@@ -13,13 +13,14 @@ use uuid::Uuid;
 use zeroship_bundle::{BlobStore, LocalDiskBlobStore};
 use zeroship_control::cron::billing_reconcile;
 use zeroship_control::metering::provider::{
-    AdjustmentNote, AggregateQuery, BillingPeriod, BillingStack, Capabilities,
-    ControlLiteStore, CorrectionCapability, IngestAck, InvoiceRef, LiteStore, Meter,
-    MeteringProvider, ProviderError, SubjectRef, UsageEvent,
+    AdjustmentNote, AggregateQuery, BillingPeriod, BillingStack, Capabilities, ControlLiteStore,
+    CorrectionCapability, IngestAck, InvoiceRef, LiteStore, Meter, MeteringProvider, ProviderError,
+    SubjectRef, UsageEvent,
 };
 use zeroship_control::{
     AppState, EnvStore, Quota, RateLimiter, Registry, SecretString, StripeStore,
 };
+use zeroship_core::AppId;
 
 const TEST_MASTER_KEY: &str = "test-master-key-deadbeefcafebabe";
 const METER: &str = "compute_units";
@@ -210,7 +211,9 @@ impl zeroship_control::metering::provider::Invoicer for DbAdjustmentProvider {
         subject: &SubjectRef,
         note: &AdjustmentNote,
     ) -> Result<InvoiceRef, ProviderError> {
-        self.store.adjustment_note_invoice(subject.as_str(), note).await
+        self.store
+            .adjustment_note_invoice(subject.as_str(), note)
+            .await
     }
 }
 
@@ -240,7 +243,8 @@ impl MeteringProvider for DbAdjustmentProvider {
 async fn reconcile_pass_writes_invoice_credit_adjustment_idempotently() {
     let url = db_url();
     let fx = build_fixture(&url, "invoice-credit").await;
-    let period_start = billing_reconcile::previous_period_start_unix(unique_closed_period_now().await);
+    let period_start =
+        billing_reconcile::previous_period_start_unix(unique_closed_period_now().await);
     let period = BillingPeriod {
         start: period_start,
         end: billing_reconcile::period_end_unix(period_start),
@@ -249,7 +253,7 @@ async fn reconcile_pass_writes_invoice_credit_adjustment_idempotently() {
     let organization = organization.as_str();
     let plan_id = make_plan(&fx.state).await;
     let app = make_owned_app(&fx.state, &plan_id, organization).await;
-    seed_witness_and_invoice(&fx.state, organization, app, &plan_id, period).await;
+    seed_witness_and_invoice(&fx.state, organization, &app, &plan_id, period).await;
 
     let first = billing_reconcile::reconcile_pass(&fx.state, period)
         .await
@@ -258,20 +262,20 @@ async fn reconcile_pass_writes_invoice_credit_adjustment_idempotently() {
     assert_eq!(first.corrections_issued, 1);
     assert_eq!(first.findings_recorded, 1);
 
-    let (line_count, amount_sum) = correction_lines(&fx.state, app).await;
+    let (line_count, amount_sum) = correction_lines(&fx.state, &app).await;
     assert_eq!(line_count, 1);
     assert_eq!(amount_sum, 25);
-    assert_eq!(finding_count(&fx.state, app, period).await, 1);
+    assert_eq!(finding_count(&fx.state, &app, period).await, 1);
 
     let second = billing_reconcile::reconcile_pass(&fx.state, period)
         .await
         .expect("second reconcile pass");
     assert_eq!(second.corrections_issued, 0);
     assert_eq!(second.findings_recorded, 0);
-    let (line_count, amount_sum) = correction_lines(&fx.state, app).await;
+    let (line_count, amount_sum) = correction_lines(&fx.state, &app).await;
     assert_eq!(line_count, 1);
     assert_eq!(amount_sum, 25);
-    assert_eq!(finding_count(&fx.state, app, period).await, 1);
+    assert_eq!(finding_count(&fx.state, &app, period).await, 1);
 
     // Teardown: the fixture holds a Postgres connection, and locals are dropped
     // only after the body returns - by which point the runtime is gone and the
@@ -284,9 +288,10 @@ async fn reconcile_pass_writes_invoice_credit_adjustment_idempotently() {
 #[compio::test]
 async fn stripe_meters_self_invoicing_drift_issues_invoice_credit_not_provider_reject() {
     let url = db_url();
-    let fx = build_fixture_with_provider(&url, "stripe-meters-self-invoice", "stripe_meters", 100)
-        .await;
-    let period_start = billing_reconcile::previous_period_start_unix(unique_closed_period_now().await);
+    let fx =
+        build_fixture_with_provider(&url, "stripe-meters-self-invoice", "stripe_meters", 100).await;
+    let period_start =
+        billing_reconcile::previous_period_start_unix(unique_closed_period_now().await);
     let period = BillingPeriod {
         start: period_start,
         end: billing_reconcile::period_end_unix(period_start),
@@ -295,7 +300,7 @@ async fn stripe_meters_self_invoicing_drift_issues_invoice_credit_not_provider_r
     let organization = organization.as_str();
     let plan_id = make_plan(&fx.state).await;
     let app = make_owned_app(&fx.state, &plan_id, organization).await;
-    seed_witness_and_invoice(&fx.state, organization, app, &plan_id, period).await;
+    seed_witness_and_invoice(&fx.state, organization, &app, &plan_id, period).await;
 
     let first = billing_reconcile::reconcile_pass(&fx.state, period)
         .await
@@ -305,12 +310,12 @@ async fn stripe_meters_self_invoicing_drift_issues_invoice_credit_not_provider_r
     assert_eq!(first.provider_rejects, 0);
     assert_eq!(first.findings_recorded, 2);
 
-    let (line_count, amount_sum) = correction_lines(&fx.state, app).await;
+    let (line_count, amount_sum) = correction_lines(&fx.state, &app).await;
     assert_eq!(line_count, 1);
     assert_eq!(amount_sum, 25);
-    assert_eq!(finding_count(&fx.state, app, period).await, 1);
+    assert_eq!(finding_count(&fx.state, &app, period).await, 1);
     assert_eq!(
-        provider_reject_count(&fx.state, app, period).await,
+        provider_reject_count(&fx.state, &app, period).await,
         0,
         "stripe_meters InvoiceCredit drift must not be recorded as provider_reject"
     );
@@ -326,9 +331,10 @@ async fn stripe_meters_self_invoicing_unpriceable_drift_flags_not_credits() {
     // must NOT be "corrected" with a credit priced at the old ~1¢/unit fallback:
     // it is flagged `correction_unpriceable` for provider-authoritative repricing.
     let url = db_url();
-    let fx = build_fixture_with_provider(&url, "stripe-meters-unpriceable", "stripe_meters", 100)
-        .await;
-    let period_start = billing_reconcile::previous_period_start_unix(unique_closed_period_now().await);
+    let fx =
+        build_fixture_with_provider(&url, "stripe-meters-unpriceable", "stripe_meters", 100).await;
+    let period_start =
+        billing_reconcile::previous_period_start_unix(unique_closed_period_now().await);
     let period = BillingPeriod {
         start: period_start,
         end: billing_reconcile::period_end_unix(period_start),
@@ -338,7 +344,7 @@ async fn stripe_meters_self_invoicing_unpriceable_drift_flags_not_credits() {
     let plan_id = make_plan(&fx.state).await;
     let app = make_owned_app(&fx.state, &plan_id, organization).await;
     // Witness only — deliberately NO invoice / invoice_lines seeded.
-    seed_witness_only(&fx.state, app, period).await;
+    seed_witness_only(&fx.state, &app, period).await;
 
     let summary = billing_reconcile::reconcile_pass(&fx.state, period)
         .await
@@ -350,10 +356,10 @@ async fn stripe_meters_self_invoicing_unpriceable_drift_flags_not_credits() {
     );
     assert_eq!(summary.provider_rejects, 0);
 
-    let (line_count, _) = correction_lines(&fx.state, app).await;
+    let (line_count, _) = correction_lines(&fx.state, &app).await;
     assert_eq!(line_count, 0, "no credit/debit line may be written");
     assert_eq!(
-        unpriceable_finding_count(&fx.state, app, period).await,
+        unpriceable_finding_count(&fx.state, &app, period).await,
         1,
         "the drift must be flagged correction_unpriceable for operator repricing"
     );
@@ -366,7 +372,8 @@ async fn stripe_meters_self_invoicing_unpriceable_drift_flags_not_credits() {
 async fn reconcile_pass_corrects_multi_metric_app_per_metric() {
     let url = db_url();
     let fx = build_fixture(&url, "multi-metric").await;
-    let period_start = billing_reconcile::previous_period_start_unix(unique_closed_period_now().await);
+    let period_start =
+        billing_reconcile::previous_period_start_unix(unique_closed_period_now().await);
     let period = BillingPeriod {
         start: period_start,
         end: billing_reconcile::period_end_unix(period_start),
@@ -376,7 +383,7 @@ async fn reconcile_pass_corrects_multi_metric_app_per_metric() {
     let plan_id = make_plan(&fx.state).await;
     seed_metric(&fx.state, SECOND_METER).await;
     let app = make_owned_app(&fx.state, &plan_id, organization).await;
-    seed_multi_metric_witness_and_invoice(&fx.state, organization, app, &plan_id, period).await;
+    seed_multi_metric_witness_and_invoice(&fx.state, organization, &app, &plan_id, period).await;
 
     let first = billing_reconcile::reconcile_pass(&fx.state, period)
         .await
@@ -393,7 +400,7 @@ async fn reconcile_pass_corrects_multi_metric_app_per_metric() {
              FROM zeroship.invoice_lines \
              WHERE app_id = $1 AND line_kind = 'debit_note' \
              ORDER BY correction_dedup_key",
-            &[&app],
+            &[&app.as_str()],
         )
         .await
         .expect("read correction lines");
@@ -416,9 +423,12 @@ async fn reconcile_pass_corrects_multi_metric_app_per_metric() {
         .collect();
     assert_eq!(deltas.get(METER), Some(&25));
     assert_eq!(deltas.get(SECOND_METER), Some(&10));
-    assert_eq!(finding_count_for_meter(&fx.state, app, METER, period).await, 1);
     assert_eq!(
-        finding_count_for_meter(&fx.state, app, SECOND_METER, period).await,
+        finding_count_for_meter(&fx.state, &app, METER, period).await,
+        1
+    );
+    assert_eq!(
+        finding_count_for_meter(&fx.state, &app, SECOND_METER, period).await,
         1
     );
 
@@ -491,21 +501,21 @@ async fn seed_metric(state: &AppState, metric: &str) {
 /// An app the given ORGANIZATION bills. See the equivalent in the reconcile
 /// tests: an app seeded into a different organization than the one asserted on
 /// is never billed, so the pass would go green over an empty set.
-async fn make_owned_app(state: &AppState, plan_id: &str, organization: &str) -> Uuid {
+async fn make_owned_app(state: &AppState, plan_id: &str, organization: &str) -> AppId {
     let name = format!("safety-{}", Uuid::new_v4());
     common::seed_app_in_organization(&state.control_pg, &name, plan_id, organization).await
 }
 
 /// Seed only the local witness (usage_aggregates) with no invoice/invoice_lines —
 /// the shape a self-invoicing provider produces (it bills at the provider).
-async fn seed_witness_only(state: &AppState, app: Uuid, period: BillingPeriod) {
+async fn seed_witness_only(state: &AppState, app: &AppId, period: BillingPeriod) {
     let period_date = common::period_date(period.start);
     state
         .control_pg
         .execute(
             "INSERT INTO zeroship.usage_aggregates (app_id, period, metric, total) \
              VALUES ($1, $2::date, $3, 125)",
-            &[&app, &period_date, &METER],
+            &[&app.as_str(), &period_date, &METER],
         )
         .await
         .expect("seed witness only");
@@ -514,7 +524,7 @@ async fn seed_witness_only(state: &AppState, app: Uuid, period: BillingPeriod) {
 async fn seed_witness_and_invoice(
     state: &AppState,
     organization: &str,
-    app: Uuid,
+    app: &AppId,
     plan_id: &str,
     period: BillingPeriod,
 ) {
@@ -524,7 +534,7 @@ async fn seed_witness_and_invoice(
         .execute(
             "INSERT INTO zeroship.usage_aggregates (app_id, period, metric, total) \
              VALUES ($1, $2::date, $3, 125)",
-            &[&app, &period_date, &METER],
+            &[&app.as_str(), &period_date, &METER],
         )
         .await
         .expect("seed local witness");
@@ -548,7 +558,7 @@ async fn seed_witness_and_invoice(
                (invoice_id, app_id, segment_no, plan_id, included_units, \
                 fx_pico_cents_per_unit, base_fee_cents, amount_cents, usage_snapshot, weights_snapshot) \
              VALUES ($1, $2, 0, $3, 0, 1000, 0, 100, $4, $5)",
-            &[&invoice_id, &app, &plan_id, &usage, &weights],
+            &[&invoice_id, &app.as_str(), &plan_id, &usage, &weights],
         )
         .await
         .expect("seed invoiced usage line");
@@ -567,7 +577,7 @@ async fn seed_witness_and_invoice(
 async fn seed_multi_metric_witness_and_invoice(
     state: &AppState,
     organization: &str,
-    app: Uuid,
+    app: &AppId,
     plan_id: &str,
     period: BillingPeriod,
 ) {
@@ -578,7 +588,7 @@ async fn seed_multi_metric_witness_and_invoice(
             .execute(
                 "INSERT INTO zeroship.usage_aggregates (app_id, period, metric, total) \
                  VALUES ($1, $2::date, $3, $4)",
-                &[&app, &period_date, &metric, &total],
+                &[&app.as_str(), &period_date, &metric, &total],
             )
             .await
             .expect("seed local multi-metric witness");
@@ -606,7 +616,7 @@ async fn seed_multi_metric_witness_and_invoice(
                (invoice_id, app_id, segment_no, plan_id, included_units, \
                 fx_pico_cents_per_unit, base_fee_cents, amount_cents, usage_snapshot, weights_snapshot) \
              VALUES ($1, $2, 0, $3, 0, 1000, 0, 150, $4, $5)",
-            &[&invoice_id, &app, &plan_id, &usage, &weights],
+            &[&invoice_id, &app.as_str(), &plan_id, &usage, &weights],
         )
         .await
         .expect("seed multi-metric invoiced usage line");
@@ -622,26 +632,30 @@ async fn seed_multi_metric_witness_and_invoice(
         .expect("finalize seeded invoice");
 }
 
-async fn correction_lines(state: &AppState, app: Uuid) -> (i64, i64) {
+async fn correction_lines(state: &AppState, app: &AppId) -> (i64, i64) {
     let rows = state
         .control_pg
         .query(
             "SELECT COUNT(*)::bigint AS n, COALESCE(SUM(amount_cents), 0)::bigint AS amount \
              FROM zeroship.invoice_lines \
              WHERE app_id = $1 AND line_kind = 'debit_note'",
-            &[&app],
+            &[&app.as_str()],
         )
         .await
         .expect("count correction lines");
     (rows[0].get("n"), rows[0].get("amount"))
 }
 
-async fn finding_count(state: &AppState, app: Uuid, period: BillingPeriod) -> i64 {
+async fn finding_count(state: &AppState, app: &AppId, period: BillingPeriod) -> i64 {
     finding_count_for_meter(state, app, METER, period).await
 }
 
-async fn provider_reject_count(state: &AppState, app: Uuid, period: BillingPeriod) -> i64 {
-    let entity_id = format!("billing-correction:{app}:{METER}:{}", period.start);
+async fn provider_reject_count(state: &AppState, app: &AppId, period: BillingPeriod) -> i64 {
+    let entity_id = format!(
+        "billing-correction:{}:{METER}:{}",
+        app.as_str(),
+        period.start
+    );
     let rows = state
         .control_pg
         .query(
@@ -656,8 +670,12 @@ async fn provider_reject_count(state: &AppState, app: Uuid, period: BillingPerio
     rows[0].get("n")
 }
 
-async fn unpriceable_finding_count(state: &AppState, app: Uuid, period: BillingPeriod) -> i64 {
-    let entity_id = format!("billing-correction:{app}:{METER}:{}", period.start);
+async fn unpriceable_finding_count(state: &AppState, app: &AppId, period: BillingPeriod) -> i64 {
+    let entity_id = format!(
+        "billing-correction:{}:{METER}:{}",
+        app.as_str(),
+        period.start
+    );
     let rows = state
         .control_pg
         .query(
@@ -674,11 +692,15 @@ async fn unpriceable_finding_count(state: &AppState, app: Uuid, period: BillingP
 
 async fn finding_count_for_meter(
     state: &AppState,
-    app: Uuid,
+    app: &AppId,
     meter: &str,
     period: BillingPeriod,
 ) -> i64 {
-    let entity_id = format!("billing-correction:{app}:{meter}:{}", period.start);
+    let entity_id = format!(
+        "billing-correction:{}:{meter}:{}",
+        app.as_str(),
+        period.start
+    );
     let rows = state
         .control_pg
         .query(
@@ -728,7 +750,7 @@ async fn a_later_run_starts_above_every_period_this_run_seeded() {
 
     // A window of this test's own, used the way every other caller uses one.
     let now = unique_closed_period_now().await;
-    common::seed_usage_total(&fx.state.control_pg, app, now, METER, 125).await;
+    common::seed_usage_total(&fx.state.control_pg, &app, now, METER, 125).await;
     let seeded = common::months_since_band_start(common::period_date(now));
 
     let after = common::resolve_run_band_base().await;
@@ -844,8 +866,10 @@ fn period_band_is_reserved_for_the_allocator() {
         let b = line.as_bytes();
         for i in 0..b.len().saturating_sub(6) {
             let is_year = b[i..i + 4].iter().all(u8::is_ascii_digit);
-            let looks_like_date =
-                is_year && b[i + 4] == b'-' && b[i + 5].is_ascii_digit() && b[i + 6].is_ascii_digit();
+            let looks_like_date = is_year
+                && b[i + 4] == b'-'
+                && b[i + 5].is_ascii_digit()
+                && b[i + 6].is_ascii_digit();
             if !looks_like_date || (i > 0 && b[i - 1].is_ascii_digit()) {
                 continue;
             }

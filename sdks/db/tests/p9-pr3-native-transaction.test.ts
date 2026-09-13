@@ -5,8 +5,7 @@
  * (`crates/zeroship-data-orm/src/transaction/mod.rs`). The
  * `@zeroship/bootstrap` `transactionImpl` is now a thin `Result`-wrapping
  * shim over the native `env.db.transaction(callback, opts)` v8_method,
- * keeping only the JS-only concerns (DataLoader drain + `_txDepth`
- * bookkeeping).
+ * keeping the JS loader drain, callback-local guards, and Result mapping.
  *
  * These tests mock the native method (no DB) to pin the observable
  * creator-facing contract through the bootstrap wrapper:
@@ -195,10 +194,7 @@ describe("P9 PR 3 — native env.db.transaction(fn)", () => {
   test("re-install then transaction(fn) does not recurse (native method captured once)", async () => {
     // The install loop plants an own `transaction` property that shadows
     // the native method. A second installSchema on the same native handle
-    // must still reach the *native* orchestrator, not the previously
-    // installed wrapper (which would recurse forever). The bootstrap
-    // stashes the native method under a hidden key on first install and
-    // reuses it.
+    // must still reach the captured native orchestrator.
     const native = makeNativeTxMock();
     const db1 = installSchemaForTest(
       { posts: { title: t.string().required() } },

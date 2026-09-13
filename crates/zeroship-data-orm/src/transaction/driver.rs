@@ -124,11 +124,7 @@ pub struct StepConfig {
     /// How to open the transaction, for the step that runs
     /// [`Action::IssueBegin`].
     ///
-    /// **An intent, never a statement.** This carried a rendered
-    /// `BEGIN [ISOLATION LEVEL ...]` string until 2026-09-02 - PostgreSQL
-    /// dialect threaded through the vendor-neutral state machine, which the
-    /// SQLite arm then ignored in favour of a hardcoded `BEGIN`. Each lane
-    /// spells the intent now.
+    /// The reducer carries an intent; each backend renders its own statement.
     pub begin: BeginIntent,
 
     /// The backend [`Action::IssueBegin`] opens its session on.

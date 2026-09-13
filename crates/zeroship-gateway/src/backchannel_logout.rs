@@ -25,6 +25,9 @@ use ntex::web::{self, types::Form, types::State, HttpResponse};
 use serde::Deserialize;
 use serde_json::json;
 
+use zeroship_core::app_id::AppId;
+use zeroship_core::user_id::UserId;
+
 use crate::sessions;
 use crate::GateState;
 
@@ -60,12 +63,12 @@ pub async fn handle(
 
     // Per-app BCL disambiguation: each per-app
     // OAuth client registers its own `backchannel_logout_uri` with its own
-    // `aud` (= the per-app `client_id`, `oac_<base62>`). Peek the token's `aud`
+    // `aud` (= the per-app `client_id`, `oac_<base36>`). Peek the token's `aud`
     // (routing only — the signature is still verified below) to learn which
     // client it is for; a per-app client resolves to one app's subdomain so we
     // revoke only THAT app's sessions.
     //
-    // `app_id` carries the app's STABLE UUID (`apps.id`) when a per-app
+    // `app_id` carries the app's STABLE typed id (`apps.id`) when a per-app
     // client matched (revoke only that app — the canonical session/anchor
     // key).
     // `revoke_sector` carries that app's `sector_identifier` so the per-app
@@ -80,15 +83,11 @@ pub async fn handle(
         .iter()
         .find_map(|cand| {
             // The per-app session/anchor rows are keyed by the app's STABLE
-            // UUID (`apps.id`), not the renameable subdomain slug — so the
-            // per-app revoke scope carries the app id, never `route.entry.name`.
-            // The route table is keyed by the typed id now; the session and
-            // anchor rows this function revokes are keyed by `apps.id`, which
-            // is still a uuid column. Unwrap once, here, so every use below is
-            // reading the id the DATABASE holds rather than the one the
-            // gateway routes by.
+            // typed id (`apps.id`), not the renameable subdomain slug — so
+            // the per-app revoke scope carries the app id, never
+            // `route.entry.name`.
             state.routes.lookup_by_oauth_client_id(cand).map(|(id, route)| {
-                (cand.clone(), id.uuid(), route.entry.sector_identifier.clone())
+                (cand.clone(), id, route.entry.sector_identifier.clone())
             })
         }) else {
             tracing::warn!(
@@ -115,6 +114,18 @@ pub async fn handle(
                 .header("cache-control", "no-store")
                 .body("invalid logout_token");
         }
+    };
+    let global_user_id = match token.sub.as_deref() {
+        Some(sub) => match UserId::parse(sub) {
+            Ok(user_id) => Some(user_id),
+            Err(_) => {
+                tracing::warn!(sub = %sub, "backchannel_logout: sub is not a global user id");
+                return HttpResponse::BadRequest()
+                    .header("cache-control", "no-store")
+                    .body("invalid logout_token");
+            }
+        },
+        None => None,
     };
 
     let now_secs = unix_now_secs();
@@ -196,7 +207,7 @@ pub async fn handle(
     // revoked at OP AFTER the connection is released (no conn held across the
     // outbound HTTP). Each family is paired with its global user id so we can
     // rebuild the per-family AEAD AAD for the decrypt.
-    let mut anchor_families: Vec<(uuid::Uuid, crate::anchors::DeletedFamily)> = Vec::new();
+    let mut anchor_families: Vec<(UserId, crate::anchors::DeletedFamily)> = Vec::new();
     // `&mut Client`: the RLS-scoped `revoke_app_sessions_for_user` needs it (it
     // opens a tenant-GUC transaction). The non-RLS `wrapper_revocation` +
     // audit-insert calls below reborrow it immutably; every touch is sequential
@@ -206,9 +217,9 @@ pub async fn handle(
         if let Some(sid) = token.sid.as_deref() {
             let users = match sessions::revoke_app_sessions_for_sid(
                 &mut *conn,
-                app_id,
+                &app_id,
                 sid,
-                token.sub.as_deref(),
+                global_user_id.as_ref(),
             )
             .await
             {
@@ -216,7 +227,7 @@ pub async fn handle(
                 Err(e) => {
                     tracing::error!(
                         error = %e,
-                        app_id = %app_id,
+                        app_id = app_id.as_str(),
                         sid = %sid,
                         "backchannel_logout: revoke_app_sessions_for_sid failed"
                     );
@@ -225,20 +236,20 @@ pub async fn handle(
             };
             revoked = users.len() as u64;
             if users.is_empty() {
-                if let Some(sub) = token.sub.as_deref() {
+                if let Some(global_user_id) = global_user_id.as_ref() {
                     tracing::warn!(
-                        app_id = %app_id,
+                        app_id = app_id.as_str(),
                         sid = %sid,
-                        sub = %sub,
+                        sub = global_user_id.as_str(),
                         "backchannel_logout: sid matched zero sessions; falling back to app-scoped sub revoke"
                     );
-                    revoked = match revoke_by_sub(
+                    revoked = match revoke_by_user(
                         &mut *conn,
                         &state,
                         &aud,
-                        app_id,
+                        &app_id,
                         revoke_sector.as_deref(),
-                        sub,
+                        global_user_id,
                         &mut anchor_families,
                     )
                     .await
@@ -247,7 +258,7 @@ pub async fn handle(
                         Err(e) => {
                             tracing::error!(
                                 error = %e,
-                                app_id = %app_id,
+                                app_id = app_id.as_str(),
                                 sid = %sid,
                                 "backchannel_logout: sub fallback revocation failed"
                             );
@@ -256,19 +267,19 @@ pub async fn handle(
                     };
                 } else {
                     tracing::error!(
-                        app_id = %app_id,
+                        app_id = app_id.as_str(),
                         sid = %sid,
                         "backchannel_logout: sid matched zero sessions and logout_token has no sub fallback"
                     );
                     return retryable_processing_error();
                 }
             }
-            for global_user_id in users {
+            for global_user_id in &users {
                 if let Err(e) = teardown_per_app_user(
                     &mut *conn,
                     &state,
                     &aud,
-                    app_id,
+                    &app_id,
                     revoke_sector.as_deref(),
                     global_user_id,
                     &mut anchor_families,
@@ -277,21 +288,21 @@ pub async fn handle(
                 {
                     tracing::error!(
                         error = %e,
-                        app_id = %app_id,
+                        app_id = app_id.as_str(),
                         sid = %sid,
                         "backchannel_logout: sid-scoped teardown failed"
                     );
                     return retryable_processing_error();
                 }
             }
-        } else if let Some(sub) = token.sub.as_deref() {
-            revoked = match revoke_by_sub(
+        } else if let Some(global_user_id) = global_user_id.as_ref() {
+            revoked = match revoke_by_user(
                 &mut *conn,
                 &state,
                 &aud,
-                app_id,
+                &app_id,
                 revoke_sector.as_deref(),
-                sub,
+                global_user_id,
                 &mut anchor_families,
             )
             .await
@@ -300,7 +311,7 @@ pub async fn handle(
                 Err(e) => {
                     tracing::error!(
                         error = %e,
-                        app_id = %app_id,
+                        app_id = app_id.as_str(),
                         "backchannel_logout: revoke_app_sessions_for_user failed"
                     );
                     return retryable_processing_error();
@@ -311,7 +322,7 @@ pub async fn handle(
         tracing::info!(
             sub = ?token.sub,
             sid = ?token.sid,
-            app = %app_id,
+            app = app_id.as_str(),
             revoked,
             "backchannel_logout: sessions revoked"
         );
@@ -352,8 +363,7 @@ pub async fn handle(
     // source, not just locally. The anchor rows are already gone (the
     // authoritative step); an OP hiccup here is logged, never surfaced.
     for (global_user_id, fam) in &anchor_families {
-        let sub_str = global_user_id.to_string();
-        let aad = anchor_aad(&fam.client_id, &sub_str);
+        let aad = anchor_aad(&fam.client_id, global_user_id.as_str());
         let refresh = match zeroship_core::crypto::decrypt(
             &state.anchor_enc_key,
             &aad,
@@ -463,53 +473,39 @@ impl Drop for LogoutJtiClaim {
     }
 }
 
-async fn revoke_by_sub(
+async fn revoke_by_user(
     conn: &mut compio_postgres::Client,
     state: &GateState,
     client_id: &str,
-    app_id: uuid::Uuid,
+    app_id: &AppId,
     sector: Option<&str>,
-    sub: &str,
-    anchor_families: &mut Vec<(uuid::Uuid, crate::anchors::DeletedFamily)>,
+    global_user_id: &UserId,
+    anchor_families: &mut Vec<(UserId, crate::anchors::DeletedFamily)>,
 ) -> Result<u64, crate::error::GatewayError> {
-    let global_user_id = match uuid::Uuid::parse_str(sub) {
-        Ok(id) => Some(id),
-        Err(_) => {
-            tracing::warn!(
-                app_id = %app_id,
-                sub = %sub,
-                "backchannel_logout: sub is not a UUID; skipping per-app teardown"
-            );
-            None
-        }
-    };
-    if let Some(global_user_id) = global_user_id {
-        teardown_per_app_user(
-            conn,
-            state,
-            client_id,
-            app_id,
-            sector,
-            global_user_id,
-            anchor_families,
-        )
-        .await?;
-    }
-    sessions::revoke_app_sessions_for_user(conn, app_id, sub).await
+    teardown_per_app_user(
+        conn,
+        state,
+        client_id,
+        app_id,
+        sector,
+        global_user_id,
+        anchor_families,
+    )
+    .await?;
+    sessions::revoke_app_sessions_for_user(conn, app_id, global_user_id).await
 }
 
 async fn teardown_per_app_user(
     conn: &mut compio_postgres::Client,
     state: &GateState,
     client_id: &str,
-    app_id: uuid::Uuid,
+    app_id: &AppId,
     sector: Option<&str>,
-    global_user_id: uuid::Uuid,
-    anchor_families: &mut Vec<(uuid::Uuid, crate::anchors::DeletedFamily)>,
+    global_user_id: &UserId,
+    anchor_families: &mut Vec<(UserId, crate::anchors::DeletedFamily)>,
 ) -> Result<(), crate::error::GatewayError> {
-    let global_sub = global_user_id.to_string();
     if let Some(sector) = sector {
-        let pws = zeroship_core::auth::derive_pairwise(&state.pairwise_salt, &global_sub, sector);
+        let pws = zeroship_core::auth::derive_pairwise(&state.pairwise_salt, global_user_id, sector);
         if let Err(e) = zeroship_authz::wrapper_revocation::revoke_family(conn, client_id, &pws).await
         {
             tracing::error!(
@@ -524,7 +520,7 @@ async fn teardown_per_app_user(
         state.revocation_cache.invalidate(client_id, &pws);
     } else {
         tracing::warn!(
-            app_id = %app_id,
+            app_id = app_id.as_str(),
             "backchannel_logout: per-app BCL has no sector_identifier; \
              skipping token-family marker (sessions still revoked)"
         );
@@ -532,12 +528,12 @@ async fn teardown_per_app_user(
 
     match crate::anchors::delete_all_for_user(conn, app_id, global_user_id).await {
         Ok(deleted) => {
-            anchor_families.extend(deleted.into_iter().map(|fam| (global_user_id, fam)));
+            anchor_families.extend(deleted.into_iter().map(|fam| (global_user_id.clone(), fam)));
         }
         Err(e) => {
             tracing::error!(
                 error = %e,
-                app_id = %app_id,
+                app_id = app_id.as_str(),
                 "backchannel_logout: anchor delete_all_for_user failed"
             );
             return Err(e);

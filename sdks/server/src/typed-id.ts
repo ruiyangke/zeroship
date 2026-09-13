@@ -1,5 +1,5 @@
-const BASE62 = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
-const TYPED_ID_RE = /^([a-z]{3})_([0-9A-Za-z]{22})$/;
+const BASE36 = "0123456789abcdefghijklmnopqrstuvwxyz";
+const TYPED_ID_RE = /^([a-z]{3,4})_([0-9a-z]{25})$/;
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -10,7 +10,7 @@ export interface ParsedTypedId {
 }
 
 function assertPrefix(prefix: string): void {
-  if (!/^[a-z]{3}$/.test(prefix)) {
+  if (!/^[a-z]{3,4}$/.test(prefix)) {
     throw new Error(`invalid typed-id prefix: ${prefix}`);
   }
 }
@@ -38,39 +38,39 @@ function bigIntToUuid(value: bigint): string {
   ].join("-");
 }
 
-export function uuidToBase62(uuid: string): string {
+export function uuidToBase36(uuid: string): string {
   let n = uuidToBigInt(uuid);
   let out = "";
-  for (let i = 0; i < 22; i++) {
-    out = BASE62[Number(n % 62n)] + out;
-    n /= 62n;
+  for (let i = 0; i < 25; i++) {
+    out = BASE36[Number(n % 36n)] + out;
+    n /= 36n;
   }
   return out;
 }
 
-export function base62ToUuid(encoded: string): string {
-  if (encoded.length !== 22) {
-    throw new Error(`expected 22 base62 chars, got ${encoded.length}`);
+export function base36ToUuid(encoded: string): string {
+  if (encoded.length !== 25) {
+    throw new Error(`expected 25 base36 chars, got ${encoded.length}`);
   }
 
   let n = 0n;
   for (const ch of encoded) {
-    const digit = BASE62.indexOf(ch);
+    const digit = BASE36.indexOf(ch);
     if (digit < 0) {
-      throw new Error(`invalid base62 character: ${ch}`);
+      throw new Error(`invalid base36 character: ${ch}`);
     }
-    n = n * 62n + BigInt(digit);
+    n = n * 36n + BigInt(digit);
   }
 
   if (n > ((1n << 128n) - 1n)) {
-    throw new Error("base62 overflow");
+    throw new Error("base36 overflow");
   }
   return bigIntToUuid(n);
 }
 
 export function typedIdFromUuid(prefix: string, uuid: string): string {
   assertPrefix(prefix);
-  return `${prefix}_${uuidToBase62(uuid)}`;
+  return `${prefix}_${uuidToBase36(uuid)}`;
 }
 
 export function parseTypedId(id: string, expectedPrefix?: string): ParsedTypedId {
@@ -82,7 +82,7 @@ export function parseTypedId(id: string, expectedPrefix?: string): ParsedTypedId
   if (expectedPrefix !== undefined && prefix !== expectedPrefix) {
     throw new Error(`expected prefix '${expectedPrefix}', got '${prefix}'`);
   }
-  return { prefix, encoded, uuid: base62ToUuid(encoded) };
+  return { prefix, encoded, uuid: base36ToUuid(encoded) };
 }
 
 export function isTypedId(id: string, expectedPrefix?: string): boolean {

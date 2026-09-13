@@ -6,14 +6,15 @@ use ntex::http::Payload;
 use ntex::web::{self, FromRequest, HttpRequest, HttpResponse};
 use serde_json::json;
 use uuid::Uuid;
-use zeroship_authz::{self as authz, Action, AuthzContext, AuthzDecision, Resource};
 use zeroship_authn::{AuthnRejection, VerifiedPrincipal};
+use zeroship_authz::{self as authz, Action, AuthzContext, AuthzDecision, Resource};
+use zeroship_core::UserId;
 
 use crate::{http_util, AppState};
 
 #[derive(Debug)]
 pub struct AuthzGuard {
-    pub principal_id: Uuid,
+    pub principal_id: UserId,
     pub token_policy: Option<authz::Policy>,
     pub request_ip: Option<IpAddr>,
     pub request_id: String,
@@ -26,8 +27,8 @@ impl FromRequest<web::DefaultError> for AuthzGuard {
         let state = req
             .app_state::<Arc<AppState>>()
             .ok_or_else(|| AuthnRejection::internal("missing_app_state"))?;
-        let request_ip = http_util::source_ip(req, state.trust_proxy)
-            .and_then(|ip| ip.parse::<IpAddr>().ok());
+        let request_ip =
+            http_util::source_ip(req, state.trust_proxy).and_then(|ip| ip.parse::<IpAddr>().ok());
         let request_id = request_id(req);
 
         // Bearer is the ONLY principal path, and the platform OP is its only
@@ -67,7 +68,7 @@ impl AuthzGuard {
         };
 
         let ctx = AuthzContext {
-            principal_id: self.principal_id,
+            principal_id: self.principal_id.clone(),
             token_policy: self.token_policy.clone(),
             action,
             resource,
@@ -78,9 +79,9 @@ impl AuthzGuard {
 
         match authz::enforce(&state.control_pg, &state.static_policies, &ctx).await {
             Ok(AuthzDecision::Allow) => Ok(()),
-            Ok(AuthzDecision::Deny) => Err(
-                HttpResponse::Forbidden().json(&json!({"error": "forbidden"})),
-            ),
+            Ok(AuthzDecision::Deny) => {
+                Err(HttpResponse::Forbidden().json(&json!({"error": "forbidden"})))
+            }
             Err(err) => Err(HttpResponse::InternalServerError()
                 .json(&json!({"error": "authz_error", "detail": err.to_string()}))),
         }
@@ -105,12 +106,13 @@ impl AuthzGuard {
             Ok(now) => now,
             Err(err) => {
                 tracing::error!(error = %err, "control: authz clock failed");
-                return Err(HttpResponse::InternalServerError()
-                    .json(&json!({"error": "authz_error"})));
+                return Err(
+                    HttpResponse::InternalServerError().json(&json!({"error": "authz_error"}))
+                );
             }
         };
         let ctx = AuthzContext {
-            principal_id: self.principal_id,
+            principal_id: self.principal_id.clone(),
             token_policy: self.token_policy.clone(),
             action,
             resource: Resource::Any,
@@ -159,7 +161,7 @@ async fn guard_from_bearer(
     if verified.seed_platform_cli_grants {
         match zeroship_authn::platform_cli::materialize_default_grants(
             state.control_pg.as_ref(),
-            verified.principal_id,
+            &verified.principal_id,
         )
         .await
         {
@@ -177,19 +179,19 @@ async fn guard_from_bearer(
             }
             Ok(_) => {}
             Err(err) => {
-            // Loud but non-fatal, and the two halves of that are deliberate.
-            // Failing the request would lock a creator out over a table they
-            // have never heard of, for a request the entitlement rules already
-            // permit. But while this keeps failing the marker is never written,
-            // so the principal stays on the default-set fallback and an
-            // operator's DELETE will not narrow them - which is a silent loss
-            // of the capability, hence `error` and not `warn`.
-            tracing::error!(
-                error = %err,
-                principal_id = %verified.principal_id,
-                "control: materializing default platform CLI grants failed; \
-                 operator narrowing will not take effect for this principal"
-            );
+                // Loud but non-fatal, and the two halves of that are deliberate.
+                // Failing the request would lock a creator out over a table they
+                // have never heard of, for a request the entitlement rules already
+                // permit. But while this keeps failing the marker is never written,
+                // so the principal stays on the default-set fallback and an
+                // operator's DELETE will not narrow them - which is a silent loss
+                // of the capability, hence `error` and not `warn`.
+                tracing::error!(
+                    error = %err,
+                    principal_id = verified.principal_id.as_str(),
+                    "control: materializing default platform CLI grants failed; \
+                     operator narrowing will not take effect for this principal"
+                );
             }
         }
     }

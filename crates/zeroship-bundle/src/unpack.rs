@@ -17,7 +17,7 @@ use std::sync::Arc;
 
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use uuid::Uuid;
+use zeroship_id::AppId;
 
 use crate::blob::{BlobError, BlobStore, PutOutcome};
 use crate::limits::{
@@ -122,7 +122,7 @@ fn truncate_detail(detail: String) -> String {
 /// 9. return the success record so the HTTP layer can update the DB.
 pub async fn ingest(
     blob_store: &Arc<dyn BlobStore>,
-    app_id: &Uuid,
+    app_id: &AppId,
     compressed: &[u8],
 ) -> Result<IngestSuccess, IngestError> {
     // Step 1-2: open the zstd → tar streaming pipeline.

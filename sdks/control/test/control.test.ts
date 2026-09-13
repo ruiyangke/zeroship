@@ -4,8 +4,20 @@ import test from "node:test";
 import {
   ControlError,
   createControlClient,
+  isAppId,
+  type AppId,
   type ControlClientOptions,
+  type UserId,
 } from "../src/index.ts";
+
+const APP_ID: AppId = "app_0000000002e4nenowz3qmamtd";
+
+test("AppId validation matches the canonical wire shape", () => {
+  assert.equal(isAppId(APP_ID), true);
+  assert.equal(isAppId("00000000-0000-7000-8000-000000000001"), false);
+  assert.equal(isAppId("app_0000000002E4NENOWZ3QMAMTD"), false);
+  assert.equal(isAppId("app_zzzzzzzzzzzzzzzzzzzzzzzzz"), false);
+});
 
 test("apps.create sends bearer auth and JSON", async () => {
   const requests: Request[] = [];
@@ -14,7 +26,7 @@ test("apps.create sends bearer auth and JSON", async () => {
     auth: "master-key",
     fetch: async (input, init) => {
       requests.push(new Request(input, init));
-      return json({ id: "app_1", name: "demo" }, 201);
+      return json({ id: APP_ID, name: "demo" }, 201);
     },
   });
 
@@ -40,15 +52,15 @@ test("request forwards cookies and mirrors set-cookie", async () => {
     fetch: async (input, init) => {
       const req = new Request(input, init);
       assert.equal(req.headers.get("cookie"), "a=b");
-      return json({ id: "app_1", name: "demo" }, 200, {
+      return json({ id: APP_ID, name: "demo" }, 200, {
         "set-cookie": "session=token; HttpOnly",
       });
     },
   });
 
-  const result = await client.apps.get("app_1");
+  const result = await client.apps.get(APP_ID);
 
-  assert.equal(result.id, "app_1");
+  assert.equal(result.id, APP_ID);
   assert.deepEqual(mirrored, ["session=token; HttpOnly"]);
 });
 
@@ -60,7 +72,7 @@ test("apps archive and unarchive use the idempotent archive resource", async () 
       const request = new Request(input, init);
       requests.push(request);
       return json({
-        id: "app_1",
+        id: APP_ID,
         name: "demo",
         plan_id: "free",
         deploy_hash: null,
@@ -72,8 +84,8 @@ test("apps archive and unarchive use the idempotent archive resource", async () 
     },
   });
 
-  const archived = await client.apps.archive("app 1");
-  const restored = await client.apps.unarchive("app 1");
+  const archived = await client.apps.archive(APP_ID);
+  const restored = await client.apps.unarchive(APP_ID);
 
   assert.equal(archived.archived_at, "2026-08-31T12:00:00Z");
   assert.equal(restored.archived_at, null);
@@ -82,8 +94,8 @@ test("apps archive and unarchive use the idempotent archive resource", async () 
       (request) => `${request.method} ${new URL(request.url).pathname}`,
     ),
     [
-      "PUT /api/apps/app%201/archive",
-      "DELETE /api/apps/app%201/archive",
+      `PUT /api/apps/${APP_ID}/archive`,
+      `DELETE /api/apps/${APP_ID}/archive`,
     ],
   );
 });
@@ -100,13 +112,13 @@ test("env mutations treat 204 as void", async () => {
   });
 
   assert.equal(
-    await client.env.setVar("app 1", { key: "FOO", value: "bar" }),
+    await client.env.setVar(APP_ID, { key: "FOO", value: "bar" }),
     undefined,
   );
-  assert.equal(await client.env.deleteSecret("app 1", "SECRET/1"), undefined);
+  assert.equal(await client.env.deleteSecret(APP_ID, "SECRET/1"), undefined);
   assert.deepEqual(seen, [
-    "POST /api/apps/app%201/vars",
-    "DELETE /api/apps/app%201/secrets/SECRET%2F1",
+    `POST /api/apps/${APP_ID}/vars`,
+    `DELETE /api/apps/${APP_ID}/secrets/SECRET%2F1`,
   ]);
 });
 
@@ -121,7 +133,7 @@ test("deploy sends binary artifact as application/x-zship", async () => {
     },
   });
 
-  const result = await client.apps.deploy("app_1", artifact);
+  const result = await client.apps.deploy(APP_ID, artifact);
 
   assert.equal(result.deploy_hash, "sha256:abc");
   assert.equal(request?.method, "POST");
@@ -144,17 +156,17 @@ test("workflow helpers send app scope headers and JSON bodies", async () => {
   });
 
   await client.workflows.createSignalToken("run_1", {
-    appId: "app_1",
+    appId: APP_ID,
     types: ["approved"],
     ttl: "PT5M",
   });
   await client.workflows.createTopicSignalToken("approvals", {
-    appId: "app_1",
+    appId: APP_ID,
     types: ["approved"],
     ttl: "PT5M",
   });
   await client.workflows.publishTopic("approvals", {
-    appId: "app_1",
+    appId: APP_ID,
     type: "approved",
     payload: { ok: true },
     idempotencyKey: "idem-1",
@@ -169,7 +181,7 @@ test("workflow helpers send app scope headers and JSON bodies", async () => {
     ],
   );
   for (const req of requests) {
-    assert.equal(req.headers.get("x-zeroship-app-id"), "app_1");
+    assert.equal(req.headers.get("x-zeroship-app-id"), APP_ID);
     assert.equal(req.headers.get("content-type"), "application/json");
   }
   assert.deepEqual(await requests[0]!.json(), {
@@ -213,7 +225,7 @@ test("non-2xx responses throw ControlError with parsed body", async () => {
   });
 
   await assert.rejects(
-    client.apps.logs("app_1"),
+    client.apps.logs(APP_ID),
     (error: unknown) => {
       assert.ok(error instanceof ControlError);
       assert.equal(error.status, 401);
@@ -259,7 +271,7 @@ test("ControlError lifts trace_id off an infrastructure error body", async () =>
       ),
   });
 
-  await assert.rejects(client.apps.logs("app_1"), (error: unknown) => {
+  await assert.rejects(client.apps.logs(APP_ID), (error: unknown) => {
     assert.ok(error instanceof ControlError);
     assert.equal(error.status, 500);
     assert.equal(error.trace_id, "3f2a1c88-9d4e-4f1b-8a02-6c5b7e9d0a11");
@@ -279,7 +291,7 @@ test("ControlError leaves trace_id undefined when the body omits it", async () =
     fetch: async () => json({ error: "internal error" }, 500),
   });
 
-  await assert.rejects(client.apps.logs("app_1"), (error: unknown) => {
+  await assert.rejects(client.apps.logs(APP_ID), (error: unknown) => {
     assert.ok(error instanceof ControlError);
     assert.equal(error.trace_id, undefined);
     return true;
@@ -292,7 +304,7 @@ test("ControlError ignores a non-string trace_id", async () => {
     fetch: async () => json({ error: "internal error", trace_id: 7 }, 500),
   });
 
-  await assert.rejects(client.apps.logs("app_1"), (error: unknown) => {
+  await assert.rejects(client.apps.logs(APP_ID), (error: unknown) => {
     assert.ok(error instanceof ControlError);
     assert.equal(error.trace_id, undefined);
     return true;
@@ -306,12 +318,12 @@ test("ControlError ignores a non-string trace_id", async () => {
 const ORG = "org_0123456789abcdefghijkl";
 const PRJ = "prj_0123456789abcdefghijkl";
 const IVT = "ivt_0123456789abcdefghijkl";
-const USER = "11111111-2222-3333-4444-555555555555";
+const USER = "usr_0000000002e4nenowz3qmamtd";
 
 /**
  * The whole organization/project surface, stated as the request each method
  * makes. Method, path and body are the three things a mistake here sends
- * somewhere else, and every path segment carries a typed id or a UUID - the
+ * somewhere else, and every path segment carries a typed id - the
  * server parses those before authorization runs, so a slug sent here is a 400
  * rather than a silent denial.
  *
@@ -647,7 +659,10 @@ test("organization ids are percent-encoded into the path", async () => {
     },
   });
 
-  await client.organizations.removeMember("org/../apps", "user?x#y");
+  await client.organizations.removeMember(
+    "org/../apps",
+    "user?x#y" as UserId,
+  );
 
   assert.equal(
     seen[0],

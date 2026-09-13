@@ -49,7 +49,7 @@ async fn logout_emission_posts_signed_logout_token_with_sid() {
         let session = session_store::create(
             &db,
             &session_store::CreateSession {
-                user_id,
+                user_id: user_id.clone(),
                 auth_method: "pwd",
                 amr: vec!["pwd".to_string()],
                 acr: None,
@@ -62,14 +62,12 @@ async fn logout_emission_posts_signed_logout_token_with_sid() {
         .expect("create OP session");
         let sid = session.id.to_string();
         // Record the pairwise subject the OP gives this client's user.
-        let sub = issuer.pairwise_subject(
-            &user_id.to_string(),
-            &format!("https://{client_id}.zeroship.localhost"),
-        );
+        let sub =
+            issuer.pairwise_subject(&user_id, &format!("https://{client_id}.zeroship.localhost"));
 
         backchannel_logout::record_rp_participation(
             &db,
-            user_id,
+            &user_id,
             &sid,
             &client_id,
             &sub,
@@ -154,13 +152,13 @@ fn raw_claims(token: &str) -> Value {
     serde_json::from_slice(&decoded).expect("payload json")
 }
 
-async fn seed_user(db: &Client) -> Uuid {
-    let user_id = Uuid::new_v4();
+async fn seed_user(db: &Client) -> zeroship_core::UserId {
+    let user_id = zeroship_core::UserId::mint();
     let email = format!("bcl-emit-{}@zeroship.test", Uuid::new_v4().simple());
     db.execute(
         "INSERT INTO zeroship.users (id, email, email_verified_at, name) \
          VALUES ($1, $2::citext, NOW(), 'BCL Emit User')",
-        &[&user_id, &email],
+        &[&user_id.as_str(), &email],
     )
     .await
     .expect("seed user");

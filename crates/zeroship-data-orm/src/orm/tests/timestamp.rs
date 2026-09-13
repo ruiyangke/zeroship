@@ -129,6 +129,70 @@ async fn exercise_timestamps(db: &Database) {
     assert_eq!(rows[0]["instant"], Value::Null);
 }
 
+async fn exercise_timestamp_extrema(postgres: bool) {
+    let owner = if postgres {
+        CollectionFixture::postgres("events", fields()).await
+    } else {
+        CollectionFixture::sqlite("events", fields()).await
+    };
+    let events = owner.database.collection("events").unwrap();
+    events
+        .execute(Operation::InsertMany {
+            documents: value!([
+                {"instant":"2026-01-01T00:00:00Z"},
+                {"instant":"2026-01-03T00:00:00Z"}
+            ]),
+        })
+        .await
+        .unwrap();
+
+    let Output::Rows { rows, .. } = events
+        .execute(Operation::Aggregate {
+            pipeline: value!([{"$group":{
+                "earliest":{"$min":"instant"},
+                "latest":{"$max":"instant"}
+            }}]),
+            options: value!({}),
+        })
+        .await
+        .unwrap()
+    else {
+        panic!("aggregate must return rows")
+    };
+    assert_eq!(rows.len(), 1);
+    assert!(matches!(
+        rows[0]["earliest"],
+        Value::Timestamp(1_767_225_600_000)
+    ));
+    assert!(matches!(
+        rows[0]["latest"],
+        Value::Timestamp(1_767_398_400_000)
+    ));
+
+    let Output::Rows { rows, .. } = events
+        .execute(Operation::Aggregate {
+            pipeline: value!([{"$group":{"instant":{"$count":true}}}]),
+            options: value!({}),
+        })
+        .await
+        .unwrap()
+    else {
+        panic!("aggregate must return rows")
+    };
+    assert_eq!(rows, vec![value!({"instant":2})]);
+    owner.close().await;
+}
+
+#[compio::test]
+async fn postgres_timestamp_extrema_are_native_timestamps() {
+    exercise_timestamp_extrema(true).await;
+}
+
+#[compio::test]
+async fn sqlite_timestamp_extrema_are_native_timestamps() {
+    exercise_timestamp_extrema(false).await;
+}
+
 #[compio::test]
 async fn timestamps_reject_corrupt_sqlite_storage_without_exposing_it() {
     let owner = CollectionFixture::sqlite("events", fields()).await;

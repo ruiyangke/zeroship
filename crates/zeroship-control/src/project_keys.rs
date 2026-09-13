@@ -2,8 +2,7 @@
 //! app's database-bound project through the authenticated internal API.
 
 use crate::{registry::Registry, secret_cipher::SecretCipher};
-use uuid::Uuid;
-use zeroship_core::{project_data_key::ProjectDataKey, project_id::ProjectId};
+use zeroship_core::{app_id::AppId, project_data_key::ProjectDataKey, project_id::ProjectId};
 
 #[derive(Debug)]
 pub(crate) enum KeyError {
@@ -20,7 +19,7 @@ impl From<compio_postgres::Error> for KeyError {
 pub(crate) async fn for_app(
     registry: &Registry,
     cipher: &SecretCipher,
-    app: Uuid,
+    app: &AppId,
 ) -> Result<ProjectDataKey, KeyError> {
     let mut connection = registry
         .conn()
@@ -33,7 +32,7 @@ pub(crate) async fn for_app(
         .query(
             "SELECT p.id FROM zeroship.projects p JOIN zeroship.apps a ON a.project_id = p.id \
          WHERE a.id = $1 FOR UPDATE OF p FOR KEY SHARE OF a",
-            &[&app],
+            &[&app.as_str()],
         )
         .await?;
     let project = projects
@@ -96,9 +95,9 @@ pub(crate) async fn for_app(
 mod tests {
     use super::*;
     use testcontainers::{
-        GenericImage, ImageExt,
         core::{IntoContainerPort, WaitFor},
         runners::SyncRunner,
+        GenericImage, ImageExt,
     };
 
     #[test]
@@ -125,7 +124,7 @@ mod tests {
             connection.batch_execute(
                 "CREATE SCHEMA zeroship; \
                  CREATE TABLE zeroship.projects (id text COLLATE \"C\" PRIMARY KEY); \
-                 CREATE TABLE zeroship.apps (id uuid PRIMARY KEY, project_id text REFERENCES zeroship.projects); \
+                 CREATE TABLE zeroship.apps (id text COLLATE \"C\" PRIMARY KEY, project_id text REFERENCES zeroship.projects); \
                  CREATE TABLE zeroship.project_data_keys (project_id text COLLATE \"C\" PRIMARY KEY \
                     REFERENCES zeroship.projects ON DELETE CASCADE, ciphertext bytea NOT NULL); \
                  CREATE ROLE key_fixture_worker; GRANT USAGE ON SCHEMA zeroship TO key_fixture_worker;"
@@ -135,19 +134,19 @@ mod tests {
             for project in [&first, &second] {
                 connection.execute("INSERT INTO zeroship.projects VALUES ($1)", &[&project.as_str()]).await.unwrap();
             }
-            let apps = [Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4()];
+            let apps = [AppId::mint(), AppId::mint(), AppId::mint()];
             for (app, project) in [(&apps[0], &first), (&apps[1], &first), (&apps[2], &second)] {
-                connection.execute("INSERT INTO zeroship.apps VALUES ($1, $2)", &[app, &project.as_str()]).await.unwrap();
+                connection.execute("INSERT INTO zeroship.apps VALUES ($1, $2)", &[&app.as_str(), &project.as_str()]).await.unwrap();
             }
             let original = SecretCipher::new("original-master", &[]);
-            let deliveries = futures::future::join_all((0..8).map(|i| for_app(&registry, &original, apps[i % 2]))).await;
+            let deliveries = futures::future::join_all((0..8).map(|i| for_app(&registry, &original, &apps[i % 2]))).await;
             let key = deliveries[0].as_ref().unwrap();
             for delivered in &deliveries {
                 let delivered = delivered.as_ref().unwrap();
                 assert_eq!(delivered.project_id, first);
                 assert_eq!(delivered.key(), key.key());
             }
-            let other = for_app(&registry, &original, apps[2]).await.unwrap();
+            let other = for_app(&registry, &original, &apps[2]).await.unwrap();
             assert_ne!(other.key(), key.key());
             let read_ciphertext = || async {
                 connection.query("SELECT ciphertext FROM zeroship.project_data_keys WHERE project_id = $1", &[&first.as_str()])
@@ -156,13 +155,17 @@ mod tests {
             let ciphertext = read_ciphertext().await;
             assert!(!ciphertext.windows(key.key().len()).any(|window| window == key.key()));
             let restarted = Registry::new(&url).await.unwrap();
-            assert_eq!(for_app(&restarted, &original, apps[1]).await.unwrap().key(), key.key());
+            assert_eq!(for_app(&restarted, &original, &apps[1]).await.unwrap().key(), key.key());
             let rotated = SecretCipher::new("replacement-master", &["original-master"]);
-            assert_eq!(for_app(&registry, &rotated, apps[0]).await.unwrap().key(), key.key());
+            assert_eq!(for_app(&registry, &rotated, &apps[0]).await.unwrap().key(), key.key());
             assert_ne!(read_ciphertext().await, ciphertext);
             let current = SecretCipher::new("replacement-master", &[]);
-            assert_eq!(for_app(&registry, &current, apps[1]).await.unwrap().key(), key.key());
-            assert!(matches!(for_app(&registry, &current, Uuid::new_v4()).await, Err(KeyError::AppNotFound)));
+            assert_eq!(for_app(&registry, &current, &apps[1]).await.unwrap().key(), key.key());
+            let missing_app = AppId::mint();
+            assert!(matches!(
+                for_app(&registry, &current, &missing_app).await,
+                Err(KeyError::AppNotFound)
+            ));
 
             connection.batch_execute("SET ROLE key_fixture_worker").await.unwrap();
             let denied = connection.query("SELECT * FROM zeroship.project_data_keys", &[]).await.unwrap_err();
@@ -170,11 +173,11 @@ mod tests {
             connection.batch_execute("RESET ROLE").await.unwrap();
             connection.execute("UPDATE zeroship.project_data_keys SET ciphertext = $1 WHERE project_id = $2", &[&ciphertext, &second.as_str()])
                 .await.unwrap();
-            assert!(for_app(&registry, &original, apps[2]).await.is_err(), "another project's wrapped key must not authenticate");
+            assert!(for_app(&registry, &original, &apps[2]).await.is_err(), "another project's wrapped key must not authenticate");
             let invalid = b"corrupt key".to_vec();
             connection.execute("UPDATE zeroship.project_data_keys SET ciphertext = $1 WHERE project_id = $2", &[&invalid, &first.as_str()])
                 .await.unwrap();
-            assert!(for_app(&registry, &current, apps[0]).await.is_err());
+            assert!(for_app(&registry, &current, &apps[0]).await.is_err());
             assert_eq!(read_ciphertext().await, invalid, "corruption must never trigger key replacement");
             drop(connection);
             assert!(compio_postgres::drain_connections(std::time::Duration::from_secs(2)).await);

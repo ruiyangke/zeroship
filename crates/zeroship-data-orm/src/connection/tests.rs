@@ -1,10 +1,88 @@
 use super::*;
-use crate::sql::compile::SqlDialect;
-use futures::{FutureExt, future::LocalBoxFuture};
+use futures::{future::LocalBoxFuture, FutureExt};
+use std::rc::Rc;
 use std::sync::{
-    Arc,
     atomic::{AtomicUsize, Ordering},
+    Arc,
 };
+
+struct SingleReadFactory {
+    calls: Arc<AtomicUsize>,
+    registration: crate::sql::registration::SqlRegistration,
+}
+
+impl BackendFactory for SingleReadFactory {
+    fn sql_registration(&self) -> crate::sql::registration::SqlRegistration {
+        assert_eq!(self.calls.fetch_add(1, Ordering::SeqCst), 0);
+        self.registration.clone()
+    }
+
+    fn connect(&self, _: ProjectKeySource) -> LocalBoxFuture<'_, Result<BackendHandle, DbError>> {
+        async { Err(DbError::config("fixture", "connection is not expected")) }.boxed_local()
+    }
+}
+
+#[test]
+fn connection_factory_captures_the_sql_registration_once() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let _factory = ConnectionFactory::new(
+        "single-read",
+        SingleReadFactory {
+            calls: calls.clone(),
+            registration: crate::sql::registration::SqlRegistration::sqlite(),
+        },
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+}
+
+#[compio::test]
+async fn direct_backend_handles_have_stable_distinct_connection_identities() {
+    let first_directory = tempfile::tempdir().unwrap();
+    let second_directory = tempfile::tempdir().unwrap();
+    let open = |directory: &tempfile::TempDir| {
+        BackendHandle::new(Rc::new(
+            crate::backend_selection::new_sqlite_backend(
+                directory.path().to_owned(),
+                ProjectKeySource::unavailable(),
+            )
+            .unwrap(),
+        ))
+    };
+    let first = open(&first_directory);
+    let first_clone = first.clone();
+    let second = BackendHandle::with_sql(
+        Rc::new(
+            crate::backend_selection::new_sqlite_backend(
+                second_directory.path().to_owned(),
+                ProjectKeySource::unavailable(),
+            )
+            .unwrap(),
+        ),
+        crate::sql::registration::SqlRegistration::sqlite(),
+    )
+    .unwrap();
+
+    assert_eq!(
+        first.connection_identity(),
+        first_clone.connection_identity()
+    );
+    assert_ne!(first.connection_identity(), second.connection_identity());
+
+    let captured = crate::tx_route::CapturedRoute::capture(
+        None,
+        "app_direct_backend_route",
+        crate::sql::SchemaName::new("app_direct_backend_route").unwrap(),
+        first.sql_registration().clone(),
+        first.connection_identity(),
+    );
+    assert!(matches!(
+        captured.bind(second),
+        Err(DbError::Configuration {
+            code: "backend_connection_mismatch",
+            ..
+        })
+    ));
+}
 
 struct ControlledFactory {
     inner: ConnectionFactory,
@@ -13,8 +91,8 @@ struct ControlledFactory {
     fail_first: bool,
 }
 impl BackendFactory for ControlledFactory {
-    fn dialect(&self) -> SqlDialect {
-        self.inner.dialect()
+    fn sql_registration(&self) -> crate::sql::registration::SqlRegistration {
+        self.inner.sql_registration().clone()
     }
     fn connect(
         &self,
@@ -83,7 +161,7 @@ async fn a_captured_route_refuses_a_replacement_connection_with_the_same_sql_bun
         "app_route_connection",
         crate::sql::SchemaName::new("app_route_connection").unwrap(),
         first.sql_registration().clone(),
-        Some(first.identity()),
+        first.identity(),
     );
     let replacement = second
         .connect(ProjectKeySource::unavailable())
@@ -164,16 +242,27 @@ fn configuration_identity_and_debug_follow_the_connection_contract() {
     assert_eq!(first.identity(), same.identity());
     assert_ne!(first.identity(), other.identity());
     assert!(!format!("{first:?}").contains("secret"));
-    let limit =
-        ConnectionFactory::for_url_with_limit(first.url().unwrap(), NonZeroUsize::new(1)).unwrap();
+    let limit = ConnectionFactory::for_url_with_limit(
+        first.url().unwrap(),
+        NonZeroUsize::new(1),
+        SessionAuthority::PerAppRole,
+    )
+    .unwrap();
     assert_ne!(first.identity(), limit.identity());
+    let service = ConnectionFactory::for_url_with_limit(
+        first.url().unwrap(),
+        None,
+        SessionAuthority::Connection,
+    )
+    .unwrap();
+    assert_ne!(first.identity(), service.identity());
     fn thread_safe<T: Send + Sync>() {}
     thread_safe::<ConnectionFactory>();
 }
 
 mod url_selection {
 
-    use super::{BackendUrl, backend_for_url};
+    use super::{backend_for_url, BackendUrl};
     use std::path::PathBuf;
 
     #[test]

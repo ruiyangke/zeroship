@@ -43,8 +43,8 @@ struct Fixture {
     db: Arc<Client>,
     issuer: Arc<Issuer>,
     client_id: String,
-    app_id: Uuid,
-    user_id: Uuid,
+    app_id: zeroship_core::AppId,
+    user_id: zeroship_core::UserId,
     user_email: String,
     user_name: String,
     user_avatar_url: String,
@@ -57,16 +57,16 @@ impl Fixture {
         let db = Arc::new(database.connect().await);
         let issuer = Arc::new(test_issuer(ISSUER));
 
-        let user_id = Uuid::new_v4();
-        let app_id = Uuid::new_v4();
+        let user_id = zeroship_core::UserId::mint();
+        let app_id = zeroship_core::AppId::mint();
         let client_id = format!("oac_userinfo_{}", Uuid::new_v4().simple());
         let app_name = format!("userinfo-{}", Uuid::new_v4().simple());
         let user_profile =
-            seed_user_client(&db, &issuer, user_id, app_id, &app_name, &client_id).await;
+            seed_user_client(&db, &issuer, &user_id, &app_id, &app_name, &client_id).await;
         let session = session_store::create(
             &db,
             &session_store::CreateSession {
-                user_id,
+                user_id: user_id.clone(),
                 auth_method: "pwd",
                 amr: vec!["pwd".to_string()],
                 acr: None,
@@ -90,7 +90,7 @@ impl Fixture {
             issuer,
             client_id,
             app_id,
-            user_id,
+            user_id: user_id.clone(),
             user_email: user_profile.email,
             user_name: user_profile.name,
             user_avatar_url: user_profile.avatar_url,
@@ -261,7 +261,7 @@ async fn userinfo_rejects_disabled_user() {
         fx.db
             .execute(
                 "UPDATE zeroship.users SET disabled_at = NOW() WHERE id = $1",
-                &[&fx.user_id],
+                &[&fx.user_id.as_str()],
             )
             .await
             .expect("disable user");
@@ -287,18 +287,18 @@ fn test_issuer(issuer: &str) -> Issuer {
 async fn seed_user_client(
     db: &Client,
     issuer: &Issuer,
-    user_id: Uuid,
-    app_id: Uuid,
+    user_id: &zeroship_core::UserId,
+    app_id: &zeroship_core::AppId,
     app_name: &str,
     client_id: &str,
 ) -> SeededUserProfile {
     let email = format!("userinfo-{}@zeroship.test", Uuid::new_v4().simple());
     let name = format!("UserInfo User {}", Uuid::new_v4().simple());
-    let avatar_url = format!("https://cdn.zeroship.test/avatars/{user_id}.png");
+    let avatar_url = format!("https://cdn.zeroship.test/avatars/{}.png", user_id.as_str());
     db.execute(
         "INSERT INTO zeroship.users (id, email, email_verified_at, name, avatar_url) \
          VALUES ($1, $2::citext, NOW(), $3, $4)",
-        &[&user_id, &email, &name, &avatar_url],
+        &[&user_id.as_str(), &email, &name, &avatar_url],
     )
     .await
     .expect("seed user");
@@ -317,7 +317,7 @@ async fn seed_user_client(
     db.execute(
         "INSERT INTO zeroship.apps (id, name, project_id, organization_id) \
          SELECT $1, $2, p.id, p.organization_id FROM zeroship.projects p WHERE p.id = $3",
-        &[&app_id, &app_name, &project_id],
+        &[&app_id.as_str(), &app_name, &project_id],
     )
     .await
     .expect("seed app");
@@ -340,7 +340,7 @@ async fn seed_user_client(
     db.execute(
         "INSERT INTO zeroship.app_oauth_clients (app_id, client_id, sector_identifier) \
          VALUES ($1, $2, $3)",
-        &[&app_id, &client_id, &SECTOR],
+        &[&app_id.as_str(), &client_id, &SECTOR],
     )
     .await
     .expect("seed app oauth client");
@@ -349,7 +349,7 @@ async fn seed_user_client(
              (user_id, client_id, granted_scopes, granted_at, updated_at) \
          VALUES ($1, $2, $3, NOW(), NOW())",
         &[
-            &user_id,
+            &user_id.as_str(),
             &client_id,
             &vec![
                 "openid".to_string(),
@@ -361,12 +361,12 @@ async fn seed_user_client(
     .await
     .expect("seed oauth grant");
 
-    let pairwise_sub = issuer.pairwise_subject(&user_id.to_string(), SECTOR);
+    let pairwise_sub = issuer.pairwise_subject(user_id, SECTOR);
     db.execute(
         "INSERT INTO zeroship.app_user_identities \
             (app_client_id, global_user_id, pairwise_sub) \
          VALUES ($1, $2, $3)",
-        &[&client_id, &user_id, &pairwise_sub],
+        &[&client_id, &user_id.as_str(), &pairwise_sub],
     )
     .await
     .expect("seed app user identity");
@@ -588,8 +588,8 @@ fn access_claims(fx: &Fixture) -> Value {
     let now = unix_timestamp();
     json!({
         "iss": fx.issuer.issuer(),
-        "sub": fx.issuer.pairwise_subject(&fx.user_id.to_string(), SECTOR),
-        "aud": format!("app:{}", fx.app_id),
+        "sub": fx.issuer.pairwise_subject(&fx.user_id, SECTOR),
+        "aud": format!("app:{}", fx.app_id.as_str()),
         "exp": now + 600,
         "iat": now,
         "jti": Uuid::new_v4().to_string(),

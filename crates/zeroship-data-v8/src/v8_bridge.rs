@@ -200,12 +200,8 @@ fn decode_native_depth(
         budget.take_bytes(s.len())?;
         return Ok(Value::String(s));
     }
-    // Date — `JSON.stringify(new Date())` calls `Date.prototype.toJSON`
-    // which returns an ISO string. Mirror that here so date fields in
-    // filters/docs round-trip the same way they did under the legacy
-    // `JSON.stringify` boundary. Without this branch the object walk
-    // below sees `new Date()` as a plain object with no own properties
-    // and produces `{}` — silently losing the value.
+    // Preserve Date values as ISO strings instead of walking them as empty
+    // objects.
     if v.is_date() {
         if let Ok(obj) = v8::Local::<v8::Object>::try_from(v) {
             let to_iso_key = v8::String::new(scope, "toISOString").unwrap();

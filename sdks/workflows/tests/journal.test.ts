@@ -36,12 +36,12 @@ class EchoChildWorkflow extends Workflow<{ value: string }, { value: string }> {
 
 function envelope(steps: JournalEnvelope["steps"] = []): JournalEnvelope {
   return {
-    runId: "run_0123456789ABCDEFGHIJKL",
+    runId: "run_0000000000000000000000001",
     workflowName: "Checkout",
     trigger: {
       input: { orderId: "ord_1" },
       startedAt: new Date("2026-07-05T00:00:00.000Z"),
-      runId: "run_0123456789ABCDEFGHIJKL",
+      runId: "run_0000000000000000000000001",
       workflowName: "Checkout",
     },
     steps,

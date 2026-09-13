@@ -4,8 +4,6 @@ use crate::tests::fixtures::Host;
 
 use compio_postgres::{NoTls, Pool};
 
-use crate::value::{Value, value};
-
 pub(super) async fn require_pg(
     host: &Host,
 ) -> (crate::tests::fixtures::postgres::Postgres, String) {
@@ -45,132 +43,6 @@ pub(super) async fn require_pg(
     }
 }
 
-/// Set up a test's own schema and `notes` table. Drops and recreates on every
-/// call, which is what makes a rerun idempotent.
-///
-/// `schema` is the caller's per-test app id (`test_app_id!()`). It was one
-/// shared `const SCHEMA = "plugin_db_test"` until 2026-09-04, and the
-/// `DROP ... CASCADE` below is why twenty tests then had to run serially.
-pub(super) async fn setup(pool: &Pool, schema: &str) {
-    pool.execute(&format!("DROP SCHEMA IF EXISTS \"{schema}\" CASCADE"), &[])
-        .await
-        .unwrap();
-    pool.execute(&format!("CREATE SCHEMA \"{schema}\""), &[])
-        .await
-        .unwrap();
-    pool.execute(
-        &format!(
-            // The descriptor below declares the same fields and defaults.
-            r#"CREATE TABLE "{schema}"."notes" (
-                id SERIAL PRIMARY KEY,
-                title TEXT NOT NULL,
-                body TEXT,
-                category TEXT,
-                views INTEGER DEFAULT 0,
-                tags JSONB DEFAULT '[]'::jsonb,
-                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                created_by TEXT,
-                updated_by TEXT,
-                version INTEGER NOT NULL DEFAULT 1,
-                deleted_at TIMESTAMPTZ
-            )"#
-        ),
-        &[],
-    )
-    .await
-    .unwrap();
-}
-
-/// Helper: build + execute a query, return parsed JSON array.
-pub(super) async fn exec_query(
-    pool: &Pool,
-    bq: crate::sql::compiler::CompiledQuery,
-) -> Vec<Value> {
-    let param_refs = &bq.params;
-    let rows = zeroship_data_orm::backend::postgres::params::query(
-        &pool.acquire().await.unwrap(),
-        &bq.sql,
-        param_refs,
-    )
-    .await
-    .unwrap();
-    rows.iter().map(row_to_value).collect()
-}
-
-/// Helper: build + execute a mutation, return parsed JSON array.
-pub(super) async fn exec_mutation(
-    pool: &Pool,
-    bq: crate::sql::compiler::CompiledQuery,
-) -> Vec<Value> {
-    let param_refs = &bq.params;
-    let rows = zeroship_data_orm::backend::postgres::params::query(
-        &pool.acquire().await.unwrap(),
-        &bq.sql,
-        param_refs,
-    )
-    .await
-    .unwrap();
-    rows.iter().map(row_to_value).collect()
-}
-
-/// Simplified row → JSON (just text columns for testing).
-pub(super) fn row_to_value(row: &compio_postgres::Row) -> Value {
-    let mut obj = crate::value::Map::new();
-    for col in row.columns() {
-        let name = col.name();
-        let val = match col.type_().oid() {
-            // INT4 = 23
-            23 => match row.try_get::<_, i32>(name) {
-                Ok(v) => Value::Number(v.into()),
-                Err(_) => Value::Null,
-            },
-            // INT8 = 20
-            20 => match row.try_get::<_, i64>(name) {
-                Ok(v) => Value::Number(v.into()),
-                Err(_) => Value::Null,
-            },
-            // BOOL = 16
-            16 => match row.try_get::<_, bool>(name) {
-                Ok(v) => Value::Bool(v),
-                Err(_) => Value::Null,
-            },
-            // JSONB = 3802 — binary format has 1-byte version prefix, strip it
-            3802 => match row.raw_value(name) {
-                Ok(Some(bytes)) if bytes.len() > 1 => {
-                    let json_str = std::str::from_utf8(&bytes[1..]).unwrap_or("null");
-                    serde_json::from_str(json_str).unwrap_or(Value::Null)
-                }
-                _ => Value::Null,
-            },
-            // JSON = 114 — text format, no prefix
-            114 => match row.try_get::<_, String>(name) {
-                Ok(s) => {
-                    let parsed = serde_json::from_str(&s).ok();
-                    parsed.unwrap_or(Value::String(s))
-                }
-                Err(_) => Value::Null,
-            },
-            // TIMESTAMPTZ = 1184 — read raw, return as number
-            1184 => match row.raw_value(name) {
-                Ok(Some(bytes)) if bytes.len() == 8 => {
-                    let pg_usec = i64::from_be_bytes(bytes.try_into().unwrap());
-                    let unix_ms = pg_usec / 1_000 + 946_684_800_000;
-                    Value::Number(unix_ms.into())
-                }
-                _ => Value::Null,
-            },
-            // Everything else → String
-            _ => match row.try_get::<_, String>(name) {
-                Ok(v) => Value::String(v),
-                Err(_) => Value::Null,
-            },
-        };
-        obj.insert(name.to_string(), val);
-    }
-    Value::Object(obj)
-}
-
 /// Release everything this test opened against Postgres, then wait for the
 /// sockets to actually close.
 ///
@@ -203,18 +75,6 @@ pub(super) async fn drain_pg(host: &Host) {
             compio_postgres::live_connections()
         );
     }
-}
-
-/// Descriptor for the table created by `setup`.
-pub(super) fn notes_schema() -> Value {
-    crate::tests::fixtures::schema::generated_fields(value!({
-        "id": { "type": "integer", "assign": {"by":"identity", "on":"insert"} },
-        "title": { "type": "string" },
-        "body": { "type": "string" },
-        "category": { "type": "string" },
-        "views": { "type": "int" },
-        "tags": { "type": "json" },
-    }))
 }
 
 /// The three system indexes every confined table carries.
@@ -271,17 +131,8 @@ pub(super) async fn provision_app_with_role(pool: &std::rc::Rc<Pool>, app: &str)
     pool.execute(&format!("CREATE SCHEMA \"{app}\""), &[])
         .await
         .unwrap();
-    // The unmask audit table, APPLY-AHEAD. `crud/unmask.rs` created it lazily on
-    // every dispatch until 2026-08-28; it emits no DDL now, so the migration
-    // service creates it and this fixture stands in for that service. These are
-    // the PRODUCTION bytes - `audit_unmask_table_sql` is the same generator
-    // `provision_audit_unmask_table` executes - not a copy of them.
-    //
-    // BEFORE the caller's `ensure_per_app_role`, so this bootstrap recipe can
-    // resolve the exact table and its `BIGSERIAL` sequence from the live catalog
-    // before installing only INSERT and USAGE. The migrate server independently
-    // uses the same provisioning-before-role ordering; it does not call this
-    // helper.
+    // Stand in for the migration service by creating the audit table before
+    // provisioning the app role and its schema-wide data grants.
     //
     // `batch_execute`, not `execute`: this is multi-statement DDL and the
     // extended protocol refuses it with "cannot insert multiple commands into a
@@ -397,13 +248,13 @@ pub(super) async fn require_postgis(pool: &Pool) {
     );
 }
 
-/// The seven platform system columns, PostgreSQL spelling.
+/// Common schema-declared columns used by PostgreSQL fixtures.
 ///
-/// Hand-written, not rendered. plugin-db does not own DDL, so a test that needs
+/// Hand-written, not rendered. The ORM does not own DDL, so a test that needs
 /// a table spells it; a fixture rendered by the layer under test cannot detect
 /// that layer being wrong. Same argument as `tests/fixtures/data/sqlite.rs` on the
 /// SQLite side.
-pub(super) const PG_SYSTEM_COLUMNS: &str = r#"
+pub(super) const PG_COMMON_FIXTURE_COLUMNS: &str = r#"
   id TEXT PRIMARY KEY,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),

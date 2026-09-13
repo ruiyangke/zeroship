@@ -38,17 +38,7 @@ mod backup_pg {
     use zeroship_data_orm::capability::{BusyPolicy, LockScope, SnapshotHandle, SnapshotOpts};
     use zeroship_data_orm::error::DbError;
 
-    /// Parse a `file:///abs/path` URI into the underlying filesystem
-    /// path. Returns a typed `Configuration` error for unsupported
-    /// schemes (e.g. `s3://`) so the SDK can branch on `.code`.
-    ///
-    /// Only the `file://` scheme is supported -- S3 / R2 land alongside
-    /// the production BlobStore wire-through later. The path
-    /// is the on-disk address of the dump artifact; SHA-256 hashing
-    /// happens on write (snapshot) and re-verification on read
-    /// (restore). The handle's `uri` field echoes the caller-supplied
-    /// string so dashboards and operators can correlate the snapshot
-    /// back to wherever they asked for it to land.
+    /// Resolve a file URI or bare filesystem path for a snapshot artifact.
     fn parse_dest_path(dest_uri: &str) -> Result<PathBuf, DbError> {
         if let Some(rest) = dest_uri.strip_prefix("file://") {
             // RFC 8089: `file:///abs/path` — the empty authority leaves
@@ -61,14 +51,9 @@ mod backup_pg {
                 code: "backup_dest_uri_unsupported",
                 message: format!(
                     "snapshot destination URI {dest_uri:?} uses an unsupported scheme; \
-                     PR 4 ships `file://` only — S3/HTTPS land alongside the production \
-                     BlobStore wire-through in a later PR"
+                     snapshots require a file URI or bare filesystem path"
                 ),
-                hint: Some(
-                    "use `file:///abs/path/to/snapshot.dump` in P5 PR 4; \
-                     S3/R2 destinations are deferred"
-                        .to_string(),
-                ),
+                hint: Some("use `file:///abs/path/to/snapshot.dump`".to_string()),
             })
         } else {
             // Treat anything else as a bare filesystem path so the
@@ -434,11 +419,7 @@ mod backup_pg {
                          NOTE: schema {app_id:?} is EMPTY after partial restore — \
                          operator must re-run restore to reconstruct state"
                     ),
-                    hint: Some(
-                        "P6a hardening lands the swap_schema_atomic SECURITY DEFINER \
-                         function that makes the restore non-destructive on failure"
-                            .to_string(),
-                    ),
+                    hint: Some("re-run restore from the verified snapshot".to_string()),
                 },
                 other => other,
             });

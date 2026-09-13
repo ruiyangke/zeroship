@@ -2,7 +2,8 @@
 
 use crate::tests::fixtures::parity;
 
-use zeroship_data_orm::sql::compile::raw_column_name;
+pub(super) use zeroship_core::app_id::LOCAL_DEV_APP_ID;
+use zeroship_data_orm::sql::mapping::raw_column_name;
 
 /// Drive a future to completion on a fresh compio runtime. The
 /// integration target has no global runtime — each `#[test]` builds
@@ -93,27 +94,25 @@ CREATE INDEX IF NOT EXISTS "{app_id}"."{collection}_created_by_idx" ON "{collect
 pub(super) fn users_encrypted_ssn_ddl() -> String {
     let raw_ssn = raw_column_name("ssn");
     format!(
-        r#"CREATE TABLE IF NOT EXISTS "default"."users" ({SYSTEM_COLUMNS_SQLITE},
+        r#"CREATE TABLE IF NOT EXISTS "{LOCAL_DEV_APP_ID}"."users" ({SYSTEM_COLUMNS_SQLITE},
   "email" TEXT NOT NULL,
   "name" TEXT NOT NULL,
   "{raw_ssn}" BLOB /* zero-migrate:enc:string */,
   "ssn" TEXT /* zero-migrate:mask:kind=last4,classification=spi */
 );
 {}
-CREATE UNIQUE INDEX IF NOT EXISTS "default"."users_email_key" ON "users" ("email");
+CREATE UNIQUE INDEX IF NOT EXISTS "{LOCAL_DEV_APP_ID}"."users_email_key" ON "users" ("email");
 "#,
-        system_indexes_sqlite("default", "users")
+        system_indexes_sqlite(LOCAL_DEV_APP_ID, "users")
     )
 }
 
 /// Create the `users` table in the dev app file BEFORE the runtime boots.
 ///
 /// `dir` is the same directory `parity::sqlite_url` points the runtime at, so the
-/// fixture writes `<dir>/zs-default.sqlite` - the exact file the data plane will
-/// ATTACH. `default` is the app id the runtime derives with no `APP_ID` in the
-/// env snapshot.
+/// fixture writes the exact app file the data plane will attach.
 pub(super) fn apply_schema_ahead_of_runtime(dir: &tempfile::TempDir, ddl: &str) {
-    crate::tests::fixtures::tables::create_sqlite_table(dir.path(), "default", ddl);
+    crate::tests::fixtures::tables::create_sqlite_table(dir.path(), LOCAL_DEV_APP_ID, ddl);
 }
 
 pub(super) struct SqliteRuntimeSource {

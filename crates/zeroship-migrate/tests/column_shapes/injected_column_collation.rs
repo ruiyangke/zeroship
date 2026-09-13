@@ -25,12 +25,9 @@ const PRODUCTION_CONFINED_CHARTER_TOML: &str = concat!(
     include_str!("../../../../policies/confined-system-shape.inject.toml"),
 );
 
-/// Four ids in the consumer's shape - a prefix plus base62 - listed in CREATION
-/// order, which for base62 of a monotonic UUIDv7 is BYTE order.
-///
-/// The four suffixes vary only in the case runs `A`, `Z`, `a`, `z`, whose byte
-/// values ascend (0x41 < 0x5A < 0x61 < 0x7A). Under `en_US.utf8` PostgreSQL
-/// interleaves those runs, which is the whole defect; under `C` it does not.
+/// Mixed-case sentinel keys in byte order. They are deliberately outside the
+/// lowercase typed-id alphabet so the test can distinguish bytewise collation
+/// from a locale collation.
 const CREATION_ORDER: [&str; 4] = [
     "note_0000000000000000000AAA",
     "note_0000000000000000000Zzz",

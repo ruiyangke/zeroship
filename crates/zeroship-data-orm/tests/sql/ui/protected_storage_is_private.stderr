@@ -1,0 +1,35 @@
+error[E0603]: function `read_raw_column_value` is private
+ --> tests/sql/ui/protected_storage_is_private.rs:2:48
+  |
+2 |     let _ = zeroship_data_orm::backend_handle::read_raw_column_value;
+  |                                                ^^^^^^^^^^^^^^^^^^^^^ private function
+  |
+note: the function `read_raw_column_value` is defined here
+ --> src/backend_handle.rs
+  |
+  | / pub(crate) async fn read_raw_column_value(
+  | |     route: &TxRoute,
+  | |     collection: &str,
+  | |     raw_column: &str,
+  | |     row_pk: &str,
+  | |     schema: &Value,
+  | | ) -> Result<ScalarRead<Value>, DbError> {
+  | |_______________________________________^
+
+error[E0603]: function `read_raw_column_bytes` is private
+ --> tests/sql/ui/protected_storage_is_private.rs:3:48
+  |
+3 |     let _ = zeroship_data_orm::backend_handle::read_raw_column_bytes;
+  |                                                ^^^^^^^^^^^^^^^^^^^^^ private function
+  |
+note: the function `read_raw_column_bytes` is defined here
+ --> src/backend_handle.rs
+  |
+  | / pub(crate) async fn read_raw_column_bytes(
+  | |     route: &TxRoute,
+  | |     collection: &str,
+  | |     raw_column: &str,
+  | |     row_pk: &str,
+  | |     schema: &Value,
+  | | ) -> Result<ScalarRead<Vec<u8>>, DbError> {
+  | |_________________________________________^

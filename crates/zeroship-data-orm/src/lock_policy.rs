@@ -117,20 +117,8 @@ mod tests {
     use std::cell::Cell;
 
     /// **Security [I43]**: exhaust the bounded-retry loop against a mock whose
-    /// `try_acquire_advisory_lock` always returns `Ok(false)` - perpetual
-    /// contention - and pin four things:
-    ///
-    /// - the loop runs EXACTLY the schedule's five attempts, so shrinking or
-    ///   growing `SCHEDULE` fails here rather than silently changing the
-    ///   security bound;
-    /// - the exhaustion path surfaces at all (the loop never returns `Ok`);
-    /// - the typed variant survives trait dispatch, no flatten to `Internal`;
-    /// - the wire mapping is the canonical contention code, and the message
-    ///   names the scope so an operator grepping `lock_not_available` can see
-    ///   which scope contended.
-    ///
-    /// This test moved here from `backend/mod.rs` with the policy it pins:
-    /// it exercises the retry loop, which is no longer part of the contract.
+    /// Perpetual contention exhausts the configured schedule and preserves the
+    /// typed error through wire mapping.
     #[test]
     fn try_acquire_with_backoff_exhaustion_yields_lock_contention() {
         struct MockClient;
@@ -149,7 +137,7 @@ mod tests {
             ) -> Result<(), DbError> {
                 unreachable!(
                     "the typed surface must route through try_acquire_with_backoff, \
-                     never the legacy blocking primitive"
+                     never the blocking primitive"
                 )
             }
 

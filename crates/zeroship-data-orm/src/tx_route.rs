@@ -11,8 +11,9 @@
 //! the physical schema and immutable SQL registration used by query preparation.
 
 use crate::backend::BackendHandle;
+use crate::binding::DbBinding;
+use crate::sql::registration::SqlRegistration;
 use crate::sql::SchemaName;
-use crate::sql::{compile::SqlDialect, registration::SqlRegistration};
 use crate::transaction::scope::TransactionScope;
 
 /// A synchronous routing decision awaiting backend binding.
@@ -29,7 +30,14 @@ pub struct CapturedRoute {
     scope: Option<TransactionScope>,
     /// Compiler, codecs, and effective support captured before backend acquisition.
     registration: SqlRegistration,
-    connection: Option<crate::connection::ConnectionIdentity>,
+    connection: CapturedConnection,
+}
+
+#[derive(Debug)]
+enum CapturedConnection {
+    Bound(crate::connection::ConnectionIdentity),
+    #[cfg(test)]
+    Unbound,
 }
 
 /// A captured dispatch bound to its backend. It carries app identity, callback
@@ -38,12 +46,26 @@ pub struct CapturedRoute {
 #[derive(Debug)]
 pub struct TxRoute {
     app_id: String,
+    meter: Option<zeroship_metering::MeterHandle>,
     schema: SchemaName,
     in_tx: bool,
     scope: Option<TransactionScope>,
     backend: BackendHandle,
     registration: SqlRegistration,
-    connection: Option<crate::connection::ConnectionIdentity>,
+    connection: crate::connection::ConnectionIdentity,
+}
+
+fn validate_binding_target(
+    app_id: &str,
+    schema: &SchemaName,
+    binding: &DbBinding,
+) -> Result<(), crate::error::DbError> {
+    if app_id != binding.app_id() || schema != binding.schema() {
+        return Err(crate::error::DbError::internal(
+            "ORM binding does not match the captured database route",
+        ));
+    }
+    Ok(())
 }
 
 impl CapturedRoute {
@@ -54,7 +76,7 @@ impl CapturedRoute {
         app_id: &str,
         schema: SchemaName,
         registration: SqlRegistration,
-        connection: Option<crate::connection::ConnectionIdentity>,
+        connection: crate::connection::ConnectionIdentity,
     ) -> Self {
         // SEC-1 compares TENANT against TENANT. The schema rides along; it is
         // never the admission key, because two apps sharing one database would
@@ -69,7 +91,7 @@ impl CapturedRoute {
             in_tx,
             scope,
             registration,
-            connection,
+            connection: CapturedConnection::Bound(connection),
         }
     }
 
@@ -83,34 +105,25 @@ impl CapturedRoute {
         &self.app_id
     }
 
-    /// The decision itself, before a backend is attached.
-    ///
-    /// Readable here because the SEC-1 comparison happens in [`Self::capture`],
-    /// so this is the value that comparison produced - the tests below assert
-    /// on it directly rather than having to bind a backend first.
+    /// Whether the captured dispatch belongs to a transaction callback.
     pub fn in_tx(&self) -> bool {
         self.in_tx
-    }
-
-    /// Legacy dialect selector used by operations awaiting compiler cutover.
-    pub fn dialect(&self) -> SqlDialect {
-        self.registration.dialect()
     }
 
     pub fn sql_registration(&self) -> &SqlRegistration {
         &self.registration
     }
 
-    pub fn connection_identity(&self) -> Option<crate::connection::ConnectionIdentity> {
-        self.connection
+    pub(crate) fn validate_binding(
+        &self,
+        binding: &DbBinding,
+    ) -> Result<(), crate::error::DbError> {
+        validate_binding_target(&self.app_id, &self.schema, binding)
     }
 
     /// Bind the frozen decision to the backend its SQL will run on.
     ///
-    /// Consuming, and the ONLY way to build a [`TxRoute`]. The adapter calls
-    /// it once per dispatch from the async body, because that is the first
-    /// point at which a backend can be opened; see
-    /// the adapter tier's `tx_scope::bind_route`.
+    /// Binding consumes the captured route so it cannot be attached twice.
     pub fn bind(self, backend: BackendHandle) -> Result<TxRoute, crate::error::DbError> {
         if self.registration.identity() != backend.sql_registration().identity() {
             return Err(crate::error::DbError::config(
@@ -118,53 +131,73 @@ impl CapturedRoute {
                 "captured SQL registration does not match the resolved backend",
             ));
         }
-        if self.connection.is_some() && self.connection != backend.connection_identity() {
-            return Err(crate::error::DbError::config(
-                "backend_connection_mismatch",
-                "captured connection does not match the resolved backend",
-            ));
-        }
+        let connection = match self.connection {
+            CapturedConnection::Bound(connection) => {
+                if connection != backend.connection_identity() {
+                    return Err(crate::error::DbError::config(
+                        "backend_connection_mismatch",
+                        "captured connection does not match the resolved backend",
+                    ));
+                }
+                connection
+            }
+            #[cfg(test)]
+            CapturedConnection::Unbound => backend.connection_identity(),
+        };
+        let meter = crate::metrics::bind(&self.app_id)?;
         Ok(TxRoute {
+            meter,
             app_id: self.app_id,
             schema: self.schema,
             in_tx: self.in_tx,
             scope: self.scope,
             backend,
             registration: self.registration,
-            connection: self.connection,
+            connection,
         })
     }
 
     /// Test-only autocommit route with the corresponding built-in registration.
     #[cfg(test)]
     #[doc(hidden)]
-    pub fn pool_for_tests(app_id: &str, dialect: SqlDialect) -> Self {
+    pub fn pool_for_tests(app_id: &str, registration: SqlRegistration) -> Self {
         Self {
             app_id: app_id.to_string(),
             schema: SchemaName::new(app_id).expect("test app ids are legal schema names"),
             in_tx: false,
             scope: None,
-            registration: SqlRegistration::builtin(dialect),
-            connection: None,
+            registration,
+            connection: CapturedConnection::Unbound,
         }
     }
 
     /// Test-only route claiming the app’s currently installed transaction scope.
     #[cfg(test)]
     #[doc(hidden)]
-    pub fn tx_for_tests(app_id: &str, dialect: SqlDialect) -> Self {
+    pub fn tx_for_tests(app_id: &str, registration: SqlRegistration) -> Self {
         Self {
             app_id: app_id.to_string(),
             schema: SchemaName::new(app_id).expect("test app ids are legal schema names"),
             in_tx: true,
             scope: TransactionScope::current(app_id).ok(),
-            registration: SqlRegistration::builtin(dialect),
-            connection: None,
+            registration,
+            connection: CapturedConnection::Unbound,
         }
     }
 }
 
 impl TxRoute {
+    pub(crate) fn validate_binding(
+        &self,
+        binding: &DbBinding,
+    ) -> Result<(), crate::error::DbError> {
+        validate_binding_target(&self.app_id, &self.schema, binding)
+    }
+
+    pub(crate) fn meter(&self) -> Option<&zeroship_metering::MeterHandle> {
+        self.meter.as_ref()
+    }
+
     /// Validate the captured callback before admitting work to its lane.
     pub(crate) fn check_scope(&self) -> Result<(), crate::error::DbError> {
         self.scope.as_ref().map_or(Ok(()), TransactionScope::check)
@@ -187,23 +220,16 @@ impl TxRoute {
 
     /// The backend this dispatch's SQL runs on.
     ///
-    /// Bound at [`CapturedRoute::bind`], so it is the handle the adapter
-    /// resolved for THIS dispatch rather than whatever the thread's context
-    /// holds by the time the statement finally runs.
+    /// This is the handle frozen by [`CapturedRoute::bind`].
     pub fn backend(&self) -> &BackendHandle {
         &self.backend
-    }
-
-    /// Legacy dialect selector used by operations awaiting compiler cutover.
-    pub fn dialect(&self) -> SqlDialect {
-        self.registration.dialect()
     }
 
     pub fn sql_registration(&self) -> &SqlRegistration {
         &self.registration
     }
 
-    pub fn connection_identity(&self) -> Option<crate::connection::ConnectionIdentity> {
+    pub fn connection_identity(&self) -> crate::connection::ConnectionIdentity {
         self.connection
     }
 
@@ -227,14 +253,3 @@ impl TxRoute {
         Ok(self)
     }
 }
-
-// THE `#[cfg(test)] mod tests` THAT SAT HERE MOVED to `zeroship-data-v8`'s
-// `tx_scope.rs` with the data-engine cut, unchanged in substance.
-//
-// All five arms drive `tx_scope::capture_route` inside a live `v8::PinScope`,
-// and three of the four names they use - `tx_scope`, `context`,
-// `set_db_url_for_tests`, plus `v8` and `zeroship_runtime::init_v8` - are the
-// adapter's. What they establish is a property OF the capture, not of the value
-// it produces: that `capture` reads the async-scope marker and is provably not
-// the ambient `tx_lanes::has_tx_for` answer. Reverting `capture` to the pre-fix
-// ambient test still fails three of them, in their new home.

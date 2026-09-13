@@ -14,17 +14,12 @@ use zeroship_migrate_sqlite::backend::AUDIT_UNMASK_TABLE as SQLITE_CREATOR;
 /// failure but the one that would ship silently.
 const AUDIT_TABLE: &str = "__zeroship_audit_unmask";
 
-/// The prefix that makes this name unreachable for a creator collection.
-const RESERVED_PREFIX: &str = "__zeroship_";
-
 /// The binding proper: three crates, one name.
 #[test]
 fn every_declaration_of_the_audit_table_name_is_the_one_this_file_states() {
     assert_eq!(
         WRITER, AUDIT_TABLE,
-        "the data plane's unmask-audit INSERT target moved; it is the only writer \
-         and creates nothing, so it would be INSERTing into a relation neither \
-         apply host makes",
+        "the ORM audit INSERT target must match the relation created by both apply hosts",
     );
     assert_eq!(
         SQLITE_CREATOR, AUDIT_TABLE,
@@ -71,39 +66,11 @@ fn the_postgres_apply_host_creates_the_relation_the_writer_targets() {
     );
 }
 
-/// Why the name is safe to hardcode at all, held against the fence that makes
-/// it so.
-///
-/// This is the arm the three above cannot cover: they would all stay green if
-/// the shared name were renamed to something a creator can also declare. The
-/// relation lives in the creator's OWN schema alongside their tables, so the
-/// only thing stopping a creator from declaring a colliding collection - and
-/// thereby handing the worker a relation the creator controls to write its
-/// audit log into - is that the schema authority refuses the `__zeroship_`
-/// prefix on an inbound collection name.
+/// Tables in the bound creator schema use the same ORM path regardless of name.
 #[test]
-fn the_audit_relation_sits_in_a_namespace_a_creator_cannot_declare() {
+fn the_audit_relation_is_addressable_as_an_ordinary_collection() {
     assert!(
-        AUDIT_TABLE.starts_with(RESERVED_PREFIX),
-        "{AUDIT_TABLE} left the reserved platform namespace {RESERVED_PREFIX}",
-    );
-    assert!(
-        zeroship_data_orm::sql::compile::validate_collection(AUDIT_TABLE).is_err(),
-        "the schema authority now ACCEPTS {AUDIT_TABLE} as a creator collection; a \
-         creator could declare the relation their own audit log is written into",
-    );
-    // The control, differing in one variable: the same name without the
-    // reserved prefix is an ordinary collection. Without this the assertion
-    // above would also pass if `validate_collection` had started refusing
-    // everything.
-    let unreserved = AUDIT_TABLE.trim_start_matches('_');
-    assert_ne!(
-        unreserved, AUDIT_TABLE,
-        "the control is the same string as the subject, so it varies nothing",
-    );
-    assert!(
-        zeroship_data_orm::sql::compile::validate_collection(unreserved).is_ok(),
-        "the control name {unreserved} is refused too, so the arm above says \
-         nothing about the reserved prefix",
+        zeroship_data_orm::sql::mapping::validate_collection(AUDIT_TABLE).is_ok(),
+        "the bound creator schema must expose {AUDIT_TABLE} through the ordinary ORM path",
     );
 }

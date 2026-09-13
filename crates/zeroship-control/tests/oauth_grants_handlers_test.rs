@@ -13,9 +13,10 @@ use serde_json::{json, Value};
 use uuid::Uuid;
 use zeroship_bundle::{BlobStore, LocalDiskBlobStore};
 use zeroship_control::{
-    api, oauth_grants_handlers, AppState, EnvStore, Quota, RateLimiter,
-    Registry, SecretString, StripeStore,
+    api, oauth_grants_handlers, AppState, EnvStore, Quota, RateLimiter, Registry, SecretString,
+    StripeStore,
 };
+use zeroship_core::{AppId, UserId};
 
 use crate::common;
 
@@ -55,9 +56,10 @@ impl Fixture {
         let blob_root = tmpdir(&format!("blob-{label}"));
         let deploy_tmp_dir = tmpdir(&format!("deploy-{label}"));
         let registry = Registry::new(db_url).await.expect("registry");
-    zeroship_control::plan_catalog::seed_plans(&registry).await.expect("seed built-in plans");
-        let env_store =
-            EnvStore::new(registry.clone(), TEST_MASTER_KEY).expect("env store");
+        zeroship_control::plan_catalog::seed_plans(&registry)
+            .await
+            .expect("seed built-in plans");
+        let env_store = EnvStore::new(registry.clone(), TEST_MASTER_KEY).expect("env store");
         let stripe_store = StripeStore::new(registry.clone());
         let blob_store: Arc<dyn BlobStore> =
             Arc::new(LocalDiskBlobStore::new(blob_root.clone()).expect("blob store"));
@@ -67,7 +69,9 @@ impl Fixture {
         );
 
         let state = Arc::new(AppState {
-            service_auth: std::sync::Arc::new(zeroship_core::service_peers::ServiceAuth::unconfigured()),
+            service_auth: std::sync::Arc::new(
+                zeroship_core::service_peers::ServiceAuth::unconfigured(),
+            ),
             registry,
             env_store,
             stripe_store,
@@ -92,15 +96,18 @@ impl Fixture {
             expected_oauth_audience: "control.zeroship.ai".to_string(),
             static_policies: zeroship_authz::load_platform_policies()
                 .expect("bundled authz policies parse"),
-            auth_provider: zeroship_control::platform_auth_provider("https://auth.zeroship.test/oauth2", Some(common::platform_jwks_url())),
+            auth_provider: zeroship_control::platform_auth_provider(
+                "https://auth.zeroship.test/oauth2",
+                Some(common::platform_jwks_url()),
+            ),
             // A real, non-zero pairwise salt so the disconnect-app cascade
             // writes a `token_revocations` marker under a `pws_` the test can
             // re-derive with the SAME salt + sector (Batch A fix 4).
-        // No platform deploy-token mint here: that is control's OUTBOUND
-        // destination for the device flow, and no fixture below drives one.
-        provider_registry: zeroship_control::metering::provider::builtin_registry(),
-        billing_stack: zeroship_control::metering::provider::BillingStack::for_tests(),
-        billing_stream: None,
+            // No platform deploy-token mint here: that is control's OUTBOUND
+            // destination for the device flow, and no fixture below drives one.
+            provider_registry: zeroship_control::metering::provider::builtin_registry(),
+            billing_stack: zeroship_control::metering::provider::BillingStack::for_tests(),
+            billing_stream: None,
             tax_provider: zeroship_control::tax::build_tax_provider(
                 &zeroship_control::tax::TaxProviderConfig::native(),
             )
@@ -152,7 +159,7 @@ impl Drop for Fixture {
 }
 
 struct AccountCaller {
-    user_id: Uuid,
+    user_id: UserId,
     token: String,
 }
 
@@ -162,7 +169,7 @@ impl AccountCaller {
     }
 
     async fn cleanup(&self, state: &AppState) {
-        cleanup_user(state, self.user_id).await;
+        cleanup_user(state, &self.user_id).await;
     }
 }
 
@@ -172,7 +179,7 @@ impl AccountCaller {
 async fn account_caller(state: &AppState, label: &str) -> AccountCaller {
     let user_id = insert_user(state, label).await;
     let token = common::platform_token_for_client(
-        user_id,
+        &user_id,
         "account:read account:write",
         common::CONSOLE_CLIENT_ID,
     );
@@ -180,47 +187,53 @@ async fn account_caller(state: &AppState, label: &str) -> AccountCaller {
     AccountCaller { user_id, token }
 }
 
-async fn insert_user(state: &AppState, label: &str) -> Uuid {
-    let user_id = Uuid::new_v4();
-    let email = format!("{label}-{user_id}@zeroship.test");
+async fn insert_user(state: &AppState, label: &str) -> UserId {
+    let user_id = UserId::mint();
+    let email = format!("{label}-{}@zeroship.test", user_id.as_str());
     state
         .control_pg
         .execute(
             "INSERT INTO zeroship.users (id, email, name, email_verified_at) \
              VALUES ($1, $2::citext, $3, NOW())",
-            &[&user_id, &email, &label],
+            &[&user_id.as_str(), &email, &label],
         )
         .await
         .expect("insert test user");
     user_id
 }
 
-async fn cleanup_user(state: &AppState, user_id: Uuid) {
+async fn cleanup_user(state: &AppState, user_id: &UserId) {
     let _ = state
         .control_pg
         .execute(
             "DELETE FROM zeroship.authz_decisions WHERE actor_user_id = $1",
-            &[&user_id],
+            &[&user_id.as_str()],
         )
         .await;
     let _ = state
         .control_pg
         .execute(
             "DELETE FROM zeroship.oauth_grants WHERE user_id = $1",
-            &[&user_id],
+            &[&user_id.as_str()],
         )
         .await;
     let _ = state
         .control_pg
-        .execute("DELETE FROM zeroship.platform_admin_roles WHERE user_id = $1", &[&user_id])
+        .execute(
+            "DELETE FROM zeroship.platform_admin_roles WHERE user_id = $1",
+            &[&user_id.as_str()],
+        )
         .await;
     let _ = state
         .control_pg
-        .execute("DELETE FROM zeroship.users WHERE id = $1", &[&user_id])
+        .execute(
+            "DELETE FROM zeroship.users WHERE id = $1",
+            &[&user_id.as_str()],
+        )
         .await;
 }
 
-async fn insert_client(state: &AppState, client_id: &str, created_by: Uuid) {
+async fn insert_client(state: &AppState, client_id: &str, created_by: &UserId) {
     let redirect_uri = format!("https://{client_id}.example/callback");
     let redirect_uris = vec![redirect_uri.as_str()];
     let scopes = vec!["apps:read", "env:read"];
@@ -238,14 +251,14 @@ async fn insert_client(state: &AppState, client_id: &str, created_by: Uuid) {
                 &Some(format!("https://{client_id}.example/logo.png")),
                 &redirect_uris,
                 &scopes,
-                &created_by,
+                &created_by.as_str(),
             ],
         )
         .await
         .expect("insert oauth client");
 }
 
-async fn insert_grant(state: &AppState, user_id: Uuid, client_id: &str, scopes: &[&str]) {
+async fn insert_grant(state: &AppState, user_id: &UserId, client_id: &str, scopes: &[&str]) {
     let granted_scopes = scopes.to_vec();
     state
         .control_pg
@@ -253,7 +266,7 @@ async fn insert_grant(state: &AppState, user_id: Uuid, client_id: &str, scopes: 
             "INSERT INTO zeroship.oauth_grants \
                 (user_id, client_id, granted_scopes, granted_at, last_used_at) \
              VALUES ($1, $2, $3, NOW(), NOW())",
-            &[&user_id, &client_id, &granted_scopes],
+            &[&user_id.as_str(), &client_id, &granted_scopes],
         )
         .await
         .expect("insert oauth grant");
@@ -273,18 +286,17 @@ async fn insert_identity_with_alias(
     state: &AppState,
     client_id: &str,
     sector: &str,
-    user_id: Uuid,
+    user_id: &UserId,
     relay_email: &str,
 ) {
-    let pairwise_sub =
-        zeroship_core::auth::derive_pairwise(&state.pairwise_salt, &user_id.to_string(), sector);
+    let pairwise_sub = zeroship_core::auth::derive_pairwise(&state.pairwise_salt, user_id, sector);
     state
         .control_pg
         .execute(
             "INSERT INTO zeroship.app_user_identities \
                 (app_client_id, global_user_id, pairwise_sub, relay_email) \
              VALUES ($1, $2, $3, $4)",
-            &[&client_id, &user_id, &pairwise_sub, &relay_email],
+            &[&client_id, &user_id.as_str(), &pairwise_sub, &relay_email],
         )
         .await
         .expect("insert app_user_identities row");
@@ -301,13 +313,13 @@ async fn alias_is_active(state: &AppState, relay_email: &str) -> bool {
         .is_some()
 }
 
-async fn identity_revoked_at_is_set(state: &AppState, client_id: &str, user_id: Uuid) -> bool {
+async fn identity_revoked_at_is_set(state: &AppState, client_id: &str, user_id: &UserId) -> bool {
     let rows = state
         .control_pg
         .query(
             "SELECT revoked_at FROM zeroship.app_user_identities \
              WHERE app_client_id = $1 AND global_user_id = $2",
-            &[&client_id, &user_id],
+            &[&client_id, &user_id.as_str()],
         )
         .await
         .expect("query identity revoked_at");
@@ -339,14 +351,14 @@ async fn cleanup_identities(state: &AppState, client_id: &str) {
         .await;
 }
 
-async fn count_grant(state: &AppState, user_id: Uuid, client_id: &str) -> i64 {
+async fn count_grant(state: &AppState, user_id: &UserId, client_id: &str) -> i64 {
     let rows = state
         .control_pg
         .query(
             "SELECT COUNT(*)::BIGINT AS n \
              FROM zeroship.oauth_grants \
              WHERE user_id = $1 AND client_id = $2",
-            &[&user_id, &client_id],
+            &[&user_id.as_str(), &client_id],
         )
         .await
         .expect("count oauth grant");
@@ -355,7 +367,7 @@ async fn count_grant(state: &AppState, user_id: Uuid, client_id: &str) -> i64 {
 
 async fn audit_event_count(
     state: &AppState,
-    user_id: Uuid,
+    user_id: &UserId,
     event_type: &str,
     client_id: &str,
 ) -> i64 {
@@ -365,7 +377,7 @@ async fn audit_event_count(
             "SELECT COUNT(*)::BIGINT AS n \
              FROM zeroship.audit_events \
              WHERE actor_user_id = $1 AND event_type = $2 AND client_id = $3",
-            &[&user_id, &event_type, &client_id],
+            &[&user_id.as_str(), &event_type, &client_id],
         )
         .await
         .expect("count audit events");
@@ -418,8 +430,14 @@ async fn list_returns_user_grants_with_client_metadata() {
     let caller = account_caller(&fx.state, "metadata").await;
     let app = init_control!(fx);
     let client_id = format!("oauth-grant-metadata-{}", Uuid::new_v4().simple());
-    insert_client(&fx.state, &client_id, caller.user_id).await;
-    insert_grant(&fx.state, caller.user_id, &client_id, &["apps:read", "env:read"]).await;
+    insert_client(&fx.state, &client_id, &caller.user_id).await;
+    insert_grant(
+        &fx.state,
+        &caller.user_id,
+        &client_id,
+        &["apps:read", "env:read"],
+    )
+    .await;
 
     let req = test::TestRequest::get()
         .uri("/me/oauth-grants")
@@ -434,17 +452,18 @@ async fn list_returns_user_grants_with_client_metadata() {
     let grant = &grants[0];
     assert_eq!(grant["client_id"].as_str(), Some(client_id.as_str()));
     assert_eq!(grant["client_name"], format!("Client {client_id}"));
-    assert_eq!(
-        grant["client_uri"],
-        format!("https://{client_id}.example")
-    );
+    assert_eq!(grant["client_uri"], format!("https://{client_id}.example"));
     assert_eq!(
         grant["logo_uri"],
         format!("https://{client_id}.example/logo.png")
     );
     assert_eq!(grant["granted_scopes"], json!(["apps:read", "env:read"]));
-    assert!(grant["granted_at"].as_str().is_some_and(|value| value.contains('T')));
-    assert!(grant["last_used_at"].as_str().is_some_and(|value| value.contains('T')));
+    assert!(grant["granted_at"]
+        .as_str()
+        .is_some_and(|value| value.contains('T')));
+    assert!(grant["last_used_at"]
+        .as_str()
+        .is_some_and(|value| value.contains('T')));
 
     fx.cleanup_clients(&[client_id]).await;
     caller.cleanup(&fx.state).await;
@@ -463,10 +482,10 @@ async fn list_does_not_leak_other_users_grants() {
     let app = init_control!(fx);
     let client_a = format!("oauth-grant-a-{}", Uuid::new_v4().simple());
     let client_b = format!("oauth-grant-b-{}", Uuid::new_v4().simple());
-    insert_client(&fx.state, &client_a, caller.user_id).await;
-    insert_client(&fx.state, &client_b, caller.user_id).await;
-    insert_grant(&fx.state, caller.user_id, &client_a, &["apps:read"]).await;
-    insert_grant(&fx.state, other_user, &client_b, &["env:read"]).await;
+    insert_client(&fx.state, &client_a, &caller.user_id).await;
+    insert_client(&fx.state, &client_b, &caller.user_id).await;
+    insert_grant(&fx.state, &caller.user_id, &client_a, &["apps:read"]).await;
+    insert_grant(&fx.state, &other_user, &client_b, &["env:read"]).await;
 
     let req = test::TestRequest::get()
         .uri("/me/oauth-grants")
@@ -481,7 +500,7 @@ async fn list_does_not_leak_other_users_grants() {
     assert_eq!(grants[0]["client_id"].as_str(), Some(client_a.as_str()));
 
     fx.cleanup_clients(&[client_a, client_b]).await;
-    cleanup_user(&fx.state, other_user).await;
+    cleanup_user(&fx.state, &other_user).await;
     caller.cleanup(&fx.state).await;
 
     drop(app);
@@ -496,8 +515,8 @@ async fn revoke_removes_grant_row() {
     let caller = account_caller(&fx.state, "revoke-row").await;
     let app = init_control!(fx);
     let client_id = format!("oauth-grant-revoke-{}", Uuid::new_v4().simple());
-    insert_client(&fx.state, &client_id, caller.user_id).await;
-    insert_grant(&fx.state, caller.user_id, &client_id, &["apps:read"]).await;
+    insert_client(&fx.state, &client_id, &caller.user_id).await;
+    insert_grant(&fx.state, &caller.user_id, &client_id, &["apps:read"]).await;
 
     let req = test::TestRequest::delete()
         .uri(&format!("/me/oauth-grants/{client_id}"))
@@ -508,9 +527,9 @@ async fn revoke_removes_grant_row() {
     let status = test::call_service(&app, req).await.status();
 
     assert_eq!(status, StatusCode::NO_CONTENT);
-    assert_eq!(count_grant(&fx.state, caller.user_id, &client_id).await, 0);
+    assert_eq!(count_grant(&fx.state, &caller.user_id, &client_id).await, 0);
     assert_eq!(
-        audit_event_count(&fx.state, caller.user_id, "oauth_grant_revoke", &client_id).await,
+        audit_event_count(&fx.state, &caller.user_id, "oauth_grant_revoke", &client_id).await,
         1
     );
 
@@ -529,8 +548,8 @@ async fn revoke_removes_native_grant_for_user_client_pair() {
     let caller = account_caller(&fx.state, "revoke-native").await;
     let app = init_control!(fx);
     let client_id = format!("oauth-grant-native-{}", Uuid::new_v4().simple());
-    insert_client(&fx.state, &client_id, caller.user_id).await;
-    insert_grant(&fx.state, caller.user_id, &client_id, &["apps:read"]).await;
+    insert_client(&fx.state, &client_id, &caller.user_id).await;
+    insert_grant(&fx.state, &caller.user_id, &client_id, &["apps:read"]).await;
 
     let req = test::TestRequest::delete()
         .uri(&format!("/me/oauth-grants/{client_id}"))
@@ -541,9 +560,9 @@ async fn revoke_removes_native_grant_for_user_client_pair() {
     let status = test::call_service(&app, req).await.status();
 
     assert_eq!(status, StatusCode::NO_CONTENT);
-    assert_eq!(count_grant(&fx.state, caller.user_id, &client_id).await, 0);
+    assert_eq!(count_grant(&fx.state, &caller.user_id, &client_id).await, 0);
     assert_eq!(
-        audit_event_count(&fx.state, caller.user_id, "oauth_grant_revoke", &client_id).await,
+        audit_event_count(&fx.state, &caller.user_id, "oauth_grant_revoke", &client_id).await,
         1
     );
 
@@ -588,8 +607,8 @@ async fn revoke_does_not_affect_other_users() {
     let revoker = account_caller(&fx.state, "other-user-revoker").await;
     let app = init_control!(fx);
     let client_id = format!("oauth-grant-other-{}", Uuid::new_v4().simple());
-    insert_client(&fx.state, &client_id, owner.user_id).await;
-    insert_grant(&fx.state, owner.user_id, &client_id, &["apps:read"]).await;
+    insert_client(&fx.state, &client_id, &owner.user_id).await;
+    insert_grant(&fx.state, &owner.user_id, &client_id, &["apps:read"]).await;
 
     let req = test::TestRequest::delete()
         .uri(&format!("/me/oauth-grants/{client_id}"))
@@ -600,7 +619,7 @@ async fn revoke_does_not_affect_other_users() {
     let status = test::call_service(&app, req).await.status();
 
     assert_eq!(status, StatusCode::NOT_FOUND);
-    assert_eq!(count_grant(&fx.state, owner.user_id, &client_id).await, 1);
+    assert_eq!(count_grant(&fx.state, &owner.user_id, &client_id).await, 1);
 
     fx.cleanup_clients(&[client_id]).await;
     revoker.cleanup(&fx.state).await;
@@ -625,10 +644,23 @@ async fn revoke_cascade_revokes_relay_alias_so_inbound_bounces() {
     let app = init_control!(fx);
     let client_id = format!("oauth-grant-cascade-{}", Uuid::new_v4().simple());
     let sector = format!("https://{client_id}.zeroship.localhost");
-    insert_client(&fx.state, &client_id, caller.user_id).await;
-    insert_grant(&fx.state, caller.user_id, &client_id, &["apps:read", "email"]).await;
+    insert_client(&fx.state, &client_id, &caller.user_id).await;
+    insert_grant(
+        &fx.state,
+        &caller.user_id,
+        &client_id,
+        &["apps:read", "email"],
+    )
+    .await;
     let relay_email = format!("{}@relay.zeroship.localhost", Uuid::new_v4().simple());
-    insert_identity_with_alias(&fx.state, &client_id, &sector, caller.user_id, &relay_email).await;
+    insert_identity_with_alias(
+        &fx.state,
+        &client_id,
+        &sector,
+        &caller.user_id,
+        &relay_email,
+    )
+    .await;
 
     // Pre-condition: the alias forwards (active map present — what 5b resolves).
     assert!(
@@ -647,9 +679,9 @@ async fn revoke_cascade_revokes_relay_alias_so_inbound_bounces() {
     assert_eq!(status, StatusCode::NO_CONTENT);
 
     // The grant is gone AND the alias is revoked — committed atomically.
-    assert_eq!(count_grant(&fx.state, caller.user_id, &client_id).await, 0);
+    assert_eq!(count_grant(&fx.state, &caller.user_id, &client_id).await, 0);
     assert!(
-        identity_revoked_at_is_set(&fx.state, &client_id, caller.user_id).await,
+        identity_revoked_at_is_set(&fx.state, &client_id, &caller.user_id).await,
         "revoke must set app_user_identities.revoked_at (the cascade UPDATE)"
     );
     // The faithful seam: the 5b webhook's active-map resolution now returns
@@ -673,13 +705,13 @@ async fn revoke_cascade_revokes_relay_alias_so_inbound_bounces() {
 /// to derive the per-app `pws_` before writing the token-family marker.
 /// `app_oauth_clients.app_id` FKs `zeroship.apps`, so we seed a minimal app row
 /// first. Returns the seeded `app_id` so the caller can clean it up.
-async fn insert_app_oauth_client(state: &AppState, client_id: &str, sector: &str) -> Uuid {
-    let app_id = Uuid::new_v4();
+async fn insert_app_oauth_client(state: &AppState, client_id: &str, sector: &str) -> AppId {
+    let app_id = AppId::mint();
     // This case is about the OAuth client row, not about who owns the app.
     let project = common::unowned_project(&state.control_pg).await;
     // `apps.plan_id` FKs `zeroship.plans`; the column default is the literal
     // string 'free', but the catalog's built-in free tier is keyed by the
-    // derived `pln_<base62>` id (`free_plan_id()`), NOT 'free'. Seed it
+    // derived canonical plan id (`free_plan_id()`), NOT 'free'. Seed it
     // explicitly so the insert satisfies `apps_plan_fk`. The fixture already
     // seeded the built-in plans (`seed_plans`), so this id is present.
     state
@@ -688,8 +720,8 @@ async fn insert_app_oauth_client(state: &AppState, client_id: &str, sector: &str
             "INSERT INTO zeroship.apps (id, name, plan_id, project_id, organization_id) \
              SELECT $1, $2, $3, p.id, p.organization_id FROM zeroship.projects p WHERE p.id = $4",
             &[
-                &app_id,
-                &format!("app-{}", app_id.simple()),
+                &app_id.as_str(),
+                &format!("app-{}", app_id.as_str()),
                 &zeroship_control::plan_catalog::free_plan_id(),
                 &project,
             ],
@@ -701,7 +733,7 @@ async fn insert_app_oauth_client(state: &AppState, client_id: &str, sector: &str
         .execute(
             "INSERT INTO zeroship.app_oauth_clients (app_id, client_id, sector_identifier) \
              VALUES ($1, $2, $3)",
-            &[&app_id, &client_id, &sector],
+            &[&app_id.as_str(), &client_id, &sector],
         )
         .await
         .expect("insert app_oauth_clients row");
@@ -723,20 +755,30 @@ async fn revoke_grant_writes_token_family_marker_that_rejects_live_token() {
     let app = init_control!(fx);
     let client_id = format!("oac_tokmarker_{}", Uuid::new_v4().simple());
     let sector = format!("https://{}.zeroship.localhost", Uuid::new_v4().simple());
-    insert_client(&fx.state, &client_id, caller.user_id).await;
+    insert_client(&fx.state, &client_id, &caller.user_id).await;
     let app_id = insert_app_oauth_client(&fx.state, &client_id, &sector).await;
-    insert_grant(&fx.state, caller.user_id, &client_id, &["apps:read", "email"]).await;
+    insert_grant(
+        &fx.state,
+        &caller.user_id,
+        &client_id,
+        &["apps:read", "email"],
+    )
+    .await;
     let relay_email = format!("{}@relay.zeroship.localhost", Uuid::new_v4().simple());
-    insert_identity_with_alias(&fx.state, &client_id, &sector, caller.user_id, &relay_email).await;
+    insert_identity_with_alias(
+        &fx.state,
+        &client_id,
+        &sector,
+        &caller.user_id,
+        &relay_email,
+    )
+    .await;
 
     // The per-app pws_ the gateway projects for this (app, user) — derived with
     // the SAME salt the AppState carries + the app's sector. A live token for
     // this user carries this sub.
-    let pws = zeroship_core::auth::derive_pairwise(
-        &fx.state.pairwise_salt,
-        &caller.user_id.to_string(),
-        &sector,
-    );
+    let pws =
+        zeroship_core::auth::derive_pairwise(&fx.state.pairwise_salt, &caller.user_id, &sector);
     // A token issued BEFORE the disconnect (iat in the past) — what "live"
     // means: still cryptographically valid, must be rejected after revoke.
     let live_token_iat = i64::try_from(
@@ -789,7 +831,7 @@ async fn revoke_grant_writes_token_family_marker_that_rejects_live_token() {
 
     // The faithful seam: the EXACT reader the gateway arms run now reports the
     // still-live token as revoked. A regression that dropped this write (or
-    // keyed it on the global UUID) would leave the live token accepted here.
+    // keyed it on the global user id) would leave the live token accepted here.
     assert!(
         zeroship_authz::wrapper_revocation::is_family_revoked_since(
             fx.state.control_pg.as_ref(),
@@ -824,7 +866,10 @@ async fn revoke_grant_writes_token_family_marker_that_rejects_live_token() {
     // The apps row FKs app_oauth_clients (deleted above) — drop it last.
     fx.state
         .control_pg
-        .execute("DELETE FROM zeroship.apps WHERE id = $1", &[&app_id])
+        .execute(
+            "DELETE FROM zeroship.apps WHERE id = $1",
+            &[&app_id.as_str()],
+        )
         .await
         .ok();
     caller.cleanup(&fx.state).await;
@@ -847,10 +892,17 @@ async fn re_grant_reuses_same_alias_with_cleared_revoked_at() {
     let app = init_control!(fx);
     let client_id = format!("oauth-grant-regrant-{}", Uuid::new_v4().simple());
     let sector = format!("https://{client_id}.zeroship.localhost");
-    insert_client(&fx.state, &client_id, caller.user_id).await;
-    insert_grant(&fx.state, caller.user_id, &client_id, &["email"]).await;
+    insert_client(&fx.state, &client_id, &caller.user_id).await;
+    insert_grant(&fx.state, &caller.user_id, &client_id, &["email"]).await;
     let relay_email = format!("{}@relay.zeroship.localhost", Uuid::new_v4().simple());
-    insert_identity_with_alias(&fx.state, &client_id, &sector, caller.user_id, &relay_email).await;
+    insert_identity_with_alias(
+        &fx.state,
+        &client_id,
+        &sector,
+        &caller.user_id,
+        &relay_email,
+    )
+    .await;
 
     // Revoke → alias goes inactive.
     let req = test::TestRequest::delete()
@@ -870,11 +922,11 @@ async fn re_grant_reuses_same_alias_with_cleared_revoked_at() {
     // alias's `EXISTS` gate consults. (Un-revoking the alias alone, without the
     // grant, leaves it correctly inert — that is the structural fix's whole
     // point and is asserted by the §10 race test.)
-    insert_grant(&fx.state, caller.user_id, &client_id, &["email"]).await;
+    insert_grant(&fx.state, &caller.user_id, &client_id, &["email"]).await;
     let reused = zeroship_auth::store::relay::mint_alias_at_consent(
         fx.state.control_pg.as_ref(),
         &client_id,
-        caller.user_id,
+        &caller.user_id,
         "relay.zeroship.localhost",
     )
     .await
@@ -904,7 +956,7 @@ async fn re_grant_reuses_same_alias_with_cleared_revoked_at() {
 async fn grant_and_alias_state(
     state: &AppState,
     client_id: &str,
-    user_id: Uuid,
+    user_id: &UserId,
 ) -> (bool, bool) {
     let grant_present = count_grant(state, user_id, client_id).await > 0;
     let revoked_set = identity_revoked_at_is_set(state, client_id, user_id).await;
@@ -938,7 +990,7 @@ async fn revoke_vs_reconsent_race_grant_absent_implies_alias_inert() {
     // upsert the grant ledger row AND clear the alias's revoked_at (the
     // mint_alias_at_consent un-revoke). We run the alias un-revoke via the REAL
     // auth-store writer so this is a faithful cross-service seam, not a stub.
-    async fn reconsent(state: &AppState, client_id: &str, user_id: Uuid, relay_domain: &str) {
+    async fn reconsent(state: &AppState, client_id: &str, user_id: &UserId, relay_domain: &str) {
         // grant upsert (the ledger write accept_consent performs under its lock)
         state
             .control_pg
@@ -948,7 +1000,7 @@ async fn revoke_vs_reconsent_race_grant_absent_implies_alias_inert() {
                  VALUES ($1, $2, $3, NOW(), NOW()) \
                  ON CONFLICT (user_id, client_id) DO UPDATE \
                  SET granted_scopes = EXCLUDED.granted_scopes, updated_at = NOW()",
-                &[&user_id, &client_id, &vec!["email".to_string()]],
+                &[&user_id.as_str(), &client_id, &vec!["email".to_string()]],
             )
             .await
             .expect("reconsent grant upsert");
@@ -969,12 +1021,22 @@ async fn revoke_vs_reconsent_race_grant_absent_implies_alias_inert() {
     {
         let client_id = format!("oac_race_a_{}", Uuid::new_v4().simple());
         let sector = format!("https://{}.zeroship.localhost", Uuid::new_v4().simple());
-        insert_client(&fx.state, &client_id, caller.user_id).await;
+        insert_client(&fx.state, &client_id, &caller.user_id).await;
         let app_id = insert_app_oauth_client(&fx.state, &client_id, &sector).await;
-        insert_grant(&fx.state, caller.user_id, &client_id, &["email"]).await;
+        insert_grant(&fx.state, &caller.user_id, &client_id, &["email"]).await;
         let relay_email = format!("{}@relay.zeroship.localhost", Uuid::new_v4().simple());
-        insert_identity_with_alias(&fx.state, &client_id, &sector, caller.user_id, &relay_email).await;
-        assert!(alias_is_active(&fx.state, &relay_email).await, "active before");
+        insert_identity_with_alias(
+            &fx.state,
+            &client_id,
+            &sector,
+            &caller.user_id,
+            &relay_email,
+        )
+        .await;
+        assert!(
+            alias_is_active(&fx.state, &relay_email).await,
+            "active before"
+        );
 
         // First revoke (sets revoked_at + DELETEs grant), then re-consent fully
         // re-grants (un-revoke + grant), then revoke AGAIN as the LAST writer.
@@ -988,7 +1050,13 @@ async fn revoke_vs_reconsent_race_grant_absent_implies_alias_inert() {
         .await
         .status();
         assert_eq!(status, StatusCode::NO_CONTENT);
-        reconsent(&fx.state, &client_id, caller.user_id, "relay.zeroship.localhost").await;
+        reconsent(
+            &fx.state,
+            &client_id,
+            &caller.user_id,
+            "relay.zeroship.localhost",
+        )
+        .await;
         // After re-consent the alias forwards again (grant present, revoked_at cleared).
         assert!(
             alias_is_active(&fx.state, &relay_email).await,
@@ -1007,7 +1075,7 @@ async fn revoke_vs_reconsent_race_grant_absent_implies_alias_inert() {
         assert_eq!(status, StatusCode::NO_CONTENT);
 
         let (grant_present, _revoked) =
-            grant_and_alias_state(&fx.state, &client_id, caller.user_id).await;
+            grant_and_alias_state(&fx.state, &client_id, &caller.user_id).await;
         assert!(!grant_present, "order A terminal: grant absent");
         assert!(
             !alias_is_active(&fx.state, &relay_email).await,
@@ -1034,7 +1102,10 @@ async fn revoke_vs_reconsent_race_grant_absent_implies_alias_inert() {
             .ok();
         fx.state
             .control_pg
-            .execute("DELETE FROM zeroship.apps WHERE id = $1", &[&app_id])
+            .execute(
+                "DELETE FROM zeroship.apps WHERE id = $1",
+                &[&app_id.as_str()],
+            )
             .await
             .ok();
     }
@@ -1047,12 +1118,22 @@ async fn revoke_vs_reconsent_race_grant_absent_implies_alias_inert() {
     {
         let client_id = format!("oac_race_b_{}", Uuid::new_v4().simple());
         let sector = format!("https://{}.zeroship.localhost", Uuid::new_v4().simple());
-        insert_client(&fx.state, &client_id, caller.user_id).await;
+        insert_client(&fx.state, &client_id, &caller.user_id).await;
         let app_id = insert_app_oauth_client(&fx.state, &client_id, &sector).await;
-        insert_grant(&fx.state, caller.user_id, &client_id, &["email"]).await;
+        insert_grant(&fx.state, &caller.user_id, &client_id, &["email"]).await;
         let relay_email = format!("{}@relay.zeroship.localhost", Uuid::new_v4().simple());
-        insert_identity_with_alias(&fx.state, &client_id, &sector, caller.user_id, &relay_email).await;
-        assert!(alias_is_active(&fx.state, &relay_email).await, "active before");
+        insert_identity_with_alias(
+            &fx.state,
+            &client_id,
+            &sector,
+            &caller.user_id,
+            &relay_email,
+        )
+        .await;
+        assert!(
+            alias_is_active(&fx.state, &relay_email).await,
+            "active before"
+        );
 
         // Revoke commits: grant DELETEd, revoked_at set.
         let status = test::call_service(
@@ -1075,14 +1156,14 @@ async fn revoke_vs_reconsent_race_grant_absent_implies_alias_inert() {
         zeroship_auth::store::relay::mint_alias_at_consent(
             fx.state.control_pg.as_ref(),
             &client_id,
-            caller.user_id,
+            &caller.user_id,
             "relay.zeroship.localhost",
         )
         .await
         .expect("stray alias un-revoke after revoke");
 
         let (grant_present, revoked_set) =
-            grant_and_alias_state(&fx.state, &client_id, caller.user_id).await;
+            grant_and_alias_state(&fx.state, &client_id, &caller.user_id).await;
         assert!(!grant_present, "order B terminal: grant ABSENT");
         assert!(
             !revoked_set,
@@ -1115,7 +1196,10 @@ async fn revoke_vs_reconsent_race_grant_absent_implies_alias_inert() {
             .ok();
         fx.state
             .control_pg
-            .execute("DELETE FROM zeroship.apps WHERE id = $1", &[&app_id])
+            .execute(
+                "DELETE FROM zeroship.apps WHERE id = $1",
+                &[&app_id.as_str()],
+            )
             .await
             .ok();
     }
@@ -1141,15 +1225,15 @@ async fn app_archive_preserves_relay_identities() {
     let user_a = insert_user(&fx.state, "appdel-a").await;
     let user_b = insert_user(&fx.state, "appdel-b").await;
     let client_id = format!("client-{}", Uuid::new_v4().simple());
-    insert_client(&fx.state, &client_id, user_a).await;
+    insert_client(&fx.state, &client_id, &user_a).await;
     let sector = format!("https://{client_id}.zeroship.localhost");
     let app_uuid = insert_app_oauth_client(&fx.state, &client_id, &sector).await;
-    insert_grant(&fx.state, user_a, &client_id, &["email"]).await;
-    insert_grant(&fx.state, user_b, &client_id, &["email"]).await;
+    insert_grant(&fx.state, &user_a, &client_id, &["email"]).await;
+    insert_grant(&fx.state, &user_b, &client_id, &["email"]).await;
     let alias_a = format!("{}@relay.zeroship.localhost", Uuid::new_v4().simple());
     let alias_b = format!("{}@relay.zeroship.localhost", Uuid::new_v4().simple());
-    insert_identity_with_alias(&fx.state, &client_id, &sector, user_a, &alias_a).await;
-    insert_identity_with_alias(&fx.state, &client_id, &sector, user_b, &alias_b).await;
+    insert_identity_with_alias(&fx.state, &client_id, &sector, &user_a, &alias_a).await;
+    insert_identity_with_alias(&fx.state, &client_id, &sector, &user_b, &alias_b).await;
 
     assert!(alias_is_active(&fx.state, &alias_a).await);
     assert!(alias_is_active(&fx.state, &alias_b).await);
@@ -1174,19 +1258,28 @@ async fn app_archive_preserves_relay_identities() {
         2,
         "archive preserves app_user_identities"
     );
-    assert_eq!(count_grant(&fx.state, user_a, &client_id).await, 1);
-    assert_eq!(count_grant(&fx.state, user_b, &client_id).await, 1);
-    assert!(!fx.state.registry.get_routes().await.unwrap().contains_key(&app_uuid));
+    assert_eq!(count_grant(&fx.state, &user_a, &client_id).await, 1);
+    assert_eq!(count_grant(&fx.state, &user_b, &client_id).await, 1);
+    assert!(!fx
+        .state
+        .registry
+        .get_routes()
+        .await
+        .unwrap()
+        .contains_key(&app_uuid));
 
     cleanup_identities(&fx.state, &client_id).await;
     fx.cleanup_clients(std::slice::from_ref(&client_id)).await;
     fx.state
         .control_pg
-        .execute("DELETE FROM zeroship.apps WHERE id = $1", &[&app_uuid])
+        .execute(
+            "DELETE FROM zeroship.apps WHERE id = $1",
+            &[&app_uuid.as_str()],
+        )
         .await
         .ok();
-    cleanup_user(&fx.state, user_a).await;
-    cleanup_user(&fx.state, user_b).await;
+    cleanup_user(&fx.state, &user_a).await;
+    cleanup_user(&fx.state, &user_b).await;
 
     drop(fx);
     common::drain_pg().await;
@@ -1218,37 +1311,35 @@ async fn app_archive_returns_200_with_retained_record() {
         .expect("create app");
     let app_id = record.id;
 
-    let app = test::init_service(
-        web::App::new()
-            .state(fx.state.clone())
-            .service(
-                web::resource("/api/apps/{id}/archive")
-                    .route(web::put().to(api::archive_app)),
-            ),
-    )
-    .await;
+    let app =
+        test::init_service(web::App::new().state(fx.state.clone()).service(
+            web::resource("/api/apps/{id}/archive").route(web::put().to(api::archive_app)),
+        ))
+        .await;
 
     let req = test::TestRequest::put()
-        .uri(&format!("/api/apps/{app_id}/archive"))
+        .uri(&format!("/api/apps/{}/archive", app_id.as_str()))
         .header("authorization", caller.bearer())
         .to_request();
     let resp = test::call_service(&app, req).await;
 
-    assert_eq!(
-        resp.status(),
-        StatusCode::OK,
-        "archive returns a clean 200"
-    );
+    assert_eq!(resp.status(), StatusCode::OK, "archive returns a clean 200");
     let body: Value =
         serde_json::from_slice(&test::read_body(resp).await).expect("archive body json");
     assert!(body.get("archived_at").and_then(Value::as_str).is_some());
-    assert_eq!(body.get("id").and_then(Value::as_str), Some(app_id.to_string().as_str()));
+    assert_eq!(
+        body.get("id").and_then(Value::as_str),
+        Some(app_id.as_str())
+    );
 
     caller.cleanup(&fx.state).await;
-    cleanup_user(&fx.state, caller.user_id).await;
+    cleanup_user(&fx.state, &caller.user_id).await;
     fx.state
         .control_pg
-        .execute("DELETE FROM zeroship.apps WHERE id = $1", &[&app_id])
+        .execute(
+            "DELETE FROM zeroship.apps WHERE id = $1",
+            &[&app_id.as_str()],
+        )
         .await
         .ok();
 
@@ -1263,7 +1354,9 @@ async fn unauthenticated_request_returns_401() {
     let fx = Fixture::new(&db_url, "unauth").await;
     let app = init_control!(fx);
 
-    let req = test::TestRequest::get().uri("/me/oauth-grants").to_request();
+    let req = test::TestRequest::get()
+        .uri("/me/oauth-grants")
+        .to_request();
     // Status only: a retained `WebResponse` keeps the app state - and its
     // Postgres client - alive past the teardown below.
     let status = test::call_service(&app, req).await.status();

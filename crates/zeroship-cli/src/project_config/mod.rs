@@ -22,6 +22,7 @@ mod jsonc;
 use std::path::{Path, PathBuf};
 
 use serde_json::{Map, Value};
+use zeroship_core::AppId;
 
 pub use generated::CONFIG_FILENAME;
 
@@ -449,7 +450,8 @@ impl ProjectConfig {
     /// member is appended through the CST, which retains comments, key order,
     /// interior blank lines, trailing commas, newlines, and source text. The
     /// CST deliberately normalises extra blank lines touching the root braces.
-    pub fn write_app(&self, app_id: &str) -> Result<(), String> {
+    pub fn write_app(&self, app_id: &AppId) -> Result<(), String> {
+        let app_id = app_id.as_str();
         let next = if let Some((start, end)) = jsonc::top_level_value_span(&self.text, "app") {
             let mut next = String::with_capacity(self.text.len() + app_id.len());
             next.push_str(&self.text[..start]);

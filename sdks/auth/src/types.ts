@@ -17,9 +17,9 @@
 /**
  * Authenticated user profile.
  *
- * `id` is the per-app pairwise subject (`pws_…`, an opaque TEXT id — NOT a
- * UUID) the gateway projects so app JS reading its own identity can never
- * correlate the user across apps (gateway §6.2/G4). `email` is the per-app
+ * `id` is the per-app pairwise subject (`pws_…`, an opaque text id distinct
+ * from the global platform `UserId`) the gateway projects so app JS reading
+ * its own identity can never correlate the user across apps (gateway §6.2/G4). `email` is the per-app
  * relay alias (`…@{relay_domain}`), `null` when the `email` scope is not
  * granted.
  */

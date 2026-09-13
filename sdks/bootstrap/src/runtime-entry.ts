@@ -51,13 +51,14 @@ export {};
 // Private bootstrap-module binding emitted by the Rust host. Creator globals
 // cannot turn a production runtime into a deferred dev entry.
 declare const __zsAllowDeferredSchemaInstall: boolean;
+declare const __zsInstallDbMaskPolicy: (
+  policy: Record<string, readonly string[]>,
+) => Promise<void>;
 
 declare const globalThis: {
   __zs_env?: () => { db?: unknown } | undefined;
-  // **P9 §8** — the capability-handle resolver the runtime installs.
-  // `runtime-entry` is the sole legitimate caller: it resolves the
-  // `__platform` handle for the mask-policy flush, then DELETES this
-  // global so no creator handler can reach it.
+  // The internal runtime bridge consumes this before creator evaluation.
+  // It remains declared here only for unconditional defensive cleanup.
   __zsDbPlatform?: (db: unknown) => unknown;
   // Schema-readiness promise, set here for the mask-policy flush and
   // awaited by the shared dispatcher (`dispatcher.ts`) before running any
@@ -94,7 +95,7 @@ function runtimeDescriptorFields(value: Record<string, unknown> | undefined): Re
     typeof (value as { collections?: unknown }).collections === "object" &&
     !Array.isArray((value as { collections?: unknown }).collections)
   ) {
-    const out: Record<string, unknown> = {};
+    const out = Object.create(null) as Record<string, unknown>;
     for (const [name, collection] of Object.entries(
       (value as { collections: Record<string, unknown> }).collections,
     )) {
@@ -149,14 +150,6 @@ if (!deferredInstall && hasDescriptor && schema && typeof schema === "object") {
       ) => { collections: unknown };
     };
     if (typeof sdk.installSchema === "function") {
-      // **P9 §8** — resolve the platform capability handle via the
-      // runtime resolver, BEFORE we delete the global below. The handle
-      // carries `setMaskPolicy`, which moved off `env.db`; the local
-      // reference keeps the flush working after the resolver is gone.
-      const plat = (typeof globalThis.__zsDbPlatform === "function" && envDb)
-        ? globalThis.__zsDbPlatform(envDb)
-        : undefined;
-
       // `installSchema` plants the Collection wrappers synchronously.
       sdk.installSchema(schema, envDb, {
         // **P5 S3** — the descriptor is the source of truth; _installSchemaInner
@@ -176,38 +169,16 @@ if (!deferredInstall && hasDescriptor && schema && typeof schema === "object") {
         const pending = typeof policyMod._flushPendingMaskPolicy === "function"
           ? policyMod._flushPendingMaskPolicy()
           : null;
-        const setMaskPolicy = (plat as { setMaskPolicy?: unknown } | undefined)?.setMaskPolicy;
-        if (typeof setMaskPolicy === "function") {
-          // Call via `.call(plat, ...)` so the v8_class brand check
-          // sees the right receiver.
-          await (setMaskPolicy as (
-            this: typeof plat,
-            p: Record<string, readonly string[]>,
-          ) => Promise<unknown>).call(plat, pending ?? {});
-        }
+        await __zsInstallDbMaskPolicy(pending ?? {});
       })();
     }
   }
 }
 
-// **P9 §8** — capability boundary close-out. The platform handle has
-// been used to start the mask flush; the resolver global is no longer
-// needed. Delete it so no creator `fetch` /
-// `rpc` handler — which runs only AFTER this module evaluation
-// completes — can call `globalThis.__zsDbPlatform(env.db)` to fish the
-// handle out of the private slot. The handle itself remains live (held
-// by `env.db`'s private symbol); only the JS-reachable resolver is
-// removed.
-//
-// Runs UNCONDITIONALLY (outside the `env.db` / schema guards):
-// the runtime installs `__zsDbPlatform` on every isolate, so it must be
-// cleared even on RPC-only / fetch-only apps that skipped the schema
-// install above. Idempotent: a no-op if the runtime never installed it
-// or a re-evaluation already cleared it.
+// The internal bridge already removes the resolver before creator evaluation
+// in production. Keep this unconditional cleanup for schema-less and dev boots.
 try {
   delete globalThis.__zsDbPlatform;
 } catch {
-  // A non-configurable global (shouldn't happen — the runtime installs
-  // it as a plain property) would throw in strict mode; swallow so the
-  // boot doesn't fail on the cleanup step.
+  // The runtime installs a configurable property; cleanup stays best-effort.
 }

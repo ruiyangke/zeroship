@@ -175,7 +175,7 @@ async fn submit(
     let revoked = completed.counts;
 
     tracing::info!(
-        user_id = %completed.user_id,
+        user_id = completed.user_id.as_str(),
         idp_sessions = revoked.idp_sessions,
         gateway_sessions = revoked.gateway_sessions,
         magic_tokens = revoked.magic_tokens,
@@ -209,7 +209,7 @@ struct ResetRevocationCounts {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ResetCompletion {
-    user_id: uuid::Uuid,
+    user_id: zeroship_core::UserId,
     email: String,
     counts: ResetRevocationCounts,
 }
@@ -272,7 +272,7 @@ async fn complete_password_reset_tx(
     let idp_sessions = conn
         .execute(
             "DELETE FROM zeroship.idp_sessions WHERE user_id = $1",
-            &[&completed.user_id],
+            &[&completed.user_id.as_str()],
         )
         .await
         .map_err(|e| AuthError::Db(format!("password_reset delete zeroship.idp_sessions: {e}")))?;
@@ -280,7 +280,7 @@ async fn complete_password_reset_tx(
     let gateway_sessions = conn
         .execute(
             "DELETE FROM zeroship.gateway_sessions WHERE user_id = $1",
-            &[&completed.user_id],
+            &[&completed.user_id.as_str()],
         )
         .await
         .map_err(|e| AuthError::Db(format!("password_reset delete gateway_sessions: {e}")))?;

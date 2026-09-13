@@ -24,7 +24,6 @@ pub(crate) struct CommittedBatch {
 #[derive(Debug)]
 pub(crate) enum Action {
     Pending,
-    Metadata(PgOutputMessage),
     Commit(CommittedBatch),
 }
 
@@ -86,7 +85,6 @@ impl TransactionBuffer {
                     needs_resync: pending.needs_resync,
                 }))
             }
-            Message::Relation { xid: None, .. } => Ok(Action::Metadata(message)),
             Message::Type { xid: None, .. }
             | Message::Origin { .. }
             | Message::Message { xid: None, .. } => Ok(Action::Pending),

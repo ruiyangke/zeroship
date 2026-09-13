@@ -32,7 +32,7 @@ export default {
     zs("app_deploys").create({
       columns: {
         id: t.text().notNull(),
-        app_id: t.uuid().notNull(),
+        app_id: t.text().notNull(),
         deploy_hash: t.text().notNull(),
         manifest_json: t.text().notNull(),
         created_at: t.timestamp().notNull().default(now()),
@@ -49,7 +49,7 @@ export default {
       columns: {
         id: t.text().notNull(),
         workflow_name: t.text().notNull(),
-        app_id: t.uuid().notNull(),
+        app_id: t.text().notNull(),
         deploy_id: t.text().notNull(),
         state: t.text().notNull(),
         input: t.json(),
@@ -149,7 +149,7 @@ export default {
     zs("workflow_signal_keys").create({
       columns: {
         id: t.text().notNull(),
-        app_id: t.uuid().notNull(),
+        app_id: t.text().notNull(),
         kid: t.text().notNull(),
         verifier: t.text().notNull(),
         secret_ct: t.bytes().notNull(),
@@ -169,7 +169,7 @@ export default {
     zs("workflow_broadcasts").create({
       columns: {
         id: t.text().notNull(),
-        app_id: t.uuid().notNull(),
+        app_id: t.text().notNull(),
         topic: t.text().notNull(),
         type: t.text().notNull(),
         payload: t.json().notNull(),
@@ -292,7 +292,7 @@ export default {
     zs("workflow_subscriptions").create({
       columns: {
         id: t.text().notNull(),
-        app_id: t.uuid().notNull(),
+        app_id: t.text().notNull(),
         topic: t.text().notNull(),
         run_id: t.text().notNull(),
         signal_name: t.text().notNull(),
@@ -310,7 +310,7 @@ export default {
     zs("workflow_schedules").create({
       columns: {
         id: t.text().notNull(),
-        app_id: t.uuid().notNull(),
+        app_id: t.text().notNull(),
         deploy_id: t.text().notNull(),
         deploy_hash: t.text().notNull(),
         name: t.text().notNull(),

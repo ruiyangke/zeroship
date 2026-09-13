@@ -3,7 +3,7 @@ use super::fixtures::*;
 
 use crate::tests::fixtures::parity;
 
-use zeroship_data_orm::sql::compile::raw_column_name;
+use zeroship_data_orm::sql::mapping::raw_column_name;
 
 /// One randomised-encrypted column and no mask - the fast-path fixtures assert
 /// a PLAIN write skips row resolution, so the encrypted column must exist but
@@ -22,21 +22,21 @@ fn users_encrypted_secret_schema() -> zeroship_data_orm::value::Value {
 /// Raw DDL matching [`users_encrypted_secret_schema`].
 fn users_encrypted_secret_ddl() -> String {
     format!(
-        r#"CREATE TABLE IF NOT EXISTS "default"."users" ({SYSTEM_COLUMNS_SQLITE},
+        r#"CREATE TABLE IF NOT EXISTS "{LOCAL_DEV_APP_ID}"."users" ({SYSTEM_COLUMNS_SQLITE},
   "email" TEXT NOT NULL,
   "name" TEXT NOT NULL,
   "secret" BLOB /* zero-migrate:enc:string */
 );
 {}
-CREATE UNIQUE INDEX IF NOT EXISTS "default"."users_email_key" ON "users" ("email");
+CREATE UNIQUE INDEX IF NOT EXISTS "{LOCAL_DEV_APP_ID}"."users_email_key" ON "users" ("email");
 "#,
-        system_indexes_sqlite("default", "users")
+        system_indexes_sqlite(LOCAL_DEV_APP_ID, "users")
     )
 }
 
 #[test]
 fn upsert_insert_branch_auto_mints_id_sqlite_runtime() {
-    let _keys = with_project_key(&["default"], &"e".repeat(64));
+    let _keys = with_project_key(&[LOCAL_DEV_APP_ID], &"e".repeat(64));
 
     run(async {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -81,7 +81,9 @@ const _procedures = { upsertInsert };
         let client = crate::tests::fixtures::sqlite::Inspector::open(dir.path());
         let rows = client
             .query(
-                r#"SELECT id, version FROM "default"."users" WHERE email = 'mint@example.com'"#,
+                &format!(
+                    r#"SELECT id, version FROM "{LOCAL_DEV_APP_ID}"."users" WHERE email = 'mint@example.com'"#
+                ),
                 &[],
             )
             .await
@@ -102,7 +104,7 @@ const _procedures = { upsertInsert };
 
 #[test]
 fn upsert_conflict_update_preserves_insert_only_fields_and_encrypts_sqlite_runtime() {
-    let _keys = with_project_key(&["default"], &"f".repeat(64));
+    let _keys = with_project_key(&[LOCAL_DEV_APP_ID], &"f".repeat(64));
 
     run(async {
         use rusqlite::types::Value as TypedCell;
@@ -198,7 +200,7 @@ const _procedures = { upsertConflict };
             .query_typed(
                 &format!(
                     r#"SELECT id, created_by, updated_by, version, "{raw_ssn}", ssn
-                   FROM "default"."users"
+                   FROM "{LOCAL_DEV_APP_ID}"."users"
                    WHERE email = 'alice@example.com'"#
                 ),
                 &[],
@@ -255,11 +257,11 @@ const _procedures = { upsertConflict };
 
         let keys =
             zeroship_data_orm::encryption::KeyStore::new(crate::tests::fixtures::key_source());
-        let key = keys.resolve("default").await.expect("resolve key");
+        let key = keys.resolve(LOCAL_DEV_APP_ID).await.expect("resolve key");
         let plaintext = zeroship_data_orm::encryption::aead::decrypt(
             &key,
             &stored_blob,
-            &encryption::canonical_aad("default", "users", "ssn", first_id.as_bytes()),
+            &encryption::canonical_aad(LOCAL_DEV_APP_ID, "users", "ssn", first_id.as_bytes()),
         )
         .expect("decrypt stored conflict ciphertext");
         assert_eq!(
@@ -272,7 +274,7 @@ const _procedures = { upsertConflict };
 
 #[test]
 fn plain_upsert_on_encrypted_collection_skips_conflict_probe_sqlite_runtime() {
-    let _keys = with_project_key(&["default"], &"a".repeat(64));
+    let _keys = with_project_key(&[LOCAL_DEV_APP_ID], &"a".repeat(64));
 
     run(async {
         let dir = tempfile::tempdir().expect("tempdir");

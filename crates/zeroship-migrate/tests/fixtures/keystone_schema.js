@@ -6,7 +6,7 @@
 import { dbType as internalDbType } from "@zeroship/migrate";
 
 const users = {
-  // Internal platform id. Its wire value is the engine's base62 UUIDv7 format,
+  // Internal platform id. Its wire value is the engine's base36 UUIDv7 format,
   // not a public TypeID; this local compatibility builder does not retain prefixes.
   id: internalDbType.id(),
   email: internalDbType.string().required().unique(),

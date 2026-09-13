@@ -17,7 +17,7 @@ async fn concurrent_issue_leaves_one_active_reset_token() {
             .query_one(
                 "SELECT token_hash FROM zeroship.magic_links \
                  WHERE user_id = $1 AND purpose = 'reset' AND consumed_at IS NULL FOR UPDATE",
-                &[&user.id],
+                &[&user.id.as_str()],
             )
             .await
             .expect("hold the token being superseded");
@@ -50,7 +50,7 @@ async fn concurrent_issue_leaves_one_active_reset_token() {
             .query_one(
                 "SELECT COUNT(*) FROM zeroship.magic_links \
                  WHERE user_id = $1 AND purpose = 'reset' AND consumed_at IS NULL",
-                &[&user.id],
+                &[&user.id.as_str()],
             )
             .await
             .unwrap()
@@ -112,7 +112,7 @@ async fn completion_obeys_transaction_rollback_and_commit() {
         let epoch: i64 = client
             .query_one(
                 "SELECT credential_version FROM zeroship.users WHERE id = $1",
-                &[&user.id],
+                &[&user.id.as_str()],
             )
             .await
             .unwrap()
@@ -129,7 +129,7 @@ async fn completion_obeys_transaction_rollback_and_commit() {
         let row = client
             .query_one(
                 "SELECT password_hash, credential_version FROM zeroship.users WHERE id = $1",
-                &[&user.id],
+                &[&user.id.as_str()],
             )
             .await
             .unwrap();
@@ -146,7 +146,7 @@ async fn completion_obeys_transaction_rollback_and_commit() {
         let row = client
             .query_one(
                 "SELECT password_hash, credential_version FROM zeroship.users WHERE id = $1",
-                &[&user.id],
+                &[&user.id.as_str()],
             )
             .await
             .unwrap();
@@ -160,7 +160,7 @@ async fn completion_obeys_transaction_rollback_and_commit() {
         let stored: String = client
             .query_one(
                 "SELECT password_hash FROM zeroship.users WHERE id = $1",
-                &[&user.id],
+                &[&user.id.as_str()],
             )
             .await
             .unwrap()
@@ -198,14 +198,14 @@ async fn completion_binds_the_user_at_issue_time_after_email_reassignment() {
         admin
             .execute(
                 "UPDATE zeroship.users SET email = 'moved@example.test'::citext WHERE id = $1",
-                &[&original.id],
+                &[&original.id.as_str()],
             )
             .await
             .unwrap();
         admin
             .execute(
                 "UPDATE zeroship.users SET email = $1::citext WHERE id = $2",
-                &[&original.email, &other.id],
+                &[&original.email, &other.id.as_str()],
             )
             .await
             .unwrap();
@@ -219,7 +219,7 @@ async fn completion_binds_the_user_at_issue_time_after_email_reassignment() {
         let original_hash: String = client
             .query_one(
                 "SELECT password_hash FROM zeroship.users WHERE id = $1",
-                &[&original.id],
+                &[&original.id.as_str()],
             )
             .await
             .unwrap()
@@ -227,7 +227,7 @@ async fn completion_binds_the_user_at_issue_time_after_email_reassignment() {
         let other_hash: String = client
             .query_one(
                 "SELECT password_hash FROM zeroship.users WHERE id = $1",
-                &[&other.id],
+                &[&other.id.as_str()],
             )
             .await
             .unwrap()

@@ -8,15 +8,38 @@ import {
   sequence,
 } from "@zeroship/migrate";
 
+const userIdColumnsByTable: Readonly<Record<string, readonly string[]>> = {
+  app_session_anchors: ["global_user_id"],
+  app_user_identities: ["global_user_id"],
+  audit_events: ["actor_user_id"],
+  authz_decisions: ["actor_user_id"],
+  device_grants: ["principal_id"],
+  email_verifications: ["user_id"],
+  federated_identities: ["user_id"],
+  gateway_sessions: ["user_id"],
+  identity_links: ["principal_id"],
+  idp_sessions: ["user_id"],
+  magic_links: ["user_id"],
+  oauth_authorization_codes: ["user_id"],
+  oauth_clients: ["created_by"],
+  oauth_grants: ["user_id"],
+  oauth_refresh_tokens: ["user_id"],
+  oidc_session_clients: ["user_id"],
+  principal_grants: ["principal_id"],
+  totp_backup_codes: ["user_id"],
+  totp_credentials: ["user_id"],
+  users: ["id"],
+};
+
 export default {
   name: "auth_oauth_tables",
   schema() {
     table("app_session_anchors", { schema: "zeroship" }).create({
       columns: {
         id: t.uuid().notNull().default(uuidV4()),
-        app_id: t.uuid().notNull(),
+        app_id: t.text().notNull(),
         client_id: t.text().notNull(),
-        global_user_id: t.uuid().notNull(),
+        global_user_id: t.text().notNull(),
         refresh_token_enc: t.bytes().notNull(),
         refresh_family_id: t.text().notNull(),
         granted_scopes: t.textArray().notNull().default([]),
@@ -29,7 +52,7 @@ export default {
     table("app_user_identities", { schema: "zeroship" }).create({
       columns: {
         app_client_id: t.text().notNull(),
-        global_user_id: t.uuid().notNull(),
+        global_user_id: t.text().notNull(),
         pairwise_sub: t.text().notNull(),
         relay_email: t.text(),
         created_at: t.timestamp().notNull().default(now()),
@@ -43,7 +66,7 @@ export default {
         occurred_at: t.timestamp().notNull().default(now()),
         event_type: t.text().notNull(),
         outcome: t.text().notNull(),
-        actor_user_id: t.uuid(),
+        actor_user_id: t.text(),
         client_id: t.text(),
         request_id: t.text(),
         ip: t.inet(),
@@ -58,7 +81,7 @@ export default {
       columns: {
         id: t.uuid().notNull().default(uuidV4()),
         occurred_at: t.timestamp().notNull().default(now()),
-        actor_user_id: t.uuid(),
+        actor_user_id: t.text(),
         token_id: t.uuid(),
         action: t.text().notNull(),
         resource_type: t.text().notNull(),
@@ -84,7 +107,7 @@ export default {
         device_code_hash: t.text().notNull(),
         user_code: t.text().notNull(),
         status: t.text().notNull().default("pending"),
-        principal_id: t.uuid(),
+        principal_id: t.text(),
         platform_access_token_enc: t.bytes(),
         provider: t.text().notNull(),
         scope: t.text(),
@@ -119,7 +142,7 @@ export default {
     table("email_verifications", { schema: "zeroship" }).create({
       columns: {
         token_hash: t.bytes().notNull(),
-        user_id: t.uuid().notNull(),
+        user_id: t.text().notNull(),
         email: t.text({ caseSensitive: false }).notNull(),
         issued_at: t.timestamp().notNull().default(now()),
         expires_at: t.timestamp().notNull(),
@@ -130,7 +153,7 @@ export default {
     table("federated_identities", { schema: "zeroship" }).create({
       columns: {
         id: t.uuid().notNull().default(uuidV4()),
-        user_id: t.uuid().notNull(),
+        user_id: t.text().notNull(),
         provider: t.text().notNull(),
         subject: t.text().notNull(),
         email_at_link: t.text({ caseSensitive: false }),
@@ -142,8 +165,8 @@ export default {
     table("gateway_sessions", { schema: "zeroship" }).create({
       columns: {
         id: t.uuid().notNull().default(uuidV4()),
-        user_id: t.uuid().notNull(),
-        app_id: t.uuid().notNull(),
+        user_id: t.text().notNull(),
+        app_id: t.text().notNull(),
         email: t.text({ caseSensitive: false }),
         name: t.text(),
         avatar_url: t.text(),
@@ -161,7 +184,7 @@ export default {
     });
     table("identity_links", { schema: "zeroship" }).create({
       columns: {
-        principal_id: t.uuid().notNull(),
+        principal_id: t.text().notNull(),
         provider: t.text().notNull(),
         provider_subject: t.text().notNull(),
         email: t.text(),
@@ -172,7 +195,7 @@ export default {
     table("idp_sessions", { schema: "zeroship" }).create({
       columns: {
         id: t.uuid().notNull().default(uuidV4()),
-        user_id: t.uuid().notNull(),
+        user_id: t.text().notNull(),
         auth_method: t.text().notNull(),
         amr: t.textArray().notNull(),
         acr: t.text(),
@@ -217,7 +240,7 @@ export default {
         expires_at: t.timestamp().notNull(),
         consumed_pending_at: t.timestamp(),
         consumed_at: t.timestamp(),
-        user_id: t.uuid(),
+        user_id: t.text(),
       },
       primaryKey: ["token_hash"],
     });
@@ -231,7 +254,7 @@ export default {
         requested_scopes: t.textArray().notNull(),
         granted_scopes: t.textArray().notNull(),
         nonce: t.text(),
-        user_id: t.uuid().notNull(),
+        user_id: t.text().notNull(),
         created_at: t.timestamp().notNull().default(now()),
         expires_at: t.timestamp().notNull(),
         consumed_at: t.timestamp(),
@@ -252,7 +275,7 @@ export default {
         scopes: t.textArray().notNull(),
         skip_consent: t.boolean().notNull().default(false),
         created_at: t.timestamp().notNull().default(now()),
-        created_by: t.uuid(),
+        created_by: t.text(),
         client_secret_hash: t.text(),
         refresh_allowed: t.boolean().notNull().default(false),
         token_endpoint_auth_method: t.text().notNull().default("none"),
@@ -265,7 +288,7 @@ export default {
     table("oauth_clients", { schema: "zeroship" }).check("oauth_clients_token_endpoint_auth_method_check").add({ expr: (col) => col("token_endpoint_auth_method").in(["none", "client_secret_basic", "client_secret_post"]) });
     table("oauth_grants", { schema: "zeroship" }).create({
       columns: {
-        user_id: t.uuid().notNull(),
+        user_id: t.text().notNull(),
         client_id: t.text().notNull(),
         granted_scopes: t.textArray().notNull(),
         granted_at: t.timestamp().notNull().default(now()),
@@ -281,7 +304,7 @@ export default {
         refresh_family_id: t.text().notNull(),
         replaced_by_token_hash: t.bytes(),
         client_id: t.text().notNull(),
-        user_id: t.uuid().notNull(),
+        user_id: t.text().notNull(),
         sub: t.text().notNull(),
         granted_scopes: t.textArray().notNull(),
         family_granted_scopes: t.textArray().notNull(),
@@ -301,7 +324,7 @@ export default {
     table("oidc_session_clients", { schema: "zeroship" }).create({
       columns: {
         idp_session_id: t.uuid().notNull(),
-        user_id: t.uuid().notNull(),
+        user_id: t.text().notNull(),
         client_id: t.text().notNull(),
         sid: t.text().notNull(),
         sub: t.text().notNull(),
@@ -312,7 +335,7 @@ export default {
     });
     table("principal_grants", { schema: "zeroship" }).create({
       columns: {
-        principal_id: t.uuid().notNull(),
+        principal_id: t.text().notNull(),
         grant_name: t.text().notNull(),
       },
       primaryKey: ["principal_id", "grant_name"],
@@ -351,7 +374,7 @@ export default {
     table("totp_backup_codes", { schema: "zeroship" }).create({
       columns: {
         id: t.bigInt().notNull().identity({ always: true }),
-        user_id: t.uuid().notNull(),
+        user_id: t.text().notNull(),
         code_hash: t.text().notNull(),
         used_at: t.timestamp(),
         created_at: t.timestamp().notNull().default(now()),
@@ -360,7 +383,7 @@ export default {
     });
     table("totp_credentials", { schema: "zeroship" }).create({
       columns: {
-        user_id: t.uuid().notNull(),
+        user_id: t.text().notNull(),
         encrypted_secret: t.bytes().notNull(),
         confirmed_at: t.timestamp(),
         created_at: t.timestamp().notNull().default(now()),
@@ -369,7 +392,7 @@ export default {
     });
     table("users", { schema: "zeroship" }).create({
       columns: {
-        id: t.uuid().notNull().default(uuidV4()),
+        id: t.text().notNull(),
         email: t.text({ caseSensitive: false }).notNull(),
         email_verified_at: t.timestamp(),
         name: t.text().notNull(),
@@ -388,5 +411,12 @@ export default {
       },
       primaryKey: ["id"],
     });
+    for (const [tableName, columns] of Object.entries(userIdColumnsByTable)) {
+      for (const column of columns) {
+        table(tableName, { schema: "zeroship" })
+          .check(`${tableName}_${column}_usr_shape`)
+          .add({ expr: (col) => col(column).regex("^usr_[0-9a-z]{25}$") });
+      }
+    }
   },
 };

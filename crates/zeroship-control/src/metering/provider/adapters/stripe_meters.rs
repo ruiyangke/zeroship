@@ -72,9 +72,10 @@ pub fn factory(ctx: &ProviderCtx) -> Result<Arc<dyn MeteringProvider>, ProviderE
             )));
         }
     }
-    let store = ctx.store.clone().ok_or_else(|| {
-        ProviderError::Config("stripe_meters: LiteStore is required".to_string())
-    })?;
+    let store = ctx
+        .store
+        .clone()
+        .ok_or_else(|| ProviderError::Config("stripe_meters: LiteStore is required".to_string()))?;
     Ok(Arc::new(StripeMetersProvider {
         store,
         secret_key,
@@ -134,12 +135,7 @@ impl Meter for StripeMetersProvider {
         })?;
         Ok(self
             .stripe()
-            .meter_event_summary(
-                meter_id,
-                q.subject.as_str(),
-                q.period.start,
-                q.period.end,
-            )
+            .meter_event_summary(meter_id, q.subject.as_str(), q.period.start, q.period.end)
             .await?)
     }
 }
@@ -160,9 +156,13 @@ impl crate::metering::provider::Invoicer for StripeMetersProvider {
         note: &crate::metering::provider::AdjustmentNote,
     ) -> Result<InvoiceRef, ProviderError> {
         let organization = OrganizationId::parse(subject.as_str()).map_err(|e| {
-            ProviderError::Config(format!("stripe_meters: subject is not an organization id: {e}"))
+            ProviderError::Config(format!(
+                "stripe_meters: subject is not an organization id: {e}"
+            ))
         })?;
-        self.store.adjustment_note_invoice(organization.as_str(), note).await
+        self.store
+            .adjustment_note_invoice(organization.as_str(), note)
+            .await
     }
 }
 

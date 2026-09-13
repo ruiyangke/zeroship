@@ -1,4 +1,4 @@
-//! The app -> project -> organization resolution, across the uuid/text seam.
+//! The app -> project -> organization resolution, end to end.
 //!
 //! **This file replaces `anywhere_uuid_regression_test.rs`, and the premise is
 //! re-read rather than ported.** That test existed because
@@ -7,32 +7,44 @@
 //! `is_authorized_anywhere` reached that read unconditionally. `app_members` is
 //! deleted, so the defect it pinned cannot recur in that form.
 //!
-//! The seam it was really about is still here and has moved: an app is reached
-//! by `uuid`, and everything above it - `projects.id`,
-//! `organization_members.organization_id`, `project_members.project_id` - is
-//! `text COLLATE "C"`. One resolve query now spans both, binding a parsed
-//! `Uuid` against `apps.id` and text against the project chain. Getting either
-//! side's type wrong fails the query outright, so the test that matters is
-//! whether the whole chain resolves and produces the right authority.
+//! **The uuid/text seam this file was named for is GONE.** It ran through
+//! `apps.id`: that column was `uuid` while every id above it - `projects.id`,
+//! `organization_members.organization_id`, `project_members.project_id` - was
+//! `text COLLATE "C"`, so one resolve query bound a parsed `Uuid` on one side of
+//! a join and text on the other. An app id is a typed id now and `apps.id` holds
+//! its printed form, so the whole chain is text and there is no cast to get
+//! wrong.
+//!
+//! What remains worth testing is what the seam was standing in for: whether the
+//! chain resolves at all, and whether it produces the RIGHT authority rather
+//! than a quiet zero. A wrong id does not fail this query - `apps` is reached by
+//! LEFT JOIN, so it contributes no row and the answer is "you hold no seat" -
+//! which is why the cases below pair a resolve that must succeed with an unknown
+//! app that must deny.
 //!
 //! Requires a test database with the committed migration corpus applied
 //! (`PG_TEST_URL`). Without one this target REFUSES rather than skipping; the
 //! reasoning is in `crates/zeroship-authz/tests/common/mod.rs`.
-
-mod common;
+//!
+//! **`zeroship.apps.id` MUST BE `text` for this file to pass.** The resolve
+//! binds the printed app id, so a database still carrying the `uuid` column
+//! fails these tests on the INSERT in [`Fixture::new`] - loudly, and before any
+//! assertion.
 
 use common::live_dsn;
 use compio_postgres::{connect, Client, NoTls};
 use std::future::Future;
-use uuid::Uuid;
 use zeroship_authz::{
     authority, enforce, is_authorized_anywhere, load_platform_policies, Action, AuthzContext,
-    AuthzDecision, AuthzError, Resource,
+    AuthzDecision, Resource,
 };
+use zeroship_id::{AppId, UserId};
 
-/// The whole chain, in one request: `Resource::App` carries a uuid in string
-/// form, the resolve parses it, joins `apps -> projects -> organization_members
-/// -> organization_roles`, and produces the seat's rank.
+mod common;
+
+/// The whole chain, in one request: `Resource::App` carries the typed id, the
+/// resolve binds its printed form, joins `apps -> projects ->
+/// organization_members -> organization_roles`, and produces the seat's rank.
 #[test]
 fn an_app_resolves_its_authority_through_its_project() {
     run_db_test(|pg| async move {
@@ -40,9 +52,9 @@ fn an_app_resolves_its_authority_through_its_project() {
         fixture.seat_on_project(&pg, "developer").await;
         let policies = load_platform_policies().unwrap();
 
-        let resolved = authority::resolve(&pg, fixture.user_id, &fixture.app())
+        let resolved = authority::resolve(&pg, &fixture.user_id, &fixture.app())
             .await
-            .expect("resolve must not error on the uuid/text seam");
+            .expect("resolve must not error across the app -> project chain");
         assert_eq!(
             resolved.effective_rank, 20,
             "the developer seat must survive the app -> project -> organization join"
@@ -66,16 +78,18 @@ fn an_app_resolves_its_authority_through_its_project() {
 /// Naming an app that does not exist must DENY, not error. The resolve still
 /// has to read the principal's own row, so "no such app" and "no such user" are
 /// different outcomes and only the second is a validation failure.
+///
+/// This is also the control for the neighbour above: a WELL-FORMED app id that
+/// names no row denies quietly, so the neighbour's Allow is evidence that the
+/// join found the fixture's app and not merely that nothing errored.
 #[test]
 fn an_unknown_app_denies_without_erroring() {
     run_db_test(|pg| async move {
         let fixture = Fixture::new(&pg, "resolve-missing", "owner").await;
         let policies = load_platform_policies().unwrap();
 
-        let missing = Resource::App {
-            id: Uuid::new_v4().to_string(),
-        };
-        let resolved = authority::resolve(&pg, fixture.user_id, &missing)
+        let missing = Resource::App { id: AppId::mint() };
+        let resolved = authority::resolve(&pg, &fixture.user_id, &missing)
             .await
             .expect("an unknown app is not a database failure");
         assert_eq!(resolved.effective_rank, 0);
@@ -92,45 +106,6 @@ fn an_unknown_app_denies_without_erroring() {
     });
 }
 
-/// An app id in a rendering `authority::app_uuid_or_refuse` has not been taught
-/// is a REFUSAL, and it must not be a deny.
-///
-/// **This test asserted the opposite until the refusal landed**, and asserting
-/// the opposite is what made the bug possible: the old shape parsed a uuid and,
-/// on failure, fell through to the UNRANKED read, so the canonical
-/// `app_<base62>` rendering resolved to rank zero and 403'd as "you hold no
-/// seat on this app". Two very different things - an id we cannot read, and an
-/// id naming an app the caller cannot reach - produced one indistinguishable
-/// answer, in the response and in `zeroship.authz_decisions` alike.
-///
-/// The neighbour above is the control that keeps this a boundary rather than a
-/// blanket refusal: a WELL-FORMED uuid naming no app still denies quietly,
-/// because "no such app" is a real answer and this is not.
-#[test]
-fn a_malformed_app_id_is_refused_rather_than_denied() {
-    run_db_test(|pg| async move {
-        let fixture = Fixture::new(&pg, "resolve-malformed", "owner").await;
-        let policies = load_platform_policies().unwrap();
-
-        let malformed = Resource::App {
-            id: "not-a-uuid".to_owned(),
-        };
-        let resolved = authority::resolve(&pg, fixture.user_id, &malformed).await;
-        assert!(
-            matches!(resolved, Err(AuthzError::Validation(_))),
-            "an unreadable app id must be refused, not resolved to rank zero: {resolved:?}"
-        );
-
-        let decision = enforce(&pg, &policies, &fixture.ctx(Action::AppsRead, malformed)).await;
-        assert!(
-            matches!(decision, Err(AuthzError::Validation(_))),
-            "the refusal must reach the caller instead of being audited as a deny: {decision:?}"
-        );
-
-        fixture.cleanup(&pg).await;
-    });
-}
-
 /// A principal with no `zeroship.users` row is a VALIDATION failure, never rank
 /// zero. Degrading it to a Deny would file an unknown principal as "an ordinary
 /// member with no seat" in the audit trail.
@@ -139,17 +114,16 @@ fn an_unknown_principal_is_a_validation_error_not_rank_zero() {
     run_db_test(|pg| async move {
         for resource in [
             Resource::Any,
-            Resource::App {
-                id: Uuid::new_v4().to_string(),
-            },
+            Resource::App { id: AppId::mint() },
             Resource::Project {
-                id: "prj_0000000000000000000001".to_owned(),
+                id: "prj_0000000000000000000000001".to_owned(),
             },
             Resource::Organization {
-                id: "org_0000000000000000000001".to_owned(),
+                id: "org_0000000000000000000000001".to_owned(),
             },
         ] {
-            let err = authority::resolve(&pg, Uuid::new_v4(), &resource)
+            let unknown = UserId::mint();
+            let err = authority::resolve(&pg, &unknown, &resource)
                 .await
                 .expect_err("an unknown principal must not resolve");
             assert!(
@@ -171,7 +145,7 @@ fn the_probe_reads_the_text_id_columns_and_returns_valid_resources() {
         let fixture = Fixture::new(&pg, "probe-ids", "developer").await;
         fixture.seat_on_project(&pg, "viewer").await;
 
-        let organizations = authority::organization_resources(&pg, fixture.user_id)
+        let organizations = authority::organization_resources(&pg, &fixture.user_id)
             .await
             .expect("organization memberships must read as text");
         assert_eq!(
@@ -181,7 +155,7 @@ fn the_probe_reads_the_text_id_columns_and_returns_valid_resources() {
             }]
         );
 
-        let projects = authority::project_probe_resources(&pg, fixture.user_id)
+        let projects = authority::project_probe_resources(&pg, &fixture.user_id)
             .await
             .expect("project memberships must read as text");
         assert_eq!(
@@ -245,23 +219,31 @@ where
         });
 }
 
+// Four ids and nothing else, so `struct_field_names` fires on the shared
+// postfix. It started firing when `app_uuid` went: that field was the second
+// rendering of `app_id`, and it is the only reason the names ever varied.
+#[allow(clippy::struct_field_names)] // every field IS an id; naming them so is the point
 struct Fixture {
-    user_id: Uuid,
+    user_id: UserId,
     organization_id: String,
     project_id: String,
-    app_uuid: Uuid,
+    app_id: AppId,
 }
 
 impl Fixture {
     async fn new(pg: &Client, label: &str, organization_role: &str) -> Self {
-        let user_id = Uuid::new_v4();
+        let user_id = UserId::mint();
         let organization_id = typed_id("org");
         let project_id = typed_id("prj");
-        let app_uuid = Uuid::new_v4();
+        let app_id = AppId::mint();
 
         pg.execute(
             "INSERT INTO zeroship.users (id, email, name) VALUES ($1, $2::citext, $3)",
-            &[&user_id, &format!("{label}-{user_id}@example.com"), &label],
+            &[
+                &user_id.as_str(),
+                &format!("{label}-{}@example.com", user_id.as_str()),
+                &label,
+            ],
         )
         .await
         .expect("insert user");
@@ -295,8 +277,8 @@ impl Fixture {
             "INSERT INTO zeroship.apps (id, name, project_id, organization_id) \
              SELECT $1, $2, p.id, p.organization_id FROM zeroship.projects p WHERE p.id = $3",
             &[
-                &app_uuid,
-                &format!("authz-{label}-{}", Uuid::new_v4().simple()),
+                &app_id.as_str(),
+                &format!("authz-{label}-{}", app_id.as_str()),
                 &project_id,
             ],
         )
@@ -305,7 +287,7 @@ impl Fixture {
         pg.execute(
             "INSERT INTO zeroship.organization_members (organization_id, user_id, role) \
              VALUES ($1, $2, $3)",
-            &[&organization_id, &user_id, &organization_role],
+            &[&organization_id, &user_id.as_str(), &organization_role],
         )
         .await
         .expect("insert organization membership");
@@ -314,7 +296,7 @@ impl Fixture {
             user_id,
             organization_id,
             project_id,
-            app_uuid,
+            app_id,
         }
     }
 
@@ -325,7 +307,7 @@ impl Fixture {
             &[
                 &self.project_id,
                 &self.organization_id,
-                &self.user_id,
+                &self.user_id.as_str(),
                 &role,
             ],
         )
@@ -335,13 +317,13 @@ impl Fixture {
 
     fn app(&self) -> Resource {
         Resource::App {
-            id: self.app_uuid.to_string(),
+            id: self.app_id.clone(),
         }
     }
 
-    const fn ctx(&self, action: Action, resource: Resource) -> AuthzContext<'_> {
+    fn ctx(&self, action: Action, resource: Resource) -> AuthzContext<'_> {
         AuthzContext {
-            principal_id: self.user_id,
+            principal_id: self.user_id.clone(),
             token_policy: None,
             action,
             resource,
@@ -357,10 +339,13 @@ impl Fixture {
             "DELETE FROM zeroship.project_members WHERE user_id = $1",
             "DELETE FROM zeroship.organization_members WHERE user_id = $1",
         ] {
-            let _ = pg.execute(sql, &[&self.user_id]).await;
+            let _ = pg.execute(sql, &[&self.user_id.as_str()]).await;
         }
         let _ = pg
-            .execute("DELETE FROM zeroship.apps WHERE id = $1", &[&self.app_uuid])
+            .execute(
+                "DELETE FROM zeroship.apps WHERE id = $1",
+                &[&self.app_id.as_str()],
+            )
             .await;
         let _ = pg
             .execute(
@@ -375,12 +360,19 @@ impl Fixture {
             )
             .await;
         let _ = pg
-            .execute("DELETE FROM zeroship.users WHERE id = $1", &[&self.user_id])
+            .execute(
+                "DELETE FROM zeroship.users WHERE id = $1",
+                &[&self.user_id.as_str()],
+            )
             .await;
     }
 }
 
+/// A canonical typed id, minted by the one minter.
+///
+/// Composing a body by hand pins BOTH the width and the alphabet, so it stops
+/// satisfying the schema's shape CHECK the moment either moves - and it fails at
+/// insert time, not at compile time.
 fn typed_id(prefix: &str) -> String {
-    let hex = Uuid::new_v4().simple().to_string();
-    format!("{prefix}_{}", &hex[..22])
+    zeroship_id::typed_id::generate(prefix)
 }

@@ -26,9 +26,8 @@
  *     into the AsyncIterable's queue. v1 yields every rerun; deep-equal
  *     diffing to suppress no-op events is future work.
  *
- *   - Tx awareness: calling `db.live` inside a `db.transaction(tx => ...)`
- *     callback throws synchronously with `code = "LIVE_IN_TRANSACTION"`.
- *     Live queries are by definition long-lived; a tx is per-request.
+ * Transaction callbacks are rejected by the bootstrap wrapper before this
+ * factory runs.
  *
  * Limitations (future work, not v1):
  *
@@ -43,7 +42,6 @@
  */
 
 import { subscribe, type Subscription, type SubscriptionEvent } from "./subscribe";
-import { anyCollectionInTransaction } from "./tx-state";
 
 /**
  * The minimal contract a `queryFn` return value must satisfy. Either a
@@ -136,24 +134,14 @@ function isResultEnvelope(v: unknown): v is { data: unknown; error: unknown } {
 }
 
 /**
- * Build a `LiveQuery<R>` from a `queryFn` and the parent `db` object.
+ * Build a `LiveQuery<R>` from a `queryFn`.
  * Exported via `env.db.live` (planted by `installSchema` — see
- * `db-types.ts`). `db` is the Collections map `installSchema` built —
- * used to (a) verify we're not inside a tx and (b) call
- * `subscribe(name)` for every detected table.
+ * `db-types.ts`).
  */
 export function createLive<R>(
-  db: Record<string, unknown>,
   queryFn: () => QueryFnResult<R>,
   options?: LiveOptions,
 ): LiveQuery<R> {
-  if (anyCollectionInTransaction(db)) {
-    throw Object.assign(
-      new Error("@zeroship/db: db.live cannot be called inside db.transaction — live queries outlive the request-scoped tx"),
-      { code: "LIVE_IN_TRANSACTION" as const },
-    );
-  }
-
   // Queue of results waiting to be consumed by `next()`, plus a
   // single-slot pending resolver if a consumer is waiting. The queue
   // can also hold a terminal `done` sentinel (`null`) so `close()`

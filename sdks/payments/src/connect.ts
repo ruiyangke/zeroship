@@ -18,6 +18,7 @@ import {
   ControlError,
   createControlClient,
   type ControlClientOptions,
+  type UserId,
 } from "@zeroship/control";
 
 /**
@@ -27,11 +28,13 @@ import {
  */
 export interface PaymentsClientOptions extends ControlClientOptions {
   /**
-   * The creator (`usr_…` / uuid) whose Connect account the calls act on. The
+   * The creator whose Connect account the calls act on. This is the canonical
+   * platform `UserId` (`usr_` plus its fixed-width lowercase base36 UUIDv7
+   * body). The
    * server binds this to the authenticated principal (self-service) or an
    * operator with `BillingWrite`.
    */
-  creatorId: string;
+  creatorId: UserId;
 }
 
 /**
@@ -111,7 +114,7 @@ interface OnboardResponseWire {
  */
 export class PaymentsClient {
   readonly #control: ControlClient;
-  readonly #creatorId: string;
+  readonly #creatorId: UserId;
 
   constructor(options: PaymentsClientOptions) {
     if (!options.creatorId) {

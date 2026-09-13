@@ -1,7 +1,7 @@
 //! Resolved column roles and SQL assignments supplied by the ORM.
 
+use crate::sql::mapping::QueryError;
 use crate::value::Value;
-use crate::sql::{compile::{QueryError, SqlDialect, quote_ident}};
 
 fn invalid(message: &str) -> QueryError {
     QueryError::InvalidFilter(message.into())
@@ -47,37 +47,6 @@ pub struct WriteAssignments {
     pub columns: Vec<ColumnAssignment>,
 }
 
-impl WriteAssignments {
-    pub fn render(
-        &self,
-        dialect: SqlDialect,
-        params: &mut Vec<Value>,
-        source: Option<&str>,
-    ) -> Result<Vec<String>, QueryError> {
-        self.columns
-            .iter()
-            .map(|assignment| {
-                crate::sql::compile::validate_field_name(&assignment.column)?;
-                let column = quote_ident(&assignment.column);
-                let value = match &assignment.value {
-                    AssignedValue::CurrentTimestamp => dialect.current_timestamp_expr().into(),
-                    AssignedValue::Increment(step) => {
-                        let operand = source
-                            .map_or_else(|| column.clone(), |source| format!("{source}.{column}"));
-                        params.push(Value::from(*step));
-                        format!("{operand} + ${}", params.len())
-                    }
-                    AssignedValue::Bound(value) => {
-                        params.push(value.clone());
-                        format!("${}", params.len())
-                    }
-                };
-                Ok(format!("{column} = {value}"))
-            })
-            .collect()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -98,7 +67,7 @@ mod tests {
     }
 
     #[test]
-    fn assignments_keep_values_bound_and_qualify_conflict_operands() {
+    fn assignments_preserve_their_resolved_values() {
         let assignments = WriteAssignments {
             columns: vec![
                 ColumnAssignment {
@@ -111,19 +80,15 @@ mod tests {
                 },
             ],
         };
-        for dialect in [SqlDialect::Postgres, SqlDialect::Sqlite] {
-            let mut params = Vec::new();
-            let sql = assignments
-                .render(dialect, &mut params, Some("\"records\""))
-                .unwrap();
-            assert_eq!(
-                sql,
-                [
-                    "\"revision\" = \"records\".\"revision\" + $1",
-                    "\"editor\" = $2"
-                ]
-            );
-            assert_eq!(params, [value!(2), value!("actor'")]);
-        }
+        assert_eq!(assignments.columns[0].column, "revision");
+        assert!(matches!(
+            assignments.columns[0].value,
+            AssignedValue::Increment(2)
+        ));
+        assert_eq!(assignments.columns[1].column, "editor");
+        assert!(matches!(
+            &assignments.columns[1].value,
+            AssignedValue::Bound(value) if value == &value!("actor'")
+        ));
     }
 }

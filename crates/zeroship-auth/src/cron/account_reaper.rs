@@ -109,7 +109,7 @@ use std::time::Duration;
 
 use compio_postgres::{Client, GenericClient};
 use serde_json::json;
-use uuid::Uuid;
+use zeroship_core::UserId;
 
 use crate::advisory_lock::{self, ACCOUNT_REAPER_SWEEP_LOCK};
 use crate::audit::{self, AuditEvent};
@@ -239,25 +239,25 @@ pub async fn tick(db: &mut Client, control: &ControlAccess) -> Result<ReaperRepo
         // The preflight is asked OUTSIDE the transaction and BEFORE it, so a
         // control plane that cannot answer costs a skipped user rather than an
         // open transaction held across a network round trip.
-        match still_erasable(control, user_id).await {
+        match still_erasable(control, &user_id).await {
             Ok(()) => {}
             Err(refusal) => {
                 report.failed += 1;
-                record_failure(db, user_id, refusal.stage, &refusal.reason, None).await;
+                record_failure(db, &user_id, refusal.stage, &refusal.reason, None).await;
                 continue;
             }
         }
-        match erase_one(db, user_id).await {
+        match erase_one(db, &user_id).await {
             Ok(EraseOutcome::Erased) => report.erased += 1,
             Ok(EraseOutcome::Skipped) => {}
             Ok(EraseOutcome::Refused(refusal)) => {
                 report.failed += 1;
-                record_failure(db, user_id, refusal.stage, &refusal.reason, None).await;
+                record_failure(db, &user_id, refusal.stage, &refusal.reason, None).await;
             }
             Err(e) => {
                 report.failed += 1;
                 let (stage, constraint) = classify(&e);
-                record_failure(db, user_id, stage, &e.to_string(), constraint).await;
+                record_failure(db, &user_id, stage, &e.to_string(), constraint).await;
             }
         }
     }
@@ -285,7 +285,7 @@ struct Refusal {
 #[allow(clippy::future_not_send)]
 async fn still_erasable(
     control: &ControlAccess,
-    user_id: Uuid,
+    user_id: &UserId,
 ) -> std::result::Result<(), Refusal> {
     match control_client::erasure_preflight(&control.control_url, &control.keyring, user_id).await {
         Ok(report) if report.is_clear() => Ok(()),
@@ -357,7 +357,7 @@ fn classify_blockers(report: &control_client::ErasurePreflight) -> Refusal {
 /// Users whose erasure is due: an explicit request and a schedule in the past.
 /// A schedule alone denies authentication but is not authority to erase the
 /// account.
-async fn find_due(db: &Client) -> Result<Vec<Uuid>> {
+async fn find_due(db: &Client) -> Result<Vec<UserId>> {
     let rows = db
         .query(
             "SELECT id FROM zeroship.users \
@@ -368,7 +368,11 @@ async fn find_due(db: &Client) -> Result<Vec<Uuid>> {
         )
         .await
         .map_err(|e| AuthError::Db(format!("account_reaper find_due: {e}")))?;
-    Ok(rows.iter().map(|r| r.get::<_, Uuid>("id")).collect())
+    rows.iter()
+        .map(|row| {
+            crate::entity_ids::user_id_with_context(row, "id", "account reaper user_id is invalid")
+        })
+        .collect()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -382,7 +386,7 @@ enum EraseOutcome {
 }
 
 /// Erase one due user inside a single transaction.
-async fn erase_one(conn: &mut Client, user_id: Uuid) -> Result<EraseOutcome> {
+async fn erase_one(conn: &mut Client, user_id: &UserId) -> Result<EraseOutcome> {
     let tx = conn
         .transaction()
         .await
@@ -410,7 +414,10 @@ async fn erase_one(conn: &mut Client, user_id: Uuid) -> Result<EraseOutcome> {
     }
 }
 
-async fn erase_one_tx(conn: &(impl GenericClient + Sync), user_id: Uuid) -> Result<EraseOutcome> {
+async fn erase_one_tx(
+    conn: &(impl GenericClient + Sync),
+    user_id: &UserId,
+) -> Result<EraseOutcome> {
     // Serialize against cancellation and recheck the complete erasure
     // authority after the due scan. The row lock makes cancellation either
     // win first (this returns Skipped) or wait for the committed erasure.
@@ -422,7 +429,7 @@ async fn erase_one_tx(conn: &(impl GenericClient + Sync), user_id: Uuid) -> Resu
                AND deletion_scheduled_for IS NOT NULL \
                AND deletion_scheduled_for <= NOW() \
              FOR UPDATE",
-            &[&user_id],
+            &[&user_id.as_str()],
         )
         .await
         .map_err(|e| AuthError::Db(format!("account_reaper lock due user: {e}")))?;
@@ -495,7 +502,7 @@ async fn erase_one_tx(conn: &(impl GenericClient + Sync), user_id: Uuid) -> Resu
 /// plane, which owns the billing tables and the remedies a person is shown.
 async fn refuse_if_it_strands_an_organization(
     conn: &(impl GenericClient + Sync),
-    user_id: Uuid,
+    user_id: &UserId,
 ) -> Result<Option<Refusal>> {
     conn.query(
         "SELECT o.id FROM zeroship.organizations o \
@@ -505,7 +512,7 @@ async fn refuse_if_it_strands_an_organization(
                            AND m.user_id = $1) \
           ORDER BY o.id \
           FOR UPDATE",
-        &[&user_id],
+        &[&user_id.as_str()],
     )
     .await
     .map_err(|e| AuthError::Db(format!("account_reaper lock seated organizations: {e}")))?;
@@ -523,7 +530,7 @@ async fn refuse_if_it_strands_an_organization(
                                    AND rival.role = 'owner' \
                                    AND rival.user_id <> $1) \
               ORDER BY o.slug",
-            &[&user_id],
+            &[&user_id.as_str()],
         )
         .await
         .map_err(|e| AuthError::Db(format!("account_reaper recheck ownership: {e}")))?;
@@ -552,22 +559,23 @@ async fn refuse_if_it_strands_an_organization(
 /// The SQLSTATE is preserved rather than flattened into a message: `23503` and
 /// `23514` are what a newly-added blocking reference looks like, and the
 /// constraint name in them is the only thing that says which one.
-async fn hard_delete_user(conn: &(impl GenericClient + Sync), user_id: Uuid) -> Result<()> {
-    conn.execute("DELETE FROM zeroship.users WHERE id = $1", &[&user_id])
-        .await
-        .map_err(|e| {
-            if let Some(db_err) = e.as_db_error() {
-                let constraint = db_err.constraint().unwrap_or("<unnamed>");
-                let table = db_err.table().unwrap_or("<unknown>");
-                return AuthError::DbCode {
-                    code: db_err.code().code().to_string(),
-                    message: format!(
-                        "account_reaper hard delete blocked by {table}.{constraint}: {e}"
-                    ),
-                };
-            }
-            AuthError::Db(format!("account_reaper hard delete: {e}"))
-        })?;
+async fn hard_delete_user(conn: &(impl GenericClient + Sync), user_id: &UserId) -> Result<()> {
+    conn.execute(
+        "DELETE FROM zeroship.users WHERE id = $1",
+        &[&user_id.as_str()],
+    )
+    .await
+    .map_err(|e| {
+        if let Some(db_err) = e.as_db_error() {
+            let constraint = db_err.constraint().unwrap_or("<unnamed>");
+            let table = db_err.table().unwrap_or("<unknown>");
+            return AuthError::DbCode {
+                code: db_err.code().code().to_string(),
+                message: format!("account_reaper hard delete blocked by {table}.{constraint}: {e}"),
+            };
+        }
+        AuthError::Db(format!("account_reaper hard delete: {e}"))
+    })?;
     Ok(())
 }
 
@@ -597,13 +605,13 @@ fn classify(err: &AuthError) -> (&'static str, Option<String>) {
 #[allow(clippy::future_not_send)]
 async fn record_failure(
     db: &Client,
-    user_id: Uuid,
+    user_id: &UserId,
     stage: &str,
     reason: &str,
     constraint: Option<String>,
 ) {
     tracing::error!(
-        user_id = %user_id,
+        user_id = user_id.as_str(),
         stage,
         constraint = constraint.as_deref().unwrap_or("-"),
         reason,
@@ -614,7 +622,7 @@ async fn record_failure(
         &AuditEvent {
             event_type: "account_erasure_failed",
             outcome: "failure",
-            user_id: Some(&user_id),
+            user_id: Some(user_id),
             client_id: None,
             request_id: None,
             ip: None,

@@ -17,12 +17,13 @@ use crate::common;
 use compio_postgres::{connect, NoTls};
 use uuid::Uuid;
 
+use zeroship_control::egress_rules;
 use zeroship_control::plan_catalog::{Plan, PlanCatalog};
 use zeroship_control::pricing::{charge_cents, MetricWeight, MetricWeights, PlanPrice, FX_SCALE};
-use zeroship_control::egress_rules;
 use zeroship_control::Registry;
 use zeroship_core::net_policy::Verdict;
 use zeroship_core::types::{AppNetPolicyLimits, AppRuntimeLimits};
+use zeroship_core::{AppId, UserId};
 
 fn db_url() -> String {
     common::require_control_db()
@@ -40,7 +41,9 @@ fn db_url() -> String {
 static FX_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 fn lock_fx() -> std::sync::MutexGuard<'static, ()> {
-    FX_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    FX_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 async fn pg(db_url: &str) -> compio_postgres::Client {
@@ -79,17 +82,20 @@ async fn seed_plan(catalog: &PlanCatalog, name: &str) -> Plan {
         archived: false,
         assignable_by_creator: false,
     };
-    catalog.upsert(&plan, Some(plan.archived)).await.expect("upsert plan")
+    catalog
+        .upsert(&plan, Some(plan.archived))
+        .await
+        .expect("upsert plan")
 }
 
 /// Mint a user row so `create_app`'s owner-membership insert has a valid FK.
-async fn make_user(client: &compio_postgres::Client) -> Uuid {
-    let id = Uuid::now_v7();
-    let email = format!("plan-test-{id}@example.com");
+async fn make_user(client: &compio_postgres::Client) -> UserId {
+    let id = UserId::mint();
+    let email = format!("plan-test-{}@example.com", id.as_str());
     client
         .execute(
             "INSERT INTO zeroship.users (id, email, name) VALUES ($1, $2, $3)",
-            &[&id, &email, &"Plan Test"],
+            &[&id.as_str(), &email, &"Plan Test"],
         )
         .await
         .expect("insert user");
@@ -105,13 +111,23 @@ async fn upsert_and_get_round_trips_pure_types() {
 
     let plan = seed_plan(&catalog, "round-trip").await;
     let fetched = catalog.get(&plan.id).await.expect("get").expect("present");
-    assert_eq!(fetched, plan, "JSONB columns round-trip the pure types verbatim");
+    assert_eq!(
+        fetched, plan,
+        "JSONB columns round-trip the pure types verbatim"
+    );
 
     // upsert again (same id) updates in place — idempotent.
     let mut updated = plan.clone();
     updated.name = "round-trip-2".to_string();
-    catalog.upsert(&updated, Some(updated.archived)).await.expect("re-upsert");
-    let again = catalog.get(&plan.id).await.expect("get2").expect("present2");
+    catalog
+        .upsert(&updated, Some(updated.archived))
+        .await
+        .expect("re-upsert");
+    let again = catalog
+        .get(&plan.id)
+        .await
+        .expect("get2")
+        .expect("present2");
     assert_eq!(again.name, "round-trip-2");
 
     // Teardown: `catalog`/`registry`/the raw `_client` each cycle their own
@@ -141,7 +157,10 @@ async fn create_app_with_unknown_plan_id_is_rejected() {
         .expect_err("unknown plan must be rejected");
     match err {
         zeroship_control::registry::RegistryError::InvalidInput(msg) => {
-            assert!(msg.contains("unknown plan"), "clean InvalidInput, got: {msg}");
+            assert!(
+                msg.contains("unknown plan"),
+                "clean InvalidInput, got: {msg}"
+            );
         }
         other => panic!("expected InvalidInput, got {other:?}"),
     }
@@ -211,11 +230,21 @@ async fn set_plan_to_archived_plan_is_rejected() {
     }
 
     // The app's plan is unchanged.
-    let still = registry.get_app(&app.id).await.expect("get").expect("present");
-    assert_eq!(still.plan_id, live.id, "rejected set_plan must not change the plan");
+    let still = registry
+        .get_app(&app.id)
+        .await
+        .expect("get")
+        .expect("present");
+    assert_eq!(
+        still.plan_id, live.id,
+        "rejected set_plan must not change the plan"
+    );
 
     // set_plan to the live plan still works.
-    assert!(registry.set_plan(&app.id, &live.id).await.expect("set live"));
+    assert!(registry
+        .set_plan(&app.id, &live.id)
+        .await
+        .expect("set live"));
 
     drop(catalog);
     drop(client);
@@ -241,7 +270,10 @@ async fn get_versions_derives_limits_from_catalog_not_hardcode() {
         wall_timeout_ms: Some(23_456),
         heap_limit_mb: Some(177),
     };
-    catalog.upsert(&plan, Some(plan.archived)).await.expect("upsert bespoke limits");
+    catalog
+        .upsert(&plan, Some(plan.archived))
+        .await
+        .expect("upsert bespoke limits");
 
     let name = format!("limits-{}", Uuid::new_v4().simple());
     let app = registry
@@ -252,7 +284,11 @@ async fn get_versions_derives_limits_from_catalog_not_hardcode() {
     let versions = registry.get_versions().await.expect("get_versions");
     let info = versions.get(&app.id).expect("app in versions");
     assert_eq!(info.plan_id, plan.id);
-    assert_eq!(info.runtime.cpu_limit_ms, Some(12_345), "from the catalog row, not a name table");
+    assert_eq!(
+        info.runtime.cpu_limit_ms,
+        Some(12_345),
+        "from the catalog row, not a name table"
+    );
     assert_eq!(info.runtime.wall_timeout_ms, Some(23_456));
     assert_eq!(info.runtime.heap_limit_mb, Some(177));
 
@@ -283,7 +319,10 @@ async fn get_versions_projects_app_egress_rules_with_plan_caps() {
         egress_ceiling_bytes: 42 * 1024 * 1024,
         max_grants: 3,
     };
-    catalog.upsert(&plan, Some(plan.archived)).await.expect("upsert net caps");
+    catalog
+        .upsert(&plan, Some(plan.archived))
+        .await
+        .expect("upsert net caps");
 
     let name = format!("egress-rule-{}", Uuid::new_v4().simple());
     let app = registry
@@ -291,7 +330,10 @@ async fn get_versions_projects_app_egress_rules_with_plan_caps() {
         .await
         .expect("create");
 
-    let versions = registry.get_versions().await.expect("get_versions no rules");
+    let versions = registry
+        .get_versions()
+        .await
+        .expect("get_versions no rules");
     assert_eq!(
         versions.get(&app.id).expect("app").net_policy,
         zeroship_core::types::AppNetPolicy::default(),
@@ -300,14 +342,14 @@ async fn get_versions_projects_app_egress_rules_with_plan_caps() {
 
     let written = egress_rules::upsert_rule(
         &client,
-        app.id,
+        &app.id,
         &egress_rules::EgressRuleBody {
             verdict: Verdict::Accept,
             destination: "DB.Example.COM.".to_string(),
             port: 5432,
             note: Some("primary".to_string()),
         },
-        &owner.to_string(),
+        &owner,
     )
     .await
     .expect("creator rule");
@@ -316,7 +358,10 @@ async fn get_versions_projects_app_egress_rules_with_plan_caps() {
         "the destination is normalized on write"
     );
 
-    let versions = registry.get_versions().await.expect("get_versions with rule");
+    let versions = registry
+        .get_versions()
+        .await
+        .expect("get_versions with rule");
     let net = &versions.get(&app.id).expect("app").net_policy;
     assert_eq!(net.egress.len(), 1);
     assert_eq!(net.egress[0].destination, "db.example.com");
@@ -330,14 +375,14 @@ async fn get_versions_projects_app_egress_rules_with_plan_caps() {
     // second is what would break if rejects were charged.
     egress_rules::upsert_rule(
         &client,
-        app.id,
+        &app.id,
         &egress_rules::EgressRuleBody {
             verdict: Verdict::Reject,
             destination: "203.0.113.0/24".to_string(),
             port: 5432,
             note: None,
         },
-        &owner.to_string(),
+        &owner,
     )
     .await
     .expect("creator reject rule");
@@ -348,28 +393,28 @@ async fn get_versions_projects_app_egress_rules_with_plan_caps() {
     for port in [5433_u16, 5434] {
         egress_rules::upsert_rule(
             &client,
-            app.id,
+            &app.id,
             &egress_rules::EgressRuleBody {
                 verdict: Verdict::Accept,
                 destination: "db.example.com".to_string(),
                 port,
                 note: None,
             },
-            &owner.to_string(),
+            &owner,
         )
         .await
         .expect("accept rules within the cap");
     }
     let over = egress_rules::upsert_rule(
         &client,
-        app.id,
+        &app.id,
         &egress_rules::EgressRuleBody {
             verdict: Verdict::Accept,
             destination: "db.example.com".to_string(),
             port: 5435,
             note: None,
         },
-        &owner.to_string(),
+        &owner,
     )
     .await;
     assert!(
@@ -391,15 +436,21 @@ async fn get_versions_projects_app_egress_rules_with_plan_caps() {
         "three accepts plus the reject; the refused accept reached no runtime"
     );
     assert_eq!(
-        net.egress.iter().filter(|e| e.verdict == Verdict::Reject).count(),
+        net.egress
+            .iter()
+            .filter(|e| e.verdict == Verdict::Reject)
+            .count(),
         1,
         "the reject rule projects and was not charged against the accept cap"
     );
-    assert_eq!(net.max_sockets, 9, "a refused rule leaves the caps untouched");
+    assert_eq!(
+        net.max_sockets, 9,
+        "a refused rule leaves the caps untouched"
+    );
     assert_eq!(net.egress_ceiling_bytes, 42 * 1024 * 1024);
 
     for port in [5432_u16, 5433, 5434] {
-        egress_rules::delete_rule(&client, app.id, "db.example.com", port)
+        egress_rules::delete_rule(&client, &app.id, "db.example.com", port)
             .await
             .expect("creator delete");
     }
@@ -407,7 +458,10 @@ async fn get_versions_projects_app_egress_rules_with_plan_caps() {
     // refuse but never admit is still an app that cannot open a socket. The
     // empty-set default-deny is the OTHER way to say that, and this asserts
     // the two do not disagree.
-    let versions = registry.get_versions().await.expect("get_versions rejects only");
+    let versions = registry
+        .get_versions()
+        .await
+        .expect("get_versions rejects only");
     let net = &versions.get(&app.id).expect("app").net_policy;
     assert_eq!(net.egress.len(), 1);
     assert!(
@@ -415,10 +469,13 @@ async fn get_versions_projects_app_egress_rules_with_plan_caps() {
         "only the reject rule survives"
     );
 
-    egress_rules::delete_rule(&client, app.id, "203.0.113.0/24", 5432)
+    egress_rules::delete_rule(&client, &app.id, "203.0.113.0/24", 5432)
         .await
         .expect("creator delete reject");
-    let versions = registry.get_versions().await.expect("get_versions after delete");
+    let versions = registry
+        .get_versions()
+        .await
+        .expect("get_versions after delete");
     assert_eq!(
         versions.get(&app.id).expect("app").net_policy,
         zeroship_core::types::AppNetPolicy::default(),
@@ -444,7 +501,12 @@ async fn upsert_with_none_archived_preserves_existing_archived() {
     let plan = seed_plan(&catalog, "to-stay-archived").await;
     assert!(catalog.archive(&plan.id).await.expect("archive"));
     assert!(
-        catalog.get(&plan.id).await.expect("get").expect("present").archived,
+        catalog
+            .get(&plan.id)
+            .await
+            .expect("get")
+            .expect("present")
+            .archived,
         "precondition: archived"
     );
 
@@ -452,15 +514,27 @@ async fn upsert_with_none_archived_preserves_existing_archived() {
     // resurrect the plan.
     let mut renamed = plan.clone();
     renamed.name = "renamed-while-archived".to_string();
-    let written = catalog.upsert(&renamed, None).await.expect("upsert none-archived");
-    assert!(written.archived, "name edit with archived=None must NOT un-archive");
-    assert_eq!(written.name, "renamed-while-archived", "the name DID change");
+    let written = catalog
+        .upsert(&renamed, None)
+        .await
+        .expect("upsert none-archived");
+    assert!(
+        written.archived,
+        "name edit with archived=None must NOT un-archive"
+    );
+    assert_eq!(
+        written.name, "renamed-while-archived",
+        "the name DID change"
+    );
 
     let fetched = catalog.get(&plan.id).await.expect("get").expect("present");
     assert!(fetched.archived, "still archived after the read-back");
 
     // Explicit Some(false) is the deliberate un-archive path.
-    let unarchived = catalog.upsert(&renamed, Some(false)).await.expect("explicit un-archive");
+    let unarchived = catalog
+        .upsert(&renamed, Some(false))
+        .await
+        .expect("explicit un-archive");
     assert!(!unarchived.archived, "Some(false) explicitly un-archives");
 
     drop(catalog);
@@ -484,7 +558,10 @@ async fn set_plan_guards_archive_in_one_statement() {
     let live = seed_plan(&catalog, "live-8").await;
     let target = seed_plan(&catalog, "target-8").await;
     let name = format!("toctou-{}", Uuid::new_v4().simple());
-    let app = registry.create_app(&name, &live.id, &owner, None).await.expect("create");
+    let app = registry
+        .create_app(&name, &live.id, &owner, None)
+        .await
+        .expect("create");
 
     // Archive the target, then attempt to assign it: the guarded UPDATE matches
     // 0 rows and the disambiguation returns InvalidInput("archived").
@@ -499,13 +576,23 @@ async fn set_plan_guards_archive_in_one_statement() {
         }
         other => panic!("expected InvalidInput, got {other:?}"),
     }
-    let still = registry.get_app(&app.id).await.expect("get").expect("present");
-    assert_eq!(still.plan_id, live.id, "rejected set_plan must not change the plan");
+    let still = registry
+        .get_app(&app.id)
+        .await
+        .expect("get")
+        .expect("present");
+    assert_eq!(
+        still.plan_id, live.id,
+        "rejected set_plan must not change the plan"
+    );
 
     // set_plan to a non-existent app returns Ok(false), NOT an error.
-    let ghost = Uuid::now_v7();
+    let ghost = AppId::mint();
     assert!(
-        !registry.set_plan(&ghost, &live.id).await.expect("no such app -> Ok(false)"),
+        !registry
+            .set_plan(&ghost, &live.id)
+            .await
+            .expect("no such app -> Ok(false)"),
         "no such app yields Ok(false)"
     );
 
@@ -555,7 +642,10 @@ async fn poison_runtime_limits_still_prices_via_both_list_and_get() {
         .iter()
         .find(|p| p.id == poison_id)
         .expect("poison row is STILL listed (priceable), not skipped");
-    assert_eq!(listed.price.base_fee_cents, 700, "poison row keeps its real price (list)");
+    assert_eq!(
+        listed.price.base_fee_cents, 700,
+        "poison row keeps its real price (list)"
+    );
 
     // get() of the poison id is ALSO tolerant now — returns the priced plan
     // (free-tier runtime fallback), no hard error.
@@ -564,7 +654,10 @@ async fn poison_runtime_limits_still_prices_via_both_list_and_get() {
         .await
         .expect("get tolerates poison row (prices it)")
         .expect("poison plan is present");
-    assert_eq!(got.price.base_fee_cents, 700, "poison row keeps its real price (get)");
+    assert_eq!(
+        got.price.base_fee_cents, 700,
+        "poison row keeps its real price (get)"
+    );
     assert_eq!(
         got.runtime,
         zeroship_core::types::FREE_TIER_RUNTIME_LIMITS,
@@ -613,27 +706,29 @@ async fn charge_from_real_aggregates_uses_weight_table() {
     // Plan: base 500c, 1M CU included, FX = 1 cent/CU (explicit).
     let plan = seed_plan(&catalog, "charge").await;
     let name = format!("charge-{}", Uuid::new_v4().simple());
-    let app = registry.create_app(&name, &plan.id, &owner, None).await.expect("create");
+    let app = registry
+        .create_app(&name, &plan.id, &owner, None)
+        .await
+        .expect("create");
 
     // Write 1.5M requests into the current period, then read it back through the
     // real Metering aggregate reader.
     let metering = zeroship_control::metering::Metering::new(registry.clone());
     let period = zeroship_control::metering::current_period_start_unix();
-    common::seed_usage_total(
-        &client,
-        app.id,
-        period,
-        "requests",
-        1_500_000,
-    )
-    .await;
+    common::seed_usage_total(&client, &app.id, period, "requests", 1_500_000).await;
 
     // Read back the real aggregates, the real global weight table, and price.
-    let totals = metering.period_totals(&app.id, period).await.expect("totals");
+    let totals = metering
+        .period_totals(&app.id, period)
+        .await
+        .expect("totals");
     let fetched_plan = catalog.get(&plan.id).await.expect("get").expect("present");
     let pricing = zeroship_control::pricing_store::PricingStore::new(registry.clone());
     let weights = pricing.weights().await.expect("weights");
-    let default_fx = pricing.default_fx_pico_cents_per_unit().await.expect("default fx");
+    let default_fx = pricing
+        .default_fx_pico_cents_per_unit()
+        .await
+        .expect("default fx");
     let price = fetched_plan.price.with_effective_fx(default_fx);
     let breakdown = charge_cents(&price, &totals, &weights).expect("charge");
 
@@ -673,9 +768,18 @@ async fn charge_uses_only_db_weight_table_and_default_fx() {
     let default_fx = pricing.default_fx_pico_cents_per_unit().await.expect("fx");
     assert!(default_fx.is_some(), "the global default FX is seeded");
     let mut t = MetricWeights::new();
-    t.insert("requests".to_string(), MetricWeight { units_per_op: 1, per_units: 1 });
+    t.insert(
+        "requests".to_string(),
+        MetricWeight {
+            units_per_op: 1,
+            per_units: 1,
+        },
+    );
     // sanity: the loaded table is non-empty (seeded platform counters)
-    assert!(weights.contains_key("requests"), "platform-counter weight is seeded");
+    assert!(
+        weights.contains_key("requests"),
+        "platform-counter weight is seeded"
+    );
 
     drop(pricing);
     drop(registry);
@@ -753,7 +857,10 @@ async fn below_floor_global_fx_rejected_by_check_and_loader_fails_closed() {
             &[],
         )
         .await;
-    assert!(blocked.is_err(), "below-floor global FX (0) must be rejected by the CHECK (MAJOR-3)");
+    assert!(
+        blocked.is_err(),
+        "below-floor global FX (0) must be rejected by the CHECK (MAJOR-3)"
+    );
 
     // (b) Bypass the CHECK to inject a below-floor value, then prove the loader
     // fails closed (None), then restore the CHECK + seeded value.
@@ -827,7 +934,10 @@ async fn metric_weights_rejects_negative_units_per_op() {
     );
     // Clean up any row that somehow landed (it shouldn't have).
     let _ = client
-        .execute("DELETE FROM zeroship.metric_weights WHERE metric = $1", &[&metric])
+        .execute(
+            "DELETE FROM zeroship.metric_weights WHERE metric = $1",
+            &[&metric],
+        )
         .await;
 
     drop(client);

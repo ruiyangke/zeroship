@@ -11,8 +11,8 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use ntex::util::Bytes;
-use uuid::Uuid;
 
+use zeroship_core::app_id::AppId;
 use zeroship_metering::Meter;
 
 // ---------------------------------------------------------------------------
@@ -56,11 +56,11 @@ const STREAM_EGRESS_FLUSH_BYTES: u64 = 1024 * 1024;
 /// construction — the gateway only meters bodies the worker never sees.
 pub(super) struct StreamEgressMeter {
     meter: Arc<Meter>,
-    app_id: Uuid,
+    app_id: AppId,
 }
 
 impl StreamEgressMeter {
-    pub(super) fn new(meter: Arc<Meter>, app_id: Uuid) -> Self {
+    pub(super) fn new(meter: Arc<Meter>, app_id: AppId) -> Self {
         Self { meter, app_id }
     }
 
@@ -68,10 +68,14 @@ impl StreamEgressMeter {
     /// app. A no-op for `n == 0`. Cheap: the same `Meter::increment` the
     /// buffered path uses (an `RwLock` read + a per-app `Mutex` for the custom
     /// metric — uncontended, no await, no blocking I/O).
+    ///
+    /// Keyed by `app_id.as_str()`: `Meter::drain` decodes this key with
+    /// `AppId::parse`, so any other rendering drops the app's counters
+    /// silently rather than failing loudly.
     fn record(&self, n: u64) {
         if n > 0 {
             self.meter
-                .increment(&self.app_id.to_string(), "gateway_egress_bytes", n);
+                .increment(&self.app_id, "gateway_egress_bytes", n);
         }
     }
 }

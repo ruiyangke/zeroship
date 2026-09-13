@@ -120,21 +120,7 @@ impl Db {
         scope: &mut v8::PinScope<'s, '_>,
         name: String,
     ) -> Result<v8::Local<'s, v8::Object>, OpError> {
-        if name.is_empty() {
-            return Err(OpError::type_error(
-                "db.collection: name must be a non-empty string",
-            ));
-        }
-        use std::collections::hash_map::Entry;
-        let mut cache = self.collection_cache.borrow_mut();
-        match cache.entry(name) {
-            Entry::Occupied(o) => Ok(v8::Local::new(scope, o.get())),
-            Entry::Vacant(v) => {
-                let obj = mint_collection(scope, v.key().clone(), self.binding.clone())?;
-                v.insert(v8::Global::new(scope, obj));
-                Ok(obj)
-            }
-        }
+        cached_collection(scope, &self.binding, &self.collection_cache, name, None)
     }
 
     /// `db.transaction(asyncFn, opts?)` — run `asyncFn` inside a
@@ -142,7 +128,7 @@ impl Db {
     ///
     /// This is the native orchestrator behind the creator-facing
     /// `await env.db.transaction(async tx => { ... })`. `asyncFn` is
-    /// called with a collections-only `tx` view
+    /// called with a transaction-scoped `tx` view
     /// ([`super::transaction::mint_tx_view`]); the returned promise
     /// resolves with the callback's result on **commit** (callback
     /// resolved) and rejects with the callback's error on **rollback**
@@ -227,6 +213,52 @@ impl Db {
         }
         .to_op_error())
     }
+}
+
+pub(crate) fn cached_collection<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    binding: &DbBinding,
+    cache: &RefCell<HashMap<String, v8::Global<v8::Object>>>,
+    name: String,
+    transaction_scope: Option<&zeroship_data_orm::transaction::scope::TransactionScope>,
+) -> Result<v8::Local<'s, v8::Object>, OpError> {
+    if name.is_empty() {
+        return Err(OpError::type_error(
+            "db.collection: name must be a non-empty string",
+        ));
+    }
+    use std::collections::hash_map::Entry;
+    let mut cache = cache.borrow_mut();
+    match cache.entry(name) {
+        Entry::Occupied(o) => Ok(v8::Local::new(scope, o.get())),
+        Entry::Vacant(v) => {
+            let obj = mint_collection(
+                scope,
+                v.key().clone(),
+                binding.clone(),
+                transaction_scope.cloned(),
+            )?;
+            v.insert(v8::Global::new(scope, obj));
+            Ok(obj)
+        }
+    }
+}
+
+pub(crate) fn collection_for_namespace<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    namespace: v8::Local<'s, v8::Object>,
+    name: &str,
+) -> Result<v8::Local<'s, v8::Object>, String> {
+    let external: v8::Local<v8::External> = namespace
+        .get_internal_field(scope, 0)
+        .ok_or_else(|| "native env.db state is missing".to_string())?
+        .try_into()
+        .map_err(|_| "native env.db state has an invalid type".to_string())?;
+    // SAFETY: DbPlugin supplies the namespace from `mint_db`, which stores a
+    // live `Box<Db>` in this internal field for the wrapper's lifetime.
+    let db = unsafe { &*(external.value() as *const Db) };
+    db.collection(scope, name.to_string())
+        .map_err(|error| error.to_string())
 }
 
 /// Cheap JS-side type label for error messages. Matches the labels

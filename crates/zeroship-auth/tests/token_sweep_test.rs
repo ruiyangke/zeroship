@@ -80,7 +80,7 @@ async fn token_sweep_deletes_expired_rows_after_grace_and_keeps_fresh_rows() {
                     ($4, $2, $3::citext, NOW() + INTERVAL '1 hour', NULL)",
                 &[
                     &stale_verify_hash.as_slice(),
-                    &user.id,
+                    &user.id.as_str(),
                     &verify_email,
                     &fresh_verify_hash.as_slice(),
                 ],
@@ -153,12 +153,12 @@ async fn retained_completion_nonces(client: &compio_postgres::Client, tag: &str)
 
 async fn retained_verification_tokens(
     client: &compio_postgres::Client,
-    user_id: Uuid,
+    user_id: zeroship_core::UserId,
 ) -> Vec<Vec<u8>> {
     client
         .query(
             "SELECT token_hash FROM zeroship.email_verifications WHERE user_id = $1",
-            &[&user_id],
+            &[&user_id.as_str()],
         )
         .await
         .expect("read retained verifications")

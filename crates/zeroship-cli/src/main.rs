@@ -19,6 +19,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use zeroship_core::AppId;
 use zeroship_runtime::{ModuleEntry, NativePlugin};
 
 mod auth;
@@ -180,10 +181,10 @@ fn cmd_serve(args: &[String]) {
             .into_iter()
             .collect();
     // The single-app dev host owns its namespace just as the worker does.
-    // Keep it aligned with Vite's DEV_APP_ID when no identity was supplied.
-    env_vars
-        .entry("APP_ID".into())
-        .or_insert_with(|| "default".into());
+    let dev_app_id = resolve_dev_app_id(&mut env_vars).unwrap_or_else(|error| {
+        eprintln!("zeroship serve: {error}");
+        std::process::exit(2);
+    });
 
     // Opt-in db plugin: when DATABASE_URL is set, register the db plugin
     // so JS `zeroship.db.*` works in the dev path (e.g. `vite-plugin` spawns
@@ -229,7 +230,7 @@ fn cmd_serve(args: &[String]) {
                         zeroship_data_v8::service::DbServiceConfig {
                             project_keys: project_keys::load(
                                 std::path::Path::new(".zeroship/private"),
-                                &env_vars["APP_ID"],
+                                &dev_app_id,
                             ).map_err(|error| zeroship_data_orm::error::DbError::config("local_project_key", error))?,
                             connection,
                             cdc_relay: None,
@@ -452,7 +453,7 @@ fn cmd_deploy(args: &[String]) {
     ) {
         Ok(outcome) => {
             if let Some(created) = outcome.created_app {
-                eprintln!("created app {} ({})", created.name, created.id);
+                eprintln!("created app {} ({})", created.name, created.id.as_str());
                 record_created_app(
                     config.as_ref(),
                     flag_str(args, "--env=").as_deref(),
@@ -548,8 +549,7 @@ fn deploy_target(args: &[String]) -> Result<DeployTarget, String> {
 /// > deliberately not a required key, `deploy` already resolves-or-creates by
 /// > name, and the id it mints is reported for the file. Doing this in
 /// > `migrate` would let a typo'd name migrate a fresh empty app while the
-/// > real one stayed broken, and in `secret`/`var` it would not work at all -
-/// > the control plane parses that path segment as a uuid.
+/// > real one stayed broken. Secret and var commands require an app identity.
 fn resolve_deploy_app(
     args: &[String],
     resolved: Option<&project_config::Resolved>,
@@ -604,10 +604,11 @@ fn record_created_app(
     config: Option<&project_config::ProjectConfig>,
     environment: Option<&str>,
     app_source: &project_config::Source,
-    id: &str,
+    id: &AppId,
 ) {
     let Some(config) = config else {
-        eprintln!("  record it with --app={id} on the next command, or in a {} (see docs/reference/project-config.md)",
+        eprintln!("  record it with --app={} on the next command, or in a {} (see docs/reference/project-config.md)",
+            id.as_str(),
             project_config::CONFIG_FILENAME);
         return;
     };
@@ -618,8 +619,9 @@ fn record_created_app(
     // through the writeback door.
     if let Some(env) = environment {
         eprintln!(
-            "  add this under environments.{env} in {}:\n    \"app\": \"{id}\",",
-            config.path.display()
+            "  add this under environments.{env} in {}:\n    \"app\": \"{}\",",
+            config.path.display(),
+            id.as_str()
         );
         return;
     }
@@ -630,7 +632,7 @@ fn record_created_app(
         Ok(()) => {
             eprintln!("  wrote app id into {}", config.path.display());
         }
-        Err(e) => eprintln!("  could not record the app id ({e}); add it by hand: \"app\": \"{id}\","),
+        Err(e) => eprintln!("  could not record the app id ({e}); add it by hand: \"app\": \"{}\",", id.as_str()),
     }
 }
 
@@ -681,7 +683,7 @@ trait ControlClient {
     fn deploy_zship(
         &mut self,
         control_url: &str,
-        app: &str,
+        app: &AppId,
         token: &str,
         body: &[u8],
     ) -> Result<ControlResponse, String>;
@@ -691,7 +693,7 @@ trait ControlClient {
     fn list_secrets(
         &mut self,
         control_url: &str,
-        app: &str,
+        app: &AppId,
         token: &str,
     ) -> Result<ControlResponse, String>;
 
@@ -709,11 +711,11 @@ impl ControlClient for CurlControlClient {
     fn deploy_zship(
         &mut self,
         control_url: &str,
-        app: &str,
+        app: &AppId,
         token: &str,
         body: &[u8],
     ) -> Result<ControlResponse, String> {
-        let deploy_url = format!("{control_url}/api/apps/{app}/deploy");
+        let deploy_url = format!("{control_url}/api/apps/{}/deploy", app.as_str());
         let auth = format!("Authorization: Bearer {token}");
         let mut command = std::process::Command::new("curl");
         command.args([
@@ -744,10 +746,10 @@ impl ControlClient for CurlControlClient {
     fn list_secrets(
         &mut self,
         control_url: &str,
-        app: &str,
+        app: &AppId,
         token: &str,
     ) -> Result<ControlResponse, String> {
-        let url = format!("{control_url}/api/apps/{app}/secrets");
+        let url = format!("{control_url}/api/apps/{}/secrets", app.as_str());
         let auth = format!("Authorization: Bearer {token}");
         let mut command = std::process::Command::new("curl");
         command.args(["-s", "-w", "\n%{http_code}", "-H", &auth, &url]);
@@ -837,12 +839,12 @@ struct DeployOutcome {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct CreatedApp {
     name: String,
-    id: String,
+    id: AppId,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ResolvedApp {
-    id: String,
+    id: AppId,
     created: Option<CreatedApp>,
 }
 
@@ -893,10 +895,11 @@ fn deploy_failure_message(app: &AppTarget, response: &ControlResponse) -> String
     match app {
         AppTarget::Id(id) if response.status == 404 => format!(
             "{base}\n  \
-             `{id}` is an app ID, and an app is never created from one: that \
+             `{}` is an app ID, and an app is never created from one: that \
              would mint a new app whose NAME is the id and deploy there, \
              leaving the app you meant untouched. Check the id, or address the \
-             app by its routing label with --app-name=<name>."
+             app by its routing label with --app-name=<name>.",
+            id.as_str()
         ),
         _ => base,
     }
@@ -905,10 +908,11 @@ fn deploy_failure_message(app: &AppTarget, response: &ControlResponse) -> String
 fn warn_for_missing_declared_secrets<C: ControlClient>(
     client: &mut C,
     control_url: &str,
-    app: &str,
+    app: &AppId,
     token: &str,
     declared: &[String],
 ) {
+    let app_text = app.as_str();
     if declared.is_empty() {
         return;
     }
@@ -916,14 +920,14 @@ fn warn_for_missing_declared_secrets<C: ControlClient>(
         Ok(response) => response,
         Err(error) => {
             eprintln!(
-                "zeroship deploy: warning: could not check declared secrets for app {app}: {error}"
+                "zeroship deploy: warning: could not check declared secrets for app {app_text}: {error}"
             );
             return;
         }
     };
     if response.status != 200 {
         eprintln!(
-            "zeroship deploy: warning: could not check declared secrets for app {app} \
+            "zeroship deploy: warning: could not check declared secrets for app {app_text} \
              (HTTP {}): {}",
             response.status, response.body
         );
@@ -931,7 +935,7 @@ fn warn_for_missing_declared_secrets<C: ControlClient>(
     }
     let Some(present) = parse_secret_names(&response.body) else {
         eprintln!(
-            "zeroship deploy: warning: could not parse the secret list for app {app}: {}",
+            "zeroship deploy: warning: could not parse the secret list for app {app_text}: {}",
             response.body
         );
         return;
@@ -1000,7 +1004,7 @@ fn find_existing_app<C: ControlClient>(
     control_url: &str,
     token: &str,
     name: &str,
-) -> Result<Option<String>, String> {
+) -> Result<Option<AppId>, String> {
     let list = client.list_apps(control_url, token)?;
     if list.status != 200 {
         return Err(format!(
@@ -1029,76 +1033,44 @@ fn deploy_auto_create(args: &[String]) -> bool {
     !args.iter().any(|arg| arg == "--no-create")
 }
 
-/// What a command was pointed at: an app IDENTITY, or the app's routing LABEL.
-///
-/// THE DISCRIMINATOR IS WHICH INPUT SUPPLIED THE VALUE, NEVER THE VALUE ITSELF.
-/// `--app=` and the `app` member of `zeroship.jsonc` carry an id;
-/// `--app-name=` and the file's `name` member carry a name.
-///
-/// This type replaces `is_uuid`, which chose between these two behaviours by
-/// inspecting the string the creator typed. That rustdoc is preserved below
-/// because it records the failure the guess produced, which is the reason the
-/// guess is gone rather than merely re-tuned:
-///
-/// > Uses the same parse the control plane applies to the path segment
-/// > (`id.parse::<Uuid>()`), because the two must agree on the boundary. The
-/// > hand-rolled check this replaces accepted ONLY the 36-character hyphenated
-/// > form, while the server also takes the simple (32 hex, no hyphens), braced
-/// > and `urn:uuid:` forms. An id in any of those spellings therefore fell
-/// > through to resolve-or-create and, under the default auto-create, produced
-/// > a brand-new app named after the id - with the deploy landing on it instead
-/// > of on the app the caller meant.
-///
-/// Widening the parse removed that INSTANCE and left the CLASS. An app id is
-/// `app_<base62>` (`zeroship_core::app_id::AppId`), which is not a uuid in any
-/// of those four spellings, so every `--app=app_...` reproduced the same bug -
-/// measured, not predicted, by
-/// `tests::a_typed_app_id_deploys_to_that_app_and_creates_nothing` before this
-/// change: it recorded `Create("app_034KLb07Lrb9JGMA6imvmX")` followed by a
-/// deploy to the freshly minted app.
+fn resolve_dev_app_id(
+    env_vars: &mut std::collections::HashMap<String, String>,
+) -> Result<AppId, String> {
+    match env_vars.get("APP_ID") {
+        Some(raw) => AppId::parse(raw).map_err(|error| format!("invalid APP_ID: {error}")),
+        None => {
+            let id = zeroship_core::app_id::local_dev_app_id();
+            env_vars.insert("APP_ID".to_string(), id.as_str().to_string());
+            Ok(id)
+        }
+    }
+}
+
+/// A target selected explicitly by stable identity or by routing name.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum AppTarget {
     /// Addressed by identity: deployed to (or migrated) directly, never created.
-    Id(String),
+    Id(AppId),
     /// Addressed by the hostname label: resolved, and for `deploy` created on
     /// first push.
     Name(String),
 }
 
-/// Accept an `--app` value only if it is an app ID, naming the distinction.
-///
-/// The canonical rendering is `app_<base62>`. A uuid in any spelling
-/// `uuid::Uuid` accepts is taken too, and THAT ARM IS TRANSITIONAL:
-/// `zeroship.apps.id` is still a `uuid` column, so a uuid is what
-/// `POST /api/apps` hands back and what control's `/api/apps/{id}` parses
-/// today. It goes when the column flips.
-///
-/// The difference from `is_uuid` is not the width of the parse - it is that
-/// this decides ACCEPT or REFUSE rather than which of two behaviours to take.
-/// Both accepted renderings mean one thing and go to one place. A rendering
-/// this function has not been taught is a loud refusal naming both concepts,
-/// where the guess silently took the other branch.
-///
-/// The value is passed on VERBATIM. The CLI does not convert between the two
-/// renderings: control speaks the uuid one today and the typed one after the
-/// column flips, and a conversion here would be wrong on one side of that
-/// change with nothing to say which side it was on.
-pub(crate) fn app_id_or_refuse(value: &str) -> Result<String, String> {
-    if zeroship_core::app_id::AppId::parse(value).is_ok() || value.parse::<uuid::Uuid>().is_ok() {
-        return Ok(value.to_string());
-    }
-    Err(format!(
-        "--app takes an app ID and `{value}` is not one.\n  \
+/// Parse the canonical identity accepted by `--app`.
+pub(crate) fn app_id_or_refuse(value: &str) -> Result<AppId, String> {
+    AppId::parse(value).map_err(|_| {
+        format!(
+            "--app takes an app ID and `{value}` is not one.\n  \
          An app's NAME is a routing label: it is the hostname subdomain the app \
          is served on, and it can change.\n  \
          An app's ID is the identity every deploy, migration, secret and log \
-         lookup keys on. It is spelled `app_<id>` - or, until the platform \
-         column flips, the uuid `POST /api/apps` returned.\n  \
+         lookup keys on. It is spelled `app_<id>`.\n  \
          To address this app by its name instead, pass --app-name={value}."
-    ))
+        )
+    })
 }
 
-fn find_app_id_by_name(body: &str, name: &str) -> Result<Option<String>, String> {
+fn find_app_id_by_name(body: &str, name: &str) -> Result<Option<AppId>, String> {
     let json = serde_json::from_str::<serde_json::Value>(body)
         .map_err(|e| format!("parse app list response: {e}"))?;
     let apps = json
@@ -1112,17 +1084,18 @@ fn find_app_id_by_name(body: &str, name: &str) -> Result<Option<String>, String>
     Ok(None)
 }
 
-pub(crate) fn parse_app_id(body: &str, context: &str) -> Result<String, String> {
+pub(crate) fn parse_app_id(body: &str, context: &str) -> Result<AppId, String> {
     let json = serde_json::from_str::<serde_json::Value>(body)
         .map_err(|e| format!("parse {context}: {e}"))?;
     parse_app_id_value(&json, context)
 }
 
-fn parse_app_id_value(json: &serde_json::Value, context: &str) -> Result<String, String> {
-    json.get("id")
+fn parse_app_id_value(json: &serde_json::Value, context: &str) -> Result<AppId, String> {
+    let raw = json
+        .get("id")
         .and_then(|id| id.as_str())
-        .map(|id| id.to_string())
-        .ok_or_else(|| format!("parse {context}: missing string id"))
+        .ok_or_else(|| format!("parse {context}: missing string id"))?;
+    AppId::parse(raw).map_err(|error| format!("parse {context}: invalid app id: {error}"))
 }
 
 // ---------------------------------------------------------------------------
@@ -1162,11 +1135,11 @@ fn print_usage() {
     eprintln!("                   The organization owns your projects and is the billed party.");
     eprintln!("                   `use <org_...>` records which one, so the other subcommands");
     eprintln!("                   need --organization= only to override it.");
-    eprintln!("  zeroship secret   set|list|rm|expose|unexpose|expose-list  --app=<uuid> [--control=URL] [--token=TOKEN]");
+    eprintln!("  zeroship secret   set|list|rm|expose|unexpose|expose-list  --app=<id> [--control=URL] [--token=TOKEN]");
     eprintln!("                   Encrypted at rest. Always readable as env.KEY; reaches");
     eprintln!("                   process.env (where any npm dependency can read it) only");
     eprintln!("                   via `secret set KEY=v --expose` or `secret expose KEY`.");
-    eprintln!("  zeroship var      set|list|rm  --app=<uuid> [--control=URL] [--token=TOKEN]");
+    eprintln!("  zeroship var      set|list|rm  --app=<id> [--control=URL] [--token=TOKEN]");
     eprintln!("                   PLAINTEXT config, always in both env and process.env.");
     eprintln!("                   Never put a credential in a var; use a secret.");
     eprintln!();
@@ -1359,34 +1332,22 @@ mod tests {
     use super::*;
     use std::collections::VecDeque;
 
-    /// `--app=<id>` accepts every rendering of an app ID and nothing else.
-    ///
-    /// This replaces `app_id_recognises_every_form_the_server_accepts`, whose
-    /// premise is preserved because it is still true of the uuid renderings:
-    /// the server parses that path segment with `id.parse::<Uuid>()`, which
-    /// takes the simple (32 hex, no hyphens), hyphenated, braced and
-    /// `urn:uuid:` forms. The canonical `app_<base62>` rendering is added
-    /// beside them.
-    ///
-    /// What CHANGED is the consequence of a miss. Under the old helper a
-    /// rendering it did not know was silently routed down resolve-or-create,
-    /// so a pasted id created a NEW app under a name that was really an id and
-    /// the deploy landed on the wrong app. There is no other branch to fall
-    /// into now: an unrecognised value is refused.
-    #[test]
-    fn app_id_accepts_every_rendering_of_an_id() {
-        let canonical = "app_034KLb07Lrb9JGMA6imvmX";
-        let hyphenated = "0197f8a1-2b3c-7d4e-8f90-1a2b3c4d5e6f";
-        let simple = "0197f8a12b3c7d4e8f901a2b3c4d5e6f";
-        let braced = "{0197f8a1-2b3c-7d4e-8f90-1a2b3c4d5e6f}";
-        let urn = "urn:uuid:0197f8a1-2b3c-7d4e-8f90-1a2b3c4d5e6f";
+    const APP_ID: &str = "app_034klb07lrb9jgma6imvmx000";
 
-        for form in [canonical, hyphenated, simple, braced, urn] {
-            assert_eq!(
-                app_id_or_refuse(form).as_deref(),
-                Ok(form),
-                "{form} is an app id, and --app must take it verbatim"
-            );
+    fn app_id(raw: &str) -> AppId {
+        AppId::parse(raw).expect("test app id must be canonical")
+    }
+
+    #[test]
+    fn app_id_accepts_only_the_canonical_typed_id() {
+        assert_eq!(app_id_or_refuse(APP_ID), Ok(app_id(APP_ID)));
+        for raw_uuid in [
+            "0197f8a1-2b3c-7d4e-8f90-1a2b3c4d5e6f",
+            "0197f8a12b3c7d4e8f901a2b3c4d5e6f",
+            "{0197f8a1-2b3c-7d4e-8f90-1a2b3c4d5e6f}",
+            "urn:uuid:0197f8a1-2b3c-7d4e-8f90-1a2b3c4d5e6f",
+        ] {
+            app_id_or_refuse(raw_uuid).expect_err("raw UUID app ids must be rejected");
         }
     }
 
@@ -1413,6 +1374,40 @@ mod tests {
                 "and must name the flag that addresses an app by name: {err}"
             );
         }
+    }
+
+    #[test]
+    fn control_response_requires_a_canonical_app_id() {
+        let parsed = parse_app_id(
+            r#"{"id":"app_034klb07lrb9jgma6imvmx000"}"#,
+            "create app response",
+        )
+        .expect("canonical app id");
+        assert_eq!(parsed, app_id(APP_ID));
+
+        let error = parse_app_id(
+            r#"{"id":"0197f8a1-2b3c-7d4e-8f90-1a2b3c4d5e6f"}"#,
+            "create app response",
+        )
+        .expect_err("raw UUID response must not enter an app route");
+        assert!(error.contains("invalid app id"), "{error}");
+    }
+
+    #[test]
+    fn dev_app_id_defaults_to_the_shared_typed_identity() {
+        let mut env = std::collections::HashMap::new();
+        let app = resolve_dev_app_id(&mut env).expect("default dev app id");
+        assert_eq!(app, zeroship_core::app_id::local_dev_app_id());
+        assert_eq!(env.get("APP_ID").map(String::as_str), Some(app.as_str()));
+    }
+
+    #[test]
+    fn dev_app_id_rejects_raw_uuid_input() {
+        let mut env = std::collections::HashMap::from([(
+            "APP_ID".to_string(),
+            "0197f8a1-2b3c-7d4e-8f90-1a2b3c4d5e6f".to_string(),
+        )]);
+        resolve_dev_app_id(&mut env).expect_err("raw UUID must not scope local app data");
     }
 
     // -----------------------------------------------------------------------
@@ -1566,11 +1561,11 @@ mod tests {
         fn deploy_zship(
             &mut self,
             _control_url: &str,
-            app: &str,
+            app: &AppId,
             _token: &str,
             _body: &[u8],
         ) -> Result<ControlResponse, String> {
-            self.calls.push(FakeCall::Deploy(app.to_string()));
+            self.calls.push(FakeCall::Deploy(app.as_str().to_string()));
             self.deploys
                 .pop_front()
                 .ok_or_else(|| "unexpected deploy call".to_string())
@@ -1590,10 +1585,11 @@ mod tests {
         fn list_secrets(
             &mut self,
             _control_url: &str,
-            app: &str,
+            app: &AppId,
             _token: &str,
         ) -> Result<ControlResponse, String> {
-            self.calls.push(FakeCall::ListSecrets(app.to_string()));
+            self.calls
+                .push(FakeCall::ListSecrets(app.as_str().to_string()));
             self.secret_lists
                 .pop_front()
                 .ok_or_else(|| "unexpected secret list call".to_string())
@@ -1612,35 +1608,23 @@ mod tests {
         }
     }
 
-    /// An ID that resolves to nothing is a WRONG ID, and the CLI says so
-    /// instead of minting an app named after it.
-    ///
-    /// This inverts `deploy_creates_missing_app_after_404_and_retries_by_id`,
-    /// which asserted the create-on-404 retry as correct. What that test
-    /// actually pinned is visible in its own fixture: the created app's `name`
-    /// was `33333333-3333-4333-8333-333333333333` - a uuid - and the deploy
-    /// then landed on a DIFFERENT id than the one the caller passed. That is
-    /// the wrong-target failure the `is_uuid` guess produced for unrecognised
-    /// renderings, reached here through the recognised one.
-    ///
-    /// The client is stocked with a list and a create so the old path remains
-    /// available; nothing but the code's own choice stops it being taken.
+    /// A missing identity must never trigger name-based app creation.
     #[test]
     fn a_missing_app_id_is_refused_rather_than_created() {
-        let missing_app = "33333333-3333-4333-8333-333333333333";
+        let missing_app = APP_ID;
         let mut client = FakeControlClient::default()
             .with_deploy(404, r#"{"error":"app not found"}"#)
             .with_list(200, "[]")
             .with_create(
                 201,
-                r#"{"id":"11111111-1111-4111-8111-111111111111","name":"33333333-3333-4333-8333-333333333333"}"#,
+                r#"{"id":"app_034klb07lrb9jgma6imvmx001","name":"missing"}"#,
             )
             .with_deploy(200, r#"{"deploy_hash":"sha256:abc"}"#);
 
         let err = deploy_archive(
             &mut client,
             "http://control.test",
-            &AppTarget::Id(missing_app.to_string()),
+            &AppTarget::Id(app_id(missing_app)),
             "token",
             b"zship",
             &[],
@@ -1660,20 +1644,14 @@ mod tests {
         );
     }
 
-    /// The by-name path, reached through the flag that means it.
-    ///
-    /// This used to spell the scratch target `--app=scratch-test`, which the
-    /// deleted guess read as a name because it was not uuid-shaped. The
-    /// behaviour it pins is unchanged - resolve, create, deploy by the returned
-    /// id, and leave the committed `app` alone - but the request is now
-    /// explicit, and it goes through `resolve_deploy_app` rather than around it.
+    /// A name target resolves or creates an app without replacing configured identity.
     #[test]
     fn deploy_flag_auto_create_preserves_configured_app() {
         let temp = tempfile::tempdir().expect("create temp project");
         let config_path = temp.path().join(project_config::CONFIG_FILENAME);
         let original = r#"{
   "name": "production-app",
-  "app": "11111111-1111-4111-8111-111111111111",
+  "app": "app_034klb07lrb9jgma6imvmx000",
   "control": "http://control.test",
   "runtime_date": "2026-08-14",
   "build": { "mode": "full", "dist": "dist", "output": "dist/app.zship" },
@@ -1703,7 +1681,7 @@ mod tests {
             .with_list(200, "[]")
             .with_create(
                 201,
-                r#"{"id":"22222222-2222-4222-8222-222222222222","name":"scratch-test"}"#,
+                r#"{"id":"app_034klb07lrb9jgma6imvmx001","name":"scratch-test"}"#,
             )
             .with_deploy(200, r#"{"deploy_hash":"sha256:def"}"#);
 
@@ -1727,7 +1705,7 @@ mod tests {
             vec![
                 FakeCall::List,
                 FakeCall::Create("scratch-test".to_string()),
-                FakeCall::Deploy("22222222-2222-4222-8222-222222222222".to_string()),
+                FakeCall::Deploy("app_034klb07lrb9jgma6imvmx001".to_string()),
             ]
         );
         assert_eq!(
@@ -1747,7 +1725,7 @@ mod tests {
         // `resolve_deploy_app` now refuses.
         let original = r#"{
   "name": "production-app",
-  "app": "66666666-6666-4666-8666-666666666666",
+  "app": "app_034klb07lrb9jgma6imvmx000",
   "control": "http://control.test",
   "runtime_date": "2026-08-14",
   "build": { "mode": "full", "dist": "dist", "output": "dist/app.zship" },
@@ -1774,7 +1752,7 @@ mod tests {
             Some(&config),
             None,
             &app.source,
-            "33333333-3333-4333-8333-333333333333",
+            &app_id("app_034klb07lrb9jgma6imvmx001"),
         );
 
         assert_eq!(
@@ -1810,7 +1788,7 @@ mod tests {
             Some(&config),
             Some("staging"),
             &project_config::Source::FileMember("name"),
-            "44444444-4444-4444-8444-444444444444",
+            &app_id("app_034klb07lrb9jgma6imvmx001"),
         );
 
         assert_eq!(
@@ -1822,12 +1800,12 @@ mod tests {
 
     #[test]
     fn deploy_no_create_suppresses_missing_app_provisioning() {
-        let missing_app = "44444444-4444-4444-8444-444444444444";
+        let missing_app = APP_ID;
         let args = s(&[
             "zeroship",
             "deploy",
             "dist/app.zship",
-            "--app=44444444-4444-4444-8444-444444444444",
+            "--app=app_034klb07lrb9jgma6imvmx000",
             "--no-create",
         ]);
         assert!(!deploy_auto_create(&args));
@@ -1838,7 +1816,7 @@ mod tests {
         let err = deploy_archive(
             &mut client,
             "http://control.test",
-            &AppTarget::Id(missing_app.to_string()),
+            &AppTarget::Id(app_id(missing_app)),
             "token",
             b"zship",
             &[],
@@ -1858,7 +1836,7 @@ mod tests {
         let outcome = deploy_archive(
             &mut client,
             "http://control.test",
-            &AppTarget::Id("11111111-1111-4111-8111-111111111111".to_string()),
+            &AppTarget::Id(app_id(APP_ID)),
             "token",
             b"zship",
             &[],
@@ -1868,12 +1846,7 @@ mod tests {
 
         assert_eq!(outcome.deploy_hash.as_deref(), Some("sha256:existing"));
         assert_eq!(outcome.created_app, None);
-        assert_eq!(
-            client.calls,
-            vec![FakeCall::Deploy(
-                "11111111-1111-4111-8111-111111111111".to_string()
-            )]
-        );
+        assert_eq!(client.calls, vec![FakeCall::Deploy(APP_ID.to_string())]);
     }
 
     /// A typed app id is an IDENTITY: deploy addresses it and creates nothing.
@@ -1884,19 +1857,19 @@ mod tests {
     /// measuring it. Whichever path `deploy_archive` takes, it gets served.
     #[test]
     fn a_typed_app_id_deploys_to_that_app_and_creates_nothing() {
-        let id = "app_034KLb07Lrb9JGMA6imvmX";
+        let id = "app_034klb07lrb9jgma6imvmx000";
         let mut client = FakeControlClient::default()
             .with_list(200, "[]")
             .with_create(
                 201,
-                r#"{"id":"55555555-5555-4555-8555-555555555555","name":"app_034KLb07Lrb9JGMA6imvmX"}"#,
+                r#"{"id":"app_034klb07lrb9jgma6imvmx001","name":"app_034klb07lrb9jgma6imvmx000"}"#,
             )
             .with_deploy(200, r#"{"deploy_hash":"sha256:typed"}"#);
 
         let outcome = deploy_archive(
             &mut client,
             "http://control.test",
-            &AppTarget::Id(id.to_string()),
+            &AppTarget::Id(app_id(id)),
             "token",
             b"zship",
             &[],
@@ -1948,7 +1921,7 @@ mod tests {
             "zeroship",
             "deploy",
             "dist/app.zship",
-            "--app=11111111-1111-4111-8111-111111111111",
+            "--app=app_034klb07lrb9jgma6imvmx000",
             "--app-name=my-app",
         ]);
         let err = resolve_deploy_app(&args, None).expect_err("two targets must be refused");

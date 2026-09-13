@@ -15,19 +15,21 @@
  *     natively before this JavaScript installer runs.
  *
  * Re-entrancy: a second call with overlapping names re-installs the
- * Collection wrappers (`configurable: true` on the descriptors).
- * Reserved native names throw at boot rather than silently shadowing.
+ * Collection wrappers (`configurable: true` on the descriptors). Collections
+ * colliding with native method names remain available through
+ * `env.db.collection(name)`.
  */
 import {
   drainCollectionLoaders,
-  enterTransactionScope,
-  exitTransactionScope,
   captureNativeTransaction,
   Collection,
   readFrom,
+  scopeAliasedCollection,
+  TRANSACTION_READ,
   type ReadFrom,
   type AliasedCollection,
   type NativeDb,
+  type NativeCollection,
   type NativeTransactionFn,
   Query,
   createLive,
@@ -43,6 +45,7 @@ import {
   type Result,
   type Row,
   type RowId,
+  type TransactionDb,
   type TxCollection,
   type TxQuery,
   type TransactionOptions,
@@ -51,11 +54,27 @@ import {
   type UpsertOptions,
   type UpdateExpression,
   type Filter,
+  type DistinctField,
+  type SelectInput,
+  type SortInput,
+  type SortSpec,
   type WithSpec,
   type PlainObject,
+  type Actor,
   type FieldDef,
 } from "@zeroship/db/internal";
-export type { TxCollection, TxQuery, TransactionOptions } from "@zeroship/db/internal";
+export type { TransactionDb, TxCollection, TxQuery, TransactionOptions } from "@zeroship/db/internal";
+
+type AsyncLocalStorageLike<T> = {
+  getStore(): T | undefined;
+  run<R>(store: T, callback: () => R): R;
+};
+type AsyncLocalStorageConstructor = new <T>() => AsyncLocalStorageLike<T>;
+const asyncHooksSpecifier = "node:" + "async_hooks";
+const { AsyncLocalStorage } = await import(asyncHooksSpecifier) as {
+  AsyncLocalStorage: AsyncLocalStorageConstructor;
+};
+const transactionContext = new AsyncLocalStorage<boolean>();
 
 // ---------------------------------------------------------------------------
 // normalizeSchema + expandUnionToFlatColumns (moved from @zeroship/db/schema)
@@ -188,7 +207,7 @@ function runtimeDescriptorFields(
 ): Record<string, Record<string, FieldDef>> | null {
   const v2 = assertRuntimeDescriptorV2(descriptor);
   if (v2 !== null) {
-    const out: Record<string, Record<string, FieldDef>> = {};
+    const out = Object.create(null) as Record<string, Record<string, FieldDef>>;
     for (const [name, collection] of Object.entries(v2.collections)) {
       out[name] = collection.fields;
     }
@@ -480,8 +499,6 @@ export function model<S extends Record<string, unknown>>(
   schema: S,
   native: NativeDb,
   namingStrategy: NamingStrategy = naming.asIs,
-  softDelete: boolean = false,
-  versioning: boolean = false,
   declaredIndexes: readonly NamedIndexSpec[] = [],
 ): Collection<S> {
   if (typeof name !== "string" || name.trim().length === 0) {
@@ -503,8 +520,6 @@ export function model<S extends Record<string, unknown>>(
 
   return new Collection<S>(name, normalized, native, {
     naming: namingStrategy,
-    softDelete,
-    versioning,
     indexes: declaredIndexes,
   });
 }
@@ -561,13 +576,26 @@ export type Collections<T extends Record<string, SchemaInput>> = {
   [K in keyof T]: Collection<UnwrapSchema<T[K]>, K & string, T>;
 };
 
+type DbMethodName = keyof Object
+  | "__platform"
+  | "__proto__"
+  | "collection"
+  | "from"
+  | "live"
+  | "transaction";
+
+type DirectCollections<T extends Record<string, SchemaInput>> = {
+  [K in keyof T as K extends DbMethodName ? never : K]: Collection<UnwrapSchema<T[K]>, K & string, T>;
+};
+
 export type DbExtensions<T extends Record<string, SchemaInput>> = {
+  collection<K extends string & keyof T>(name: K): NativeCollection;
   from: ReadFrom;
-  transaction: <R>(fn: (tx: { [K in keyof T]: TxCollection<UnwrapSchema<T[K]>, T> } & { from: ReadFrom<true> }) => Promise<R>, options?: TransactionOptions) => Promise<Result<R>>;
+  transaction: <R>(fn: (tx: TransactionDb<T>) => Promise<R>, options?: TransactionOptions) => Promise<Result<R>>;
   live: <R>(queryFn: () => Promise<R[]> | { then(onFulfilled: (value: unknown) => unknown, onRejected?: (reason: unknown) => unknown): unknown }, options?: LiveOptions) => LiveQuery<R>;
 };
 
-export type Db<T extends Record<string, SchemaInput>> = Collections<T> & DbExtensions<T>;
+export type Db<T extends Record<string, SchemaInput>> = DirectCollections<T> & DbExtensions<T>;
 
 // ---------------------------------------------------------------------------
 // TxCollection — wraps a Collection, throws on error
@@ -578,132 +606,193 @@ async function unwrap<T>(result: Result<T>): Promise<T> {
   return result.data as T;
 }
 
-function createTxCollection<S>(collection: Collection<S>): TxCollection<S> {
+type TxReadHints<S> = {
+  actor?: Actor;
+  unmask?: (string & keyof Row<S>)[];
+  unmaskReason?: string;
+};
+
+function transactionScopeExpired(): Error {
+  return Object.assign(new Error("transaction scope has expired"), {
+    code: "TRANSACTION_SCOPE_EXPIRED" as const,
+  });
+}
+
+function requireActiveTransaction(active: () => boolean): void {
+  if (!active()) throw transactionScopeExpired();
+}
+
+function createTxCollection<S>(
+  collection: Collection<S>,
+  active: () => boolean,
+): TxCollection<S> {
+  async function run<T>(work: () => Promise<Result<T>>): Promise<T> {
+    requireActiveTransaction(active);
+    return unwrap(await work());
+  }
+
   async function getImpl(
     idOrFilter: RowId<S> | Filter<S>,
-    opts?: { select?: (string & keyof Row<S>)[]; orderBy?: Record<string, 1 | -1> },
+    opts?: {
+      select?: (string & keyof Row<S>)[];
+      orderBy?: SortSpec<S>;
+    } & TxReadHints<S>,
   ): Promise<unknown> {
     const colAny = collection as unknown as {
       get(
         idOrFilter: RowId<S> | Filter<S>,
-        opts?: { select?: (string & keyof Row<S>)[]; orderBy?: Record<string, 1 | -1> },
+        opts?: {
+          select?: (string & keyof Row<S>)[];
+          orderBy?: SortSpec<S>;
+        } & TxReadHints<S> & { [TRANSACTION_READ]?: boolean },
       ): Promise<Result<Row<S> | null>>;
     };
-    return unwrap(await colAny.get(idOrFilter, opts));
+    return run(() => colAny.get(idOrFilter, {
+      ...opts,
+      [TRANSACTION_READ]: true,
+    }));
   }
 
   const tx: TxCollection<S> = {
-    as: alias => collection.as(alias),
+    as: alias => {
+      requireActiveTransaction(active);
+      return scopeAliasedCollection(collection.as(alias), active);
+    },
     async insert(row: RowInput<S>) {
-      return unwrap(await collection.insert(row));
+      return run(() => collection.insert(row));
     },
     async insertMany(rows: RowInput<S>[]) {
-      return unwrap(await collection.insertMany(rows));
+      return run(() => collection.insertMany(rows));
     },
     get: getImpl as TxCollection<S>["get"],
     async exists(filter: Filter<S>) {
-      return unwrap(await collection.exists(filter));
+      return run(() => collection.exists(filter));
     },
-    find: ((filter: Filter<S> = {} as Filter<S>, opts?: { with?: WithSpec }): TxQuery<S, Row<S>> => {
+    find: ((filter: Filter<S> = {} as Filter<S>, opts?: { with?: WithSpec<S> } & TxReadHints<S>): TxQuery<S, Row<S>> => {
+      requireActiveTransaction(active);
       const query = (opts?.with !== undefined
         ? (collection as unknown as {
-            find(f: Filter<S>, o: { with: WithSpec }): Query<S, Row<S>>;
-          }).find(filter, { with: opts.with })
-        : collection.find(filter));
-      return createTxQuery<S>(query);
+            find(f: Filter<S>, o: { with: WithSpec<S> } & TxReadHints<S> & { [TRANSACTION_READ]?: boolean }): Query<S, Row<S>>;
+          }).find(filter, {
+            ...opts,
+            with: opts.with,
+            [TRANSACTION_READ]: true,
+          })
+        : (collection as unknown as {
+            find(f: Filter<S>, o?: TxReadHints<S> & { [TRANSACTION_READ]?: boolean }): Query<S, Row<S>>;
+          }).find(filter, {
+            ...opts,
+            [TRANSACTION_READ]: true,
+          }));
+      return createTxQuery<S>(query, active);
     }) as TxCollection<S>["find"],
     async upsert(row: RowInput<S>, options: UpsertOptions<S>) {
-      return unwrap(await collection.upsert(row, options));
+      return run(() => collection.upsert(row, options));
     },
     async update(idOrFilter: RowId<S> | Filter<S>, patch: UpdateExpression<S>) {
-      return unwrap(await collection.update(idOrFilter, patch));
+      return run(() => collection.update(idOrFilter, patch));
     },
     async updateMany(filter: Filter<S>, patch: UpdateExpression<S>) {
-      return unwrap(await collection.updateMany(filter, patch));
+      return run(() => collection.updateMany(filter, patch));
     },
     async delete(idOrFilter: RowId<S> | Filter<S>) {
-      return unwrap(await collection.delete(idOrFilter));
+      return run(() => collection.delete(idOrFilter));
     },
     async deleteMany(filter: Filter<S>) {
-      return unwrap(await collection.deleteMany(filter));
+      return run(() => collection.deleteMany(filter));
     },
     async purge(idOrFilter: RowId<S> | Filter<S>) {
-      return unwrap(await collection.purge(idOrFilter));
+      return run(() => collection.purge(idOrFilter));
     },
     async purgeMany(filter: Filter<S> = {} as Filter<S>) {
-      return unwrap(await collection.purgeMany(filter));
+      return run(() => collection.purgeMany(filter));
     },
     async restore(idOrFilter: RowId<S> | Filter<S>) {
-      return unwrap(await collection.restore(idOrFilter));
+      return run(() => collection.restore(idOrFilter));
     },
     async restoreMany(filter: Filter<S> = {} as Filter<S>) {
-      return unwrap(await collection.restoreMany(filter));
+      return run(() => collection.restoreMany(filter));
     },
     async count(filter: Filter<S> = {} as Filter<S>) {
-      return unwrap(await collection.count(filter));
+      return run(() => collection.count(filter));
     },
-    async distinct(field: string & keyof Row<S>, filter: Filter<S> = {} as Filter<S>) {
-      return unwrap(await collection.distinct(field, filter));
+    async distinct<K extends DistinctField<S> & keyof Row<S>>(
+      field: K,
+      filter: Filter<S> = {} as Filter<S>,
+    ): Promise<Exclude<Row<S>[K], undefined>[]> {
+      return run(() => collection.distinct(field, filter));
     },
     async aggregate(pipeline: ZeroshipDbAggregateStage[]) {
-      return unwrap(await collection.aggregate(pipeline));
+      return run(() => collection.aggregate(pipeline));
     },
     async bulkUnmask(
       ...args: Parameters<Collection<S>["bulkUnmask"]>
     ) {
-      return unwrap(await collection.bulkUnmask(...args));
+      return run(() => collection.bulkUnmask(...args));
     },
     async search(
       ...args: Parameters<Collection<S>["search"]>
     ) {
-      return unwrap(await collection.search(...args));
+      return run(() => collection.search(...args));
     },
     async near(
       ...args: Parameters<Collection<S>["near"]>
     ) {
-      return unwrap(await collection.near(...args));
+      return run(() => collection.near(...args));
     },
   };
   return tx;
 }
 
-function createTxQuery<S>(query: Query<S, Row<S>>): TxQuery<S, Row<S>> {
-  function selectImpl(
-    s: string | string[] | Record<string, number | boolean>,
-  ): unknown {
+function createTxQuery<S>(
+  query: Query<S, Row<S>>,
+  active: () => boolean,
+): TxQuery<S, Row<S>> {
+  function selectImpl(s: SelectInput<S>): unknown {
+    requireActiveTransaction(active);
     (query.select as (arg: unknown) => unknown)(s);
     return wrapped;
   }
   const wrapped: TxQuery<S, Row<S>> = {
-    sort(s: Record<string, number> | string) { query.sort(s); return wrapped; },
-    limit(n: number) { query.limit(n); return wrapped; },
-    skip(n: number) { query.skip(n); return wrapped; },
+    sort(s: SortInput<S>) { requireActiveTransaction(active); query.sort(s); return wrapped; },
+    limit(n: number) { requireActiveTransaction(active); query.limit(n); return wrapped; },
+    skip(n: number) { requireActiveTransaction(active); query.skip(n); return wrapped; },
     select: selectImpl as TxQuery<S, Row<S>>["select"],
-    after(id: RowId<S>) { query.after(id); return wrapped; },
-    with: ((spec: WithSpec) => {
-      (query as unknown as { with(s: WithSpec): unknown }).with(spec);
+    after(id: RowId<S>) { requireActiveTransaction(active); query.after(id); return wrapped; },
+    with: ((spec: WithSpec<S>) => {
+      requireActiveTransaction(active);
+      (query as unknown as { with(s: WithSpec<S>): unknown }).with(spec);
       return wrapped;
     }) as TxQuery<S, Row<S>>["with"],
     async paginate(
       opts: Parameters<Query<S, Row<S>>["paginate"]>[0],
     ): Promise<PaginationResult<Row<S>>> {
+      requireActiveTransaction(active);
       return unwrap(await query.paginate(opts));
     },
     // **P9 PR 1** — Result→throw shims for the new terminals so the
     // tx-callback contract (throw, not return Result) stays uniform.
     async first(): Promise<Row<S> | null> {
+      requireActiveTransaction(active);
       return unwrap(await query.first());
     },
     async unique(): Promise<Row<S>> {
+      requireActiveTransaction(active);
       return unwrap(await query.unique());
     },
     async last(): Promise<Row<S> | null> {
+      requireActiveTransaction(active);
       return unwrap(await query.last());
     },
     then<TResult1 = Row<S>[], TResult2 = never>(
       resolve?: ((value: Row<S>[]) => TResult1 | PromiseLike<TResult1>) | null,
       reject?: ((reason: unknown) => TResult2 | PromiseLike<TResult2>) | null,
     ): Promise<TResult1 | TResult2> {
+      try {
+        requireActiveTransaction(active);
+      } catch (error) {
+        return (Promise.reject(error) as Promise<Row<S>[]>).then(resolve, reject);
+      }
       return query.then(
         (result: Result<Row<S>[]>) => {
           if (result.error) throw result.error;
@@ -762,13 +851,14 @@ export interface InstallSchemaOptions {
 }
 
 const RESERVED_ENV_DB_NAMES = new Set<string>([
+  "__platform",
+  "__proto__",
   "collection",
-  "migrations",
+  "constructor",
   // **P9 PR 3** — `beginTransaction` removed: the native primitive was
   // deleted entirely (transaction orchestration moved into Rust). The
   // creator-facing `transaction` (below) is now a native method on
   // `env.db`, so it stays reserved.
-  "openSubscription",
   "transaction",
   "live",
   "from",
@@ -831,29 +921,15 @@ function _installSchemaInner<const T extends Record<string, SchemaInput>>(
       ? (descriptorFields as unknown as T)
       : ({} as T);
 
-  const collections = {} as { [K in keyof T]: Collection<UnwrapSchema<T[K]>, K & string, T> };
+  const collections = Object.create(null) as {
+    [K in keyof T]: Collection<UnwrapSchema<T[K]>, K & string, T>;
+  };
 
-  // **P9 PR 3** — capture the *native* `Db.transaction(callback, opts)`
-  // method BEFORE the install loop overwrites `env.db.transaction` with
-  // the bootstrap `transactionImpl` wrapper.
-  //
-  // The hazard: the install loop does `Object.defineProperty(native,
-  // "transaction", transactionImpl)`, planting an OWN property that
-  // shadows the native prototype method. A naive `native.transaction`
-  // read on a *re-install* would then resolve to the previously-installed
-  // `transactionImpl` (own property) — and `transactionImpl` calling
-  // itself recurses forever.
-  //
-  // Fix: stash the captured native method under a non-enumerable hidden
-  // key the first time, and reuse it on every subsequent install. The
-  // first capture reads `native.transaction` before any own property is
-  // planted, so it picks up the real native orchestrator (in production a
-  // `Db.prototype` method; in tests a mock's own `transaction`). Bound to
-  // `native` so the v8_class receiver check passes.
-  const NATIVE_TX_KEY = "__zsNativeTransaction";
+  // Capture the native orchestrator before installing the SDK wrapper.
+  // The weak-map capture remains stable across repeated installs and cannot
+  // collide with a creator table name.
   const nativeTransaction = captureNativeTransaction(
     native as unknown as object,
-    NATIVE_TX_KEY,
   ) as NativeTransactionFn | undefined;
 
   validateRefTargets(source);
@@ -862,19 +938,15 @@ function _installSchemaInner<const T extends Record<string, SchemaInput>>(
   const collectionOptionsFor = (
     name: string,
   ): {
-    softDelete: boolean;
-    versioning: boolean;
     indexes: readonly NamedIndexSpec[];
   } => {
     const fromDescriptor = descriptorV2?.collections[name];
     if (fromDescriptor !== undefined) {
       return {
-        softDelete: fromDescriptor.options?.softDelete ?? false,
-        versioning: fromDescriptor.options?.versioning ?? false,
         indexes: fromDescriptor.indexes ?? [],
       };
     }
-    return { softDelete: false, versioning: false, indexes: [] };
+    return { indexes: [] };
   };
 
   for (const [name, rawSchema] of Object.entries(source)) {
@@ -888,8 +960,6 @@ function _installSchemaInner<const T extends Record<string, SchemaInput>>(
         collectionFields as Record<string, unknown>,
         native,
         namingStrategy,
-        opts.softDelete,
-        opts.versioning,
         opts.indexes,
       ) as Collection<unknown, string, T>;
   }
@@ -902,17 +972,17 @@ function _installSchemaInner<const T extends Record<string, SchemaInput>>(
     })._setResolveCollection(resolveCollection);
   }
 
-  const txCollections = {} as { [K in keyof T]: TxCollection<UnwrapSchema<T[K]>, T> };
-  for (const [name, col] of Object.entries(collections)) {
-    (txCollections as Record<string, unknown>)[name] =
-      createTxCollection(col as Collection<unknown>);
-  }
-
   function liveImpl<R>(
     queryFn: () => Promise<R[]> | { then(onFulfilled: (value: unknown) => unknown, onRejected?: (reason: unknown) => unknown): unknown },
     liveOptions?: LiveOptions,
   ): LiveQuery<R> {
-    return createLive<R>(collections as Record<string, unknown>, queryFn, liveOptions);
+    if (transactionContext.getStore() === true) {
+      throw Object.assign(
+        new Error("@zeroship/db: db.live cannot be called inside db.transaction"),
+        { code: "LIVE_IN_TRANSACTION" as const },
+      );
+    }
+    return createLive<R>(queryFn, liveOptions);
   }
 
   // **P9 PR 3** — transaction orchestration moved into Rust.
@@ -928,32 +998,18 @@ function _installSchemaInner<const T extends Record<string, SchemaInput>>(
   // (`err.code`, plus `err.status` when the classification has an HTTP
   // remedy).
   //
-  // This wrapper keeps only the JS-side concerns that have no Rust
-  // counterpart:
-  //   1. **DataLoader drain** — the per-collection `IdLoader` microtask
-  //      queues are pure JS state; we flush them before opening the tx so
-  //      a batched `get(id)` issued just before `transaction(...)`
-  //      completes on the pool, not the tx connection.
-  //   2. **`_txDepth` bookkeeping** — bumped on every collection while the
-  //      tx is open so (a) the IdLoader's `LOADER_TX_RACE` guard rejects a
-  //      non-tx batched read that finds a tx opened mid-batch, and (b)
-  //      `live()` refuses with `LIVE_IN_TRANSACTION` when called inside a
-  //      tx body. (The Rust orchestrator owns *nesting depth*; this JS
-  //      counter is purely the "am I inside a tx on this collection"
-  //      signal those two JS-layer checks read.)
-  //   3. **`Result` wrapping** — `transaction(fn)` returns
-  //      `Promise<Result<R>>`; the native promise resolves/rejects, so we
-  //      adapt resolve → `ok`, reject → `err`.
+  // This wrapper drains pending JS loaders before BEGIN, scopes the
+  // creator-facing transaction handles to the callback, and maps the native
+  // promise to Result. AsyncLocalStorage keeps SDK-only guards local to the
+  // callback continuation while Rust owns connection routing and nesting.
   //
   // The `txCollections` (SDK collections wrapped `Result`→throw) route
   // through the tx connection automatically, since the native CRUD path
-  // consults the `tx_conn` slot the orchestrator set. We therefore pass
-  // `txCollections` to the creator callback and ignore the native
-  // `rawTxView` (its collections are the same connection; the SDK
-  // wrappers add the field-mapping + throwing contract the callback
-  // expects).
+  // consults the `tx_conn` slot the orchestrator set. The native raw view
+  // serves plain-JS callers; this wrapper exposes the same name lookup over
+  // SDK handles with field mapping and the throwing transaction contract.
   async function transactionImpl<R>(
-    fn: (tx: { [K in keyof T]: TxCollection<UnwrapSchema<T[K]>, T> } & { from: ReadFrom<true> }) => Promise<R>,
+    fn: (tx: TransactionDb<T>) => Promise<R>,
     txOptions?: TransactionOptions,
   ): Promise<Result<R>> {
     if (nativeTransaction === undefined) {
@@ -970,8 +1026,7 @@ function _installSchemaInner<const T extends Record<string, SchemaInput>>(
 
     const collectionList = Object.values(collections);
 
-    // 1. Drain the JS DataLoader queues (JS-only state; cannot move to
-    //    Rust). A drain failure aborts before any BEGIN runs.
+    // A drain failure aborts before BEGIN.
     try {
       await drainCollectionLoaders(collectionList);
     } catch (drainErr) {
@@ -987,13 +1042,8 @@ function _installSchemaInner<const T extends Record<string, SchemaInput>>(
       return err(wrapped);
     }
 
-    // 2. Mark every collection in-tx so the loader race-guard +
-    //    live-in-tx refusal see depth > 0 for the duration. Bumped
-    //    synchronously *before* the native call so an in-flight batched
-    //    read observes the tx the instant BEGIN opens.
-    const txScopedCollections = enterTransactionScope(collectionList);
     try {
-      // 3. Native orchestrator: begin → callback(txCollections) →
+      // Native orchestrator: begin → callback(txCollections) →
       //    commit/rollback. Resolves with the callback's result on
       //    commit; rejects with the typed error on rollback, setup denial,
       //    begin failure, commit indeterminacy, or depth exhaustion.
@@ -1001,14 +1051,34 @@ function _installSchemaInner<const T extends Record<string, SchemaInput>>(
         ? { isolationLevel: txOptions.isolationLevel }
         : undefined;
       const bodyResult = (await nativeTransaction(
-        // The native view's collections share the tx connection, so we
-        // hand the creator our SDK-wrapped `txCollections` (Result→throw
-        // + field mapping). `rawTxView` is intentionally unused.
+        // The native view and SDK handles share the active tx connection.
         async (_rawTxView: unknown) => {
           let active = true;
           const from: ReadFrom<true> = source => readFrom(native, source, true, () => active);
-          try { return await fn({ ...txCollections, from }); }
-          finally { active = false; }
+          const txCollections = Object.create(null) as {
+            [K in keyof T]: TxCollection<UnwrapSchema<T[K]>, T>;
+          };
+          for (const [name, col] of Object.entries(collections)) {
+            (txCollections as Record<string, unknown>)[name] =
+              createTxCollection(col as Collection<unknown>, () => active);
+          }
+          const collection = <K extends string & keyof T>(name: K) => {
+            requireActiveTransaction(() => active);
+            const txCollection = txCollections[name];
+            if (txCollection === undefined) {
+              throw Object.assign(
+                new Error(`@zeroship/db: collection "${name}" is not declared`),
+                { code: "COLLECTION_NOT_DECLARED" as const },
+              );
+            }
+            return txCollection;
+          };
+          return transactionContext.run(true, async () => {
+            try {
+              return await fn({ ...txCollections, collection, from } as TransactionDb<T>);
+            }
+            finally { active = false; }
+          });
         },
         opts,
       )) as R;
@@ -1019,8 +1089,6 @@ function _installSchemaInner<const T extends Record<string, SchemaInput>>(
       // fence) or is the creator's own thrown error verbatim. Surface it as
       // `result.error`.
       return err(txErr instanceof Error ? txErr : new Error(String(txErr)));
-    } finally {
-      exitTransactionScope(txScopedCollections);
     }
   }
 
@@ -1043,14 +1111,11 @@ function _installSchemaInner<const T extends Record<string, SchemaInput>>(
       }
     }
     for (const [name, col] of Object.entries(collections)) {
-      if (RESERVED_ENV_DB_NAMES.has(name)) {
-        throw Object.assign(
-          new Error(
-            `@zeroship/bootstrap: schema name "${name}" collides with a native env.db method — ` +
-              `rename the collection. Reserved: ${[...RESERVED_ENV_DB_NAMES].join(", ")}.`,
-          ),
-          { code: "RESERVED_ENV_DB_NAME" as const },
-        );
+      if (
+        RESERVED_ENV_DB_NAMES.has(name) ||
+        (!Object.hasOwn(target, name) && name in target)
+      ) {
+        continue;
       }
       Object.defineProperty(target, name, {
         value: col,

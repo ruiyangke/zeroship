@@ -119,14 +119,11 @@ The independently managed Database and Grant records described below remain plan
 
 ## Identity, and what a creator may see
 
-Every entity carries a typed id - UUIDv7, base62, three-letter prefix
-(`crates/zeroship-core/src/typed_id.rs`). `ds_...` for a Datastore, `dbs_...` for a Database.
-(`dbs`, not `db`, for consistency: every prefix in `typed_id.rs` is three letters and its doc
-comments state the shape `^[a-z]{3}_[A-Za-z0-9]{22}$`. Note that shape is a CONVENTION, not a
-parser constraint - `parse` is `split_once('_')` plus a base62 decode of the remainder
-(`crates/zeroship-core/src/typed_id.rs:139-145`), so `db_<22 chars>` would parse fine. Choose `dbs`
-because the tree is
-uniform, not because the parser refuses two letters.)
+Every entity carries a typed id: a UUIDv7 encoded as fixed-width lowercase
+base36 with an entity prefix. The concrete newtypes in
+`crates/zeroship-id/` enforce their own prefixes and the shared decoder
+enforces the canonical body. Datastores use `ds_...`; databases use
+`dbs_...`.
 
 **Both ids are internal. Neither is exposed to creators.**
 
@@ -318,28 +315,24 @@ worker executes creator code, so any capability the worker holds is reachable by
 the worker. A privileged call the worker can make is not a boundary. What the worker may do must be
 what the tenant may do.
 
-Two exceptions exist today and are deliberate, not oversights:
+The worker's database posture permits one ambient workflow-owner membership and rejects other
+inherited data roles. CDC runs in a separate relay process: the worker login must not have
+`REPLICATION` or `BYPASSRLS`, and workers receive value-free invalidations from the relay.
 
-1. The worker holds `zeroship_workflow_owner` by a plain grant, boot *requires* that membership
-   (`crates/zeroship-worker/src/db_posture.rs:101-103`), and the fence exempts it by name
-   (`AMBIENT_MEMBERSHIP_EXEMPTION`, `crates/zeroship-worker/src/db_posture.rs:13`).
-2. **The replication plane is not fenced at all.** Logical decoding consults no column ACL and no
-   RLS - a role denied `SELECT ssn` still receives the plaintext in the decoded stream. The boot
-   posture requires `REPLICATION` and `BYPASSRLS` on that same login
-   (`crates/zeroship-worker/src/db_posture.rs:96-100`).
+### Runtime role and descriptor authority
 
-### Column-level grants are the masking authority
+The runtime role receives ordinary data privileges on every table and sequence in its bound
+creator schema. Prefixes such as `__zeroship_` do not change ORM visibility, privileges or CDC
+publication. The role receives schema `USAGE` without `CREATE`, and it receives no authority on
+another creator schema.
 
-A column a grant withholds is unreadable at the database, not merely absent from a descriptor.
-Two consequences measured on live PostgreSQL:
+The runtime descriptor remains the ORM's logical schema authority. It defines the collections,
+fields and physical storage mappings that creator code can express through the compiled query
+API. The ORM exposes no raw SQL surface to creator code, and its protection passes keep raw storage
+columns out of ordinary reads.
 
-- **The runtime role receives no blanket table grants.** A table-level grant subsumes any column
-  list, so neither production provisioning nor the plugin-db test provisioner grants DML on all
-  tables or installs prospective table default privileges. Bindings grant their columns
-  explicitly. The sole reserved-table exception is `__zeroship_audit_unmask`: the runtime role
-  receives table `INSERT` plus `USAGE` on its owned serial sequence, and nothing else. That the
-  grant is TABLE-level rather than column-scoped is what let `claimed_actor` be added on
-  2026-09-01 without a grant change; a column-scoped grant would have failed the INSERT instead.
+Consequences:
+
 - **The unmask audit row separates the actor from the claim that was refused.** `actor_id` and
   `actor_role` carry identity the platform accepted; `claimed_actor` carries, verbatim and
   untrusted, an actor claim the DB-3 fence stripped. They are distinct columns because
@@ -347,13 +340,9 @@ Two consequences measured on live PostgreSQL:
   erased the evidence anyone tried: a forged `kind: "auto"` audited byte-for-byte like a caller
   who sent no actor at all. Never read `claimed_actor` as identity - it is what a handler SENT,
   which is precisely why it is recorded.
-- **Bounded writes narrow through the primary key.** PostgreSQL refuses `SELECT ctid` with 42501
-  under column-scoped SELECT, which made update, soft-delete and restore unusable and also blocked
-  purge once its separately required table DELETE privilege was present. Those paths now select
-  the immutable, readable `id TEXT PRIMARY KEY` and retain `FOR UPDATE`; live tests execute all four
-  shipped builders and the replacement data-plan's bounded update/delete with column-scoped read
-  authority. PostgreSQL has no column-level DELETE privilege, so readwrite bindings necessarily
-  grant DELETE at table scope; it does not confer SELECT on any column.
+- **Bounded writes narrow through the primary key.** Update, soft-delete, restore and purge select
+  the immutable `id` primary key and retain `FOR UPDATE`. The compiler derives this behavior from
+  the descriptor rather than from table-name conventions.
 
 ---
 
@@ -463,9 +452,9 @@ things in. It is reinstated for exactly one row shape and nothing else.
 ## Change streams
 
 The deployed runtime still uses app schemas in a shared PostgreSQL database.
-Each app has a migration-owned publication excluding platform journals. The
-database-decoupling design above does not supply runtime identities yet; the CDC
-protocol uses the actual app schema rather than inventing grants or epochs.
+Each app publication includes every top-level table in the bound app schema;
+table names do not alter CDC visibility. The CDC protocol uses the actual app
+schema rather than inventing grants or epochs.
 
 `zeroship-data-cdc-server` owns logical decoding in a separate process. Workers
 connect through the authenticated TLS client in `zeroship-data-orm::cdc::relay`.
@@ -584,22 +573,12 @@ never name a datastore.
   breaks the ordering the masking and deploy-gate story rests on: an app must not read a schema
   older than the descriptor it was built against. That is a design problem, not a config flag.
 
-## What this costs
+## Operational consequences
 
-Three costs remain, and the first two are PostgreSQL constraints rather than choices:
-
-1. **Classified columns lose plaintext reactivity for everyone, including the owner.** One published
-   column set per table per decode stream is a database constraint. Withhold a column from one
-   reader and it is withheld from the change stream for all of them.
-2. **Every apply must regenerate explicit per-column grants inside the DDL transaction.** A
-   migration that fails to do so leaves the database *unreadable* rather than *over-readable* - the
-   right failure direction, but a new way for a deploy to break.
-3. **Every grant and every live epoch is a row in the cluster-shared catalog.** `pg_authid` and
-   `pg_auth_members` are `relisshared = t`, so the role graph is the one resource a datastore's
-   tenants cannot be partitioned away from each other in. Two things bound it: `SET ROLE` measures
-   flat across a 2000x growth in membership rows, and the apply-time reaper caps live epochs at two.
-   What is not bounded by measurement is per-backend membership cache construction at connect time,
-   which nothing has measured.
+CDC carries invalidation metadata without row values. A subscriber re-reads through the ORM, where
+the descriptor and protection passes shape the result. PostgreSQL role memberships remain
+cluster-shared catalog state, so datastore capacity planning must include the tenant role graph and
+connection authentication caches.
 
 **One scope limit ships with it:** `readwrite`/`readonly` grants are restricted to apps under the
 same creator - which the workspace model satisfies by construction. Cross-creator sharing is blocked

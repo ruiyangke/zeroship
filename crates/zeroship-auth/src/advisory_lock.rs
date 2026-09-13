@@ -3,7 +3,7 @@
 use std::future::Future;
 
 use compio_postgres::{Client, GenericClient};
-use uuid::Uuid;
+use zeroship_core::UserId;
 
 use crate::error::{AuthError, Result};
 
@@ -127,9 +127,12 @@ pub async fn with_xact_advisory_lock2<C>(conn: &C, ns: i32, key: i32) -> Result<
 where
     C: GenericClient + ?Sized,
 {
-    conn.execute("SELECT pg_advisory_xact_lock($1::INT4, $2::INT4)", &[&ns, &key])
-        .await
-        .map_err(|e| AuthError::Db(format!("pg_advisory_xact_lock({ns},{key}): {e}")))?;
+    conn.execute(
+        "SELECT pg_advisory_xact_lock($1::INT4, $2::INT4)",
+        &[&ns, &key],
+    )
+    .await
+    .map_err(|e| AuthError::Db(format!("pg_advisory_xact_lock({ns},{key}): {e}")))?;
     Ok(())
 }
 
@@ -137,16 +140,21 @@ where
 ///
 /// The SQL deliberately hashes in Postgres as `hashtext(user_id::text)`, matching
 /// the P5b lock contract and all companion writers.
-pub async fn lock_refresh_user_xact<C>(conn: &C, user_id: Uuid) -> Result<()>
+pub async fn lock_refresh_user_xact<C>(conn: &C, user_id: &UserId) -> Result<()>
 where
     C: GenericClient + ?Sized,
 {
     conn.execute(
         "SELECT pg_advisory_xact_lock($1::INT4, hashtext($2::text))",
-        &[&NS_USER, &user_id.to_string()],
+        &[&NS_USER, &user_id.as_str()],
     )
     .await
-    .map_err(|e| AuthError::Db(format!("refresh user advisory lock {user_id}: {e}")))?;
+    .map_err(|e| {
+        AuthError::Db(format!(
+            "refresh user advisory lock {}: {e}",
+            user_id.as_str()
+        ))
+    })?;
     Ok(())
 }
 
@@ -170,10 +178,10 @@ where
 
 /// Stable i64 advisory-lock key for one OAuth grant mutation.
 #[must_use]
-pub fn oauth_grant_lock_key(user_id: &uuid::Uuid, client_id: &str) -> i64 {
+pub fn oauth_grant_lock_key(user_id: &UserId, client_id: &str) -> i64 {
     stable_lock_key(
         b"zeroship-auth:oauth-grant:",
-        &[user_id.as_bytes(), client_id.as_bytes()],
+        &[user_id.as_str().as_bytes(), client_id.as_bytes()],
     )
 }
 
@@ -188,8 +196,11 @@ pub fn oauth_grant_lock_key(user_id: &uuid::Uuid, client_id: &str) -> i64 {
 /// fresh implicit transaction *after* the winner commits and releases the
 /// lock, so its orphan check reads the winner's committed delete.
 #[must_use]
-pub fn identity_unlink_lock_key(user_id: &uuid::Uuid) -> i64 {
-    stable_lock_key(b"zeroship-auth:identity-unlink:", &[user_id.as_bytes()])
+pub fn identity_unlink_lock_key(user_id: &UserId) -> i64 {
+    stable_lock_key(
+        b"zeroship-auth:identity-unlink:",
+        &[user_id.as_str().as_bytes()],
+    )
 }
 
 fn stable_lock_key(prefix: &[u8], parts: &[&[u8]]) -> i64 {

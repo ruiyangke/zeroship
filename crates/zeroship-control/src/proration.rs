@@ -31,7 +31,7 @@ use std::collections::HashMap;
 
 use chrono::{Datelike, TimeZone, Utc};
 use compio_postgres::GenericClient;
-use uuid::Uuid;
+use zeroship_core::app_id::AppId;
 
 use crate::pricing::PlanPrice;
 use crate::registry::{Registry, RegistryError};
@@ -97,7 +97,7 @@ pub fn next_period_date(period: chrono::NaiveDate) -> chrono::NaiveDate {
 /// when the app row is absent.
 pub async fn record_plan_change<C: GenericClient + Sync>(
     tx: &C,
-    app_id: &Uuid,
+    app_id: &AppId,
     organization_id: &str,
     from_plan_id: Option<&str>,
     to_plan_id: &str,
@@ -126,7 +126,7 @@ pub async fn record_plan_change<C: GenericClient + Sync>(
             "UPDATE zeroship.apps SET plan_id = $1, updated_at = NOW() \
              WHERE id = $2 AND deleted_at IS NULL \
                AND EXISTS (SELECT 1 FROM zeroship.plans WHERE id = $1 AND NOT archived)",
-            &[&to_plan_id, app_id],
+            &[&to_plan_id, &app_id.as_str()],
         )
         .await?;
     if flipped == 0 {
@@ -155,7 +155,7 @@ pub async fn record_plan_change<C: GenericClient + Sync>(
         .query(
             "SELECT COUNT(*)::bigint AS n FROM zeroship.plan_change_events \
              WHERE app_id = $1 AND period = $2::date",
-            &[app_id, &period],
+            &[&app_id.as_str(), &period],
         )
         .await?;
     let existing: i64 = count_rows.first().map_or(0, |r| r.get::<_, i64>("n"));
@@ -170,7 +170,7 @@ pub async fn record_plan_change<C: GenericClient + Sync>(
         .query(
             "SELECT metric, total FROM zeroship.usage_aggregates \
              WHERE app_id = $1 AND period = $2::date",
-            &[app_id, &period],
+            &[&app_id.as_str(), &period],
         )
         .await?;
     let mut usage_at_change = serde_json::Map::new();
@@ -190,7 +190,7 @@ pub async fn record_plan_change<C: GenericClient + Sync>(
          VALUES ($1, $2, $3::date, $4, $5, $6, $7)",
         &[
             &event_id,
-            app_id,
+            &app_id.as_str(),
             &period,
             &from_plan_id,
             &to_plan_id,
@@ -213,7 +213,7 @@ pub async fn record_plan_change<C: GenericClient + Sync>(
 /// Propagates DB / transaction errors.
 pub async fn record_plan_change_tx(
     registry: &Registry,
-    app_id: &Uuid,
+    app_id: &AppId,
     organization_id: &str,
     from_plan_id: Option<&str>,
     to_plan_id: &str,

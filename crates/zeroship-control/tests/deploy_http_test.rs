@@ -31,14 +31,14 @@ use ntex::http::StatusCode;
 use ntex::web::{self, test};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
+use zeroship_core::{AppId, UserId};
 
 use zeroship_bundle::{
     AssetEntry, AuthConfig, BlobStore, LocalDiskBlobStore, Manifest, ManifestMetadata, ScopeDef,
     WorkerCode,
 };
 use zeroship_control::{
-    api, AppState, EnvStore, Quota, RateLimiter, Registry, SecretString,
-    StripeStore,
+    api, AppState, EnvStore, Quota, RateLimiter, Registry, SecretString, StripeStore,
 };
 
 use crate::common;
@@ -261,14 +261,14 @@ async fn build_test_state_with_admin_quota(
     // Concrete LocalDiskBlobStore handle: kept in the fixture so the
     // assertion `bs.has_blob(...)` works without having to downcast
     // the trait-object stored on AppState.
-    let blob_store_concrete = Arc::new(
-        LocalDiskBlobStore::new(blob_root.clone()).expect("blob store"),
-    );
+    let blob_store_concrete =
+        Arc::new(LocalDiskBlobStore::new(blob_root.clone()).expect("blob store"));
 
     let registry = Registry::new(db_url).await.expect("registry");
-    zeroship_control::plan_catalog::seed_plans(&registry).await.expect("seed built-in plans");
-    let env_store = EnvStore::new(registry.clone(), TEST_MASTER_KEY)
-        .expect("env store");
+    zeroship_control::plan_catalog::seed_plans(&registry)
+        .await
+        .expect("seed built-in plans");
+    let env_store = EnvStore::new(registry.clone(), TEST_MASTER_KEY).expect("env store");
     let stripe_store = StripeStore::new(registry.clone());
 
     let blob_store: Arc<dyn BlobStore> = blob_store_concrete.clone();
@@ -313,7 +313,10 @@ async fn build_test_state_with_admin_quota(
         expected_oauth_audience: "control.zeroship.ai".to_string(),
         static_policies: zeroship_authz::load_platform_policies()
             .expect("bundled authz policies parse"),
-        auth_provider: zeroship_control::platform_auth_provider("https://auth.zeroship.test/oauth2", Some(common::platform_jwks_url())),
+        auth_provider: zeroship_control::platform_auth_provider(
+            "https://auth.zeroship.test/oauth2",
+            Some(common::platform_jwks_url()),
+        ),
         // No platform deploy-token mint here: that is control's OUTBOUND
         // destination for the device flow, and no fixture below drives one.
         provider_registry: zeroship_control::metering::provider::builtin_registry(),
@@ -351,12 +354,17 @@ async fn deploy_happy_path_returns_200_with_deploy_hash() {
 
     // Real app row in the test DB.
     let pat = seed_owner(&fx.state, "httpd").await;
-    let owner_id = pat.user_id;
+    let owner_id = &pat.user_id;
     let app_name = format!("httpd-{}", &Uuid::new_v4().simple().to_string()[..10]);
     let record = fx
         .state
         .registry
-        .create_app(&app_name, &zeroship_control::plan_catalog::free_plan_id(), &owner_id, None)
+        .create_app(
+            &app_name,
+            &zeroship_control::plan_catalog::free_plan_id(),
+            owner_id,
+            None,
+        )
         .await
         .expect("create app");
     let app_id = record.id;
@@ -381,20 +389,18 @@ async fn deploy_happy_path_returns_200_with_deploy_hash() {
     // Mount a single deploy route under the test app. PayloadConfig
     // mirrors what main.rs configures so the upper bound matches prod.
     let app = test::init_service(
-        web::App::new()
-            .state(fx.state.clone())
-            .service(
-                web::resource("/api/apps/{id}/deploy")
-                    .state(web::types::PayloadConfig::new(
-                        zeroship_control::deploy::MAX_COMPRESSED_BYTES,
-                    ))
-                    .route(web::post().to(api::deploy)),
-            ),
+        web::App::new().state(fx.state.clone()).service(
+            web::resource("/api/apps/{id}/deploy")
+                .state(web::types::PayloadConfig::new(
+                    zeroship_control::deploy::MAX_COMPRESSED_BYTES,
+                ))
+                .route(web::post().to(api::deploy)),
+        ),
     )
     .await;
 
     let req = test::TestRequest::post()
-        .uri(&format!("/api/apps/{app_id}/deploy"))
+        .uri(&format!("/api/apps/{}/deploy", app_id.as_str()))
         .header("authorization", pat.bearer())
         .header("content-type", "application/x-zship")
         .set_payload(body)
@@ -404,8 +410,7 @@ async fn deploy_happy_path_returns_200_with_deploy_hash() {
 
     // ntex 3.x has no `read_body_json` helper — read bytes + parse.
     let bytes = test::read_body(resp).await;
-    let json: serde_json::Value =
-        serde_json::from_slice(&bytes).expect("response is JSON");
+    let json: serde_json::Value = serde_json::from_slice(&bytes).expect("response is JSON");
     let deploy_hash = json
         .get("deploy_hash")
         .and_then(|v| v.as_str())
@@ -479,20 +484,18 @@ async fn deploy_wrong_content_type_returns_415_without_consuming_body() {
     let body: Vec<u8> = b"this is not a zship payload".to_vec();
 
     let app = test::init_service(
-        web::App::new()
-            .state(fx.state.clone())
-            .service(
-                web::resource("/api/apps/{id}/deploy")
-                    .state(web::types::PayloadConfig::new(
-                        zeroship_control::deploy::MAX_COMPRESSED_BYTES,
-                    ))
-                    .route(web::post().to(api::deploy)),
-            ),
+        web::App::new().state(fx.state.clone()).service(
+            web::resource("/api/apps/{id}/deploy")
+                .state(web::types::PayloadConfig::new(
+                    zeroship_control::deploy::MAX_COMPRESSED_BYTES,
+                ))
+                .route(web::post().to(api::deploy)),
+        ),
     )
     .await;
 
     let req = test::TestRequest::post()
-        .uri(&format!("/api/apps/{app_id}/deploy"))
+        .uri(&format!("/api/apps/{}/deploy", app_id.as_str()))
         .header("authorization", pat.bearer())
         .header("content-type", "application/octet-stream")
         .set_payload(body)
@@ -521,25 +524,23 @@ async fn deploy_missing_auth_returns_401_without_consuming_body() {
     let db_url = db_url();
 
     let fx = build_test_state(&db_url, "auth").await;
-    let app_id = Uuid::new_v4();
+    let app_id = AppId::mint();
     let body: Vec<u8> = b"won't ever be looked at".to_vec();
 
     let app = test::init_service(
-        web::App::new()
-            .state(fx.state.clone())
-            .service(
-                web::resource("/api/apps/{id}/deploy")
-                    .state(web::types::PayloadConfig::new(
-                        zeroship_control::deploy::MAX_COMPRESSED_BYTES,
-                    ))
-                    .route(web::post().to(api::deploy)),
-            ),
+        web::App::new().state(fx.state.clone()).service(
+            web::resource("/api/apps/{id}/deploy")
+                .state(web::types::PayloadConfig::new(
+                    zeroship_control::deploy::MAX_COMPRESSED_BYTES,
+                ))
+                .route(web::post().to(api::deploy)),
+        ),
     )
     .await;
 
     // No authorization header at all.
     let req = test::TestRequest::post()
-        .uri(&format!("/api/apps/{app_id}/deploy"))
+        .uri(&format!("/api/apps/{}/deploy", app_id.as_str()))
         .header("content-type", "application/x-zship")
         .set_payload(body.clone())
         .to_request();
@@ -554,7 +555,7 @@ async fn deploy_missing_auth_returns_401_without_consuming_body() {
 
     // Invalid PAT bearer should also reject — same status.
     let req = test::TestRequest::post()
-        .uri(&format!("/api/apps/{app_id}/deploy"))
+        .uri(&format!("/api/apps/{}/deploy", app_id.as_str()))
         .header("authorization", "Bearer not-a-valid-pat")
         .header("content-type", "application/x-zship")
         .set_payload(body)
@@ -581,12 +582,17 @@ async fn deploy_manifest_not_first_returns_400() {
     // produce the structured BadRequest, so the app must exist for
     // the registry path to behave normally up to the rejection.
     let pat = seed_owner(&fx.state, "httpmf").await;
-    let owner_id = pat.user_id;
+    let owner_id = &pat.user_id;
     let app_name = format!("httpmf-{}", &Uuid::new_v4().simple().to_string()[..10]);
     let record = fx
         .state
         .registry
-        .create_app(&app_name, &zeroship_control::plan_catalog::free_plan_id(), &owner_id, None)
+        .create_app(
+            &app_name,
+            &zeroship_control::plan_catalog::free_plan_id(),
+            owner_id,
+            None,
+        )
         .await
         .expect("create app");
     let app_id = record.id;
@@ -600,20 +606,18 @@ async fn deploy_manifest_not_first_returns_400() {
     let body = build_zship(&manifest_bytes, &blobs, /*manifest_first=*/ false);
 
     let app = test::init_service(
-        web::App::new()
-            .state(fx.state.clone())
-            .service(
-                web::resource("/api/apps/{id}/deploy")
-                    .state(web::types::PayloadConfig::new(
-                        zeroship_control::deploy::MAX_COMPRESSED_BYTES,
-                    ))
-                    .route(web::post().to(api::deploy)),
-            ),
+        web::App::new().state(fx.state.clone()).service(
+            web::resource("/api/apps/{id}/deploy")
+                .state(web::types::PayloadConfig::new(
+                    zeroship_control::deploy::MAX_COMPRESSED_BYTES,
+                ))
+                .route(web::post().to(api::deploy)),
+        ),
     )
     .await;
 
     let req = test::TestRequest::post()
-        .uri(&format!("/api/apps/{app_id}/deploy"))
+        .uri(&format!("/api/apps/{}/deploy", app_id.as_str()))
         .header("authorization", pat.bearer())
         .header("content-type", "application/x-zship")
         .set_payload(body)
@@ -622,8 +626,7 @@ async fn deploy_manifest_not_first_returns_400() {
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "expected 400");
 
     let bytes = test::read_body(resp).await;
-    let json: serde_json::Value =
-        serde_json::from_slice(&bytes).expect("response is JSON");
+    let json: serde_json::Value = serde_json::from_slice(&bytes).expect("response is JSON");
     let error = json
         .get("error")
         .and_then(|v| v.as_str())
@@ -659,12 +662,17 @@ async fn deploy_colliding_scope_returns_400_invalid_scope() {
     let fx = build_test_state(&db_url, "scopecollide").await;
 
     let pat = seed_owner(&fx.state, "httpsc").await;
-    let owner_id = pat.user_id;
+    let owner_id = &pat.user_id;
     let app_name = format!("httpsc-{}", &Uuid::new_v4().simple().to_string()[..10]);
     let record = fx
         .state
         .registry
-        .create_app(&app_name, &zeroship_control::plan_catalog::free_plan_id(), &owner_id, None)
+        .create_app(
+            &app_name,
+            &zeroship_control::plan_catalog::free_plan_id(),
+            owner_id,
+            None,
+        )
         .await
         .expect("create app");
     let app_id = record.id;
@@ -690,7 +698,7 @@ async fn deploy_colliding_scope_returns_400_invalid_scope() {
     .await;
 
     let req = test::TestRequest::post()
-        .uri(&format!("/api/apps/{app_id}/deploy"))
+        .uri(&format!("/api/apps/{}/deploy", app_id.as_str()))
         .header("authorization", pat.bearer())
         .header("content-type", "application/x-zship")
         .set_payload(body)
@@ -703,8 +711,7 @@ async fn deploy_colliding_scope_returns_400_invalid_scope() {
     );
 
     let bytes = test::read_body(resp).await;
-    let json: serde_json::Value =
-        serde_json::from_slice(&bytes).expect("response is JSON");
+    let json: serde_json::Value = serde_json::from_slice(&bytes).expect("response is JSON");
     assert_eq!(
         json.get("error").and_then(|v| v.as_str()),
         Some("invalid_scope"),
@@ -752,12 +759,17 @@ async fn deploy_noncolliding_scope_returns_200() {
     let fx = build_test_state(&db_url, "scopeok").await;
 
     let pat = seed_owner(&fx.state, "httpok").await;
-    let owner_id = pat.user_id;
+    let owner_id = &pat.user_id;
     let app_name = format!("httpok-{}", &Uuid::new_v4().simple().to_string()[..10]);
     let record = fx
         .state
         .registry
-        .create_app(&app_name, &zeroship_control::plan_catalog::free_plan_id(), &owner_id, None)
+        .create_app(
+            &app_name,
+            &zeroship_control::plan_catalog::free_plan_id(),
+            owner_id,
+            None,
+        )
         .await
         .expect("create app");
     let app_id = record.id;
@@ -781,7 +793,7 @@ async fn deploy_noncolliding_scope_returns_200() {
     .await;
 
     let req = test::TestRequest::post()
-        .uri(&format!("/api/apps/{app_id}/deploy"))
+        .uri(&format!("/api/apps/{}/deploy", app_id.as_str()))
         .header("authorization", pat.bearer())
         .header("content-type", "application/x-zship")
         .set_payload(body)
@@ -794,10 +806,11 @@ async fn deploy_noncolliding_scope_returns_200() {
     );
 
     let bytes = test::read_body(resp).await;
-    let json: serde_json::Value =
-        serde_json::from_slice(&bytes).expect("response is JSON");
+    let json: serde_json::Value = serde_json::from_slice(&bytes).expect("response is JSON");
     assert_eq!(
-        json.get("deploy_hash").and_then(|v| v.as_str()).map(str::len),
+        json.get("deploy_hash")
+            .and_then(|v| v.as_str())
+            .map(str::len),
         Some(64),
         "deploy committed with a sha256 deploy_hash"
     );
@@ -856,11 +869,7 @@ fn worker_only_zship() -> Vec<u8> {
 async fn deploy_service(
     state: Arc<AppState>,
 ) -> ntex::Pipeline<
-    impl ntex::Service<
-        ntex::http::Request,
-        Response = ntex::web::WebResponse,
-        Error = ntex::web::Error,
-    >,
+    impl ntex::Service<ntex::http::Request, Response = ntex::web::WebResponse, Error = ntex::web::Error>,
 > {
     test::init_service(
         web::App::new().state(state).service(
@@ -874,8 +883,8 @@ async fn deploy_service(
     .await
 }
 
-async fn schema_exists(conn: &compio_postgres::Client, app_id: &Uuid) -> bool {
-    let schema = app_id.to_string();
+async fn schema_exists(conn: &compio_postgres::Client, app_id: &AppId) -> bool {
+    let schema = app_id.as_str();
     let rows = conn
         .query(
             "SELECT 1 FROM information_schema.schemata WHERE schema_name = $1",
@@ -892,14 +901,17 @@ async fn deploy_rejects_legacy_migration_approval_query() {
     let fx = build_test_state(&db_url, "legacy-query").await;
     let app = deploy_service(fx.state.clone()).await;
     let pat = seed_owner(&fx.state, "legacy-query").await;
-    let owner_id = pat.user_id;
+    let owner_id = &pat.user_id;
     let record = fx
         .state
         .registry
         .create_app(
-            &format!("legacy-query-{}", &Uuid::new_v4().simple().to_string()[..10]),
+            &format!(
+                "legacy-query-{}",
+                &Uuid::new_v4().simple().to_string()[..10]
+            ),
             &zeroship_control::plan_catalog::free_plan_id(),
-            &owner_id,
+            owner_id,
             None,
         )
         .await
@@ -909,7 +921,8 @@ async fn deploy_rejects_legacy_migration_approval_query() {
 
     let req = test::TestRequest::post()
         .uri(&format!(
-            "/api/apps/{app_id}/deploy?approved_versions=abc&expected_manifest={}",
+            "/api/apps/{}/deploy?approved_versions=abc&expected_manifest={}",
+            app_id.as_str(),
             "deadbeef".repeat(8)
         ))
         .header("authorization", pat.bearer())
@@ -939,14 +952,17 @@ async fn deploy_rejects_legacy_manifest_migrations_and_runs_no_migration() {
     let fx = build_test_state(&db_url, "legacy-manifest").await;
     let app = deploy_service(fx.state.clone()).await;
     let pat = seed_owner(&fx.state, "legacy-manifest").await;
-    let owner_id = pat.user_id;
+    let owner_id = &pat.user_id;
     let record = fx
         .state
         .registry
         .create_app(
-            &format!("legacy-manifest-{}", &Uuid::new_v4().simple().to_string()[..10]),
+            &format!(
+                "legacy-manifest-{}",
+                &Uuid::new_v4().simple().to_string()[..10]
+            ),
             &zeroship_control::plan_catalog::free_plan_id(),
-            &owner_id,
+            owner_id,
             None,
         )
         .await
@@ -955,7 +971,7 @@ async fn deploy_rejects_legacy_manifest_migrations_and_runs_no_migration() {
     let bundle = zship_with_legacy_migrations_key();
 
     let req = test::TestRequest::post()
-        .uri(&format!("/api/apps/{app_id}/deploy"))
+        .uri(&format!("/api/apps/{}/deploy", app_id.as_str()))
         .header("authorization", pat.bearer())
         .header("content-type", "application/x-zship")
         .set_payload(bundle)
@@ -1036,10 +1052,10 @@ async fn deploy_to_nonexistent_app_does_not_write_blobs() {
     .await;
 
     // Never created through the registry, so no app row exists for it.
-    let ghost_id = Uuid::new_v4();
+    let ghost_id = AppId::mint();
     let pat = common::authz_fixture::seeded_principal(&fx.state).await;
     let req = test::TestRequest::post()
-        .uri(&format!("/api/apps/{ghost_id}/deploy"))
+        .uri(&format!("/api/apps/{}/deploy", ghost_id.as_str()))
         .header("authorization", pat.bearer())
         .header("content-type", "application/x-zship")
         .set_payload(body)
@@ -1084,7 +1100,7 @@ async fn deploy_is_rate_limited() {
     // Small admin quota so 31 requests actually cross it.
     let fx =
         build_test_state_with_admin_quota(&db_url, "ratelimit", Quota::per_minute(5, 60)).await;
-    let app_id = Uuid::new_v4();
+    let app_id = AppId::mint();
 
     let app = test::init_service(
         web::App::new().state(fx.state.clone()).service(
@@ -1112,7 +1128,7 @@ async fn deploy_is_rate_limited() {
     let mut statuses = Vec::new();
     for _ in 0..31 {
         let req = test::TestRequest::post()
-            .uri(&format!("/api/apps/{app_id}/deploy"))
+            .uri(&format!("/api/apps/{}/deploy", app_id.as_str()))
             .header("authorization", pat.bearer())
             .header("x-forwarded-for", caller_ip.as_str())
             .header("content-type", "application/x-zship")
@@ -1206,8 +1222,8 @@ fn zship_with_descriptor(descriptor: Option<&[u8]>) -> Vec<u8> {
 /// cannot control which row is newest cannot tell "newest" from "any".
 async fn insert_applied_migration(
     conn: &compio_postgres::Client,
-    app_id: &Uuid,
-    submitted_by: &Uuid,
+    app_id: &AppId,
+    submitted_by: &UserId,
     descriptor_sha256: &str,
     applied_at: &str,
 ) {
@@ -1219,9 +1235,9 @@ async fn insert_applied_migration(
          VALUES ($1, $2, 'applied', '{}'::jsonb, '{}'::jsonb, 'test-ceiling', 1, \
                  '[]'::jsonb, $3, $4::text::timestamptz, $5)",
         &[
-            app_id,
+            &app_id.as_str(),
             &Uuid::now_v7(),
-            submitted_by,
+            &submitted_by.as_str(),
             &applied_at,
             &descriptor_sha256,
         ],
@@ -1235,7 +1251,7 @@ async fn insert_applied_migration(
 /// Read through `get_routes()` rather than off `zeroship.apps`, because that is
 /// the projection the gateway polls. Asserting the 409 alone would pass on a
 /// build that answers 409 AND commits the UPDATE.
-async fn live_deploy_hash(state: &AppState, app_id: &Uuid) -> Option<String> {
+async fn live_deploy_hash(state: &AppState, app_id: &AppId) -> Option<String> {
     state
         .registry
         .get_routes()
@@ -1253,12 +1269,12 @@ async fn post_zship(
             Error = ntex::web::Error,
         >,
     >,
-    app_id: &Uuid,
+    app_id: &AppId,
     bearer: &str,
     body: Vec<u8>,
 ) -> (StatusCode, serde_json::Value) {
     let req = test::TestRequest::post()
-        .uri(&format!("/api/apps/{app_id}/deploy"))
+        .uri(&format!("/api/apps/{}/deploy", app_id.as_str()))
         .header("authorization", bearer)
         .header("content-type", "application/x-zship")
         .set_payload(body)
@@ -1271,7 +1287,7 @@ async fn post_zship(
 }
 
 /// Create an app named for `label`, owned by `owner_id`.
-async fn create_labelled_app(state: &AppState, label: &str, owner_id: &Uuid) -> Uuid {
+async fn create_labelled_app(state: &AppState, label: &str, owner_id: &UserId) -> AppId {
     state
         .registry
         .create_app(
@@ -1326,8 +1342,9 @@ async fn deploy_with_unapplied_schema_is_refused_and_nothing_goes_live() {
     assert!(
         body.get("remedy")
             .and_then(|v| v.as_str())
-            .is_some_and(|remedy| remedy.contains("zeroship migrate")
-                && remedy.contains(&app_id.to_string())),
+            .is_some_and(
+                |remedy| remedy.contains("zeroship migrate") && remedy.contains(app_id.as_str())
+            ),
         "the body must carry the remedy command naming this app, got {body}",
     );
     // THE ASSERTION THAT MAKES THE 409 MEAN SOMETHING. A build that answers 409

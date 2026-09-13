@@ -22,6 +22,7 @@ use std::sync::Arc;
 use compio_postgres::{connect, NoTls};
 use uuid::Uuid;
 
+use zeroship_core::app_id::AppId;
 use zeroship_control::cron::billing_reconcile::DEFAULT_SETTLE_WINDOW_SECS;
 use zeroship_control::cron::spend_recompute::{recompute_usage_aggregates, SpendRecomputeConfig};
 use zeroship_control::metering::current_period_start_unix;
@@ -82,29 +83,46 @@ async fn seed_pricing(client: &compio_postgres::Client) -> String {
     plan_id
 }
 
-async fn seed_priced_app(client: &compio_postgres::Client, plan_id: &str) -> Uuid {
+async fn seed_priced_app(client: &compio_postgres::Client, plan_id: &str) -> AppId {
     let name = format!("e2e-probe-{}", Uuid::new_v4());
-    common::seed_app(client, &name, plan_id).await
+    // `common::seed_app` is shared by every other fixture in this crate's test
+    // suite and returns the row's raw uuid decode for callers that still key
+    // on it; this pipeline compares the seeded app against the AppId-typed
+    // usage-event and spend-transition surfaces, so it reads the same row's
+    // `id` column as text and parses the canonical id instead of going
+    // through that shared decode.
+    let organization_id = common::seed_organization(client).await;
+    let project_id = common::unowned_project_in(client, &organization_id).await;
+    let rows = client
+        .query(
+            "INSERT INTO zeroship.apps (name, plan_id, project_id, organization_id) \
+             VALUES ($1, $2, $3, $4) RETURNING id",
+            &[&name, &plan_id, &project_id, &organization_id],
+        )
+        .await
+        .expect("seed fixture app");
+    let id_raw: String = rows[0].get("id");
+    AppId::parse(&id_raw).expect("seeded app id is canonical")
 }
 
-async fn usage_total(client: &compio_postgres::Client, app: Uuid) -> i64 {
+async fn usage_total(client: &compio_postgres::Client, app: &AppId) -> i64 {
     // The app is freshly created, so it has at most this run's single period.
     let rows = client
         .query(
             "SELECT COALESCE(SUM(total), 0)::bigint AS n FROM zeroship.usage_aggregates \
              WHERE app_id = $1",
-            &[&app],
+            &[&app.as_str()],
         )
         .await
         .expect("query usage_aggregates");
     rows[0].get("n")
 }
 
-async fn spend_state(client: &compio_postgres::Client, app: Uuid) -> String {
+async fn spend_state(client: &compio_postgres::Client, app: &AppId) -> String {
     let rows = client
         .query(
             "SELECT state FROM zeroship.app_spend_state WHERE app_id = $1",
-            &[&app],
+            &[&app.as_str()],
         )
         .await
         .expect("query app_spend_state");
@@ -152,10 +170,10 @@ async fn producer_to_redpanda_to_recompute_to_spend_block_end_to_end() {
 
     // ── 1. REAL producer: worker Meter accrues usage, drains to UsageEvents ──
     let meter = Meter::with_source("worker-e2e");
-    meter.increment(&app.to_string(), "requests", 100);
+    meter.increment(&app, "requests", 100);
     let events = meter.drain();
     assert_eq!(events.len(), 1, "one drained requests event");
-    assert_eq!(events[0].subject.app, Some(app));
+    assert_eq!(events[0].subject.app, Some(app.clone()));
     assert_eq!(events[0].value, 100);
 
     // ── 2. REAL outbox publishes them to the REAL Redpanda broker ──
@@ -207,7 +225,7 @@ async fn producer_to_redpanda_to_recompute_to_spend_block_end_to_end() {
             .await
             .expect("recompute cycle");
         let _ = cycle;
-        total = usage_total(&client, app).await;
+        total = usage_total(&client, &app).await;
         if total >= 100 {
             break;
         }
@@ -227,7 +245,7 @@ async fn producer_to_redpanda_to_recompute_to_spend_block_end_to_end() {
         "the app must transition spend state after recompute"
     );
     assert_eq!(
-        spend_state(&client, app).await,
+        spend_state(&client, &app).await,
         "block",
         "100 requests × 1¢ == the $1.00 spend limit → Block at the gateway edge"
     );

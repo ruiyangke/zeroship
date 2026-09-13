@@ -244,20 +244,7 @@ describe("with: { fk: true } — relation-aware reads", () => {
   });
 
   test("more than 100 distinct FKs → the IN list is chunked, never over the cap", async () => {
-    // The native builder REJECTS a membership list longer than
-    // MAX_MEMBERSHIP_LIST_LEN = 100 (`zeroship-data-orm::sql/src/compile.rs:604`),
-    // and the loader issues `{ id: { $in: ids } }` with the whole
-    // deduplicated set (`src/collection/relations.ts:125`) - no chunking,
-    // no length guard. So a page carrying >100 DISTINCT foreign keys is
-    // rejected outright: a documented feature failing on ordinary data.
-    //
-    // Ids are deduplicated first, so this needs >100 distinct targets, which
-    // an unpaginated find() over a modest table reaches easily.
-    //
-    // The assertion is on the CALL SHAPE rather than on an error, because
-    // the cap lives in the Rust builder that this mock does not model.
-    // Asserting "no batch exceeds the cap" tests the property the loader
-    // must hold regardless of who enforces it.
+    // The SDK must split relation lookups before they reach the ORM budget.
     const N = 150;
     const users: Record<string, AnyRec> = {};
     const todos: Record<string, AnyRec> = {};
@@ -319,7 +306,7 @@ describe("with: { fk: true } — relation-aware reads", () => {
 
   test("with: { bogus: true } — clear error when field is unknown", async () => {
     const { db } = makeDb();
-    const { data, error } = await db.todos.find({}, { with: { bogus: true } as { bogus: true } });
+    const { data, error } = await db.todos.find({}, { with: { bogus: true } as never });
     assert.equal(data, null);
     assert.ok(error);
     assert.match(error!.message, /is not a reference field/);
@@ -328,7 +315,7 @@ describe("with: { fk: true } — relation-aware reads", () => {
   test("with: { id: true } — clear error when field is not a ref", async () => {
     const { db } = makeDb();
     // `id` is a real field but not a t.ref — must reject identically.
-    const { data, error } = await db.todos.find({}, { with: { id: true } as { id: true } });
+    const { data, error } = await db.todos.find({}, { with: { id: true } as never });
     assert.equal(data, null);
     assert.ok(error);
     assert.match(error!.message, /is not a reference field/);
@@ -336,7 +323,7 @@ describe("with: { fk: true } — relation-aware reads", () => {
 
   test("with: { title: true } — clear error when field exists but isn't a ref", async () => {
     const { db } = makeDb();
-    const { data, error } = await db.todos.find({}, { with: { title: true } as { title: true } });
+    const { data, error } = await db.todos.find({}, { with: { title: true } as never });
     assert.equal(data, null);
     assert.ok(error);
     assert.match(error!.message, /is not a reference field/);
@@ -381,7 +368,7 @@ describe("with: { fk: true } — relation-aware reads", () => {
 
   test("with: {} (empty spec) is a no-op — relation step never runs", async () => {
     const { db, calls } = makeDb();
-    const { data } = await db.todos.find({ projectId: PROJECT_10 }, { with: {} });
+    const { data } = await db.todos.find({ projectId: PROJECT_10 }, { with: {} as never });
     assert.ok(data);
     // Original todos shape preserved; no users find fired.
     const userFinds = calls.find.filter((c) => c.collection === "users");
@@ -568,7 +555,7 @@ describe("Query.with — guards against direct Query construction", () => {
       async () => [],
     );
     assert.throws(
-      () => q.with({ userId: true }),
+      () => q.with({ userId: true } as never),
       (e: unknown) => {
         assert.ok(e instanceof TypeError);
         assert.match((e as Error).message, /Collection\.find/);

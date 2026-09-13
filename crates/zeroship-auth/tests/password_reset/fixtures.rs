@@ -60,7 +60,7 @@ pub(super) async fn idp_session(pg: &Client, user: &users::UserRow) -> Uuid {
     sessions::create(
         pg,
         &sessions::CreateSession {
-            user_id: user.id,
+            user_id: user.id.clone(),
             auth_method: "password",
             amr: vec!["pwd".into()],
             acr: None,
@@ -83,7 +83,7 @@ pub(super) async fn gateway_session(database: &Database, user: &users::UserRow, 
          (user_id, app_id, email, name, email_verified, idle_expires_at, abs_expires_at) \
          VALUES ($1, $2, $3::citext, 'Reset', true, \
          NOW() + INTERVAL '30 minutes', NOW() + INTERVAL '12 hours') RETURNING id",
-            &[&user.id, &app.id, &user.email],
+            &[&user.id.as_str(), &app.id, &user.email],
         )
         .await
         .unwrap()
@@ -95,13 +95,13 @@ pub(super) async fn gateway_session(database: &Database, user: &users::UserRow, 
 pub(super) async fn identity(database: &Database, user: &users::UserRow, app: &App) -> String {
     let subject = zeroship_core::auth::derive_pairwise(
         &zeroship_core::crypto::derive_key("password-reset-test-salt"),
-        &user.id.to_string(),
+        &user.id,
         &format!("https://{}.example.test", app.client_id),
     );
     database.connect().await.execute(
         "INSERT INTO zeroship.app_user_identities (app_client_id, global_user_id, pairwise_sub) \
          VALUES ($1, $2, $3)",
-        &[&app.client_id, &user.id, &subject],
+        &[&app.client_id, &user.id.as_str(), &subject],
     ).await.unwrap();
     subject
 }
@@ -112,7 +112,7 @@ pub(super) async fn anchor(database: &Database, user: &users::UserRow, app: &App
         "INSERT INTO zeroship.app_session_anchors \
          (id, app_id, client_id, global_user_id, refresh_token_enc, refresh_family_id, abs_expires_at) \
          VALUES ($1, $2, $3, $4, $5, $6, NOW() + INTERVAL '30 days')",
-        &[&id, &app.id, &app.client_id, &user.id, &b"opaque-gateway-ciphertext".to_vec(),
+        &[&id, &app.id, &app.client_id, &user.id.as_str(), &b"opaque-gateway-ciphertext".to_vec(),
           &format!("rfam_{id}")],
     ).await.unwrap();
     id
@@ -141,7 +141,7 @@ pub(super) async fn refresh_session(
     let scopes = vec!["openid".into(), "offline_access".into()];
     let grant_id = session_store::upsert_grant(
         pg,
-        user.id,
+        &user.id,
         &Audience::App {
             client_id: app.client_id.clone(),
         },
@@ -155,7 +155,7 @@ pub(super) async fn refresh_session(
         pg,
         &keys,
         &NewSession {
-            person_id: user.id,
+            person_id: &user.id,
             grant_id: &grant_id,
             subject,
             grant_scopes: &scopes,

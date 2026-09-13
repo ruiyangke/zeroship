@@ -52,12 +52,8 @@ pub struct ColumnInfo {
         reason = "This metadata is exported for test-helper diff assertions and future live-schema consumers beyond the current release path."
     )]
     pub is_geopoint: bool,
-    /// Encryption metadata recovered from the stored column sentinel.
-    #[allow(
-        dead_code,
-        reason = "This metadata is exported for test-helper diff assertions and future live-schema consumers beyond the current release path."
-    )]
-    pub encryption: Option<EncryptionMeta>,
+    /// Whether the stored catalog marks this column as encrypted.
+    pub encrypted: bool,
     /// Mask strategy, classification and raw-column metadata recovered from the catalog.
     pub mask: Option<MaskMeta>,
 }
@@ -72,28 +68,10 @@ impl Default for ColumnInfo {
             default_volatility: None,
             vector_dims: None,
             is_geopoint: false,
-            encryption: None,
+            encrypted: false,
             mask: None,
         }
     }
-}
-
-/// Plaintext type retained by the physical catalog for encrypted storage.
-/// PostgreSQL records the encryption sentinel in a column comment; SQLite
-/// retains its inline comment in `sqlite_master.sql`.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct EncryptionMeta {
-    /// The logical primitive hidden by the physical binary SQL type. Runtime
-    /// codecs use the installed field descriptor's `type`.
-    pub wraps: WrappedType,
-}
-
-/// Plaintext primitive encoded in a catalog encryption sentinel.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum WrappedType {
-    String,
-    Number,
-    Bytes,
 }
 
 /// Mask metadata recovered from a protection sentinel on the visible column.
@@ -107,7 +85,7 @@ pub struct MaskMeta {
     pub classification: Classification,
     /// Conventional raw-column name derived during catalog recovery.
     /// Runtime reads and writes use the installed descriptor’s storage mapping.
-    pub sibling_column: String,
+    pub raw_column: String,
 }
 
 /// Built-in mask strategy. `None` disables masking while retaining encryption.
@@ -129,7 +107,7 @@ pub enum MaskKind {
     DateYear,
     /// `"198?-**-**"` — preserve decade. Coarser-grained analytics.
     DateDecade,
-    /// Explicit opt-out: no sibling emission, no mask wrap on read.
+    /// Explicit opt-out: no raw storage column and no mask wrapper on read.
     /// Used by encrypted columns the creator wants plaintext-on-read
     /// for (e.g. background-job-only read paths).
     None,
@@ -183,15 +161,9 @@ impl MaskKind {
 /// Taxonomy of sensitivity classes used to drive
 /// unmask authorization and audit-row tagging.
 ///
-/// Mirrors the SDK's `Classification` union. The taxonomy is
-/// deliberately small — six classes covering the standard regulatory
-/// boundaries (PII / SPI / PHI / PCI) plus `Public` (nothing to
-/// protect) and `Internal` (platform metadata).
-///
-/// The six default-classification names (`public`, `pii`, `spi`,
-/// `phi`, `pci`, `internal`) are RESERVED as column names by
-/// `query::validate_field_name` so creators cannot accidentally
-/// collide with the classification taxonomy in their schemas.
+/// Mirrors the SDK's `Classification` union. It covers the regulatory
+/// categories plus public and application-internal data. The canonical names
+/// are reserved as columns so schemas cannot collide with the taxonomy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Classification {
     /// Usernames, display names, public profile data — visible to all.
@@ -206,7 +178,7 @@ pub enum Classification {
     Phi,
     /// PCI — card numbers, CVV, magnetic stripe data (PCI-DSS scope).
     Pci,
-    /// Internal — platform-internal metadata, system field overrides.
+    /// Internal application metadata.
     Internal,
 }
 

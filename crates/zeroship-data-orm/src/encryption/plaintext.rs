@@ -1,14 +1,15 @@
 //! Native plaintext encoding selected by the logical field type.
 
-use base64::Engine as _;
 use crate::value::Value;
+use base64::Engine as _;
 
-use crate::error::DbError;
+use crate::{error::DbError, sql::statement::DecimalStorage};
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum PlaintextType {
     String,
     Number,
+    ExactDecimal(DecimalStorage),
     Bytes,
 }
 
@@ -25,6 +26,17 @@ impl PlaintextType {
         }
         match field.get("type").and_then(Value::as_str) {
             Some("string") => Ok(Some(Self::String)),
+            Some("number") if field.get("precision").is_some() => {
+                let storage = crate::sql::decimal::storage(field).map_err(|error| {
+                    DbError::validation("invalid_numeric_metadata", error.to_string())
+                })?;
+                Ok(Some(Self::ExactDecimal(storage.ok_or_else(|| {
+                    DbError::validation(
+                        "invalid_numeric_metadata",
+                        "fixed precision number requires decimal storage",
+                    )
+                })?)))
+            }
             Some("number") => Ok(Some(Self::Number)),
             Some("bytes") => Ok(Some(Self::Bytes)),
             _ => Err(DbError::validation(
@@ -41,6 +53,14 @@ impl PlaintextType {
                 .as_f64()
                 .filter(|n| n.is_finite())
                 .map(|n| n.to_be_bytes().to_vec()),
+            Self::ExactDecimal(storage) => match value {
+                Value::Decimal(value) if crate::sql::decimal::valid(value) => {
+                    crate::sql::decimal::quantize(value, storage)
+                        .ok()
+                        .map(String::into_bytes)
+                }
+                _ => None,
+            },
             Self::Bytes => value.as_bytes().map(<[u8]>::to_vec),
         };
         bytes.ok_or_else(|| {
@@ -64,6 +84,13 @@ impl PlaintextType {
                 })?;
                 Value::try_from(f64::from_be_bytes(bytes)).map_err(DbError::internal)
             }
+            Self::ExactDecimal(storage) => {
+                let value = std::str::from_utf8(bytes)
+                    .map_err(|_| DbError::internal("decrypted decimal is not valid UTF-8"))?;
+                crate::sql::decimal::quantize(value, storage)
+                    .map(Value::Decimal)
+                    .map_err(|_| DbError::internal("decrypted decimal is not valid"))
+            }
             Self::Bytes => Ok(Value::Bytes(bytes.to_vec())),
         }
     }
@@ -77,6 +104,9 @@ impl PlaintextType {
             Self::Number => {
                 f64::from_be_bytes(bytes.try_into().expect("encoded number")).to_string()
             }
+            Self::ExactDecimal(_) => std::str::from_utf8(bytes)
+                .expect("encoded decimal")
+                .to_owned(),
             Self::Bytes => base64::engine::general_purpose::STANDARD.encode(bytes),
         }
     }
@@ -100,6 +130,25 @@ mod tests {
             let bytes = codec.encode(&value).unwrap();
             assert_eq!(codec.decode(&bytes).unwrap(), value);
         }
+    }
+
+    #[test]
+    fn encrypted_exact_decimal_round_trips_without_floating_point() {
+        let codec = PlaintextType::from_field(&value!({
+            "type": "number",
+            "precision": 30,
+            "scale": 2,
+            "encrypted": true
+        }))
+        .unwrap()
+        .unwrap();
+        let value = Value::Decimal("9007199254740993.005".into());
+        let bytes = codec.encode(&value).unwrap();
+        assert_eq!(
+            codec.decode(&bytes).unwrap(),
+            Value::Decimal("9007199254740993.01".into())
+        );
+        assert_eq!(codec.mask_text(&bytes), "9007199254740993.01");
     }
 
     #[test]

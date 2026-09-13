@@ -21,6 +21,7 @@ use zeroship_control::oauth_clients::reconcile_oauth_clients;
 use zeroship_core::auth::hash_client_secret;
 use zeroship_core::config::OauthClientRegistration;
 use zeroship_core::device_grant::PLATFORM_CLI_CLIENT_ID;
+use zeroship_core::AppId;
 
 use crate::common;
 
@@ -223,7 +224,7 @@ async fn absent_config_manages_nothing_and_present_config_prunes() {
 #[compio::test]
 async fn pruning_spares_per_app_clients_and_the_platform_cli_client() {
     let pg = pg().await;
-    let app_client = zeroship_core::typed_id::app_oauth_client_id(&Uuid::now_v7());
+    let app_client = zeroship_core::typed_id::app_oauth_client_id(&AppId::mint());
     let named = format!("cfg-named-{}", Uuid::new_v4().simple());
 
     // Register both foreigners through the same path, then reconcile a config

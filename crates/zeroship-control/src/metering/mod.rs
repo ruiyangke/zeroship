@@ -14,6 +14,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 use chrono::{Datelike, NaiveDate, TimeZone, Utc};
 use uuid::Uuid;
+use zeroship_core::app_id::AppId;
 use zeroship_core::usage_event::{UsageEvent, UsageSubject};
 
 use crate::registry::{Registry, RegistryError};
@@ -60,7 +61,7 @@ pub(crate) fn period_date(period_start_unix_secs: i64) -> NaiveDate {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UsageAggregate {
-    pub app_id: Uuid,
+    pub app_id: AppId,
     pub metric: String,
     pub total: i64,
 }
@@ -72,7 +73,7 @@ pub struct UsageAggregate {
 /// [`Metering::replace_period_snapshot`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PeriodTotalDecrease {
-    pub app_id: Uuid,
+    pub app_id: AppId,
     pub metric: String,
     pub prior_total: i64,
     pub new_total: i64,
@@ -119,7 +120,7 @@ impl Metering {
     /// Record trusted control-plane usage in the current billing period.
     pub async fn record_direct(
         &self,
-        app_id: &Uuid,
+        app_id: &AppId,
         deltas: &[(String, i64)],
         billing_stream: Option<&BillingStreamConfig>,
     ) -> Result<(), RegistryError> {
@@ -135,7 +136,7 @@ impl Metering {
     /// aggregate table is incremented directly as a dev-only fallback.
     pub async fn record_direct_at(
         &self,
-        app_id: &Uuid,
+        app_id: &AppId,
         deltas: &[(String, i64)],
         event_time_unix_secs: i64,
         billing_stream: Option<&BillingStreamConfig>,
@@ -148,9 +149,9 @@ impl Metering {
             if *delta <= 0 {
                 continue;
             }
-            if !Self::register_metric(&tx, app_id, metric).await? {
+            if !Self::register_metric(&tx, app_id.as_str(), metric).await? {
                 tracing::warn!(
-                    app_id = %app_id,
+                    app_id = %app_id.as_str(),
                     metric = %metric,
                     billing_event = "custom_metric_cap_refused",
                     "metering: custom metric refused at per-app cap — dropping direct delta"
@@ -170,7 +171,7 @@ impl Metering {
                      VALUES ($1, $2::date, $3, $4, NOW()) \
                      ON CONFLICT (app_id, period, metric) \
                      DO UPDATE SET total = u.total + EXCLUDED.total, updated_at = NOW()",
-                    &[app_id, &period, metric, delta],
+                    &[&app_id.as_str(), &period, metric, delta],
                 )
                 .await?;
             }
@@ -190,7 +191,7 @@ impl Metering {
                 event_id: Uuid::now_v7().to_string(),
                 source: "zeroship-control".to_string(),
                 subject: UsageSubject {
-                    app: Some(*app_id),
+                    app: Some(app_id.clone()),
                     organization: None,
                 },
                 meter,
@@ -252,9 +253,17 @@ impl Metering {
                 &[&period],
             )
             .await?;
-        let mut prior = HashMap::<(Uuid, String), i64>::new();
+        let mut prior = HashMap::<(AppId, String), i64>::new();
         for row in &prior_rows {
-            prior.insert((row.get("app_id"), row.get("metric")), row.get("total"));
+            let app_id_raw: String = row.get("app_id");
+            let Ok(app_id) = AppId::parse(&app_id_raw) else {
+                tracing::error!(
+                    app_id = %app_id_raw,
+                    "metering: usage_aggregates row has a malformed app id; skipping in shrink check"
+                );
+                continue;
+            };
+            prior.insert((app_id, row.get("metric")), row.get("total"));
         }
 
         tx.execute(
@@ -265,11 +274,11 @@ impl Metering {
 
         let mut decreased = Vec::new();
         let mut written = 0usize;
-        let mut resolved_cache = HashSet::<(Uuid, String)>::new();
+        let mut resolved_cache = HashSet::<(AppId, String)>::new();
         for aggregate in aggregates {
             if aggregate.total < 0 {
                 tracing::warn!(
-                    app_id = %aggregate.app_id,
+                    app_id = %aggregate.app_id.as_str(),
                     metric = %aggregate.metric,
                     total = aggregate.total,
                     "metering: negative snapshot total refused"
@@ -279,11 +288,11 @@ impl Metering {
             if aggregate.total == 0 {
                 continue;
             }
-            let cache_key = (aggregate.app_id, aggregate.metric.clone());
+            let cache_key = (aggregate.app_id.clone(), aggregate.metric.clone());
             if !resolved_cache.contains(&cache_key) {
-                if !Self::register_metric(&tx, &aggregate.app_id, &aggregate.metric).await? {
+                if !Self::register_metric(&tx, aggregate.app_id.as_str(), &aggregate.metric).await? {
                     tracing::warn!(
-                        app_id = %aggregate.app_id,
+                        app_id = %aggregate.app_id.as_str(),
                         metric = %aggregate.metric,
                         billing_event = "custom_metric_cap_refused",
                         "metering: custom metric refused at per-app cap — dropping snapshot total"
@@ -300,7 +309,7 @@ impl Metering {
                  ON CONFLICT (app_id, period, metric) DO UPDATE SET \
                    total = EXCLUDED.total, updated_at = NOW()",
                 &[
-                    &aggregate.app_id,
+                    &aggregate.app_id.as_str(),
                     &period,
                     &aggregate.metric,
                     &aggregate.total,
@@ -311,10 +320,10 @@ impl Metering {
 
             // Compared per (app, metric) rather than on a period sum: one app's total
             // shrinking is invisible in a sum that another app's growth covers.
-            if let Some(&was) = prior.get(&(aggregate.app_id, aggregate.metric.clone())) {
+            if let Some(&was) = prior.get(&(aggregate.app_id.clone(), aggregate.metric.clone())) {
                 if aggregate.total < was {
                     decreased.push(PeriodTotalDecrease {
-                        app_id: aggregate.app_id,
+                        app_id: aggregate.app_id.clone(),
                         metric: aggregate.metric.clone(),
                         prior_total: was,
                         new_total: aggregate.total,
@@ -327,9 +336,14 @@ impl Metering {
         Ok(PeriodSnapshotWrite { written, decreased })
     }
 
+    /// `owner_app` is the printed app id, bound directly as the `text` column
+    /// it names. Taking a bare string rather than [`AppId`] keeps this private
+    /// helper decoupled from the identity type: every caller already holds an
+    /// [`AppId`] and passes `app_id.as_str()`, so the string is the shape the
+    /// column and the SQL bind actually need.
     async fn register_metric<C: compio_postgres::GenericClient + Sync>(
         conn: &C,
-        owner_app: &Uuid,
+        owner_app: &str,
         metric: &str,
     ) -> Result<bool, RegistryError> {
         let existing = conn
@@ -358,7 +372,7 @@ impl Metering {
                           WHERE owner_app = $2 AND kind = 'custom') < $3 \
                  ON CONFLICT (metric) DO UPDATE SET last_seen_at = NOW() \
                  RETURNING metric",
-                &[&metric, owner_app, &MAX_CUSTOM_METRICS_PER_APP],
+                &[&metric, &owner_app, &MAX_CUSTOM_METRICS_PER_APP],
             )
             .await?;
         Ok(!inserted.is_empty())
@@ -368,7 +382,7 @@ impl Metering {
     /// `metric → total` map.
     pub async fn period_totals(
         &self,
-        app_id: &Uuid,
+        app_id: &AppId,
         period_start_unix_secs: i64,
     ) -> Result<HashMap<String, i64>, RegistryError> {
         let conn = self.registry.conn().await?;
@@ -378,14 +392,14 @@ impl Metering {
     /// As [`Metering::period_totals`] but on a borrowed connection.
     pub async fn period_totals_on<C: compio_postgres::GenericClient + Sync>(
         conn: &C,
-        app_id: &Uuid,
+        app_id: &AppId,
         period_start_unix_secs: i64,
     ) -> Result<HashMap<String, i64>, RegistryError> {
         let rows = conn
             .query(
                 "SELECT metric, total FROM zeroship.usage_aggregates \
                  WHERE app_id = $1 AND period = $2::date",
-                &[app_id, &period_date(period_start_unix_secs)],
+                &[&app_id.as_str(), &period_date(period_start_unix_secs)],
             )
             .await?;
         let mut out = HashMap::new();
@@ -399,15 +413,26 @@ impl Metering {
     /// period.
     pub async fn current_period_totals(
         &self,
-        app_id: &Uuid,
+        app_id: &AppId,
     ) -> Result<HashMap<String, i64>, RegistryError> {
         self.period_totals(app_id, current_period_start_unix()).await
+    }
+
+    /// [`Self::current_period_totals`] on a fresh connection. Kept as a
+    /// separate entry point for callers (e.g. the `env.db` usage read in
+    /// [`crate::api`]) that already hold nothing but the app id and want the
+    /// current period in one call.
+    pub async fn current_period_totals_for_app(
+        &self,
+        app_id: &zeroship_core::app_id::AppId,
+    ) -> Result<HashMap<String, i64>, RegistryError> {
+        self.current_period_totals(app_id).await
     }
 
     /// Read the aggregated total for a `(app_id, period_start, metric)` bucket.
     pub async fn total(
         &self,
-        app_id: &Uuid,
+        app_id: &AppId,
         period_start_unix_secs: i64,
         metric: &str,
     ) -> Result<i64, RegistryError> {
@@ -417,7 +442,7 @@ impl Metering {
                 "SELECT total FROM zeroship.usage_aggregates \
                  WHERE app_id = $1 AND period = $2::date \
                    AND metric = $3",
-                &[app_id, &period_date(period_start_unix_secs), &metric],
+                &[&app_id.as_str(), &period_date(period_start_unix_secs), &metric],
             )
             .await?;
         Ok(rows.first().map_or(0, |r| r.get("total")))

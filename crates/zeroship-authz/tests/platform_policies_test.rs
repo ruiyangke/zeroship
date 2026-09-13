@@ -23,8 +23,8 @@ use serde_json::json;
 use zeroship_authz::{load_platform_policies, PlatformPolicies};
 
 const APP: &str = "app_blog";
-const PROJECT: &str = "prj_0000000000000000000001";
-const ORGANIZATION: &str = "org_0000000000000000000001";
+const PROJECT: &str = "prj_0000000000000000000000001";
+const ORGANIZATION: &str = "org_0000000000000000000000001";
 
 const VIEWER: i64 = 10;
 const DEVELOPER: i64 = 20;

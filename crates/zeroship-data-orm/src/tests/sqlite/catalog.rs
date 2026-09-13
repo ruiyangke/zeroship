@@ -37,7 +37,11 @@ fn introspect_empty_schema_yields_empty_live_schema() {
                 .await
                 .expect("ensure_app_schema");
             let live = backend
-                .introspect_schema("app_demo")
+                .introspect_schema(
+                    "app_demo",
+                    &crate::sql::SchemaName::new("app_demo").unwrap(),
+                    None,
+                )
                 .await
                 .expect("introspect_schema on empty namespace");
             // No user tables → empty `tables` / `indexes` / `foreign_keys`.
@@ -98,7 +102,11 @@ fn introspect_after_create_table_round_trip() {
                 .expect("CREATE INDEX items_name_idx");
 
             let live = backend
-                .introspect_schema("app_demo")
+                .introspect_schema(
+                    "app_demo",
+                    &crate::sql::SchemaName::new("app_demo").unwrap(),
+                    None,
+                )
                 .await
                 .expect("introspect_schema after CREATE TABLE");
 
@@ -114,11 +122,8 @@ fn introspect_after_create_table_round_trip() {
                 cols.keys().collect::<Vec<_>>()
             );
 
-            // Type strings: SQLite returns the declared affinity uppercase
-            // ("INTEGER" / "TEXT"). The diff classifier reads these
-            // stringly — the PG impl populates `format_type(...)` results
-            // here; SQLite populates the affinity name directly per plan
-            // §3.4 ("populate `pg_type` with SQLite affinity names").
+            // SQLite reports declared affinity names where PostgreSQL reports
+            // `format_type(...)`; the shared catalog model stores either form.
             let id_col = cols.get("id").expect("id column");
             assert_eq!(id_col.pg_type, "INTEGER");
             // `id INTEGER PRIMARY KEY` is a special SQLite case — it's an
@@ -165,6 +170,44 @@ fn introspect_after_create_table_round_trip() {
                 .await
                 .expect("estimate_row_count");
             assert_eq!(n, 0, "freshly-created table has 0 rows");
+        });
+    })
+}
+
+#[test]
+fn introspection_includes_prefixed_creator_schema_tables() {
+    Host::test(|host| {
+        host.run(async {
+            let (backend, _dir) = fresh_backend(host);
+            backend
+                .attach_app_file("app_demo")
+                .await
+                .expect("attach creator database");
+            backend
+                .execute_fixture(
+                    "CREATE TABLE \"app_demo\".\"__zs_workflow_state\" (\
+                     id TEXT PRIMARY KEY, \
+                     \"secret\" TEXT /* zero-migrate:mask:kind=full,classification=pii */\
+                     )",
+                    &[],
+                )
+                .await
+                .expect("create prefixed table");
+
+            let live = backend
+                .introspect_schema(
+                    "app_demo",
+                    &crate::sql::SchemaName::new("app_demo").unwrap(),
+                    None,
+                )
+                .await
+                .expect("introspect prefixed table");
+            let secret = live
+                .tables
+                .get("__zs_workflow_state")
+                .and_then(|columns| columns.get("secret"))
+                .expect("prefixed table protection metadata");
+            assert!(secret.mask.is_some(), "stored mask metadata was skipped");
         });
     })
 }

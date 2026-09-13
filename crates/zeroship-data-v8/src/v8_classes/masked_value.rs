@@ -332,8 +332,11 @@ impl MaskedValue {
             // returning early, so the `probe` branch keeps deciding what a
             // rejection means: `not_configured` is not `unmask_not_permitted`,
             // so `canUnmask()` still re-throws it instead of answering `false`.
-            let outcome = match crate::tx_scope::bind_route(route).await {
-                Ok(route) => dispatch_unmask(&route, &binding, args).await,
+            let outcome = match route {
+                Ok(route) => match crate::tx_scope::bind_route(route).await {
+                    Ok(route) => dispatch_unmask(&route, &binding, args).await,
+                    Err(e) => Err(e),
+                },
                 Err(e) => Err(e),
             };
             match outcome {
@@ -445,8 +448,11 @@ impl MaskedValue {
         state.borrow_mut().spawned_ops.push(Box::pin(async move {
             // Bound adapter-side and folded into the error arm, exactly as
             // in [`MaskedValue::dispatch_unmask_single`] above.
-            let outcome = match crate::tx_scope::bind_route(route).await {
-                Ok(route) => dispatch_bulk_unmask(&route, &binding, args).await,
+            let outcome = match route {
+                Ok(route) => match crate::tx_scope::bind_route(route).await {
+                    Ok(route) => dispatch_bulk_unmask(&route, &binding, args).await,
+                    Err(e) => Err(e),
+                },
                 Err(e) => Err(e),
             };
             match outcome {
@@ -553,7 +559,7 @@ pub fn rehydrate_masked_values<'s, 'a>(
         env_vars
             .get("APP_ID")
             .cloned()
-            .unwrap_or_else(|| "default".to_string())
+            .unwrap_or_else(|| zeroship_core::app_id::LOCAL_DEV_APP_ID.to_string())
     };
     // Same identity `v8_classes::db::mint_db` captures, through the same one
     // helper: a pinned workflow isolate and a current isolate of one app hold

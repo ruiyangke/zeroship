@@ -3,8 +3,7 @@
  *
  * Re-exports the SDK innards needed by `@zeroship/bootstrap` (the
  * coordination package the runtime crate + Vite plugin consume). User
- * code MUST NOT import from this subpath — symbols here have no
- * back-compat guarantee.
+ * code must not import from this subpath; it is not public API.
  *
  * The dependency direction is bootstrap → db: bootstrap owns
  * `installSchema`, the `__zsDispatch` dispatcher, and dev/runtime
@@ -16,6 +15,7 @@
  * explicit at the import site.
  */
 export { Collection } from "./collection";
+export { TRANSACTION_READ } from "./collection/crud";
 export { captureNativeTransaction } from "./native";
 export type {
   NativeDb,
@@ -25,24 +25,21 @@ export type {
 } from "./native";
 export { Query } from "./query";
 export type { PaginationResult } from "./query";
-export type { TxCollection, TxQuery, TransactionOptions } from "./db-types";
+export type { TransactionDb, TxCollection, TxQuery, TransactionOptions } from "./db-types";
 export { createLive } from "./live";
 export type { LiveOptions, LiveQuery } from "./live";
 export { subscribe } from "./subscribe";
 export type { Subscription, SubscriptionEvent } from "./subscribe";
 export {
-  anyCollectionInTransaction,
   drainCollectionLoaders,
-  enterTransactionScope,
-  exitTransactionScope,
-  readTransactionDepth,
 } from "./tx-state";
 export type { TransactionStateCarrier } from "./tx-state";
 export { naming, SchemaBuilder, TypeBuilder, ok, err } from "./types";
-export { readFrom } from "./read";
+export { readFrom, scopeAliasedCollection } from "./read";
 export type { ReadFrom, AliasedCollection } from "./read";
 export type {
   NamingStrategy,
+  Actor,
   NamedIndexSpec,
   PlainObject,
   Result,
@@ -52,6 +49,10 @@ export type {
   UpsertOptions,
   UpdateExpression,
   Filter,
+  DistinctField,
+  SelectInput,
+  SortInput,
+  SortSpec,
   IsolationLevel,
   WithSpec,
   WithRelations,
@@ -84,8 +85,6 @@ export { validateDoc, checkPartial } from "./validate";
 // drive the dedup state the matching internal getter inspects.
 export { translateAggregatePipeline } from "./utils";
 
-// P5.5 PR 5 — defineMaskPolicy() pending-slot drain. The bootstrap
-// runtime-entry calls `_flushPendingMaskPolicy()` once at app init and
-// flushes the returned policy through `__platform.setMaskPolicy`.
+// Mask-policy startup handoff consumed by the bootstrap package.
 export { _flushPendingMaskPolicy, _peekPendingMaskPolicy } from "./policy";
 export type { MaskPolicy } from "./policy";

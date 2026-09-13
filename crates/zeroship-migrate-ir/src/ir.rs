@@ -1041,13 +1041,12 @@ pub enum VectorMetric {
 #[serde(rename_all = "camelCase")]
 pub enum ColumnCollation {
     /// Compare and order this column by its stored BYTES, so a value whose byte
-    /// order is its semantic order (a ULID, a TypeID, a base62 UUIDv7) sorts the
+    /// order is its semantic order (a ULID, a TypeID, a base36 UUIDv7) sorts the
     /// way it was minted.
     ///
     /// PostgreSQL `COLLATE "C"`, SQLite `COLLATE BINARY`, MySQL
     /// `utf8mb4_0900_bin`. Without it the column takes the database default,
-    /// which on a `en_US.utf8` PostgreSQL interleaves the upper- and lower-case
-    /// runs of base62 and silently stops `ORDER BY id` being creation order.
+    /// which may not use the same ordering rules as the encoded value.
     Bytewise,
 }
 
@@ -1368,12 +1367,12 @@ pub struct IrColumn {
     /// the whole story.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub references: Option<ColumnReference>,
-    /// Legacy internal platform-ID prefix for the
-    /// `<prefix>_<22 base62 UUIDv7>` format. This is a DECLARED-ONLY hint DB
+    /// Internal platform-ID prefix for the
+    /// `<prefix>_<25 base36 UUIDv7>` format. This is a DECLARED-ONLY hint DB
     /// introspection cannot recover (the minted value is opaque text in the
     /// catalog; the prefix is a mint-time input, not a stored column attribute).
-    /// It is retained for internal platform descriptors and old data only; it is
-    /// neither TypeID nor public migration authoring. Carried so gen-types - and
+    /// It is used by internal platform descriptors; it is neither TypeID nor
+    /// public migration authoring. Carried so gen-types - and
     /// the runtime, once it deletes the declared-schema cache - keep that legacy
     /// internal brand.
     /// Default-absent + `skip_serializing_if` so a column that declares no prefix is

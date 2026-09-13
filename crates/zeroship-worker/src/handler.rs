@@ -50,7 +50,7 @@ const STREAM_FLUSH_INTERVAL: std::time::Duration = std::time::Duration::from_sec
 const STREAM_FLUSH_BYTES: u64 = 1024 * 1024;
 
 const WORKFLOW_INLINE_OUTPUT_CAP_BYTES: usize = 1024 * 1024;
-static PROVISIONED_WORKFLOW_JOURNALS: OnceLock<Mutex<HashSet<Uuid>>> = OnceLock::new();
+static PROVISIONED_WORKFLOW_JOURNALS: OnceLock<Mutex<HashSet<AppId>>> = OnceLock::new();
 
 /// Cap on the decoded creator-app request body.
 ///
@@ -268,13 +268,7 @@ pub async fn dispatch(
     let handler_start = std::time::Instant::now();
 
     let app_id = match AppId::parse(path.as_str()) {
-        // TRANSITIONAL, and the worker's ONLY conversion. Everything below this
-        // line - the isolate cache, the env cache, the version feed, the meter,
-        // the schema the app's tables live in - is keyed by the uuid the
-        // control plane stores and serves, so the typed id is unwrapped here
-        // rather than carried. Carrying it would silently re-key all of them to
-        // a rendering no database row holds.
-        Ok(id) => id.uuid(),
+        Ok(id) => id,
         Err(_) => {
             // The only reject with no app to attribute to: the id did not
             // parse, so there is no subject to meter against.
@@ -366,8 +360,10 @@ pub async fn dispatch(
     let runtime = match cache::get_runtime(&app_id) {
         Some(r) => r,
         None => {
-            let response =
-                HttpResponse::NotFound().body(format!(r#"{{"error":"app {app_id} not loaded"}}"#));
+            let response = HttpResponse::NotFound().body(format!(
+                r#"{{"error":"app {} not loaded"}}"#,
+                app_id.as_str()
+            ));
             record_reject(&response, request_body.len() as u64);
             return response;
         }
@@ -488,13 +484,13 @@ pub async fn dispatch(
 
     match outcome {
         FetchOutcome::Response { status, headers, body, logs: request_logs } => {
-            crate::logs::append(&logs, app_id, request_logs);
+            crate::logs::append(&logs, &app_id, request_logs);
             record(body.len() as u64);
             make_http_response(status, headers, body)
         }
         FetchOutcome::Stream { status, headers, body_reader, logs: request_logs } => {
-            crate::logs::append(&logs, app_id, request_logs);
-            record_stream_unary(app_id, cpu_us, ingress_bytes, wall_start);
+            crate::logs::append(&logs, &app_id, request_logs);
+            record_stream_unary(&app_id, cpu_us, ingress_bytes, wall_start);
             stream_response(status, &headers, body_reader, app_id)
         }
         FetchOutcome::WebSocketUpgrade { .. } => {
@@ -513,7 +509,7 @@ pub async fn dispatch(
                     body,
                     logs: request_logs,
                 })) => {
-                    crate::logs::append(&logs, app_id, request_logs);
+                    crate::logs::append(&logs, &app_id, request_logs);
                     record(body.len() as u64);
                     make_http_response(status, headers, body)
                 }
@@ -523,12 +519,12 @@ pub async fn dispatch(
                     body_reader,
                     logs: request_logs,
                 })) => {
-                    crate::logs::append(&logs, app_id, request_logs);
-                    record_stream_unary(app_id, cpu_us, ingress_bytes, wall_start);
+                    crate::logs::append(&logs, &app_id, request_logs);
+                    record_stream_unary(&app_id, cpu_us, ingress_bytes, wall_start);
                     stream_response(status, &headers, body_reader, app_id)
                 }
                 Some(Ok(SettledFetch::WebSocketUpgrade { logs: request_logs, .. })) => {
-                    crate::logs::append(&logs, app_id, request_logs);
+                    crate::logs::append(&logs, &app_id, request_logs);
                     let response =
                         make_error_msg(500, "WebSocket upgrade not supported via HTTP dispatch");
                     record(buffered_response_body_len(&response));
@@ -627,10 +623,9 @@ pub async fn workflow_advance_unsigned(
     }
 
     // Same shape and the same reason as `dispatch` above: the path carries the
-    // typed id, and the uuid is what the journal, the claim and the pinned
-    // isolate are keyed by.
+    // typed id, and it is carried - not decoded - into everything below.
     let app_id = match AppId::parse(path.as_str()) {
-        Ok(id) => id.uuid(),
+        Ok(id) => id,
         Err(_) => {
             metrics::inc(&metrics::DISPATCH_REJECTED_BAD_APP_ID);
             return HttpResponse::BadRequest().body(r#"{"error":"invalid app_id"}"#);
@@ -727,7 +722,11 @@ pub async fn workflow_advance_unsigned(
         Some(r) => r,
         None => {
             return HttpResponse::NotFound().json(&serde_json::json!({
-                "error": format!("app {app_id} deploy {} not loaded", claim.deploy_hash)
+                "error": format!(
+                    "app {} deploy {} not loaded",
+                    app_id.as_str(),
+                    claim.deploy_hash
+                )
             }));
         }
     };
@@ -765,7 +764,7 @@ pub async fn workflow_advance_unsigned(
     };
     let heartbeat = spawn_workflow_heartbeat(
         db_url.clone(),
-        claim.app_id,
+        claim.app_id.clone(),
         claim.run_id.clone(),
         claim.owner_id.clone(),
         claim.dispatch_nonce.clone(),
@@ -797,7 +796,7 @@ pub async fn workflow_advance_unsigned(
 
     match outcome {
         WorkflowOutcome::Response { json, logs: request_logs } => {
-            crate::logs::append(&logs, app_id, request_logs);
+            crate::logs::append(&logs, &app_id, request_logs);
             let response = match apply_workflow_advance_result(
                 &config,
                 &db_url,
@@ -819,7 +818,7 @@ pub async fn workflow_advance_unsigned(
         WorkflowOutcome::Pending { rx, cancel } => {
             match recv_with_timeout(&rx, wall_limit(&runtime), &cancel, &runtime).await {
                 Some(Ok(SettledWorkflow { json, logs: request_logs })) => {
-                    crate::logs::append(&logs, app_id, request_logs);
+                    crate::logs::append(&logs, &app_id, request_logs);
                     let response = match apply_workflow_advance_result(
                         &config,
                         &db_url,
@@ -870,7 +869,7 @@ impl Drop for WorkflowHeartbeat {
 
 fn spawn_workflow_heartbeat(
     db_url: String,
-    app_id: Uuid,
+    app_id: AppId,
     run_id: String,
     owner_id: String,
     dispatch_nonce: String,
@@ -890,7 +889,7 @@ fn spawn_workflow_heartbeat(
             }
             match renew_workflow_claim(
                 &db_url,
-                app_id,
+                &app_id,
                 &run_id,
                 &owner_id,
                 &dispatch_nonce,
@@ -937,7 +936,7 @@ async fn apply_workflow_advance_result(
     }
     match renew_workflow_claim(
         db_url,
-        request.app_id,
+        &request.app_id,
         &request.run_id,
         &request.owner_id,
         &request.dispatch_nonce,
@@ -1007,10 +1006,10 @@ async fn apply_workflow_advance_json(
         ));
     }
 
-    let store = PgStore::new(db_url.to_string(), request.app_id);
+    let store = PgStore::new(db_url.to_string(), &request.app_id);
     let apply_config = workflow_apply_config_from_request(request);
     match apply::apply_step_result_on_store(&store, &apply_config, step_result).await {
-        Ok(_applied) => match collect_post_apply_registrations(db_url, request.app_id, &request.run_id, true).await {
+        Ok(_applied) => match collect_post_apply_registrations(db_url, &request.app_id, &request.run_id, true).await {
             Ok(registrations) => Ok(WorkflowAdvanceResponse::ack(
                 request.run_id.clone(),
                 registrations,
@@ -1056,7 +1055,7 @@ fn workflow_apply_config_from_request(request: &StepRequest) -> WorkflowEngineCo
     }
 }
 
-async fn ensure_workflow_journal_provisioned(db_url: &str, app_id: &Uuid) -> Result<(), String> {
+async fn ensure_workflow_journal_provisioned(db_url: &str, app_id: &AppId) -> Result<(), String> {
     let cache = PROVISIONED_WORKFLOW_JOURNALS.get_or_init(|| Mutex::new(HashSet::new()));
     if cache
         .lock()
@@ -1082,13 +1081,13 @@ async fn ensure_workflow_journal_provisioned(db_url: &str, app_id: &Uuid) -> Res
     cache
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .insert(*app_id);
+        .insert(app_id.clone());
     Ok(())
 }
 
 async fn rewrite_workflow_output_blobs(
     config: &WorkerConfig,
-    app_id: &Uuid,
+    app_id: &AppId,
     json: String,
 ) -> Result<String, HttpResponse> {
     let mut value: Value = serde_json::from_str(&json).map_err(|e| {
@@ -1114,7 +1113,7 @@ async fn rewrite_workflow_output_blobs(
 
 async fn rewrite_workflow_outcome_blob(
     config: &WorkerConfig,
-    app_id: &Uuid,
+    app_id: &AppId,
     outcome: &mut Value,
 ) -> Result<(), HttpResponse> {
     let kind = outcome.get("kind").and_then(Value::as_str).unwrap_or_default();
@@ -1213,7 +1212,7 @@ fn output_bytes(output: &Value) -> Result<Vec<u8>, serde_json::Error> {
 
 async fn write_workflow_output_blob(
     config: &WorkerConfig,
-    app_id: &Uuid,
+    app_id: &AppId,
     bytes: &[u8],
     content_type: &str,
 ) -> Result<Value, HttpResponse> {
@@ -1288,7 +1287,7 @@ fn spill_encode_response(err: serde_json::Error) -> HttpResponse {
 /// INCREMENTALLY in the drain task via [`cache::record_stream_delta`], so a
 /// multi-hour stream bills continuously and a crash loses ≤ one interval.
 fn record_stream_unary(
-    app_id: Uuid,
+    app_id: &AppId,
     cpu_us: u64,
     ingress_bytes: u64,
     wall_start: std::time::Instant,
@@ -1296,7 +1295,7 @@ fn record_stream_unary(
     let wall_us = wall_start.elapsed().as_micros() as u64;
     // egress = 0: the streamed body accrues as incremental `egress_bytes`
     // deltas in the drain; `requests` is counted once here and never again.
-    cache::record_request(&app_id, cpu_us, wall_us, 0, ingress_bytes);
+    cache::record_request(app_id, cpu_us, wall_us, 0, ingress_bytes);
 }
 
 /// Build an HTTP response forwarding the JS handler's status, headers, and body.
@@ -1324,7 +1323,7 @@ fn stream_response(
     status: u16,
     headers: &[(String, String)],
     reader: StreamReader,
-    app_id: Uuid,
+    app_id: AppId,
 ) -> HttpResponse {
     let status_code = ntex::http::StatusCode::from_u16(status)
         .unwrap_or(ntex::http::StatusCode::OK);
@@ -1478,16 +1477,20 @@ fn make_error_msg(status: u16, msg: &str) -> HttpResponse {
 async fn load_on_demand(
     config: &WorkerConfig,
     envs: &SharedEnvs,
-    app_id: &Uuid,
+    app_id: &AppId,
 ) -> Result<(), String> {
     let app_version = crate::sync::fetch_app_version(&config.control_url, &config.service_auth, app_id).await?;
 
     let manifest = app_version
         .manifest
         .as_ref()
-        .ok_or_else(|| format!("app {app_id} has no manifest yet"))?;
-    let bundle_hash = crate::sync::worker_entry_hash(manifest, app_id)
-        .ok_or_else(|| format!("app {app_id} has no worker code (SSG-only or malformed manifest)"))?;
+        .ok_or_else(|| format!("app {} has no manifest yet", app_id.as_str()))?;
+    let bundle_hash = crate::sync::worker_entry_hash(manifest, app_id).ok_or_else(|| {
+        format!(
+            "app {} has no worker code (SSG-only or malformed manifest)",
+            app_id.as_str()
+        )
+    })?;
 
     let bytes = config
         .blob_store
@@ -1507,7 +1510,7 @@ async fn load_on_demand(
 
     // Now commit both atomically (env first so dispatchers always see
     // env present once runtime is present).
-    if let Err(e) = crate::sync::put_env_from_json(envs, *app_id, &env_json, app_version.env_version) {
+    if let Err(e) = crate::sync::put_env_from_json(envs, app_id.clone(), &env_json, app_version.env_version) {
         return Err(format!("env parse failed: {e}"));
     }
     let env_entry = crate::sync::get_env(envs, app_id)
@@ -1529,7 +1532,7 @@ async fn load_on_demand(
         }
     };
     cache::load_app(
-        *app_id,
+        app_id.clone(),
         &bytes,
         app_version.runtime.clone(),
         app_version.net_policy.clone(),
@@ -1549,13 +1552,13 @@ async fn load_on_demand(
     // without it, a later env-only rotation would be invisible to
     // `sync::needs_reload` and the isolate would keep serving revoked
     // credentials.
-    cache::set_loaded_meta(*app_id, cache::LoadedMeta {
+    cache::set_loaded_meta(app_id.clone(), cache::LoadedMeta {
         deploy_hash: app_version.deploy_hash.clone(),
         env_version: app_version.env_version,
         net_policy: app_version.net_policy,
     });
     tracing::info!(
-        app_id = %app_id,
+        app_id = app_id.as_str(),
         blob_prefix = &bundle_hash[..bundle_hash.len().min(8)],
         "worker: on-demand loaded app"
     );
@@ -1565,7 +1568,7 @@ async fn load_on_demand(
 async fn load_pinned_workflow_on_demand(
     config: &WorkerConfig,
     envs: &SharedEnvs,
-    app_id: &Uuid,
+    app_id: &AppId,
     deploy_hash: &str,
 ) -> Result<(), String> {
     let app_version = crate::sync::fetch_app_version(&config.control_url, &config.service_auth, app_id)
@@ -1588,8 +1591,12 @@ async fn load_pinned_workflow_on_demand(
         .validate()
         .map_err(|e| format!("manifest validation failed: {e}"))?;
 
-    let bundle_hash = crate::sync::worker_entry_hash(&manifest, app_id)
-        .ok_or_else(|| format!("app {app_id} deploy {deploy_hash} has no worker code"))?;
+    let bundle_hash = crate::sync::worker_entry_hash(&manifest, app_id).ok_or_else(|| {
+        format!(
+            "app {} deploy {deploy_hash} has no worker code",
+            app_id.as_str()
+        )
+    })?;
     let bytes = config
         .blob_store
         .get_blob(&bundle_hash)
@@ -1608,7 +1615,7 @@ async fn load_pinned_workflow_on_demand(
             .await
             .map_err(|e| format!("env fetch failed for pinned workflow load: {e}"))?;
         let env_version = app_version.as_ref().map_or(0, |info| info.env_version);
-        crate::sync::put_env_from_json(envs, *app_id, &env_json, env_version)
+        crate::sync::put_env_from_json(envs, app_id.clone(), &env_json, env_version)
             .map_err(|e| format!("env parse failed for pinned workflow load: {e}"))?;
     }
 
@@ -1625,7 +1632,7 @@ async fn load_pinned_workflow_on_demand(
         .map_or_else(AppNetPolicy::default, |info| info.net_policy.clone());
 
     cache::load_pinned_workflow_app(
-        *app_id,
+        app_id.clone(),
         deploy_hash,
         &bytes,
         runtime_limits,
@@ -1637,7 +1644,7 @@ async fn load_pinned_workflow_on_demand(
     .map_err(|e| format!("failed to load pinned bundle: {e}"))?;
 
     tracing::info!(
-        app_id = %app_id,
+        app_id = app_id.as_str(),
         deploy_hash = %deploy_hash,
         blob_prefix = &bundle_hash[..bundle_hash.len().min(8)],
         "worker: on-demand loaded pinned workflow app"
@@ -1677,19 +1684,6 @@ pub(crate) mod tests {
         path
     }
 
-    /// The path segment the worker's routes take: the app id in its printed,
-    /// typed form.
-    ///
-    /// Tests hold the `Uuid` the control plane stores, and the worker's routes
-    /// no longer read that spelling - the gateway renders the typed id and so
-    /// must anything else addressing these endpoints. Spelling the uuid into
-    /// the URL here would test a door the gateway never knocks on.
-    pub(super) fn worker_app_path(app_id: &Uuid) -> String {
-        zeroship_core::app_id::canonical_app_id_for(app_id)
-            .as_str()
-            .to_owned()
-    }
-
     fn dispatch_frame(method: &str, url: &str, body: &[u8]) -> Vec<u8> {
         zeroship_core::dispatch_frame::encode_dispatch_frame(method, url, &[], body)
             .expect("dispatch frame")
@@ -1697,17 +1691,17 @@ pub(crate) mod tests {
 
     pub(super) fn usage_value(
         events: &[zeroship_core::usage_event::UsageEvent],
-        app_id: Uuid,
+        app_id: &AppId,
         meter: &str,
     ) -> Option<u64> {
         events
             .iter()
-            .find(|event| event.subject.app == Some(app_id) && event.meter == meter)
+            .find(|event| event.subject.app.as_ref() == Some(app_id) && event.meter == meter)
             .map(|event| event.value)
     }
 
     struct MeteredDispatchResult {
-        app_id: Uuid,
+        app_id: AppId,
         status: StatusCode,
         body: Vec<u8>,
         events: Vec<zeroship_core::usage_event::UsageEvent>,
@@ -1885,7 +1879,7 @@ pub(crate) mod tests {
         let runtime = compio::runtime::Runtime::new().expect("compio runtime");
 
         Some(runtime.block_on(async {
-            let app_id = Uuid::new_v4();
+            let app_id = AppId::mint();
             let meter = Arc::new(zeroship_metering::Meter::new());
             crate::cache::init_cache(
                 10,
@@ -1915,7 +1909,7 @@ pub(crate) mod tests {
             .await;
 
             let req = test::TestRequest::post()
-                .uri(&format!("/dispatch/{}", worker_app_path(&app_id)))
+                .uri(&format!("/dispatch/{}", app_id.as_str()))
                 .header("authorization", gateway_authorization())
                 .set_payload(payload)
                 .to_request();
@@ -2017,8 +2011,7 @@ pub(crate) mod tests {
     /// well against a door that is shut to everyone.
     #[test]
     fn the_canonical_rendering_of_the_same_id_passes_the_door() {
-        let raw = Uuid::new_v4();
-        let canonical = zeroship_core::app_id::canonical_app_id_for(&raw);
+        let canonical = AppId::mint();
         let (status, rejected) = dispatch_path_segment(canonical.as_str());
         assert_eq!(
             rejected, 0,
@@ -2097,7 +2090,7 @@ pub(crate) mod tests {
         Some(runtime.block_on(async {
             init_runtime();
 
-            let app_id = Uuid::new_v4();
+            let app_id = AppId::mint();
             let meter = Arc::new(zeroship_metering::Meter::new());
             crate::cache::init_cache(
                 10,
@@ -2112,7 +2105,7 @@ pub(crate) mod tests {
                 },
             );
             crate::cache::load_app(
-                app_id,
+                app_id.clone(),
                 source,
                 limits,
                 zeroship_core::types::AppNetPolicy::default(),
@@ -2127,7 +2120,7 @@ pub(crate) mod tests {
             if insert_env {
                 crate::sync::put_env_from_json(
                     &envs,
-                    app_id,
+                    app_id.clone(),
                     r#"{"vars":{},"secrets":{},"expose":[]}"#,
                     0,
                 )
@@ -2147,7 +2140,7 @@ pub(crate) mod tests {
             .await;
 
             let req = test::TestRequest::post()
-                .uri(&format!("/dispatch/{}", worker_app_path(&app_id)))
+                .uri(&format!("/dispatch/{}", app_id.as_str()))
                 .header("authorization", gateway_authorization())
                 .set_payload(dispatch_frame(
                     "POST",
@@ -2169,12 +2162,12 @@ pub(crate) mod tests {
         assert_eq!(result.status, status);
         assert!(!result.body.is_empty(), "generated error body must be non-empty");
         assert_eq!(
-            usage_value(&result.events, result.app_id, "requests"),
+            usage_value(&result.events, &result.app_id, "requests"),
             Some(1),
             "generated error must count exactly one request"
         );
         assert_eq!(
-            usage_value(&result.events, result.app_id, "egress_bytes"),
+            usage_value(&result.events, &result.app_id, "egress_bytes"),
             Some(result.body.len() as u64),
             "generated error egress must equal the response body length"
         );
@@ -2310,12 +2303,12 @@ pub(crate) mod tests {
             String::from_utf8_lossy(&result.body),
         );
         assert_eq!(
-            usage_value(&result.events, result.app_id, "requests"),
+            usage_value(&result.events, &result.app_id, "requests"),
             Some(1),
             "exactly one request",
         );
 
-        let cpu_us = usage_value(&result.events, result.app_id, "cpu_us").unwrap_or(0);
+        let cpu_us = usage_value(&result.events, &result.app_id, "cpu_us").unwrap_or(0);
         assert!(
             cpu_us >= 200_000,
             "a 300 ms spin loop that runs on the pump must be metered as \
@@ -2414,7 +2407,7 @@ pub(crate) mod tests {
         );
         assert_eq!(result.body, b"pump-alive");
 
-        let cpu_us = usage_value(&result.events, result.app_id, "cpu_us").unwrap_or(0);
+        let cpu_us = usage_value(&result.events, &result.app_id, "cpu_us").unwrap_or(0);
         assert!(
             cpu_us >= 25_000,
             "the CPU a self-rescheduling zero-delay chain burns on the pump must \
@@ -2435,17 +2428,17 @@ pub(crate) mod tests {
 
         assert_eq!(result.status, StatusCode::BAD_REQUEST);
         assert_eq!(
-            usage_value(&result.events, result.app_id, "requests"),
+            usage_value(&result.events, &result.app_id, "requests"),
             Some(1),
             "a rejected envelope is still one request the platform served"
         );
         assert_eq!(
-            usage_value(&result.events, result.app_id, "ingress_bytes"),
+            usage_value(&result.events, &result.app_id, "ingress_bytes"),
             Some(payload.len() as u64),
             "ingress must be the raw frame bytes received, since the frame did not decode"
         );
         assert_eq!(
-            usage_value(&result.events, result.app_id, "egress_bytes"),
+            usage_value(&result.events, &result.app_id, "egress_bytes"),
             Some(result.body.len() as u64),
             "egress must be the error body actually sent"
         );
@@ -2463,12 +2456,12 @@ pub(crate) mod tests {
 
         assert_eq!(result.status, StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(
-            usage_value(&result.events, result.app_id, "requests"),
+            usage_value(&result.events, &result.app_id, "requests"),
             Some(1),
             "a failed on-demand load is still one request the platform handled"
         );
         assert_eq!(
-            usage_value(&result.events, result.app_id, "ingress_bytes"),
+            usage_value(&result.events, &result.app_id, "ingress_bytes"),
             Some(request_body.len() as u64),
             "ingress must be the request body the worker received"
         );
@@ -2496,26 +2489,26 @@ pub(crate) mod tests {
         assert_eq!(result.status, StatusCode::SERVICE_UNAVAILABLE);
         assert!(!result.body.is_empty(), "503 body must be non-empty");
         assert_eq!(
-            usage_value(&result.events, result.app_id, "requests"),
+            usage_value(&result.events, &result.app_id, "requests"),
             Some(1),
             "missing env must count exactly one request"
         );
         assert_eq!(
-            usage_value(&result.events, result.app_id, "ingress_bytes"),
+            usage_value(&result.events, &result.app_id, "ingress_bytes"),
             Some(request_body.len() as u64),
             "missing env ingress must equal the request body length"
         );
         assert!(
-            usage_value(&result.events, result.app_id, "wall_us").unwrap_or(0) > 0,
+            usage_value(&result.events, &result.app_id, "wall_us").unwrap_or(0) > 0,
             "missing env wall time must be recorded"
         );
         assert_eq!(
-            usage_value(&result.events, result.app_id, "cpu_us").unwrap_or(0),
+            usage_value(&result.events, &result.app_id, "cpu_us").unwrap_or(0),
             0,
             "missing env does not enter V8 and must record zero V8 CPU time"
         );
         assert_eq!(
-            usage_value(&result.events, result.app_id, "egress_bytes"),
+            usage_value(&result.events, &result.app_id, "egress_bytes"),
             Some(result.body.len() as u64),
             "missing env egress must equal the 503 body length"
         );
@@ -2567,7 +2560,7 @@ pub(crate) mod tests {
         runtime.block_on(async {
             init_runtime();
 
-            let app_id = Uuid::new_v4();
+            let app_id = AppId::mint();
             let source = br#"
                 export default {
                   fetch(req) {
@@ -2589,7 +2582,7 @@ pub(crate) mod tests {
                 },
             );
             crate::cache::load_app(
-                app_id,
+                app_id.clone(),
                 source,
                 AppRuntimeLimits::default(),
                 zeroship_core::types::AppNetPolicy::default(),
@@ -2603,7 +2596,7 @@ pub(crate) mod tests {
             let envs: SharedEnvs = Arc::new(RwLock::new(HashMap::new()));
             crate::sync::put_env_from_json(
                 &envs,
-                app_id,
+                app_id.clone(),
                 r#"{"vars":{},"secrets":{},"expose":[]}"#,
                 0,
             )
@@ -2647,7 +2640,7 @@ pub(crate) mod tests {
             .await;
 
             let req = test::TestRequest::post()
-                .uri(&format!("/dispatch/{}", worker_app_path(&app_id)))
+                .uri(&format!("/dispatch/{}", app_id.as_str()))
                 .header("authorization", gateway_authorization())
                 .set_payload(dispatch_frame(
                     "GET",
@@ -2661,7 +2654,7 @@ pub(crate) mod tests {
             assert_eq!(&body[..], b"ok");
 
             let req = test::TestRequest::get()
-                .uri(&format!("/logs/{}", worker_app_path(&app_id)))
+                .uri(&format!("/logs/{}", app_id.as_str()))
                 .header("authorization", control_authorization())
                 .to_request();
             let resp = test::call_service(&app, req).await;
@@ -2769,7 +2762,7 @@ pub(crate) mod tests {
     ) -> (StatusCode, Vec<String>) {
         init_runtime();
 
-        let app_id = Uuid::new_v4();
+        let app_id = AppId::mint();
         crate::cache::init_cache(
             10,
             4,
@@ -2785,7 +2778,7 @@ pub(crate) mod tests {
         // The declared policy travels the last hop with the bundle it belongs
         // to, so what the fixture declared above is what `dispatch` rules on.
         crate::cache::load_app(
-            app_id,
+            app_id.clone(),
             AUTH_OBLIVIOUS_APP,
             AppRuntimeLimits::default(),
             zeroship_core::types::AppNetPolicy::default(),
@@ -2797,7 +2790,7 @@ pub(crate) mod tests {
         .expect("app loads");
 
         let envs: SharedEnvs = Arc::new(RwLock::new(HashMap::new()));
-        crate::sync::put_env_from_json(&envs, app_id, r#"{"vars":{},"secrets":{},"expose":[]}"#, 0)
+        crate::sync::put_env_from_json(&envs, app_id.clone(), r#"{"vars":{},"secrets":{},"expose":[]}"#, 0)
             .expect("insert env");
         let logs = crate::logs::new_store();
         let blob_root = tmpdir("declared-auth-policy");
@@ -2816,7 +2809,7 @@ pub(crate) mod tests {
         // what a caller with direct network access to the worker sends, and
         // what the gateway forwards on a public route.
         let req = test::TestRequest::post()
-            .uri(&format!("/dispatch/{}", worker_app_path(&app_id)))
+            .uri(&format!("/dispatch/{}", app_id.as_str()))
                 .header("authorization", gateway_authorization())
             .set_payload(dispatch_frame(
                 "GET",
@@ -2871,7 +2864,7 @@ pub(crate) mod tests {
         compio::runtime::Runtime::new().unwrap().block_on(async {
             let dir = tmpdir("dispatch-no-credential");
             let config = test_worker_config(&dir);
-            let app_id = Uuid::new_v4();
+            let app_id = AppId::mint();
             let app = test::init_service(
                 web::App::new()
                     .state(config.clone())
@@ -2883,7 +2876,7 @@ pub(crate) mod tests {
 
             for header in [None, Some("Bearer "), Some("Bearer not-an-assertion")] {
                 let mut req = test::TestRequest::post()
-                    .uri(&format!("/dispatch/{}", worker_app_path(&app_id)))
+                    .uri(&format!("/dispatch/{}", app_id.as_str()))
                     .set_payload(dispatch_frame("GET", "http://example.test/", b""));
                 if let Some(value) = header {
                     req = req.header("authorization", value);
@@ -2903,7 +2896,7 @@ pub(crate) mod tests {
             let resp = test::call_service(
                 &app,
                 test::TestRequest::post()
-                    .uri(&format!("/dispatch/{}", worker_app_path(&app_id)))
+                    .uri(&format!("/dispatch/{}", app_id.as_str()))
                     .header("authorization", gateway_authorization())
                     .set_payload(dispatch_frame("GET", "http://example.test/", b""))
                     .to_request(),
@@ -2925,7 +2918,7 @@ pub(crate) mod tests {
             let mut config = test_worker_config(&dir);
             Arc::get_mut(&mut config).expect("sole owner").service_auth =
                 Arc::new(zeroship_core::service_peers::ServiceAuth::unconfigured());
-            let app_id = Uuid::new_v4();
+            let app_id = AppId::mint();
             let app = test::init_service(
                 web::App::new()
                     .state(config.clone())
@@ -2940,7 +2933,7 @@ pub(crate) mod tests {
             let resp = test::call_service(
                 &app,
                 test::TestRequest::post()
-                    .uri(&format!("/dispatch/{}", worker_app_path(&app_id)))
+                    .uri(&format!("/dispatch/{}", app_id.as_str()))
                     .header("authorization", gateway_authorization())
                     .set_payload(dispatch_frame("GET", "http://example.test/", b""))
                     .to_request(),
@@ -2971,7 +2964,7 @@ pub(crate) mod tests {
         compio::runtime::Runtime::new().unwrap().block_on(async {
             let dir = tmpdir("dispatch-forged-identity");
             let config = test_worker_config(&dir);
-            let app_id = Uuid::new_v4();
+            let app_id = AppId::mint();
             let app = test::init_service(
                 web::App::new()
                     .state(config.clone())
@@ -2992,7 +2985,7 @@ pub(crate) mod tests {
             let resp = test::call_service(
                 &app,
                 test::TestRequest::post()
-                    .uri(&format!("/dispatch/{}", worker_app_path(&app_id)))
+                    .uri(&format!("/dispatch/{}", app_id.as_str()))
                     .header("authorization", gateway_authorization())
                     .header("x-request-id", request_id.to_string().as_str())
                     .header("zeroship-user", forged.as_str())
@@ -3021,7 +3014,7 @@ pub(crate) mod tests {
             let resp = test::call_service(
                 &app,
                 test::TestRequest::post()
-                    .uri(&format!("/dispatch/{}", worker_app_path(&app_id)))
+                    .uri(&format!("/dispatch/{}", app_id.as_str()))
                     .header("authorization", gateway_authorization())
                     .header("x-request-id", request_id.to_string().as_str())
                     .header("zeroship-user", relabelled.as_str())
@@ -3045,7 +3038,7 @@ pub(crate) mod tests {
             let resp = test::call_service(
                 &app,
                 test::TestRequest::post()
-                    .uri(&format!("/dispatch/{}", worker_app_path(&app_id)))
+                    .uri(&format!("/dispatch/{}", app_id.as_str()))
                     .header("authorization", gateway_authorization())
                     .header("x-request-id", request_id.to_string().as_str())
                     .header("zeroship-user", genuine.as_str())
@@ -3127,7 +3120,7 @@ pub(crate) mod tests {
         runtime.block_on(async {
             init_runtime();
 
-            let app_id = Uuid::new_v4();
+            let app_id = AppId::mint();
             let source = br#"
                 export default {
                   async fetch(req) {
@@ -3149,7 +3142,7 @@ pub(crate) mod tests {
                 },
             );
             crate::cache::load_app(
-                app_id,
+                app_id.clone(),
                 source,
                 AppRuntimeLimits::default(),
                 zeroship_core::types::AppNetPolicy::default(),
@@ -3163,7 +3156,7 @@ pub(crate) mod tests {
             let envs: SharedEnvs = Arc::new(RwLock::new(HashMap::new()));
             crate::sync::put_env_from_json(
                 &envs,
-                app_id,
+                app_id.clone(),
                 r#"{"vars":{},"secrets":{},"expose":[]}"#,
                 0,
             )
@@ -3204,7 +3197,7 @@ pub(crate) mod tests {
 
             let raw_body = [0xff, 0x00, 0xfe, 0x80];
             let req = test::TestRequest::post()
-                .uri(&format!("/dispatch/{}", worker_app_path(&app_id)))
+                .uri(&format!("/dispatch/{}", app_id.as_str()))
                 .header("authorization", gateway_authorization())
                 .set_payload(dispatch_frame(
                     "POST",
@@ -3234,7 +3227,7 @@ pub(crate) mod tests {
         runtime.block_on(async {
             init_runtime();
 
-            let app_id = Uuid::new_v4();
+            let app_id = AppId::mint();
             let source = br#"
                 export default {
                   fetch() {
@@ -3255,7 +3248,7 @@ pub(crate) mod tests {
                 },
             );
             crate::cache::load_app(
-                app_id,
+                app_id.clone(),
                 source,
                 AppRuntimeLimits::default(),
                 zeroship_core::types::AppNetPolicy::default(),
@@ -3269,7 +3262,7 @@ pub(crate) mod tests {
             let envs: SharedEnvs = Arc::new(RwLock::new(HashMap::new()));
             crate::sync::put_env_from_json(
                 &envs,
-                app_id,
+                app_id.clone(),
                 r#"{"vars":{},"secrets":{},"expose":[]}"#,
                 0,
             )
@@ -3309,7 +3302,7 @@ pub(crate) mod tests {
             .await;
 
             let req = test::TestRequest::post()
-                .uri(&format!("/dispatch/{}", worker_app_path(&app_id)))
+                .uri(&format!("/dispatch/{}", app_id.as_str()))
                 .header("authorization", gateway_authorization())
                 .set_payload(dispatch_frame(
                     "GET",
@@ -3347,7 +3340,7 @@ pub(crate) mod tests {
         runtime.block_on(async {
             init_runtime();
 
-            let app_id = Uuid::new_v4();
+            let app_id = AppId::mint();
             // The handler echoes its request body so egress is deterministic,
             // and burns a little CPU in a loop so cpu_us is reliably > 0.
             let source = br#"
@@ -3376,7 +3369,7 @@ pub(crate) mod tests {
                 },
             );
             crate::cache::load_app(
-                app_id,
+                app_id.clone(),
                 source,
                 AppRuntimeLimits::default(),
                 zeroship_core::types::AppNetPolicy::default(),
@@ -3390,7 +3383,7 @@ pub(crate) mod tests {
             let envs: SharedEnvs = Arc::new(RwLock::new(HashMap::new()));
             crate::sync::put_env_from_json(
                 &envs,
-                app_id,
+                app_id.clone(),
                 r#"{"vars":{},"secrets":{},"expose":[]}"#,
                 0,
             )
@@ -3433,7 +3426,7 @@ pub(crate) mod tests {
             let req_body = "the-end-user-request-body-payload";
             let url = "http://example.test/counters-probe";
             let req = test::TestRequest::post()
-                .uri(&format!("/dispatch/{}", worker_app_path(&app_id)))
+                .uri(&format!("/dispatch/{}", app_id.as_str()))
                 .header("authorization", gateway_authorization())
                 .set_payload(dispatch_frame("POST", url, req_body.as_bytes()))
                 .to_request();
@@ -3447,26 +3440,26 @@ pub(crate) mod tests {
             let events = meter.drain();
 
             assert_eq!(
-                usage_value(&events, app_id, "requests"),
+                usage_value(&events, &app_id, "requests"),
                 Some(1),
                 "requests counter unchanged"
             );
             assert_eq!(
-                usage_value(&events, app_id, "ingress_bytes"),
+                usage_value(&events, &app_id, "ingress_bytes"),
                 Some(req_body.len() as u64),
                 "ingress_bytes must equal the request body length"
             );
             assert_eq!(
-                usage_value(&events, app_id, "egress_bytes"),
+                usage_value(&events, &app_id, "egress_bytes"),
                 Some(resp_body_len),
                 "egress_bytes must equal the response body length"
             );
             assert!(
-                usage_value(&events, app_id, "wall_us").unwrap_or(0) > 0,
+                usage_value(&events, &app_id, "wall_us").unwrap_or(0) > 0,
                 "wall_us must be a positive elapsed-time measurement"
             );
             assert!(
-                usage_value(&events, app_id, "cpu_us").unwrap_or(0) > 0,
+                usage_value(&events, &app_id, "cpu_us").unwrap_or(0) > 0,
                 "cpu_us must be a positive CPU-time measurement"
             );
 
@@ -3519,7 +3512,7 @@ pub(crate) mod tests {
         runtime.block_on(async {
             init_runtime();
 
-            let app_id = Uuid::new_v4();
+            let app_id = AppId::mint();
             // The handler exercises every kernel namespace and reports a
             // JSON verdict. A missing namespace surfaces as a thrown
             // TypeError (→ 500), so a green 200 + matching body proves the
@@ -3580,7 +3573,7 @@ pub(crate) mod tests {
                 },
             );
             crate::cache::load_app(
-                app_id,
+                app_id.clone(),
                 source,
                 AppRuntimeLimits::default(),
                 zeroship_core::types::AppNetPolicy::default(),
@@ -3594,7 +3587,7 @@ pub(crate) mod tests {
             let envs: SharedEnvs = Arc::new(RwLock::new(HashMap::new()));
             crate::sync::put_env_from_json(
                 &envs,
-                app_id,
+                app_id.clone(),
                 r#"{"vars":{},"secrets":{},"expose":[]}"#,
                 0,
             )
@@ -3634,7 +3627,7 @@ pub(crate) mod tests {
             .await;
 
             let req = test::TestRequest::post()
-                .uri(&format!("/dispatch/{}", worker_app_path(&app_id)))
+                .uri(&format!("/dispatch/{}", app_id.as_str()))
                 .header("authorization", gateway_authorization())
                 .set_payload(dispatch_frame(
                     "GET",
@@ -3734,7 +3727,7 @@ pub(crate) mod tests {
         let rt = compio::runtime::Runtime::new().expect("compio runtime");
         rt.block_on(async {
             let meter = init_meter_for_stream_test();
-            let app_id = Uuid::new_v4();
+            let app_id = AppId::mint();
 
             // Generous cap so a > 1 MiB push isn't rejected by the per-stream
             // overflow guard.
@@ -3743,7 +3736,7 @@ pub(crate) mod tests {
 
             // Hold the response so its `rx` stays alive (a dropped rx would
             // make `tx.send` fail and finalize early).
-            let _resp = stream_response(200, &[], reader, app_id);
+            let _resp = stream_response(200, &[], reader, app_id.clone());
 
             // Push > STREAM_FLUSH_BYTES so the mid-stream byte-threshold flush
             // fires while the stream is still open (NOT closed yet).
@@ -3760,7 +3753,7 @@ pub(crate) mod tests {
             // bound). Pre-fix this is empty (finalize-only recording).
             let events = meter.drain();
             assert_eq!(
-                usage_value(&events, app_id, "egress_bytes"),
+                usage_value(&events, &app_id, "egress_bytes"),
                 Some(pushed),
                 "the mid-stream byte-threshold flush records the streamed bytes \
                  before finalize"
@@ -3769,13 +3762,13 @@ pub(crate) mod tests {
             // metric was ever recorded (clippy::absurd_extreme_comparisons), which
             // silently defeated the "is recorded" claim below. Assert presence instead.
             assert!(
-                usage_value(&events, app_id, "stream_wall_us").is_some(),
+                usage_value(&events, &app_id, "stream_wall_us").is_some(),
                 "stream_wall_us is recorded as a custom metric on the incremental flush"
             );
             // The drain task NEVER counts `requests` (a stream is one request,
             // counted by record_stream_unary — not exercised here).
             assert_eq!(
-                usage_value(&events, app_id, "requests"),
+                usage_value(&events, &app_id, "requests"),
                 None,
                 "stream_response must not touch requests"
             );
@@ -3796,12 +3789,12 @@ pub(crate) mod tests {
             // wall delta).
             let events2 = meter.drain();
             assert_eq!(
-                usage_value(&events2, app_id, "egress_bytes"),
+                usage_value(&events2, &app_id, "egress_bytes"),
                 Some(more_len),
                 "the final delta records the remaining streamed bytes"
             );
             assert_eq!(
-                usage_value(&events2, app_id, "requests"),
+                usage_value(&events2, &app_id, "requests"),
                 None,
                 "still no requests from the drain"
             );
@@ -3818,16 +3811,16 @@ pub(crate) mod tests {
         let rt = compio::runtime::Runtime::new().expect("compio runtime");
         rt.block_on(async {
             let meter = init_meter_for_stream_test();
-            let app_id = Uuid::new_v4();
+            let app_id = AppId::mint();
 
             // The unary recorder runs once at stream start (as the dispatch
             // arm does), counting requests + cpu + ingress.
             let wall_start = std::time::Instant::now();
-            record_stream_unary(app_id, 123, 456, wall_start);
+            record_stream_unary(&app_id, 123, 456, wall_start);
 
             let (writer, reader) =
                 zeroship_runtime::core::channel::stream_buffer_with_cap(16 * 1024 * 1024);
-            let _resp = stream_response(200, &[], reader, app_id);
+            let _resp = stream_response(200, &[], reader, app_id.clone());
 
             // Two large batches → two mid-stream byte-threshold deltas + a
             // final delta = three drain-side increments of egress/stream_wall.
@@ -3844,27 +3837,27 @@ pub(crate) mod tests {
 
             let events = meter.drain();
             assert_eq!(
-                usage_value(&events, app_id, "requests"),
+                usage_value(&events, &app_id, "requests"),
                 Some(1),
                 "a stream counts exactly one request despite many incremental deltas"
             );
             assert_eq!(
-                usage_value(&events, app_id, "cpu_us"),
+                usage_value(&events, &app_id, "cpu_us"),
                 Some(123),
                 "unary cpu_us recorded once"
             );
             assert_eq!(
-                usage_value(&events, app_id, "ingress_bytes"),
+                usage_value(&events, &app_id, "ingress_bytes"),
                 Some(456),
                 "unary ingress_bytes recorded once"
             );
             assert!(
-                usage_value(&events, app_id, "egress_bytes").unwrap_or(0) > 0,
+                usage_value(&events, &app_id, "egress_bytes").unwrap_or(0) > 0,
                 "incremental egress accrued across deltas"
             );
             assert!(
-                usage_value(&events, app_id, "stream_wall_us").unwrap_or(0) > 0
-                    || usage_value(&events, app_id, "egress_bytes").unwrap_or(0) > 0,
+                usage_value(&events, &app_id, "stream_wall_us").unwrap_or(0) > 0
+                    || usage_value(&events, &app_id, "egress_bytes").unwrap_or(0) > 0,
                 "stream_wall_us accrues over the stream lifetime"
             );
         });
@@ -3910,8 +3903,8 @@ pub(crate) mod tests {
         rt.block_on(async {
             init_runtime();
 
-            let app_a = Uuid::new_v4();
-            let app_b = Uuid::new_v4();
+            let app_a = AppId::mint();
+            let app_b = AppId::mint();
 
             // max_size = 1: loading app B MUST try to evict app A.
             crate::cache::init_cache(
@@ -3943,7 +3936,7 @@ pub(crate) mod tests {
             "#;
 
             crate::cache::load_app(
-                app_a,
+                app_a.clone(),
                 slow,
                 AppRuntimeLimits::default(),
                 zeroship_core::types::AppNetPolicy::default(),
@@ -3957,7 +3950,7 @@ pub(crate) mod tests {
             let envs: SharedEnvs = Arc::new(RwLock::new(HashMap::new()));
             crate::sync::put_env_from_json(
                 &envs,
-                app_a,
+                app_a.clone(),
                 r#"{"vars":{},"secrets":{},"expose":[]}"#,
                 0,
             )
@@ -3976,9 +3969,10 @@ pub(crate) mod tests {
             .await;
 
             // Drive A's dispatch concurrently with this task.
+            let dispatch_app_a = app_a.clone();
             let dispatch = compio::runtime::spawn(async move {
                 let req = test::TestRequest::post()
-                    .uri(&format!("/dispatch/{}", worker_app_path(&app_a)))
+                    .uri(&format!("/dispatch/{}", dispatch_app_a.as_str()))
                 .header("authorization", gateway_authorization())
                     .set_payload(dispatch_frame("GET", "http://app-a.test/", b""))
                     .to_request();
@@ -4082,7 +4076,7 @@ mod workflow_tests {
     use zeroship_workflow::store::pg::{PgStore, WorkflowTables};
 
     use super::tests::{
-        gateway_authorization, init_runtime, test_service_auth, tmpdir, usage_value, worker_app_path,
+        gateway_authorization, init_runtime, test_service_auth, tmpdir, usage_value,
     };
     use super::*;
 
@@ -4161,7 +4155,7 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
 
     async fn deploy_workflow_fixture(
         blob_store: &Arc<dyn BlobStore>,
-        app_id: &Uuid,
+        app_id: &AppId,
         mark: &str,
     ) -> String {
         let source = workflow_source(mark);
@@ -4172,14 +4166,14 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
             .deploy_hash
     }
 
-    fn workflow_request(app_id: &Uuid) -> serde_json::Value {
+    fn workflow_request(app_id: &AppId) -> serde_json::Value {
         workflow_request_for_run(app_id, "run_test")
     }
 
-    fn workflow_request_for_run(app_id: &Uuid, run_id: &str) -> serde_json::Value {
+    fn workflow_request_for_run(app_id: &AppId, run_id: &str) -> serde_json::Value {
         serde_json::json!({
             "runId": run_id,
-            "appId": app_id,
+            "appId": app_id.as_str(),
         })
     }
 
@@ -4198,7 +4192,7 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
 
     // (app_id, blob_store, envs, logs, config, blob_root)
     type WorkflowTestState = (
-        Uuid,
+        AppId,
         Arc<dyn BlobStore>,
         SharedEnvs,
         crate::logs::SharedLogs,
@@ -4214,7 +4208,7 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
 
     // (app_id, blob_store, envs, logs, config, meter, blob_root)
     type WorkflowTestStateWithMeter = (
-        Uuid,
+        AppId,
         Arc<dyn BlobStore>,
         SharedEnvs,
         crate::logs::SharedLogs,
@@ -4225,7 +4219,7 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
 
     fn workflow_test_state_with_meter(max_pinned_isolates_per_app: usize) -> WorkflowTestStateWithMeter {
         init_runtime();
-        let app_id = Uuid::new_v4();
+        let app_id = AppId::mint();
         let meter = Arc::new(zeroship_metering::Meter::new());
         let db_url = workflow_test_db_url_opt();
         crate::cache::init_cache(
@@ -4243,7 +4237,7 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
         let envs: SharedEnvs = Arc::new(RwLock::new(HashMap::new()));
         crate::sync::put_env_from_json(
             &envs,
-            app_id,
+            app_id.clone(),
             r#"{"vars":{},"secrets":{},"expose":[]}"#,
             0,
         )
@@ -4290,7 +4284,7 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
 
     async fn seed_unclaimed_workflow_run(
         db_url: &str,
-        app_id: &Uuid,
+        app_id: &AppId,
         run_id: &str,
         workflow_name: &str,
         deploy_hash: &str,
@@ -4321,11 +4315,11 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
         .await
         .expect("upsert worker workflow test plan");
         // The app name has to vary with the id. `apps.name` is UNIQUE, and every
-        // caller seeds a fresh `Uuid::new_v4()`, so a fixed name means the
+        // caller seeds a fresh `AppId::mint()`, so a fixed name means the
         // ON CONFLICT (id) arm never fires and the insert collides on
         // `apps_name_key` instead. These tests run concurrently, so a shared name
         // makes all but the first fail on contact.
-        let app_name = format!("worker-workflow-test-app-{app_id}");
+        let app_name = format!("worker-workflow-test-app-{}", app_id.as_str());
         // An app needs a project and a project needs an organization:
         // `apps.project_id` is NOT NULL against a RESTRICT foreign key. Workflow
         // admission is what these tests drive, not authority, so the
@@ -4350,7 +4344,7 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
             "INSERT INTO zeroship.apps (id, name, plan_id, workflows_enabled, project_id, organization_id) \
              SELECT $1, $3, $2, true, p.id, p.organization_id FROM zeroship.projects p WHERE p.id = $4 \
              ON CONFLICT (id) DO UPDATE SET plan_id = EXCLUDED.plan_id, workflows_enabled = true",
-            &[app_id, &WORKFLOW_TEST_PLAN, &app_name, &project_id],
+            &[&app_id.as_str(), &WORKFLOW_TEST_PLAN, &app_name, &project_id],
         )
         .await
         .expect("upsert worker workflow test app");
@@ -4365,7 +4359,11 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
                  VALUES ($1, $2, $3, '{}', now()) \
                  ON CONFLICT (app_id, deploy_hash) DO UPDATE SET activated_at = now() \
                  RETURNING id",
-                &[&format!("dep_{app_id}_{run_id}"), app_id, &deploy_hash],
+                &[
+                    &format!("dep_{}_{run_id}", app_id.as_str()),
+                    &app_id.as_str(),
+                    &deploy_hash,
+                ],
             )
             .await
             .expect("upsert worker workflow test deploy")
@@ -4381,7 +4379,7 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
             &[
                 &run_id,
                 &workflow_name,
-                app_id,
+                &app_id.as_str(),
                 &deploy_id,
                 &serde_json::json!({"orderId": "ord_1"}),
             ],
@@ -4390,7 +4388,7 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
         .expect("seed unclaimed workflow run");
     }
 
-    async fn reclaim_workflow_run(db_url: &str, app_id: &Uuid, run_id: &str) {
+    async fn reclaim_workflow_run(db_url: &str, app_id: &AppId, run_id: &str) {
         let conn = pg_client(db_url).await;
         let tables = WorkflowTables::for_app_id(app_id);
         conn.execute(
@@ -4406,7 +4404,7 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
         .expect("reclaim workflow run for replay");
     }
 
-    async fn steal_workflow_claim(db_url: &str, app_id: &Uuid, run_id: &str) {
+    async fn steal_workflow_claim(db_url: &str, app_id: &AppId, run_id: &str) {
         let conn = pg_client(db_url).await;
         let tables = WorkflowTables::for_app_id(app_id);
         let lease_expires_ms = std::time::SystemTime::now()
@@ -4427,7 +4425,7 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
         .expect("steal workflow claim");
     }
 
-    async fn workflow_step_names(db_url: &str, app_id: &Uuid, run_id: &str) -> Vec<String> {
+    async fn workflow_step_names(db_url: &str, app_id: &AppId, run_id: &str) -> Vec<String> {
         let conn = pg_client(db_url).await;
         let tables = WorkflowTables::for_app_id(app_id);
         conn.query(
@@ -4446,7 +4444,7 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
 
     async fn workflow_step_output(
         db_url: &str,
-        app_id: &Uuid,
+        app_id: &AppId,
         run_id: &str,
         name: &str,
     ) -> serde_json::Value {
@@ -4527,7 +4525,7 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
             .await;
 
             let req = test::TestRequest::post()
-                .uri(&format!("/workflow-advance-unsigned/{}", worker_app_path(&app_id)))
+                .uri(&format!("/workflow-advance-unsigned/{}", app_id.as_str()))
                 .header("authorization", gateway_authorization())
                 .set_payload(serde_json::to_vec(&workflow_request(&app_id)).unwrap())
                 .to_request();
@@ -4577,7 +4575,7 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
             .await;
 
             let req = test::TestRequest::post()
-                .uri(&format!("/workflow-advance-unsigned/{}", worker_app_path(&app_id)))
+                .uri(&format!("/workflow-advance-unsigned/{}", app_id.as_str()))
                 .header("authorization", gateway_authorization())
                 .set_payload(
                     serde_json::to_vec(&workflow_request_for_run(&app_id, "run_claim_lost"))
@@ -4628,7 +4626,7 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
             .await;
 
             let req = test::TestRequest::post()
-                .uri(&format!("/workflow-advance-unsigned/{}", worker_app_path(&app_id)))
+                .uri(&format!("/workflow-advance-unsigned/{}", app_id.as_str()))
                 .header("authorization", gateway_authorization())
                 .set_payload(
                     serde_json::to_vec(&workflow_request(&app_id))
@@ -4679,7 +4677,7 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
 
             let payload = serde_json::to_vec(&workflow_request(&app_id)).unwrap();
             let req = test::TestRequest::post()
-                .uri(&format!("/workflow-advance-unsigned/{}", worker_app_path(&app_id)))
+                .uri(&format!("/workflow-advance-unsigned/{}", app_id.as_str()))
                 .header("authorization", gateway_authorization())
                 .set_payload(payload.clone())
                 .to_request();
@@ -4690,30 +4688,30 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
 
             let events = meter.drain();
             assert_eq!(
-                usage_value(&events, app_id, "requests"),
+                usage_value(&events, &app_id, "requests"),
                 Some(1),
                 "workflow advance is one metered request"
             );
             assert_eq!(
-                usage_value(&events, app_id, "ingress_bytes"),
+                usage_value(&events, &app_id, "ingress_bytes"),
                 Some(payload.len() as u64),
                 "workflow advance ingress is the StepRequest JSON body"
             );
             assert_eq!(
-                usage_value(&events, app_id, "egress_bytes"),
+                usage_value(&events, &app_id, "egress_bytes"),
                 Some(body.len() as u64),
                 "workflow advance egress is the ack JSON body"
             );
             assert!(
-                usage_value(&events, app_id, "wall_us").unwrap_or(0) > 0,
+                usage_value(&events, &app_id, "wall_us").unwrap_or(0) > 0,
                 "workflow advance records wall_us"
             );
             assert!(
-                usage_value(&events, app_id, "cpu_us").unwrap_or(0) > 0,
+                usage_value(&events, &app_id, "cpu_us").unwrap_or(0) > 0,
                 "workflow advance records cpu_us"
             );
             assert_eq!(
-                usage_value(&events, app_id, "workflow_steps"),
+                usage_value(&events, &app_id, "workflow_steps"),
                 Some(1),
                 "workflow advance records observability workflow_steps"
             );
@@ -4751,7 +4749,7 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
             .await;
 
             let first_req = test::TestRequest::post()
-                .uri(&format!("/workflow-advance-unsigned/{}", worker_app_path(&app_id)))
+                .uri(&format!("/workflow-advance-unsigned/{}", app_id.as_str()))
                 .header("authorization", gateway_authorization())
                 .set_payload(serde_json::to_vec(&workflow_request(&app_id)).unwrap())
                 .to_request();
@@ -4761,7 +4759,7 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
             assert_workflow_ack(&first_body, "run_test");
             reclaim_workflow_run(&db_url, &app_id, "run_test").await;
             let second_req = test::TestRequest::post()
-                .uri(&format!("/workflow-advance-unsigned/{}", worker_app_path(&app_id)))
+                .uri(&format!("/workflow-advance-unsigned/{}", app_id.as_str()))
                 .header("authorization", gateway_authorization())
                 .set_payload(serde_json::to_vec(&workflow_request(&app_id)).unwrap())
                 .to_request();
@@ -4813,7 +4811,7 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
                 let run_id = format!("run_test_pinned_{idx}");
                 seed_unclaimed_workflow_run(&db_url, &app_id, &run_id, "Checkout", deploy_hash).await;
                 let req = test::TestRequest::post()
-                    .uri(&format!("/workflow-advance-unsigned/{}", worker_app_path(&app_id)))
+                    .uri(&format!("/workflow-advance-unsigned/{}", app_id.as_str()))
                 .header("authorization", gateway_authorization())
                     .set_payload(serde_json::to_vec(&workflow_request_for_run(&app_id, &run_id)).unwrap())
                     .to_request();
@@ -4861,7 +4859,7 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
             )
             .await;
             let req_a = test::TestRequest::post()
-                .uri(&format!("/workflow-advance-unsigned/{}", worker_app_path(&app_id)))
+                .uri(&format!("/workflow-advance-unsigned/{}", app_id.as_str()))
                 .header("authorization", gateway_authorization())
                 .set_payload(
                     serde_json::to_vec(&workflow_request_for_run(&app_id, "run_test_lru_a"))
@@ -4881,7 +4879,7 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
             )
             .await;
             let req_b = test::TestRequest::post()
-                .uri(&format!("/workflow-advance-unsigned/{}", worker_app_path(&app_id)))
+                .uri(&format!("/workflow-advance-unsigned/{}", app_id.as_str()))
                 .header("authorization", gateway_authorization())
                 .set_payload(
                     serde_json::to_vec(&workflow_request_for_run(&app_id, "run_test_lru_b"))

@@ -1,6 +1,5 @@
 import type { NormalizedSchema } from "../schema";
 import type { Filter, IdValue, PlainObject, Result, WithSpec } from "../types";
-import { readTransactionDepth } from "../tx-state.js";
 import { identityKey, isIdentityForField } from "../identity.js";
 import { MAX_ID_BATCH } from "../membership-cap.js";
 
@@ -22,6 +21,7 @@ export async function loadRelations(
   self: RelationsCollectionInternals,
   rows: PlainObject[],
   withSpec: WithSpec,
+  transactionScoped = false,
 ): Promise<void> {
   if (rows.length === 0) return;
   const load = async ([field, spec]: [string, unknown]): Promise<void> => {
@@ -88,16 +88,8 @@ export async function loadRelations(
       for (const r of rows) r[field] = null;
       return;
     }
-    // Chunked, because the native builder REJECTS a membership list longer
-    // than MAX_MEMBERSHIP_LIST_LEN (`zeroship-data-orm::sql/src/compile.rs`). Sending
-    // the whole deduplicated set failed outright for any page carrying more
-    // than that many DISTINCT foreign keys - which an unpaginated find()
-    // reaches easily, so a documented feature broke on ordinary data.
-    //
-    // Deliberately sequential rather than Promise.all: the relations
-    // can run concurrently outside a transaction, and fanning out here
-    // too would multiply in-flight queries by the chunk count for a single
-    // creator call.
+    // Stay within the ORM membership budget. Run chunks sequentially so one
+    // relation load cannot multiply its own in-flight native queries.
     const targetKey = fieldDef.refColumn ?? "id";
     const byId = new Map<string, PlainObject>();
     for (let i = 0; i < ids.length; i += MAX_ID_BATCH) {
@@ -124,7 +116,7 @@ export async function loadRelations(
     }
   };
   const entries = Object.entries(withSpec);
-  if (readTransactionDepth(self) > 0) {
+  if (transactionScoped) {
     for (const entry of entries) await load(entry);
   } else {
     await Promise.all(entries.map(load));

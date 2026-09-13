@@ -142,7 +142,7 @@ describe("dev-tier auth — @zeroship/auth client ↔ real dev provider", () => 
     // cookie in our jar), then probe the server-validated user via getUser().
     const provider = wireProviderToHarness(
       h,
-      JSON.stringify({ user: { id: "pws_devalice", email: "alice@localhost", name: "Alice", scopes: ["openid", "profile", "email"] } }),
+      JSON.stringify({ user: { id: "pws_000000000000devalice", email: "alice@localhost", name: "Alice", scopes: ["openid", "profile", "email"] } }),
     );
     const client = createAuthClient({ appOrigin: APP_ORIGIN }, h.env);
     const signinPromise = client.signInWithOAuth({ popup: true });
@@ -151,7 +151,7 @@ describe("dev-tier auth — @zeroship/auth client ↔ real dev provider", () => 
 
     const user = await client.getUser();
     assert.ok(user, "getUser should resolve a dev user");
-    assert.equal(user!.id, "pws_devalice");
+    assert.equal(user!.id, "pws_000000000000devalice");
     assert.equal(user!.email, "alice@localhost");
     assert.equal(user!.name, "Alice");
     assert.equal(user!.emailVerified, true); // snake→camel normalization

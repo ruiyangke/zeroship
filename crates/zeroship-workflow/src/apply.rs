@@ -1,5 +1,6 @@
 use chrono::Utc;
 use serde_json::Value;
+use zeroship_core::app_id::AppId;
 
 use crate::engine::{
     compensation_outcomes_from_step_outcomes, fold_outcomes, stalled_error,
@@ -317,7 +318,7 @@ fn locked_run_row<'a>(rows: &'a [RunLockRow], run_id: &str) -> Option<&'a RunLoc
 
 async fn reconcile_step_side_effects<T>(
     tx: &mut T,
-    app_id: &uuid::Uuid,
+    app_id: &AppId,
     run_id: &str,
     checkpoint: &StepCheckpoint,
 ) -> Result<(), WorkflowError>
@@ -504,7 +505,7 @@ mod tests {
     use async_trait::async_trait;
     use chrono::{DateTime, Utc};
     use serde_json::Value;
-    use uuid::Uuid;
+    use zeroship_core::app_id::AppId;
 
     use super::apply_step_result_on_store;
     use crate::engine::{
@@ -520,7 +521,7 @@ mod tests {
 
     #[derive(Debug, Default)]
     struct MemState {
-        app_id: Uuid,
+        app_id: Option<AppId>,
         deploy_id: String,
         owner_id: String,
         dispatch_nonce: String,
@@ -611,7 +612,10 @@ mod tests {
                 .iter()
                 .map(|run_id| RunLockRow {
                     id: run_id.clone(),
-                    app_id: state.app_id,
+                    app_id: state
+                        .app_id
+                        .clone()
+                        .expect("the fixture must seed an app id"),
                     workflow_name: "TestWorkflow".to_string(),
                     deploy_id: state.deploy_id.clone(),
                     claimed_by: Some(state.owner_id.clone()),
@@ -682,7 +686,7 @@ mod tests {
             &mut self,
             _config: &WorkflowEngineConfig,
             _parent_run_id: &str,
-            _app_id: &Uuid,
+            _app_id: &AppId,
             _deploy_id: &str,
             _parent_tree_depth: i16,
             _checkpoint: &mut StepCheckpoint,
@@ -695,7 +699,7 @@ mod tests {
             _config: &WorkflowEngineConfig,
             _current_run_id: &str,
             successor_run_id: &str,
-            _app_id: &Uuid,
+            _app_id: &AppId,
             _workflow_name: &str,
             seed_input: Option<&Value>,
             seed_input_ref: Option<&WorkflowOutputRef>,
@@ -721,7 +725,7 @@ mod tests {
 
         async fn upsert_subscription(
             &mut self,
-            _app_id: &Uuid,
+            _app_id: &AppId,
             _run_id: &str,
             _checkpoint: &StepCheckpoint,
         ) -> Result<(), WorkflowError> {
@@ -844,10 +848,10 @@ mod tests {
 
     #[compio::test]
     async fn apply_step_result_uses_store_port() {
-        let app_id = Uuid::new_v4();
+        let app_id = AppId::mint();
         let store = MemStore {
             state: Rc::new(RefCell::new(MemState {
-                app_id,
+                app_id: Some(app_id),
                 deploy_id: "dep_test".to_string(),
                 owner_id: "owner-a".to_string(),
                 dispatch_nonce: "wfd_test".to_string(),
@@ -890,10 +894,10 @@ mod tests {
 
     #[compio::test]
     async fn apply_cancel_requested_run_writes_no_checkpoints() {
-        let app_id = Uuid::new_v4();
+        let app_id = AppId::mint();
         let store = MemStore {
             state: Rc::new(RefCell::new(MemState {
-                app_id,
+                app_id: Some(app_id),
                 deploy_id: "dep_test".to_string(),
                 owner_id: "owner-a".to_string(),
                 dispatch_nonce: "wfd_test".to_string(),
@@ -938,10 +942,10 @@ mod tests {
 
     #[compio::test]
     async fn apply_locks_dispatched_and_foreign_runs_in_global_ascending_order() {
-        let app_id = Uuid::new_v4();
+        let app_id = AppId::mint();
         let store = MemStore {
             state: Rc::new(RefCell::new(MemState {
-                app_id,
+                app_id: Some(app_id),
                 deploy_id: "dep_test".to_string(),
                 owner_id: "owner-a".to_string(),
                 dispatch_nonce: "wfd_test".to_string(),
@@ -987,11 +991,11 @@ mod tests {
 
     #[compio::test]
     async fn apply_recomputes_wake_at_from_under_lock_due_signal_frontier() {
-        let app_id = Uuid::new_v4();
+        let app_id = AppId::mint();
         let future_wake = Utc::now() + chrono::Duration::hours(1);
         let store = MemStore {
             state: Rc::new(RefCell::new(MemState {
-                app_id,
+                app_id: Some(app_id),
                 deploy_id: "dep_test".to_string(),
                 owner_id: "owner-a".to_string(),
                 dispatch_nonce: "wfd_test".to_string(),
@@ -1034,10 +1038,10 @@ mod tests {
 
     #[compio::test]
     async fn apply_continue_as_new_creates_successor_before_terminal_transition() {
-        let app_id = Uuid::new_v4();
+        let app_id = AppId::mint();
         let store = MemStore {
             state: Rc::new(RefCell::new(MemState {
-                app_id,
+                app_id: Some(app_id),
                 deploy_id: "dep_test".to_string(),
                 owner_id: "owner-a".to_string(),
                 dispatch_nonce: "wfd_test".to_string(),
@@ -1079,10 +1083,10 @@ mod tests {
 
     #[compio::test]
     async fn apply_continue_as_new_rejects_pending_compensation_before_writes() {
-        let app_id = Uuid::new_v4();
+        let app_id = AppId::mint();
         let store = MemStore {
             state: Rc::new(RefCell::new(MemState {
-                app_id,
+                app_id: Some(app_id),
                 deploy_id: "dep_test".to_string(),
                 owner_id: "owner-a".to_string(),
                 dispatch_nonce: "wfd_test".to_string(),

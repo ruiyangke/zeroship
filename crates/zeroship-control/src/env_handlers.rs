@@ -10,8 +10,8 @@ use std::sync::Arc;
 
 use ntex::web::{self, types::{Json, Path, State}};
 use serde::Deserialize;
-use uuid::Uuid;
 use zeroship_authz::{Action as AuthzAction, Resource};
+use zeroship_core::app_id::AppId;
 
 use crate::audit::{self, Action, AuditEntry};
 use crate::authz_guard::AuthzGuard;
@@ -43,7 +43,7 @@ pub(crate) async fn admin_rate_limit(
     .await
 }
 
-fn bad_uuid() -> web::HttpResponse {
+fn bad_app_id() -> web::HttpResponse {
     web::HttpResponse::BadRequest().json(&serde_json::json!({"error": "bad app_id"}))
 }
 
@@ -85,14 +85,14 @@ pub async fn list_vars(
     state: State<Arc<AppState>>,
 ) -> web::HttpResponse {
     if let Some(r) = admin_rate_limit(&req, &state).await { return r; }
-    let Ok(id) = Uuid::parse_str(&path) else { return bad_uuid(); };
+    let Ok(id) = AppId::parse(&path) else { return bad_app_id(); };
     if let Err(resp) = authz
-        .require(AuthzAction::EnvRead, Resource::App { id: id.to_string() }, &state)
+        .require(AuthzAction::EnvRead, Resource::App { id: id.clone() }, &state)
         .await
     {
         return resp;
     }
-    match state.env_store.list_vars(id).await {
+    match state.env_store.list_vars(&id).await {
         Ok(rows) => {
             let items: Vec<_> = rows
                 .into_iter()
@@ -112,20 +112,20 @@ pub async fn set_var(
     state: State<Arc<AppState>>,
 ) -> web::HttpResponse {
     if let Some(r) = admin_rate_limit(&req, &state).await { return r; }
-    let Ok(id) = Uuid::parse_str(&path) else { return bad_uuid(); };
+    let Ok(id) = AppId::parse(&path) else { return bad_app_id(); };
     if let Err(resp) = authz
-        .require(AuthzAction::EnvWrite, Resource::App { id: id.to_string() }, &state)
+        .require(AuthzAction::EnvWrite, Resource::App { id: id.clone() }, &state)
         .await
     {
         return resp;
     }
-    match state.env_store.set_var(id, &body.key, &body.value).await {
+    match state.env_store.set_var(&id, &body.key, &body.value).await {
         Ok(()) => {
             let ip = source_ip(&req, &state);
             audit::log(&state.registry, AuditEntry {
-                app_id: Some(id),
+                app_id: Some(&id),
                 organization_id: None,
-                actor_user_id: Some(authz.principal_id),
+                actor_user_id: Some(&authz.principal_id),
                 action: Action::SetVar,
                 resource: Some(&body.key),
                 source_ip: ip.as_deref(),
@@ -144,20 +144,20 @@ pub async fn delete_var(
 ) -> web::HttpResponse {
     if let Some(r) = admin_rate_limit(&req, &state).await { return r; }
     let (id_s, key) = path.into_inner();
-    let Ok(id) = Uuid::parse_str(&id_s) else { return bad_uuid(); };
+    let Ok(id) = AppId::parse(&id_s) else { return bad_app_id(); };
     if let Err(resp) = authz
-        .require(AuthzAction::EnvWrite, Resource::App { id: id.to_string() }, &state)
+        .require(AuthzAction::EnvWrite, Resource::App { id: id.clone() }, &state)
         .await
     {
         return resp;
     }
-    match state.env_store.delete_var(id, &key).await {
+    match state.env_store.delete_var(&id, &key).await {
         Ok(true) => {
             let ip = source_ip(&req, &state);
             audit::log(&state.registry, AuditEntry {
-                app_id: Some(id),
+                app_id: Some(&id),
                 organization_id: None,
-                actor_user_id: Some(authz.principal_id),
+                actor_user_id: Some(&authz.principal_id),
                 action: Action::DeleteVar,
                 resource: Some(&key),
                 source_ip: ip.as_deref(),
@@ -180,14 +180,14 @@ pub async fn list_secrets(
     state: State<Arc<AppState>>,
 ) -> web::HttpResponse {
     if let Some(r) = admin_rate_limit(&req, &state).await { return r; }
-    let Ok(id) = Uuid::parse_str(&path) else { return bad_uuid(); };
+    let Ok(id) = AppId::parse(&path) else { return bad_app_id(); };
     if let Err(resp) = authz
-        .require(AuthzAction::SecretsRead, Resource::App { id: id.to_string() }, &state)
+        .require(AuthzAction::SecretsRead, Resource::App { id: id.clone() }, &state)
         .await
     {
         return resp;
     }
-    match state.env_store.list_secret_names(id).await {
+    match state.env_store.list_secret_names(&id).await {
         Ok(names) => web::HttpResponse::Ok().json(&serde_json::json!({"secrets": names})),
         Err(e) => env_err_response(e),
     }
@@ -201,20 +201,20 @@ pub async fn set_secret(
     state: State<Arc<AppState>>,
 ) -> web::HttpResponse {
     if let Some(r) = admin_rate_limit(&req, &state).await { return r; }
-    let Ok(id) = Uuid::parse_str(&path) else { return bad_uuid(); };
+    let Ok(id) = AppId::parse(&path) else { return bad_app_id(); };
     if let Err(resp) = authz
-        .require(AuthzAction::SecretsWrite, Resource::App { id: id.to_string() }, &state)
+        .require(AuthzAction::SecretsWrite, Resource::App { id: id.clone() }, &state)
         .await
     {
         return resp;
     }
-    match state.env_store.set_secret(id, &body.key, &body.value).await {
+    match state.env_store.set_secret(&id, &body.key, &body.value).await {
         Ok(()) => {
             let ip = source_ip(&req, &state);
             audit::log(&state.registry, AuditEntry {
-                app_id: Some(id),
+                app_id: Some(&id),
                 organization_id: None,
-                actor_user_id: Some(authz.principal_id),
+                actor_user_id: Some(&authz.principal_id),
                 action: Action::SetSecret,
                 resource: Some(&body.key),
                 source_ip: ip.as_deref(),
@@ -239,14 +239,14 @@ pub async fn list_expose(
     state: State<Arc<AppState>>,
 ) -> web::HttpResponse {
     if let Some(r) = admin_rate_limit(&req, &state).await { return r; }
-    let Ok(id) = Uuid::parse_str(&path) else { return bad_uuid(); };
+    let Ok(id) = AppId::parse(&path) else { return bad_app_id(); };
     if let Err(resp) = authz
-        .require(AuthzAction::SecretsRead, Resource::App { id: id.to_string() }, &state)
+        .require(AuthzAction::SecretsRead, Resource::App { id: id.clone() }, &state)
         .await
     {
         return resp;
     }
-    match state.env_store.list_expose(id).await {
+    match state.env_store.list_expose(&id).await {
         Ok(keys) => web::HttpResponse::Ok().json(&serde_json::json!({"expose": keys})),
         Err(e) => env_err_response(e),
     }
@@ -278,14 +278,14 @@ pub async fn set_expose(
     state: State<Arc<AppState>>,
 ) -> web::HttpResponse {
     if let Some(r) = admin_rate_limit(&req, &state).await { return r; }
-    let Ok(id) = Uuid::parse_str(&path) else { return bad_uuid(); };
+    let Ok(id) = AppId::parse(&path) else { return bad_app_id(); };
     if let Err(resp) = authz
-        .require(AuthzAction::SecretsWrite, Resource::App { id: id.to_string() }, &state)
+        .require(AuthzAction::SecretsWrite, Resource::App { id: id.clone() }, &state)
         .await
     {
         return resp;
     }
-    match state.env_store.set_expose(id, &body.keys).await {
+    match state.env_store.set_expose(&id, &body.keys).await {
         Ok(applied) => {
             // Audit: log the new list (joined with commas) as the
             // resource string. The full set is recoverable from
@@ -294,9 +294,9 @@ pub async fn set_expose(
             let resource = applied.join(",");
             let ip = source_ip(&req, &state);
             audit::log(&state.registry, AuditEntry {
-                app_id: Some(id),
+                app_id: Some(&id),
                 organization_id: None,
-                actor_user_id: Some(authz.principal_id),
+                actor_user_id: Some(&authz.principal_id),
                 action: Action::SetEnvExpose,
                 resource: Some(&resource),
                 source_ip: ip.as_deref(),
@@ -322,19 +322,19 @@ pub async fn list_audit(
     state: State<Arc<AppState>>,
 ) -> web::HttpResponse {
     if let Some(r) = admin_rate_limit(&req, &state).await { return r; }
-    let Ok(id) = Uuid::parse_str(&path) else { return bad_uuid(); };
+    let Ok(id) = AppId::parse(&path) else { return bad_app_id(); };
     if let Err(resp) = authz
-        .require(AuthzAction::AppsRead, Resource::App { id: id.to_string() }, &state)
+        .require(AuthzAction::AppsRead, Resource::App { id: id.clone() }, &state)
         .await
     {
         return resp;
     }
     let limit = query.limit.unwrap_or(50);
-    match audit::recent_for_app(&state.registry, id, limit).await {
+    match audit::recent_for_app(&state.registry, &id, limit).await {
         Ok(rows) => web::HttpResponse::Ok().json(&serde_json::json!({
             "audit": rows.iter().map(|r| serde_json::json!({
                 "id": r.id.to_string(),
-                "actor_user_id": r.actor_user_id.map(|id| id.to_string()),
+                "actor_user_id": r.actor_user_id.as_ref().map(|id| id.as_str()),
                 "action": r.action,
                 "resource": r.resource,
                 "source_ip": r.source_ip,
@@ -364,20 +364,20 @@ pub async fn delete_secret(
 ) -> web::HttpResponse {
     if let Some(r) = admin_rate_limit(&req, &state).await { return r; }
     let (id_s, key) = path.into_inner();
-    let Ok(id) = Uuid::parse_str(&id_s) else { return bad_uuid(); };
+    let Ok(id) = AppId::parse(&id_s) else { return bad_app_id(); };
     if let Err(resp) = authz
-        .require(AuthzAction::SecretsWrite, Resource::App { id: id.to_string() }, &state)
+        .require(AuthzAction::SecretsWrite, Resource::App { id: id.clone() }, &state)
         .await
     {
         return resp;
     }
-    match state.env_store.delete_secret(id, &key).await {
+    match state.env_store.delete_secret(&id, &key).await {
         Ok(true) => {
             let ip = source_ip(&req, &state);
             audit::log(&state.registry, AuditEntry {
-                app_id: Some(id),
+                app_id: Some(&id),
                 organization_id: None,
-                actor_user_id: Some(authz.principal_id),
+                actor_user_id: Some(&authz.principal_id),
                 action: Action::DeleteSecret,
                 resource: Some(&key),
                 source_ip: ip.as_deref(),

@@ -13,11 +13,11 @@ pub use trusted_clients::{
     default_trusted_oauth_clients, is_trusted_client_id, resolve_trusted_oauth_clients,
 };
 
+use crate::UserId;
 use base64::Engine as _;
 use hkdf::Hkdf;
 use hmac::{Hmac, Mac};
 use sha2::{Digest, Sha256};
-use uuid::Uuid;
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -125,9 +125,7 @@ pub fn validate_broker_master(master: &[u8]) -> Result<(), String> {
         return Err("AUTH_BROKER_SECRET_FILE is all zero; refusing weak broker secret".into());
     }
     if master == DEV_BROKER_MASTER_SECRET {
-        return Err(
-            "AUTH_BROKER_SECRET_FILE is the dev sentinel; refusing broker secret".into(),
-        );
+        return Err("AUTH_BROKER_SECRET_FILE is the dev sentinel; refusing broker secret".into());
     }
     Ok(())
 }
@@ -190,23 +188,20 @@ pub fn verify_hmac_sha256_hex(key: &[u8], payload: &[u8], expected_hex: &str) ->
     constant_time_eq(&computed, expected_hex)
 }
 
-/// Length of the base62 body of a `pws_…` pairwise subject (after the
-/// `pws_` prefix). 20 base62 chars ≈ 119 bits of the HMAC tag — ample to
-/// avoid collisions while keeping the id compact (auth-sdk §6.2).
+/// Length of the base36 body of a `pws_…` pairwise subject.
 pub const PAIRWISE_SUB_BODY_LEN: usize = 20;
 
 /// The fixed prefix every per-app pairwise subject carries. App access tokens
 /// and gateway session cookies use this shape so their verification paths can
 /// reject, as defense in depth, any credential whose subject is an unprojected
-/// global user UUID.
+/// platform user id.
 pub const PAIRWISE_SUB_PREFIX: &str = "pws_";
 
 /// Whether `sub` has the EXACT shape [`derive_pairwise`] mints: the `pws_`
-/// prefix followed by exactly [`PAIRWISE_SUB_BODY_LEN`] base62 (`[0-9A-Za-z]`)
+/// prefix followed by exactly [`PAIRWISE_SUB_BODY_LEN`] base36 (`[0-9a-z]`)
 /// chars. The gateway wrapper / session cookie is JS-readable by app code, so
-/// it MUST NOT carry the global user UUID in any claim; a `sub` that survives
-/// this predicate can never be the un-projected global identity (a bare UUID
-/// has no `pws_` prefix).
+/// it MUST NOT carry the global user id in any claim; a `sub` that survives
+/// this predicate can never be the unprojected `usr_` identity.
 ///
 /// ## This is a SHAPE inverse, NOT a forgery/trust gate (security-review I8)
 ///
@@ -224,7 +219,7 @@ pub const PAIRWISE_SUB_PREFIX: &str = "pws_";
 ///   then binds the token to its client and resource audience. The shape check
 ///   remains defense in depth and is never the source of trust.
 ///
-/// Anchoring on the EXACT minted shape (prefix + fixed length + base62
+/// Anchoring on the exact minted shape (prefix + fixed length + base36
 /// alphabet) rather than a loose `pws_<anything>` closes the gap where a
 /// malformed or forged-shape body (`pws_short`, a punctuation/path-traversal
 /// body, an over-length splice) would silently pass: such a string is provably
@@ -234,7 +229,9 @@ pub fn is_pairwise_subject(sub: &str) -> bool {
     match sub.strip_prefix(PAIRWISE_SUB_PREFIX) {
         Some(body) => {
             body.len() == PAIRWISE_SUB_BODY_LEN
-                && body.bytes().all(|c| c.is_ascii_alphanumeric())
+                && body
+                    .bytes()
+                    .all(|c| c.is_ascii_digit() || c.is_ascii_lowercase())
         }
         None => false,
     }
@@ -277,7 +274,7 @@ pub fn derive_pairwise_salt(pairwise_salt_secret_bytes: &[u8]) -> [u8; 32] {
 /// projection):
 ///
 /// ```text
-/// pws = "pws_" + base62( HMAC-SHA256(salt, canonical(global_user_id) || ":" || sector) )[:20]
+/// pws = "pws_" + base36(HMAC-SHA256(salt, user_id || ":" || sector))[:N]
 /// ```
 ///
 /// Deterministic: the same `(global_user_id, sector)` always yields the same
@@ -287,42 +284,17 @@ pub fn derive_pairwise_salt(pairwise_salt_secret_bytes: &[u8]) -> [u8; 32] {
 /// the user across apps. Rotating `salt` rotates every sub (a deliberate
 /// break-glass).
 ///
-/// `salt` is the platform-wide pairwise secret (config); `global_user_id` is
-/// the global user subject (the `usr_…` UUID string); `sector` is the app's
-/// stable apex origin (`RouteEntry.sector_identifier`).
-///
-/// ## Input canonicalization (Batch A M1)
-///
-/// The `global_user_id` argument reaches this function from multiple shapes
-/// across the writers/readers: a verified `sub` string and `Uuid::to_string()`
-/// (`/session` exchange + `?mint=1`, `/signout`, the control disconnect-app
-/// cascade). Those are byte-identical only while the issuer emits a canonical
-/// hyphenated-lowercase UUID. If the issuer ever emits a non-canonical form
-/// (uppercase / braces / no-dash), a session cookie's `pws_` would diverge
-/// from the `/signout`-written family marker's `pws_`, silently breaking
-/// cross-arm revocation. To make the `pws_` independent of the inbound
-/// spelling, we canonicalize HERE in the ONE place every writer and reader
-/// funnels through:
-/// if `global_user_id` parses as a UUID we hash its canonical
-/// `Uuid::to_string()` (hyphenated lowercase); otherwise (a non-UUID subject —
-/// which the user-session arms already reject before deriving) we hash it
-/// verbatim. Either convention picked consistently would work; canonicalizing
-/// in the derive itself means no caller can pick the wrong one.
+/// `salt` is the platform-wide pairwise secret; `global_user_id` is the
+/// canonical platform [`UserId`]; `sector` is the app's stable apex origin.
 #[must_use]
-pub fn derive_pairwise(salt: &[u8], global_user_id: &str, sector: &str) -> String {
-    // Normalize the subject to its canonical UUID spelling when it is one, so
-    // the derived `pws_` is byte-identical no matter whether the caller passed
-    // the raw provider sub or `Uuid::to_string()`. Non-UUID subjects (never a
-    // real end-user identity on the pairwise paths) hash verbatim.
-    let canonical = Uuid::parse_str(global_user_id)
-        .map(|u| u.to_string())
-        .unwrap_or_else(|_| global_user_id.to_string());
+pub fn derive_pairwise(salt: &[u8], global_user_id: &UserId, sector: &str) -> String {
+    let canonical = global_user_id.as_str();
     let mut payload = Vec::with_capacity(canonical.len() + 1 + sector.len());
     payload.extend_from_slice(canonical.as_bytes());
     payload.push(b':');
     payload.extend_from_slice(sector.as_bytes());
     let tag = hmac_sha256(salt, &payload);
-    let mut body = crate::typed_id::base62_encode_bytes(&tag);
+    let mut body = crate::typed_id::base36_encode_bytes(&tag);
     body.truncate(PAIRWISE_SUB_BODY_LEN);
     format!("pws_{body}")
 }
@@ -330,6 +302,10 @@ pub fn derive_pairwise(salt: &[u8], global_user_id: &str, sector: &str) -> Strin
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn user() -> UserId {
+        UserId::mint()
+    }
 
     #[test]
     fn equal_secrets_match() {
@@ -353,7 +329,10 @@ mod tests {
         assert_eq!(a, derive_broker_secret(master, client_a));
         assert_ne!(a, derive_broker_secret(master, client_b));
         assert_ne!(a, derive_broker_secret(other_master, client_a));
-        assert!(!a.contains(client_a), "derived secret must not embed client_id");
+        assert!(
+            !a.contains(client_a),
+            "derived secret must not embed client_id"
+        );
     }
 
     #[test]
@@ -368,10 +347,10 @@ mod tests {
     #[test]
     fn pairwise_is_deterministic_per_app_and_prefixed() {
         let salt = b"platform-pairwise-salt";
-        let uid = "0192f1aa-bbbb-7ccc-8ddd-eeeeffff0001";
-        let a = derive_pairwise(salt, uid, "https://app-a.zeroship.ai");
-        let a2 = derive_pairwise(salt, uid, "https://app-a.zeroship.ai");
-        let b = derive_pairwise(salt, uid, "https://app-b.zeroship.ai");
+        let uid = user();
+        let a = derive_pairwise(salt, &uid, "https://app-a.zeroship.ai");
+        let a2 = derive_pairwise(salt, &uid, "https://app-a.zeroship.ai");
+        let b = derive_pairwise(salt, &uid, "https://app-b.zeroship.ai");
 
         // Deterministic for the same (user, sector).
         assert_eq!(a, a2);
@@ -380,21 +359,27 @@ mod tests {
         assert_eq!(a.len(), 4 + PAIRWISE_SUB_BODY_LEN, "{a}");
         // Different sector ⇒ different sub (no cross-app correlation).
         assert_ne!(a, b);
-        // The global UUID never appears in the derived sub.
-        assert!(!a.contains(uid), "global UUID must not leak into pws_: {a}");
+        // The global user id never appears in the derived sub.
+        assert!(
+            !a.contains(uid.as_str()),
+            "global user id must not leak into pws_: {a}"
+        );
     }
 
     #[test]
-    fn is_pairwise_subject_accepts_derived_and_rejects_uuid() {
+    fn is_pairwise_subject_accepts_derived_and_refuses_user_id() {
         let salt = b"platform-pairwise-salt";
-        let uid = "0192f1aa-bbbb-7ccc-8ddd-eeeeffff0001";
-        let pws = derive_pairwise(salt, uid, "https://app.zeroship.ai");
+        let uid = user();
+        let pws = derive_pairwise(salt, &uid, "https://app.zeroship.ai");
         // Every minted pws_ satisfies the inbound invariant.
-        assert!(is_pairwise_subject(&pws), "derived pws_ must be accepted: {pws}");
-        // A bare global UUID (what the un-projected wrapper would carry) fails.
         assert!(
-            !is_pairwise_subject(uid),
-            "a global UUID must NOT pass the pairwise-subject invariant"
+            is_pairwise_subject(&pws),
+            "derived pws_ must be accepted: {pws}"
+        );
+        // An unprojected global user id fails.
+        assert!(
+            !is_pairwise_subject(uid.as_str()),
+            "a global user id must not pass the pairwise-subject invariant"
         );
         // A typed usr_ id is not a pairwise subject.
         assert!(!is_pairwise_subject("usr_abc123"));
@@ -409,15 +394,15 @@ mod tests {
         // `derive_pairwise` output (which is exactly PAIRWISE_SUB_BODY_LEN
         // chars), so the tightened shape inverse rejects it (security-review I8).
         assert!(
-            !is_pairwise_subject(&format!("pws_{}", uid.replace('-', ""))),
-            "a 32-char no-dash-UUID body is over-length → not a derivable subject"
+            !is_pairwise_subject(&format!("pws_{}", uid.as_str())),
+            "an over-length typed-id body is not a derivable subject"
         );
     }
 
     /// I8 (security-review 2026-06-02): `is_pairwise_subject` must be the EXACT
     /// inverse of [`derive_pairwise`]'s output shape — `pws_` + exactly
-    /// [`PAIRWISE_SUB_BODY_LEN`] base62 chars — so a `pws_`-SHAPED string that
-    /// `derive_pairwise` could never have minted (wrong length, or a non-base62
+    /// [`PAIRWISE_SUB_BODY_LEN`] base36 chars — so a `pws_`-shaped string that
+    /// `derive_pairwise` could never have minted (wrong length, or a non-base36
     /// byte) is rejected. This is hardening only: at every production call site
     /// the predicate runs DOWNSTREAM of cryptographic authentication (the OP or
     /// session-cookie signature) and client/audience binding. Making the
@@ -427,11 +412,14 @@ mod tests {
     #[test]
     fn is_pairwise_subject_rejects_forged_non_derived_shapes() {
         let salt = b"platform-pairwise-salt";
-        let uid = "0192f1aa-bbbb-7ccc-8ddd-eeeeffff0001";
-        let minted = derive_pairwise(salt, uid, "https://app.zeroship.ai");
+        let uid = user();
+        let minted = derive_pairwise(salt, &uid, "https://app.zeroship.ai");
         // The real minted shape is still accepted (sanity).
-        assert!(is_pairwise_subject(&minted), "minted pws_ must pass: {minted}");
-        // The minted body is exactly PAIRWISE_SUB_BODY_LEN base62 chars.
+        assert!(
+            is_pairwise_subject(&minted),
+            "minted pws_ must pass: {minted}"
+        );
+        // The minted body has the exact derived width.
         let minted_body = minted.strip_prefix(PAIRWISE_SUB_PREFIX).unwrap();
         assert_eq!(minted_body.len(), PAIRWISE_SUB_BODY_LEN);
 
@@ -446,25 +434,22 @@ mod tests {
             !is_pairwise_subject(&format!("pws_{}", "a".repeat(PAIRWISE_SUB_BODY_LEN + 1))),
             "an over-length pws_ body is not a derivable pairwise subject"
         );
-        // A body of the RIGHT length but carrying a non-base62 byte — the
-        // base62 alphabet is [0-9A-Za-z], so '-', '_', '.', '/', '+', '=' are
-        // all out. A forged path-traversal-shaped or punctuation-laced body
-        // that happens to be 20 chars must still be rejected.
+        // Punctuation is outside the derived alphabet.
         assert!(
             !is_pairwise_subject(&format!("pws_{}", "-".repeat(PAIRWISE_SUB_BODY_LEN))),
-            "a right-length body of non-base62 bytes is not a derivable subject"
+            "a right-length body outside base36 is not a derivable subject"
         );
         assert!(
             !is_pairwise_subject("pws_..%2F..%2Fetc%2Fpw"),
             "a punctuation/encoded forged body must be rejected even at length"
         );
-        // A right-length, all-base62 body IS accepted — we reject SHAPE, not
+        // A right-length base36 body is accepted — we reject shape, not
         // value (the value's authenticity is the signature's job, not the
         // predicate's). This documents the trust boundary: the predicate is a
         // shape inverse, never a forgery gate on its own.
         assert!(
             is_pairwise_subject(&format!("pws_{}", "a".repeat(PAIRWISE_SUB_BODY_LEN))),
-            "a well-shaped (right-length base62) body passes the shape inverse"
+            "a well-shaped base36 body passes the shape inverse"
         );
     }
 
@@ -482,7 +467,10 @@ mod tests {
         ));
         assert_eq!(a, expected);
         // Different stash ⇒ different salt (rotating the secret rotates subs).
-        assert_ne!(derive_pairwise_salt(b"other-stash-key-32-bytes-long----"), a);
+        assert_ne!(
+            derive_pairwise_salt(b"other-stash-key-32-bytes-long----"),
+            a
+        );
     }
 
     /// MAJOR fix (pairwise_salt secret lifecycle) — `pws_` derives from its OWN
@@ -495,21 +483,27 @@ mod tests {
     #[test]
     fn pws_is_a_pure_function_of_the_dedicated_salt_secret() {
         let dedicated = b"dedicated-pairwise-salt-32+bytes-stable!";
-        let user = "0192f1aa-bbbb-7ccc-8ddd-eeeeffff0001";
+        let user = user();
         let sector = "https://myapp.zeroship.ai";
 
         let salt = derive_pairwise_salt(dedicated);
-        let pws_a = derive_pairwise(&salt, user, sector);
+        let pws_a = derive_pairwise(&salt, &user, sector);
         // Re-deriving from the SAME dedicated secret yields the SAME pws_ — the
         // app's stored FK is stable as long as PAIRWISE_SALT is unchanged.
-        let pws_b = derive_pairwise(&derive_pairwise_salt(dedicated), user, sector);
-        assert_eq!(pws_a, pws_b, "pws_ must be stable for a fixed dedicated salt");
+        let pws_b = derive_pairwise(&derive_pairwise_salt(dedicated), &user, sector);
+        assert_eq!(
+            pws_a, pws_b,
+            "pws_ must be stable for a fixed dedicated salt"
+        );
 
         // A genuinely DIFFERENT dedicated secret re-keys the anchor — which is
         // exactly why rotating it requires a migration (and why it is NOT the
         // rotatable stash key).
-        let pws_rotated =
-            derive_pairwise(&derive_pairwise_salt(b"a-completely-different-32+byte-salt-value"), user, sector);
+        let pws_rotated = derive_pairwise(
+            &derive_pairwise_salt(b"a-completely-different-32+byte-salt-value"),
+            &user,
+            sector,
+        );
         assert_ne!(
             pws_a, pws_rotated,
             "a different dedicated salt re-keys pws_ (migration-only rotation)"
@@ -518,62 +512,49 @@ mod tests {
 
     #[test]
     fn pairwise_changes_with_salt_and_user() {
-        let uid = "0192f1aa-bbbb-7ccc-8ddd-eeeeffff0001";
-        let other = "0192f1aa-bbbb-7ccc-8ddd-eeeeffff0002";
+        let uid = user();
+        let other = user();
         let sector = "https://app.zeroship.ai";
         assert_ne!(
-            derive_pairwise(b"salt-1", uid, sector),
-            derive_pairwise(b"salt-2", uid, sector),
+            derive_pairwise(b"salt-1", &uid, sector),
+            derive_pairwise(b"salt-2", &uid, sector),
             "rotating the salt must rotate the sub"
         );
         assert_ne!(
-            derive_pairwise(b"salt", uid, sector),
-            derive_pairwise(b"salt", other, sector),
+            derive_pairwise(b"salt", &uid, sector),
+            derive_pairwise(b"salt", &other, sector),
             "different users get different subs"
         );
     }
 
+    /// The successor to a test that asserted invariance to inbound UUID
+    /// spelling. That property is no longer expressible, and its absence is the
+    /// point: [`derive_pairwise`] takes a [`UserId`], which has exactly one
+    /// printed form, so there is no second spelling for a writer and a reader to
+    /// disagree about.
+    ///
+    /// What the old shape protected against was real. `/token` passed the raw
+    /// provider `sub` while `/signout` passed a re-rendered id, and if the two
+    /// ever differed the signout wrote a family marker under one `pws_` while
+    /// the live wrapper carried another - a revocation that silently does
+    /// nothing. Canonicalizing inside the derive fixed that for UUIDs and then
+    /// broke when a second id format arrived: control hashed `usr_<base36>`
+    /// verbatim while the gateway hashed a hyphenated uuid canonically.
+    ///
+    /// A type cannot drift that way, so what is left to test is that distinct
+    /// users and distinct sectors still separate.
     #[test]
-    fn pairwise_is_invariant_to_inbound_uuid_spelling() {
-        // Batch A M1 regression: the writers feed `derive_pairwise` either the
-        // raw provider sub string (e.g. `/token` passing `claims.sub`) or the
-        // canonical `Uuid::to_string()` (e.g. `/signout`, control cascade). If
-        // the issuer ever emits a non-canonical sub spelling (uppercase /
-        // braces / no-dash), a `/token`-minted wrapper's `pws_` MUST still equal the
-        // `pws_` a `/signout`-style `revoke_family(derive_pairwise(uuid.to_string()))`
-        // writes — otherwise a signout silently fails to revoke the live wrapper.
+    fn pairwise_accepts_only_canonical_user_identity() {
         let salt = b"platform-pairwise-salt";
         let sector = "https://app.zeroship.ai";
-        let canonical = "0192f1aa-bbbb-7ccc-8ddd-eeeeffff0001";
-        let expected = derive_pairwise(salt, canonical, sector);
+        let canonical = user();
+        let expected = derive_pairwise(salt, &canonical, sector);
 
-        // Every non-canonical spelling of the SAME UUID derives the SAME pws_.
-        for spelling in [
-            canonical.to_uppercase(),                          // uppercase hex
-            "0192F1AABBBB7CCC8DDDEEEEFFFF0001".to_string(),    // uppercase, no dashes
-            "0192f1aabbbb7ccc8dddeeeeffff0001".to_string(),    // lowercase, no dashes
-            "{0192f1aa-bbbb-7ccc-8ddd-eeeeffff0001}".to_string(), // braced
-            "urn:uuid:0192f1aa-bbbb-7ccc-8ddd-eeeeffff0001".to_string(), // urn form
-        ] {
-            assert_eq!(
-                derive_pairwise(salt, &spelling, sector),
-                expected,
-                "pws_ must be invariant to inbound UUID spelling: {spelling}"
-            );
-        }
-
-        // A genuinely different user still derives a different pws_ (the
-        // canonicalization does not collapse distinct UUIDs).
+        assert_eq!(derive_pairwise(salt, &canonical, sector), expected);
         assert_ne!(
-            derive_pairwise(salt, "0192f1aa-bbbb-7ccc-8ddd-eeeeffff0002", sector),
+            derive_pairwise(salt, &user(), sector,),
             expected
         );
-
-        // A non-UUID subject (never a real end-user identity on the pairwise
-        // paths) hashes verbatim — still deterministic, still prefixed.
-        let non_uuid = derive_pairwise(salt, "not-a-uuid", sector);
-        assert!(non_uuid.starts_with("pws_"));
-        assert_eq!(non_uuid, derive_pairwise(salt, "not-a-uuid", sector));
     }
 
     #[test]
@@ -613,7 +594,8 @@ mod tests {
         ] {
             let (_equal, iterations) = constant_time_compare(provided, expected);
             assert_eq!(
-                iterations, n,
+                iterations,
+                n,
                 "iteration count must equal expected.len()={n} regardless of \
                  provided.len()={}, got {iterations}",
                 provided.len()

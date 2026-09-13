@@ -85,7 +85,8 @@ describe("db.transaction — OptimisticLockError surfaces via result.error", () 
     );
     const occ = result.error as OptimisticLockError;
     assert.equal(occ.code, "OPTIMISTIC_CONCURRENCY");
-    assert.equal(occ.expectedVersion, 7);
+    assert.equal(occ.concurrencyColumn, "version");
+    assert.equal(occ.expectedValue, 7);
 
     // Outer wrapper rolled back, did not commit.
     const state = (native as unknown as { _state: { rolledBack: boolean; committed: boolean } })._state;

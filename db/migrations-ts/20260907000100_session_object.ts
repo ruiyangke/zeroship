@@ -1,5 +1,10 @@
 import { grant, now, raw, t, table } from "@zeroship/migrate";
 
+const userIdColumnsByTable: Readonly<Record<string, readonly string[]>> = {
+  grants: ["person_id"],
+  sessions: ["person_id"],
+};
+
 // The session object and the grant it hangs off. Step 5 of
 // docs/proposals/2026-09-05-auth-foundation-redesign.md.
 //
@@ -58,7 +63,7 @@ export default {
     table("grants", { schema: "zeroship" }).create({
       columns: {
         id: t.text().notNull(),
-        person_id: t.uuid().notNull(),
+        person_id: t.text().notNull(),
         audience_kind: t.text().notNull(),
         client_id: t.text(),
         // The subject this person presents to this audience. Derived, never
@@ -79,7 +84,7 @@ export default {
     });
     table("grants", { schema: "zeroship" })
       .check("grants_id_shape")
-      .add({ expr: (col) => col("id").regex("^grt_[0-9A-Za-z]{22}$") });
+      .add({ expr: (col) => col("id").regex("^grt_[0-9a-z]{25}$") });
     table("grants", { schema: "zeroship" })
       .check("grants_audience_kind_check")
       .add({ expr: (col) => col("audience_kind").in(["platform", "app"]) });
@@ -156,7 +161,7 @@ export default {
     table("sessions", { schema: "zeroship" }).create({
       columns: {
         id: t.text().notNull(),
-        person_id: t.uuid().notNull(),
+        person_id: t.text().notNull(),
         audience_kind: t.text().notNull(),
         client_id: t.text(),
         grant_id: t.text().notNull(),
@@ -198,7 +203,7 @@ export default {
     });
     table("sessions", { schema: "zeroship" })
       .check("sessions_id_shape")
-      .add({ expr: (col) => col("id").regex("^ses_[0-9A-Za-z]{22}$") });
+      .add({ expr: (col) => col("id").regex("^ses_[0-9a-z]{25}$") });
     table("sessions", { schema: "zeroship" })
       .check("sessions_audience_kind_check")
       .add({ expr: (col) => col("audience_kind").in(["platform", "app"]) });
@@ -306,13 +311,12 @@ export default {
     // ---- sortable typed-id collations --------------------------------------
     // Bytewise ordering for every typed-id column and every copy of one, for
     // the reason db/migrations-ts/20260831000001_sortable_entity_id_collations.ts
-    // states: PostgreSQL's locale collation does not keep the base62 alphabet
+    // states: PostgreSQL's locale collation does not keep the base36 alphabet
     // in numeric order, and a copy under a different collation cannot serve an
     // indexed join against the collated original.
     //
-    // The collation is applied AFTER the foreign keys above and in the SAME
-    // file, which is the ordering the entity migration demonstrated: both sides
-    // are authored as plain `text`, keyed, and then collated together. A LATER
+    // The grant and session identifiers and their user references use the
+    // text-plus-collation pattern. A LATER
     // file adding a key against these columns must author its own column
     // collated, because the engine's pre-migration catalog snapshot cannot see
     // a `raw` collation island - that is why
@@ -321,11 +325,11 @@ export default {
     //
     // `client_id` is absent on purpose: an OAuth client id is not a typed id
     // and the collation map excludes that whole family. `subject` is absent for
-    // the same reason - it is a pairwise derivation or a UUID rendering, not an
-    // identity domain this corpus mints.
+    // the same reason - it is a pairwise derivation or a rendered user id, not
+    // an identity domain this corpus mints.
     const typedIdColumnsByTable: Readonly<Record<string, readonly string[]>> = {
-      grants: ["id"],
-      sessions: ["id", "grant_id", "parent_session_id"],
+      grants: ["id", "person_id"],
+      sessions: ["id", "grant_id", "parent_session_id", "person_id"],
     };
     for (const [tableName, columns] of Object.entries(typedIdColumnsByTable)) {
       const alterations = columns
@@ -337,6 +341,13 @@ export default {
           "typed-id text domains need bytewise comparison, including matching copies used by "
           + "indexed joins",
       });
+    }
+    for (const [tableName, columns] of Object.entries(userIdColumnsByTable)) {
+      for (const column of columns) {
+        table(tableName, { schema: "zeroship" })
+          .check(`${tableName}_${column}_usr_shape`)
+          .add({ expr: (col) => col(column).regex("^usr_[0-9a-z]{25}$") });
+      }
     }
 
     // ---- grants ------------------------------------------------------------

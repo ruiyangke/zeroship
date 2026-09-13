@@ -68,12 +68,7 @@ schemars = "1"
 sha2 = "0.10"
 sha1 = "0.10"
 hmac = "0.12"
-# **P5 PR 1** — column-encryption AEAD + key derivation. Promoted to
-# the workspace from `crates/core/Cargo.toml` (where it lived as a
-# crate-local pin for `crypto.rs`) so the plugin-db encryption module
-# and the existing core wrappers share one version. HKDF-SHA256
-# expands per-platform root keys into the (k_enc, k_siv) halves the
-# plugin-db `EncryptedColumn` impls consume.
+# Column-encryption AEAD and key derivation.
 aes-gcm = "0.10"
 hkdf = "0.12"
 ed25519-dalek = { version = "2", default-features = false, features = ["std", "fast", "zeroize"] }
@@ -88,19 +83,11 @@ postgres-protocol = "0.6.12"
 postgres-types = { version = "0.2", features = ["with-uuid-1"] }
 fallible-iterator = "0.2"
 percent-encoding = "2"
-# SQLite — bundled amalgamation pinned at the rusqlite-shipped version
-# (3.51.3 ≥ the 3.16 minimum for `sqlite3_preupdate_hook`). `bundled`
-# avoids a system-library dep; `preupdate_hook` enables the CDC seam
-# we'll wire in P2. Optional throughout — only `zeroship-data-v8`
-# pulls it in under its `sqlite` feature.
+# Bundled SQLite with the commit-change hook used by the ORM's CDC adapter.
 rusqlite = { version = "0.39", features = ["bundled", "preupdate_hook"] }
-# **P4 PR 7** — `sqlite-vec` statically compiles the C `vec0` extension
-# into the binary and registers it via `sqlite3_auto_extension`. NO
-# `.so` ships; preserves the bundled-SQLite invariant (design §1). The
-# Rust crate exposes `sqlite3_vec_init` which rusqlite's `ffi`
-# re-export of `sqlite3_auto_extension` hooks once per process. Gated
-# to `plugin-db`'s `sqlite` feature.
+# The SQLite vector extension is linked into the ORM backend.
 sqlite-vec = "0.1"
+num-bigint = "0.4"
 
 # IDs
 uuid = { version = "1", features = ["v4", "v7", "serde"] }
@@ -189,15 +176,7 @@ tracing-log = "0.2"
 tracing-logfmt = "0.3"
 tracing-bunyan-formatter = "0.3"
 
-# MPMC channel. Consumed by `crates/plugin-db`, `crates/gateway` and
-# `crates/workflow-scheduler`.
-#
-# This comment used to justify the dependency by a planned worker queue in a
-# sandbox-crate module that no longer exists here - the sandbox was extracted to
-# the standalone `zeroship-sandbox` project. The dependency is
-# not stale, but its stated reason was: the real consumers arrived elsewhere and
-# nothing updated the note. A citation to a path that cannot resolve is worth
-# less than no citation, because it invites a reader to go looking.
+# MPMC channel used by the data ORM, gateway, and workflow scheduler.
 flume = { version = "0.11", default-features = false, features = ["async"] }
 # Kafka-family stream transport. Default features stay OFF so rust-rdkafka does
 # not enable its tokio-backed async producer/consumer helpers; the stream crate
@@ -212,6 +191,7 @@ rdkafka = { version = "0.36", default-features = false, features = ["cmake-build
 tempfile = "3"
 
 # Internal crates
+zeroship-id = { path = "crates/zeroship-id" }
 zeroship-core = { path = "crates/zeroship-core" }
 zeroship-bundle = { path = "crates/zeroship-bundle" }
 compio-postgres = { path = "libs/compio-postgres" }

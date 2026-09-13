@@ -55,6 +55,12 @@ export class ReadRow<T, A extends string, Optional extends boolean> {
   readonly kind = "row";
   constructor(readonly source: AliasedCollection<T, A>, readonly optional: Optional, readonly fields?: string[]) {}
 }
+const aliasScopes = new WeakMap<object, () => boolean>();
+
+function aliasIsActive(source: object): boolean {
+  return aliasScopes.get(source)?.() ?? true;
+}
+
 export class AliasedCollection<T, A extends string = string> {
   readonly columns: { [K in keyof T]-?: ReadColumn<T[K], A> };
   constructor(readonly native: NativeDb, readonly collection: string, readonly alias: A,
@@ -63,6 +69,22 @@ export class AliasedCollection<T, A extends string = string> {
   }
   row(): ReadRow<T, A, false> { return new ReadRow(this, false); }
   optionalRow(): ReadRow<T, A, true> { return new ReadRow(this, true); }
+}
+
+export function scopeAliasedCollection<T, A extends string>(
+  source: AliasedCollection<T, A>,
+  active: () => boolean,
+): AliasedCollection<T, A> {
+  const scoped = new AliasedCollection<T, A>(
+    source.native,
+    source.collection,
+    source.alias,
+    Object.keys(source.columns),
+    source.toColumn,
+    source.toField,
+  );
+  aliasScopes.set(scoped, active);
+  return scoped;
 }
 type Projection = ReadRow<any, any, boolean> | ReadColumn<any, any> | ReadAggregate<any>;
 type Projected<P, Nullable extends string> = { [K in keyof P]: P[K] extends ReadColumn<infer T, infer A>
@@ -102,7 +124,11 @@ export class ReadBuilder<P = never, Nullable extends string = never, Throws exte
   all(): Promise<Throws extends true ? P[] : Result<P[]>> {
     let work: Promise<Record<string, unknown>[]>;
     try {
-      if (!this.active()) throw Object.assign(new Error("transaction scope has expired"), { code: "transaction_scope_expired" });
+      if (!this.active() || this.sources.some(source => !aliasIsActive(source))) {
+        throw Object.assign(new Error("transaction scope has expired"), {
+          code: "TRANSACTION_SCOPE_EXPIRED" as const,
+        });
+      }
       if (!this.input.select) throw new Error("read requires an explicit projection");
       for (const source of this.sources) trackCollectionAccess(source.collection);
       work = this.root.native.collection(this.root.collection).read(this.input);
@@ -127,5 +153,5 @@ export class ReadBuilder<P = never, Nullable extends string = never, Throws exte
 
 export function readFrom<T, A extends string, Throws extends boolean = false>(native: NativeDb, source: AliasedCollection<T, A>, throws = false as Throws, active: () => boolean = () => true): ReadBuilder<never, never, Throws> {
   if (source.native !== native) throw new Error("read source belongs to another database");
-  return new ReadBuilder(source, { from: { collection: source.collection, alias: source.alias }, joins: [] }, [source], {}, throws, active);
+  return new ReadBuilder(source, { from: { collection: source.collection, alias: source.alias }, joins: [] }, [source], {}, throws, () => active() && aliasIsActive(source));
 }

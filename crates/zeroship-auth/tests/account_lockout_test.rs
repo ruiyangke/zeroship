@@ -96,7 +96,7 @@ async fn consecutive_failures_lock_account_then_success_resets() {
     let locked_until: Option<chrono::DateTime<chrono::Utc>> = pg
         .query_one(
             "SELECT locked_until FROM zeroship.users WHERE id = $1",
-            &[&user.id],
+            &[&user.id.as_str()],
         )
         .await
         .expect("query locked_until")
@@ -134,7 +134,7 @@ async fn consecutive_failures_lock_account_then_success_resets() {
     //    login resets the failure counter back to 0.
     pg.execute(
         "UPDATE zeroship.users SET locked_until = NOW() - INTERVAL '1 second' WHERE id = $1",
-        &[&user.id],
+        &[&user.id.as_str()],
     )
     .await
     .expect("expire lock window");
@@ -149,27 +149,33 @@ async fn consecutive_failures_lock_account_then_success_resets() {
     )
     .await
     .expect("correct password after lock window must succeed");
-    assert_eq!(verified.id, user.id, "verified user id mismatch");
+    assert_eq!(&verified.id, &user.id, "verified user id mismatch");
 
     let (count, locked): (i32, Option<chrono::DateTime<chrono::Utc>>) = {
         let row = pg
             .query_one(
                 "SELECT failed_login_count, locked_until FROM zeroship.users WHERE id = $1",
-                &[&user.id],
+                &[&user.id.as_str()],
             )
             .await
             .expect("query post-success state");
         (row.get("failed_login_count"), row.get("locked_until"))
     };
-    assert_eq!(count, 0, "successful login must reset failed_login_count to 0");
+    assert_eq!(
+        count, 0,
+        "successful login must reset failed_login_count to 0"
+    );
     assert!(
         locked.is_none(),
         "successful login must clear locked_until, got {locked:?}"
     );
 
-    pg.execute("DELETE FROM zeroship.users WHERE id = $1", &[&user.id])
-        .await
-        .ok();
+    pg.execute(
+        "DELETE FROM zeroship.users WHERE id = $1",
+        &[&user.id.as_str()],
+    )
+    .await
+    .ok();
 }
 
 /// Connect + spawn the PG driver, returning a shared client.
@@ -194,7 +200,7 @@ async fn connect_pg(label: &'static str) -> Arc<compio_postgres::Client> {
 async fn lock_account_via_failures(
     pg: &compio_postgres::Client,
     email: &str,
-    user_id: Uuid,
+    user_id: &zeroship_core::UserId,
 ) {
     let req = TestRequest::default().to_http_request();
     for n in 0..LOCKOUT_THRESHOLD {
@@ -211,7 +217,7 @@ async fn lock_account_via_failures(
     let locked_until: Option<chrono::DateTime<chrono::Utc>> = pg
         .query_one(
             "SELECT locked_until FROM zeroship.users WHERE id = $1",
-            &[&user_id],
+            &[&user_id.as_str()],
         )
         .await
         .expect("query locked_until")
@@ -250,7 +256,7 @@ async fn locked_account_recovers_via_password_reset() {
         .await
         .expect("seed user");
 
-    lock_account_via_failures(&pg, &email, user.id).await;
+    lock_account_via_failures(&pg, &email, &user.id).await;
 
     // Real password-reset completion flow (mirrors the `/reset` POST handler in
     // `ui/reset.rs`, which calls `complete` directly — `redeem` is only the GET
@@ -264,21 +270,15 @@ async fn locked_account_recovers_via_password_reset() {
         .await
         .expect("complete reset")
         .expect("reset must complete");
-    assert_eq!(completed.user_id, user.id, "completed reset user mismatch");
+    assert_eq!(&completed.user_id, &user.id, "completed reset user mismatch");
 
     // The account must now be recoverable: the NEW password verifies.
     // Pre-fix this is rejected `Ineligible` (locked_until still set).
     let req = TestRequest::default().to_http_request();
-    let verified = verify_password_credentials(
-        &pg,
-        &req,
-        "test-client",
-        "198.51.100.200",
-        &email,
-        NEW_PW,
-    )
-    .await
-    .expect("post-reset login with the NEW password must succeed (account recovered)");
+    let verified =
+        verify_password_credentials(&pg, &req, "test-client", "198.51.100.200", &email, NEW_PW)
+            .await
+            .expect("post-reset login with the NEW password must succeed (account recovered)");
     assert_eq!(verified.id, user.id, "recovered user id mismatch");
 
     // And the lockout state is fully cleared.
@@ -286,7 +286,7 @@ async fn locked_account_recovers_via_password_reset() {
         let row = pg
             .query_one(
                 "SELECT failed_login_count, locked_until FROM zeroship.users WHERE id = $1",
-                &[&user.id],
+                &[&user.id.as_str()],
             )
             .await
             .expect("query post-reset state");
@@ -298,9 +298,12 @@ async fn locked_account_recovers_via_password_reset() {
         "password reset must clear locked_until, got {locked:?}"
     );
 
-    pg.execute("DELETE FROM zeroship.users WHERE id = $1", &[&user.id])
-        .await
-        .ok();
+    pg.execute(
+        "DELETE FROM zeroship.users WHERE id = $1",
+        &[&user.id.as_str()],
+    )
+    .await
+    .ok();
 }
 
 /// F2 regression — the magic-link and OAuth success paths share the
@@ -327,11 +330,11 @@ async fn locked_account_recovers_at_eligibility_gate_after_lockout_clear() {
         .await
         .expect("seed user");
 
-    lock_account_via_failures(&pg, &email, user.id).await;
+    lock_account_via_failures(&pg, &email, &user.id).await;
 
     // Baseline: while locked, the shared gate rejects (Locked). This is the
     // gate magic-link / OAuth success hit BEFORE minting a session.
-    match eligibility::check_user_eligible(&pg, user.id).await {
+    match eligibility::check_user_eligible(&pg, &user.id).await {
         Err(LoginIneligible::Locked) => {}
         other => panic!("locked account should fail eligibility as Locked, got {other:?}"),
     }
@@ -339,10 +342,10 @@ async fn locked_account_recovers_at_eligibility_gate_after_lockout_clear() {
     // The magic/oauth/link success paths now clear the soft lockout (strong
     // owner-present evidence) before this gate. Exercise that production store
     // call, then re-run the SAME gate.
-    users::reset_login_failures(&pg, user.id)
+    users::reset_login_failures(&pg, &user.id)
         .await
         .expect("clear soft lockout");
-    eligibility::check_user_eligible(&pg, user.id)
+    eligibility::check_user_eligible(&pg, &user.id)
         .await
         .expect("after lockout clear the account must pass eligibility (recovered)");
 
@@ -350,18 +353,21 @@ async fn locked_account_recovers_at_eligibility_gate_after_lockout_clear() {
     // lockout must not resurrect a hard-disabled account.
     pg.execute(
         "UPDATE zeroship.users SET disabled_at = NOW() WHERE id = $1",
-        &[&user.id],
+        &[&user.id.as_str()],
     )
     .await
     .expect("disable account");
-    match eligibility::check_user_eligible(&pg, user.id).await {
+    match eligibility::check_user_eligible(&pg, &user.id).await {
         Err(LoginIneligible::Disabled) => {}
         other => panic!("disabled account must still be rejected, got {other:?}"),
     }
 
-    pg.execute("DELETE FROM zeroship.users WHERE id = $1", &[&user.id])
-        .await
-        .ok();
+    pg.execute(
+        "DELETE FROM zeroship.users WHERE id = $1",
+        &[&user.id.as_str()],
+    )
+    .await
+    .ok();
 }
 
 /// 5.1 regression (status-code enumeration oracle) — a LOCKED real account, an
@@ -397,7 +403,7 @@ async fn locked_absent_and_wrongpw_are_status_indistinguishable() {
     let locked_user = users::create(&pg, &locked_email, "Oracle Locked", Some(&phc))
         .await
         .expect("seed locked user");
-    lock_account_via_failures(&pg, &locked_email, locked_user.id).await;
+    lock_account_via_failures(&pg, &locked_email, &locked_user.id).await;
     let locked_err = verify_password_credentials(
         &pg,
         &req,
@@ -411,16 +417,10 @@ async fn locked_absent_and_wrongpw_are_status_indistinguishable() {
 
     // ── Probe B: an ABSENT account. ──
     let ghost_email = format!("oracle-ghost-{}@zeroship.test", Uuid::new_v4().simple());
-    let absent_err = verify_password_credentials(
-        &pg,
-        &req,
-        "test-client",
-        &probe_ip(2),
-        &ghost_email,
-        BAD_PW,
-    )
-    .await
-    .expect_err("absent account must fail");
+    let absent_err =
+        verify_password_credentials(&pg, &req, "test-client", &probe_ip(2), &ghost_email, BAD_PW)
+            .await
+            .expect_err("absent account must fail");
 
     // ── Probe C: a real account with the WRONG password (one sub-threshold
     //    attempt so it does not itself lock). ──
@@ -429,16 +429,10 @@ async fn locked_absent_and_wrongpw_are_status_indistinguishable() {
     let real_user = users::create(&pg, &real_email, "Oracle Real", Some(&phc2))
         .await
         .expect("seed real user");
-    let wrongpw_err = verify_password_credentials(
-        &pg,
-        &req,
-        "test-client",
-        &probe_ip(3),
-        &real_email,
-        BAD_PW,
-    )
-    .await
-    .expect_err("wrong password must fail");
+    let wrongpw_err =
+        verify_password_credentials(&pg, &req, "test-client", &probe_ip(3), &real_email, BAD_PW)
+            .await
+            .expect_err("wrong password must fail");
 
     // The crux: status codes (via CredentialError) must be IDENTICAL. A locked
     // real account that answers 403 while absent/wrong answer 401 is a
@@ -462,7 +456,7 @@ async fn locked_absent_and_wrongpw_are_status_indistinguishable() {
 
     pg.execute(
         "DELETE FROM zeroship.users WHERE id = ANY($1)",
-        &[&vec![locked_user.id, real_user.id]],
+        &[&vec![locked_user.id.as_str(), real_user.id.as_str()]],
     )
     .await
     .ok();
@@ -550,7 +544,7 @@ async fn failure_arms_perform_equivalent_db_roundtrips() {
     // ── Arm 5: locked/disabled real user must also match (no sibling oracle). ──
     pg.execute(
         "UPDATE zeroship.users SET disabled_at = NOW() WHERE id = $1",
-        &[&user.id],
+        &[&user.id.as_str()],
     )
     .await
     .expect("disable user");
@@ -573,7 +567,10 @@ async fn failure_arms_perform_equivalent_db_roundtrips() {
          arm ({real_delta}); a faster path here is a distinguishable account-state oracle"
     );
 
-    pg.execute("DELETE FROM zeroship.users WHERE id = $1", &[&user.id])
-        .await
-        .ok();
+    pg.execute(
+        "DELETE FROM zeroship.users WHERE id = $1",
+        &[&user.id.as_str()],
+    )
+    .await
+    .ok();
 }

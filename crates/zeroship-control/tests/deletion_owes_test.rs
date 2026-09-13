@@ -46,6 +46,7 @@ use zeroship_control::billing_read::{BillingRemedy, LocalInvoicing};
 use zeroship_control::erasure::preflight;
 use zeroship_control::organizations::{self, CreateOrganizationBody, OrganizationError};
 use zeroship_control::Registry;
+use zeroship_core::UserId;
 
 use crate::common;
 
@@ -112,14 +113,14 @@ impl Fx {
         Self { registry, pg }
     }
 
-    async fn seed_user(&self, label: &str) -> Uuid {
-        let id = Uuid::new_v4();
-        let email = format!("{label}-{}@zeroship.test", id.simple());
+    async fn seed_user(&self, label: &str) -> UserId {
+        let id = UserId::mint();
+        let email = format!("{label}-{}@zeroship.test", id.as_str());
         self.pg
             .execute(
                 "INSERT INTO zeroship.users (id, email, name, email_verified_at) \
                  VALUES ($1, $2::citext, $3, NOW())",
-                &[&id, &email, &label],
+                &[&id.as_str(), &email, &label],
             )
             .await
             .expect("insert user");
@@ -130,7 +131,7 @@ impl Fx {
     /// billing row every invoice FKs into. `create_organization` does not write
     /// that row - the billing setup route does - so a fixture that wants an
     /// invoice has to say so.
-    async fn organization(&self, owner: Uuid, label: &str) -> String {
+    async fn organization(&self, owner: &UserId, label: &str) -> String {
         let id = organizations::create_organization(
             &self.registry,
             owner,
@@ -301,7 +302,12 @@ impl Fx {
         // fixture does the same, which is why the draft's requested amounts are
         // carried to `finalize` rather than written here.
         let (subtotal, credit, total, finalized_at) = if status == FINALIZED {
-            (subtotal_cents, credit_cents, subtotal_cents - credit_cents, "NOW()")
+            (
+                subtotal_cents,
+                credit_cents,
+                subtotal_cents - credit_cents,
+                "NOW()",
+            )
         } else {
             (0, 0, 0, "NULL")
         };
@@ -381,7 +387,7 @@ impl Fx {
     }
 
     /// The remedy the erasure fence names for one organization.
-    async fn remedy(&self, principal: Uuid, organization: &str) -> BillingRemedy {
+    async fn remedy(&self, principal: &UserId, organization: &str) -> BillingRemedy {
         preflight(&self.pg, principal, LocalInvoicing::Yes)
             .await
             .expect("preflight")
@@ -395,7 +401,7 @@ impl Fx {
     /// The erasure fence's answer for one principal, reduced to the money rule.
     /// The OWNERSHIP rule is not read here: it has its own file, and mixing the
     /// two would let an ownership blocker stand in for a money one.
-    async fn money_blockers(&self, principal: Uuid) -> Vec<String> {
+    async fn money_blockers(&self, principal: &UserId) -> Vec<String> {
         preflight(&self.pg, principal, LocalInvoicing::Yes)
             .await
             .expect("preflight")
@@ -405,7 +411,11 @@ impl Fx {
             .collect()
     }
 
-    async fn dissolve(&self, principal: Uuid, organization: &str) -> Result<(), OrganizationError> {
+    async fn dissolve(
+        &self,
+        principal: &UserId,
+        organization: &str,
+    ) -> Result<(), OrganizationError> {
         organizations::dissolve_organization(
             &self.registry,
             principal,
@@ -420,8 +430,8 @@ impl Fx {
 
 /// Both enforcement points that read the tables refuse, and the refusal names
 /// the money rather than something else that could also have refused.
-async fn assert_refused(fx: &Fx, owner: Uuid, organization: &str, owed_cents: i64) {
-    let report = preflight(&fx.pg, owner, LocalInvoicing::Yes)
+async fn assert_refused(fx: &Fx, owner: &UserId, organization: &str, owed_cents: i64) {
+    let report = preflight(&fx.pg, &owner, LocalInvoicing::Yes)
         .await
         .expect("preflight");
     let blocker = report
@@ -434,7 +444,7 @@ async fn assert_refused(fx: &Fx, owner: Uuid, organization: &str, owed_cents: i6
         "the refusal has to quote what is actually owed"
     );
 
-    match fx.dissolve(owner, organization).await {
+    match fx.dissolve(&owner, organization).await {
         Err(OrganizationError::OrganizationOwesBilling(outstanding)) => {
             assert_eq!(outstanding.owed_cents(), owed_cents);
         }
@@ -450,8 +460,8 @@ async fn assert_refused(fx: &Fx, owner: Uuid, organization: &str, owed_cents: i6
 /// for and a refusal that offered only that one said "you owe" and "you owe
 /// nothing" in the same breath. Both figures are checked here so neither can
 /// quietly become the other.
-async fn assert_unbilled_refused(fx: &Fx, owner: Uuid, organization: &str, unbilled_cents: i64) {
-    let report = preflight(&fx.pg, owner, LocalInvoicing::Yes)
+async fn assert_unbilled_refused(fx: &Fx, owner: &UserId, organization: &str, unbilled_cents: i64) {
+    let report = preflight(&fx.pg, &owner, LocalInvoicing::Yes)
         .await
         .expect("preflight");
     let blocker = report
@@ -473,7 +483,7 @@ async fn assert_unbilled_refused(fx: &Fx, owner: Uuid, organization: &str, unbil
         "the refusal has to quote what the unbilled period priced to"
     );
 
-    match fx.dissolve(owner, organization).await {
+    match fx.dissolve(&owner, organization).await {
         Err(OrganizationError::OrganizationOwesBilling(outstanding)) => {
             assert_eq!(outstanding.owed_cents(), 0);
             assert_eq!(outstanding.unbilled_cents(), unbilled_cents);
@@ -488,14 +498,14 @@ async fn assert_unbilled_refused(fx: &Fx, owner: Uuid, organization: &str, unbil
 /// still owns an app, so `dissolve` answers the projects rider and can never
 /// succeed. What is asserted is which refusal comes out, which is the whole of
 /// what the money rule decides.
-async fn assert_money_clear(fx: &Fx, owner: Uuid, organization: &str) {
-    let blockers = fx.money_blockers(owner).await;
+async fn assert_money_clear(fx: &Fx, owner: &UserId, organization: &str) {
+    let blockers = fx.money_blockers(&owner).await;
     assert!(
         !blockers.iter().any(|id| id == organization),
         "{organization} owes nothing and must not be a money blocker: {blockers:?}"
     );
     if let Err(OrganizationError::OrganizationOwesBilling(outstanding)) =
-        fx.dissolve(owner, organization).await
+        fx.dissolve(&owner, organization).await
     {
         panic!("dissolve cited the money rule over a settled organization: {outstanding:?}");
     }
@@ -503,16 +513,16 @@ async fn assert_money_clear(fx: &Fx, owner: Uuid, organization: &str) {
 
 /// Neither point holds this organization back. `dissolve` is destructive, so it
 /// runs last and its success is the strongest form of "allowed" available.
-async fn assert_allowed(fx: &Fx, owner: Uuid, organization: &str) {
-    let blockers = fx.money_blockers(owner).await;
+async fn assert_allowed(fx: &Fx, owner: &UserId, organization: &str) {
+    let blockers = fx.money_blockers(&owner).await;
     assert!(
         !blockers.iter().any(|id| id == organization),
         "{organization} is settled and must not be a money blocker: {blockers:?}"
     );
-    fx.dissolve(owner, organization)
+    fx.dissolve(&owner, organization)
         .await
         .expect("a settled organization closes");
-    let blockers = fx.money_blockers(owner).await;
+    let blockers = fx.money_blockers(&owner).await;
     assert!(
         !blockers.iter().any(|id| id == organization),
         "closing a settled organization must not create a debt: {blockers:?}"
@@ -528,17 +538,17 @@ async fn an_unpaid_invoice_refuses_and_paying_it_clears_the_refusal() {
     let fx = Fx::new().await;
 
     let debtor = fx.seed_user("owes-unpaid").await;
-    let owing = fx.organization(debtor, "owes-unpaid").await;
+    let owing = fx.organization(&debtor, "owes-unpaid").await;
     fx.drop_projects(&owing).await;
     fx.invoice(&owing, FINALIZED, 1_500, 0).await;
-    assert_refused(&fx, debtor, &owing, 1_500).await;
+    assert_refused(&fx, &debtor, &owing, 1_500).await;
 
     let payer = fx.seed_user("owes-paid").await;
-    let settled = fx.organization(payer, "owes-paid").await;
+    let settled = fx.organization(&payer, "owes-paid").await;
     fx.drop_projects(&settled).await;
     let invoice = fx.invoice(&settled, FINALIZED, 1_500, 0).await;
     fx.pay(&invoice, 1_500, CHARGE).await;
-    assert_allowed(&fx, payer, &settled).await;
+    assert_allowed(&fx, &payer, &settled).await;
 
     common::drain_pg().await;
 }
@@ -551,22 +561,22 @@ async fn a_void_and_a_fully_credited_invoice_are_both_settled() {
     let fx = Fx::new().await;
 
     let voider = fx.seed_user("owes-void").await;
-    let voided = fx.organization(voider, "owes-void").await;
+    let voided = fx.organization(&voider, "owes-void").await;
     fx.drop_projects(&voided).await;
     let invoice = fx.invoice(&voided, FINALIZED, 2_000, 0).await;
     // Standing, it refuses. This is the control: one transition separates the
     // two halves of this test.
-    assert_refused(&fx, voider, &voided, 2_000).await;
+    assert_refused(&fx, &voider, &voided, 2_000).await;
     fx.void(&invoice).await;
-    assert_allowed(&fx, voider, &voided).await;
+    assert_allowed(&fx, &voider, &voided).await;
 
     let credited_owner = fx.seed_user("owes-credit").await;
-    let credited = fx.organization(credited_owner, "owes-credit").await;
+    let credited = fx.organization(&credited_owner, "owes-credit").await;
     fx.drop_projects(&credited).await;
     // Subtotal fully covered by credit: total_cents is zero, no payment row
     // exists, and nothing is owed.
     fx.invoice(&credited, FINALIZED, 2_000, 2_000).await;
-    assert_allowed(&fx, credited_owner, &credited).await;
+    assert_allowed(&fx, &credited_owner, &credited).await;
 
     common::drain_pg().await;
 }
@@ -579,18 +589,18 @@ async fn a_partially_collected_invoice_still_owes_the_remainder() {
     let fx = Fx::new().await;
 
     let owner = fx.seed_user("owes-partial").await;
-    let partial = fx.organization(owner, "owes-partial").await;
+    let partial = fx.organization(&owner, "owes-partial").await;
     fx.drop_projects(&partial).await;
     let invoice = fx.invoice(&partial, FINALIZED, 1_000, 0).await;
     fx.pay(&invoice, 400, CHARGE).await;
-    assert_refused(&fx, owner, &partial, 600).await;
+    assert_refused(&fx, &owner, &partial, 600).await;
 
     let full_owner = fx.seed_user("owes-full").await;
-    let full = fx.organization(full_owner, "owes-full").await;
+    let full = fx.organization(&full_owner, "owes-full").await;
     fx.drop_projects(&full).await;
     let paid = fx.invoice(&full, FINALIZED, 1_000, 0).await;
     fx.pay(&paid, 1_000, CHARGE).await;
-    assert_allowed(&fx, full_owner, &full).await;
+    assert_allowed(&fx, &full_owner, &full).await;
 
     common::drain_pg().await;
 }
@@ -603,19 +613,19 @@ async fn a_chargeback_reopens_a_paid_invoice() {
     let fx = Fx::new().await;
 
     let owner = fx.seed_user("owes-chargeback").await;
-    let disputed = fx.organization(owner, "owes-chargeback").await;
+    let disputed = fx.organization(&owner, "owes-chargeback").await;
     fx.drop_projects(&disputed).await;
     let invoice = fx.invoice(&disputed, FINALIZED, 1_000, 0).await;
     fx.pay(&invoice, 1_000, CHARGE).await;
     fx.pay(&invoice, -400, DISPUTE_DEBIT).await;
-    assert_refused(&fx, owner, &disputed, 400).await;
+    assert_refused(&fx, &owner, &disputed, 400).await;
 
     let clean_owner = fx.seed_user("owes-undisputed").await;
-    let clean = fx.organization(clean_owner, "owes-undisputed").await;
+    let clean = fx.organization(&clean_owner, "owes-undisputed").await;
     fx.drop_projects(&clean).await;
     let paid = fx.invoice(&clean, FINALIZED, 1_000, 0).await;
     fx.pay(&paid, 1_000, CHARGE).await;
-    assert_allowed(&fx, clean_owner, &clean).await;
+    assert_allowed(&fx, &clean_owner, &clean).await;
 
     common::drain_pg().await;
 }
@@ -640,17 +650,17 @@ async fn a_draft_invoice_is_not_yet_a_claim_and_finalizing_it_makes_one() {
     let fx = Fx::new().await;
 
     let owner = fx.seed_user("owes-draft").await;
-    let drafted = fx.organization(owner, "owes-draft").await;
+    let drafted = fx.organization(&owner, "owes-draft").await;
     fx.drop_projects(&drafted).await;
     let invoice = fx.invoice(&drafted, DRAFT, 3_000, 0).await;
-    let blockers = fx.money_blockers(owner).await;
+    let blockers = fx.money_blockers(&owner).await;
     assert!(
         !blockers.iter().any(|id| id == &drafted),
         "a draft is not a claim: {blockers:?}"
     );
 
     fx.finalize(&invoice, 3_000).await;
-    assert_refused(&fx, owner, &drafted, 3_000).await;
+    assert_refused(&fx, &owner, &drafted, 3_000).await;
 
     common::drain_pg().await;
 }
@@ -662,15 +672,15 @@ async fn an_organization_owing_nothing_is_allowed_everywhere() {
     let fx = Fx::new().await;
 
     let owner = fx.seed_user("owes-clear").await;
-    let clear = fx.organization(owner, "owes-clear").await;
+    let clear = fx.organization(&owner, "owes-clear").await;
     fx.drop_projects(&clear).await;
-    assert_allowed(&fx, owner, &clear).await;
+    assert_allowed(&fx, &owner, &clear).await;
 
     let debtor = fx.seed_user("owes-control").await;
-    let owing = fx.organization(debtor, "owes-control").await;
+    let owing = fx.organization(&debtor, "owes-control").await;
     fx.drop_projects(&owing).await;
     fx.invoice(&owing, FINALIZED, 700, 0).await;
-    assert_refused(&fx, debtor, &owing, 700).await;
+    assert_refused(&fx, &debtor, &owing, 700).await;
 
     common::drain_pg().await;
 }
@@ -691,12 +701,12 @@ async fn a_debt_that_appears_after_the_dissolve_still_blocks_the_erasure() {
     let fx = Fx::new().await;
 
     let owner = fx.seed_user("owes-reaped").await;
-    let closed = fx.organization(owner, "owes-reaped").await;
+    let closed = fx.organization(&owner, "owes-reaped").await;
     fx.drop_projects(&closed).await;
-    fx.dissolve(owner, &closed)
+    fx.dissolve(&owner, &closed)
         .await
         .expect("a settled organization closes");
-    let blockers = fx.money_blockers(owner).await;
+    let blockers = fx.money_blockers(&owner).await;
     assert!(
         !blockers.iter().any(|id| id == &closed),
         "closed and settled: nothing to refuse yet: {blockers:?}"
@@ -704,7 +714,7 @@ async fn a_debt_that_appears_after_the_dissolve_still_blocks_the_erasure() {
 
     // The sweep bills the month the organization was open for.
     fx.invoice(&closed, FINALIZED, 900, 0).await;
-    let report = preflight(&fx.pg, owner, LocalInvoicing::Yes)
+    let report = preflight(&fx.pg, &owner, LocalInvoicing::Yes)
         .await
         .expect("preflight");
     assert!(
@@ -717,7 +727,10 @@ async fn a_debt_that_appears_after_the_dissolve_still_blocks_the_erasure() {
         .iter()
         .find(|b| b.organization_id == closed)
         .unwrap_or_else(|| panic!("a debt after the dissolve must block: {report:?}"));
-    assert!(blocker.dissolved, "the blocker says the organization is closed");
+    assert!(
+        blocker.dissolved,
+        "the blocker says the organization is closed"
+    );
     assert_eq!(blocker.owed_cents, 900);
 
     common::drain_pg().await;
@@ -738,20 +751,21 @@ async fn closed_period_usage_blocks_only_when_it_priced_to_money() {
     let fx = Fx::new().await;
 
     let free_owner = fx.seed_user("owes-usage-free").await;
-    let free = fx.organization(free_owner, "owes-usage-free").await;
+    let free = fx.organization(&free_owner, "owes-usage-free").await;
     let generous = fx.plan(COVERING_QUOTA).await;
     fx.app_with_usage(&free, &generous, METERED_UNITS, 2).await;
-    let blockers = fx.money_blockers(free_owner).await;
+    let blockers = fx.money_blockers(&free_owner).await;
     assert!(
         !blockers.iter().any(|id| id == &free),
         "usage inside the included quota prices to zero and owes nobody: {blockers:?}"
     );
 
     let billed_owner = fx.seed_user("owes-usage-paid").await;
-    let billable = fx.organization(billed_owner, "owes-usage-paid").await;
+    let billable = fx.organization(&billed_owner, "owes-usage-paid").await;
     let metered = fx.plan(NO_QUOTA).await;
-    fx.app_with_usage(&billable, &metered, METERED_UNITS, 2).await;
-    let blockers = fx.money_blockers(billed_owner).await;
+    fx.app_with_usage(&billable, &metered, METERED_UNITS, 2)
+        .await;
+    let blockers = fx.money_blockers(&billed_owner).await;
     assert!(
         blockers.iter().any(|id| id == &billable),
         "priced usage that never reached an invoice is a debt: {blockers:?}"
@@ -761,11 +775,13 @@ async fn closed_period_usage_blocks_only_when_it_priced_to_money() {
     // rider for them. What this asserts at that point is which refusal comes
     // out: the money rule is asked first, so the billable one must cite money
     // and the free one must not.
-    match fx.dissolve(billed_owner, &billable).await {
+    match fx.dissolve(&billed_owner, &billable).await {
         Err(OrganizationError::OrganizationOwesBilling(_)) => {}
         other => panic!("dissolve must cite the money rule: {other:?}"),
     }
-    if let Err(OrganizationError::OrganizationOwesBilling(o)) = fx.dissolve(free_owner, &free).await {
+    if let Err(OrganizationError::OrganizationOwesBilling(o)) =
+        fx.dissolve(&free_owner, &free).await
+    {
         panic!("a zero-priced period must not refuse the close: {o:?}")
     }
 
@@ -781,22 +797,24 @@ async fn invoicing_the_period_clears_the_unbilled_usage_blocker() {
     let metered = fx.plan(NO_QUOTA).await;
 
     let uninvoiced_owner = fx.seed_user("owes-usage-open").await;
-    let uninvoiced = fx.organization(uninvoiced_owner, "owes-usage-open").await;
-    fx.app_with_usage(&uninvoiced, &metered, METERED_UNITS, 2).await;
-    let blockers = fx.money_blockers(uninvoiced_owner).await;
+    let uninvoiced = fx.organization(&uninvoiced_owner, "owes-usage-open").await;
+    fx.app_with_usage(&uninvoiced, &metered, METERED_UNITS, 2)
+        .await;
+    let blockers = fx.money_blockers(&uninvoiced_owner).await;
     assert!(
         blockers.iter().any(|id| id == &uninvoiced),
         "no invoice covers the period: {blockers:?}"
     );
 
     let invoiced_owner = fx.seed_user("owes-usage-billed").await;
-    let invoiced = fx.organization(invoiced_owner, "owes-usage-billed").await;
-    fx.app_with_usage(&invoiced, &metered, METERED_UNITS, 2).await;
+    let invoiced = fx.organization(&invoiced_owner, "owes-usage-billed").await;
+    fx.app_with_usage(&invoiced, &metered, METERED_UNITS, 2)
+        .await;
     // The invoice sits in the SAME period the usage is in, and is paid, so the
     // invoice arm is silent too.
     let invoice = fx.invoice(&invoiced, FINALIZED, 500, 0).await;
     fx.pay(&invoice, 500, CHARGE).await;
-    let blockers = fx.money_blockers(invoiced_owner).await;
+    let blockers = fx.money_blockers(&invoiced_owner).await;
     assert!(
         !blockers.iter().any(|id| id == &invoiced),
         "the period was billed and the invoice paid: {blockers:?}"
@@ -815,10 +833,11 @@ async fn the_unbilled_arm_belongs_to_the_local_invoicer_and_the_invoice_arm_to_b
     let metered = fx.plan(NO_QUOTA).await;
 
     let usage_owner = fx.seed_user("owes-stack-usage").await;
-    let usage_only = fx.organization(usage_owner, "owes-stack-usage").await;
-    fx.app_with_usage(&usage_only, &metered, METERED_UNITS, 2).await;
+    let usage_only = fx.organization(&usage_owner, "owes-stack-usage").await;
+    fx.app_with_usage(&usage_only, &metered, METERED_UNITS, 2)
+        .await;
     assert!(
-        preflight(&fx.pg, usage_owner, LocalInvoicing::Yes)
+        preflight(&fx.pg, &usage_owner, LocalInvoicing::Yes)
             .await
             .expect("preflight")
             .billing_blockers
@@ -827,7 +846,7 @@ async fn the_unbilled_arm_belongs_to_the_local_invoicer_and_the_invoice_arm_to_b
         "the local invoicer asks about unbilled usage"
     );
     assert!(
-        preflight(&fx.pg, usage_owner, LocalInvoicing::No)
+        preflight(&fx.pg, &usage_owner, LocalInvoicing::No)
             .await
             .expect("preflight")
             .billing_blockers
@@ -836,12 +855,12 @@ async fn the_unbilled_arm_belongs_to_the_local_invoicer_and_the_invoice_arm_to_b
     );
 
     let invoice_owner = fx.seed_user("owes-stack-invoice").await;
-    let invoice_only = fx.organization(invoice_owner, "owes-stack-invoice").await;
+    let invoice_only = fx.organization(&invoice_owner, "owes-stack-invoice").await;
     fx.drop_projects(&invoice_only).await;
     fx.invoice(&invoice_only, FINALIZED, 250, 0).await;
     for invoicing in [LocalInvoicing::Yes, LocalInvoicing::No] {
         assert!(
-            preflight(&fx.pg, invoice_owner, invoicing)
+            preflight(&fx.pg, &invoice_owner, invoicing)
                 .await
                 .expect("preflight")
                 .billing_blockers
@@ -871,12 +890,15 @@ async fn a_void_over_a_period_with_usage_agrees_with_the_plain_void() {
     let metered = fx.plan(NO_QUOTA).await;
 
     let standing_owner = fx.seed_user("owes-void-usage-standing").await;
-    let standing = fx.organization(standing_owner, "owes-void-usage-standing").await;
-    fx.app_with_usage(&standing, &metered, METERED_UNITS, 2).await;
+    let standing = fx
+        .organization(&standing_owner, "owes-void-usage-standing")
+        .await;
+    fx.app_with_usage(&standing, &metered, METERED_UNITS, 2)
+        .await;
     fx.invoice(&standing, FINALIZED, 800, 0).await;
     // The control: the invoice stands over the same usage, and it refuses.
     assert!(
-        fx.money_blockers(standing_owner)
+        fx.money_blockers(&standing_owner)
             .await
             .iter()
             .any(|id| id == &standing),
@@ -884,11 +906,11 @@ async fn a_void_over_a_period_with_usage_agrees_with_the_plain_void() {
     );
 
     let voided_owner = fx.seed_user("owes-void-usage").await;
-    let voided = fx.organization(voided_owner, "owes-void-usage").await;
+    let voided = fx.organization(&voided_owner, "owes-void-usage").await;
     fx.app_with_usage(&voided, &metered, METERED_UNITS, 2).await;
     let released = fx.invoice(&voided, FINALIZED, 800, 0).await;
     fx.void(&released).await;
-    let blockers = fx.money_blockers(voided_owner).await;
+    let blockers = fx.money_blockers(&voided_owner).await;
     assert!(
         !blockers.iter().any(|id| id == &voided),
         "a void releases the period; the usage arm must not re-open it: {blockers:?}"
@@ -913,16 +935,16 @@ async fn a_draft_invoice_does_not_settle_the_period_it_claimed() {
     let metered = fx.plan(NO_QUOTA).await;
 
     let owner = fx.seed_user("owes-draft-stuck").await;
-    let stuck = fx.organization(owner, "owes-draft-stuck").await;
+    let stuck = fx.organization(&owner, "owes-draft-stuck").await;
     fx.app_with_usage(&stuck, &metered, METERED_UNITS, 2).await;
     let claimed = fx.invoice(&stuck, DRAFT, PRICED_PERIOD_CENTS, 0).await;
-    assert_unbilled_refused(&fx, owner, &stuck, PRICED_PERIOD_CENTS).await;
+    assert_unbilled_refused(&fx, &owner, &stuck, PRICED_PERIOD_CENTS).await;
 
     // Finalizing is what turns the claim into one, and the cash then clears it.
     // Nothing else about the organization moves.
     fx.finalize(&claimed, PRICED_PERIOD_CENTS).await;
     fx.pay(&claimed, PRICED_PERIOD_CENTS, CHARGE).await;
-    assert_money_clear(&fx, owner, &stuck).await;
+    assert_money_clear(&fx, &owner, &stuck).await;
 
     common::drain_pg().await;
 }
@@ -939,18 +961,21 @@ async fn a_draft_sends_the_period_to_the_pricer_rather_than_asserting_a_debt() {
     let fx = Fx::new().await;
 
     let free_owner = fx.seed_user("owes-draft-free").await;
-    let free = fx.organization(free_owner, "owes-draft-free").await;
+    let free = fx.organization(&free_owner, "owes-draft-free").await;
     let generous = fx.plan(COVERING_QUOTA).await;
     fx.app_with_usage(&free, &generous, METERED_UNITS, 2).await;
     fx.invoice(&free, DRAFT, 0, 0).await;
-    assert_money_clear(&fx, free_owner, &free).await;
+    assert_money_clear(&fx, &free_owner, &free).await;
 
     let billable_owner = fx.seed_user("owes-draft-billable").await;
-    let billable = fx.organization(billable_owner, "owes-draft-billable").await;
+    let billable = fx
+        .organization(&billable_owner, "owes-draft-billable")
+        .await;
     let metered = fx.plan(NO_QUOTA).await;
-    fx.app_with_usage(&billable, &metered, METERED_UNITS, 2).await;
+    fx.app_with_usage(&billable, &metered, METERED_UNITS, 2)
+        .await;
     fx.invoice(&billable, DRAFT, 0, 0).await;
-    assert_unbilled_refused(&fx, billable_owner, &billable, PRICED_PERIOD_CENTS).await;
+    assert_unbilled_refused(&fx, &billable_owner, &billable, PRICED_PERIOD_CENTS).await;
 
     common::drain_pg().await;
 }
@@ -976,16 +1001,18 @@ async fn a_non_accruing_app_on_a_base_fee_plan_is_priced_into_the_period() {
     let no_standing_charge = fx.plan_priced(0, NO_QUOTA).await;
 
     let owner = fx.seed_user("owes-roster-base").await;
-    let charged = fx.organization(owner, "owes-roster-base").await;
-    fx.app_with_usage(&charged, &covered, METERED_UNITS, 2).await;
+    let charged = fx.organization(&owner, "owes-roster-base").await;
+    fx.app_with_usage(&charged, &covered, METERED_UNITS, 2)
+        .await;
     fx.app(&charged, &standing_charge).await;
-    assert_unbilled_refused(&fx, owner, &charged, BASE_FEE_CENTS).await;
+    assert_unbilled_refused(&fx, &owner, &charged, BASE_FEE_CENTS).await;
 
     let control_owner = fx.seed_user("owes-roster-free").await;
-    let uncharged = fx.organization(control_owner, "owes-roster-free").await;
-    fx.app_with_usage(&uncharged, &covered, METERED_UNITS, 2).await;
+    let uncharged = fx.organization(&control_owner, "owes-roster-free").await;
+    fx.app_with_usage(&uncharged, &covered, METERED_UNITS, 2)
+        .await;
     fx.app(&uncharged, &no_standing_charge).await;
-    assert_money_clear(&fx, control_owner, &uncharged).await;
+    assert_money_clear(&fx, &control_owner, &uncharged).await;
 
     common::drain_pg().await;
 }
@@ -1005,20 +1032,23 @@ async fn the_unbilled_remedy_turns_on_whether_a_payment_identity_exists() {
     let metered = fx.plan(NO_QUOTA).await;
 
     let cardless_owner = fx.seed_user("owes-remedy-cardless").await;
-    let cardless = fx.organization(cardless_owner, "owes-remedy-cardless").await;
-    fx.app_with_usage(&cardless, &metered, METERED_UNITS, 2).await;
+    let cardless = fx
+        .organization(&cardless_owner, "owes-remedy-cardless")
+        .await;
+    fx.app_with_usage(&cardless, &metered, METERED_UNITS, 2)
+        .await;
     assert_eq!(
-        fx.remedy(cardless_owner, &cardless).await,
+        fx.remedy(&cardless_owner, &cardless).await,
         BillingRemedy::AttachPaymentMethod,
         "no customer: nothing bills or collects until one is attached"
     );
 
     let carded_owner = fx.seed_user("owes-remedy-carded").await;
-    let carded = fx.organization(carded_owner, "owes-remedy-carded").await;
+    let carded = fx.organization(&carded_owner, "owes-remedy-carded").await;
     fx.app_with_usage(&carded, &metered, METERED_UNITS, 2).await;
     fx.payment_identity(&carded).await;
     assert_eq!(
-        fx.remedy(carded_owner, &carded).await,
+        fx.remedy(&carded_owner, &carded).await,
         BillingRemedy::ReconcileClosedPeriod,
         "customer on file: the invoice is the only missing piece"
     );
@@ -1046,21 +1076,27 @@ async fn a_void_does_not_answer_for_a_period_that_still_holds_a_draft() {
 
     // The CONTROL first: voided and nothing pending. Nothing is owed.
     let settled_owner = fx.seed_user("owes-void-only").await;
-    let settled = fx.organization(settled_owner, "owes-void-only").await;
-    fx.app_with_usage(&settled, &metered, METERED_UNITS, 2).await;
-    let withdrawn = fx.invoice(&settled, FINALIZED, PRICED_PERIOD_CENTS, 0).await;
+    let settled = fx.organization(&settled_owner, "owes-void-only").await;
+    fx.app_with_usage(&settled, &metered, METERED_UNITS, 2)
+        .await;
+    let withdrawn = fx
+        .invoice(&settled, FINALIZED, PRICED_PERIOD_CENTS, 0)
+        .await;
     fx.void(&withdrawn).await;
-    assert_money_clear(&fx, settled_owner, &settled).await;
+    assert_money_clear(&fx, &settled_owner, &settled).await;
 
     // The reissue, caught mid-flight: the void has committed and the
     // replacement is still a draft, so the money is real and unclaimed.
     let owner = fx.seed_user("owes-void-then-draft").await;
-    let reissuing = fx.organization(owner, "owes-void-then-draft").await;
-    fx.app_with_usage(&reissuing, &metered, METERED_UNITS, 2).await;
-    let wrong = fx.invoice(&reissuing, FINALIZED, PRICED_PERIOD_CENTS, 0).await;
+    let reissuing = fx.organization(&owner, "owes-void-then-draft").await;
+    fx.app_with_usage(&reissuing, &metered, METERED_UNITS, 2)
+        .await;
+    let wrong = fx
+        .invoice(&reissuing, FINALIZED, PRICED_PERIOD_CENTS, 0)
+        .await;
     fx.void(&wrong).await;
     fx.invoice(&reissuing, DRAFT, 0, 0).await;
-    assert_unbilled_refused(&fx, owner, &reissuing, PRICED_PERIOD_CENTS).await;
+    assert_unbilled_refused(&fx, &owner, &reissuing, PRICED_PERIOD_CENTS).await;
 
     common::drain_pg().await;
 }

@@ -27,10 +27,10 @@ use zeroship_bundle::{BlobStore, LocalDiskBlobStore};
 use zeroship_control::plan_catalog::{Plan, PlanCatalog};
 use zeroship_control::pricing::{PlanPrice, FX_SCALE};
 use zeroship_control::{
-    api, AppState, EnvStore, Quota, RateLimiter, Registry, SecretString,
-    StripeStore,
+    api, AppState, EnvStore, Quota, RateLimiter, Registry, SecretString, StripeStore,
 };
 use zeroship_core::types::{AppNetPolicyLimits, AppRuntimeLimits};
+use zeroship_core::{AppId, UserId};
 
 use crate::common;
 
@@ -86,7 +86,7 @@ async fn build_test_state(db_url: &str, label: &str) -> Fixture {
         env_store,
         stripe_store,
         blob_store,
-            workflow_blob_store,
+        workflow_blob_store,
         control_key: SecretString::new("test-control-key".to_string()),
         master_key: SecretString::new(TEST_MASTER_KEY.to_string()),
         stripe_webhook_secret: SecretString::new(String::new()),
@@ -106,7 +106,10 @@ async fn build_test_state(db_url: &str, label: &str) -> Fixture {
         expected_oauth_audience: "control.zeroship.ai".to_string(),
         static_policies: zeroship_authz::load_platform_policies()
             .expect("bundled authz policies parse"),
-        auth_provider: zeroship_control::platform_auth_provider("https://auth.zeroship.test/oauth2", Some(common::platform_jwks_url())),
+        auth_provider: zeroship_control::platform_auth_provider(
+            "https://auth.zeroship.test/oauth2",
+            Some(common::platform_jwks_url()),
+        ),
         // No platform deploy-token mint here: that is control's OUTBOUND
         // destination for the device flow, and no fixture below drives one.
         provider_registry: zeroship_control::metering::provider::builtin_registry(),
@@ -133,7 +136,7 @@ async fn build_test_state(db_url: &str, label: &str) -> Fixture {
 
 /// A bearer, plus the user_id it is bound to, for one principal.
 struct Caller {
-    user_id: Uuid,
+    user_id: UserId,
     token: String,
 }
 
@@ -150,10 +153,10 @@ impl Caller {
 /// It used to take an optional platform role and seed a `platform_admin_roles`
 /// row for the operator paths. That table and those roles are deleted, so every
 /// principal this mints is an ordinary creator.
-async fn issue_bearer(state: &AppState, user_id: Uuid, scope: &str) -> Caller {
+async fn issue_bearer(state: &AppState, user_id: &UserId, scope: &str) -> Caller {
     let _ = state;
     Caller {
-        user_id,
+        user_id: user_id.clone(),
         token: common::platform_token_for_client(user_id, scope, common::CONSOLE_CLIENT_ID),
     }
 }
@@ -195,24 +198,27 @@ async fn seed_plan(catalog: &PlanCatalog, name: &str, assignable: bool) -> Plan 
     catalog.upsert(&plan, Some(false)).await.expect("seed plan")
 }
 
-async fn make_user(pg: &Client, label: &str) -> Uuid {
-    let id = Uuid::now_v7();
-    let email = format!("{label}-{}@zeroship.test", id.simple());
+async fn make_user(pg: &Client, label: &str) -> UserId {
+    let id = UserId::mint();
+    let email = format!("{label}-{}@zeroship.test", id.as_str());
     pg.execute(
         "INSERT INTO zeroship.users (id, email, name, email_verified_at) \
          VALUES ($1, $2, $3, NOW())",
-        &[&id, &email, &label],
+        &[&id.as_str(), &email, &label],
     )
     .await
     .expect("insert user");
     id
 }
 
-async fn app_plan_id(pg: &Client, app_id: Uuid) -> String {
-    pg.query_one("SELECT plan_id FROM zeroship.apps WHERE id = $1", &[&app_id])
-        .await
-        .expect("read app plan")
-        .get("plan_id")
+async fn app_plan_id(pg: &Client, app_id: &AppId) -> String {
+    pg.query_one(
+        "SELECT plan_id FROM zeroship.apps WHERE id = $1",
+        &[&app_id.as_str()],
+    )
+    .await
+    .expect("read app plan")
+    .get("plan_id")
 }
 
 #[compio::test]
@@ -234,26 +240,31 @@ async fn creator_cannot_self_assign_non_assignable_plan_operator_can() {
     let app = fx
         .state
         .registry
-        .create_app(&format!("setplan-{}", Uuid::new_v4().simple()), &start.id, &owner, None)
+        .create_app(
+            &format!("setplan-{}", Uuid::new_v4().simple()),
+            &start.id,
+            &owner,
+            None,
+        )
         .await
         .expect("create app");
 
-    let creator_caller = issue_bearer(&fx.state, owner, "billing:write").await;
+    let creator_caller = issue_bearer(&fx.state, &owner, "billing:write").await;
 
     // An operator: platform 'billing' role + BillingWrite on Resource::Any.
     let op_user = make_user(&pg, "operator").await;
-    let operator_caller = issue_bearer(&fx.state, op_user, "billing:write").await;
+    let operator_caller = issue_bearer(&fx.state, &op_user, "billing:write").await;
 
     let app_svc = test::init_service(
-        web::App::new().state(fx.state.clone()).service(
-            web::resource("/api/apps/{id}/plan").route(web::put().to(api::set_plan)),
-        ),
+        web::App::new()
+            .state(fx.state.clone())
+            .service(web::resource("/api/apps/{id}/plan").route(web::put().to(api::set_plan))),
     )
     .await;
 
-    let put = |bearer: String, app_id: Uuid, plan_id: String| {
+    let put = |bearer: String, app_id: &AppId, plan_id: String| {
         test::TestRequest::put()
-            .uri(&format!("/api/apps/{app_id}/plan"))
+            .uri(&format!("/api/apps/{}/plan", app_id.as_str()))
             .header("authorization", bearer)
             .set_json(&serde_json::json!({ "plan_id": plan_id }))
             .to_request()
@@ -264,7 +275,7 @@ async fn creator_cannot_self_assign_non_assignable_plan_operator_can() {
     // Postgres client - alive past the teardown at the end of this test.
     let status = test::call_service(
         &app_svc,
-        put(creator_caller.bearer(), app.id, operator_only.id.clone()),
+        put(creator_caller.bearer(), &app.id, operator_only.id.clone()),
     )
     .await
     .status();
@@ -274,7 +285,7 @@ async fn creator_cannot_self_assign_non_assignable_plan_operator_can() {
         "creator must NOT self-assign a non-assignable (operator) plan",
     );
     assert_eq!(
-        app_plan_id(&pg, app.id).await,
+        app_plan_id(&pg, &app.id).await,
         start.id,
         "a rejected creator assignment must not change the plan",
     );
@@ -282,12 +293,20 @@ async fn creator_cannot_self_assign_non_assignable_plan_operator_can() {
     // 2. Creator assigning an ASSIGNABLE plan ⇒ 200, plan updated.
     let status = test::call_service(
         &app_svc,
-        put(creator_caller.bearer(), app.id, assignable.id.clone()),
+        put(creator_caller.bearer(), &app.id, assignable.id.clone()),
     )
     .await
     .status();
-    assert_eq!(status, StatusCode::OK, "creator may assign an assignable plan");
-    assert_eq!(app_plan_id(&pg, app.id).await, assignable.id, "creator assignment applied");
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "creator may assign an assignable plan"
+    );
+    assert_eq!(
+        app_plan_id(&pg, &app.id).await,
+        assignable.id,
+        "creator assignment applied"
+    );
 
     // 3. A SECOND creator who owns nothing here is refused outright. There is
     //    no operator arm to assign the operator-only plan any more: it was
@@ -296,7 +315,7 @@ async fn creator_cannot_self_assign_non_assignable_plan_operator_can() {
     //    through this endpoint.
     let status = test::call_service(
         &app_svc,
-        put(operator_caller.bearer(), app.id, operator_only.id.clone()),
+        put(operator_caller.bearer(), &app.id, operator_only.id.clone()),
     )
     .await
     .status();
@@ -306,23 +325,46 @@ async fn creator_cannot_self_assign_non_assignable_plan_operator_can() {
         "a caller with no membership of the app may not assign its plan",
     );
     assert_eq!(
-        app_plan_id(&pg, app.id).await,
+        app_plan_id(&pg, &app.id).await,
         assignable.id,
         "the refused assignment leaves the creator's plan in place",
     );
 
     // Cleanup (best-effort; FK order: spend state, members, app, tokens, roles).
-    let _ = pg.execute("DELETE FROM zeroship.app_spend_state WHERE app_id = $1", &[&app.id]).await;
-    let _ = pg.execute("DELETE FROM zeroship.organization_members om \
+    let _ = pg
+        .execute(
+            "DELETE FROM zeroship.app_spend_state WHERE app_id = $1",
+            &[&app.id.as_str()],
+        )
+        .await;
+    let _ = pg
+        .execute(
+            "DELETE FROM zeroship.organization_members om \
                  USING zeroship.apps a JOIN zeroship.projects p ON p.id = a.project_id \
-                 WHERE om.organization_id = p.organization_id AND a.id = $1", &[&app.id]).await;
-    let _ = pg.execute("DELETE FROM zeroship.apps WHERE id = $1", &[&app.id]).await;
+                 WHERE om.organization_id = p.organization_id AND a.id = $1",
+            &[&app.id.as_str()],
+        )
+        .await;
+    let _ = pg
+        .execute(
+            "DELETE FROM zeroship.apps WHERE id = $1",
+            &[&app.id.as_str()],
+        )
+        .await;
     for caller in [&creator_caller, &operator_caller] {
         let _ = pg
-            .execute("DELETE FROM zeroship.authz_decisions WHERE actor_user_id = $1", &[&caller.user_id])
+            .execute(
+                "DELETE FROM zeroship.authz_decisions WHERE actor_user_id = $1",
+                &[&caller.user_id.as_str()],
+            )
             .await;
     }
-    let _ = pg.execute("DELETE FROM zeroship.users WHERE id = ANY($1)", &[&vec![owner]]).await;
+    let _ = pg
+        .execute(
+            "DELETE FROM zeroship.users WHERE id = $1",
+            &[&owner.as_str()],
+        )
+        .await;
 
     // Teardown: the service, the plan catalog, the cloned `pg` handle, and the
     // fixture all hold (or share) a Postgres connection, and locals are dropped
@@ -363,29 +405,37 @@ async fn assigning_an_archived_plan_is_refused_and_not_reported_as_a_missing_app
     let start = seed_plan(&catalog, "start-tier", true).await;
     // Seed assignable, then archive it. `upsert`'s second arg is `archived`.
     let retired = seed_plan(&catalog, "retired-tier", true).await;
-    catalog.upsert(&retired, Some(true)).await.expect("archive the plan");
+    catalog
+        .upsert(&retired, Some(true))
+        .await
+        .expect("archive the plan");
 
     let owner = make_user(&pg, "creator").await;
     let app = fx
         .state
         .registry
-        .create_app(&format!("setplan-arch-{}", Uuid::new_v4().simple()), &start.id, &owner, None)
+        .create_app(
+            &format!("setplan-arch-{}", Uuid::new_v4().simple()),
+            &start.id,
+            &owner,
+            None,
+        )
         .await
         .expect("create app");
 
-    let owner_caller = issue_bearer(&fx.state, owner, "billing:write").await;
+    let owner_caller = issue_bearer(&fx.state, &owner, "billing:write").await;
 
     let app_svc = test::init_service(
-        web::App::new().state(fx.state.clone()).service(
-            web::resource("/api/apps/{id}/plan").route(web::put().to(api::set_plan)),
-        ),
+        web::App::new()
+            .state(fx.state.clone())
+            .service(web::resource("/api/apps/{id}/plan").route(web::put().to(api::set_plan))),
     )
     .await;
 
     let status = test::call_service(
         &app_svc,
         test::TestRequest::put()
-            .uri(&format!("/api/apps/{}/plan", app.id))
+            .uri(&format!("/api/apps/{}/plan", app.id.as_str()))
             .header("authorization", owner_caller.bearer())
             .set_json(&serde_json::json!({ "plan_id": retired.id }))
             .to_request(),
@@ -405,16 +455,29 @@ async fn assigning_an_archived_plan_is_refused_and_not_reported_as_a_missing_app
         "assigning an archived plan is a bad request, like an unknown plan id",
     );
     assert_eq!(
-        app_plan_id(&pg, app.id).await,
+        app_plan_id(&pg, &app.id).await,
         start.id,
         "a refused assignment must leave the plan untouched",
     );
 
-    let _ = pg.execute("DELETE FROM zeroship.apps WHERE id = $1", &[&app.id]).await;
     let _ = pg
-        .execute("DELETE FROM zeroship.authz_decisions WHERE actor_user_id = $1", &[&owner_caller.user_id])
+        .execute(
+            "DELETE FROM zeroship.apps WHERE id = $1",
+            &[&app.id.as_str()],
+        )
         .await;
-    let _ = pg.execute("DELETE FROM zeroship.users WHERE id = ANY($1)", &[&vec![owner]]).await;
+    let _ = pg
+        .execute(
+            "DELETE FROM zeroship.authz_decisions WHERE actor_user_id = $1",
+            &[&owner_caller.user_id.as_str()],
+        )
+        .await;
+    let _ = pg
+        .execute(
+            "DELETE FROM zeroship.users WHERE id = $1",
+            &[&owner.as_str()],
+        )
+        .await;
 
     drop(app_svc);
     drop(catalog);

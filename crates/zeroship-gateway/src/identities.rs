@@ -7,7 +7,7 @@
 //! need to reverse `pws_` to `(app, global_user)`.
 //!
 //! The row is keyed on `(app_client_id, global_user_id)` where
-//! `app_client_id` is the per-app OAuth client_id (`oac_<base62>`). The
+//! `app_client_id` is the per-app OAuth client_id (`oac_<base36>`). The
 //! `pairwise_sub` is the deterministic `pws_…` projection (a column, not
 //! the PK: re-login / re-grant re-derives the SAME value and UPSERTS the
 //! one row). `relay_email` stays `NULL` until the consent flow populates it
@@ -19,7 +19,8 @@
 //! enumerates these rows to revoke access-only and cookie token families.
 
 use compio_postgres::Client;
-use uuid::Uuid;
+
+use zeroship_core::user_id::UserId;
 
 use crate::error::{GatewayError, Result};
 use crate::rls;
@@ -45,7 +46,7 @@ const fn identity_upsert_sql() -> &'static str {
 ///   - `relay_email` is LEFT UNTOUCHED, so the gateway projection never
 ///     clobbers an alias minted at consent time.
 ///
-/// `app_client_id` is the per-app OAuth client_id (`oac_<base62>`,
+/// `app_client_id` is the per-app OAuth client_id (`oac_<base36>`,
 /// `route.oauth_client_id`); `pairwise_sub` is the derived `pws_…`.
 ///
 /// # Errors
@@ -54,7 +55,7 @@ const fn identity_upsert_sql() -> &'static str {
 pub async fn upsert(
     conn: &mut Client,
     app_client_id: &str,
-    global_user_id: Uuid,
+    global_user_id: &UserId,
     pairwise_sub: &str,
 ) -> Result<()> {
     let tx = conn
@@ -65,7 +66,7 @@ pub async fn upsert(
     let mapped = tx
         .execute(
         identity_upsert_sql(),
-        &[&app_client_id, &global_user_id, &pairwise_sub],
+        &[&app_client_id, &global_user_id.as_str(), &pairwise_sub],
     )
     .await
     .map_err(|e| GatewayError::Db(format!("app_user_identities upsert: {e}")))?;
@@ -89,7 +90,7 @@ pub async fn upsert(
 pub async fn lookup_pairwise_sub(
     conn: &mut Client,
     app_client_id: &str,
-    global_user_id: Uuid,
+    global_user_id: &UserId,
 ) -> Result<Option<String>> {
     let tx = conn
         .transaction()
@@ -100,7 +101,7 @@ pub async fn lookup_pairwise_sub(
         .query(
             "SELECT pairwise_sub FROM zeroship.app_user_identities \
              WHERE app_client_id = $1 AND global_user_id = $2",
-            &[&app_client_id, &global_user_id],
+            &[&app_client_id, &global_user_id.as_str()],
         )
         .await
         .map_err(|e| GatewayError::Db(format!("app_user_identities lookup: {e}")))?;
@@ -130,7 +131,7 @@ pub async fn lookup_pairwise_sub(
 pub async fn lookup_relay_email(
     conn: &mut Client,
     app_client_id: &str,
-    global_user_id: Uuid,
+    global_user_id: &UserId,
 ) -> Result<Option<String>> {
     let tx = conn
         .transaction()
@@ -143,7 +144,7 @@ pub async fn lookup_relay_email(
              WHERE app_client_id = $1 AND global_user_id = $2 \
                AND relay_email IS NOT NULL \
                AND revoked_at IS NULL",
-            &[&app_client_id, &global_user_id],
+            &[&app_client_id, &global_user_id.as_str()],
         )
         .await
         .map_err(|e| GatewayError::Db(format!("app_user_identities relay lookup: {e}")))?;

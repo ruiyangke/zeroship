@@ -16,31 +16,11 @@ use zeroship_data_orm::protection::unmask::{
     dispatch_bulk_unmask, dispatch_unmask, parse_args, parse_bulk_args,
 };
 
-/// Look up the current request's authenticated actor id (typed_id
-/// string), if any.
+/// Read the authenticated actor ID from the current V8 request.
 ///
-/// Reads the runtime's `per_request_user` slot using the request id
-/// currently bound by the pump (see `crates/zeroship-runtime/src/auth.rs` for
-/// the wire contract). The user JSON shape is gateway-defined and
-/// carries at minimum `{ "id": "usr_..." }` for an authenticated
-/// user; we extract the `id` field and discard the rest (Q-SF-A:
-/// "typed_id only" for `created_by` - only the id flows to the row,
-/// not the role / display name / etc.).
-///
-/// Returns `None` when no request is bound (module init, raw
-/// background dispatch), when no user is attached to the request
-/// (anonymous), or when the user JSON is malformed. NULL is the
-/// design choice for `created_by` in that case (§2.3 of the
-/// proposal); the column is nullable so the INSERT succeeds.
-///
-/// **Lives here, in the adapter, because per-request identity is runtime
-/// state.** It sat in `crud/assignment_pass.rs` until 2026-09-02, where its
-/// `&SharedState` parameter was the LAST signature in the ENGINE tier naming
-/// the V8 runtime crate - the final row on
-/// `tests/lib/tier_signature_census.sh`. All nine of its callers were already
-/// in this file, so the move relocated a definition and nothing else: the
-/// engine's write pass takes the actor id as an ARGUMENT and never learns where
-/// it came from.
+/// The ORM receives the captured ID for descriptor-declared actor assignments;
+/// it does not depend on V8 request state. Anonymous or malformed request
+/// identity produces no actor assignment.
 pub(crate) fn current_actor_id(state: &SharedState) -> Option<String> {
     let s = state.borrow();
     let rid = s.executing_request_id?;
@@ -52,23 +32,32 @@ pub(crate) fn current_actor_id(state: &SharedState) -> Option<String> {
         .map(|s| s.to_string())
 }
 
+#[derive(Clone, Copy)]
+pub(super) enum OutputMode {
+    Many,
+    One,
+    Exists,
+}
+
 pub(super) fn dispatch_operation<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     binding: DbBinding,
     collection: &str,
     operation: Operation,
-    one: bool,
+    mode: OutputMode,
 ) -> v8::Local<'s, v8::Promise> {
     crate::v8_bridge::ensure_read_set_capture();
     let state = runtime_state(scope);
     let route = crate::tx_scope::capture_route(scope, &binding);
-    let prepared = PreparedOperation::new(
-        binding,
-        collection,
-        route,
-        current_actor_id(&state),
-        operation,
-    );
+    let prepared = route.and_then(|route| {
+        PreparedOperation::new(
+            binding,
+            collection,
+            route,
+            current_actor_id(&state),
+            operation,
+        )
+    });
     let (resolver, request_id, promise) = setup_js_promise(scope, &state);
     state.borrow_mut().spawned_ops.push(Box::pin(settle(
         resolver,
@@ -80,8 +69,11 @@ pub(super) fn dispatch_operation<'s>(
                 .await
         },
         move |output| match output {
+            Output::Count(count) if matches!(mode, OutputMode::Exists) => {
+                ResolveValue::Bool(count != 0)
+            }
             Output::Count(count) => ResolveValue::F64(count as f64),
-            Output::Rows { rows, has_masked } if one => {
+            Output::Rows { rows, has_masked } if matches!(mode, OutputMode::One) => {
                 crate::v8_bridge::first_row_or_null_masked(rows, has_masked)
             }
             Output::Rows { rows, has_masked } => {
@@ -107,9 +99,42 @@ pub(crate) fn dispatch_find<'s>(
             filter,
             options: opts,
         },
-        false,
+        OutputMode::Many,
     )
 }
+
+pub(crate) fn dispatch_find_one<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    binding: DbBinding,
+    collection: &str,
+    filter: Value,
+    options: Value,
+) -> v8::Local<'s, v8::Promise> {
+    dispatch_operation(
+        scope,
+        binding,
+        collection,
+        Operation::Find { filter, options },
+        OutputMode::One,
+    )
+}
+
+pub(crate) fn dispatch_exists<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    binding: DbBinding,
+    collection: &str,
+    filter: Value,
+    options: Value,
+) -> v8::Local<'s, v8::Promise> {
+    dispatch_operation(
+        scope,
+        binding,
+        collection,
+        Operation::Count { filter, options },
+        OutputMode::Exists,
+    )
+}
+
 pub(crate) fn dispatch_insert<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     binding: DbBinding,
@@ -121,7 +146,7 @@ pub(crate) fn dispatch_insert<'s>(
         binding,
         collection,
         Operation::Insert { document: doc },
-        true,
+        OutputMode::One,
     )
 }
 pub(crate) fn dispatch_insert_many<'s>(
@@ -135,7 +160,7 @@ pub(crate) fn dispatch_insert_many<'s>(
         binding,
         collection,
         Operation::InsertMany { documents: docs },
-        false,
+        OutputMode::Many,
     )
 }
 pub(crate) fn dispatch_update_one<'s>(
@@ -154,7 +179,7 @@ pub(crate) fn dispatch_update_one<'s>(
             patch: update,
             many: false,
         },
-        true,
+        OutputMode::One,
     )
 }
 pub(crate) fn dispatch_update_many<'s>(
@@ -173,7 +198,7 @@ pub(crate) fn dispatch_update_many<'s>(
             patch: update,
             many: true,
         },
-        false,
+        OutputMode::Many,
     )
 }
 pub(crate) fn dispatch_delete_one<'s>(
@@ -190,7 +215,7 @@ pub(crate) fn dispatch_delete_one<'s>(
             filter,
             many: false,
         },
-        true,
+        OutputMode::One,
     )
 }
 pub(crate) fn dispatch_delete_many<'s>(
@@ -204,7 +229,7 @@ pub(crate) fn dispatch_delete_many<'s>(
         binding,
         collection,
         Operation::Delete { filter, many: true },
-        false,
+        OutputMode::Many,
     )
 }
 pub(crate) fn dispatch_purge_one<'s>(
@@ -221,7 +246,7 @@ pub(crate) fn dispatch_purge_one<'s>(
             filter,
             many: false,
         },
-        true,
+        OutputMode::One,
     )
 }
 pub(crate) fn dispatch_purge_many<'s>(
@@ -235,7 +260,7 @@ pub(crate) fn dispatch_purge_many<'s>(
         binding,
         collection,
         Operation::Purge { filter, many: true },
-        false,
+        OutputMode::Many,
     )
 }
 pub(crate) fn dispatch_restore_one<'s>(
@@ -252,7 +277,7 @@ pub(crate) fn dispatch_restore_one<'s>(
             filter,
             many: false,
         },
-        true,
+        OutputMode::One,
     )
 }
 pub(crate) fn dispatch_restore_many<'s>(
@@ -266,7 +291,7 @@ pub(crate) fn dispatch_restore_many<'s>(
         binding,
         collection,
         Operation::Restore { filter, many: true },
-        false,
+        OutputMode::Many,
     )
 }
 pub(crate) fn dispatch_aggregate<'s>(
@@ -284,7 +309,7 @@ pub(crate) fn dispatch_aggregate<'s>(
             pipeline,
             options: opts,
         },
-        false,
+        OutputMode::Many,
     )
 }
 pub(crate) fn dispatch_distinct<'s>(
@@ -304,7 +329,7 @@ pub(crate) fn dispatch_distinct<'s>(
             filter,
             options: opts,
         },
-        false,
+        OutputMode::Many,
     )
 }
 pub(crate) fn dispatch_count<'s>(
@@ -322,7 +347,7 @@ pub(crate) fn dispatch_count<'s>(
             filter,
             options: opts,
         },
-        false,
+        OutputMode::Many,
     )
 }
 pub(crate) fn dispatch_upsert<'s>(
@@ -340,7 +365,7 @@ pub(crate) fn dispatch_upsert<'s>(
             document: doc,
             conflict_fields,
         },
-        true,
+        OutputMode::One,
     )
 }
 pub(crate) fn dispatch_search<'s>(
@@ -354,7 +379,7 @@ pub(crate) fn dispatch_search<'s>(
         binding,
         collection,
         Operation::Search { arguments: args },
-        false,
+        OutputMode::Many,
     )
 }
 pub(crate) fn dispatch_near<'s>(
@@ -368,7 +393,7 @@ pub(crate) fn dispatch_near<'s>(
         binding,
         collection,
         Operation::Near { arguments: args },
-        false,
+        OutputMode::Many,
     )
 }
 // ---------------------------------------------------------------------------
@@ -464,6 +489,7 @@ pub(crate) fn dispatch_unmask_field<'s>(
                 // `dispatch_unmask(.., parsed?)` reads the same and is not: the `?`
                 // then runs behind the await, and the backend error wins.
                 let args = parsed?;
+                let route = route?;
                 let route = crate::tx_scope::bind_route(route).await?;
                 dispatch_unmask(&route, &binding, args).await
             },
@@ -514,6 +540,7 @@ pub(crate) fn dispatch_bulk_unmask_field<'s>(
                 // after the route is bound, which is a separate deliberate
                 // trade documented in `crud/unmask.rs`.
                 let args = parsed?;
+                let route = route?;
                 let route = crate::tx_scope::bind_route(route).await?;
                 dispatch_bulk_unmask(&route, &binding, args).await
             },

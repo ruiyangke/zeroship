@@ -75,16 +75,16 @@ impl Fixture {
         let db = database.connect().await;
         let issuer = Arc::new(test_issuer());
 
-        let user_id = Uuid::new_v4();
-        let app_id = Uuid::new_v4();
+        let user_id = zeroship_core::UserId::mint();
+        let app_id = zeroship_core::AppId::mint();
         let client_id = format!("oac_tca_{}", Uuid::new_v4().simple());
         let app_name = format!("token-client-auth-{}", Uuid::new_v4().simple());
-        seed_user_client(&db, user_id, app_id, &app_name, &client_id, kind).await;
+        seed_user_client(&db, &user_id, &app_id, &app_name, &client_id, kind).await;
 
         let session = session_store::create(
             &db,
             &session_store::CreateSession {
-                user_id,
+                user_id: user_id.clone(),
                 auth_method: "pwd",
                 amr: vec!["pwd".to_string()],
                 acr: None,
@@ -276,8 +276,8 @@ fn test_issuer() -> Issuer {
 
 async fn seed_user_client(
     db: &Client,
-    user_id: Uuid,
-    app_id: Uuid,
+    user_id: &zeroship_core::UserId,
+    app_id: &zeroship_core::AppId,
     app_name: &str,
     client_id: &str,
     kind: ClientKind,
@@ -286,7 +286,7 @@ async fn seed_user_client(
     db.execute(
         "INSERT INTO zeroship.users (id, email, email_verified_at, name) \
          VALUES ($1, $2::citext, NOW(), 'Token Client Auth User')",
-        &[&user_id, &email],
+        &[&user_id.as_str(), &email],
     )
     .await
     .expect("seed user");
@@ -305,7 +305,7 @@ async fn seed_user_client(
     db.execute(
         "INSERT INTO zeroship.apps (id, name, project_id, organization_id) \
          SELECT $1, $2, p.id, p.organization_id FROM zeroship.projects p WHERE p.id = $3",
-        &[&app_id, &app_name, &project_id],
+        &[&app_id.as_str(), &app_name, &project_id],
     )
     .await
     .expect("seed app");
@@ -332,7 +332,7 @@ async fn seed_user_client(
     db.execute(
         "INSERT INTO zeroship.app_oauth_clients (app_id, client_id, sector_identifier) \
          VALUES ($1, $2, $3)",
-        &[&app_id, &client_id, &SECTOR],
+        &[&app_id.as_str(), &client_id, &SECTOR],
     )
     .await
     .expect("seed app oauth client");
@@ -340,7 +340,7 @@ async fn seed_user_client(
         "INSERT INTO zeroship.oauth_grants \
              (user_id, client_id, granted_scopes, granted_at, updated_at) \
          VALUES ($1, $2, $3, NOW(), NOW())",
-        &[&user_id, &client_id, &scopes],
+        &[&user_id.as_str(), &client_id, &scopes],
     )
     .await
     .expect("seed oauth grant");

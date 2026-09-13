@@ -259,7 +259,7 @@ These don't change. If you're about to violate one, stop and ask.
   its accepted cyper dependency follows the Rust client.
 
 - **V8 per thread, one isolate per (app, live deploy) plus a bounded budget of pinned workflow isolates per app (`max_pinned_isolates_per_app`) for deploy-pinned workflow replay.** Worker uses LRU eviction; isolates `enter`/`exit` to allow many apps per thread (`crates/zeroship-worker/src/cache.rs`).
-- **typed_id everywhere.** UUIDv7 + base62 + entity prefix (`usr_…`, `app_…`, `ses_…`). Defined in `crates/zeroship-core/src/typed_id.rs`.
+- **typed_id everywhere.** UUIDv7 + base36 + entity prefix (`usr_…`, `app_…`, `ses_…`). Defined in `crates/zeroship-id/src/typed_id.rs`.
 - **Wire formats are explicit contracts.** `Manifest`, `RouteEntry`, `AppRecord`, `.zship` archive layout, and RPC envelopes must be changed deliberately. Pre-launch can break them, but every producer, consumer, fixture, and reference doc changes in the same patch; no hidden compatibility shim.
 - **Native primitives are the kernel.** Anything user code can do via `fetch` or composition belongs in an npm package (`@zeroship/*`), not in Rust. The native surface is small and stable on purpose.
 - **The gateway is dumb.** It does manifest dispatch, JWT, rate-limit, CHWBL routing — and forwards. All app logic runs in the worker.
@@ -269,9 +269,11 @@ These don't change. If you're about to violate one, stop and ask.
   Privileged schema changes, replication ownership and key management belong to
   the migration service, CDC relay and control plane respectively.
 
-  Preserve reserved system names: they protect migration, audit and workflow
-  tables in app schemas. Any future shared system schema must hold state written
-  by a separate service that workers cannot forge.
+  Every table in a bound creator schema is visible through the ORM and V8
+  adapter. A table-name prefix does not change access, role grants or CDC
+  publication. Schema binding remains the tenant boundary, and runtime code
+  still cannot create schema objects. Any future shared system schema must hold
+  state written by a separate service that workers cannot forge.
 
   Runtime descriptors define an isolate's schema. Catalog protection markers
   prevent descriptors from removing masking or encryption. Transaction identity

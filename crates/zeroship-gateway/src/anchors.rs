@@ -47,6 +47,9 @@ use compio_postgres::Client;
 use futures::future::Shared;
 use uuid::Uuid;
 
+use zeroship_core::app_id::AppId;
+use zeroship_core::user_id::UserId;
+
 use crate::error::{GatewayError, Result};
 use crate::rls;
 
@@ -145,14 +148,14 @@ pub fn clear_breadcrumb_cookie(host: &str) -> String {
 #[derive(Debug, Clone)]
 pub struct Anchor {
     pub id: Uuid,
-    /// The app's stable UUID (`apps.id`). The
-    /// `zeroship.app_session_anchors.app_id` column is UUID and bound natively —
-    /// the same canonical key the gateway session uses, so the
-    /// `anchor.app_id == route.app_id` self-consistency check is never
-    /// slug-vs-UUID skewed.
-    pub app_id: Uuid,
+    /// The app's stable typed id (`apps.id`). The `zeroship
+    /// .app_session_anchors.app_id` column is `text` and holds
+    /// `app_id.as_str()` — the same canonical key the gateway session uses,
+    /// so the `anchor.app_id == route.app_id` self-consistency check is
+    /// never slug-vs-id skewed.
+    pub app_id: AppId,
     pub client_id: String,
-    pub global_user_id: Uuid,
+    pub global_user_id: UserId,
     /// AES-256-GCM ciphertext of the server-held refresh family.
     pub refresh_token_enc: Vec<u8>,
     pub refresh_family_id: String,
@@ -164,11 +167,12 @@ pub struct Anchor {
 /// Args for [`create`].
 #[derive(Debug)]
 pub struct NewAnchor<'a> {
-    /// The app's stable UUID (`apps.id`), bound natively into the UUID
-    /// `app_id` column — the SAME canonical key the gateway session row uses.
-    pub app_id: Uuid,
+    /// The app's stable typed id (`apps.id`), bound into the `text` `app_id`
+    /// column as `app_id.as_str()` — the SAME canonical key the gateway
+    /// session row uses.
+    pub app_id: &'a AppId,
     pub client_id: &'a str,
-    pub global_user_id: Uuid,
+    pub global_user_id: &'a UserId,
     pub refresh_token_enc: &'a [u8],
     pub refresh_family_id: &'a str,
     pub granted_scopes: &'a [String],
@@ -198,9 +202,9 @@ pub async fn create(conn: &mut Client, params: &NewAnchor<'_>) -> Result<Anchor>
              RETURNING id, app_id, client_id, global_user_id, refresh_token_enc, \
                        refresh_family_id, granted_scopes, created_at, abs_expires_at",
             &[
-                &params.app_id,
+                &params.app_id.as_str(),
                 &params.client_id,
-                &params.global_user_id,
+                &params.global_user_id.as_str(),
                 &refresh_enc,
                 &params.refresh_family_id,
                 &scopes,
@@ -214,7 +218,7 @@ pub async fn create(conn: &mut Client, params: &NewAnchor<'_>) -> Result<Anchor>
         let row = rows
             .first()
             .ok_or_else(|| GatewayError::Db("app_session_anchors create: empty return".into()))?;
-        row_to_anchor(row)
+        row_to_anchor(row)?
     };
     tx.commit()
         .await
@@ -237,7 +241,7 @@ pub async fn create(conn: &mut Client, params: &NewAnchor<'_>) -> Result<Anchor>
 ///
 /// # Errors
 /// [`GatewayError::Db`] on PG failure.
-pub async fn read_live(conn: &mut Client, app_id: Uuid, id: Uuid) -> Result<Option<Anchor>> {
+pub async fn read_live(conn: &mut Client, app_id: &AppId, id: Uuid) -> Result<Option<Anchor>> {
     let tx = conn
         .transaction()
         .await
@@ -249,11 +253,11 @@ pub async fn read_live(conn: &mut Client, app_id: Uuid, id: Uuid) -> Result<Opti
                     refresh_family_id, granted_scopes, created_at, abs_expires_at \
              FROM zeroship.app_session_anchors \
              WHERE id = $1 AND app_id = $2 AND revoked_at IS NULL AND abs_expires_at > NOW()",
-            &[&id, &app_id],
+            &[&id, &app_id.as_str()],
         )
         .await
         .map_err(|e| GatewayError::Db(format!("app_session_anchors read_live: {e}")))?;
-    let anchor = rows.first().map(row_to_anchor);
+    let anchor = rows.first().map(row_to_anchor).transpose()?;
     tx.commit()
         .await
         .map_err(|e| GatewayError::Db(format!("app_session_anchors read_live commit: {e}")))?;
@@ -279,7 +283,7 @@ pub async fn read_live(conn: &mut Client, app_id: Uuid, id: Uuid) -> Result<Opti
 /// [`GatewayError::Db`] on PG failure.
 pub async fn update_rotated_family(
     conn: &mut Client,
-    app_id: Uuid,
+    app_id: &AppId,
     id: Uuid,
     refresh_token_enc: &[u8],
     refresh_family_id: &str,
@@ -310,7 +314,7 @@ pub async fn update_rotated_family(
 ///
 /// # Errors
 /// [`GatewayError::Db`] on PG failure.
-pub async fn delete(conn: &mut Client, app_id: Uuid, id: Uuid) -> Result<()> {
+pub async fn delete(conn: &mut Client, app_id: &AppId, id: Uuid) -> Result<()> {
     let tx = conn
         .transaction()
         .await
@@ -318,7 +322,7 @@ pub async fn delete(conn: &mut Client, app_id: Uuid, id: Uuid) -> Result<()> {
     rls::set_tenant_app(&tx, app_id).await?;
     tx.execute(
         "DELETE FROM zeroship.app_session_anchors WHERE id = $1 AND app_id = $2",
-        &[&id, &app_id],
+        &[&id, &app_id.as_str()],
     )
     .await
     .map_err(|e| GatewayError::Db(format!("app_session_anchors delete: {e}")))?;
@@ -341,8 +345,8 @@ pub async fn delete(conn: &mut Client, app_id: Uuid, id: Uuid) -> Result<()> {
 /// [`GatewayError::Db`] on PG failure.
 pub async fn delete_all_for_user(
     conn: &mut Client,
-    app_id: Uuid,
-    global_user_id: Uuid,
+    app_id: &AppId,
+    global_user_id: &UserId,
 ) -> Result<Vec<DeletedFamily>> {
     let tx = conn.transaction().await.map_err(|e| {
         GatewayError::Db(format!("app_session_anchors delete_all_for_user begin: {e}"))
@@ -353,7 +357,7 @@ pub async fn delete_all_for_user(
             "DELETE FROM zeroship.app_session_anchors \
              WHERE app_id = $1 AND global_user_id = $2 \
              RETURNING refresh_token_enc, client_id",
-            &[&app_id, &global_user_id],
+            &[&app_id.as_str(), &global_user_id.as_str()],
         )
         .await
         .map_err(|e| GatewayError::Db(format!("app_session_anchors delete_all_for_user: {e}")))?;
@@ -378,18 +382,25 @@ pub struct DeletedFamily {
     pub client_id: String,
 }
 
-fn row_to_anchor(row: &compio_postgres::Row) -> Anchor {
-    Anchor {
+fn row_to_anchor(row: &compio_postgres::Row) -> Result<Anchor> {
+    let app_id: String = row.get("app_id");
+    let app_id = AppId::parse(&app_id)
+        .map_err(|e| GatewayError::Db(format!("app_session_anchors: invalid app_id: {e}")))?;
+    let global_user_id: &str = row.get("global_user_id");
+    let global_user_id = UserId::parse(global_user_id).map_err(|e| {
+        GatewayError::Db(format!("app_session_anchors: invalid global_user_id: {e}"))
+    })?;
+    Ok(Anchor {
         id: row.get("id"),
-        app_id: row.get("app_id"),
+        app_id,
         client_id: row.get("client_id"),
-        global_user_id: row.get("global_user_id"),
+        global_user_id,
         refresh_token_enc: row.get("refresh_token_enc"),
         refresh_family_id: row.get("refresh_family_id"),
         granted_scopes: row.get("granted_scopes"),
         created_at: row.get("created_at"),
         abs_expires_at: row.get("abs_expires_at"),
-    }
+    })
 }
 
 // ─── Per-node family-rotation single-flight ────────────
@@ -430,7 +441,7 @@ pub type RotationResult = std::result::Result<RotationOk, RotationError>;
 /// raw OP access JWT never leaves the gateway and no JWT reaches the browser.
 #[derive(Debug, Clone)]
 pub struct RotationOk {
-    pub global_user_id: Uuid,
+    pub global_user_id: UserId,
     /// Issuance time of the verified access token returned by the rotation.
     pub credential_iat: i64,
     pub granted_scopes: Vec<String>,
@@ -654,7 +665,7 @@ mod tests {
 
         let fut: super::SharedRotationFuture = (Box::pin(async {
             Ok(RotationOk {
-                global_user_id: Uuid::new_v4(),
+                global_user_id: UserId::mint(),
                 credential_iat: 1_700_000_000,
                 sid: None,
                 granted_scopes: vec!["openid".into()],

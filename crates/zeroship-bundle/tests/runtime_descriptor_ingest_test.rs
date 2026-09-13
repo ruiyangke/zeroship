@@ -12,6 +12,7 @@
 //! content-addressed round-trip. Migration documents are applied through the
 //! migration service and are rejected if a legacy manifest still carries them.
 
+use zeroship_id::AppId;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -95,7 +96,7 @@ async fn descriptor_survives_pack_then_ingest_byte_identical() {
 
     let store: Arc<dyn BlobStore> =
         Arc::new(LocalDiskBlobStore::new(tmpdir()).expect("local store"));
-    let app_id = Uuid::now_v7();
+    let app_id = AppId::mint();
 
     let success = ingest(&store, &app_id, &archive)
         .await
@@ -128,7 +129,7 @@ async fn workflow_declarations_survive_pack_then_ingest() {
     let archive = pack(&manifest, &[]);
     let store: Arc<dyn BlobStore> =
         Arc::new(LocalDiskBlobStore::new(tmpdir()).expect("local store"));
-    let app_id = Uuid::now_v7();
+    let app_id = AppId::mint();
 
     let success = ingest(&store, &app_id, &archive)
         .await
@@ -153,7 +154,7 @@ async fn absent_descriptor_ingests_to_none() {
 
     let store: Arc<dyn BlobStore> =
         Arc::new(LocalDiskBlobStore::new(tmpdir()).expect("local store"));
-    let app_id = Uuid::now_v7();
+    let app_id = AppId::mint();
 
     let success = ingest(&store, &app_id, &archive)
         .await
@@ -185,7 +186,7 @@ async fn legacy_manifest_migrations_key_is_rejected() {
 
     let store: Arc<dyn BlobStore> =
         Arc::new(LocalDiskBlobStore::new(tmpdir()).expect("local store"));
-    let app_id = Uuid::now_v7();
+    let app_id = AppId::mint();
 
     let err = ingest(&store, &app_id, &archive)
         .await
@@ -218,7 +219,7 @@ async fn descriptor_blob_missing_from_tar_is_rejected() {
 
     let store: Arc<dyn BlobStore> =
         Arc::new(LocalDiskBlobStore::new(tmpdir()).expect("local store"));
-    let app_id = Uuid::now_v7();
+    let app_id = AppId::mint();
 
     let err = ingest(&store, &app_id, &archive)
         .await

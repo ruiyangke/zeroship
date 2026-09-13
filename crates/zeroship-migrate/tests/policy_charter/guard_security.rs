@@ -1885,7 +1885,7 @@ fn crate_root_reexports_compose_an_end_to_end_check() {
                 preconditions: &[],
             }),
             flags: MigrationFlags::default(),
-            owner_app: "app_0000000000000000000000".to_string(),
+            owner_app: "app_0000000000000000000000000".to_string(),
             depends_on: vec![],
             supersedes: Vec::new(),
             preconditions: Vec::new(),

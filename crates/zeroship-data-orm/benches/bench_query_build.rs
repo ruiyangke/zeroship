@@ -1,115 +1,222 @@
-//! Benchmark descriptor-aware SQL compilation and native parameter binding.
+//! Benchmark typed statement compilation and SDK filter decoding.
 //! Run with `cargo bench -p zeroship-data-orm --bench bench_query_build`.
 
 use std::time::Duration;
 
-use criterion::{BatchSize, BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
-use zeroship_data_orm::value;
+use criterion::{black_box, criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion};
+use zeroship_data_orm::{
+    sql::{
+        registration::SqlRegistration,
+        statement::{
+            Expression, Insert, InsertParts, ResolvedOperand, ResolvedPredicate,
+            ResolvedPredicateValue, ReturnedColumn, RowLock, SelectParts, SelectStatement,
+            SelectedExpression, Statement, StorageType, Table,
+        },
+        CompareOp, Ident, IdentRole, MembershipOp, SchemaName,
+    },
+    value, Value,
+};
 
-use zeroship_data_orm::sql::compile::{build_find_with_schema, build_insert};
-
-/// The descriptor entry the benchmarked read is projected through.
-///
-/// `build_find` took no schema and expanded to `SELECT *`; it is deleted, and
-/// the read path now always builds an explicit projection from the descriptor.
-/// This map declares the fields the filter fixtures below name, so the builder
-/// does the same identifier validation and projection expansion it does at
-/// runtime — a benchmark against a `SELECT *` builder would be measuring work
-/// production no longer performs.
-fn users_schema() -> zeroship_data_orm::value::Value {
-    value!({
-        "status": { "type": "string" },
-        "role": { "type": "string" },
-        "score": { "type": "int" },
-        "email": { "type": "string" },
-        "name": { "type": "string" },
-        "createdAt": { "type": "date" },
-        "updatedAt": { "type": "date" },
-    })
+#[derive(Clone, Copy)]
+enum ReadWorkload {
+    Empty,
+    Small,
+    Complex,
 }
 
-// ---------------------------------------------------------------------------
-// Filter shapes — each represents a realistic SDK call site
-// ---------------------------------------------------------------------------
-
-/// Trivial: `find()` with no filter. Smallest query the SDK can produce.
-fn empty_filter() -> zeroship_data_orm::value::Value {
-    value!({})
+fn ident(name: &str, role: IdentRole) -> Ident {
+    Ident::parse_as(name, role).expect("benchmark identifier")
 }
 
-/// Median: `find({ status: "active", role: "admin" })`. The most common
-/// shape in CRUD-style SDK use (1-3 top-level equalities).
-fn small_filter() -> zeroship_data_orm::value::Value {
-    value!({
-        "status": "active",
-        "role": "admin",
-    })
+fn users_table(alias: Option<&str>) -> Table {
+    let namespace =
+        SchemaName::new("app_01HJQK2A8R000000000000000").expect("benchmark schema name");
+    let collection = ident("users", IdentRole::Collection);
+    let columns = [
+        ("id", StorageType::Text),
+        ("status", StorageType::Text),
+        ("role", StorageType::Text),
+        ("score", StorageType::Integer),
+        ("email", StorageType::Text),
+        ("name", StorageType::Text),
+        ("created_at", StorageType::Timestamp),
+        ("updated_at", StorageType::Timestamp),
+    ]
+    .map(|(name, storage)| (ident(name, IdentRole::StoredColumn), storage));
+    match alias {
+        Some(alias) => Table::aliased(
+            namespace,
+            collection,
+            ident(alias, IdentRole::Alias),
+            columns,
+        ),
+        None => Table::new(namespace, collection, columns),
+    }
+    .expect("benchmark table")
 }
 
-/// Complex: `$and` + `$or` + `$in` + range. Mirrors the harder query
-/// shape an analytics page or admin filter would produce.
-fn complex_filter() -> zeroship_data_orm::value::Value {
-    value!({
-        "$and": [
-            { "status": { "$in": ["active", "pending", "trial"] } },
-            { "$or": [
-                { "role": "admin" },
-                { "createdAt": { "$gte": "2026-01-01" } },
-            ]},
-            { "score": { "$gte": 50, "$lte": 100 } },
-        ]
-    })
+fn comparison(table: &Table, field: &str, op: CompareOp, value: Value) -> ResolvedPredicate {
+    let column = table.column(field).expect("benchmark column");
+    ResolvedPredicate::Compare {
+        lhs: ResolvedOperand::Column(column.clone()),
+        op,
+        rhs: ResolvedPredicateValue::Bind {
+            storage: column.storage(),
+            value,
+        },
+    }
 }
 
-/// Insert doc — typical user record shape.
-fn small_insert_doc() -> zeroship_data_orm::value::Value {
-    value!({
-        "id": "usr_01HJQK2A8R000000000000000",
-        "email": "alice@example.com",
-        "name": "Alice Example",
-        "role": "admin",
-        "createdAt": "2026-05-22T00:00:00Z",
-        "updatedAt": "2026-05-22T00:00:00Z",
-    })
+fn read_predicate(workload: ReadWorkload, table: &Table) -> ResolvedPredicate {
+    match workload {
+        ReadWorkload::Empty => ResolvedPredicate::Const(true),
+        ReadWorkload::Small => ResolvedPredicate::and(vec![
+            comparison(table, "status", CompareOp::Eq, Value::from("active")),
+            comparison(table, "role", CompareOp::Eq, Value::from("admin")),
+        ]),
+        ReadWorkload::Complex => ResolvedPredicate::and(vec![
+            ResolvedPredicate::Membership {
+                lhs: ResolvedOperand::Column(table.column("status").expect("status column")),
+                op: MembershipOp::In,
+                values: vec![
+                    Value::from("active"),
+                    Value::from("pending"),
+                    Value::from("trial"),
+                ],
+            },
+            ResolvedPredicate::or(vec![
+                comparison(table, "role", CompareOp::Eq, Value::from("admin")),
+                comparison(
+                    table,
+                    "created_at",
+                    CompareOp::Gte,
+                    Value::Timestamp(1_767_225_600_000),
+                ),
+            ]),
+            comparison(table, "score", CompareOp::Gte, Value::from(50)),
+            comparison(table, "score", CompareOp::Lte, Value::from(100)),
+        ]),
+    }
 }
 
-// ---------------------------------------------------------------------------
-// Bench groups
-// ---------------------------------------------------------------------------
+fn read_statement(workload: ReadWorkload) -> Statement {
+    let table = users_table(Some("source"));
+    let projection = ["id", "status", "role", "score", "email", "name"]
+        .into_iter()
+        .map(|field| SelectedExpression {
+            expression: ResolvedOperand::Column(table.column(field).expect("projection column")),
+            alias: ident(field, IdentRole::Alias),
+        })
+        .collect();
+    Statement::Select(
+        SelectStatement::new(SelectParts {
+            predicate: read_predicate(workload, &table),
+            table,
+            joins: Vec::new(),
+            projection,
+            group_by: Vec::new(),
+            having: ResolvedPredicate::Const(true),
+            order_by: Vec::new(),
+            limit: Some(50),
+            offset: Some(0),
+            distinct: false,
+            lock: RowLock::None,
+        })
+        .expect("benchmark select"),
+    )
+}
 
-fn bench_build_find(c: &mut Criterion) {
-    let schema_name = zeroship_data_orm::sql::SchemaName::new("app_01HJQK2A8R000000000000000")
-        .expect("benchmark schema");
-    let collection = "users";
-    let schema = users_schema();
+fn sdk_filter(workload: ReadWorkload) -> Value {
+    match workload {
+        ReadWorkload::Empty => value!({}),
+        ReadWorkload::Small => value!({"status":"active", "role":"admin"}),
+        ReadWorkload::Complex => value!({
+            "$and": [
+                {"status":{"$in":["active", "pending", "trial"]}},
+                {"$or":[
+                    {"role":"admin"},
+                    {"created_at":{"$gte":1_767_225_600_000_i64}}
+                ]},
+                {"score":{"$gte":50, "$lte":100}}
+            ]
+        }),
+    }
+}
 
-    let workloads = vec![
-        ("empty", empty_filter()),
-        ("small", small_filter()),
-        ("complex", complex_filter()),
-    ];
+fn insert_statement() -> Statement {
+    let table = users_table(None);
+    let columns = ["id", "email", "name", "role", "created_at", "updated_at"]
+        .iter()
+        .map(|field| table.column(field).expect("insert column"))
+        .collect();
+    let rows = vec![vec![
+        Expression::Bind(Value::from("usr_01HJQK2A8R000000000000000")),
+        Expression::Bind(Value::from("alice@example.com")),
+        Expression::Bind(Value::from("Alice Example")),
+        Expression::Bind(Value::from("admin")),
+        Expression::Bind(Value::Timestamp(1_769_040_000_000)),
+        Expression::Bind(Value::Timestamp(1_769_040_000_000)),
+    ]];
+    Statement::Insert(
+        Insert::new(InsertParts {
+            returning: vec![ReturnedColumn {
+                column: table.column("id").expect("identity column"),
+                alias: None,
+            }],
+            table,
+            columns,
+            rows,
+            insert_generated_identity: false,
+        })
+        .expect("benchmark insert"),
+    )
+}
 
-    let mut group = c.benchmark_group("build_find");
+fn bench_compile_read(c: &mut Criterion) {
+    let registration = SqlRegistration::postgres();
+    let mut group = c.benchmark_group("compile_read");
     group.measurement_time(Duration::from_secs(3));
     group.warm_up_time(Duration::from_secs(1));
+    for (name, workload) in [
+        ("empty", ReadWorkload::Empty),
+        ("small", ReadWorkload::Small),
+        ("complex", ReadWorkload::Complex),
+    ] {
+        group.bench_with_input(
+            BenchmarkId::from_parameter(name),
+            &workload,
+            |b, workload| {
+                b.iter(|| {
+                    black_box(
+                        registration
+                            .compile(read_statement(*workload))
+                            .expect("compile benchmark select"),
+                    );
+                });
+            },
+        );
+    }
+    group.finish();
+}
 
-    for (name, filter) in &workloads {
-        group.bench_with_input(BenchmarkId::from_parameter(name), filter, |b, filter| {
+fn bench_decode_sdk_filter(c: &mut Criterion) {
+    let mut group = c.benchmark_group("decode_sdk_filter");
+    group.measurement_time(Duration::from_secs(3));
+    group.warm_up_time(Duration::from_secs(1));
+    for (name, workload) in [
+        ("empty", ReadWorkload::Empty),
+        ("small", ReadWorkload::Small),
+        ("complex", ReadWorkload::Complex),
+    ] {
+        let input = sdk_filter(workload);
+        group.bench_with_input(BenchmarkId::from_parameter(name), &input, |b, input| {
             b.iter_batched_ref(
-                || filter.clone(),
-                |filter| {
-                    let built = build_find_with_schema(
-                        &schema_name,
-                        collection,
-                        filter,
-                        Some(50),
-                        Some(0),
-                        None,
-                        None,
-                        &schema,
-                    )
-                    .expect("build_find_with_schema should succeed on benchmark fixture");
-                    black_box(built);
+                || input.clone(),
+                |input| {
+                    black_box(
+                        zeroship_data_orm::sql::filter::decode(input)
+                            .expect("decode benchmark filter"),
+                    );
                 },
                 BatchSize::SmallInput,
             );
@@ -118,33 +225,27 @@ fn bench_build_find(c: &mut Criterion) {
     group.finish();
 }
 
-fn bench_build_insert(c: &mut Criterion) {
-    let schema_name = zeroship_data_orm::sql::SchemaName::new("app_01HJQK2A8R000000000000000")
-        .expect("benchmark schema");
-    let collection = "users";
-    let doc = small_insert_doc();
-    // The write builder now projects its `RETURNING` list from the descriptor,
-    // so the benchmark measures the same work production does.
-    let schema = users_schema();
-
-    let mut group = c.benchmark_group("build_insert");
+fn bench_compile_insert(c: &mut Criterion) {
+    let registration = SqlRegistration::postgres();
+    let mut group = c.benchmark_group("compile_insert");
     group.measurement_time(Duration::from_secs(3));
     group.warm_up_time(Duration::from_secs(1));
-
-    group.bench_function("small_doc", |b| {
-        b.iter_batched_ref(
-            || doc.clone(),
-            |doc| {
-                let built = build_insert(&schema_name, collection, &schema, doc)
-                    .expect("build_insert should succeed on benchmark fixture");
-                black_box(built);
-            },
-            BatchSize::SmallInput,
-        );
+    group.bench_function("typed_record", |b| {
+        b.iter(|| {
+            black_box(
+                registration
+                    .compile(insert_statement())
+                    .expect("compile benchmark insert"),
+            );
+        });
     });
-
     group.finish();
 }
 
-criterion_group!(benches, bench_build_find, bench_build_insert);
+criterion_group!(
+    benches,
+    bench_compile_read,
+    bench_decode_sdk_filter,
+    bench_compile_insert
+);
 criterion_main!(benches);

@@ -5,10 +5,10 @@ use crate::common;
 use ntex::http::{Method, Request, StatusCode};
 use ntex::web::{self, test};
 use serde_json::{json, Value};
-use uuid::Uuid;
 use zeroship_control::organizations::{
     self, AddMemberBody, AddProjectMemberBody, CreateInviteBody, CreateOrganizationBody,
 };
+use zeroship_core::UserId;
 
 #[compio::test]
 async fn organization_mutations_require_a_bearer_and_more_than_read_consent() {
@@ -17,18 +17,18 @@ async fn organization_mutations_require_a_bearer_and_more_than_read_consent() {
     // principal explicit entitlement so refusal tests isolate token consent.
     let mut grants = zeroship_core::device_grant::PLATFORM_CLI_ISSUABLE_SCOPES.to_vec();
     grants.push("organization:write");
-    seed_grants(&fx.state, fx.user_id, &grants).await;
-    let member = Uuid::new_v4();
-    let newcomer = Uuid::new_v4();
-    insert_user(&fx.state, member, "member").await;
-    insert_user(&fx.state, newcomer, "newcomer").await;
-    seat(&fx, &organization, member, "viewer").await;
+    seed_grants(&fx.state, &fx.user_id, &grants).await;
+    let member = UserId::mint();
+    let newcomer = UserId::mint();
+    insert_user(&fx.state, &member, "member").await;
+    insert_user(&fx.state, &newcomer, "newcomer").await;
+    seat(&fx, &organization, &member, "viewer").await;
     organizations::add_project_member(
         &fx.state.registry,
-        fx.user_id,
+        &fx.user_id,
         &project,
         &AddProjectMemberBody {
-            user_id: member,
+            user_id: member.clone(),
             role: "viewer".into(),
         },
         None,
@@ -37,10 +37,10 @@ async fn organization_mutations_require_a_bearer_and_more_than_read_consent() {
     .unwrap();
     let invite = organizations::create_invite(
         &fx.state.registry,
-        fx.user_id,
+        &fx.user_id,
         &organization,
         &CreateInviteBody {
-            email: format!("newcomer-{newcomer}@zeroship.test"),
+            email: format!("newcomer-{}@zeroship.test", newcomer.as_str()),
             role: "viewer".into(),
         },
         None,
@@ -54,7 +54,7 @@ async fn organization_mutations_require_a_bearer_and_more_than_read_consent() {
     )
     .await;
     let before = snapshot(&fx, &organization).await;
-    let read_only = bearer_for_scope(fx.user_id, "organization:read project:read");
+    let read_only = bearer_for_scope(&fx.user_id, "organization:read project:read");
     let org_path = format!("/api/organizations/{organization}");
     let project_path = format!("/api/projects/{project}");
 
@@ -62,7 +62,7 @@ async fn organization_mutations_require_a_bearer_and_more_than_read_consent() {
         (
             Method::POST,
             "/api/organizations".into(),
-            json!({"name": format!("created-{}", fx.user_id)}),
+            json!({"name": format!("created-{}", fx.user_id.as_str())}),
         ),
         (Method::PATCH, org_path.clone(), json!({"name": "changed"})),
         (Method::DELETE, org_path.clone(), Value::Null),
@@ -73,12 +73,12 @@ async fn organization_mutations_require_a_bearer_and_more_than_read_consent() {
         ),
         (
             Method::PATCH,
-            format!("{org_path}/members/{member}"),
+            format!("{org_path}/members/{}", member.as_str()),
             json!({"role": "developer"}),
         ),
         (
             Method::DELETE,
-            format!("{org_path}/members/{member}"),
+            format!("{org_path}/members/{}", member.as_str()),
             Value::Null,
         ),
         (
@@ -94,7 +94,7 @@ async fn organization_mutations_require_a_bearer_and_more_than_read_consent() {
         (
             Method::POST,
             format!("{org_path}/invites"),
-            json!({"email": format!("other-{}@zeroship.test", fx.user_id), "role": "viewer"}),
+            json!({"email": format!("other-{}@zeroship.test", fx.user_id.as_str()), "role": "viewer"}),
         ),
         (
             Method::DELETE,
@@ -119,12 +119,12 @@ async fn organization_mutations_require_a_bearer_and_more_than_read_consent() {
         ),
         (
             Method::PATCH,
-            format!("{project_path}/members/{member}"),
+            format!("{project_path}/members/{}", member.as_str()),
             json!({"role": "developer"}),
         ),
         (
             Method::DELETE,
-            format!("{project_path}/members/{member}"),
+            format!("{project_path}/members/{}", member.as_str()),
             Value::Null,
         ),
     ] {
@@ -150,7 +150,7 @@ async fn organization_mutations_require_a_bearer_and_more_than_read_consent() {
         request(
             Method::PATCH,
             &org_path,
-            Some(&bearer_for_scope(fx.user_id, "organization:write")),
+            Some(&bearer_for_scope(&fx.user_id, "organization:write")),
             &json!({"name": "Renamed organization"}),
         ),
     )
@@ -165,17 +165,17 @@ async fn organization_mutations_require_a_bearer_and_more_than_read_consent() {
         "Renamed organization"
     );
     drop(app);
-    cleanup(fx, &[member, newcomer]).await;
+    cleanup(fx, &[&member, &newcomer]).await;
 }
 
 #[compio::test]
 async fn removing_an_admin_revokes_the_same_bearer_on_the_next_request() {
     let (fx, organization, _) = fixture("org-route-revocation").await;
-    let admin = Uuid::new_v4();
-    let member = Uuid::new_v4();
-    insert_user(&fx.state, admin, "admin").await;
-    insert_user(&fx.state, member, "member").await;
-    seat(&fx, &organization, admin, "admin").await;
+    let admin = UserId::mint();
+    let member = UserId::mint();
+    insert_user(&fx.state, &admin, "admin").await;
+    insert_user(&fx.state, &member, "member").await;
+    seat(&fx, &organization, &admin, "admin").await;
     let app = test::init_service(
         web::App::new()
             .state(fx.state.clone())
@@ -183,9 +183,9 @@ async fn removing_an_admin_revokes_the_same_bearer_on_the_next_request() {
     )
     .await;
     let path = format!("/api/organizations/{organization}/members");
-    let admin_bearer = bearer_for_scope(admin, "organization:members:write");
-    let owner_bearer = bearer_for_scope(fx.user_id, "organization:members:write");
-    let body = json!({"user_id": member, "role": "viewer"});
+    let admin_bearer = bearer_for_scope(&admin, "organization:members:write");
+    let owner_bearer = bearer_for_scope(&fx.user_id, "organization:members:write");
+    let body = json!({"user_id": member.as_str(), "role": "viewer"});
     let status = test::call_service(
         &app,
         request(Method::POST, &path, Some(&admin_bearer), &body),
@@ -194,16 +194,16 @@ async fn removing_an_admin_revokes_the_same_bearer_on_the_next_request() {
     .status();
     assert_eq!(status, StatusCode::CREATED);
     assert_eq!(
-        role(&fx, &organization, member).await.as_deref(),
+        role(&fx, &organization, &member).await.as_deref(),
         Some("viewer")
     );
 
-    for user in [member, admin] {
+    for user in [&member, &admin] {
         let status = test::call_service(
             &app,
             request(
                 Method::DELETE,
-                &format!("{path}/{user}"),
+                &format!("{path}/{}", user.as_str()),
                 Some(&owner_bearer),
                 &Value::Null,
             ),
@@ -220,7 +220,7 @@ async fn removing_an_admin_revokes_the_same_bearer_on_the_next_request() {
     .await
     .status();
     assert_eq!(status, StatusCode::FORBIDDEN);
-    assert_eq!(role(&fx, &organization, member).await, None);
+    assert_eq!(role(&fx, &organization, &member).await, None);
 
     let status = test::call_service(
         &app,
@@ -230,23 +230,23 @@ async fn removing_an_admin_revokes_the_same_bearer_on_the_next_request() {
     .status();
     assert_eq!(status, StatusCode::CREATED);
     assert_eq!(
-        role(&fx, &organization, member).await.as_deref(),
+        role(&fx, &organization, &member).await.as_deref(),
         Some("viewer")
     );
     drop(app);
-    cleanup(fx, &[admin, member]).await;
+    cleanup(fx, &[&admin, &member]).await;
 }
 
 #[compio::test]
 async fn owning_another_organization_does_not_authorize_its_neighbor() {
     let (fx, organization, project) = fixture("org-route-isolation").await;
-    let outsider = Uuid::new_v4();
-    insert_user(&fx.state, outsider, "other-owner").await;
+    let outsider = UserId::mint();
+    insert_user(&fx.state, &outsider, "other-owner").await;
     let other = organizations::create_organization(
         &fx.state.registry,
-        outsider,
+        &outsider,
         &CreateOrganizationBody {
-            name: format!("Other {outsider}"),
+            name: format!("Other {}", outsider.as_str()),
             slug: None,
             billing_email: None,
         },
@@ -261,7 +261,7 @@ async fn owning_another_organization_does_not_authorize_its_neighbor() {
     )
     .await;
     let bearer = bearer_for_scope(
-        outsider,
+        &outsider,
         "organization:read organization:write project:read project:write",
     );
     let status = test::call_service(
@@ -302,7 +302,7 @@ async fn owning_another_organization_does_not_authorize_its_neighbor() {
         request(
             Method::PATCH,
             &format!("/api/projects/{project}"),
-            Some(&bearer_for_scope(fx.user_id, "project:write")),
+            Some(&bearer_for_scope(&fx.user_id, "project:write")),
             &json!({"name": "Owner rename"}),
         ),
     )
@@ -337,20 +337,20 @@ async fn owning_another_organization_does_not_authorize_its_neighbor() {
         .await
         .unwrap();
     drop(app);
-    cleanup(fx, &[outsider]).await;
+    cleanup(fx, &[&outsider]).await;
 }
 
 #[compio::test]
 async fn invite_redemption_requires_organization_consent_and_the_issued_capability() {
     let (fx, organization, _) = fixture("org-route-invite").await;
-    let invitee = Uuid::new_v4();
-    insert_user(&fx.state, invitee, "invitee").await;
+    let invitee = UserId::mint();
+    insert_user(&fx.state, &invitee, "invitee").await;
     let issued = organizations::create_invite(
         &fx.state.registry,
-        fx.user_id,
+        &fx.user_id,
         &organization,
         &CreateInviteBody {
-            email: format!("invitee-{invitee}@zeroship.test"),
+            email: format!("invitee-{}@zeroship.test", invitee.as_str()),
             role: "viewer".into(),
         },
         None,
@@ -369,7 +369,7 @@ async fn invite_redemption_requires_organization_consent_and_the_issued_capabili
     for (bearer, status) in [
         (None, StatusCode::UNAUTHORIZED),
         (
-            Some(bearer_for_scope(invitee, "apps:read")),
+            Some(bearer_for_scope(&invitee, "apps:read")),
             StatusCode::FORBIDDEN,
         ),
     ] {
@@ -378,7 +378,7 @@ async fn invite_redemption_requires_organization_consent_and_the_issued_capabili
         assert_eq!(response.status(), status);
         assert_eq!(snapshot(&fx, &organization).await, before);
     }
-    let bearer = bearer_for_scope(invitee, "organization:read");
+    let bearer = bearer_for_scope(&invitee, "organization:read");
     let response = test::call_service(
         &app,
         request(
@@ -398,7 +398,7 @@ async fn invite_redemption_requires_organization_consent_and_the_issued_capabili
         .status();
     assert_eq!(status, StatusCode::OK);
     assert_eq!(
-        role(&fx, &organization, invitee).await.as_deref(),
+        role(&fx, &organization, &invitee).await.as_deref(),
         Some("viewer")
     );
     let consumed: bool = fx
@@ -417,7 +417,7 @@ async fn invite_redemption_requires_organization_consent_and_the_issued_capabili
         .status();
     assert_eq!(status, StatusCode::FORBIDDEN);
     drop(app);
-    cleanup(fx, &[invitee]).await;
+    cleanup(fx, &[&invitee]).await;
 }
 
 fn request(method: Method, path: &str, bearer: Option<&str>, body: &Value) -> Request {
@@ -432,27 +432,28 @@ fn request(method: Method, path: &str, bearer: Option<&str>, body: &Value) -> Re
 }
 
 async fn fixture(label: &str) -> (Fixture, String, String) {
-    let mut fx = fixture_with_platform(label, Uuid::new_v4()).await;
+    let user_id = UserId::mint();
+    let mut fx = fixture_with_platform(label, &user_id).await;
     let app_id = create_app(&mut fx, label).await;
     let row = fx
         .state
         .control_pg
         .query_one(
             "SELECT organization_id, project_id FROM zeroship.apps WHERE id = $1",
-            &[&app_id],
+            &[&app_id.as_str()],
         )
         .await
         .unwrap();
     (fx, row.get(0), row.get(1))
 }
 
-async fn seat(fx: &Fixture, organization: &str, user_id: Uuid, role: &str) {
+async fn seat(fx: &Fixture, organization: &str, user_id: &UserId, role: &str) {
     organizations::add_member(
         &fx.state.registry,
-        fx.user_id,
+        &fx.user_id,
         organization,
         &AddMemberBody {
-            user_id,
+            user_id: user_id.clone(),
             role: role.into(),
         },
         None,
@@ -461,13 +462,13 @@ async fn seat(fx: &Fixture, organization: &str, user_id: Uuid, role: &str) {
     .unwrap();
 }
 
-async fn role(fx: &Fixture, organization: &str, user_id: Uuid) -> Option<String> {
+async fn role(fx: &Fixture, organization: &str, user_id: &UserId) -> Option<String> {
     fx.state
         .control_pg
         .query_opt(
             "SELECT role FROM zeroship.organization_members
              WHERE organization_id = $1 AND user_id = $2",
-            &[&organization, &user_id],
+            &[&organization, &user_id.as_str()],
         )
         .await
         .unwrap()
@@ -483,18 +484,18 @@ async fn snapshot(fx: &Fixture, organization: &str) -> Value {
              'project_members', (SELECT jsonb_agg(to_jsonb(m) ORDER BY project_id, user_id) FROM zeroship.project_members m WHERE organization_id = $2),
              'invites', (SELECT jsonb_agg(to_jsonb(i) ORDER BY id) FROM zeroship.organization_invites i WHERE organization_id = $2)
          )",
-        &[&fx.user_id, &organization],
+        &[&fx.user_id.as_str(), &organization],
     ).await.unwrap().get(0)
 }
 
-async fn cleanup(fx: Fixture, additional_users: &[Uuid]) {
+async fn cleanup(fx: Fixture, additional_users: &[&UserId]) {
     fx.cleanup().await;
     assert!(
         fx.state
             .control_pg
             .query_opt(
                 "SELECT id FROM zeroship.users WHERE id = $1",
-                &[&fx.user_id]
+                &[&fx.user_id.as_str()]
             )
             .await
             .unwrap()
@@ -504,7 +505,10 @@ async fn cleanup(fx: Fixture, additional_users: &[Uuid]) {
     for user in additional_users {
         fx.state
             .control_pg
-            .execute("DELETE FROM zeroship.users WHERE id = $1", &[user])
+            .execute(
+                "DELETE FROM zeroship.users WHERE id = $1",
+                &[&user.as_str()],
+            )
             .await
             .unwrap();
     }

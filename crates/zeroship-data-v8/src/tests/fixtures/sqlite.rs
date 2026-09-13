@@ -1,4 +1,6 @@
 //! Inspect persisted SQLite cells independently of ORM decoding.
+use zeroship_core::app_id::LOCAL_DEV_APP_ID;
+
 pub(crate) struct Inspector(rusqlite::Connection);
 impl Inspector {
     pub(crate) fn open(directory: &std::path::Path) -> Self {
@@ -6,9 +8,9 @@ impl Inspector {
             rusqlite::Connection::open_in_memory().expect("open inspection connection");
         connection
             .execute(
-                "ATTACH DATABASE ?1 AS \"default\"",
+                &format!(r#"ATTACH DATABASE ?1 AS "{LOCAL_DEV_APP_ID}""#),
                 [directory
-                    .join("zs-default.sqlite")
+                    .join(format!("zs-{LOCAL_DEV_APP_ID}.sqlite"))
                     .to_str()
                     .expect("fixture path")],
             )

@@ -40,6 +40,7 @@ use zeroship_control::billing_read::{outstanding_billing, LocalInvoicing};
 use zeroship_control::erasure::{preflight, ErasureRemedy};
 use zeroship_control::organizations::{self, AddMemberBody, OrganizationError};
 use zeroship_control::Registry;
+use zeroship_core::{AppId, UserId};
 
 use crate::common;
 
@@ -62,14 +63,14 @@ impl Fx {
         Self { registry, pg }
     }
 
-    async fn seed_user(&self, label: &str) -> Uuid {
-        let id = Uuid::new_v4();
-        let email = format!("{label}-{}@zeroship.test", id.simple());
+    async fn seed_user(&self, label: &str) -> UserId {
+        let id = UserId::mint();
+        let email = format!("{label}-{}@zeroship.test", id.as_str());
         self.pg
             .execute(
                 "INSERT INTO zeroship.users (id, email, name, email_verified_at) \
                  VALUES ($1, $2::citext, $3, NOW())",
-                &[&id, &email, &label],
+                &[&id.as_str(), &email, &label],
             )
             .await
             .expect("insert user");
@@ -116,7 +117,7 @@ impl Fx {
             .query(
                 "SELECT a.organization_id, a.project_id \
                    FROM zeroship.apps a WHERE a.id = $1",
-                &[&app.id],
+                &[&app.id.as_str()],
             )
             .await
             .expect("read the minted ownership")
@@ -137,16 +138,16 @@ impl Fx {
         }
     }
 
-    async fn count(&self, sql: &str, app: Uuid) -> i64 {
+    async fn count(&self, sql: &str, app: &AppId) -> i64 {
         self.pg
-            .query(sql, &[&app])
+            .query(sql, &[&app.as_str()])
             .await
             .expect("count")
             .first()
             .map_or(0, |row| row.get::<_, i64>("n"))
     }
 
-    async fn app_state(&self, app: Uuid) -> (bool, bool, Option<String>) {
+    async fn app_state(&self, app: &AppId) -> (bool, bool, Option<String>) {
         let rows = self
             .pg
             .query(
@@ -154,7 +155,7 @@ impl Fx {
                         deleted_at IS NOT NULL AS deleted, \
                         project_id \
                    FROM zeroship.apps WHERE id = $1",
-                &[&app],
+                &[&app.as_str()],
             )
             .await
             .expect("read app state");
@@ -168,8 +169,8 @@ impl Fx {
 }
 
 struct Deployed {
-    owner: Uuid,
-    app: Uuid,
+    owner: UserId,
+    app: AppId,
     organization: String,
     project: String,
 }
@@ -191,14 +192,14 @@ async fn a_live_app_is_not_deleted_and_an_archived_one_is() {
     let fx = Fx::new().await;
     let d = fx.first_deploy("livedel").await;
 
-    let err = organizations::delete_app(&fx.registry, d.owner, d.app, None)
+    let err = organizations::delete_app(&fx.registry, &d.owner, &d.app, None)
         .await
         .expect_err("a live app must not be deleted");
     assert!(
         matches!(err, OrganizationError::AppNotArchived),
         "the refusal must name the missing step, got {err:?}"
     );
-    let (archived, deleted, project) = fx.app_state(d.app).await;
+    let (archived, deleted, project) = fx.app_state(&d.app).await;
     assert!(!archived && !deleted, "the refusal changed nothing");
     assert_eq!(project.as_deref(), Some(d.project.as_str()));
 
@@ -207,12 +208,15 @@ async fn a_live_app_is_not_deleted_and_an_archived_one_is() {
         .await
         .expect("archive")
         .expect("the app exists");
-    organizations::delete_app(&fx.registry, d.owner, d.app, None)
+    organizations::delete_app(&fx.registry, &d.owner, &d.app, None)
         .await
         .expect("an archived app is deleted");
 
-    let (archived, deleted, project) = fx.app_state(d.app).await;
-    assert!(archived && deleted, "the marker is set and archive survives");
+    let (archived, deleted, project) = fx.app_state(&d.app).await;
+    assert!(
+        archived && deleted,
+        "the marker is set and archive survives"
+    );
     assert!(
         project.is_none(),
         "a deleted app leaves its project, which is what lets the project go"
@@ -249,7 +253,7 @@ async fn a_deleted_app_is_not_restored() {
         .expect("archive again")
         .expect("the app exists");
 
-    organizations::delete_app(&fx.registry, d.owner, d.app, None)
+    organizations::delete_app(&fx.registry, &d.owner, &d.app, None)
         .await
         .expect("delete");
 
@@ -261,7 +265,7 @@ async fn a_deleted_app_is_not_restored() {
             .is_none(),
         "a deleted app is absent to restore, not restorable"
     );
-    let (_, deleted, _) = fx.app_state(d.app).await;
+    let (_, deleted, _) = fx.app_state(&d.app).await;
     assert!(deleted, "the marker did not move");
 
     common::drain_pg().await;
@@ -277,10 +281,10 @@ async fn deleting_an_app_needs_admin_authority() {
     let developer = fx.seed_user("rankdel-dev").await;
     organizations::add_member(
         &fx.registry,
-        d.owner,
+        &d.owner,
         &d.organization,
         &AddMemberBody {
-            user_id: developer,
+            user_id: developer.clone(),
             role: "developer".to_string(),
         },
         None,
@@ -293,18 +297,15 @@ async fn deleting_an_app_needs_admin_authority() {
         .expect("archive")
         .expect("the app exists");
 
-    let err = organizations::delete_app(&fx.registry, developer, d.app, None)
+    let err = organizations::delete_app(&fx.registry, &developer, &d.app, None)
         .await
         .expect_err("a developer must not delete an app");
-    assert!(
-        matches!(err, OrganizationError::Insufficient(_)),
-        "{err:?}"
-    );
-    let (_, deleted, _) = fx.app_state(d.app).await;
+    assert!(matches!(err, OrganizationError::Insufficient(_)), "{err:?}");
+    let (_, deleted, _) = fx.app_state(&d.app).await;
     assert!(!deleted, "the refused delete wrote nothing");
 
     // The CONTROL: the owner, differing only in rank, succeeds.
-    organizations::delete_app(&fx.registry, d.owner, d.app, None)
+    organizations::delete_app(&fx.registry, &d.owner, &d.app, None)
         .await
         .expect("the owner deletes it");
 
@@ -327,7 +328,7 @@ async fn deletion_keeps_the_billing_evidence_and_destroys_the_environment() {
         .execute(
             "INSERT INTO zeroship.billing_metrics (metric, kind, unit, owner_app) \
              VALUES ($1, 'custom', 'unit', $2)",
-            &[&metric, &d.app],
+            &[&metric, &d.app.as_str()],
         )
         .await
         .expect("seed a metric");
@@ -335,14 +336,14 @@ async fn deletion_keeps_the_billing_evidence_and_destroys_the_environment() {
         .execute(
             "INSERT INTO zeroship.usage_aggregates (app_id, period, metric, total) \
              VALUES ($1, $2::date, $3, 4242)",
-            &[&d.app, &first_of_this_month(), &metric],
+            &[&d.app.as_str(), &first_of_this_month(), &metric],
         )
         .await
         .expect("seed usage");
     fx.pg
         .execute(
             "INSERT INTO zeroship.app_vars (app_id, key_name, value) VALUES ($1, 'API_BASE', 'x')",
-            &[&d.app],
+            &[&d.app.as_str()],
         )
         .await
         .expect("seed a var");
@@ -350,7 +351,7 @@ async fn deletion_keeps_the_billing_evidence_and_destroys_the_environment() {
         .execute(
             "INSERT INTO zeroship.app_secrets (app_id, key_name, ciphertext) \
              VALUES ($1, 'TOKEN', $2)",
-            &[&d.app, &vec![1u8, 2, 3]],
+            &[&d.app.as_str(), &vec![1u8, 2, 3]],
         )
         .await
         .expect("seed a secret");
@@ -360,14 +361,14 @@ async fn deletion_keeps_the_billing_evidence_and_destroys_the_environment() {
         .await
         .expect("archive")
         .expect("the app exists");
-    organizations::delete_app(&fx.registry, d.owner, d.app, None)
+    organizations::delete_app(&fx.registry, &d.owner, &d.app, None)
         .await
         .expect("delete");
 
     assert_eq!(
         fx.count(
             "SELECT COUNT(*)::bigint AS n FROM zeroship.usage_aggregates WHERE app_id = $1",
-            d.app
+            &d.app
         )
         .await,
         1,
@@ -376,7 +377,7 @@ async fn deletion_keeps_the_billing_evidence_and_destroys_the_environment() {
     assert_eq!(
         fx.count(
             "SELECT COUNT(*)::bigint AS n FROM zeroship.apps WHERE id = $1",
-            d.app
+            &d.app
         )
         .await,
         1,
@@ -385,7 +386,7 @@ async fn deletion_keeps_the_billing_evidence_and_destroys_the_environment() {
     assert_eq!(
         fx.count(
             "SELECT COUNT(*)::bigint AS n FROM zeroship.app_vars WHERE app_id = $1",
-            d.app
+            &d.app
         )
         .await,
         0,
@@ -394,7 +395,7 @@ async fn deletion_keeps_the_billing_evidence_and_destroys_the_environment() {
     assert_eq!(
         fx.count(
             "SELECT COUNT(*)::bigint AS n FROM zeroship.app_secrets WHERE app_id = $1",
-            d.app
+            &d.app
         )
         .await,
         0,
@@ -404,7 +405,7 @@ async fn deletion_keeps_the_billing_evidence_and_destroys_the_environment() {
         fx.count(
             "SELECT COUNT(*)::bigint AS n FROM zeroship.app_audit \
               WHERE app_id = $1 AND action = 'app_deleted'",
-            d.app
+            &d.app
         )
         .await,
         1,
@@ -421,7 +422,7 @@ async fn deletion_keeps_the_billing_evidence_and_destroys_the_environment() {
             .await
             .expect("list the creator's apps")
             .iter()
-            .all(|record| record.id != d.app),
+            .all(|record| record.id.as_str() != d.app.as_str()),
         "a deleted app is gone from the creator's listing"
     );
 
@@ -438,7 +439,10 @@ async fn deletion_keeps_the_billing_evidence_and_destroys_the_environment() {
         .await
         .expect("read usage through the organization")[0]
         .get::<_, i64>("n");
-    assert_eq!(seen, 1, "a detached app is still the organization's to bill");
+    assert_eq!(
+        seen, 1,
+        "a detached app is still the organization's to bill"
+    );
     outstanding_billing(&fx.pg, &d.organization, LocalInvoicing::Yes)
         .await
         .expect("the debt predicate still runs over a deleted app");
@@ -459,7 +463,7 @@ async fn the_closure_funnel_terminates_for_a_sole_creator_who_deployed() {
 
     // 1. Erase the account: refused, sole owner of a live organization, and the
     //    remedy names the projects.
-    let report = preflight(&fx.pg, d.owner, LocalInvoicing::Yes)
+    let report = preflight(&fx.pg, &d.owner, LocalInvoicing::Yes)
         .await
         .expect("preflight");
     let blocker = report
@@ -473,13 +477,13 @@ async fn the_closure_funnel_terminates_for_a_sole_creator_who_deployed() {
     // 2. Dissolve: refused, it still owns projects.
     let err = organizations::dissolve_organization(
         &fx.registry,
-        d.owner,
+        &d.owner,
         &d.organization,
         LocalInvoicing::Yes,
         None,
     )
-        .await
-        .expect_err("an organization owning a project is not dissolved");
+    .await
+    .expect_err("an organization owning a project is not dissolved");
     assert!(
         matches!(err, OrganizationError::OrganizationHasProjects(n) if n == 1),
         "{err:?}"
@@ -487,7 +491,7 @@ async fn the_closure_funnel_terminates_for_a_sole_creator_who_deployed() {
 
     // 3. Delete the project: refused, it still owns an app. THIS is the refusal
     //    whose remedy did not exist.
-    let err = organizations::delete_project(&fx.registry, d.owner, &d.project, None)
+    let err = organizations::delete_project(&fx.registry, &d.owner, &d.project, None)
         .await
         .expect_err("a project owning an app is not deleted");
     assert!(
@@ -496,7 +500,7 @@ async fn the_closure_funnel_terminates_for_a_sole_creator_who_deployed() {
     );
 
     // 4. Delete the app: refused until archived, then done.
-    let err = organizations::delete_app(&fx.registry, d.owner, d.app, None)
+    let err = organizations::delete_app(&fx.registry, &d.owner, &d.app, None)
         .await
         .expect_err("a live app is not deleted");
     assert!(matches!(err, OrganizationError::AppNotArchived), "{err:?}");
@@ -505,30 +509,30 @@ async fn the_closure_funnel_terminates_for_a_sole_creator_who_deployed() {
         .await
         .expect("archive")
         .expect("the app exists");
-    organizations::delete_app(&fx.registry, d.owner, d.app, None)
+    organizations::delete_app(&fx.registry, &d.owner, &d.app, None)
         .await
         .expect("the funnel's last step exists");
 
     // 5. The project now goes.
-    organizations::delete_project(&fx.registry, d.owner, &d.project, None)
+    organizations::delete_project(&fx.registry, &d.owner, &d.project, None)
         .await
         .expect("a project whose last app is deleted can be deleted");
 
     // 6. The organization now closes.
     organizations::dissolve_organization(
         &fx.registry,
-        d.owner,
+        &d.owner,
         &d.organization,
         LocalInvoicing::Yes,
         None,
     )
-        .await
-        .expect("an organization whose last project is gone can be dissolved");
+    .await
+    .expect("an organization whose last project is gone can be dissolved");
 
     // 7. And the human is erasable: the dissolved organization is no longer an
     //    ownership blocker, and the retained usage owes nothing (its period is
     //    the current month, which the unbilled arm excludes by design).
-    let report = preflight(&fx.pg, d.owner, LocalInvoicing::Yes)
+    let report = preflight(&fx.pg, &d.owner, LocalInvoicing::Yes)
         .await
         .expect("preflight");
     assert!(
@@ -572,7 +576,7 @@ async fn a_deleted_app_refuses_every_write_that_would_resurrect_it() {
         .await
         .expect("archive")
         .expect("the app exists");
-    organizations::delete_app(&fx.registry, dead.owner, dead.app, None)
+    organizations::delete_app(&fx.registry, &dead.owner, &dead.app, None)
         .await
         .expect("delete");
 
@@ -586,7 +590,7 @@ async fn a_deleted_app_refuses_every_write_that_would_resurrect_it() {
         !redeployed,
         "a deploy landed on a deleted app and restored the manifest the delete cleared"
     );
-    let (_, _, deploy_hash) = fx.app_state(dead.app).await;
+    let (_, _, deploy_hash) = fx.app_state(&dead.app).await;
     assert!(
         deploy_hash.is_none(),
         "the deleted app carries a deploy hash again: {deploy_hash:?}"
@@ -602,21 +606,22 @@ async fn a_deleted_app_refuses_every_write_that_would_resurrect_it() {
 
     assert!(
         matches!(
-            env.set_var(dead.app, "RESURRECTED", "yes").await,
+            env.set_var(&dead.app, "RESURRECTED", "yes").await,
             Err(zeroship_control::env_store::EnvError::AppNotFound)
         ),
         "a var was written to a deleted app, rebuilding the environment the delete destroyed"
     );
     assert!(
         matches!(
-            env.set_secret(dead.app, "RESURRECTED", "yes").await,
+            env.set_secret(&dead.app, "RESURRECTED", "yes").await,
             Err(zeroship_control::env_store::EnvError::AppNotFound)
         ),
         "a secret was written to a deleted app"
     );
     assert!(
         matches!(
-            env.set_expose(dead.app, &["RESURRECTED".to_string()]).await,
+            env.set_expose(&dead.app, &["RESURRECTED".to_string()])
+                .await,
             Err(zeroship_control::env_store::EnvError::AppNotFound)
         ),
         "an exposure set was written to a deleted app"
@@ -624,7 +629,7 @@ async fn a_deleted_app_refuses_every_write_that_would_resurrect_it() {
     assert_eq!(
         fx.count(
             "SELECT count(*) AS n FROM zeroship.app_vars WHERE app_id = $1",
-            dead.app
+            &dead.app
         )
         .await,
         0,
@@ -639,13 +644,13 @@ async fn a_deleted_app_refuses_every_write_that_would_resurrect_it() {
             .expect("deploy on a live app"),
         "the deploy fence refuses a live app too, so it is not discriminating"
     );
-    env.set_var(live.app, "ORDINARY", "yes")
+    env.set_var(&live.app, "ORDINARY", "yes")
         .await
         .expect("a var on a live app");
-    env.set_secret(live.app, "ORDINARY", "yes")
+    env.set_secret(&live.app, "ORDINARY", "yes")
         .await
         .expect("a secret on a live app");
-    env.set_expose(live.app, &["ORDINARY".to_string()])
+    env.set_expose(&live.app, &["ORDINARY".to_string()])
         .await
         .expect("an exposure on a live app");
 

@@ -26,9 +26,7 @@ pub fn factory(ctx: &ProviderCtx) -> Result<Arc<dyn MeteringProvider>, ProviderE
         .store
         .clone()
         .ok_or_else(|| ProviderError::Config("lite: LiteStore is required".to_string()))?;
-    Ok(Arc::new(LiteProvider {
-        store,
-    }))
+    Ok(Arc::new(LiteProvider { store }))
 }
 
 #[async_trait::async_trait(?Send)]
@@ -66,7 +64,9 @@ impl crate::metering::provider::Invoicer for LiteProvider {
         let organization = OrganizationId::parse(subject.as_str()).map_err(|e| {
             ProviderError::Config(format!("lite: subject is not an organization id: {e}"))
         })?;
-        self.store.close_period_invoice(organization.as_str(), period).await
+        self.store
+            .close_period_invoice(organization.as_str(), period)
+            .await
     }
 
     async fn adjustment_note(
@@ -77,7 +77,9 @@ impl crate::metering::provider::Invoicer for LiteProvider {
         let organization = OrganizationId::parse(subject.as_str()).map_err(|e| {
             ProviderError::Config(format!("lite: subject is not an organization id: {e}"))
         })?;
-        self.store.adjustment_note_invoice(organization.as_str(), note).await
+        self.store
+            .adjustment_note_invoice(organization.as_str(), note)
+            .await
     }
 }
 

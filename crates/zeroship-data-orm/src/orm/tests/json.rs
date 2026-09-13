@@ -40,10 +40,9 @@ async fn sqlite_json_values_round_trip_through_the_orm() {
         panic!("find must return rows")
     };
     assert!(!rows.is_empty());
-    assert!(
-        rows.iter()
-            .all(|row| row["payload"] == Value::String("true".into()))
-    );
+    assert!(rows
+        .iter()
+        .all(|row| row["payload"] == Value::String("true".into())));
     owner.close().await;
 }
 
@@ -107,4 +106,29 @@ async fn exercise_json_values(db: &Database) {
             "find must preserve the JSON type"
         );
     }
+
+    let id = db
+        .collection("documents")
+        .unwrap()
+        .insert(value!({"payload":{"a":1,"b":[2,3]}}))
+        .await
+        .unwrap();
+    let Output::Rows { rows: inserted, .. } = id else {
+        panic!("insert must return rows")
+    };
+    let id = inserted[0]["id"].clone();
+    let Output::Rows { rows, .. } = db
+        .collection("documents")
+        .unwrap()
+        .find(
+            value!({"payload":{"$eq":{"b":[2.0,3.0],"a":1.0}}}),
+            value!({}),
+        )
+        .await
+        .unwrap()
+    else {
+        panic!("find must return rows")
+    };
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["id"], id);
 }

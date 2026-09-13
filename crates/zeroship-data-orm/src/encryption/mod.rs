@@ -6,7 +6,7 @@ pub mod keys;
 pub(crate) mod plaintext;
 pub mod wire;
 
-#[allow(unused_imports)] // consumed by crud/encryption_pass.rs
+#[allow(unused_imports)] // consumed by the protection write pass
 pub use aad::canonical_aad;
 pub use aead::{AeadKey, decrypt, encrypt};
 pub use keys::{KeyStore, ProjectKeySource, SuppliedProjectKeys};

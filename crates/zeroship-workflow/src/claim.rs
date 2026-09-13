@@ -1,8 +1,8 @@
 use chrono::{DateTime, Utc};
 use compio_postgres::{GenericClient, NoTls};
 use serde_json::Value;
-use uuid::Uuid;
 use zeroship_core::app_derivation;
+use zeroship_core::app_id::AppId;
 use zeroship_core::typed_id;
 
 use crate::advance::{
@@ -15,7 +15,7 @@ use crate::engine::{
 };
 use crate::errors::WorkflowError;
 use crate::store::pg::{
-    cascade_cancel_children_on_conn, compensation_progress_on_conn,
+    app_id_from_row, cascade_cancel_children_on_conn, compensation_progress_on_conn,
     collect_related_run_lock_ids_on_conn, emit_child_terminal_hook_on_conn,
     insert_resolved_step_on_conn, lock_run_set_for_apply_on_conn, WorkflowTables,
 };
@@ -38,7 +38,7 @@ pub enum WorkflowClaimOutcome {
 #[derive(Debug, Clone)]
 struct CandidateRun {
     run_id: String,
-    app_id: Uuid,
+    app_id: AppId,
     workflow_name: String,
     deploy_id: String,
     deploy_hash: String,
@@ -85,7 +85,7 @@ where
     // claim either commits before archive returns or observes the marker.
     tx.query_one(
         "SELECT pg_advisory_xact_lock_shared(hashtextextended($1, 0))",
-        &[&app_derivation::lifecycle_lock_seed_for_stored_uuid(&request.app_id)],
+        &[&app_derivation::lifecycle_lock_seed(&request.app_id)],
     )
     .await?;
     let tables = WorkflowTables::for_app_id(&request.app_id);
@@ -106,14 +106,16 @@ where
             AND NOT plan.archived",
         runs = tables.runs
     );
-    let rows = tx.query(&select_sql, &[&request.run_id, &request.app_id]).await?;
+    let rows = tx
+        .query(&select_sql, &[&request.run_id, &request.app_id.as_str()])
+        .await?;
     let Some(row) = rows.first() else {
         return Ok(WorkflowClaimOutcome::ClaimLost);
     };
 
     let candidate = CandidateRun {
         run_id: row.get("id"),
-        app_id: row.get("app_id"),
+        app_id: app_id_from_row(row, "app_id")?,
         workflow_name: row.get("workflow_name"),
         deploy_id: row.get("deploy_id"),
         deploy_hash: row.get("deploy_hash"),
@@ -138,7 +140,7 @@ where
 
     if is_terminal_state(&candidate.state) {
         return Ok(WorkflowClaimOutcome::Terminal(
-            collect_post_apply_registrations_on_conn(tx, request.app_id, &request.run_id, true)
+            collect_post_apply_registrations_on_conn(tx, &request.app_id, &request.run_id, true)
                 .await?,
         ));
     }
@@ -161,7 +163,7 @@ where
         return Ok(WorkflowClaimOutcome::ClaimLost);
     };
     let mut candidate = candidate;
-    candidate.app_id = locked_candidate.app_id;
+    candidate.app_id = locked_candidate.app_id.clone();
     candidate.workflow_name = locked_candidate.workflow_name.clone();
     candidate.deploy_id = locked_candidate.deploy_id.clone();
     candidate.state = locked_candidate.state.clone();
@@ -173,7 +175,7 @@ where
 
     if is_terminal_state(&candidate.state) {
         return Ok(WorkflowClaimOutcome::Terminal(
-            collect_post_apply_registrations_on_conn(tx, request.app_id, &request.run_id, true)
+            collect_post_apply_registrations_on_conn(tx, &request.app_id, &request.run_id, true)
                 .await?,
         ));
     }
@@ -195,7 +197,7 @@ where
 
 pub async fn renew_workflow_claim(
     db_url: &str,
-    app_id: Uuid,
+    app_id: &AppId,
     run_id: &str,
     owner_id: &str,
     dispatch_nonce: &str,
@@ -221,7 +223,7 @@ pub async fn renew_workflow_claim(
 
 pub async fn renew_workflow_claim_on_conn<C>(
     conn: &C,
-    app_id: Uuid,
+    app_id: &AppId,
     run_id: &str,
     owner_id: &str,
     dispatch_nonce: &str,
@@ -230,7 +232,7 @@ pub async fn renew_workflow_claim_on_conn<C>(
 where
     C: GenericClient + Sync,
 {
-    let tables = WorkflowTables::for_app_id(&app_id);
+    let tables = WorkflowTables::for_app_id(app_id);
     let lease_expires = Utc::now() + chrono::Duration::milliseconds(claim_ttl_ms);
     let sql = format!(
         "UPDATE {runs} \
@@ -267,19 +269,22 @@ where
         runs = tables.runs
     );
     let inflight = tx
-        .query(&inflight_sql, &[&candidate.app_id, &candidate.run_id])
+        .query(
+            &inflight_sql,
+            &[&candidate.app_id.as_str(), &candidate.run_id],
+        )
         .await?;
     let inflight: i64 = inflight[0].get("n");
     if inflight >= config.max_inflight_per_app {
         return Ok(WorkflowClaimOutcome::Backpressure(format!(
             "workflow app {} has {inflight} in-flight claims",
-            candidate.app_id
+            candidate.app_id.as_str()
         )));
     }
 
     if !candidate.cancel_requested && candidate.wake_at.is_some_and(|wake_at| wake_at > Utc::now()) {
         return Ok(WorkflowClaimOutcome::Terminal(
-            collect_post_apply_registrations_on_conn(tx, candidate.app_id, &candidate.run_id, true)
+            collect_post_apply_registrations_on_conn(tx, &candidate.app_id, &candidate.run_id, true)
                 .await?,
         ));
     }
@@ -289,7 +294,7 @@ where
             return Ok(WorkflowClaimOutcome::Terminal(
                 collect_post_apply_registrations_on_conn(
                     tx,
-                    candidate.app_id,
+                    &candidate.app_id,
                     &candidate.run_id,
                     true,
                 )
@@ -306,7 +311,7 @@ where
             return Ok(WorkflowClaimOutcome::Terminal(
                 collect_post_apply_registrations_on_conn(
                     tx,
-                    candidate.app_id,
+                    &candidate.app_id,
                     &candidate.run_id,
                     true,
                 )

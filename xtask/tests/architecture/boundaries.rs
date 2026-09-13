@@ -81,7 +81,7 @@ fn adapter_boundary_checks_reject_forbidden_controls() {
     }
     for input in [
         "use zeroship_data_orm::cdc::broker;",
-        "pub(crate) use zeroship_data_orm::sql::compile;",
+        "pub(crate) use zeroship_data_orm::sql::mapping;",
     ] {
         assert!(source::parse(input).public_uses.is_empty());
     }
@@ -155,6 +155,29 @@ fn contracts_codecs_and_context_have_authoritative_owners() {
     assert!(
         source::parse("thread_local! { static STATE: usize = 0; }").names_any(&["thread_local"])
     );
+}
+
+#[test]
+fn backend_compilers_dispatch_every_statement_family() {
+    for backend in ["postgres", "sqlite"] {
+        let source = source::parse(&repo::read(&format!(
+            "crates/zeroship-data-orm/src/sql/compiler/{backend}.rs"
+        )));
+        for statement in [
+            "Select",
+            "VectorSearch",
+            "SpatialNear",
+            "Insert",
+            "Upsert",
+            "Update",
+            "Delete",
+        ] {
+            assert!(
+                source.contains(&format!("Statement :: {statement}")),
+                "{backend} compiler does not dispatch Statement::{statement}"
+            );
+        }
+    }
 }
 
 #[test]

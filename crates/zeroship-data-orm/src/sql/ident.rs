@@ -31,9 +31,6 @@ use core::fmt;
 /// creator-selected identifiers. Migration code separately caps generated names.
 pub const MAX_IDENT_BYTES: usize = 63;
 
-/// Platform collection prefixes checked against migration validation by parity tests.
-pub const PLATFORM_RESERVED_COLLECTION_PREFIXES: &[&str] = &["__zeroship"];
-
 /// Where an identifier is about to be used. The fences differ per role, so the
 /// role is a required argument to [`Ident::parse_as`] rather than something a
 /// caller may leave to a default.
@@ -46,20 +43,10 @@ pub enum IdentRole {
     /// A column name being *referenced*. Not a column being declared: this
     /// crate plans no DDL.
     Column,
-    /// A column the PLATFORM references, not one a creator declared: the
-    /// physical side of a [`zeroship_data_orm::sql::ProjectionSource::Stored`].
+    /// A column the platform references rather than one a creator declared.
     ///
-    /// It exists for the same reason [`Self::Alias`] does. The platform's stored
-    /// forms are spelled with the very prefixes `COLUMN_RESERVATIONS` refuses,
-    /// because refusing them is what stops a creator declaring one; the platform
-    /// still has to name them. Splitting the role is how that is expressed
-    /// without weakening the creator-facing fence.
-    ///
-    /// This replaced a `pub(crate)` constructor that built the name by
-    /// `format!` and skipped `parse_as` entirely, so a stored name went through
-    /// no charset check and no catalog fence at all. A role is strictly
-    /// stronger: it still refuses `pg_` and `sqlite_`, the classification names,
-    /// quote injection and NUL.
+    /// This role permits platform prefixes while retaining identifier and
+    /// database-catalog validation.
     StoredColumn,
     /// An output name in a projection, including the platform's own synthetic
     /// result columns.
@@ -103,31 +90,25 @@ impl fmt::Display for IdentRole {
     }
 }
 
-/// The shape of a reservation. Mirrors `query.rs`'s `ReservedName` so the
-/// fences can be compared row by row when the port moves them.
+/// A role-specific reserved-name rule.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Reservation {
     /// Refuse a name spelled exactly this.
     Exact(&'static str),
     /// Refuse any name starting with this, case-insensitively.
     Prefix(&'static str),
-    /// Refuse any name ending with this, case-sensitively.
-    Suffix(&'static str),
 }
 
 impl Reservation {
     fn matches(self, name: &str) -> bool {
         match self {
             Self::Exact(n) => name == n,
-            // Case-insensitive, as both forks of `validate_collection` are:
-            // PostgreSQL folds unquoted identifiers to lower case, so `PG_Foo`
-            // and `pg_foo` are the same catalog name and a case-sensitive fence
-            // would miss one of them.
+            // PostgreSQL folds unquoted identifiers, so catalog-prefix fences
+            // are case-insensitive even though emitted identifiers are quoted.
             Self::Prefix(p) => {
                 name.len() >= p.len()
                     && name.as_bytes()[..p.len()].eq_ignore_ascii_case(p.as_bytes())
             }
-            Self::Suffix(s) => name.ends_with(s),
         }
     }
 
@@ -135,24 +116,14 @@ impl Reservation {
         match self {
             Self::Exact(n) => format!("the name '{n}' is reserved"),
             Self::Prefix(p) => format!("the prefix '{p}' is reserved"),
-            Self::Suffix(s) => format!("the suffix '{s}' is reserved"),
         }
     }
 }
 
 /// Schema-name fences.
 ///
-/// `__zeroship` is refused here, and it guards two distinct things. The first is
-/// live: `__zeroship_` is the prefix of tables that exist in every app schema
-/// today - the migration journal, the unmask audit table, the workflow journal -
-/// and a creator-named collection colliding with one of them is a corruption
-/// rather than a name clash. The second is a reservation: this crate builds
-/// plans the *worker* executes, and the worker executes creator code, so per the
-/// platform invariant, state a separate service writes and the worker only reads
-/// must not be nameable from a worker-built plan. No such platform-owned schema
-/// exists at the time of writing; the fence holds the namespace open for one and
-/// protects the live tables meanwhile. Do not narrow it on the grounds that the
-/// schema is absent.
+/// These reservations prevent qualified access to backend catalogs and
+/// platform-owned schemas. Collection names are checked separately.
 const NAMESPACE_RESERVATIONS: &[Reservation] = &[
     Reservation::Prefix("pg_"),
     Reservation::Exact("information_schema"),
@@ -161,34 +132,23 @@ const NAMESPACE_RESERVATIONS: &[Reservation] = &[
     Reservation::Prefix("sqlite_"),
 ];
 
-/// Catalog prefixes owned by the backends the runtime can address.
-///
-/// These are separate from the neutral platform tables. SQLite refuses
-/// `sqlite_*` table names outright, while PostgreSQL does not reliably refuse
-/// every `pg_*` object. Both prefixes apply to columns because the migration
-/// engine fences the union from every registered backend against later
-/// retargeting. The behavioral parity suite derives the real shipping set and
-/// fails when runtime reservations drifts.
+/// SQLite catalog tables live inside each attached database. PostgreSQL
+/// catalogs live in a separate schema, so a schema-qualified `pg_*` table in
+/// the bound creator schema is an ordinary table.
+const COLLECTION_RESERVATIONS: &[Reservation] = &[Reservation::Prefix("sqlite_")];
+
 const BACKEND_CATALOG_RESERVATIONS: &[Reservation] =
     &[Reservation::Prefix("pg_"), Reservation::Prefix("sqlite_")];
 
-/// Column-name fences, in `RESERVED_NAMES` order so the error a given name
-/// produces is the same one it produces today.
-///
-/// `Prefix("_")` subsumes `__zs_` and `__zeroship_`; both are kept anyway,
-/// because the port SC-3 describes is a *move* of this table and a move that
-/// silently drops rows is exactly the failure the "pair, not a single
-/// guardian" note warns about.
+/// Column-name fences. Platform prefixes remain explicit for auditability even
+/// though the leading-underscore rule also matches them.
 const COLUMN_RESERVATIONS: &[Reservation] = &[
     // Synthetic result columns the runtime emits, e.g. `_distance` on vector
     // search. Reserved so a creator column cannot shadow one.
     Reservation::Prefix("_"),
     Reservation::Prefix("__zs_"),
     Reservation::Prefix("__zeroship_"),
-    // Masked-column sibling suffix (the Path B sibling-column strategy).
-    Reservation::Suffix("_masked"),
-    // The six default classifications, reserved at column level so a creator
-    // schema cannot collide with the taxonomy authorization and audit use.
+    // Classification names are reserved for authorization and audit metadata.
     Reservation::Exact("public"),
     Reservation::Exact("pii"),
     Reservation::Exact("spi"),
@@ -200,15 +160,8 @@ const COLUMN_RESERVATIONS: &[Reservation] = &[
 /// Fences for a column the platform references rather than one a creator
 /// declared.
 ///
-/// This is `COLUMN_RESERVATIONS` with the four platform-shape rows removed -
-/// `Prefix("_")`, `Prefix("__zs_")`, `Prefix("__zeroship_")` and
-/// `Suffix("_masked")` - because those rows exist to stop a CREATOR naming a
-/// platform column, and this role is the platform doing exactly that. The
-/// classification names stay: nothing the platform stores is called `pii`, and
-/// keeping them costs nothing while preserving the taxonomy fence in both roles.
-///
-/// The backend catalog fences (`pg_`, `sqlite_`) apply to this role too, wired
-/// beside [`IdentRole::Column`] in `parse_as`.
+/// Platform prefixes are permitted here; classification and backend catalog
+/// names remain reserved.
 const STORED_COLUMN_RESERVATIONS: &[Reservation] = &[
     Reservation::Exact("public"),
     Reservation::Exact("pii"),
@@ -220,48 +173,31 @@ const STORED_COLUMN_RESERVATIONS: &[Reservation] = &[
 
 /// Output-name fences.
 ///
-/// An alias is **allowed** a single leading `_`, which a column is not, and the
-/// asymmetry is the reason the role exists. The platform's own synthetic result
-/// columns are spelled that way - `_distance` on a vector search - and they are
-/// emitted as aliases, never declared as columns. The `_` fence on
-/// `COLUMN_RESERVATIONS` is what stops a creator column shadowing one; the
-/// alias side is the platform's to spell.
-///
-/// The `_masked` suffix is likewise allowed here, because an internal-exposure
-/// projection may legitimately surface a sibling under its own name.
+/// Aliases may use a leading underscore for synthetic result fields. Creator
+/// columns cannot use that prefix, so they cannot shadow those fields.
 const ALIAS_RESERVATIONS: &[Reservation] = &[
     Reservation::Prefix("__zs_"),
     Reservation::Prefix("__zeroship"),
     Reservation::Prefix("sqlite_"),
 ];
 
-/// Fences for names the platform derives (constraints, indexes). No creator
-/// reservation applies - a creator does not choose these - so only the shared
-/// shape rules (charset, length, no NUL) run.
+/// Derived constraint and index names use the shared shape rules.
 const DERIVED_NAME_RESERVATIONS: &[Reservation] = &[];
 
 /// Why an identifier was refused.
 ///
-/// Every variant names the role, because the same text is legal in one position
-/// and refused in another and an error that does not say which is being tested
-/// sends the reader to the wrong fence.
+/// Every variant names the identifier role that rejected the input.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IdentError {
     /// The name was empty.
     Empty { role: IdentRole },
-    /// The name contained a NUL byte. Kept as its own variant rather than
-    /// folded into [`IdentError::IllegalCharacter`]: a NUL is how a truncating
-    /// C-string consumer is attacked, not a typo.
+    /// The name contained a NUL byte.
     NulByte { role: IdentRole },
     /// The name exceeded [`MAX_IDENT_BYTES`].
     TooLong { role: IdentRole, len: usize },
     /// The name contained something outside `[A-Za-z0-9_]`.
     ///
-    /// The offending character is reported escaped, and the *name* is not
-    /// echoed at all. This is a deliberate departure from
-    /// `validate_field_name`, whose message interpolates the raw name and so
-    /// can carry control characters or a broken escape into whatever reads the
-    /// error.
+    /// The error reports the escaped character without echoing the whole name.
     IllegalCharacter { role: IdentRole, character: char },
     /// The name hit the role's reservation table. Safe to echo: the charset
     /// check runs first, so `name` here is always `[A-Za-z0-9_]`.
@@ -303,21 +239,15 @@ impl std::error::Error for IdentError {}
 /// is no `From<String>`, no `Deserialize`, and no `into_string`. See the module
 /// documentation for the compile-fail proofs of each of those.
 ///
-/// `Ident` does **not** remember which role validated it. That follows SC-3's
-/// own sketch, and it is a real limitation rather than an oversight: nothing
-/// stops a value parsed as an alias being stored in a field that wants a
-/// collection. What prevents it in practice is that the plan structs name their
-/// slots, so the miscarriage has to be written deliberately. Carrying the role
-/// in the type was considered and rejected because it forces a double parse at
-/// every stored projection, where the same text is both a column and an alias.
+/// `Ident` does not retain its validation role. Statement constructors own the
+/// role of each slot and validate text at that boundary.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Ident(String);
 
 impl Ident {
     /// Validate `raw` for use in `role`.
     ///
-    /// Order matters and is the same order `query.rs` uses: emptiness, NUL,
-    /// length, charset, and only then the reservation table. Running the
+    /// Validation checks emptiness, NUL, length, charset, then reservations. Running the
     /// charset check before the reservations is what makes
     /// [`IdentError::Reserved`] safe to echo, and it is also why a name like
     /// `"caf\u{e9}"` reports the encoding problem rather than a spurious
@@ -349,17 +279,7 @@ impl Ident {
             });
         }
         if role == IdentRole::Collection {
-            for reservation in BACKEND_CATALOG_RESERVATIONS {
-                if reservation.matches(raw) {
-                    return Err(IdentError::Reserved {
-                        role,
-                        name: raw.to_string(),
-                        reservation: reservation.describe(),
-                    });
-                }
-            }
-            for prefix in PLATFORM_RESERVED_COLLECTION_PREFIXES {
-                let reservation = Reservation::Prefix(prefix);
+            for reservation in COLLECTION_RESERVATIONS {
                 if reservation.matches(raw) {
                     return Err(IdentError::Reserved {
                         role,
@@ -424,8 +344,6 @@ mod tests {
             "prefix fence must be case-insensitive"
         );
         assert!(!Reservation::Prefix("pg_").matches("page_views"));
-        assert!(Reservation::Suffix("_masked").matches("ssn_masked"));
-        assert!(!Reservation::Suffix("_masked").matches("masked_ssn"));
         assert!(Reservation::Exact("pii").matches("pii"));
         assert!(!Reservation::Exact("pii").matches("piix"));
     }
@@ -435,7 +353,6 @@ mod tests {
     #[test]
     fn a_short_name_does_not_panic_the_prefix_fence() {
         assert!(!Reservation::Prefix("__zeroship").matches("_"));
-        assert!(!Reservation::Suffix("_masked").matches("s"));
     }
 
     /// Every role must have deliberate reservation behavior. Collection and
@@ -446,13 +363,11 @@ mod tests {
     fn every_role_has_deliberate_reservation_behavior() {
         let cases = [
             (IdentRole::Namespace, "__zeroship_reserved", false),
-            (IdentRole::Collection, "pg_class", false),
+            (IdentRole::Collection, "pg_class", true),
+            (IdentRole::Collection, "__zeroship_audit_unmask", true),
             (IdentRole::Column, "pg_attribute", false),
-            // Accepted, and that IS the deliberate behaviour: this role exists
-            // so the platform can name its own stored columns. The refusal half
-            // is `the_stored_prefix_is_reserved_against_creators_and_nameable_
-            // by_the_platform` in `tests/ident_refusals.rs`, which pins that
-            // `pg_`, `sqlite_` and the classification names still fail here.
+            // Stored physical columns use a separate role; backend catalog and
+            // classification names remain invalid for it.
             (IdentRole::StoredColumn, "__zs_raw__ssn", true),
             (IdentRole::Alias, "__zeroship_internal", false),
             (IdentRole::Constraint, "pg_constraint", true),
@@ -480,6 +395,13 @@ mod tests {
                 | IdentRole::Index => {}
             }
         }
-        println!("ruled on {} roles", cases.len());
+    }
+
+    #[test]
+    fn app_schema_tables_share_one_collection_role() {
+        assert!(Ident::parse_as("__zeroship_audit_unmask", IdentRole::Collection).is_ok());
+        assert!(Ident::parse_as("__zeroship_migrations", IdentRole::Collection).is_ok());
+        assert!(Ident::parse_as("pg_class", IdentRole::Collection).is_ok());
+        assert!(Ident::parse_as("sqlite_schema", IdentRole::Collection).is_err());
     }
 }

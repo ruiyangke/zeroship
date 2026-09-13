@@ -8,18 +8,18 @@ use zeroship_core::types::{
     NetEgressEntry, RouteEntry, SpendState,
 };
 use std::collections::HashMap;
-use uuid::Uuid;
+use zeroship_core::app_id::AppId;
 
 #[test]
 fn control_event_deploy_json() {
-    let app_id = Uuid::new_v4();
+    let app_id = AppId::mint();
     let event = ControlEvent::Deploy {
-        app_id,
+        app_id: app_id.clone(),
         hash: "abc123".to_string(),
     };
 
     let json = serde_json::to_string(&event).unwrap();
-    assert!(json.contains(&app_id.to_string()));
+    assert!(json.contains(app_id.as_str()));
     assert!(json.contains("abc123"));
 
     let decoded: ControlEvent = serde_json::from_str(&json).unwrap();
@@ -34,11 +34,13 @@ fn control_event_deploy_json() {
 
 #[test]
 fn control_event_delete_json() {
-    let app_id = Uuid::new_v4();
-    let event = ControlEvent::Delete { app_id };
+    let app_id = AppId::mint();
+    let event = ControlEvent::Delete {
+        app_id: app_id.clone(),
+    };
 
     let json = serde_json::to_string(&event).unwrap();
-    assert!(json.contains(&app_id.to_string()));
+    assert!(json.contains(app_id.as_str()));
 
     let decoded: ControlEvent = serde_json::from_str(&json).unwrap();
     match decoded {
@@ -169,9 +171,9 @@ fn spend_state_serde_is_snake_case_and_defaults_allow() {
 
 #[test]
 fn control_event_spend_state_json() {
-    let app_id = Uuid::new_v4();
+    let app_id = AppId::mint();
     let event = ControlEvent::SpendState {
-        app_id,
+        app_id: app_id.clone(),
         state: SpendState::Block,
     };
     let json = serde_json::to_string(&event).unwrap();
