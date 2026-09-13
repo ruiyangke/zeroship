@@ -1,4 +1,7 @@
-use super::*;
+use super::{
+    read, CompareOp, DbError, EncodeValue, NullOrder, Operand, OrderKey, Predicate, ReadOrigin,
+    Value, ValueOperand,
+};
 
 /// A relational predicate retaining the origin of every referenced expression.
 #[derive(Debug, Clone)]
@@ -15,7 +18,7 @@ impl Default for ReadPredicate {
 }
 
 impl ReadPredicate {
-    pub fn all() -> Self {
+    pub const fn all() -> Self {
         Self::new(Predicate::Const(true), Vec::new())
     }
 
@@ -31,7 +34,7 @@ impl ReadPredicate {
         Self::new(Predicate::Not(Box::new(self.expression)), self.origins)
     }
 
-    pub(super) fn new(expression: Predicate, origins: Vec<ReadOrigin>) -> Self {
+    pub(super) const fn new(expression: Predicate, origins: Vec<ReadOrigin>) -> Self {
         Self {
             expression,
             origins,
@@ -109,7 +112,7 @@ impl<S, T: EncodeValue<S>> IntoReadOperand<S, ValueOperand> for T {
     }
 }
 impl ReadOperand {
-    pub(super) fn expression(expression: Operand, origins: Vec<ReadOrigin>) -> Self {
+    pub(super) const fn expression(expression: Operand, origins: Vec<ReadOrigin>) -> Self {
         Self(ReadOperandValue::Expression(expression, origins))
     }
     pub(super) fn compare(

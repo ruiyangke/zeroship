@@ -1,4 +1,11 @@
-use super::*;
+#![expect(
+    clippy::future_not_send,
+    reason = "ORM reads use thread-local compio sessions"
+)]
+
+use super::{
+    count_rows, DbError, Future, Output, ReadBuilder, ReadProjection, ReadSelection, Value,
+};
 use crate::sql::statement::SelectSummary;
 
 impl<P> ReadBuilder<P> {
@@ -42,11 +49,17 @@ impl<P> ReadBuilder<P> {
     }
 
     /// Count matching rows or groups independently of ordering and page bounds.
+    ///
+    /// # Errors
+    /// Refuses invalid queries, changed metadata, expired transactions, or database failures.
     pub fn count(self) -> impl Future<Output = Result<i64, DbError>> {
         self.summary(SelectSummary::Count)
     }
 
     /// Test for matching rows or groups independently of ordering and page bounds.
+    ///
+    /// # Errors
+    /// Refuses invalid queries, changed metadata, expired transactions, or database failures.
     pub fn exists(self) -> impl Future<Output = Result<bool, DbError>> {
         let work = self.summary(SelectSummary::Exists);
         async move { Ok(work.await? != 0) }
@@ -54,6 +67,9 @@ impl<P> ReadBuilder<P> {
 }
 
 impl<P: ReadSelection> ReadBuilder<P> {
+    ///
+    /// # Errors
+    /// Refuses invalid queries, changed metadata, expired transactions, or database failures.
     pub fn all(self) -> impl Future<Output = Result<Vec<P::Output>, DbError>> {
         let work = self.execute();
         async move {
@@ -71,9 +87,11 @@ impl<P: ReadSelection> ReadBuilder<P> {
         }
     }
 
-    pub fn first(mut self) -> impl Future<Output = Result<Option<P::Output>, DbError>> {
-        self.query.limit = RowLimit::new(1).expect("a single row is within the query limit");
-        let work = self.all();
-        async move { Ok(work.await?.into_iter().next()) }
+    ///
+    /// # Errors
+    /// Refuses invalid queries, changed metadata, expired transactions, or database failures.
+    pub fn first(self) -> impl Future<Output = Result<Option<P::Output>, DbError>> {
+        let work = self.limit(1).map(Self::all);
+        async move { Ok(work?.await?.into_iter().next()) }
     }
 }

@@ -1,0 +1,28 @@
+warning: unused import: `zeroship_data_orm::orm::*`
+ --> tests/ui/null_arithmetic_operand.rs:1:5
+  |
+1 | use zeroship_data_orm::orm::*;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+error[E0277]: the trait bound `Option<i64>: EncodeValue<zeroship_data_orm::orm::sql_types::BigInt>` is not satisfied
+ --> tests/ui/null_arithmetic_operand.rs:4:58
+  |
+4 | fn main() { let _ = schema::counters::optional.increment(None::<i64>); }
+  |                                                --------- ^^^^^^^^^^^ the trait `EncodeValue<zeroship_data_orm::orm::sql_types::BigInt>` is not implemented for `Option<i64>`
+  |                                                |
+  |                                                required by a bound introduced by this call
+  |
+help: the trait `EncodeValue<zeroship_data_orm::orm::sql_types::BigInt>` is not implemented for `Option<i64>`
+      but trait `EncodeValue<Nullable<_>>` is implemented for it
+ --> src/orm/codecs.rs
+  |
+  | impl<S, T: EncodeValue<S>> EncodeValue<Nullable<S>> for Option<T> {
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  = help: for that trait implementation, expected `Nullable<_>`, found `zeroship_data_orm::orm::sql_types::BigInt`
+note: required by a bound in `orm::model::patch::<impl zeroship_data_orm::orm::Field<C>>::increment`
+ --> src/orm/model/patch.rs
+  |
+  |     pub fn increment<T: EncodeValue<<C::SqlType as NumericSqlType>::Operand>>(
+  |                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `orm::model::patch::<impl Field<C>>::increment`

@@ -21,8 +21,8 @@ help: the trait `EncodeValue<zeroship_data_orm::orm::sql_types::Text>` is not im
   | impl<S, T: EncodeValue<S>> EncodeValue<Nullable<S>> for Option<T> {
   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
   = help: for that trait implementation, expected `Nullable<_>`, found `zeroship_data_orm::orm::sql_types::Text`
-note: required by a bound in `zeroship_data_orm::orm::Field::<C>::set`
- --> src/orm/model.rs
+note: required by a bound in `orm::model::patch::<impl zeroship_data_orm::orm::Field<C>>::set`
+ --> src/orm/model/patch.rs
   |
   |     pub fn set<T: EncodeValue<C::SqlType>>(self, value: T) -> Result<Patch<C::Entity>, DbError> {
-  |                   ^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `Field::<C>::set`
+  |                   ^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `orm::model::patch::<impl Field<C>>::set`
