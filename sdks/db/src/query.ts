@@ -1,3 +1,4 @@
+import { trackRelations, type ReadResultMapper } from "./collection/read-mapping";
 import type { FieldDef } from "./types";
 /**
  * Lazy query builder for @zeroship/db.
@@ -150,12 +151,7 @@ function sameOrderBy(a: Record<string, 1 | -1>, b: Record<string, 1 | -1>): bool
  * The generic parameter `S` is the raw schema shape; `P` is the projected document shape.
  * When `.select()` is called with typed field names, `P` narrows to `Pick<Row<S>, K>`.
  *
- * `AllSchemas` is the parent db's full schema map (threaded in by
- * `installSchema` via `Collection<S, N, AllSchemas>`). It lets `.with({ fk:
- * true })` resolve the joined field's type to the target collection's
- * `Row<...>` instead of the safe-default `PlainObject`. Direct `new
- * Query(...)` callers inherit the safe default, so the v1 behaviour is
- * unchanged for tests that build a Query without a parent db.
+ * `AllSchemas` resolves named relation edges to their target row types.
  *
  * Collects query options lazily and executes via the native layer when awaited.
  */
@@ -169,7 +165,7 @@ export class Query<
   private _toField: (s: string) => string;
   private _toColumn: (s: string) => string;
   private _native: NativeFn;
-  private _loadRelations: ((rows: PlainObject[], spec: WithSpec) => Promise<void>) | null;
+  private _mapReadResult: ReadResultMapper;
 
   private _sort: Record<string, number> | undefined;
   private _limit: number | undefined;
@@ -188,7 +184,7 @@ export class Query<
     native: NativeFn,
     toField?: (s: string) => string,
     toColumn?: (s: string) => string,
-    loadRelations?: (rows: PlainObject[], spec: WithSpec) => Promise<void>,
+    mapReadResult?: ReadResultMapper,
     readHints?: {
       unmask?: string[];
       actor?: Actor;
@@ -201,7 +197,7 @@ export class Query<
     this._native = native;
     this._toField = toField ?? (s => s);
     this._toColumn = toColumn ?? (s => s);
-    this._loadRelations = loadRelations ?? null;
+    this._mapReadResult = mapReadResult ?? (row => mapResultDoc(row, this._toField));
     this._unmask = readHints?.unmask;
     this._actor = readHints?.actor;
     this._unmaskReason = readHints?.unmaskReason;
@@ -250,34 +246,12 @@ export class Query<
     return this;
   }
 
-  /**
-   * Eager-load referenced rows for each key in `spec`. Each key must be a
-   * `t.ref(...)` field on the parent schema; the joined row replaces the
-   * FK number at that key (or null when the FK is null / target row is missing).
-   *
-   * Exactly one batched `find({id: {$in: [...]}})` fires per relation across
-   * the entire page — no N+1. Type-level narrowing: `.with({user: true})`
-   * returns `Query<S, Row<S> & { user: PlainObject | null }>` so the awaited
-   * `data[i].user` typechecks without a cast.
-   */
+  /** Load named schema edges while preserving their scalar foreign-key fields. */
   with<const W extends WithSpec<S>>(
     spec: ExactWithSpec<S, W>,
   ): Query<S, Omit<P, keyof W> & WithRelations<S, W, AllSchemas>, AllSchemas>;
   with(spec: WithSpec<S>): Query<S, any, AllSchemas> {
-    // Reject early when the Query was constructed without a relation
-    // loader (e.g. someone called `new Query(...)` directly outside
-    // `Collection.find`). The old behaviour was a silent no-op — the
-    // `_with` spec accumulated but never fired, so callers got back the
-    // bare FK values they hoped to join and had no clue why. A loud
-    // TypeError makes the contract explicit.
-    if (this._loadRelations === null) {
-      throw Object.assign(
-        new TypeError(
-          "Query.with() requires the Query to be constructed via Collection.find — direct Query construction is not supported",
-        ),
-        { code: "QUERY_WITH_NO_LOADER" as const },
-      );
-    }
+    trackRelations(this._schema, spec);
     this._with = { ...(this._with ?? {}), ...spec } as WithSpec<S>;
     return this as unknown as Query<S, any, AllSchemas>;
   }
@@ -292,11 +266,11 @@ export class Query<
    * When called with a typed array of literal field names, the return type narrows
    * to `Query<S, Pick<Row<S>, K>>` so that awaited results only contain those fields.
    */
-  select<K extends SelectableField<S>>(field: K): Query<S, Pick<Row<S>, K>, AllSchemas>;
-  select<K extends SelectableField<S>>(fields: readonly K[]): Query<S, Pick<Row<S>, K>, AllSchemas>;
+  select<K extends SelectableField<S>>(field: K): Query<S, Pick<Row<S>, K> & Omit<P, keyof Row<S>>, AllSchemas>;
+  select<K extends SelectableField<S>>(fields: readonly K[]): Query<S, Pick<Row<S>, K> & Omit<P, keyof Row<S>>, AllSchemas>;
   select<const Selection extends SelectSpec<S>>(
     fields: Selection,
-  ): Query<S, Pick<Row<S>, keyof Selection & keyof Row<S>>, AllSchemas>;
+  ): Query<S, Pick<Row<S>, keyof Selection & keyof Row<S>> & Omit<P, keyof Row<S>>, AllSchemas>;
   select(s: SelectInput<S>): Query<S, any, AllSchemas> {
     if (Array.isArray(s)) {
       this._select = [...s];
@@ -398,6 +372,8 @@ export class Query<
       opts2.unmaskReason = this._unmaskReason;
     }
 
+    if (this._with !== undefined) opts2.with = this._with as Record<string, true>;
+
     let filter: ZeroshipDbFilter = this._filter;
     if (cursorState !== null) {
       const seek = this._buildSeekFilter(orderBy, cursorState);
@@ -412,17 +388,8 @@ export class Query<
       const rows: PlainObject[] = Array.isArray(raw) ? raw : [];
       const isDone = rows.length <= numItems;
       const kept = isDone ? rows : rows.slice(0, numItems);
-      const page = kept.map((d) => mapResultDoc(d, this._toField)) as P[];
+      const page = kept.map((row) => this._mapReadResult(row, this._with)) as P[];
 
-      // Cursor is computed BEFORE relation loading so the orderBy value
-      // captured from the last row is the raw column — not an overwritten
-      // joined object. `with` keys are FK fields and would be replaced
-      // in place by `_loadRelations`.
-      //
-      // R7 m4 — when `isDone` is true, return `""` (the sentinel for the
-      // initial page) so callers keying on `continueCursor === ""` see
-      // terminal state. Carrying the input cursor forward would mislead
-      // those callers.
       let continueCursor = "";
       if (!isDone && kept.length > 0) {
         const last = page[page.length - 1] as PlainObject;
@@ -436,12 +403,8 @@ export class Query<
           );
         }
         const lastValues: Record<string, unknown> = {};
-        for (const k of Object.keys(orderBy)) lastValues[k] = last[k];
+        for (const field of Object.keys(orderBy)) lastValues[field] = last[field];
         continueCursor = encodeCursor({ orderBy, lastValues, lastId });
-      }
-
-      if (this._with !== undefined && this._loadRelations !== null && page.length > 0) {
-        await this._loadRelations(page as unknown as PlainObject[], this._with);
       }
 
       return ok({ page, continueCursor, isDone });
@@ -598,6 +561,7 @@ export class Query<
     if (this._unmask !== undefined) opts.unmask = this._unmask.map(f => this._toColumn(f));
     if (this._actor !== undefined) opts.actor = this._actor;
     if (this._unmaskReason !== undefined) opts.unmaskReason = this._unmaskReason;
+    if (this._with !== undefined) opts.with = this._with as Record<string, true>;
 
     // Merge cursor condition into filter
     let filter: ZeroshipDbFilter = this._filter;
@@ -612,10 +576,7 @@ export class Query<
     try {
       const rows = await this._native(this._collection, filter, opts);
       const list: PlainObject[] = Array.isArray(rows) ? rows : [];
-      const mapped = list.map(d => mapResultDoc(d, this._toField)) as P[];
-      if (this._with !== undefined && this._loadRelations !== null && mapped.length > 0) {
-        await this._loadRelations(mapped as unknown as PlainObject[], this._with);
-      }
+      const mapped = list.map(row => this._mapReadResult(row, this._with)) as P[];
       return ok(mapped);
     } catch (e: unknown) {
       // Rethrow the original Error so any structured `.code` set by the

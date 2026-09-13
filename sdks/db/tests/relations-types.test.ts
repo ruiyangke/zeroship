@@ -1,195 +1,98 @@
-/**
- * Type-level assertions for the v2 relations generics.
- *
- * The runtime body of each test is trivial — what makes these "tests"
- * is `tsc --noEmit` (run by `pnpm build` / the test runner's TS step)
- * refusing to compile the file if the generics regress. Each `const _x:
- * SomeType = ...` is an assignability assertion: changing
- * `WithRelations`/`Collection`/`Query` so the joined field widens back
- * to `PlainObject` (or narrows to `never`) will fail to compile.
- *
- * The shapes we lock in:
- *   - `db.todos.find({}, { with: { userId: true } }).data[0].userId.email` is `string`
- *   - The chained `.with({ userId: true })` form propagates the AllSchemas
- *     parameter so the result matches the inline form
- *   - `tx.todos.find({}, { with: { userId: true } })` is also strong-typed
- *   - Without `with`, the row type stays `Row<S>` (no joined keys leak)
- *   - The `Id<TargetName>` brand survives the join (the joined row carries `id: string`)
- */
-import { test, describe } from "node:test";
-import assert from "node:assert/strict";
+import { t, type Query } from "@zeroship/db";
 import { installSchemaForTest } from "./_install-helper.js";
-import { t } from "@zeroship/db";
 import type { NativeDb } from "../src/native.js";
 
-type AnyRec = Record<string, unknown>;
-
-const native = {
-  // P9 PR 3: native `transaction(callback)` orchestrator stub.
-  transaction: async (cb: (raw: unknown) => unknown) => cb(undefined),
-  collection(_name: string) {
-    return {
-      async findOne(_filter: AnyRec, _opts: AnyRec) { return null; },
-      async find(_filter: AnyRec, _opts: AnyRec) { return []; },
-      async insert(doc: AnyRec) { return doc; },
-    };
+const db = installSchemaForTest({
+  users: { email: t.string().required(), name: t.string().required() },
+  projects: { name: t.string().required() },
+  todos: {
+    userId: t.ref("users", { relation: "user" }), projectId: t.ref("projects", { relation: "project" }).required(),
+    optionalReviewer: t.ref("users", { relation: "reviewer" }).nullable().default(null).required(),
+    unnamedUser: t.ref("users"), title: t.string().required(),
   },
-} as unknown as NativeDb;
+}, { native: { collection: () => ({ find: async () => [] }) } as unknown as NativeDb });
 
-const db = installSchemaForTest(
-  {
-    users: {
-      email: t.string().required().unique(),
-      name: t.string().required(),
-    },
-    projects: {
-      name: t.string().required(),
-    },
-    todos: {
-      userId: t.ref("users"),
-      projectId: t.ref("projects").required(),
-      title: t.string().required(),
-    },
-  },
-  { native, naming: { toColumn: (s) => s, toField: (s) => s } },
-);
-
-function relationKeyTypes(): void {
-  db.todos.find({}).with({ userId: true });
-  db.todos.find({}, { with: { projectId: true } });
-  // @ts-expect-error relation loading requires a declared reference field
-  db.todos.find({}).with({ title: true });
-  // @ts-expect-error valid relation keys do not permit unrelated fields
-  db.todos.find({}).with({ userId: true, title: true });
-  // @ts-expect-error an empty relation request has no effect
-  db.todos.get("todo_1", { with: {} });
+async function relationContracts(): Promise<void> {
+  const inline = await db.todos.find({}, { with: { user: true } });
+  if (inline.data) {
+    const fk: string | undefined = inline.data[0].userId;
+    const email: string | undefined = inline.data[0].user?.email;
+    void [fk, email];
+  }
+  const chained = await db.todos.find().with({ user: true }).with({ project: true });
+  if (chained.data) {
+    const name: string | undefined = chained.data[0].project?.name;
+    const email: string | undefined = chained.data[0].user?.email;
+    void [name, email];
+  }
+  const selected = await db.todos.find().with({ user: true }).select(["id"]);
+  const selectedFirst = await db.todos.find().select(["id"]).with({ user: true });
+  for (const result of [selected, selectedFirst]) {
+    if (result.data) {
+      const email: string | undefined = result.data[0].user?.email;
+      // @ts-expect-error Selecting id excludes unselected scalar fields.
+      result.data[0].title;
+      void email;
+    }
+  }
+  const single = await db.todos.get("todo_a", { select: ["id"], with: { user: true } });
+  if (single.data) {
+    const email: string | undefined = single.data.user?.email;
+    // @ts-expect-error get selection excludes unselected scalar fields.
+    single.data.title;
+    void email;
+  }
+  const page = await db.todos.find().with({ user: true }).paginate({ numItems: 10 });
+  if (page.data) {
+    const email: string | undefined = page.data.page[0].user?.email;
+    void email;
+  }
+  await db.transaction(async tx => {
+    const rows = await tx.todos.find({}, { with: { user: true } });
+    const selected = await tx.todos.find().with({ user: true }).select(["id"]);
+    const single = await tx.todos.get("todo_a", { select: ["id"], with: { user: true } });
+    const page = await tx.todos.find().with({ user: true }).paginate({ numItems: 10 });
+    const emails: (string | undefined)[] = [rows[0].user?.email, selected[0].user?.email, single?.user?.email, page.page[0].user?.email];
+    // @ts-expect-error Transaction selection excludes unselected scalar fields.
+    selected[0].title;
+    // @ts-expect-error Transaction get selection excludes unselected scalar fields.
+    single?.title;
+    // @ts-expect-error Aliases cannot replace declared scalar columns.
+    tx.todos.find().with({ userId: { field: "userId" } });
+    return emails;
+  });
+  db.todos.find().with({ reviewer: true });
+  // @ts-expect-error Foreign-key field names are not relation names.
+  db.todos.find().with({ userId: true });
+  // @ts-expect-error Unnamed references are not loadable edges.
+  db.todos.find().with({ unnamedUser: true });
+  // @ts-expect-error Unknown relation names are rejected.
+  db.todos.find().with({ missing: true });
+  // @ts-expect-error Arbitrary query aliases are unavailable.
+  db.todos.find().with({ custom: { field: "userId" } });
+  // @ts-expect-error True is the only supported relation option.
+  db.todos.find().with({ user: { field: "userId" } });
+  // @ts-expect-error A provided relation option must be true.
+  db.todos.find().with({ user: undefined });
+  // @ts-expect-error False does not load a relation.
+  db.todos.find().with({ user: false });
+  // @ts-expect-error Scalar fields are unavailable as relation names.
+  db.todos.find().select(["id"]).with({ title: true });
+  // @ts-expect-error Prototype-sensitive relation names are unavailable.
+  db.todos.find().with({ constructor: true });
+  const extra = { user: true, missing: true } as const;
+  // @ts-expect-error Extra relation names are rejected for variables too.
+  db.todos.find().with(extra);
+  // @ts-expect-error An empty relation specification has no effect.
+  db.todos.get("todo_a", { with: {} });
+  // @ts-expect-error Relation names are not physical projection columns.
+  db.todos.find().with({ user: true }).select(["user"]);
 }
-void relationKeyTypes;
+void relationContracts;
 
-describe("relations type-level: inline find(filter, { with })", () => {
-  test("data[0].userId is Row<usersSchema> | null — .email / .name / .id all typecheck", async () => {
-    const { data } = await db.todos.find({}, { with: { userId: true } });
-    if (!data || data.length === 0) return;
-    const row = data[0];
-    // The joined key narrows to the target row + null. Each typed access
-    // below is an assignability check — uncomment any line and replace
-    // its annotation with the wrong type to verify the assertion fires.
-    if (row.userId !== null) {
-      const email: string = row.userId.email;
-      const name: string = row.userId.name;
-      const id: string = row.userId.id;
-      const created_at: number = row.userId.created_at;
-      const updated_at: number = row.userId.updated_at;
-      assert.equal(typeof email, "string");
-      assert.equal(typeof name, "string");
-      assert.equal(typeof id, "string");
-      assert.equal(typeof created_at, "number");
-      assert.equal(typeof updated_at, "number");
-    }
-  });
-
-  test("two relations: both joined fields resolve to their target Row", async () => {
-    const { data } = await db.todos.find(
-      {},
-      { with: { userId: true, projectId: true } },
-    );
-    if (!data || data.length === 0) return;
-    const row = data[0];
-    if (row.userId !== null) {
-      const _email: string = row.userId.email;
-      assert.equal(typeof _email, "string");
-    }
-    if (row.projectId !== null) {
-      const _projectName: string = row.projectId.name;
-      assert.equal(typeof _projectName, "string");
-    }
-  });
-});
-
-describe("relations type-level: chainable .with(...)", () => {
-  test(".with({ userId: true }) propagates AllSchemas — joined Row<usersSchema>", async () => {
-    const { data } = await db.todos.find({}).with({ userId: true });
-    if (!data || data.length === 0) return;
-    const row = data[0];
-    if (row.userId !== null) {
-      const email: string = row.userId.email;
-      assert.equal(typeof email, "string");
-    }
-  });
-
-  test("Query.paginate honours .with(...) at the type layer too", async () => {
-    const { data } = await db.todos
-      .find({})
-      .sort({ id: 1 })
-      .with({ userId: true })
-      .paginate({ cursor: null, numItems: 10 });
-    if (!data || data.page.length === 0) return;
-    const row = data.page[0];
-    if (row.userId !== null) {
-      const email: string = row.userId.email;
-      assert.equal(typeof email, "string");
-    }
-  });
-});
-
-describe("relations type-level: TxCollection / TxQuery propagation", () => {
-  test("tx.todos.find({}, { with: { userId: true } }) — joined Row<usersSchema>", async () => {
-    await db.transaction(async (tx) => {
-      const rows = await tx.todos.find({}, { with: { userId: true } });
-      if (rows.length > 0) {
-        const row = rows[0];
-        if (row.userId !== null) {
-          const email: string = row.userId.email;
-          assert.equal(typeof email, "string");
-        }
-      }
-      return null;
-    });
-  });
-
-  test("tx.todos.find({}).with({ userId: true }) chainable — joined Row<usersSchema>", async () => {
-    await db.transaction(async (tx) => {
-      const rows = await tx.todos.find({}).with({ userId: true });
-      if (rows.length > 0) {
-        const row = rows[0];
-        if (row.userId !== null) {
-          const email: string = row.userId.email;
-          assert.equal(typeof email, "string");
-        }
-      }
-      return null;
-    });
-  });
-
-  test("tx.todos.get(\"todo_1\", { with: { userId: true } }) — joined Row<usersSchema>", async () => {
-    await db.transaction(async (tx) => {
-      const row = await tx.todos.get("todo_1", { with: { userId: true } });
-      if (row !== null && row.userId !== null) {
-        const email: string = row.userId.email;
-        assert.equal(typeof email, "string");
-      }
-      return null;
-    });
-  });
-});
-
-describe("relations type-level: no `with` → row shape unchanged", () => {
-  test("find({}) without `with` keeps userId as Id<\"users\"> (no joined key leaks)", async () => {
-    const { data } = await db.todos.find({});
-    if (!data || data.length === 0) return;
-    const row = data[0];
-    // userId is still the FK brand `Id<"users"> | undefined` — assignable
-    // to `string | undefined` because Id<T> = string & {...}. If the row
-    // type had been polluted with `Row<usersSchema>`, this line would
-    // refuse to typecheck.
-    const idOrUndef: string | undefined = row.userId;
-    assert.equal(idOrUndef === undefined || typeof idOrUndef === "string", true);
-  });
-
-  test("get(\"todo_1\") without `with` keeps the bare Row<S> shape", async () => {
-    const { data } = await db.todos.get("todo_1");
-    if (!data) return;
-    const idOrUndef: string | undefined = data.userId;
-    assert.equal(idOrUndef === undefined || typeof idOrUndef === "string", true);
-  });
-});
+function untypedRelationContracts(query: Query): void {
+  query.with({ author: true });
+  // @ts-expect-error Runtime output metadata names are unavailable as relations.
+  query.with({ _meta: true });
+}
+void untypedRelationContracts;

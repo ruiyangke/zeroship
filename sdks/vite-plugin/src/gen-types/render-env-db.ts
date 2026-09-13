@@ -32,6 +32,7 @@ export interface RuntimeFieldDef {
   idPrefix?: string;
   refTarget?: string;
   refColumn?: string;
+  relation?: string;
   onDelete?: string;
   onUpdate?: string;
   deferrable?: boolean;
@@ -164,29 +165,7 @@ function renderBuilderChain(def: RuntimeFieldDef): string {
   if (hasEncrypted) {
     chain = renderEncryptedBase(def);
   } else if (typeof def.refTarget === "string" && def.refTarget.length > 0) {
-    // A relation is identified by its relation METADATA, not by the `type`
-    // token, which describes storage. This mirrors the same decision already
-    // made in the runtime's `loadRelations`.
-    //
-    // The migration-first pipeline is the platform's only schema path, and a
-    // committed migration declares a foreign key as
-    // `t.text().references("users", "id")` - the vendored engine DSL has no
-    // `t.ref()`. The engine reports that honestly as
-    // `{ type: "string", refTarget: "users" }`, and dispatching on
-    // `type === "ref"` alone rendered it as a bare `t.string()`. The runtime
-    // then eager-loaded the relation happily while `ExtractRefTarget` resolved
-    // to `never` and typed the joined field as `null`: the type layer denying
-    // a relation that works.
-    //
-    // It must render `t.ref(...)` specifically. `ExtractRefTarget` matches only
-    // a `TypeBuilder<Id<T>>` or a literal `{ type: "ref"; refTarget }`; a
-    // string field carrying `refTarget` resolves to `never` however the
-    // metadata is attached, so emitting the token is the fix, not decorating
-    // the string.
-    //
-    // This also repairs two sites downstream that key on `type === "ref"` and
-    // silently skipped migration FKs: missing-ref-target validation and FK
-    // topological ordering in `install-schema.ts`.
+    // Reference metadata is independent of the storage type.
     chain = renderRefBase(def);
   } else {
     switch (def.type) {
@@ -195,10 +174,13 @@ function renderBuilderChain(def: RuntimeFieldDef): string {
         break;
       // Preserve the wide integer contract in generated SDK declarations.
       case "bigInt":
+      case "bigint":
         chain = "t.bigInt()";
         break;
       case "int":
       case "integer":
+        chain = "t.integer()";
+        break;
       case "number":
         chain = renderNumberBase(def);
         break;
@@ -300,12 +282,15 @@ function renderRefBase(def: RuntimeFieldDef): string {
   const target = typeof def.refTarget === "string" ? def.refTarget : "";
   const opts: string[] = [];
   if (typeof def.refColumn === "string") opts.push(`column: ${jsStr(def.refColumn)}`);
+  if (typeof def.relation === "string") opts.push(`relation: ${jsStr(def.relation)}`);
   if (typeof def.onDelete === "string") opts.push(`onDelete: ${jsStr(def.onDelete)}`);
   if (typeof def.onUpdate === "string") opts.push(`onUpdate: ${jsStr(def.onUpdate)}`);
   if (typeof def.deferrable === "boolean") opts.push(`deferrable: ${def.deferrable}`);
-  return opts.length === 0
-    ? `t.ref(${jsStr(target)})`
-    : `t.ref(${jsStr(target)}, { ${opts.join(", ")} })`;
+  const args = jsStr(target) + (opts.length === 0 ? "" : `, { ${opts.join(", ")} }`);
+  if (def.type === "int" || def.type === "integer") return `t.integer().references(${args})`;
+  if (def.type === "bigInt" || def.type === "bigint") return `t.bigInt().references(${args})`;
+  if (def.type === "string" || def.type === "text" || def.type === "ref" || def.type === "id") return `t.ref(${args})`;
+  throw new Error(`Unsupported reference storage: ${def.type}`);
 }
 
 /** `t.vector(dims, { metric? })` - the vector base. */

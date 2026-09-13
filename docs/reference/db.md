@@ -179,6 +179,7 @@ Use the `t.*` factories. Every builder is chainable.
 |------------------------|-------------------------------|-----------------|
 | `t.string()`           | `string`                      | TEXT            |
 | `t.number()`           | `number`                      | DOUBLE PRECISION |
+| `t.integer()`          | `number`                      | INTEGER         |
 | `t.numeric({ precision, scale })` | `Decimal` string      | NUMERIC         |
 | `t.bigInt()`           | `number` or `bigint`           | BIGINT          |
 | `t.boolean()`          | `boolean`                     | BOOLEAN         |
@@ -403,9 +404,14 @@ IDs work with `get`, mutation shorthand, relation loading, and `bulkUnmask`.
 The map returned by `bulkUnmask` uses the caller's ID values as keys.
 
 For a manual schema, declare the foreign-key target column explicitly:
-`t.ref("users", { column: "account_key" })`. Migration-generated builders carry
-the target column from `schema.runtime.json`. Relation loading without an
-explicit column uses the target collection's `id`.
+`t.ref("users", { column: "account_key", relation: "user" })`. Migration-generated
+builders carry the target column and logical relation name from
+`schema.runtime.json`. The relation name exposes the edge to `.with()`; an
+unnamed foreign key remains a scalar reference. An omitted target column uses `id`.
+Numeric references retain their storage type: use
+`t.integer().references("users", { column: "id", relation: "user" })` or
+`t.bigInt().references(...)`. Wide integer values keep the SDK's `number | bigint`
+contract.
 
 By default, the builder emits a same-app FK without `ON DELETE`, `ON UPDATE`,
 or `DEFERRABLE` clauses,
@@ -560,78 +566,50 @@ Decimal and JSON storage do not have the same native equality or ordering on
 PostgreSQL and SQLite, so the ORM refuses to sort, group, or deduplicate those
 fields. JSON filters still use structural equality on both backends.
 
-### Relations — `with: { fk: true }`
+### Relations
 
-`find()` / `get()` accept an optional `with: { <fkField>: true }` option
-that eager-loads referenced rows in a single batched roundtrip per
-relation. No more N+1.
-
-```ts
-// Before — N+1: one users.get(id) per todo
-const { data: todos } = await db.todos.find({});
-for (const t of todos!) {
-  const { data: u } = await db.users.get(t.userId);
-  // ...
-}
-
-// After — exactly two roundtrips total, regardless of the page size
-const { data: todos } = await db.todos.find({}, { with: { userId: true } });
-// each todo: { id, projectId, title, userId: { id, email, name } | null }
-```
-
-The same option is available on `get(id)` and as a chainable `.with(...)`
-method on the lazy `Query` returned by `find()`:
+Relations are named in the schema. A foreign-key field keeps its scalar value;
+the named edge exposes the referenced row separately.
 
 ```ts
-const { data: todo }  = await db.todos.get(id, { with: { userId: true } });
-const { data: rows }  = await db.todos.find({}).with({ userId: true });
-const { data: page }  = await db.todos
+// Manual schema declaration; generated builders carry the same metadata.
+const todos = {
+  userId: t.ref("users", { column: "id", relation: "user" }),
+  title: t.string().required(),
+};
+
+const { data: rows } = await db.todos.find({}, { with: { user: true } });
+// rows[0].userId: the original scalar foreign key
+// rows[0].user: the protected users row, or null
+
+const { data: todo } = await db.todos.get(id, { with: { user: true } });
+const { data: page } = await db.todos
   .find({})
+  .with({ user: true })
   .sort({ id: 1 })
-  .with({ userId: true })
-  .paginate({ cursor: null, numItems: 20 });
+  .paginate({ numItems: 20 });
 ```
 
-Multiple relations are allowed in one call — each fires its own single
-batched fetch:
+The native ORM validates declared edges and fetches their targets in bounded
+batches. It preserves transaction routing and applies the target collection's
+read protection and soft-delete rules. The SDK forwards the selection and maps
+returned field names; it does not query target collections. Plain JavaScript can
+use the same native operation:
 
-```ts
-const { data } = await db.todos.find({}, {
-  with: { userId: true, projectId: true },
-});
-// data[0].userId    → { id, email, name } | null
-// data[0].projectId → { id, name }        | null
+```js
+const rows = await env.db.collection("todos").find({}, { with: { user: true } });
 ```
 
-#### Rules
-
-- The `with` key MUST be a `t.ref(...)` field declared on the parent
-  schema. `with: { id: true }`, `with: { title: true }`, or any
-  unknown key rejects with `"... is not a t.ref field on \"<table>\""`.
-- The joined row REPLACES the FK string id at the same key. To keep
-  both the FK and the joined row, declare the relation on a separate
-  field name (e.g. `user: t.ref("users")` instead of `userId`) — the
-  joined row lands at `user`, and its `.id` is the original FK.
-- `null` FK values stay null after the join. FK values that point to a
-  deleted / missing target row also resolve to null.
-- FK ids are deduplicated before the wire call: `N` todos with the same
-  `userId` produce one `WHERE id IN (?)` with one entry.
-
-#### v1 limitations (future work)
-
-- **Standalone models degrade.** When `env.db` is schema-typed through
-  `generated/zeroship/env.db.ts`, joined fields narrow to the referenced row type.
-  Standalone `model()` callers that do not carry a parent schema map
-  still degrade joined fields to `PlainObject | null`.
-- **No projection narrowing.** Drizzle / Prisma support
-  `with: { user: { columns: ["email"] } }` to project the joined row.
-  v1 always fetches every column of the target.
-- **No relation-level filters.** Drizzle's
-  `with: { posts: { where: ... } }` narrows the join. v1 has no
-  equivalent — use a top-level filter on the parent instead.
-- **Single-level only.** Nested relations
-  (`with: { userId: { with: { teamId: true } } }`) are not supported in
-  v1. Compose two finds in JS, or wait for v2.
+- Keys in `with` must be declared relation names. Foreign-key column names and
+  query-defined aliases are not relation names.
+- A relation name cannot collide with a column on its source collection.
+- A null foreign key or missing/deleted target produces a null relation value.
+- Requested relations remain in the result when `select()` narrows scalar
+  fields, regardless of the order of `select()` and `with()`.
+- Generated schemas infer each relation's target row type. A standalone model
+  without the target schema map uses `PlainObject | null`.
+- Forward relations support `true` only. Nested loading, reverse collections,
+  target projections, and relation-level filters are not supported.
 
 ### Update
 
