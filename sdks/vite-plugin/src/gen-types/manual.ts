@@ -177,6 +177,9 @@ function toFieldDef(
 const TYPE_TOKEN: Readonly<Record<string, string>> = {
   string: "string",
   number: "number",
+  integer: "integer",
+  int: "int",
+  bigInt: "bigInt",
   boolean: "boolean",
   date: "date",
   json: "json",
@@ -257,6 +260,7 @@ export function fieldDefToDto(
   // `ref` facets.
   if (def.refTarget !== undefined) dto.references = def.refTarget;
   if (def.refColumn !== undefined) dto.referenceColumn = def.refColumn;
+  if (def.relation !== undefined) dto.relation = def.relation;
   if (def.onDelete !== undefined) dto.onDelete = def.onDelete;
   if (def.onUpdate !== undefined) dto.onUpdate = def.onUpdate;
   if (def.deferrable !== undefined) dto.deferrable = def.deferrable;

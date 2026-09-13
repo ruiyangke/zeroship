@@ -67,6 +67,8 @@ type ZeroshipDbUpdateValue =
 
 /** Find query options — key names must match what the Rust callback reads. */
 interface ZeroshipDbFindOpts {
+  /** Load declared forward references through the native ORM. */
+  with?: Record<string, true>;
   limit?: number;
   offset?: number;
   orderBy?: Record<string, 1 | -1>;
