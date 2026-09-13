@@ -16,6 +16,7 @@ pub mod native_modules;
 pub mod node_error;
 pub(crate) mod panic_util;
 pub mod plugin;
+pub(crate) mod plugin_modules;
 pub mod runtime;
 pub mod serve;
 pub mod state;

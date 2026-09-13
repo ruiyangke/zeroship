@@ -10,6 +10,8 @@ The runtime-native plugin interface is defined in [crates/zeroship-runtime/src/c
 - `name()`
 - `register(&mut NativeRegistrar)`
 - optional `build_instance(...)`
+- optional `bind_runtime_descriptor(...)`
+- optional `javascript_modules()`
 
 `NativeRegistrar` exposes:
 
@@ -17,6 +19,18 @@ The runtime-native plugin interface is defined in [crates/zeroship-runtime/src/c
 - `add_setup(...)`
 
 The runtime builds `env` by merging user env vars and secrets with plugin namespaces, then shallow-freezes the resulting object. That behavior is implemented in [crates/zeroship-runtime/src/core/plugin.rs](../../crates/zeroship-runtime/src/core/plugin.rs).
+
+## JavaScript adapters
+
+A plugin can return compiled SDK sources as `JavaScriptModule` entries from
+`javascript_modules()`. Each specifier belongs to its
+`zeroship:<namespace>/` prefix. The runtime compiles their dependency graph and
+shares module instances across static and dynamic imports. Creator artifacts
+cannot replace these sources. An adapter may import other registered adapters,
+native modules and `zeroship`; it cannot statically import creator modules.
+
+Module delivery grants no additional authority. Privileged finalization remains
+in native lifecycle hooks; adapter JavaScript uses the app-scoped primitives.
 
 ## Current plugin styles
 
