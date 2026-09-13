@@ -84,7 +84,7 @@ impl Collection {
     /// isolate at a DIFFERENT deploy must see for an entry it never installed.
     pub(crate) fn resolved_runtime_schema_for_tests(
         &self,
-    ) -> (String, Option<zeroship_data_orm::value::Value>) {
+    ) -> (String, Option<zeroship_data_orm::schema::FieldMap>) {
         let schema = crate::descriptor::collection_schema(&self.binding, &self.name)
             .ok()
             .map(|facts| (*facts).clone());

@@ -364,7 +364,7 @@ fn zs_db_platform_callback(
 
 /// Schema auto-discovery init script. Spliced into [`bootstrap_js`]
 /// immediately after importing the creator entry module so
-/// the top-level `await import("@zeroship/bootstrap/install-schema")`
+/// the top-level `await import("zeroship:db/internal")`
 /// runs inside the bootstrap module's evaluation — before the runtime
 /// resolves `default.fetch` / `default.rpc` off the namespace.
 ///
@@ -2176,6 +2176,7 @@ pub fn load_polyfills_and_modules(
     modules: &[crate::modules::ModuleEntry],
     plugins: &[std::sync::Arc<dyn crate::plugin::NativePlugin>],
 ) -> Result<v8::Global<v8::Value>, String> {
+    crate::core::plugin_modules::register(scope, plugins, modules)?;
     let runtime_descriptor = setup_globals_with_descriptor(scope)?;
     let app_id = crate::plugin::runtime_app_id(scope);
     for plugin in plugins {

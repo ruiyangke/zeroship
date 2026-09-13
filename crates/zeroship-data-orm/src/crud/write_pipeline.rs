@@ -1,3 +1,4 @@
+use crate::schema::{ColumnSchema, FieldMap};
 use crate::value::Value;
 
 use crate::exec::exec_query;
@@ -28,7 +29,7 @@ pub enum ApplyMode<'a> {
 
 /// Normalize the update and enforce descriptor-declared assignments. Insert-fixed
 /// fields are refused; write-assigned fields are removed for the SQL builder.
-pub fn inspect_update(schema: &Value, patch: &mut Value) -> Result<(), DbError> {
+pub fn inspect_update(schema: &FieldMap, patch: &mut Value) -> Result<(), DbError> {
     crate::sql::update::normalize(patch)?;
     super::assignment_pass::apply_assignments_on_update(patch, schema)
 }
@@ -37,7 +38,7 @@ pub fn inspect_update(schema: &Value, patch: &mut Value) -> Result<(), DbError> 
 /// (insert / insertMany element / upsert) with the same `validate_field_name`
 /// fence the read/filter path enforces. Runs on the raw user document before
 /// protection and assignment passes add reserved storage keys.
-fn validate_user_doc_keys(doc: &Value, schema: &Value) -> Result<(), DbError> {
+fn validate_user_doc_keys(doc: &Value, schema: &FieldMap) -> Result<(), DbError> {
     if let Some(obj) = doc.as_object() {
         for key in obj.keys() {
             mapping::validate_field_name(key)?;
@@ -53,11 +54,11 @@ fn validate_user_doc_keys(doc: &Value, schema: &Value) -> Result<(), DbError> {
 }
 
 /// Reject a caller-supplied generated identifier before the assignment pass.
-fn refuse_generated_identifier(doc: &Value, schema: &Value) -> Result<(), DbError> {
+fn refuse_generated_identifier(doc: &Value, schema: &FieldMap) -> Result<(), DbError> {
     let Some(obj) = doc.as_object() else {
         return Ok(());
     };
-    if crate::assignments::AssignmentPlan::from_schema(schema)?
+    if crate::assignments::AssignmentPlan::from_schema(schema)
         .columns()
         .iter()
         .any(|column| {
@@ -77,12 +78,12 @@ fn refuse_generated_identifier(doc: &Value, schema: &Value) -> Result<(), DbErro
 }
 
 fn validate_upsert_conflict_fields(
-    schema: &Value,
+    schema: &FieldMap,
     doc: &Value,
     conflict_fields: &Value,
 ) -> Result<(), DbError> {
     let fields = mapping::parse_conflict_fields(conflict_fields)?;
-    let assignments = crate::assignments::AssignmentPlan::from_schema(schema)?;
+    let assignments = crate::assignments::AssignmentPlan::from_schema(schema);
     let protected = upsert_requires_conflict_probe(schema, doc);
     for field in fields {
         if assignments
@@ -319,14 +320,14 @@ pub async fn apply(
 }
 
 struct WriteStages<'a> {
-    schema: &'a Value,
+    schema: &'a FieldMap,
     has_encrypted: bool,
     has_masked: bool,
     has_plain_bytes: bool,
 }
 
 impl<'a> WriteStages<'a> {
-    fn new(schema: &'a Value) -> Self {
+    fn new(schema: &'a FieldMap) -> Self {
         Self {
             has_encrypted: super::schema_has_encrypted_columns(schema),
             has_masked: super::schema_has_masked_columns(schema),
@@ -452,7 +453,7 @@ pub struct TargetRowId {
 fn compile_target_probe(
     namespace: &crate::sql::SchemaName,
     collection: &str,
-    schema: &Value,
+    schema: &FieldMap,
     filter: super::predicate::Input,
     limit: i64,
     registration: &crate::sql::registration::SqlRegistration,
@@ -508,7 +509,7 @@ pub async fn resolve_target_row_ids(
     collection: &str,
     filter: super::predicate::Input,
     limit: i64,
-    schema: &Value,
+    schema: &FieldMap,
 ) -> Result<Vec<TargetRowId>, DbError> {
     note_target_row_resolution_for_tests();
     let built = compile_target_probe(
@@ -543,21 +544,19 @@ pub async fn resolve_target_row_ids(
 /// `collection_schema` already refused it. Returning `false` on a missing
 /// schema is what the old `Option` shape did, and it would give every row in a
 /// batch the same AAD.
-pub fn update_requires_per_row_encryption(schema: &Value, patch: &Value) -> bool {
+pub fn update_requires_per_row_encryption(schema: &FieldMap, patch: &Value) -> bool {
     update_touches_encrypted_field(schema, patch)
 }
 
 /// The upsert twin of [`update_requires_per_row_encryption`]: a doc that writes
 /// a randomised-encrypted column needs the conflict probe run
 /// first, because its ciphertext cannot be compared for ON CONFLICT equality.
-pub fn upsert_requires_conflict_probe(schema: &Value, doc: &Value) -> bool {
+pub fn upsert_requires_conflict_probe(schema: &FieldMap, doc: &Value) -> bool {
     doc_touches_encrypted_field(schema, doc)
 }
 
-fn update_touches_encrypted_field(schema: &Value, patch: &Value) -> bool {
-    let Some(schema_obj) = schema.as_object() else {
-        return false;
-    };
+fn update_touches_encrypted_field(schema: &FieldMap, patch: &Value) -> bool {
+    let schema_obj = schema;
     let Some(update_obj) = patch.as_object() else {
         return false;
     };
@@ -579,10 +578,8 @@ fn update_touches_encrypted_field(schema: &Value, patch: &Value) -> bool {
     })
 }
 
-fn doc_touches_encrypted_field(schema: &Value, doc: &Value) -> bool {
-    let Some(schema_obj) = schema.as_object() else {
-        return false;
-    };
+fn doc_touches_encrypted_field(schema: &FieldMap, doc: &Value) -> bool {
+    let schema_obj = schema;
     let Some(doc_obj) = doc.as_object() else {
         return false;
     };
@@ -595,7 +592,7 @@ fn doc_touches_encrypted_field(schema: &Value, doc: &Value) -> bool {
     })
 }
 
-fn field_is_encrypted(field_def: &Value) -> bool {
+fn field_is_encrypted(field_def: &ColumnSchema) -> bool {
     crate::sql::descriptors::is_encrypted(field_def)
 }
 
@@ -621,7 +618,7 @@ async fn rewrite_upsert_doc_id_to_existing_row_id(
     route: &TxRoute,
     collection: &str,
     conflict_fields: &Value,
-    schema: &Value,
+    schema: &FieldMap,
 ) -> Result<(), DbError> {
     if !upsert_requires_conflict_probe(schema, doc) {
         return Ok(());
@@ -742,10 +739,10 @@ mod tests {
         };
 
         let namespace = SchemaName::new("app").unwrap();
-        let schema = crate::value!({
+        let schema = crate::tests::fixtures::native_fields(crate::value!({
             "id": { "type": "string", "primaryKey": true },
             "name": { "type": "string" }
-        });
+        }));
         let dynamic = Input::Dynamic(crate::value!({ "name": "Ada" }));
         let model = Input::Model(ModelPredicate::Compare {
             field: "name",
@@ -792,10 +789,10 @@ mod tests {
         };
 
         let namespace = SchemaName::new("app").unwrap();
-        let schema = crate::value!({
+        let schema = crate::tests::fixtures::native_fields(crate::value!({
             "id": { "type": "string", "primaryKey": true },
             "active": { "type": "boolean" }
-        });
+        }));
 
         for registration in [SqlRegistration::postgres(), SqlRegistration::sqlite()] {
             let result = super::compile_target_probe(
@@ -818,7 +815,7 @@ mod tests {
         let doc = crate::value!({ "title": "hi", "id": "usr_034HQyaJ0C11GCzHMMrWwz" });
         match super::refuse_generated_identifier(
             &doc,
-            &crate::tests::fixtures::schema::generated_fields(crate::value!({})),
+            &crate::tests::fixtures::generated_schema(crate::value!({})),
         ) {
             Err(zeroship_data_orm::error::DbError::ValidationFailed { code, .. }) => {
                 assert_eq!(code, "platform_assigned_field");
@@ -830,7 +827,7 @@ mod tests {
     #[test]
     fn a_supplied_database_identity_is_refused_at_the_document_boundary() {
         let doc = crate::value!({ "id": 42, "title": "hi" });
-        let schema = crate::value!({
+        let schema = crate::tests::fixtures::native_fields(crate::value!({
             "id": {
                 "type": "bigInt",
                 "primaryKey": true,
@@ -838,7 +835,7 @@ mod tests {
                 "assign": { "by": "identity", "on": "insert" }
             },
             "title": { "type": "string" }
-        });
+        }));
         match super::refuse_generated_identifier(&doc, &schema) {
             Err(zeroship_data_orm::error::DbError::ValidationFailed { code, .. }) => {
                 assert_eq!(code, "platform_assigned_field");
@@ -854,7 +851,7 @@ mod tests {
         let doc = crate::value!({ "title": "hi" });
         super::refuse_generated_identifier(
             &doc,
-            &crate::tests::fixtures::schema::generated_fields(crate::value!({})),
+            &crate::tests::fixtures::generated_schema(crate::value!({})),
         )
         .expect("a document that supplies no id must be accepted");
     }
@@ -866,7 +863,7 @@ mod tests {
         let doc = crate::value!("not a document");
         super::refuse_generated_identifier(
             &doc,
-            &crate::tests::fixtures::schema::generated_fields(crate::value!({})),
+            &crate::tests::fixtures::generated_schema(crate::value!({})),
         )
         .expect("a non-object payload is another validator's concern");
     }
@@ -890,29 +887,43 @@ mod tests {
         // A normal document passes.
         assert!(validate_user_doc_keys(
             &value!({ "name": "a", "ssn": "x" }),
-            &value!({"name":{}, "ssn":{}})
+            &crate::tests::fixtures::native_fields(
+                value!({"name":{"type":"string"}, "ssn":{"type":"string"}})
+            )
         )
         .is_ok());
         // Nor a platform-internal `_`-prefixed name (covers `__zsbin__` markers,
         // `__zs_`, synthetic `_rank`/`_score`).
         assert!(validate_user_doc_keys(
             &value!({ "__zsbin__ssn": true }),
-            &value!({"name":{}, "ssn":{}})
+            &crate::tests::fixtures::native_fields(
+                value!({"name":{"type":"string"}, "ssn":{"type":"string"}})
+            )
         )
         .is_err());
-        assert!(
-            validate_user_doc_keys(&value!({ "_rank": 1 }), &value!({"name":{}, "ssn":{}}))
-                .is_err()
-        );
+        assert!(validate_user_doc_keys(
+            &value!({ "_rank": 1 }),
+            &crate::tests::fixtures::native_fields(
+                value!({"name":{"type":"string"}, "ssn":{"type":"string"}})
+            )
+        )
+        .is_err());
         // Null-byte and >63-byte keys (NAMEDATALEN truncation collision).
-        assert!(
-            validate_user_doc_keys(&value!({ "a\u{0}b": 1 }), &value!({"name":{}, "ssn":{}}))
-                .is_err()
-        );
+        assert!(validate_user_doc_keys(
+            &value!({ "a\u{0}b": 1 }),
+            &crate::tests::fixtures::native_fields(
+                value!({"name":{"type":"string"}, "ssn":{"type":"string"}})
+            )
+        )
+        .is_err());
         let long = "x".repeat(64);
-        assert!(
-            validate_user_doc_keys(&value!({ long: 1 }), &value!({"name":{}, "ssn":{}})).is_err()
-        );
+        assert!(validate_user_doc_keys(
+            &value!({ long: 1 }),
+            &crate::tests::fixtures::native_fields(
+                value!({"name":{"type":"string"}, "ssn":{"type":"string"}})
+            )
+        )
+        .is_err());
     }
 
     #[test]
@@ -1200,6 +1211,7 @@ mod tests {
             // descriptor and catalog agree.
             let route = crate::exec::ambient_route_for_tests(app_id, handle.clone());
             cache_schema(app_id, collection, schema.clone());
+            let schema = crate::tests::fixtures::native_fields(schema);
 
             let ddl = sqlite_fixture_sql(
                 &crate::sql::SchemaName::new(app_id).expect("fixture schema name"),

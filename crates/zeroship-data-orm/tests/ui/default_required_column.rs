@@ -1,5 +1,6 @@
 use zeroship_data_orm::orm::*;
-schema!(pub schema = "../fixtures/schema.runtime.json");
+include!("../fixtures/posts_schema.rs");
+posts_schema!(pub schema);
 #[derive(Insertable)]
 #[orm(entity = schema::posts)]
 struct Post {

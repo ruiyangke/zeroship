@@ -1,5 +1,5 @@
 error: column 'title' is mapped more than once
- --> tests/ui/duplicate_mapping.rs:7:5
+ --> tests/ui/duplicate_mapping.rs:8:5
   |
-7 |     #[orm(column = "title")]
+8 |     #[orm(column = "title")]
   |     ^

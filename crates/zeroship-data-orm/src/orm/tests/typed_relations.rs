@@ -1,7 +1,8 @@
 use super::fixtures::CollectionFixture;
 use super::*;
 
-schema!(pub relation_schema = "../../../tests/fixtures/typed-relations.runtime.json");
+include!("../../../tests/fixtures/relations_schema.rs");
+relations_schema!(pub relation_schema);
 use relation_schema::{authors, posts};
 
 #[derive(Debug, PartialEq, FromRow)]
@@ -182,16 +183,14 @@ async fn exercise(postgres: bool) {
         assert_eq!(post.title, "first");
         assert_eq!(author.unwrap().serial, 9_007_199_254_740_993_i64);
     }
-    assert!(
-        posts
-            .query()
-            .filter(posts::title.eq("absent").unwrap())
-            .with_related(posts::relations::author)
-            .first::<Post, Author>()
-            .await
-            .unwrap()
-            .is_none()
-    );
+    assert!(posts
+        .query()
+        .filter(posts::title.eq("absent").unwrap())
+        .with_related(posts::relations::author)
+        .first::<Post, Author>()
+        .await
+        .unwrap()
+        .is_none());
 
     db.collection("authors")
         .unwrap()
@@ -240,15 +239,15 @@ async fn scope_and_schema(postgres: bool) {
     assert!(reads.iter().any(|read| read.collection == "posts"));
     assert!(reads.iter().any(|read| read.collection == "authors"));
     assert_eq!(prepared.await.unwrap().len(), 3);
-    let mut unrelated_schema = authors::Entity::schema().clone();
-    unrelated_schema["name"]["readable"] = value!(false);
+    let mut unrelated_schema = authors::Entity::schema().fields().clone();
+    unrelated_schema["name"].readable = false;
     let unrelated = Database::from_schema(
         db.binding.clone(),
         db.backend.clone(),
-        vec![
+        Schema::new([
             ("posts".into(), posts::Entity::schema().clone()),
-            ("authors".into(), unrelated_schema),
-        ],
+            ("authors".into(), CollectionSchema::new(unrelated_schema)),
+        ]),
     )
     .unwrap();
     let prepared = db
@@ -337,16 +336,16 @@ async fn scope_and_schema(postgres: bool) {
         .query()
         .with_related(posts::relations::author)
         .all::<Post, Author>();
-    let mut changed = authors::Entity::schema().clone();
-    changed["name"]["readable"] = value!(false);
+    let mut changed = authors::Entity::schema().fields().clone();
+    changed["name"].readable = false;
     db.context
         .with(|| {
             crate::descriptor::install_collections(
                 &db.binding,
-                vec![
+                Schema::new([
                     ("posts".into(), posts::Entity::schema().clone()),
-                    ("authors".into(), changed),
-                ],
+                    ("authors".into(), CollectionSchema::new(changed)),
+                ]),
             )
         })
         .unwrap();
@@ -447,21 +446,21 @@ async fn related_keys_use_postgres_case_insensitive_equality() {
 async fn empty_related_reads_validate_the_target_projection_budget() {
     let owner = fixture(false).await;
     let db = &owner.database;
-    let mut author_schema = authors::Entity::schema().clone();
+    let mut author_schema = authors::Entity::schema().fields().clone();
     for index in 0..read::MAX_READ_FIELDS {
-        author_schema
-            .as_object_mut()
-            .unwrap()
-            .insert(format!("extra{index}"), value!({"type":"string"}));
+        author_schema.insert(
+            format!("extra{index}"),
+            ColumnSchema::new(LogicalType::Text),
+        );
     }
     db.context
         .with(|| {
             crate::descriptor::install_collections(
                 &db.binding,
-                vec![
+                Schema::new([
                     ("posts".into(), posts::Entity::schema().clone()),
-                    ("authors".into(), author_schema),
-                ],
+                    ("authors".into(), CollectionSchema::new(author_schema)),
+                ]),
             )
         })
         .unwrap();

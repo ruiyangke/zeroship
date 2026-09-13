@@ -34,7 +34,8 @@ V8 values -- native capture ------------+--> PreparedOperation
 
 The shared value layer preserves integers, booleans, text and binary buffers.
 Rust model mapping does not require Serde. Rust collection and column metadata is
-generated from the migration runtime descriptor by `schema!`. Focused `FromRow`,
+declared with `schema!` and compiled into native definitions. Creator runtime
+descriptors decode into that same representation at the host boundary. Focused `FromRow`,
 `Insertable`, and `Changeset` derives check field names and logical types against
 that metadata. Read projections and write inputs are independent. Typed handles
 refuse metadata that differs from the host's installed field descriptor. The V8

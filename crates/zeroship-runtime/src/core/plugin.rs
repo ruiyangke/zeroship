@@ -27,6 +27,14 @@ pub fn runtime_app_identity(scope: &v8::PinScope<'_, '_>) -> Option<AppId> {
         .and_then(|identity| identity.0.clone())
 }
 
+/// JavaScript adapter source supplied by a native plugin.
+/// Specifiers belong to the plugin's `zeroship:<namespace>/` prefix.
+#[derive(Clone, Copy, Debug)]
+pub struct JavaScriptModule {
+    pub specifier: &'static str,
+    pub source: &'static str,
+}
+
 /// A native extension that registers functions on `env.{namespace}.*`.
 ///
 /// Plugins are the extension mechanism for the runtime. Each plugin:
@@ -61,6 +69,13 @@ pub trait NativePlugin: Send + Sync + 'static {
     /// `register()` fire repeatedly as multiple Runtimes are constructed
     /// on it (one per app in multi-tenant workers). Init must be idempotent.
     fn register(&self, r: &mut NativeRegistrar);
+
+    /// Provide SDK adapter modules independently of the creator artifact.
+    /// These modules may import other plugin modules, native modules and
+    /// `zeroship`. They receive no additional authority through this API.
+    fn javascript_modules(&self) -> &'static [JavaScriptModule] {
+        &[]
+    }
 
     /// Optional hook: build the V8 namespace object yourself instead of
     /// letting the runtime allocate a plain `v8::Object` for you.

@@ -214,14 +214,7 @@ describe("buildServerEntrySource — forbidden helpers (Stage 5b cleanup)", () =
     "installSchema",
     "__zsSchemaInit",
     "_zsSchemaMod",
-    // No SDK *helper* logic in the entry — i.e. no NAMED imports pulling
-    // symbols out of the db SDK. The entry MAY (and must) bare side-effect-
-    // import `@zeroship/db/internal` + `@zeroship/bootstrap/install-schema`
-    // so the bundler includes the exact modules the runtime-entry resolves
-    // via dynamic `import()` at isolate boot (V8 can only resolve dynamic
-    // imports against bundle-resident modules). Those are `import "…";` with
-    // no `from`, so forbidding `from "@zeroship/db` catches helper imports
-    // while allowing the bundle-inclusion side-effect import.
+    // Schema initialization is supplied by the host.
     'from "@zeroship/db',
     "installOnEnvDb",
   ];
@@ -341,13 +334,7 @@ describe("buildServerEntrySource — Phase-2 (binding-fed) shape", () => {
 });
 
 describe("buildServerEntrySource — dict-shape end-to-end", () => {
-  // The synthetic entry side-effect-imports `@zeroship/bootstrap` for
-  // bundle inclusion (the runtime's dynamic-import target). Resolving
-  // that bare specifier requires node_modules to be visible from the
-  // evaluation directory — `os.tmpdir()` is outside the workspace and
-  // can't reach the workspace's pnpm store. Materialise the entry
-  // inside a workspace-local scratch dir so the package resolves via
-  // the standard upward node_modules walk.
+  // Evaluate generated entries against package-shaped transport fixtures.
   const workspaceTmpRoot = new URL("./.tmp/", import.meta.url).pathname;
 
   async function installBootstrapStub(baseDir: string): Promise<void> {
@@ -685,4 +672,27 @@ describe("pickEntryWireId — resolution order", () => {
       "x",
     );
   });
+});
+
+function assertHostProvidedSchemaModules(code: string): void {
+  const artifact = acornParse(code, { ecmaVersion: 2024, sourceType: "module" });
+  const imports = artifact.body.filter(node => node.type === "ImportDeclaration");
+  assert.ok(imports.length > 0, "generated entry must import its application targets");
+  for (const node of imports) {
+    assert.notEqual(node.source.value, "@zeroship/db/internal", "installer is host-provided");
+    assert.notEqual(node.source.value, "@zeroship/bootstrap", "entry imports only the helpers it uses");
+  }
+}
+
+test("generated entries leave schema module delivery to the host", () => {
+  for (const bindings of [undefined, bindingMap([
+    { sourceFile: "/proj/server.ts", exportName: "ping" },
+  ])]) {
+    const code = buildServerEntrySource({ userEntryRel: "/proj/server.ts", bindings });
+    assertHostProvidedSchemaModules(code);
+    assert.throws(() => assertHostProvidedSchemaModules(
+      code + '\nimport "@zeroship/db/internal";'
+    ), /installer is host-provided/);
+  }
+  assert.throws(() => assertHostProvidedSchemaModules("export default {};"), /application targets/);
 });

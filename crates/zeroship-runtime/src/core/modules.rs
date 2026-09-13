@@ -1,13 +1,10 @@
 //! V8 ESM module registry — lazy compilation via import graph discovery.
 //!
-//! Only the entry module is compiled eagerly. Its imports are discovered via
-//! `v8::Module::get_module_requests()`, compiled, and their imports discovered
-//! recursively — all BEFORE `instantiate_module` is called. The resolve
-//! callback only does lookups into the pre-compiled registry.
+//! The entry and plugin adapter modules are compiled eagerly. V8's module
+//! requests drive recursive import discovery before instantiation. The resolve
+//! callback only looks up compiled modules.
 //!
-//! This means: if an app has 1000 modules but the entry only imports 3
-//! (transitively), only 4 modules are compiled. The other 996 are never
-//! parsed by V8.
+//! Creator modules outside the entry's import graph are left unparsed.
 
 #![allow(unsafe_code)]
 
@@ -26,6 +23,8 @@ pub struct ModuleEntry {
 pub struct ModuleRegistry {
     /// Uncompiled bundle modules remain available to dynamic imports.
     sources: HashMap<String, String>,
+    /// Adapter ownership applies to dependencies discovered by either import path.
+    plugin_modules: HashSet<String>,
     /// Compiled V8 modules — populated by the lazy compilation loop.
     compiled: HashMap<String, v8::Global<v8::Module>>,
 }
@@ -42,6 +41,7 @@ impl ModuleRegistry {
     pub fn new() -> Self {
         Self {
             sources: HashMap::new(),
+            plugin_modules: HashSet::new(),
             compiled: HashMap::new(),
         }
     }
@@ -63,6 +63,18 @@ impl ModuleRegistry {
         module: v8::Global<v8::Module>,
     ) -> Option<v8::Global<v8::Module>> {
         self.compiled.insert(specifier, module)
+    }
+
+    fn check_source_import(&self, referrer: &str, resolved: &str) -> Result<(), String> {
+        if self.plugin_modules.contains(referrer)
+            && resolved != "zeroship"
+            && !self.plugin_modules.contains(resolved)
+        {
+            return Err(format!(
+                "Plugin module {referrer:?} cannot import creator module {resolved:?}"
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -96,10 +108,7 @@ fn resolve_specifier(
 
 /// Compile a single module from source.
 ///
-/// `pub(crate)` so the dynamic-import host callback can compile
-/// runtime-provided JS modules (e.g. `@zeroship/bootstrap/install-schema`)
-/// on demand and feed them through the same registry the static
-/// `resolve_callback` reads.
+/// Shared with the dynamic-import callback for the core `zeroship` facade.
 pub(crate) fn compile_module(
     scope: &mut v8::PinScope,
     specifier: &str,
@@ -178,6 +187,7 @@ fn compile_graph(
                 })
             }
             .ok_or_else(|| format!("Cannot resolve import '{imported}' from '{spec}'"))?;
+            registry.borrow().check_source_import(&spec, &resolved)?;
             queue.push_back(resolved);
         }
     }
@@ -188,11 +198,13 @@ fn compile_graph(
         .ok_or_else(|| format!("Module not compiled: {root}"))
 }
 
+/// Prepare a dynamic dependency and return its canonical registry name.
+/// Evaluation is deferred until the importing module leaves its sync frame.
 pub(crate) fn dynamic_module(
     scope: &mut v8::PinScope,
     specifier: &str,
     referrer: &str,
-) -> Result<Option<v8::Global<v8::Module>>, String> {
+) -> Result<Option<String>, String> {
     let Some(registry) = scope.get_slot::<SharedRegistry>().cloned() else {
         return Ok(None);
     };
@@ -205,19 +217,24 @@ pub(crate) fn dynamic_module(
     let Some(root) = resolved else {
         return Ok(None);
     };
+    if !super::native_modules::is_native(scope, &root) {
+        registry.borrow().check_source_import(referrer, &root)?;
+    }
     if let Some(module) = registry.borrow().get(&root).cloned() {
         // Linking has already prepared this module's complete static closure.
         if v8::Local::new(scope, &module).get_status() != v8::ModuleStatus::Uninstantiated {
-            return Ok(Some(module));
+            return Ok(Some(root));
         }
     }
-    compile_graph(scope, &registry, &root).map(Some)
+    compile_graph(scope, &registry, &root)?;
+    Ok(Some(root))
 }
 
 /// Load modules with lazy compilation.
 ///
 /// `entries[0]` is the entrypoint. All entries are stored as source strings,
-/// but only transitively imported modules are compiled.
+/// but only transitively imported creator modules are compiled. Registered
+/// plugin adapters and their dependency graphs are also compiled.
 ///
 /// Returns the entrypoint module's namespace object (contains exports).
 pub fn load_modules(
@@ -234,12 +251,40 @@ pub fn load_modules(
         sources.insert(entry.specifier.clone(), entry.source.clone());
     }
 
+    let plugin_modules = scope
+        .get_slot::<super::plugin_modules::PluginModules>()
+        .cloned()
+        .unwrap_or_default();
+    for module in &plugin_modules.0 {
+        if sources
+            .insert(module.specifier.to_string(), module.source.to_string())
+            .is_some()
+        {
+            return Err(format!("Module shadows plugin source: {}", module.specifier));
+        }
+    }
+    let host_names: HashSet<String> = plugin_modules
+        .0
+        .iter()
+        .map(|module| module.specifier.to_owned())
+        .collect();
+
     let registry: SharedRegistry = Rc::new(RefCell::new(ModuleRegistry::new()));
 
-    registry.borrow_mut().sources = sources;
+    {
+        let mut reg = registry.borrow_mut();
+        reg.sources = sources;
+        reg.plugin_modules = host_names;
+    }
+
+    // Store registry in isolate slot for the resolve callback
     scope.set_slot(registry.clone());
     let entrypoint = &entries[0].specifier;
     compile_graph(scope, &registry, entrypoint)?;
+    // Validate adapter roots even when creator code only imports them lazily.
+    for module in &plugin_modules.0 {
+        compile_graph(scope, &registry, module.specifier)?;
+    }
 
     // Instantiate the entrypoint.
     // resolve_callback only does lookups — all modules are pre-compiled.
@@ -259,7 +304,7 @@ pub fn load_modules(
     //
     // The registry borrow is released BEFORE `module.evaluate()`: a
     // top-level `await import(...)` in the entry (e.g. the bootstrap
-    // `runtime-entry.js`'s `import("@zeroship/bootstrap/install-schema")`)
+    // `runtime-entry.js`'s `import("zeroship:db/internal")`)
     // fires the dynamic-import host callback synchronously during evaluate
     // AND during the microtask checkpoint below. That callback may
     // `borrow_mut()` the registry to cache a freshly-resolved module — so
@@ -345,12 +390,8 @@ pub fn load_modules(
 
 /// V8 resolve callback — lookups only, never compiles.
 ///
-/// All transitively imported modules are pre-compiled before
-/// `instantiate_module`. `pub(crate)` so the dynamic-import host callback
-/// can reuse the exact same lookup when instantiating a runtime-provided
-/// module (e.g. `@zeroship/bootstrap/install-schema`), whose own static
-/// imports (`@zeroship/db/internal`, `zeroship`) must resolve against the
-/// registry the host callback pre-populated.
+/// All transitively imported modules are compiled before instantiation.
+/// Dynamic imports reuse this lookup for plugin adapter dependency graphs.
 pub(crate) fn resolve_callback<'a>(
     context: v8::Local<'a, v8::Context>,
     specifier: v8::Local<'a, v8::String>,

@@ -64,7 +64,7 @@ None of this is licence to measure less - measure more, and put the result in a 
 | **Build a creator app + deploy** (the primary creator flow) | `docs/build-and-deploy-golden-path.md` · `examples/starter/` (scaffold + `CLAUDE.md`) · `tests/golden_path.sh` · `crates/zeroship-cli/` (`zeroship deploy`) |
 | **Creator project config** (`zeroship.jsonc`: app, control, build shape, migration paths, environments) | `docs/reference/project-config.md`, `schema/project-v1.json`, `crates/zeroship-cli/src/project_config/`, `sdks/vite-plugin/src/project-config/` |
 | **zeroship deploy contract** (`default = { fetch?, rpc? }`, dispatcher, raw-JS deploys) | `docs/reference/zeroship-standard.md` · `sdks/bootstrap/src/{dispatcher,runtime-entry}.ts` · `crates/zeroship-runtime/src/core/init.rs` |
-| **Framework-internal coordination** (`installSchema`, `__zsDispatch`, dev-entry) | `sdks/bootstrap/` · `sdks/bootstrap/README.md` |
+| **Framework-internal coordination** (`installSchema`, `__zsDispatch`, dev-entry) | `sdks/db/src/install-schema.ts` · `crates/zeroship-data-v8/src/lib.rs` · `sdks/bootstrap/README.md` |
 | **Billing / metering / Stripe Connect** | `docs/reference/billing-metering.md` · `crates/zeroship-control/src/metering/provider/` · `crates/zeroship-stream/` · `crates/zeroship-control/src/cron/{event_forwarder,spend_recompute,billing_reconcile}.rs` |
 | **WebSocket** (RFC 6455 implementation) | `docs/reference/websocket-design.md` · `crates/zeroship-runtime/src/` (search `WebSocket`) |
 | **Vite plugin / build pipeline** (synthetic entry is a thin normaliser; runtime owns dispatch) | `docs/reference/vite-plugin.md` · `docs/reference/vite-environment-api.md` · `sdks/vite-plugin/src/rpc-registry.ts` |
@@ -360,12 +360,17 @@ SDK packages call the `env.*` native primitives internally. Validation, query bu
 
 `@zeroship/bootstrap` is the coordination package the runtime crate and Vite plugin both consume. It owns:
 
-- `installSchema(schema, env.db, { descriptor })` — framework-internal installer for the generated RuntimeSchemaDescriptor
 - `__zsDispatch` — the embedded RPC dispatcher (input parse / capability / stream framing)
 - `normalizeUserModule` — namespace → `{ fetch, rpc, userDefault }` shape
 - `createFetchHandler` — WinterCG fetch wrapper routing `/__zeroship/v1/<id>` through the dispatcher
 - `runtime-entry.ts` — TLA orchestrator the runtime crate `include_str!`s
 - `dev-entry.ts` — dev-mode equivalent the Vite plugin's dev-bootstrap delegates to
+
+The DB SDK internal entry owns `installSchema` and its collection, transaction,
+relation and live-query helpers. `DbPlugin` supplies that compiled adapter as
+`zeroship:db/internal` through `NativePlugin::javascript_modules`. Runtime
+initialization supplies the native DB handle and generated descriptor; Vite
+emits no installer import or call.
 
 **User code MUST NOT import `@zeroship/bootstrap`.** It carries no back-compat guarantee; the runtime crate and Vite plugin are the only stable consumers. See `sdks/bootstrap/README.md`.
 
@@ -457,9 +462,7 @@ range yourself with `tests/commit_msg_gate.sh --range origin/main..HEAD`.
 
 ```bash
 # Build (workspace) — build the SDKs FIRST. The runtime crate
-# include_str!s `sdks/bootstrap/dist/{runtime-entry,install-schema}.js`
-# and `sdks/db/dist/internal.js` (NOT dispatcher.js -- checked
-# 2026-08-11; see the header of sdks/bootstrap/src/dispatcher.ts),
+# includes `sdks/bootstrap/dist/runtime-entry.js` and `sdks/db/dist/internal.js`,
 # so `pnpm build` must run before `cargo build -p zeroship-runtime`.
 # Root `pnpm build` respects the dependency graph (bootstrap → db);
 # cargo then sees the freshly emitted dist files.

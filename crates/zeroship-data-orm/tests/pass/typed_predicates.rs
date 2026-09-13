@@ -1,5 +1,6 @@
 use zeroship_data_orm::orm::*;
-schema!(pub schema = "../fixtures/typed-predicates.runtime.json");
+include!("../fixtures/predicates_schema.rs");
+predicates_schema!(pub schema);
 use schema::predicate_rows as rows;
 fn predicates(source: &EntityAlias<rows::Entity>) -> Result<(), DbError> {
     let _ = rows::rank.gte(1_i64)?.and(rows::rank.lte(3_i64)?).negate();

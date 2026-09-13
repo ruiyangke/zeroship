@@ -162,6 +162,7 @@ fn gap_b_end_to_end_insert_inside_tx_defers_emit_until_commit() {
                 "name": {"type":"string", "required":true}
             }));
             crate::tests::fixtures::cache_schema(app, "users", schema.clone());
+            let schema = crate::tests::fixtures::native_fields(schema);
             // Insert via the production helper.
             let bq = crate::crud::insert::build_one(
                 &crate::sql::SchemaName::new(app).expect("fixture schema name"),

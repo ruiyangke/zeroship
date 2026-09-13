@@ -1,7 +1,15 @@
-error[E0277]: the trait bound `i64: EncodeValue<zeroship_data_orm::orm::sql_types::Text>` is not satisfied
- --> tests/ui/wrong_membership_value.rs:4:34
+warning: unused import: `zeroship_data_orm::orm::*`
+ --> tests/ui/wrong_membership_value.rs:1:5
   |
-4 |     let _ = schema::posts::title.in_values([1_i64]);
+1 | use zeroship_data_orm::orm::*;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+error[E0277]: the trait bound `i64: EncodeValue<zeroship_data_orm::orm::sql_types::Text>` is not satisfied
+ --> tests/ui/wrong_membership_value.rs:5:34
+  |
+5 |     let _ = schema::posts::title.in_values([1_i64]);
   |                                  ^^^^^^^^^ the trait `EncodeValue<zeroship_data_orm::orm::sql_types::Text>` is not implemented for `i64`
   |
 help: the following other types implement trait `EncodeValue<S>`
@@ -10,7 +18,7 @@ help: the following other types implement trait `EncodeValue<S>`
   |           impl EncodeValue<$sql> for $rust {
   |           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
   |           |
-  |           `i64` implements `EncodeValue<BigInt>`
+  |           `i64` implements `EncodeValue<zeroship_data_orm::orm::sql_types::BigInt>`
   |           `i64` implements `EncodeValue<zeroship_data_orm::orm::sql_types::Integer>`
 ...
   | / integer_codec!(

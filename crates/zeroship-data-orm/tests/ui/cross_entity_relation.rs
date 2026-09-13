@@ -1,5 +1,6 @@
 use zeroship_data_orm::orm::*;
-schema!(pub schema = "../fixtures/typed-relations.runtime.json");
+include!("../fixtures/relations_schema.rs");
+relations_schema!(pub schema);
 fn invalid(db: &Database) {
     db.entity::<schema::authors::Entity>()
         .unwrap()

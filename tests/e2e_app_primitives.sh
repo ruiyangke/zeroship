@@ -33,27 +33,10 @@
 #     OP) session. There is no shortcut to mint an app session,
 #     so authenticated env.db RPC through the gateway is not headlessly
 #     reachable without standing up the native OP. (gateway-auth gap)
-#   * SCHEMA-INIT bug — FIXED, and this header described it as live long after
-#     it stopped being so. It said any app exporting a declared schema fails
-#     module init on the production worker, because runtime-entry's
-#     `await import("@zeroship/bootstrap/install-schema")` could not be
-#     resolved by the worker's module loader (not in the bundle's static
-#     graph, not a native module) => `Cannot find module`.
-#
-#     That resolution now exists. `crates/zeroship-runtime/src/core/dynamic_import.rs`
-#     carries "Path 2.5: runtime-provided module", which resolves exactly
-#     `@zeroship/bootstrap/install-schema`, `@zeroship/db/internal` and
-#     `zeroship` on the grounds that the runtime injects the code importing
-#     them, so it owns their resolution even when a tree-shaken bundle does
-#     not carry them (ISS-63).
-#
-#     Verified by running, 2026-08-10, not by reading the fix:
-#       cargo test -p zeroship-runtime --test bootstrap_install_schema_resolve
-#       4 passed; 0 failed  (resolves_and_is_callable, resolves_during_module
-#       _evaluation, shares_instance_across_imports, transitive_db_internal)
-#     That target name stopped resolving on 2026-08-20: the file is a module of
-#     crates/zeroship-runtime/tests/main.rs now. Rerun it with
-#       cargo test -p zeroship-runtime --test main -- bootstrap_install_schema_resolve::
+#   * Schema adapter resolution is owned by DbPlugin. It supplies the compiled
+#     DB SDK under zeroship:db/internal, independently of creator bundling.
+#     Exercise that delivery with the native plugin and its PostgreSQL fixture:
+#       cargo test -p zeroship-data-v8 --lib tests::postgres::plugin_modules
 #
 # So db-todos DOES run on the worker. It is the DEPLOYED vehicle of
 # tests/e2e_dev_vs_deployed_db.sh, and `tests/golden_path.sh` step 10 deploys

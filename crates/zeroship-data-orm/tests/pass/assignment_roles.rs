@@ -1,5 +1,6 @@
 use zeroship_data_orm::orm::*;
-schema!(pub models = "../fixtures/assignment-roles.runtime.json");
+include!("../fixtures/assignment_roles_schema.rs");
+assignment_roles_schema!(pub models);
 use models::entries;
 
 #[derive(Insertable)]
