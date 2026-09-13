@@ -264,6 +264,8 @@ table has the `__zeroship_workflow_` prefix; none belongs in Control's schema.
 | `app_state` | App serialization and journal counters. Trusted admission policy remains outside customer SQL. |
 | `deploys` | Locally accepted immutable app deployment and availability state. |
 | `deployment_holds` | Customer dependency intent and observed hold generation; not the platform hold ledger. |
+| `activations` | Immutable readiness per manager activation job, app revision and deployment; committed with the logical job receipt. |
+| `activation_scopes` | Highest manager activation revision selected for new work. Older readiness remains independently replayable. |
 | `runs` | Run identity, lifecycle state, current generation, relationships and logical frontier revision, independent of the task lease epoch. |
 | `generations` | Pinned deployment, input, output/error references and generation lifecycle. |
 | `steps` | Replay history, checkpoints and compensation state. |
@@ -402,8 +404,9 @@ It defines activation, advance, cron, management, reconciliation and collection 
 further availability. Activation names its platform revision; cron names the
 logical schedule identity and bundle declaration name alongside the occurrence's
 request, run, revision and instant. The input-free registration and activation
-envelopes live in `workflow_schedules.rs`. Creator activation/cron handlers,
-event delivery and paginated maintenance still need integration.
+envelopes live in `workflow_schedules.rs`. The creator activation handler is
+implemented natively; creator cron, event delivery and paginated maintenance
+still need integration.
 
 Keep the following identities distinct:
 
@@ -1631,11 +1634,27 @@ rollback. Corruption regressions reject changed descriptors, substituted jobs
 and missing occurrence linkage. Native schema declarations also pass parity
 checks against the migration artifacts.
 
+Creator activation now resolves the immutable deployment hash through the
+authenticated journal hold receipt and verifies the normal app artifact. Its
+readiness history, current selection and completed job receipt share a creator
+transaction. Late older activations remain ready for their queued jobs without
+replacing newer selection. Exact retries validate the stored readiness and
+replay without loading or reacquiring the artifact. The bounded delivery slot
+acknowledges activation without starting an executor. Captured delivery and
+policy authority fence lock waits, external I/O and journal commits. Once manager
+activation selects code, direct local activation cannot replace it and the old
+creator calendar is disabled for that app.
+PostgreSQL and SQLite activation contracts cover delayed delivery, lost replies,
+expired authority, policy replacement, missing artifacts, readiness corruption
+and transaction rollback. Retention tests cover unresolved hash recovery,
+concurrent replies and stale generations. The full creator library passes,
+including schema parity, object storage and executor-free activation delivery.
+
 The manager scheduling loop, scope deadline orchestration, capacity activation,
 and ordinary worker/CLI consumer composition still require implementation and integration.
-The consumer accepts advance and reconciliation jobs; the queue claim is not
+The consumer accepts activation, advance and reconciliation jobs; the queue claim is not
 filtered by operation. Other delivered operation handlers must land before
-switching a host that receives activation, cron, management or collection jobs to this loop.
+switching a host that receives cron, management or collection jobs to this loop.
 Queue-owned deployment holds must also be acquired before publishing those jobs
 in the production host. Persisting a deployment identity in the queue does not
 protect its bundle from Control reclamation.

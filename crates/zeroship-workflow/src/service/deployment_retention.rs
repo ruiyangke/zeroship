@@ -25,7 +25,7 @@ const MAX_PENDING_BATCH: u32 = 256;
 #[orm(entity = holds)]
 struct Intent {
     deploy_id: String,
-    deploy_hash: String,
+    deploy_hash: Option<String>,
     holder_id: String,
     generation: i64,
     state: String,
@@ -41,7 +41,11 @@ impl Intent {
         if self.holder_id != scope.holder() {
             return Err(WorkflowServiceError::PermissionDenied);
         }
-        if !zeroship_bundle::validate_hash_format(&self.deploy_hash)
+        let valid_hash = self.deploy_hash.as_deref().map_or_else(
+            || self.state == "acquiring",
+            zeroship_bundle::validate_hash_format,
+        );
+        if !valid_hash
             || !matches!(
                 self.state.as_str(),
                 "acquiring" | "held" | "releasing" | "released"
@@ -62,9 +66,48 @@ impl Intent {
             deploy_id: self.deploy_id.clone(),
             holder_id: self.holder_id.clone(),
             generation: self.validate(scope)?,
-            deploy_hash: self.deploy_hash.clone(),
+            deploy_hash: self.hash()?.into(),
             state,
         })
+    }
+
+    fn hash(&self) -> Result<&str, WorkflowServiceError> {
+        self.deploy_hash.as_deref().ok_or_else(invalid_storage)
+    }
+
+    fn matches_expected_hash(&self, expected: Option<&str>) -> Result<(), WorkflowServiceError> {
+        if let (Some(stored), Some(expected)) = (self.deploy_hash.as_deref(), expected) {
+            if stored != expected {
+                return Err(conflict("deployment hold identity is immutable"));
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_receipt(
+        &self,
+        scope: &HoldScope,
+        desired: HoldState,
+        expected_hash: Option<&str>,
+        receipt: &HoldReceipt,
+    ) -> Result<(), WorkflowServiceError> {
+        if receipt.app_id != *scope.app()
+            || receipt.deploy_id != self.deploy_id
+            || receipt.holder_id != self.holder_id
+            || receipt.generation != self.validate(scope)?
+            || receipt.state != desired
+            || !zeroship_bundle::validate_hash_format(&receipt.deploy_hash)
+            || self
+                .deploy_hash
+                .as_deref()
+                .is_some_and(|hash| hash != receipt.deploy_hash)
+            || expected_hash.is_some_and(|hash| hash != receipt.deploy_hash)
+        {
+            return Err(conflict(
+                "deployment hold acknowledgement does not match its intent",
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -86,41 +129,63 @@ impl WorkflowService {
         hash: &str,
         client: &dyn DeploymentHoldClient,
     ) -> Result<HoldReceipt, WorkflowServiceError> {
+        self.acquire_deployment_hold_checked(app, deployment, Some(hash), client, &|| Ok(()))
+            .await
+    }
+
+    /// A delivered job may resolve a deployment's immutable hash from the hold
+    /// acknowledgement. Its authority must survive every journal commit and the
+    /// external call; losing authority leaves the durable acquisition pending.
+    pub(super) async fn acquire_deployment_hold_checked(
+        &self,
+        app: &AppId,
+        deployment: &str,
+        hash: Option<&str>,
+        client: &dyn DeploymentHoldClient,
+        check: &impl Fn() -> Result<(), WorkflowServiceError>,
+    ) -> Result<HoldReceipt, WorkflowServiceError> {
         validate_scope(app, deployment, client.scope())?;
-        if !zeroship_bundle::validate_hash_format(hash) {
+        if hash.is_some_and(|hash| !zeroship_bundle::validate_hash_format(hash)) {
             return Err(WorkflowServiceError::InvalidRequest(
                 "invalid deployment hash".into(),
             ));
         }
+        check()?;
         let mut tx = self.begin().await?;
         lock_app(&mut tx, app).await?;
+        check()?;
         let collection = tx.database().collection(holds::Entity::COLLECTION)?;
-        match read_intent(&tx, app, deployment).await? {
+        let generation = match read_intent(&tx, app, deployment).await? {
             None => {
+                let generation = HoldGeneration::try_from(1).map_err(|_| invalid_storage())?;
                 collection
                     .insert(value!({
                         "id":super::types::storage_id(), "app_id":app.as_str(), "deploy_id":deployment, "deploy_hash":hash,
-                        "holder_id":client.scope().holder(), "generation":1, "state":"acquiring"
+                        "holder_id":client.scope().holder(), "generation":generation.get(), "state":"acquiring"
                     }))
                     .await?;
+                generation
             }
             Some(intent) => {
                 let generation = intent.validate(client.scope())?;
-                if intent.deploy_hash != hash {
-                    return Err(conflict("deployment hold identity is immutable"));
-                }
+                intent.matches_expected_hash(hash)?;
                 match intent.state.as_str() {
-                    "acquiring" => {}
+                    "acquiring" => generation,
                     "held" => {
                         let receipt = intent.receipt(client.scope(), HoldState::Held)?;
+                        check()?;
                         tx.commit().await?;
                         return Ok(receipt);
                     }
                     "released" => {
-                        collection.update(
-                            identity(app, deployment),
-                            value!({"generation":generation.next()?.get(), "state":"acquiring"}),
-                        ).await?;
+                        let generation = generation.next()?;
+                        collection
+                            .update(
+                                identity(app, deployment),
+                                value!({"generation":generation.get(), "state":"acquiring"}),
+                            )
+                            .await?;
+                        generation
                     }
                     _ => {
                         return Err(conflict(
@@ -129,10 +194,18 @@ impl WorkflowService {
                     }
                 }
             }
-        }
+        };
+        check()?;
         tx.commit().await?;
-        self.reconcile_deployment_hold(app, deployment, client)
-            .await
+        self.reconcile_deployment_hold_checked(
+            app,
+            deployment,
+            hash,
+            Some((generation, HoldState::Held)),
+            client,
+            check,
+        )
+        .await
     }
 
     /// Close admission and record release only when the customer journal has no
@@ -149,10 +222,10 @@ impl WorkflowService {
         let intent = read_intent(&tx, app, deployment)
             .await?
             .ok_or_else(missing)?;
-        intent.validate(client.scope())?;
+        let generation = intent.validate(client.scope())?;
         match intent.state.as_str() {
             "held" => {
-                close_admission(&tx, app, deployment, &intent.deploy_hash).await?;
+                close_admission(&tx, app, deployment, intent.hash()?).await?;
                 tx.database()
                     .collection(holds::Entity::COLLECTION)?
                     .update(identity(app, deployment), value!({"state":"releasing"}))
@@ -171,8 +244,15 @@ impl WorkflowService {
             }
         }
         tx.commit().await?;
-        self.reconcile_deployment_hold(app, deployment, client)
-            .await
+        self.reconcile_deployment_hold_checked(
+            app,
+            deployment,
+            None,
+            Some((generation, HoldState::Released)),
+            client,
+            &|| Ok(()),
+        )
+        .await
     }
 
     /// Retry durable acquisition or release after disconnection, lost replies or
@@ -183,33 +263,59 @@ impl WorkflowService {
         deployment: &str,
         client: &dyn DeploymentHoldClient,
     ) -> Result<HoldReceipt, WorkflowServiceError> {
+        self.reconcile_deployment_hold_checked(app, deployment, None, None, client, &|| Ok(()))
+            .await
+    }
+
+    async fn reconcile_deployment_hold_checked(
+        &self,
+        app: &AppId,
+        deployment: &str,
+        expected_hash: Option<&str>,
+        transition: Option<(HoldGeneration, HoldState)>,
+        client: &dyn DeploymentHoldClient,
+        check: &impl Fn() -> Result<(), WorkflowServiceError>,
+    ) -> Result<HoldReceipt, WorkflowServiceError> {
         validate_scope(app, deployment, client.scope())?;
+        check()?;
         let mut tx = self.begin().await?;
         lock_app(&mut tx, app).await?;
+        check()?;
         let intent = read_intent(&tx, app, deployment)
             .await?
             .ok_or_else(missing)?;
         let generation = intent.validate(client.scope())?;
+        intent.matches_expected_hash(expected_hash)?;
+        if let Some((expected_generation, desired)) = transition {
+            let matching_state = match desired {
+                HoldState::Held => matches!(intent.state.as_str(), "acquiring" | "held"),
+                HoldState::Released => matches!(intent.state.as_str(), "releasing" | "released"),
+            };
+            if generation != expected_generation || !matching_state {
+                return Err(conflict("deployment hold transition is stale"));
+            }
+        }
+        check()?;
         tx.commit().await?;
-        let receipt = match intent.state.as_str() {
-            "acquiring" => client.acquire(deployment, generation).await?,
-            "releasing" => client.release(deployment, generation).await?,
+        check()?;
+        let result = match intent.state.as_str() {
+            "acquiring" => client.acquire(deployment, generation).await,
+            "releasing" => client.release(deployment, generation).await,
             "held" => return intent.receipt(client.scope(), HoldState::Held),
             "released" => return intent.receipt(client.scope(), HoldState::Released),
             _ => return Err(invalid_storage()),
         };
+        check()?;
+        let receipt = result?;
         let desired = if intent.state == "acquiring" {
             HoldState::Held
         } else {
             HoldState::Released
         };
-        if receipt != intent.receipt(client.scope(), desired)? {
-            return Err(conflict(
-                "deployment hold acknowledgement does not match its intent",
-            ));
-        }
+        intent.validate_receipt(client.scope(), desired, expected_hash, &receipt)?;
         let mut tx = self.begin().await?;
         lock_app(&mut tx, app).await?;
+        check()?;
         let current = read_intent(&tx, app, deployment)
             .await?
             .ok_or_else(missing)?;
@@ -219,7 +325,10 @@ impl WorkflowService {
         } else {
             "released"
         };
-        if current.deploy_hash != intent.deploy_hash
+        let resolved_concurrently = intent.deploy_hash.is_none()
+            && current.deploy_hash.as_deref() == Some(receipt.deploy_hash.as_str())
+            && current.state == desired_state;
+        if (current.deploy_hash != intent.deploy_hash && !resolved_concurrently)
             || current.generation != intent.generation
             || (current.state != intent.state && current.state != desired_state)
         {
@@ -227,8 +336,12 @@ impl WorkflowService {
         }
         tx.database()
             .collection(holds::Entity::COLLECTION)?
-            .update(identity(app, deployment), value!({"state":desired_state}))
+            .update(
+                identity(app, deployment),
+                value!({"state":desired_state, "deploy_hash":receipt.deploy_hash.clone()}),
+            )
             .await?;
+        check()?;
         tx.commit().await?;
         Ok(receipt)
     }
@@ -388,7 +501,10 @@ pub(super) async fn admission_generation(
         .await?
         .ok_or_else(|| conflict("deployment hold is missing"))?;
     intent.validate(scope)?;
-    if intent.state != "held" || intent.generation <= 0 || intent.deploy_hash != hash {
+    if intent.state != "held"
+        || intent.generation <= 0
+        || intent.deploy_hash.as_deref() != Some(hash)
+    {
         return Err(conflict("deployment hold has not opened admission"));
     }
     Ok(intent.generation)

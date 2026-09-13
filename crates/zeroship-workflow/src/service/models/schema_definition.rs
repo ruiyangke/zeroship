@@ -2,6 +2,21 @@
 
 zeroship_data_orm::orm::schema! {
     pub journal {
+        __zeroship_workflow_activation_scopes {
+            #[orm(primary_key)]
+            id: Text,
+            activation_id: Text,
+            revision: BigInt,
+        }
+
+        __zeroship_workflow_activations {
+            #[orm(primary_key)]
+            id: Text,
+            app_id: Text,
+            deploy_id: Text,
+            revision: BigInt,
+        }
+
         __zeroship_workflow_app_state {
             #[orm(primary_key)]
             id: Text,
@@ -33,7 +48,7 @@ zeroship_data_orm::orm::schema! {
             id: Text,
             app_id: Text,
             deploy_id: Text,
-            deploy_hash: Text,
+            deploy_hash: Nullable<Text>,
             holder_id: Text,
             generation: BigInt,
             state: Text,

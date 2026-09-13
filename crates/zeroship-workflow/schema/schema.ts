@@ -63,7 +63,7 @@ export function workflowSchema(namespace) {
     { name: "deploy_hash_identity", columns: ["app_id", "hash"] },
   ]);
   create("deployment_holds", {
-    ...identity(), deploy_id: text(), deploy_hash: text(), holder_id: text(),
+    ...identity(), deploy_id: text(), deploy_hash: t.text(), holder_id: text(),
     generation: integer(), state: text(),
   }, ["app_id", "deploy_id"], [appFk("deployment_holds")]);
   index("deployment_holds", "pending", ["app_id", "state", "deploy_id"]);
@@ -114,6 +114,18 @@ export function workflowSchema(namespace) {
     created_at: integer(), completed_at: t.bigInt(),
   }, ["app_id", "id"], [appFk("job_receipts")]);
   index("job_receipts", "run", ["app_id", "run_id"]);
+  create("activations", {
+    ...identity(), deploy_id: text(), revision: integer(),
+  }, ["app_id", "revision"], [
+    fk("activation_deploy", ["app_id", "deploy_id"], "deploys", ["app_id", "id"]),
+    fk("activation_receipt", ["app_id", "id"], "job_receipts", ["app_id", "id"]),
+  ], [{ name: "activation_identity", columns: ["app_id", "id"] }]);
+  create("activation_scopes", {
+    activation_id: text(), revision: integer(),
+  }, ["id"], [
+    fk("activation_scope_app", ["id"], "app_state", ["app_id"]),
+    fk("activation_scope_receipt", ["id", "activation_id"], "activations", ["app_id", "id"]),
+  ]);
   create("tasks", {
     ...generation(), id: text(), worker: text(), epoch: integer(), token_hash: text(),
     deadline: integer(), state: text(), completion_digest: t.text(), receipt: t.text(),
@@ -214,6 +226,8 @@ export function workflowSchema(namespace) {
       for (const [name, columns] of Object.entries({
         job_publications: ["id", "app_id", "run_id", "deploy_id"],
         job_receipts: ["id", "app_id", "run_id"],
+        activations: ["id", "app_id", "deploy_id"],
+        activation_scopes: ["id", "activation_id"],
         publication_scans: ["id", "after_job", "upper_job"],
         tasks: ["job_id"],
       })) {

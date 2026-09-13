@@ -21,6 +21,7 @@ fn configured_policy(revision: i64, policy: AppPolicy) -> PolicySnapshot {
     PolicySnapshot::configuration(revision.try_into().unwrap(), policy).unwrap()
 }
 
+mod activation;
 mod background_scope;
 mod delivery;
 #[path = "../../../../tests/fixtures/workflow_deployments.rs"]

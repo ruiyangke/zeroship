@@ -94,6 +94,7 @@ impl WorkflowService {
             .client(app)?;
         let mut tx = self.begin().await?;
         let policy = lock_app(&mut tx, app).await?;
+        super::activation::require_local_selection(&tx, app).await?;
         if admission_generation(&tx, app, &deploy.id, &deploy.hash, client.scope()).await?
             != generation
         {
@@ -117,7 +118,7 @@ impl WorkflowService {
             )
             .await?;
         let now = tx.now().await?;
-        super::schedules::reconcile(&mut tx, app, deploy, &policy, now).await?;
+        super::schedules::reconcile(&tx, app, deploy, &policy, now).await?;
         tx.commit().await
     }
 
@@ -176,28 +177,40 @@ impl WorkflowService {
         {
             return Err(conflict());
         }
-        let collection = tx.database().collection(deploys::Entity::COLLECTION)?;
-        if let Some(existing) = read(&tx, app, &deploy.id).await? {
-            existing.check(deploy)?;
-            let epoch = existing.availability_epoch.checked_add(1).ok_or_else(|| {
-                WorkflowServiceError::ResourceExhausted(
-                    "deployment availability epoch exhausted".into(),
-                )
-            })?;
-            collection
-                .update(
-                    value!({"app_id":app.as_str(), "id":deploy.id}),
-                    value!({"state":"available", "availability_epoch":epoch}),
-                )
-                .await?;
-        } else {
-            let now = tx.now().await?;
-            collection.insert(value!({"app_id":app.as_str(), "id":deploy.id, "hash":deploy.hash,
-                "manifest":encode(deploy)?, "created_at":now, "active":0, "state":"available", "availability_epoch":1})).await?;
-        }
+        let now = tx.now().await?;
+        record_verified(&tx, app, deploy, now).await?;
         tx.commit().await?;
         Ok(generation)
     }
+}
+
+/// The caller has verified the normal bundle and its current retained generation.
+pub(super) async fn record_verified(
+    tx: &Transaction,
+    app: &AppId,
+    deploy: &DeployRegistration,
+    now: i64,
+) -> Result<(), WorkflowServiceError> {
+    validate(deploy)?;
+    let collection = tx.database().collection(deploys::Entity::COLLECTION)?;
+    if let Some(existing) = read(tx, app, &deploy.id).await? {
+        existing.check(deploy)?;
+        let epoch = existing.availability_epoch.checked_add(1).ok_or_else(|| {
+            WorkflowServiceError::ResourceExhausted(
+                "deployment availability epoch exhausted".into(),
+            )
+        })?;
+        collection
+            .update(
+                value!({"app_id":app.as_str(), "id":deploy.id}),
+                value!({"state":"available", "availability_epoch":epoch}),
+            )
+            .await?;
+    } else {
+        collection.insert(value!({"app_id":app.as_str(), "id":deploy.id, "hash":deploy.hash,
+            "manifest":encode(deploy)?, "created_at":now, "active":0, "state":"available", "availability_epoch":1})).await?;
+    }
+    Ok(())
 }
 
 fn conflict() -> WorkflowServiceError {
