@@ -404,9 +404,9 @@ It defines activation, advance, cron, management, reconciliation and collection 
 further availability. Activation names its platform revision; cron names the
 logical schedule identity and bundle declaration name alongside the occurrence's
 request, run, revision and instant. The input-free registration and activation
-envelopes live in `workflow_schedules.rs`. The creator activation handler is
-implemented natively; creator cron, event delivery and paginated maintenance
-still need integration.
+envelopes live in `workflow_schedules.rs`. Creator activation and cron acceptance
+are implemented natively; production host composition, event delivery and
+paginated maintenance still need integration.
 
 Keep the following identities distinct:
 
@@ -1661,13 +1661,30 @@ replacing newer selection. Exact retries validate the stored readiness and
 replay without loading or reacquiring the artifact. The bounded delivery slot
 acknowledges activation without starting an executor. Captured delivery and
 policy authority fence lock waits, external I/O and journal commits. Once manager
-activation selects code, direct local activation cannot replace it and the old
-creator calendar is disabled for that app.
+activation selects code, direct local activation cannot replace it.
 PostgreSQL and SQLite activation contracts cover delayed delivery, lost replies,
 expired authority, policy replacement, missing artifacts, readiness corruption
 and transaction rollback. Retention tests cover unresolved hash recovery,
 concurrent replies and stale generations. The full creator library passes,
 including schema parity, object storage and executor-free activation delivery.
+
+Creator cron acceptance now consumes manager-delivered occurrences. It verifies
+the selected activation and ordinary retained bundle, resolves static input from
+that deployment, and binds the manager's schedule identity to its logical name.
+The app transaction checks overlap and admission, creates the exact run and
+Advance publication intent, and retains the occurrence and completed receipt.
+An overlap skip is durable; capacity, policy and unavailable prerequisites remain
+retryable. Journal hold reacquisition and the final generation check preserve
+retention across delayed delivery. Exact retries validate receipt linkage before
+performing artifact I/O.
+
+The creator's calendar loop and its reconciliation metadata have been removed.
+Creator schedule rows hold acceptance identity; occurrence rows require the
+manager revision and receipt link. The delivery slot acknowledges cron acceptance
+without starting an executor, and a lost acknowledgement replays the retained
+result. Paired native contracts cover historical input, conflicting identities,
+overlap through continuation, admission changes, retained code, expired authority
+and rollback of the run, publication and occurrence together.
 
 Queue retention is now required by the native queue, scheduler and recovery
 operations. PostgreSQL and SQLite tests cover lost hold replies, stale generations,
@@ -1684,9 +1701,9 @@ deletion; it no longer delegates deletion authority to creator journal scans.
 
 The manager scheduling loop, scope deadline orchestration, capacity activation,
 and ordinary worker/CLI consumer composition still require implementation and integration.
-The consumer accepts activation, advance and reconciliation jobs; the queue claim is not
+The consumer accepts activation, cron, advance and reconciliation jobs; the queue claim is not
 filtered by operation. Other delivered operation handlers must land before
-switching a host that receives cron, management or collection jobs to this loop.
+switching a host that receives management or collection jobs to this loop.
 The server injects an authenticated Control hold client into its native queue.
 Production deployment registration, scheduling-loop composition and durable
 retention-intent reconciliation still require host integration.
@@ -1698,8 +1715,7 @@ Manager contracts cover continuation deadlines, periodic responsibility, old ACK
 replay and atomic rollback. Consumer tests connect manager-issued reconciliation
 to outbox publication and subsequent execution in separate ORM databases. The
 production dispatch/activation host and ingress responsibility handshake remain
-unwired. Existing customer
-scheduler/task polling and maintenance code remains a foundation to replace.
+unwired. Existing customer task polling and maintenance code remains to replace.
 Its existence does not satisfy manager-owned scheduling.
 
 Legacy production paths still include Control journal access, worker platform

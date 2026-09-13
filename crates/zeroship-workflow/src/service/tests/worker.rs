@@ -204,10 +204,6 @@ async fn capacity_contract(store: Rc<OrmStore>, dir: &Path) {
     maintenance_while_busy(&deployments, &service, &app, &probe, &mut worker).await;
 }
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "the contract follows staging and scheduling through concurrent execution"
-)]
 async fn maintenance_while_busy(
     deployments: &Deployments,
     service: &WorkflowService,
@@ -216,10 +212,7 @@ async fn maintenance_while_busy(
     worker: &mut WorkflowWorker,
 ) {
     use crate::engine::WorkflowOutputRef;
-    use crate::service::{
-        IntervalAnchor, ScheduleCatchUp, ScheduleOverlap, ScheduleRegistration, ScheduleTiming,
-        WorkerIdentity,
-    };
+    use crate::service::WorkerIdentity;
     deployments
         .activate(
             service,
@@ -228,17 +221,7 @@ async fn maintenance_while_busy(
                 id: typed_id::generate("dep"),
                 hash: "b".repeat(64),
                 workflows: ["Example".into()].into(),
-                schedules: vec![ScheduleRegistration {
-                    name: "periodic".into(),
-                    workflow_name: "Example".into(),
-                    schedule: ScheduleTiming::Interval {
-                        interval_ms: 1_000,
-                        anchor: IntervalAnchor::Deploy,
-                    },
-                    input: json!(null),
-                    overlap: ScheduleOverlap::default(),
-                    catch_up: ScheduleCatchUp::default(),
-                }],
+                schedules: vec![],
             },
         )
         .await
@@ -279,13 +262,6 @@ async fn maintenance_while_busy(
     let due = tx.now().await.unwrap() - 1;
     journal_update(
         &tx,
-        "schedules",
-        json!({"app_id":app.app_id().as_str()}),
-        json!({"next_at":due}),
-    )
-    .await;
-    journal_update(
-        &tx,
         "payloads",
         json!({"app_id":app.app_id().as_str()}),
         json!({"expires_at":due}),
@@ -298,9 +274,6 @@ async fn maintenance_while_busy(
         worker.run_until(async {
             loop {
                 let tx = service.begin().await.unwrap();
-                let schedules =
-                    journal_count(&tx, "occurrences", json!({"app_id":app.app_id().as_str()}))
-                        .await;
                 let payloads = journal_count(
                     &tx,
                     "payloads",
@@ -308,7 +281,7 @@ async fn maintenance_while_busy(
                 )
                 .await;
                 tx.commit().await.unwrap();
-                if probe.active.get() == options().task_slots && schedules > 0 && payloads > 0 {
+                if probe.active.get() == options().task_slots && payloads > 0 {
                     break;
                 }
                 compio::time::sleep(Duration::from_millis(5)).await;

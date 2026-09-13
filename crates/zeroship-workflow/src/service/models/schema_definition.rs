@@ -125,7 +125,9 @@ zeroship_data_orm::orm::schema! {
             id: Text,
             app_id: Text,
             schedule_id: Text,
+            revision: BigInt,
             at: BigInt,
+            job_id: Text,
             run_id: Nullable<Text>,
         }
 
@@ -219,13 +221,6 @@ zeroship_data_orm::orm::schema! {
             id: Text,
             app_id: Text,
             name: Text,
-            workflow_name: Text,
-            deploy_id: Text,
-            definition: Text,
-            next_at: Nullable<BigInt>,
-            revision: BigInt,
-            anchor_at: BigInt,
-            last_checked_at: BigInt,
         }
 
         __zeroship_workflow_schema_version {

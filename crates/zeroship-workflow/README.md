@@ -6,7 +6,8 @@ and customer-bound PostgreSQL and SQLite execution. It does not depend on V8.
 
 - `engine.rs`: dispatch envelopes, outcomes, and journal folding.
 - `execution.rs`: typed replay inputs, executor outcomes and runtime decoding.
-- `calendar.rs`: shared cron parsing, timezone handling and calendar occurrences.
+- `zeroship-workflow-calendar`: shared parsing and timing semantics used by the
+  manager; creator acceptance does not evaluate calendars.
 - `claim.rs`, `apply.rs`, `advance.rs`: claims, fencing, and durable advancement.
 - `store/`: existing Control journal implementation, awaiting production cutover.
 - `backend.rs`, `client.rs`: app-scoped control-plane operations for Rust hosts.
@@ -80,7 +81,15 @@ ready for queued jobs when a newer revision becomes selected. Exact retries
 read the committed receipt without loading or reacquiring the artifact.
 Captured delivery and policy authority fence app-lock waits, external I/O and
 commits. Activation runs no creator code and schedules no occurrences.
-`runner::delivery::DeliverySlot` routes activation and reconciliation jobs to
+`AppWorkflows::cron_job` binds a manager occurrence to its activated deployment,
+reacquires the journal's deployment hold, and resolves static input from the
+verified normal bundle. Under the app lock it commits the schedule identity,
+occurrence, exact run, Advance publication intent and job receipt together.
+Overlap skips retain a rejected receipt; capacity and unavailable prerequisites
+remain retryable. Historical activations keep their original input even after
+replacement or schedule removal. Receipt replay requires the exact occurrence
+linkage and performs no artifact I/O.
+`runner::delivery::DeliverySlot` routes activation, cron and reconciliation jobs to
 bounded journal operations and advance jobs to the existing executor and
 payload pipeline. Its host supplies `JobTransport`;
 the authenticated worker client implements that metadata interface. The slot
@@ -181,9 +190,10 @@ reconciles a durable hold, verifies the app-scoped manifest and its referenced
 modules and descriptor, then selects the deployment under the customer app lock.
 Failed preparation preserves the previous selection. The host serializes
 deployment selection updates. Once a manager activation selects a revision,
-direct local activation cannot replace it, and the old local calendar is
-disabled for that app. `retain_deploy` verifies repaired artifacts
-without changing which deployment new runs and schedules select. Publication
+direct local activation cannot replace it. Local registration still validates
+schedule declarations, but the creator journal owns no calendar or due cursor.
+`retain_deploy` verifies repaired artifacts without changing which deployment
+new runs select. Publication
 and repair use the normal app deployment store.
 
 Task executable reads resolve the deployment from a live journal claim, verify
@@ -194,9 +204,10 @@ epoch so a stale failed read cannot revoke the repair. Artifact I/O releases
 the app lock, allowing concurrent heartbeats and lifecycle operations. Missing
 code also leaves cancellation and
 expired-lease cleanup available; compensation execution still needs its code.
-Schedules for unavailable code keep their due frontier without admitting runs
-or consuming occurrences. Repair resumes the configured catch-up behavior;
-unavailable deployments do not occupy the schedule discovery budget.
+Manager scheduling owns due frontiers and catch-up. Creator cron acceptance
+leaves missing or corrupt code retryable without consuming an occurrence.
+Local host composition with the manager scheduler remains pending; the CLI's
+existing task loop does not generate cron jobs.
 Native contracts cover these boundaries against SQLite, PostgreSQL and S3.
 The Vite plugin's `dev-bundle.ts` builds local app archives through
 the deployment compiler and `.zship` packer, retaining static and dynamic module
@@ -230,7 +241,7 @@ Task hosts instead use `runner::TaskPayloadReader`: it captures the assignment's
 journal, resolves named occurrences in that snapshot and reads referenced
 objects through the live task lease. `WorkerTasks` implements the
 payload read/write contract alongside the local task protocol.
-`runner::WorkflowWorker` drives bounded task slots, scheduling and expired
+`runner::WorkflowWorker` drives bounded task slots and expired
 payload collection on its host's compio thread. Background discovery selects
 only host-assigned apps before applying batch limits; customer journal rows
 cannot register apps with the host. Expired assignments still permit lease and

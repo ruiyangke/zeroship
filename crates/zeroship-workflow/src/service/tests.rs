@@ -23,6 +23,7 @@ fn configured_policy(revision: i64, policy: AppPolicy) -> PolicySnapshot {
 
 mod activation;
 mod background_scope;
+mod cron;
 mod delivery;
 #[path = "../../../../tests/fixtures/workflow_deployments.rs"]
 pub(super) mod deployment_fixture;
@@ -46,7 +47,6 @@ mod restart_models;
 mod runner;
 #[path = "../../../../tests/fixtures/s3.rs"]
 mod s3_fixture;
-mod schedule_models;
 mod schema_binding;
 mod schema_metadata;
 mod signal_models;
@@ -1449,183 +1449,6 @@ async fn signal_race_contract(store: Rc<OrmStore>) {
         .unwrap();
 }
 
-#[compio::test]
-async fn sqlite_schedules_commit_occurrences_with_runs() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("zs-workflow.sqlite");
-    schema::initialize_sqlite(&path).unwrap();
-    schedule_contract(Rc::new(sqlite_store(&path).await)).await;
-}
-#[compio::test]
-async fn postgres_schedules_commit_occurrences_with_runs() {
-    let fixture = PostgresFixture::start().await;
-    schedule_contract(Rc::new(fixture.store.clone())).await;
-}
-async fn schedule_contract(store: Rc<OrmStore>) {
-    use super::{
-        IntervalAnchor, ScheduleCatchUp, ScheduleOverlap, ScheduleRegistration, ScheduleTiming,
-    };
-    let (service, app, _, deployments) = registered_service(store.clone()).await;
-    let deploy = DeployRegistration {
-        id: typed_id::generate("dep"),
-        hash: "c".repeat(64),
-        workflows: ["Example".into()].into(),
-        schedules: vec![ScheduleRegistration {
-            name: "billing".into(),
-            workflow_name: "Example".into(),
-            schedule: ScheduleTiming::Interval {
-                interval_ms: 60_000,
-                anchor: IntervalAnchor::Epoch,
-            },
-            input: json!({"scheduled":true}),
-            overlap: ScheduleOverlap::Allow,
-            catch_up: ScheduleCatchUp::Backfill { max: 3 },
-        }],
-    };
-    deployments.activate(&service, &app, &deploy).await.unwrap();
-    assert_eq!(service.tick_schedules().await.unwrap(), 0);
-    let mut tx = store.begin().await.unwrap();
-    let now = tx.now().await.unwrap();
-    let at = (now / 60_000 - 5) * 60_000;
-    journal_update(
-        &tx,
-        "schedules",
-        json!({"app_id":app.as_str()}),
-        json!({"next_at":at}),
-    )
-    .await;
-    tx.commit().await.unwrap();
-    // Activation notification retries must not move a persisted due frontier.
-    deployments.activate(&service, &app, &deploy).await.unwrap();
-    let mut ticks = Vec::new();
-    for _ in 0..3 {
-        let service = service.clone();
-        ticks.push(compio::runtime::spawn(async move {
-            service.tick_schedules().await
-        }));
-    }
-    let mut fired = 0;
-    for tick in ticks {
-        fired += tick.await.unwrap().unwrap();
-    }
-    assert_eq!(fired, 3);
-    let tx = store.begin().await.unwrap();
-    let mut rows = journal_rows(&tx, "occurrences", json!({"app_id":app.as_str()})).await;
-    rows.sort_by_key(|row| row.integer("at").unwrap());
-    assert_eq!(rows.len(), 3);
-    assert_eq!(rows[0].integer("at").unwrap(), at);
-    let scheduled_ids: std::collections::BTreeSet<String> =
-        rows.iter().map(|row| row.text("run_id").unwrap()).collect();
-    tx.commit().await.unwrap();
-    let worker = super::WorkerIdentity::new("schedule-worker".into()).unwrap();
-    let mut executed = std::collections::BTreeSet::new();
-    while let Some(task) = service.poll(&worker).await.unwrap() {
-        assert_eq!(task.invocation.deploy_id, deploy.id);
-        assert_eq!(
-            task.invocation.trigger.input,
-            Some(json!({"scheduled":true}))
-        );
-        executed.insert(task.invocation.run_id.clone());
-        service
-            .complete(
-                &worker,
-                &task.id,
-                &task.token,
-                execution(json!([{"kind":"RunCompleted"}])),
-            )
-            .await
-            .unwrap();
-    }
-    assert_eq!(executed, scheduled_ids);
-    let mut skip = deploy.clone();
-    skip.id = typed_id::generate("dep");
-    skip.hash = "d".repeat(64);
-    skip.schedules[0].overlap = ScheduleOverlap::SkipIfRunning;
-    deployments.activate(&service, &app, &skip).await.unwrap();
-    let mut tx = store.begin().await.unwrap();
-    let later = tx.now().await.unwrap();
-    let first = at + 180_000 + 10;
-    journal_update(
-        &tx,
-        "schedules",
-        json!({"app_id":app.as_str()}),
-        json!({"next_at":first}),
-    )
-    .await;
-    tx.commit().await.unwrap();
-    assert_eq!(service.tick_schedules().await.unwrap(), 1);
-    let tx = store.begin().await.unwrap();
-    let rows = journal_rows(
-        &tx,
-        "occurrences",
-        json!({"app_id":app.as_str(), "at":{"$gte":first, "$lte":later}}),
-    )
-    .await;
-    assert_eq!(
-        rows.iter()
-            .filter(|row| row.optional_text("run_id").unwrap().is_some())
-            .count(),
-        1
-    );
-    assert!(rows
-        .iter()
-        .any(|row| row.optional_text("run_id").unwrap().is_none()));
-    tx.commit().await.unwrap();
-    let task = service.poll(&worker).await.unwrap().unwrap();
-    service
-        .complete(
-            &worker,
-            &task.id,
-            &task.token,
-            execution(json!([{"kind":"ContinueAsNew","input":"scheduled continuation"}])),
-        )
-        .await
-        .unwrap();
-    let tx = store.begin().await.unwrap();
-    journal_update(
-        &tx,
-        "schedules",
-        json!({"app_id":app.as_str()}),
-        json!({"next_at":(first + 1)}),
-    )
-    .await;
-    tx.commit().await.unwrap();
-    assert_eq!(service.tick_schedules().await.unwrap(), 0);
-    let successor = service.poll(&worker).await.unwrap().unwrap();
-    assert_ne!(successor.invocation.run_id, task.invocation.run_id);
-    service
-        .complete(
-            &worker,
-            &successor.id,
-            &successor.token,
-            execution(json!([{"kind":"RunCompleted"}])),
-        )
-        .await
-        .unwrap();
-    let mut disabled = skip.clone();
-    disabled.id = typed_id::generate("dep");
-    disabled.hash = "e".repeat(64);
-    disabled.schedules.clear();
-    deployments
-        .activate(&service, &app, &disabled)
-        .await
-        .unwrap();
-    let tx = store.begin().await.unwrap();
-    assert!(journal_rows(
-        &tx,
-        "schedules",
-        json!({"app_id":app.as_str(), "next_at":{"$exists":true}})
-    )
-    .await
-    .is_empty());
-    assert!(
-        !journal_rows(&tx, "occurrences", json!({"app_id":app.as_str()}))
-            .await
-            .is_empty()
-    );
-    tx.commit().await.unwrap();
-    assert_eq!(service.tick_schedules().await.unwrap(), 0);
-}
 
 #[compio::test]
 async fn sqlite_topic_fanout_preserves_recipient_scope_after_restart() {

@@ -33,8 +33,9 @@ catch-up boundary and remaining allowance. Occurrences wait for their own
 activation job to complete; replacement stops future generation without changing
 already queued jobs. Claims and receipt replay verify stored job linkage, and
 frontier extension checks the immutable descriptor and calendar interpretation.
-Creator activation is handled by the customer engine. The manager host loop and
-creator cron handler still need composition before production scheduling can be enabled.
+Creator activation and cron acceptance are handled by the customer engine. The
+manager scheduling loop and ordinary host composition still need integration
+before production scheduling can be enabled.
 
 `recovery::Recovery` stores persistent scope responsibility and publishes due
 reconciliation into this queue. Repeated activation registration preserves its

@@ -8,6 +8,7 @@ pub use backend::AppBackend;
 pub use bundle::BundleExecutable;
 pub mod capability;
 mod control;
+mod cron;
 pub mod delivery;
 mod deployment_retention;
 mod deployments;

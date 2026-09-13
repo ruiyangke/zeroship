@@ -242,6 +242,10 @@ impl<T: JobTransport> DeliverySlot<T> {
             .await?;
             return self.acknowledge(receipt, &lease).await;
         }
+        if matches!(lease.delivery().job.operation, JobOperation::Cron { .. }) {
+            let receipt = bounded(self.options.execution_timeout, app.cron_job(&lease)).await?;
+            return self.acknowledge(receipt, &lease).await;
+        }
         let accepted = app.accept_job(&lease).await?;
         let task = match accepted {
             JobAcceptance::Deferred => return Ok(DeliveryOutcome::Deferred),

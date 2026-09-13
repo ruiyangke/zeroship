@@ -182,18 +182,6 @@ pub struct SignalMessage {
 }
 
 #[derive(FromRow)]
-#[orm(entity = schedules)]
-pub struct ScheduleRecord {
-    pub id: String,
-    pub name: String,
-    pub deploy_id: String,
-    pub definition: String,
-    pub next_at: Option<i64>,
-    pub anchor_at: i64,
-    pub revision: i64,
-}
-
-#[derive(FromRow)]
 #[orm(entity = payloads)]
 pub struct PayloadRecord {
     pub id: String,

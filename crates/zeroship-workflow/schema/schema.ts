@@ -68,13 +68,10 @@ export function workflowSchema(namespace) {
   }, ["app_id", "deploy_id"], [appFk("deployment_holds")]);
   index("deployment_holds", "pending", ["app_id", "state", "deploy_id"]);
   create("schedules", {
-    ...identity(), id: text(), name: text(), workflow_name: text(), deploy_id: text(), definition: text(),
-    next_at: t.bigInt(), revision: integer(), anchor_at: integer(), last_checked_at: integer(),
-  }, ["app_id", "id"], [
-    appFk("schedules"),
-    fk("schedule_deploy", ["app_id", "deploy_id"], "deploys", ["app_id", "id"]),
-  ], [{ name: "schedule_name", columns: ["app_id", "name"] }]);
-  index("schedules", "due", ["next_at", "app_id", "id"]);
+    ...identity(), id: text(), name: text(),
+  }, ["app_id", "id"], [appFk("schedules")], [
+    { name: "schedule_name", columns: ["app_id", "name"] },
+  ]);
   create("runs", {
     ...identity(), id: text(), workflow_name: text(), deploy_id: text(),
     generation: integer(), state: text(), control: text(), due_at: t.bigInt(),
@@ -183,11 +180,12 @@ export function workflowSchema(namespace) {
     ...identity(), request_id: text(), digest: text(), outcome: text(), created_at: integer(),
   }, ["app_id", "request_id"], [appFk("management_receipts")]);
   create("occurrences", {
-    ...identity(), schedule_id: text(), at: integer(), run_id: t.text(),
-  }, ["app_id", "schedule_id", "at"], [
+    ...identity(), schedule_id: text(), revision: integer(), at: integer(), job_id: text(), run_id: t.text(),
+  }, ["app_id", "schedule_id", "revision", "at"], [
     fk("occurrence_schedule", ["app_id", "schedule_id"], "schedules", ["app_id", "id"]),
+    fk("occurrence_job", ["app_id", "job_id"], "job_receipts", ["app_id", "id"]),
     fk("occurrence_run", ["app_id", "run_id"], "runs", ["app_id", "id"]),
-  ]);
+  ], [{ name: "occurrence_job_identity", columns: ["app_id", "job_id"] }]);
   create("payloads", {
     ...generation(), id: text(), task_id: text(), request_id: text(), hash: text(), size: integer(),
     content_type: t.text(), state: text(), created_at: integer(), expires_at: integer(),
@@ -228,6 +226,8 @@ export function workflowSchema(namespace) {
         job_receipts: ["id", "app_id", "run_id"],
         activations: ["id", "app_id", "deploy_id"],
         activation_scopes: ["id", "activation_id"],
+        schedules: ["id", "app_id", "name"],
+        occurrences: ["id", "app_id", "schedule_id", "job_id", "run_id"],
         publication_scans: ["id", "after_job", "upper_job"],
         tasks: ["job_id"],
       })) {

@@ -1102,6 +1102,17 @@
             "valueColumn": "schedule_id"
           }
         },
+        "revision": {
+          "type": "bigInt",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "revision"
+          }
+        },
         "at": {
           "type": "bigInt",
           "required": true,
@@ -1111,6 +1122,17 @@
           "projectable": true,
           "storage": {
             "valueColumn": "at"
+          }
+        },
+        "job_id": {
+          "type": "string",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "job_id"
           }
         },
         "run_id": {
@@ -1135,7 +1157,16 @@
           "fields": [
             "app_id",
             "schedule_id",
+            "revision",
             "at"
+          ],
+          "unique": true
+        },
+        {
+          "name": "__zeroship_workflow_occurrence_job_identity",
+          "fields": [
+            "app_id",
+            "job_id"
           ],
           "unique": true
         }
@@ -1984,82 +2015,6 @@
           "storage": {
             "valueColumn": "name"
           }
-        },
-        "workflow_name": {
-          "type": "string",
-          "required": true,
-          "readable": true,
-          "filterable": true,
-          "sortable": true,
-          "projectable": true,
-          "storage": {
-            "valueColumn": "workflow_name"
-          }
-        },
-        "deploy_id": {
-          "type": "string",
-          "required": true,
-          "readable": true,
-          "filterable": true,
-          "sortable": true,
-          "projectable": true,
-          "storage": {
-            "valueColumn": "deploy_id"
-          }
-        },
-        "definition": {
-          "type": "string",
-          "required": true,
-          "readable": true,
-          "filterable": true,
-          "sortable": true,
-          "projectable": true,
-          "storage": {
-            "valueColumn": "definition"
-          }
-        },
-        "next_at": {
-          "type": "bigInt",
-          "readable": true,
-          "filterable": true,
-          "sortable": true,
-          "projectable": true,
-          "storage": {
-            "valueColumn": "next_at"
-          }
-        },
-        "revision": {
-          "type": "bigInt",
-          "required": true,
-          "readable": true,
-          "filterable": true,
-          "sortable": true,
-          "projectable": true,
-          "storage": {
-            "valueColumn": "revision"
-          }
-        },
-        "anchor_at": {
-          "type": "bigInt",
-          "required": true,
-          "readable": true,
-          "filterable": true,
-          "sortable": true,
-          "projectable": true,
-          "storage": {
-            "valueColumn": "anchor_at"
-          }
-        },
-        "last_checked_at": {
-          "type": "bigInt",
-          "required": true,
-          "readable": true,
-          "filterable": true,
-          "sortable": true,
-          "projectable": true,
-          "storage": {
-            "valueColumn": "last_checked_at"
-          }
         }
       },
       "options": {
@@ -2083,14 +2038,6 @@
             "name"
           ],
           "unique": true
-        },
-        {
-          "name": "__zeroship_workflow_schedules_due_idx",
-          "fields": [
-            "next_at",
-            "app_id",
-            "id"
-          ]
         }
       ]
     },
