@@ -28,7 +28,7 @@ impl Fixture<'_> {
             let app_id = AppId::mint();
             let meter = Arc::new(zeroship_metering::Meter::new());
             let worker_url = database.url_as("zeroship_worker");
-            zeroship_worker::db_posture::validate_database_url(worker_url.as_str())
+            crate::db_posture::validate_database_url(worker_url.as_str())
                 .await
                 .unwrap();
             let kernel =

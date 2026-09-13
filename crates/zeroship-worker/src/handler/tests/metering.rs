@@ -358,7 +358,7 @@ async fn dispatch_feeds_all_five_platform_counters() {
     );
 }
 
-fn assert_generated_error_metering(result: fixture::Response, status: StatusCode) {
+fn assert_generated_error_metering(result: crate::worker_fixture::Response, status: StatusCode) {
     assert_eq!(result.status, status);
     assert!(
         !result.body.is_empty(),
