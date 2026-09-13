@@ -31,8 +31,10 @@ classes and minified identifiers work without renaming the constructor. An
 unexported constructor cannot select another workflow by copying its name.
 Each constructor must have an unambiguous export name, and each name must select
 the same constructor wherever it is declared. Repeating the same binding in
-named exports and `default.workflows` is allowed. Conflicting bindings fail the
-dispatch. Inherited dictionary properties and a bare default constructor do not
+named exports and `default.workflows` is allowed. Resolving a conflicting binding
+fails dispatch. Unrelated callable exports are not instantiated during lookup.
+Both prototype methods and instance-field implementations of `run` are supported.
+Inherited dictionary properties and a bare default constructor do not
 declare workflows, and a missing name never falls back to another class.
 
 Development workflow execution uses the retained normal app bundle. Live

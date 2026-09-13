@@ -880,6 +880,12 @@ class ZsJournalBackedStep {
         if (name === undefined) {
             throw wfErr("child workflow must be an exported workflow constructor", 500, "WORKFLOW_DEFINITION_ERROR");
         }
+        if (name === null) {
+            throw wfErr("workflow export bindings must be unambiguous", 500, "WORKFLOW_DEFINITION_ERROR");
+        }
+        if (WorkflowClass.prototype == null || typeof WorkflowClass.prototype !== "object") {
+            throw wfErr("child workflow must be an exported workflow constructor", 500, "WORKFLOW_DEFINITION_ERROR");
+        }
         const issued = this.#issue(name, "child");
         if (issued.record) return this.#recordPromise(issued.record);
         return this.#suspendFrontier({
@@ -1306,23 +1312,27 @@ function workflowClasses(userNamespace) {
     const def = mod.default && typeof mod.default === "object" ? mod.default : {};
     const classes = new Map();
     const names = new Map();
-    const isWorkflow = (value) => typeof value === "function"
-        && value.prototype != null && typeof value.prototype.run === "function";
     const add = (name, constructor) => {
-        if (!name || !isWorkflow(constructor)) {
-            throw wfErr("workflow export must name a constructor with run(trigger, step)", 500, "WORKFLOW_DEFINITION_ERROR");
+        if (!name || typeof constructor !== "function") {
+            throw wfErr("workflow export must name a constructor", 500, "WORKFLOW_DEFINITION_ERROR");
         }
-        if ((classes.has(name) && classes.get(name) !== constructor)
-            || (names.has(constructor) && names.get(constructor) !== name)) {
-            throw wfErr("workflow export bindings must be unambiguous", 500, "WORKFLOW_DEFINITION_ERROR");
+        if (classes.has(name) && classes.get(name) !== constructor) {
+            const previous = classes.get(name);
+            if (previous !== null) names.set(previous, null);
+            names.set(constructor, null);
+            classes.set(name, null);
+        } else {
+            classes.set(name, constructor);
+            names.set(constructor, names.has(constructor) && names.get(constructor) !== name ? null : name);
         }
-        classes.set(name, constructor);
-        names.set(constructor, name);
     };
     // Bind constructor identity before invoking app code. Minification, frozen
     // classes and later changes to Function.name cannot change child targets.
+    // Inspecting prototype.run would lose valid instance-field implementations.
+    // Unrelated callable exports may have aliases; reject ambiguity only when
+    // resolving a workflow target, without constructing every exported value.
     for (const name of Object.keys(mod)) {
-        if (name !== "default" && isWorkflow(mod[name])) add(name, mod[name]);
+        if (name !== "default" && typeof mod[name] === "function") add(name, mod[name]);
     }
     const declared = def.workflows;
     if (declared != null) {
@@ -1336,7 +1346,10 @@ function workflowClasses(userNamespace) {
 
 function resolveWorkflow(registry, workflowName) {
     const found = registry.classes.get(workflowName);
-    if (!found) throw wfErr("Workflow not found: " + workflowName, 404, "WORKFLOW_NOT_FOUND");
+    if (found === undefined) throw wfErr("Workflow not found: " + workflowName, 404, "WORKFLOW_NOT_FOUND");
+    if (found === null || registry.names.get(found) === null) {
+        throw wfErr("workflow export bindings must be unambiguous", 500, "WORKFLOW_DEFINITION_ERROR");
+    }
     return found;
 }
 

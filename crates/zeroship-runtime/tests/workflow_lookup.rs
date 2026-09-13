@@ -2,7 +2,7 @@ use serde_json::{Value, json};
 
 use super::{build_runtime, dispatch_workflow};
 
-fn invoke(source: &str, workflow: &str, journal: Value) -> Value {
+fn invoke(source: &str, workflow: &str, journal: &Value) -> Value {
     let runtime = build_runtime(source);
     dispatch_workflow(
         &runtime,
@@ -24,7 +24,7 @@ const FROZEN_CHILD: &str = r#"
 
 #[test]
 fn frozen_minified_child_uses_its_export_binding() {
-    let result = invoke(FROZEN_CHILD, "Parent", json!([]));
+    let result = invoke(FROZEN_CHILD, "Parent", &json!([]));
     assert_eq!(result["kind"], "Child", "{result}");
     assert_eq!(result["childWorkflowName"], "Child", "{result}");
     assert_eq!(result["name"], "Child", "{result}");
@@ -63,13 +63,44 @@ fn frozen_minified_child_replays_the_export_named_journal() {
     let result = invoke(
         FROZEN_CHILD,
         "Parent",
-        json!([{
+        &json!([{
             "ordinal": 0, "name": "Child", "nameOccurrence": 0,
             "kind": "child", "state": "completed", "output": "saved-child",
         }]),
     );
     assert_eq!(result["kind"], "RunCompleted", "{result}");
     assert_eq!(result["output"], "saved-child", "{result}");
+}
+
+#[test]
+fn synthetic_entry_preserves_explicit_workflow_dictionary_data() {
+    zeroship_runtime::init_v8();
+    let runtime = zeroship_runtime::Runtime::builder()
+        .modules(vec![
+            zeroship_runtime::ModuleEntry {
+                specifier: "index.js".into(),
+                source: "import * as user from './app.js'; export * from './app.js'; export default { rpc: {}, workflows: user.default.workflows };".into(),
+            },
+            zeroship_runtime::ModuleEntry {
+                specifier: "app.js".into(),
+                source: r"
+                    const x = Object.freeze(class x { run() {} });
+                    class Parent { run(_trigger, step) { return step.call(x, null); } }
+                    export default { workflows: { Parent, Child: x } };
+                ".into(),
+            },
+        ])
+        .build();
+    let result = dispatch_workflow(
+        &runtime,
+        &json!({
+            "runId": "wfr_forwarded", "nonce": "lookup", "workflowName": "Parent",
+            "phase": "running", "trigger": { "input": null }, "journal": [],
+        })
+        .to_string(),
+    );
+    assert_eq!(result["kind"], "Child", "{result}");
+    assert_eq!(result["childWorkflowName"], "Child", "{result}");
 }
 
 #[test]
@@ -86,7 +117,7 @@ fn declared_child_binding_survives_function_name_changes() {
         export default { workflows: { Parent, Child: x } };
         "#,
         "Parent",
-        json!([]),
+        &json!([]),
     );
     assert_eq!(result["kind"], "Child", "{result}");
     assert_eq!(result["childWorkflowName"], "Child", "{result}");
@@ -95,15 +126,15 @@ fn declared_child_binding_survives_function_name_changes() {
 #[test]
 fn an_unexported_constructor_cannot_select_a_child_by_name() {
     let result = invoke(
-        r#"
+        r"
         export class Child { run() {} }
         const impostor = class Child { run() {} };
         export class Parent {
             run(_trigger, step) { return step.call(impostor, null); }
         }
-        "#,
+        ",
         "Parent",
-        json!([]),
+        &json!([]),
     );
     assert_eq!(result["kind"], "RunFailed", "{result}");
     assert_eq!(
@@ -113,17 +144,18 @@ fn an_unexported_constructor_cannot_select_a_child_by_name() {
 }
 
 #[test]
-fn conflicting_names_for_a_constructor_are_rejected() {
+fn repeating_a_declaration_cannot_clear_constructor_alias_ambiguity() {
     let result = invoke(
-        r#"
+        r"
         class x { run() {} }
         export { x as First, x as Second };
+        export default { workflows: { First: x } };
         export class Parent {
             run(_trigger, step) { return step.call(x, null); }
         }
-        "#,
+        ",
         "Parent",
-        json!([]),
+        &json!([]),
     );
     assert_eq!(result["kind"], "RunFailed", "{result}");
     assert_eq!(
@@ -141,7 +173,7 @@ fn conflicting_constructors_for_an_export_are_rejected() {
         export default { workflows: { Target: Different } };
         "#,
         "Target",
-        json!([]),
+        &json!([]),
     );
     assert_eq!(result["kind"], "RunFailed", "{result}");
     assert_eq!(
@@ -158,7 +190,7 @@ fn matching_named_and_declared_exports_share_constructor_identity() {
         export default { workflows: { Target } };
         "#,
         "Target",
-        json!([]),
+        &json!([]),
     );
     assert_eq!(result["kind"], "RunCompleted", "{result}");
     assert_eq!(result["output"], "target", "{result}");
@@ -169,7 +201,7 @@ fn missing_workflow_does_not_fall_back_to_a_default_constructor() {
     let result = invoke(
         "export default class Present { run() { return 'wrong target'; } }",
         "Missing",
-        json!([]),
+        &json!([]),
     );
     assert_eq!(result["kind"], "RunFailed", "{result}");
     assert_eq!(
@@ -186,11 +218,81 @@ fn inherited_workflow_properties_are_not_exports() {
         export default { workflows: Object.create({ Hidden }) };
         "#,
         "Hidden",
-        json!([]),
+        &json!([]),
     );
     assert_eq!(result["kind"], "RunFailed", "{result}");
     assert_eq!(
         result["error"]["message"], "Workflow not found: Hidden",
         "{result}"
     );
+}
+
+#[test]
+fn instance_field_run_implementations_keep_export_identity() {
+    for declarations in [
+        "export { x as Child, Parent };",
+        "export default { workflows: { Child: x, Parent } };",
+    ] {
+        let source = format!(
+            r#"
+            const x = Object.freeze(class x {{ run = () => "child"; }});
+            class Parent {{ run = (_trigger, step) => step.call(x, null); }}
+            {declarations}
+            "#,
+        );
+        let result = invoke(&source, "Parent", &json!([]));
+        assert_eq!(result["kind"], "Child", "{result}");
+        assert_eq!(result["childWorkflowName"], "Child", "{result}");
+        let child = invoke(&source, "Child", &json!([]));
+        assert_eq!(child["kind"], "RunCompleted", "{child}");
+        assert_eq!(child["output"], "child", "{child}");
+    }
+}
+
+#[test]
+fn unrelated_aliased_callables_are_not_constructed_or_resolved() {
+    let result = invoke(
+        r#"
+        function unrelated() { throw new Error("unrelated constructor ran"); }
+        export { unrelated as First, unrelated as Second };
+        export class Target { run = () => "target"; }
+        "#,
+        "Target",
+        &json!([]),
+    );
+    assert_eq!(result["kind"], "RunCompleted", "{result}");
+    assert_eq!(result["output"], "target", "{result}");
+}
+
+#[test]
+fn start_many_uses_export_identity_for_frontiers_and_replay() {
+    let source = r#"
+        const x = Object.freeze(class x { run = () => "child"; });
+        export { x as Child };
+        export class Parent {
+            run(_trigger, step) {
+                return step.startMany(x, [{ input: "first" }, { input: "second" }]);
+            }
+        }
+    "#;
+    let frontier = invoke(source, "Parent", &json!([]));
+    let outcomes = frontier["outcomes"].as_array().expect("child frontiers");
+    assert_eq!(outcomes.len(), 2, "{frontier}");
+    for (ordinal, outcome) in outcomes.iter().enumerate() {
+        assert_eq!(outcome["kind"], "Child", "{frontier}");
+        assert_eq!(outcome["childWorkflowName"], "Child", "{frontier}");
+        assert_eq!(outcome["name"], "Child", "{frontier}");
+        assert_eq!(outcome["ordinal"], ordinal, "{frontier}");
+        assert_eq!(outcome["nameOccurrence"], ordinal, "{frontier}");
+    }
+    let replay = invoke(
+        source,
+        "Parent",
+        &json!([
+            { "ordinal": 0, "nameOccurrence": 0, "name": "Child", "kind": "child", "state": "completed", "output": "first" },
+            { "ordinal": 1, "nameOccurrence": 1, "name": "Child", "kind": "child", "state": "completed", "output": "second" },
+        ]),
+    );
+    assert_eq!(replay["kind"], "RunCompleted", "{replay}");
+    assert_eq!(replay["output"], json!(["first", "second"]), "{replay}");
 }
