@@ -22,8 +22,14 @@ its durable receipt without adding successor jobs again.
 Claim and heartbeat return `DeliveryGrant`; converting it to a wire lease after
 commit charges elapsed time against the originally observed assignment authority.
 Worker publication cannot mint manager-owned cron or management commands.
-Scope registration establishes queue storage; manager-owned reconciliation
-deadlines must still be integrated before enabling customer ingress.
+`recovery::Recovery` stores persistent scope responsibility and publishes due
+reconciliation into this queue. Repeated activation registration preserves its
+deadline; newer activation affects future jobs while a pending job keeps its pin.
+Publication and the next deadline commit together. An unsettled job is reused
+across replicas and restarts, so absent workers cannot erase responsibility or
+accumulate replacement jobs. Bounded due pages include healthy scopes and must
+be swept repeatedly. Host scheduling, capacity provisioning and the ingress
+epoch handshake still require integration before enabling customer ingress.
 
 `deployments::DeploymentHolds` belongs in Control or the local platform host.
 It records normal app deployments and generation-fenced retention holds. Manager

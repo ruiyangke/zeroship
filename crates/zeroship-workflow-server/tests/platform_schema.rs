@@ -53,6 +53,7 @@ async fn platform_role_can_coordinate_without_customer_or_journal_privileges() {
         );
     }
     manager_queue_authority(&fixture, &runtime).await;
+    manager_recovery_authority(&fixture).await;
     let schema = fixture
         .admin
         .query(
@@ -97,6 +98,51 @@ async fn platform_role_can_coordinate_without_customer_or_journal_privileges() {
 }
 
 #[expect(
+    clippy::future_not_send,
+    reason = "native recovery operations stay on the host's compio thread"
+)]
+async fn manager_recovery_authority(fixture: &platform::Platform) {
+    use zeroship_core::{
+        app_id::AppId,
+        schema_name::SchemaName,
+        workflow_jobs::{DeploymentId, JobOperation},
+    };
+    use zeroship_data_orm::binding::DbBinding;
+    use zeroship_workflow_manager::{
+        recovery::{Options as RecoveryOptions, Recovery},
+        Options as QueueOptions, Queue,
+    };
+
+    let queue = Queue::connect(
+        DbBinding::new(
+            "workflow_manager",
+            "platform-schema",
+            SchemaName::new("workflow_manager").unwrap(),
+        ),
+        &fixture.runtime_url,
+        QueueOptions::default(),
+    )
+    .await
+    .unwrap();
+    let recovery = Recovery::new(queue, RecoveryOptions::default()).unwrap();
+    let app = AppId::mint();
+    let deployment = DeploymentId::mint();
+    recovery
+        .ensure(&app, &deployment, 1.try_into().unwrap())
+        .await
+        .unwrap();
+    assert_eq!(
+        recovery.due(None).await.unwrap(),
+        std::slice::from_ref(&app)
+    );
+    let job = recovery.dispatch(&app).await.unwrap().unwrap();
+    assert_eq!(job.app_id, app);
+    assert_eq!(job.deployment_id, deployment);
+    assert_eq!(job.operation, JobOperation::Reconcile {});
+    assert_eq!(recovery.dispatch(&app).await.unwrap(), Some(job));
+}
+
+#[expect(
     clippy::too_many_lines,
     reason = "the provisioned role's grants and refusals are checked against the same queue state"
 )]
@@ -129,6 +175,7 @@ async fn manager_queue_authority(fixture: &platform::Platform, runtime: &compio_
             "management",
             "placement_receipts",
             "queue_scopes",
+            "recovery_scopes",
             "schema_version",
             "workers"
         ]

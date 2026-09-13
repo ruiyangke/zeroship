@@ -531,7 +531,7 @@ impl Queue {
         Ok(output.bytes)
     }
 
-    async fn insert(&self, tx: &Database, spec: &JobSpec, now: i64) -> Result<(), Error> {
+    pub(crate) async fn insert(&self, tx: &Database, spec: &JobSpec, now: i64) -> Result<(), Error> {
         let digest = digest(&self.encode(spec)?);
         if let Some(job) = load(tx, &spec.app_id, spec.id.as_str()).await? {
             return if job.spec_digest == digest && job.spec()? == *spec {
@@ -619,7 +619,7 @@ pub async fn lock_scope(tx: &Database, app: &AppId) -> Result<(), Error> {
     }
 }
 
-async fn load(tx: &Database, app: &AppId, id: &str) -> Result<Option<Job>, Error> {
+pub async fn load(tx: &Database, app: &AppId, id: &str) -> Result<Option<Job>, Error> {
     Ok(tx
         .entity::<jobs::Entity>()?
         .find::<Job>(

@@ -39,6 +39,12 @@ CREATE INDEX IF NOT EXISTS "jobs_available_idx" ON "workflow_manager"."jobs" ("a
 
 CREATE INDEX IF NOT EXISTS "jobs_lease_idx" ON "workflow_manager"."jobs" ("app_id", "state", "lease_deadline", "id");
 
+CREATE TABLE "workflow_manager"."recovery_scopes" ("id" text PRIMARY KEY NOT NULL, "deployment_id" text NOT NULL, "activation_revision" bigint NOT NULL, "next_due_at" bigint NOT NULL, "pending_job_id" text, CONSTRAINT "recovery_job" FOREIGN KEY ("pending_job_id") REFERENCES "workflow_manager"."jobs" (id) ON DELETE RESTRICT, CONSTRAINT "recovery_scope" FOREIGN KEY ("id") REFERENCES "workflow_manager"."queue_scopes" (id) ON DELETE RESTRICT);
+
+CREATE INDEX IF NOT EXISTS "recovery_job_idx" ON "workflow_manager"."recovery_scopes" ("pending_job_id");
+
+CREATE INDEX IF NOT EXISTS "recovery_scopes_due_idx" ON "workflow_manager"."recovery_scopes" ("next_due_at", "id");
+
 ALTER TABLE "workflow_manager"."schema_version" ALTER COLUMN "id" TYPE text COLLATE "C";
 
 ALTER TABLE "workflow_manager"."queue_scopes" ALTER COLUMN "id" TYPE text COLLATE "C";
@@ -52,4 +58,6 @@ ALTER TABLE "workflow_manager"."placement_receipts" ALTER COLUMN "id" TYPE text 
 ALTER TABLE "workflow_manager"."management" ALTER COLUMN "id" TYPE text COLLATE "C", ALTER COLUMN "app_id" TYPE text COLLATE "C", ALTER COLUMN "request_id" TYPE text COLLATE "C", ALTER COLUMN "run_id" TYPE text COLLATE "C", ALTER COLUMN "ack_worker_id" TYPE text COLLATE "C";
 
 ALTER TABLE "workflow_manager"."jobs" ALTER COLUMN "id" TYPE text COLLATE "C", ALTER COLUMN "app_id" TYPE text COLLATE "C", ALTER COLUMN "deployment_id" TYPE text COLLATE "C", ALTER COLUMN "worker_id" TYPE text COLLATE "C";
-INSERT INTO workflow_manager.schema_version (id, fingerprint) VALUES ('manager', 'da1a9579a7e8535b894cce0b7be241cfd148e918e713108c63b08e5ed2a6344e');
+
+ALTER TABLE "workflow_manager"."recovery_scopes" ALTER COLUMN "id" TYPE text COLLATE "C", ALTER COLUMN "deployment_id" TYPE text COLLATE "C", ALTER COLUMN "pending_job_id" TYPE text COLLATE "C";
+INSERT INTO workflow_manager.schema_version (id, fingerprint) VALUES ('manager', '8cd3dcb758d30bcb6ae0220eef7d8994a82ae10cb6275aac2c2d7e7a0ad37c12');

@@ -7,6 +7,7 @@ pub mod deployments;
 mod error;
 mod models;
 mod queue;
+pub mod recovery;
 
 pub use error::Error;
 pub use models::collections;

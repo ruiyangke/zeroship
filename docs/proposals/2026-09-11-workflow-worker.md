@@ -224,12 +224,13 @@ with this queue namespace; it is not a second authoritative placement store.
 | `workflow_manager.placement_receipts` | Immutable assignment/release request identity and recorded result. |
 | `workflow_manager.management` | Authorized command metadata, request provenance and reported closed outcome. |
 | `workflow_manager.jobs` | Immutable job specification, availability, current attempt, delivery fence and settlement digest/outcome. It currently also supplies submission and settlement deduplication. |
+| `workflow_manager.recovery_scopes` | Durable reconciliation responsibility, activation revision, future-job deployment, next due time and retained pending job. |
 | `zeroship.worker_instances` | Control-owned enrollment, public key and revocation state; distinct from workflow registration. |
 | `zeroship.app_deploys` | Control-owned immutable deployment metadata and reclamation state. |
 | `zeroship.app_deploy_holds` | Control-owned app/deployment/holder generation and retention state. |
 
 The scheduling target also requires durable schedule revisions and cursors,
-occurrence identities, deployment activation, scope recovery epochs/deadlines,
+occurrence identities, deployment activation, scope ingress epochs,
 capacity demand and management delivery barriers. Their physical model is not
 implemented by the current table list. Prefer extending the owning manager
 models over adding another store. Final table names and the shared protocol
@@ -898,8 +899,22 @@ Each obligation has a manager-owned deadline even when no job is visibly pending
 Healthy heartbeats cannot postpone it indefinitely because the manager cannot
 observe an unpublished customer commit. Bounded immediate publication retry is
 an optimization; periodic manager-issued reconciliation supplies correctness.
-The current `queue_scopes` row and recovery scan of missing owners do not yet
-implement this durable deadline/epoch protocol.
+The native `recovery::Recovery` ledger supplies the deadline and pending job.
+`ensure` registers a trusted activation without postponing existing work; a newer
+activation changes only the deployment selected for future jobs. `dispatch`
+serializes with queue operations under the app lock and commits the job identity
+with the next deadline. A pending job is returned unchanged across retries and
+replicas until it settles. Settlement does not reset the deadline, so overdue
+responsibility immediately becomes eligible again. The pending-job foreign key
+prevents deleting the job that still carries this obligation.
+
+`due` pages by app identity using manager database time and includes healthy
+owners. The scheduler resumes after the last returned app, then begins another
+sweep after an empty page; newly due work behind the cursor joins that sweep.
+Job publication failure leaves the prior deadline and pending identity intact.
+These native operations do not yet establish the authenticated activation-to-
+ingress handshake, run a host scheduler or provision missing worker capacity.
+The ingress epoch and drain evidence remain required before enabling that path.
 
 A reconciliation job processes an app-scoped page. It confirms manager receipts
 before advancing publication state and yields continuation metadata when needed.
@@ -1395,6 +1410,11 @@ HTTP tests cover scope denial, enrollment revocation and key replacement during
 lock waits, process restart and receipt replay after placement expiry. These
 checks do not establish a completed distributed workflow system.
 
+Native recovery contracts cover replica races, absence of workers, restart,
+activation changes, deadline persistence and atomic publication rollback. The
+canonical platform migration test also executes recovery with the runtime role
+and checks table ownership and denial of worker, gateway and app access.
+
 The ORM owner's cancellation fix passes the creator lifecycle and receipt tests
 with their database barriers still held. The shared ORM typed-read allocation
 fix also passes the complete workflow library test target on the normal test
@@ -1412,7 +1432,7 @@ platform migrations still grant the workflow owner role to worker and Control,
 and workflow provisioning still grants that role schema creation authority.
 Remove those obsolete edges with the legacy journal provisioning paths.
 
-Manager cron/timer discovery, durable scope deadlines, capacity activation,
+Manager cron/timer discovery, scope deadline orchestration, capacity activation,
 creator job receipts/publication intents and the simple worker consumer still
 require implementation and integration. Existing customer
 scheduler/task polling and maintenance code remains a foundation to replace.
