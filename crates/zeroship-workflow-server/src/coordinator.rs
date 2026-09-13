@@ -97,6 +97,7 @@ impl Options {
 #[derive(Debug, Clone)]
 pub struct Coordinator {
     pool: Pool,
+    pub(crate) queue: Queue,
     pub manager: NativeCoordinator,
 }
 impl Coordinator {
@@ -137,7 +138,7 @@ impl Coordinator {
         .await
         .map_err(|_| Error::Unavailable)??;
         let manager = NativeCoordinator::new(
-            queue,
+            queue.clone(),
             NativeOptions {
                 worker_ttl: options.worker_ttl,
                 assignment_ttl: options.assignment_ttl,
@@ -145,7 +146,11 @@ impl Coordinator {
                 max_pending_management: options.max_pending_management,
             },
         )?;
-        let service = Self { pool, manager };
+        let service = Self {
+            pool,
+            queue,
+            manager,
+        };
         service.verify().await?;
         Ok(service)
     }
@@ -189,6 +194,12 @@ impl Coordinator {
             "assignments",
             "placement_receipts",
             "management",
+            "schedule_deployments",
+            "schedule_activations",
+            "schedule_scopes",
+            "schedules",
+            "schedule_occurrences",
+            "recovery_scopes",
         ] {
             let name = format!("workflow_manager.{table}");
             let rows = self
@@ -224,7 +235,13 @@ impl Coordinator {
              SELECT id,app_id,deployment_id,operation,spec_digest,available_at,state,attempt,worker_id,assignment_revision,lease_deadline,outcome,settlement_digest,created_at FROM workflow_manager.jobs LIMIT 0;
              SELECT app_id,worker_id,revision,expires_at,released,wake_revision,next_due_at FROM workflow_manager.assignments LIMIT 0;
              SELECT app_id,request_id,operation,worker_id,expected_revision,wake_revision,result_revision,result_expires_at FROM workflow_manager.placement_receipts LIMIT 0;
-             SELECT app_id,request_id,run_id,actor,operation,restart_name,restart_occurrence,restart_deploy,created_at,outcome,run_state,ack_worker_id,ack_revision FROM workflow_manager.management LIMIT 0;"
+             SELECT app_id,request_id,run_id,actor,operation,restart_name,restart_occurrence,restart_deploy,created_at,outcome,run_state,ack_worker_id,ack_revision FROM workflow_manager.management LIMIT 0;
+             SELECT id,app_id,definition,interpretation,created_at FROM workflow_manager.schedule_deployments LIMIT 0;
+             SELECT id,app_id,deployment_id,revision,activated_at FROM workflow_manager.schedule_activations LIMIT 0;
+             SELECT id,revision,activation_id FROM workflow_manager.schedule_scopes LIMIT 0;
+             SELECT id,app_id,name,activation_id,revision,definition,next_at,anchor_at,catch_up_until,catch_up_remaining FROM workflow_manager.schedules LIMIT 0;
+             SELECT id,app_id,schedule_id,revision,scheduled_at,run_id,job_id,activation_id FROM workflow_manager.schedule_occurrences LIMIT 0;
+             SELECT id,deployment_id,activation_revision,next_due_at,pending_job_id FROM workflow_manager.recovery_scopes LIMIT 0;"
         ).await?;
         Ok(())
     }

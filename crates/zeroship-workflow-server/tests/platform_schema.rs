@@ -113,6 +113,34 @@ async fn platform_role_can_coordinate_without_customer_or_journal_privileges() {
         .await
         .unwrap();
     service.verify().await.unwrap();
+    for table in [
+        "schedule_deployments",
+        "schedule_activations",
+        "schedule_scopes",
+        "schedules",
+        "schedule_occurrences",
+        "recovery_scopes",
+    ] {
+        fixture
+            .admin
+            .batch_execute(&format!(
+                "REVOKE UPDATE ON workflow_manager.{table} FROM zeroship_workflow"
+            ))
+            .await
+            .unwrap();
+        assert!(
+            service.verify().await.is_err(),
+            "missing driver privilege on {table}"
+        );
+        fixture
+            .admin
+            .batch_execute(&format!(
+                "GRANT UPDATE ON workflow_manager.{table} TO zeroship_workflow"
+            ))
+            .await
+            .unwrap();
+        service.verify().await.unwrap();
+    }
     assert!(fixture.work.path().join("migrate.toml").is_file());
 }
 

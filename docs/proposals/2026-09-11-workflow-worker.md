@@ -940,18 +940,45 @@ receipt. Explicit lifecycle refusals may be durable `NotFound`, `Conflict` or
 remain retryable and create no permanent refusal. In particular, expiry of an
 admission-policy lease is not equivalent to valid policy with admission disabled.
 
+Delivered management must carry the complete immutable command and a manager-issued
+per-run management revision. This order is distinct from deployment activation,
+run generation, task epochs and execution-frontier revisions. Persist the command,
+job linkage and provisional barrier together. Deliver commands in revision order;
+the creator independently rejects gaps and changed identities, and records durable
+refusals in that same ordering. Its attempt captures the delivery lease and policy
+before waiting for the app lock or performing I/O.
+
 Pause/cancel/restart can provisionally block conflicting execution jobs. Management
 and required reconciliation remain deliverable so the barrier cannot prevent
 its own resolution. Barrier ownership includes command identity and lifecycle
 revision. A rejected command releases only its own provisional barrier; a delayed
-ACK cannot clear a newer pause or undo a later command. Creator fences remain
+ACK cannot clear a newer command's barrier or undo a later command. Creator fences remain
 authoritative for work already delivered when the barrier was installed.
 
-Resume requires current authorized admission. Restart quiesces the source
-generation before creating another; generation changes fence timers, children
-and stale completions. Atomic queue/command/barrier settlement and the required
-lifecycle revision fields are cutover work; the existing separate command ACK
-surface does not yet encode this complete protocol.
+After settlement, remove the matching provisional barrier and let creator control
+state govern later execution. A blanket persistent barrier would also suppress
+the Advance work needed to finish cancellation, compensation or interrupted-task
+recovery. Filter provisional barriers before applying the queue candidate limit.
+
+Resume requires current authorized admission. Restart requires source-generation
+quiescence before creating another; generation changes fence timers, children
+and stale completions. The current creator operation durably refuses live execution
+or unsafe descendants. Automatic quiescence would require a separate bounded
+preparation state; it cannot wait indefinitely inside a delivery slot.
+
+Creator lifecycle changes, publication intents, management ordering and the exact
+job receipt must commit together. Preserve the requested run identity in command
+history independently of the actual run foreign key, so `NotFound` can be receipted
+without inventing a run. Carry the closed management outcome through queue
+settlement and commit it with the command outcome and matching barrier changes.
+Generic completion classifications cannot substitute for that lifecycle result.
+
+Code-free journal operations need an explicit deployment prerequisite contract;
+do not make cancellation depend on loading an unrelated current bundle. A restart
+target that creates a generation needs a frozen deployment choice and verified
+journal hold before its final fenced transaction. These envelope and prerequisite
+fields remain cutover work; the existing separate command inbox and ACK surface
+does not yet encode the complete protocol.
 
 `ManageRun` currently contains no deployment while `JobSpec` requires one.
 Management dispatch must resolve the deployment prerequisite from trusted platform
@@ -1338,6 +1365,7 @@ fallbacks.
 | Manager host | `WorkflowSettings` supplies listener, service peers, platform DB binding, body/page bounds and worker/assignment policy. `workflow.database_url` is a platform credential. |
 | Native coordinator | `coordinator::Options::{worker_ttl, assignment_ttl, batch_limit, max_pending_management}` bounds placement and command behavior. |
 | Native queue | `Options::{max_connections, lease, transaction_timeout, max_successors, max_metadata_bytes}` bounds storage concurrency, delivery and metadata transactions. |
+| Native manager driver | `driver::Options::{page_limit, lane_timeout, scheduling, recovery}` bounds each calendar, recovery and unfinished-hold lane. The server maps `workflow.batch_limit` to the candidate page and owns cadence through `workflow.driver_interval_ms`; `workflow.driver_lane_timeout_ms` bounds each lane's complete turn. |
 | Metadata client | Client `Options::{timeout, max_request_bytes, max_response_bytes}` bounds the complete exchange. Each call uses the host signer. |
 | Customer host | Normal creator DB/storage, trusted app identity and policy snapshot. `ConsumerOptions` bounds slots, assigned scopes, claim polling and backoff; `DeliveryOptions` bounds execution and finalization. Worker maintenance scheduling settings disappear with their loops. |
 | Scheduling/recovery host policy | Explicit misfire, overlap, reconciliation and capacity/backpressure bounds. New setting names are finalized with those modules, not invented CLI switches. |
@@ -1699,14 +1727,32 @@ queue and journal holders, app scope, archived current deployments and denial of
 creator-schema access. The collector is the production caller of manifest
 deletion; it no longer delegates deletion authority to creator journal scans.
 
-The manager scheduling loop, scope deadline orchestration, capacity activation,
-and ordinary worker/CLI consumer composition still require implementation and integration.
+The native manager driver now runs in the workflow server independently of
+worker registration and placement. Its calendar, recovery and unfinished-hold
+lanes each share an original deadline across their scans and candidate page.
+Each lane captures an upper storage identity and advances past an attempted
+candidate before external work, preserving progress through malformed metadata,
+timeouts and cancellation. Failed candidates retain their durable jobs or
+intents and retry after the finite sweep wraps. New rows and work becoming due
+behind the cursor join a subsequent sweep. The host delays between completed
+passes and joins its current bounded pass during shutdown.
+
+The driver resumes acquiring/releasing queue holds. It does not interpret an
+empty queue or expired worker as permission to release held code or retire an
+ingress responsibility. Explicit release still checks all manager dependencies
+under the app lock. Automatic held-deployment release policy, capacity activation,
+and ordinary worker/CLI consumer composition remain to integrate.
 The consumer accepts activation, cron, advance and reconciliation jobs; the queue claim is not
 filtered by operation. Other delivered operation handlers must land before
 switching a host that receives management or collection jobs to this loop.
 The server injects an authenticated Control hold client into its native queue.
-Production deployment registration, scheduling-loop composition and durable
-retention-intent reconciliation still require host integration.
+Production deployment registration and activation publication still require
+host integration. The normal Control deployment transaction needs a durable
+publication intent and stable activation identity; an HTTP attempt after commit
+cannot be its only handoff. Pending activation consumers must retain their code
+until the manager's exact acceptance receipt discharges that intent. The manager
+acquires its queue hold through Control outside Control's deployment transaction
+to avoid a callback waiting on the transaction that initiated it.
 Publication intents and advance-job receipts exist in the journal; their
 delivered reconciliation and queue settlement are integrated natively. Creator
 reconciliation tests exercise persisted progress, failed publication, policy
@@ -1740,6 +1786,7 @@ through the replacement before deleting the old source.
 | Enrollment bootstrap and revocation | A revoked worker cannot regain equivalent authority by automatic enrollment. Finalize bootstrap trust, replacement authorization and registry freshness with auth ownership. |
 | Placement eligibility and capacity provider | Only platform-authorized app/zone combinations may be assigned. Select the trusted eligibility source and host adapter's durable request/progress contract. |
 | Complete job envelopes | Keep closed metadata. Finalize activation, event/fanout, continuation cursors, management lifecycle revisions and operation-specific deployment prerequisites before their consumers are wired. |
+| Normal deployment publication | Bind activation revision issuance to a stable deploy command and immutable body. Artifact identity alone cannot distinguish a delayed retry from an intentional rollback. Define archive/stage/restore and revision-fenced schedule disable, and keep the calendar's activation origin explicit across delayed delivery. |
 | Scope retirement | Define ingress epoch closure and durable drain evidence. Registration expiry and empty polling cannot retire unpublished-work responsibility. |
 | Receipt retirement | Define admissibility fences and publication/settlement watermarks before deleting job deduplication state. Retain it until that proof exists. |
 | Dispatch fairness and persistent failure | Define fair progress and observable parking/retry policy without deleting accepted work or starving management/reconciliation. |
@@ -1752,16 +1799,15 @@ outside the queue cutover.
 
 ### Dependency-ordered completion
 
-- Finish native server composition and schema/grant verification with the shared
-  manager transaction domain and current enrollment checks.
 - Finalize the missing closed delivery, scope-recovery and retention contracts;
   add their manager models using the canonical migration/ORM pipeline.
-- Replace Control's journal-derived deployment reclamation with the native hold
-  and reclamation fence before admitting production dependencies through it.
 - Connect normal deployment registration, activation and queue holds to manager
-  scheduling; move calendar ownership and remove the standalone scheduler host.
-- Add creator delivered-job acceptance, receipts and publication intents together
-  with durable scope responsibility before enabling new ingress semantics.
+  scheduling through a durable Control publication intent; finish lifecycle
+  disable/restore behavior and remove the standalone scheduler host.
+- Finish creator management and collection job acceptance with durable receipts,
+  publication intents and lifecycle fences before enabling those deliveries.
+- Complete the ingress responsibility handshake before admitting new work through
+  the production host; retain pending work through outage and restart.
 - Compose the bounded worker consumer, payload/retention jobs and trusted runtime
   loader; remove worker schedule discovery and independent maintenance loops.
 - Route signals, dependent work and management through the common protocol;

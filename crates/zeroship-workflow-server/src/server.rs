@@ -25,7 +25,11 @@ use zeroship_core::{
     workflow_jobs::DeploymentId,
 };
 use zeroship_workflow_client::{Options as ClientOptions, QueueDeploymentHolds, Transport};
-use zeroship_workflow_manager::{retention::HoldClient, Error as ManagerError};
+use zeroship_workflow_manager::{
+    driver::{Driver, Options as DriverOptions, TickReport},
+    retention::HoldClient,
+    Error as ManagerError,
+};
 
 type Error = Box<dyn std::error::Error>;
 
@@ -37,6 +41,8 @@ pub struct ServerOptions {
     pub max_request_bytes: usize,
     pub coordinator: Options,
     replay_sweep: Duration,
+    pub driver: DriverOptions,
+    pub driver_interval: Duration,
 }
 impl ServerOptions {
     /// Pure validation used by the read-only configuration check.
@@ -49,10 +55,12 @@ impl ServerOptions {
         let max_connections = *settings.max_connections.get();
         let max_request_bytes = *settings.max_request_bytes.get();
         let replay_sweep = Duration::from_millis(*settings.replay_sweep_ms.get());
+        let driver_interval = Duration::from_millis(*settings.driver_interval_ms.get());
         if http_threads == 0
             || max_connections == 0
             || max_request_bytes == 0
             || replay_sweep.is_zero()
+            || driver_interval.is_zero()
         {
             return Err("workflow HTTP and maintenance limits must be positive".into());
         }
@@ -78,6 +86,12 @@ impl ServerOptions {
             max_pending_management: *settings.max_pending_management.get(),
         };
         coordinator.validate()?;
+        let driver = DriverOptions {
+            page_limit: coordinator.batch_limit.try_into()?,
+            lane_timeout: Duration::from_millis(*settings.driver_lane_timeout_ms.get()),
+            ..DriverOptions::default()
+        };
+        driver.validate()?;
         Transport::validate_config(settings.control_url.get(), client_options(coordinator))?;
         Ok(Self {
             listen,
@@ -86,6 +100,8 @@ impl ServerOptions {
             max_request_bytes,
             coordinator,
             replay_sweep,
+            driver,
+            driver_interval,
         })
     }
 }
@@ -129,7 +145,9 @@ pub async fn run(settings: WorkflowSettings, options: ServerOptions) -> Result<(
     let holds = ControlHolds::new(&control_url, outbound.clone(), options.coordinator)?;
     // Verify migration readiness before accepting connections. Each HTTP thread
     // constructs its own bounded pool and retention transport in the state factory.
-    Coordinator::connect(&url, options.coordinator, Rc::new(holds)).await?;
+    let startup = Coordinator::connect(&url, options.coordinator, Rc::new(holds)).await?;
+    let driver = Driver::new(startup.queue.clone(), options.driver)?;
+    drop(startup);
     compio::time::timeout(options.coordinator.command_timeout, replay.purge_expired()).await??;
     let auth = Arc::new(WorkflowAuth::new(
         verifier,
@@ -137,18 +155,11 @@ pub async fn run(settings: WorkflowSettings, options: ServerOptions) -> Result<(
         replay.clone(),
     ));
     compio::time::timeout(options.coordinator.command_timeout, auth.ready()).await??;
-    let maintenance = compio::runtime::spawn(async move {
-        loop {
-            if !matches!(
-                compio::time::timeout(options.coordinator.command_timeout, replay.purge_expired())
-                    .await,
-                Ok(Ok(_))
-            ) {
-                tracing::warn!("workflow assertion replay cleanup unavailable");
-            }
-            compio::time::sleep(options.replay_sweep).await;
-        }
-    });
+    let maintenance = compio::runtime::spawn(sweep_assertions(
+        replay,
+        options.coordinator.command_timeout,
+        options.replay_sweep,
+    ));
     let coordinator = options.coordinator;
     let max_request_bytes = options.max_request_bytes;
     let server = web::HttpServer::new(move || {
@@ -175,12 +186,90 @@ pub async fn run(settings: WorkflowSettings, options: ServerOptions) -> Result<(
     .bind(options.listen)?
     .run();
     tracing::info!(listen = %options.listen, "workflow coordinator listening");
-    let result = match select(Box::pin(server), disconnected).await {
-        Either::Left((result, _)) => result.map_err(Into::into),
-        Either::Right(_) => Err("workflow authentication database disconnected".into()),
+    let serving = async {
+        match select(Box::pin(server), disconnected).await {
+            Either::Left((result, _)) => result.map_err(Into::into),
+            Either::Right(_) => Err("workflow authentication database disconnected".into()),
+        }
     };
-    drop(maintenance);
+    let (stop, stopped) = futures::channel::oneshot::channel();
+    let driving = drive(driver, options.driver_interval, stopped);
+    let result = match select(Box::pin(serving), Box::pin(driving)).await {
+        Either::Left((result, driving)) => {
+            let _ = stop.send(());
+            // Finish the bounded pass already in progress before releasing its
+            // database and outbound client. No further pass starts after stop.
+            driving.await;
+            result
+        }
+        Either::Right(_) => Err("workflow manager driver stopped".into()),
+    };
+    let _ = maintenance.cancel().await;
     result
+}
+
+async fn sweep_assertions(
+    replay: Arc<SharedClientReplayStore>,
+    timeout: Duration,
+    interval: Duration,
+) {
+    loop {
+        if !matches!(
+            compio::time::timeout(timeout, replay.purge_expired()).await,
+            Ok(Ok(_))
+        ) {
+            tracing::warn!("workflow assertion replay cleanup unavailable");
+        }
+        compio::time::sleep(interval).await;
+    }
+}
+
+async fn drive(
+    mut driver: Driver,
+    interval: Duration,
+    mut stopped: futures::channel::oneshot::Receiver<()>,
+) {
+    loop {
+        if !matches!(stopped.try_recv(), Ok(None)) {
+            return;
+        }
+        report_tick(driver.tick().await);
+        if matches!(
+            select(Box::pin(compio::time::sleep(interval)), &mut stopped).await,
+            Either::Right(_)
+        ) {
+            return;
+        }
+    }
+}
+
+fn report_tick(report: TickReport) {
+    for (lane, progress) in [
+        ("scheduling", report.scheduling),
+        ("recovery", report.recovery),
+        ("retention", report.retention),
+    ] {
+        if let Some(error) = progress.scan_error {
+            tracing::warn!(lane, %error, "workflow manager scan unavailable");
+        }
+        if progress.timed_out {
+            tracing::warn!(
+                lane,
+                unvisited = progress.unvisited,
+                "workflow manager lane deadline exhausted"
+            );
+        }
+        for failure in &progress.failures {
+            tracing::warn!(
+                lane,
+                ?failure,
+                "workflow manager candidate retained for retry"
+            );
+        }
+        if progress.visited != 0 {
+            tracing::debug!(lane, ?progress, "workflow manager pass completed");
+        }
+    }
 }
 
 fn client_options(options: Options) -> ClientOptions {

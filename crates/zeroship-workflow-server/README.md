@@ -15,9 +15,18 @@ database credentials. Each HTTP thread owns its bounded Control client.
 The [manager and job queue design](../../docs/proposals/2026-09-11-workflow-worker.md)
 defines manager-owned cron, durable timers and the metadata job queue. Native
 queue and placement operations share the manager's database and transaction
-handle. The job HTTP endpoints and typed client are implemented; manager
-scheduling and the worker consumer still require cutover. Existing workers still discover due
+handle. The server drives the native scheduling, recovery and retention loop on
+its own platform-bound queue. Normal deployment publication and the worker
+consumer still require cutover. Existing workers still discover due
 customer work; that behavior does not define the target role split.
+
+The driver runs independently of HTTP threads and worker registration. Each pass
+visits bounded pages of due schedules, reconciliation obligations and unfinished
+deployment holds. A deadline shared by each lane's scans and candidate operations
+prevents a slow candidate from consuming the next lane's turn. Failed candidates
+remain durable and retry after a finite identity sweep; restarts preserve the
+queue's original occurrence and recovery identities. Shutdown stops new passes
+and joins the current bounded pass before releasing its clients.
 
 Control authorizes placement and queues typed pause, resume, cancellation or
 restart commands. Workers authenticate with their enrolled instance key, then
@@ -54,11 +63,12 @@ recovery instead of leaving a listener attached to a dead verifier connection.
 - `src/coordinator.rs`: provisioned ORM composition and startup authority checks.
 - `../zeroship-workflow-manager/src/coordinator/`: native placement and management.
 - `src/config.rs`: `[workflow]` settings and generated CLI overrides.
-- `src/server.rs`: metadata pools, verification and HTTP lifecycle.
+- `src/server.rs`: metadata pools, verification, native driver and HTTP lifecycle.
 - `../zeroship-workflow-manager/schema/schema.ts`: the shared migration DSL definition.
 - `tests/coordinator.rs`: native store, fencing and recovery contracts.
 - `tests/http.rs`: real server processes, replicas, revocation and restart.
 - `tests/http_jobs.rs`: job delivery, scoped publication and enrollment changes during lock waits.
+- `tests/driver.rs`: process-owned scheduling and retention recovery without workers.
 - `tests/platform_schema.rs`: actual platform migrations and database authority.
 
 Run `cargo test -p zeroship-workflow-server` for the host contracts. Required
@@ -72,6 +82,10 @@ private `workflow.service_key_file`, and `workflow.service_peers_file` containin
 Control's public key. Control's peer bundle must contain the workflow service's
 public key. The Control origin requires HTTPS except for literal loopback HTTP
 addresses. The host needs no customer connection or payload location.
+`workflow.driver_interval_ms` controls the delay after a completed pass;
+`workflow.driver_lane_timeout_ms` bounds each lane. `workflow.batch_limit` also
+bounds the candidate page. These settings control the manager host and add no
+workflow-specific creator CLI setup.
 `zeroship-workflow-server --config zeroship.toml --check-config`
 validates settings without connecting to dependencies. `/healthz` reports process
 liveness; `/readyz` verifies metadata and worker-registry access.
