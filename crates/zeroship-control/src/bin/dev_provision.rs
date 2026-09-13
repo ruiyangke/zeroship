@@ -251,5 +251,25 @@ fn parse_user_id(raw: &str) -> Result<UserId, String> {
 }
 
 fn default_owner_id() -> UserId {
-    UserId::parse("usr_0000000000000000000001").expect("fixed dev owner id is canonical")
+    UserId::parse("usr_0000000000000000000000001").expect("fixed dev owner id is canonical")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_owner_is_a_stable_canonical_user_id() {
+        let owner = default_owner_id();
+        assert_eq!(owner, default_owner_id());
+        assert_eq!(UserId::parse(owner.as_str()).unwrap(), owner);
+    }
+
+    #[test]
+    fn owner_parser_rejects_other_entities_and_raw_uuids() {
+        let owner = UserId::mint();
+        assert_eq!(parse_user_id(owner.as_str()).unwrap(), owner);
+        assert!(parse_user_id(zeroship_core::AppId::mint().as_str()).is_err());
+        assert!(parse_user_id("00000000-0000-0000-0000-000000000001").is_err());
+    }
 }
