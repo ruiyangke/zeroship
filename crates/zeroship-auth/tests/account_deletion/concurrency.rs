@@ -63,7 +63,7 @@ async fn a_departure_after_the_preflight_cannot_leave_the_organization_ownerless
         let (mock, control) = clear_control().await;
 
         let tag = Uuid::new_v4().simple().to_string();
-        let organization_id = format!("org_{}", &tag[..22]);
+        let organization_id = zeroship_core::typed_id::generate("org");
         let slug = format!("acctdel-{}", &tag[..12]);
         let victim = users::create(
             &db,
@@ -248,7 +248,7 @@ async fn a_promotion_after_the_preflight_cannot_leave_the_organization_ownerless
         let (mock, control) = clear_control().await;
 
         let tag = Uuid::new_v4().simple().to_string();
-        let organization_id = format!("org_{}", &tag[..22]);
+        let organization_id = zeroship_core::typed_id::generate("org");
         let slug = format!("acctdel-{}", &tag[..12]);
         let victim = users::create(
             &db,
