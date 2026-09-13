@@ -386,7 +386,7 @@ async fn handle_queue(
         } else {
             api.release_queue(&command).await
         };
-        result.map_err(failure)
+        result.map_err(|error| failure(&error))
     })
     .await
     .map_err(|_| FailureCode::Unavailable)?
@@ -471,7 +471,7 @@ async fn handle(
         } else {
             api.release(&worker, &command).await
         };
-        result.map_err(failure)
+        result.map_err(|error| failure(&error))
     })
     .await
     .map_err(|_| FailureCode::Unavailable)?
@@ -497,7 +497,7 @@ fn respond(result: Result<HoldReceipt, FailureCode>) -> web::HttpResponse {
         }
     }
 }
-fn failure(error: DeploymentError) -> FailureCode {
+const fn failure(error: &DeploymentError) -> FailureCode {
     match error {
         DeploymentError::InvalidRequest(_) => FailureCode::Invalid,
         DeploymentError::Unauthenticated => FailureCode::Unauthenticated,

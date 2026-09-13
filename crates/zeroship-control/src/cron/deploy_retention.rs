@@ -354,12 +354,12 @@ pub async fn run(state: Arc<AppState>, tick_secs: u64) {
         }
         if let Some(collector) = &mut collector {
             match collector.tick().await {
-                Ok(stats) if stats.candidates != 0 => tracing::info!(
-                    candidates = stats.candidates,
-                    retained = stats.retained,
-                    manifests_deleted = stats.manifests_deleted,
-                    finished = stats.finished,
-                    failed = stats.failed,
+                Ok(progress) if progress.candidates != 0 => tracing::info!(
+                    candidates = progress.candidates,
+                    retained = progress.retained,
+                    manifests_deleted = progress.manifests_deleted,
+                    finished = progress.finished,
+                    failed = progress.failed,
                     "deployment collector visited catalog page"
                 ),
                 Ok(_) => {}
