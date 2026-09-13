@@ -887,43 +887,7 @@ pub fn plan_delete_one(
     filter: Value,
     actor_id: Option<&str>,
 ) -> Result<crate::sql::compiler::CompiledQuery, DbError> {
-    plan_delete_one_input(binding, route, collection, filter.into(), actor_id)
-}
-
-pub(crate) fn plan_delete_one_input(
-    binding: &DbBinding,
-    route: &crate::tx_route::CapturedRoute,
-    collection: &str,
-    filter: predicate::Input,
-    actor_id: Option<&str>,
-) -> Result<crate::sql::compiler::CompiledQuery, DbError> {
-    // Resolve-then-build, folded into the one `Result` `run_op` already
-    // rejects on: an undeclared collection cannot be soft-deleted through a
-    // filter this deploy has no schema to lower.
-    crate::descriptor::collection_schema(binding, collection).and_then(|schema| {
-        let autobump =
-            AssignmentPlan::from_schema(&schema)?.write_assignments(&schema, actor_id, true, false);
-        let builder = delete::Builder::new(
-            binding.schema(),
-            collection,
-            &schema,
-            route.sql_registration(),
-        );
-        if soft_delete_column(&schema)?.is_none() {
-            return builder
-                .hard(filter, delete::Cardinality::One)
-                .map_err(DbError::from);
-        }
-        builder
-            .lifecycle(
-                filter,
-                soft_delete_column(&schema)?.expect("soft-delete column was resolved"),
-                false,
-                &autobump,
-                delete::Cardinality::One,
-            )
-            .map_err(DbError::from)
-    })
+    plan_delete_input(binding, route, collection, filter.into(), actor_id, false)
 }
 
 /// Compile a bulk soft delete, or a hard delete when no lifecycle marker exists.
@@ -934,30 +898,33 @@ pub fn plan_delete_many(
     filter: Value,
     actor_id: Option<&str>,
 ) -> Result<crate::sql::compiler::CompiledQuery, DbError> {
-    crate::descriptor::collection_schema(binding, collection).and_then(|schema| {
-        let autobump =
-            AssignmentPlan::from_schema(&schema)?.write_assignments(&schema, actor_id, true, false);
-        let builder = delete::Builder::new(
-            binding.schema(),
-            collection,
-            &schema,
-            route.sql_registration(),
-        );
-        if soft_delete_column(&schema)?.is_none() {
-            return builder
-                .hard(filter.into(), delete::Cardinality::Many)
-                .map_err(DbError::from);
+    plan_delete_input(binding, route, collection, filter.into(), actor_id, true)
+}
+
+pub(crate) fn plan_delete_input(
+    binding: &DbBinding,
+    route: &crate::tx_route::CapturedRoute,
+    collection: &str,
+    filter: predicate::Input,
+    actor_id: Option<&str>,
+    many: bool,
+) -> Result<crate::sql::compiler::CompiledQuery, DbError> {
+    let schema = crate::descriptor::collection_schema(binding, collection)?;
+    let autobump =
+        AssignmentPlan::from_schema(&schema)?.write_assignments(&schema, actor_id, true, false);
+    let builder = delete::Builder::new(
+        binding.schema(),
+        collection,
+        &schema,
+        route.sql_registration(),
+    );
+    match soft_delete_column(&schema)? {
+        None => builder.hard(filter, mutation_cardinality(many)),
+        Some(marker) => {
+            builder.lifecycle(filter, marker, false, &autobump, mutation_cardinality(many))
         }
-        builder
-            .lifecycle(
-                filter.into(),
-                soft_delete_column(&schema)?.expect("soft-delete column was resolved"),
-                false,
-                &autobump,
-                delete::Cardinality::Many,
-            )
-            .map_err(DbError::from)
-    })
+    }
+    .map_err(DbError::from)
 }
 
 /// Permanently remove a matching row regardless of its deletion marker.
@@ -967,16 +934,7 @@ pub fn plan_purge_one(
     collection: &str,
     filter: Value,
 ) -> Result<crate::sql::compiler::CompiledQuery, DbError> {
-    crate::descriptor::collection_schema(binding, collection).and_then(|schema| {
-        delete::Builder::new(
-            binding.schema(),
-            collection,
-            &schema,
-            route.sql_registration(),
-        )
-        .hard(filter.into(), delete::Cardinality::One)
-        .map_err(DbError::from)
-    })
+    plan_purge_input(binding, route, collection, filter.into(), false)
 }
 
 /// Compile a bulk hard delete.
@@ -986,16 +944,25 @@ pub fn plan_purge_many(
     collection: &str,
     filter: Value,
 ) -> Result<crate::sql::compiler::CompiledQuery, DbError> {
-    crate::descriptor::collection_schema(binding, collection).and_then(|schema| {
-        delete::Builder::new(
-            binding.schema(),
-            collection,
-            &schema,
-            route.sql_registration(),
-        )
-        .hard(filter.into(), delete::Cardinality::Many)
-        .map_err(DbError::from)
-    })
+    plan_purge_input(binding, route, collection, filter.into(), true)
+}
+
+pub(crate) fn plan_purge_input(
+    binding: &DbBinding,
+    route: &crate::tx_route::CapturedRoute,
+    collection: &str,
+    filter: predicate::Input,
+    many: bool,
+) -> Result<crate::sql::compiler::CompiledQuery, DbError> {
+    let schema = crate::descriptor::collection_schema(binding, collection)?;
+    delete::Builder::new(
+        binding.schema(),
+        collection,
+        &schema,
+        route.sql_registration(),
+    )
+    .hard(filter, mutation_cardinality(many))
+    .map_err(DbError::from)
 }
 
 /// Compile restoration of one soft-deleted row and its declared assignments.
@@ -1006,30 +973,7 @@ pub fn plan_restore_one(
     filter: Value,
     actor_id: Option<&str>,
 ) -> Result<crate::sql::compiler::CompiledQuery, DbError> {
-    crate::descriptor::collection_schema(binding, collection).and_then(|schema| {
-        let autobump =
-            AssignmentPlan::from_schema(&schema)?.write_assignments(&schema, actor_id, false, true);
-        let marker = soft_delete_column(&schema)?.ok_or_else(|| {
-            DbError::validation(
-                "restore_not_supported",
-                "collection has no soft-delete column",
-            )
-        })?;
-        delete::Builder::new(
-            binding.schema(),
-            collection,
-            &schema,
-            route.sql_registration(),
-        )
-        .lifecycle(
-            filter.into(),
-            marker,
-            true,
-            &autobump,
-            delete::Cardinality::One,
-        )
-        .map_err(DbError::from)
-    })
+    plan_restore_input(binding, route, collection, filter.into(), actor_id, false)
 }
 
 /// Compile restoration of matching soft-deleted rows and declared assignments.
@@ -1040,30 +984,42 @@ pub fn plan_restore_many(
     filter: Value,
     actor_id: Option<&str>,
 ) -> Result<crate::sql::compiler::CompiledQuery, DbError> {
-    crate::descriptor::collection_schema(binding, collection).and_then(|schema| {
-        let autobump =
-            AssignmentPlan::from_schema(&schema)?.write_assignments(&schema, actor_id, false, true);
-        let marker = soft_delete_column(&schema)?.ok_or_else(|| {
-            DbError::validation(
-                "restore_not_supported",
-                "collection has no soft-delete column",
-            )
-        })?;
-        delete::Builder::new(
-            binding.schema(),
-            collection,
-            &schema,
-            route.sql_registration(),
+    plan_restore_input(binding, route, collection, filter.into(), actor_id, true)
+}
+
+pub(crate) fn plan_restore_input(
+    binding: &DbBinding,
+    route: &crate::tx_route::CapturedRoute,
+    collection: &str,
+    filter: predicate::Input,
+    actor_id: Option<&str>,
+    many: bool,
+) -> Result<crate::sql::compiler::CompiledQuery, DbError> {
+    let schema = crate::descriptor::collection_schema(binding, collection)?;
+    let autobump =
+        AssignmentPlan::from_schema(&schema)?.write_assignments(&schema, actor_id, false, true);
+    let marker = soft_delete_column(&schema)?.ok_or_else(|| {
+        DbError::validation(
+            "restore_not_supported",
+            "collection has no soft-delete column",
         )
-        .lifecycle(
-            filter.into(),
-            marker,
-            true,
-            &autobump,
-            delete::Cardinality::Many,
-        )
-        .map_err(DbError::from)
-    })
+    })?;
+    delete::Builder::new(
+        binding.schema(),
+        collection,
+        &schema,
+        route.sql_registration(),
+    )
+    .lifecycle(filter, marker, true, &autobump, mutation_cardinality(many))
+    .map_err(DbError::from)
+}
+
+fn mutation_cardinality(many: bool) -> delete::Cardinality {
+    if many {
+        delete::Cardinality::Many
+    } else {
+        delete::Cardinality::One
+    }
 }
 
 // ---------------------------------------------------------------------------

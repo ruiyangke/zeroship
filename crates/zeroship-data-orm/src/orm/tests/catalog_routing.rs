@@ -84,7 +84,7 @@ async fn sqlite_catalog_reads_transaction_local_protection() {
 
             let committed = backend.introspect_schema(&app_id, &schema, None).await?;
             assert!(
-                committed.tables.get("protected_records").is_none(),
+                !committed.tables.contains_key("protected_records"),
                 "the autocommit connection must not see transaction-local catalog changes"
             );
             let transactional = crate::exec::read_catalog(&route).await?;

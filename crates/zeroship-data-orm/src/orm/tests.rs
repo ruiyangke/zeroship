@@ -5,6 +5,7 @@ use zeroship_data_orm::encryption::ProjectKeySource;
 schema!(pub test_schema = "../../tests/fixtures/schema.runtime.json");
 use test_schema::posts;
 
+mod aggregate_protection;
 mod bulk;
 mod conflicts;
 mod calendar_date;
@@ -28,8 +29,12 @@ mod protected_updates;
 mod schema_updates;
 mod sql_registration;
 mod timestamp;
+mod transaction_options;
 mod typed_arrays;
+mod typed_predicates;
+mod typed_mutations;
 mod typed_updates;
+mod typed_reads;
 mod update_operators;
 mod update_validation;
 mod upsert_contract;
@@ -636,9 +641,19 @@ async fn database() -> (Database, tempfile::TempDir) {
 }
 
 async fn database_with_keys(key_source: ProjectKeySource) -> (Database, tempfile::TempDir) {
+    database_with_binding(
+        DbBinding::cold_start(zeroship_core::app_id::AppId::mint().as_str()),
+        key_source,
+    )
+    .await
+}
+
+async fn database_with_binding(
+    binding: DbBinding,
+    key_source: ProjectKeySource,
+) -> (Database, tempfile::TempDir) {
     crate::tests::fixtures::reset_engine();
     let directory = tempfile::tempdir().unwrap();
-    let binding = DbBinding::cold_start("orm_fixture");
     let migration_backend = zeroship_migrate_sqlite::SqliteBackend::open(
         &directory
             .path()
@@ -1123,8 +1138,11 @@ use crate::tests::fixtures::DatabaseFixture;
 
 #[compio::test]
 async fn independent_databases_keep_schema_policy_and_transactions_isolated() {
-    let (first, _first_files) = database().await;
-    let (second, _second_files) = database().await;
+    let binding = DbBinding::cold_start(zeroship_core::app_id::AppId::mint().as_str());
+    let (first, _first_files) =
+        database_with_binding(binding.clone(), ProjectKeySource::unavailable()).await;
+    let (second, _second_files) =
+        database_with_binding(binding, ProjectKeySource::unavailable()).await;
     assert_eq!(first.binding(), second.binding());
     first.install_mask_policy(value!({})).unwrap();
     second

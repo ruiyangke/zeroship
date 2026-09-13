@@ -263,7 +263,9 @@ impl TxLanes {
         match self.lanes.entry(app_id.to_string()) {
             std::collections::hash_map::Entry::Occupied(_) => false,
             std::collections::hash_map::Entry::Vacant(slot) => {
-                slot.insert(TxLane::default());
+                let mut lane = TxLane::default();
+                lane.completion = Some(crate::transaction::driver::Completion::default());
+                slot.insert(lane);
                 true
             }
         }
@@ -490,7 +492,7 @@ impl TxLanes {
             previous.is_none(),
             "admit_transaction: a transaction is already admitted for this app",
         );
-        lane.completion = Some(crate::transaction::driver::Completion::default());
+        lane.completion.get_or_insert_with(Default::default);
         // A fresh transaction starts from a clean withdrawal state; the
         // tombstone belongs to the session that was withdrawn, not to the app.
         self.withdrawn_tx_sessions.remove(app_id);

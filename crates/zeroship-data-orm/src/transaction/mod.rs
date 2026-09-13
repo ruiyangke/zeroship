@@ -25,7 +25,6 @@ pub(crate) mod driver;
 #[cfg(test)]
 pub mod probe;
 
-use crate::exec::clear_pending_emits;
 use crate::tx_route::TxRoute;
 use zeroship_data_orm::error::DbError;
 
@@ -67,24 +66,14 @@ impl std::future::Future for AwaitTxClaim {
     }
 }
 
-/// The admission claim, as an RAII guard covering `Preparing` and `Starting`.
-///
-/// **SC-1 rule 5, the defect labelled DBR-11.** Cancellation before `BEGIN`
-/// returns must not leak the claim, and that window is exactly these two states:
-/// from the moment admission is granted to the moment the session is installed
-/// and the reducer reaches `Idle`. Before this guard, a spawned op cancelled
-/// inside that window left the claim held and every later transaction for the
-/// app parked until the isolate was evicted.
-///
-/// It is disarmed by [`Self::handed_to_reducer`] and by nothing else. From
-/// `Idle` onward the reducer emits `Action::ReleaseAdmission` on *every* path to
-/// `Settled` - including the forced ones - so the release stops being something
-/// a `return` can skip. A creator callback that never settles is bounded by the
-/// execution deadline, which is armed on the same transition that granted
-/// admission.
+/// Owns a native transaction's admission until settlement takes over.
+/// Dropping an admitted guard starts supervised cancellation; its lane remains
+/// claimed until cleanup acknowledges rollback or withdraws an uncertain session.
 #[derive(Debug)]
 pub struct TxAdmission {
     app_id: String,
+    owner: crate::OrmContext,
+    completion: driver::Completion,
     armed: bool,
 }
 
@@ -92,8 +81,16 @@ impl TxAdmission {
     /// Wait for the claim, then arm.
     pub async fn acquire(app_id: String) -> Self {
         AwaitTxClaim::new(app_id.clone()).await;
+        Self::current(app_id)
+    }
+
+    fn current(app_id: String) -> Self {
+        let completion = crate::tx_lanes::with(|l| l.transaction_completion(&app_id))
+            .expect("a claimed lane has an admission identity");
         Self {
             app_id,
+            owner: crate::orm_context::current(),
+            completion,
             armed: true,
         }
     }
@@ -109,25 +106,16 @@ impl Drop for TxAdmission {
         if !self.armed {
             return;
         }
-        // This transaction is not going to settle. Retire its state, WITHDRAW
-        // any session that was installed - a session abandoned mid-`BEGIN` has
-        // unknown health and must not go back to the pool - and release the
-        // claim so later transactions for this app are not parked forever.
-        //
-        // `withdraw_tx_session`, not `take_tx_client_for`: the session may be
-        // out on loan behind a `TxClientSlotGuard` whose future was cancelled by
-        // the same drop that got us here, and the tombstone is what destroys it
-        // when that guard restores it.
-        let client = crate::tx_lanes::with_mut(|l| {
-            l.retire_transaction(&self.app_id);
-            let client = l.withdraw_tx_session(&self.app_id);
-            l.release_tx_claim(&self.app_id);
-            client
+        self.owner.with(|| {
+            if !crate::tx_lanes::with(|l| self.completion.is_current_in(l, &self.app_id)) {
+                return;
+            }
+            if driver::cancel_admission(&self.app_id, self.completion.clone()) {
+                return;
+            }
+            // No reducer means BEGIN has not been dispatched by this claim.
+            crate::tx_lanes::with_mut(|l| l.release_tx_claim(&self.app_id));
         });
-        if let Some(client) = client {
-            crate::tx_lanes::destroy_tx_connection(client);
-        }
-        clear_pending_emits(&self.app_id);
     }
 }
 
@@ -139,17 +127,16 @@ impl Drop for TxAdmission {
 /// returned only after that frame reports a successful rollback. Settlement
 /// goes through [`exec_settle`], and therefore through the reducer - including
 /// the PostgreSQL `COMMIT`-answered-with-`ROLLBACK` check the driver's terminal
-/// classifier makes. Dropping an unsettled top-level frame withdraws its
-/// session through [`TxAdmission`]: the connection is destroyed rather than
-/// pooled, because a transaction abandoned mid-flight has unknown health.
+/// classifier makes. Dropping an unsettled top-level frame transfers cleanup
+/// to [`TxAdmission`], which retains ownership until the backend settles.
 #[must_use = "an atomic write frame must be settled with finish"]
 #[derive(Debug)]
 pub struct AtomicWriteFrame {
     route: TxRoute,
     frame: Option<reducer::frames::FrameId>,
     state: AtomicWriteFrameState,
-    /// Held for a top-level frame until the settle path takes over, so a
-    /// cancelled `begin` releases the claim it took. See [`TxAdmission`].
+    /// Armed through the callback and savepoint settlement. Root terminal SQL
+    /// transfers ownership to the driver's supervised settlement task.
     admission: Option<TxAdmission>,
 }
 
@@ -163,6 +150,13 @@ enum AtomicWriteFrameState {
 impl AtomicWriteFrame {
     /// Open the frame and promote the captured dispatch route onto it.
     pub async fn begin(route: TxRoute) -> Result<Self, DbError> {
+        Self::begin_with_isolation(route, None).await
+    }
+
+    pub(crate) async fn begin_with_isolation(
+        route: TxRoute,
+        isolation_level: Option<zeroship_data_orm::error::IsolationLevel>,
+    ) -> Result<Self, DbError> {
         route.check_scope()?;
         let nested = route.in_tx();
         let app_id = route.app_id().to_string();
@@ -170,31 +164,35 @@ impl AtomicWriteFrame {
         if nested && !crate::tx_lanes::with(|l| l.has_tx_for(&app_id)) {
             return Err(DbError::validation_hinted(
                 "transaction_scope_expired",
-                "updateMany: the enclosing transaction has already settled".to_string(),
-                "Run updateMany while its enclosing db.transaction callback is still open.",
+                "the enclosing transaction has already settled".to_string(),
+                "Run the mutation while its enclosing db.transaction callback is still open.",
             ));
         }
         // The depth cap is the frame stack's, not a second copy here.
         let admission = if nested {
-            None
+            Some(TxAdmission::current(app_id.clone()))
         } else {
             Some(TxAdmission::acquire(app_id.clone()).await)
         };
 
-        // Cloned off the route while it is still alive - it is consumed by
-        // `into_internal_transaction` two lines below. Both `BackendHandle`
-        // arms are an `Rc`, so this is a refcount bump, not a second backend.
         let backend = route.backend().clone();
-        match exec_begin_or_savepoint(nested, None, &app_id, schema, backend).await {
+        match exec_begin_or_savepoint(nested, isolation_level, &app_id, schema, backend).await {
             Ok(frame) => Ok(Self {
                 route: route.into_internal_transaction()?,
                 frame,
                 state: AtomicWriteFrameState::Open,
                 admission,
             }),
-            // `admission` drops here, releasing the claim and destroying any
-            // session that was installed.
-            Err(error) => Err(error),
+            Err(error) => {
+                // A returned refusal is handled by the caller. Only abandoned
+                // nested work forces its enclosing transaction to end.
+                if nested {
+                    if let Some(admission) = admission {
+                        admission.handed_to_reducer();
+                    }
+                }
+                Err(error)
+            }
         }
     }
 
@@ -210,14 +208,28 @@ impl AtomicWriteFrame {
     /// a savepoint settle failure wins because the enclosing transaction state
     /// is then no longer trustworthy.
     pub async fn finish<T>(mut self, body: Result<T, DbError>) -> Result<T, DbError> {
+        if self.admission.as_ref().is_some_and(|admission| {
+            !admission.owner.with(|| {
+                crate::tx_lanes::with(|l| {
+                    admission.completion.is_current_in(l, &admission.app_id)
+                })
+            })
+        }) {
+            return Err(scope::expired());
+        }
         let success = body.is_ok();
         // The reducer owns the admission release from here: every path it takes
         // to `Settled` emits `ReleaseAdmission`.
-        if let Some(admission) = self.admission.take() {
-            admission.handed_to_reducer();
+        if self.frame.is_none() {
+            if let Some(admission) = self.admission.take() {
+                admission.handed_to_reducer();
+            }
         }
         self.state = AtomicWriteFrameState::Settling;
         let outcome = exec_settle(self.route.app_id(), success, self.frame).await;
+        if let Some(admission) = self.admission.take() {
+            admission.handed_to_reducer();
+        }
         self.state = AtomicWriteFrameState::Settled;
         match (body, outcome) {
             (Ok(value), SettleOutcome::Ok) => Ok(value),
@@ -236,28 +248,7 @@ impl Drop for AtomicWriteFrame {
             return;
         }
 
-        let app_id = self.route.app_id();
-        if self.frame.is_some() {
-            // A nested frame cannot synchronously issue ROLLBACK TO from Drop.
-            // The enclosing transaction still owns the session and must settle
-            // it; do not release its claim or destroy its session here.
-            tracing::warn!(
-                app_id,
-                "nested atomic write frame dropped before savepoint settlement"
-            );
-            return;
-        }
-
-        // A top-level frame dropped unsettled is the cancellation case, and
-        // `admission`'s own Drop is what handles it: retire the reducer,
-        // destroy the session rather than pool it, release the claim, clear the
-        // queued events. Nothing is open-coded here any more, so the two paths
-        // cannot disagree about what a cancelled admission owes.
-        //
-        // The SQLite fail-closed arm this replaced ("no client; retaining
-        // claim") kept a claim forever whenever the exec path happened to hold
-        // the handle at drop time. The withdrawal tombstone answers that
-        // properly: the handle IS destroyed, when its holder returns it.
+        // The admission guard transfers cancellation to the supervised driver.
         drop(self.admission.take());
     }
 }
@@ -285,6 +276,12 @@ pub async fn exec_begin_or_savepoint(
     backend: crate::backend::BackendHandle,
 ) -> Result<Option<reducer::frames::FrameId>, DbError> {
     if nested {
+        if isolation_level.is_some() {
+            return Err(DbError::validation(
+                "nested_isolation_level",
+                "db.transaction: savepoints inherit the enclosing transaction's isolation",
+            ));
+        }
         let driven = driver::open_frame(app_id).await;
         if let Some(refusal) = driven.refusal() {
             return Err(frame_refusal(refusal, driven.error));
@@ -310,6 +307,9 @@ pub async fn exec_begin_or_savepoint(
             let error = driven.error.unwrap_or_else(|| {
                 DbError::internal("db.transaction: BEGIN did not open a transaction")
             });
+            if matches!(error, DbError::ValidationFailed { .. }) {
+                return Err(error);
+            }
             Err(DbError::Coded {
                 code: "begin_failed".to_string(),
                 message: format!("db.transaction: BEGIN failed: {}", error.message_str()),
@@ -761,7 +761,7 @@ mod tests {
     /// because both were the same single connection. That coupling is the
     /// divergence SC-2 retires, so the probe now names the lane it wants.
     #[test]
-    fn sqlite_top_level_begin_ignores_isolation_and_commits() {
+    fn sqlite_top_level_begin_accepts_serializable_and_commits() {
         run(async {
             let (backend, _dir, _reset) = install_sqlite_backend_for_test();
             let probe = backend.autocommit_client();
@@ -1088,6 +1088,21 @@ mod tests {
                 Some("0"),
                 "dropping an unsettled frame must roll back its writes"
             );
+            let next = compio::time::timeout(
+                std::time::Duration::from_secs(1),
+                AtomicWriteFrame::begin(
+                    crate::tx_route::CapturedRoute::pool_for_tests(
+                        "app_sqlite",
+                        test_backend().sql_registration().clone(),
+                    )
+                    .bind(test_backend())
+                    .unwrap(),
+                ),
+            )
+            .await
+            .expect("supervised cleanup must release the transaction lane")
+            .expect("begin after cleanup");
+            next.finish(Ok(())).await.expect("settle replacement");
             assert!(!crate::tx_lanes::with(|l| {
                 l.has_tx_for("app_sqlite") || l.tx_claimed_by("app_sqlite")
             }));
