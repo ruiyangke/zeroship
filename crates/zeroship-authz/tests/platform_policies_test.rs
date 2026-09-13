@@ -4,7 +4,7 @@
 //! the loaded bands with the rank the resolve WOULD have produced. That is the
 //! point of carrying authority in context rather than in a principal
 //! attribute - the policy's decision is a pure function of (action, resource
-//! type, rank), so it can be pinned exhaustively here, and `two_call_test.rs`
+//! type, rank), so it can be pinned exhaustively here, and `eval::database_tests`
 //! is left to prove that the rank the database produces is the right one.
 //!
 //! **The developer and viewer bands get their first behavioural tests here.**

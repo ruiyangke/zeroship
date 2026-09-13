@@ -516,3 +516,6 @@ mod tests {
         assert!(refuse_on_evaluation_error(&clean_response, "test pass").is_ok());
     }
 }
+
+#[cfg(test)]
+mod database_tests;
