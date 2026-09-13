@@ -174,7 +174,7 @@ impl<E: Entity> EntityQuery<E> {
             database: self.entity.collection.database,
             query,
             selection: (),
-            validate_selection: |_, database, _| database.check_scope(),
+            validate_selection: |(), database, _| database.check_scope(),
             error: None,
         })
     }

@@ -1,6 +1,12 @@
+#![expect(
+    clippy::future_not_send,
+    reason = "ORM fixtures use thread-local compio sessions"
+)]
+
 use super::fixtures::CollectionFixture;
 use super::*;
 
+#[expect(clippy::too_many_lines, reason = "shared backend conformance scenario")]
 async fn exercise(owner: CollectionFixture) {
     let db = &owner.database;
     let table = db.entity::<posts::Entity>().unwrap();
@@ -181,25 +187,25 @@ async fn exercise(owner: CollectionFixture) {
 }
 #[compio::test]
 async fn typed_read_terminals_sqlite() {
-    exercise(
+    Box::pin(exercise(
         CollectionFixture::sqlite_native(
             "posts",
             posts::Entity::schema().clone(),
             fixtures::post_migration_fields(),
         )
         .await,
-    )
+    ))
     .await;
 }
 #[compio::test]
 async fn typed_read_terminals_postgres() {
-    exercise(
+    Box::pin(exercise(
         CollectionFixture::postgres_native(
             "posts",
             posts::Entity::schema().clone(),
             fixtures::post_migration_fields(),
         )
         .await,
-    )
+    ))
     .await;
 }
