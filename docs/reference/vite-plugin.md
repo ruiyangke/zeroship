@@ -178,17 +178,34 @@ Kind resolution is:
 
 Names are never used to infer `query`. Reads opt in via `query(...)` or an explicit `config.kind = "query"` so cache and retry policy do not depend on identifier spelling.
 
-`lazy: true` is supported in either the wrapper config or `fn.config`. When present, the synthetic server entry emits a dynamic `import()` wrapper instead of an eager namespace import. Non-literal `lazy` values warn and stay eager.
+`lazy: true` is recorded from either the wrapper config or `fn.config`.
+When the entry generator receives explicit server bindings, it emits a
+`{ load: () => Promise<Procedure> }` record for a lazy binding. The loader
+returns the actual exported procedure, including its validation and kind
+metadata. Non-literal `lazy` values warn and stay eager. A module already
+statically imported by the app still evaluates during startup.
 
 ## Synthetic server entry
 
-[`sdks/vite-plugin/src/rpc-registry.ts`](../../sdks/vite-plugin/src/rpc-registry.ts) emits `virtual:zeroship/_server-entry`. Its job is to normalize the app module and delegate RPC fall-through to `@zeroship/bootstrap`:
+[`sdks/vite-plugin/src/rpc-registry.ts`](../../sdks/vite-plugin/src/rpc-registry.ts)
+emits `virtual:zeroship/_server-entry`. It normalizes the app's exports for
+native runtime dispatch:
 
-- schema comes from the generated `schema.runtime.json` descriptor, not the synthetic default export
-- `default.fetch` is a shared bootstrap fetch handler that routes `/__zeroship/v1/<wireId>` and falls through to the user's own fetch for non-RPC paths
-- `default.rpc` is a plain object keyed by `wireId`
+- Schema preparation uses the host's generated `schema.runtime.json` descriptor.
+- `default.fetch` retains the user's handler and original default-object
+  receiver. When absent, a top-level `fetch` export is used. When neither is
+  present, the runtime handles the missing handler.
+- `default.rpc` is a dictionary of procedure references or lazy load records,
+  keyed by string wire IDs. Declared own string properties are copied first;
+  named exports or explicit bindings take precedence. Names such as
+  `__proto__` and `constructor` are ordinary own keys. A callable or array
+  `default.rpc` is rejected.
 
-The runtime-side dispatcher and stream encoder live in [`sdks/bootstrap/README.md`](../../sdks/bootstrap/README.md) and [`zeroship-standard.md`](zeroship-standard.md), not as generated helper code in the entry.
+The generated entry supplies callable references and module imports. The
+[native dispatcher](../../crates/zeroship-runtime/src/rpc/dispatch/mod.rs)
+owns HTTP RPC invocation, validation, capability context and response framing.
+The entry still imports the workflow collector from bootstrap while the
+workflow integration remains active. See [the deploy contract](zeroship-standard.md).
 
 ## See also
 
