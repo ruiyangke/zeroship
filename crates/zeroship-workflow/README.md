@@ -55,6 +55,14 @@ Lifecycle changes do not free an accepted request identity for reuse. Replaying
 a signal-token request returns the original token, whose expiration and
 revocation still apply. Receipt retirement requires explicit admission fences;
 the journal does not infer them from elapsed time.
+`service::publication` records immutable advance-job intents with creator
+transitions. `AppWorkflows::pending_jobs` and `publish_job` publish under a bound
+app scope without holding a creator transaction across manager I/O. The entire
+returned specification must match before confirmation; retries preserve job
+identities, and pending intents retain deployment dependencies independently of
+run history. `AssignedPublisher` uses the authenticated worker client. Delivered
+job acceptance, semantic receipts and the manager-dispatched consumer remain
+cutover work; publication alone does not establish that production protocol.
 `zeroship-workflow-manager::deployments::DeploymentHolds` accepts an authorized
 platform ORM database. Holds survive
 reconnection, and generation checks reject stale releases. The collector helpers

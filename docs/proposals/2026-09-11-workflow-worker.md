@@ -253,7 +253,7 @@ table has the `__zeroship_workflow_` prefix; none belongs in Control's schema.
 | `app_state` | App serialization and journal counters. Trusted admission policy remains outside customer SQL. |
 | `deploys` | Locally accepted immutable app deployment and availability state. |
 | `deployment_holds` | Customer dependency intent and observed hold generation; not the platform hold ledger. |
-| `runs` | Run identity, lifecycle state, current generation, relationships and frontier metadata. |
+| `runs` | Run identity, lifecycle state, current generation, relationships and logical frontier revision, independent of the task lease epoch. |
 | `generations` | Pinned deployment, input, output/error references and generation lifecycle. |
 | `steps` | Replay history, checkpoints and compensation state. |
 | `tasks` | Existing customer execution claims, fences and completion receipts. Adapt to delivered jobs rather than use it as a second scheduler. |
@@ -263,12 +263,17 @@ table has the `__zeroship_workflow_` prefix; none belongs in Control's schema.
 | `management_receipts` | Durable creator outcomes keyed by coordinator management request, independently scoped from app requests. |
 | `schedules`, `occurrences` | Existing customer schedule definitions and accepted occurrences. Calendar discovery moves to the manager; customer acceptance, overlap state and input references remain customer-side. |
 | `payloads`, `payload_refs` | Prepared upload metadata, ownership, integrity and committed references. |
-| `outbox` | Existing customer event outbox. Extend or replace its contracts for durable queue publication; its present existence does not mean that cutover is complete. |
+| `outbox` | Customer events and their payloads; distinct from manager queue metadata. |
+| `job_publications` | Immutable advance job specifications, generation/frontier/due-time identity and manager confirmation time. Pending records retain deployment dependencies and survive history removal. |
 
-Delivered-job receipts, publication intents and execution fences need stable
-job/frontier identities independent of transport attempts. They may use adapted
-journal tables or dedicated receipt models. Their exact schema is pending; the
-transaction and retention rules below are required regardless of placement.
+Publication intents now use dedicated journal records. The scoped unique index
+binds run, generation, frontier revision and due time; `id` remains the sole
+primary key. A transition that advances an idle run invalidates its older
+frontier without retargeting already committed jobs. Task claim, heartbeat and
+release do not advance that logical revision. A new generation starts a fresh
+frontier. Delivered-job receipts and their binding to creator execution claims
+still require implementation, including rejecting superseded frontiers before
+execution and replaying the original semantic outcome across delivery attempts.
 There is no manager reader of these tables. A reconciliation job reads them
 through an app-bound worker, never through a platform connection.
 
@@ -530,6 +535,23 @@ Creator state commits before its ACK. If the manager is unavailable or full,
 intents remain pending. Marking publication confirmed happens only after a
 manager receipt is validated against app, job and content. A lost confirmation
 write merely causes another idempotent publication attempt.
+
+`AppWorkflows::pending_jobs` pages creator-owned advance intents under trusted
+app policy. `publish_job` reads and commits locally before calling its
+host-bound `JobPublisher`, validates the entire immutable specification, then
+confirms it under the app lock in a new creator transaction. Concurrent
+publishers may submit the same job; a confirmed intent remains as a durable
+receipt. `AssignedPublisher` uses the authenticated worker client and its
+current app assignment. These methods do not discover apps or schedule work;
+the future consumer invokes them for its delivered reconciliation scope.
+
+Starts, child/continuation creation, task checkpoints, restart and runnable
+lifecycle/signal/dependency wake-ups record their advance intent in the creator
+transaction. A checkpoint publication failure rolls back history and its task
+receipt together. Pending intents prevent creator deployment-hold release even
+if run history has been removed. Confirmed records do not retain that customer
+hold by themselves; the manager's queue and retention fences then own delivery
+dependencies. The production collector cutover remains required.
 
 App request receipts and delivery receipts have separate identities. Both retain
 their deduplication state until an explicit retirement protocol proves that the
@@ -1432,9 +1454,16 @@ platform migrations still grant the workflow owner role to worker and Control,
 and workflow provisioning still grants that role schema creation authority.
 Remove those obsolete edges with the legacy journal provisioning paths.
 
+Creator publication contracts cover acceptance and checkpoint rollback, changed
+acknowledgements, lost replies, confirmation failure, concurrent publication,
+reopen, scope isolation and generation/frontier changes. Queue submission in
+these tests uses a separate native manager database. They do not prove the
+production scope-duty admission handshake or delivered-job receipt protocol.
+
 Manager cron/timer discovery, scope deadline orchestration, capacity activation,
-creator job receipts/publication intents and the simple worker consumer still
-require implementation and integration. Existing customer
+creator delivered-job receipts and the simple worker consumer still require
+implementation and integration. Publication intents exist in the journal; their
+manager-dispatched reconciliation and settlement integration remain unwired. Existing customer
 scheduler/task polling and maintenance code remains a foundation to replace.
 Its existence does not satisfy manager-owned scheduling.
 

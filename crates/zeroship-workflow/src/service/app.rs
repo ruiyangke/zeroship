@@ -164,10 +164,13 @@ impl AppWorkflows {
                             value!({"$set":{"key":null, "control":"cancel"}}),
                         )
                         .await?;
-                        runs.execute(Operation::Update {
-                            filter: value!({"app_id":self.app.as_str(), "id":existing.id, "task_id":null}),
+                        let woke = runs.execute(Operation::Update {
+                            filter: value!({"app_id":self.app.as_str(), "id":existing.id.clone(), "task_id":null}),
                             patch: value!({"$set":{"due_at":now}}), many: true,
                         }).await?;
+                        if matches!(woke, Output::Count(1)) {
+                            super::publication::advance(&tx, &self.app, &existing.id, now).await?;
+                        }
                     }
                 }
             }
@@ -442,6 +445,7 @@ pub(crate) async fn insert_root_run(
             "input":encode(&options.input)?, "state":"queued", "started_at":now,
         }))
         .await?;
+    super::publication::record(tx, app, id, now).await?;
     emit(
         tx,
         app,

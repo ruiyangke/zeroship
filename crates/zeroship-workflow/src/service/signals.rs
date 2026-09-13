@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use zeroship_core::{app_id::AppId, typed_id};
 use zeroship_data_orm::{
-    orm::{Entity, FindOptions, FromRow, Output},
+    orm::{Entity, FindOptions, FromRow, Operation, Output},
     sql::{CompareOp, Literal, Operand, Predicate},
     value,
 };
@@ -126,6 +126,7 @@ pub(crate) async fn deliver(
                     "task_id":null, "control":"none", "state":"waiting"}),
                 value!({"due_at":now}),
             ).await?;
+            super::publication::advance(tx, app, run_id, now).await?;
         }
     }
     emit(
@@ -337,10 +338,14 @@ impl WorkflowService {
                     "target_ordinal":recipient.ordinal,
                 })).await?;
                 delivered += 1;
-                tx.database().collection(models::runs::Entity::COLLECTION)?.update(
+                let woke = tx.database().collection(models::runs::Entity::COLLECTION)?.execute(Operation::Update {
+                    filter:
                     value!({"app_id":app.as_str(), "id":recipient.run_id.clone(), "generation":recipient.generation,
-                        "task_id":null, "control":"none", "state":"waiting"}), value!({"due_at":now}),
-                ).await?;
+                        "task_id":null, "control":"none", "state":"waiting"}), patch:value!({"due_at":now}), many:true,
+                }).await?;
+                if matches!(woke, Output::Count(1)) {
+                    super::publication::advance(&tx, &app, &recipient.run_id, now).await?;
+                }
                 emit(
                     &mut tx,
                     &app,

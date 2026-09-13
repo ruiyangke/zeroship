@@ -25,6 +25,10 @@ scope = { include = ["${namespace}"] }
 key = "schema.cross_schema"
 value = true
 scope = { include = ["${namespace}"] }
+[[grant]]
+key = "sql.raw"
+value = true
+scope = { include = ["${namespace}"] }
 `;
   const statements = previewSql({ envelopes: [JSON.stringify(envelope)], dialect, defaultSchema: namespace, ownerApp: "workflow", charterLayers: [charter] });
   const artifacts = genArtifacts({ envelopes: [envelope], dialect, projectSchema: namespace, charterLayers: [charter] });

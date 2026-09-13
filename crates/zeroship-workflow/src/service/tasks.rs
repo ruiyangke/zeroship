@@ -150,6 +150,7 @@ impl WorkflowService {
                     advanced = true;
                 }
                 if !frontier::prepare(&mut tx, &app, &run, now).await? {
+                    super::publication::advance(&tx, &app, &id, now).await?;
                     advanced = true;
                     tx.commit().await?;
                     continue;
@@ -308,6 +309,7 @@ impl WorkflowService {
             claim.now,
         )
         .await?;
+        super::publication::advance(&tx, &claim.app, &claim.run.text("id")?, claim.now).await?;
         claim.validate_at(tx.now().await?)?;
         let receipt = CompletionReceipt {
             task_id: task_id.into(),
@@ -348,6 +350,7 @@ impl WorkflowService {
         claim
             .update_run(&tx, value!({"task_id":null, "due_at":claim.now}))
             .await?;
+        super::publication::record(&tx, &claim.app, &claim.run.text("id")?, claim.now).await?;
         tx.commit().await
     }
 }

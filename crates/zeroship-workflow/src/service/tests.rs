@@ -37,6 +37,7 @@ mod output_writes;
 mod payload_models;
 mod payloads;
 mod policy;
+mod publication;
 mod restart_models;
 mod requests;
 mod runner;

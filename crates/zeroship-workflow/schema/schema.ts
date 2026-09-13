@@ -1,4 +1,4 @@
-import { dialect, table, t } from "../../../packages/zero-migrate/dist/index.js";
+import { dialect, raw, table, t } from "../../../packages/zero-migrate/dist/index.js";
 
 // The customer owns the journal. Provisioning supplies its resolved schema;
 // both database adapters use the canonical definition and reserved table names.
@@ -78,7 +78,7 @@ export function workflowSchema(namespace) {
   create("runs", {
     ...identity(), id: text(), workflow_name: text(), deploy_id: text(),
     generation: integer(), state: text(), control: text(), due_at: t.bigInt(),
-    task_id: t.text(), lease_epoch: integer(), key: t.text(),
+    task_id: t.text(), lease_epoch: integer(), frontier_revision: integer().default(1), key: t.text(),
     parent_id: t.text(), parent_generation: t.bigInt(), parent_ordinal: t.bigInt(),
     cascade: integer(), depth: integer(), created_at: integer(), terminal_at: t.bigInt(),
     signal_epoch: integer(), compensation_target: t.text(), schedule_id: t.text(),
@@ -185,5 +185,25 @@ export function workflowSchema(namespace) {
     ...identity(), id: text(), kind: text(), payload: text(), created_at: integer(), delivered_at: t.bigInt(),
   }, ["app_id", "id"], [appFk("outbox")]);
   index("outbox", "delivery", ["delivered_at", "created_at"]);
+  create("job_publications", {
+    ...runIdentity(), id: text(), deploy_id: text(), generation: integer(),
+    frontier_revision: integer(), available_at: integer(), specification: text(),
+    created_at: integer(), confirmed_at: t.bigInt(),
+  }, ["app_id", "id"], [appFk("job_publications")], [
+    { name: "job_publication_frontier", columns: ["app_id", "run_id", "generation", "frontier_revision", "available_at"] },
+  ]);
+  index("job_publications", "pending", ["app_id", "confirmed_at", "id"]);
+  index("job_publications", "deployment", ["app_id", "deploy_id", "confirmed_at"]);
+  // The migration DSL does not expose the column collation facet yet. Cursor
+  // order and identity copies must use bytewise comparison; SQLite uses BINARY.
+  dialect({
+    postgres() {
+      raw({
+        sql: `ALTER TABLE "${namespace}"."job_publications" ${["id", "app_id", "run_id", "deploy_id"].map(column => `ALTER COLUMN "${column}" TYPE text COLLATE "C"`).join(", ")}`,
+        reason: "workflow publication identities require bytewise comparison",
+      });
+    },
+    sqlite() {},
+  });
   return { identifiers, columns: columnsInSchema };
 }

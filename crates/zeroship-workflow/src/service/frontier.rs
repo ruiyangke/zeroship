@@ -26,6 +26,12 @@ struct WaitingParent {
     generation: i64,
 }
 
+#[derive(FromRow)]
+#[orm(entity = models::runs)]
+struct CancelledChild {
+    id: String,
+}
+
 pub(crate) async fn invocation(
     tx: &mut Transaction,
     app: &AppId,
@@ -389,6 +395,7 @@ async fn settle(
             many:true,
         }).await?;
     }
+    publish_cancelled_children(tx, app, &id, run.integer("generation")?, now).await?;
     if has_compensation(tx, app, run).await? {
         tx.database().collection(models::generations::Entity::COLLECTION)?.update(
             value!({"app_id":app.as_str(), "run_id":id.clone(), "generation":run.integer("generation")?}),
@@ -399,6 +406,52 @@ async fn settle(
         Ok(RunState::Compensating)
     } else {
         finish(tx, app, run, target, None, update.error(), now).await
+    }
+}
+
+async fn publish_cancelled_children(
+    tx: &Transaction,
+    app: &AppId,
+    parent: &str,
+    generation: i64,
+    now: i64,
+) -> Result<(), WorkflowServiceError> {
+    let source = tx.database().entity::<models::runs::Entity>()?.alias("r")?;
+    let mut after: Option<String> = None;
+    loop {
+        let mut filter = vec![
+            source.column(models::runs::app_id).eq(app.as_str())?,
+            source.column(models::runs::parent_id).eq(Some(parent))?,
+            source
+                .column(models::runs::parent_generation)
+                .eq(Some(generation))?,
+            source.column(models::runs::cascade).eq(1i64)?,
+            source.column(models::runs::control).eq("cancel")?,
+            source.column(models::runs::task_id).eq(None::<String>)?,
+        ];
+        if let Some(after) = &after {
+            filter.push(Predicate::compare(
+                Operand::Path(source.column(models::runs::id).asc().path),
+                CompareOp::Gt,
+                Operand::Lit(Literal::Text(after.clone())),
+            ));
+        }
+        let page = tx
+            .database()
+            .from(&source)
+            .filter(Predicate::And(filter))
+            .order_by(source.column(models::runs::id).asc())
+            .select(source.row::<CancelledChild>())?
+            .limit(RowLimit::default().get())?
+            .all()
+            .await?;
+        if page.is_empty() {
+            return Ok(());
+        }
+        for child in page {
+            super::publication::advance(tx, app, &child.id, now).await?;
+            after = Some(child.id);
+        }
     }
 }
 async fn compensation_ready(
@@ -649,11 +702,12 @@ async fn wake_parents(
         let count = page.len();
         for parent in page {
             runs.execute(Operation::Update {
-                filter: value!({"app_id":app.as_str(), "id":parent.run_id, "generation":parent.generation,
+                filter: value!({"app_id":app.as_str(), "id":parent.run_id.clone(), "generation":parent.generation,
                     "task_id":null, "control":"none", "state":{"$in":["waiting","sleeping","queued"]}}),
                 patch: value!({"due_at":now}),
                 many: true,
             }).await?;
+            super::publication::advance(tx, app, &parent.run_id, now).await?;
             after = Some(parent.id);
         }
         if count < page_limit as usize {
