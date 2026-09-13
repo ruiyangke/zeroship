@@ -14,8 +14,12 @@ struct Label {
 
 #[compio::test]
 async fn sqlite_typed_predicates_preserve_native_values_and_null_semantics() {
-    let mut owner =
-        CollectionFixture::sqlite_native("predicate_rows", rows::Entity::schema().clone(), super::fixtures::predicate_migration_fields()).await;
+    let mut owner = CollectionFixture::sqlite_native(
+        "predicate_rows",
+        rows::Entity::schema().clone(),
+        super::fixtures::predicate_migration_fields(),
+    )
+    .await;
     owner
         .replace_from_migration(
             "predicate_rows",
@@ -28,8 +32,12 @@ async fn sqlite_typed_predicates_preserve_native_values_and_null_semantics() {
 
 #[compio::test]
 async fn postgres_typed_predicates_preserve_native_values_and_null_semantics() {
-    let mut owner =
-        CollectionFixture::postgres_native("predicate_rows", rows::Entity::schema().clone(), super::fixtures::predicate_migration_fields()).await;
+    let mut owner = CollectionFixture::postgres_native(
+        "predicate_rows",
+        rows::Entity::schema().clone(),
+        super::fixtures::predicate_migration_fields(),
+    )
+    .await;
     owner
         .replace_from_migration(
             "predicate_rows",
@@ -70,7 +78,8 @@ fn predicate_fixture_matches_the_migration_artifact() {
         artifacts.runtime_json,
         include_str!("../../../tests/fixtures/typed-predicates.runtime.json")
     );
-    let decoded = CollectionSchema::from_fields(&super::fixtures::predicate_migration_fields()).unwrap();
+    let decoded =
+        CollectionSchema::from_fields(&super::fixtures::predicate_migration_fields()).unwrap();
     assert_eq!(rows::Entity::schema(), &decoded);
 }
 
@@ -246,15 +255,13 @@ async fn exercise(db: &Database) {
             .unwrap();
         assert_labels(found, expected);
     }
-    assert!(
-        entity
-            .find::<Label>(
-                rows::optional.lt(None::<&str>).unwrap(),
-                FindOptions::default()
-            )
-            .await
-            .is_err()
-    );
+    assert!(entity
+        .find::<Label>(
+            rows::optional.lt(None::<&str>).unwrap(),
+            FindOptions::default()
+        )
+        .await
+        .is_err());
     assert!(source.column(rows::optional).lt(None::<&str>).is_err());
     for filter in [
         source
@@ -267,28 +274,23 @@ async fn exercise(db: &Database) {
             .unwrap(),
         source.column(Field::<Secret>::new()).is_null(),
     ] {
-        assert!(
-            db.from(&source)
-                .filter(filter)
-                .select(source.row::<Label>())
-                .unwrap()
-                .all()
-                .await
-                .is_err()
-        );
+        assert!(db
+            .from(&source)
+            .filter(filter)
+            .select(source.row::<Label>())
+            .unwrap()
+            .all()
+            .await
+            .is_err());
     }
     let too_many = crate::sql::MAX_MEMBERSHIP_LIST_LEN + 1;
-    assert!(
-        rows::rank
-            .in_values(std::iter::repeat_n(1_i64, too_many))
-            .is_err()
-    );
-    assert!(
-        source
-            .column(rows::optional)
-            .in_values(std::iter::repeat_n(None::<&str>, too_many))
-            .is_err()
-    );
+    assert!(rows::rank
+        .in_values(std::iter::repeat_n(1_i64, too_many))
+        .is_err());
+    assert!(source
+        .column(rows::optional)
+        .in_values(std::iter::repeat_n(None::<&str>, too_many))
+        .is_err());
     let changed: Option<Label> = entity
         .update(
             rows::rank
@@ -300,13 +302,11 @@ async fn exercise(db: &Database) {
         .await
         .unwrap();
     assert_eq!(changed.unwrap().label, "changed");
-    assert!(
-        entity
-            .delete::<Label>(rows::label.in_values(["changed"]).unwrap())
-            .await
-            .unwrap()
-            .is_some()
-    );
+    assert!(entity
+        .delete::<Label>(rows::label.in_values(["changed"]).unwrap())
+        .await
+        .unwrap()
+        .is_some());
 }
 
 fn assert_labels(found: Vec<Label>, expected: Vec<&str>) {

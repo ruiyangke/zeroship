@@ -163,10 +163,8 @@ mod tests {
                 AssignedValue::Increment(2)
             ));
         }
-        assert!(
-            AssignmentPlan::from_schema(&FieldMap::new())
-                .columns()
-                .is_empty()
-        );
+        assert!(AssignmentPlan::from_schema(&FieldMap::new())
+            .columns()
+            .is_empty());
     }
 }

@@ -16,7 +16,10 @@ use std::sync::{
 struct FixtureCodecs;
 
 impl SqlStorageCodecs for FixtureCodecs {
-    fn storage_type(&self, definition: &crate::schema::ColumnSchema) -> Result<StorageType, CompileError> {
+    fn storage_type(
+        &self,
+        definition: &crate::schema::ColumnSchema,
+    ) -> Result<StorageType, CompileError> {
         SqlRegistration::sqlite().storage_type(definition)
     }
 
@@ -67,7 +70,10 @@ fn sqlite_registration_owns_boolean_vector_and_geographic_storage() {
 fn registrations_derive_exact_decimal_storage_from_numeric_facets() {
     for registration in [SqlRegistration::postgres(), SqlRegistration::sqlite()] {
         let storage = registration
-            .storage_type(&ColumnSchema::from_descriptor(&value!({"type":"number","precision":30,"scale":2})).unwrap())
+            .storage_type(
+                &ColumnSchema::from_descriptor(&value!({"type":"number","precision":30,"scale":2}))
+                    .unwrap(),
+            )
             .unwrap();
         let decimal = storage.decimal().unwrap();
         assert_eq!((decimal.precision(), decimal.scale()), (30, 2));
@@ -78,7 +84,10 @@ fn registrations_derive_exact_decimal_storage_from_numeric_facets() {
             StorageType::Real
         );
         assert!(registration
-            .storage_type(&ColumnSchema::from_descriptor(&value!({"type":"number","precision":2,"scale":3})).unwrap())
+            .storage_type(
+                &ColumnSchema::from_descriptor(&value!({"type":"number","precision":2,"scale":3}))
+                    .unwrap()
+            )
             .is_err());
     }
 }
@@ -509,7 +518,12 @@ async fn dynamic_find_refuses_a_non_filterable_field() {
 
 #[compio::test]
 async fn typed_update_and_delete_use_the_registered_compiler() {
-    let owner = CollectionFixture::sqlite_native("posts", posts::Entity::schema().clone(), super::fixtures::post_migration_fields()).await;
+    let owner = CollectionFixture::sqlite_native(
+        "posts",
+        posts::Entity::schema().clone(),
+        super::fixtures::post_migration_fields(),
+    )
+    .await;
     let Output::Rows { rows, .. } = owner
         .database
         .collection("posts")

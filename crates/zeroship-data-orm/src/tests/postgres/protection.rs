@@ -1965,9 +1965,8 @@ fn no_write_verb_hands_back_a_column_the_descriptor_does_not_declare() {
             assert_eq!(stored.len(), 1, "the row must exist");
 
             // BOUNDARY 2, the runtime's.
-            let allowed: BTreeSet<String> = read_surface_columns(
-                &crate::tests::fixtures::generated_schema(schema.clone()),
-            );
+            let allowed: BTreeSet<String> =
+                read_surface_columns(&crate::tests::fixtures::generated_schema(schema.clone()));
             let finalized = host
                 .finalize_rows_on_read(app, "people", returned.clone())
                 .await
@@ -2959,10 +2958,9 @@ fn a_migration_engine_built_table_refuses_an_encryption_downgrade() {
             let app_id = zeroship_core::AppId::mint();
             let encrypted = encrypted_schema();
             let _keys = host.supply_project_key(&[app_id.as_str()], &"01".repeat(32));
-            let app = fixture_via_the_migration_engine(
-                host, &pool, &url, &app_id, "people", &encrypted,
-            )
-            .await;
+            let app =
+                fixture_via_the_migration_engine(host, &pool, &url, &app_id, "people", &encrypted)
+                    .await;
 
             // The live catalog must retain an encryption marker the runtime recognizes.
             let stored = column_comment(&pool, &app, "people", "secret")

@@ -61,7 +61,11 @@ async fn sqlite_catalog_reads_transaction_local_protection() {
     let database = Database::from_schema(
         owner.database.binding.clone(),
         owner.database.backend.clone(),
-        Schema::from_collections(vec![("protected_records".into(), fields_with_unprotected_secret())]).unwrap(),
+        Schema::from_collections(vec![(
+            "protected_records".into(),
+            fields_with_unprotected_secret(),
+        )])
+        .unwrap(),
     )
     .unwrap();
 

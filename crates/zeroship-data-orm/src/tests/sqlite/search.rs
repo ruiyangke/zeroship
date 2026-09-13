@@ -802,7 +802,11 @@ fn near_uses_an_unreadable_identity_without_returning_it() {
                 "location":{"type":"geoPoint"}
             });
             zeroship_data_orm::schema_cache::with_mut(|cache| {
-                cache.insert_one(&binding, "places", crate::tests::fixtures::native_fields(schema))
+                cache.insert_one(
+                    &binding,
+                    "places",
+                    crate::tests::fixtures::native_fields(schema),
+                )
             });
             let registration = zeroship_data_orm::sql::registration::SqlRegistration::sqlite();
             let route = zeroship_data_orm::tx_route::CapturedRoute::pool_for_tests(
@@ -822,15 +826,10 @@ fn near_uses_an_unreadable_identity_without_returning_it() {
                 }),
             )
             .unwrap();
-            let rows = zeroship_data_orm::crud::run_near(
-                &route,
-                binding,
-                "places".into(),
-                plan,
-            )
-            .await
-            .unwrap()
-            .rows;
+            let rows = zeroship_data_orm::crud::run_near(&route, binding, "places".into(), plan)
+                .await
+                .unwrap()
+                .rows;
 
             assert_eq!(rows.len(), 1);
             assert_eq!(rows[0]["label"], "visible");
