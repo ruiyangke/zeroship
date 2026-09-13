@@ -1295,3 +1295,5 @@ async fn cancelled_transaction_cleans_up_its_own_context() {
 }
 
 mod typed_read_terminals;
+
+mod typed_mutation_expressions;

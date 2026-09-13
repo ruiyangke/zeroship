@@ -1,3 +1,8 @@
+#![expect(
+    clippy::future_not_send,
+    reason = "ORM fixtures use thread-local compio sessions"
+)]
+
 use super::fixtures::CollectionFixture;
 use super::*;
 
@@ -35,6 +40,14 @@ async fn typed_predicates_and_ordering_retain_their_database() {
             .await
     }
     .await;
+    let compared = async {
+        db.from(&p)
+            .filter(p.column(posts::title).eq(other.column(posts::title))?)
+            .select(count_rows())?
+            .all()
+            .await
+    }
+    .await;
     let grouped = async {
         db.from(&p)
             .having(other.column(posts::counter).sum().gte(1_i64)?)
@@ -53,6 +66,7 @@ async fn typed_predicates_and_ordering_retain_their_database() {
     .await;
     for result in [
         filtered.map(|_| ()),
+        compared.map(|_| ()),
         ordered.map(|_| ()),
         grouped.map(|_| ()),
     ] {
@@ -230,26 +244,26 @@ async fn compare_values_and_expressions(owner: CollectionFixture) {
 
 #[compio::test]
 async fn typed_comparison_operands_sqlite() {
-    compare_values_and_expressions(
+    Box::pin(compare_values_and_expressions(
         CollectionFixture::sqlite_native(
             "posts",
             posts::Entity::schema().clone(),
             fixtures::post_migration_fields(),
         )
         .await,
-    )
+    ))
     .await;
 }
 
 #[compio::test]
 async fn typed_comparison_operands_postgres() {
-    compare_values_and_expressions(
+    Box::pin(compare_values_and_expressions(
         CollectionFixture::postgres_native(
             "posts",
             posts::Entity::schema().clone(),
             fixtures::post_migration_fields(),
         )
         .await,
-    )
+    ))
     .await;
 }
