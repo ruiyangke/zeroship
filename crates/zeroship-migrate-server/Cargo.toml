@@ -72,14 +72,15 @@ toml = { workspace = true }
 base64 = { workspace = true }
 ed25519-dalek = { workspace = true, features = ["pkcs8", "pem", "rand_core"] }
 jsonwebtoken = { workspace = true }
+testcontainers = { version = "0.28", features = ["blocking"] }
 # Authoring proof: run the zero-migrate recorder inside zeroship-runtime's V8 isolate
 # to author an ir_version:1 envelope from a `.ts` migration - the platform's own V8
 # (no Node in the loop). Dev-only: the library surface stays V8-free.
 zeroship-runtime = { workspace = true }
 v8 = { workspace = true }
 
-# Database verification is mandatory in ordinary cargo test runs.
-# tests/run_billing_suite.sh provisions the migrated platform database.
+# Database verification is mandatory in ordinary cargo test runs. PostgreSQL
+# targets own their servers through private Testcontainers fixtures.
 
 [[test]]
 name = "apply_api_test"
