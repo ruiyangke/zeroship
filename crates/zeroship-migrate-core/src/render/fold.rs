@@ -5578,6 +5578,12 @@ pub fn descriptors_to_create_ops(
 ) -> Result<Vec<Op>, ProduceError> {
     let mut ops = Vec::with_capacity(descriptors.len());
     for d in descriptors {
+        crate::model::relations::validate_descriptor_relations(d).map_err(|message| {
+            ProduceError::TableShape {
+                table: d.name.clone(),
+                message,
+            }
+        })?;
         let mut columns = Vec::with_capacity(d.fields.len());
         let mut constraints = Vec::new();
         for f in &d.fields {
@@ -5700,6 +5706,7 @@ fn column_reference_for_field(
         on_delete: f.on_delete.as_deref().and_then(parse_ref_action),
         on_update: f.on_update.as_deref().and_then(parse_ref_action),
         name: f.reference_name.clone(),
+        relation: f.relation.clone(),
     })
 }
 
@@ -7412,6 +7419,7 @@ columns = [
             unique: None,
             value_format: None,
             references: Some(ColumnReference {
+                relation: None,
                 table: "accounts".into(),
                 column: "id".into(),
                 on_delete: None,
@@ -9314,6 +9322,7 @@ columns = [
             unique: None,
             value_format: None,
             references: Some(ColumnReference {
+                relation: None,
                 table: "orgs".into(),
                 column: "id".into(),
                 on_delete: None,

@@ -331,6 +331,7 @@ fn create_table_with_live_fk_render_is_byte_identical_pg() {
             unique: None,
             value_format: None,
             references: Some(zeroship_migrate::model::ir::ColumnReference {
+                relation: None,
                 table: "authors".into(),
                 column: "id".into(),
                 on_delete: None,
@@ -1578,6 +1579,7 @@ fn create_table_with_live_fk_render_is_byte_identical_sqlite() {
             unique: None,
             value_format: None,
             references: Some(zeroship_migrate::model::ir::ColumnReference {
+                relation: None,
                 table: "authors".into(),
                 column: "id".into(),
                 on_delete: None,
