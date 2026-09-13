@@ -122,6 +122,10 @@ struct Deployment {
 impl WorkflowService {
     /// Durably request a hold before admitting work from this app deployment.
     /// A failed or cancelled platform call leaves an acquisition to reconcile.
+    ///
+    /// # Errors
+    /// Refuses foreign scopes, invalid identities, conflicting transitions or
+    /// receipts, and unavailable journal or platform operations.
     pub async fn acquire_deployment_hold(
         &self,
         app: &AppId,
@@ -210,6 +214,10 @@ impl WorkflowService {
 
     /// Close admission and record release only when the customer journal has no
     /// retained execution or scheduling references. Terminal history still pins code.
+    ///
+    /// # Errors
+    /// Refuses foreign scopes, retained dependencies, inconsistent hold state,
+    /// and failed journal or platform operations.
     pub async fn release_deployment_hold(
         &self,
         app: &AppId,
@@ -257,6 +265,10 @@ impl WorkflowService {
 
     /// Retry durable acquisition or release after disconnection, lost replies or
     /// host restart. Platform I/O never holds a customer journal transaction open.
+    ///
+    /// # Errors
+    /// Refuses foreign scopes, invalid intents, stale acknowledgements, and
+    /// unavailable journal or platform operations.
     pub async fn reconcile_deployment_hold(
         &self,
         app: &AppId,
@@ -349,6 +361,9 @@ impl WorkflowService {
     /// Page pending intents for a host-authorized app before contacting its client.
     /// The cursor is an opaque stored key, so discovery can pass a malformed
     /// intent whose identity will be refused during reconciliation.
+    ///
+    /// # Errors
+    /// Refuses invalid page bounds, unavailable app policy, and failed journal reads.
     pub async fn pending_deployment_holds(
         &self,
         app: &AppId,

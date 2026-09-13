@@ -20,7 +20,7 @@ async fn journal_count(fixture: &Fixture, table: &str) -> i64 {
 #[compio::test]
 async fn activation_lost_ack_and_redelivery_never_start_the_executor() {
     let fixture = Fixture::new(AppPolicy::default()).await;
-    let deployment = fixture._deployments.deploy(fixture.app.app_id()).await;
+    let deployment = fixture.deployments.deploy(fixture.app.app_id()).await;
     let mut lease = fixture.lease.clone();
     lease.delivery.job.id = JobId::mint();
     lease.delivery.job.deployment_id = DeploymentId::parse(&deployment.id).unwrap();
@@ -35,7 +35,9 @@ async fn activation_lost_ack_and_redelivery_never_start_the_executor() {
     fixture.metadata.lose_ack.set(true);
     let mut slot = fixture.slot(Duration::from_secs(5));
     let DeliveryOutcome::Settled { creator, manager } =
-        slot.run(&fixture.app, lease.clone()).await.unwrap()
+        Box::pin(slot.run(&fixture.app, lease.clone()))
+            .await
+            .unwrap()
     else {
         panic!("activation must settle its readiness receipt")
     };
@@ -50,11 +52,11 @@ async fn activation_lost_ack_and_redelivery_never_start_the_executor() {
         assert!(requests[0].successors.is_empty());
     }
     fixture
-        ._deployments
+        .deployments
         .assert_held(fixture.app.app_id(), &deployment.id)
         .await;
     fixture
-        ._deployments
+        .deployments
         .source
         .delete_manifest(fixture.app.app_id(), &deployment.hash)
         .await
@@ -66,7 +68,9 @@ async fn activation_lost_ack_and_redelivery_never_start_the_executor() {
     let DeliveryOutcome::Settled {
         creator: replayed,
         manager,
-    } = restarted.run(&fixture.app, lease.clone()).await.unwrap()
+    } = Box::pin(restarted.run(&fixture.app, lease.clone()))
+        .await
+        .unwrap()
     else {
         panic!("committed activation must replay despite missing artifact")
     };
