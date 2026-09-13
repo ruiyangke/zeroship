@@ -3,10 +3,10 @@ use serde_json::{json, Value};
 use std::fmt::Debug;
 use zeroship_core::{
     app_id::AppId,
-    workflow_coordination::{RequestId, RunId, WorkerId},
+    workflow_coordination::{AssignedScope, RequestId, RunId, WorkerId},
     workflow_jobs::{
-        Delivery, DeploymentId, JobId, JobOperation, JobOutcome, JobSpec, Settlement,
-        SettlementReceipt,
+        Delivery, DeliveryLease, DeploymentId, JobId, JobOperation, JobOutcome, JobSpec,
+        Settlement, SettlementReceipt, SubmitJob,
     },
 };
 
@@ -140,6 +140,63 @@ fn delivery_and_settlement_preserve_logical_and_attempt_identities() {
         outcome: JobOutcome::Completed,
         ..settlement
     });
+}
+
+#[test]
+fn worker_publication_and_lease_replies_are_closed_and_carry_no_caller_expiry() {
+    let value = settlement(JobOperation::Reconcile {});
+    let request = SubmitJob {
+        scope: AssignedScope {
+            app_id: value.delivery.job.app_id.clone(),
+            assignment_revision: value.delivery.assignment_revision,
+        },
+        job: value.delivery.job.clone(),
+    };
+    let wire = round_trip(&request);
+    assert_eq!(
+        wire,
+        json!({"scope":{
+        "appId":request.scope.app_id,"assignmentRevision":request.scope.assignment_revision,
+    },"job":request.job})
+    );
+    for path in ["", "/scope", "/job", "/job/operation"] {
+        for field in ["expiresAt", "input", "databaseUrl", "credentials"] {
+            let mut invalid = wire.clone();
+            invalid
+                .pointer_mut(path)
+                .unwrap()
+                .as_object_mut()
+                .unwrap()
+                .insert(field.into(), json!("untrusted"));
+            refuses::<SubmitJob>(invalid);
+        }
+    }
+    let lease = DeliveryLease {
+        delivery: value.delivery,
+        remaining_ms: std::num::NonZeroU64::new(789).unwrap(),
+    };
+    let wire = round_trip(&lease);
+    assert_eq!(wire, json!({"delivery":lease.delivery,"remainingMs":789}));
+    for bad in [json!(0), json!(-1), json!(0.5), json!("1"), Value::Null] {
+        let mut invalid = wire.clone();
+        invalid["remainingMs"] = bad;
+        refuses::<DeliveryLease>(invalid);
+    }
+    for path in ["", "/delivery", "/delivery/job", "/delivery/job/operation"] {
+        let mut invalid = wire.clone();
+        invalid
+            .pointer_mut(path)
+            .unwrap()
+            .as_object_mut()
+            .unwrap()
+            .insert("input".into(), json!({"secret":true}));
+        refuses::<DeliveryLease>(invalid);
+    }
+    for field in ["delivery", "remainingMs"] {
+        let mut missing = wire.clone();
+        missing.as_object_mut().unwrap().remove(field);
+        refuses::<DeliveryLease>(missing);
+    }
 }
 
 #[test]

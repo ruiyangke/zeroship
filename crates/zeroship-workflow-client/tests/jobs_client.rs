@@ -1,0 +1,622 @@
+//! Typed job clients verify metadata identity and transfer monotonic authority.
+#![allow(
+    clippy::future_not_send,
+    reason = "native HTTP fixtures stay on their compio runtime"
+)]
+
+use compio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
+use futures::{channel::oneshot, future::Either};
+use serde_json::{json, Value};
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
+use zeroship_core::{
+    app_id::AppId,
+    service_assertion::{
+        InMemoryReplayStore, ServiceAssertionVerifier, ServiceIssuer, ServiceSigningKey,
+        ServiceTrustBundle, TransportAssertionVerifier,
+    },
+    service_identity::{endpoints, verify_service_call, ServiceEndpoint},
+    service_peers::{ServiceAuth, ServiceKeyring},
+    workflow_coordination::{AssignedScope, FailureCode, RequestId, RunId, WorkerId, AUDIENCE},
+    workflow_jobs::{
+        Delivery, DeploymentId, JobId, JobOperation, JobOutcome, JobSpec, Settlement,
+        SettlementReceipt, SubmitJob,
+    },
+};
+use zeroship_workflow_client::{Error, Options, WorkerCoordinator};
+
+struct Fixture {
+    auth: Arc<ServiceAuth>,
+    scope: AssignedScope,
+    spec: JobSpec,
+    delivery: Delivery,
+}
+
+impl Fixture {
+    fn new() -> Self {
+        let worker = WorkerId::mint();
+        let issuer = ServiceIssuer::parse(&format!(
+            "spiffe://zeroship.ai/svc/worker/{}",
+            worker.as_str()
+        ))
+        .unwrap();
+        let auth = Arc::new(ServiceAuth::new(
+            ServiceKeyring::from_parts(
+                issuer,
+                ServiceSigningKey::generate(),
+                ServiceTrustBundle::new(),
+            )
+            .unwrap(),
+            Arc::new(TransportAssertionVerifier::new(ServiceTrustBundle::new())),
+        ));
+        let scope = AssignedScope {
+            app_id: AppId::mint(),
+            assignment_revision: 1.try_into().unwrap(),
+        };
+        let spec = JobSpec {
+            id: JobId::mint(),
+            app_id: scope.app_id.clone(),
+            deployment_id: DeploymentId::mint(),
+            operation: JobOperation::Advance {
+                run_id: RunId::mint(),
+                generation: 0,
+                revision: 1.try_into().unwrap(),
+            },
+            available_at: 0.try_into().unwrap(),
+        };
+        let delivery = Delivery {
+            job: spec.clone(),
+            worker_id: worker,
+            assignment_revision: scope.assignment_revision,
+            attempt: 1.try_into().unwrap(),
+            // Deliberately unrelated to the receiving worker's wall clock.
+            deadline: 1.try_into().unwrap(),
+        };
+        Self {
+            auth,
+            scope,
+            spec,
+            delivery,
+        }
+    }
+
+    fn submission(&self) -> SubmitJob {
+        SubmitJob {
+            scope: self.scope.clone(),
+            job: self.spec.clone(),
+        }
+    }
+
+    fn settlement(&self) -> Settlement {
+        Settlement {
+            delivery: self.delivery.clone(),
+            outcome: JobOutcome::Waiting,
+            successors: Vec::new(),
+        }
+    }
+}
+
+fn receipt(command: &Settlement) -> SettlementReceipt {
+    SettlementReceipt {
+        job_id: command.delivery.job.id.clone(),
+        app_id: command.delivery.job.app_id.clone(),
+        attempt: command.delivery.attempt,
+        outcome: command.outcome,
+    }
+}
+
+fn lease(delivery: &Delivery, remaining_ms: u64) -> Value {
+    json!({"delivery":delivery,"remainingMs":remaining_ms})
+}
+
+struct Exchange {
+    endpoint: ServiceEndpoint,
+    request: Value,
+    response: Value,
+    status: u16,
+    delay: Duration,
+}
+
+impl Exchange {
+    fn new(endpoint: ServiceEndpoint, request: &impl serde::Serialize, response: Value) -> Self {
+        Self {
+            endpoint,
+            request: serde_json::to_value(request).unwrap(),
+            response,
+            status: 200,
+            delay: Duration::ZERO,
+        }
+    }
+}
+
+async fn peer(
+    fixture: &Fixture,
+    exchanges: Vec<Exchange>,
+    test: impl AsyncFnOnce(WorkerCoordinator),
+) {
+    let listener = compio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let client = WorkerCoordinator::new(
+        &format!("http://{}", listener.local_addr().unwrap()),
+        fixture.auth.clone(),
+        Options::default(),
+    )
+    .unwrap();
+    let (issuer, key) = fixture.auth.signing_identity().unwrap();
+    let mut trust = ServiceTrustBundle::new();
+    trust.trust_signing_key(issuer, key.key_id(), key).unwrap();
+    let verifier = ServiceAssertionVerifier::new(trust, Arc::new(InMemoryReplayStore::new()));
+    let (done, completed) = oneshot::channel();
+    let server = async {
+        let mut previous = None;
+        for exchange in exchanges {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let observed = request(&mut stream).await;
+            assert_eq!(observed.path, exchange.endpoint.path_template());
+            assert_eq!(observed.body, exchange.request);
+            assert_ne!(previous.as_ref(), Some(&observed.authorization));
+            verify_service_call(
+                &verifier,
+                Some(&observed.authorization),
+                AUDIENCE,
+                exchange.endpoint,
+            )
+            .await
+            .unwrap();
+            assert!(verify_service_call(
+                &verifier,
+                Some(&observed.authorization),
+                AUDIENCE,
+                exchange.endpoint,
+            )
+            .await
+            .is_err());
+            previous = Some(observed.authorization);
+            if !exchange.delay.is_zero() {
+                let received = Instant::now();
+                compio::time::sleep(exchange.delay).await;
+                assert!(received.elapsed() >= exchange.delay);
+            }
+            let body = serde_json::to_vec(&exchange.response).unwrap();
+            let mut response = format!(
+                "HTTP/1.1 {} Test\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: {}\r\n\r\n",
+                exchange.status, body.len()
+            )
+            .into_bytes();
+            response.extend(body);
+            stream.write_all(response).await.0.unwrap();
+            stream.flush().await.unwrap();
+        }
+        match futures::future::select(completed, Box::pin(listener.accept())).await {
+            Either::Left((result, _)) => result.unwrap(),
+            Either::Right(_) => panic!("client sent an unexpected HTTP request"),
+        }
+    };
+    compio::time::timeout(Duration::from_secs(10), async {
+        futures::join!(server, async {
+            test(client).await;
+            done.send(()).unwrap();
+        });
+    })
+    .await
+    .expect("job client contract hung");
+}
+
+struct Request {
+    path: String,
+    authorization: String,
+    body: Value,
+}
+
+async fn request(stream: &mut compio::net::TcpStream) -> Request {
+    let mut bytes = Vec::new();
+    loop {
+        let compio::BufResult(read, buffer) = stream.read(vec![0; 1024]).await;
+        let read = read.unwrap();
+        assert_ne!(read, 0, "peer closed before sending its request");
+        bytes.extend_from_slice(&buffer[..read]);
+        assert!(bytes.len() <= 16 * 1024);
+        let Some(end) = bytes.windows(4).position(|part| part == b"\r\n\r\n") else {
+            continue;
+        };
+        let header = std::str::from_utf8(&bytes[..end]).unwrap();
+        let mut lines = header.lines();
+        let mut operation = lines.next().unwrap().split_ascii_whitespace();
+        assert_eq!(operation.next(), Some("POST"));
+        let path = operation.next().unwrap().to_owned();
+        assert_eq!(operation.next(), Some("HTTP/1.1"));
+        let mut length = None;
+        let mut authorization = None;
+        for line in lines {
+            let (name, value) = line.split_once(':').unwrap();
+            if name.eq_ignore_ascii_case("content-length") {
+                assert!(length.is_none());
+                length = Some(value.trim().parse::<usize>().unwrap());
+            } else if name.eq_ignore_ascii_case("authorization") {
+                assert!(authorization.is_none());
+                authorization = Some(value.trim().to_owned());
+            }
+        }
+        let length = length.unwrap();
+        if bytes.len() < end + 4 + length {
+            continue;
+        }
+        assert_eq!(bytes.len(), end + 4 + length);
+        return Request {
+            path,
+            authorization: authorization.unwrap(),
+            body: serde_json::from_slice(&bytes[end + 4..]).unwrap(),
+        };
+    }
+}
+
+#[compio::test]
+async fn job_methods_preserve_identity_and_use_remaining_authority() {
+    let fixture = Fixture::new();
+    let submit = fixture.submission();
+    let mut renewed = fixture.delivery.clone();
+    renewed.deadline = 0.try_into().unwrap();
+    let settlement = Settlement {
+        delivery: renewed.clone(),
+        ..fixture.settlement()
+    };
+    let settled = receipt(&settlement);
+    peer(
+        &fixture,
+        vec![
+            Exchange::new(endpoints::WORKFLOW_JOB_SUBMIT, &submit, json!(fixture.spec)),
+            Exchange::new(
+                endpoints::WORKFLOW_JOB_CLAIM,
+                &fixture.scope,
+                lease(&fixture.delivery, 60_000),
+            ),
+            Exchange::new(
+                endpoints::WORKFLOW_JOB_HEARTBEAT,
+                &fixture.delivery,
+                lease(&renewed, 60_000),
+            ),
+            Exchange::new(endpoints::WORKFLOW_JOB_SETTLE, &settlement, json!(settled)),
+            Exchange::new(endpoints::WORKFLOW_JOB_SETTLE, &settlement, json!(settled)),
+            Exchange::new(endpoints::WORKFLOW_JOB_CLAIM, &fixture.scope, Value::Null),
+        ],
+        async |client| {
+            assert_eq!(client.submit_job(&submit).await.unwrap(), fixture.spec);
+            let claimed = client.claim_job(&fixture.scope).await.unwrap().unwrap();
+            assert_eq!(claimed.delivery(), &fixture.delivery);
+            assert!(claimed.remaining().unwrap() <= Duration::from_secs(60));
+            let heartbeat = client.heartbeat_job(&claimed).await.unwrap();
+            assert_eq!(heartbeat.delivery(), &renewed);
+            assert!(heartbeat.remaining().unwrap() <= Duration::from_secs(60));
+            assert_eq!(client.settle_job(&settlement).await.unwrap(), settled);
+            assert_eq!(client.settle_job(&settlement).await.unwrap(), settled);
+            assert!(client.claim_job(&fixture.scope).await.unwrap().is_none());
+        },
+    )
+    .await;
+}
+
+#[compio::test]
+async fn manager_dispatched_jobs_can_be_claimed_and_settled() {
+    for operation in [
+        JobOperation::Cron {
+            request_id: RequestId::mint(),
+            run_id: RunId::mint(),
+            revision: 1.try_into().unwrap(),
+            scheduled_at: 0.try_into().unwrap(),
+        },
+        JobOperation::Management {
+            request_id: RequestId::mint(),
+            run_id: RunId::mint(),
+        },
+    ] {
+        let mut fixture = Fixture::new();
+        fixture.spec.operation = operation;
+        fixture.delivery.job = fixture.spec.clone();
+        let command = fixture.settlement();
+        let settled = receipt(&command);
+        peer(
+            &fixture,
+            vec![
+                Exchange::new(
+                    endpoints::WORKFLOW_JOB_CLAIM,
+                    &fixture.scope,
+                    lease(&fixture.delivery, 60_000),
+                ),
+                Exchange::new(endpoints::WORKFLOW_JOB_SETTLE, &command, json!(settled)),
+            ],
+            async |client| {
+                let claimed = client.claim_job(&fixture.scope).await.unwrap().unwrap();
+                assert_eq!(claimed.delivery(), &fixture.delivery);
+                assert_eq!(client.settle_job(&command).await.unwrap(), settled);
+            },
+        )
+        .await;
+    }
+}
+
+#[compio::test]
+async fn submission_and_settlement_receipts_cannot_substitute_metadata() {
+    let fixture = Fixture::new();
+    let submit = fixture.submission();
+    let mut altered_job = json!(fixture.spec);
+    altered_job["deploymentId"] = json!(DeploymentId::mint());
+    peer(
+        &fixture,
+        vec![Exchange::new(
+            endpoints::WORKFLOW_JOB_SUBMIT,
+            &submit,
+            altered_job,
+        )],
+        async |client| {
+            assert_eq!(
+                client.submit_job(&submit).await.unwrap_err(),
+                Error::InvalidResponse
+            )
+        },
+    )
+    .await;
+    let command = fixture.settlement();
+    let settled = receipt(&command);
+    for (field, value) in [
+        ("jobId", json!(JobId::mint())),
+        ("appId", json!(AppId::mint())),
+        ("attempt", json!(2)),
+        ("outcome", json!("completed")),
+        ("input", json!("private")),
+    ] {
+        let mut altered = json!(settled);
+        altered[field] = value;
+        peer(
+            &fixture,
+            vec![Exchange::new(
+                endpoints::WORKFLOW_JOB_SETTLE,
+                &command,
+                altered,
+            )],
+            async |client| {
+                assert_eq!(
+                    client.settle_job(&command).await.unwrap_err(),
+                    Error::InvalidResponse
+                )
+            },
+        )
+        .await;
+    }
+}
+
+#[compio::test]
+async fn claim_rejects_foreign_and_malformed_lease_metadata() {
+    let fixture = Fixture::new();
+    let valid = lease(&fixture.delivery, 60_000);
+    let mut cases = Vec::new();
+    for (field, value) in [
+        ("workerId", json!(WorkerId::mint())),
+        ("assignmentRevision", json!(2)),
+        ("attempt", json!(0)),
+        ("input", json!("private")),
+    ] {
+        let mut altered = valid.clone();
+        altered["delivery"][field] = value;
+        cases.push(altered);
+    }
+    let mut foreign = valid.clone();
+    foreign["delivery"]["job"]["appId"] = json!(AppId::mint());
+    cases.push(foreign);
+    let mut nested = valid.clone();
+    nested["delivery"]["job"]["operation"]["history"] = json!(["private"]);
+    cases.push(nested);
+    for remaining in [json!(0), json!(-1), json!(u64::MAX)] {
+        let mut altered = valid.clone();
+        altered["remainingMs"] = remaining;
+        cases.push(altered);
+    }
+    for body in cases {
+        peer(
+            &fixture,
+            vec![Exchange::new(
+                endpoints::WORKFLOW_JOB_CLAIM,
+                &fixture.scope,
+                body,
+            )],
+            async |client| {
+                assert_eq!(
+                    client.claim_job(&fixture.scope).await.unwrap_err(),
+                    Error::InvalidResponse
+                )
+            },
+        )
+        .await;
+    }
+}
+
+#[compio::test]
+async fn heartbeat_preserves_the_full_immutable_delivery() {
+    let fixture = Fixture::new();
+    let valid = lease(&fixture.delivery, 60_000);
+    let mut cases = Vec::new();
+    for (field, value) in [
+        ("workerId", json!(WorkerId::mint())),
+        ("assignmentRevision", json!(2)),
+        ("attempt", json!(2)),
+    ] {
+        let mut altered = valid.clone();
+        altered["delivery"][field] = value;
+        cases.push(altered);
+    }
+    for (field, value) in [
+        ("id", json!(JobId::mint())),
+        ("appId", json!(AppId::mint())),
+        ("deploymentId", json!(DeploymentId::mint())),
+        ("availableAt", json!(2)),
+        ("operation", json!({"kind":"collect"})),
+    ] {
+        let mut altered = valid.clone();
+        altered["delivery"]["job"][field] = value;
+        cases.push(altered);
+    }
+    for body in cases {
+        peer(
+            &fixture,
+            vec![
+                Exchange::new(endpoints::WORKFLOW_JOB_CLAIM, &fixture.scope, valid.clone()),
+                Exchange::new(endpoints::WORKFLOW_JOB_HEARTBEAT, &fixture.delivery, body),
+            ],
+            async |client| {
+                let claimed = client.claim_job(&fixture.scope).await.unwrap().unwrap();
+                assert_eq!(
+                    client.heartbeat_job(&claimed).await.unwrap_err(),
+                    Error::InvalidResponse
+                );
+            },
+        )
+        .await;
+    }
+}
+
+#[compio::test]
+async fn forbidden_publication_is_rejected_without_http() {
+    let fixture = Fixture::new();
+    peer(&fixture, Vec::new(), async |client| {
+        let denied = Error::Refused(FailureCode::Denied);
+        let mut foreign = fixture.submission();
+        foreign.scope.app_id = AppId::mint();
+        assert_eq!(client.submit_job(&foreign).await.unwrap_err(), denied);
+        for operation in [
+            JobOperation::Cron {
+                request_id: RequestId::mint(),
+                run_id: RunId::mint(),
+                revision: 1.try_into().unwrap(),
+                scheduled_at: 0.try_into().unwrap(),
+            },
+            JobOperation::Management {
+                request_id: RequestId::mint(),
+                run_id: RunId::mint(),
+            },
+        ] {
+            let mut command = fixture.submission();
+            command.job.operation = operation;
+            assert_eq!(client.submit_job(&command).await.unwrap_err(), denied);
+            let command = Settlement {
+                successors: vec![command.job],
+                ..fixture.settlement()
+            };
+            assert_eq!(client.settle_job(&command).await.unwrap_err(), denied);
+        }
+        let mut command = fixture.settlement();
+        let mut foreign = fixture.spec.clone();
+        foreign.app_id = AppId::mint();
+        command.successors.push(foreign);
+        assert_eq!(client.settle_job(&command).await.unwrap_err(), denied);
+        let mut command = fixture.settlement();
+        command.delivery.worker_id = WorkerId::mint();
+        assert_eq!(client.settle_job(&command).await.unwrap_err(), denied);
+    })
+    .await;
+}
+
+#[compio::test]
+async fn delayed_claim_reply_cannot_reset_the_grant_clock() {
+    let fixture = Fixture::new();
+    let mut exchange = Exchange::new(
+        endpoints::WORKFLOW_JOB_CLAIM,
+        &fixture.scope,
+        lease(&fixture.delivery, 50),
+    );
+    exchange.delay = Duration::from_millis(100);
+    peer(&fixture, vec![exchange], async |client| {
+        assert_eq!(
+            client.claim_job(&fixture.scope).await.unwrap_err(),
+            Error::Timeout
+        );
+    })
+    .await;
+}
+
+#[compio::test]
+async fn heartbeat_reply_cannot_revive_expired_local_authority() {
+    let fixture = Fixture::new();
+    let mut heartbeat = Exchange::new(
+        endpoints::WORKFLOW_JOB_HEARTBEAT,
+        &fixture.delivery,
+        lease(&fixture.delivery, 60_000),
+    );
+    heartbeat.delay = Duration::from_millis(700);
+    peer(
+        &fixture,
+        vec![
+            Exchange::new(
+                endpoints::WORKFLOW_JOB_CLAIM,
+                &fixture.scope,
+                lease(&fixture.delivery, 500),
+            ),
+            heartbeat,
+        ],
+        async |client| {
+            let claimed = client.claim_job(&fixture.scope).await.unwrap().unwrap();
+            assert_eq!(
+                client.heartbeat_job(&claimed).await.unwrap_err(),
+                Error::Timeout
+            );
+            assert_eq!(claimed.remaining(), Err(Error::Timeout));
+        },
+    )
+    .await;
+}
+
+#[compio::test]
+async fn expired_handle_refuses_heartbeat_but_allows_receipt_replay() {
+    let fixture = Fixture::new();
+    let command = fixture.settlement();
+    let settled = receipt(&command);
+    peer(
+        &fixture,
+        vec![
+            Exchange::new(
+                endpoints::WORKFLOW_JOB_CLAIM,
+                &fixture.scope,
+                lease(&fixture.delivery, 200),
+            ),
+            Exchange::new(endpoints::WORKFLOW_JOB_SETTLE, &command, json!(settled)),
+        ],
+        async |client| {
+            let claimed = client.claim_job(&fixture.scope).await.unwrap().unwrap();
+            let cloned = claimed.clone();
+            compio::time::sleep(claimed.remaining().unwrap()).await;
+            assert_eq!(claimed.remaining(), Err(Error::Timeout));
+            assert_eq!(cloned.remaining(), Err(Error::Timeout));
+            assert_eq!(
+                client.heartbeat_job(&cloned).await.unwrap_err(),
+                Error::Timeout
+            );
+            assert_eq!(client.settle_job(&command).await.unwrap(), settled);
+        },
+    )
+    .await;
+}
+
+#[compio::test]
+async fn job_refusals_keep_the_closed_error_contract() {
+    let fixture = Fixture::new();
+    for (body, expected) in [
+        (
+            json!({"code":"unavailable"}),
+            Error::Refused(FailureCode::Unavailable),
+        ),
+        (json!({"code":"denied"}), Error::InvalidResponse),
+        (
+            json!({"code":"unavailable","input":"private"}),
+            Error::InvalidResponse,
+        ),
+    ] {
+        let mut exchange = Exchange::new(endpoints::WORKFLOW_JOB_CLAIM, &fixture.scope, body);
+        exchange.status = 503;
+        peer(&fixture, vec![exchange], async |client| {
+            assert_eq!(
+                client.claim_job(&fixture.scope).await.unwrap_err(),
+                expected
+            );
+        })
+        .await;
+    }
+}
