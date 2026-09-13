@@ -1836,11 +1836,11 @@ mod tests {
                     if deployment == "original" {
                         load_pinned_workflow_app(app_id.clone(), deployment, executable.modules,
                             AppRuntimeLimits::default(), AppNetPolicy::default(),
-                            executable.descriptor.as_deref(), &manifest, &EnvSnapshot::empty()).unwrap();
+                            executable.descriptor.as_deref(), &manifest, &EnvSnapshot::empty()).await.unwrap();
                     } else {
                         load_app(app_id.clone(), executable.modules, AppRuntimeLimits::default(),
                             AppNetPolicy::default(), Some(deployment), executable.descriptor.as_deref(),
-                            &manifest, &EnvSnapshot::empty()).unwrap();
+                            &manifest, &EnvSnapshot::empty()).await.unwrap();
                     }
                 }
                 let active = get_runtime(&app_id).unwrap();
@@ -1941,8 +1941,8 @@ mod tests {
                 let env = EnvSnapshot::empty();
                 let mut loading = Box::pin(load_app(
                     app_id.clone(),
-                    br#"await new Promise(resolve => setTimeout(resolve, 10));
-                        export default { fetch() { return new Response("ready"); } }"#,
+                    test_modules(br#"await new Promise(resolve => setTimeout(resolve, 10));
+                        export default { fetch() { return new Response("ready"); } }"#),
                     AppRuntimeLimits::default(), AppNetPolicy::default(),
                     Some("ready-deploy"), None, &manifest, &env,
                 ));
@@ -1953,8 +1953,8 @@ mod tests {
 
                 let mut reloading = Box::pin(load_app(
                     app_id.clone(),
-                    br#"await new Promise(resolve => setTimeout(resolve, 10));
-                        throw new Error("candidate startup rejected");"#,
+                    test_modules(br#"await new Promise(resolve => setTimeout(resolve, 10));
+                        throw new Error("candidate startup rejected");"#),
                     AppRuntimeLimits::default(), AppNetPolicy::default(),
                     Some("failed-deploy"), None, &manifest, &env,
                 ));
