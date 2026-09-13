@@ -92,8 +92,10 @@ The native RPC subscription transport uses the `zs.v1` subprotocol:
 - streamed frames are JSON envelopes carrying `data`, `error`, or `end`
 
 Rust resolves the string-keyed procedure, retains the returned iterator and
-pulls it under the captured request context. Disconnect closes the session and
-calls the iterator's `return()` method. See
+pulls it under the captured request context. It requests the next item only
+after the kernel writer completes the prior frame, so socket progress controls
+producer progress. Disconnect closes the session and calls the iterator's
+`return()` method. See
 [`crates/zeroship-runtime/src/rpc/subscription.rs`](../../crates/zeroship-runtime/src/rpc/subscription.rs)
 for the exact wire behavior.
 
