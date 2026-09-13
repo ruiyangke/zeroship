@@ -346,3 +346,68 @@ fn artifact_binary_defaults_decode_into_native_metadata() {
     }))
     .is_err());
 }
+
+#[test]
+fn conflicting_physical_storage_cannot_replace_an_installed_schema() {
+    use zeroship_data_orm::{binding::DbBinding, descriptor, OrmContext};
+
+    let context = OrmContext::new();
+    context.with(|| {
+        let binding = DbBinding::new(
+            "app_storage_contract",
+            "revision",
+            zeroship_data_orm::sql::SchemaName::new("storage_contract").unwrap(),
+        );
+        let original = CollectionSchema::new([("id".into(), identity())]);
+        descriptor::install_collections(
+            &binding,
+            Schema::new([("posts".into(), original.clone())]),
+        )
+        .unwrap();
+
+        for fields in [
+            value!({
+                "id": {"type":"string", "required":true, "primaryKey":true},
+                "title": {"type":"string", "storage":{"valueColumn":"id"}}
+            }),
+            value!({
+                "id": {"type":"string", "required":true, "primaryKey":true},
+                "secret": {"type":"string", "mask":{"kind":"full"}},
+                "other": {"type":"string", "mask":{"kind":"full"},
+                    "storage":{"rawColumn":"__zs_raw__secret"}}
+            }),
+            value!({
+                "id": {"type":"string", "required":true, "primaryKey":true},
+                "secret": {"type":"string", "mask":{"kind":"full"}},
+                "public": {"type":"string", "storage":{"valueColumn":"__zs_raw__secret"}}
+            }),
+        ] {
+            let artifact = CollectionSchema::from_fields(&fields).unwrap();
+            let native = CollectionSchema::new(artifact.clone().into_fields());
+            for candidate in [artifact, native] {
+                assert!(descriptor::install_collections(
+                    &binding,
+                    Schema::new([("posts".into(), candidate)]),
+                )
+                .is_err());
+                assert_eq!(
+                    descriptor::collection_schema(&binding, "posts")
+                        .unwrap()
+                        .as_ref(),
+                    original.fields(),
+                );
+            }
+        }
+
+        let mut title = ColumnSchema::new(LogicalType::Text);
+        title.storage.value_column = Some("stored_title".into());
+        descriptor::install_collections(
+            &binding,
+            Schema::new([(
+                "posts".into(),
+                CollectionSchema::new([("id".into(), identity()), ("title".into(), title)]),
+            )]),
+        )
+        .unwrap();
+    });
+}
