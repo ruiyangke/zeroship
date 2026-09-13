@@ -148,7 +148,8 @@ async fn relay_delivers_to_the_real_inbox_with_alias_headers_and_bounce_sender()
                 );
             }
             assert_eq!(delivered.message.subject, inbound.subject);
-            assert_eq!(delivered.message.text, inbound.text_body);
+            // SMTP terminates the final line of the text-only message.
+            assert_eq!(delivered.message.text, format!("{}\r\n", inbound.text_body));
             assert!(delivered.message.html.is_empty());
         })
         .await;
