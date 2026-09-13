@@ -183,13 +183,8 @@ pub fn require(dsn: &str, required_schemas: &[&str]) {
 
 /// [`require`], at most once per `(dsn, required_schemas)` per test binary.
 ///
-/// WHY THE MEMOISATION IS HERE AND NOT AT THE CALL SITE. A preflight is a fact
-/// about the process, so it wants to run once; but it also has to run before
-/// the FIRST database touch, and any test can be the first when a filter
-/// selects it (`cargo test --exact <one>`). That means every gate in a file
-/// calls it -- `crates/zeroship-gateway/tests/backchannel_logout_test.rs` alone
-/// has eleven -- and a `OnceLock` per call site is a `OnceLock` per file, which
-/// is the seven copies this helper exists to avoid.
+/// Every filtered case must perform its preflight before touching the database.
+/// Cache successful probes here so callers in the same binary share the result.
 ///
 /// The lock is held across the probe on purpose: two threads arriving together
 /// must not both dial, and libtest gives every test its own thread.
