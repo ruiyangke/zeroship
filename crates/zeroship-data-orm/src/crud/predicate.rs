@@ -169,6 +169,26 @@ fn resolve_model_inner(
             let (column, definition) = resolve_column(field, schema, table)?;
             comparison(column, field, definition, op, value, registration)?
         }
+        ModelPredicate::CompareColumn { field, op, other } => {
+            if mapping::column_is_masked(field, schema) || mapping::column_is_masked(other, schema)
+            {
+                return Err(invalid(
+                    "protected field is not valid in a column comparison",
+                ));
+            }
+            let (lhs, left) = resolve_column(field, schema, table)?;
+            let (rhs, right) = resolve_column(other, schema, table)?;
+            validate_comparison(left, op)?;
+            validate_comparison(right, op)?;
+            if left.logical_type != right.logical_type || lhs.storage() != rhs.storage() {
+                return Err(invalid("column comparisons require compatible types"));
+            }
+            ResolvedPredicate::Compare {
+                lhs: ResolvedOperand::Column(lhs),
+                op,
+                rhs: ResolvedPredicateValue::Operand(ResolvedOperand::Column(rhs)),
+            }
+        }
         ModelPredicate::Membership { field, op, values } => {
             let (column, definition) = resolve_column(field, schema, table)?;
             condition(
@@ -611,6 +631,17 @@ mod tests {
             value: "value".into(),
         };
         assert!(run(plain.clone(), equality()).is_ok());
+        for op in [CompareOp::Eq, CompareOp::Ne] {
+            assert!(run(
+                crate::value!({"type":"string", "mask":{"kind":"full"}}),
+                ModelPredicate::CompareColumn {
+                    field: "field",
+                    op,
+                    other: "field"
+                }
+            )
+            .is_err());
+        }
         for definition in [
             crate::value!({"type":"string", "filterable":false}),
             crate::value!({"type":"string", "encrypted":true}),

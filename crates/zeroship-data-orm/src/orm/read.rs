@@ -72,6 +72,7 @@ pub struct ReadQuery {
     pub order_by: Vec<OrderKey>,
     pub limit: RowLimit,
     pub offset: RowOffset,
+    pub(crate) summary: Option<crate::sql::statement::SelectSummary>,
     pub(crate) model_filter: Option<super::model::ModelPredicate>,
 }
 impl ReadQuery {
@@ -87,6 +88,7 @@ impl ReadQuery {
             limit: RowLimit::default(),
             offset: RowOffset::default(),
             model_filter: None,
+            summary: None,
         }
     }
 }
@@ -113,6 +115,7 @@ pub(super) struct PreparedRead {
     projections: Vec<ReadProjection>,
     scalar_slots: BTreeMap<String, String>,
     scalar_schema: FieldMap,
+    summary: bool,
 }
 
 impl PreparedRead {
@@ -348,6 +351,10 @@ impl PreparedRead {
             lock: crate::sql::statement::RowLock::None,
         })
         .map_err(|error| invalid(error.to_string()))?;
+        let statement = match input.summary {
+            Some(summary) => statement.summarize(summary),
+            None => statement,
+        };
         let query = registration
             .compile(Statement::Select(statement))
             .map_err(|error| invalid(error.to_string()))?;
@@ -364,6 +371,7 @@ impl PreparedRead {
             projections: input.projection,
             scalar_slots,
             scalar_schema,
+            summary: input.summary.is_some(),
         })
     }
 
@@ -372,6 +380,11 @@ impl PreparedRead {
         binding: &DbBinding,
         route: &crate::tx_route::TxRoute,
     ) -> Result<Output, DbError> {
+        if self.summary {
+            return crate::exec::exec_count(route, self.query)
+                .await
+                .map(Output::Count);
+        }
         let mut rows = crate::exec::exec_query(route, self.query).await?;
         let mut budget = MAX_READ_RESULT_BYTES;
         for row in &rows {

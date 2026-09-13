@@ -1,0 +1,29 @@
+error[E0277]: the trait bound `SourceColumn<counter>: IntoReadOperand<zeroship_data_orm::orm::sql_types::Text, _>` is not satisfied
+ --> tests/ui/compare_read_type.rs:5:52
+  |
+5 |     let _ = source.column(schema::posts::title).eq(source.column(schema::posts::counter));
+  |                                                 -- ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `IntoReadOperand<zeroship_data_orm::orm::sql_types::Text, _>` is not implemented for `SourceColumn<counter>`
+  |                                                 |
+  |                                                 required by a bound introduced by this call
+  |
+help: the following other types implement trait `IntoReadOperand<S, Kind>`
+ --> src/orm/read_builder/predicates.rs
+  |
+  | / impl<S, C> IntoReadOperand<S, ExpressionOperand> for SourceColumn<C>
+  | | where
+  | |     S: ComparableSqlType,
+  | |     C: FilterableColumn,
+  | |     C::SqlType: ComparableSqlType<Base = S::Base>,
+  | |__________________________________________________^ `SourceColumn<C>`
+...
+  | / impl<S, C> IntoReadOperand<S, ExpressionOperand> for &SourceColumn<C>
+  | | where
+  | |     S: ComparableSqlType,
+  | |     C: FilterableColumn,
+  | |     C::SqlType: ComparableSqlType<Base = S::Base>,
+  | |__________________________________________________^ `&SourceColumn<C>`
+note: required by a bound in `orm::read_builder::predicates::<impl SourceColumn<C>>::eq`
+ --> src/orm/read_builder/predicates.rs
+  |
+  |     pub fn eq<T: IntoReadOperand<C::SqlType, K>, K>(
+  |                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `orm::read_builder::predicates::<impl SourceColumn<C>>::eq`
