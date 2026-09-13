@@ -23,7 +23,7 @@ use std::{
 use zeroship_core::{
     app_id::AppId,
     workflow_coordination::{Assignment, VerifyAssignment, WorkerId},
-    workflow_jobs::{Delivery, DeliveryLease, JobSpec, Settlement, SettlementReceipt},
+    workflow_jobs::{Delivery, DeliveryLease, JobLease, JobSpec, Settlement, SettlementReceipt},
 };
 use zeroship_data_orm::{
     binding::DbBinding,
@@ -73,11 +73,29 @@ pub struct Queue {
 /// Response construction must consume only the authority still remaining.
 #[derive(Debug, Clone)]
 pub struct DeliveryGrant {
-    pub delivery: Delivery,
+    delivery: Delivery,
     expires_at: Instant,
 }
 
+impl JobLease for DeliveryGrant {
+    fn delivery(&self) -> &Delivery {
+        &self.delivery
+    }
+
+    fn remaining(&self) -> Option<Duration> {
+        self.expires_at
+            .checked_duration_since(Instant::now())
+            .filter(|remaining| !remaining.is_zero())
+    }
+}
+
 impl DeliveryGrant {
+    /// Read the immutable identity covered by this grant's lease authority.
+    #[must_use]
+    pub const fn delivery(&self) -> &Delivery {
+        &self.delivery
+    }
+
     fn new(delivery: Delivery, sample: Sample, assignment_expires: Instant) -> Result<Self, Error> {
         let expires_at = local_deadline(sample, delivery.deadline.get())?.min(assignment_expires);
         if expires_at <= Instant::now() {
@@ -531,7 +549,12 @@ impl Queue {
         Ok(output.bytes)
     }
 
-    pub(crate) async fn insert(&self, tx: &Database, spec: &JobSpec, now: i64) -> Result<(), Error> {
+    pub(crate) async fn insert(
+        &self,
+        tx: &Database,
+        spec: &JobSpec,
+        now: i64,
+    ) -> Result<(), Error> {
         let digest = digest(&self.encode(spec)?);
         if let Some(job) = load(tx, &spec.app_id, spec.id.as_str()).await? {
             return if job.spec_digest == digest && job.spec()? == *spec {
@@ -657,8 +680,7 @@ fn current(
     observed: Assignment,
     now: i64,
 ) -> Result<Assignment, Error> {
-    if original != &VerifyAssignment::from(&observed) || observed.expires_at.get() <= now
-    {
+    if original != &VerifyAssignment::from(&observed) || observed.expires_at.get() <= now {
         return Err(Error::Denied);
     }
     Ok(observed)

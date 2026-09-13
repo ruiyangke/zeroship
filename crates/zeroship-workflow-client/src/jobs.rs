@@ -4,7 +4,8 @@ use zeroship_core::{
     service_identity::endpoints,
     workflow_coordination::{AssignedScope, FailureCode},
     workflow_jobs::{
-        Delivery, DeliveryLease, JobOperation, JobSpec, Settlement, SettlementReceipt, SubmitJob,
+        Delivery, DeliveryLease, JobLease, JobOperation, JobSpec, Settlement, SettlementReceipt,
+        SubmitJob,
     },
 };
 
@@ -14,6 +15,16 @@ use zeroship_core::{
 pub struct LeasedJob {
     delivery: Delivery,
     expires: Instant,
+}
+
+impl JobLease for LeasedJob {
+    fn delivery(&self) -> &Delivery {
+        &self.delivery
+    }
+
+    fn remaining(&self) -> Option<Duration> {
+        LeasedJob::remaining(self).ok()
+    }
 }
 
 impl LeasedJob {

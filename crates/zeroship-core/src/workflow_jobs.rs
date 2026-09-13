@@ -11,6 +11,7 @@ use crate::{
 };
 use serde::{Deserialize, Serialize};
 use std::num::NonZeroU64;
+use std::time::Duration;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(
@@ -77,6 +78,15 @@ pub struct Delivery {
 pub struct DeliveryLease {
     pub delivery: Delivery,
     pub remaining_ms: NonZeroU64,
+}
+
+/// Host-authorized delivery with a deadline on the host's monotonic clock.
+/// Native manager grants and authenticated client replies implement this seam;
+/// a serialized delivery alone cannot supply execution authority. Implementors
+/// must preserve the original expiration when cloned or repeatedly observed.
+pub trait JobLease {
+    fn delivery(&self) -> &Delivery;
+    fn remaining(&self) -> Option<Duration>;
 }
 
 /// Scheduling classification without customer results or free-form failures.
