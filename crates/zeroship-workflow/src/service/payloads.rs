@@ -1,6 +1,7 @@
 use super::{
     app::{deadline, emit, lock_app, lock_run, not_found, validate_run},
     models,
+    policy::PolicyAuthority,
     store::{Row, Transaction},
     tasks::authorized_task,
     AppWorkflows, RequestId, TaskToken, WorkerIdentity, WorkflowService,
@@ -11,7 +12,7 @@ use crate::{
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::{cell::Cell, rc::Rc, time::Duration};
+use std::{cell::Cell, rc::Rc, sync::Arc, time::Duration};
 use zeroship_core::{app_id::AppId, typed_id};
 use zeroship_data_orm::{
     orm::{Entity, FindOptions, FromRow, Operation, Output},
@@ -64,6 +65,16 @@ pub struct PayloadRead {
     pub body: BoxByteStream,
 }
 impl PayloadRead {
+    fn guarded(mut self, authority: Option<Arc<PolicyAuthority>>) -> Self {
+        if let Some(authority) = authority {
+            self.body = Box::new(AuthorizedSource {
+                inner: Some(self.body),
+                authority,
+            });
+        }
+        self
+    }
+
     /// Collect a verified payload within the host's memory budget.
     ///
     /// # Errors
@@ -136,7 +147,31 @@ impl WorkflowService {
 
     /// Upload against current task ownership. The upload identity is durable
     /// before object I/O, so an interrupted writer leaves a collectible record.
+    ///
+    /// # Errors
+    /// Rejects stale task or policy authority, invalid content and storage failures.
     pub async fn stage_payload(
+        &self,
+        worker: &WorkerIdentity,
+        task_id: &str,
+        token: &TaskToken,
+        request: &RequestId,
+        reference: WorkflowOutputRef,
+        body: BoxChunkSource,
+    ) -> Result<StagedPayload, WorkflowServiceError> {
+        let authority = payload_authority(self)?;
+        let service = match authority.as_deref() {
+            Some(authority) => self.with_authority(authority.clone())?,
+            None => self.clone(),
+        };
+        guarded_payload(
+            authority.as_deref(),
+            Box::pin(service.stage_payload_inner(worker, task_id, token, request, reference, body)),
+        )
+        .await
+    }
+
+    async fn stage_payload_inner(
         &self,
         worker: &WorkerIdentity,
         task_id: &str,
@@ -269,7 +304,30 @@ impl WorkflowService {
     }
 
     /// Task reads follow committed replay edges or that task's own staged objects.
+    ///
+    /// # Errors
+    /// Rejects stale authority, unrelated payloads and unavailable or corrupt storage.
     pub async fn read_task_payload(
+        &self,
+        worker: &WorkerIdentity,
+        task_id: &str,
+        token: &TaskToken,
+        reference: &WorkflowOutputRef,
+    ) -> Result<PayloadRead, WorkflowServiceError> {
+        let authority = payload_authority(self)?;
+        let service = match authority.as_deref() {
+            Some(authority) => self.with_authority(authority.clone())?,
+            None => self.clone(),
+        };
+        let read = guarded_payload(
+            authority.as_deref(),
+            Box::pin(service.read_task_payload_inner(worker, task_id, token, reference)),
+        )
+        .await?;
+        Ok(read.guarded(authority))
+    }
+
+    async fn read_task_payload_inner(
         &self,
         worker: &WorkerIdentity,
         task_id: &str,
@@ -410,6 +468,22 @@ impl AppWorkflows {
         name: &str,
         occurrence: u32,
     ) -> Result<PayloadRead, WorkflowServiceError> {
+        let authority = Arc::new(self.capture_policy().authority()?.clone());
+        let scope = self.clone().with_authority(authority.as_ref().clone())?;
+        let read = authority
+            .run(Box::pin(
+                scope.read_step_output_inner(run_id, name, occurrence),
+            ))
+            .await?;
+        Ok(read.guarded(Some(authority)))
+    }
+
+    async fn read_step_output_inner(
+        &self,
+        run_id: &str,
+        name: &str,
+        occurrence: u32,
+    ) -> Result<PayloadRead, WorkflowServiceError> {
         validate_run(run_id)?;
         validation::step_name(name)?;
         let occurrence = i32::try_from(occurrence).map_err(|_| {
@@ -474,7 +548,25 @@ impl AppWorkflows {
         Ok(read)
     }
 
+    /// Read a retained payload through this app's original policy authority.
+    ///
+    /// # Errors
+    /// Rejects missing history, unavailable policy and failed storage reads.
     pub async fn read_payload(
+        &self,
+        run_id: &str,
+        generation: i64,
+        slot: PayloadSlot,
+    ) -> Result<PayloadRead, WorkflowServiceError> {
+        let authority = Arc::new(self.capture_policy().authority()?.clone());
+        let scope = self.clone().with_authority(authority.as_ref().clone())?;
+        let read = authority
+            .run(Box::pin(scope.read_payload_inner(run_id, generation, slot)))
+            .await?;
+        Ok(read.guarded(Some(authority)))
+    }
+
+    async fn read_payload_inner(
         &self,
         run_id: &str,
         generation: i64,
@@ -489,6 +581,52 @@ impl AppWorkflows {
         let read = open_payload(&storage, &self.app, &row).await?;
         tx.commit().await?;
         Ok(read)
+    }
+}
+
+fn payload_authority(
+    service: &WorkflowService,
+) -> Result<Option<Arc<PolicyAuthority>>, WorkflowServiceError> {
+    service
+        .capture_policy()
+        .map(|captured| captured.authority().cloned().map(Arc::new))
+        .transpose()
+}
+
+fn guarded_payload<'a, T: 'a>(
+    authority: Option<&'a PolicyAuthority>,
+    operation: futures::future::LocalBoxFuture<'a, Result<T, WorkflowServiceError>>,
+) -> futures::future::LocalBoxFuture<'a, Result<T, WorkflowServiceError>> {
+    match authority {
+        Some(authority) => authority.run(operation),
+        None => operation,
+    }
+}
+
+struct AuthorizedSource {
+    inner: Option<BoxByteStream>,
+    authority: Arc<PolicyAuthority>,
+}
+
+#[async_trait::async_trait(?Send)]
+impl ChunkSource for AuthorizedSource {
+    async fn next_chunk(&mut self) -> Option<ChunkResult> {
+        let inner = self.inner.as_mut()?;
+        let read = self
+            .authority
+            .run(async { Ok(inner.next_chunk().await) })
+            .await;
+        if let Ok(chunk) = read {
+            if !matches!(chunk, Some(Ok(_))) {
+                self.inner = None;
+            }
+            chunk
+        } else {
+            self.inner = None;
+            Some(Err(StorageError::Stream(
+                "workflow payload authority is unavailable".into(),
+            )))
+        }
     }
 }
 

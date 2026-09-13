@@ -28,9 +28,10 @@ struct Fixture {
 impl Fixture {
     async fn new() -> Self {
         let directory = tempfile::tempdir().unwrap();
+        let policies = Arc::new(HostPolicies::default());
         let service = WorkflowService::open(
             std::rc::Rc::new(orm_fixture::store(directory.path()).await),
-            Arc::new(HostPolicies::default()),
+            policies.clone(),
         )
         .await
         .unwrap();
@@ -38,19 +39,22 @@ impl Fixture {
         let app = AppId::mint();
         let other = AppId::mint();
         let service = service.with_deployments(deployments.binding(&[&app, &other]));
-        for id in [&app, &other] {
-            service
-                .register_app(
-                    id,
+        let bindings = [policies.bind(app).unwrap(), policies.bind(other).unwrap()];
+        let mut apps = Vec::new();
+        for binding in &bindings {
+            binding
+                .begin_refresh()
+                .unwrap()
+                .install(
                     PolicySnapshot::configuration(1.try_into().unwrap(), AppPolicy::default())
                         .unwrap(),
                 )
-                .await
                 .unwrap();
+            let app = service.register_app(binding).await.unwrap();
             deployments
                 .activate(
                     &service,
-                    id,
+                    app.app_id(),
                     &DeployRegistration {
                         id: typed_id::generate("dep"),
                         hash: "a".repeat(64),
@@ -60,11 +64,13 @@ impl Fixture {
                 )
                 .await
                 .unwrap();
+            apps.push(app);
         }
+        let [app, other]: [AppWorkflows; 2] = apps.try_into().unwrap();
         Self {
             _directory: directory,
-            app: service.for_app(app),
-            other: service.for_app(other),
+            app,
+            other,
             service,
         }
     }

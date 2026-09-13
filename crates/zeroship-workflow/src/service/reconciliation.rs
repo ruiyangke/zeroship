@@ -6,7 +6,7 @@
 )]
 
 use super::{
-    app::{decode, encode, lock_app},
+    app::{decode, encode, lock_app_state},
     delivery::{self, CapturedLease, JobReceipt},
     models::{job_publications, job_receipts, publication_scans},
     publication::JobPublisher,
@@ -144,7 +144,8 @@ impl AppWorkflows {
         }
         let authority = CapturedLease::capture(self, grant);
         let budget = delivery::attempt_budget(authority.as_ref().ok(), None);
-        compio::time::timeout(
+        delivery::run_attempt(
+            authority.as_ref().ok().map(CapturedLease::cancelled),
             budget,
             Box::pin(async {
                 let plan = match self
@@ -181,7 +182,6 @@ impl AppWorkflows {
             }),
         )
         .await
-        .map_err(|_| WorkflowServiceError::Timeout)?
     }
 
     async fn prepare_reconciliation(
@@ -191,7 +191,7 @@ impl AppWorkflows {
         options: ReconciliationOptions,
     ) -> Result<Admission, WorkflowServiceError> {
         let mut tx = self.service.begin().await?;
-        lock_app(&mut tx, self.app_id()).await?;
+        lock_app_state(&mut tx, self.app_id()).await?;
         let record = delivery::read(&tx, job).await?;
         if let Some(record) = &record {
             if let Some(receipt) = record.receipt(job)? {
@@ -278,7 +278,7 @@ impl AppWorkflows {
         authority: &CapturedLease,
     ) -> Result<Progress, WorkflowServiceError> {
         let mut tx = self.service.begin().await?;
-        lock_app(&mut tx, self.app_id()).await?;
+        lock_app_state(&mut tx, self.app_id()).await?;
         let record = delivery::read(&tx, job).await?.ok_or_else(invalid)?;
         if let Some(receipt) = record.receipt(job)? {
             tx.commit().await?;

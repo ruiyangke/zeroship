@@ -144,7 +144,7 @@ async fn empty_service(
         .with_deployments(platform.binding(&[&app, &other]));
     for identity in [&app, &other] {
         service
-            .register_app(identity, configured_policy(1, AppPolicy::default()))
+            .fixture_register(identity, leased_policy(1, AppPolicy::default()))
             .await
             .unwrap();
     }
@@ -202,7 +202,7 @@ async fn replay_and_order(store: Rc<OrmStore>) {
     let (service, app, _, platform) = empty_service(store, Deployments::new().await).await;
     let old = platform.deploy(&app).await;
     let new = platform.deploy(&app).await;
-    let scope = service.for_app(app.clone());
+    let scope = service.fixture_app(app.clone());
     let newest = Grant::new(&app, &new, 5);
     let newest_receipt = scope.activate_job(&newest).await.unwrap();
     assert_eq!(newest_receipt.job, newest.delivery.job);
@@ -233,7 +233,7 @@ async fn replay_and_order(store: Rc<OrmStore>) {
         .await
         .unwrap();
     let service = reopened(&service).await;
-    let scope = service.for_app(app.clone());
+    let scope = service.fixture_app(app.clone());
     let mut retry = previous.retry();
     retry.expires = Instant::now();
     assert_eq!(scope.activate_job(&retry).await.unwrap(), old_receipt);
@@ -260,7 +260,7 @@ async fn conflicts(store: Rc<OrmStore>) {
     let (service, app, _, platform) = empty_service(store, Deployments::new().await).await;
     let first = platform.deploy(&app).await;
     let other = platform.deploy(&app).await;
-    let scope = service.for_app(app.clone());
+    let scope = service.fixture_app(app.clone());
     let grant = Grant::new(&app, &first, 1);
     let receipt = scope.activate_job(&grant).await.unwrap();
     let history = snapshot(&service, "activations", &app).await;
@@ -298,7 +298,7 @@ async fn conflicts(store: Rc<OrmStore>) {
 async fn artifacts(store: Rc<OrmStore>) {
     let (service, app, _, platform) = empty_service(store, Deployments::new().await).await;
     let deployment = platform.deploy(&app).await;
-    let scope = service.for_app(app.clone());
+    let scope = service.fixture_app(app.clone());
     let grant = Grant::new(&app, &deployment, 1);
     let manifest = platform
         .source
@@ -346,7 +346,7 @@ async fn receipt_history(store: Rc<OrmStore>) {
     let (service, app, _, platform) = empty_service(store, Deployments::new().await).await;
     let older = platform.deploy(&app).await;
     let newer = platform.deploy(&app).await;
-    let scope = service.for_app(app.clone());
+    let scope = service.fixture_app(app.clone());
     let previous = Grant::new(&app, &older, 1);
     let current = Grant::new(&app, &newer, 2);
     let previous_receipt = scope.activate_job(&previous).await.unwrap();
@@ -422,10 +422,13 @@ async fn receipt_history(store: Rc<OrmStore>) {
 async fn authority(store: Rc<OrmStore>) {
     let (service, app, other, platform) = empty_service(store, Deployments::new().await).await;
     let deployment = platform.deploy(&app).await;
-    let scope = service.for_app(app.clone());
+    let scope = service.fixture_app(app.clone());
     let grant = Grant::new(&app, &deployment, 1);
     assert!(matches!(
-        service.for_app(other.clone()).activate_job(&grant).await,
+        service
+            .fixture_app(other.clone())
+            .activate_job(&grant)
+            .await,
         Err(WorkflowServiceError::PermissionDenied)
     ));
     assert!(snapshot(&service, "deployment_holds", &other)
@@ -459,7 +462,7 @@ async fn authority(store: Rc<OrmStore>) {
 async fn policy_lock(store: Rc<OrmStore>) {
     let (service, app, _, platform) = empty_service(store, Deployments::new().await).await;
     let deployment = platform.deploy(&app).await;
-    let scope = service.for_app(app.clone());
+    let scope = service.fixture_app(app.clone());
     let grant = Grant::new(&app, &deployment, 1);
     let mut held = service.begin().await.unwrap();
     super::super::app::lock_app(&mut held, &app).await.unwrap();
@@ -467,7 +470,7 @@ async fn policy_lock(store: Rc<OrmStore>) {
     assert!(futures::poll!(work.as_mut()).is_pending());
     service
         .policies
-        .install(&app, configured_policy(2, AppPolicy::default()))
+        .fixture_install(&app, leased_policy(2, AppPolicy::default()))
         .unwrap();
     held.commit().await.unwrap();
     assert!(matches!(
@@ -570,7 +573,7 @@ async fn policy_hold(store: Rc<OrmStore>) {
             .with_hold_client(client.clone()),
     );
     let deployment = platform.deploy(&app).await;
-    let scope = service.for_app(app.clone());
+    let scope = service.fixture_app(app.clone());
     let grant = Grant::new(&app, &deployment, 1);
     let (wait, entered, resume) = gate();
     *client.gate.borrow_mut() = Some(wait);
@@ -578,7 +581,7 @@ async fn policy_hold(store: Rc<OrmStore>) {
         entered.recv_async().await.unwrap();
         service
             .policies
-            .install(&app, configured_policy(2, AppPolicy::default()))
+            .fixture_install(&app, leased_policy(2, AppPolicy::default()))
             .unwrap();
         resume.send_async(()).await.unwrap();
     });
@@ -606,7 +609,7 @@ async fn hold_replies(store: Rc<OrmStore>) {
             .with_hold_client(client.clone()),
     );
     let deployment = platform.deploy(&app).await;
-    let scope = service.for_app(app.clone());
+    let scope = service.fixture_app(app.clone());
     let grant = Grant::new(&app, &deployment, 1);
     for reply in [Reply::Lost, Reply::Foreign] {
         client.reply.set(reply);
@@ -621,7 +624,7 @@ async fn hold_replies(store: Rc<OrmStore>) {
     let reopened = reopened(&service).await;
     assert_eq!(
         reopened
-            .for_app(app.clone())
+            .fixture_app(app.clone())
             .activate_job(&grant.retry())
             .await
             .unwrap()
@@ -707,7 +710,7 @@ async fn policy_artifact(store: Rc<OrmStore>) {
     let platform = Deployments::with_source(directory, objects.clone()).await;
     let (service, app, _, platform) = empty_service(store, platform).await;
     let deployment = platform.deploy(&app).await;
-    let scope = service.for_app(app.clone());
+    let scope = service.fixture_app(app.clone());
     let grant = Grant::new(&app, &deployment, 1);
     let (wait, entered, resume) = gate();
     *objects.gate.lock().unwrap() = Some(wait);
@@ -715,7 +718,7 @@ async fn policy_artifact(store: Rc<OrmStore>) {
         entered.recv_async().await.unwrap();
         service
             .policies
-            .install(&app, configured_policy(2, AppPolicy::default()))
+            .fixture_install(&app, leased_policy(2, AppPolicy::default()))
             .unwrap();
         resume.send_async(()).await.unwrap();
     });
@@ -798,7 +801,7 @@ async fn rollback(store: Rc<OrmStore>, fault: ReceiptFault) {
     let (service, app, _, platform) = empty_service(store, Deployments::new().await).await;
     let first = platform.deploy(&app).await;
     let second = platform.deploy(&app).await;
-    let scope = service.for_app(app.clone());
+    let scope = service.fixture_app(app.clone());
     scope
         .activate_job(&Grant::new(&app, &first, 1))
         .await

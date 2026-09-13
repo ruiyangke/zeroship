@@ -208,7 +208,15 @@ async fn initialize(
         catalog.clone(),
         HoldScope::for_app(app.clone()),
     );
-    let service = WorkflowService::open(Rc::new(store), Arc::new(HostPolicies::default()))
+    let policies = Arc::new(HostPolicies::default());
+    let policy = policies.bind(app.clone())?;
+    policy
+        .begin_refresh()?
+        .install(PolicySnapshot::configuration(
+            1.try_into().expect("initial host policy revision"),
+            AppPolicy::default(),
+        )?)?;
+    let service = WorkflowService::open(Rc::new(store), policies)
         .await?
         .with_payload_storage(storage)?
         .with_deployments(
@@ -216,19 +224,9 @@ async fn initialize(
                 .artifacts(config.max_source_bytes)?
                 .with_hold_client(Rc::new(client)),
         );
-    service
-        .register_app(
-            app,
-            PolicySnapshot::configuration(
-                1.try_into().expect("initial host policy revision"),
-                AppPolicy::default(),
-            )?,
-        )
-        .await?;
+    let api = service.register_app(&policy).await?;
     let installed = install_bundle(config, deployment, &catalog, &service, app).await?;
-    let backend = service
-        .for_app(app.clone())
-        .into_backend(config.payloads.max_payload_bytes)?;
+    let backend = api.into_backend(config.payloads.max_payload_bytes)?;
     let tasks = Rc::new(service.tasks(WorkerIdentity::new(typed_id::generate("wkr"))?));
     let env = zeroship_runtime::serve::app_env_from_prefixed_vars(&env_vars);
     let loader = Rc::new(AppRuntimeLoader::new(

@@ -265,7 +265,7 @@ async fn restart_contract(store: Rc<OrmStore>) {
     .await
     .unwrap();
     tx.commit().await.unwrap();
-    let scope = service.for_app(local.clone());
+    let scope = service.fixture_app(local.clone());
     let request = RequestId::mint();
     assert!(matches!(
         scope

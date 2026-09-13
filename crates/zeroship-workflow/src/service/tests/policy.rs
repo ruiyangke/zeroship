@@ -5,10 +5,12 @@ use crate::{
 };
 use std::time::{Duration, Instant};
 
+mod lifetimes;
+
 #[test]
 fn authority_preserves_raw_admission_near_lease_expiry() {
     let app = AppId::mint();
-    let policies = HostPolicies::default();
+    let policies = Arc::new(HostPolicies::default());
     let policy = AppPolicy::default();
     let stop = Instant::now() + Duration::from_secs(5);
     loop {
@@ -18,12 +20,12 @@ fn authority_preserves_raw_admission_near_lease_expiry() {
         );
         let until = Instant::now() + Duration::from_micros(900);
         policies
-            .install(
+            .fixture_install(
                 &app,
                 PolicySnapshot::lease(1.try_into().unwrap(), policy.clone(), until).unwrap(),
             )
             .unwrap();
-        let authority = match policies.authority(&app) {
+        let authority = match policies.fixture_authority(&app) {
             Ok(authority) => authority,
             Err(WorkflowServiceError::Unavailable(_)) if Instant::now() >= until => continue,
             Err(error) => panic!("unexpected management authority failure: {error}"),
@@ -33,7 +35,7 @@ fn authority_preserves_raw_admission_near_lease_expiry() {
         assert!(authority.policy.admission);
         assert!(authority.policy.admit().is_ok());
         assert!(
-            !policies.resolve(&app).unwrap().admission,
+            !policies.fixture_resolve(&app).unwrap().admission,
             "the effective execution policy must exercise its expiry rounding"
         );
         break;
@@ -43,93 +45,89 @@ fn authority_preserves_raw_admission_near_lease_expiry() {
 #[test]
 fn authority_keeps_the_original_deadline_after_refresh() {
     let app = AppId::mint();
-    let policies = HostPolicies::default();
+    let policies = Arc::new(HostPolicies::default());
     let until = Instant::now() + Duration::from_secs(30);
     policies
-        .install(
+        .fixture_install(
             &app,
             PolicySnapshot::lease(1.try_into().unwrap(), AppPolicy::default(), until).unwrap(),
         )
         .unwrap();
-    let mut authority = policies.authority(&app).unwrap();
-    authority.check(&policies, &app).unwrap();
+    let mut authority = policies.fixture_authority(&app).unwrap();
+    authority.check().unwrap();
     let refreshed_until = until + Duration::from_secs(30);
     policies
-        .install(
+        .fixture_install(
             &app,
             PolicySnapshot::lease(1.try_into().unwrap(), AppPolicy::default(), refreshed_until)
                 .unwrap(),
         )
         .unwrap();
     assert_eq!(authority.deadline, Some(until));
-    authority.check(&policies, &app).unwrap();
-    let refreshed = policies.authority(&app).unwrap();
+    authority.check().unwrap();
+    let refreshed = policies.fixture_authority(&app).unwrap();
     assert_eq!(refreshed.deadline, Some(refreshed_until));
-    refreshed.check(&policies, &app).unwrap();
+    refreshed.check().unwrap();
 
     // Simulate expiration of the captured budget while the refreshed host lease
     // remains valid, without waiting for wall-clock scheduling.
     authority.deadline = Some(Instant::now());
     assert!(matches!(
-        authority.check(&policies, &app),
+        authority.check(),
         Err(WorkflowServiceError::Unavailable(_))
     ));
-    refreshed.check(&policies, &app).unwrap();
+    refreshed.check().unwrap();
 }
 
 #[test]
 fn authority_retries_when_the_host_revision_changes() {
     let app = AppId::mint();
-    let policies = HostPolicies::default();
+    let policies = Arc::new(HostPolicies::default());
     policies
-        .install(&app, configured_policy(1, AppPolicy::default()))
+        .fixture_install(&app, leased_policy(1, AppPolicy::default()))
         .unwrap();
-    let authority = policies.authority(&app).unwrap();
-    authority.check(&policies, &app).unwrap();
+    let authority = policies.fixture_authority(&app).unwrap();
+    authority.check().unwrap();
     policies
-        .install(&app, configured_policy(2, AppPolicy::default()))
+        .fixture_install(&app, leased_policy(2, AppPolicy::default()))
         .unwrap();
     assert!(matches!(
-        authority.check(&policies, &app),
+        authority.check(),
         Err(WorkflowServiceError::Unavailable(_))
     ));
-    policies
-        .authority(&app)
-        .unwrap()
-        .check(&policies, &app)
-        .unwrap();
+    policies.fixture_authority(&app).unwrap().check().unwrap();
 }
 
 #[test]
 fn authority_requires_a_present_unexpired_host_snapshot() {
     let app = AppId::mint();
-    let policies = HostPolicies::default();
+    let policies = Arc::new(HostPolicies::default());
     assert!(matches!(
-        policies.authority(&app),
+        policies.fixture_authority(&app),
         Err(WorkflowServiceError::Unavailable(_))
     ));
     policies
-        .install(&app, configured_policy(1, AppPolicy::default()))
+        .fixture_install(&app, leased_policy(1, AppPolicy::default()))
         .unwrap();
-    let authority = policies.authority(&app).unwrap();
-    authority.check(&policies, &app).unwrap();
+    let authority = policies.fixture_authority(&app).unwrap();
+    authority.check().unwrap();
     assert!(matches!(
-        authority.check(&HostPolicies::default(), &app),
+        Arc::new(HostPolicies::default()).fixture_authority(&app),
         Err(WorkflowServiceError::Unavailable(_))
     ));
     policies
-        .install(
+        .fixture_install(
             &app,
             PolicySnapshot::lease(2.try_into().unwrap(), AppPolicy::default(), Instant::now())
                 .unwrap(),
         )
         .unwrap();
     assert!(matches!(
-        policies.authority(&app),
+        policies.fixture_authority(&app),
         Err(WorkflowServiceError::Unavailable(_))
     ));
     assert!(matches!(
-        authority.check(&policies, &app),
+        authority.check(),
         Err(WorkflowServiceError::Unavailable(_))
     ));
 }
@@ -137,18 +135,21 @@ fn authority_requires_a_present_unexpired_host_snapshot() {
 #[test]
 fn authority_preserves_an_explicit_configured_admission_denial() {
     let app = AppId::mint();
-    let policies = HostPolicies::default();
+    let policies = Arc::new(HostPolicies::default());
     let policy = AppPolicy {
         admission: false,
         ..AppPolicy::default()
     };
     policies
-        .install(&app, configured_policy(1, policy.clone()))
+        .fixture_install(
+            &app,
+            PolicySnapshot::configuration(1.try_into().unwrap(), policy.clone()).unwrap(),
+        )
         .unwrap();
-    let authority = policies.authority(&app).unwrap();
+    let authority = policies.fixture_authority(&app).unwrap();
     assert_eq!(authority.deadline, None);
     assert_eq!(authority.policy, policy);
-    authority.check(&policies, &app).unwrap();
+    authority.check().unwrap();
     assert!(matches!(
         authority.policy.admit(),
         Err(WorkflowServiceError::PermissionDenied)
@@ -158,11 +159,11 @@ fn authority_preserves_an_explicit_configured_admission_denial() {
 #[test]
 fn host_policy_revisions_reject_conflicting_limits_and_accept_authorized_refreshes() {
     let app = AppId::mint();
-    let policies = HostPolicies::default();
+    let policies = Arc::new(HostPolicies::default());
     let until = Instant::now() + Duration::from_secs(30);
     let snapshot =
         PolicySnapshot::lease(1.try_into().unwrap(), AppPolicy::default(), until).unwrap();
-    policies.install(&app, snapshot.clone()).unwrap();
+    policies.fixture_install(&app, snapshot.clone()).unwrap();
     let conflicting = PolicySnapshot::lease(
         1.try_into().unwrap(),
         AppPolicy {
@@ -173,23 +174,34 @@ fn host_policy_revisions_reject_conflicting_limits_and_accept_authorized_refresh
     )
     .unwrap();
     assert!(matches!(
-        policies.install(&app, conflicting),
+        policies.fixture_install(&app, conflicting),
         Err(WorkflowServiceError::Conflict(_))
     ));
-    assert!(policies.resolve(&app).unwrap().admission);
+    assert!(policies.fixture_resolve(&app).unwrap().admission);
     let refresh = PolicySnapshot::lease(
         1.try_into().unwrap(),
         AppPolicy::default(),
         until + Duration::from_secs(30),
     )
     .unwrap();
-    policies.install(&app, refresh).unwrap();
-    policies.install(&app, snapshot).unwrap();
-    let original_remaining = until.saturating_duration_since(Instant::now()).as_millis();
-    assert!(u128::try_from(policies.resolve(&app).unwrap().lease_ms).unwrap() > original_remaining);
+    let delayed = policies
+        .fixture_binding(&app)
+        .unwrap()
+        .begin_refresh()
+        .unwrap();
+    policies.fixture_install(&app, refresh).unwrap();
     assert!(matches!(
-        policies.resolve(&AppId::mint()),
-        Err(WorkflowServiceError::PermissionDenied)
+        delayed.install(snapshot),
+        Err(WorkflowServiceError::Unavailable(_))
+    ));
+    let original_remaining = until.saturating_duration_since(Instant::now()).as_millis();
+    assert!(
+        u128::try_from(policies.fixture_resolve(&app).unwrap().lease_ms).unwrap()
+            > original_remaining
+    );
+    assert!(matches!(
+        policies.fixture_resolve(&AppId::mint()),
+        Err(WorkflowServiceError::Unavailable(_))
     ));
 }
 
@@ -206,7 +218,7 @@ async fn policy_revocation_while_waiting_for_customer_lock_prevents_admission() 
         )
         .await
         .unwrap();
-    let scope = service.for_app(app.clone());
+    let scope = service.fixture_app(app.clone());
     let starting = compio::runtime::spawn(async move {
         scope
             .start(&RequestId::mint(), "Example", StartOptions::default())
@@ -222,7 +234,7 @@ async fn policy_revocation_while_waiting_for_customer_lock_prevents_admission() 
     }).await.expect("start reached the customer app lock");
     service
         .policies
-        .install(
+        .fixture_install(
             &app,
             PolicySnapshot::lease(2.try_into().unwrap(), AppPolicy::default(), Instant::now())
                 .unwrap(),
@@ -274,7 +286,7 @@ async fn postgres_host_policy_needs_no_platform_database() {
 )]
 async fn host_policy_contract(store: Rc<OrmStore>) {
     let (service, app, other, _deployments) = registered_service(store.clone()).await;
-    let scope = service.for_app(app.clone());
+    let scope = service.fixture_app(app.clone());
     let request = RequestId::mint();
     let run = scope
         .start(&request, "Example", StartOptions::default())
@@ -284,12 +296,15 @@ async fn host_policy_contract(store: Rc<OrmStore>) {
     let task = service.poll(&worker).await.unwrap().unwrap();
     let expired =
         PolicySnapshot::lease(2.try_into().unwrap(), AppPolicy::default(), Instant::now()).unwrap();
-    service.register_app(&app, expired.clone()).await.unwrap();
+    service
+        .policies
+        .fixture_install(&app, expired.clone())
+        .unwrap();
     assert!(matches!(
         scope
             .start(&RequestId::mint(), "Example", StartOptions::default())
             .await,
-        Err(WorkflowServiceError::PermissionDenied)
+        Err(WorkflowServiceError::Unavailable(_))
     ));
     assert_eq!(
         scope
@@ -320,28 +335,31 @@ async fn host_policy_contract(store: Rc<OrmStore>) {
     assert_eq!(status.state, RunState::Completed);
     assert_eq!(status.output, Some(json!({"customer":"retained"})));
     assert!(service
-        .for_app(other)
+        .fixture_app(other)
         .start(&RequestId::mint(), "Example", StartOptions::default())
         .await
         .is_ok());
     assert!(matches!(
         service
-            .register_app(&app, configured_policy(1, AppPolicy::default()))
+            .fixture_register(&app, leased_policy(1, AppPolicy::default()))
             .await,
         Err(WorkflowServiceError::Conflict(_))
     ));
     assert!(matches!(
         service
-            .register_app(&app, configured_policy(2, AppPolicy::default()))
+            .fixture_register(
+                &app,
+                PolicySnapshot::configuration(2.try_into().unwrap(), AppPolicy::default()).unwrap()
+            )
             .await,
         Err(WorkflowServiceError::Conflict(_))
     ));
-    service.register_app(&app, expired).await.unwrap();
+    service.policies.fixture_install(&app, expired).unwrap();
     assert!(matches!(
         scope
             .start(&RequestId::mint(), "Example", StartOptions::default())
             .await,
-        Err(WorkflowServiceError::PermissionDenied)
+        Err(WorkflowServiceError::Unavailable(_))
     ));
 
     // Journal contents cannot repopulate host authorization after a restart.
@@ -350,29 +368,126 @@ async fn host_policy_contract(store: Rc<OrmStore>) {
         .unwrap();
     assert!(matches!(
         unconfigured
-            .for_app(app.clone())
+            .fixture_app(app.clone())
             .start(&RequestId::mint(), "Example", StartOptions::default())
             .await,
-        Err(WorkflowServiceError::PermissionDenied)
+        Err(WorkflowServiceError::Unavailable(_))
     ));
     let reopened = WorkflowService::open(store, service.policies.clone())
         .await
         .unwrap();
     assert!(matches!(
         reopened
-            .for_app(app.clone())
+            .fixture_app(app.clone())
             .start(&RequestId::mint(), "Example", StartOptions::default())
             .await,
-        Err(WorkflowServiceError::PermissionDenied)
+        Err(WorkflowServiceError::Unavailable(_))
     ));
     reopened
-        .register_app(&app, configured_policy(3, AppPolicy::default()))
+        .fixture_register(&app, leased_policy(3, AppPolicy::default()))
         .await
         .unwrap();
     assert!(scope
         .start(&RequestId::mint(), "Example", StartOptions::default())
         .await
         .is_ok());
+}
+
+#[compio::test]
+async fn sqlite_retired_app_handles_cannot_use_replacement_authority() {
+    let directory = tempfile::tempdir().unwrap();
+    retired_app_handles(Rc::new(
+        sqlite_store(&directory.path().join("app.sqlite")).await,
+    ))
+    .await;
+}
+
+#[compio::test]
+async fn postgres_retired_app_handles_cannot_use_replacement_authority() {
+    let fixture = PostgresFixture::start().await;
+    retired_app_handles(Rc::new(fixture.store.clone())).await;
+}
+
+#[expect(
+    clippy::future_not_send,
+    reason = "the fixture retains native handles on their owning compio thread"
+)]
+async fn retired_app_handles(store: Rc<OrmStore>) {
+    use crate::backend::WorkflowBackend;
+
+    let (service, app, other, _deployments) = registered_service(store).await;
+    let binding = service.policies.current_binding(&app).unwrap();
+    let scope = service.bind_app(&binding).unwrap();
+    let backend = scope.clone().into_backend(1024).unwrap();
+    let unrelated = service.fixture_app(other);
+    scope
+        .start(&RequestId::mint(), "Example", StartOptions::default())
+        .await
+        .unwrap();
+    binding
+        .begin_refresh()
+        .unwrap()
+        .install(leased_policy(2, AppPolicy::default()))
+        .unwrap();
+    scope
+        .start(&RequestId::mint(), "Example", StartOptions::default())
+        .await
+        .unwrap();
+    backend
+        .start("Example".into(), StartOptions::default())
+        .await
+        .unwrap();
+
+    let delayed = binding.begin_refresh().unwrap();
+    binding.revoke().unwrap();
+    let replacement = service.policies.bind(app.clone()).unwrap();
+    replacement
+        .begin_refresh()
+        .unwrap()
+        .install(leased_policy(2, AppPolicy::default()))
+        .unwrap();
+    let current = service.register_app(&replacement).await.unwrap();
+    assert!(matches!(
+        delayed.install(leased_policy(3, AppPolicy::default())),
+        Err(WorkflowServiceError::Unavailable(_))
+    ));
+    assert!(matches!(
+        binding.revoke(),
+        Err(WorkflowServiceError::Unavailable(_))
+    ));
+    let before = ingress_state(&service, &app).await;
+    assert!(matches!(
+        scope
+            .start(&RequestId::mint(), "Example", StartOptions::default())
+            .await,
+        Err(WorkflowServiceError::Unavailable(_))
+    ));
+    assert!(matches!(
+        backend
+            .start("Example".into(), StartOptions::default())
+            .await,
+        Err(WorkflowServiceError::Unavailable(_))
+    ));
+    assert_eq!(ingress_state(&service, &app).await, before);
+    current
+        .start(&RequestId::mint(), "Example", StartOptions::default())
+        .await
+        .unwrap();
+    unrelated
+        .start(&RequestId::mint(), "Example", StartOptions::default())
+        .await
+        .unwrap();
+
+    let foreign = Arc::new(HostPolicies::default()).bind(app).unwrap();
+    foreign
+        .begin_refresh()
+        .unwrap()
+        .install(leased_policy(3, AppPolicy::default()))
+        .unwrap();
+    assert!(matches!(
+        service.bind_app(&foreign),
+        Err(WorkflowServiceError::PermissionDenied)
+    ));
 }
 
 #[compio::test]
@@ -386,8 +501,11 @@ async fn metadata_lease_bounds_grants_and_duplicate_delivery_keeps_its_deadline(
     let until = Instant::now() + lifetime;
     let snapshot =
         PolicySnapshot::lease(2.try_into().unwrap(), AppPolicy::default(), until).unwrap();
-    service.register_app(&app, snapshot.clone()).await.unwrap();
-    let scope = service.for_app(app.clone());
+    service
+        .policies
+        .fixture_install(&app, snapshot.clone())
+        .unwrap();
+    let scope = service.fixture_app(app.clone());
     scope
         .start(&RequestId::mint(), "Example", StartOptions::default())
         .await
@@ -396,12 +514,12 @@ async fn metadata_lease_bounds_grants_and_duplicate_delivery_keeps_its_deadline(
     let task = service.poll(&worker).await.unwrap().unwrap();
     assert!(u128::try_from(task.lease_ms).unwrap() <= lifetime.as_millis());
     compio::time::sleep(until.saturating_duration_since(Instant::now())).await;
-    service.register_app(&app, snapshot).await.unwrap();
+    service.policies.fixture_install(&app, snapshot).unwrap();
     assert!(matches!(
         scope
             .start(&RequestId::mint(), "Example", StartOptions::default())
             .await,
-        Err(WorkflowServiceError::PermissionDenied)
+        Err(WorkflowServiceError::Unavailable(_))
     ));
     assert!(service.poll(&worker).await.unwrap().is_none());
     assert!(matches!(
@@ -450,7 +568,7 @@ async fn customer_schema_binding_is_explicit_and_independent_of_app_identity() {
     .unwrap();
     let second = second.with_deployments(deployments.binding(&[&app]));
     second
-        .register_app(&app, configured_policy(1, AppPolicy::default()))
+        .fixture_register(&app, leased_policy(1, AppPolicy::default()))
         .await
         .unwrap();
     deployments
@@ -466,8 +584,8 @@ async fn customer_schema_binding_is_explicit_and_independent_of_app_identity() {
         )
         .await
         .unwrap();
-    let first = first.for_app(app.clone());
-    let second = second.for_app(app);
+    let first = first.fixture_app(app.clone());
+    let second = second.fixture_app(app);
     let request = RequestId::mint();
     let a = first
         .start(&request, "Example", StartOptions::default())
@@ -542,7 +660,7 @@ struct IngressCall {
 impl IngressCall {
     async fn prepare(service: &WorkflowService, app: &AppId, operation: IngressOperation) -> Self {
         use crate::service::{capability::SignalTarget, SignalTokenRequest};
-        let scope = service.for_app(app.clone());
+        let scope = service.fixture_app(app.clone());
         let run = scope
             .start(&RequestId::mint(), "Example", StartOptions::default())
             .await
@@ -630,11 +748,9 @@ impl IngressCall {
             ),
             IngressOperation::Ingest => serde_json::to_value(
                 self.scope
-                    .service
                     .ingest_signal(
                         &self.request,
                         self.token.as_str(),
-                        self.scope.app_id(),
                         &SignalTarget::Run {
                             run_id: self.run.clone(),
                         },
@@ -800,7 +916,7 @@ async fn ingress_receipt_expiry(store: Rc<OrmStore>) {
         revision += 1;
         service
             .policies
-            .install(
+            .fixture_install(
                 &app,
                 PolicySnapshot::lease(
                     revision.try_into().unwrap(),
@@ -816,7 +932,7 @@ async fn ingress_receipt_expiry(store: Rc<OrmStore>) {
         revision += 1;
         service
             .policies
-            .install(&app, configured_policy(revision, AppPolicy::default()))
+            .fixture_install(&app, leased_policy(revision, AppPolicy::default()))
             .unwrap();
     }
 }
@@ -934,9 +1050,9 @@ async fn postgres_ingress_revocation_after_writes_rolls_back() {
         revision += 1;
         service
             .policies
-            .install(
+            .fixture_install(
                 &app,
-                configured_policy(
+                leased_policy(
                     revision,
                     AppPolicy {
                         admission: false,
@@ -958,12 +1074,88 @@ async fn postgres_ingress_revocation_after_writes_rolls_back() {
         revision += 1;
         service
             .policies
-            .install(&app, configured_policy(revision, AppPolicy::default()))
+            .fixture_install(&app, leased_policy(revision, AppPolicy::default()))
             .unwrap();
         let accepted = call.invoke().await.unwrap();
         assert_eq!(call.invoke().await.unwrap(), accepted, "{operation:?}");
         call.assert_token_effect(&accepted, previous_epoch).await;
         assert_ne!(ingress_state(&service, &app).await, before, "{operation:?}");
+    }
+}
+
+#[compio::test]
+async fn postgres_ingress_binding_change_cancels_blocked_write() {
+    use futures::{
+        future::{select, Either},
+        FutureExt,
+    };
+    let fixture = PostgresFixture::start().await;
+    let (service, app, _, _deployments) = registered_service(Rc::new(fixture.store.clone())).await;
+    let service = signed_ingress(service);
+    for replace in [false, true] {
+        let call = IngressCall::prepare(&service, &app, IngressOperation::Start).await;
+        let binding = service.policies.current_binding(&app).unwrap();
+        let delayed = binding.begin_refresh().unwrap();
+        let before = ingress_state(&service, &app).await;
+        let barrier = IngressBarrier::install(&fixture.admin_url).await;
+        let (worker, pending) =
+            match select(barrier.blocked().boxed_local(), call.invoke().boxed_local()).await {
+                Either::Left(result) => result,
+                Either::Right((result, _)) => {
+                    panic!("ingress finished before its write barrier: {result:?}")
+                }
+            };
+        let current = if replace {
+            service.policies.bind(app.clone()).unwrap()
+        } else {
+            binding.clone()
+        };
+        current
+            .begin_refresh()
+            .unwrap()
+            .install(
+                PolicySnapshot::lease(
+                    1.try_into().unwrap(),
+                    AppPolicy::default(),
+                    Instant::now() + Duration::from_secs(30),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        assert!(matches!(
+            delayed.install(leased_policy(1, AppPolicy::default())),
+            Err(WorkflowServiceError::Unavailable(_))
+        ));
+        assert!(matches!(
+            compio::time::timeout(Duration::from_secs(3), pending)
+                .await
+                .unwrap(),
+            Err(WorkflowServiceError::Unavailable(_))
+        ));
+        barrier.rolled_back(worker).await;
+        barrier.unlock().await;
+        barrier.remove().await;
+        assert_eq!(ingress_state(&service, &app).await, before);
+        let accepted = service
+            .bind_app(&current)
+            .unwrap()
+            .start(&call.request, "Example", StartOptions::default())
+            .await
+            .unwrap();
+        assert_eq!(
+            service
+                .bind_app(&current)
+                .unwrap()
+                .start(&call.request, "Example", StartOptions::default())
+                .await
+                .unwrap(),
+            accepted
+        );
+        current
+            .begin_refresh()
+            .unwrap()
+            .install(leased_policy(1, AppPolicy::default()))
+            .unwrap();
     }
 }
 
@@ -993,7 +1185,7 @@ async fn postgres_ingress_expiry_cancels_blocked_write_without_refreshing_the_at
         let deadline = Instant::now() + Duration::from_secs(3);
         service
             .policies
-            .install(
+            .fixture_install(
                 &app,
                 PolicySnapshot::lease(revision.try_into().unwrap(), AppPolicy::default(), deadline)
                     .unwrap(),
@@ -1009,7 +1201,7 @@ async fn postgres_ingress_expiry_cancels_blocked_write_without_refreshing_the_at
         if refresh {
             service
                 .policies
-                .install(
+                .fixture_install(
                     &app,
                     PolicySnapshot::lease(
                         revision.try_into().unwrap(),
@@ -1033,13 +1225,13 @@ async fn postgres_ingress_expiry_cancels_blocked_write_without_refreshing_the_at
         assert_eq!(call.epoch().await, previous_epoch);
         if refresh {
             assert!(
-                service.policies.authority(&app).is_ok(),
+                service.policies.fixture_authority(&app).is_ok(),
                 "the refreshed host lease remains live"
             );
         }
         service
             .policies
-            .install(&app, configured_policy(revision + 1, AppPolicy::default()))
+            .fixture_install(&app, leased_policy(revision + 1, AppPolicy::default()))
             .unwrap();
         let accepted = call.invoke().await.unwrap();
         call.assert_token_effect(&accepted, previous_epoch).await;
@@ -1049,23 +1241,48 @@ async fn postgres_ingress_expiry_cancels_blocked_write_without_refreshing_the_at
 #[compio::test]
 async fn sqlite_captured_ingress_deadline_rolls_back_native_transaction() {
     let directory = tempfile::tempdir().unwrap();
-    captured_transaction_deadline(Rc::new(
-        sqlite_store(&directory.path().join("app.sqlite")).await,
-    ))
+    captured_transaction_policy(
+        Rc::new(sqlite_store(&directory.path().join("app.sqlite")).await),
+        CapturedChange::Extend,
+    )
     .await;
 }
 
 #[compio::test]
 async fn postgres_captured_ingress_deadline_rolls_back_native_transaction() {
     let fixture = PostgresFixture::start().await;
-    captured_transaction_deadline(Rc::new(fixture.store.clone())).await;
+    captured_transaction_policy(Rc::new(fixture.store.clone()), CapturedChange::Extend).await;
+}
+
+#[compio::test]
+async fn sqlite_captured_ingress_binding_change_rolls_back_native_transaction() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = Rc::new(sqlite_store(&directory.path().join("app.sqlite")).await);
+    for change in [CapturedChange::Shorten, CapturedChange::Replace] {
+        captured_transaction_policy(store.clone(), change).await;
+    }
+}
+
+#[compio::test]
+async fn postgres_captured_ingress_binding_change_rolls_back_native_transaction() {
+    let fixture = PostgresFixture::start().await;
+    for change in [CapturedChange::Shorten, CapturedChange::Replace] {
+        captured_transaction_policy(Rc::new(fixture.store.clone()), change).await;
+    }
+}
+
+#[derive(Clone, Copy)]
+enum CapturedChange {
+    Extend,
+    Shorten,
+    Replace,
 }
 
 #[expect(
     clippy::future_not_send,
     reason = "native transactions stay on their owning compio thread"
 )]
-async fn captured_transaction_deadline(store: Rc<OrmStore>) {
+async fn captured_transaction_policy(store: Rc<OrmStore>, change: CapturedChange) {
     use crate::service::{app::lock_app, policy::CapturedPolicy};
     use futures::{
         future::{select, Either},
@@ -1073,20 +1290,24 @@ async fn captured_transaction_deadline(store: Rc<OrmStore>) {
     };
     let (service, app, _, _deployments) = registered_service(store).await;
     let before = ingress_state(&service, &app).await;
-    let deadline = Instant::now() + Duration::from_secs(1);
+    let deadline = Instant::now()
+        + Duration::from_secs(match change {
+            CapturedChange::Extend => 1,
+            _ => 60,
+        });
     service
         .policies
-        .install(
+        .fixture_install(
             &app,
             PolicySnapshot::lease(2.try_into().unwrap(), AppPolicy::default(), deadline).unwrap(),
         )
         .unwrap();
-    let captured = CapturedPolicy::capture(&service.policies, &app);
+    let captured = CapturedPolicy::capture(&service.policies.fixture_binding(&app).unwrap());
     let (written, observe) = futures::channel::oneshot::channel();
     let operation = captured.run(async {
         let mut tx = service.begin().await?;
         lock_app(&mut tx, &app).await?;
-        captured.check(&service.policies, &app)?;
+        captured.check()?;
         journal_update(
             &tx,
             "app_state",
@@ -1113,16 +1334,20 @@ async fn captured_transaction_deadline(store: Rc<OrmStore>) {
             panic!("transaction ended before its pending continuation: {result:?}")
         }
     };
-    service
-        .policies
+    let binding = match change {
+        CapturedChange::Replace => service.policies.bind(app.clone()).unwrap(),
+        _ => service.policies.current_binding(&app).unwrap(),
+    };
+    let refreshed_until = match change {
+        CapturedChange::Extend => deadline + Duration::from_secs(30),
+        _ => Instant::now() + Duration::from_secs(30),
+    };
+    binding
+        .begin_refresh()
+        .unwrap()
         .install(
-            &app,
-            PolicySnapshot::lease(
-                2.try_into().unwrap(),
-                AppPolicy::default(),
-                deadline + Duration::from_secs(30),
-            )
-            .unwrap(),
+            PolicySnapshot::lease(2.try_into().unwrap(), AppPolicy::default(), refreshed_until)
+                .unwrap(),
         )
         .unwrap();
     assert!(matches!(
@@ -1131,7 +1356,7 @@ async fn captured_transaction_deadline(store: Rc<OrmStore>) {
             .unwrap(),
         Err(WorkflowServiceError::Unavailable(_))
     ));
-    assert!(service.policies.authority(&app).is_ok());
+    assert!(service.policies.fixture_authority(&app).is_ok());
     assert_eq!(ingress_state(&service, &app).await, before);
 }
 
@@ -1164,9 +1389,9 @@ async fn disabled_ingress_semantics(store: Rc<OrmStore>) {
     let controls = IngressCall::prepare(&service, &app, IngressOperation::Start).await;
     service
         .policies
-        .install(
+        .fixture_install(
             &app,
-            configured_policy(
+            leased_policy(
                 2,
                 AppPolicy {
                     admission: false,

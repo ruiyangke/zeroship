@@ -184,7 +184,7 @@ async fn read_contract(store: Rc<OrmStore>) {
         tx.commit().await.unwrap();
         for (scope, (app_id, run_id)) in scopes.iter().enumerate() {
             let status = service
-                .for_app((*app_id).clone())
+                .fixture_app((*app_id).clone())
                 .status(run_id)
                 .await
                 .unwrap();
@@ -209,7 +209,7 @@ async fn read_contract(store: Rc<OrmStore>) {
 
     for (scope, (app_id, run_id)) in scopes.iter().enumerate() {
         service
-            .for_app((*app_id).clone())
+            .fixture_app((*app_id).clone())
             .restart(
                 &RequestId::mint(),
                 run_id,

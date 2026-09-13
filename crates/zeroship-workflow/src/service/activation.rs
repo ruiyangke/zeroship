@@ -6,7 +6,7 @@
 )]
 
 use super::{
-    app::{encode, lock_app},
+    app::{encode, lock_app_state},
     delivery::{self, CapturedLease, JobReceipt},
     deployment_retention::admission_generation,
     deployments::unavailable,
@@ -65,11 +65,12 @@ impl AppWorkflows {
             .ok()
             .and_then(JobLease::remaining)
             .unwrap_or_else(|| delivery::attempt_budget(None, None));
-        compio::time::timeout(
+        delivery::run_attempt(
+            authority.as_ref().ok().map(CapturedLease::cancelled),
             budget,
             Box::pin(async {
                 let mut tx = self.service.begin().await?;
-                lock_app(&mut tx, self.app_id()).await?;
+                lock_app_state(&mut tx, self.app_id()).await?;
                 if let Some(receipt) = receipt(&tx, job).await? {
                     tx.commit().await?;
                     return Ok(receipt);
@@ -102,12 +103,13 @@ impl AppWorkflows {
                 );
 
                 let mut tx = self.service.begin().await?;
-                let policy = lock_app(&mut tx, self.app_id()).await?;
+                lock_app_state(&mut tx, self.app_id()).await?;
                 if let Some(receipt) = receipt(&tx, job).await? {
                     tx.commit().await?;
                     return Ok(receipt);
                 }
                 authority.check(self)?;
+                let policy = authority.policy();
                 require_fresh(&tx, job, revision.get()).await?;
                 if admission_generation(
                     &tx,
@@ -122,7 +124,7 @@ impl AppWorkflows {
                     return Err(conflict());
                 }
                 let now = tx.now().await?;
-                super::schedules::validate_deployment(&deploy, &policy, now)?;
+                super::schedules::validate_deployment(&deploy, policy, now)?;
                 deploys::record_verified(&tx, self.app_id(), &deploy, now).await?;
                 tx.database()
                     .collection(job_receipts::Entity::COLLECTION)?
@@ -146,7 +148,6 @@ impl AppWorkflows {
             }),
         )
         .await
-        .map_err(|_| WorkflowServiceError::Timeout)?
     }
 }
 

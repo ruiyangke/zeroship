@@ -49,7 +49,7 @@ async fn initialization_contract(first: OrmStore, second: OrmStore) {
     let foreign = AppId::mint();
     for app_id in [&local, &foreign] {
         first
-            .register_app(app_id, configured_policy(1, AppPolicy::default()))
+            .fixture_register(app_id, leased_policy(1, AppPolicy::default()))
             .await
             .unwrap();
     }
@@ -58,7 +58,7 @@ async fn initialization_contract(first: OrmStore, second: OrmStore) {
     };
     let original = issue_concurrently(&first, &second, &local, &target).await;
     let foreign_token = second
-        .for_app(foreign.clone())
+        .fixture_app(foreign.clone())
         .issue_signal_token(&RequestId::mint(), token_options(&target))
         .await
         .unwrap();
@@ -68,18 +68,13 @@ async fn initialization_contract(first: OrmStore, second: OrmStore) {
     };
     for token in &original {
         second
-            .ingest_signal(
-                &RequestId::mint(),
-                token.as_str(),
-                &local,
-                &target,
-                message.clone(),
-            )
+            .fixture_app(local.clone())
+            .ingest_signal(&RequestId::mint(), token.as_str(), &target, message.clone())
             .await
             .unwrap();
     }
     let revoked = first
-        .for_app(local.clone())
+        .fixture_app(local.clone())
         .revoke_signal_tokens(&RequestId::mint(), Some(target.clone()))
         .await
         .unwrap();
@@ -88,13 +83,8 @@ async fn initialization_contract(first: OrmStore, second: OrmStore) {
     for token in &original {
         assert_eq!(
             first
-                .ingest_signal(
-                    &RequestId::mint(),
-                    token.as_str(),
-                    &local,
-                    &target,
-                    message.clone(),
-                )
+                .fixture_app(local.clone())
+                .ingest_signal(&RequestId::mint(), token.as_str(), &target, message.clone())
                 .await,
             Err(WorkflowServiceError::Unauthenticated)
         );
@@ -105,55 +95,40 @@ async fn initialization_contract(first: OrmStore, second: OrmStore) {
         .chain(std::iter::once((&foreign, &foreign_token)))
     {
         second
-            .ingest_signal(
-                &RequestId::mint(),
-                token.as_str(),
-                app_id,
-                &target,
-                message.clone(),
-            )
+            .fixture_app((app_id).clone())
+            .ingest_signal(&RequestId::mint(), token.as_str(), &target, message.clone())
             .await
             .unwrap();
     }
 
     first
-        .for_app(local.clone())
+        .fixture_app(local.clone())
         .revoke_signal_tokens(&RequestId::mint(), None)
         .await
         .unwrap();
     let (a, b) = futures::join!(
-        first.register_app(&local, configured_policy(1, AppPolicy::default())),
-        second.register_app(&local, configured_policy(1, AppPolicy::default())),
+        first.fixture_register(&local, leased_policy(1, AppPolicy::default())),
+        second.fixture_register(&local, leased_policy(1, AppPolicy::default())),
     );
     a.unwrap();
     b.unwrap();
     for token in replacements {
         assert_eq!(
             second
-                .ingest_signal(
-                    &RequestId::mint(),
-                    token.as_str(),
-                    &local,
-                    &target,
-                    message.clone()
-                )
+                .fixture_app(local.clone())
+                .ingest_signal(&RequestId::mint(), token.as_str(), &target, message.clone())
                 .await,
             Err(WorkflowServiceError::Unauthenticated)
         );
     }
     let replacement = first
-        .for_app(local.clone())
+        .fixture_app(local.clone())
         .issue_signal_token(&RequestId::mint(), token_options(&target))
         .await
         .unwrap();
     second
-        .ingest_signal(
-            &RequestId::mint(),
-            replacement.as_str(),
-            &local,
-            &target,
-            message,
-        )
+        .fixture_app(local.clone())
+        .ingest_signal(&RequestId::mint(), replacement.as_str(), &target, message)
         .await
         .unwrap();
 }
@@ -170,7 +145,7 @@ async fn issue_concurrently(
         .into_iter()
         .map(|service| async move {
             service
-                .for_app(app_id.clone())
+                .fixture_app(app_id.clone())
                 .issue_signal_token(&RequestId::mint(), token_options(target))
                 .await
                 .unwrap()

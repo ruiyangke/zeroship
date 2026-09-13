@@ -181,9 +181,11 @@ case!(
 
 async fn pages(store: Rc<OrmStore>) {
     let (service, app, foreign, _deployments) = registered_service(store.clone()).await;
-    let scoped = service.for_app(app.clone());
+    let scoped = service.fixture_app(app.clone());
     let jobs = start(&scoped, 3).await;
-    let other = start(&service.for_app(foreign.clone()), 1).await.remove(0);
+    let other = start(&service.fixture_app(foreign.clone()), 1)
+        .await
+        .remove(0);
     let publisher = Publisher::new(&app).await;
     let first = Grant::new(&jobs[0]);
     let receipt = scoped
@@ -199,9 +201,9 @@ async fn pages(store: Rc<OrmStore>) {
         .await
         .unwrap();
     reopened
-        .register_app(
+        .fixture_register(
             &app,
-            configured_policy(
+            leased_policy(
                 1,
                 AppPolicy {
                     admission: false,
@@ -212,7 +214,7 @@ async fn pages(store: Rc<OrmStore>) {
         )
         .await
         .unwrap();
-    let scope = reopened.for_app(app.clone());
+    let scope = reopened.fixture_app(app.clone());
     let mut expired = first.retry();
     expired.expires = Instant::now();
     assert_eq!(
@@ -265,7 +267,7 @@ async fn pages(store: Rc<OrmStore>) {
 
 async fn timeout_progress(store: Rc<OrmStore>) {
     let (service, app, _, _deployments) = registered_service(store).await;
-    let scope = service.for_app(app.clone());
+    let scope = service.fixture_app(app.clone());
     let jobs = start(&scope, 2).await;
     let mut publisher = Publisher::new(&app).await;
     publisher.hang = Some(jobs[0].id.clone());
@@ -306,7 +308,7 @@ async fn timeout_progress(store: Rc<OrmStore>) {
 
 async fn failures(store: Rc<OrmStore>) {
     let (service, app, _, _deployments) = registered_service(store).await;
-    let scope = service.for_app(app.clone());
+    let scope = service.fixture_app(app.clone());
     let jobs = start(&scope, 3).await;
     let publisher = Publisher::new(&app).await;
     publisher.lose_reply.set(true);
@@ -352,7 +354,7 @@ async fn failures(store: Rc<OrmStore>) {
 
 async fn policy(store: Rc<OrmStore>) {
     let (service, app, _, _deployments) = registered_service(store).await;
-    let scope = service.for_app(app.clone());
+    let scope = service.fixture_app(app.clone());
     let jobs = start(&scope, 1).await;
     let mut publisher = Publisher::new(&app).await;
     let (entered, waiting) = flume::bounded(1);
@@ -362,7 +364,7 @@ async fn policy(store: Rc<OrmStore>) {
     let replace = async {
         waiting.recv_async().await.unwrap();
         service
-            .register_app(&app, configured_policy(2, AppPolicy::default()))
+            .fixture_register(&app, leased_policy(2, AppPolicy::default()))
             .await
             .unwrap();
         resume.send_async(()).await.unwrap();
@@ -390,7 +392,7 @@ async fn policy(store: Rc<OrmStore>) {
 
 async fn concurrency(store: Rc<OrmStore>) {
     let (service, app, _, _deployments) = registered_service(store).await;
-    let scope = service.for_app(app.clone());
+    let scope = service.fixture_app(app.clone());
     let jobs = start(&scope, 2).await;
     let mut publisher = Publisher::new(&app).await;
     let (entered, waiting) = flume::bounded(2);
@@ -492,7 +494,7 @@ async fn postgres_reconciliation_receipt_failure_does_not_advance_the_scan() {
 
 async fn receipt_rollback(store: Rc<OrmStore>, fault: ReceiptFault) {
     let (service, app, _, _deployments) = registered_service(store).await;
-    let scope = service.for_app(app.clone());
+    let scope = service.fixture_app(app.clone());
     let jobs = start(&scope, 2).await;
     let publisher = Publisher::new(&app).await;
     let grant = Grant::new(&jobs[0]);

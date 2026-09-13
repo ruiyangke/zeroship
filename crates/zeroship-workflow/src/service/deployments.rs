@@ -128,11 +128,23 @@ impl WorkflowService {
         task: &str,
         token: &TaskToken,
     ) -> Result<LoadedWorker, WorkflowServiceError> {
+        self.run_bound(|service| {
+            Box::pin(async move { service.task_executable_inner(worker, task, token).await })
+        })
+        .await
+    }
+
+    async fn task_executable_inner(
+        &self,
+        worker: &WorkerIdentity,
+        task: &str,
+        token: &TaskToken,
+    ) -> Result<LoadedWorker, WorkflowServiceError> {
         let source = self.deployments.as_ref().ok_or_else(unavailable)?;
         let mut tx = self.begin().await?;
         let claim = authorized_task(&mut tx, worker, task, token).await?;
         claim.validate_live()?;
-        let app = claim.app;
+        let app = claim.app.clone();
         let client = source.client(&app)?;
         let id = claim.run.text("deploy_id")?;
         let record = deploys::read(&tx, &app, &id)

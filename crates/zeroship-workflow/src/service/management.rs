@@ -6,10 +6,10 @@
 )]
 
 use super::{
-    app::{decode, encode, lock_app},
+    app::{decode, encode, lock_app_state},
     control::{self, Preparation},
     models,
-    policy::{CapturedPolicy, PolicyAuthority},
+    policy::PolicyAuthority,
     store::Transaction,
     types::{digest, storage_id},
     AppWorkflows,
@@ -36,7 +36,7 @@ impl AppWorkflows {
         &self,
         command: &ManageRun,
     ) -> Result<ManagementOutcome, WorkflowServiceError> {
-        let captured = CapturedPolicy::capture(&self.service.policies, &self.app);
+        let captured = self.capture_policy();
         captured
             .run(async {
                 if command.app_id != self.app {
@@ -46,7 +46,7 @@ impl AppWorkflows {
                 let mut tx = self.service.begin().await?;
                 let authority = captured.authority();
                 if authority.is_ok() {
-                    lock_app(&mut tx, &self.app).await?;
+                    lock_app_state(&mut tx, &self.app).await?;
                 }
                 // Immutable receipts can be replayed without fresh mutation authority.
                 // A missing receipt must still fail with the original captured error.
@@ -87,7 +87,7 @@ impl AppWorkflows {
         digest: &str,
         authority: &PolicyAuthority,
     ) -> Result<ManagementOutcome, WorkflowServiceError> {
-        authority.check(&self.service.policies, &self.app)?;
+        authority.check()?;
         let policy = &authority.policy;
         let now = tx.now().await?;
         let run_id = command.run_id.as_str();
@@ -99,7 +99,7 @@ impl AppWorkflows {
                 .await?
                 {
                     Preparation::Ready(plan) => {
-                        authority.check(&self.service.policies, &self.app)?;
+                        authority.check()?;
                         ManagementOutcome::Applied {
                             state: plan.apply(&tx, &self.app, run_id).await?.state,
                         }
@@ -112,7 +112,7 @@ impl AppWorkflows {
                     .await?
                 {
                     Preparation::Ready(plan) => {
-                        authority.check(&self.service.policies, &self.app)?;
+                        authority.check()?;
                         ManagementOutcome::Applied {
                             state: plan.apply(&mut tx, &self.app, run_id, now).await?.state,
                         }
@@ -129,7 +129,7 @@ impl AppWorkflows {
                 "outcome":encode(&outcome)?, "created_at":now,
             }))
             .await?;
-        authority.check(&self.service.policies, &self.app)?;
+        authority.check()?;
         tx.commit().await?;
         Ok(outcome)
     }

@@ -31,8 +31,8 @@ async fn independent_hosts(first: OrmStore, second: OrmStore) {
         .await
         .unwrap()
         .with_deployments(first.deployments.clone().unwrap());
-    let first_app = first.for_app(app.clone());
-    let second_app = second.for_app(app);
+    let first_app = first.fixture_app(app.clone());
+    let second_app = second.fixture_app(app);
     let request = RequestId::mint();
     let options = StartOptions {
         key: Some("invoice".into()),
@@ -61,8 +61,8 @@ async fn native_client_crosses_runtime_threads_without_losing_app_scope() {
     let directory = tempfile::tempdir().unwrap();
     let store = Rc::new(sqlite_store(&directory.path().join("zs-workflow.sqlite")).await);
     let (service, app, other, _deployments) = registered_service(store).await;
-    let client = service.for_app(app.clone()).into_backend(1024).unwrap();
-    let other_client = service.for_app(other).into_backend(1024).unwrap();
+    let client = service.fixture_app(app.clone()).into_backend(1024).unwrap();
+    let other_client = service.fixture_app(other).into_backend(1024).unwrap();
     let (reply, result) = oneshot::channel();
     let thread = std::thread::spawn(move || {
         let runtime = compio::runtime::Runtime::new().unwrap();
@@ -88,7 +88,12 @@ async fn native_client_crosses_runtime_threads_without_losing_app_scope() {
         .unwrap();
     thread.join().unwrap();
     assert_eq!(
-        service.for_app(app).status(&run.id).await.unwrap().state,
+        service
+            .fixture_app(app)
+            .status(&run.id)
+            .await
+            .unwrap()
+            .state,
         run.state
     );
 }
@@ -98,7 +103,7 @@ async fn cancelled_queued_requests_do_not_mutate_and_overload_is_bounded() {
     let directory = tempfile::tempdir().unwrap();
     let store = Rc::new(sqlite_store(&directory.path().join("zs-workflow.sqlite")).await);
     let (service, app, _, _deployments) = registered_service(store.clone()).await;
-    let client = service.for_app(app).into_backend(1024).unwrap();
+    let client = service.fixture_app(app).into_backend(1024).unwrap();
     let mut waiting = Vec::new();
     // Do not yield to the engine until the request queue rejects admission.
     loop {
@@ -142,7 +147,7 @@ async fn cancelled_queued_requests_do_not_mutate_and_overload_is_bounded() {
 async fn cancelling_a_database_wait_rolls_back_before_the_next_request() {
     let fixture = PostgresFixture::start().await;
     let (service, app, _, _deployments) = registered_service(Rc::new(fixture.store.clone())).await;
-    let client = service.for_app(app.clone()).into_backend(1024).unwrap();
+    let client = service.fixture_app(app.clone()).into_backend(1024).unwrap();
     let blocker = connect(&fixture.admin_url).await;
     blocker.batch_execute("BEGIN").await.unwrap();
     blocker

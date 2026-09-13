@@ -169,6 +169,9 @@ impl OrmStore {
             binding: self.binding.clone(),
             clock: self.clock.clone(),
             policies: None,
+            policy_binding: None,
+            observed_policy: None,
+            mutation_authority: None,
         };
         if tx.dialect() == "sqlite" {
             // A no-match write obtains SQLite's writer reservation before any
@@ -224,6 +227,9 @@ pub struct Transaction {
     binding: DbBinding,
     clock: BackendHandle,
     pub(crate) policies: Option<std::sync::Arc<super::HostPolicies>>,
+    pub(crate) policy_binding: Option<super::PolicyBinding>,
+    pub(super) observed_policy: Option<super::policy::CapturedPolicy>,
+    mutation_authority: Option<super::policy::PolicyAuthority>,
 }
 impl std::fmt::Debug for Transaction {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -237,12 +243,63 @@ impl Transaction {
         &self.database
     }
     pub(crate) fn host_app_ids(&self) -> Result<Vec<AppId>, WorkflowServiceError> {
+        if let Some(binding) = &self.policy_binding {
+            return Ok(vec![binding.app_id().clone()]);
+        }
         self.policies
             .as_ref()
             .ok_or_else(|| {
                 WorkflowServiceError::Internal("workflow host policy was not bound".into())
             })?
             .app_ids()
+    }
+    pub(crate) fn check_app(&self, app: &AppId) -> Result<(), WorkflowServiceError> {
+        if self
+            .policy_binding
+            .as_ref()
+            .is_some_and(|binding| binding.app_id() != app)
+        {
+            return Err(WorkflowServiceError::PermissionDenied);
+        }
+        Ok(())
+    }
+    pub(crate) fn policy(&self, app: &AppId) -> Result<super::AppPolicy, WorkflowServiceError> {
+        self.check_app(app)?;
+        if let Some(binding) = &self.policy_binding {
+            if let Some(authority) = &self.mutation_authority {
+                return authority.effective();
+            }
+            return binding.resolve();
+        }
+        self.policies
+            .as_ref()
+            .ok_or_else(|| {
+                WorkflowServiceError::Unavailable("workflow host policy not bound".into())
+            })?
+            .resolve(app)
+    }
+    pub(crate) fn capture_mutation(&mut self, app: &AppId) -> Result<(), WorkflowServiceError> {
+        self.check_app(app)?;
+        if self.policy_binding.is_some() {
+            if self.mutation_authority.is_none() {
+                self.mutation_authority = Some(
+                    self.observed_policy
+                        .as_ref()
+                        .ok_or_else(|| {
+                            WorkflowServiceError::Unavailable(
+                                "workflow policy capture missing".into(),
+                            )
+                        })?
+                        .authority()?
+                        .clone(),
+                );
+            }
+            self.mutation_authority
+                .as_ref()
+                .expect("captured binding authority")
+                .check()?;
+        }
+        Ok(())
     }
     pub(crate) fn dialect(&self) -> &'static str {
         match self.clock.sql_registration().family() {
@@ -279,6 +336,17 @@ impl Transaction {
             .and_then(|row| Row(row).integer("now"))
     }
     pub async fn commit(mut self) -> Result<(), WorkflowServiceError> {
+        if let Some(authority) = self.mutation_authority.take() {
+            authority.check()?;
+            return authority.run(self.commit_unchecked()).await;
+        }
+        self.commit_unchecked().await
+    }
+    #[expect(
+        clippy::future_not_send,
+        reason = "commit settles its owning ORM transaction"
+    )]
+    async fn commit_unchecked(mut self) -> Result<(), WorkflowServiceError> {
         let _abort = self.abort;
         let intent = self.settle.take().expect("workflow settlement intent");
         let _ = intent.send(());

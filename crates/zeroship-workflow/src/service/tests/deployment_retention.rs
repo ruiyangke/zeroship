@@ -137,7 +137,7 @@ async fn recovery_contract(store: Rc<OrmStore>) {
         .unwrap()
         .is_empty());
     let foreign_run = reopened
-        .for_app(other.clone())
+        .fixture_app(other.clone())
         .start(&RequestId::mint(), "Example", StartOptions::default())
         .await
         .unwrap();
@@ -245,7 +245,7 @@ async fn dependencies_contract(store: Rc<OrmStore>) {
         .await
         .unwrap();
     service.activate_deploy(&app, &first).await.unwrap();
-    let scope = service.for_app(app.clone());
+    let scope = service.fixture_app(app.clone());
     let run = scope
         .start(&RequestId::mint(), "Example", StartOptions::default())
         .await
@@ -556,7 +556,6 @@ async fn receipt_contract(store: Rc<OrmStore>) {
             .unwrap();
     }
 }
-
 
 struct NoPlatformIo(HoldScope);
 

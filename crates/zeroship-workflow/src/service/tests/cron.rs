@@ -250,7 +250,7 @@ async fn replay(store: Rc<OrmStore>) {
         ScheduleOverlap::Allow,
     )
     .await;
-    let scope = service.for_app(app.clone());
+    let scope = service.fixture_app(app.clone());
     activate(&scope, &deployment, 1).await;
     let grant = Grant::cron(&app, &deployment, &ScheduleId::mint(), 1, 1000);
     let receipt = scope.cron_job(&grant).await.unwrap();
@@ -290,14 +290,14 @@ async fn replay(store: Rc<OrmStore>) {
         .await
         .unwrap();
     reopened
-        .register_app(&app, configured_policy(1, AppPolicy::default()))
+        .fixture_register(&app, leased_policy(1, AppPolicy::default()))
         .await
         .unwrap();
     let mut expired = grant.retry();
     expired.expires = Instant::now();
     assert_eq!(
         reopened
-            .for_app(app.clone())
+            .fixture_app(app.clone())
             .cron_job(&expired)
             .await
             .unwrap(),
@@ -320,7 +320,7 @@ async fn historical(store: Rc<OrmStore>) {
     )
     .await;
     let removed = platform.deploy(&app).await;
-    let scope = service.for_app(app.clone());
+    let scope = service.fixture_app(app.clone());
     activate(&scope, &newer, 2).await;
     activate(&scope, &old, 1).await;
     let schedule = ScheduleId::mint();
@@ -365,12 +365,12 @@ async fn identities(store: Rc<OrmStore>) {
         .publish(&app, &registration, &Sources::default())
         .await
         .unwrap();
-    let scope = service.for_app(app.clone());
+    let scope = service.fixture_app(app.clone());
     activate(&scope, &deployment, 1).await;
     let schedule = ScheduleId::mint();
     let grant = Grant::cron(&app, &deployment, &schedule, 1, 1000);
     assert!(matches!(
-        service.for_app(other).cron_job(&grant).await,
+        service.fixture_app(other).cron_job(&grant).await,
         Err(WorkflowServiceError::PermissionDenied)
     ));
     scope.cron_job(&grant).await.unwrap();
@@ -427,7 +427,7 @@ async fn identities(store: Rc<OrmStore>) {
 }
 
 async fn finish_run(service: &WorkflowService, app: &AppId, continuation: bool) {
-    let scope = service.for_app(app.clone());
+    let scope = service.fixture_app(app.clone());
     let mut pending = None;
     for job in scope.pending_jobs(None, 10).await.unwrap() {
         if scope.job_receipt(&job).await.unwrap().is_none() {
@@ -464,7 +464,7 @@ async fn finish_run(service: &WorkflowService, app: &AppId, continuation: bool) 
 async fn overlap(store: Rc<OrmStore>) {
     let (service, app, _, platform) = registered_service(store).await;
     let deployment = publish(&platform, &app, json!(null), ScheduleOverlap::SkipIfRunning).await;
-    let scope = service.for_app(app.clone());
+    let scope = service.fixture_app(app.clone());
     activate(&scope, &deployment, 1).await;
     let schedule = ScheduleId::mint();
     let first = Grant::cron(&app, &deployment, &schedule, 1, 1000);
@@ -504,12 +504,12 @@ async fn capacity(store: Rc<OrmStore>) {
         ScheduleOverlap::Allow,
     )
     .await;
-    let scope = service.for_app(app.clone());
+    let scope = service.fixture_app(app.clone());
     activate(&scope, &deployment, 1).await;
     service
-        .register_app(
+        .fixture_register(
             &app,
-            configured_policy(
+            leased_policy(
                 2,
                 AppPolicy {
                     max_live_runs: 1,
@@ -532,9 +532,9 @@ async fn capacity(store: Rc<OrmStore>) {
     assert_unaccepted(&service, &scope, &retry).await;
     finish_run(&service, &app, false).await;
     service
-        .register_app(
+        .fixture_register(
             &app,
-            configured_policy(
+            leased_policy(
                 3,
                 AppPolicy {
                     admission: false,
@@ -550,9 +550,9 @@ async fn capacity(store: Rc<OrmStore>) {
     ));
     assert_unaccepted(&service, &scope, &retry).await;
     service
-        .register_app(
+        .fixture_register(
             &app,
-            configured_policy(
+            leased_policy(
                 4,
                 AppPolicy {
                     max_input_bytes: 1,
@@ -568,7 +568,7 @@ async fn capacity(store: Rc<OrmStore>) {
     ));
     assert_unaccepted(&service, &scope, &retry).await;
     service
-        .register_app(&app, configured_policy(5, AppPolicy::default()))
+        .fixture_register(&app, leased_policy(5, AppPolicy::default()))
         .await
         .unwrap();
     assert_eq!(
@@ -581,7 +581,7 @@ async fn reacquire(store: Rc<OrmStore>) {
     let (service, app, _, platform) = registered_service(store).await;
     let deployment = publish(&platform, &app, json!("retained"), ScheduleOverlap::Allow).await;
     let replacement = platform.deploy(&app).await;
-    let scope = service.for_app(app.clone());
+    let scope = service.fixture_app(app.clone());
     activate(&scope, &deployment, 1).await;
     activate(&scope, &replacement, 2).await;
     let client = platform.client(&app);
@@ -620,7 +620,7 @@ async fn reacquire(store: Rc<OrmStore>) {
 async fn prerequisites(store: Rc<OrmStore>) {
     let (service, app, _, platform) = registered_service(store).await;
     let deployment = publish(&platform, &app, json!(null), ScheduleOverlap::Allow).await;
-    let scope = service.for_app(app.clone());
+    let scope = service.fixture_app(app.clone());
     let grant = Grant::cron(&app, &deployment, &ScheduleId::mint(), 1, 1000);
     assert!(matches!(
         scope.cron_job(&grant).await,
@@ -669,7 +669,7 @@ async fn prerequisites(store: Rc<OrmStore>) {
 async fn authority(store: Rc<OrmStore>) {
     let (service, app, _, platform) = registered_service(store).await;
     let deployment = publish(&platform, &app, json!(null), ScheduleOverlap::Allow).await;
-    let scope = service.for_app(app.clone());
+    let scope = service.fixture_app(app.clone());
     activate(&scope, &deployment, 1).await;
     let grant = Grant::cron(&app, &deployment, &ScheduleId::mint(), 1, 1000);
     let mut expired = grant.clone();
@@ -694,7 +694,7 @@ async fn authority(store: Rc<OrmStore>) {
 async fn policy_lock(store: Rc<OrmStore>) {
     let (service, app, _, platform) = registered_service(store).await;
     let deployment = publish(&platform, &app, json!(null), ScheduleOverlap::Allow).await;
-    let scope = service.for_app(app.clone());
+    let scope = service.fixture_app(app.clone());
     activate(&scope, &deployment, 1).await;
     let grant = Grant::cron(&app, &deployment, &ScheduleId::mint(), 1, 1000);
     let mut held = service.begin().await.unwrap();
@@ -703,7 +703,7 @@ async fn policy_lock(store: Rc<OrmStore>) {
     assert!(futures::poll!(work.as_mut()).is_pending());
     service
         .policies
-        .install(&app, configured_policy(2, AppPolicy::default()))
+        .fixture_install(&app, leased_policy(2, AppPolicy::default()))
         .unwrap();
     held.commit().await.unwrap();
     assert!(matches!(
@@ -717,7 +717,7 @@ async fn policy_lock(store: Rc<OrmStore>) {
 async fn linkage(store: Rc<OrmStore>) {
     let (service, app, _, platform) = registered_service(store).await;
     let deployment = publish(&platform, &app, json!(null), ScheduleOverlap::Allow).await;
-    let scope = service.for_app(app.clone());
+    let scope = service.fixture_app(app.clone());
     activate(&scope, &deployment, 1).await;
     let schedule = ScheduleId::mint();
     let first = Grant::cron(&app, &deployment, &schedule, 1, 1000);
@@ -858,7 +858,7 @@ async fn rollback(store: Rc<OrmStore>, fault: ReceiptFault) {
         ScheduleOverlap::Allow,
     )
     .await;
-    let scope = service.for_app(app.clone());
+    let scope = service.fixture_app(app.clone());
     activate(&scope, &deployment, 1).await;
     let grant = Grant::cron(&app, &deployment, &ScheduleId::mint(), 1, 1000);
     fault.set(true).await;
@@ -975,7 +975,7 @@ async fn held_authority(store: Rc<OrmStore>, expire: bool) {
     let (service, app, _, platform) = registered_service(store).await;
     let deployment = publish(&platform, &app, json!("original"), ScheduleOverlap::Allow).await;
     let replacement = platform.deploy(&app).await;
-    let scope = service.for_app(app.clone());
+    let scope = service.fixture_app(app.clone());
     activate(&scope, &deployment, 1).await;
     activate(&scope, &replacement, 2).await;
     service
@@ -990,7 +990,7 @@ async fn held_authority(store: Rc<OrmStore>, expire: bool) {
     let gated = service
         .clone()
         .with_deployments(platform.binding(&[&app]).with_hold_client(client));
-    let scope = gated.for_app(app.clone());
+    let scope = gated.fixture_app(app.clone());
     let mut grant = Grant::cron(&app, &deployment, &ScheduleId::mint(), 1, 1000);
     if expire {
         grant.expires = Instant::now() + Duration::from_secs(2);
@@ -1008,7 +1008,7 @@ async fn held_authority(store: Rc<OrmStore>, expire: bool) {
         } else {
             service
                 .policies
-                .install(&app, configured_policy(2, AppPolicy::default()))
+                .fixture_install(&app, leased_policy(2, AppPolicy::default()))
                 .unwrap();
         }
         let _ = resume.send_async(()).await;
@@ -1022,7 +1022,7 @@ async fn held_authority(store: Rc<OrmStore>, expire: bool) {
     platform.assert_held(&app, &deployment.id).await;
     assert_eq!(
         service
-            .for_app(app)
+            .fixture_app(app)
             .cron_job(&grant.retry())
             .await
             .unwrap()

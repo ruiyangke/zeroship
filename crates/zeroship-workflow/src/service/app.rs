@@ -26,6 +26,8 @@ use zeroship_data_orm::{
 pub struct WorkflowService {
     pub(crate) store: Rc<OrmStore>,
     pub(crate) policies: Arc<super::HostPolicies>,
+    pub(crate) bound_policy: Option<super::PolicyBinding>,
+    operation_policy: Option<CapturedPolicy>,
     pub(crate) deployments: Option<super::AppDeployments>,
     pub(crate) signal_authority: Option<Arc<super::SignalAuthority>>,
     pub(crate) payload_storage: Option<zeroship_storage::Storage>,
@@ -39,6 +41,7 @@ impl std::fmt::Debug for WorkflowService {
 pub struct AppWorkflows {
     pub(crate) service: WorkflowService,
     pub(crate) app: AppId,
+    pub(crate) binding: super::PolicyBinding,
 }
 
 impl WorkflowService {
@@ -57,6 +60,8 @@ impl WorkflowService {
         Ok(Self {
             store,
             policies,
+            bound_policy: None,
+            operation_policy: None,
             deployments: None,
             signal_authority: None,
             payload_storage: None,
@@ -67,13 +72,24 @@ impl WorkflowService {
         self.signal_authority = Some(authority);
         self
     }
-    /// Bind an app whose identity the host has already authorized.
-    #[must_use]
-    pub fn for_app(&self, app: AppId) -> AppWorkflows {
-        AppWorkflows {
-            service: self.clone(),
-            app,
+    /// Retain the host's exact app authority, including across asynchronous calls.
+    ///
+    /// # Errors
+    /// Refuses a binding from another registry or retargeting an app-bound service.
+    pub fn bind_app(
+        &self,
+        binding: &super::PolicyBinding,
+    ) -> Result<AppWorkflows, WorkflowServiceError> {
+        if !binding.belongs_to(&self.policies) || self.bound_policy.is_some() {
+            return Err(WorkflowServiceError::PermissionDenied);
         }
+        let mut service = self.clone();
+        service.bound_policy = Some(binding.clone());
+        Ok(AppWorkflows {
+            service,
+            app: binding.app_id().clone(),
+            binding: binding.clone(),
+        })
     }
 
     #[expect(
@@ -81,37 +97,129 @@ impl WorkflowService {
         reason = "Compio drives the journal on its owning runtime thread"
     )]
     pub(crate) async fn begin(&self) -> Result<Transaction, WorkflowServiceError> {
-        let mut tx = self.store.begin().await?;
+        let captured = self.capture_policy();
+        let mut tx = match &captured {
+            Some(captured) => captured.run(self.store.begin()).await?,
+            None => self.store.begin().await?,
+        };
+        tx.observed_policy = captured;
         tx.policies = Some(self.policies.clone());
+        tx.policy_binding.clone_from(&self.bound_policy);
         Ok(tx)
     }
 
-    /// Register an app using policy already authorized by the trusted host.
-    ///
-    /// Policy installation takes effect before the journal transaction, including
-    /// when that transaction fails. Storage failure cannot roll back revocation.
+    /// Open immutable history without using a live mutation capability.
+    #[expect(
+        clippy::future_not_send,
+        reason = "history uses its owning compio thread"
+    )]
+    pub(super) async fn begin_history(&self) -> Result<Transaction, WorkflowServiceError> {
+        let mut tx = self.store.begin().await?;
+        tx.policies = Some(self.policies.clone());
+        tx.policy_binding.clone_from(&self.bound_policy);
+        Ok(tx)
+    }
+
+    pub(crate) fn with_authority(
+        &self,
+        authority: super::policy::PolicyAuthority,
+    ) -> Result<Self, WorkflowServiceError> {
+        if self
+            .bound_policy
+            .as_ref()
+            .is_none_or(|binding| !authority.belongs_to(binding))
+        {
+            return Err(WorkflowServiceError::PermissionDenied);
+        }
+        authority.check()?;
+        let mut service = self.clone();
+        service.operation_policy = Some(CapturedPolicy::retained(authority));
+        Ok(service)
+    }
+
+    pub(super) fn capture_policy(&self) -> Option<CapturedPolicy> {
+        self.operation_policy
+            .clone()
+            .or_else(|| self.bound_policy.as_ref().map(CapturedPolicy::capture))
+    }
+
+    pub(super) fn run_bound<'a, T: 'a>(
+        &self,
+        operation: impl FnOnce(Self) -> futures::future::LocalBoxFuture<'a, Result<T, WorkflowServiceError>>
+            + 'a,
+    ) -> futures::future::LocalBoxFuture<'a, Result<T, WorkflowServiceError>> {
+        let captured = self.capture_policy();
+        let mut service = self.clone();
+        service.operation_policy.clone_from(&captured);
+        Box::pin(async move {
+            let operation = operation(service);
+            match captured {
+                Some(captured) => captured.run(operation).await,
+                None => operation.await,
+            }
+        })
+    }
+
+    pub(crate) fn policy_for(&self, app: &AppId) -> Result<AppPolicy, WorkflowServiceError> {
+        if let Some(binding) = &self.bound_policy {
+            if binding.app_id() != app {
+                return Err(WorkflowServiceError::PermissionDenied);
+            }
+            return binding.resolve();
+        }
+        self.policies.resolve(app)
+    }
+
+    /// Register the app selected by an already configured host binding.
+    /// Policy installation and revocation remain independent of creator storage.
     ///
     /// # Errors
-    /// Rejects stale or conflicting policy and reports journal storage failures.
+    /// Rejects foreign or unavailable authority and reports journal storage failures.
     pub async fn register_app(
         &self,
-        app: &AppId,
-        policy: super::PolicySnapshot,
-    ) -> Result<(), WorkflowServiceError> {
-        self.policies.install(app, policy)?;
-        let tx = self.begin().await?;
-        tx.database()
-            .collection(models::app_state::Entity::COLLECTION)?
-            .execute(Operation::Upsert {
-                document: value!({"id":app.as_str(), "app_id":app.as_str()}),
-                conflict_fields: value!(["app_id"]),
+        binding: &super::PolicyBinding,
+    ) -> Result<AppWorkflows, WorkflowServiceError> {
+        let scope = self.bind_app(binding)?;
+        let captured = CapturedPolicy::capture(binding);
+        captured
+            .run(async {
+                captured.check()?;
+                let tx = scope.service.begin().await?;
+                let app = scope.app_id();
+                tx.database()
+                    .collection(models::app_state::Entity::COLLECTION)?
+                    .execute(Operation::Upsert {
+                        document: value!({"id":app.as_str(), "app_id":app.as_str()}),
+                        conflict_fields: value!(["app_id"]),
+                    })
+                    .await?;
+                captured.check()?;
+                tx.commit().await
             })
             .await?;
-        tx.commit().await
+        Ok(scope)
     }
 }
 
 impl AppWorkflows {
+    pub(super) fn capture_policy(&self) -> CapturedPolicy {
+        self.service
+            .capture_policy()
+            .expect("app workflow policy binding")
+    }
+
+    pub(crate) fn with_authority(
+        mut self,
+        authority: super::policy::PolicyAuthority,
+    ) -> Result<Self, WorkflowServiceError> {
+        if !authority.belongs_to(&self.binding) {
+            return Err(WorkflowServiceError::PermissionDenied);
+        }
+        authority.check()?;
+        self.service = self.service.with_authority(authority)?;
+        Ok(self)
+    }
+
     #[must_use]
     pub fn app_id(&self) -> &AppId {
         &self.app
@@ -123,7 +231,7 @@ impl AppWorkflows {
         name: &str,
         options: StartOptions,
     ) -> Result<StartedRun, WorkflowServiceError> {
-        let captured = CapturedPolicy::capture(&self.service.policies, &self.app);
+        let captured = self.capture_policy();
         captured
             .run(self.start_captured(request_id, name, options, &captured))
             .await
@@ -140,14 +248,15 @@ impl AppWorkflows {
         validation::start(&options)?;
         let digest = digest(&(name, &options))?;
         let mut tx = self.service.begin().await?;
-        let policy = lock_app(&mut tx, &self.app).await?;
+        lock_app_state(&mut tx, &self.app).await?;
         let now = tx.now().await?;
         if let Some(receipt) = request_result(&tx, &self.app, request_id, "start", &digest).await? {
             return Ok(receipt);
         }
-        captured.recheck(&self.service.policies, &self.app)?;
+        captured.recheck()?;
+        let policy = &captured.authority()?.policy;
         policy.admit()?;
-        captured.check(&self.service.policies, &self.app)?;
+        captured.check()?;
         if encode(&options.input)?.len() > policy.max_input_bytes {
             return Err(WorkflowServiceError::PayloadTooLarge);
         }
@@ -210,14 +319,14 @@ impl AppWorkflows {
             &mut tx, &self.app, request_id, "start", &digest, &result, now,
         )
         .await?;
-        captured.check(&self.service.policies, &self.app)?;
+        captured.check()?;
         tx.commit().await?;
         Ok(result)
     }
 
     pub async fn status(&self, run_id: &str) -> Result<RunStatus, WorkflowServiceError> {
         validate_run(run_id)?;
-        let tx = self.service.begin().await?;
+        let tx = self.service.begin_history().await?;
         let (run, outcome) = current_run(&tx, &self.app, run_id)
             .await?
             .ok_or_else(|| not_found("workflow run"))?;
@@ -243,21 +352,22 @@ impl AppWorkflows {
         run_id: &str,
         options: SignalOptions,
     ) -> Result<DeliveredSignal, WorkflowServiceError> {
-        let captured = CapturedPolicy::capture(&self.service.policies, &self.app);
+        let captured = self.capture_policy();
         captured
             .run(async {
                 validate_run(run_id)?;
                 validation::signal_type(&options.signal_type)?;
                 let digest = digest(&(run_id, &options))?;
                 let mut tx = self.service.begin().await?;
-                let policy = lock_app(&mut tx, &self.app).await?;
+                lock_app_state(&mut tx, &self.app).await?;
                 let now = tx.now().await?;
                 if let Some(receipt) =
                     request_result(&tx, &self.app, request_id, "signal", &digest).await?
                 {
                     return Ok(receipt);
                 }
-                captured.check(&self.service.policies, &self.app)?;
+                captured.check()?;
+                let policy = &captured.authority()?.policy;
                 if encode(&options.payload)?.len() > policy.max_input_bytes {
                     return Err(WorkflowServiceError::PayloadTooLarge);
                 }
@@ -268,7 +378,7 @@ impl AppWorkflows {
                     &mut tx, &self.app, request_id, "signal", &digest, &result, now,
                 )
                 .await?;
-                captured.check(&self.service.policies, &self.app)?;
+                captured.check()?;
                 tx.commit().await?;
                 Ok(result)
             })
@@ -358,6 +468,26 @@ pub(crate) async fn lock_app(
     tx: &mut Transaction,
     app: &AppId,
 ) -> Result<AppPolicy, WorkflowServiceError> {
+    tx.capture_mutation(app)?;
+    lock_app_state(tx, app).await?;
+    tx.policy(app)
+}
+
+/// Serialize journal state without granting permission for a fresh mutation.
+/// Receipt replay uses this path before consulting live policy authority.
+#[expect(
+    clippy::future_not_send,
+    reason = "app locks use the creator transaction thread"
+)]
+#[expect(
+    clippy::needless_pass_by_ref_mut,
+    reason = "app lock acquisition is an exclusive transaction operation"
+)]
+pub(super) async fn lock_app_state(
+    tx: &mut Transaction,
+    app: &AppId,
+) -> Result<(), WorkflowServiceError> {
+    tx.check_app(app)?;
     let Output::Count(locked) = tx
         .database()
         .collection(models::app_state::Entity::COLLECTION)?
@@ -375,10 +505,7 @@ pub(crate) async fn lock_app(
     if locked != 1 {
         return Err(not_found("workflow app"));
     }
-    tx.policies
-        .as_ref()
-        .ok_or_else(|| WorkflowServiceError::Unavailable("workflow host policy not bound".into()))?
-        .resolve(app)
+    Ok(())
 }
 
 pub(crate) async fn lock_run(

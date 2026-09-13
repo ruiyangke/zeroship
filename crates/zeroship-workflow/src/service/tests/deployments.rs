@@ -91,7 +91,7 @@ async fn deployment_contract(store: Rc<OrmStore>, deployments: Deployments) {
         .await
         .unwrap();
     service.activate_deploy(&app, &first).await.unwrap();
-    let scope = service.for_app(app.clone());
+    let scope = service.fixture_app(app.clone());
     let old_run = scope
         .start(&RequestId::mint(), "Example", StartOptions::default())
         .await
@@ -107,7 +107,7 @@ async fn deployment_contract(store: Rc<OrmStore>, deployments: Deployments) {
         .await
         .unwrap();
     let other_run = service
-        .for_app(other.clone())
+        .fixture_app(other.clone())
         .start(&RequestId::mint(), "Example", StartOptions::default())
         .await
         .unwrap();

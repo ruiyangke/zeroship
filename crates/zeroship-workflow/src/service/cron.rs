@@ -7,7 +7,7 @@
 
 use super::{
     activation,
-    app::{decode, encode, insert_root_run, live_runs, lock_app},
+    app::{decode, encode, insert_root_run, live_runs, lock_app_state},
     delivery::{self, CapturedLease, JobReceipt},
     deployment_retention::admission_generation,
     deployments::unavailable,
@@ -197,11 +197,12 @@ impl AppWorkflows {
         let cron = Cron::from_job(job)?;
         let captured = CapturedLease::capture(self, lease);
         let budget = delivery::attempt_budget(captured.as_ref().ok(), None);
-        compio::time::timeout(
+        delivery::run_attempt(
+            captured.as_ref().ok().map(CapturedLease::cancelled),
             budget,
             Box::pin(async {
                 let mut tx = self.service.begin().await?;
-                lock_app(&mut tx, self.app_id()).await?;
+                lock_app_state(&mut tx, self.app_id()).await?;
                 if let Some(receipt) = receipt(&tx, job).await? {
                     tx.commit().await?;
                     return Ok(receipt);
@@ -245,7 +246,7 @@ impl AppWorkflows {
                 let registration = cron.declaration(&deployment)?;
 
                 let mut tx = self.service.begin().await?;
-                let policy = lock_app(&mut tx, self.app_id()).await?;
+                lock_app_state(&mut tx, self.app_id()).await?;
                 if let Some(receipt) = receipt(&tx, job).await? {
                     tx.commit().await?;
                     return Ok(receipt);
@@ -265,6 +266,7 @@ impl AppWorkflows {
                 {
                     return Err(conflict());
                 }
+                let policy = authority.policy();
                 policy.admit()?;
                 if encode(&registration.input)?.len() > policy.max_input_bytes {
                     return Err(WorkflowServiceError::PayloadTooLarge);
@@ -364,7 +366,6 @@ impl AppWorkflows {
             }),
         )
         .await
-        .map_err(|_| WorkflowServiceError::Timeout)?
     }
 }
 

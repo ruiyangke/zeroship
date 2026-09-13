@@ -210,12 +210,12 @@ finalized with the authentication owner; registration alone does not solve them.
 
 ## Policy bindings and authenticated leases
 
-**Target; implementation pending verification.** The creator engine currently
-accepts trusted `PolicySnapshot` values and fences operations with captured policy
-revisions and deadlines. An app lookup alone does not distinguish a retired host
-context from its replacement. Immutable native bindings, authenticated policy
-lease transport and the authoritative Control policy source remain required work.
-The names below describe the intended API contract, not available methods.
+**Native lifecycle implemented; transport and source integration remain open.**
+The creator engine accepts trusted `PolicySnapshot` values through immutable
+`PolicyBinding` capabilities and ordered `PolicyRefresh` tickets. App handles,
+queued backend calls and delivered execution retain the original authority across
+asynchronous work. Authenticated policy lease transport and the authoritative
+Control policy source remain required integration work.
 
 ### Native binding identity and policy revision
 
@@ -242,8 +242,8 @@ requires explicit replacement. Native `zeroship-workflow` does not need service-
 types: its opaque binding is the local fence, while the host/client validates the
 transport identities before installing a snapshot through that binding.
 
-Construct `AppWorkflows` from a `PolicyBinding`, replacing the ambient
-`for_app(AppId)` accessor. The handle retains that exact binding; cloning it does
+Construct `AppWorkflows` with `WorkflowService::register_app(&binding)` after
+installing a snapshot, or use `bind_app(&binding)` for an existing journal. The handle retains that exact binding; cloning it does
 not resolve current authority by app ID. `AppBackend`, `ConsumerScope`, runtime
 contexts and queued backend calls preserve the same capability. A retained V8
 handle or old consumer cannot start a fresh mutation by borrowing a replacement's
@@ -416,8 +416,9 @@ shortened grants, revocation during lock waits, and exact receipt replay without
 new authority. Transport tests cover app/worker/key/assignment substitution, key
 replacement during issuance, stale source renewal, delayed responses and unrelated
 absolute clocks. Host tests deny workers Control DB access and deny platform
-processes creator access. Binding and transport remain pending until these paths
-are implemented and verified; local captured-policy tests alone do not prove them.
+processes creator access. Native binding tests cover the local lifecycle; transport
+and production host verification remain required. Local policy tests alone do not
+prove remote authorization or private-zone deployment.
 
 ## Storage inventory and schema ownership
 
@@ -1870,8 +1871,14 @@ durable receipt replay. These local fences do not establish assignment-bound
 remote policy delivery or a distributed archive acknowledgement. The native
 binding and authenticated lease contract is specified in
 [policy bindings and leases](#policy-bindings-and-authenticated-leases); its
-capabilities, source authority and transport remain pending implementation and
-verification.
+native capabilities are implemented. Native tests exercise retired app/backend
+handles, delayed and consumed refresh tickets, shortening followed by extension,
+blocked database cancellation, queued calls retaining their original deadline,
+and returned payload streams stopping under revoked authority. Delivery tests
+revoke policy while retaining the same consumer scope and keep occupied capacity
+until native shutdown joins. Exact semantic receipts and status remain readable
+through the retained app scope after execution authority is gone. Source authority,
+authenticated transport and production composition remain required work.
 
 Workflow provisioning preserves an existing creator schema's migrator ownership.
 Native PostgreSQL container tests exercise both provisioning orders, repeated

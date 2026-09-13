@@ -270,7 +270,7 @@ impl Fixture {
             .unwrap()
             .with_deployments(deployments.binding(&[&app_id]));
         service
-            .register_app(
+            .fixture_register(
                 &app_id,
                 PolicySnapshot::configuration(Revision::try_from(1).unwrap(), policy).unwrap(),
             )
@@ -289,7 +289,7 @@ impl Fixture {
             )
             .await
             .unwrap();
-        let app = service.for_app(app_id);
+        let app = service.fixture_app(app_id);
         app.start(&RequestId::mint(), "Example", StartOptions::default())
             .await
             .unwrap();

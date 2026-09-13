@@ -9,6 +9,7 @@ use super::{CancelOnDrop, ExecutionGuard, TaskExecution, TaskExecutor};
 use crate::{
     service::{
         delivery::{DeliveredTask, JobAcceptance, JobReceipt},
+        policy::PolicyAuthority,
         publication::JobPublisher,
         reconciliation::ReconciliationOptions,
         AppWorkflows, ControlIntent,
@@ -134,6 +135,7 @@ struct Active<L> {
     app: AppWorkflows,
     claims: RefCell<Claims<L>>,
     execution: Box<dyn TaskExecution>,
+    authority: PolicyAuthority,
     guard: ExecutionGuard,
     phase: Phase,
 }
@@ -246,13 +248,31 @@ impl<T: JobTransport> DeliverySlot<T> {
             let receipt = bounded(self.options.execution_timeout, app.cron_job(&lease)).await?;
             return self.acknowledge(receipt, &lease).await;
         }
+        let authority = app.capture_policy().authority().cloned();
         let accepted = app.accept_job(&lease).await?;
         let task = match accepted {
             JobAcceptance::Deferred => return Ok(DeliveryOutcome::Deferred),
             JobAcceptance::Settled(receipt) => return self.acknowledge(receipt, &lease).await,
             JobAcceptance::Execute(task) => *task,
         };
-        let guard = match ExecutionGuard::new(self.options.execution_timeout) {
+        let authority = match authority.and_then(|authority| {
+            authority.check()?;
+            Ok(authority)
+        }) {
+            Ok(authority) => authority,
+            Err(error) => {
+                release(app, &task, &lease, self.options.operation_timeout).await;
+                return Err(error);
+            }
+        };
+        let timeout = authority
+            .deadline
+            .map_or(self.options.execution_timeout, |deadline| {
+                self.options
+                    .execution_timeout
+                    .min(deadline.saturating_duration_since(Instant::now()))
+            });
+        let guard = match ExecutionGuard::new(timeout) {
             Ok(guard) => guard,
             Err(error) => {
                 release(app, &task, &lease, self.options.operation_timeout).await;
@@ -260,7 +280,10 @@ impl<T: JobTransport> DeliverySlot<T> {
             }
         };
         let claims = Claims { lease, task };
-        if let Err(error) = constrain(&guard, &claims) {
+        if let Err(error) = guard
+            .cancel_on(authority.cancelled())
+            .and_then(|()| constrain(&guard, &claims))
+        {
             release(
                 app,
                 &claims.task,
@@ -270,6 +293,7 @@ impl<T: JobTransport> DeliverySlot<T> {
             .await;
             return Err(error);
         }
+        let scoped = app.clone().with_authority(authority.clone())?;
         let execution = match self
             .executor
             .start(claims.task.assignment(), guard.budget())
@@ -287,9 +311,10 @@ impl<T: JobTransport> DeliverySlot<T> {
             }
         };
         let active = self.active.insert(Active {
-            app: app.clone(),
+            app: scoped,
             claims: RefCell::new(claims),
             execution,
+            authority,
             guard,
             phase: Phase::new(self.options.execution_timeout),
         });
@@ -389,15 +414,14 @@ async fn run_active<T: JobTransport>(
             options,
         )
         .boxed_local();
-        let ownership = renew(
+        let ownership = active.authority.run(renew(
             transport,
             &active.app,
             &active.claims,
             &active.guard,
             &active.phase,
             options,
-        )
-        .boxed_local();
+        ));
         match futures::future::select(work, ownership).await {
             Either::Left((result, ownership)) => {
                 drop(ownership);

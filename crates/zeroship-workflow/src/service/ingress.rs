@@ -1,12 +1,10 @@
 use super::{
-    app::{encode, lock_app, lock_run, parse_state, request_result, store_request},
+    app::{encode, lock_app_state, lock_run, parse_state, request_result, store_request},
     capability::{
         mint_signal_capability, verify_signal_capability, CapabilityToken, SignalGrant,
         SignalTarget, WORKFLOW_AUDIENCE,
     },
-    models,
-    policy::CapturedPolicy,
-    signals,
+    models, signals,
     store::Transaction,
     types::digest,
     AppWorkflows, RequestId, WorkflowService,
@@ -88,22 +86,23 @@ impl AppWorkflows {
         request: &RequestId,
         options: SignalTokenRequest,
     ) -> Result<CapabilityToken, WorkflowServiceError> {
-        let captured = CapturedPolicy::capture(&self.service.policies, &self.app);
+        let captured = self.capture_policy();
         captured
             .run(async {
                 let authority = authority(&self.service)?;
                 let digest = digest(&options)?;
                 let mut tx = self.service.begin().await?;
-                let policy = lock_app(&mut tx, &self.app).await?;
+                lock_app_state(&mut tx, &self.app).await?;
                 let now = tx.now().await?;
                 if let Some(receipt) =
                     request_result(&tx, &self.app, request, "issue_signal_token", &digest).await?
                 {
                     return Ok(receipt);
                 }
-                captured.recheck(&self.service.policies, &self.app)?;
+                captured.recheck()?;
+                let policy = &captured.authority()?.policy;
                 policy.admit()?;
-                captured.check(&self.service.policies, &self.app)?;
+                captured.check()?;
                 if options.lifetime_seconds <= 0
                     || options.lifetime_seconds > policy.max_signal_token_lifetime_seconds
                 {
@@ -112,7 +111,7 @@ impl AppWorkflows {
                     ));
                 }
                 let app_epoch = app_epoch(&mut tx, &self.app).await?;
-                captured.check(&self.service.policies, &self.app)?;
+                captured.check()?;
                 let epoch = target_epoch(&mut tx, &self.app, &options.target, true).await?;
                 let grant = SignalGrant {
                     app_id: self.app.clone(),
@@ -137,7 +136,7 @@ impl AppWorkflows {
                     now,
                 )
                 .await?;
-                captured.check(&self.service.policies, &self.app)?;
+                captured.check()?;
                 tx.commit().await?;
                 Ok(token)
             })
@@ -156,19 +155,19 @@ impl AppWorkflows {
         request: &RequestId,
         target: Option<SignalTarget>,
     ) -> Result<RevokedSignals, WorkflowServiceError> {
-        let captured = CapturedPolicy::capture(&self.service.policies, &self.app);
+        let captured = self.capture_policy();
         captured
             .run(async {
                 let digest = digest(&target)?;
                 let mut tx = self.service.begin().await?;
-                lock_app(&mut tx, &self.app).await?;
+                lock_app_state(&mut tx, &self.app).await?;
                 let now = tx.now().await?;
                 if let Some(receipt) =
                     request_result(&tx, &self.app, request, "revoke_signal_tokens", &digest).await?
                 {
                     return Ok(receipt);
                 }
-                captured.check(&self.service.policies, &self.app)?;
+                captured.check()?;
                 let previous = if let Some(target) = &target {
                     target_epoch(&mut tx, &self.app, target, false).await?
                 } else {
@@ -179,7 +178,7 @@ impl AppWorkflows {
                         "workflow signal epoch exhausted".into(),
                     )
                 })?;
-                captured.check(&self.service.policies, &self.app)?;
+                captured.check()?;
                 match target {
                     Some(SignalTarget::Run { run_id }) => {
                         tx.database()
@@ -220,27 +219,31 @@ impl AppWorkflows {
                     now,
                 )
                 .await?;
-                captured.check(&self.service.policies, &self.app)?;
+                captured.check()?;
                 tx.commit().await?;
                 Ok(result)
             })
             .await
     }
 }
-impl WorkflowService {
+impl AppWorkflows {
+    /// Accept a signed signal through the host-selected app binding.
+    ///
+    /// # Errors
+    /// Rejects stale or mismatched capabilities, unavailable authority and journal failures.
     pub async fn ingest_signal(
         &self,
         request: &RequestId,
         token: &str,
-        app: &AppId,
         target: &SignalTarget,
         options: SignalOptions,
     ) -> Result<IngressReceipt, WorkflowServiceError> {
-        let captured = CapturedPolicy::capture(&self.policies, app);
+        let app = &self.app;
+        let captured = self.capture_policy();
         captured
             .run(async {
-                let authority = authority(self)?;
-                let mut tx = self.begin().await?;
+                let authority = authority(&self.service)?;
+                let mut tx = self.service.begin().await?;
                 let now = tx.now().await?;
                 let grant =
                     verify_signal_capability(token, &authority.trust, now.div_euclid(1000))?;
@@ -252,7 +255,7 @@ impl WorkflowService {
                 if !grant.types.contains(&options.signal_type) {
                     return Err(WorkflowServiceError::PermissionDenied);
                 }
-                let policy = lock_app(&mut tx, app).await?;
+                lock_app_state(&mut tx, app).await?;
                 let now = tx.now().await?;
                 verify_signal_capability(token, &authority.trust, now.div_euclid(1000))?;
                 if app_epoch(&mut tx, app).await? != grant.app_epoch
@@ -266,9 +269,10 @@ impl WorkflowService {
                 {
                     return Ok(receipt);
                 }
-                captured.recheck(&self.policies, app)?;
+                captured.recheck()?;
+                let policy = &captured.authority()?.policy;
                 policy.admit()?;
-                captured.check(&self.policies, app)?;
+                captured.check()?;
                 if !policy.ingress {
                     return Err(WorkflowServiceError::PermissionDenied);
                 }
@@ -298,7 +302,7 @@ impl WorkflowService {
                     now,
                 )
                 .await?;
-                captured.check(&self.policies, app)?;
+                captured.check()?;
                 tx.commit().await?;
                 Ok(result)
             })

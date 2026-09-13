@@ -24,7 +24,7 @@ async fn foreign_reference(store: Rc<OrmStore>) {
     let mut assignments = Vec::new();
     for app_id in [&app, &foreign] {
         let started = service
-            .for_app(app_id.clone())
+            .fixture_app(app_id.clone())
             .start(&RequestId::mint(), "Example", StartOptions::default())
             .await
             .unwrap();
@@ -56,7 +56,7 @@ async fn foreign_reference(store: Rc<OrmStore>) {
         .await
         .unwrap();
     reopened
-        .register_app(&app, configured_policy(1, AppPolicy::default()))
+        .fixture_register(&app, leased_policy(1, AppPolicy::default()))
         .await
         .unwrap();
     assert!(matches!(

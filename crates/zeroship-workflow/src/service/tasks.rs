@@ -1,5 +1,5 @@
 use super::{
-    app::{deadline, decode, encode, lock_app, lock_run, not_found, parse_state},
+    app::{deadline, decode, encode, lock_app, lock_app_state, lock_run, not_found, parse_state},
     frontier, models,
     store::{Row, Transaction},
     types::{
@@ -32,6 +32,14 @@ struct PollOrder {
 impl WorkflowService {
     /// Claim service-selected work for an authenticated worker with free capacity.
     pub async fn poll(
+        &self,
+        worker: &WorkerIdentity,
+    ) -> Result<Option<TaskAssignment>, WorkflowServiceError> {
+        self.run_bound(|service| Box::pin(async move { service.poll_inner(worker).await }))
+            .await
+    }
+
+    async fn poll_inner(
         &self,
         worker: &WorkerIdentity,
     ) -> Result<Option<TaskAssignment>, WorkflowServiceError> {
@@ -204,6 +212,18 @@ impl WorkflowService {
         task_id: &str,
         token: &TaskToken,
     ) -> Result<Heartbeat, WorkflowServiceError> {
+        self.run_bound(|service| {
+            Box::pin(async move { service.heartbeat_inner(worker, task_id, token).await })
+        })
+        .await
+    }
+
+    async fn heartbeat_inner(
+        &self,
+        worker: &WorkerIdentity,
+        task_id: &str,
+        token: &TaskToken,
+    ) -> Result<Heartbeat, WorkflowServiceError> {
         let mut tx = self.begin().await?;
         let claim = authorized_task(&mut tx, worker, task_id, token).await?;
         if claim.task.job_id.is_some() {
@@ -244,9 +264,26 @@ impl WorkflowService {
         token: &TaskToken,
         execution: WorkflowExecution,
     ) -> Result<CompletionReceipt, WorkflowServiceError> {
+        self.run_bound(|service| {
+            Box::pin(async move {
+                service
+                    .complete_inner(worker, task_id, token, execution)
+                    .await
+            })
+        })
+        .await
+    }
+
+    async fn complete_inner(
+        &self,
+        worker: &WorkerIdentity,
+        task_id: &str,
+        token: &TaskToken,
+        execution: WorkflowExecution,
+    ) -> Result<CompletionReceipt, WorkflowServiceError> {
         let body_digest = digest(&execution)?;
         let mut tx = self.begin().await?;
-        let claim = authorized_task(&mut tx, worker, task_id, token).await?;
+        let claim = inspect_task(&mut tx, worker, task_id, token).await?;
         if claim.task.job_id.is_some() {
             return Err(WorkflowServiceError::PermissionDenied);
         }
@@ -263,6 +300,7 @@ impl WorkflowService {
             return Ok(receipt);
         }
         claim.validate_live()?;
+        let claim = claim.authorize(&mut tx)?;
         let receipt = complete_in(&mut tx, &claim, execution, &body_digest).await?;
         tx.commit().await?;
         Ok(receipt)
@@ -275,8 +313,20 @@ impl WorkflowService {
         task_id: &str,
         token: &TaskToken,
     ) -> Result<(), WorkflowServiceError> {
+        self.run_bound(|service| {
+            Box::pin(async move { service.release_inner(worker, task_id, token).await })
+        })
+        .await
+    }
+
+    async fn release_inner(
+        &self,
+        worker: &WorkerIdentity,
+        task_id: &str,
+        token: &TaskToken,
+    ) -> Result<(), WorkflowServiceError> {
         let mut tx = self.begin().await?;
-        let claim = authorized_task(&mut tx, worker, task_id, token).await?;
+        let claim = inspect_task(&mut tx, worker, task_id, token).await?;
         if claim.task.job_id.is_some() {
             return Err(WorkflowServiceError::PermissionDenied);
         }
@@ -284,6 +334,7 @@ impl WorkflowService {
             return Ok(());
         }
         claim.validate_live()?;
+        let claim = claim.authorize(&mut tx)?;
         claim
             .update_task(&tx, value!({"state":"released", "finished_at":claim.now}))
             .await?;
@@ -296,13 +347,35 @@ impl WorkflowService {
 }
 
 pub(crate) struct AuthorizedTask {
-    pub(crate) app: AppId,
+    inspection: TaskInspection,
     pub(crate) policy: AppPolicy,
+}
+impl std::ops::Deref for AuthorizedTask {
+    type Target = TaskInspection;
+    fn deref(&self) -> &Self::Target {
+        &self.inspection
+    }
+}
+
+/// Task identity and retained settlement can be inspected without renewed policy.
+pub struct TaskInspection {
+    pub(crate) app: AppId,
     pub(crate) task: models::TaskRecord,
     pub(crate) run: Row,
     pub(crate) now: i64,
 }
-impl AuthorizedTask {
+impl TaskInspection {
+    pub(crate) fn authorize(
+        self,
+        tx: &mut Transaction,
+    ) -> Result<AuthorizedTask, WorkflowServiceError> {
+        tx.capture_mutation(&self.app)?;
+        let policy = tx.policy(&self.app)?;
+        Ok(AuthorizedTask {
+            inspection: self,
+            policy,
+        })
+    }
     pub(crate) fn validate_live(&self) -> Result<(), WorkflowServiceError> {
         self.validate_at(self.now)
     }
@@ -365,6 +438,21 @@ pub(crate) async fn authorized_task(
     task_id: &str,
     token: &TaskToken,
 ) -> Result<AuthorizedTask, WorkflowServiceError> {
+    inspect_task(tx, worker, task_id, token)
+        .await?
+        .authorize(tx)
+}
+
+#[expect(
+    clippy::future_not_send,
+    reason = "task inspection uses its creator transaction thread"
+)]
+pub(super) async fn inspect_task(
+    tx: &mut Transaction,
+    worker: &WorkerIdentity,
+    task_id: &str,
+    token: &TaskToken,
+) -> Result<TaskInspection, WorkflowServiceError> {
     typed_id::parse_with_prefix(task_id, typed_id::WORKFLOW_DISPATCH_PREFIX)
         .map_err(|_| not_found("workflow task"))?;
     let tasks = tx.database().entity::<models::tasks::Entity>()?;
@@ -403,7 +491,7 @@ pub(crate) async fn authorized_task(
     let app = AppId::parse(&initial.app_id).map_err(|_| {
         WorkflowServiceError::Internal("invalid persisted workflow app identity".into())
     })?;
-    let policy = lock_app(tx, &app).await?;
+    lock_app_state(tx, &app).await?;
     let run = lock_run(tx, &app, &initial.run_id).await?;
     // The initial lookup establishes scope only. Re-read after taking the app
     // lock so concurrent completion, release and reclaim cannot evade fencing.
@@ -421,9 +509,8 @@ pub(crate) async fn authorized_task(
         .next()
         .ok_or_else(|| not_found("workflow task"))?;
     let now = tx.now().await?;
-    Ok(AuthorizedTask {
+    Ok(TaskInspection {
         app,
-        policy,
         task,
         run,
         now,
