@@ -1605,7 +1605,7 @@ mod tests {
         let mut recorder = Recorder {
             calls: Vec::new(),
             status: 201,
-            body: r#"{"id":"prj_0123456789abcdefghijkl"}"#.to_string(),
+            body: r#"{"id":"prj_0000123456789abcdefghijkl"}"#.to_string(),
         };
         let call = plan(
             "projects",

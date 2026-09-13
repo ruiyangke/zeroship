@@ -86,7 +86,9 @@ impl NativePlugin for WorkflowBinding {
         _descriptor: Option<&serde_json::Value>,
     ) -> Result<(), String> {
         if let WorkflowBackendFactory::Service { backend } = &self.backend {
-            if zeroship_runtime::plugin::runtime_app_uuid(scope) != Some(backend.app_id().uuid()) {
+            if zeroship_runtime::plugin::runtime_app_identity(scope).as_ref()
+                != Some(backend.app_id())
+            {
                 return Err("workflow binding does not match runtime app identity".into());
             }
         }

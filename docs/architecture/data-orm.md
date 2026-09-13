@@ -259,8 +259,9 @@ its transaction lane before exposing a physical connection source.
 `backend::Backend` is the host registration contract above the driver:
 
 - `ScopedExecutor` supplies routed, authorized statement execution.
-- `protection::Catalog` supplies live protection evidence. Catalog failures
-  remain failures; they cannot become an empty protection floor.
+- `protection::Catalog` supplies live protection evidence for the bound physical
+  schema. Transaction catalog reads reuse the active session and its cancellation
+  protocol. Catalog failures remain failures; they cannot become an empty floor.
 - `protection::Protection` supplies column keys.
 - `search::Search` supplies optional ORM search strategies. Default methods
   reject unsupported operations explicitly.

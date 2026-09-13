@@ -21,8 +21,8 @@ zeroship-data-orm = { workspace = true }
 zeroship-core = { workspace = true }
 zeroship-storage = { workspace = true }
 sha2 = { workspace = true }
+zeroship-id = { workspace = true }
 tempfile = { workspace = true }
-uuid = { workspace = true }
 rusqlite = { workspace = true, features = ["bundled"] }
 
 [lints]

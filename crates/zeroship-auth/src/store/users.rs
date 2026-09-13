@@ -243,8 +243,8 @@ pub async fn record_login_failure(conn: &Client, id: &UserId) -> Result<i32> {
 }
 
 /// Enumeration-defense companion to [`record_login_failure`]: issue ONE
-/// throwaway `UPDATE zeroship.users … WHERE id = $1` against a random,
-/// guaranteed-absent UUID so the absent / OAuth-only / no-credential failure
+/// throwaway `UPDATE zeroship.users … WHERE id = $1` against a freshly minted,
+/// guaranteed-absent user id so the absent / OAuth-only / no-credential failure
 /// arm performs the SAME serialized PG round-trip the real-password arm does
 /// (finding F7).
 ///
@@ -253,8 +253,8 @@ pub async fn record_login_failure(conn: &Client, id: &UserId) -> Result<i32> {
 /// absent arm runs only the audit INSERT — a measurable post-Argon2 latency
 /// delta that leaks whether an email belongs to a real, password-bearing
 /// account. This is the DB-round-trip analog of the dummy-hash that already
-/// equalizes the Argon2 wall time. The UPDATE matches zero rows (random UUID),
-/// so it never mutates any account.
+/// equalizes the Argon2 wall time. The UPDATE matches zero rows (an id minted
+/// here and never stored), so it never mutates any account.
 ///
 /// Best-effort by contract: like the real arm, a fault here must NOT change the
 /// credential decision. The caller logs and proceeds.

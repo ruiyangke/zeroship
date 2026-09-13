@@ -1,32 +1,21 @@
-//! Vendored typed-id subset (base62/UUIDv7 id machinery for `MigrationId`).
+//! Typed-id codec used by [`crate::migration::MigrationId`].
 //!
-//! Copied byte-identically from the upstream typed-id module so this crate can be
-//! embedded as a lean library without a runtime dependency on the upstream core.
-//! The base62/uuid encoding is a WIRE CONTRACT, and nothing in THIS repository can
-//! check it: the upstream core it was copied from is not here, so there is no second
-//! copy to compare against. An earlier version of this note promised a
-//! `tests/core_id_parity.rs` guard "while both crates coexist in-tree" - that
-//! condition is false where it was written.
-//!
-//! The guard lives where the condition holds. zeroship vendors this crate alongside
-//! its own `crates/zeroship-core/src/typed_id.rs`, so both copies coexist there, and its
-//! `crates/zeroship-migrate-server/tests/typed_id_parity.rs` cross-decodes the two encodings.
-//! Reported agreeing across a sweep that includes the all-zero, all-ones and
-//! low-bit edges, with the harness proven to fail on a planted alphabet swap.
-//!
-//! Does NOT cover the parse/validate prefix helpers - that guard is encode/decode
-//! only, and nothing covers the rest on either side.
+//! Keep this leaf implementation byte-compatible with `zeroship-id`; the
+//! migration-server parity test cross-encodes and decodes both implementations.
 
-/// Base62 alphabet - sorted so lexicographic order matches numeric order
+/// Base36 alphabet - sorted so lexicographic order matches numeric order
 /// for the high bits (timestamp), preserving `UUIDv7` sort order.
-const BASE62: &[u8; 62] = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+const BASE36: &[u8; 36] = b"0123456789abcdefghijklmnopqrstuvwxyz";
 
-/// Reverse lookup table: ASCII byte -> base62 digit (255 = invalid)
+/// Width of a base36-encoded UUID.
+pub const BODY_LEN: usize = 25;
+
+/// Reverse lookup table: ASCII byte -> base36 digit (255 = invalid)
 const fn build_decode_table() -> [u8; 128] {
     let mut table = [255u8; 128];
     let mut i = 0;
-    while i < 62 {
-        table[BASE62[i] as usize] = i as u8;
+    while i < 36 {
+        table[BASE36[i] as usize] = i as u8;
         i += 1;
     }
     table
@@ -34,34 +23,34 @@ const fn build_decode_table() -> [u8; 128] {
 
 const DECODE: [u8; 128] = build_decode_table();
 
-/// Encode 128-bit UUID bytes to 22-char base62 string.
+/// Encode UUID bytes as fixed-width base36.
 #[must_use]
-pub fn uuid_to_base62(uuid: &uuid::Uuid) -> String {
+pub fn uuid_to_base36(uuid: &uuid::Uuid) -> String {
     let bytes = uuid.as_bytes();
-    // Treat as a 128-bit big-endian integer and repeatedly divide by 62
+    // Treat the UUID as one big-endian integer.
     let mut n = u128::from_be_bytes(*bytes);
-    let mut buf = [0u8; 22];
-    for i in (0..22).rev() {
-        buf[i] = BASE62[(n % 62) as usize];
-        n /= 62;
+    let mut buf = [0u8; BODY_LEN];
+    for i in (0..BODY_LEN).rev() {
+        buf[i] = BASE36[(n % 36) as usize];
+        n /= 36;
     }
-    String::from_utf8(buf.to_vec()).expect("base62 chars are valid UTF-8")
+    String::from_utf8(buf.to_vec()).expect("base36 chars are valid UTF-8")
 }
 
-/// Encode an arbitrary byte slice as a base62 string by treating it as a
-/// big-endian integer and repeatedly dividing by 62.
+/// Encode an arbitrary byte slice as a base36 string by treating it as a
+/// big-endian integer.
 ///
-/// Unlike [`uuid_to_base62`] (fixed 22-char width for a 128-bit UUID), this
+/// Unlike [`uuid_to_base36`], this
 /// handles inputs of any length, so it can encode an HMAC tag. The output
 /// length is not fixed; callers that want a bounded id should truncate the
 /// returned string (e.g. the pairwise-subject derivation takes the first 20
 /// chars). Empty input yields an empty string.
 #[must_use]
-pub fn base62_encode_bytes(bytes: &[u8]) -> String {
+pub fn base36_encode_bytes(bytes: &[u8]) -> String {
     if bytes.is_empty() {
         return String::new();
     }
-    // Big-endian byte-array long division by 62, collecting remainders.
+    // Big-endian byte-array long division, collecting remainders.
     let mut digits = bytes.to_vec();
     let mut out = Vec::new();
     // Strip leading zero bytes only after the loop preserves value; we loop
@@ -71,40 +60,40 @@ pub fn base62_encode_bytes(bytes: &[u8]) -> String {
         let mut all_zero = true;
         for d in &mut digits {
             let cur = (rem << 8) | u16::from(*d);
-            let q = cur / 62;
-            rem = cur % 62;
+            let q = cur / 36;
+            rem = cur % 36;
             *d = u8::try_from(q).unwrap_or(0);
             if *d != 0 {
                 all_zero = false;
             }
         }
-        out.push(BASE62[rem as usize]);
+        out.push(BASE36[rem as usize]);
         if all_zero {
             break;
         }
     }
     out.reverse();
-    String::from_utf8(out).expect("base62 chars are valid UTF-8")
+    String::from_utf8(out).expect("base36 chars are valid UTF-8")
 }
 
-/// Decode 22-char base62 string to UUID bytes.
-pub fn base62_to_uuid(s: &str) -> Result<uuid::Uuid, String> {
-    if s.len() != 22 {
-        return Err(format!("expected 22 base62 chars, got {}", s.len()));
+/// Decode a fixed-width base36 string to UUID bytes.
+pub fn base36_to_uuid(s: &str) -> Result<uuid::Uuid, String> {
+    if s.len() != BODY_LEN {
+        return Err(format!("expected {BODY_LEN} base36 chars, got {}", s.len()));
     }
     let mut n: u128 = 0;
     for &b in s.as_bytes() {
         if b >= 128 {
-            return Err(format!("invalid base62 character: {}", b as char));
+            return Err(format!("invalid base36 character: {}", b as char));
         }
         let digit = DECODE[b as usize];
         if digit == 255 {
-            return Err(format!("invalid base62 character: {}", b as char));
+            return Err(format!("invalid base36 character: {}", b as char));
         }
         n = n
-            .checked_mul(62)
+            .checked_mul(36)
             .and_then(|n| n.checked_add(u128::from(digit)))
-            .ok_or_else(|| "base62 overflow".to_string())?;
+            .ok_or_else(|| "base36 overflow".to_string())?;
     }
     Ok(uuid::Uuid::from_bytes(n.to_be_bytes()))
 }
@@ -115,11 +104,11 @@ pub fn new_v7() -> uuid::Uuid {
     uuid::Uuid::now_v7()
 }
 
-/// Generate a typed ID: `{prefix}_{base62(uuidv7)}`
+/// Generate a typed ID: `{prefix}_{base36(uuidv7)}`
 #[must_use]
 pub fn generate(prefix: &str) -> String {
     let uuid = new_v7();
-    format!("{}_{}", prefix, uuid_to_base62(&uuid))
+    format!("{}_{}", prefix, uuid_to_base36(&uuid))
 }
 
 /// Parse a typed ID: extract the prefix and decode to UUID.
@@ -127,7 +116,7 @@ pub fn parse(typed_id: &str) -> Result<(&str, uuid::Uuid), String> {
     let (prefix, encoded) = typed_id
         .split_once('_')
         .ok_or_else(|| format!("invalid typed ID (no prefix): {typed_id}"))?;
-    let uuid = base62_to_uuid(encoded)?;
+    let uuid = base36_to_uuid(encoded)?;
     Ok((prefix, uuid))
 }
 
@@ -141,7 +130,7 @@ pub enum ParseError {
     /// path-traversal-hardening boundary check: a caller that asked for one
     /// entity type must never receive an id minted for another.
     WrongPrefix { expected: String, got: String },
-    /// The id failed to parse - wrong shape, invalid base62, missing
+    /// The id failed to parse - wrong shape, invalid base36, missing
     /// underscore, etc. Carries the same string the underlying [`parse`]
     /// would have returned.
     Malformed(String),

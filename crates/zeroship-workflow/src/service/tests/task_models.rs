@@ -63,10 +63,11 @@ async fn foreign_reference(store: Rc<OrmStore>) {
         reopened.poll(&worker).await,
         Err(WorkflowServiceError::Internal(_))
     ));
-    assert!(matches!(
-        reopened.heartbeat(&worker, &other.id, &other.token).await,
-        Err(WorkflowServiceError::PermissionDenied)
-    ));
+    let heartbeat = reopened.heartbeat(&worker, &other.id, &other.token).await;
+    assert!(
+        matches!(heartbeat, Err(WorkflowServiceError::NotFound(_))),
+        "a task outside the host's apps must be invisible: {heartbeat:?}"
+    );
     let mut tx = store.begin().await.unwrap();
     for assignment in &assignments {
         let task = tx

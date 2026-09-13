@@ -141,8 +141,8 @@
 //! with a typed key. This adapter carries it by binding through `execute_typed` /
 //! `query_typed` with `Type::UNKNOWN` for those values - see `Untyped`.
 
-use compio_postgres::types::{to_sql_checked, Format, IsNull, Kind, ToSql, Type};
 use compio_postgres::types::private::BytesMut;
+use compio_postgres::types::{to_sql_checked, Format, IsNull, Kind, ToSql, Type};
 use compio_postgres::{Client, Error as PgError, Row as PgRow};
 use zeroship_migrate::driver::{Bind, DbError, Row, SqlSession, Value};
 

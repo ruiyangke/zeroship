@@ -9,11 +9,11 @@ use zeroship_workflow::{
 };
 
 fn backend(fleet: &Fleet) -> HttpWorkflowBackend {
-    let app = fleet.app_id.to_string();
+    let app = fleet.app_id.as_str();
     HttpWorkflowBackend::new(WorkflowClientConfig::new(
         &fleet.control_url,
-        &app,
-        app_scoped_token(workflow_fleet::CONTROL_KEY, &app),
+        app,
+        app_scoped_token(workflow_fleet::CONTROL_KEY, app),
     ))
 }
 
@@ -96,7 +96,8 @@ async fn the_gateway_requires_a_control_service_assertion_before_app_lookup() {
     let url = format!("{}/__zeroship/internal/workflow-advance", fleet.gateway_url);
     let denied = post(&url, "localhost", &request, None).await;
     assert_eq!(denied.0, 401);
-    let unknown = json!({"runId":"run_missing","appId":uuid::Uuid::new_v4()});
+    let unknown_app = zeroship_core::AppId::mint();
+    let unknown = json!({"runId":"run_missing","appId":unknown_app.as_str()});
     assert_eq!(
         post(&url, "localhost", &unknown, None).await,
         denied,
@@ -106,7 +107,7 @@ async fn the_gateway_requires_a_control_service_assertion_before_app_lookup() {
         "Bearer legacy-worker-key".to_owned(),
         format!(
             "Bearer {}",
-            app_scoped_token(workflow_fleet::CONTROL_KEY, &fleet.app_id.to_string())
+            app_scoped_token(workflow_fleet::CONTROL_KEY, fleet.app_id.as_str())
         ),
         workflow_fleet::service_auth("worker")
             .authorization_for(&service_issuer("svc/gateway").unwrap())
@@ -178,18 +179,17 @@ async fn the_gateway_requires_a_control_service_assertion_before_app_lookup() {
 async fn the_worker_default_refuses_advancement_even_from_an_authenticated_gateway() {
     let mut fleet = Fleet::with_advance(false);
     let run = start(&fleet).await;
-    let app = zeroship_core::app_id::AppId::from_uuid(&fleet.app_id);
     let url = format!(
         "{}/workflow-advance-unsigned/{}",
         fleet.worker_url,
-        app.as_str()
+        fleet.app_id.as_str()
     );
     let credential = workflow_fleet::service_auth("gateway")
         .authorization_for(&service_issuer("svc/worker").unwrap());
     let response = post(
         &url,
         "localhost",
-        &json!({"runId":run,"appId":fleet.app_id}),
+        &json!({"runId":run,"appId":fleet.app_id.as_str()}),
         credential,
     )
     .await;

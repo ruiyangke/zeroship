@@ -12,9 +12,10 @@
 pub use zeroship_core::workflow_deployments::{HoldGeneration, HoldReceipt, HoldScope, HoldState};
 use zeroship_core::{app_id::AppId, typed_id};
 use zeroship_data_orm::{
+    Value,
     error::DbError,
     orm::{Database, Entity, FindOptions, FromRow, Operation, Output},
-    value, Value,
+    value,
 };
 
 mod catalog;
@@ -182,14 +183,14 @@ impl DeploymentHolds {
         transact(&self.database, |tx| async move {
             let deploy = lock_deployment(&tx, scope.app(), deployment).await?;
             authorize().await?;
-            let app = scope.app().uuid().to_string();
+            let app = scope.app().as_str();
             let filter =
                 value!({"app_id":app, "deploy_id":deployment, "holder_id":scope.holder().to_owned()});
             let row = tx
                 .entity::<holds::Entity>()?
                 .find::<HoldRecord>(
                     holds::app_id
-                        .eq(app.clone())?
+                        .eq(app)?
                         .and(holds::deploy_id.eq(deployment.to_owned())?)
                         .and(holds::holder_id.eq(scope.holder().to_owned())?),
                     FindOptions {
@@ -278,7 +279,7 @@ pub async fn fence_reclamation(
         let retained = tx
             .collection(holds::Entity::COLLECTION)?
             .count(
-                value!({"app_id":app.uuid().to_string(), "deploy_id":deployment,
+                value!({"app_id":app.as_str(), "deploy_id":deployment,
                     "$or":[{"state":{"$ne":"released"}}, {"generation":{"$lte":0}}]}),
                 value!({}),
             )
@@ -289,7 +290,7 @@ pub async fn fence_reclamation(
         if record.retention_state == "available" {
             tx.collection(deploys::Entity::COLLECTION)?
                 .update(
-                    value!({"app_id":app.uuid().to_string(), "id":deployment}),
+                    value!({"app_id":app.as_str(), "id":deployment}),
                     value!({"retention_state":"reclaiming"}),
                 )
                 .await?;
@@ -313,7 +314,7 @@ pub async fn finish_reclamation(tx: &Database, app: &AppId, deployment: &str) ->
         }
         tx.collection(deploys::Entity::COLLECTION)?
             .update(
-                value!({"app_id":app.uuid().to_string(), "id":deployment}),
+                value!({"app_id":app.as_str(), "id":deployment}),
                 value!({"retention_state":"deleted"}),
             )
             .await?;
@@ -334,7 +335,7 @@ async fn lock_deployment(
     let changed = tx
         .collection(deploys::Entity::COLLECTION)?
         .execute(Operation::Update {
-            filter: value!({"app_id":app.uuid().to_string(), "id":deployment}),
+            filter: value!({"app_id":app.as_str(), "id":deployment}),
             patch: value!({"retention_lock":{"$inc":0}}),
             many: true,
         })
@@ -346,7 +347,7 @@ async fn lock_deployment(
         .entity::<deploys::Entity>()?
         .find::<DeploymentRecord>(
             deploys::app_id
-                .eq(app.uuid().to_string())?
+                .eq(app.as_str())?
                 .and(deploys::id.eq(deployment.to_owned())?),
             FindOptions {
                 limit: Some(1),

@@ -185,7 +185,6 @@ impl Fixture {
         let organization = OrganizationId::mint();
         let project = ProjectId::mint();
         let app = AppId::mint();
-        let app_uuid = app.uuid();
         let email = format!("{name}@zeroship.test");
         let inserted = self
             .platform
@@ -216,7 +215,7 @@ impl Fixture {
                 "INSERT INTO zeroship.apps(id,name,plan_id,project_id,organization_id) \
                  VALUES($1,$2,$3,$4,$5)",
                 &[
-                    &app_uuid,
+                    &app.as_str(),
                     &name,
                     &zeroship_control::plan_catalog::free_plan_id(),
                     &project.as_str(),
@@ -239,7 +238,7 @@ impl Fixture {
             .execute(
                 "INSERT INTO zeroship.app_deploys(id,app_id,deploy_hash,manifest_json) \
                  VALUES($1,$2,$3,$4)",
-                &[&deployment, &app_uuid, &hash, &manifest_json],
+                &[&deployment, &app.as_str(), &hash, &manifest_json],
             )
             .await
             .unwrap();

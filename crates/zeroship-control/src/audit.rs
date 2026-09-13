@@ -8,7 +8,7 @@
 //!
 use serde_json::{json, Value};
 use uuid::Uuid;
-use zeroship_core::UserId;
+use zeroship_core::{AppId, UserId};
 
 use crate::registry::{Registry, RegistryError};
 
@@ -225,7 +225,7 @@ impl Action {
 
 #[derive(Debug)]
 pub struct AuditEntry<'a> {
-    pub app_id: Option<Uuid>,
+    pub app_id: Option<&'a AppId>,
     /// The organization the event is attributed to (`org_…`).
     ///
     /// Borrowed, not owned, for the same reason `resource` is: an audit entry is
@@ -270,11 +270,12 @@ pub async fn log(registry: &Registry, entry: AuditEntry<'_>) {
 /// Best-effort audit insert with structured detail JSON for operations where
 /// `resource` alone is not enough to reconstruct the mutation.
 pub async fn log_with_detail(registry: &Registry, entry: AuditEntry<'_>, detail: &Value) {
+    let app_id = entry.app_id.map(AppId::as_str);
     let actor_user_id = entry.actor_user_id.map(UserId::as_str);
     let stdout_payload = json!({
-        "app_id": entry.app_id,
+        "app_id": app_id,
         "organization_id": entry.organization_id,
-        "actor_user_id": entry.actor_user_id,
+        "actor_user_id": actor_user_id,
         "action": entry.action.as_str(),
         "resource": entry.resource,
         "source_ip": entry.source_ip,
@@ -299,7 +300,7 @@ pub async fn log_with_detail(registry: &Registry, entry: AuditEntry<'_>, detail:
             "INSERT INTO zeroship.app_audit(app_id, organization_id, actor_user_id, action, resource, source_ip, detail)
              VALUES($1, $2, $3, $4, $5, $6::text::inet, $7)",
             &[
-                &entry.app_id,
+                &app_id,
                 &entry.organization_id,
                 &actor_user_id,
                 &entry.action.as_str(),
@@ -345,11 +346,12 @@ pub async fn log_in_tx<C: compio_postgres::GenericClient + Sync>(
     entry: AuditEntry<'_>,
     detail: &Value,
 ) {
+    let app_id = entry.app_id.map(AppId::as_str);
     let actor_user_id = entry.actor_user_id.map(UserId::as_str);
     let stdout_payload = json!({
-        "app_id": entry.app_id,
+        "app_id": app_id,
         "organization_id": entry.organization_id,
-        "actor_user_id": entry.actor_user_id,
+        "actor_user_id": actor_user_id,
         "action": entry.action.as_str(),
         "resource": entry.resource,
         "source_ip": entry.source_ip,
@@ -365,7 +367,7 @@ pub async fn log_in_tx<C: compio_postgres::GenericClient + Sync>(
             "INSERT INTO zeroship.app_audit(app_id, organization_id, actor_user_id, action, resource, source_ip, detail)
              VALUES($1, $2, $3, $4, $5, $6::text::inet, $7)",
             &[
-                &entry.app_id,
+                &app_id,
                 &entry.organization_id,
                 &actor_user_id,
                 &entry.action.as_str(),
@@ -383,7 +385,7 @@ pub async fn log_in_tx<C: compio_postgres::GenericClient + Sync>(
 /// Read recent audit entries for an app. Newest first.
 pub async fn recent_for_app(
     registry: &Registry,
-    app_id: Uuid,
+    app_id: &AppId,
     limit: i64,
 ) -> Result<Vec<AuditRow>, RegistryError> {
     let limit = limit.clamp(1, 500);
@@ -396,7 +398,7 @@ pub async fn recent_for_app(
              WHERE app_id = $1
              ORDER BY occurred_at DESC
              LIMIT $2",
-            &[&app_id, &limit],
+            &[&app_id.as_str(), &limit],
         )
         .await?;
     rows.iter()

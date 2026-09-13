@@ -2,7 +2,7 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
-use uuid::Uuid;
+use zeroship_id::AppId;
 use zeroship_runtime::channel::CancelFlag;
 use zeroship_runtime::plugin::NativePlugin;
 use zeroship_runtime::{
@@ -19,10 +19,10 @@ fn modules(source: &str) -> Vec<ModuleEntry> {
     }]
 }
 
-async fn run_workflow_app(control_url: String, app_id: Uuid, source: &str) -> (u16, String) {
+async fn run_workflow_app(control_url: String, app_id: AppId, source: &str) -> (u16, String) {
     init_v8();
     let mut env_vars = HashMap::new();
-    env_vars.insert("APP_ID".to_string(), app_id.to_string());
+    env_vars.insert("APP_ID".to_string(), app_id.as_str().to_owned());
     let plugin: Arc<dyn NativePlugin> =
         Arc::new(WorkflowBinding::new(control_url, TEST_CONTROL_KEY));
     let runtime = Runtime::builder()
@@ -112,7 +112,7 @@ async fn v8_binding_getter_exclusions_are_undefined() {
         };
     "#;
     let (status, body) =
-        run_workflow_app("http://127.0.0.1:9".to_string(), Uuid::new_v4(), source).await;
+        run_workflow_app("http://127.0.0.1:9".to_string(), AppId::mint(), source).await;
     assert_eq!(status, 200, "body: {body}");
     let value: Value = serde_json::from_str(&body).expect("body json");
     assert_eq!(value["thenIsUndefined"], true, "body: {body}");

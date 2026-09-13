@@ -316,7 +316,7 @@ pub async fn consume_at_finalize<C: GenericClient + Sync>(
     // entry, same currency, not expired, with undrawn balance remaining. `remaining`
     // = the grant amount plus the (negative) sum of every prior `consumed` entry that
     // drew from it. The trailing `, g.id` is only a STABLE tiebreak within a single
-    // `created_at` microsecond — the base62 id is NOT chronological, so it does not
+    // `created_at` microsecond — the base36 id is NOT chronological, so it does not
     // imply ordering between same-instant grants; it just makes the draw deterministic.
     let grant_rows = conn
         .query(

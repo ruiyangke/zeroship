@@ -256,6 +256,7 @@ mod tests {
         let quoted_role = crate::sql::mapping::quote_ident(&role);
 
         let migration = zeroship_migrate_server::apply::runtime_role_provisioning_sql(
+            &zeroship_core::app_id::AppId::mint(),
             &schema,
             "zs_migrator_fixture",
         )
@@ -338,6 +339,7 @@ mod tests {
         const TENANT_APP_ID: &str = "0191e7a2-b3c4-4d5e-8f90-123456789abc";
         const SCHEMA_NAME: &str = "db_0191e7a2b3c44d5e8f90123456789abc";
         const MIGRATOR: &str = "zs_migrator_fixture";
+        let app_id = zeroship_core::AppId::mint();
 
         // ---- Arm 1: the blindness, demonstrated. ----
         // The shipped test's shape, run against each identity on its own. Both
@@ -346,7 +348,7 @@ mod tests {
         for single_input in [TENANT_APP_ID, SCHEMA_NAME] {
             let as_schema = SchemaName::new(single_input).expect("fixture schema name");
             let migration =
-                zeroship_migrate_server::apply::runtime_role_provisioning_sql(&as_schema, MIGRATOR)
+                zeroship_migrate_server::apply::runtime_role_provisioning_sql(&app_id, &as_schema, MIGRATOR)
                     .expect("provisioning role name");
             let data_plane = per_app_role_name(single_input).expect("data-plane role name");
             assert_eq!(
@@ -369,7 +371,7 @@ mod tests {
         // are both carried in the failure message so one assertion diagnoses it.
         let schema = SchemaName::new(SCHEMA_NAME).expect("fixture schema name");
         let provisioned =
-            zeroship_migrate_server::apply::runtime_role_provisioning_sql(&schema, MIGRATOR)
+            zeroship_migrate_server::apply::runtime_role_provisioning_sql(&app_id, &schema, MIGRATOR)
                 .expect("provisioning role name");
         let setup_sql = crate::backend::postgres::pg_session_sql::tx_session_setup_sql(
             &schema,
@@ -433,6 +435,7 @@ mod tests {
 
         let schema = SchemaName::new(SCHEMA_NAME).expect("fixture schema name");
         let provisioned = zeroship_migrate_server::apply::runtime_role_provisioning_sql(
+            &zeroship_core::app_id::AppId::mint(),
             &schema,
             "zs_migrator_fixture",
         )

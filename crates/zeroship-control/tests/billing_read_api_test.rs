@@ -44,7 +44,7 @@ use zeroship_control::pricing::{charge_cents, MetricWeight, MetricWeights, PlanP
 use zeroship_control::{
     api, AppState, EnvStore, Quota, RateLimiter, Registry, SecretString, StripeStore,
 };
-use zeroship_core::UserId;
+use zeroship_core::{AppId, UserId};
 
 const TEST_MASTER_KEY: &str = "test-master-key-deadbeefcafebabe";
 
@@ -191,10 +191,10 @@ async fn issue_bearer(state: &AppState, user_id: &UserId, scope: &str) -> Caller
 /// separately would produce a well-formed organization that owns nothing, and
 /// every scope assertion below would then pass against an empty set - the
 /// failure mode a fixture must not be able to have.
-async fn app_organization(pg: &Client, app: &Uuid) -> String {
+async fn app_organization(pg: &Client, app: &AppId) -> String {
     pg.query(
         "SELECT organization_id FROM zeroship.apps WHERE id = $1",
-        &[app],
+        &[&app.as_str()],
     )
     .await
     .expect("read app organization")
@@ -245,7 +245,7 @@ async fn seed_plan(
 }
 
 /// Create an app in `owner`'s personal organization (minted on demand).
-async fn make_app(registry: &Registry, plan_id: &str, owner: &UserId) -> Uuid {
+async fn make_app(registry: &Registry, plan_id: &str, owner: &UserId) -> AppId {
     registry
         .create_app(
             &format!("read-{}", Uuid::new_v4().simple()),
@@ -268,7 +268,7 @@ async fn make_app(registry: &Registry, plan_id: &str, owner: &UserId) -> Uuid {
 /// the hole this models WIDER, not narrower: seating a viewer now exposes every
 /// app of the organization rather than one, which is exactly what the assertion
 /// downstream has to keep refusing.
-async fn add_member(pg: &Client, app: &Uuid, user: &UserId, role: &str) {
+async fn add_member(pg: &Client, app: &AppId, user: &UserId, role: &str) {
     pg.execute(
         "INSERT INTO zeroship.organization_members (organization_id, user_id, role) \
          SELECT p.organization_id, $2, $3 \
@@ -276,7 +276,7 @@ async fn add_member(pg: &Client, app: &Uuid, user: &UserId, role: &str) {
            JOIN zeroship.projects p ON p.id = a.project_id \
           WHERE a.id = $1 \
          ON CONFLICT (organization_id, user_id) DO UPDATE SET role = EXCLUDED.role",
-        &[app, &user.as_str(), &role],
+        &[&app.as_str(), &user.as_str(), &role],
     )
     .await
     .expect("seat non-owner organization member");
@@ -316,7 +316,7 @@ async fn seed_customer_ref(pg: &Client, organization_id: &str, external_id: &str
 async fn seed_finalized_invoice(
     pg: &Client,
     organization_id: &str,
-    app_id: &Uuid,
+    app_id: &AppId,
     plan_id: &str,
     period: chrono::NaiveDate, // first-of-month
     price: &PlanPrice,
@@ -350,7 +350,7 @@ async fn seed_finalized_invoice(
          VALUES ($1, $2, 0, $3, $4, $5, $6, $7, $8, $9)",
         &[
             &invoice_id,
-            app_id,
+            &app_id.as_str(),
             &plan_id,
             &included,
             &fx,
@@ -376,7 +376,7 @@ async fn seed_finalized_invoice(
 
 async fn seed_usage(
     pg: &Client,
-    app_id: &Uuid,
+    app_id: &AppId,
     period: chrono::NaiveDate,
     metric: &str,
     total: i64,
@@ -385,7 +385,7 @@ async fn seed_usage(
         "INSERT INTO zeroship.usage_aggregates (app_id, period, metric, total) \
          VALUES ($1, $2::date, $3, $4) \
          ON CONFLICT (app_id, period, metric) DO UPDATE SET total = EXCLUDED.total",
-        &[app_id, &period, &metric, &total],
+        &[&app_id.as_str(), &period, &metric, &total],
     )
     .await
     .expect("seed usage");
@@ -433,33 +433,33 @@ fn current_period() -> chrono::NaiveDate {
     chrono::NaiveDate::from_ymd_opt(now.year(), now.month(), 1).expect("first-of-month")
 }
 
-async fn cleanup(pg: &Client, user_ids: &[&UserId], app_ids: &[Uuid], callers: &[&Caller]) {
+async fn cleanup(pg: &Client, user_ids: &[&UserId], app_ids: &[AppId], callers: &[&Caller]) {
     for app in app_ids {
         let _ = pg
             .execute(
                 "DELETE FROM zeroship.usage_aggregates WHERE app_id = $1",
-                &[app],
+                &[&app.as_str()],
             )
             .await;
         let _ = pg
             .execute(
                 "DELETE FROM zeroship.invoice_lines WHERE app_id = $1",
-                &[app],
+                &[&app.as_str()],
             )
             .await;
         let _ = pg
             .execute(
                 "DELETE FROM zeroship.app_spend_state WHERE app_id = $1",
-                &[app],
+                &[&app.as_str()],
             )
             .await;
         let _ = pg
             .execute(
                 "DELETE FROM zeroship.app_spend_limit WHERE app_id = $1",
-                &[app],
+                &[&app.as_str()],
             )
             .await;
-        let _ = pg.execute("DELETE FROM zeroship.organization_members om USING zeroship.apps a JOIN zeroship.projects p ON p.id = a.project_id WHERE om.organization_id = p.organization_id AND a.id = $1", &[app]).await;
+        let _ = pg.execute("DELETE FROM zeroship.organization_members om USING zeroship.apps a JOIN zeroship.projects p ON p.id = a.project_id WHERE om.organization_id = p.organization_id AND a.id = $1", &[&app.as_str()]).await;
     }
     for user in user_ids {
         // Invoices reference lines (RESTRICT) — lines were dropped above by app_id,
@@ -504,7 +504,7 @@ async fn cleanup(pg: &Client, user_ids: &[&UserId], app_ids: &[Uuid], callers: &
     }
     for app in app_ids {
         let _ = pg
-            .execute("DELETE FROM zeroship.apps WHERE id = $1", &[app])
+            .execute("DELETE FROM zeroship.apps WHERE id = $1", &[&app.as_str()])
             .await;
     }
     for caller in callers {
@@ -635,7 +635,10 @@ async fn invoice_history_is_creator_scoped_with_no_operator_exception() {
     // Creator A reads app A's invoices → their own bill is present.
     let body: serde_json::Value = test::read_response_json(
         &svc,
-        get(pat_a.bearer(), format!("/api/apps/{app_a}/invoices")),
+        get(
+            pat_a.bearer(),
+            format!("/api/apps/{}/invoices", app_a.as_str()),
+        ),
     )
     .await;
     let invoices = body["invoices"].as_array().expect("invoices array");
@@ -653,7 +656,10 @@ async fn invoice_history_is_creator_scoped_with_no_operator_exception() {
     // Postgres client - alive past the teardown below.
     let status = test::call_service(
         &svc,
-        get(pat_a.bearer(), format!("/api/apps/{app_b}/invoices")),
+        get(
+            pat_a.bearer(),
+            format!("/api/apps/{}/invoices", app_b.as_str()),
+        ),
     )
     .await
     .status();
@@ -667,10 +673,13 @@ async fn invoice_history_is_creator_scoped_with_no_operator_exception() {
     // holding the same billing scopes, but no membership of either app, is
     // refused on BOTH - which is the property the operator arm used to be the
     // documented exception to.
-    for app in [app_a, app_b] {
+    for app in [&app_a, &app_b] {
         let status = test::call_service(
             &svc,
-            get(pat_outsider.bearer(), format!("/api/apps/{app}/invoices")),
+            get(
+                pat_outsider.bearer(),
+                format!("/api/apps/{}/invoices", app.as_str()),
+            ),
         )
         .await
         .status();
@@ -736,9 +745,9 @@ async fn unauthorized_token_is_forbidden_on_billing_reads() {
 
     // App-scoped reads → 403.
     for uri in [
-        format!("/api/apps/{app}/invoices"),
-        format!("/api/apps/{app}/projected-charge"),
-        format!("/api/apps/{app}/billing-status"),
+        format!("/api/apps/{}/invoices", app.as_str()),
+        format!("/api/apps/{}/projected-charge", app.as_str()),
+        format!("/api/apps/{}/billing-status", app.as_str()),
     ] {
         let status = test::call_service(&svc, get(uri.clone())).await.status();
         assert_eq!(
@@ -923,7 +932,7 @@ async fn projected_charge_is_non_authoritative_and_cache_budget_holds() {
 
     let get = || {
         test::TestRequest::get()
-            .uri(&format!("/api/apps/{app}/projected-charge"))
+            .uri(&format!("/api/apps/{}/projected-charge", app.as_str()))
             .header("authorization", pat.bearer())
             .to_request()
     };
@@ -1188,7 +1197,10 @@ async fn credit_balance_pm_and_billing_status_are_creator_scoped() {
     // Billing-status for app A: plan + spend cap + states.
     let bs_a: serde_json::Value = test::read_response_json(
         &svc,
-        get(pat_a.bearer(), format!("/api/apps/{app_a}/billing-status")),
+        get(
+            pat_a.bearer(),
+            format!("/api/apps/{}/billing-status", app_a.as_str()),
+        ),
     )
     .await;
     assert_eq!(bs_a["plan_id"], plan);
@@ -1202,7 +1214,10 @@ async fn credit_balance_pm_and_billing_status_are_creator_scoped() {
     // Cross-organization: A cannot read B's billing-status.
     let status = test::call_service(
         &svc,
-        get(pat_a.bearer(), format!("/api/apps/{app_b}/billing-status")),
+        get(
+            pat_a.bearer(),
+            format!("/api/apps/{}/billing-status", app_b.as_str()),
+        ),
     )
     .await
     .status();
@@ -1501,7 +1516,10 @@ async fn app_invoice_history_follows_money_authority_not_app_authority() {
     // The owner reads it.
     let body: serde_json::Value = test::read_response_json(
         &svc,
-        get(pat_owner.bearer(), format!("/api/apps/{app_o}/invoices")),
+        get(
+            pat_owner.bearer(),
+            format!("/api/apps/{}/invoices", app_o.as_str()),
+        ),
     )
     .await;
     let invoices = body["invoices"].as_array().expect("invoices array");
@@ -1517,7 +1535,7 @@ async fn app_invoice_history_follows_money_authority_not_app_authority() {
         &svc,
         get(
             pat_bookkeeper.bearer(),
-            format!("/api/apps/{app_o}/invoices"),
+            format!("/api/apps/{}/invoices", app_o.as_str()),
         ),
     )
     .await;
@@ -1537,7 +1555,7 @@ async fn app_invoice_history_follows_money_authority_not_app_authority() {
         &svc,
         get(
             pat_developer.bearer(),
-            format!("/api/apps/{app_o}/invoices"),
+            format!("/api/apps/{}/invoices", app_o.as_str()),
         ),
     )
     .await
@@ -1551,7 +1569,10 @@ async fn app_invoice_history_follows_money_authority_not_app_authority() {
     // Nor does someone with no seat at the organization at all.
     let status = test::call_service(
         &svc,
-        get(pat_outsider.bearer(), format!("/api/apps/{app_o}/invoices")),
+        get(
+            pat_outsider.bearer(),
+            format!("/api/apps/{}/invoices", app_o.as_str()),
+        ),
     )
     .await
     .status();

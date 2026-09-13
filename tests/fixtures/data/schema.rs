@@ -46,7 +46,7 @@ fn fixture_table_sql_for(
     let policy =
         zeroship_migrate_server::policy::ManagedPolicyConfig::default_confined([7u8; 32], 1)
             .expect("load the creator charter")
-            .current_ceiling_for_app(&uuid::Uuid::nil(), None)
+            .current_ceiling_for_app(&zeroship_core::AppId::mint(), None)
             .expect("compose the creator charter")
             .policy;
     // The confined policy supplies assigned fields when compiling authored DDL.

@@ -12,7 +12,6 @@ pub mod __private {
 }
 
 pub mod app_derivation;
-pub mod app_id;
 pub mod auth;
 pub mod auth_provider;
 pub mod client_ip;
@@ -22,17 +21,13 @@ pub mod database_role;
 pub mod db_url;
 pub mod device_grant;
 pub mod dispatch_frame;
-pub(crate) mod entity_id;
-pub mod invite_id;
 pub mod logout_token;
 pub mod net_policy;
 pub mod observability;
 pub mod oidc_verify;
-pub mod organization_id;
 pub mod pkce;
 pub mod preview_ports;
 pub mod project_data_key;
-pub mod project_id;
 pub mod readiness;
 pub mod replication_names;
 pub mod schema_name;
@@ -40,16 +35,28 @@ pub mod service_assertion;
 pub mod service_identity;
 pub mod service_peers;
 pub mod superjson;
-pub mod typed_id;
 pub mod types;
 pub mod usage_event;
+pub mod workflow_signal_token;
 pub mod user_envelope;
-pub mod user_id;
 pub mod worker_ring;
 pub mod workflow_coordination;
 pub mod workflow_deployments;
 pub mod workflow_jobs;
 
+// The entity-id vocabulary lives in `zeroship-id`, a leaf that carries only
+// `uuid` and `serde`. It is re-exported at the paths it has always occupied
+// because this crate owns the wire types that NAME these ids, so a caller
+// reaching a wire type has the id vocabulary in scope by construction.
+//
+// The leaf exists because `zeroship-bundle` and `zeroship-cdc-wire` also name an
+// app id and sit BELOW this crate: nothing that carries an HTTP client and AEAD
+// keys can be depended on by an artifact format. One `AppId` for the whole tree
+// is the property being bought.
+pub use zeroship_id::{
+    app_id, entity_id, invite_id, organization_id, project_id, typed_id, user_id, AppId,
+    InviteId, OrganizationId, ProjectId, UserId,
+};
+
 pub use superjson::Envelope;
 pub use types::*;
-pub use user_id::UserId;

@@ -3,7 +3,7 @@ pub mod pg;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use serde_json::Value;
-use uuid::Uuid;
+use zeroship_core::app_id::AppId;
 
 use crate::engine::{RunUpdate, StepCheckpoint, WorkflowEngineConfig, WorkflowOutputRef};
 use crate::errors::WorkflowError;
@@ -11,7 +11,7 @@ use crate::errors::WorkflowError;
 #[derive(Debug, Clone)]
 pub struct RunLockRow {
     pub id: String,
-    pub app_id: Uuid,
+    pub app_id: AppId,
     pub workflow_name: String,
     pub deploy_id: String,
     pub claimed_by: Option<String>,
@@ -168,7 +168,7 @@ pub trait WorkflowTx {
         &mut self,
         config: &WorkflowEngineConfig,
         parent_run_id: &str,
-        app_id: &Uuid,
+        app_id: &AppId,
         deploy_id: &str,
         parent_tree_depth: i16,
         checkpoint: &mut StepCheckpoint,
@@ -180,7 +180,7 @@ pub trait WorkflowTx {
         config: &WorkflowEngineConfig,
         current_run_id: &str,
         successor_run_id: &str,
-        app_id: &Uuid,
+        app_id: &AppId,
         workflow_name: &str,
         seed_input: Option<&Value>,
         seed_input_ref: Option<&WorkflowOutputRef>,
@@ -197,7 +197,7 @@ pub trait WorkflowTx {
 
     async fn upsert_subscription(
         &mut self,
-        app_id: &Uuid,
+        app_id: &AppId,
         run_id: &str,
         checkpoint: &StepCheckpoint,
     ) -> Result<(), WorkflowError>;

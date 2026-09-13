@@ -229,9 +229,8 @@ impl Meter for LagoProvider {
             ));
         }
         let subject = encode_query_component(q.subject.as_str());
-        let path = format!(
-            "/api/v1/customers/{subject}/current_usage?external_subscription_id={subject}"
-        );
+        let path =
+            format!("/api/v1/customers/{subject}/current_usage?external_subscription_id={subject}");
         let json = self.get_json(&path).await?;
         Ok(parse_current_usage_total(&json, &q.meter))
     }

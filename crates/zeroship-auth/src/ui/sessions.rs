@@ -167,7 +167,7 @@ pub async fn revoke(
                         )
                         .await
                     }
-                    SessionKind::App => match revoked.app_id {
+                    SessionKind::App => match revoked.app_id.as_ref() {
                         Some(app_id) => {
                             oidc::backchannel_logout::emit_for_app_session(
                                 db.as_ref(),
@@ -269,13 +269,13 @@ mod tests {
     #[test]
     fn current_flag_only_for_matching_idp_session() {
         let cur = uuid::Uuid::new_v4();
-        let app_id = uuid::Uuid::new_v4();
+        let app_id = zeroship_core::app_id::AppId::mint();
         let now = chrono::Utc::now();
         let mk = |id, kind| SessionSummary {
             id,
             kind,
             app_id: if kind == SessionKind::App {
-                Some(app_id)
+                Some(app_id.clone())
             } else {
                 None
             },

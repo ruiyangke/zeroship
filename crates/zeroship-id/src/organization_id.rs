@@ -14,10 +14,11 @@
 //! seeds no subject derivation, appears in no token `aud`, and is never handed
 //! to app code.
 //!
-//! That is why this type has no `uuid` accessor where [`crate::app_id::AppId`]
-//! has one. An app id seeds a schema name, two role names, a publication digest
-//! and an encryption salt, so its embedded bits are load-bearing at two call
-//! sites. An organization id keys rows and nothing else.
+//! It also seeds no physical name. [`crate::app_id::AppId`] is the id with a
+//! whole module of derivations hanging off it - a schema, two roles, a
+//! publication, a salt; an organization id keys rows and nothing else. Neither
+//! exposes a route to the embedded bits, and that is the macro's rule rather
+//! than a property of this one type.
 //!
 //! # Spelling
 //!
@@ -31,7 +32,7 @@ use crate::entity_id::declare_entity_id;
 use crate::typed_id::ORGANIZATION_PREFIX;
 
 declare_entity_id! {
-    /// The typed id of one organization: `org_<base62(uuidv7)>`.
+    /// The typed id of one organization: `org_<base36(uuidv7)>`.
     OrganizationId,
     ORGANIZATION_PREFIX,
     organization_id_tests,

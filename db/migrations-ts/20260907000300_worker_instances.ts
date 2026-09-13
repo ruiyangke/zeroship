@@ -106,7 +106,7 @@ export default {
     });
     table("worker_instances", { schema: "zeroship" })
       .check("worker_instances_id_shape")
-      .add({ expr: (col) => col("id").regex("^wkr_[0-9A-Za-z]{22}$") });
+      .add({ expr: (col) => col("id").regex("^wkr_[0-9a-z]{25}$") });
     // Ed25519 public keys are exactly 32 octets (RFC 8032 section 5.1.5), so
     // "raw Ed25519 bytes" is a shape the database can hold rather than a
     // sentence the verifier discovers is false at read time. `length(bytea)` is
@@ -128,7 +128,7 @@ export default {
       .add({ expr: (col) => col("status").in(["active", "draining", "gone"]) });
 
     // The typed-id domain needs bytewise comparison; PostgreSQL's locale
-    // collation does not keep the base62 alphabet in numeric order. There are no
+    // collation does not keep the base36 alphabet in numeric order. There are no
     // foreign-key copies of this id yet, so this is the only column to pin.
     raw({
       sql: 'ALTER TABLE "zeroship"."worker_instances" ALTER COLUMN "id" TYPE text COLLATE "C"',

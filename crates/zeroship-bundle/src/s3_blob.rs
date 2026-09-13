@@ -28,7 +28,7 @@
 use bytes::Bytes;
 use compio_s3::{PutOptions, S3Client, S3Config, S3Credentials, S3Error, UploadId};
 use sha2::Digest;
-use uuid::Uuid;
+use zeroship_id::AppId;
 
 use crate::blob::{validate_hash_format, BlobError, BlobStore, PutOutcome};
 use crate::limits::{MAX_BLOB_BYTES, MAX_MANIFEST_BYTES};
@@ -75,13 +75,13 @@ impl S3BlobStore {
     }
 
     /// Logical key for a per-deploy manifest.
-    fn manifest_key(app_id: &Uuid, deploy_hash: &str) -> String {
-        format!("manifests/{app_id}/{deploy_hash}.json")
+    fn manifest_key(app_id: &AppId, deploy_hash: &str) -> String {
+        format!("manifests/{}/{deploy_hash}.json", app_id.as_str())
     }
 
     /// Logical prefix under which an app's manifests live.
-    fn manifest_prefix(app_id: &Uuid) -> String {
-        format!("manifests/{app_id}/")
+    fn manifest_prefix(app_id: &AppId) -> String {
+        format!("manifests/{}/", app_id.as_str())
     }
 
     /// The streaming body of `put_blob_stream`: read the source in `PART_SIZE`
@@ -571,7 +571,7 @@ impl BlobStore for S3BlobStore {
 
     async fn put_manifest(
         &self,
-        app_id: &Uuid,
+        app_id: &AppId,
         deploy_hash: &str,
         json: &[u8],
     ) -> Result<(), BlobError> {
@@ -612,7 +612,7 @@ impl BlobStore for S3BlobStore {
         }
     }
 
-    async fn get_manifest(&self, app_id: &Uuid, deploy_hash: &str) -> Result<Bytes, BlobError> {
+    async fn get_manifest(&self, app_id: &AppId, deploy_hash: &str) -> Result<Bytes, BlobError> {
         let key = Self::manifest_key(app_id, deploy_hash);
         let (bytes, _meta) = self
             .client
@@ -622,7 +622,7 @@ impl BlobStore for S3BlobStore {
         Ok(bytes)
     }
 
-    async fn delete_manifest(&self, app_id: &Uuid, deploy_hash: &str) -> Result<bool, BlobError> {
+    async fn delete_manifest(&self, app_id: &AppId, deploy_hash: &str) -> Result<bool, BlobError> {
         let key = Self::manifest_key(app_id, deploy_hash);
         let existed = self
             .client
@@ -641,7 +641,7 @@ impl BlobStore for S3BlobStore {
         Ok(true)
     }
 
-    async fn delete_app_manifests(&self, app_id: &Uuid) -> Result<(), BlobError> {
+    async fn delete_app_manifests(&self, app_id: &AppId) -> Result<(), BlobError> {
         let prefix = Self::manifest_prefix(app_id);
         // List every manifest object under the app prefix, paging until the
         // listing is exhausted, then delete each with bounded idempotent
@@ -673,8 +673,9 @@ impl BlobStore for S3BlobStore {
                     }
                     Err(e) => {
                         return Err(BlobError::Backend(format!(
-                            "delete_app_manifests({app_id}): deleted {deleted} then failed on \
+                            "delete_app_manifests({}): deleted {deleted} then failed on \
                              {}: {e}",
+                            app_id.as_str(),
                             entry.key
                         )));
                     }
@@ -697,14 +698,14 @@ mod tests {
 
     #[test]
     fn manifest_key_layout() {
-        let id = Uuid::nil();
+        let id = AppId::mint();
         assert_eq!(
             S3BlobStore::manifest_key(&id, "deadbeef"),
-            format!("manifests/{id}/deadbeef.json")
+            format!("manifests/{}/deadbeef.json", id.as_str())
         );
         assert_eq!(
             S3BlobStore::manifest_prefix(&id),
-            format!("manifests/{id}/")
+            format!("manifests/{}/", id.as_str())
         );
     }
 

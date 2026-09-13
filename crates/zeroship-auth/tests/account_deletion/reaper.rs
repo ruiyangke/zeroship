@@ -269,13 +269,13 @@ async fn reaper_erases_a_user_holding_every_previously_blocking_reference() {
         )
         .await
         .unwrap();
-        let app_id = Uuid::new_v4();
+        let app_id = zeroship_core::AppId::mint();
         let project_id = common::unowned_project(&db).await;
         db.execute(
             "INSERT INTO zeroship.apps (id, name, plan_id, project_id, organization_id) \
          SELECT $1, $2, 'free', p.id, p.organization_id \
            FROM zeroship.projects p WHERE p.id = $3",
-            &[&app_id, &format!("acctdel-edges-app-{tag}"), &project_id],
+            &[&app_id.as_str(), &format!("acctdel-edges-app-{tag}"), &project_id],
         )
         .await
         .unwrap();
@@ -286,7 +286,7 @@ async fn reaper_erases_a_user_holding_every_previously_blocking_reference() {
              ceiling_id, ceiling_version, descriptor_sha256, submitted_by) \
          VALUES ($1, $2, 'applied', '{}'::jsonb, '{}'::jsonb, 'managed', 1, $3, $4)",
             &[
-                &app_id,
+                &app_id.as_str(),
                 &migration_id,
                 &format!("sha-{tag}"),
                 &victim.id.as_str(),
@@ -349,7 +349,7 @@ async fn reaper_erases_a_user_holding_every_previously_blocking_reference() {
             .query_one(
                 "SELECT submitted_by FROM zeroship.app_schema_applies \
              WHERE app_id = $1 AND migration_id = $2",
-                &[&app_id, &migration_id],
+                &[&app_id.as_str(), &migration_id],
             )
             .await
             .expect("the schema apply record survives its submitter")

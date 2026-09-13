@@ -9595,8 +9595,8 @@ pub(crate) fn ir_column_to_field(c: &IrColumn) -> FieldDescriptor {
     };
     // Thread the two DECLARED-ONLY, uncatalogable
     // facets the runtime/gen-types lose if the IR doesn't carry them:
-    //   - legacy internal `id_prefix` -> the descriptor's `id_prefix` so the
-    //     shared kernel keeps the base62-UUIDv7 platform brand on the `id` column;
+    //   - internal `id_prefix` -> the descriptor's `id_prefix` so the shared
+    //     kernel keeps the base36-UUIDv7 platform brand on the `id` column;
     //   - `vector_metric` (`t.vector(n, {metric})`) -> the descriptor's
     //     `vector_metric` (camelCase token) so the ivfflat/hnsw opclass renders the
     //     declared metric instead of defaulting.

@@ -6,6 +6,7 @@ use std::path::PathBuf;
 
 use bytes::Bytes;
 use uuid::Uuid;
+use zeroship_id::AppId;
 
 // ---------------------------------------------------------------------------
 // Errors
@@ -134,13 +135,13 @@ pub trait BlobStore: Send + Sync + std::fmt::Debug {
     /// Manifest storage — separate keyspace from blobs.
     async fn put_manifest(
         &self,
-        app_id: &Uuid,
+        app_id: &AppId,
         deploy_hash: &str,
         json: &[u8],
     ) -> Result<(), BlobError>;
 
     /// Read a manifest, enforcing `MAX_MANIFEST_BYTES` before allocating its body.
-    async fn get_manifest(&self, app_id: &Uuid, deploy_hash: &str) -> Result<Bytes, BlobError>;
+    async fn get_manifest(&self, app_id: &AppId, deploy_hash: &str) -> Result<Bytes, BlobError>;
 
     /// Delete one per-deploy manifest object. Returns `true` when an object was
     /// present and removed, `false` when it was already absent.
@@ -148,7 +149,7 @@ pub trait BlobStore: Send + Sync + std::fmt::Debug {
     /// Content-addressed blobs under `blobs/` are NOT app-owned and are not
     /// deleted here; this only removes the manifest handle
     /// `manifests/<app_id>/<deploy_hash>.json`.
-    async fn delete_manifest(&self, app_id: &Uuid, deploy_hash: &str) -> Result<bool, BlobError>;
+    async fn delete_manifest(&self, app_id: &AppId, deploy_hash: &str) -> Result<bool, BlobError>;
 
     /// Delete every manifest object owned by `app_id` (the
     /// `manifests/<app_id>/` keyspace). App archive deliberately does not call
@@ -159,7 +160,7 @@ pub trait BlobStore: Send + Sync + std::fmt::Debug {
     /// `Ok(())`. Content-addressed blobs under `blobs/` are NOT app-owned and
     /// are never deleted here (shared-blob GC is a separate design). A
     /// partial failure after bounded retries is [`BlobError::Backend`].
-    async fn delete_app_manifests(&self, app_id: &Uuid) -> Result<(), BlobError>;
+    async fn delete_app_manifests(&self, app_id: &AppId) -> Result<(), BlobError>;
 }
 
 // ---------------------------------------------------------------------------
@@ -217,10 +218,10 @@ impl LocalDiskBlobStore {
         self.root.join("blobs").join(shard).join(rest)
     }
 
-    fn manifest_path(&self, app_id: &Uuid, deploy_hash: &str) -> PathBuf {
+    fn manifest_path(&self, app_id: &AppId, deploy_hash: &str) -> PathBuf {
         self.root
             .join("manifests")
-            .join(app_id.to_string())
+            .join(app_id.as_str())
             .join(format!("{deploy_hash}.json"))
     }
 }
@@ -495,7 +496,7 @@ impl BlobStore for LocalDiskBlobStore {
 
     async fn put_manifest(
         &self,
-        app_id: &Uuid,
+        app_id: &AppId,
         deploy_hash: &str,
         json: &[u8],
     ) -> Result<(), BlobError> {
@@ -512,13 +513,13 @@ impl BlobStore for LocalDiskBlobStore {
         Ok(())
     }
 
-    async fn get_manifest(&self, app_id: &Uuid, deploy_hash: &str) -> Result<Bytes, BlobError> {
+    async fn get_manifest(&self, app_id: &AppId, deploy_hash: &str) -> Result<Bytes, BlobError> {
         use compio::io::AsyncReadAtExt;
         let path = self.manifest_path(app_id, deploy_hash);
         let file = match compio::fs::File::open(&path).await {
             Ok(file) => file,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                return Err(BlobError::NotFound(format!("{app_id}/{deploy_hash}")));
+                return Err(BlobError::NotFound(format!("{}/{deploy_hash}", app_id.as_str())));
             }
             Err(e) => return Err(BlobError::Io(e)),
         };
@@ -532,7 +533,7 @@ impl BlobStore for LocalDiskBlobStore {
         Ok(Bytes::from(bytes))
     }
 
-    async fn delete_manifest(&self, app_id: &Uuid, deploy_hash: &str) -> Result<bool, BlobError> {
+    async fn delete_manifest(&self, app_id: &AppId, deploy_hash: &str) -> Result<bool, BlobError> {
         let path = self.manifest_path(app_id, deploy_hash);
         match compio::fs::remove_file(&path).await {
             Ok(()) => Ok(true),
@@ -541,8 +542,8 @@ impl BlobStore for LocalDiskBlobStore {
         }
     }
 
-    async fn delete_app_manifests(&self, app_id: &Uuid) -> Result<(), BlobError> {
-        let dir = self.root.join("manifests").join(app_id.to_string());
+    async fn delete_app_manifests(&self, app_id: &AppId) -> Result<(), BlobError> {
+        let dir = self.root.join("manifests").join(app_id.as_str());
         // `remove_dir_all` removes the whole `manifests/<app_id>/` subtree.
         // An absent directory is success (idempotent). Content-addressed
         // blobs live under `blobs/` and are untouched. compio::fs has no

@@ -116,6 +116,7 @@ struct ObservedTasks {
     lose_completion: Cell<bool>,
     fail_completion: Cell<bool>,
     poll_delay: Cell<Duration>,
+    prefetched: RefCell<Option<(TaskAssignment, std::time::Instant)>>,
     completions: RefCell<Vec<String>>,
     run: RefCell<Option<String>>,
 }
@@ -123,7 +124,14 @@ struct ObservedTasks {
 impl TaskTransport for ObservedTasks {
     async fn poll(&self) -> Result<Option<TaskAssignment>, WorkflowServiceError> {
         self.probe.record("poll");
-        let mut task = self.inner.poll().await?;
+        let prefetched = self.prefetched.borrow_mut().take();
+        let mut task = match prefetched {
+            Some((mut task, started)) => {
+                task.lease_ms -= i64::try_from(started.elapsed().as_millis()).unwrap();
+                Some(task)
+            }
+            None => self.inner.poll().await?,
+        };
         if !self.poll_delay.get().is_zero() {
             compio::time::sleep(self.poll_delay.get()).await;
         }
@@ -237,6 +245,7 @@ impl Harness {
             lose_completion: Cell::new(false),
             fail_completion: Cell::new(false),
             poll_delay: Cell::new(Duration::ZERO),
+            prefetched: RefCell::new(None),
             completions: RefCell::new(Vec::new()),
             run: RefCell::new(None),
         });
@@ -348,10 +357,17 @@ async fn runner_control_waits_for_stopped_execution_before_releasing() {
 async fn runner_timeout_waits_for_stopped_execution_before_releasing() {
     let (_dir, harness) = sqlite().await;
     harness.probe.mode.set(ExecutionMode::Pending);
+    // Claim through the real journal before the short execution budget starts,
+    // so this test reaches execution timeout independently of database latency.
+    let started = std::time::Instant::now();
+    let assignment = harness.tasks.poll().await.unwrap().unwrap();
+    *harness.tasks.prefetched.borrow_mut() = Some((assignment, started));
     let gate = harness.probe.block_stop();
     let mut slot = harness.slot(Duration::from_millis(20));
     let observer = async {
         harness.probe.observed("stopping").await;
+        assert_eq!(harness.probe.count("execute"), 1);
+        assert!(harness.probe.count("cancel") > 0);
         assert_eq!(harness.probe.count("release"), 0);
         assert_eq!(harness.probe.count("complete"), 0);
         gate.send(()).unwrap();

@@ -11,9 +11,9 @@ use zeroship_auth::store::sessions::{self, SessionKind};
 use zeroship_auth::store::users;
 
 /// Seed the app and control-plane records referenced by gateway sessions.
-async fn seed_app(database: &Database) -> Uuid {
+async fn seed_app(database: &Database) -> zeroship_core::AppId {
     let client = database.connect().await;
-    let app_id = Uuid::new_v4();
+    let app_id = zeroship_core::AppId::mint();
     let plan_id = "session-visibility-test-plan";
     client
         .execute(
@@ -34,8 +34,8 @@ async fn seed_app(database: &Database) -> Uuid {
             "INSERT INTO zeroship.apps (id, name, plan_id, project_id, organization_id) \
              SELECT $1, $2, $3, p.id, p.organization_id FROM zeroship.projects p WHERE p.id = $4",
             &[
-                &app_id,
-                &format!("iss10-app-{}", app_id.simple()),
+                &app_id.as_str(),
+                &format!("iss10-app-{}", app_id.as_str()),
                 &plan_id,
                 &project_id,
             ],
@@ -49,7 +49,7 @@ async fn seed_app(database: &Database) -> Uuid {
 async fn seed_gateway_session(
     database: &Database,
     user_id: &zeroship_core::UserId,
-    app_id: Uuid,
+    app_id: &zeroship_core::AppId,
     email: &str,
 ) -> Uuid {
     let client = database.connect().await;
@@ -60,7 +60,7 @@ async fn seed_gateway_session(
              VALUES ($1, $2, $3::citext, $4, true, \
                      NOW() + INTERVAL '30 minutes', NOW() + INTERVAL '12 hours') \
              RETURNING id",
-            &[&user_id.as_str(), &app_id, &email, &"Test"],
+            &[&user_id.as_str(), &app_id.as_str(), &email, &"Test"],
         )
         .await
         .expect("seed gateway session");
@@ -106,7 +106,7 @@ async fn list_returns_idp_and_gateway_sessions() {
         .expect("put the IDP session before the gateway session");
 
         let app_id = seed_app(database).await;
-        let gw_id = seed_gateway_session(database, &user.id, app_id, &email).await;
+        let gw_id = seed_gateway_session(database, &user.id, &app_id, &email).await;
 
         let list = sessions::list_by_user(&client, &user.id)
             .await
@@ -132,7 +132,7 @@ async fn list_returns_idp_and_gateway_sessions() {
         assert_eq!(gw_row.id, gw_id);
         assert_eq!(
             gw_row.app_id,
-            Some(app_id),
+            Some(app_id.clone()),
             "gateway session carries app_id"
         );
     })
@@ -176,8 +176,8 @@ async fn list_excludes_revoked_and_expired() {
 
         // An expired gateway session.
         let app_id = seed_app(database).await;
-        let live_gateway = seed_gateway_session(database, &user.id, app_id, &email).await;
-        let revoked_gateway = seed_gateway_session(database, &user.id, app_id, &email).await;
+        let live_gateway = seed_gateway_session(database, &user.id, &app_id, &email).await;
+        let revoked_gateway = seed_gateway_session(database, &user.id, &app_id, &email).await;
         let seed = database.connect().await;
         seed.execute(
             "UPDATE zeroship.gateway_sessions SET revoked_at = NOW() WHERE id = $1",
@@ -189,7 +189,7 @@ async fn list_excludes_revoked_and_expired() {
                     (user_id, app_id, email, name, email_verified, idle_expires_at, abs_expires_at) \
                  VALUES ($1, $2, $3::citext, $4, true, \
                          NOW() - INTERVAL '1 minute', NOW() + INTERVAL '12 hours')",
-                &[&user.id.as_str(), &app_id, &email, &"Test"],
+                &[&user.id.as_str(), &app_id.as_str(), &email, &"Test"],
             )
             .await
             .expect("seed expired gateway session");
@@ -225,7 +225,7 @@ async fn list_excludes_other_users_sessions() {
         // user_b has both an idp and a gateway session.
         seed_idp_session(&client, &user_b.id).await;
         let app_id = seed_app(database).await;
-        seed_gateway_session(database, &user_b.id, app_id, &email_b).await;
+        seed_gateway_session(database, &user_b.id, &app_id, &email_b).await;
 
         let a_idp = seed_idp_session(&client, &user_a.id).await;
         let list_a = sessions::list_by_user(&client, &user_a.id)
@@ -294,8 +294,8 @@ async fn revoke_one_gateway_session_succeeds() {
             .await
             .expect("seed user");
         let app_id = seed_app(database).await;
-        let gw_id = seed_gateway_session(database, &user.id, app_id, &email).await;
-        let other = seed_gateway_session(database, &user.id, app_id, &email).await;
+        let gw_id = seed_gateway_session(database, &user.id, &app_id, &email).await;
+        let other = seed_gateway_session(database, &user.id, &app_id, &email).await;
 
         let revoked = sessions::revoke_one_for_user(&client, &user.id, gw_id, SessionKind::App)
             .await
@@ -304,7 +304,7 @@ async fn revoke_one_gateway_session_succeeds() {
         assert_eq!(revoked.kind, SessionKind::App);
         assert_eq!(
             revoked.app_id,
-            Some(app_id),
+            Some(app_id.clone()),
             "the app arm must report which app to send the back-channel logout to"
         );
 
@@ -339,7 +339,7 @@ async fn revoke_other_users_session_is_noop_idor_guard() {
 
         // user_b's gateway session.
         let app_id = seed_app(database).await;
-        let b_gw = seed_gateway_session(database, &user_b.id, app_id, &email_b).await;
+        let b_gw = seed_gateway_session(database, &user_b.id, &app_id, &email_b).await;
 
         // user_a attempts to revoke BOTH of user_b's sessions by id.
         let idp_attempt =

@@ -7,6 +7,8 @@ use serde_json::json;
 use uuid::Uuid;
 use zeroship_authn::rate_limit::RateLimitDecision;
 use zeroship_authz::Action;
+use zeroship_core::app_derivation;
+use zeroship_id::AppId;
 
 use crate::apply::{
     apply_error_kind, apply_ir_documents, ApplyMigrationsRequest, ApplyRequestError,
@@ -50,10 +52,10 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
 pub async fn provision_workflows(
     req: web::HttpRequest,
     state: State<Arc<MigrationServiceState>>,
-    app_id: Path<Uuid>,
+    app_id: Path<AppId>,
 ) -> web::HttpResponse {
     let app_id = app_id.into_inner();
-    let caller = match authorize_mutation(&req, &state, app_id).await {
+    let caller = match authorize_mutation(&req, &state, &app_id).await {
         Ok(caller) => caller,
         Err(response) => return response,
     };
@@ -64,11 +66,15 @@ pub async fn provision_workflows(
     .await;
     match result {
         Ok(()) => {
-            tracing::info!(%app_id, principal_id = caller.principal_id.as_str(), "workflow journal schema provisioned");
+            tracing::info!(
+                app_id = app_id.as_str(),
+                principal_id = caller.principal_id.as_str(),
+                "workflow journal schema provisioned"
+            );
             web::HttpResponse::Ok().json(&json!({"app_id": app_id}))
         }
         Err(error) => {
-            tracing::error!(%app_id, %error, "workflow journal schema provisioning failed");
+            tracing::error!(app_id = app_id.as_str(), %error, "workflow journal schema provisioning failed");
             database_infrastructure_response()
         }
     }
@@ -77,16 +83,22 @@ pub async fn provision_workflows(
 /// Explicitly create the data schema and migrator role for an app-derived
 /// database id.
 ///
-/// The UUID is still the app id in this pre-rekey step. Keeping the database
-/// route now lets the later database-entity change replace only id resolution,
-/// without moving lifecycle authority or adding a compatibility route.
+/// The path segment IS the app id, which is why it authorizes against the app
+/// and provisions the app's derived schema. Keeping the database route lets the
+/// later database-entity change replace only id resolution, without moving
+/// lifecycle authority or adding a compatibility route.
+///
+/// The segment is typed, so a uuid-rendered id is a 404 from the extractor
+/// rather than a request that authorizes against an app the roster does not
+/// hold. The schema comes from [`app_derivation::schema_name`], never from a
+/// second rendering of the id spelled here.
 pub async fn create_database(
     req: web::HttpRequest,
     state: State<Arc<MigrationServiceState>>,
-    database_id: Path<Uuid>,
+    database_id: Path<AppId>,
 ) -> web::HttpResponse {
     let database_id = database_id.into_inner();
-    let caller = match authorize_mutation(&req, &state, database_id).await {
+    let caller = match authorize_mutation(&req, &state, &database_id).await {
         Ok(caller) => caller,
         Err(response) => return response,
     };
@@ -95,16 +107,17 @@ pub async fn create_database(
         Err(error) => {
             tracing::error!(
                 error = %error,
-                database_id = %database_id,
+                database_id = database_id.as_str(),
                 "migrate-server: database create connection failed"
             );
             return database_infrastructure_response();
         }
     };
-    if let Err(error) = provision_database(session.client(), &database_id.to_string()).await {
+    let schema = app_derivation::schema_name(&database_id);
+    if let Err(error) = provision_database(session.client(), &schema).await {
         tracing::error!(
             error = %error,
-            database_id = %database_id,
+            database_id = database_id.as_str(),
             principal_id = caller.principal_id.as_str(),
             "migrate-server: database create failed"
         );
@@ -112,7 +125,7 @@ pub async fn create_database(
     }
 
     tracing::info!(
-        database_id = %database_id,
+        database_id = database_id.as_str(),
         principal_id = caller.principal_id.as_str(),
         "migrate-server: database created"
     );
@@ -169,11 +182,11 @@ pub async fn readyz(state: State<Arc<MigrationServiceState>>) -> web::HttpRespon
 pub async fn apply(
     req: web::HttpRequest,
     state: State<Arc<MigrationServiceState>>,
-    app_id: Path<Uuid>,
+    app_id: Path<AppId>,
     body: Json<ApplyMigrationsRequest>,
 ) -> web::HttpResponse {
     let app_id = app_id.into_inner();
-    let caller = match authorize_mutation(&req, &state, app_id).await {
+    let caller = match authorize_mutation(&req, &state, &app_id).await {
         Ok(caller) => caller,
         Err(response) => return response,
     };
@@ -191,7 +204,7 @@ pub async fn apply(
     {
         Ok(report) => {
             tracing::info!(
-                app_id = %app_id,
+                app_id = app_id.as_str(),
                 principal_id = caller.principal_id.as_str(),
                 applied = report.applied.len(),
                 skipped = report.skipped.len(),
@@ -209,9 +222,9 @@ pub async fn apply(
 pub async fn rollback(
     req: web::HttpRequest,
     state: State<Arc<MigrationServiceState>>,
-    app_id: Path<Uuid>,
+    app_id: Path<AppId>,
 ) -> web::HttpResponse {
-    if let Err(response) = authorize_mutation(&req, &state, app_id.into_inner()).await {
+    if let Err(response) = authorize_mutation(&req, &state, &app_id.into_inner()).await {
         return response;
     }
     stub_phase2().await
@@ -220,7 +233,7 @@ pub async fn rollback(
 async fn authorize_mutation(
     req: &web::HttpRequest,
     state: &MigrationServiceState,
-    app_id: Uuid,
+    app_id: &AppId,
 ) -> Result<crate::auth::VerifiedCaller, web::HttpResponse> {
     let Some(token) = bearer_token(req) else {
         return Err(web::HttpResponse::Unauthorized().json(&json!({"error": "unauthenticated"})));
@@ -356,7 +369,7 @@ fn apply_error_response(err: ApplyRequestError) -> web::HttpResponse {
         return web::HttpResponse::build(status).json(&json!({
             "error": kind,
             "detail": err.to_string(),
-            "remedy": format!("POST /v1/databases/{database_id}"),
+            "remedy": format!("POST /v1/databases/{}", database_id.as_str()),
         }));
     }
     // `migration_id` and `gated_versions` used to ride along here, and both existed

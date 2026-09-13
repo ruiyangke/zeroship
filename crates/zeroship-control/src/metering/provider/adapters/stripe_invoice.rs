@@ -51,9 +51,13 @@ impl crate::metering::provider::Invoicer for StripeInvoiceProvider {
         period: BillingPeriod,
     ) -> Result<InvoiceRef, ProviderError> {
         let organization = OrganizationId::parse(subject.as_str()).map_err(|e| {
-            ProviderError::Config(format!("stripe_invoice: subject is not an organization id: {e}"))
+            ProviderError::Config(format!(
+                "stripe_invoice: subject is not an organization id: {e}"
+            ))
         })?;
-        self.store.close_period_invoice(organization.as_str(), period).await
+        self.store
+            .close_period_invoice(organization.as_str(), period)
+            .await
     }
 
     async fn adjustment_note(
@@ -62,9 +66,13 @@ impl crate::metering::provider::Invoicer for StripeInvoiceProvider {
         note: &crate::metering::provider::AdjustmentNote,
     ) -> Result<InvoiceRef, ProviderError> {
         let organization = OrganizationId::parse(subject.as_str()).map_err(|e| {
-            ProviderError::Config(format!("stripe_invoice: subject is not an organization id: {e}"))
+            ProviderError::Config(format!(
+                "stripe_invoice: subject is not an organization id: {e}"
+            ))
         })?;
-        self.store.adjustment_note_invoice(organization.as_str(), note).await
+        self.store
+            .adjustment_note_invoice(organization.as_str(), note)
+            .await
     }
 }
 

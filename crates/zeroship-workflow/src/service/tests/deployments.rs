@@ -166,18 +166,12 @@ async fn deployment_contract(store: Rc<OrmStore>, deployments: Deployments) {
         .find(|task| task.invocation.run_id == new_run.id)
         .unwrap();
     let objects = &deployments.source;
-    let bytes = objects
-        .get_manifest(&app.uuid(), &second.hash)
-        .await
-        .unwrap();
+    let bytes = objects.get_manifest(&app, &second.hash).await.unwrap();
     let mut corrupt = bytes.to_vec();
     *corrupt.last_mut().unwrap() ^= 1;
+    objects.delete_manifest(&app, &second.hash).await.unwrap();
     objects
-        .delete_manifest(&app.uuid(), &second.hash)
-        .await
-        .unwrap();
-    objects
-        .put_manifest(&app.uuid(), &second.hash, &corrupt)
+        .put_manifest(&app, &second.hash, &corrupt)
         .await
         .unwrap();
     assert!(matches!(
@@ -211,12 +205,9 @@ async fn deployment_contract(store: Rc<OrmStore>, deployments: Deployments) {
         )
         .await
         .unwrap();
+    objects.delete_manifest(&app, &second.hash).await.unwrap();
     objects
-        .delete_manifest(&app.uuid(), &second.hash)
-        .await
-        .unwrap();
-    objects
-        .put_manifest(&app.uuid(), &second.hash, &bytes)
+        .put_manifest(&app, &second.hash, &bytes)
         .await
         .unwrap();
     service.retain_deploy(&app, &second).await.unwrap();
@@ -241,10 +232,7 @@ async fn deployment_contract(store: Rc<OrmStore>, deployments: Deployments) {
         )
         .await
         .unwrap();
-    objects
-        .delete_manifest(&app.uuid(), &second.hash)
-        .await
-        .unwrap();
+    objects.delete_manifest(&app, &second.hash).await.unwrap();
     assert!(matches!(
         tasks.executable(&recovered).await,
         Err(WorkflowServiceError::Unavailable(_))

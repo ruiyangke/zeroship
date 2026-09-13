@@ -302,7 +302,7 @@ async fn cancellation_does_not_restore_pre_deletion_app_credentials() {
         )
         .await
         .unwrap();
-        let app_id = Uuid::new_v4();
+        let app_id = zeroship_core::AppId::mint();
         let client_id = format!("oac_acctdel_{tag}");
         // DERIVED through the production function, not invented. The deletion
         // cascade copies whatever subject it finds stored, so "seed X, assert
@@ -330,7 +330,7 @@ async fn cancellation_does_not_restore_pre_deletion_app_credentials() {
             "INSERT INTO zeroship.apps (id, name, plan_id, project_id, organization_id) \
          SELECT $1, $2, 'free', p.id, p.organization_id \
            FROM zeroship.projects p WHERE p.id = $3",
-            &[&app_id, &format!("acctdel-app-{tag}"), &project_id],
+            &[&app_id.as_str(), &format!("acctdel-app-{tag}"), &project_id],
         )
         .await
         .unwrap();
@@ -363,7 +363,7 @@ async fn cancellation_does_not_restore_pre_deletion_app_credentials() {
          VALUES ($1, $2, $3, $4, $5, $6, NOW() + INTERVAL '30 days')",
             &[
                 &anchor_id,
-                &app_id,
+                &app_id.as_str(),
                 &client_id,
                 &user.id.as_str(),
                 &b"enc-refresh".to_vec(),

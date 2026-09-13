@@ -169,15 +169,16 @@ async fn postgres_collector_helpers_keep_the_lock_and_fence_in_one_transaction()
 
     // The marker is transaction-local: an autocommit lock cannot authorize a
     // later state change, even if the pool returns the same connection.
-    assert!(db
-        .collection(deploys::Entity::COLLECTION)
-        .unwrap()
-        .update(
-            value!({"id":deployment}),
-            value!({"retention_state":"reclaiming"}),
-        )
-        .await
-        .is_err());
+    assert!(
+        db.collection(deploys::Entity::COLLECTION)
+            .unwrap()
+            .update(
+                value!({"id":deployment}),
+                value!({"retention_state":"reclaiming"}),
+            )
+            .await
+            .is_err()
+    );
     let holder = scope(&app);
     ledger
         .acquire(&holder, &deployment, generation(1))
@@ -264,14 +265,14 @@ async fn local_catalog_uses_the_exact_host_selected_file() {
     let identity: String = stored
         .query_row(
             "SELECT id FROM app_deploys WHERE app_id = ?1 AND deploy_hash = ?2",
-            rusqlite::params![app.uuid().to_string(), hash],
+            rusqlite::params![app.as_str(), hash],
             |row| row.get(0),
         )
         .unwrap();
     assert_eq!(identity, deployment);
     let state: String = stored.query_row(
         "SELECT state FROM app_deploy_holds WHERE app_id = ?1 AND deploy_id = ?2 AND holder_id = ?3",
-        rusqlite::params![app.uuid().to_string(), deployment, holder.holder()],
+        rusqlite::params![app.as_str(), deployment, holder.holder()],
         |row| row.get(0),
     ).unwrap();
     assert_eq!(state, "held");
@@ -294,7 +295,9 @@ async fn local_catalog_rejects_incompatible_schema_without_rewriting_it() {
             .unwrap(),
         "keep"
     );
-    assert!(connection
-        .prepare("SELECT * FROM app_deploy_holds")
-        .is_err());
+    assert!(
+        connection
+            .prepare("SELECT * FROM app_deploy_holds")
+            .is_err()
+    );
 }

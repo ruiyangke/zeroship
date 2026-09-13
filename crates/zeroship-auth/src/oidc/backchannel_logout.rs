@@ -9,7 +9,7 @@ use std::time::Duration;
 use compio_postgres::{Client, GenericClient};
 use http::Method;
 use uuid::Uuid;
-use zeroship_core::UserId;
+use zeroship_core::{AppId, UserId};
 
 use crate::error::{AuthError, Result};
 use crate::oidc::{Issuer, LogoutTokenMint};
@@ -121,7 +121,7 @@ pub async fn emit_for_session(
 pub async fn emit_for_app_session(
     db: &Client,
     issuer: &Issuer,
-    app_id: Uuid,
+    app_id: &AppId,
     user_id: &UserId,
 ) -> Result<LogoutEmissionReport> {
     let rows = db
@@ -132,7 +132,7 @@ pub async fn emit_for_app_session(
              JOIN zeroship.oauth_clients oc ON oc.client_id = aoc.client_id \
              WHERE aoc.app_id = $1 \
                AND oc.backchannel_logout_uri IS NOT NULL",
-            &[&app_id],
+            &[&app_id.as_str()],
         )
         .await
         .map_err(|e| AuthError::Db(format!("load BCL RP for app: {e}")))?;

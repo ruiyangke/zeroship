@@ -2,6 +2,7 @@ use std::str::FromStr;
 
 use cedar_policy::PolicySet;
 use zeroship_authz::{lower, Action, Effect, Policy, Resource, Statement};
+use zeroship_id::AppId;
 
 fn app_read_policy(name: &str) -> Policy {
     Policy {
@@ -9,9 +10,7 @@ fn app_read_policy(name: &str) -> Policy {
         statements: vec![Statement {
             effect: Effect::Allow,
             actions: vec![Action::AppsRead],
-            resources: vec![Resource::App {
-                id: "app_blog".to_owned(),
-            }],
+            resources: vec![Resource::App { id: AppId::mint() }],
             conditions: Vec::new(),
         }],
     }

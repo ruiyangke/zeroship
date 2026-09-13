@@ -696,7 +696,7 @@ async fn same_device_finish(
                 &AuditEvent {
                     event_type: "magic_redeemed_same_device",
                     outcome: "success",
-                    user_id: Some(&user_id),
+                    user_id: Some(user_id),
                     auth_method: Some("magic"),
                     detail: json!({ "second_factor": "required" }),
                     ..AuditEvent::from_request(req)
@@ -764,7 +764,7 @@ async fn same_device_finish(
         &AuditEvent {
             event_type: "magic_redeemed_same_device",
             outcome: "success",
-            user_id: Some(&user_id),
+            user_id: Some(user_id),
             auth_method: Some("magic"),
             ..AuditEvent::from_request(req)
         },
@@ -930,7 +930,7 @@ async fn cross_device_show_code(
         &AuditEvent {
             event_type: "magic_redeemed_cross_device",
             outcome: "success",
-            user_id: Some(&user_id),
+            user_id: Some(user_id),
             auth_method: Some("magic"),
             ..AuditEvent::from_request(req)
         },

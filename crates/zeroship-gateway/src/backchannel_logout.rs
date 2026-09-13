@@ -24,7 +24,9 @@ use std::sync::{Arc, Mutex, OnceLock};
 use ntex::web::{self, types::Form, types::State, HttpResponse};
 use serde::Deserialize;
 use serde_json::json;
-use zeroship_core::UserId;
+
+use zeroship_core::app_id::AppId;
+use zeroship_core::user_id::UserId;
 
 use crate::sessions;
 use crate::GateState;
@@ -50,7 +52,10 @@ pub struct LogoutForm {
 /// sessions that originated from that OP session. If the logout token lacks
 /// `sid`, fall back to revoking all sessions for the token's `sub` at that app.
 #[allow(clippy::future_not_send)]
-pub async fn handle(form: Form<LogoutForm>, state: State<Arc<GateState>>) -> HttpResponse {
+pub async fn handle(
+    form: Form<LogoutForm>,
+    state: State<Arc<GateState>>,
+) -> HttpResponse {
     // `state.oidc_rp.issuer` is the canonical op issuer string
     // (built from `auth_ui_url` at boot, optionally overridden via
     // `OidcRp::with_issuer` in tests).
@@ -58,12 +63,12 @@ pub async fn handle(form: Form<LogoutForm>, state: State<Arc<GateState>>) -> Htt
 
     // Per-app BCL disambiguation: each per-app
     // OAuth client registers its own `backchannel_logout_uri` with its own
-    // `aud` (= the per-app `client_id`, `oac_<base62>`). Peek the token's `aud`
+    // `aud` (= the per-app `client_id`, `oac_<base36>`). Peek the token's `aud`
     // (routing only — the signature is still verified below) to learn which
     // client it is for; a per-app client resolves to one app's subdomain so we
     // revoke only THAT app's sessions.
     //
-    // `app_id` carries the app's STABLE UUID (`apps.id`) when a per-app
+    // `app_id` carries the app's STABLE typed id (`apps.id`) when a per-app
     // client matched (revoke only that app — the canonical session/anchor
     // key).
     // `revoke_sector` carries that app's `sector_identifier` so the per-app
@@ -72,35 +77,27 @@ pub async fn handle(form: Form<LogoutForm>, state: State<Arc<GateState>>) -> Htt
     // user's live signed session / raw-OP access token for THAT app, not just its
     // gateway sessions. `None` sector ⇒ the marker write is skipped (no live
     // per-app subject to revoke without a sector).
-    let aud_candidates = zeroship_core::logout_token::unverified_aud_candidates(&form.logout_token);
-    let Some((aud, app_id, revoke_sector)) = aud_candidates.iter().find_map(|cand| {
-        // The per-app session/anchor rows are keyed by the app's STABLE
-        // UUID (`apps.id`), not the renameable subdomain slug — so the
-        // per-app revoke scope carries the app id, never `route.entry.name`.
-        // The route table is keyed by the typed id now; the session and
-        // anchor rows this function revokes are keyed by `apps.id`, which
-        // is still a uuid column. Unwrap once, here, so every use below is
-        // reading the id the DATABASE holds rather than the one the
-        // gateway routes by.
-        state
-            .routes
-            .lookup_by_oauth_client_id(cand)
-            .map(|(id, route)| {
-                (
-                    cand.clone(),
-                    id.uuid(),
-                    route.entry.sector_identifier.clone(),
-                )
+    let aud_candidates =
+        zeroship_core::logout_token::unverified_aud_candidates(&form.logout_token);
+    let Some((aud, app_id, revoke_sector)) = aud_candidates
+        .iter()
+        .find_map(|cand| {
+            // The per-app session/anchor rows are keyed by the app's STABLE
+            // typed id (`apps.id`), not the renameable subdomain slug — so
+            // the per-app revoke scope carries the app id, never
+            // `route.entry.name`.
+            state.routes.lookup_by_oauth_client_id(cand).map(|(id, route)| {
+                (cand.clone(), id, route.entry.sector_identifier.clone())
             })
-    }) else {
-        tracing::warn!(
-            aud = ?aud_candidates,
-            "backchannel_logout: no provisioned per-app client matched logout_token audience"
-        );
-        return HttpResponse::BadRequest()
-            .header("cache-control", "no-store")
-            .body("invalid logout_token");
-    };
+        }) else {
+            tracing::warn!(
+                aud = ?aud_candidates,
+                "backchannel_logout: no provisioned per-app client matched logout_token audience"
+            );
+            return HttpResponse::BadRequest()
+                .header("cache-control", "no-store")
+                .body("invalid logout_token");
+        };
 
     let token = match zeroship_core::logout_token::verify(
         &state.oidc_rp.jwks,
@@ -117,18 +114,6 @@ pub async fn handle(form: Form<LogoutForm>, state: State<Arc<GateState>>) -> Htt
                 .header("cache-control", "no-store")
                 .body("invalid logout_token");
         }
-    };
-    let token_user_id = match token.sub.as_deref() {
-        Some(raw) => match UserId::parse(raw) {
-            Ok(user_id) => Some(user_id),
-            Err(err) => {
-                tracing::warn!(error = %err, sub = raw, "backchannel_logout: invalid user id");
-                return HttpResponse::BadRequest()
-                    .header("cache-control", "no-store")
-                    .body("invalid logout_token");
-            }
-        },
-        None => None,
     };
 
     let now_secs = unix_now_secs();
@@ -220,9 +205,9 @@ pub async fn handle(form: Form<LogoutForm>, state: State<Arc<GateState>>) -> Htt
         if let Some(sid) = token.sid.as_deref() {
             let users = match sessions::revoke_app_sessions_for_sid(
                 &mut *conn,
-                app_id,
+                &app_id,
                 sid,
-                token_user_id.as_ref(),
+                token.sub.as_deref(),
             )
             .await
             {
@@ -230,7 +215,7 @@ pub async fn handle(form: Form<LogoutForm>, state: State<Arc<GateState>>) -> Htt
                 Err(e) => {
                     tracing::error!(
                         error = %e,
-                        app_id = %app_id,
+                        app_id = app_id.as_str(),
                         sid = %sid,
                         "backchannel_logout: revoke_app_sessions_for_sid failed"
                     );
@@ -239,18 +224,18 @@ pub async fn handle(form: Form<LogoutForm>, state: State<Arc<GateState>>) -> Htt
             };
             revoked = users.len() as u64;
             if users.is_empty() {
-                if let Some(sub) = token_user_id.as_ref() {
+                if let Some(sub) = token.sub.as_deref() {
                     tracing::warn!(
-                        app_id = %app_id,
+                        app_id = app_id.as_str(),
                         sid = %sid,
-                        sub = sub.as_str(),
+                        sub = %sub,
                         "backchannel_logout: sid matched zero sessions; falling back to app-scoped sub revoke"
                     );
                     revoked = match revoke_by_sub(
                         &mut *conn,
                         &state,
                         &aud,
-                        app_id,
+                        &app_id,
                         revoke_sector.as_deref(),
                         sub,
                         &mut anchor_families,
@@ -261,7 +246,7 @@ pub async fn handle(form: Form<LogoutForm>, state: State<Arc<GateState>>) -> Htt
                         Err(e) => {
                             tracing::error!(
                                 error = %e,
-                                app_id = %app_id,
+                                app_id = app_id.as_str(),
                                 sid = %sid,
                                 "backchannel_logout: sub fallback revocation failed"
                             );
@@ -270,40 +255,40 @@ pub async fn handle(form: Form<LogoutForm>, state: State<Arc<GateState>>) -> Htt
                     };
                 } else {
                     tracing::error!(
-                        app_id = %app_id,
+                        app_id = app_id.as_str(),
                         sid = %sid,
                         "backchannel_logout: sid matched zero sessions and logout_token has no sub fallback"
                     );
                     return retryable_processing_error();
                 }
             }
-            for global_user_id in users {
+            for global_user_id in &users {
                 if let Err(e) = teardown_per_app_user(
                     &mut *conn,
                     &state,
                     &aud,
-                    app_id,
+                    &app_id,
                     revoke_sector.as_deref(),
-                    &global_user_id,
+                    global_user_id,
                     &mut anchor_families,
                 )
                 .await
                 {
                     tracing::error!(
                         error = %e,
-                        app_id = %app_id,
+                        app_id = app_id.as_str(),
                         sid = %sid,
                         "backchannel_logout: sid-scoped teardown failed"
                     );
                     return retryable_processing_error();
                 }
             }
-        } else if let Some(sub) = token_user_id.as_ref() {
+        } else if let Some(sub) = token.sub.as_deref() {
             revoked = match revoke_by_sub(
                 &mut *conn,
                 &state,
                 &aud,
-                app_id,
+                &app_id,
                 revoke_sector.as_deref(),
                 sub,
                 &mut anchor_families,
@@ -314,7 +299,7 @@ pub async fn handle(form: Form<LogoutForm>, state: State<Arc<GateState>>) -> Htt
                 Err(e) => {
                     tracing::error!(
                         error = %e,
-                        app_id = %app_id,
+                        app_id = app_id.as_str(),
                         "backchannel_logout: revoke_app_sessions_for_user failed"
                     );
                     return retryable_processing_error();
@@ -325,7 +310,7 @@ pub async fn handle(form: Form<LogoutForm>, state: State<Arc<GateState>>) -> Htt
         tracing::info!(
             sub = ?token.sub,
             sid = ?token.sid,
-            app = %app_id,
+            app = app_id.as_str(),
             revoked,
             "backchannel_logout: sessions revoked"
         );
@@ -381,11 +366,7 @@ pub async fn handle(form: Form<LogoutForm>, state: State<Arc<GateState>>) -> Htt
                 continue;
             }
         };
-        if let Err(e) = state
-            .oidc_rp
-            .revoke_token_public(&fam.client_id, &refresh)
-            .await
-        {
+        if let Err(e) = state.oidc_rp.revoke_token_public(&fam.client_id, &refresh).await {
             // RFC 7009 §2.2: best-effort — the anchor row is already gone.
             tracing::warn!(
                 error = %e,
@@ -411,7 +392,9 @@ fn anchor_aad(client_id: &str, sub: &str) -> Vec<u8> {
 /// available (not gated on anything) — op's webhook surface needs
 /// a stable URL.
 pub fn configure(cfg: &mut web::ServiceConfig) {
-    cfg.service(web::resource("/oidc/backchannel-logout").route(web::post().to(handle)));
+    cfg.service(
+        web::resource("/oidc/backchannel-logout").route(web::post().to(handle)),
+    );
 }
 
 fn unix_now_secs() -> i64 {
@@ -482,38 +465,49 @@ async fn revoke_by_sub(
     conn: &mut compio_postgres::Client,
     state: &GateState,
     client_id: &str,
-    app_id: uuid::Uuid,
+    app_id: &AppId,
     sector: Option<&str>,
-    global_user_id: &UserId,
+    sub: &str,
     anchor_families: &mut Vec<(UserId, crate::anchors::DeletedFamily)>,
 ) -> Result<u64, crate::error::GatewayError> {
-    teardown_per_app_user(
-        conn,
-        state,
-        client_id,
-        app_id,
-        sector,
-        global_user_id,
-        anchor_families,
-    )
-    .await?;
-    sessions::revoke_app_sessions_for_user(conn, app_id, global_user_id).await
+    let global_user_id = match UserId::parse(sub) {
+        Ok(id) => Some(id),
+        Err(_) => {
+            tracing::warn!(
+                app_id = app_id.as_str(),
+                sub = %sub,
+                "backchannel_logout: sub is not a global user id; skipping per-app teardown"
+            );
+            None
+        }
+    };
+    if let Some(global_user_id) = global_user_id.as_ref() {
+        teardown_per_app_user(
+            conn,
+            state,
+            client_id,
+            app_id,
+            sector,
+            global_user_id,
+            anchor_families,
+        )
+        .await?;
+    }
+    sessions::revoke_app_sessions_for_user(conn, app_id, sub).await
 }
 
 async fn teardown_per_app_user(
     conn: &mut compio_postgres::Client,
     state: &GateState,
     client_id: &str,
-    app_id: uuid::Uuid,
+    app_id: &AppId,
     sector: Option<&str>,
     global_user_id: &UserId,
     anchor_families: &mut Vec<(UserId, crate::anchors::DeletedFamily)>,
 ) -> Result<(), crate::error::GatewayError> {
     if let Some(sector) = sector {
-        let pws =
-            zeroship_core::auth::derive_pairwise(&state.pairwise_salt, global_user_id, sector);
-        if let Err(e) =
-            zeroship_authz::wrapper_revocation::revoke_family(conn, client_id, &pws).await
+        let pws = zeroship_core::auth::derive_pairwise(&state.pairwise_salt, global_user_id, sector);
+        if let Err(e) = zeroship_authz::wrapper_revocation::revoke_family(conn, client_id, &pws).await
         {
             tracing::error!(
                 error = %e,
@@ -527,7 +521,7 @@ async fn teardown_per_app_user(
         state.revocation_cache.invalidate(client_id, &pws);
     } else {
         tracing::warn!(
-            app_id = %app_id,
+            app_id = app_id.as_str(),
             "backchannel_logout: per-app BCL has no sector_identifier; \
              skipping token-family marker (sessions still revoked)"
         );
@@ -540,7 +534,7 @@ async fn teardown_per_app_user(
         Err(e) => {
             tracing::error!(
                 error = %e,
-                app_id = %app_id,
+                app_id = app_id.as_str(),
                 "backchannel_logout: anchor delete_all_for_user failed"
             );
             return Err(e);

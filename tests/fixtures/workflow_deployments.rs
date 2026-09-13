@@ -102,9 +102,12 @@ impl Deployments {
         }
     }
     pub fn client(&self, app: &AppId) -> OwnedClient {
+        self.client_for_scope(HoldScope::for_app(app.clone()))
+    }
+    pub fn client_for_scope(&self, scope: HoldScope) -> OwnedClient {
         OwnedClient {
             ledger: self.ledger.clone(),
-            scope: HoldScope::for_app(app.clone()),
+            scope,
             _directory: self.directory.clone(),
         }
     }
@@ -166,21 +169,19 @@ impl Deployments {
             panic!("catalog rows");
         };
         if let Some(record) = rows.first() {
-            if record["app_id"] != value!(app.uuid().to_string())
-                || record["deploy_hash"] != value!(hash)
-            {
+            if record["app_id"] != value!(app.as_str()) || record["deploy_hash"] != value!(hash) {
                 return Err(WorkflowServiceError::Conflict(
                     "fixture deployment is immutable".into(),
                 ));
             }
         } else {
-            let mut document = value!({"id":declaration.id, "app_id":app.uuid().to_string(), "deploy_hash":hash,
+            let mut document = value!({"id":declaration.id, "app_id":app.as_str(), "deploy_hash":hash,
                 "manifest_json":encoded, "activated_at":null, "retention_state":"available", "retention_lock":0});
             document["created_at"] = Value::Timestamp(0);
             records.insert(document).await.unwrap();
         }
         self.source
-            .put_manifest(&app.uuid(), &hash, encoded.as_bytes())
+            .put_manifest(app, &hash, encoded.as_bytes())
             .await
             .unwrap();
         let mut registration = DeployRegistration {

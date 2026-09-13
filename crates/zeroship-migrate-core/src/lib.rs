@@ -124,7 +124,7 @@ pub mod engine;
 // `zeroship_migrate::fault::...` path resolves unchanged.
 #[doc(hidden)]
 pub use zeroship_migrate_backend::fault;
-// The typed-id (base62/UUIDv7) machinery lives in the `zeroship-migrate-ir` leaf crate;
+// The typed-id (base36/UUIDv7) machinery lives in the `zeroship-migrate-ir` leaf crate;
 // re-export it under its historical `crate::id` path.
 pub use zeroship_migrate_ir::id;
 // The deploy-bundle migration-file record + content-addressed hash, vendored

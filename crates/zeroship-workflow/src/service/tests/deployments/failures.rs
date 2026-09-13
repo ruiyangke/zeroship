@@ -71,15 +71,10 @@ impl BlobStore for Faults {
             .get_blob_to_file(hash, out, expected_size, max_bytes)
             .await
     }
-    async fn put_manifest(
-        &self,
-        app: &uuid::Uuid,
-        hash: &str,
-        bytes: &[u8],
-    ) -> Result<(), BlobError> {
+    async fn put_manifest(&self, app: &AppId, hash: &str, bytes: &[u8]) -> Result<(), BlobError> {
         self.local.put_manifest(app, hash, bytes).await
     }
-    async fn get_manifest(&self, app: &uuid::Uuid, hash: &str) -> Result<bytes::Bytes, BlobError> {
+    async fn get_manifest(&self, app: &AppId, hash: &str) -> Result<bytes::Bytes, BlobError> {
         if self.fail_read.swap(false, Ordering::SeqCst) {
             return Err(BlobError::Backend("injected read failure".into()));
         }
@@ -95,10 +90,10 @@ impl BlobStore for Faults {
         }
         Ok(object)
     }
-    async fn delete_manifest(&self, app: &uuid::Uuid, hash: &str) -> Result<bool, BlobError> {
+    async fn delete_manifest(&self, app: &AppId, hash: &str) -> Result<bool, BlobError> {
         self.local.delete_manifest(app, hash).await
     }
-    async fn delete_app_manifests(&self, app: &uuid::Uuid) -> Result<(), BlobError> {
+    async fn delete_app_manifests(&self, app: &AppId) -> Result<(), BlobError> {
         self.local.delete_app_manifests(app).await
     }
 }

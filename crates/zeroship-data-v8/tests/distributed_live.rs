@@ -39,6 +39,7 @@ use std::thread::{self, JoinHandle, ThreadId};
 use std::time::{Duration, Instant};
 
 use compio_postgres::{NoTls, Pool};
+use zeroship_core::AppId;
 use zeroship_data_v8::service::{DbService, DbServiceConfig};
 use zeroship_runtime::channel::{CancelFlag, StreamReader};
 use zeroship_runtime::plugin::NativePlugin;
@@ -255,7 +256,7 @@ const APP_SCHEMA_SLOT: &str = "APP_SCHEMA";
 
 fn runtime_for(
     url: &str,
-    app_uuid: uuid::Uuid,
+    runtime_app_id: AppId,
     app_id: &str,
     relay: &RelayConfig,
     modules: Vec<ModuleEntry>,
@@ -275,7 +276,7 @@ fn runtime_for(
         .modules(modules)
         .env_vars(env_vars)
         .plugins(plugins)
-        .app_id(app_uuid)
+        .app_id(runtime_app_id)
         // The worker vector's `RuntimeState.runtime_descriptor` slot
         // (`crates/zeroship-worker/src/sync.rs:40-70` resolves the blob;
         // `crates/zeroship-runtime/src/core/init.rs:3415-3434` validates it and
@@ -547,7 +548,7 @@ struct AnchorChannels {
 
 fn spawn_anchor(
     url: String,
-    app_uuid: uuid::Uuid,
+    runtime_app_id: AppId,
     app_id: String,
     relay: RelayConfig,
     channels: AnchorChannels,
@@ -561,7 +562,7 @@ fn spawn_anchor(
     thread::spawn(move || {
         init_v8();
         let thread_id = thread::current().id();
-        let runtime = runtime_for(&url, app_uuid, &app_id, &relay, anchor_modules());
+        let runtime = runtime_for(&url, runtime_app_id, &app_id, &relay, anchor_modules());
         let arm = call(&runtime, "GET", "/arm", "");
         let io = compio::runtime::Runtime::new()
             .map_err(|error| format!("anchor compio runtime: {error}"))?;
@@ -605,7 +606,7 @@ fn spawn_anchor(
 
 fn spawn_subscriber(
     url: String,
-    app_uuid: uuid::Uuid,
+    runtime_app_id: AppId,
     app_id: String,
     relay: RelayConfig,
     initial: std::sync::mpsc::Sender<Result<(ThreadId, String), String>>,
@@ -613,7 +614,7 @@ fn spawn_subscriber(
     thread::spawn(move || {
         init_v8();
         let thread_id = thread::current().id();
-        let runtime = runtime_for(&url, app_uuid, &app_id, &relay, subscriber_modules());
+        let runtime = runtime_for(&url, runtime_app_id, &app_id, &relay, subscriber_modules());
         let outcome = call(
             &runtime,
             "POST",
@@ -679,14 +680,14 @@ fn spawn_subscriber(
 
 fn spawn_writer(
     url: String,
-    app_uuid: uuid::Uuid,
+    runtime_app_id: AppId,
     app_id: String,
     relay: RelayConfig,
 ) -> JoinHandle<Result<WriterResult, String>> {
     thread::spawn(move || {
         init_v8();
         let thread_id = thread::current().id();
-        let runtime = runtime_for(&url, app_uuid, &app_id, &relay, writer_modules());
+        let runtime = runtime_for(&url, runtime_app_id, &app_id, &relay, writer_modules());
         let outcome = call(&runtime, "POST", "/write", "{}");
         let io = compio::runtime::Runtime::new()
             .map_err(|error| format!("writer compio runtime: {error}"))?;
@@ -866,8 +867,8 @@ fn db_live_stream_crosses_relay_and_v8_isolates_without_worker_replication() {
     test_tracing::init_test_tracing();
     let postgres = postgres::Postgres::start();
     let url = postgres.url();
-    let app_uuid = uuid::Uuid::new_v4();
-    let app_id = app_uuid.to_string();
+    let runtime_app_id = AppId::mint();
+    let app_id = runtime_app_id.as_str().to_string();
     let publication = zeroship_core::replication_names::publication_name(&app_id).unwrap();
     let slot = publication.replacen("__zs_pub_", "__zs_relay_", 1);
 
@@ -922,7 +923,7 @@ fn db_live_stream_crosses_relay_and_v8_isolates_without_worker_replication() {
     let (finish_tx, finish_rx) = flume::bounded(1);
     let anchor = spawn_anchor(
         worker_url.clone(),
-        app_uuid,
+        runtime_app_id.clone(),
         app_id.clone(),
         relay.config.clone(),
         AnchorChannels {
@@ -941,7 +942,7 @@ fn db_live_stream_crosses_relay_and_v8_isolates_without_worker_replication() {
         let (initial_tx, initial_rx) = std::sync::mpsc::channel();
         subscriber = Some(spawn_subscriber(
             worker_url.clone(),
-            app_uuid,
+            runtime_app_id.clone(),
             app_id.clone(),
             relay.config.clone(),
             initial_tx,
@@ -955,7 +956,7 @@ fn db_live_stream_crosses_relay_and_v8_isolates_without_worker_replication() {
 
         writer = Some(spawn_writer(
             worker_url.clone(),
-            app_uuid,
+            runtime_app_id,
             app_id.clone(),
             relay.config.clone(),
         ));

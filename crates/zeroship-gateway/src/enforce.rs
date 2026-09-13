@@ -433,7 +433,6 @@ pub fn acquire_concurrency(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use uuid::Uuid;
 
     fn rl(rps: Option<u32>, rpm: Option<u32>, per: RateLimitPer) -> RateLimit {
         RateLimit { rps, rpm, per }
@@ -444,7 +443,7 @@ mod tests {
         // rps=2 → bucket capacity 2, refill 2/s. 5 rapid requests:
         // first 2 succeed (drain the burst), the rest 429 until refill.
         let reg = PerRuleRateLimitRegistry::new();
-        let app = zeroship_core::app_id::canonical_app_id_for(&Uuid::nil());
+        let app = AppId::mint();
         let lim = rl(Some(2), None, RateLimitPer::App);
         // First two within the burst succeed.
         assert!(reg.check(&app, 0, lim.per, "app", &lim).is_ok());
@@ -470,7 +469,7 @@ mod tests {
         // rpm=60, rps=None → 1 rps internally. Burst=1, so the first
         // request succeeds and the second within the same second 429s.
         let reg = PerRuleRateLimitRegistry::new();
-        let app = zeroship_core::app_id::canonical_app_id_for(&Uuid::nil());
+        let app = AppId::mint();
         let lim = rl(None, Some(60), RateLimitPer::App);
         assert!(reg.check(&app, 0, lim.per, "app", &lim).is_ok());
         let err = reg
@@ -484,7 +483,7 @@ mod tests {
         // Two requests from different IPs with rps=1 each. Both within
         // their own burst → both succeed even though aggregate is 2.
         let reg = PerRuleRateLimitRegistry::new();
-        let app = zeroship_core::app_id::canonical_app_id_for(&Uuid::nil());
+        let app = AppId::mint();
         let lim = rl(Some(1), None, RateLimitPer::Ip);
         assert!(reg.check(&app, 0, lim.per, "1.1.1.1", &lim).is_ok());
         assert!(reg.check(&app, 0, lim.per, "2.2.2.2", &lim).is_ok());
@@ -502,7 +501,7 @@ mod tests {
         // Different `__Host-zeroship_app_session` values → independent buckets even
         // when the request comes from the same machine.
         let reg = PerRuleRateLimitRegistry::new();
-        let app = zeroship_core::app_id::canonical_app_id_for(&Uuid::nil());
+        let app = AppId::mint();
         let lim = rl(Some(1), None, RateLimitPer::Session);
         assert!(reg.check(&app, 0, lim.per, "session-aaa", &lim).is_ok());
         assert!(reg.check(&app, 0, lim.per, "session-bbb", &lim).is_ok());
@@ -519,7 +518,7 @@ mod tests {
         // same bucket. The router uses "app" verbatim regardless of
         // IP/session, so we feed "app" here too.
         let reg = PerRuleRateLimitRegistry::new();
-        let app = zeroship_core::app_id::canonical_app_id_for(&Uuid::nil());
+        let app = AppId::mint();
         let lim = rl(Some(1), None, RateLimitPer::App);
         assert!(reg.check(&app, 0, lim.per, "app", &lim).is_ok());
         // Even an "unrelated" caller (different IP, different session)
@@ -535,7 +534,7 @@ mod tests {
     fn per_rule_no_limit_passes_through() {
         // rate_limit with both fields None → no enforcement, ever.
         let reg = PerRuleRateLimitRegistry::new();
-        let app = zeroship_core::app_id::canonical_app_id_for(&Uuid::nil());
+        let app = AppId::mint();
         let lim = rl(None, None, RateLimitPer::Ip);
         for _ in 0..1000 {
             assert!(reg.check(&app, 0, lim.per, "1.1.1.1", &lim).is_ok());
@@ -552,7 +551,7 @@ mod tests {
     fn degraded_tiny_burst_still_admits_some_requests() {
         // rate=1, burst=1 → capacity 1 logical token, far below DEGRADE_FACTOR.
         let reg = RateLimitRegistry::new(1, 1);
-        let app = zeroship_core::app_id::canonical_app_id_for(&Uuid::nil());
+        let app = AppId::mint();
         reg.set_degraded(&app, true);
         assert!(
             reg.is_degraded(&app),
@@ -593,7 +592,7 @@ mod tests {
         // Same shape (rps=1, App), same app, different rule_idx →
         // independent buckets. A rule-0 burst doesn't drain rule-1.
         let reg = PerRuleRateLimitRegistry::new();
-        let app = zeroship_core::app_id::canonical_app_id_for(&Uuid::nil());
+        let app = AppId::mint();
         let lim = rl(Some(1), None, RateLimitPer::App);
         assert!(reg.check(&app, 0, lim.per, "app", &lim).is_ok());
         // Rule 1's bucket is fresh.

@@ -60,7 +60,10 @@ struct ResourceLowering {
 }
 
 fn lower_resources(resources: &[Resource]) -> ResourceLowering {
-    if resources.iter().any(|resource| matches!(resource, Resource::Any)) {
+    if resources
+        .iter()
+        .any(|resource| matches!(resource, Resource::Any))
+    {
         return ResourceLowering {
             scope: "resource".to_owned(),
             condition: None,
@@ -126,12 +129,7 @@ fn lower_condition(condition: &Condition) -> String {
 
             cidrs
                 .iter()
-                .map(|cidr| {
-                    format!(
-                        "context.request_ip.isInRange(ip({}))",
-                        cedar_string(cidr)
-                    )
-                })
+                .map(|cidr| format!("context.request_ip.isInRange(ip({}))", cedar_string(cidr)))
                 .collect::<Vec<_>>()
                 .join(" || ")
         }

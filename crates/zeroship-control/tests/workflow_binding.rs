@@ -15,13 +15,14 @@ use zeroship_control::{
     workflow_instance_api, AppState, EnvStore, Quota, RateLimiter, Registry, SecretString,
     StripeStore,
 };
-use zeroship_workflow_v8::WorkflowBinding;
-use zeroship_workflow::store::pg::{PgStore, WorkflowTables};
+use zeroship_core::AppId;
 use zeroship_runtime::channel::CancelFlag;
 use zeroship_runtime::plugin::NativePlugin;
 use zeroship_runtime::{
     init_v8, EnvSnapshot, FetchOutcome, ModuleEntry, RequestCtx, Runtime, SettledFetch,
 };
+use zeroship_workflow::store::pg::{PgStore, WorkflowTables};
+use zeroship_workflow_v8::WorkflowBinding;
 
 use crate::common;
 
@@ -29,10 +30,8 @@ const TEST_CONTROL_KEY: &str = "test-control-key";
 const TEST_MASTER_KEY: &str = "test-master-key-deadbeefcafebabe";
 
 fn tmpdir(label: &str) -> PathBuf {
-    let path = std::env::temp_dir().join(format!(
-        "zs-wf-plugin-{label}-{}",
-        Uuid::new_v4().simple()
-    ));
+    let path =
+        std::env::temp_dir().join(format!("zs-wf-plugin-{label}-{}", Uuid::new_v4().simple()));
     std::fs::create_dir_all(&path).expect("mkdir tmp");
     path
 }
@@ -153,7 +152,9 @@ async fn build_fixture(database: crate::workflow_postgres::Database, label: &str
 
     Fixture {
         state: Arc::new(AppState {
-            service_auth: std::sync::Arc::new(zeroship_core::service_peers::ServiceAuth::unconfigured()),
+            service_auth: std::sync::Arc::new(
+                zeroship_core::service_peers::ServiceAuth::unconfigured(),
+            ),
             registry,
             env_store,
             stripe_store,
@@ -205,8 +206,8 @@ async fn build_fixture(database: crate::workflow_postgres::Database, label: &str
     }
 }
 
-async fn seed_app(fx: &Fixture, workflows: &[&str]) -> Uuid {
-    let app_id = Uuid::new_v4();
+async fn seed_app(fx: &Fixture, workflows: &[&str]) -> AppId {
+    let app_id = AppId::mint();
     let app_name = format!("wf-plugin-{}", Uuid::new_v4().simple());
     // This case is about the V8 binding, not about who owns the app.
     let project = common::unowned_project(fx.pg.as_ref()).await;
@@ -217,7 +218,7 @@ async fn seed_app(fx: &Fixture, workflows: &[&str]) -> Uuid {
              SELECT $1, $2, $3, true, p.id, p.organization_id \
                FROM zeroship.projects p WHERE p.id = $4",
             &[
-                &app_id,
+                &app_id.as_str(),
                 &app_name,
                 &zeroship_control::plan_catalog::free_plan_id(),
                 &project,
@@ -244,22 +245,24 @@ async fn seed_app(fx: &Fixture, workflows: &[&str]) -> Uuid {
         .execute(
             "INSERT INTO zeroship.app_deploys (id, app_id, deploy_hash, manifest_json, activated_at) \
              VALUES ($1, $2, $3, $4, now())",
-            &[&deploy_id, &app_id, &format!("hash-{deploy_id}"), &manifest],
+            &[
+                &deploy_id,
+                &app_id.as_str(),
+                &format!("hash-{deploy_id}"),
+                &manifest,
+            ],
         )
         .await
         .expect("insert deploy");
     app_id
 }
 
-fn wf_sql(app_id: Uuid, sql: &str) -> String {
-    let tables = WorkflowTables::for_app_id(&app_id);
+fn wf_sql(app_id: &AppId, sql: &str) -> String {
+    let tables = WorkflowTables::for_app_id(app_id);
     sql.replace("zeroship.workflow_runs", &tables.runs)
         .replace("zeroship.workflow_steps", &tables.steps)
         .replace("zeroship.workflow_signals", &tables.signals)
-        .replace(
-            "zeroship.workflow_subscriptions",
-            &tables.subscriptions,
-        )
+        .replace("zeroship.workflow_subscriptions", &tables.subscriptions)
         .replace("zeroship.workflow_blobs", &tables.blobs)
 }
 
@@ -270,10 +273,10 @@ fn modules(source: &str) -> Vec<ModuleEntry> {
     }]
 }
 
-async fn run_workflow_app(control_url: String, app_id: Uuid, source: &str) -> (u16, String) {
+async fn run_workflow_app(control_url: String, app_id: &AppId, source: &str) -> (u16, String) {
     init_v8();
     let mut env_vars = HashMap::new();
-    env_vars.insert("APP_ID".to_string(), app_id.to_string());
+    env_vars.insert("APP_ID".to_string(), app_id.as_str().to_owned());
     let plugin: Arc<dyn NativePlugin> =
         Arc::new(WorkflowBinding::new(control_url, TEST_CONTROL_KEY));
     let runtime = Runtime::builder()
@@ -360,7 +363,7 @@ async fn v8_binding_round_trips_through_the_control_instance_api() {
           }
         };
     "#;
-    let (status, body) = run_workflow_app(control_url, app_id, source).await;
+    let (status, body) = run_workflow_app(control_url, &app_id, source).await;
     assert_eq!(status, 200, "body: {body}");
     let value: Value = serde_json::from_str(&body).expect("body json");
     assert_eq!(value["ok"], true, "body: {body}");
@@ -370,10 +373,10 @@ async fn v8_binding_round_trips_through_the_control_instance_api() {
         .pg
         .query_one(
             &wf_sql(
-                app_id,
+                &app_id,
                 "SELECT state FROM zeroship.workflow_runs WHERE id = $1 AND app_id = $2",
             ),
-            &[&run_id, &app_id],
+            &[&run_id, &app_id.as_str()],
         )
         .await
         .expect("run row");
@@ -383,7 +386,7 @@ async fn v8_binding_round_trips_through_the_control_instance_api() {
         .pg
         .query_one(
             &wf_sql(
-                app_id,
+                &app_id,
                 "SELECT count(*)::int4 AS count \
                FROM zeroship.workflow_signals \
               WHERE run_id = $1 AND type = 'approved'",
@@ -416,8 +419,8 @@ async fn native_output_reads_preserve_bytes_and_reject_another_apps_run() {
     let control = ControlServer::start(Arc::clone(&fx.state));
     let backend = HttpWorkflowBackend::new(WorkflowClientConfig::new(
         &control.base,
-        app.to_string(),
-        app_scoped_token(TEST_CONTROL_KEY, &app.to_string()),
+        app.as_str().to_owned(),
+        app_scoped_token(TEST_CONTROL_KEY, app.as_str()),
     ));
     let started = backend
         .start(
@@ -438,7 +441,7 @@ async fn native_output_reads_preserve_bytes_and_reject_another_apps_run() {
         .await
         .unwrap();
     fx.pg.execute(
-        &wf_sql(app, "INSERT INTO zeroship.workflow_steps \
+        &wf_sql(&app, "INSERT INTO zeroship.workflow_steps \
          (run_id, ordinal, name, name_occurrence, kind, state, output_kind, output_hash, output_size, output_content_type, batch_id) \
          VALUES ($1, 0, 'payload', 0, 'run', 'completed', 'blob', $2, $3, 'application/octet-stream', 'batch_output')"),
         &[&run, &hash, &(bytes.len() as i64)],
@@ -453,13 +456,13 @@ async fn native_output_reads_preserve_bytes_and_reject_another_apps_run() {
         }} }};
     "#
     );
-    let (status, body) = run_workflow_app(control.base.clone(), app, &source).await;
+    let (status, body) = run_workflow_app(control.base.clone(), &app, &source).await;
     assert_eq!(status, 200, "{body}");
     assert_eq!(
         serde_json::from_str::<Value>(&body).unwrap(),
         json!({"bytes":bytes,"typed":true})
     );
-    let (status, body) = run_workflow_app(control.base.clone(), other, &source).await;
+    let (status, body) = run_workflow_app(control.base.clone(), &other, &source).await;
     assert_eq!(status, 400, "another app read the saved output: {body}");
     let error: Value = serde_json::from_str(&body).unwrap();
     assert_eq!(error["code"], "workflow_not_found");

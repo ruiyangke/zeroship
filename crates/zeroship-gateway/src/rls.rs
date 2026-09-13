@@ -5,9 +5,9 @@
 //! `app_session_anchors`, `app_user_identities` — are `FORCE ROW LEVEL
 //! SECURITY` with a `tenant_isolation` policy keyed on a per-request GUC:
 //!
-//!   - `zeroship.tenant_app`    — the app UUID (text form), for `app_id`-keyed
-//!     tables (`gateway_sessions`, `app_session_anchors`; also `app_secrets`,
-//!     which the gateway never touches).
+//!   - `zeroship.tenant_app`    — the app's typed id (`app_<base36>`), for
+//!     `app_id`-keyed tables (`gateway_sessions`, `app_session_anchors`; also
+//!     `app_secrets`, which the gateway never touches).
 //!   - `zeroship.tenant_client` — the per-app OAuth `oac_…` `client_id`, for the
 //!     `app_client_id`-keyed `app_user_identities`.
 //!
@@ -37,29 +37,32 @@
 //! plugin-db `SET LOCAL ROLE`-in-transaction precedent.
 
 use compio_postgres::Transaction;
-use uuid::Uuid;
+
+use zeroship_core::app_id::AppId;
 
 use crate::error::{GatewayError, Result};
 
-/// GUC name for the app-UUID tenant key (`app_id`-keyed tables).
+/// GUC name for the app tenant key (`app_id`-keyed tables).
 pub const GUC_TENANT_APP: &str = "zeroship.tenant_app";
 /// GUC name for the per-app OAuth `client_id` tenant key
 /// (`app_client_id`-keyed `app_user_identities`).
 pub const GUC_TENANT_CLIENT: &str = "zeroship.tenant_client";
 
-/// Bind `zeroship.tenant_app` to `app_id` (text form) for the lifetime of `tx`.
+/// Bind `zeroship.tenant_app` to `app_id`'s printed typed id for the lifetime
+/// of `tx`.
 ///
 /// Transaction-local (`set_config(..., true)`) — auto-reverts on COMMIT /
-/// ROLLBACK. The RLS policy casts the GUC back to UUID
-/// (`current_setting('zeroship.tenant_app', true)::uuid`); binding the text
-/// form keeps the parameter type unambiguous.
+/// ROLLBACK. The RLS policy compares the GUC against the `app_id` column as
+/// text (`"app_id" = current_setting('zeroship.tenant_app', true)`, no cast
+/// either side), so the GUC must carry exactly the string the column holds:
+/// `app_id.as_str()`.
 ///
 /// # Errors
 /// [`GatewayError::Db`] if the `set_config` statement fails.
-pub async fn set_tenant_app(tx: &Transaction<'_>, app_id: Uuid) -> Result<()> {
+pub async fn set_tenant_app(tx: &Transaction<'_>, app_id: &AppId) -> Result<()> {
     tx.execute(
         "SELECT set_config($1, $2, true)",
-        &[&GUC_TENANT_APP, &app_id.to_string()],
+        &[&GUC_TENANT_APP, &app_id.as_str()],
     )
     .await
     .map_err(|e| GatewayError::Db(format!("rls set tenant_app: {e}")))?;

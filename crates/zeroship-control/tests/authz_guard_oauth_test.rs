@@ -26,7 +26,7 @@ use zeroship_core::config::{Secret, SourceKind};
 use zeroship_core::device_grant::{
     OP_PROVIDER, PLATFORM_CLI_CLIENT_ID, PLATFORM_CLI_REGISTERED_SCOPES,
 };
-use zeroship_core::UserId;
+use zeroship_core::{AppId, UserId};
 
 use crate::common;
 
@@ -66,7 +66,7 @@ fn tmpdir(label: &str) -> PathBuf {
 struct Fixture {
     state: Arc<AppState>,
     user_id: UserId,
-    app_id: Option<Uuid>,
+    app_id: Option<AppId>,
     blob_root: PathBuf,
     deploy_tmp_dir: PathBuf,
     _jwks: Option<PlatformJwksMock>,
@@ -83,14 +83,17 @@ impl Fixture {
                 &[&self.user_id.as_str()],
             )
             .await;
-        if let Some(app_id) = self.app_id {
+        if let Some(app_id) = &self.app_id {
             // The app must go BEFORE the project that owns it: `apps.project_id`
             // is ON DELETE RESTRICT, so deleting the organization first would be
             // refused and leave the whole fixture behind.
             let _ = self
                 .state
                 .control_pg
-                .execute("DELETE FROM zeroship.apps WHERE id = $1", &[&app_id])
+                .execute(
+                    "DELETE FROM zeroship.apps WHERE id = $1",
+                    &[&app_id.as_str()],
+                )
                 .await;
         }
         let _ = self
@@ -243,7 +246,7 @@ async fn insert_user(state: &AppState, user_id: &UserId, label: &str) {
 }
 
 /// Create an app owned by the fixture's principal (binds the owner membership).
-async fn create_app(fx: &mut Fixture, label: &str) -> Uuid {
+async fn create_app(fx: &mut Fixture, label: &str) -> AppId {
     let owner = fx.user_id.clone();
     create_app_owned_by(fx, label, &owner).await
 }
@@ -252,7 +255,7 @@ async fn create_app(fx: &mut Fixture, label: &str) -> Uuid {
 /// fixture principal). Used to exercise the "principal is only a viewer of an
 /// app someone else owns" case — the create now binds an owner membership, so
 /// tests that need the principal to NOT be the owner must seed a distinct owner.
-async fn create_app_owned_by(fx: &mut Fixture, label: &str, owner_id: &UserId) -> Uuid {
+async fn create_app_owned_by(fx: &mut Fixture, label: &str, owner_id: &UserId) -> AppId {
     if owner_id != &fx.user_id {
         // The owner must exist (FK on app_members.user_id → users.id).
         insert_user(&fx.state, owner_id, &format!("{label}-owner")).await;
@@ -269,7 +272,7 @@ async fn create_app_owned_by(fx: &mut Fixture, label: &str, owner_id: &UserId) -
         )
         .await
         .expect("create app");
-    fx.app_id = Some(record.id);
+    fx.app_id = Some(record.id.clone());
     record.id
 }
 
@@ -285,7 +288,12 @@ async fn create_app_owned_by(fx: &mut Fixture, label: &str, owner_id: &UserId) -
 /// `zeroship_control::organizations::add_member`, because these cases seat a
 /// role on behalf of no particular actor. The rank fence is tested where it
 /// lives, in `organizations_test.rs`, not here.
-async fn grant_organization_member(state: &AppState, app_id: Uuid, user_id: &UserId, role: &str) {
+async fn grant_organization_member(
+    state: &AppState,
+    app_id: &AppId,
+    user_id: &UserId,
+    role: &str,
+) {
     state
         .control_pg
         .execute(
@@ -295,7 +303,7 @@ async fn grant_organization_member(state: &AppState, app_id: Uuid, user_id: &Use
                JOIN zeroship.projects p ON p.id = a.project_id \
               WHERE a.id = $1 \
              ON CONFLICT (organization_id, user_id) DO UPDATE SET role = EXCLUDED.role",
-            &[&app_id, &user_id.as_str(), &role],
+            &[&app_id.as_str(), &user_id.as_str(), &role],
         )
         .await
         .expect("seat organization member");
@@ -333,12 +341,13 @@ async fn raw_app_read(
     authz: AuthzGuard,
     state: web::types::State<Arc<AppState>>,
 ) -> web::HttpResponse {
+    let Ok(id) = AppId::parse(&path.into_inner()) else {
+        return web::HttpResponse::BadRequest().finish();
+    };
     match authz
         .require(
             Action::AppsRead,
-            Resource::App {
-                id: path.into_inner(),
-            },
+            Resource::App { id },
             &state,
         )
         .await
@@ -353,12 +362,13 @@ async fn raw_app_deploy_check(
     authz: AuthzGuard,
     state: web::types::State<Arc<AppState>>,
 ) -> web::HttpResponse {
+    let Ok(id) = AppId::parse(&path.into_inner()) else {
+        return web::HttpResponse::BadRequest().finish();
+    };
     match authz
         .require(
             Action::AppsDeploy,
-            Resource::App {
-                id: path.into_inner(),
-            },
+            Resource::App { id },
             &state,
         )
         .await
@@ -889,7 +899,7 @@ async fn op_cli_device_token_authorizes_control_endpoint() {
 
     let control = init_control!(fx);
     let deploy_request = test::TestRequest::post()
-        .uri(&format!("/raw-app/{app_id}/deploy-check"))
+        .uri(&format!("/raw-app/{}/deploy-check", app_id.as_str()))
         .header("authorization", bearer_for(access_token))
         .to_request();
     let deploy_response = test::call_service(&control, deploy_request).await;
@@ -898,7 +908,7 @@ async fn op_cli_device_token_authorizes_control_endpoint() {
     let deploy_body_text = String::from_utf8_lossy(&deploy_body).to_string();
 
     let app_request = test::TestRequest::get()
-        .uri(&format!("/api/apps/{app_id}"))
+        .uri(&format!("/api/apps/{}", app_id.as_str()))
         .header("authorization", bearer_for(access_token))
         .to_request();
     let app_response = test::call_service(&control, app_request).await;
@@ -952,7 +962,7 @@ async fn platform_issuer_accepts_valid_token_and_rejects_unknown_issuer() {
 
     let platform_deploy = platform_token(&user_id, "apps:deploy", PLATFORM_ISSUER);
     let req = test::TestRequest::post()
-        .uri(&format!("/raw-app/{app_id}/deploy-check"))
+        .uri(&format!("/raw-app/{}/deploy-check", app_id.as_str()))
         .header("authorization", bearer_for(&platform_deploy))
         .to_request();
     let resp = test::call_service(&app, req).await;
@@ -1003,7 +1013,7 @@ async fn platform_access_token_revocation_marker_rejects_within_cache_ttl() {
         .expect("insert platform token revocation marker");
 
     let req = test::TestRequest::post()
-        .uri(&format!("/raw-app/{app_id}/deploy-check"))
+        .uri(&format!("/raw-app/{}/deploy-check", app_id.as_str()))
         .header("authorization", bearer_for(&token))
         .to_request();
     let status = test::call_service(&app, req).await.status();
@@ -1260,7 +1270,7 @@ async fn creator_self_service_creates_and_lists_only_own_apps() {
         serde_json::from_slice(&test::read_body(resp).await).expect("create body json");
     let created_id = body["id"].as_str().expect("created app id").to_string();
     // Track for fixture cleanup (FK cascade removes the owner membership).
-    fx.app_id = Some(Uuid::parse_str(&created_id).expect("uuid"));
+    fx.app_id = Some(AppId::parse(&created_id).expect("app id"));
 
     // 2. List — the creator sees their app, scoped to ownership.
     let req = test::TestRequest::get()
@@ -1285,7 +1295,7 @@ async fn creator_self_service_creates_and_lists_only_own_apps() {
     );
     // 3. The other creator's app must NOT leak into this principal's list.
     assert!(
-        !ids.contains(&other_app.id.to_string()),
+        !ids.iter().any(|id| id == other_app.id.as_str()),
         "scoped list must NOT include another tenant's app"
     );
 
@@ -1295,13 +1305,16 @@ async fn creator_self_service_creates_and_lists_only_own_apps() {
         .control_pg
         .execute(
             "DELETE FROM zeroship.organization_members om USING zeroship.apps a JOIN zeroship.projects p ON p.id = a.project_id WHERE om.organization_id = p.organization_id AND a.id = $1",
-            &[&other_app.id],
+            &[&other_app.id.as_str()],
         )
         .await;
     let _ = fx
         .state
         .control_pg
-        .execute("DELETE FROM zeroship.apps WHERE id = $1", &[&other_app.id])
+        .execute(
+            "DELETE FROM zeroship.apps WHERE id = $1",
+            &[&other_app.id.as_str()],
+        )
         .await;
     let _ = fx
         .state
@@ -1326,7 +1339,7 @@ async fn oauth_token_without_required_scope_returns_403() {
     let app = init_control!(fx);
 
     let req = test::TestRequest::post()
-        .uri(&format!("/api/apps/{app_id}/deploy"))
+        .uri(&format!("/api/apps/{}/deploy", app_id.as_str()))
         .header("authorization", bearer_for_scope(&user_id, "apps:read"))
         .to_request();
     let status = test::call_service(&app, req).await.status();
@@ -1472,7 +1485,7 @@ async fn oauth_token_subset_of_user_two_call_enforcement() {
     assert_eq!(status, StatusCode::OK);
 
     let req = test::TestRequest::put()
-        .uri(&format!("/api/apps/{app_id}/archive"))
+        .uri(&format!("/api/apps/{}/archive", app_id.as_str()))
         .header("authorization", bearer_for_scope(&user_id, "apps:read"))
         .to_request();
     let status = test::call_service(&app, req).await.status();
@@ -1601,7 +1614,7 @@ async fn a_first_cli_request_is_authorized_and_materializes_the_default_grants()
     );
 
     let req = test::TestRequest::post()
-        .uri(&format!("/raw-app/{app_id}/deploy-check"))
+        .uri(&format!("/raw-app/{}/deploy-check", app_id.as_str()))
         .header(
             "authorization",
             bearer_for_scope(&user_id, "apps:deploy apps:read"),
@@ -1663,7 +1676,7 @@ async fn an_operator_deleting_a_grant_row_narrows_the_next_cli_request() {
     let app = init_control!(fx);
 
     let read = test::TestRequest::get()
-        .uri(&format!("/api/apps/{app_id}"))
+        .uri(&format!("/api/apps/{}", app_id.as_str()))
         .header(
             "authorization",
             bearer_for_scope(&user_id, "apps:deploy apps:read"),
@@ -1672,7 +1685,7 @@ async fn an_operator_deleting_a_grant_row_narrows_the_next_cli_request() {
     let read_status = test::call_service(&app, read).await.status();
 
     let deploy = test::TestRequest::post()
-        .uri(&format!("/raw-app/{app_id}/deploy-check"))
+        .uri(&format!("/raw-app/{}/deploy-check", app_id.as_str()))
         .header(
             "authorization",
             bearer_for_scope(&user_id, "apps:deploy apps:read"),
@@ -1716,7 +1729,7 @@ async fn viewer_role_cannot_use_granted_apps_archive_scope() {
     // must NOT be the creator for this "viewer-only" scenario.)
     let owner_id = UserId::mint();
     let app_id = create_app_owned_by(&mut fx, "user-subset", &owner_id).await;
-    grant_organization_member(&fx.state, app_id, &user_id, "viewer").await;
+    grant_organization_member(&fx.state, &app_id, &user_id, "viewer").await;
     // The principal is entitled to `apps:archive` and the token carries it, so
     // the 403 below is the ROLE check refusing a viewer. Seed the grant
     // explicitly so the assertion does not depend on just-in-time default CLI
@@ -1725,7 +1738,7 @@ async fn viewer_role_cannot_use_granted_apps_archive_scope() {
     let app = init_control!(fx);
 
     let req = test::TestRequest::put()
-        .uri(&format!("/api/apps/{app_id}/archive"))
+        .uri(&format!("/api/apps/{}/archive", app_id.as_str()))
         .header("authorization", bearer_for_scope(&user_id, "apps:archive"))
         .to_request();
     let status = test::call_service(&app, req).await.status();

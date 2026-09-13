@@ -95,12 +95,10 @@ impl WorkerWorkflowRuntimeLoader {
             ));
         }
 
-        // The ordinary worker's primitives currently use the stored UUID
-        // spelling. The immutable Runtime app identity remains the authority;
-        // the canonical workflow ID is checked against its bound backend above.
+        // Native primitives and the runtime share the authorized app identity.
         context
             .env_vars
-            .insert("APP_ID".into(), app.uuid().to_string());
+            .insert("APP_ID".into(), app.as_str().to_owned());
         context.env_vars.insert(
             "ZEROSHIP_DEPLOY_ID".into(),
             assignment.invocation.deploy_hash.clone(),
@@ -127,7 +125,7 @@ impl WorkerWorkflowRuntimeLoader {
             .transpose()
             .map_err(|_| invalid("invalid workflow runtime descriptor"))?;
         let mut builder = Runtime::builder()
-            .app_id(app.uuid())
+            .app_id(app)
             .modules(modules)
             .runtime_descriptor(descriptor)
             .env_vars(context.env_vars)
@@ -154,7 +152,7 @@ fn validate_peers(context: &WorkflowAppContext) -> Result<(), WorkflowServiceErr
             // The V8 data adapter currently derives its physical schema from
             // APP_ID; it exposes no public explicit DbBinding injection hook.
             // Refuse a different host schema instead of opening the wrong one.
-            let expected = app_derivation::schema_name(&AppId::from_uuid(&context.app.uuid()));
+            let expected = app_derivation::schema_name(&context.app);
             if context.schema.as_str() != expected {
                 return Err(invalid(
                     "workflow runtime database schema binding is unsupported",
@@ -240,7 +238,7 @@ mod tests {
             zeroship_runtime::init_v8();
             let directory = tempfile::tempdir().unwrap();
             let app = AppId::mint();
-            let tenant = app.uuid().to_string();
+            let tenant = app_derivation::schema_name(&app);
             let store = OrmStore::connect(
                 DbBinding::new(&tenant, "fixture", SchemaName::new(&tenant).unwrap()),
                 &ConnectionFactory::for_url(&format!(
@@ -346,10 +344,7 @@ mod tests {
             runtime.clone().into_inner_probe_for_test().strong_count(),
             1
         );
-        assert_eq!(
-            runtime.app_id(),
-            Some(fixture.contexts.0.borrow().app.uuid())
-        );
+        assert_eq!(runtime.app_id(), Some(&fixture.contexts.0.borrow().app));
         assert_eq!(runtime.limits(), fixture.contexts.0.borrow().limits);
         assert_eq!(runtime.modules()[0].source, source);
         {
@@ -357,7 +352,7 @@ mod tests {
             let state = state.borrow();
             assert_eq!(
                 state.env_vars["APP_ID"],
-                fixture.contexts.0.borrow().app.uuid().to_string()
+                fixture.contexts.0.borrow().app.as_str()
             );
             assert_eq!(
                 state.env_vars["ZEROSHIP_DEPLOY_ID"],
@@ -370,16 +365,13 @@ mod tests {
                 descriptor
             );
             let meter = state.meter.as_ref().unwrap();
-            assert_eq!(
-                meter.app_id(),
-                fixture.contexts.0.borrow().app.uuid().to_string()
-            );
+            assert_eq!(meter.app_id(), fixture.contexts.0.borrow().app.as_str());
             meter.record("egress_bytes", 7);
         }
         let events = fixture.contexts.0.borrow().meter.as_ref().unwrap().drain();
         assert!(events
             .iter()
-            .any(|event| event.subject.app == runtime.app_id()
+            .any(|event| event.subject.app.as_ref() == runtime.app_id()
                 && event.meter == "egress_bytes"
                 && event.value == 7));
         // Initialization remains the executor's responsibility; this marker
@@ -401,7 +393,7 @@ mod tests {
             Err(WorkflowServiceError::InvalidRequest(_))
         ));
         assignment.invocation.deploy_hash = "b".repeat(64);
-        assignment.invocation.app_id = fixture.contexts.0.borrow().app.uuid().to_string();
+        assignment.invocation.app_id = uuid::Uuid::new_v4().to_string();
         assert!(matches!(
             fixture.loader().load(&assignment, &executable),
             Err(WorkflowServiceError::InvalidRequest(_))
@@ -503,10 +495,7 @@ mod tests {
         assert_eq!(new["color"], "green");
         assert_eq!(old["netAvailable"], true);
         assert_eq!(new["netAvailable"], false);
-        assert_eq!(
-            new["app"],
-            fixture.contexts.0.borrow().app.uuid().to_string()
-        );
+        assert_eq!(new["app"], fixture.contexts.0.borrow().app.as_str());
         assert_eq!(new["deployment"], assignment.invocation.deploy_hash);
     }
 

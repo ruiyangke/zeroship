@@ -31,8 +31,6 @@ use std::sync::Arc;
 
 use compio::io::{AsyncRead, AsyncWriteExt};
 use compio::net::{TcpListener, TcpStream};
-use uuid::Uuid;
-
 use zeroship_control::worker_health::{self, HealthView, Liveness};
 
 use crate::common;
@@ -97,12 +95,13 @@ async fn connect_pg() -> Arc<compio_postgres::Client> {
     Arc::new(client)
 }
 
-/// A typed id matching `worker_instances_id_shape`: `wkr_` plus 22 characters
-/// from the base62 alphabet. Hex digits are inside that alphabet, so a truncated
-/// simple-form UUID satisfies the CHECK and keeps ids unique per run.
+/// A typed id matching `worker_instances_id_shape`, minted by the one minter.
+///
+/// Composing a body by hand pins BOTH the width and the alphabet, so it stops
+/// satisfying the CHECK the moment either moves - and it fails at insert time,
+/// not at compile time.
 fn fresh_instance_id() -> String {
-    let hex = Uuid::new_v4().simple().to_string();
-    format!("wkr_{}", &hex[..22])
+    zeroship_core::typed_id::generate(zeroship_core::typed_id::WORKER_INSTANCE_PREFIX)
 }
 
 /// Insert an enrolled instance exactly as enrolment would leave it: `active`,

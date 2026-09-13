@@ -11,8 +11,7 @@ use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
-use uuid::Uuid;
-use zeroship_core::UserId;
+use zeroship_core::{AppId, UserId};
 
 use crate::config::AuthConfig;
 use crate::oidc::auth_request::{AuthRequest, AuthRequestError};
@@ -98,7 +97,7 @@ pub(super) struct OAuthClient {
     pub client_id: String,
     pub redirect_uris: Vec<String>,
     pub scopes: Vec<String>,
-    pub app_id: Option<Uuid>,
+    pub app_id: Option<AppId>,
     pub sector_identifier: String,
     pub client_secret_hash: Option<String>,
     pub refresh_allowed: bool,
@@ -112,9 +111,17 @@ pub(super) struct OAuthClient {
 }
 
 impl OAuthClient {
+    /// The `aud` an access token for this client carries.
+    ///
+    /// The app arm renders the printed app id, so the string the gateway builds
+    /// from the app id it resolved and the string minted here are the same
+    /// composition of the same value. Rendering anything else - a decoded uuid,
+    /// a bare body - makes the two sides of that equality disagree while both
+    /// still compile.
     pub(super) fn resource_audience(&self) -> String {
         self.app_id
-            .map(|id| format!("app:{id}"))
+            .as_ref()
+            .map(|id| format!("app:{}", id.as_str()))
             .unwrap_or_else(|| "zeroship".to_string())
     }
 }
@@ -1060,7 +1067,10 @@ pub(super) async fn load_client(
         client_id: row.get("client_id"),
         redirect_uris: row.get("redirect_uris"),
         scopes: sort_dedup(row.get("scopes")),
-        app_id: row.try_get("app_id").ok().flatten(),
+        app_id: crate::entity_ids::optional_app_id(row, "app_id").map_err(|err| {
+            tracing::error!(error = %err, client_id = %client_id, "oauth client carries an unreadable app id");
+            OAuthError::server_error("client registry unavailable")
+        })?,
         sector_identifier,
         client_secret_hash,
         refresh_allowed: row.try_get("refresh_allowed").unwrap_or(false),
@@ -1572,6 +1582,7 @@ mod access_identity_tests {
 
     use base64::Engine as _;
     use compio_postgres::{connect, Client, NoTls};
+    use uuid::Uuid;
 
     use super::*;
 

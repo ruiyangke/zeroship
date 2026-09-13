@@ -6,18 +6,26 @@ use ed25519_dalek::SigningKey;
 use ntex::web::{self, test};
 use serde_json::json;
 use uuid::Uuid;
+use zeroship_core::app_id::AppId;
+use zeroship_core::typed_id::APP_OAUTH_CLIENT_PREFIX;
 
 use common::test_auth_config;
 
 const ISSUER: &str = "https://auth.zeroship.test/oauth2";
 const REDIRECT_URI: &str = "https://builder.zeroship.test/callback";
 
-/// Mirror of control plane `client_id_for_app` (`oac_<base62-app-id>`). The
-/// consent classifier decodes this prefix to resolve `zeroship.app_scope_defs`.
+/// Mirror of control plane `client_id_for_app` (`oac_<body>`). The app id and
+/// its OAuth client id share ONE body under two prefixes, so the mirror
+/// carries the body over verbatim, exactly as the control plane does.
 /// Reproduced here (not imported from `zeroship-control`) to avoid pulling the
 /// control crate into auth's test graph.
-fn client_id_for_app(app_id: &Uuid) -> String {
-    format!("oac_{}", zeroship_core::typed_id::uuid_to_base62(app_id))
+fn client_id_for_app(app_id: &AppId) -> String {
+    let body = app_id
+        .as_str()
+        .strip_prefix(AppId::PREFIX)
+        .and_then(|rest| rest.strip_prefix('_'))
+        .expect("a printed app id is <PREFIX>_<body>");
+    format!("{APP_OAUTH_CLIENT_PREFIX}_{body}")
 }
 
 /// An app-declared end-user scope (mirrors `zeroship.app_scope_defs`), seeded by
@@ -33,11 +41,11 @@ struct ConsentTestApp {
     cfg: Arc<zeroship_auth::config::AuthConfig>,
     pg: Arc<compio_postgres::Client>,
     user_id: zeroship_core::UserId,
-    app_id: Uuid,
+    app_id: AppId,
     client_id: String,
-    /// Real `zeroship.apps.id` UUID for a per-app (`oac_`) client; `None` for the
+    /// Real `zeroship.apps.id` for a per-app (`oac_`) client; `None` for the
     /// builder/console clients booted via `boot`.
-    seeded_app_uuid: Option<Uuid>,
+    seeded_app_id: Option<AppId>,
 }
 
 impl ConsentTestApp {
@@ -47,16 +55,16 @@ impl ConsentTestApp {
         Self::boot_inner(scopes, app_role, skip, &client_id, None, &[]).await
     }
 
-    /// Boot a per-app end-user OAuth client (`oac_<base62-app-id>`) — the Slice
+    /// Boot a per-app end-user OAuth client (`oac_<app-id-body>`) — the Slice
     /// 1d/3b client identity. Seeds a real `zeroship.apps` row (the FK target for
     /// `app_scope_defs`) and the app's declared scopes, so the consent
     /// classifier resolves `client_id → app_id → app_scope_defs`. `skip_consent`
     /// is FALSE (per-app clients never auto-accept — spec §5.2 round-3).
     #[allow(clippy::future_not_send)]
     async fn boot_app_client(requested: &[&str], declared: &[AppScope]) -> Self {
-        let app_uuid = Uuid::new_v4();
-        let client_id = client_id_for_app(&app_uuid);
-        Self::boot_inner(requested, None, false, &client_id, Some(app_uuid), declared).await
+        let app_id = AppId::mint();
+        let client_id = client_id_for_app(&app_id);
+        Self::boot_inner(requested, None, false, &client_id, Some(app_id), declared).await
     }
 
     #[allow(clippy::future_not_send, clippy::too_many_arguments)]
@@ -65,7 +73,7 @@ impl ConsentTestApp {
         app_role: Option<&str>,
         skip: bool,
         client_id: &str,
-        app_uuid: Option<Uuid>,
+        requested_app_id: Option<AppId>,
         declared: &[AppScope],
     ) -> Self {
         let client_id = client_id.to_owned();
@@ -82,8 +90,9 @@ impl ConsentTestApp {
         let pg = Arc::new(pg_client);
 
         let user_id = zeroship_core::UserId::mint();
-        let app_id = app_uuid.unwrap_or_else(Uuid::new_v4);
-        let seeded_app_uuid = (app_role.is_some() || app_uuid.is_some()).then_some(app_id);
+        let app_id = requested_app_id.clone().unwrap_or_else(AppId::mint);
+        let seeded_app_id =
+            (app_role.is_some() || requested_app_id.is_some()).then_some(app_id.clone());
         let email = format!("consent-{}@zeroship.test", user_id.as_str());
         pg.execute(
             "INSERT INTO zeroship.users (id, email, name, email_verified_at) \
@@ -92,7 +101,7 @@ impl ConsentTestApp {
         )
         .await
         .expect("insert consent test user");
-        if let Some(seed_app_id) = seeded_app_uuid {
+        if let Some(seed_app_id) = seeded_app_id.as_ref() {
             let plan_id = "consent-test-plan";
             let limits = json!({
                 "cpu_ms": 1000,
@@ -111,7 +120,7 @@ impl ConsentTestApp {
             .await
             .expect("insert consent test plan");
 
-            let app_name = format!("consent-app-{}", seed_app_id.simple());
+            let app_name = format!("consent-app-{}", Uuid::new_v4().simple());
             // Every app belongs to a project, and the project belongs to an
             // organization: that chain is the app's only path to a human, so a
             // fixture app needs both rows before it can exist at all. The
@@ -125,7 +134,7 @@ impl ConsentTestApp {
                  VALUES ($1, $2, 'Consent Test Organization', 'consent@zeroship.test')",
                 &[
                     &organization_id,
-                    &format!("consent-{}", seed_app_id.simple()),
+                    &format!("consent-{}", Uuid::new_v4().simple()),
                 ],
             )
             .await
@@ -141,7 +150,7 @@ impl ConsentTestApp {
                 "INSERT INTO zeroship.apps (id, name, plan_id, project_id, organization_id) \
                  SELECT $1, $2, $3, p.id, p.organization_id \
                    FROM zeroship.projects p WHERE p.id = $4",
-                &[&seed_app_id, &app_name, &plan_id, &project_id],
+                &[&seed_app_id.as_str(), &app_name, &plan_id, &project_id],
             )
             .await
             .expect("insert zeroship.apps");
@@ -155,7 +164,7 @@ impl ConsentTestApp {
                  SELECT p.organization_id, $2, $3, $2 FROM zeroship.apps a \
                    JOIN zeroship.projects p ON p.id = a.project_id WHERE a.id = $1 \
                  ON CONFLICT (organization_id, user_id) DO UPDATE SET role = EXCLUDED.role",
-                &[&app_id, &user_id.as_str(), &role],
+                &[&app_id.as_str(), &user_id.as_str(), &role],
             )
             .await
             .expect("insert app member");
@@ -163,13 +172,13 @@ impl ConsentTestApp {
         // Per-app client: seed zeroship.apps (FK target) + app_scope_defs so the
         // consent classifier's `client_id → app_id → app_scope_defs` resolution
         // is exercised against the real tables, not a stub.
-        if let Some(app_uuid) = app_uuid {
+        if let Some(app_id) = requested_app_id.as_ref() {
             for s in declared {
                 let desc: Option<String> = s.description.map(ToOwned::to_owned);
                 pg.execute(
                     "INSERT INTO zeroship.app_scope_defs (app_id, scope_id, label, description) \
                      VALUES ($1, $2, $3, $4)",
-                    &[&app_uuid, &s.id, &s.label, &desc],
+                    &[&app_id.as_str(), &s.id, &s.label, &desc],
                 )
                 .await
                 .expect("insert app_scope_defs");
@@ -197,7 +206,7 @@ impl ConsentTestApp {
             user_id: user_id.clone(),
             app_id,
             client_id,
-            seeded_app_uuid,
+            seeded_app_id,
         }
     }
 
@@ -224,7 +233,7 @@ impl ConsentTestApp {
                  USING zeroship.apps a JOIN zeroship.projects p ON p.id = a.project_id \
                  WHERE om.organization_id = p.organization_id AND a.id = $1 \
                    AND om.user_id = $2",
-                &[&self.app_id, &self.user_id.as_str()],
+                &[&self.app_id.as_str(), &self.user_id.as_str()],
             )
             .await;
         let _ = self
@@ -235,10 +244,10 @@ impl ConsentTestApp {
             )
             .await;
         // zeroship.app_scope_defs/app_members rows cascade via the apps FK.
-        if let Some(app_uuid) = self.seeded_app_uuid {
+        if let Some(app_id) = self.seeded_app_id {
             let _ = self
                 .pg
-                .execute("DELETE FROM zeroship.apps WHERE id = $1", &[&app_uuid])
+                .execute("DELETE FROM zeroship.apps WHERE id = $1", &[&app_id.as_str()])
                 .await;
         }
         let _ = self

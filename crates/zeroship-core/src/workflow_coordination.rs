@@ -5,10 +5,12 @@
 //! Service authentication establishes the caller; IDs in messages select
 //! resources and never grant authority to them.
 
+pub use zeroship_id::workflow::{RequestId, RunId, WorkerId};
+
 mod lifecycle;
 pub use lifecycle::{RestartDeploy, RestartOptions, RestartTarget, RunOperation, RunState};
 
-use crate::{app_id::AppId, entity_id::declare_entity_id, typed_id};
+use crate::app_id::AppId;
 use serde::{Deserialize, Serialize};
 use std::num::{NonZeroI64, NonZeroU32};
 
@@ -49,25 +51,6 @@ pub struct ScopePage {
 pub struct ManagementStatus {
     pub app_id: AppId,
     pub request_id: RequestId,
-}
-
-declare_entity_id! {
-    /// An enrolled worker instance named by a placement assignment.
-    WorkerId,
-    typed_id::WORKER_INSTANCE_PREFIX,
-    worker_id_tests,
-}
-declare_entity_id! {
-    /// A customer's workflow run selected by a management command.
-    RunId,
-    typed_id::WORKFLOW_RUN_PREFIX,
-    run_id_tests,
-}
-declare_entity_id! {
-    /// Stable identity for a retried workflow mutation or management command.
-    RequestId,
-    typed_id::WORKFLOW_REQUEST_PREFIX,
-    request_id_tests,
 }
 
 /// A positive revision representable by the coordinator's database counters.

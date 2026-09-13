@@ -55,6 +55,28 @@ pub(crate) fn take_tx_lane(route: &TxRoute) -> Result<crate::tx_lanes::TxClientS
         .map_err(|_| tx_slot_unavailable(route.app_id()))
 }
 
+/// Read catalog evidence on the captured binding and transaction lease.
+pub(crate) async fn read_catalog(
+    route: &TxRoute,
+) -> Result<crate::sql::catalog::LiveSchema, DbError> {
+    if route.in_tx() {
+        route.check_scope()?;
+        return crate::transaction::driver::execute_operation(route.app_id(), async {
+            let lane = take_tx_lane(route)?;
+            route.backend().validate_session(lane.client())?;
+            route
+                .backend()
+                .introspect_schema(route.app_id(), route.schema(), Some(lane.client()))
+                .await
+        })
+        .await;
+    }
+    route
+        .backend()
+        .introspect_schema(route.app_id(), route.schema(), None)
+        .await
+}
+
 /// Execute SQL with text params — uses the app's TX connection when this
 /// dispatch was issued inside that transaction, otherwise the pool.
 pub async fn run_sql(route: &TxRoute, sql: &str, params: &[Value]) -> Result<Vec<Value>, DbError> {
@@ -535,7 +557,7 @@ mod tests {
     fn synthetic_typed_id_row() -> Value {
         Value::Object(
             [
-                ("id".to_string(), Value::from("usr_02HXTESTSUBSCRIPTIONID")),
+                ("id".to_string(), Value::from("usr_02hxtestsubscriptionid000")),
                 ("title".to_string(), Value::from("hi")),
             ]
             .into_iter()
@@ -875,10 +897,10 @@ mod tests {
 
         match sub.pop() {
             Some(crate::cdc::broker::SubscriptionMessage::Change(ev)) => {
-                assert_eq!(ev.pk.as_deref(), Some("usr_02HXTESTSUBSCRIPTIONID"));
+                assert_eq!(ev.pk.as_deref(), Some("usr_02hxtestsubscriptionid000"));
                 assert_eq!(
                     ev.new_tuple.get("id").map(String::as_str),
-                    Some("usr_02HXTESTSUBSCRIPTIONID")
+                    Some("usr_02hxtestsubscriptionid000")
                 );
             }
             other => panic!("expected Change variant, got {other:?}"),
@@ -1009,7 +1031,8 @@ mod tests {
         use std::sync::Arc;
         reset_world("app_metering_db_exec_emits_reads_writes_rows_and_skips_failures");
         run(async {
-            let app_id = "00000000-0000-7000-8000-0000000000e5";
+            let identity = zeroship_core::AppId::mint();
+            let app_id = identity.as_str();
             let dir = tempfile::tempdir().expect("tempdir");
             let backend = Rc::new(
                 crate::backend_selection::new_sqlite_backend(
@@ -1119,19 +1142,19 @@ mod tests {
             .is_err());
 
             let events = meter.drain();
-            let id = uuid::Uuid::parse_str(app_id).unwrap();
+            let id = zeroship_core::app_id::AppId::parse(app_id).unwrap();
             assert_eq!(
-                usage_value(&events, id, "db_writes"),
+                usage_value(&events, &id, "db_writes"),
                 Some(3),
                 "successful mutation statements are metered: {events:?}"
             );
             assert_eq!(
-                usage_value(&events, id, "db_rows_written"),
+                usage_value(&events, &id, "db_rows_written"),
                 Some(2),
                 "returned and affected rows are metered: {events:?}"
             );
             assert_eq!(
-                usage_value(&events, id, "db_reads"),
+                usage_value(&events, &id, "db_reads"),
                 Some(2),
                 "one query + one count = 2 db_reads (the FAILED query did NOT bill); got {events:?}"
             );
@@ -1143,12 +1166,12 @@ mod tests {
 
     fn usage_value(
         events: &[zeroship_core::usage_event::UsageEvent],
-        app_id: uuid::Uuid,
+        app_id: &zeroship_core::app_id::AppId,
         meter: &str,
     ) -> Option<u64> {
         events
             .iter()
-            .find(|event| event.subject.app == Some(app_id) && event.meter == meter)
+            .find(|event| event.subject.app.as_ref() == Some(app_id) && event.meter == meter)
             .map(|event| event.value)
     }
 

@@ -36,6 +36,7 @@ use zeroship_control::{
 };
 use zeroship_core::net_policy::Verdict;
 use zeroship_core::types::{AppNetPolicyLimits, AppRuntimeLimits};
+use zeroship_core::AppId;
 
 use crate::common;
 
@@ -173,35 +174,35 @@ async fn seed_plan_with_max_accept_rules(catalog: &PlanCatalog, max_grants: u32)
         .expect("upsert plan")
 }
 
-async fn count_rules(pg: &Client, app_id: Uuid) -> i64 {
+async fn count_rules(pg: &Client, app_id: &AppId) -> i64 {
     let rows = pg
         .query(
             "SELECT COUNT(*)::BIGINT AS n FROM zeroship.app_egress_rules WHERE app_id = $1",
-            &[&app_id],
+            &[&app_id.as_str()],
         )
         .await
         .expect("count rules");
     rows[0].get("n")
 }
 
-async fn cleanup_app(pg: &Client, app_id: Uuid) {
+async fn cleanup_app(pg: &Client, app_id: &AppId) {
     let _ = pg
         .execute(
             "DELETE FROM zeroship.app_egress_rules WHERE app_id = $1",
-            &[&app_id],
+            &[&app_id.as_str()],
         )
         .await;
     let _ = pg
         .execute(
             "DELETE FROM zeroship.app_audit WHERE app_id = $1",
-            &[&app_id],
+            &[&app_id.as_str()],
         )
         .await;
 }
 
-fn post(app_id: Uuid, bearer: &str, body: serde_json::Value) -> test::TestRequest {
+fn post(app_id: &AppId, bearer: &str, body: serde_json::Value) -> test::TestRequest {
     test::TestRequest::post()
-        .uri(&format!("/api/apps/{app_id}/egress-rules"))
+        .uri(&format!("/api/apps/{}/egress-rules", app_id.as_str()))
         .header("authorization", bearer.to_string())
         .set_json(&body)
 }
@@ -232,7 +233,10 @@ async fn owner_can_write_list_and_delete_rules_of_both_forms() {
 
     // Deny-by-default: a fresh app holds no rules at all.
     let req = test::TestRequest::get()
-        .uri(&format!("/api/apps/{}/egress-rules", app_record.id))
+        .uri(&format!(
+            "/api/apps/{}/egress-rules",
+            app_record.id.as_str()
+        ))
         .header("authorization", owner.bearer())
         .to_request();
     let resp = test::call_service(&app, req).await;
@@ -246,7 +250,7 @@ async fn owner_can_write_list_and_delete_rules_of_both_forms() {
     // A name rule. The destination is normalised on the way in and the kind is
     // inferred rather than supplied.
     let req = post(
-        app_record.id,
+        &app_record.id,
         &owner.bearer(),
         serde_json::json!({
             "verdict": "accept",
@@ -276,7 +280,7 @@ async fn owner_can_write_list_and_delete_rules_of_both_forms() {
 
     // A range rule, written with host bits set, stored canonical.
     let req = post(
-        app_record.id,
+        &app_record.id,
         &owner.bearer(),
         serde_json::json!({
             "verdict": "accept",
@@ -296,7 +300,10 @@ async fn owner_can_write_list_and_delete_rules_of_both_forms() {
     assert_eq!(body["rule"]["kind"], "cidr");
 
     let req = test::TestRequest::get()
-        .uri(&format!("/api/apps/{}/egress-rules", app_record.id))
+        .uri(&format!(
+            "/api/apps/{}/egress-rules",
+            app_record.id.as_str()
+        ))
         .header("authorization", owner.bearer())
         .to_request();
     let resp = test::call_service(&app, req).await;
@@ -310,7 +317,10 @@ async fn owner_can_write_list_and_delete_rules_of_both_forms() {
     // canonicalised the same way, so the spelling that created the row is not
     // the only spelling that removes it.
     let req = test::TestRequest::delete()
-        .uri(&format!("/api/apps/{}/egress-rules", app_record.id))
+        .uri(&format!(
+            "/api/apps/{}/egress-rules",
+            app_record.id.as_str()
+        ))
         .header("authorization", owner.bearer())
         .set_json(&serde_json::json!({"destination": "SMTP.example.com", "port": 587}))
         .to_request();
@@ -319,7 +329,10 @@ async fn owner_can_write_list_and_delete_rules_of_both_forms() {
         StatusCode::NO_CONTENT
     );
     let req = test::TestRequest::delete()
-        .uri(&format!("/api/apps/{}/egress-rules", app_record.id))
+        .uri(&format!(
+            "/api/apps/{}/egress-rules",
+            app_record.id.as_str()
+        ))
         .header("authorization", owner.bearer())
         .set_json(&serde_json::json!({"destination": "198.51.100.9/24", "port": 443}))
         .to_request();
@@ -327,9 +340,9 @@ async fn owner_can_write_list_and_delete_rules_of_both_forms() {
         test::call_service(&app, req).await.status(),
         StatusCode::NO_CONTENT
     );
-    assert_eq!(count_rules(&fx.state.control_pg, app_record.id).await, 0);
+    assert_eq!(count_rules(&fx.state.control_pg, &app_record.id).await, 0);
 
-    cleanup_app(&fx.state.control_pg, app_record.id).await;
+    cleanup_app(&fx.state.control_pg, &app_record.id).await;
     owner.cleanup(&fx.state).await;
     drop(app);
     drop(fx);
@@ -359,7 +372,7 @@ async fn a_creator_cannot_touch_another_creators_app() {
     // "nothing to delete".
     egress_rules::upsert_rule(
         fx.state.control_pg.as_ref(),
-        app_record.id,
+        &app_record.id,
         &egress_rules::EgressRuleBody {
             verdict: Verdict::Accept,
             destination: "smtp.example.com".to_string(),
@@ -379,7 +392,10 @@ async fn a_creator_cannot_touch_another_creators_app() {
     .await;
 
     let read = test::TestRequest::get()
-        .uri(&format!("/api/apps/{}/egress-rules", app_record.id))
+        .uri(&format!(
+            "/api/apps/{}/egress-rules",
+            app_record.id.as_str()
+        ))
         .header("authorization", stranger.bearer())
         .to_request();
     assert_eq!(
@@ -389,7 +405,7 @@ async fn a_creator_cannot_touch_another_creators_app() {
     );
 
     let write = post(
-        app_record.id,
+        &app_record.id,
         &stranger.bearer(),
         serde_json::json!({"verdict": "accept", "destination": "evil.example.com", "port": 443}),
     )
@@ -400,7 +416,10 @@ async fn a_creator_cannot_touch_another_creators_app() {
     );
 
     let delete = test::TestRequest::delete()
-        .uri(&format!("/api/apps/{}/egress-rules", app_record.id))
+        .uri(&format!(
+            "/api/apps/{}/egress-rules",
+            app_record.id.as_str()
+        ))
         .header("authorization", stranger.bearer())
         .set_json(&serde_json::json!({"destination": "smtp.example.com", "port": 587}))
         .to_request();
@@ -410,12 +429,12 @@ async fn a_creator_cannot_touch_another_creators_app() {
     );
 
     assert_eq!(
-        count_rules(&fx.state.control_pg, app_record.id).await,
+        count_rules(&fx.state.control_pg, &app_record.id).await,
         1,
         "the stranger neither added nor removed a row"
     );
 
-    cleanup_app(&fx.state.control_pg, app_record.id).await;
+    cleanup_app(&fx.state.control_pg, &app_record.id).await;
     owner.cleanup(&fx.state).await;
     stranger.cleanup(&fx.state).await;
     drop(app);
@@ -504,7 +523,7 @@ async fn the_grammar_refuses_and_accepts_in_pairs() {
     let mut written = 0;
     for (verdict, destination, expected, what) in cases {
         let req = post(
-            app_record.id,
+            &app_record.id,
             &owner.bearer(),
             serde_json::json!({"verdict": verdict, "destination": destination, "port": 443}),
         )
@@ -527,14 +546,14 @@ async fn the_grammar_refuses_and_accepts_in_pairs() {
         assert_eq!(status, expected, "{verdict} {destination} ({what})");
     }
     assert_eq!(
-        count_rules(&fx.state.control_pg, app_record.id).await,
+        count_rules(&fx.state.control_pg, &app_record.id).await,
         written,
         "exactly the accepted half of each pair wrote a row"
     );
 
     // A body with no verdict is refused rather than assumed to mean accept.
     let req = post(
-        app_record.id,
+        &app_record.id,
         &owner.bearer(),
         serde_json::json!({"destination": "novrdct.example.com", "port": 443}),
     )
@@ -545,7 +564,7 @@ async fn the_grammar_refuses_and_accepts_in_pairs() {
         "a rule without a verdict is a 400, never a defaulted accept"
     );
 
-    cleanup_app(&fx.state.control_pg, app_record.id).await;
+    cleanup_app(&fx.state.control_pg, &app_record.id).await;
     owner.cleanup(&fx.state).await;
     drop(app);
     drop(fx);
@@ -579,7 +598,7 @@ async fn the_plan_cap_counts_accept_rules_and_not_reject_rules() {
     .await;
 
     let first = post(
-        app_record.id,
+        &app_record.id,
         &owner.bearer(),
         serde_json::json!({"verdict": "accept", "destination": "one.example.com", "port": 5432}),
     )
@@ -590,7 +609,7 @@ async fn the_plan_cap_counts_accept_rules_and_not_reject_rules() {
     );
 
     let second = post(
-        app_record.id,
+        &app_record.id,
         &owner.bearer(),
         serde_json::json!({"verdict": "accept", "destination": "two.example.com", "port": 5432}),
     )
@@ -611,7 +630,7 @@ async fn the_plan_cap_counts_accept_rules_and_not_reject_rules() {
     // A reject can only narrow what the app reaches, so charging it against
     // the accept ceiling would mean the ceiling caps safety.
     let reject = post(
-        app_record.id,
+        &app_record.id,
         &owner.bearer(),
         serde_json::json!({"verdict": "reject", "destination": "two.example.com", "port": 5432}),
     )
@@ -625,7 +644,7 @@ async fn the_plan_cap_counts_accept_rules_and_not_reject_rules() {
     // Re-noting the rule the app already holds is not a new row, so the cap
     // does not block it. Without this the ceiling would freeze an app's rules.
     let renote = post(
-        app_record.id,
+        &app_record.id,
         &owner.bearer(),
         serde_json::json!({
             "verdict": "accept",
@@ -641,9 +660,9 @@ async fn the_plan_cap_counts_accept_rules_and_not_reject_rules() {
         serde_json::from_slice(&test::read_body(resp).await).expect("renote json");
     assert_eq!(body["rule"]["note"], "primary replica");
 
-    assert_eq!(count_rules(&fx.state.control_pg, app_record.id).await, 2);
+    assert_eq!(count_rules(&fx.state.control_pg, &app_record.id).await, 2);
 
-    cleanup_app(&fx.state.control_pg, app_record.id).await;
+    cleanup_app(&fx.state.control_pg, &app_record.id).await;
     owner.cleanup(&fx.state).await;
     drop(app);
     drop(catalog);
@@ -685,7 +704,7 @@ async fn the_first_range_accept_rule_says_the_app_now_resolves_before_refusing()
     .await;
 
     let name_rule = post(
-        app_record.id,
+        &app_record.id,
         &owner.bearer(),
         serde_json::json!({"verdict": "accept", "destination": "api.example.com", "port": 443}),
     )
@@ -701,7 +720,7 @@ async fn the_first_range_accept_rule_says_the_app_now_resolves_before_refusing()
     // A range REJECT cannot turn a refusal into an admission, so it does not
     // open the gate and must not claim to.
     let range_reject = post(
-        app_record.id,
+        &app_record.id,
         &owner.bearer(),
         serde_json::json!({"verdict": "reject", "destination": "203.0.113.0/24", "port": 443}),
     )
@@ -716,7 +735,7 @@ async fn the_first_range_accept_rule_says_the_app_now_resolves_before_refusing()
     );
 
     let first_range = post(
-        app_record.id,
+        &app_record.id,
         &owner.bearer(),
         serde_json::json!({"verdict": "accept", "destination": "198.51.100.0/24", "port": 443}),
     )
@@ -742,7 +761,7 @@ async fn the_first_range_accept_rule_says_the_app_now_resolves_before_refusing()
     );
 
     let second_range = post(
-        app_record.id,
+        &app_record.id,
         &owner.bearer(),
         serde_json::json!({"verdict": "accept", "destination": "192.0.2.0/24", "port": 443}),
     )
@@ -756,7 +775,7 @@ async fn the_first_range_accept_rule_says_the_app_now_resolves_before_refusing()
         "the notice is a one-time statement about the app, not a label on range rules"
     );
 
-    cleanup_app(&fx.state.control_pg, app_record.id).await;
+    cleanup_app(&fx.state.control_pg, &app_record.id).await;
     owner.cleanup(&fx.state).await;
     drop(app);
     drop(fx);
@@ -799,12 +818,15 @@ async fn a_dead_accept_reports_the_effective_verdict() {
         // accept range.
         serde_json::json!({"verdict": "accept", "destination": "198.51.100.128/25", "port": 8443}),
     ] {
-        let req = post(app_record.id, &owner.bearer(), body).to_request();
+        let req = post(&app_record.id, &owner.bearer(), body).to_request();
         assert_eq!(test::call_service(&app, req).await.status(), StatusCode::OK);
     }
 
     let req = test::TestRequest::get()
-        .uri(&format!("/api/apps/{}/egress-rules", app_record.id))
+        .uri(&format!(
+            "/api/apps/{}/egress-rules",
+            app_record.id.as_str()
+        ))
         .header("authorization", owner.bearer())
         .to_request();
     let body: serde_json::Value =
@@ -834,7 +856,7 @@ async fn a_dead_accept_reports_the_effective_verdict() {
         "a reject at another port does not reach it"
     );
 
-    cleanup_app(&fx.state.control_pg, app_record.id).await;
+    cleanup_app(&fx.state.control_pg, &app_record.id).await;
     owner.cleanup(&fx.state).await;
     drop(app);
     drop(fx);

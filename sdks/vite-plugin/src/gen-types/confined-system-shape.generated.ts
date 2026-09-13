@@ -80,8 +80,8 @@ columns = [
   # id is deliberately defaultless - it is minted into the INSERT instead.
   #
   # TYPED-ID COMPARISON DOMAIN. id is the creator-visible row identity: prefix
-  # + "_" + a base62 UUIDv7. Its byte order is its creation-time order, so it
-  # must not inherit a locale collation that interleaves base62's case runs.
+  # + "_" + a base36 UUIDv7. Its byte order is its creation-time order, so it
+  # must not inherit a locale-dependent collation.
   # created_by and updated_by carry typed actor ids and belong to the same
   # comparison domain: mismatched collations change ordering and prevent
   # collation-compatible ordered index joins. All three therefore use the

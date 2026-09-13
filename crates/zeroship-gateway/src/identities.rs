@@ -7,7 +7,7 @@
 //! need to reverse `pws_` to `(app, global_user)`.
 //!
 //! The row is keyed on `(app_client_id, global_user_id)` where
-//! `app_client_id` is the per-app OAuth client_id (`oac_<base62>`). The
+//! `app_client_id` is the per-app OAuth client_id (`oac_<base36>`). The
 //! `pairwise_sub` is the deterministic `pws_…` projection (a column, not
 //! the PK: re-login / re-grant re-derives the SAME value and UPSERTS the
 //! one row). `relay_email` stays `NULL` until the consent flow populates it
@@ -19,7 +19,8 @@
 //! enumerates these rows to revoke access-only and cookie token families.
 
 use compio_postgres::Client;
-use zeroship_core::UserId;
+
+use zeroship_core::user_id::UserId;
 
 use crate::error::{GatewayError, Result};
 use crate::rls;
@@ -45,7 +46,7 @@ const fn identity_upsert_sql() -> &'static str {
 ///   - `relay_email` is LEFT UNTOUCHED, so the gateway projection never
 ///     clobbers an alias minted at consent time.
 ///
-/// `app_client_id` is the per-app OAuth client_id (`oac_<base62>`,
+/// `app_client_id` is the per-app OAuth client_id (`oac_<base36>`,
 /// `route.oauth_client_id`); `pairwise_sub` is the derived `pws_…`.
 ///
 /// # Errors
@@ -64,11 +65,11 @@ pub async fn upsert(
     rls::set_tenant_client(&tx, app_client_id).await?;
     let mapped = tx
         .execute(
-            identity_upsert_sql(),
-            &[&app_client_id, &global_user_id.as_str(), &pairwise_sub],
-        )
-        .await
-        .map_err(|e| GatewayError::Db(format!("app_user_identities upsert: {e}")))?;
+        identity_upsert_sql(),
+        &[&app_client_id, &global_user_id.as_str(), &pairwise_sub],
+    )
+    .await
+    .map_err(|e| GatewayError::Db(format!("app_user_identities upsert: {e}")))?;
     if mapped != 1 {
         return Err(GatewayError::Db(
             "app_user_identities pairwise binding changed".to_string(),
@@ -160,7 +161,8 @@ mod tests {
 
     #[test]
     fn mapping_upsert_refuses_pairwise_subject_rebinding() {
-        assert!(identity_upsert_sql()
-            .contains("WHERE zeroship.app_user_identities.pairwise_sub = EXCLUDED.pairwise_sub"));
+        assert!(identity_upsert_sql().contains(
+            "WHERE zeroship.app_user_identities.pairwise_sub = EXCLUDED.pairwise_sub"
+        ));
     }
 }

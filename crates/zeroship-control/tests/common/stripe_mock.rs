@@ -68,12 +68,16 @@ impl MockStripe {
 
     pub fn preload_invoice_item(&self, customer: &str, item_key: &str) -> String {
         let id = format!("ii_orphan_{}", short());
-        self.state.lock().unwrap().invoice_items.push(MockInvoiceItem {
-            id: id.clone(),
-            customer: customer.to_string(),
-            zs_item_key: Some(item_key.to_string()),
-            amount: 0,
-        });
+        self.state
+            .lock()
+            .unwrap()
+            .invoice_items
+            .push(MockInvoiceItem {
+                id: id.clone(),
+                customer: customer.to_string(),
+                zs_item_key: Some(item_key.to_string()),
+                amount: 0,
+            });
         id
     }
 
@@ -92,7 +96,9 @@ impl MockStripe {
 }
 
 pub async fn start_mock_stripe() -> MockStripe {
-    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind mock stripe");
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind mock stripe");
     let addr = listener.local_addr().expect("mock stripe local addr");
     let base_url = format!("http://{addr}");
     let state = Arc::new(Mutex::new(MockState {
@@ -208,7 +214,9 @@ fn handle_mock_request(req: &RecordedRequest, state: &Arc<Mutex<MockState>>) -> 
             st.invoice_items.retain(|item| item.id != id);
             st.requests.push(req.clone());
         }
-        return http_200_json(&format!(r#"{{"id":"{id}","object":"invoiceitem","deleted":true}}"#));
+        return http_200_json(&format!(
+            r#"{{"id":"{id}","object":"invoiceitem","deleted":true}}"#
+        ));
     }
 
     if req.method == "GET" && req.path.starts_with("/v1/invoiceitems") {
@@ -264,7 +272,10 @@ fn handle_mock_request(req: &RecordedRequest, state: &Arc<Mutex<MockState>>) -> 
     } else if is_invoice_create {
         format!(r#"{{"id":"{new_invoice_id}","object":"invoice","status":"draft"}}"#)
     } else if req.path.starts_with("/v1/invoices") {
-        format!(r#"{{"id":"in_mock_{}","object":"invoice","status":"draft"}}"#, short())
+        format!(
+            r#"{{"id":"in_mock_{}","object":"invoice","status":"draft"}}"#,
+            short()
+        )
     } else {
         r#"{"id":"obj_mock","object":"unknown"}"#.to_string()
     };
@@ -310,7 +321,9 @@ fn handle_mock_request(req: &RecordedRequest, state: &Arc<Mutex<MockState>>) -> 
         }
         st.requests.push(req.clone());
         if let Some(key) = req.idempotency_key.clone() {
-            st.idempotency_replies.entry(key).or_insert_with(|| json.clone());
+            st.idempotency_replies
+                .entry(key)
+                .or_insert_with(|| json.clone());
         }
     }
 

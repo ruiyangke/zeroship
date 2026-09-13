@@ -1015,14 +1015,14 @@ fn metering_kv_ops_counts_are_exact_and_per_app() {
     assert_ok(status, &body);
 
     let events = meter.drain();
-    let id = uuid::Uuid::parse_str(app_id).unwrap();
+    let id = zeroship_core::app_id::AppId::parse(app_id).unwrap();
     assert_eq!(
-        usage_value(&events, id, "kv_writes"),
+        usage_value(&events, &id, "kv_writes"),
         Some(3),
         "set + set + incr = 3 kv_writes; got {events:?}"
     );
     assert_eq!(
-        usage_value(&events, id, "kv_reads"),
+        usage_value(&events, &id, "kv_reads"),
         Some(2),
         "get + get(miss) = 2 kv_reads; got {events:?}"
     );
@@ -1052,10 +1052,10 @@ export default {
     assert_ok(status, &body);
 
     let events = meter.drain();
-    let id = uuid::Uuid::parse_str(app_id).unwrap();
+    let id = zeroship_core::app_id::AppId::parse(app_id).unwrap();
     // No successful op ⇒ no metric for this app at all (drain omits zero apps).
     assert!(
-        !events.iter().any(|event| event.subject.app == Some(id)),
+        !events.iter().any(|event| event.subject.app.as_ref() == Some(&id)),
         "a failed kv op must emit no metric; got {:?}",
         events
     );
@@ -1063,11 +1063,11 @@ export default {
 
 fn usage_value(
     events: &[zeroship_core::usage_event::UsageEvent],
-    app_id: uuid::Uuid,
+    app_id: &zeroship_core::app_id::AppId,
     meter: &str,
 ) -> Option<u64> {
     events
         .iter()
-        .find(|event| event.subject.app == Some(app_id) && event.meter == meter)
+        .find(|event| event.subject.app.as_ref() == Some(app_id) && event.meter == meter)
         .map(|event| event.value)
 }

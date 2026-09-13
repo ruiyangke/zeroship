@@ -10,7 +10,7 @@ use compio_tls::TlsAcceptor;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use rustls::server::{ClientHello, ResolvesServerCert};
 use rustls::sign::CertifiedKey;
-use uuid::Uuid;
+use zeroship_core::app_id::AppId;
 use zeroship_core::usage_event::UsageEvent;
 use zeroship_runtime::channel::CancelFlag;
 use zeroship_runtime::{EgressResolver, EgressRule, ResolveFuture, Verdict,
@@ -92,10 +92,10 @@ fn lock_env() -> MutexGuard<'static, ()> {
         .unwrap_or_else(|err| err.into_inner())
 }
 
-fn usage_value(events: &[UsageEvent], app_id: Uuid, meter: &str) -> Option<u64> {
+fn usage_value(events: &[UsageEvent], app_id: &AppId, meter: &str) -> Option<u64> {
     events
         .iter()
-        .find(|event| event.subject.app == Some(app_id) && event.meter == meter)
+        .find(|event| event.subject.app.as_ref() == Some(app_id) && event.meter == meter)
         .map(|event| event.value)
 }
 
@@ -223,7 +223,7 @@ async fn run_js_module(
     module_src: String,
     policy: NetPolicy,
     max_wait: Duration,
-    meter: Option<(Uuid, Arc<zeroship_metering::Meter>)>,
+    meter: Option<(AppId, Arc<zeroship_metering::Meter>)>,
 ) -> JsResult {
     let modules = vec![ModuleEntry {
         specifier: "index.js".to_string(),
@@ -1141,7 +1141,7 @@ return `writes=${{refused}}|flushed=${{flushed}}`;
 fn egress_ceiling_destroys_socket_and_feeds_spend_meter() {
     let _lock = lock_env();
     let _env = SettingsGuard::set(Settings { dev_mode: true, ..Settings::default() });
-    let app_id = Uuid::new_v4();
+    let app_id = AppId::mint();
     let meter = Arc::new(zeroship_metering::Meter::new());
     let result = compio::runtime::Runtime::new().unwrap().block_on(async {
         let addr = spawn_tcp_server(ServerMode::Idle).await;
@@ -1168,7 +1168,7 @@ return await new Promise((resolve) => {{
             ),
             allowlist("127.0.0.1", addr.port(), 4, 64),
             Duration::from_secs(5),
-            Some((app_id, Arc::clone(&meter))),
+            Some((app_id.clone(), Arc::clone(&meter))),
         )
         .await
     });
@@ -1180,12 +1180,12 @@ return await new Promise((resolve) => {{
     );
     let events = meter.drain();
     assert_eq!(
-        usage_value(&events, app_id, "egress_bytes"),
+        usage_value(&events, &app_id, "egress_bytes"),
         Some(40),
         "accepted socket egress must feed fixed spend metric"
     );
     assert_eq!(
-        usage_value(&events, app_id, "net_egress_bytes"),
+        usage_value(&events, &app_id, "net_egress_bytes"),
         Some(40),
         "net-specific attribution metric should also be stamped"
     );
@@ -1195,7 +1195,7 @@ return await new Promise((resolve) => {{
 fn socket_reads_feed_net_ingress_meter() {
     let _lock = lock_env();
     let _env = SettingsGuard::set(Settings { dev_mode: true, ..Settings::default() });
-    let app_id = Uuid::new_v4();
+    let app_id = AppId::mint();
     let meter = Arc::new(zeroship_metering::Meter::new());
     let result = compio::runtime::Runtime::new().unwrap().block_on(async {
         let addr = spawn_tcp_server(ServerMode::Echo).await;
@@ -1223,7 +1223,7 @@ return await new Promise((resolve) => {{
             ),
             allowlist("127.0.0.1", addr.port(), 4, 1024 * 1024),
             Duration::from_secs(5),
-            Some((app_id, Arc::clone(&meter))),
+            Some((app_id.clone(), Arc::clone(&meter))),
         )
         .await
     });
@@ -1231,12 +1231,12 @@ return await new Promise((resolve) => {{
     assert_eq!(result.body, "hello");
     let events = meter.drain();
     assert_eq!(
-        usage_value(&events, app_id, "ingress_bytes"),
+        usage_value(&events, &app_id, "ingress_bytes"),
         Some(5),
         "accepted socket reads feed fixed ingress metric"
     );
     assert_eq!(
-        usage_value(&events, app_id, "net_ingress_bytes"),
+        usage_value(&events, &app_id, "net_ingress_bytes"),
         Some(5),
         "net-specific ingress attribution metric should also be stamped"
     );

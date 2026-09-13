@@ -24,7 +24,7 @@ impl HoldScope {
     /// Stable journal identity for the app, preserved across worker replacement.
     #[must_use]
     pub fn for_app(app: AppId) -> Self {
-        let holder = format!("dhl_{}", typed_id::uuid_to_base62(&app.uuid()));
+        let holder = format!("dhl_{}", app.as_str().trim_start_matches("app_"));
         Self { app, holder }
     }
 

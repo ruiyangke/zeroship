@@ -146,11 +146,7 @@ async fn drop_schemas(session: &CompioPgSession, cfg: &ExecutorConfig) {
 /// policy (the platform's create-table policy) — the same normalisation the
 /// SQLite IR-apply test uses before lowering. `addColumn` ops pass through
 /// untouched.
-fn resolved_envelope_json(
-    raw: &str,
-    effective: &EffectivePolicy,
-    default_schema: &str,
-) -> String {
+fn resolved_envelope_json(raw: &str, effective: &EffectivePolicy, default_schema: &str) -> String {
     let ir: MigrationIr = serde_json::from_str(raw).expect("test IR parses");
     let resolved =
         resolve_create_table_policy(&ir, effective, default_schema).expect("test IR resolves");
@@ -271,9 +267,7 @@ async fn ir_envelope_lowers_and_applies_over_native_compio_seam() {
         .await
         .expect("idempotent re-apply");
     assert!(out2.is_noop(), "second apply is a no-op");
-    let applied2 = read_journal(&session, &cfg)
-        .await
-        .expect("journal re-read");
+    let applied2 = read_journal(&session, &cfg).await.expect("journal re-read");
     assert_eq!(
         applied2.len(),
         migrations.len(),

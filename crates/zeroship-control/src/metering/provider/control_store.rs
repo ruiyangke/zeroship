@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use uuid::Uuid;
+use zeroship_core::app_id::AppId;
 
 use super::{
     AdjustmentNote, BillingPeriod, IngestAck, InvoiceRef, LiteStore, ProviderError, UsageEvent,
@@ -69,7 +69,7 @@ impl LiteStore for ControlLiteStore {
         ))
     }
 
-    async fn owned_app_ids(&self, organization: &str) -> Result<Vec<Uuid>, ProviderError> {
+    async fn owned_app_ids(&self, organization: &str) -> Result<Vec<AppId>, ProviderError> {
         billing_reconcile::owned_app_ids_for_registry(&self.registry, organization)
             .await
             .map_err(ProviderError::from)
@@ -120,7 +120,7 @@ impl LiteStore for ControlLiteStore {
                 .query(
                     "SELECT total FROM zeroship.usage_aggregates \
                      WHERE app_id = $1 AND period = $2::date AND metric = $3",
-                    &[&app_id, &period, &meter],
+                    &[&app_id.as_str(), &period, &meter],
                 )
                 .await?;
             let Some(row) = rows.first() else {
@@ -162,9 +162,12 @@ impl LiteStore for ControlLiteStore {
         )
         .await?;
         if billed {
-            let invoice_id =
-                billing_reconcile::lookup_invoice_id_for_registry(&self.registry, organization, period.start)
-                    .await?;
+            let invoice_id = billing_reconcile::lookup_invoice_id_for_registry(
+                &self.registry,
+                organization,
+                period.start,
+            )
+            .await?;
             Ok(InvoiceRef(invoice_id))
         } else {
             Ok(InvoiceRef(None))
@@ -176,7 +179,7 @@ impl LiteStore for ControlLiteStore {
         organization: &str,
         note: &AdjustmentNote,
     ) -> Result<InvoiceRef, ProviderError> {
-        let app_id = note.app_id.ok_or_else(|| {
+        let app_id = note.app_id.as_ref().ok_or_else(|| {
             ProviderError::Config(
                 "adjustment_note requires an app_id for local invoice_lines bookkeeping"
                     .to_string(),
@@ -236,13 +239,17 @@ impl LiteStore for ControlLiteStore {
         }
 
         let plan_id = conn
-            .query("SELECT plan_id FROM zeroship.apps WHERE id = $1", &[&app_id])
+            .query(
+                "SELECT plan_id FROM zeroship.apps WHERE id = $1",
+                &[&app_id.as_str()],
+            )
             .await?
             .first()
             .map(|r| r.get::<_, String>("plan_id"))
             .ok_or_else(|| {
                 ProviderError::Store(format!(
-                    "adjustment_note app {app_id} has no current plan"
+                    "adjustment_note app {} has no current plan",
+                    app_id.as_str()
                 ))
             })?;
         if !conn
@@ -260,7 +267,7 @@ impl LiteStore for ControlLiteStore {
                 "SELECT COALESCE(MIN(segment_no), 32767)::smallint AS next_floor \
                  FROM zeroship.invoice_lines \
                  WHERE invoice_id = $1 AND app_id = $2 AND line_kind <> 'usage'",
-                &[&invoice_id, &app_id],
+                &[&invoice_id, &app_id.as_str()],
             )
             .await?;
         let floor: i16 = segment_row
@@ -301,7 +308,7 @@ impl LiteStore for ControlLiteStore {
              DO NOTHING",
             &[
                 &invoice_id,
-                &app_id,
+                &app_id.as_str(),
                 &segment_no,
                 &plan_id,
                 &note.amount_cents,

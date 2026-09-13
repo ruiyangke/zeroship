@@ -6,7 +6,7 @@ export function deploymentSchema(namespace) {
   deploys.create({
     columns: {
       id: t.text().notNull(),
-      app_id: t.uuid().notNull(),
+      app_id: t.text().notNull(),
       deploy_hash: t.text().notNull(),
       manifest_json: t.text().notNull(),
       created_at: t.timestamp().notNull().default(now()),
@@ -23,7 +23,7 @@ export function deploymentSchema(namespace) {
   table("app_deploy_holds", { schema: namespace }).create({
     columns: {
       id: t.text().notNull(),
-      app_id: t.uuid().notNull(),
+      app_id: t.text().notNull(),
       deploy_id: t.text().notNull(),
       holder_id: t.text().notNull(),
       generation: t.bigInt().notNull(),

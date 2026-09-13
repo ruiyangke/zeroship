@@ -121,9 +121,7 @@ async fn family_revocation_decision(
             // Cache the loaded marker (negative caching included) keyed on
             // `now`; re-read `Instant::now()` is unnecessary — the lookup is
             // fast and `now` is a tight upper bound on freshness.
-            state
-                .revocation_cache
-                .store(client_id, sub, revoked_after, now);
+            state.revocation_cache.store(client_id, sub, revoked_after, now);
             if zeroship_authz::wrapper_revocation::family_revoked_at(revoked_after, iat) {
                 RevocationDecision::Revoked
             } else {
@@ -354,8 +352,13 @@ async fn resolve_auth_inner(
         BearerOutcome::NotBearer => {}
     }
 
-    let session_user_header =
-        resolve_app_session_user_header_inner(req, state, request_id, oauth_client_id).await;
+    let session_user_header = resolve_app_session_user_header_inner(
+        req,
+        state,
+        request_id,
+        oauth_client_id,
+    )
+    .await;
     let session_user_header = match session_user_header {
         CookieOutcome::Allowed(header) => {
             // BFF anti-CSRF gate (spec §1.2/§2.3, P3). The SameSite=Lax
@@ -537,7 +540,7 @@ fn jwt_issuer_unverified(jwt: &str) -> Option<String> {
 ///
 /// Pairwise binding: the OP issuer already stamps app access tokens with a
 /// `pws_` subject. This path requires that shape and forwards it unchanged.
-/// Treating it as a global user ID and deriving again would produce a different
+/// Treating it as a global UUID and deriving again would produce a different
 /// identity that cannot match revocation or lifecycle state.
 async fn resolve_bearer_user_header(
     req: &HttpRequest,
@@ -567,7 +570,9 @@ async fn resolve_bearer_user_header(
     if iss == state.oidc_rp.issuer {
         // ── RAW-OP path (RFC 9068, non-browser clients) ────────────
         let Some(expected_client_id) = oauth_client_id else {
-            tracing::warn!("raw OP Bearer presented but route has no oauth_client_id; rejecting");
+            tracing::warn!(
+                "raw OP Bearer presented but route has no oauth_client_id; rejecting"
+            );
             return BearerOutcome::Invalid;
         };
         let claims = match state.oidc_rp.verify_access_token(token).await {
@@ -601,7 +606,11 @@ async fn resolve_bearer_user_header(
             );
             return BearerOutcome::Invalid;
         };
-        let expected_resource_audience = format!("app:{expected_app_id}");
+        // The audience is `app:` plus the app id's PRINTED form, which is what
+        // every other producer of this audience emits. Rendering the bits any
+        // other way builds a string that compiles, matches nothing, and shows
+        // up only against a live token.
+        let expected_resource_audience = format!("app:{}", expected_app_id.as_str());
         if !claims
             .aud
             .iter()
@@ -629,7 +638,12 @@ async fn resolve_bearer_user_header(
             return BearerOutcome::Invalid;
         }
         let pws_sub = claims.sub.clone();
-        if !credential_authentication_allows(state, expected_client_id, &pws_sub, claims.iat) {
+        if !credential_authentication_allows(
+            state,
+            expected_client_id,
+            &pws_sub,
+            claims.iat,
+        ) {
             tracing::warn!(sub = %pws_sub, "raw OP Bearer principal lifecycle rejected");
             return BearerOutcome::Invalid;
         }
@@ -666,7 +680,12 @@ async fn resolve_bearer_user_header(
                 RevocationDecision::Unavailable => return BearerOutcome::Invalid,
             }
         }
-        if !credential_authentication_allows(state, expected_client_id, &pws_sub, claims.iat) {
+        if !credential_authentication_allows(
+            state,
+            expected_client_id,
+            &pws_sub,
+            claims.iat,
+        ) {
             tracing::warn!(sub = %pws_sub, "raw OP Bearer lifecycle changed during verification");
             return BearerOutcome::Invalid;
         }
@@ -812,9 +831,7 @@ async fn resolve_app_session_user_header_inner(
     // client_id (un-provisioned app) we cannot bind, so refuse rather than
     // accept an unbound cookie — mirrors the raw OP Bearer arm.
     let Some(expected_client_id) = oauth_client_id else {
-        tracing::warn!(
-            "signed session cookie presented but route has no oauth_client_id; rejecting"
-        );
+        tracing::warn!("signed session cookie presented but route has no oauth_client_id; rejecting");
         return CookieOutcome::None;
     };
     let Some(verifier) = state.session_verifier.as_ref() else {
@@ -960,7 +977,6 @@ pub(super) fn extract_session_cookie(cookie_header: Option<&str>) -> Option<Stri
 #[cfg(test)]
 mod tests {
     use super::*;
-    use zeroship_core::UserId;
 
     #[test]
     fn extract_session_cookie_handles_empty_value() {
@@ -1061,10 +1077,7 @@ mod tests {
         };
         let owned = build_worker_user_from_access_claims(&claims);
         assert_eq!(owned.id, "usr_global");
-        assert_eq!(
-            owned.scopes,
-            vec!["openid".to_string(), "read:billing".to_string()]
-        );
+        assert_eq!(owned.scopes, vec!["openid".to_string(), "read:billing".to_string()]);
     }
 
     // ─── Bearer / cookie GateState fixtures ───────────────────────────
@@ -1087,7 +1100,10 @@ mod tests {
 
     #[async_trait::async_trait(?Send)]
     impl zeroship_bundle::BlobStore for StubBlobStore {
-        async fn get_blob(&self, _h: &str) -> Result<bytes::Bytes, zeroship_bundle::BlobError> {
+        async fn get_blob(
+            &self,
+            _h: &str,
+        ) -> Result<bytes::Bytes, zeroship_bundle::BlobError> {
             Err(zeroship_bundle::BlobError::NotFound("unused".into()))
         }
         fn local_path(&self, _h: &str) -> Option<std::path::PathBuf> {
@@ -1126,7 +1142,7 @@ mod tests {
         }
         async fn put_manifest(
             &self,
-            _a: &uuid::Uuid,
+            _a: &zeroship_core::app_id::AppId,
             _d: &str,
             _j: &[u8],
         ) -> Result<(), zeroship_bundle::BlobError> {
@@ -1134,21 +1150,21 @@ mod tests {
         }
         async fn get_manifest(
             &self,
-            _a: &uuid::Uuid,
+            _a: &zeroship_core::app_id::AppId,
             _d: &str,
         ) -> Result<bytes::Bytes, zeroship_bundle::BlobError> {
             Err(zeroship_bundle::BlobError::NotFound("unused".into()))
         }
         async fn delete_manifest(
             &self,
-            _a: &uuid::Uuid,
+            _a: &zeroship_core::app_id::AppId,
             _d: &str,
         ) -> Result<bool, zeroship_bundle::BlobError> {
             Ok(false)
         }
         async fn delete_app_manifests(
             &self,
-            _a: &uuid::Uuid,
+            _a: &zeroship_core::app_id::AppId,
         ) -> Result<(), zeroship_bundle::BlobError> {
             Ok(())
         }
@@ -1198,8 +1214,12 @@ mod tests {
         use std::sync::Arc as StdArc;
 
         let mut tmp = std::env::temp_dir();
-        tmp.push(format!("zsgate-auth-u4-{}", uuid::Uuid::new_v4().simple()));
-        let disk = crate::blob_cache::DiskBlobCache::new(tmp, 1024 * 1024).expect("disk cache");
+        tmp.push(format!(
+            "zsgate-auth-u4-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let disk = crate::blob_cache::DiskBlobCache::new(tmp, 1024 * 1024)
+            .expect("disk cache");
 
         // The signed session-cookie issuer/verifier comes from the configured key.
         let session_issuer =
@@ -1231,10 +1251,14 @@ mod tests {
             blob_store: StdArc::new(StubBlobStore),
             blob_cache: crate::blob_cache::BlobCache::new(8 * 1024 * 1024),
             disk_cache: disk,
-            idempotency_store: StdArc::new(crate::idempotency::InMemoryIdempotencyStore::new()),
+            idempotency_store: StdArc::new(
+                crate::idempotency::InMemoryIdempotencyStore::new(),
+            ),
             oidc_rp: StdArc::new(oidc_rp),
             db,
-            logout_jti_cache: StdArc::new(zeroship_core::logout_token::LogoutJtiCache::default()),
+            logout_jti_cache: StdArc::new(
+                zeroship_core::logout_token::LogoutJtiCache::default(),
+            ),
             revocation_cache: StdArc::new(
                 zeroship_authz::wrapper_revocation::RevocationCache::new(),
             ),
@@ -1272,30 +1296,33 @@ mod tests {
     /// dial URL from the `iss` the access JWT actually carries.
     const OP_ISS: &str = "https://auth.zeroship.ai/oauth2";
 
-    /// Fixed app UUIDs the raw-OP fixtures derive their `oac_` client ids and
-    /// resource audiences from. `OP_APP_UUID` is the single-app default;
-    /// `OP_APP_A_UUID`/`OP_APP_B_UUID` are the two genuinely distinct apps the
-    /// cross-app divergence test needs.
-    const OP_APP_UUID: &str = "0192f1aa-0000-7000-8000-0000000000a1";
-    const OP_APP_A_UUID: &str = "0192f1aa-0000-7000-8000-0000000000aa";
-    const OP_APP_B_UUID: &str = "0192f1aa-0000-7000-8000-0000000000bb";
+    /// Fixed app ids the raw-OP fixtures derive their `oac_` client ids and
+    /// resource audiences from. `OP_APP` is the single-app default; `OP_APP_A`
+    /// and `OP_APP_B` are the two genuinely distinct apps the cross-app
+    /// divergence test needs.
+    ///
+    /// Fixed rather than minted so a failure reproduces exactly. Each is a legal
+    /// app id body, because `op_app_binding` parses it - a hand-spelled label
+    /// would be refused there rather than by the arm under test.
+    const OP_APP: &str = "app_03crmczxba3ohg1cs4pvmt50h";
+    const OP_APP_A: &str = "app_03crmczxba3ohg1cs4pvmt50q";
+    const OP_APP_B: &str = "app_03crmczxba3ohg1cs4pvmt517";
 
     /// Mint the consistent `(client_id, resource_audience)` pair the raw-OP arm
     /// expects for one app, from a fixed app UUID.
     ///
-    /// The arm decodes the route's client id back to an app UUID via
-    /// `typed_id::app_id_from_oauth_client_id` (strip the `oac_` prefix, then
-    /// base62-decode the tail) and requires the token's `aud` to contain
-    /// `app:{app_uuid}`. A hand-written label such as `oac_myapp` has a tail
-    /// that does not base62-decode to a UUID, so the arm rejects it before any
-    /// binding or sector check is reached - fixtures on this path must derive
-    /// the client id from a real UUID rather than spell one out. The UUIDs are
-    /// fixed rather than random so a failure reproduces exactly.
-    fn op_app_binding(app_uuid: &str) -> (String, String) {
-        let app_id = Uuid::parse_str(app_uuid).expect("fixture app uuid parses");
+    /// The arm decodes the route's client id back to an `AppId` via
+    /// `typed_id::app_id_from_oauth_client_id` (strip the `oac_` prefix, parse
+    /// the tail as an app-id body) and requires the token's `aud` to contain
+    /// `app:<printed app id>`. A hand-written label such as `oac_myapp` has a
+    /// tail that is not a legal body, so the arm rejects it before any binding
+    /// or sector check is reached - fixtures on this path must derive the client
+    /// id from a real app id rather than spell one out.
+    fn op_app_binding(app: &str) -> (String, String) {
+        let app_id = zeroship_core::app_id::AppId::parse(app).expect("fixture app id parses");
         (
             zeroship_core::typed_id::app_oauth_client_id(&app_id),
-            format!("app:{app_id}"),
+            format!("app:{}", app_id.as_str()),
         )
     }
 
@@ -1457,7 +1484,9 @@ mod tests {
 
     /// A `User` policy that additionally demands `required` scopes, exercising
     /// the route-level scope gate.
-    fn user_policy_requiring(required: &[&str]) -> zeroship_bundle::compiled::EffectivePolicy {
+    fn user_policy_requiring(
+        required: &[&str],
+    ) -> zeroship_bundle::compiled::EffectivePolicy {
         let mut p = user_policy();
         p.required_scopes = required.iter().map(|s| s.to_string()).collect();
         p
@@ -1512,12 +1541,7 @@ mod tests {
         let host = "myapp.zeroship.ai";
         let config = csrf_config(zeroship_core::config::OriginScheme::Http, &[]);
         assert!(!cookie_csrf_rejected(
-            &csrf_req(
-                ntex::http::Method::GET,
-                host,
-                Some("https://evil.example"),
-                None
-            ),
+            &csrf_req(ntex::http::Method::GET, host, Some("https://evil.example"), None),
             &config,
         ));
         assert!(!cookie_csrf_rejected(
@@ -1542,12 +1566,7 @@ mod tests {
         ));
         // Sec-Fetch-Site absent is tolerated (advisory) when Origin matches.
         assert!(!cookie_csrf_rejected(
-            &csrf_req(
-                ntex::http::Method::POST,
-                host,
-                Some("http://myapp.zeroship.ai"),
-                None
-            ),
+            &csrf_req(ntex::http::Method::POST, host, Some("http://myapp.zeroship.ai"), None),
             &config,
         ));
     }
@@ -1616,12 +1635,7 @@ mod tests {
         let config = csrf_config(zeroship_core::config::OriginScheme::Http, &[]);
         // Foreign Origin on a state-changing POST rejects the cookie credential.
         assert!(cookie_csrf_rejected(
-            &csrf_req(
-                ntex::http::Method::POST,
-                host,
-                Some("https://evil.example"),
-                None
-            ),
+            &csrf_req(ntex::http::Method::POST, host, Some("https://evil.example"), None),
             &config,
         ));
         // Missing Origin on a state-changing POST has no origin to match.
@@ -1645,11 +1659,7 @@ mod tests {
             &config,
         ));
         // PUT/PATCH/DELETE are state-changing too.
-        for m in [
-            ntex::http::Method::PUT,
-            ntex::http::Method::PATCH,
-            ntex::http::Method::DELETE,
-        ] {
+        for m in [ntex::http::Method::PUT, ntex::http::Method::PATCH, ntex::http::Method::DELETE] {
             assert!(
                 cookie_csrf_rejected(
                     &csrf_req(m.clone(), host, Some("https://evil.example"), None),
@@ -1665,41 +1675,21 @@ mod tests {
         let host = "myapp.zeroship.ai";
         let https_config = csrf_config(zeroship_core::config::OriginScheme::Https, &[]);
         assert!(!cookie_csrf_rejected(
-            &csrf_req(
-                ntex::http::Method::POST,
-                host,
-                Some("https://myapp.zeroship.ai"),
-                Some("same-origin")
-            ),
+            &csrf_req(ntex::http::Method::POST, host, Some("https://myapp.zeroship.ai"), Some("same-origin")),
             &https_config,
         ));
         assert!(cookie_csrf_rejected(
-            &csrf_req(
-                ntex::http::Method::POST,
-                host,
-                Some("http://myapp.zeroship.ai"),
-                None
-            ),
+            &csrf_req(ntex::http::Method::POST, host, Some("http://myapp.zeroship.ai"), None),
             &https_config,
         ));
 
         let http_config = csrf_config(zeroship_core::config::OriginScheme::Http, &[]);
         assert!(!cookie_csrf_rejected(
-            &csrf_req(
-                ntex::http::Method::POST,
-                host,
-                Some("http://myapp.zeroship.ai"),
-                None
-            ),
+            &csrf_req(ntex::http::Method::POST, host, Some("http://myapp.zeroship.ai"), None),
             &http_config,
         ));
         assert!(cookie_csrf_rejected(
-            &csrf_req(
-                ntex::http::Method::POST,
-                host,
-                Some("https://myapp.zeroship.ai"),
-                None
-            ),
+            &csrf_req(ntex::http::Method::POST, host, Some("https://myapp.zeroship.ai"), None),
             &http_config,
         ));
     }
@@ -1823,12 +1813,7 @@ mod tests {
     // scopes regardless of which arm authenticated.)
 
     /// Build a GET request carrying a signed session cookie for the cookie arm.
-    fn scope_cookie_req(
-        state: &crate::GateState,
-        client_id: &str,
-        scopes: &[&str],
-        aud: &str,
-    ) -> ntex::web::HttpRequest {
+    fn scope_cookie_req(state: &crate::GateState, client_id: &str, scopes: &[&str], aud: &str) -> ntex::web::HttpRequest {
         let scopes: Vec<String> = scopes.iter().map(|s| (*s).to_string()).collect();
         let pws = format!("pws_{}", &Uuid::new_v4().simple().to_string()[..20]);
         let token =
@@ -1878,12 +1863,7 @@ mod tests {
         let gateway_signing = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
         let state = build_state_with_session(gateway_signing);
         let aud = "myapp.zeroship.ai";
-        let req = scope_cookie_req(
-            &state,
-            "oac_myapp",
-            &["openid", "email", "read:billing"],
-            aud,
-        );
+        let req = scope_cookie_req(&state, "oac_myapp", &["openid", "email", "read:billing"], aud);
         let request_id = Uuid::new_v4();
 
         let outcome = resolve_auth(
@@ -1908,7 +1888,7 @@ mod tests {
             .expect("the test gateway signs")
             .own_verifier()
             .verify(&header)
-            .expect("ZeroShip-User MAC verifies");
+        .expect("ZeroShip-User MAC verifies");
         let user: serde_json::Value = serde_json::from_str(&json).expect("user json");
         assert!(
             user["scopes"]
@@ -1940,12 +1920,7 @@ mod tests {
         )
         .await;
         assert!(
-            matches!(
-                outcome,
-                AuthOutcome::Allowed {
-                    user_header: Some(_)
-                }
-            ),
+            matches!(outcome, AuthOutcome::Allowed { user_header: Some(_) }),
             "empty required_scopes ⇒ no scope gate, got {outcome:?}"
         );
     }
@@ -1975,12 +1950,7 @@ mod tests {
         )
         .await;
         assert!(
-            matches!(
-                outcome,
-                AuthOutcome::Allowed {
-                    user_header: Some(_)
-                }
-            ),
+            matches!(outcome, AuthOutcome::Allowed { user_header: Some(_) }),
             "granted superset must pass the scope gate, got {outcome:?}"
         );
     }
@@ -2045,12 +2015,7 @@ mod tests {
         )
         .await;
         assert!(
-            matches!(
-                outcome,
-                AuthOutcome::Allowed {
-                    user_header: Some(_)
-                }
-            ),
+            matches!(outcome, AuthOutcome::Allowed { user_header: Some(_) }),
             "underscoped authenticated principal on an Anonymous route must be Allowed, \
              never scope-403'd, got {outcome:?}"
         );
@@ -2102,17 +2067,17 @@ mod tests {
         // Happy path (raw OP): a real EdDSA-signed access JWT,
         // JWKS-verified against a live JWKS server, with a matching
         // client_id claim produces Allowed + ZeroShip-User whose id is the
-        // issuer-projected per-app pws_; no global user ID reaches the worker.
+        // issuer-projected per-app pws_; no global UUID reaches the worker.
         let jwks_signing = ed25519_dalek::SigningKey::from_bytes(&[55u8; 32]); // OP's key
         let gateway_signing = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]); // gateway wrapper key
         let srv = start_jwks_server(op_jwks_doc(&jwks_signing)).await;
         let base = srv.url("").trim_end_matches('/').to_string();
         let state = build_state_for_op(gateway_signing, &base);
 
-        let global_sub = UserId::mint();
+        let global_sub = zeroship_core::user_id::UserId::mint();
         let sector = "https://myapp.zeroship.ai";
         let host = "myapp.zeroship.ai";
-        let (client_id, resource_aud) = op_app_binding(OP_APP_UUID);
+        let (client_id, resource_aud) = op_app_binding(OP_APP);
         let expected_pws =
             zeroship_core::auth::derive_pairwise(&state.pairwise_salt, &global_sub, sector);
         let token = sign_op_access_jwt(
@@ -2129,9 +2094,14 @@ mod tests {
 
         let req = bearer_req(&token, host);
         let request_id = Uuid::new_v4();
-        let outcome =
-            resolve_bearer_user_header(&req, &state, &request_id, Some(&client_id), Some(sector))
-                .await;
+        let outcome = resolve_bearer_user_header(
+            &req,
+            &state,
+            &request_id,
+            Some(&client_id),
+            Some(sector),
+        )
+        .await;
         let BearerOutcome::Allowed(header) = outcome else {
             panic!("expected Allowed, got {outcome:?}");
         };
@@ -2141,17 +2111,17 @@ mod tests {
             .expect("the test gateway signs")
             .own_verifier()
             .verify(&header)
-            .expect("MAC verifies");
+        .expect("MAC verifies");
         let user: serde_json::Value = serde_json::from_str(&json).expect("user json");
         assert_eq!(user["id"], expected_pws);
         assert!(
             expected_pws.starts_with("pws_"),
             "id must be a pws_, got {expected_pws}"
         );
-        // The global user ID must NOT appear anywhere in the worker header JSON.
+        // The global user id must NOT appear anywhere in the worker header JSON.
         assert!(
             !json.contains(global_sub.as_str()),
-            "global user ID leaked into ZeroShip-User: {json}"
+            "global user id leaked into ZeroShip-User: {json}"
         );
         // Email-claim swap: the app NEVER sees the real email.
         // With no DB/alias source here (`build_state_for_op` db=None) the
@@ -2182,7 +2152,7 @@ mod tests {
         let state = build_state_for_op(gateway_signing, &base);
 
         let host = "myapp.zeroship.ai";
-        let (client_id, resource_aud) = op_app_binding(OP_APP_UUID);
+        let (client_id, resource_aud) = op_app_binding(OP_APP);
         let token = sign_op_access_jwt(
             &jwks_signing,
             "0192f1aa-bbbb-7ccc-8ddd-eeeeffff0002",
@@ -2228,10 +2198,9 @@ mod tests {
         let state = build_state_for_op(gateway_signing, &base);
 
         let aud = "myapp.zeroship.ai";
-        let global_user_id = UserId::mint();
         let token = sign_op_access_jwt(
             &jwks_signing,
-            global_user_id.as_str(),
+            "usr_global_uuid",
             Some("oac_app_a"),
             serde_json::json!(["http://api.zeroship.localhost"]),
             "user@example.com",
@@ -2262,10 +2231,9 @@ mod tests {
         let state = build_state_for_op(gateway_signing, &base);
 
         let aud = "myapp.zeroship.ai";
-        let global_user_id = UserId::mint();
         let token = sign_op_access_jwt(
             &jwks_signing,
-            global_user_id.as_str(),
+            "usr_global_uuid",
             Some("oac_myapp"),
             serde_json::json!(["http://api.zeroship.localhost"]),
             "user@example.com",
@@ -2297,12 +2265,11 @@ mod tests {
         let state = build_state_for_op(gateway_signing, &base);
 
         let aud = "myapp.zeroship.ai";
-        let global_user_id = UserId::mint();
         // Signed by forged key → its kid won't be in the JWKS (the kid is
         // the thumbprint of the forged public half).
         let token = sign_op_access_jwt(
             &forged_signing,
-            global_user_id.as_str(),
+            "usr_global_uuid",
             Some("oac_myapp"),
             serde_json::json!(["http://api.zeroship.localhost"]),
             "user@example.com",
@@ -2344,10 +2311,7 @@ mod tests {
             None,
         )
         .await;
-        assert!(matches!(
-            anonymous,
-            AuthOutcome::Allowed { user_header: None }
-        ));
+        assert!(matches!(anonymous, AuthOutcome::Allowed { user_header: None }));
         let gated = resolve_auth(
             &req,
             &state,
@@ -2399,7 +2363,7 @@ mod tests {
         // A fresh global sub per run: this test WRITES a revocation marker, and
         // a fixed sub would leave a row that makes the next run's "not revoked"
         // arm depend on the previous run.
-        let sub = UserId::mint();
+        let sub = zeroship_core::user_id::UserId::mint();
 
         // Two genuinely distinct apps, built with the same `op_app_binding`
         // helper the sibling per-app tests use.
@@ -2407,15 +2371,15 @@ mod tests {
         // This test used to hand the arm the placeholder strings "oac_app_a" /
         // "oac_app_b" and a resource audience of "http://api.zeroship.localhost".
         // Neither is what the arm accepts: a per-app client_id is
-        // `oac_<base62(app uuid)>`, which the arm PARSES back to an app id
+        // `oac_<base36(app uuid)>`, which the arm PARSES back to an app id
         // before it consults revocation at all, and `aud` must carry that app's
         // `app:{app_id}` resource audience. So both tokens were refused on the
         // shape check ("route client_id is not a per-app OAuth client"), which
         // failed the app B assertion outright AND made the app A assertion pass
         // for the wrong reason - the token was rejected as malformed, not as
         // revoked. The property this test claims to prove was never exercised.
-        let (client_a, resource_aud_a) = op_app_binding(OP_APP_A_UUID);
-        let (client_b, resource_aud_b) = op_app_binding(OP_APP_B_UUID);
+        let (client_a, resource_aud_a) = op_app_binding(OP_APP_A);
+        let (client_b, resource_aud_b) = op_app_binding(OP_APP_B);
         assert_ne!(client_a, client_b, "fixture must model two DIFFERENT apps");
         assert_ne!(resource_aud_a, resource_aud_b);
         let sector_a = "https://app-a.zeroship.ai";
@@ -2526,10 +2490,10 @@ mod tests {
         let base = srv.url("").trim_end_matches('/').to_string();
         let state = build_state_for_op(gateway_signing, &base);
 
-        let global_sub = UserId::mint();
+        let global_sub = zeroship_core::user_id::UserId::mint();
         let sector = "https://myapp.zeroship.ai";
         let host = "myapp.zeroship.ai";
-        let (client_id, resource_aud) = op_app_binding(OP_APP_UUID);
+        let (client_id, resource_aud) = op_app_binding(OP_APP);
         let pws_sub =
             zeroship_core::auth::derive_pairwise(&state.pairwise_salt, &global_sub, sector);
         let token = sign_op_access_jwt(
@@ -2565,17 +2529,14 @@ mod tests {
             .expect("the test gateway signs")
             .own_verifier()
             .verify(&header)
-            .expect("MAC verifies");
+        .expect("MAC verifies");
         let user: serde_json::Value = serde_json::from_str(&json).expect("user json");
         // The OP-issued per-app pws_ survives resolve_auth unchanged; the
-        // global user ID never reaches the worker header.
+        // global UUID never reaches the worker header.
         let expected_pws =
             zeroship_core::auth::derive_pairwise(&state.pairwise_salt, &global_sub, sector);
         assert_eq!(user["id"], expected_pws);
-        assert!(
-            !json.contains(global_sub.as_str()),
-            "global user id leaked: {json}"
-        );
+        assert!(!json.contains(global_sub.as_str()), "global user id leaked: {json}");
 
         drop(srv);
     }
@@ -2609,8 +2570,7 @@ mod tests {
         let pws = format!("pws_{}", &Uuid::new_v4().simple().to_string()[..20]);
 
         // Mint a REAL, currently-valid SIGNED cookie for a user.
-        let signed =
-            issue_signed_session_cookie(&state, client_id, &pws, "relay-alias@zeroship.ai", &[]);
+        let signed = issue_signed_session_cookie(&state, client_id, &pws, "relay-alias@zeroship.ai", &[]);
 
         // Sanity: that cookie ALONE (no Bearer) authenticates the User route.
         let cookie_name = oidc_rp::app_session_cookie_name();
@@ -2656,10 +2616,7 @@ mod tests {
         let shadowed_req = ntex::web::test::TestRequest::default()
             .uri("/api/me")
             .header(http::header::HOST, aud)
-            .header(
-                http::header::AUTHORIZATION,
-                format!("Bearer {unverifiable_bearer}"),
-            )
+            .header(http::header::AUTHORIZATION, format!("Bearer {unverifiable_bearer}"))
             .header("cookie", format!("{cookie_name}={signed}"))
             .to_http_request();
         let outcome = resolve_auth(
@@ -2722,12 +2679,7 @@ mod tests {
         .await;
 
         assert!(
-            matches!(
-                outcome,
-                AuthOutcome::Allowed {
-                    user_header: Some(_)
-                }
-            ),
+            matches!(outcome, AuthOutcome::Allowed { user_header: Some(_) }),
             "signed cookie granting read:billing must pass the scope gate, got {outcome:?}"
         );
     }
@@ -2782,12 +2734,12 @@ mod tests {
     // (1) cross-app divergence (same user, two apps → different pws_);
     // (2) cross-arm + re-login consistency (the issuer and cookie minter
     //     produce the SAME pws_ for the same (user, app));
-    // (3) the global user ID is ABSENT from every outward `ZeroShip-User`;
+    // (3) the global UUID is ABSENT from every outward `ZeroShip-User`;
     // (4) fail-closed 503 when the route has no sector yet.
     // The DB upsert + cookie arm are PG-gated (skip when there is no test
     // database, like the revocation tests); the in-memory arms run always.
 
-    /// A fixed global user ID + two distinct app sectors. A `pws_` derived for
+    /// A fixed global UUID + two distinct app sectors. A `pws_` derived for
     /// the SAME user under DIFFERENT sectors MUST differ — no cross-app
     /// correlation. This is the cross-app divergence property at the
     /// gateway boundary, asserted against the raw OP arm's emitted header.
@@ -2799,13 +2751,13 @@ mod tests {
         let base = srv.url("").trim_end_matches('/').to_string();
         let state = build_state_for_op(gateway_signing, &base);
 
-        let global_sub = UserId::mint();
+        let global_sub = zeroship_core::user_id::UserId::mint();
 
         // Two genuinely distinct apps: distinct UUIDs, hence distinct client
         // ids and distinct resource audiences. Guarded, because the whole
         // property under test evaporates if both sides are the same app.
-        let (client_a, resource_aud_a) = op_app_binding(OP_APP_A_UUID);
-        let (client_b, resource_aud_b) = op_app_binding(OP_APP_B_UUID);
+        let (client_a, resource_aud_a) = op_app_binding(OP_APP_A);
+        let (client_b, resource_aud_b) = op_app_binding(OP_APP_B);
         assert_ne!(client_a, client_b, "fixture must model two DIFFERENT apps");
         assert_ne!(resource_aud_a, resource_aud_b);
         let pws_a = zeroship_core::auth::derive_pairwise(
@@ -2874,7 +2826,7 @@ mod tests {
             id_a, id_b,
             "same user on two apps must get DIFFERENT pws_ (cross-app divergence)"
         );
-        // The global user ID never appears in either outward header.
+        // The global UUID never appears in either outward header.
         assert!(!id_a.contains(global_sub.as_str()) && !id_b.contains(global_sub.as_str()));
 
         drop(srv);
@@ -2882,7 +2834,7 @@ mod tests {
 
     /// The OP already mints app access tokens with a pairwise subject. The
     /// gateway must forward that verified `pws_` unchanged rather than hashing
-    /// it a second time as though it were a global user ID.
+    /// it a second time as though it were a global UUID.
     #[ntex::test]
     async fn raw_op_pws_is_consistent_across_arms_and_relogin() {
         let jwks_signing = ed25519_dalek::SigningKey::from_bytes(&[55u8; 32]);
@@ -2891,10 +2843,10 @@ mod tests {
         let base = srv.url("").trim_end_matches('/').to_string();
         let state = build_state_for_op(gateway_signing, &base);
 
-        let global_sub = UserId::mint();
+        let global_sub = zeroship_core::user_id::UserId::mint();
         let sector = "https://myapp.zeroship.ai";
         let host = "myapp.zeroship.ai";
-        let (client_id, resource_aud) = op_app_binding(OP_APP_UUID);
+        let (client_id, resource_aud) = op_app_binding(OP_APP);
         let issued_pws =
             zeroship_core::auth::derive_pairwise(&state.pairwise_salt, &global_sub, sector);
 
@@ -2934,15 +2886,18 @@ mod tests {
         let base = srv.url("").trim_end_matches('/').to_string();
         let state = build_state_for_op(gateway_signing, &base);
 
-        let user_id = UserId::mint();
+        let user_id = zeroship_core::user_id::UserId::mint();
         let sector = "https://myapp.zeroship.ai";
         let host = "myapp.zeroship.ai";
-        let (client_id, resource_aud) = op_app_binding(OP_APP_UUID);
-        let issued_pws =
-            zeroship_core::auth::derive_pairwise(&state.pairwise_salt, &user_id, sector);
+        let (client_id, resource_aud) = op_app_binding(OP_APP);
+        let issued_pws = zeroship_core::auth::derive_pairwise(
+            &state.pairwise_salt,
+            &user_id,
+            sector,
+        );
         let mut routes = zeroship_core::types::RouteMap::new();
         routes.insert(
-            Uuid::parse_str(OP_APP_UUID).unwrap(),
+            zeroship_core::app_id::AppId::mint(),
             zeroship_core::types::RouteEntry {
                 name: host.to_string(),
                 plan_id: "free".to_string(),
@@ -3008,7 +2963,7 @@ mod tests {
         // so the ONLY thing that can stop it is the missing sector - i.e. the
         // request really does reach the fail-closed check rather than being
         // turned away by an earlier binding rejection.
-        let (client_id, resource_aud) = op_app_binding(OP_APP_UUID);
+        let (client_id, resource_aud) = op_app_binding(OP_APP);
         let token = sign_op_access_jwt(
             &jwks_signing,
             "0192f1aa-bbbb-7ccc-8ddd-eeeeffff0099",
@@ -3021,15 +2976,23 @@ mod tests {
         let req = bearer_req(&token, "myapp.zeroship.ai");
         let rid = Uuid::new_v4();
         // No sector → fail closed.
-        let outcome = resolve_bearer_user_header(&req, &state, &rid, Some(&client_id), None).await;
+        let outcome =
+            resolve_bearer_user_header(&req, &state, &rid, Some(&client_id), None).await;
         assert!(
             matches!(outcome, BearerOutcome::ClientNotProvisioned),
             "no sector_identifier must fail closed (ClientNotProvisioned), got {outcome:?}"
         );
 
         // And end-to-end through resolve_auth → AuthOutcome::ClientNotProvisioned.
-        let outcome =
-            resolve_auth(&req, &state, &user_policy(), &rid, Some(&client_id), None).await;
+        let outcome = resolve_auth(
+            &req,
+            &state,
+            &user_policy(),
+            &rid,
+            Some(&client_id),
+            None,
+        )
+        .await;
         assert!(
             matches!(outcome, AuthOutcome::ClientNotProvisioned),
             "resolve_auth must surface ClientNotProvisioned (→ 503), got {outcome:?}"
@@ -3046,7 +3009,7 @@ mod tests {
             .expect("the test gateway signs")
             .own_verifier()
             .verify(header)
-            .expect("ZeroShip-User MAC verifies");
+        .expect("ZeroShip-User MAC verifies");
         let v: serde_json::Value = serde_json::from_str(&json).expect("user json");
         v["id"].as_str().expect("id is a string").to_string()
     }
@@ -3085,14 +3048,14 @@ mod tests {
 
     fn install_disabled_principal_snapshot(
         state: &crate::GateState,
-        user_id: &UserId,
+        user_id: zeroship_core::user_id::UserId,
         client_id: &str,
         sector: &str,
         host: &str,
     ) {
         let mut routes = zeroship_core::types::RouteMap::new();
         routes.insert(
-            Uuid::new_v4(),
+            zeroship_core::app_id::AppId::mint(),
             zeroship_core::types::RouteEntry {
                 name: host.to_string(),
                 plan_id: "free".to_string(),
@@ -3104,9 +3067,13 @@ mod tests {
                 account_state: zeroship_core::types::AccountState::Active,
             },
         );
-        let pairwise = zeroship_core::auth::derive_pairwise(&state.pairwise_salt, user_id, sector);
+        let pairwise = zeroship_core::auth::derive_pairwise(
+            &state.pairwise_salt,
+            &user_id,
+            sector,
+        );
         let lifecycle = zeroship_core::types::GatewayPrincipalLifecycle::disabled(
-            user_id.clone(),
+            user_id,
             vec![pairwise],
         );
         state.routes.update_snapshot(
@@ -3140,13 +3107,8 @@ mod tests {
         let client_id = "oac_myapp";
         let pws = format!("pws_{}", &Uuid::new_v4().simple().to_string()[..20]);
         let scopes = vec!["openid".to_string(), "email".to_string()];
-        let token = issue_signed_session_cookie(
-            &state,
-            client_id,
-            &pws,
-            "relay-alias@zeroship.ai",
-            &scopes,
-        );
+        let token =
+            issue_signed_session_cookie(&state, client_id, &pws, "relay-alias@zeroship.ai", &scopes);
 
         let cookie_name = oidc_rp::app_session_cookie_name();
         let req = ntex::web::test::TestRequest::default()
@@ -3156,8 +3118,13 @@ mod tests {
             .to_http_request();
         let rid = Uuid::new_v4();
 
-        let outcome =
-            resolve_app_session_user_header_inner(&req, &state, &rid, Some(client_id)).await;
+        let outcome = resolve_app_session_user_header_inner(
+            &req,
+            &state,
+            &rid,
+            Some(client_id),
+        )
+        .await;
         let CookieOutcome::Allowed(header) = outcome else {
             panic!("a valid signed cookie must Allow with db=None, got {outcome:?}");
         };
@@ -3170,12 +3137,9 @@ mod tests {
             .expect("the test gateway signs")
             .own_verifier()
             .verify(&header)
-            .expect("MAC verifies");
+        .expect("MAC verifies");
         let user: serde_json::Value = serde_json::from_str(&json).expect("user json");
-        assert_eq!(
-            user["email"], "relay-alias@zeroship.ai",
-            "relay alias from claim"
-        );
+        assert_eq!(user["email"], "relay-alias@zeroship.ai", "relay alias from claim");
         assert_eq!(
             user["scopes"],
             serde_json::json!(["openid", "email"]),
@@ -3190,12 +3154,16 @@ mod tests {
             "http://127.0.0.1:1",
             None,
         );
-        let user_id = UserId::mint();
+        let user_id = zeroship_core::user_id::UserId::mint();
         let client_id = "oac_cookie_lifecycle";
         let sector = "https://cookie-lifecycle.zeroship.test";
         let host = "cookie-lifecycle.zeroship.test";
-        install_disabled_principal_snapshot(&state, &user_id, client_id, sector, host);
-        let pws = zeroship_core::auth::derive_pairwise(&state.pairwise_salt, &user_id, sector);
+        install_disabled_principal_snapshot(&state, user_id.clone(), client_id, sector, host);
+        let pws = zeroship_core::auth::derive_pairwise(
+            &state.pairwise_salt,
+            &user_id,
+            sector,
+        );
         let token = issue_signed_session_cookie(&state, client_id, &pws, "", &[]);
         let req = ntex::web::test::TestRequest::default()
             .uri("/api/me")
@@ -3206,9 +3174,13 @@ mod tests {
             )
             .to_http_request();
 
-        let outcome =
-            resolve_app_session_user_header_inner(&req, &state, &Uuid::new_v4(), Some(client_id))
-                .await;
+        let outcome = resolve_app_session_user_header_inner(
+            &req,
+            &state,
+            &Uuid::new_v4(),
+            Some(client_id),
+        )
+        .await;
         assert!(
             matches!(outcome, CookieOutcome::None),
             "a disabled principal's signed cookie must be rejected, got {outcome:?}"
@@ -3222,17 +3194,21 @@ mod tests {
             "http://127.0.0.1:1",
             None,
         );
-        let user_id = UserId::mint();
+        let user_id = zeroship_core::user_id::UserId::mint();
         let client_id = "oac_sign_lifecycle";
         let sector = "https://sign-lifecycle.zeroship.test";
         install_disabled_principal_snapshot(
             &state,
-            &user_id,
+            user_id.clone(),
             client_id,
             sector,
             "sign-lifecycle.zeroship.test",
         );
-        let pws = zeroship_core::auth::derive_pairwise(&state.pairwise_salt, &user_id, sector);
+        let pws = zeroship_core::auth::derive_pairwise(
+            &state.pairwise_salt,
+            &user_id,
+            sector,
+        );
 
         let result = crate::auth_token::sign_session_cookie(
             &state,
@@ -3258,11 +3234,8 @@ mod tests {
     #[ntex::test]
     async fn cookie_arm_rejects_tampered_expired_wrong_app_wrong_kid() {
         let gateway_signing = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
-        let state = build_state_with_session_and_auth_ui_url_and_db(
-            gateway_signing,
-            "http://127.0.0.1:1",
-            None,
-        );
+        let state =
+            build_state_with_session_and_auth_ui_url_and_db(gateway_signing, "http://127.0.0.1:1", None);
         let aud = "myapp.zeroship.ai";
         let client_id = "oac_myapp";
         let pws = format!("pws_{}", &Uuid::new_v4().simple().to_string()[..20]);
@@ -3426,11 +3399,8 @@ mod tests {
     #[ntex::test]
     async fn typ_separation_session_cookie_vs_at_jwt_both_ways() {
         let gateway_signing = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
-        let state = build_state_with_session_and_auth_ui_url_and_db(
-            gateway_signing.clone(),
-            "http://127.0.0.1:1",
-            None,
-        );
+        let state =
+            build_state_with_session_and_auth_ui_url_and_db(gateway_signing.clone(), "http://127.0.0.1:1", None);
         let aud = "myapp.zeroship.ai";
         let client_id = "oac_myapp";
         let pws = format!("pws_{}", &Uuid::new_v4().simple().to_string()[..20]);
@@ -3456,8 +3426,13 @@ mod tests {
             .header(http::header::HOST, aud)
             .header("cookie", format!("{cookie_name}={at_jwt}"))
             .to_http_request();
-        let cookie_outcome =
-            resolve_app_session_user_header_inner(&req, &state, &rid, Some(client_id)).await;
+        let cookie_outcome = resolve_app_session_user_header_inner(
+            &req,
+            &state,
+            &rid,
+            Some(client_id),
+        )
+        .await;
         assert!(
             matches!(cookie_outcome, CookieOutcome::None),
             "an at+jwt typ token must be rejected by the session-cookie arm, got {cookie_outcome:?}"
@@ -3493,8 +3468,7 @@ mod tests {
 
         // Mint under the PREVIOUS key A.
         let prev_issuer =
-            crate::session_token::Issuer::new(&prev, "https://api.zeroship.ai".into())
-                .expect("issuer");
+            crate::session_token::Issuer::new(&prev, "https://api.zeroship.ai".into()).expect("issuer");
         let token = prev_issuer
             .issue(&crate::session_token::SessionMint {
                 app: client_id,
@@ -3516,9 +3490,13 @@ mod tests {
             .header(http::header::HOST, aud)
             .header("cookie", format!("{cookie_name}={token}"))
             .to_http_request();
-        let outcome =
-            resolve_app_session_user_header_inner(&req, &state, &Uuid::new_v4(), Some(client_id))
-                .await;
+        let outcome = resolve_app_session_user_header_inner(
+            &req,
+            &state,
+            &Uuid::new_v4(),
+            Some(client_id),
+        )
+        .await;
         assert!(
             matches!(outcome, CookieOutcome::Allowed(_)),
             "a previous-kid cookie must verify during the overlap, got {outcome:?}"
@@ -3552,7 +3530,8 @@ mod tests {
         // Before revocation: Allowed.
         assert!(
             matches!(
-                resolve_app_session_user_header_inner(&req, &state, &rid, Some(client_id)).await,
+                resolve_app_session_user_header_inner(&req, &state, &rid, Some(client_id))
+                    .await,
                 CookieOutcome::Allowed(_)
             ),
             "valid signed cookie must Allow before revocation"
@@ -3573,8 +3552,13 @@ mod tests {
 
         // After revocation: the SAME valid cookie is rejected (stateless verify
         // succeeds, the family-marker gate fails it).
-        let after =
-            resolve_app_session_user_header_inner(&req, &state, &rid, Some(client_id)).await;
+        let after = resolve_app_session_user_header_inner(
+            &req,
+            &state,
+            &rid,
+            Some(client_id),
+        )
+        .await;
         assert!(
             matches!(after, CookieOutcome::None),
             "a revoked family must reject the still-valid signed cookie, got {after:?}"
@@ -3612,7 +3596,10 @@ mod tests {
 
     /// Replace `state.db` (point it at an unreachable DSN, or drop it) on a
     /// uniquely-owned state `Arc`.
-    fn set_state_db(state: &mut std::sync::Arc<crate::GateState>, db: Option<crate::db::DbConfig>) {
+    fn set_state_db(
+        state: &mut std::sync::Arc<crate::GateState>,
+        db: Option<crate::db::DbConfig>,
+    ) {
         let s = std::sync::Arc::get_mut(state).expect("state Arc must be unique");
         s.db = db;
     }
@@ -3749,9 +3736,7 @@ mod tests {
         );
         // The negative entry is now present and fresh — observable directly.
         assert_eq!(
-            state
-                .revocation_cache
-                .get(client_id, &pws, std::time::Instant::now()),
+            state.revocation_cache.get(client_id, &pws, std::time::Instant::now()),
             Some(None),
             "negative caching is mandatory: an unrevoked family must be cached as None"
         );
@@ -3922,11 +3907,8 @@ mod tests {
     #[ntex::test]
     async fn resolve_auth_cookie_arm_authenticates_signed_cookie_and_enforces_csrf() {
         let gateway_signing = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
-        let state = build_state_with_session_and_auth_ui_url_and_db(
-            gateway_signing,
-            "http://127.0.0.1:1",
-            None,
-        );
+        let state =
+            build_state_with_session_and_auth_ui_url_and_db(gateway_signing, "http://127.0.0.1:1", None);
         let aud = "myapp.zeroship.ai";
         let client_id = "oac_myapp";
         let pws = format!("pws_{}", &Uuid::new_v4().simple().to_string()[..20]);
@@ -3950,10 +3932,7 @@ mod tests {
             None,
         )
         .await;
-        let AuthOutcome::Allowed {
-            user_header: Some(header),
-        } = outcome
-        else {
+        let AuthOutcome::Allowed { user_header: Some(header) } = outcome else {
             panic!("signed cookie must authenticate on the live dispatch arm, got {outcome:?}");
         };
         assert_eq!(decode_header_id(&state, &header), pws);
@@ -3999,12 +3978,7 @@ mod tests {
         )
         .await;
         assert!(
-            matches!(
-                ok_outcome,
-                AuthOutcome::Allowed {
-                    user_header: Some(_)
-                }
-            ),
+            matches!(ok_outcome, AuthOutcome::Allowed { user_header: Some(_) }),
             "a same-origin state-changing POST MUST authenticate, got {ok_outcome:?}"
         );
     }
@@ -4012,10 +3986,10 @@ mod tests {
     // ─── Batch A fix 3: Bearer revocation parity ──────────────────────────
 
     /// Write the family marker the EXACT way `/signout` does — keyed on
-    /// `(client_id, pws_)` where `pws_ = derive_pairwise(salt, global_user_id,
+    /// `(client_id, pws_)` where `pws_ = derive_pairwise(salt, global_uuid,
     /// sector)` — then assert that a still-live raw OP Bearer token for the
     /// same `(client_id, user)` is rejected. Pre-fix the lookup used the GLOBAL
-    /// typed user id while the writer keyed on `pws_`, so a real signout never matched a
+    /// UUID while the writer keyed on `pws_`, so a real signout never matched a
     /// live token. PG-gated.
     ///
     /// `#[ntex::test]` (not `#[compio::test]`) because it stands up an
@@ -4030,7 +4004,7 @@ mod tests {
         let client_id = "oac_revparity";
         let host = "myapp.zeroship.ai";
         let sector = "https://myapp.zeroship.ai";
-        let global_sub = UserId::mint();
+        let global_sub = zeroship_core::user_id::UserId::mint();
 
         // Build a state whose oidc_rp JWKS serves the OP key. Read the SAME
         // salt the Bearer arm will use off the built state and derive the

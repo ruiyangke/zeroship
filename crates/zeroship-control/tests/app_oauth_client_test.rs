@@ -163,7 +163,7 @@ async fn provision_asserts_native_db_scopes_routes_and_redirect_sync() {
     let ext = raw
         .query(
             "SELECT client_id, sector_identifier FROM zeroship.app_oauth_clients WHERE app_id = $1",
-            &[&app_id],
+            &[&app_id.as_str()],
         )
         .await
         .expect("query app_oauth_clients");
@@ -177,7 +177,7 @@ async fn provision_asserts_native_db_scopes_routes_and_redirect_sync() {
     let defs = raw
         .query(
             "SELECT scope_id, label, description FROM zeroship.app_scope_defs WHERE app_id = $1",
-            &[&app_id],
+            &[&app_id.as_str()],
         )
         .await
         .expect("query app_scope_defs");
@@ -224,7 +224,7 @@ async fn provision_asserts_native_db_scopes_routes_and_redirect_sync() {
     let defs_after = raw
         .query(
             "SELECT scope_id FROM zeroship.app_scope_defs WHERE app_id = $1",
-            &[&app_id],
+            &[&app_id.as_str()],
         )
         .await
         .expect("query app_scope_defs after drop");
@@ -412,7 +412,7 @@ async fn appstate_origin_scheme_provisions_urls_then_archive_preserves_oauth_row
         .control_pg
         .query(
             "SELECT COUNT(*)::BIGINT AS n FROM zeroship.app_oauth_clients WHERE app_id = $1",
-            &[&app_id],
+            &[&app_id.as_str()],
         )
         .await
         .expect("count app_oauth_clients")[0]

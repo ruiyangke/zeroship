@@ -8,13 +8,13 @@ use compio::net::TcpStream;
 use zeroship_core::app_id::AppId;
 use zeroship_core::readiness::SyncFreshness;
 use zeroship_core::types::{GatewaySnapshot, RouteEntry, RouteMap};
-use zeroship_core::UserId;
+use zeroship_core::user_id::UserId;
 
 use zeroship_core::types::SpendState;
 
+use zeroship_bundle::compiled::CompiledManifest;
 use crate::enforce::{ConcurrencyRegistry, RateLimitRegistry};
 use crate::GateState;
-use zeroship_bundle::compiled::CompiledManifest;
 
 const CONTROL_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
@@ -91,7 +91,7 @@ impl RouteCache {
             .iter()
             .filter(|lifecycle| lifecycle.blocks_authentication())
         {
-            let global = lifecycle.user_id.as_str().to_owned();
+            let global = lifecycle.user_id.as_str().to_string();
             let mut subjects = prior_by_user
                 .get(&lifecycle.user_id)
                 .cloned()
@@ -186,26 +186,15 @@ impl RouteCache {
         let prev_degraded: HashMap<AppId, bool> = {
             let r = self.routes.read().unwrap();
             r.iter()
-                .map(|(id, route)| (id.clone(), route.entry.spend_state == SpendState::Degrade))
+                .map(|(id, route)| {
+                    (id.clone(), route.entry.spend_state == SpendState::Degrade)
+                })
                 .collect()
         };
 
         let mut name_idx = HashMap::new();
         let mut compiled: HashMap<AppId, Arc<CompiledRoute>> = HashMap::new();
         for (id, entry) in new_routes {
-            // TRANSITIONAL, and the gateway's ONE conversion. `RouteMap` is a
-            // wire type and still keys on the `Uuid` the control plane stores,
-            // so the typed id is minted here, once, at the edge of the pull.
-            // Everything downstream of this line - the route table, the name
-            // index, the rate and concurrency registries, the ring, the path
-            // the worker is addressed at - carries the typed id.
-            //
-            // It is the CANONICAL rendering, not `AppId::from_uuid`'s. The two
-            // differ, deliberately: this id is an identity the gateway and the
-            // worker have to agree on, and the worker's `AppId::parse` admits
-            // only this one. `from_uuid` is for derivation inputs, which the
-            // gateway composes none of.
-            let id = zeroship_core::app_id::canonical_app_id_for(&id);
             // Validate before the app enters the table, and drop it if the
             // manifest does not validate. The manifest IS the authorization
             // policy, so a manifest we cannot interpret leaves us with no
@@ -259,18 +248,15 @@ impl RouteCache {
 
     /// Resolve a route by app id.
     ///
-    /// The key is an [`AppId`], and [`AppId`] compares by its PRINTED form, so
-    /// a caller holding the other transitional rendering of the same uuid
-    /// misses here rather than matching. That is the point: the route table is
-    /// built from one rendering, and a producer that disagreed used to be able
-    /// to drop an entry silently. Now it cannot: it gets a 404 that names an
-    /// app, which is a miss an operator can see.
+    /// The key is an [`AppId`], carried end to end from the control plane's
+    /// `RouteMap` (`HashMap<AppId, RouteEntry>`) through this table, so a
+    /// lookup that misses is an unknown app, not a rendering disagreement.
     pub fn lookup_by_app_id(&self, app_id: &AppId) -> Option<Arc<CompiledRoute>> {
         let routes = self.routes.read().unwrap();
         routes.get(app_id).cloned()
     }
 
-    /// Resolve a route by its per-app OAuth `client_id` (= `oac_<base62>`).
+    /// Resolve a route by its per-app OAuth `client_id` (= `oac_<base36>`).
     ///
     /// For per-app back-channel logout, the inbound
     /// `logout_token.aud` carries the per-app `client_id`; the BCL handler uses
@@ -315,9 +301,11 @@ async fn sync_once(state: &GateState) -> Result<(), String> {
     let response = http_get(&url, &state.config.control_key).await?;
     let snapshot: GatewaySnapshot =
         serde_json::from_str(&response).map_err(|e| format!("parse gateway snapshot: {e}"))?;
-    state
-        .routes
-        .update_snapshot(snapshot, &state.rate_limiters, &state.concurrency);
+    state.routes.update_snapshot(
+        snapshot,
+        &state.rate_limiters,
+        &state.concurrency,
+    );
     Ok(())
 }
 
@@ -410,7 +398,6 @@ async fn http_get_inner(url: &str, auth_key: &str) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use uuid::Uuid;
     use zeroship_bundle::Manifest;
     use zeroship_core::types::{
         GatewayFamilyRevocation, GatewayPrincipalLifecycle, GatewaySnapshot,
@@ -419,10 +406,7 @@ mod tests {
     #[test]
     fn control_timeout_defaults_to_five_seconds() {
         assert_eq!(CONTROL_REQUEST_TIMEOUT, std::time::Duration::from_secs(5));
-        assert_eq!(
-            control_timeout_error(),
-            "control request timed out after 5s"
-        );
+        assert_eq!(control_timeout_error(), "control request timed out after 5s");
     }
 
     fn route_entry(name: &str, oauth_client_id: Option<&str>, sector: Option<&str>) -> RouteEntry {
@@ -442,7 +426,7 @@ mod tests {
     fn lifecycle_snapshot_blocks_every_non_authenticating_state_offline() {
         let salt = zeroship_core::auth::derive_pairwise_salt(b"lifecycle-snapshot-test-salt");
         let sector = "https://app.zeroship.test";
-        let app_id = Uuid::new_v4();
+        let app_id = AppId::mint();
         let mut routes = RouteMap::new();
         routes.insert(
             app_id,
@@ -453,24 +437,22 @@ mod tests {
         let anonymized = UserId::mint();
         let requested = UserId::mint();
         let scheduled = UserId::mint();
-        let lifecycle =
-            |user_id: UserId, lifecycle: fn(UserId, Vec<String>) -> GatewayPrincipalLifecycle| {
-                let pairwise = zeroship_core::auth::derive_pairwise(&salt, &user_id, sector);
-                lifecycle(user_id, vec![pairwise])
-            };
+        let lifecycle = |user_id: UserId,
+                         lifecycle: fn(UserId, Vec<String>) -> GatewayPrincipalLifecycle| {
+            let pairwise = zeroship_core::auth::derive_pairwise(
+                &salt,
+                &user_id,
+                sector,
+            );
+            lifecycle(user_id, vec![pairwise])
+        };
         let snapshot = GatewaySnapshot {
             routes,
             principal_lifecycle: vec![
                 lifecycle(disabled.clone(), GatewayPrincipalLifecycle::disabled),
                 lifecycle(anonymized.clone(), GatewayPrincipalLifecycle::anonymized),
-                lifecycle(
-                    requested.clone(),
-                    GatewayPrincipalLifecycle::deletion_requested,
-                ),
-                lifecycle(
-                    scheduled.clone(),
-                    GatewayPrincipalLifecycle::deletion_scheduled,
-                ),
+                lifecycle(requested.clone(), GatewayPrincipalLifecycle::deletion_requested),
+                lifecycle(scheduled.clone(), GatewayPrincipalLifecycle::deletion_scheduled),
             ],
             family_revocations: Vec::new(),
         };
@@ -483,8 +465,9 @@ mod tests {
         );
         let budget = std::time::Duration::from_secs(60);
         for user_id in [disabled, anonymized, requested, scheduled] {
+            let global = user_id.as_str();
             let pairwise = zeroship_core::auth::derive_pairwise(&salt, &user_id, sector);
-            assert!(!cache.principal_authentication_allowed(user_id.as_str(), budget));
+            assert!(!cache.principal_authentication_allowed(global, budget));
             assert!(!cache.principal_authentication_allowed(&pairwise, budget));
         }
         assert!(cache.principal_authentication_allowed(UserId::mint().as_str(), budget));
@@ -519,8 +502,12 @@ mod tests {
         let salt = zeroship_core::auth::derive_pairwise_salt(b"route-replacement-denial-salt");
         let user_id = UserId::mint();
         let sector = "https://retired-route.zeroship.test";
-        let pairwise = zeroship_core::auth::derive_pairwise(&salt, &user_id, sector);
-        let app_id = Uuid::new_v4();
+        let pairwise = zeroship_core::auth::derive_pairwise(
+            &salt,
+            &user_id,
+            sector,
+        );
+        let app_id = AppId::mint();
         let mut routes = RouteMap::new();
         routes.insert(
             app_id,
@@ -544,10 +531,7 @@ mod tests {
             }]
         };
         let lifecycle_without_mapping = || {
-            vec![GatewayPrincipalLifecycle::disabled(
-                user_id.clone(),
-                Vec::new(),
-            )]
+            vec![GatewayPrincipalLifecycle::disabled(user_id.clone(), Vec::new())]
         };
         let budget = std::time::Duration::from_secs(60);
 
@@ -645,67 +629,12 @@ mod tests {
             1_700_000_000,
             budget,
         ));
-        assert!(cache.credential_authentication_allowed(client_id, subject, 1_700_000_200, budget,));
-    }
-
-    /// The route table is keyed on the CANONICAL rendering of the app id, and
-    /// probing it with the other transitional rendering MISSES.
-    ///
-    /// This is the paired half of the worker's `/dispatch` refusal, and it is
-    /// the arm that makes a producer/consumer disagreement visible. Both
-    /// renderings carry the same hundred and twenty eight bits and both are an
-    /// `AppId`, so the compiler cannot tell them apart; only equality can, and
-    /// only because [`zeroship_core::app_id::AppId`] compares by its printed
-    /// form. If it compared by the embedded uuid instead, a gateway keying the
-    /// table one way and a caller probing it the other would silently agree,
-    /// which is the failure the typed id exists to remove.
-    ///
-    /// MUTATION-CHECKED, AND THE BLAST RADIUS WAS WIDER THAN EXPECTED. Spelling
-    /// `update`'s conversion as `AppId::from_uuid` - the other transitional
-    /// constructor, same argument, same type, and the natural thing to write -
-    /// fails this test on its FIRST assertion. It also fails four others in
-    /// `router::dispatch::tests`: both degrade arms and both internal
-    /// workflow-advance arms, each of which probes a registry or the route
-    /// table that `update` populated. That is the point rather than a
-    /// complication: the rendering the table is keyed on is load-bearing in
-    /// several places at once, and the mutation would have shipped a gateway
-    /// addressing every worker at a path the worker refuses.
-    #[test]
-    fn the_route_table_misses_on_the_other_rendering_of_the_same_id() {
-        let stored = Uuid::new_v4();
-        let mut routes: RouteMap = HashMap::new();
-        routes.insert(stored, route_entry("keyed.zeroship.ai", None, None));
-
-        let cache = RouteCache::new();
-        cache.update(
-            routes,
-            &RateLimitRegistry::new(1000, 2000),
-            &ConcurrencyRegistry::new(100),
-        );
-
-        let canonical = zeroship_core::app_id::canonical_app_id_for(&stored);
-        assert!(
-            cache.lookup_by_app_id(&canonical).is_some(),
-            "the table is keyed on the rendering the gateway sends to workers"
-        );
-        assert!(
-            cache.lookup_by_app_id(&AppId::from_uuid(&stored)).is_none(),
-            "the derivation rendering must MISS, so a rendering disagreement is \
-             a 404 an operator can see and not a silently dropped entry"
-        );
-
-        // The control: the miss is about the RENDERING, not about the table
-        // being empty or the id being unknown. Same table, same uuid, one
-        // spelling hits and the other does not.
-        let (by_name, _) = cache
-            .lookup_by_name("keyed.zeroship.ai")
-            .expect("the host resolves");
-        assert_eq!(by_name, canonical);
-        assert_eq!(
-            by_name.uuid(),
-            stored,
-            "and it still carries the stored bits"
-        );
+        assert!(cache.credential_authentication_allowed(
+            client_id,
+            subject,
+            1_700_000_200,
+            budget,
+        ));
     }
 
     #[test]
@@ -715,12 +644,12 @@ mod tests {
         // through to the `CompiledRoute` that `lookup_by_name` returns,
         // so the gateway resolves a per-app `oauth_client_id`/sector
         // from the request `Host` without a second lookup.
-        let provisioned_id = Uuid::new_v4();
-        let unprovisioned_id = Uuid::new_v4();
+        let provisioned_id = AppId::mint();
+        let unprovisioned_id = AppId::mint();
 
         let mut routes: RouteMap = HashMap::new();
         routes.insert(
-            provisioned_id,
+            provisioned_id.clone(),
             route_entry(
                 "provisioned.zeroship.ai",
                 Some("oac_provisioned"),
@@ -743,7 +672,7 @@ mod tests {
         let (id, compiled) = cache
             .lookup_by_name("provisioned.zeroship.ai")
             .expect("provisioned host resolves");
-        assert_eq!(id.uuid(), provisioned_id);
+        assert_eq!(id, provisioned_id);
         assert_eq!(
             compiled.entry.oauth_client_id.as_deref(),
             Some("oac_provisioned")
@@ -769,8 +698,8 @@ mod tests {
         // The deploy handler validates on ingest, so reaching this needs
         // post-ingest divergence: a validation rule that tightened under an
         // already-stored manifest, or an out-of-band edit of the stored row.
-        let good_id = Uuid::new_v4();
-        let broken_id = Uuid::new_v4();
+        let good_id = AppId::mint();
+        let broken_id = AppId::mint();
 
         let mut broken = route_entry("broken.zeroship.ai", None, None);
         broken.manifest.version = 2;
@@ -852,7 +781,7 @@ mod tests {
         let parsed: Manifest = serde_json::from_str(&manifest_json).expect("parse manifest_json");
         parsed.validate().expect("manifest valid");
 
-        let app_id = Uuid::new_v4();
+        let app_id = AppId::mint();
         let mut routes: RouteMap = HashMap::new();
         routes.insert(
             app_id,
@@ -896,10 +825,10 @@ mod tests {
         // provisioned client resolves to its app's route (and subdomain name);
         // an un-provisioned app (oauth_client_id == None) never matches; an
         // unknown client_id resolves to nothing.
-        let provisioned_id = Uuid::new_v4();
+        let provisioned_id = AppId::mint();
         let mut routes: RouteMap = HashMap::new();
         routes.insert(
-            provisioned_id,
+            provisioned_id.clone(),
             route_entry(
                 "myapp.zeroship.localhost",
                 Some("oac_myapp"),
@@ -907,7 +836,7 @@ mod tests {
             ),
         );
         routes.insert(
-            Uuid::new_v4(),
+            AppId::mint(),
             route_entry("other.zeroship.localhost", None, None),
         );
 
@@ -921,7 +850,7 @@ mod tests {
         let (id, compiled) = cache
             .lookup_by_oauth_client_id("oac_myapp")
             .expect("per-app client resolves to its route");
-        assert_eq!(id.uuid(), provisioned_id);
+        assert_eq!(id, provisioned_id);
         assert_eq!(compiled.entry.name, "myapp.zeroship.localhost");
 
         // Un-provisioned app's None oauth_client_id is never matched by a real

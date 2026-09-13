@@ -37,7 +37,7 @@ fn key() -> [u8; 32] {
 }
 
 #[allow(clippy::future_not_send)]
-async fn cleanup(db: &Client, ids: &[zeroship_core::UserId]) {
+async fn cleanup(db: &Client, ids: &[&zeroship_core::UserId]) {
     for id in ids {
         let _ = db
             .execute(
@@ -98,7 +98,7 @@ async fn only_confirmed_credential_gates_login() {
         "a confirmed credential gates login (second factor required)"
     );
 
-    cleanup(&db, &[user.id]).await;
+    cleanup(&db, &[&user.id]).await;
 }
 
 /// (2) The factor-1 stash round-trips bound to user_id + credential_version, and
@@ -139,7 +139,7 @@ async fn challenge_stash_binds_user_and_credential_version() {
         "a password change bumps credential_version, invalidating the in-flight 2FA challenge"
     );
 
-    cleanup(&db, &[user.id]).await;
+    cleanup(&db, &[&user.id]).await;
 }
 
 /// (3) The second-factor evaluation the handler runs: a current TOTP code is
@@ -211,5 +211,5 @@ async fn second_factor_accepts_totp_then_backup_code_once() {
         "a redeemed backup code can't be reused (single-use)"
     );
 
-    cleanup(&db, &[user.id]).await;
+    cleanup(&db, &[&user.id]).await;
 }

@@ -395,7 +395,7 @@ fn cmd_serve(args: &[String]) {
         modules,
         zeroship_runtime::serve::ServerOptions {
             port,
-            app_id: Some(workflow_host.app.uuid()),
+            app_id: Some(workflow_host.app.clone()),
             workers,
             cpu_limit,
             wall_timeout,
@@ -1079,11 +1079,11 @@ fn deploy_auto_create(args: &[String]) -> bool {
 /// > of on the app the caller meant.
 ///
 /// Widening the parse removed that INSTANCE and left the CLASS. An app id is
-/// `app_<base62>` (`zeroship_core::app_id::AppId`), which is not a uuid in any
+/// `app_<base36>` (`zeroship_core::app_id::AppId`), which is not a uuid in any
 /// of those four spellings, so every `--app=app_...` reproduced the same bug -
 /// measured, not predicted, by
 /// `tests::a_typed_app_id_deploys_to_that_app_and_creates_nothing` before this
-/// change: it recorded `Create("app_034KLb07Lrb9JGMA6imvmX")` followed by a
+/// change: it recorded `Create("app_034klb07lrb9jgma6imvmx000")` followed by a
 /// deploy to the freshly minted app.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum AppTarget {
@@ -1096,7 +1096,7 @@ pub(crate) enum AppTarget {
 
 /// Accept an `--app` value only if it is an app ID, naming the distinction.
 ///
-/// The canonical rendering is `app_<base62>`. A uuid in any spelling
+/// The canonical rendering is `app_<base36>`. A uuid in any spelling
 /// `uuid::Uuid` accepts is taken too, and THAT ARM IS TRANSITIONAL:
 /// `zeroship.apps.id` is still a `uuid` column, so a uuid is what
 /// `POST /api/apps` hands back and what control's `/api/apps/{id}` parses
@@ -1397,7 +1397,7 @@ mod tests {
     /// premise is preserved because it is still true of the uuid renderings:
     /// the server parses that path segment with `id.parse::<Uuid>()`, which
     /// takes the simple (32 hex, no hyphens), hyphenated, braced and
-    /// `urn:uuid:` forms. The canonical `app_<base62>` rendering is added
+    /// `urn:uuid:` forms. The canonical `app_<base36>` rendering is added
     /// beside them.
     ///
     /// What CHANGED is the consequence of a miss. Under the old helper a
@@ -1407,7 +1407,7 @@ mod tests {
     /// into now: an unrecognised value is refused.
     #[test]
     fn app_id_accepts_every_rendering_of_an_id() {
-        let canonical = "app_034KLb07Lrb9JGMA6imvmX";
+        let canonical = "app_034klb07lrb9jgma6imvmx000";
         let hyphenated = "0197f8a1-2b3c-7d4e-8f90-1a2b3c4d5e6f";
         let simple = "0197f8a12b3c7d4e8f901a2b3c4d5e6f";
         let braced = "{0197f8a1-2b3c-7d4e-8f90-1a2b3c4d5e6f}";
@@ -1916,12 +1916,12 @@ mod tests {
     /// measuring it. Whichever path `deploy_archive` takes, it gets served.
     #[test]
     fn a_typed_app_id_deploys_to_that_app_and_creates_nothing() {
-        let id = "app_034KLb07Lrb9JGMA6imvmX";
+        let id = "app_034klb07lrb9jgma6imvmx000";
         let mut client = FakeControlClient::default()
             .with_list(200, "[]")
             .with_create(
                 201,
-                r#"{"id":"55555555-5555-4555-8555-555555555555","name":"app_034KLb07Lrb9JGMA6imvmX"}"#,
+                r#"{"id":"55555555-5555-4555-8555-555555555555","name":"app_034klb07lrb9jgma6imvmx000"}"#,
             )
             .with_deploy(200, r#"{"deploy_hash":"sha256:typed"}"#);
 

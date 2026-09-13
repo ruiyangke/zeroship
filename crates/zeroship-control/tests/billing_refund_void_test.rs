@@ -44,6 +44,7 @@ use zeroship_control::stripe_store::StripeError;
 use zeroship_control::{
     AppState, EnvStore, Quota, RateLimiter, Registry, SecretString, StripeStore,
 };
+use zeroship_core::AppId;
 
 fn db_url() -> String {
     common::require_control_db()
@@ -291,7 +292,10 @@ async fn build_fixture(db_url: &str, label: &str) -> Fixture {
         expected_oauth_audience: "control.zeroship.ai".to_string(),
         static_policies: zeroship_authz::load_platform_policies()
             .expect("bundled authz policies parse"),
-        auth_provider: zeroship_control::platform_auth_provider("https://auth.zeroship.test/oauth2", Some(common::platform_jwks_url())),
+        auth_provider: zeroship_control::platform_auth_provider(
+            "https://auth.zeroship.test/oauth2",
+            Some(common::platform_jwks_url()),
+        ),
         // No platform deploy-token mint here: that is control's OUTBOUND
         // destination for the device flow, and no fixture below drives one.
         provider_registry: zeroship_control::metering::provider::builtin_registry(),
@@ -394,12 +398,12 @@ async fn make_plan(state: &AppState) -> String {
 /// one organization and asserted against another would simply never be billed -
 /// the test would go green on an empty sweep. Placing it in the caller's
 /// organization is what keeps the assertion attached to anything.
-async fn make_owned_app(state: &AppState, plan_id: &str, organization: &str) -> Uuid {
+async fn make_owned_app(state: &AppState, plan_id: &str, organization: &str) -> AppId {
     let name = format!("refund-{}", Uuid::new_v4());
     common::seed_app_in_organization(&state.control_pg, &name, plan_id, organization).await
 }
 
-async fn ingest_at(state: &AppState, app: Uuid, requests: u64, period_start: i64, seq: u64) {
+async fn ingest_at(state: &AppState, app: &AppId, requests: u64, period_start: i64, seq: u64) {
     let _ = seq;
     common::seed_usage_delta(
         &state.control_pg,
@@ -434,7 +438,11 @@ fn period_d(period_start: i64) -> chrono::NaiveDate {
 }
 
 /// The active (non-void) invoice id for `(organization, period)`.
-async fn active_invoice_id(state: &AppState, organization: &str, period_start: i64) -> Option<String> {
+async fn active_invoice_id(
+    state: &AppState,
+    organization: &str,
+    period_start: i64,
+) -> Option<String> {
     state
         .control_pg
         .query(
@@ -549,7 +557,9 @@ async fn set_customer(state: &AppState, organization: &str) {
 async fn over_refund_three_way_bound_blocks_credit_laundering() {
     let url = db_url();
     let fx = build_fixture(&url, "launder").await;
-    let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _recon = RECONCILE_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let now = now_for_closed_period().await;
     let period = prev_period(now);
 
@@ -561,12 +571,20 @@ async fn over_refund_three_way_bound_blocks_credit_laundering() {
     let app = make_owned_app(&fx.state, &plan, organization).await;
 
     // $40 credit grant; $100 of usage → subtotal 10000, credit 4000, total 6000.
-    insert_grant(&fx.state, organization, 4000, Utc::now() - Duration::hours(2)).await;
-    ingest_at(&fx.state, app, 10_000, period, 1).await;
+    insert_grant(
+        &fx.state,
+        organization,
+        4000,
+        Utc::now() - Duration::hours(2),
+    )
+    .await;
+    ingest_at(&fx.state, &app, 10_000, period, 1).await;
 
     let stripe = RecordingStripe::default();
     assert_eq!(run_reconcile(&fx.state, &stripe, now).await, 1);
-    let inv = active_invoice_id(&fx.state, organization, period).await.expect("invoice");
+    let inv = active_invoice_id(&fx.state, organization, period)
+        .await
+        .expect("invoice");
     let (status, subtotal, credit, total) = invoice_money(&fx.state, &inv).await;
     assert_eq!(status, "finalized");
     assert_eq!((subtotal, credit, total), (10_000, 4000, 6000));
@@ -583,16 +601,35 @@ async fn over_refund_three_way_bound_blocks_credit_laundering() {
     let mut conn = new_conn(&url).await;
     let provider = NativeRefundProvider;
     let r1 = refund::issue_refund(
-        &mut conn, &provider, &inv, 6000, 6000, 0, RefundDestination::Credit, None, &key(&inv, "credit-60"),
+        &mut conn,
+        &provider,
+        &inv,
+        6000,
+        6000,
+        0,
+        RefundDestination::Credit,
+        None,
+        &key(&inv, "credit-60"),
     )
     .await
     .expect("issue");
-    assert!(matches!(r1, RefundOutcome::Issued { .. }), "a $60 credit refund at the cash cap is allowed");
+    assert!(
+        matches!(r1, RefundOutcome::Issued { .. }),
+        "a $60 credit refund at the cash cap is allowed"
+    );
 
     // Now a $1 CASH refund on top must be REJECTED — combined Σ ($60 credit + $1 cash)
     // = $61 > cash $60. This is the 3-way combined bound (iii).
     let r2 = refund::issue_refund(
-        &mut conn, &provider, &inv, 100, 100, 0, RefundDestination::Cash, None, &key(&inv, "cash-1"),
+        &mut conn,
+        &provider,
+        &inv,
+        100,
+        100,
+        0,
+        RefundDestination::Cash,
+        None,
+        &key(&inv, "cash-1"),
     )
     .await
     .expect("issue");
@@ -603,7 +640,15 @@ async fn over_refund_three_way_bound_blocks_credit_laundering() {
 
     // And a pure cash refund EXCEEDING cash is rejected on its own bound (i).
     let r3 = refund::issue_refund(
-        &mut conn, &provider, &inv, 6100, 6100, 0, RefundDestination::Cash, None, &key(&inv, "cash-61"),
+        &mut conn,
+        &provider,
+        &inv,
+        6100,
+        6100,
+        0,
+        RefundDestination::Cash,
+        None,
+        &key(&inv, "cash-61"),
     )
     .await
     .expect("issue");
@@ -624,7 +669,10 @@ async fn over_refund_three_way_bound_blocks_credit_laundering() {
             &[&zeroship_core::typed_id::new_refund_id(), &inv],
         )
         .await;
-    assert!(direct.is_err(), "the over-refund trigger must RAISE on a direct over-cap INSERT");
+    assert!(
+        direct.is_err(),
+        "the over-refund trigger must RAISE on a direct over-cap INSERT"
+    );
 
     // Teardown: the fixture and the dedicated refund connection both hold
     // Postgres connections, and locals are dropped only after the body returns -
@@ -697,12 +745,23 @@ async fn cash_refund_targets_recorded_payment_intent_not_invoice() {
     let mut conn = new_conn(&url).await;
     let provider = refund::StripeRefundProvider { stripe: &stripe };
     refund::issue_refund(
-        &mut conn, &provider, &inv, 2000, 2000, 0, RefundDestination::Cash, None, &key(&inv, "tgt"),
+        &mut conn,
+        &provider,
+        &inv,
+        2000,
+        2000,
+        0,
+        RefundDestination::Cash,
+        None,
+        &key(&inv, "tgt"),
     )
     .await
     .expect("issue");
     let recorded_target = stripe.last_refund_target().expect("a refund was recorded");
-    assert_eq!(recorded_target, pi, "create_refund received the pi_ as its target");
+    assert_eq!(
+        recorded_target, pi,
+        "create_refund received the pi_ as its target"
+    );
 
     drop(link_conn);
     drop(conn);
@@ -721,7 +780,9 @@ async fn cash_refund_targets_recorded_payment_intent_not_invoice() {
 async fn cash_refund_issues_re_credit_refund_appends_grant() {
     let url = db_url();
     let fx = build_fixture(&url, "cashcredit").await;
-    let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _recon = RECONCILE_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let now = now_for_closed_period().await;
     let period = prev_period(now);
 
@@ -731,11 +792,13 @@ async fn cash_refund_issues_re_credit_refund_appends_grant() {
     set_customer(&fx.state, organization).await;
     let plan = make_plan(&fx.state).await;
     let app = make_owned_app(&fx.state, &plan, organization).await;
-    ingest_at(&fx.state, app, 10_000, period, 1).await; // $100, no credit
+    ingest_at(&fx.state, &app, 10_000, period, 1).await; // $100, no credit
 
     let stripe = RecordingStripe::default();
     assert_eq!(run_reconcile(&fx.state, &stripe, now).await, 1);
-    let inv = active_invoice_id(&fx.state, organization, period).await.expect("invoice");
+    let inv = active_invoice_id(&fx.state, organization, period)
+        .await
+        .expect("invoice");
     append_payment(&fx.state, &inv, 10_000, "in_cashcredit").await;
 
     let mut conn = new_conn(&url).await;
@@ -744,22 +807,45 @@ async fn cash_refund_issues_re_credit_refund_appends_grant() {
     // CASH refund of $30 → a Stripe Refund (re_…), a 'refund' provider ref, invoice stays
     // finalized.
     let r = refund::issue_refund(
-        &mut conn, &provider, &inv, 3000, 3000, 0, RefundDestination::Cash, None, &key(&inv, "cash-30"),
+        &mut conn,
+        &provider,
+        &inv,
+        3000,
+        3000,
+        0,
+        RefundDestination::Cash,
+        None,
+        &key(&inv, "cash-30"),
     )
     .await
     .expect("issue");
     let refund_id = match r {
-        RefundOutcome::Issued { refund_id, provider_ref } => {
-            assert!(provider_ref.as_deref().is_some_and(|p| p.starts_with("re_")), "cash refund must carry a re_… ref, got {provider_ref:?}");
+        RefundOutcome::Issued {
+            refund_id,
+            provider_ref,
+        } => {
+            assert!(
+                provider_ref
+                    .as_deref()
+                    .is_some_and(|p| p.starts_with("re_")),
+                "cash refund must carry a re_… ref, got {provider_ref:?}"
+            );
             refund_id
         }
         other => panic!("expected Issued, got {other:?}"),
     };
-    assert_eq!(stripe.refund_count(), 1, "exactly one Stripe Refund issued for cash");
+    assert_eq!(
+        stripe.refund_count(),
+        1,
+        "exactly one Stripe Refund issued for cash"
+    );
 
     // The invoice is UNTOUCHED (still finalized).
     let (status, _, _, _) = invoice_money(&fx.state, &inv).await;
-    assert_eq!(status, "finalized", "the invoice stays finalized on a refund");
+    assert_eq!(
+        status, "finalized",
+        "the invoice stays finalized on a refund"
+    );
 
     // The provider ref row is a 'refund' (re_…).
     let pr = fx
@@ -779,7 +865,10 @@ async fn cash_refund_issues_re_credit_refund_appends_grant() {
     let st: String = fx
         .state
         .control_pg
-        .query("SELECT status FROM zeroship.refunds WHERE id = $1", &[&refund_id])
+        .query(
+            "SELECT status FROM zeroship.refunds WHERE id = $1",
+            &[&refund_id],
+        )
         .await
         .expect("read refund")[0]
         .get("status");
@@ -791,23 +880,42 @@ async fn cash_refund_issues_re_credit_refund_appends_grant() {
         .await
         .expect("balance");
     let r2 = refund::issue_refund(
-        &mut conn, &provider, &inv, 2000, 2000, 0, RefundDestination::Credit, None, &key(&inv, "credit-20"),
+        &mut conn,
+        &provider,
+        &inv,
+        2000,
+        2000,
+        0,
+        RefundDestination::Credit,
+        None,
+        &key(&inv, "credit-20"),
     )
     .await
     .expect("issue");
     let credit_refund_id = match r2 {
-        RefundOutcome::Issued { refund_id, provider_ref } => {
+        RefundOutcome::Issued {
+            refund_id,
+            provider_ref,
+        } => {
             assert!(provider_ref.is_none(), "credit refund has NO provider ref");
             refund_id
         }
         other => panic!("expected Issued, got {other:?}"),
     };
-    assert_eq!(stripe.refund_count(), 1, "credit refund must NOT call Stripe (no charge reversal)");
+    assert_eq!(
+        stripe.refund_count(),
+        1,
+        "credit refund must NOT call Stripe (no charge reversal)"
+    );
 
     let bal_after = zeroship_control::credit::balance(&*fx.state.control_pg, organization, "usd")
         .await
         .expect("balance");
-    assert_eq!(bal_after - bal_before, 2000, "a $20 refund_to_credit grant was appended");
+    assert_eq!(
+        bal_after - bal_before,
+        2000,
+        "a $20 refund_to_credit grant was appended"
+    );
 
     // The refund_to_credit ledger entry exists with the marker note.
     let grant = fx
@@ -843,7 +951,9 @@ async fn cash_refund_issues_re_credit_refund_appends_grant() {
 async fn refund_replay_is_idempotent_exactly_one() {
     let url = db_url();
     let fx = build_fixture(&url, "replay").await;
-    let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _recon = RECONCILE_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let now = now_for_closed_period().await;
     let period = prev_period(now);
 
@@ -853,18 +963,28 @@ async fn refund_replay_is_idempotent_exactly_one() {
     set_customer(&fx.state, organization).await;
     let plan = make_plan(&fx.state).await;
     let app = make_owned_app(&fx.state, &plan, organization).await;
-    ingest_at(&fx.state, app, 10_000, period, 1).await;
+    ingest_at(&fx.state, &app, 10_000, period, 1).await;
 
     let stripe = RecordingStripe::default();
     assert_eq!(run_reconcile(&fx.state, &stripe, now).await, 1);
-    let inv = active_invoice_id(&fx.state, organization, period).await.expect("invoice");
+    let inv = active_invoice_id(&fx.state, organization, period)
+        .await
+        .expect("invoice");
     append_payment(&fx.state, &inv, 10_000, "in_replay").await;
 
     let mut conn = new_conn(&url).await;
     let provider = refund::StripeRefundProvider { stripe: &stripe };
 
     let first = refund::issue_refund(
-        &mut conn, &provider, &inv, 3000, 3000, 0, RefundDestination::Cash, None, &key(&inv, "replay"),
+        &mut conn,
+        &provider,
+        &inv,
+        3000,
+        3000,
+        0,
+        RefundDestination::Cash,
+        None,
+        &key(&inv, "replay"),
     )
     .await
     .expect("issue");
@@ -875,23 +995,41 @@ async fn refund_replay_is_idempotent_exactly_one() {
 
     // Replay: same key + same body. Must NOT issue a second refund.
     let replay = refund::issue_refund(
-        &mut conn, &provider, &inv, 3000, 3000, 0, RefundDestination::Cash, None, &key(&inv, "replay"),
+        &mut conn,
+        &provider,
+        &inv,
+        3000,
+        3000,
+        0,
+        RefundDestination::Cash,
+        None,
+        &key(&inv, "replay"),
     )
     .await
     .expect("issue");
     match replay {
         RefundOutcome::Duplicate(id) => assert_eq!(id, first_id, "replay returns the first refund"),
         RefundOutcome::Issued { refund_id, .. } => {
-            assert_eq!(refund_id, first_id, "replay converges to the first refund (already issued)");
+            assert_eq!(
+                refund_id, first_id,
+                "replay converges to the first refund (already issued)"
+            );
         }
         o => panic!("expected Duplicate/converged Issued, got {o:?}"),
     }
     // Exactly one Stripe Refund and one refund row.
-    assert_eq!(stripe.refund_count(), 1, "replay must not double-refund at Stripe");
+    assert_eq!(
+        stripe.refund_count(),
+        1,
+        "replay must not double-refund at Stripe"
+    );
     let n: i64 = fx
         .state
         .control_pg
-        .query("SELECT COUNT(*)::bigint AS n FROM zeroship.refunds WHERE invoice_id = $1", &[&inv])
+        .query(
+            "SELECT COUNT(*)::bigint AS n FROM zeroship.refunds WHERE invoice_id = $1",
+            &[&inv],
+        )
         .await
         .expect("count")[0]
         .get("n");
@@ -899,11 +1037,22 @@ async fn refund_replay_is_idempotent_exactly_one() {
 
     // A different body with the SAME key → 409 conflict, no new refund.
     let conflict = refund::issue_refund(
-        &mut conn, &provider, &inv, 4000, 4000, 0, RefundDestination::Cash, None, &key(&inv, "replay"),
+        &mut conn,
+        &provider,
+        &inv,
+        4000,
+        4000,
+        0,
+        RefundDestination::Cash,
+        None,
+        &key(&inv, "replay"),
     )
     .await
     .expect("issue");
-    assert!(matches!(conflict, RefundOutcome::Conflict), "same key + different body → Conflict");
+    assert!(
+        matches!(conflict, RefundOutcome::Conflict),
+        "same key + different body → Conflict"
+    );
 
     drop(conn);
     drop(fx);
@@ -957,7 +1106,15 @@ async fn tax_split_refund_returns_proportional_tax() {
     let mut conn = new_conn(&url).await;
     let provider = NativeRefundProvider;
     let r = refund::issue_refund(
-        &mut conn, &provider, &inv, 5500, 5000, 500, RefundDestination::Credit, None, &key(&inv, "tax"),
+        &mut conn,
+        &provider,
+        &inv,
+        5500,
+        5000,
+        500,
+        RefundDestination::Credit,
+        None,
+        &key(&inv, "tax"),
     )
     .await
     .expect("issue");
@@ -974,14 +1131,29 @@ async fn tax_split_refund_returns_proportional_tax() {
         .expect("read refund")[0];
     assert_eq!(row.get::<_, i64>("amount_cents"), 5500);
     assert_eq!(row.get::<_, i64>("subtotal_cents"), 5000);
-    assert_eq!(row.get::<_, i64>("tax_cents"), 500, "proportional tax (10% of $55) = $5");
+    assert_eq!(
+        row.get::<_, i64>("tax_cents"),
+        500,
+        "proportional tax (10% of $55) = $5"
+    );
 
     // A bad split (subtotal+tax != amount) is rejected by the helper + the CHECK.
     let bad = refund::issue_refund(
-        &mut conn, &provider, &inv, 1000, 1000, 100, RefundDestination::Credit, None, &key(&inv, "badsplit"),
+        &mut conn,
+        &provider,
+        &inv,
+        1000,
+        1000,
+        100,
+        RefundDestination::Credit,
+        None,
+        &key(&inv, "badsplit"),
     )
     .await;
-    assert!(bad.is_err(), "a split where subtotal+tax != amount is rejected");
+    assert!(
+        bad.is_err(),
+        "a split where subtotal+tax != amount is rejected"
+    );
 
     drop(conn);
     drop(fx);
@@ -1013,7 +1185,9 @@ async fn tax_split_refund_returns_proportional_tax() {
 async fn void_reversal_conserves_credit_balance() {
     let url = db_url();
     let fx = build_fixture(&url, "voidrev").await;
-    let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _recon = RECONCILE_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let now = now_for_closed_period().await;
     let period = prev_period(now);
 
@@ -1025,18 +1199,33 @@ async fn void_reversal_conserves_credit_balance() {
     let app = make_owned_app(&fx.state, &plan, organization).await;
 
     // $10 grant; $6 of usage → subtotal 600, credit 600, total 0 (fully credit-covered).
-    insert_grant(&fx.state, organization, 1000, Utc::now() - Duration::hours(2)).await;
-    ingest_at(&fx.state, app, 600, period, 1).await;
+    insert_grant(
+        &fx.state,
+        organization,
+        1000,
+        Utc::now() - Duration::hours(2),
+    )
+    .await;
+    ingest_at(&fx.state, &app, 600, period, 1).await;
 
     let stripe = RecordingStripe::default();
     assert_eq!(run_reconcile(&fx.state, &stripe, now).await, 1);
-    let inv_a = active_invoice_id(&fx.state, organization, period).await.expect("invoice A");
-    assert_eq!(invoice_money(&fx.state, &inv_a).await, ("finalized".into(), 600, 600, 0));
-
-    let bal_after_consume = zeroship_control::credit::balance(&*fx.state.control_pg, organization, "usd")
+    let inv_a = active_invoice_id(&fx.state, organization, period)
         .await
-        .expect("bal");
-    assert_eq!(bal_after_consume, 400, "balance after consume = $10 − $6 = $4");
+        .expect("invoice A");
+    assert_eq!(
+        invoice_money(&fx.state, &inv_a).await,
+        ("finalized".into(), 600, 600, 0)
+    );
+
+    let bal_after_consume =
+        zeroship_control::credit::balance(&*fx.state.control_pg, organization, "usd")
+            .await
+            .expect("bal");
+    assert_eq!(
+        bal_after_consume, 400,
+        "balance after consume = $10 − $6 = $4"
+    );
 
     // Void + reissue. The reissue re-prices the SAME usage (no correction here), so it
     // re-consumes $6 from the restored balance — net balance conserved at $4.
@@ -1049,13 +1238,19 @@ async fn void_reversal_conserves_credit_balance() {
 
     // The voided invoice is 'void'; the reissued is finalized with the same money.
     assert_eq!(invoice_money(&fx.state, &inv_a).await.0, "void");
-    assert_eq!(invoice_money(&fx.state, &reissued).await, ("finalized".into(), 600, 600, 0));
+    assert_eq!(
+        invoice_money(&fx.state, &reissued).await,
+        ("finalized".into(), 600, 600, 0)
+    );
 
     // BALANCE CONSERVED: still $4 (void restored +$6, reissue re-drew $6). Never $-2.
     let bal_final = zeroship_control::credit::balance(&*fx.state.control_pg, organization, "usd")
         .await
         .expect("bal");
-    assert_eq!(bal_final, 400, "void_reversal conserves balance: still $4, never the $-2 double-consume");
+    assert_eq!(
+        bal_final, 400,
+        "void_reversal conserves balance: still $4, never the $-2 double-consume"
+    );
 
     // A void_reversal entry exists for the voided invoice, +$6.
     let vr = fx
@@ -1069,7 +1264,10 @@ async fn void_reversal_conserves_credit_balance() {
         .await
         .expect("vr")[0]
         .get::<_, i64>("s");
-    assert_eq!(vr, 600, "the void_reversal restores exactly the $6 the voided invoice consumed");
+    assert_eq!(
+        vr, 600,
+        "the void_reversal restores exactly the $6 the voided invoice consumed"
+    );
 
     drop(fx);
     common::drain_pg().await;
@@ -1087,7 +1285,9 @@ async fn void_reversal_conserves_credit_balance() {
 async fn true_up_subtracts_already_issued_cash_refunds() {
     let url = db_url();
     let fx = build_fixture(&url, "trueup").await;
-    let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _recon = RECONCILE_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let now = now_for_closed_period().await;
     let period = prev_period(now);
 
@@ -1099,18 +1299,31 @@ async fn true_up_subtracts_already_issued_cash_refunds() {
     let app = make_owned_app(&fx.state, &plan, organization).await;
 
     // First bill: $60 of usage → subtotal 6000, total 6000 (no credit). $60 cash collected.
-    ingest_at(&fx.state, app, 6000, period, 1).await;
+    ingest_at(&fx.state, &app, 6000, period, 1).await;
     let stripe = RecordingStripe::default();
     assert_eq!(run_reconcile(&fx.state, &stripe, now).await, 1);
-    let inv_b = active_invoice_id(&fx.state, organization, period).await.expect("invoice B");
-    assert_eq!(invoice_money(&fx.state, &inv_b).await, ("finalized".into(), 6000, 0, 6000));
+    let inv_b = active_invoice_id(&fx.state, organization, period)
+        .await
+        .expect("invoice B");
+    assert_eq!(
+        invoice_money(&fx.state, &inv_b).await,
+        ("finalized".into(), 6000, 0, 6000)
+    );
     append_payment(&fx.state, &inv_b, 6000, "in_trueup").await;
 
     // $25 already refunded to cash (the over-charge correction).
     let mut conn = new_conn(&url).await;
     let provider = refund::StripeRefundProvider { stripe: &stripe };
     let pre = refund::issue_refund(
-        &mut conn, &provider, &inv_b, 2500, 2500, 0, RefundDestination::Cash, None, &key(&inv_b, "pre-25"),
+        &mut conn,
+        &provider,
+        &inv_b,
+        2500,
+        2500,
+        0,
+        RefundDestination::Cash,
+        None,
+        &key(&inv_b, "pre-25"),
     )
     .await
     .expect("issue");
@@ -1124,7 +1337,7 @@ async fn true_up_subtracts_already_issued_cash_refunds() {
         .execute(
             "UPDATE zeroship.usage_aggregates SET total = 1000 \
              WHERE app_id = $1 AND period = $2::date AND metric = 'requests'",
-            &[&app, &period_d(period)],
+            &[&app.as_str(), &period_d(period)],
         )
         .await
         .expect("lower usage");
@@ -1134,10 +1347,19 @@ async fn true_up_subtracts_already_issued_cash_refunds() {
         .await
         .expect("void+reissue");
     let reissued = outcome.reissued_invoice_id.expect("reissued");
-    assert_eq!(invoice_money(&fx.state, &reissued).await.3, 1000, "reissue total = $10");
+    assert_eq!(
+        invoice_money(&fx.state, &reissued).await.3,
+        1000,
+        "reissue total = $10"
+    );
 
-    assert_eq!(outcome.true_up_cents, 2500, "true-up = $60 − $25 already-refunded − $10 = $25 (NOT $50)");
-    let true_up_id = outcome.true_up_refund_id.expect("a true-up refund was issued");
+    assert_eq!(
+        outcome.true_up_cents, 2500,
+        "true-up = $60 − $25 already-refunded − $10 = $25 (NOT $50)"
+    );
+    let true_up_id = outcome
+        .true_up_refund_id
+        .expect("a true-up refund was issued");
 
     // The true-up is a CASH refund row on the VOIDED invoice.
     let row = &fx
@@ -1149,19 +1371,33 @@ async fn true_up_subtracts_already_issued_cash_refunds() {
         )
         .await
         .expect("read true-up")[0];
-    assert_eq!(row.get::<_, String>("invoice_id"), inv_b, "true-up refunds the VOIDED invoice");
+    assert_eq!(
+        row.get::<_, String>("invoice_id"),
+        inv_b,
+        "true-up refunds the VOIDED invoice"
+    );
     assert_eq!(row.get::<_, i64>("amount_cents"), 2500);
     assert_eq!(row.get::<_, String>("dest"), "cash");
 
     // Total cash refunds on B = $25 + $25 = $50 ≤ cash $60: the cap held. A
     // formula that ignored prior cash refunds would have tried $50 and been rejected.
     // Two Stripe refunds total.
-    assert_eq!(stripe.refund_count(), 2, "the pre-refund + the true-up = two Stripe Refunds");
-    let total_cash_refunds =
-        refund::refunds_total_for_destination(&*fx.state.control_pg, &inv_b, RefundDestination::Cash)
-            .await
-            .expect("sum");
-    assert_eq!(total_cash_refunds, 5000, "Σ cash refunds on B = $50 ≤ cash $60 (cap held)");
+    assert_eq!(
+        stripe.refund_count(),
+        2,
+        "the pre-refund + the true-up = two Stripe Refunds"
+    );
+    let total_cash_refunds = refund::refunds_total_for_destination(
+        &*fx.state.control_pg,
+        &inv_b,
+        RefundDestination::Cash,
+    )
+    .await
+    .expect("sum");
+    assert_eq!(
+        total_cash_refunds, 5000,
+        "Σ cash refunds on B = $50 ≤ cash $60 (cap held)"
+    );
 
     drop(conn);
     drop(fx);
@@ -1193,7 +1429,9 @@ async fn true_up_subtracts_already_issued_cash_refunds() {
 async fn true_up_recomputes_over_collection_under_the_lock() {
     let url = db_url();
     let fx = build_fixture(&url, "trueup-lock").await;
-    let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _recon = RECONCILE_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
 
     let organization = make_organization(&fx.state, "trueup-lock").await;
     let organization = organization.as_str();
@@ -1234,7 +1472,10 @@ async fn true_up_recomputes_over_collection_under_the_lock() {
     let lock_key: i64 = fx
         .state
         .control_pg
-        .query("SELECT hashtext($1::text)::bigint AS k", &[&organization.to_string()])
+        .query(
+            "SELECT hashtext($1::text)::bigint AS k",
+            &[&organization.to_string()],
+        )
         .await
         .expect("hash key")[0]
         .get("k");
@@ -1245,7 +1486,12 @@ async fn true_up_recomputes_over_collection_under_the_lock() {
         let mut writer = new_conn(&url_w).await;
         let provider = NativeRefundProvider;
         refund::issue_true_up_refund(
-            &mut writer, &provider, &inv_w, 1000, Some("true-up"), &idem_w,
+            &mut writer,
+            &provider,
+            &inv_w,
+            1000,
+            Some("true-up"),
+            &idem_w,
         )
         .await
     });
@@ -1308,7 +1554,10 @@ async fn true_up_recomputes_over_collection_under_the_lock() {
     let amount: i64 = fx
         .state
         .control_pg
-        .query("SELECT amount_cents FROM zeroship.refunds WHERE id = $1", &[&refund_id])
+        .query(
+            "SELECT amount_cents FROM zeroship.refunds WHERE id = $1",
+            &[&refund_id],
+        )
         .await
         .expect("read true-up")[0]
         .get("amount_cents");
@@ -1318,7 +1567,9 @@ async fn true_up_recomputes_over_collection_under_the_lock() {
          (a stale read taken before the lock would have claimed $50 and been rejected by the cap)",
     );
     // Cap holds: Σ cash refunds ($30) ≤ cash anchor ($40).
-    let cash = refund::cash_collected(&*fx.state.control_pg, &inv).await.expect("cash");
+    let cash = refund::cash_collected(&*fx.state.control_pg, &inv)
+        .await
+        .expect("cash");
     assert_eq!(cash, 4000, "cash anchor = $60 − $20 dispute_debit = $40");
 
     drop(obs);
@@ -1337,7 +1588,9 @@ async fn true_up_recomputes_over_collection_under_the_lock() {
 async fn one_active_invoice_per_period_void_releases_claim() {
     let url = db_url();
     let fx = build_fixture(&url, "claim").await;
-    let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _recon = RECONCILE_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let now = now_for_closed_period().await;
     let period = prev_period(now);
 
@@ -1347,11 +1600,13 @@ async fn one_active_invoice_per_period_void_releases_claim() {
     set_customer(&fx.state, organization).await;
     let plan = make_plan(&fx.state).await;
     let app = make_owned_app(&fx.state, &plan, organization).await;
-    ingest_at(&fx.state, app, 5000, period, 1).await;
+    ingest_at(&fx.state, &app, 5000, period, 1).await;
 
     let stripe = RecordingStripe::default();
     assert_eq!(run_reconcile(&fx.state, &stripe, now).await, 1);
-    let inv1 = active_invoice_id(&fx.state, organization, period).await.expect("invoice 1");
+    let inv1 = active_invoice_id(&fx.state, organization, period)
+        .await
+        .expect("invoice 1");
 
     // A second NON-void invoice for the same (organization, period) is rejected by the
     // partial unique index.
@@ -1361,10 +1616,17 @@ async fn one_active_invoice_per_period_void_releases_claim() {
         .execute(
             "INSERT INTO zeroship.invoices (id, organization_id, period, status) \
              VALUES ($1, $2, $3::date, 'finalized')",
-            &[&zeroship_core::typed_id::new_invoice_id(), &organization, &period_d(period)],
+            &[
+                &zeroship_core::typed_id::new_invoice_id(),
+                &organization,
+                &period_d(period),
+            ],
         )
         .await;
-    assert!(dup.is_err(), "a second NON-void invoice for the period must be rejected");
+    assert!(
+        dup.is_err(),
+        "a second NON-void invoice for the period must be rejected"
+    );
 
     // Void releases the claim → reissue mints a NEW active invoice.
     let outcome = zeroship_control::void_reissue::void_and_reissue(&fx.state, &stripe, &inv1)
@@ -1387,7 +1649,10 @@ async fn one_active_invoice_per_period_void_releases_claim() {
         .await
         .expect("count")[0]
         .get("n");
-    assert_eq!(active, 1, "exactly one active invoice; the void is an audit row");
+    assert_eq!(
+        active, 1,
+        "exactly one active invoice; the void is an audit row"
+    );
 
     drop(fx);
     common::drain_pg().await;
@@ -1410,7 +1675,9 @@ async fn one_active_invoice_per_period_void_releases_claim() {
 async fn issue_refund_takes_per_organization_advisory_lock() {
     let url = db_url();
     let fx = build_fixture(&url, "rlock").await;
-    let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _recon = RECONCILE_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let now = now_for_closed_period().await;
     let period = prev_period(now);
 
@@ -1422,11 +1689,13 @@ async fn issue_refund_takes_per_organization_advisory_lock() {
     set_customer(&fx.state, organization).await;
     let plan = make_plan(&fx.state).await;
     let app = make_owned_app(&fx.state, &plan, organization).await;
-    ingest_at(&fx.state, app, 5000, period, 1).await;
+    ingest_at(&fx.state, &app, 5000, period, 1).await;
 
     let stripe = RecordingStripe::default();
     assert_eq!(run_reconcile(&fx.state, &stripe, now).await, 1);
-    let inv = active_invoice_id(&fx.state, organization, period).await.expect("invoice");
+    let inv = active_invoice_id(&fx.state, organization, period)
+        .await
+        .expect("invoice");
     append_payment(&fx.state, &inv, 5000, "in_rlock").await;
 
     // A SECOND independent connection used as the lock observer.
@@ -1444,7 +1713,15 @@ async fn issue_refund_takes_per_organization_advisory_lock() {
     let mut conn = new_conn(&url).await;
     let tx = conn.transaction().await.expect("tx");
     let claim = refund::claim_refund_locked(
-        &tx, organization, &inv, 2000, 2000, 0, "usd", RefundDestination::Cash, None,
+        &tx,
+        organization,
+        &inv,
+        2000,
+        2000,
+        0,
+        "usd",
+        RefundDestination::Cash,
+        None,
         &key(&inv, "lock-claim"),
     )
     .await
@@ -1478,7 +1755,10 @@ async fn issue_refund_takes_per_organization_advisory_lock() {
         .expect("try-lock other")[0]
         .get("got");
     assert!(key_other, "a DIFFERENT organization's advisory lock is free — the lock serializes per organization only");
-    obs_client.execute("SELECT pg_advisory_unlock_all()", &[]).await.ok();
+    obs_client
+        .execute("SELECT pg_advisory_unlock_all()", &[])
+        .await
+        .ok();
 
     tx.commit().await.expect("commit claim");
 
@@ -1501,7 +1781,9 @@ async fn issue_refund_takes_per_organization_advisory_lock() {
 async fn two_refunds_summing_over_cash_second_is_rejected() {
     let url = db_url();
     let fx = build_fixture(&url, "sumcap").await;
-    let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _recon = RECONCILE_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let now = now_for_closed_period().await;
     let period = prev_period(now);
 
@@ -1511,25 +1793,46 @@ async fn two_refunds_summing_over_cash_second_is_rejected() {
     set_customer(&fx.state, organization).await;
     let plan = make_plan(&fx.state).await;
     let app = make_owned_app(&fx.state, &plan, organization).await;
-    ingest_at(&fx.state, app, 5000, period, 1).await;
+    ingest_at(&fx.state, &app, 5000, period, 1).await;
 
     let stripe = RecordingStripe::default();
     assert_eq!(run_reconcile(&fx.state, &stripe, now).await, 1);
-    let inv = active_invoice_id(&fx.state, organization, period).await.expect("invoice");
+    let inv = active_invoice_id(&fx.state, organization, period)
+        .await
+        .expect("invoice");
     append_payment(&fx.state, &inv, 5000, "in_sumcap").await;
 
     let mut conn = new_conn(&url).await;
     let provider = NativeRefundProvider;
 
     let r1 = refund::issue_refund(
-        &mut conn, &provider, &inv, 4000, 4000, 0, RefundDestination::Cash, None, &key(&inv, "first40"),
+        &mut conn,
+        &provider,
+        &inv,
+        4000,
+        4000,
+        0,
+        RefundDestination::Cash,
+        None,
+        &key(&inv, "first40"),
     )
     .await
     .expect("issue");
-    assert!(matches!(r1, RefundOutcome::Issued { .. }), "first $40 refund (≤ $50) is allowed");
+    assert!(
+        matches!(r1, RefundOutcome::Issued { .. }),
+        "first $40 refund (≤ $50) is allowed"
+    );
 
     let r2 = refund::issue_refund(
-        &mut conn, &provider, &inv, 4000, 4000, 0, RefundDestination::Cash, None, &key(&inv, "second40"),
+        &mut conn,
+        &provider,
+        &inv,
+        4000,
+        4000,
+        0,
+        RefundDestination::Cash,
+        None,
+        &key(&inv, "second40"),
     )
     .await
     .expect("issue");
@@ -1541,7 +1844,10 @@ async fn two_refunds_summing_over_cash_second_is_rejected() {
     let total = refund::refunds_total_for_destination(&conn, &inv, RefundDestination::Cash)
         .await
         .expect("sum");
-    assert_eq!(total, 4000, "only the first $40 stuck; Σ cash refunds ≤ cash $50");
+    assert_eq!(
+        total, 4000,
+        "only the first $40 stuck; Σ cash refunds ≤ cash $50"
+    );
 
     drop(conn);
     drop(fx);
@@ -1569,7 +1875,9 @@ async fn two_refunds_summing_over_cash_second_is_rejected() {
 async fn refund_to_credit_double_drive_appends_exactly_one_grant() {
     let url = db_url();
     let fx = build_fixture(&url, "rtcdup").await;
-    let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _recon = RECONCILE_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let now = now_for_closed_period().await;
     let period = prev_period(now);
 
@@ -1579,18 +1887,28 @@ async fn refund_to_credit_double_drive_appends_exactly_one_grant() {
     set_customer(&fx.state, organization).await;
     let plan = make_plan(&fx.state).await;
     let app = make_owned_app(&fx.state, &plan, organization).await;
-    ingest_at(&fx.state, app, 5000, period, 1).await;
+    ingest_at(&fx.state, &app, 5000, period, 1).await;
 
     let stripe = RecordingStripe::default();
     assert_eq!(run_reconcile(&fx.state, &stripe, now).await, 1);
-    let inv = active_invoice_id(&fx.state, organization, period).await.expect("invoice");
+    let inv = active_invoice_id(&fx.state, organization, period)
+        .await
+        .expect("invoice");
     append_payment(&fx.state, &inv, 5000, "in_rtcdup").await;
 
     // Issue a $30 credit refund (drives once → one refund_to_credit grant).
     let mut conn = new_conn(&url).await;
     let provider = NativeRefundProvider;
     let r = refund::issue_refund(
-        &mut conn, &provider, &inv, 3000, 3000, 0, RefundDestination::Credit, None, &key(&inv, "rtc-30"),
+        &mut conn,
+        &provider,
+        &inv,
+        3000,
+        3000,
+        0,
+        RefundDestination::Credit,
+        None,
+        &key(&inv, "rtc-30"),
     )
     .await
     .expect("issue");
@@ -1613,7 +1931,11 @@ async fn refund_to_credit_double_drive_appends_exactly_one_grant() {
             .expect("count")[0]
             .get::<_, i64>("n")
     };
-    assert_eq!(count_grants(fx.state.clone(), marker.clone()).await, 1, "one grant after the first drive");
+    assert_eq!(
+        count_grants(fx.state.clone(), marker.clone()).await,
+        1,
+        "one grant after the first drive"
+    );
 
     // The DURABLE guard: a SECOND direct INSERT of the SAME note (the race a missing
     // constraint would allow) is rejected by the partial UNIQUE index. THIS is the
@@ -1625,7 +1947,12 @@ async fn refund_to_credit_double_drive_appends_exactly_one_grant() {
             "INSERT INTO zeroship.credit_ledger \
                (id, organization_id, kind, amount_cents, currency, applied_invoice_id, note) \
              VALUES ($1, $2, 'refund_to_credit', 3000, 'usd', $3, $4)",
-            &[&zeroship_core::typed_id::new_credit_id(), &organization, &inv, &marker],
+            &[
+                &zeroship_core::typed_id::new_credit_id(),
+                &organization,
+                &inv,
+                &marker,
+            ],
         )
         .await;
     assert!(
@@ -1634,7 +1961,11 @@ async fn refund_to_credit_double_drive_appends_exactly_one_grant() {
     );
 
     // Still exactly one grant; the credit balance reflects ONE $30 grant, not two.
-    assert_eq!(count_grants(fx.state.clone(), marker).await, 1, "still exactly one grant — no double credit");
+    assert_eq!(
+        count_grants(fx.state.clone(), marker).await,
+        1,
+        "still exactly one grant — no double credit"
+    );
 
     drop(conn);
     drop(fx);
@@ -1654,7 +1985,9 @@ async fn refund_to_credit_double_drive_appends_exactly_one_grant() {
 async fn void_reissue_is_redrivable_after_phase1_crash() {
     let url = db_url();
     let fx = build_fixture(&url, "redrive").await;
-    let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _recon = RECONCILE_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let now = now_for_closed_period().await;
     let period = prev_period(now);
 
@@ -1666,16 +1999,30 @@ async fn void_reissue_is_redrivable_after_phase1_crash() {
     let app = make_owned_app(&fx.state, &plan, organization).await;
 
     // $10 grant; $6 usage → subtotal 600, credit 600, total 0. Balance after consume = $4.
-    insert_grant(&fx.state, organization, 1000, Utc::now() - Duration::hours(2)).await;
-    ingest_at(&fx.state, app, 600, period, 1).await;
+    insert_grant(
+        &fx.state,
+        organization,
+        1000,
+        Utc::now() - Duration::hours(2),
+    )
+    .await;
+    ingest_at(&fx.state, &app, 600, period, 1).await;
 
     let stripe = RecordingStripe::default();
     assert_eq!(run_reconcile(&fx.state, &stripe, now).await, 1);
-    let inv_a = active_invoice_id(&fx.state, organization, period).await.expect("invoice A");
-    assert_eq!(invoice_money(&fx.state, &inv_a).await, ("finalized".into(), 600, 600, 0));
+    let inv_a = active_invoice_id(&fx.state, organization, period)
+        .await
+        .expect("invoice A");
     assert_eq!(
-        zeroship_control::credit::balance(&*fx.state.control_pg, organization, "usd").await.expect("bal"),
-        400, "balance after consume = $4",
+        invoice_money(&fx.state, &inv_a).await,
+        ("finalized".into(), 600, 600, 0)
+    );
+    assert_eq!(
+        zeroship_control::credit::balance(&*fx.state.control_pg, organization, "usd")
+            .await
+            .expect("bal"),
+        400,
+        "balance after consume = $4",
     );
 
     // ── Simulate a crash AFTER Phase 1 (void + void_reversal committed) but BEFORE the
@@ -1684,9 +2031,12 @@ async fn void_reissue_is_redrivable_after_phase1_crash() {
     {
         let mut c = new_conn(&url).await;
         let tx = c.transaction().await.expect("tx");
-        tx.execute("SELECT pg_advisory_xact_lock(hashtext($1::text)::bigint)", &[&organization.to_string()])
-            .await
-            .expect("lock");
+        tx.execute(
+            "SELECT pg_advisory_xact_lock(hashtext($1::text)::bigint)",
+            &[&organization.to_string()],
+        )
+        .await
+        .expect("lock");
         // void_reversal for each consumed row.
         let consumed = tx
             .query(
@@ -1720,8 +2070,11 @@ async fn void_reissue_is_redrivable_after_phase1_crash() {
     // Now the invoice is void, reversal applied (balance back to $10), no reissue yet.
     assert_eq!(invoice_money(&fx.state, &inv_a).await.0, "void");
     assert_eq!(
-        zeroship_control::credit::balance(&*fx.state.control_pg, organization, "usd").await.expect("bal"),
-        1000, "balance restored to $10 after the void_reversal (no reissue yet)",
+        zeroship_control::credit::balance(&*fx.state.control_pg, organization, "usd")
+            .await
+            .expect("bal"),
+        1000,
+        "balance restored to $10 after the void_reversal (no reissue yet)",
     );
 
     // ── RE-DRIVE: invoke void_and_reissue on the ALREADY-VOID invoice. It must skip
@@ -1732,7 +2085,10 @@ async fn void_reissue_is_redrivable_after_phase1_crash() {
     assert_eq!(outcome.voided_invoice_id, inv_a);
     let reissued = outcome.reissued_invoice_id.expect("reissued on re-drive");
     assert_ne!(reissued, inv_a);
-    assert_eq!(invoice_money(&fx.state, &reissued).await, ("finalized".into(), 600, 600, 0));
+    assert_eq!(
+        invoice_money(&fx.state, &reissued).await,
+        ("finalized".into(), 600, 600, 0)
+    );
 
     // Exactly ONE void_reversal (no double on the re-drive); +$6.
     let vr = fx
@@ -1747,22 +2103,36 @@ async fn void_reissue_is_redrivable_after_phase1_crash() {
         .expect("vr")
         .remove(0);
     assert_eq!(vr.get::<_, i64>("s"), 600, "exactly the $6 restored");
-    assert_eq!(vr.get::<_, i64>("n"), 1, "exactly ONE void_reversal — the re-drive did not double it");
+    assert_eq!(
+        vr.get::<_, i64>("n"),
+        1,
+        "exactly ONE void_reversal — the re-drive did not double it"
+    );
 
     // BALANCE CONSERVED: reissue re-drew $6 → back to $4. Never $-2, never $10.
     assert_eq!(
-        zeroship_control::credit::balance(&*fx.state.control_pg, organization, "usd").await.expect("bal"),
-        400, "re-drive converges: balance back to $4, conserved",
+        zeroship_control::credit::balance(&*fx.state.control_pg, organization, "usd")
+            .await
+            .expect("bal"),
+        400,
+        "re-drive converges: balance back to $4, conserved",
     );
 
     // Idempotent on a THIRD invocation (now everything is done): same outcome, no churn.
     let again = zeroship_control::void_reissue::void_and_reissue(&fx.state, &stripe, &inv_a)
         .await
         .expect("third invocation converges");
-    assert_eq!(again.reissued_invoice_id.as_deref(), Some(reissued.as_str()), "third drive is a stable no-op");
     assert_eq!(
-        zeroship_control::credit::balance(&*fx.state.control_pg, organization, "usd").await.expect("bal"),
-        400, "balance still $4 after a third drive",
+        again.reissued_invoice_id.as_deref(),
+        Some(reissued.as_str()),
+        "third drive is a stable no-op"
+    );
+    assert_eq!(
+        zeroship_control::credit::balance(&*fx.state.control_pg, organization, "usd")
+            .await
+            .expect("bal"),
+        400,
+        "balance still $4 after a third drive",
     );
 
     drop(fx);
@@ -1809,7 +2179,15 @@ async fn operator_refund_on_draft_or_void_invoice_is_invalid() {
     let mut conn = new_conn(&url).await;
     let provider = NativeRefundProvider;
     let on_draft = refund::issue_refund(
-        &mut conn, &provider, &draft, 1000, 1000, 0, RefundDestination::Cash, None, &key(&draft, "g5d"),
+        &mut conn,
+        &provider,
+        &draft,
+        1000,
+        1000,
+        0,
+        RefundDestination::Cash,
+        None,
+        &key(&draft, "g5d"),
     )
     .await
     .expect("issue (draft)");
@@ -1834,7 +2212,15 @@ async fn operator_refund_on_draft_or_void_invoice_is_invalid() {
         .expect("seed void");
     append_payment(&fx.state, &voided, 5000, "in_gap5_void").await;
     let on_void = refund::issue_refund(
-        &mut conn, &provider, &voided, 1000, 1000, 0, RefundDestination::Cash, None, &key(&voided, "g5v"),
+        &mut conn,
+        &provider,
+        &voided,
+        1000,
+        1000,
+        0,
+        RefundDestination::Cash,
+        None,
+        &key(&voided, "g5v"),
     )
     .await
     .expect("issue (void)");
@@ -1855,7 +2241,10 @@ async fn operator_refund_on_draft_or_void_invoice_is_invalid() {
             .await
             .expect("count")[0]
             .get("n");
-        assert_eq!(n, 0, "a non-finalized invoice never gets a refund row claimed (invoice {inv})");
+        assert_eq!(
+            n, 0,
+            "a non-finalized invoice never gets a refund row claimed (invoice {inv})"
+        );
     }
 
     drop(conn);
@@ -1880,7 +2269,15 @@ async fn refund_on_nonexistent_invoice_is_invalid() {
     let mut conn = new_conn(&url).await;
     let provider = refund::StripeRefundProvider { stripe: &stripe };
     let r = refund::issue_refund(
-        &mut conn, &provider, &ghost, 1000, 1000, 0, RefundDestination::Cash, None, &key(&ghost, "g6"),
+        &mut conn,
+        &provider,
+        &ghost,
+        1000,
+        1000,
+        0,
+        RefundDestination::Cash,
+        None,
+        &key(&ghost, "g6"),
     )
     .await
     .expect("issue");
@@ -1889,11 +2286,18 @@ async fn refund_on_nonexistent_invoice_is_invalid() {
         other => panic!("a refund of a non-existent invoice must be InvalidInvoice, got {other:?}"),
     }
     // The provider was never called (no cash leg for a missing invoice).
-    assert_eq!(stripe.refund_count(), 0, "no Stripe Refund issued for a missing invoice");
+    assert_eq!(
+        stripe.refund_count(),
+        0,
+        "no Stripe Refund issued for a missing invoice"
+    );
     let n: i64 = fx
         .state
         .control_pg
-        .query("SELECT COUNT(*)::bigint AS n FROM zeroship.refunds WHERE invoice_id = $1", &[&ghost])
+        .query(
+            "SELECT COUNT(*)::bigint AS n FROM zeroship.refunds WHERE invoice_id = $1",
+            &[&ghost],
+        )
         .await
         .expect("count")[0]
         .get("n");
@@ -1977,7 +2381,11 @@ async fn refunds_immutable_trigger_freezes_money_and_status_lifecycle() {
         "UPDATE zeroship.refunds SET idempotency_key = 'tampered-key' WHERE id = $1",
     ] {
         assert!(
-            fx.state.control_pg.execute(sql, &[&refund_id]).await.is_err(),
+            fx.state
+                .control_pg
+                .execute(sql, &[&refund_id])
+                .await
+                .is_err(),
             "frozen-column UPDATE must RAISE: {sql}",
         );
     }
@@ -2006,7 +2414,10 @@ async fn refunds_immutable_trigger_freezes_money_and_status_lifecycle() {
     assert!(
         fx.state
             .control_pg
-            .execute("UPDATE zeroship.refunds SET status = 'pending' WHERE id = $1", &[&refund_id])
+            .execute(
+                "UPDATE zeroship.refunds SET status = 'pending' WHERE id = $1",
+                &[&refund_id]
+            )
             .await
             .is_err(),
         "issued→pending must RAISE — the refund status only progresses forward",
@@ -2035,9 +2446,21 @@ async fn refunds_immutable_trigger_freezes_money_and_status_lifecycle() {
         )
         .await
         .expect("read back")[0];
-    assert_eq!(row.get::<_, i64>("amount_cents"), 2000, "amount never changed");
-    assert_eq!(row.get::<_, String>("dest"), "cash", "destination never changed");
-    assert_eq!(row.get::<_, String>("status"), "failed", "status legally progressed to failed");
+    assert_eq!(
+        row.get::<_, i64>("amount_cents"),
+        2000,
+        "amount never changed"
+    );
+    assert_eq!(
+        row.get::<_, String>("dest"),
+        "cash",
+        "destination never changed"
+    );
+    assert_eq!(
+        row.get::<_, String>("status"),
+        "failed",
+        "status legally progressed to failed"
+    );
 
     drop(fx);
     common::drain_pg().await;
@@ -2059,7 +2482,9 @@ async fn refunds_immutable_trigger_freezes_money_and_status_lifecycle() {
 async fn true_up_noop_when_over_collection_not_positive() {
     let url = db_url();
     let fx = build_fixture(&url, "gap23-noop").await;
-    let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _recon = RECONCILE_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
 
     let organization = make_organization(&fx.state, "gap23").await;
     let organization = organization.as_str();
@@ -2085,7 +2510,12 @@ async fn true_up_noop_when_over_collection_not_positive() {
 
     // (i) reissued_total == cash ($40) ⇒ over = $40 − $0 − $40 = 0 ⇒ NoOp.
     let exact = refund::issue_true_up_refund(
-        &mut conn, &provider, &inv, 4000, Some("noop-exact"), &key(&inv, "g23-exact"),
+        &mut conn,
+        &provider,
+        &inv,
+        4000,
+        Some("noop-exact"),
+        &key(&inv, "g23-exact"),
     )
     .await
     .expect("true-up (exact)");
@@ -2097,7 +2527,12 @@ async fn true_up_noop_when_over_collection_not_positive() {
 
     // (ii) reissued_total > cash ($60 > $40) ⇒ over < 0, floored to 0 ⇒ NoOp.
     let above = refund::issue_true_up_refund(
-        &mut conn, &provider, &inv, 6000, Some("noop-above"), &key(&inv, "g23-above"),
+        &mut conn,
+        &provider,
+        &inv,
+        6000,
+        Some("noop-above"),
+        &key(&inv, "g23-above"),
     )
     .await
     .expect("true-up (above)");
@@ -2111,7 +2546,10 @@ async fn true_up_noop_when_over_collection_not_positive() {
     let n: i64 = fx
         .state
         .control_pg
-        .query("SELECT COUNT(*)::bigint AS n FROM zeroship.refunds WHERE invoice_id = $1", &[&inv])
+        .query(
+            "SELECT COUNT(*)::bigint AS n FROM zeroship.refunds WHERE invoice_id = $1",
+            &[&inv],
+        )
         .await
         .expect("count")[0]
         .get("n");
@@ -2125,18 +2563,26 @@ async fn true_up_noop_when_over_collection_not_positive() {
     let app = make_owned_app(&fx.state, &plan, organization).await;
     let now = now_for_closed_period().await;
     let period = prev_period(now);
-    ingest_at(&fx.state, app, 3000, period, 1).await; // $30
+    ingest_at(&fx.state, &app, 3000, period, 1).await; // $30
     let stripe = RecordingStripe::default();
     assert_eq!(run_reconcile(&fx.state, &stripe, now).await, 1);
-    let inv_b = active_invoice_id(&fx.state, organization, period).await.expect("invoice B");
+    let inv_b = active_invoice_id(&fx.state, organization, period)
+        .await
+        .expect("invoice B");
     // Cash collected EXACTLY equals the bill ($30); the reissue re-prices the SAME usage
     // (== $30), so over = $30 − $0 − $30 = 0 ⇒ the bridge reports no true-up.
     append_payment(&fx.state, &inv_b, 3000, "in_gap23_b").await;
     let outcome = zeroship_control::void_reissue::void_and_reissue(&fx.state, &stripe, &inv_b)
         .await
         .expect("void+reissue");
-    assert_eq!(outcome.true_up_refund_id, None, "no true-up refund when over-collection ≤ 0");
-    assert_eq!(outcome.true_up_cents, 0, "true_up_cents == 0 on the no-op path");
+    assert_eq!(
+        outcome.true_up_refund_id, None,
+        "no true-up refund when over-collection ≤ 0"
+    );
+    assert_eq!(
+        outcome.true_up_cents, 0,
+        "true_up_cents == 0 on the no-op path"
+    );
 
     drop(conn);
     drop(fx);
@@ -2177,7 +2623,9 @@ async fn true_up_noop_when_over_collection_not_positive() {
 async fn true_up_redrive_converges_noop_after_issue() {
     let url = db_url();
     let fx = build_fixture(&url, "gap4-redrive").await;
-    let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _recon = RECONCILE_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
 
     let organization = make_organization(&fx.state, "gap4").await;
     let organization = organization.as_str();
@@ -2204,11 +2652,10 @@ async fn true_up_redrive_converges_noop_after_issue() {
     let idem = key(&inv, "g4-trueup");
 
     // First true-up: reissued_total $10 ⇒ over = $60 − $0 − $10 = $50 ⇒ a REAL refund.
-    let first = refund::issue_true_up_refund(
-        &mut conn, &provider, &inv, 1000, Some("trueup"), &idem,
-    )
-    .await
-    .expect("true-up 1");
+    let first =
+        refund::issue_true_up_refund(&mut conn, &provider, &inv, 1000, Some("trueup"), &idem)
+            .await
+            .expect("true-up 1");
     let first_id = match first {
         RefundOutcome::Issued { refund_id, .. } => refund_id,
         other => panic!("expected Issued, got {other:?}"),
@@ -2217,34 +2664,49 @@ async fn true_up_redrive_converges_noop_after_issue() {
 
     // RE-DRIVE with the SAME key + SAME body ⇒ over is now $60 − $50 − $10 = 0 ⇒ the
     // no-op Duplicate(empty) sentinel. NO second refund / NO second Stripe call.
-    let redrive = refund::issue_true_up_refund(
-        &mut conn, &provider, &inv, 1000, Some("trueup"), &idem,
-    )
-    .await
-    .expect("true-up re-drive");
+    let redrive =
+        refund::issue_true_up_refund(&mut conn, &provider, &inv, 1000, Some("trueup"), &idem)
+            .await
+            .expect("true-up re-drive");
     assert_eq!(
         redrive,
         RefundOutcome::Duplicate(String::new()),
         "re-drive of an issued true-up is a no-op (over-collection already returned), got {redrive:?}",
     );
-    assert_eq!(stripe.refund_count(), 1, "re-drive must NOT issue a second Stripe refund");
+    assert_eq!(
+        stripe.refund_count(),
+        1,
+        "re-drive must NOT issue a second Stripe refund"
+    );
     let n: i64 = fx
         .state
         .control_pg
-        .query("SELECT COUNT(*)::bigint AS n FROM zeroship.refunds WHERE invoice_id = $1", &[&inv])
+        .query(
+            "SELECT COUNT(*)::bigint AS n FROM zeroship.refunds WHERE invoice_id = $1",
+            &[&inv],
+        )
         .await
         .expect("count")[0]
         .get("n");
-    assert_eq!(n, 1, "exactly one true-up refund row after the re-drive (the first $50)");
+    assert_eq!(
+        n, 1,
+        "exactly one true-up refund row after the re-drive (the first $50)"
+    );
     // The first refund is intact + issued.
     let st: String = fx
         .state
         .control_pg
-        .query("SELECT status::text AS s FROM zeroship.refunds WHERE id = $1", &[&first_id])
+        .query(
+            "SELECT status::text AS s FROM zeroship.refunds WHERE id = $1",
+            &[&first_id],
+        )
         .await
         .expect("read")[0]
         .get("s");
-    assert_eq!(st, "issued", "the original true-up stayed issued; the re-drive added nothing");
+    assert_eq!(
+        st, "issued",
+        "the original true-up stayed issued; the re-drive added nothing"
+    );
 
     drop(conn);
     drop(fx);
@@ -2257,7 +2719,9 @@ async fn true_up_redrive_converges_noop_after_issue() {
 async fn true_up_claim_key_conflict_on_moved_anchor() {
     let url = db_url();
     let fx = build_fixture(&url, "gap4-conflict").await;
-    let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _recon = RECONCILE_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
 
     let organization = make_organization(&fx.state, "gap4c").await;
     let organization = organization.as_str();
@@ -2288,11 +2752,23 @@ async fn true_up_claim_key_conflict_on_moved_anchor() {
     {
         let tx = conn.transaction().await.expect("tx");
         let claim = refund::claim_refund_locked(
-            &tx, organization, &inv, 1000, 1000, 0, "usd", RefundDestination::Cash, Some("trueup"), &idem,
+            &tx,
+            organization,
+            &inv,
+            1000,
+            1000,
+            0,
+            "usd",
+            RefundDestination::Cash,
+            Some("trueup"),
+            &idem,
         )
         .await
         .expect("claim");
-        assert!(matches!(claim, refund::ClaimResult::Claimed(_)), "the $10 true-up claim is under cash $60, got {claim:?}");
+        assert!(
+            matches!(claim, refund::ClaimResult::Claimed(_)),
+            "the $10 true-up claim is under cash $60, got {claim:?}"
+        );
         tx.commit().await.expect("commit claim");
     }
 
@@ -2303,7 +2779,16 @@ async fn true_up_claim_key_conflict_on_moved_anchor() {
     {
         let tx = conn.transaction().await.expect("tx2");
         let conflict = refund::claim_refund_locked(
-            &tx, organization, &inv, 2000, 2000, 0, "usd", RefundDestination::Cash, Some("trueup"), &idem,
+            &tx,
+            organization,
+            &inv,
+            2000,
+            2000,
+            0,
+            "usd",
+            RefundDestination::Cash,
+            Some("trueup"),
+            &idem,
         )
         .await
         .expect("conflict claim");
@@ -2318,11 +2803,17 @@ async fn true_up_claim_key_conflict_on_moved_anchor() {
     let n: i64 = fx
         .state
         .control_pg
-        .query("SELECT COUNT(*)::bigint AS n FROM zeroship.refunds WHERE idempotency_key = $1", &[&idem])
+        .query(
+            "SELECT COUNT(*)::bigint AS n FROM zeroship.refunds WHERE idempotency_key = $1",
+            &[&idem],
+        )
         .await
         .expect("count")[0]
         .get("n");
-    assert_eq!(n, 1, "the moved-anchor conflict never appended a second refund row");
+    assert_eq!(
+        n, 1,
+        "the moved-anchor conflict never appended a second refund row"
+    );
 
     drop(conn);
     drop(fx);

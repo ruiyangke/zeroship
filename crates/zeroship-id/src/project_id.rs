@@ -21,7 +21,7 @@
 //!
 //! # The prefix collision, and why it is not a foreign key
 //!
-//! `zeroship.sandboxes.project_id` carries a `^prj_[0-9A-Za-z]{20,40}$` CHECK.
+//! `zeroship.sandboxes.project_id` carries a `^prj_[0-9a-z]{25}$` CHECK.
 //! That column is NOT this entity: it holds a derived dedup key minted by the
 //! extracted `zeroship-sandbox` controller - usually an app id re-tagged into
 //! the `prj_` namespace - it has no foreign key to anything, and its only use is
@@ -29,16 +29,16 @@
 //! prefix carries one meaning per schema. Until that lands, the two must not be
 //! joined, and this crate deliberately offers no conversion between them.
 //!
-//! Like [`crate::organization_id::OrganizationId`] and unlike
-//! [`crate::app_id::AppId`], this type exposes no route to the embedded bits: a
+//! Like every macro-declared id it exposes no route to the embedded bits, and
+//! like [`crate::organization_id::OrganizationId`] it seeds no physical name: a
 //! project id keys rows and scopes a subject derivation that lives in the auth
-//! process, and nothing derives a physical name from it.
+//! process.
 
 use crate::entity_id::declare_entity_id;
 use crate::typed_id::PROJECT_PREFIX;
 
 declare_entity_id! {
-    /// The typed id of one project: `prj_<base62(uuidv7)>`.
+    /// The typed id of one project: `prj_<base36(uuidv7)>`.
     ProjectId,
     PROJECT_PREFIX,
     project_id_tests,

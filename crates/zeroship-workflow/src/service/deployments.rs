@@ -72,14 +72,14 @@ impl AppDeployments {
         app: &AppId,
         hash: &str,
     ) -> Result<BundleExecutable, ExecutableError> {
-        let bytes =
-            self.source
-                .get_manifest(&app.uuid(), hash)
-                .await
-                .map_err(|error| match error {
-                    BlobError::TooLarge => ExecutableError::InvalidManifest,
-                    other => ExecutableError::Storage(other),
-                })?;
+        let bytes = self
+            .source
+            .get_manifest(app, hash)
+            .await
+            .map_err(|error| match error {
+                BlobError::TooLarge => ExecutableError::InvalidManifest,
+                other => ExecutableError::Storage(other),
+            })?;
         if bytes.len() as u64 > zeroship_bundle::MAX_MANIFEST_BYTES {
             return Err(ExecutableError::InvalidManifest);
         }

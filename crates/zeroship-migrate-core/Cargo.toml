@@ -96,9 +96,8 @@ zeroship-migrate-backend = { workspace = true }
 # tokens to `ColType`.
 zeroship-migrate-policy = { workspace = true }
 # The canonical version→id derivation (in the loader) builds a UUIDv7-SHAPED id
-# (numeric version in the high 48 bits) and base62-encodes it via
-# `crate::id::uuid_to_base62` (the vendored typed-id module), which takes a
-# `&uuid::Uuid`.
+# (numeric version in the high bits) and base36-encodes it via the vendored
+# typed-id module.
 uuid = { workspace = true }
 # `FutureExt::catch_unwind` for panic-safe shadow-DB teardown — mirrors the
 # runtime crate's panic_util seam. Zero tokio: `futures` is the executor-agnostic

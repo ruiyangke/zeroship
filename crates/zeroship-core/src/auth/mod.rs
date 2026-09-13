@@ -188,9 +188,7 @@ pub fn verify_hmac_sha256_hex(key: &[u8], payload: &[u8], expected_hex: &str) ->
     constant_time_eq(&computed, expected_hex)
 }
 
-/// Length of the base62 body of a `pws_…` pairwise subject (after the
-/// `pws_` prefix). 20 base62 chars ≈ 119 bits of the HMAC tag — ample to
-/// avoid collisions while keeping the id compact (auth-sdk §6.2).
+/// Length of the base36 body of a `pws_…` pairwise subject.
 pub const PAIRWISE_SUB_BODY_LEN: usize = 20;
 
 /// The fixed prefix every per-app pairwise subject carries. App access tokens
@@ -200,7 +198,7 @@ pub const PAIRWISE_SUB_BODY_LEN: usize = 20;
 pub const PAIRWISE_SUB_PREFIX: &str = "pws_";
 
 /// Whether `sub` has the EXACT shape [`derive_pairwise`] mints: the `pws_`
-/// prefix followed by exactly [`PAIRWISE_SUB_BODY_LEN`] base62 (`[0-9A-Za-z]`)
+/// prefix followed by exactly [`PAIRWISE_SUB_BODY_LEN`] base36 (`[0-9a-z]`)
 /// chars. The gateway wrapper / session cookie is JS-readable by app code, so
 /// it MUST NOT carry the global user id in any claim; a `sub` that survives
 /// this predicate can never be the unprojected `usr_` identity.
@@ -221,7 +219,7 @@ pub const PAIRWISE_SUB_PREFIX: &str = "pws_";
 ///   then binds the token to its client and resource audience. The shape check
 ///   remains defense in depth and is never the source of trust.
 ///
-/// Anchoring on the EXACT minted shape (prefix + fixed length + base62
+/// Anchoring on the exact minted shape (prefix + fixed length + base36
 /// alphabet) rather than a loose `pws_<anything>` closes the gap where a
 /// malformed or forged-shape body (`pws_short`, a punctuation/path-traversal
 /// body, an over-length splice) would silently pass: such a string is provably
@@ -230,7 +228,10 @@ pub const PAIRWISE_SUB_PREFIX: &str = "pws_";
 pub fn is_pairwise_subject(sub: &str) -> bool {
     match sub.strip_prefix(PAIRWISE_SUB_PREFIX) {
         Some(body) => {
-            body.len() == PAIRWISE_SUB_BODY_LEN && body.bytes().all(|c| c.is_ascii_alphanumeric())
+            body.len() == PAIRWISE_SUB_BODY_LEN
+                && body
+                    .bytes()
+                    .all(|c| c.is_ascii_digit() || c.is_ascii_lowercase())
         }
         None => false,
     }
@@ -273,7 +274,7 @@ pub fn derive_pairwise_salt(pairwise_salt_secret_bytes: &[u8]) -> [u8; 32] {
 /// projection):
 ///
 /// ```text
-/// pws = "pws_" + base62( HMAC-SHA256(salt, canonical(global_user_id) || ":" || sector) )[:20]
+/// pws = "pws_" + base36(HMAC-SHA256(salt, user_id || ":" || sector))[:N]
 /// ```
 ///
 /// Deterministic: the same `(global_user_id, sector)` always yields the same
@@ -293,7 +294,7 @@ pub fn derive_pairwise(salt: &[u8], global_user_id: &UserId, sector: &str) -> St
     payload.push(b':');
     payload.extend_from_slice(sector.as_bytes());
     let tag = hmac_sha256(salt, &payload);
-    let mut body = crate::typed_id::base62_encode_bytes(&tag);
+    let mut body = crate::typed_id::base36_encode_bytes(&tag);
     body.truncate(PAIRWISE_SUB_BODY_LEN);
     format!("pws_{body}")
 }
@@ -302,8 +303,8 @@ pub fn derive_pairwise(salt: &[u8], global_user_id: &UserId, sector: &str) -> St
 mod tests {
     use super::*;
 
-    fn user(raw: &str) -> UserId {
-        UserId::parse(raw).expect("valid user id fixture")
+    fn user() -> UserId {
+        UserId::mint()
     }
 
     #[test]
@@ -346,7 +347,7 @@ mod tests {
     #[test]
     fn pairwise_is_deterministic_per_app_and_prefixed() {
         let salt = b"platform-pairwise-salt";
-        let uid = user("usr_0000000000000000000001");
+        let uid = user();
         let a = derive_pairwise(salt, &uid, "https://app-a.zeroship.ai");
         let a2 = derive_pairwise(salt, &uid, "https://app-a.zeroship.ai");
         let b = derive_pairwise(salt, &uid, "https://app-b.zeroship.ai");
@@ -368,7 +369,7 @@ mod tests {
     #[test]
     fn is_pairwise_subject_accepts_derived_and_refuses_user_id() {
         let salt = b"platform-pairwise-salt";
-        let uid = user("usr_0000000000000000000001");
+        let uid = user();
         let pws = derive_pairwise(salt, &uid, "https://app.zeroship.ai");
         // Every minted pws_ satisfies the inbound invariant.
         assert!(
@@ -400,8 +401,8 @@ mod tests {
 
     /// I8 (security-review 2026-06-02): `is_pairwise_subject` must be the EXACT
     /// inverse of [`derive_pairwise`]'s output shape — `pws_` + exactly
-    /// [`PAIRWISE_SUB_BODY_LEN`] base62 chars — so a `pws_`-SHAPED string that
-    /// `derive_pairwise` could never have minted (wrong length, or a non-base62
+    /// [`PAIRWISE_SUB_BODY_LEN`] base36 chars — so a `pws_`-shaped string that
+    /// `derive_pairwise` could never have minted (wrong length, or a non-base36
     /// byte) is rejected. This is hardening only: at every production call site
     /// the predicate runs DOWNSTREAM of cryptographic authentication (the OP or
     /// session-cookie signature) and client/audience binding. Making the
@@ -411,14 +412,14 @@ mod tests {
     #[test]
     fn is_pairwise_subject_rejects_forged_non_derived_shapes() {
         let salt = b"platform-pairwise-salt";
-        let uid = user("usr_0000000000000000000001");
+        let uid = user();
         let minted = derive_pairwise(salt, &uid, "https://app.zeroship.ai");
         // The real minted shape is still accepted (sanity).
         assert!(
             is_pairwise_subject(&minted),
             "minted pws_ must pass: {minted}"
         );
-        // The minted body is exactly PAIRWISE_SUB_BODY_LEN base62 chars.
+        // The minted body has the exact derived width.
         let minted_body = minted.strip_prefix(PAIRWISE_SUB_PREFIX).unwrap();
         assert_eq!(minted_body.len(), PAIRWISE_SUB_BODY_LEN);
 
@@ -433,25 +434,22 @@ mod tests {
             !is_pairwise_subject(&format!("pws_{}", "a".repeat(PAIRWISE_SUB_BODY_LEN + 1))),
             "an over-length pws_ body is not a derivable pairwise subject"
         );
-        // A body of the RIGHT length but carrying a non-base62 byte — the
-        // base62 alphabet is [0-9A-Za-z], so '-', '_', '.', '/', '+', '=' are
-        // all out. A forged path-traversal-shaped or punctuation-laced body
-        // that happens to be 20 chars must still be rejected.
+        // Punctuation is outside the derived alphabet.
         assert!(
             !is_pairwise_subject(&format!("pws_{}", "-".repeat(PAIRWISE_SUB_BODY_LEN))),
-            "a right-length body of non-base62 bytes is not a derivable subject"
+            "a right-length body outside base36 is not a derivable subject"
         );
         assert!(
             !is_pairwise_subject("pws_..%2F..%2Fetc%2Fpw"),
             "a punctuation/encoded forged body must be rejected even at length"
         );
-        // A right-length, all-base62 body IS accepted — we reject SHAPE, not
+        // A right-length base36 body is accepted — we reject shape, not
         // value (the value's authenticity is the signature's job, not the
         // predicate's). This documents the trust boundary: the predicate is a
         // shape inverse, never a forgery gate on its own.
         assert!(
             is_pairwise_subject(&format!("pws_{}", "a".repeat(PAIRWISE_SUB_BODY_LEN))),
-            "a well-shaped (right-length base62) body passes the shape inverse"
+            "a well-shaped base36 body passes the shape inverse"
         );
     }
 
@@ -485,7 +483,7 @@ mod tests {
     #[test]
     fn pws_is_a_pure_function_of_the_dedicated_salt_secret() {
         let dedicated = b"dedicated-pairwise-salt-32+bytes-stable!";
-        let user = user("usr_0000000000000000000001");
+        let user = user();
         let sector = "https://myapp.zeroship.ai";
 
         let salt = derive_pairwise_salt(dedicated);
@@ -514,8 +512,8 @@ mod tests {
 
     #[test]
     fn pairwise_changes_with_salt_and_user() {
-        let uid = user("usr_0000000000000000000001");
-        let other = user("usr_0000000000000000000002");
+        let uid = user();
+        let other = user();
         let sector = "https://app.zeroship.ai";
         assert_ne!(
             derive_pairwise(b"salt-1", &uid, sector),
@@ -529,16 +527,32 @@ mod tests {
         );
     }
 
+    /// The successor to a test that asserted invariance to inbound UUID
+    /// spelling. That property is no longer expressible, and its absence is the
+    /// point: [`derive_pairwise`] takes a [`UserId`], which has exactly one
+    /// printed form, so there is no second spelling for a writer and a reader to
+    /// disagree about.
+    ///
+    /// What the old shape protected against was real. `/token` passed the raw
+    /// provider `sub` while `/signout` passed a re-rendered id, and if the two
+    /// ever differed the signout wrote a family marker under one `pws_` while
+    /// the live wrapper carried another - a revocation that silently does
+    /// nothing. Canonicalizing inside the derive fixed that for UUIDs and then
+    /// broke when a second id format arrived: control hashed `usr_<base36>`
+    /// verbatim while the gateway hashed a hyphenated uuid canonically.
+    ///
+    /// A type cannot drift that way, so what is left to test is that distinct
+    /// users and distinct sectors still separate.
     #[test]
     fn pairwise_accepts_only_canonical_user_identity() {
         let salt = b"platform-pairwise-salt";
         let sector = "https://app.zeroship.ai";
-        let canonical = user("usr_0000000000000000000001");
+        let canonical = user();
         let expected = derive_pairwise(salt, &canonical, sector);
 
         assert_eq!(derive_pairwise(salt, &canonical, sector), expected);
         assert_ne!(
-            derive_pairwise(salt, &user("usr_0000000000000000000002"), sector,),
+            derive_pairwise(salt, &user(), sector,),
             expected
         );
     }

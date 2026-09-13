@@ -11,7 +11,7 @@ use std::sync::Arc;
 use chrono::{DateTime, Utc};
 use compio_postgres::error::SqlState;
 use serde_json::Value;
-use uuid::Uuid;
+use zeroship_core::app_id::AppId;
 use zeroship_core::typed_id;
 use zeroship_workflow::store::pg::{self, WorkflowTables};
 
@@ -233,7 +233,7 @@ async fn drain_one_broadcast(
                     AND NOT EXISTS ( \
                         SELECT 1 \
                           FROM pg_catalog.pg_namespace n \
-                         WHERE n.nspname = 'app_' || b.app_id::text \
+                         WHERE n.nspname = b.app_id \
                            AND NOT has_schema_privilege(n.oid, 'USAGE') \
                     ) \
                     AND NOT EXISTS ( \
@@ -243,7 +243,7 @@ async fn drain_one_broadcast(
                             ON c.relnamespace = n.oid \
                            AND c.relkind = 'r' \
                            AND c.relname = ANY($1::text[]) \
-                         WHERE n.nspname = 'app_' || b.app_id::text \
+                         WHERE n.nspname = b.app_id \
                          GROUP BY n.oid \
                         HAVING count(*) <> $2 \
                     ) \
@@ -265,7 +265,12 @@ async fn drain_one_broadcast(
     };
 
     let broadcast_id: String = row.get("id");
-    let app_id: Uuid = row.get("app_id");
+    let app_id_raw: String = row.get("app_id");
+    let app_id = AppId::parse(&app_id_raw).map_err(|e| {
+        RegistryError::Database(format!(
+            "workflow_broadcasts.app_id {app_id_raw} is not a canonical app id: {e}"
+        ))
+    })?;
     let topic: String = row.get("topic");
     let signal_type: String = row.get("type");
     let payload: Value = row.get("payload");
@@ -329,7 +334,7 @@ async fn drain_one_broadcast(
               LIMIT $5 \
               FOR UPDATE OF s SKIP LOCKED",
             ),
-            &[&app_id, &topic, &signal_type, &broadcast_id, &max_deliveries],
+            &[&app_id.as_str(), &topic, &signal_type, &broadcast_id, &max_deliveries],
         )
         .await
         .map_err(RegistryError::from)?;
@@ -408,7 +413,7 @@ async fn drain_one_broadcast(
                        AND sig.run_id = s.run_id \
                 )",
             ),
-            &[&app_id, &topic, &signal_type, &broadcast_id],
+            &[&app_id.as_str(), &topic, &signal_type, &broadcast_id],
         )
         .await
         .map_err(RegistryError::from)?
@@ -424,7 +429,7 @@ async fn drain_one_broadcast(
                     AND r.state IN ('queued','running','sleeping','waiting','compensating') \
                     AND r.wake_at IS NOT NULL",
             ),
-            &[&broadcast_id, &app_id],
+            &[&broadcast_id, &app_id.as_str()],
         )
         .await
         .map_err(RegistryError::from)?;
@@ -449,7 +454,7 @@ async fn drain_one_broadcast(
 async fn complete_broadcast_if_drained(
     state: &AppState,
     broadcast_id: &str,
-    app_id: Uuid,
+    app_id: AppId,
     topic: &str,
     signal_type: &str,
 ) -> Result<(), RegistryError> {
@@ -507,7 +512,7 @@ async fn complete_broadcast_if_drained(
                            AND sig.run_id = s.run_id \
                     )",
             ),
-            &[&app_id, &topic, &signal_type, &broadcast_id],
+            &[&app_id.as_str(), &topic, &signal_type, &broadcast_id],
         )
         .await
         .map_err(RegistryError::from)?

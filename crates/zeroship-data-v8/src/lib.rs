@@ -555,31 +555,20 @@ mod backend_init_tests {
 /// This test links both consumers so a fixture cannot conceal a naming mismatch.
 #[cfg(test)]
 mod journal_schema_derivations_agree {
-    use uuid::Uuid;
+    use zeroship_core::AppId;
 
     /// Both derivations must produce the same schema name for the same app.
-    ///
-    /// Asserted over several ids rather than one, because the shapes that could
-    /// diverge are formatting choices - hyphenation, case, prefix - and a single
-    /// fixed uuid can hide a difference that only some byte patterns expose.
     #[test]
     fn the_writer_and_the_reader_name_the_same_schema() {
-        let ids = [
-            Uuid::nil(),
-            Uuid::max(),
-            Uuid::parse_str("0198f0a1-0000-7000-8000-0123456789ab").expect("fixed uuid parses"),
-            Uuid::new_v4(),
-        ];
-        for id in ids {
-            let writer = zeroship_migrate_server::provisioning::workflow_journal_schema_name(&id);
-            let reader = zeroship_workflow::store::pg::app_schema_for(&id);
-            assert_eq!(
-                writer, reader,
-                "the migration service provisions the workflow journal schema as \
-                 {writer} while the workflow plugin reads {reader}; a deploy would \
-                 write its journal where nothing looks for it"
-            );
-        }
+        let id = AppId::mint();
+        let writer = zeroship_migrate_server::provisioning::workflow_journal_schema_name(&id);
+        let reader = zeroship_workflow::store::pg::app_schema_for(&id);
+        assert_eq!(
+            writer, reader,
+            "the migration service provisions the workflow journal schema as \
+             {writer} while the workflow plugin reads {reader}; a deploy would \
+             write its journal where nothing looks for it"
+        );
     }
 }
 

@@ -97,13 +97,14 @@ async fn recovery_contract(store: Rc<OrmStore>) {
             .await,
         Err(WorkflowServiceError::PermissionDenied)
     ));
-    let foreign_holder = platform
-        .ledger
-        .for_scope(HoldScope::new(app.clone(), typed_id::generate("dhl")).unwrap());
-    assert!(service
-        .acquire_deployment_hold(&app, &deploy.id, &deploy.hash, &foreign_holder)
-        .await
-        .is_err());
+    let foreign_holder =
+        platform.client_for_scope(HoldScope::new(app.clone(), typed_id::generate("dhl")).unwrap());
+    assert!(matches!(
+        service
+            .acquire_deployment_hold(&app, &deploy.id, &deploy.hash, &foreign_holder)
+            .await,
+        Err(WorkflowServiceError::PermissionDenied)
+    ));
     assert!(service
         .acquire_deployment_hold(&app, &deploy.id, &"c".repeat(64), &client)
         .await

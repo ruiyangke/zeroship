@@ -93,7 +93,7 @@ pub const CODE_INVALID_SCHEMA_IDENT: &str = "INVALID_SCHEMA_IDENT";
 /// an `ifExists` on a create*/add* op, or an `ifNotExists` on a
 /// drop*/rename/alter op. A structured authoring error, not a render-time blow-up.
 pub const CODE_GUARD_DIRECTION: &str = "GUARD_DIRECTION";
-/// A legacy internal platform `id_prefix` that is not a valid base62-UUIDv7 ID
+/// An internal platform `id_prefix` that is not a valid base36-UUIDv7 ID
 /// prefix (charset / length) or is in the reserved-prefix
 /// deny-list (`usr`, ...). The IR's threat model is a hand-crafted IR envelope, so a
 /// malformed/reserved prefix is a fail-closed VALIDATE error, not a render-time

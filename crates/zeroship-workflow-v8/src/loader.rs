@@ -83,7 +83,7 @@ impl WorkflowRuntimeLoader for AppRuntimeLoader {
                 WorkflowServiceError::InvalidRequest("invalid workflow runtime descriptor".into())
             })?;
         let runtime = Runtime::builder()
-            .app_id(self.backend.app_id().uuid())
+            .app_id(self.backend.app_id().clone())
             .modules(modules)
             .runtime_descriptor(descriptor)
             .env_vars(self.env_vars.clone())

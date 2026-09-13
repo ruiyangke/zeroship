@@ -78,14 +78,8 @@ async fn scheduled_artifact_contract(store: Rc<OrmStore>) {
     let worker = WorkerIdentity::new("artifact-worker".into()).unwrap();
     let task = service.poll(&worker).await.unwrap().unwrap();
     let objects = &deployments.source;
-    let bytes = objects
-        .get_manifest(&app.uuid(), &deploy.hash)
-        .await
-        .unwrap();
-    objects
-        .delete_manifest(&app.uuid(), &deploy.hash)
-        .await
-        .unwrap();
+    let bytes = objects.get_manifest(&app, &deploy.hash).await.unwrap();
+    objects.delete_manifest(&app, &deploy.hash).await.unwrap();
     assert!(matches!(
         service
             .task_executable(&worker, &task.id, &task.token)
@@ -127,7 +121,7 @@ async fn scheduled_artifact_contract(store: Rc<OrmStore>) {
     tx.commit().await.unwrap();
 
     objects
-        .put_manifest(&app.uuid(), &deploy.hash, &bytes)
+        .put_manifest(&app, &deploy.hash, &bytes)
         .await
         .unwrap();
     service.retain_deploy(&app, &deploy).await.unwrap();

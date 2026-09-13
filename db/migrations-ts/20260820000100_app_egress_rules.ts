@@ -41,7 +41,7 @@ export default {
   schema() {
     table("app_egress_rules", { schema: "zeroship" }).create({
       columns: {
-        app_id: t.uuid().notNull(),
+        app_id: t.text().notNull(),
         verdict: t.text().notNull(),
         kind: t.text().notNull(),
         destination: t.text().notNull(),

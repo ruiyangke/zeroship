@@ -108,6 +108,7 @@ pub async fn run(store: WorkflowSchedulerStore, config: SchedulerConfig) -> Resu
 #[cfg(test)]
 mod tests {
     use super::*;
+    use zeroship_core::app_id::AppId;
     use testcontainers::{core::{IntoContainerPort, WaitFor}, runners::SyncRunner, Container, GenericImage, ImageExt};
     use uuid::Uuid;
 
@@ -128,11 +129,11 @@ mod tests {
     async fn store_register_fire_and_ack_next_timer() {
         let (_server, store) = store().await;
         let run_id = format!("run_{}", Uuid::new_v4().simple());
-        let app_id = Uuid::new_v4();
+        let app_id = AppId::mint();
         let wake_at = Utc::now() - chrono::Duration::milliseconds(10);
 
         let registered = store
-            .register_timer(&run_id, app_id, wake_at)
+            .register_timer(&run_id, &app_id, wake_at)
             .await
             .expect("register timer");
         assert_eq!(registered.generation, 0);
@@ -148,7 +149,7 @@ mod tests {
 
         let next_wake = Utc::now() + chrono::Duration::milliseconds(100);
         let next = store
-            .ack_register_next(&run_id, app_id, next_wake)
+            .ack_register_next(&run_id, &app_id, next_wake)
             .await
             .expect("ack next");
         assert_eq!(next.generation, fired[0].dispatch_generation + 1);
@@ -159,12 +160,12 @@ mod tests {
     async fn store_reconcile_moves_inflight_back_to_timer() {
         let (_server, store) = store().await;
         let run_id = format!("run_{}", Uuid::new_v4().simple());
-        let app_id = Uuid::new_v4();
+        let app_id = AppId::mint();
         let wake_at = Utc::now() - chrono::Duration::milliseconds(10);
         let deadline = Utc::now() + chrono::Duration::milliseconds(1_000);
 
         let row = store
-            .register_timer(&run_id, app_id, wake_at)
+            .register_timer(&run_id, &app_id, wake_at)
             .await
             .expect("register timer");
         let entry = TimerEntry::from(row);
@@ -188,23 +189,23 @@ mod tests {
     async fn wheel_orders_by_wake_run_and_generation() {
         let wake = WakeHandle::new();
         let mut wheel = TimerWheel::new(wake);
-        let app_id = Uuid::new_v4();
+        let app_id = AppId::mint();
         let base = Utc::now();
         wheel.push(TimerEntry {
             run_id: "run_c".to_string(),
-            app_id,
+            app_id: app_id.clone(),
             wake_at: base + chrono::Duration::milliseconds(20),
             generation: 0,
         });
         wheel.push(TimerEntry {
             run_id: "run_b".to_string(),
-            app_id,
+            app_id: app_id.clone(),
             wake_at: base,
             generation: 1,
         });
         wheel.push(TimerEntry {
             run_id: "run_a".to_string(),
-            app_id,
+            app_id: app_id.clone(),
             wake_at: base,
             generation: 2,
         });

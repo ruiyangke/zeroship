@@ -16,6 +16,7 @@ use std::sync::{Mutex, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use uuid::Uuid;
+use zeroship_core::app_id::AppId;
 use zeroship_core::usage_event::{UsageEvent, UsageSubject};
 
 const DEFAULT_SOURCE: &str = "zeroship-worker";
@@ -269,18 +270,21 @@ impl Meter {
                 // growing exclusive-lock hold on every drain.
                 return false;
             }
-            let app_uuid = match Uuid::parse_str(app_id) {
+            // A key that is not a well-formed app id can produce no attributable
+            // event, so its counters are dropped and the entry evicted rather
+            // than carried and re-warned every drain. This arm is not reachable
+            // from the shipped producers - the worker stamps the key from the
+            // server-injected app id - and a hit means an untrusted or
+            // hand-built key reached `increment`, which is worth a warning
+            // precisely because the usage it names cannot be billed.
+            let app = match AppId::parse(app_id) {
                 Ok(id) => id,
                 Err(e) => {
                     tracing::warn!(
                         app_id = %app_id,
                         error = %e,
-                        "meter: drain skipped non-UUID app_id"
+                        "meter: drain skipped a key that is not an app id"
                     );
-                    // Evict too: this entry can never produce a valid event, so
-                    // retaining it only grows the map and re-warns every drain.
-                    // Its counters were already zeroed by `drain_metrics` above,
-                    // so keeping it would not preserve anything either.
                     return false;
                 }
             };
@@ -292,7 +296,7 @@ impl Meter {
                     event_id: Uuid::now_v7().to_string(),
                     source: self.source.clone(),
                     subject: UsageSubject {
-                        app: Some(app_uuid),
+                        app: Some(app.clone()),
                         organization: None,
                     },
                     meter: metric.meter,
@@ -319,20 +323,20 @@ mod tests {
     use super::*;
 
     fn app() -> String {
-        Uuid::new_v4().to_string()
+        AppId::mint().as_str().to_string()
     }
 
-    fn event_value(events: &[UsageEvent], app_id: Uuid, meter: &str) -> Option<u64> {
+    fn event_value(events: &[UsageEvent], app_id: &AppId, meter: &str) -> Option<u64> {
         events
             .iter()
-            .find(|event| event.subject.app == Some(app_id) && event.meter == meter)
+            .find(|event| event.subject.app.as_ref() == Some(app_id) && event.meter == meter)
             .map(|event| event.value)
     }
 
-    fn event<'a>(events: &'a [UsageEvent], app_id: Uuid, meter: &str) -> &'a UsageEvent {
+    fn event<'a>(events: &'a [UsageEvent], app_id: &AppId, meter: &str) -> &'a UsageEvent {
         events
             .iter()
-            .find(|event| event.subject.app == Some(app_id) && event.meter == meter)
+            .find(|event| event.subject.app.as_ref() == Some(app_id) && event.meter == meter)
             .expect("usage event exists")
     }
 
@@ -368,7 +372,7 @@ mod tests {
         assert_eq!(m.tracked_app_count(), 1);
         let events = m.drain();
         assert_eq!(
-            event_value(&events, Uuid::parse_str(&a).unwrap(), "requests"),
+            event_value(&events, &AppId::parse(&a).unwrap(), "requests"),
             Some(7),
             "a re-touched app must count from zero, not resume a stale total",
         );
@@ -382,11 +386,11 @@ mod tests {
         m.increment(&a, "requests", 4);
 
         let events = m.drain();
-        let id = Uuid::parse_str(&a).unwrap();
-        let request = event(&events, id, "requests");
+        let id = AppId::parse(&a).unwrap();
+        let request = event(&events, &id, "requests");
         assert_eq!(request.value, 5);
         assert_eq!(request.source, "worker-a");
-        assert_eq!(request.subject.app, Some(id));
+        assert_eq!(request.subject.app.as_ref(), Some(&id));
         assert_eq!(request.subject.organization, None);
         assert!(!request.event_id.is_empty());
         assert_eq!(
@@ -407,9 +411,9 @@ mod tests {
         m.increment(&a, "emails_sent", 2);
 
         let events = m.drain();
-        let id = Uuid::parse_str(&a).unwrap();
-        assert_eq!(event_value(&events, id, "emails_sent"), Some(5));
-        assert_eq!(event_value(&events, id, "requests"), None);
+        let id = AppId::parse(&a).unwrap();
+        assert_eq!(event_value(&events, &id, "emails_sent"), Some(5));
+        assert_eq!(event_value(&events, &id, "requests"), None);
     }
 
     #[test]
@@ -420,8 +424,8 @@ mod tests {
         // metric, not a custom duplicate.
         m.increment(&a, "cpu_us", 100);
         let events = m.drain();
-        let id = Uuid::parse_str(&a).unwrap();
-        assert_eq!(event_value(&events, id, "cpu_us"), Some(100));
+        let id = AppId::parse(&a).unwrap();
+        assert_eq!(event_value(&events, &id, "cpu_us"), Some(100));
         assert_eq!(events.len(), 1);
     }
 
@@ -435,12 +439,12 @@ mod tests {
         m.increment(&b, "widgets", 1);
 
         let events = m.drain();
-        let ia = Uuid::parse_str(&a).unwrap();
-        let ib = Uuid::parse_str(&b).unwrap();
-        assert_eq!(event_value(&events, ia, "requests"), Some(10));
-        assert_eq!(event_value(&events, ia, "widgets"), None);
-        assert_eq!(event_value(&events, ib, "requests"), Some(3));
-        assert_eq!(event_value(&events, ib, "widgets"), Some(1));
+        let ia = AppId::parse(&a).unwrap();
+        let ib = AppId::parse(&b).unwrap();
+        assert_eq!(event_value(&events, &ia, "requests"), Some(10));
+        assert_eq!(event_value(&events, &ia, "widgets"), None);
+        assert_eq!(event_value(&events, &ib, "requests"), Some(3));
+        assert_eq!(event_value(&events, &ib, "widgets"), Some(1));
     }
 
     #[test]
@@ -451,12 +455,12 @@ mod tests {
         m.record_request(&a, 100, 300, 64, 16);
 
         let events = m.drain();
-        let id = Uuid::parse_str(&a).unwrap();
-        assert_eq!(event_value(&events, id, "requests"), Some(2));
-        assert_eq!(event_value(&events, id, "cpu_us"), Some(600));
-        assert_eq!(event_value(&events, id, "wall_us"), Some(1500));
-        assert_eq!(event_value(&events, id, "egress_bytes"), Some(2112));
-        assert_eq!(event_value(&events, id, "ingress_bytes"), Some(272));
+        let id = AppId::parse(&a).unwrap();
+        assert_eq!(event_value(&events, &id, "requests"), Some(2));
+        assert_eq!(event_value(&events, &id, "cpu_us"), Some(600));
+        assert_eq!(event_value(&events, &id, "wall_us"), Some(1500));
+        assert_eq!(event_value(&events, &id, "egress_bytes"), Some(2112));
+        assert_eq!(event_value(&events, &id, "ingress_bytes"), Some(272));
     }
 
     #[test]

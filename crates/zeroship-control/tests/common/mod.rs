@@ -18,7 +18,7 @@ use serde_json::json;
 use uuid::Uuid;
 use zeroship_control::Registry;
 use zeroship_core::auth_provider::{AuthProvider, PlatformConfig, PlatformProvider};
-use zeroship_core::UserId;
+use zeroship_core::{AppId, UserId};
 
 pub const PLATFORM_ISSUER: &str = "https://auth.zeroship.test/oauth2";
 const PLATFORM_KID: &str = "platform-control-test-kid";
@@ -314,7 +314,7 @@ fn platform_jwks_body() -> String {
 ///
 /// Call it AFTER inserting the app row and BEFORE `PgStore::provision`.
 #[allow(dead_code)]
-pub async fn provision_app_workflow_schema(pg: &compio_postgres::Client, app_id: &Uuid) {
+pub async fn provision_app_workflow_schema(pg: &compio_postgres::Client, app_id: &AppId) {
     zeroship_migrate_server::provisioning::provision_workflow_journal_schema(pg, app_id)
         .await
         .expect("provision app workflow journal schema");
@@ -386,8 +386,8 @@ pub async fn unowned_project(pg: &compio_postgres::Client) -> String {
 /// Every billing fixture in this crate starts here rather than at
 /// `zeroship.users`. That is the shape change, not a rename: the party an
 /// invoice, a payout, a Connect account and a `billing_notifications` claim key
-/// on is an organization, and a test that mints a user and passes its typed id
-/// as the subject would not fail loudly - the column is `text`, so the id would
+/// on is an organization, and a test that mints a user and passes its uuid as
+/// the subject would not fail loudly - the column is `text`, so the id would
 /// simply match no organization row and the FK would refuse it at write time
 /// with an error about the wrong thing.
 ///
@@ -443,7 +443,7 @@ pub async fn unowned_project_in(pg: &compio_postgres::Client, organization_id: &
 /// See [`unowned_project`] for which tests a member-less organization is right
 /// for, and for what to do instead when the placement IS the thing under test.
 #[allow(dead_code)]
-pub async fn seed_app(pg: &compio_postgres::Client, name: &str, plan_id: &str) -> Uuid {
+pub async fn seed_app(pg: &compio_postgres::Client, name: &str, plan_id: &str) -> AppId {
     let organization_id = seed_organization(pg).await;
     seed_app_in_organization(pg, name, plan_id, &organization_id).await
 }
@@ -461,7 +461,7 @@ pub async fn seed_app_in_organization(
     name: &str,
     plan_id: &str,
     organization_id: &str,
-) -> Uuid {
+) -> AppId {
     let project_id = unowned_project_in(pg, organization_id).await;
     let rows = pg
         .query(
@@ -471,7 +471,7 @@ pub async fn seed_app_in_organization(
         )
         .await
         .expect("seed fixture app");
-    rows[0].get("id")
+    AppId::parse(rows[0].get("id")).expect("fixture app id")
 }
 
 /// Seat `user` directly in `organization` at `role`.
@@ -499,10 +499,10 @@ pub async fn seat_organization_member(
 
 /// The organization one fixture app bills, read back off the app row.
 #[allow(dead_code)]
-pub async fn app_organization(pg: &compio_postgres::Client, app: &Uuid) -> String {
+pub async fn app_organization(pg: &compio_postgres::Client, app: &AppId) -> String {
     pg.query(
         "SELECT organization_id FROM zeroship.apps WHERE id = $1",
-        &[app],
+        &[&app.as_str()],
     )
     .await
     .expect("read app organization")
@@ -534,7 +534,7 @@ pub async fn app_organization(pg: &compio_postgres::Client, app: &Uuid) -> Strin
 #[allow(dead_code)]
 pub async fn seat_app_organization_member(
     pg: &compio_postgres::Client,
-    app: &Uuid,
+    app: &AppId,
     user: &UserId,
     role: &str,
 ) {
@@ -544,25 +544,26 @@ pub async fn seat_app_organization_member(
              SELECT p.organization_id, $2, $3 FROM zeroship.apps a \
                JOIN zeroship.projects p ON p.id = a.project_id WHERE a.id = $1 \
              ON CONFLICT (organization_id, user_id) DO UPDATE SET role = EXCLUDED.role",
-            &[app, &user.as_str(), &role],
+            &[&app.as_str(), &user.as_str(), &role],
         )
         .await
         .expect("seat organization member for fixture app");
     assert_eq!(
         seated,
         1,
-        "seating {} as '{role}' on app {app} affected {seated} row(s). The \
+        "seating {} as '{role}' on app {} affected {seated} row(s). The \
          INSERT ... SELECT matched no app reaching an organization through \
          apps.project_id -> projects.organization_id, which is a SUCCESSFUL \
          statement that seats nobody. Create the app before seating it.",
-        user.as_str()
+        user.as_str(),
+        app.as_str()
     );
 }
 
 #[allow(dead_code)]
 pub async fn seed_usage_total(
     pg: &compio_postgres::Client,
-    app: Uuid,
+    app: &AppId,
     period_start_unix: i64,
     metric: &str,
     total: i64,
@@ -573,7 +574,12 @@ pub async fn seed_usage_total(
          VALUES ($1, $2::date, $3, $4, NOW()) \
          ON CONFLICT (app_id, period, metric) DO UPDATE SET \
            total = EXCLUDED.total, updated_at = NOW()",
-        &[&app, &period_date(period_start_unix), &metric, &total],
+        &[
+            &app.as_str(),
+            &period_date(period_start_unix),
+            &metric,
+            &total,
+        ],
     )
     .await
     .expect("seed usage total");
@@ -582,7 +588,7 @@ pub async fn seed_usage_total(
 #[allow(dead_code)]
 pub async fn seed_usage_delta(
     pg: &compio_postgres::Client,
-    app: Uuid,
+    app: &AppId,
     period_start_unix: i64,
     metric: &str,
     delta: i64,
@@ -593,7 +599,12 @@ pub async fn seed_usage_delta(
          VALUES ($1, $2::date, $3, $4, NOW()) \
          ON CONFLICT (app_id, period, metric) DO UPDATE SET \
            total = u.total + EXCLUDED.total, updated_at = NOW()",
-        &[&app, &period_date(period_start_unix), &metric, &delta],
+        &[
+            &app.as_str(),
+            &period_date(period_start_unix),
+            &metric,
+            &delta,
+        ],
     )
     .await
     .expect("seed usage delta");

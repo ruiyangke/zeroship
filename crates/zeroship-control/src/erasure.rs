@@ -401,7 +401,7 @@ mod tests {
 
     fn ownership_blocker() -> ErasureBlocker {
         ErasureBlocker {
-            organization_id: "org_0000000000000000000000".into(),
+            organization_id: "org_0000000000000000000000000".into(),
             organization_slug: "solo".into(),
             organization_name: "Solo".into(),
             personal: true,
@@ -413,7 +413,7 @@ mod tests {
 
     fn money_blocker() -> BillingBlocker {
         BillingBlocker {
-            organization_id: "org_0000000000000000000001".into(),
+            organization_id: "org_0000000000000000000000001".into(),
             organization_slug: "closed".into(),
             organization_name: "Closed".into(),
             personal: false,
@@ -424,7 +424,7 @@ mod tests {
             unbilled_period_count: 0,
             remedy: BillingRemedy::SettleInvoices,
             outstanding: OutstandingBilling {
-                organization_id: "org_0000000000000000000001".into(),
+                organization_id: "org_0000000000000000000000001".into(),
                 unpaid_invoices: vec![],
                 unbilled_periods: vec![],
                 billing_identity_on_file: false,

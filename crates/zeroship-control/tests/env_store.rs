@@ -10,7 +10,7 @@ use compio_postgres::{connect, NoTls};
 use uuid::Uuid;
 use zeroship_control::audit::{self, Action, AuditEntry};
 use zeroship_control::{EnvStore, Registry};
-use zeroship_core::UserId;
+use zeroship_core::{AppId, UserId};
 
 use crate::common;
 
@@ -18,7 +18,7 @@ fn db_url() -> String {
     crate::common::require_control_db()
 }
 
-async fn create_test_app(registry: &Registry) -> Uuid {
+async fn create_test_app(registry: &Registry) -> AppId {
     // create_app now binds an owner membership (FK → zeroship.users), so seed a
     // throwaway owner first. These tests only exercise EnvStore, not authz, so
     // the owner identity is immaterial — it just has to exist.
@@ -75,23 +75,23 @@ async fn var_crud_roundtrip() {
     let app = create_test_app(&registry).await;
 
     // Empty initially.
-    assert!(store.list_vars(app).await.unwrap().is_empty());
+    assert!(store.list_vars(&app).await.unwrap().is_empty());
 
     // Create one var.
-    store.set_var(app, "FOO", "bar").await.unwrap();
-    let vars = store.list_vars(app).await.unwrap();
+    store.set_var(&app, "FOO", "bar").await.unwrap();
+    let vars = store.list_vars(&app).await.unwrap();
     assert_eq!(vars, vec![("FOO".to_string(), "bar".to_string())]);
 
     // Update overwrites.
-    store.set_var(app, "FOO", "baz").await.unwrap();
-    let vars = store.list_vars(app).await.unwrap();
+    store.set_var(&app, "FOO", "baz").await.unwrap();
+    let vars = store.list_vars(&app).await.unwrap();
     assert_eq!(vars, vec![("FOO".to_string(), "baz".to_string())]);
 
     // Delete returns true.
-    assert!(store.delete_var(app, "FOO").await.unwrap());
-    assert!(store.list_vars(app).await.unwrap().is_empty());
+    assert!(store.delete_var(&app, "FOO").await.unwrap());
+    assert!(store.list_vars(&app).await.unwrap().is_empty());
     // Second delete returns false.
-    assert!(!store.delete_var(app, "FOO").await.unwrap());
+    assert!(!store.delete_var(&app, "FOO").await.unwrap());
 
     // Cleanup.
     registry.archive_app(&app).await.ok();
@@ -113,16 +113,16 @@ async fn secret_roundtrip_encrypted() {
     let app = create_test_app(&registry).await;
 
     store
-        .set_secret(app, "STRIPE_KEY", "sk_live_sensitive")
+        .set_secret(&app, "STRIPE_KEY", "sk_live_sensitive")
         .await
         .unwrap();
 
     // List surface is write-only for values — only names come back.
-    let names = store.list_secret_names(app).await.unwrap();
+    let names = store.list_secret_names(&app).await.unwrap();
     assert_eq!(names, vec!["STRIPE_KEY"]);
 
     // Merged env decrypts the secret correctly.
-    let merged = store.merged_env(app).await.unwrap();
+    let merged = store.merged_env(&app).await.unwrap();
     assert_eq!(
         merged.get("STRIPE_KEY").and_then(|v| v.as_str()),
         Some("sk_live_sensitive")
@@ -130,7 +130,7 @@ async fn secret_roundtrip_encrypted() {
 
     // Raw ciphertext at rest must NOT contain the plaintext.
     let ct = store
-        .__raw_ciphertext_for_test(app, "STRIPE_KEY")
+        .__raw_ciphertext_for_test(&app, "STRIPE_KEY")
         .await
         .unwrap()
         .expect("row");
@@ -141,10 +141,10 @@ async fn secret_roundtrip_encrypted() {
 
     // Rotation: new value replaces old.
     store
-        .set_secret(app, "STRIPE_KEY", "sk_live_rotated")
+        .set_secret(&app, "STRIPE_KEY", "sk_live_rotated")
         .await
         .unwrap();
-    let merged2 = store.merged_env(app).await.unwrap();
+    let merged2 = store.merged_env(&app).await.unwrap();
     assert_eq!(
         merged2.get("STRIPE_KEY").and_then(|v| v.as_str()),
         Some("sk_live_rotated")
@@ -166,13 +166,13 @@ async fn merged_env_secret_overrides_var() {
     let app = create_test_app(&registry).await;
 
     // Same key in both tables — secret wins because it's applied last in merged_env.
-    store.set_var(app, "API_KEY", "var-value").await.unwrap();
+    store.set_var(&app, "API_KEY", "var-value").await.unwrap();
     store
-        .set_secret(app, "API_KEY", "secret-value")
+        .set_secret(&app, "API_KEY", "secret-value")
         .await
         .unwrap();
 
-    let merged = store.merged_env(app).await.unwrap();
+    let merged = store.merged_env(&app).await.unwrap();
     assert_eq!(
         merged.get("API_KEY").and_then(|v| v.as_str()),
         Some("secret-value")
@@ -200,12 +200,12 @@ async fn invalid_key_rejected_client_side() {
         "HAS SPACE",
         "",
     ] {
-        let err = store.set_var(app, bad, "x").await.unwrap_err();
+        let err = store.set_var(&app, bad, "x").await.unwrap_err();
         assert!(
             matches!(err, zeroship_control::env_store::EnvError::BadKey(_)),
             "expected BadKey for '{bad}', got {err:?}"
         );
-        let err = store.set_secret(app, bad, "x").await.unwrap_err();
+        let err = store.set_secret(&app, bad, "x").await.unwrap_err();
         assert!(
             matches!(err, zeroship_control::env_store::EnvError::BadKey(_)),
             "expected BadKey for '{bad}', got {err:?}"
@@ -228,16 +228,16 @@ async fn per_app_isolation() {
     let app_b = create_test_app(&registry).await;
 
     store
-        .set_var(app_a, "SHARED_NAME", "a-value")
+        .set_var(&app_a, "SHARED_NAME", "a-value")
         .await
         .unwrap();
     store
-        .set_secret(app_b, "SHARED_NAME", "b-value")
+        .set_secret(&app_b, "SHARED_NAME", "b-value")
         .await
         .unwrap();
 
-    let env_a = store.merged_env(app_a).await.unwrap();
-    let env_b = store.merged_env(app_b).await.unwrap();
+    let env_a = store.merged_env(&app_a).await.unwrap();
+    let env_b = store.merged_env(&app_b).await.unwrap();
 
     assert_eq!(
         env_a.get("SHARED_NAME").and_then(|v| v.as_str()),
@@ -267,15 +267,15 @@ async fn wrong_master_key_fails_decrypt() {
     let reader = EnvStore::new(registry.clone(), "wrong-key").expect("store");
     let app = create_test_app(&registry).await;
 
-    writer.set_secret(app, "TOKEN", "hidden").await.unwrap();
+    writer.set_secret(&app, "TOKEN", "hidden").await.unwrap();
 
     // Reader with wrong master key can see the name...
-    let names = reader.list_secret_names(app).await.unwrap();
+    let names = reader.list_secret_names(&app).await.unwrap();
     assert_eq!(names, vec!["TOKEN"]);
 
     // ...but merged_env fails on decrypt rather than silently returning
     // garbage or the plaintext.
-    let err = reader.merged_env(app).await.unwrap_err();
+    let err = reader.merged_env(&app).await.unwrap_err();
     assert!(matches!(
         err,
         zeroship_control::env_store::EnvError::SecretDecrypt { .. }
@@ -299,7 +299,7 @@ async fn ciphertext_transplant_fails_across_app_and_key() {
     let client = pg_connect(&url).await;
 
     store
-        .set_secret(app_a, "STRIPE_KEY", "sk_live_victim")
+        .set_secret(&app_a, "STRIPE_KEY", "sk_live_victim")
         .await
         .unwrap();
 
@@ -311,12 +311,17 @@ async fn ciphertext_transplant_fails_across_app_and_key() {
              WHERE app_id = $3 AND key_name = $4
              ON CONFLICT (app_id, key_name) DO UPDATE
              SET ciphertext = EXCLUDED.ciphertext",
-            &[&app_b, &"STRIPE_KEY", &app_a, &"STRIPE_KEY"],
+            &[
+                &app_b.as_str(),
+                &"STRIPE_KEY",
+                &app_a.as_str(),
+                &"STRIPE_KEY",
+            ],
         )
         .await
         .expect("transplant across app");
 
-    let err = store.merged_env(app_b).await.unwrap_err();
+    let err = store.merged_env(&app_b).await.unwrap_err();
     assert!(
         matches!(
             err,
@@ -333,12 +338,17 @@ async fn ciphertext_transplant_fails_across_app_and_key() {
              WHERE app_id = $3 AND key_name = $4
              ON CONFLICT (app_id, key_name) DO UPDATE
              SET ciphertext = EXCLUDED.ciphertext",
-            &[&app_a, &"COPIED_SECRET", &app_a, &"STRIPE_KEY"],
+            &[
+                &app_a.as_str(),
+                &"COPIED_SECRET",
+                &app_a.as_str(),
+                &"STRIPE_KEY",
+            ],
         )
         .await
         .expect("transplant across key");
 
-    let err = store.merged_env(app_a).await.unwrap_err();
+    let err = store.merged_env(&app_a).await.unwrap_err();
     assert!(
         matches!(
             err,
@@ -363,16 +373,16 @@ async fn archive_preserves_app_environment() {
     let store = EnvStore::new(registry.clone(), "k").expect("store");
     let app = create_test_app(&registry).await;
 
-    store.set_var(app, "V1", "x").await.unwrap();
-    store.set_secret(app, "S1", "y").await.unwrap();
+    store.set_var(&app, "V1", "x").await.unwrap();
+    store.set_secret(&app, "S1", "y").await.unwrap();
 
     // Archive retains environment state so restore is lossless.
     registry.archive_app(&app).await.unwrap();
     assert_eq!(
-        store.list_vars(app).await.unwrap(),
+        store.list_vars(&app).await.unwrap(),
         vec![("V1".to_string(), "x".to_string())]
     );
-    assert_eq!(store.list_secret_names(app).await.unwrap(), vec!["S1"]);
+    assert_eq!(store.list_secret_names(&app).await.unwrap(), vec!["S1"]);
 
     drop(store);
     drop(registry);
@@ -391,27 +401,27 @@ async fn env_version_bumps_on_every_mutation() {
     assert_eq!(v0.get(&app).unwrap().env_version, 0);
 
     // Each mutation bumps by 1.
-    store.set_var(app, "FOO", "1").await.unwrap();
+    store.set_var(&app, "FOO", "1").await.unwrap();
     let v1 = registry.get_versions().await.unwrap();
     assert_eq!(v1.get(&app).unwrap().env_version, 1);
 
     store
-        .set_secret(app, "STRIPE_KEY", "sk_live_1")
+        .set_secret(&app, "STRIPE_KEY", "sk_live_1")
         .await
         .unwrap();
     let v2 = registry.get_versions().await.unwrap();
     assert_eq!(v2.get(&app).unwrap().env_version, 2);
 
-    store.set_var(app, "FOO", "2").await.unwrap(); // overwrite still bumps
+    store.set_var(&app, "FOO", "2").await.unwrap(); // overwrite still bumps
     let v3 = registry.get_versions().await.unwrap();
     assert_eq!(v3.get(&app).unwrap().env_version, 3);
 
-    store.delete_var(app, "FOO").await.unwrap();
+    store.delete_var(&app, "FOO").await.unwrap();
     let v4 = registry.get_versions().await.unwrap();
     assert_eq!(v4.get(&app).unwrap().env_version, 4);
 
     // Delete of a non-existent key does NOT bump.
-    let removed = store.delete_var(app, "GHOST").await.unwrap();
+    let removed = store.delete_var(&app, "GHOST").await.unwrap();
     assert!(!removed);
     let v5 = registry.get_versions().await.unwrap();
     assert_eq!(v5.get(&app).unwrap().env_version, 4);
@@ -443,18 +453,18 @@ async fn delete_secret_and_set_expose_bump_exactly_once() {
     let store = EnvStore::new(registry.clone(), "k").expect("store");
     let app = create_test_app(&registry).await;
 
-    store.set_secret(app, "TOKEN", "sk_1").await.unwrap();
+    store.set_secret(&app, "TOKEN", "sk_1").await.unwrap();
     let after_set = registry.get_versions().await.unwrap()[&app].env_version;
 
     // A real removal reports true and advances the version by exactly one.
-    let removed = store.delete_secret(app, "TOKEN").await.unwrap();
+    let removed = store.delete_secret(&app, "TOKEN").await.unwrap();
     assert!(removed, "deleting a secret that exists must report true");
     let after_delete = registry.get_versions().await.unwrap()[&app].env_version;
     assert_eq!(after_delete, after_set + 1);
 
     // A removal that matches nothing reports false and leaves the version
     // alone, so workers are not woken for a change that did not happen.
-    let removed_again = store.delete_secret(app, "TOKEN").await.unwrap();
+    let removed_again = store.delete_secret(&app, "TOKEN").await.unwrap();
     assert!(
         !removed_again,
         "second delete of the same key must report false"
@@ -462,10 +472,10 @@ async fn delete_secret_and_set_expose_bump_exactly_once() {
     let after_noop = registry.get_versions().await.unwrap()[&app].env_version;
     assert_eq!(after_noop, after_delete);
 
-    store.set_var(app, "PUBLIC_ONE", "1").await.unwrap();
+    store.set_var(&app, "PUBLIC_ONE", "1").await.unwrap();
     let before_expose = registry.get_versions().await.unwrap()[&app].env_version;
     let exposed = store
-        .set_expose(app, &["PUBLIC_ONE".to_string()])
+        .set_expose(&app, &["PUBLIC_ONE".to_string()])
         .await
         .unwrap();
     assert_eq!(exposed, vec!["PUBLIC_ONE".to_string()]);
@@ -492,7 +502,7 @@ async fn rotation_decrypts_old_secrets_and_rewrites_to_new_key() {
     // Initial write with key v1.
     let store_v1 = EnvStore::new(registry.clone(), "key-v1").expect("store");
     store_v1
-        .set_secret(app, "STRIPE_KEY", "sk_live_old")
+        .set_secret(&app, "STRIPE_KEY", "sk_live_old")
         .await
         .unwrap();
 
@@ -501,7 +511,7 @@ async fn rotation_decrypts_old_secrets_and_rewrites_to_new_key() {
     let store_v2 =
         EnvStore::new_with_previous(registry.clone(), "key-v2", &["key-v1"]).expect("store");
 
-    let merged = store_v2.merged_env(app).await.unwrap();
+    let merged = store_v2.merged_env(&app).await.unwrap();
     assert_eq!(
         merged.get("STRIPE_KEY").and_then(|v| v.as_str()),
         Some("sk_live_old")
@@ -509,17 +519,17 @@ async fn rotation_decrypts_old_secrets_and_rewrites_to_new_key() {
 
     // New write goes through with v2.
     store_v2
-        .set_secret(app, "OPENAI_KEY", "sk-new")
+        .set_secret(&app, "OPENAI_KEY", "sk-new")
         .await
         .unwrap();
-    let merged = store_v2.merged_env(app).await.unwrap();
+    let merged = store_v2.merged_env(&app).await.unwrap();
     assert_eq!(
         merged.get("OPENAI_KEY").and_then(|v| v.as_str()),
         Some("sk-new")
     );
 
     // Rewrite all secrets onto v2 (drains the rotation grace period).
-    let count = store_v2.rotate_app(app).await.unwrap();
+    let count = store_v2.rotate_app(&app).await.unwrap();
     // STRIPE_KEY needed re-encryption (was on v1); OPENAI_KEY already
     // on v2 — skipped.
     assert_eq!(count, 1);
@@ -527,7 +537,7 @@ async fn rotation_decrypts_old_secrets_and_rewrites_to_new_key() {
     // Drop the legacy key. Previously-rotated secrets still decrypt
     // via the new primary alone.
     let store_v3 = EnvStore::new(registry.clone(), "key-v2").expect("store");
-    let merged = store_v3.merged_env(app).await.unwrap();
+    let merged = store_v3.merged_env(&app).await.unwrap();
     assert_eq!(
         merged.get("STRIPE_KEY").and_then(|v| v.as_str()),
         Some("sk_live_old")
@@ -557,7 +567,7 @@ async fn audit_log_roundtrip() {
     audit::log(
         &registry,
         AuditEntry {
-            app_id: Some(app),
+            app_id: Some(&app),
             organization_id: None,
             actor_user_id: Some(&first_actor),
             action: Action::SetSecret,
@@ -569,7 +579,7 @@ async fn audit_log_roundtrip() {
     audit::log(
         &registry,
         AuditEntry {
-            app_id: Some(app),
+            app_id: Some(&app),
             organization_id: None,
             actor_user_id: Some(&second_actor),
             action: Action::DeleteSecret,
@@ -579,7 +589,7 @@ async fn audit_log_roundtrip() {
     )
     .await;
 
-    let rows = audit::recent_for_app(&registry, app, 10).await.unwrap();
+    let rows = audit::recent_for_app(&registry, &app, 10).await.unwrap();
     assert_eq!(rows.len(), 2);
     // Newest first.
     assert_eq!(rows[0].action, "delete_secret");
@@ -612,7 +622,7 @@ async fn app_audit_is_append_only() {
     audit::log(
         &registry,
         AuditEntry {
-            app_id: Some(app),
+            app_id: Some(&app),
             organization_id: None,
             actor_user_id: Some(&actor),
             action: Action::SetVar,
@@ -627,7 +637,7 @@ async fn app_audit_is_append_only() {
         .query(
             "SELECT id FROM zeroship.app_audit \
              WHERE app_id = $1 AND resource = 'APPEND_ONLY_PROBE'",
-            &[&app],
+            &[&app.as_str()],
         )
         .await
         .expect("select audit row");
@@ -658,8 +668,8 @@ async fn merged_env_404s_on_missing_app() {
     let registry = Registry::new(&url).await.expect("registry");
     let store = EnvStore::new(registry.clone(), "k").expect("store");
 
-    let ghost = Uuid::new_v4();
-    let err = store.merged_env(ghost).await.unwrap_err();
+    let ghost = AppId::mint();
+    let err = store.merged_env(&ghost).await.unwrap_err();
     assert!(
         matches!(err, zeroship_control::env_store::EnvError::AppNotFound),
         "expected AppNotFound for missing app, got {err:?}",
@@ -691,12 +701,12 @@ async fn set_value_over_cap_rejected() {
     let app = create_test_app(&registry).await;
 
     let too_big = "A".repeat(zeroship_control::env_store::MAX_VALUE_BYTES + 1);
-    let err = store.set_var(app, "FOO", &too_big).await.unwrap_err();
+    let err = store.set_var(&app, "FOO", &too_big).await.unwrap_err();
     assert!(matches!(
         err,
         zeroship_control::env_store::EnvError::TooLarge(_)
     ));
-    let err = store.set_secret(app, "FOO", &too_big).await.unwrap_err();
+    let err = store.set_secret(&app, "FOO", &too_big).await.unwrap_err();
     assert!(matches!(
         err,
         zeroship_control::env_store::EnvError::TooLarge(_)
@@ -717,26 +727,26 @@ async fn merged_env_for_worker_emits_split_shape() {
     let app = create_test_app(&registry).await;
 
     // Mix of vars + secrets + an opt-in expose entry.
-    store.set_var(app, "NODE_ENV", "production").await.unwrap();
+    store.set_var(&app, "NODE_ENV", "production").await.unwrap();
     store
-        .set_var(app, "API_URL", "https://api.example.com")
+        .set_var(&app, "API_URL", "https://api.example.com")
         .await
         .unwrap();
     store
-        .set_secret(app, "OPENAI_API_KEY", "sk-secret-1")
+        .set_secret(&app, "OPENAI_API_KEY", "sk-secret-1")
         .await
         .unwrap();
     store
-        .set_secret(app, "STRIPE_KEY", "sk_live_2")
+        .set_secret(&app, "STRIPE_KEY", "sk_live_2")
         .await
         .unwrap();
     let new_expose = store
-        .set_expose(app, &["OPENAI_API_KEY".to_string()])
+        .set_expose(&app, &["OPENAI_API_KEY".to_string()])
         .await
         .unwrap();
     assert_eq!(new_expose, vec!["OPENAI_API_KEY".to_string()]);
 
-    let payload = store.merged_env_for_worker(app).await.unwrap();
+    let payload = store.merged_env_for_worker(&app).await.unwrap();
     let obj = payload.as_object().expect("top-level object");
 
     // Three keys exactly: vars, secrets, expose.
@@ -779,10 +789,10 @@ async fn merged_env_for_worker_emits_split_shape() {
 
     // Replacing the list overwrites — not appends.
     store
-        .set_expose(app, &["STRIPE_KEY".to_string()])
+        .set_expose(&app, &["STRIPE_KEY".to_string()])
         .await
         .unwrap();
-    let payload = store.merged_env_for_worker(app).await.unwrap();
+    let payload = store.merged_env_for_worker(&app).await.unwrap();
     let names: Vec<&str> = payload["expose"]
         .as_array()
         .unwrap()
@@ -792,13 +802,13 @@ async fn merged_env_for_worker_emits_split_shape() {
     assert_eq!(names, vec!["STRIPE_KEY"]);
 
     // Empty list clears.
-    store.set_expose(app, &[]).await.unwrap();
-    let payload = store.merged_env_for_worker(app).await.unwrap();
+    store.set_expose(&app, &[]).await.unwrap();
+    let payload = store.merged_env_for_worker(&app).await.unwrap();
     assert_eq!(payload["expose"].as_array().unwrap().len(), 0);
 
     // Bad key rejected.
     let err = store
-        .set_expose(app, &["lowercase".to_string()])
+        .set_expose(&app, &["lowercase".to_string()])
         .await
         .unwrap_err();
     assert!(matches!(
@@ -824,8 +834,8 @@ async fn long_value_roundtrip() {
     let big: String = (0..16 * 1024)
         .map(|i| char::from(b'A' + (i % 26) as u8))
         .collect();
-    store.set_secret(app, "BIG_TOKEN", &big).await.unwrap();
-    let merged = store.merged_env(app).await.unwrap();
+    store.set_secret(&app, "BIG_TOKEN", &big).await.unwrap();
+    let merged = store.merged_env(&app).await.unwrap();
     assert_eq!(
         merged.get("BIG_TOKEN").and_then(|v| v.as_str()),
         Some(big.as_str())
@@ -856,9 +866,9 @@ async fn undecryptable_secret_names_the_key_in_the_error() {
     let store = EnvStore::new(registry.clone(), "dev-master-key").expect("store");
     let app = create_test_app(&registry).await;
 
-    store.set_secret(app, "GOOD_KEY", "fine").await.unwrap();
+    store.set_secret(&app, "GOOD_KEY", "fine").await.unwrap();
     store
-        .set_secret(app, "POISONED_KEY", "also fine")
+        .set_secret(&app, "POISONED_KEY", "also fine")
         .await
         .unwrap();
 
@@ -868,13 +878,13 @@ async fn undecryptable_secret_names_the_key_in_the_error() {
     conn.execute(
         "UPDATE zeroship.app_secrets SET ciphertext = $1 \
          WHERE app_id = $2 AND key_name = 'POISONED_KEY'",
-        &[&b"\x01not-a-valid-ciphertext".to_vec(), &app],
+        &[&b"\x01not-a-valid-ciphertext".to_vec(), &app.as_str()],
     )
     .await
     .expect("corrupt the row");
 
     let err = store
-        .merged_env(app)
+        .merged_env(&app)
         .await
         .expect_err("an undecryptable secret must fail closed, not be skipped");
     let msg = err.to_string();

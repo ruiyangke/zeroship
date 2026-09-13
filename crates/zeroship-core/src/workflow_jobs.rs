@@ -3,27 +3,13 @@
 //! Customer inputs, history and outputs stay in creator storage. The manager
 //! validates app scope, execution authority and successor bounds separately.
 
+pub use zeroship_id::workflow::{DeploymentId, JobId};
+
 use crate::{
     app_id::AppId,
-    entity_id::declare_entity_id,
-    typed_id,
     workflow_coordination::{RequestId, Revision, RunId, UnixMillis, WorkerId},
 };
 use serde::{Deserialize, Serialize};
-
-declare_entity_id! {
-    /// Stable identity of a logical job, preserved across delivery attempts.
-    JobId,
-    typed_id::WORKFLOW_JOB_PREFIX,
-    job_id_tests,
-}
-
-declare_entity_id! {
-    /// Immutable normal app deployment selected for a job.
-    DeploymentId,
-    typed_id::DEPLOYMENT_PREFIX,
-    deployment_id_tests,
-}
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(

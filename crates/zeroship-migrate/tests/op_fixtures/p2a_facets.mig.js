@@ -4,7 +4,7 @@
 // that the JS↔Rust value-checksum round-trip agrees on the optional facet.
 //
 // This confined-platform fixture intentionally omits an authored `id`: policy
-// injects its internal text/base62 UUIDv7 platform id. That value is not a TypeID.
+// injects its internal text/base36 UUIDv7 platform id. That value is not a TypeID.
 //
 // A plain column (no facet) is unchanged on the wire — the fixture mixes facet
 // and non-facet columns so the byte-identity golden also covers the absent case.

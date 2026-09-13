@@ -4,7 +4,7 @@ use std::str::FromStr;
 
 use cedar_policy::{Context, Decision, PolicySet, Request, Response, RestrictedExpression, Schema};
 use compio_postgres::Client;
-use zeroship_core::UserId;
+use zeroship_id::UserId;
 
 use crate::authority::{self, Authority};
 use crate::entities::{assemble_entities, cedar_string, resource_entity_uid, uid};
@@ -321,7 +321,7 @@ async fn audit_decision(
 /// silently filed under the wrong type.
 fn audit_resource(resource: &Resource) -> (&'static str, Option<String>) {
     match resource {
-        Resource::App { id } => ("app", Some(id.clone())),
+        Resource::App { id } => ("app", Some(id.as_str().to_owned())),
         Resource::Project { id } => ("project", Some(id.clone())),
         Resource::Organization { id } => ("organization", Some(id.clone())),
         Resource::Any => ("any", None),
@@ -339,10 +339,10 @@ mod tests {
     };
     use crate::entities::{resource_entity_uid, uid};
     use crate::{load_platform_policies, Action, Authority, AuthzError, Resource};
-    use zeroship_core::UserId;
+    use zeroship_id::UserId;
 
     fn principal() -> UserId {
-        UserId::parse("usr_0000000000000000000001").expect("valid user id fixture")
+        UserId::mint()
     }
 
     /// Every id-bearing variant records its own id, and each type tag is
@@ -351,7 +351,12 @@ mod tests {
     #[test]
     fn audit_tags_are_distinct_and_carry_the_id() {
         let cases = [
-            (Resource::App { id: "a".to_owned() }, "app"),
+            (
+                Resource::App {
+                    id: zeroship_id::AppId::mint(),
+                },
+                "app",
+            ),
             (Resource::Project { id: "p".to_owned() }, "project"),
             (
                 Resource::Organization { id: "o".to_owned() },
@@ -400,13 +405,13 @@ mod tests {
         let resources = [
             Resource::Any,
             Resource::App {
-                id: uuid::Uuid::nil().to_string(),
+                id: zeroship_id::AppId::mint(),
             },
             Resource::Project {
-                id: "prj_0123456789abcdefghijkl".to_owned(),
+                id: "prj_0000123456789abcdefghijkl".to_owned(),
             },
             Resource::Organization {
-                id: "org_0123456789abcdefghijkl".to_owned(),
+                id: "org_0000123456789abcdefghijkl".to_owned(),
             },
         ];
 

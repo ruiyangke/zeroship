@@ -1278,7 +1278,15 @@ This section documents the runtime that actually *runs* migrations. The heart is
 
 ### 9.2 Migration ordering (UUIDv7)
 
-A migration's identity is `MigrationId` = `mig_<base62(UUIDv7)>` (`migration.rs:33-45`). Because UUIDv7 stores a 48-bit big-endian ms timestamp in the high bits and base62 is order-preserving, **lexical string order equals creation-time order** (`Ord` over the inner string; test pins `b > a` when `b` was generated later, `migration.rs:665-679`). Ordering is a **version-tiebroken topological sort** over `depends_on` (`topo_order_version_tiebroken`, `executor.rs:1672`), shared by the apply path (`order_pending`) and the integrity manifest (`canonical_set_order`) so the manifest order can never diverge from the run order. It is Kahn's algorithm with a `BTreeSet` ready-set: among nodes with no unmet dependency, the lowest UUIDv7 emits first. Two failures abort before any execution: `MissingDependency` (an edge names a version in neither the pending set nor `pre_satisfied`) and `DependencyCycle`. Net-applied and squash-superseded versions are passed as `pre_satisfied` — edges pre-met but still required to resolve — so an expand and its contract can land in *separate deploys* and the graph still validates.
+A migration's identity is `MigrationId` = `mig_<base36(UUIDv7)>`, defined in
+`crates/zeroship-migrate-ir/src/migration.rs`. Its fixed-width encoding makes
+lexical order match UUID order. Ordering is a version-tiebroken topological
+sort over `depends_on`, implemented by `topo_order_version_tiebroken` in
+`crates/zeroship-migrate-backend/src/executor.rs`. The apply path and integrity
+manifest share that ordering, so their output cannot diverge. Missing
+dependencies and dependency cycles abort before execution. Net-applied and
+squash-superseded versions enter the graph as pre-satisfied edges, allowing an
+expand and its contract to land in separate deploys.
 
 ### 9.3 Advisory-lock concurrency control & `LockMode`
 

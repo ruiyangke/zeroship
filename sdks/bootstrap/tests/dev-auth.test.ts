@@ -656,7 +656,13 @@ describe("dev user ids must satisfy the gateway's pairwise-subject shape", () =>
   });
 
   test("other malformed shapes are refused too, not just the wrong length", () => {
-    for (const bad of ["pws_", "usr_abc123", "pws_has-a-dash00000000", "notpws_00000000000000000"]) {
+    for (const bad of [
+      "pws_",
+      "usr_abc123",
+      "pws_has-a-dash00000000",
+      "pws_0000000000000000000A",
+      "notpws_00000000000000000",
+    ]) {
       assert.throws(() => parseDevAuthConfig(cfg([{ id: bad }])), undefined, `${bad} must be refused`);
     }
   });

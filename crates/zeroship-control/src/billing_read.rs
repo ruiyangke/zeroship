@@ -23,7 +23,7 @@ use std::sync::Mutex;
 use chrono::NaiveDate;
 use compio_postgres::GenericClient;
 use serde::Serialize;
-use uuid::Uuid;
+use zeroship_core::app_id::AppId;
 
 use crate::metering::{current_period_start_unix, period_date};
 use crate::pricing::{charge_cents, PlanPrice};
@@ -70,7 +70,7 @@ struct CachedProjection {
 /// call within the TTL does NOT advance it — i.e. the budget actually holds.
 #[derive(Debug)]
 pub struct ProjectedChargeCache {
-    inner: Mutex<HashMap<(Uuid, NaiveDate), CachedProjection>>,
+    inner: Mutex<HashMap<(AppId, NaiveDate), CachedProjection>>,
     max_entries: usize,
     /// Total number of cache MISSES served by an actual `charge_cents` pass.
     /// Observability + the faithful test assertion for "the cache works".
@@ -92,13 +92,13 @@ impl ProjectedChargeCache {
     ///
     /// # Panics
     /// Panics if the internal `Mutex` is poisoned.
-    fn get(&self, app_id: &Uuid, period: NaiveDate, now_unix: i64) -> Option<CachedProjection> {
+    fn get(&self, app_id: &AppId, period: NaiveDate, now_unix: i64) -> Option<CachedProjection> {
         let mut guard = self.inner.lock().expect("poisoned");
-        match guard.get(&(*app_id, period)).copied() {
+        match guard.get(&(app_id.clone(), period)).copied() {
             Some(hit) if hit.expires_at_unix > now_unix => Some(hit),
             Some(_) => {
                 // Expired — drop it so the map does not grow unbounded with stale keys.
-                guard.remove(&(*app_id, period));
+                guard.remove(&(app_id.clone(), period));
                 None
             }
             None => None,
@@ -109,12 +109,12 @@ impl ProjectedChargeCache {
     ///
     /// # Panics
     /// Panics if the internal `Mutex` is poisoned.
-    fn put(&self, app_id: Uuid, period: NaiveDate, value: u64, now_unix: i64) {
+    fn put(&self, app_id: AppId, period: NaiveDate, value: u64, now_unix: i64) {
         let mut guard = self.inner.lock().expect("poisoned");
         // Bound memory: evict an arbitrary live entry when at capacity (the value
         // is cheap to recompute on the next miss).
-        if guard.len() >= self.max_entries && !guard.contains_key(&(app_id, period)) {
-            if let Some(victim) = guard.keys().next().copied() {
+        if guard.len() >= self.max_entries && !guard.contains_key(&(app_id.clone(), period)) {
+            if let Some(victim) = guard.keys().next().cloned() {
                 guard.remove(&victim);
             }
         }
@@ -181,7 +181,7 @@ pub struct ProjectedCharge {
 pub async fn projected_charge(
     registry: &Registry,
     cache: &ProjectedChargeCache,
-    app_id: &Uuid,
+    app_id: &AppId,
     now_unix: i64,
 ) -> Result<Option<ProjectedCharge>, RegistryError> {
     let period_start = current_period_start_unix();
@@ -200,7 +200,7 @@ pub async fn projected_charge(
     // MISS: confirm the app exists + resolve its current plan id.
     let conn = registry.conn().await?;
     let app_rows = conn
-        .query("SELECT plan_id FROM zeroship.apps WHERE id = $1", &[app_id])
+        .query("SELECT plan_id FROM zeroship.apps WHERE id = $1", &[&app_id.as_str()])
         .await?;
     let Some(app_row) = app_rows.first() else {
         return Ok(None);
@@ -212,7 +212,7 @@ pub async fn projected_charge(
         .query(
             "SELECT metric, total FROM zeroship.usage_aggregates \
              WHERE app_id = $1 AND period = $2::date",
-            &[app_id, &period],
+            &[&app_id.as_str(), &period],
         )
         .await?;
     let mut usage: HashMap<String, i64> = HashMap::with_capacity(usage_rows.len());
@@ -237,7 +237,7 @@ pub async fn projected_charge(
     // Re-price. A pricing failure (unresolved FX / overflow) is a loud error,
     // never a silent $0 (mirrors the reconciler's fail-closed posture).
     let breakdown = charge_cents(&price, &usage, &weights).map_err(|e| {
-        tracing::warn!(app_id = %app_id, error = %e, "billing_read: projected-charge pricing failed");
+        tracing::warn!(app_id = %app_id.as_str(), error = %e, "billing_read: projected-charge pricing failed");
         RegistryError::FxUnresolved
     })?;
 
@@ -245,7 +245,7 @@ pub async fn projected_charge(
     cache
         .reprice_count
         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    cache.put(*app_id, period, breakdown.total_cents, now_unix);
+    cache.put(app_id.clone(), period, breakdown.total_cents, now_unix);
 
     Ok(Some(ProjectedCharge {
         projected_charge_cents: breakdown.total_cents,
@@ -320,7 +320,7 @@ pub async fn list_invoices_for_organization(
 /// `charge_cents`.
 #[derive(Debug, Clone, Serialize)]
 pub struct InvoiceLineDetail {
-    pub app_id: Uuid,
+    pub app_id: AppId,
     pub segment_no: i16,
     pub plan_id: String,
     pub included_units: i64,
@@ -424,29 +424,33 @@ pub async fn get_invoice_detail(
             &[&invoice_id],
         )
         .await?;
-    let lines = line_rows
-        .iter()
-        .map(|r| {
-            let included_units: i64 = r.get("included_units");
-            let usage_snapshot: serde_json::Value = r.get("usage_snapshot");
-            let weights_snapshot: serde_json::Value = r.get("weights_snapshot");
-            let (compute_units, billable_units) =
-                derive_line_cu(&usage_snapshot, &weights_snapshot, included_units);
-            InvoiceLineDetail {
-                app_id: r.get("app_id"),
-                segment_no: r.get("segment_no"),
-                plan_id: r.get("plan_id"),
-                included_units,
-                fx_pico_cents_per_unit: r.get("fx_pico_cents_per_unit"),
-                base_fee_cents: r.get("base_fee_cents"),
-                amount_cents: r.get("amount_cents"),
-                usage_snapshot,
-                weights_snapshot,
-                compute_units,
-                billable_units,
-            }
-        })
-        .collect();
+    let mut lines = Vec::with_capacity(line_rows.len());
+    for r in &line_rows {
+        let included_units: i64 = r.get("included_units");
+        let usage_snapshot: serde_json::Value = r.get("usage_snapshot");
+        let weights_snapshot: serde_json::Value = r.get("weights_snapshot");
+        let (compute_units, billable_units) =
+            derive_line_cu(&usage_snapshot, &weights_snapshot, included_units);
+        let raw_app_id: String = r.get("app_id");
+        let app_id = AppId::parse(&raw_app_id).map_err(|e| {
+            RegistryError::Database(format!(
+                "get_invoice_detail: invoice_lines row has a malformed app id {raw_app_id:?}: {e}"
+            ))
+        })?;
+        lines.push(InvoiceLineDetail {
+            app_id,
+            segment_no: r.get("segment_no"),
+            plan_id: r.get("plan_id"),
+            included_units,
+            fx_pico_cents_per_unit: r.get("fx_pico_cents_per_unit"),
+            base_fee_cents: r.get("base_fee_cents"),
+            amount_cents: r.get("amount_cents"),
+            usage_snapshot,
+            weights_snapshot,
+            compute_units,
+            billable_units,
+        });
+    }
 
     Ok(Some(InvoiceDetail {
         summary,
@@ -603,7 +607,7 @@ pub struct BillingStatus {
 /// [`RegistryError`] on a DB failure.
 pub async fn billing_status(
     registry: &Registry,
-    app_id: &Uuid,
+    app_id: &AppId,
 ) -> Result<Option<BillingStatus>, RegistryError> {
     let conn = registry.conn().await?;
     let rows = conn
@@ -624,7 +628,7 @@ pub async fn billing_status(
              LEFT JOIN zeroship.organization_billing_status obs \
                     ON obs.organization_id = a.organization_id \
              WHERE a.id = $1",
-            &[app_id],
+            &[&app_id.as_str()],
         )
         .await?;
     let Some(row) = rows.first() else {
@@ -1138,7 +1142,16 @@ async fn unbilled_priced_periods<C: GenericClient + Sync>(
         )
         .await
         .map_err(|e| RegistryError::Database(e.to_string()))?;
-    let app_ids: Vec<Uuid> = app_rows.iter().map(|r| r.get::<_, Uuid>("app_id")).collect();
+    let mut app_ids = Vec::with_capacity(app_rows.len());
+    for r in &app_rows {
+        let raw: String = r.get("app_id");
+        let app_id = AppId::parse(&raw).map_err(|e| {
+            RegistryError::Database(format!(
+                "unbilled_priced_periods: apps row has a malformed app id {raw:?}: {e}"
+            ))
+        })?;
+        app_ids.push(app_id);
+    }
 
     // The pricing inputs, read ONCE for the whole organization: the global cost
     // model and the global default FX are exactly what the reconciler's sweep
@@ -1165,7 +1178,7 @@ async fn unbilled_priced_periods<C: GenericClient + Sync>(
         if charge == 0 {
             continue;
         }
-        let apps: HashSet<Uuid> = lines.iter().map(crate::cron::billing_reconcile::billed_app)
+        let apps: HashSet<&AppId> = lines.iter().map(crate::cron::billing_reconcile::billed_app)
             .collect();
         periods.push(UnbilledPeriod {
             period: period.to_string(),
@@ -1189,7 +1202,7 @@ mod tests {
     #[test]
     fn projected_charge_cache_hit_within_ttl_does_not_advance_reprice_count() {
         let cache = ProjectedChargeCache::new(8);
-        let app = Uuid::now_v7();
+        let app = AppId::mint();
         let period = NaiveDate::from_ymd_opt(2026, 6, 1).unwrap();
         let now = 1_000_000;
 
@@ -1199,7 +1212,7 @@ mod tests {
         cache
             .reprice_count
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        cache.put(app, period, 750, now);
+        cache.put(app.clone(), period, 750, now);
         assert_eq!(cache.reprice_count(), 1);
 
         // A second call 30s later (within TTL) is a HIT — value served, no bump.
@@ -1212,17 +1225,17 @@ mod tests {
     #[test]
     fn projected_charge_cache_expires_after_ttl() {
         let cache = ProjectedChargeCache::new(8);
-        let app = Uuid::now_v7();
+        let app = AppId::mint();
         let period = NaiveDate::from_ymd_opt(2026, 6, 1).unwrap();
         let now = 2_000_000;
-        cache.put(app, period, 500, now);
+        cache.put(app.clone(), period, 500, now);
 
         // Just past the TTL window ⇒ expired ⇒ miss (entry pruned).
         assert!(cache
             .get(&app, period, now + PROJECTED_CHARGE_TTL_SECS + 1)
             .is_none());
         // And a within-window read is still a hit.
-        cache.put(app, period, 500, now);
+        cache.put(app.clone(), period, 500, now);
         assert!(cache.get(&app, period, now + 1).is_some());
     }
 
@@ -1231,15 +1244,15 @@ mod tests {
         let cache = ProjectedChargeCache::new(2);
         let period = NaiveDate::from_ymd_opt(2026, 6, 1).unwrap();
         let now = 3_000_000;
-        let a = Uuid::now_v7();
-        let b = Uuid::now_v7();
-        let c = Uuid::now_v7();
-        cache.put(a, period, 1, now);
-        cache.put(b, period, 2, now);
+        let a = AppId::mint();
+        let b = AppId::mint();
+        let c = AppId::mint();
+        cache.put(a.clone(), period, 1, now);
+        cache.put(b.clone(), period, 2, now);
         // Third distinct key over a cap of 2 evicts one prior entry; the map
         // never exceeds the cap.
-        cache.put(c, period, 3, now);
-        let live = [a, b, c]
+        cache.put(c.clone(), period, 3, now);
+        let live = [&a, &b, &c]
             .iter()
             .filter(|k| cache.get(k, period, now).is_some())
             .count();

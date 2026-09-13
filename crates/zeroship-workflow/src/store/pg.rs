@@ -3,8 +3,7 @@ use chrono::{DateTime, Utc};
 use compio_postgres::{Client, GenericClient, NoTls};
 use serde_json::Value;
 use std::collections::BTreeSet;
-use uuid::Uuid;
-use zeroship_core::{app_derivation, app_id::AppId, database_role::per_app_role_name, typed_id};
+use zeroship_core::{app_derivation, app_id::AppId, typed_id};
 
 use crate::engine::{
     cap_exceeded, child_dedup_key, child_signal_type, state_cap_error, RunUpdate, StepCheckpoint,
@@ -28,7 +27,7 @@ pub struct PgStore {
 
 #[derive(Clone, Debug)]
 pub struct WorkflowTables {
-    pub app_id: Uuid,
+    pub app_id: AppId,
     pub app_schema: String,
     pub runs: String,
     pub steps: String,
@@ -39,8 +38,8 @@ pub struct WorkflowTables {
 
 impl PgStore {
     #[must_use]
-    pub fn new(db_url: impl Into<String>, app_id: Uuid) -> Self {
-        let tables = WorkflowTables::for_app_id(&app_id);
+    pub fn new(db_url: impl Into<String>, app_id: &AppId) -> Self {
+        let tables = WorkflowTables::for_app_id(app_id);
         Self {
             db_url: db_url.into(),
             tables,
@@ -52,7 +51,7 @@ impl PgStore {
         &self.tables
     }
 
-    pub async fn provision<C>(platform_client: &C, app_id: &Uuid) -> Result<WorkflowTables, WorkflowError>
+    pub async fn provision<C>(platform_client: &C, app_id: &AppId) -> Result<WorkflowTables, WorkflowError>
     where
         C: GenericClient + Sync,
     {
@@ -60,7 +59,10 @@ impl PgStore {
         // A single batch is atomic even on a connection outside a transaction.
         // Serialize catalog writes across control and worker processes; repeated
         // ALTER/REVOKE statements can otherwise report "tuple concurrently updated".
-        let lock = sql_string_literal(&format!("zeroship:workflow:provision:{app_id}"));
+        let lock = sql_string_literal(&format!(
+            "zeroship:workflow:provision:{}",
+            app_id.as_str()
+        ));
         platform_client
             .batch_execute(&format!(
                 "SELECT pg_advisory_xact_lock(hashtextextended({lock}, 0));\n{owner};\n{table_locks}\n{tables}\nRESET ROLE;\n{reconcile}\n{revoke}",
@@ -77,11 +79,11 @@ impl PgStore {
 
 impl WorkflowTables {
     #[must_use]
-    pub fn for_app_id(app_id: &Uuid) -> Self {
+    pub fn for_app_id(app_id: &AppId) -> Self {
         let app_schema = app_schema_for(app_id);
         let schema = quote_ident(&app_schema);
         Self {
-            app_id: *app_id,
+            app_id: app_id.clone(),
             app_schema,
             runs: format!("{schema}.{}", quote_ident("__zeroship_workflow_runs")),
             steps: format!("{schema}.{}", quote_ident("__zeroship_workflow_steps")),
@@ -108,9 +110,15 @@ impl WorkflowTables {
     }
 }
 
+/// The schema this app's journal tables live in.
+///
+/// Delegates to [`app_derivation::schema_name`] rather than composing a name:
+/// `zeroship_plugin_db` reads the journal out of the schema this function
+/// names, so a second spelling here would put the writer and the reader in
+/// different schemas with nothing failing.
 #[must_use]
-pub fn app_schema_for(app_id: &Uuid) -> String {
-    format!("app_{}", app_id.as_hyphenated())
+pub fn app_schema_for(app_id: &AppId) -> String {
+    app_derivation::schema_name(app_id)
 }
 
 /// The five journal table names, unqualified, in [`JOURNAL_TABLE_SUFFIXES`]
@@ -129,6 +137,26 @@ pub fn app_schema_for(app_id: &Uuid) -> String {
 #[must_use]
 pub fn journal_table_names() -> [String; 5] {
     JOURNAL_TABLE_SUFFIXES.map(|suffix| format!("__zeroship_workflow_{suffix}"))
+}
+
+/// Read one `app_id` column back as the typed id it stores.
+///
+/// The column is `text` holding the canonical `app_<base36>` rendering, so the
+/// decode is a parse and a row carrying anything else is a refusal rather than
+/// a tenant this process would go on to address. Every read of an `app_id`
+/// column in this crate goes through here, so there is one refusal message and
+/// one place the decode can be wrong.
+///
+/// # Errors
+///
+/// [`WorkflowError::Db`] if the column does not hold a canonical app id.
+pub fn app_id_from_row(row: &compio_postgres::Row, column: &str) -> Result<AppId, WorkflowError> {
+    let raw: String = row.get(column);
+    AppId::parse(&raw).map_err(|error| {
+        WorkflowError::Db(format!(
+            "workflow journal column {column} does not hold an app id: {error}"
+        ))
+    })
 }
 
 #[must_use]
@@ -171,7 +199,7 @@ fn provision_sql(tables: &WorkflowTables) -> String {
 CREATE TABLE IF NOT EXISTS {runs} (
   id text COLLATE "C" PRIMARY KEY,
   workflow_name text NOT NULL,
-  app_id uuid NOT NULL,
+  app_id text COLLATE "C" NOT NULL,
   deploy_id text NOT NULL,
   state text NOT NULL,
   input jsonb,
@@ -307,7 +335,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS workflow_signals_bcast_run_uidx ON {signals} (
 
 CREATE TABLE IF NOT EXISTS {subscriptions} (
   id text COLLATE "C" PRIMARY KEY,
-  app_id uuid NOT NULL,
+  app_id text COLLATE "C" NOT NULL,
   topic text NOT NULL,
   run_id text COLLATE "C" NOT NULL,
   signal_name text NOT NULL,
@@ -345,19 +373,17 @@ fn reconcile_owner_sql(tables: &WorkflowTables) -> String {
 
 fn reassert_table_revokes_sql(tables: &WorkflowTables) -> Result<String, WorkflowError> {
     let all_tables = tables.all().join(", ");
-    // TWO ROLES, TWO IDENTITIES, and the revoke has to name both because either
-    // could be the one that exists. The first is derived from the TENANT and so
-    // goes through the seam; the second is derived from the SCHEMA, which is
-    // what `zeroship_migrate_server::apply::runtime_role_provisioning_sql`
-    // composes from, and which the seam cannot express while a schema is a
-    // `&str` that may legally not be an app id at all.
-    let app_role =
-        app_derivation::role_name(&AppId::from_uuid(&tables.app_id)).map_err(|error| {
-            WorkflowError::Db(format!(
-                "workflow journal per-app role name refused: {error}"
-            ))
-        })?;
-    let schema_role = per_app_role_name(&tables.app_schema).map_err(|error| {
+    // ONE ROLE, because the tenant and the schema are now the same string.
+    // This named two: one derived from the TENANT through the seam, one from
+    // the SCHEMA, which is what
+    // `zeroship_migrate_server::apply::runtime_role_provisioning_sql` composes
+    // from. They were different names only while the schema was `app_<uuid>`
+    // and the tenant was the uuid. `app_derivation::schema_name` is the
+    // identity on the printed id, so the two composers now agree by
+    // construction - `table_revokes_use_shared_role_composer` binds that
+    // agreement, and goes red if a schema ever stops being an app id, which is
+    // the day the second arm has to come back.
+    let app_role = app_derivation::role_name(&tables.app_id).map_err(|error| {
         WorkflowError::Db(format!(
             "workflow journal per-app role name refused: {error}"
         ))
@@ -369,13 +395,9 @@ fn reassert_table_revokes_sql(tables: &WorkflowTables) -> Result<String, Workflo
            IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = {role_literal}) THEN \
              EXECUTE 'REVOKE ALL ON TABLE {escaped_tables} FROM ' || quote_ident({role_literal}); \
            END IF; \
-           IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = {schema_role_literal}) THEN \
-             EXECUTE 'REVOKE ALL ON TABLE {escaped_tables} FROM ' || quote_ident({schema_role_literal}); \
-           END IF; \
          END \
          $$;",
         role_literal = sql_string_literal(&app_role),
-        schema_role_literal = sql_string_literal(&schema_role),
         escaped_tables = all_tables.replace('\'', "''"),
     ))
 }
@@ -598,7 +620,7 @@ impl WorkflowTx for PgTx {
         &mut self,
         config: &WorkflowEngineConfig,
         parent_run_id: &str,
-        app_id: &Uuid,
+        app_id: &AppId,
         deploy_id: &str,
         parent_tree_depth: i16,
         checkpoint: &mut StepCheckpoint,
@@ -621,7 +643,7 @@ impl WorkflowTx for PgTx {
         config: &WorkflowEngineConfig,
         current_run_id: &str,
         successor_run_id: &str,
-        app_id: &Uuid,
+        app_id: &AppId,
         workflow_name: &str,
         seed_input: Option<&Value>,
         seed_input_ref: Option<&WorkflowOutputRef>,
@@ -662,7 +684,7 @@ impl WorkflowTx for PgTx {
 
     async fn upsert_subscription(
         &mut self,
-        app_id: &Uuid,
+        app_id: &AppId,
         run_id: &str,
         checkpoint: &StepCheckpoint,
     ) -> Result<(), WorkflowError> {
@@ -688,7 +710,7 @@ impl WorkflowTx for PgTx {
                 &sql,
                 &[
                     &id,
-                    app_id,
+                    &app_id.as_str(),
                     topic,
                     &run_id,
                     &checkpoint.name,
@@ -1007,7 +1029,7 @@ where
         if let Some(row) = rows.first() {
             locked.push(RunLockRow {
                 id: row.get("id"),
-                app_id: row.get("app_id"),
+                app_id: app_id_from_row(row, "app_id")?,
                 workflow_name: row.get("workflow_name"),
                 deploy_id: row.get("deploy_id"),
                 claimed_by: row.get("claimed_by"),
@@ -1074,7 +1096,8 @@ where
     );
     let parent_rows = conn.query(&parent_sql, &[&parent_run_id]).await?;
     if let Some(parent) = parent_rows.first() {
-        let app_id: Uuid = parent.get("app_id");
+        let app_id = app_id_from_row(parent, "app_id")?;
+        let app_id_text = app_id.as_str();
         let child_key = child_dedup_key(parent_run_id, checkpoint.ordinal);
         let existing_child_sql = format!(
             "SELECT id \
@@ -1086,7 +1109,10 @@ where
             runs = tables.runs
         );
         let existing_child = conn
-            .query(&existing_child_sql, &[&app_id, child_workflow_name, &child_key])
+            .query(
+                &existing_child_sql,
+                &[&app_id_text, child_workflow_name, &child_key],
+            )
             .await?;
         if let Some(row) = existing_child.first() {
             let child_run_id: String = row.get("id");
@@ -1212,7 +1238,7 @@ async fn prepare_child_spawn<C>(
     tables: &WorkflowTables,
     config: &WorkflowEngineConfig,
     parent_run_id: &str,
-    app_id: &Uuid,
+    app_id: &AppId,
     deploy_id: &str,
     parent_tree_depth: i16,
     checkpoint: &mut StepCheckpoint,
@@ -1220,6 +1246,7 @@ async fn prepare_child_spawn<C>(
 where
     C: GenericClient + Sync,
 {
+    let app_id_text = app_id.as_str();
     let existing_step_sql = format!(
         "SELECT child_run_id, signal_type \
                FROM {steps} \
@@ -1293,7 +1320,7 @@ where
             &[
                 &child_run_id,
                 &child_workflow_name,
-                app_id,
+                &app_id_text,
                 &deploy_id,
                 &child_input,
                 &input_journal_bytes,
@@ -1317,7 +1344,7 @@ where
         );
         conn.query_one(
             &select_child_sql,
-            &[app_id, &child_workflow_name, &child_key],
+            &[&app_id_text, &child_workflow_name, &child_key],
         )
         .await?
         .get("id")
@@ -1335,7 +1362,7 @@ async fn continue_as_new<C>(
     config: &WorkflowEngineConfig,
     current_run_id: &str,
     successor_run_id: &str,
-    app_id: &Uuid,
+    app_id: &AppId,
     workflow_name: &str,
     seed_input: Option<&Value>,
     seed_input_ref: Option<&WorkflowOutputRef>,
@@ -1343,6 +1370,7 @@ async fn continue_as_new<C>(
 where
     C: GenericClient + Sync,
 {
+    let app_id_text = app_id.as_str();
     let deploy_id = active_deploy_for_workflow(conn, app_id, workflow_name).await?;
     let (input, input_hash, input_size, input_content_type, journal_bytes, blob_bytes) =
         if let Some(input_ref) = seed_input_ref {
@@ -1383,7 +1411,7 @@ where
         &[
             &successor_run_id,
             &workflow_name,
-            app_id,
+            &app_id_text,
             &deploy_id,
             &input,
             &input_hash,
@@ -1408,7 +1436,7 @@ where
 
 async fn active_deploy_for_workflow<C>(
     conn: &C,
-    app_id: &Uuid,
+    app_id: &AppId,
     workflow_name: &str,
 ) -> Result<String, WorkflowError>
 where
@@ -1422,7 +1450,7 @@ where
                 AND activated_at IS NOT NULL \
               ORDER BY activated_at DESC, created_at DESC, id DESC \
               LIMIT 1",
-            &[app_id],
+            &[&app_id.as_str()],
         )
         .await?;
     let Some(row) = rows.first() else {
@@ -1996,30 +2024,47 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use zeroship_core::database_role::per_app_role_name;
 
+    /// A fixture app, minted rather than spelled: nothing here depends on
+    /// WHICH app it is, and a frozen literal would be a second place to edit
+    /// the day the rendering moves.
+    fn fixture_app() -> AppId {
+        AppId::mint()
+    }
+
+    /// The revoke names the role the seam composes, and the schema-derived
+    /// composer agrees with it.
+    ///
+    /// The DO block used to carry two arms because the tenant and the schema
+    /// spelled different roles. They cannot now: `app_derivation::schema_name`
+    /// is the identity on the printed id, so
+    /// `zeroship_migrate_server::apply::runtime_role_provisioning_sql`, which
+    /// composes from the SCHEMA, creates exactly the role this revokes. The
+    /// second assertion is that agreement, and it is what has to go red before
+    /// the second arm is needed again.
     #[test]
     fn table_revokes_use_shared_role_composer() -> Result<(), Box<dyn std::error::Error>> {
-        let tables = WorkflowTables::for_app_id(&Uuid::nil());
+        let tables = WorkflowTables::for_app_id(&fixture_app());
         let sql = reassert_table_revokes_sql(&tables)?;
-        let app_id = tables.app_id.as_hyphenated().to_string();
-        let expected_roles = [
-            per_app_role_name(&app_id)?,
-            per_app_role_name(&tables.app_schema)?,
-        ];
+        let role = app_derivation::role_name(&tables.app_id)?;
 
-        for role in expected_roles {
-            let role_literal = sql_string_literal(&role);
-            assert!(
-                sql.contains(&role_literal),
-                "workflow journal revokes must use shared role {role}: {sql}"
-            );
-        }
+        assert!(
+            sql.contains(&sql_string_literal(&role)),
+            "workflow journal revokes must use shared role {role}: {sql}"
+        );
+        assert_eq!(
+            per_app_role_name(&tables.app_schema)?,
+            role,
+            "the schema-derived role the migration service creates must be the \
+             role this revoke names"
+        );
         Ok(())
     }
 
     #[test]
     fn worker_provisioning_uses_a_precreated_narrow_owner_role() {
-        let tables = WorkflowTables::for_app_id(&Uuid::nil());
+        let tables = WorkflowTables::for_app_id(&fixture_app());
         let owner_sql = set_workflow_journal_owner_role_sql();
         let table_sql = provision_sql(&tables);
 
@@ -2035,7 +2080,7 @@ mod tests {
 
     #[test]
     fn provisioned_typed_id_domain_is_bytewise() {
-        let tables = WorkflowTables::for_app_id(&Uuid::nil());
+        let tables = WorkflowTables::for_app_id(&fixture_app());
         let table_sql = provision_sql(&tables);
         let collated = table_sql
             .lines()
@@ -2045,6 +2090,7 @@ mod tests {
 
         let expected = [
             "id text COLLATE \"C\" PRIMARY KEY,",
+            "app_id text COLLATE \"C\" NOT NULL,",
             "dispatch_nonce text COLLATE \"C\",",
             "parent_run_id text COLLATE \"C\",",
             "continued_as_new_run_id text COLLATE \"C\",",
@@ -2057,6 +2103,7 @@ mod tests {
             "run_id text COLLATE \"C\" NOT NULL,",
             "broadcast_id text COLLATE \"C\",",
             "id text COLLATE \"C\" PRIMARY KEY,",
+            "app_id text COLLATE \"C\" NOT NULL,",
             "run_id text COLLATE \"C\" NOT NULL,",
         ];
         assert_eq!(
@@ -2088,7 +2135,7 @@ mod tests {
     /// database - it reads generated SQL, not a catalog.
     #[test]
     fn journal_table_names_match_the_provisioned_tables() {
-        let tables = WorkflowTables::for_app_id(&Uuid::nil());
+        let tables = WorkflowTables::for_app_id(&fixture_app());
         let qualified: Vec<String> = journal_table_names()
             .iter()
             .map(|name| {

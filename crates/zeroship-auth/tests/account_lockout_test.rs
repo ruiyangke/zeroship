@@ -149,7 +149,7 @@ async fn consecutive_failures_lock_account_then_success_resets() {
     )
     .await
     .expect("correct password after lock window must succeed");
-    assert_eq!(verified.id, user.id, "verified user id mismatch");
+    assert_eq!(&verified.id, &user.id, "verified user id mismatch");
 
     let (count, locked): (i32, Option<chrono::DateTime<chrono::Utc>>) = {
         let row = pg
@@ -270,7 +270,7 @@ async fn locked_account_recovers_via_password_reset() {
         .await
         .expect("complete reset")
         .expect("reset must complete");
-    assert_eq!(completed.user_id, user.id, "completed reset user mismatch");
+    assert_eq!(&completed.user_id, &user.id, "completed reset user mismatch");
 
     // The account must now be recoverable: the NEW password verifies.
     // Pre-fix this is rejected `Ineligible` (locked_until still set).

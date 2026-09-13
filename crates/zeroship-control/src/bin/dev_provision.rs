@@ -101,7 +101,7 @@ async fn main() -> ExitCode {
     let cli = Cli::parse();
     match run(cli).await {
         Ok(app) => {
-            println!("app_id={}", app.id);
+            println!("app_id={}", app.id.as_str());
             println!("name={}", app.name);
             ExitCode::SUCCESS
         }
@@ -139,7 +139,7 @@ async fn run(cli: Cli) -> Result<zeroship_core::types::AppRecord, DevProvisionEr
         .await
         .map_err(|e| err(format!("seed built-in plans: {e}")))?;
 
-    let owner_id = cli.owner.unwrap_or_else(default_owner_id);
+    let owner_id = cli.owner.clone().unwrap_or_else(default_owner_id);
     ensure_owner_exists(&cli.db, &owner_id).await?;
 
     // `None` puts the app in the dev owner's personal organization's default
@@ -176,7 +176,7 @@ async fn run(cli: Cli) -> Result<zeroship_core::types::AppRecord, DevProvisionEr
             "dev-provision: --defer-deploy: app {0} created and blobs ingested; the deploy is \
              NOT live. Create its database with POST /v1/databases/{0}, apply its migrations, \
              then re-run without the flag.",
-            app.id,
+            app.id.as_str(),
         );
         return Ok(app);
     }
@@ -205,14 +205,14 @@ async fn run(cli: Cli) -> Result<zeroship_core::types::AppRecord, DevProvisionEr
                  /v1/databases/{0}, apply its migrations through zeroship-migrate-server, then \
                  re-run this command. To create the app WITHOUT this failure, pass \
                  --defer-deploy on the first call.",
-                app.id,
+                app.id.as_str(),
             )),
             other => err(format!("deploy commit: {other}")),
         })?;
     if !updated {
         return Err(err(format!(
             "app {} vanished between create/reuse and deploy commit",
-            app.id
+            app.id.as_str()
         )));
     }
 

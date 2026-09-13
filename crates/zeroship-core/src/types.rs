@@ -1,10 +1,9 @@
 use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
-use uuid::Uuid;
 use zeroship_bundle::Manifest;
 
-use crate::UserId;
+use crate::{AppId, UserId};
 
 /// A registered application record.
 ///
@@ -14,7 +13,7 @@ use crate::UserId;
 /// at all is in `db/migrations-ts/20260905000200_drop_app_api_key.ts`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppRecord {
-    pub id: Uuid,
+    pub id: AppId,
     pub name: String,
     pub plan_id: String,
     pub deploy_hash: Option<String>,
@@ -269,10 +268,10 @@ pub struct RouteEntry {
 }
 
 /// Map of app id → current deploy/config snapshot.
-pub type VersionMap = HashMap<Uuid, AppVersionInfo>;
+pub type VersionMap = HashMap<AppId, AppVersionInfo>;
 
 /// Map of app id → route entry for fast lookup.
-pub type RouteMap = HashMap<Uuid, RouteEntry>;
+pub type RouteMap = HashMap<AppId, RouteEntry>;
 
 /// Authentication lifecycle state pushed to gateways with the route table.
 ///
@@ -395,14 +394,14 @@ pub struct AppUsage {
 #[serde(tag = "type")]
 pub enum ControlEvent {
     Deploy {
-        app_id: Uuid,
+        app_id: AppId,
         hash: String,
     },
     Delete {
-        app_id: Uuid,
+        app_id: AppId,
     },
     PlanChange {
-        app_id: Uuid,
+        app_id: AppId,
         plan_id: String,
     },
     /// A spend-state transition for an app, emitted by the spend-reconcile
@@ -411,7 +410,7 @@ pub enum ControlEvent {
     /// live `ControlEvent` delivery path today; enforcement rides the pulled
     /// [`RouteEntry::spend_state`], not this event.
     SpendState {
-        app_id: Uuid,
+        app_id: AppId,
         state: SpendState,
     },
 }

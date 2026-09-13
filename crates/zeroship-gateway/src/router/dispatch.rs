@@ -28,11 +28,14 @@ use uuid::Uuid;
 
 use zeroship_bundle::RequiredPrincipal;
 use zeroship_core::app_id::AppId;
+use zeroship_core::user_id::UserId;
 use zeroship_core::service_identity::{endpoints, AuthError as ServiceAuthError};
 
 use crate::{enforce, idempotency, oidc_rp, proxy, GateState};
 
-use super::auth::{extract_session_cookie, jwt_subject_unverified, resolve_auth, AuthOutcome};
+use super::auth::{
+    extract_session_cookie, jwt_subject_unverified, resolve_auth, AuthOutcome,
+};
 use super::cors::{build_preflight_response, inject_cors_response_headers};
 use super::helpers::resource_key_hash;
 use super::static_serve::serve_resource_tree_static;
@@ -67,9 +70,7 @@ pub fn extract_app_name(req: &HttpRequest, path_name: Option<&str>) -> Option<St
 
     // Ignore IP addresses (starts with digit or contains only digits and dots)
     if host.starts_with(|c: char| c.is_ascii_digit())
-        && host
-            .chars()
-            .all(|c| c.is_ascii_digit() || c == '.' || c == ':')
+        && host.chars().all(|c| c.is_ascii_digit() || c == '.' || c == ':')
     {
         return None;
     }
@@ -95,7 +96,7 @@ pub fn extract_app_name(req: &HttpRequest, path_name: Option<&str>) -> Option<St
 #[serde(rename_all = "camelCase")]
 struct WorkflowStepRequest {
     run_id: String,
-    app_id: Uuid,
+    app_id: AppId,
 }
 
 /// Internal durable-workflow advance edge.
@@ -153,9 +154,8 @@ pub async fn workflow_advance_internal(
     let request: WorkflowStepRequest = match serde_json::from_slice(body.as_ref()) {
         Ok(request) => request,
         Err(e) => {
-            return HttpResponse::BadRequest().json(
-                &serde_json::json!({"error": format!("invalid workflow dispatch request: {e}")}),
-            );
+            return HttpResponse::BadRequest()
+                .json(&serde_json::json!({"error": format!("invalid workflow dispatch request: {e}")}));
         }
     };
     if request.run_id.is_empty() {
@@ -164,13 +164,8 @@ pub async fn workflow_advance_internal(
         }));
     }
 
-    // `WorkflowStepRequest` is a wire type the control plane produces, and it
-    // still carries the stored uuid. This is the second transitional
-    // conversion in this crate - the peer of the one in `sync::update` - and it
-    // uses the same canonical rendering, because it probes the very table that
-    // one builds. Rendering it any other way is a guaranteed miss.
-    let app_id = zeroship_core::app_id::canonical_app_id_for(&request.app_id);
-    let Some(compiled_route) = state.routes.lookup_by_app_id(&app_id) else {
+    let app_id = &request.app_id;
+    let Some(compiled_route) = state.routes.lookup_by_app_id(app_id) else {
         return HttpResponse::NotFound().json(&serde_json::json!({"error": "app route not found"}));
     };
 
@@ -184,9 +179,8 @@ pub async fn workflow_advance_internal(
     let worker_body = match serde_json::to_vec(&request) {
         Ok(body) => body,
         Err(e) => {
-            return HttpResponse::InternalServerError().json(
-                &serde_json::json!({"error": format!("encode worker workflow dispatch: {e}")}),
-            );
+            return HttpResponse::InternalServerError()
+                .json(&serde_json::json!({"error": format!("encode worker workflow dispatch: {e}")}));
         }
     };
 
@@ -195,7 +189,7 @@ pub async fn workflow_advance_internal(
     let worker_authorization = state.worker_authorization();
     let worker_response = match proxy::forward_workflow_advance(
         &state.hash_ring,
-        &app_id,
+        app_id,
         &compiled_route.entry.plan_id,
         &request_id,
         &worker_body,
@@ -217,9 +211,8 @@ pub async fn workflow_advance_internal(
     let (_buffered, worker_bytes) = buffer_response_body(worker_response).await;
     match workflow_worker_advance_response(&worker_bytes) {
         Ok(response) => HttpResponse::Ok().json(&response),
-        Err(e) => HttpResponse::BadGateway().json(
-            &serde_json::json!({"error": format!("invalid worker workflow advance ack: {e}")}),
-        ),
+        Err(e) => HttpResponse::BadGateway()
+            .json(&serde_json::json!({"error": format!("invalid worker workflow advance ack: {e}")})),
     }
 }
 
@@ -337,10 +330,8 @@ fn single_worker_result_to_outcome(result: &Value) -> Result<Value, String> {
             if result.get("ordinal").is_some() && result.get("name").is_some() {
                 outcome["ordinal"] = serde_json::json!(required_i64(result, "ordinal")?);
                 outcome["name"] = serde_json::json!(required_str(result, "name")?);
-                outcome["nameOccurrence"] = serde_json::json!(result
-                    .get("nameOccurrence")
-                    .and_then(Value::as_i64)
-                    .unwrap_or(0));
+                outcome["nameOccurrence"] =
+                    serde_json::json!(result.get("nameOccurrence").and_then(Value::as_i64).unwrap_or(0));
             }
             Ok(outcome)
         }
@@ -476,37 +467,29 @@ fn normalize_workflow_outcomes(
         // trailing entry. Compensation is a serial reverse-frontier outcome and is
         // trailing too.
         if kind != "StepCompleted" && kind != "Child" && idx != last {
-            return Err(
-                "workflow suspension or terminal outcome must be the trailing batch entry"
-                    .to_string(),
-            );
+            return Err("workflow suspension or terminal outcome must be the trailing batch entry".to_string());
         }
         match kind {
             "StepCompleted" => {
                 let step_kind = workflow_step_kind_or_run(outcome)?;
                 outcome["stepKind"] = step_kind;
-                outcome["compensable"] = serde_json::json!(outcome
-                    .get("compensable")
-                    .and_then(Value::as_bool)
-                    .unwrap_or(false));
-                outcome["compensationMaxAttempts"] = serde_json::json!(outcome
-                    .get("compensationMaxAttempts")
-                    .and_then(Value::as_i64)
-                    .unwrap_or(1));
+                outcome["compensable"] = serde_json::json!(
+                    outcome.get("compensable").and_then(Value::as_bool).unwrap_or(false)
+                );
+                outcome["compensationMaxAttempts"] = serde_json::json!(
+                    outcome.get("compensationMaxAttempts").and_then(Value::as_i64).unwrap_or(1)
+                );
                 ensure_workflow_output(outcome);
             }
             "RunCompleted" => ensure_workflow_output(outcome),
             "ContinueAsNew" => ensure_continue_as_new_input(outcome),
             "RunFailed" => {
-                if outcome.get("error").is_none()
-                    || outcome.get("error").is_some_and(Value::is_null)
-                {
-                    let message =
-                        if outcome.get("ordinal").is_some() && outcome.get("name").is_some() {
-                            "workflow step failed"
-                        } else {
-                            "workflow run failed"
-                        };
+                if outcome.get("error").is_none() || outcome.get("error").is_some_and(Value::is_null) {
+                    let message = if outcome.get("ordinal").is_some() && outcome.get("name").is_some() {
+                        "workflow step failed"
+                    } else {
+                        "workflow run failed"
+                    };
                     outcome["error"] = workflow_error_or_default(fallback_error.as_ref(), message);
                 }
             }
@@ -517,10 +500,7 @@ fn normalize_workflow_outcomes(
             }
             "Wait" => {
                 let wake_at = normalize_workflow_wake_at(
-                    outcome
-                        .get("wakeAt")
-                        .filter(|value| !value.is_null())
-                        .or_else(|| outcome.get("timeout")),
+                    outcome.get("wakeAt").filter(|value| !value.is_null()).or_else(|| outcome.get("timeout")),
                 )
                 .ok_or_else(|| "invalid wait timeout".to_string())?;
                 outcome["wakeAt"] = wake_at;
@@ -556,25 +536,16 @@ fn normalize_workflow_outcomes(
             "CompensationCompleted" => {
                 let _ = required_i64(outcome, "ordinal")?;
                 let _ = required_str(outcome, "name")?;
-                outcome["nameOccurrence"] = serde_json::json!(outcome
-                    .get("nameOccurrence")
-                    .and_then(Value::as_i64)
-                    .unwrap_or(0));
+                outcome["nameOccurrence"] =
+                    serde_json::json!(outcome.get("nameOccurrence").and_then(Value::as_i64).unwrap_or(0));
             }
             "CompensationFailed" => {
                 let _ = required_i64(outcome, "ordinal")?;
                 let _ = required_str(outcome, "name")?;
-                outcome["nameOccurrence"] = serde_json::json!(outcome
-                    .get("nameOccurrence")
-                    .and_then(Value::as_i64)
-                    .unwrap_or(0));
-                if outcome.get("error").is_none()
-                    || outcome.get("error").is_some_and(Value::is_null)
-                {
-                    outcome["error"] = workflow_error_or_default(
-                        fallback_error.as_ref(),
-                        "workflow compensator failed",
-                    );
+                outcome["nameOccurrence"] =
+                    serde_json::json!(outcome.get("nameOccurrence").and_then(Value::as_i64).unwrap_or(0));
+                if outcome.get("error").is_none() || outcome.get("error").is_some_and(Value::is_null) {
+                    outcome["error"] = workflow_error_or_default(fallback_error.as_ref(), "workflow compensator failed");
                 }
             }
             other => return Err(format!("unknown worker workflow outcome kind {other:?}")),
@@ -592,14 +563,8 @@ fn legacy_step_result_to_outcomes(result: &Value) -> Result<Vec<Value>, String> 
         .and_then(Value::as_array)
         .ok_or_else(|| "legacy StepResult missing checkpoints".to_string())?
     {
-        let kind = checkpoint
-            .get("kind")
-            .and_then(Value::as_str)
-            .unwrap_or_default();
-        let state = checkpoint
-            .get("state")
-            .and_then(Value::as_str)
-            .unwrap_or_default();
+        let kind = checkpoint.get("kind").and_then(Value::as_str).unwrap_or_default();
+        let state = checkpoint.get("state").and_then(Value::as_str).unwrap_or_default();
         match (kind, state) {
             ("run" | "sideEffect", "completed") => {
                 let compensable = checkpoint
@@ -743,7 +708,8 @@ fn normalize_workflow_step_result(mut result: Value) -> Result<Value, String> {
         }
         if let Some(checkpoints) = result.get_mut("checkpoints").and_then(Value::as_array_mut) {
             for checkpoint in checkpoints {
-                let is_wait = checkpoint.get("kind").and_then(Value::as_str) == Some("wait_signal");
+                let is_wait =
+                    checkpoint.get("kind").and_then(Value::as_str) == Some("wait_signal");
                 let is_running = checkpoint.get("state").and_then(Value::as_str) == Some("running");
                 if is_wait && is_running {
                     checkpoint["wakeAt"] = wake_at.clone();
@@ -913,14 +879,21 @@ pub(crate) fn compute_bucket_id(
             }
             // Unauthenticated caller hitting a user-scoped rule: degrade to
             // the session cookie, then the IP — never share one empty bucket.
-            let cookie = req.headers().get("cookie").and_then(|v| v.to_str().ok());
+            let cookie = req
+                .headers()
+                .get("cookie")
+                .and_then(|v| v.to_str().ok());
             extract_session_cookie(cookie)
                 .map(|s| format!("sess:{s}"))
                 .unwrap_or_else(|| client_ip(req, trust_proxy))
         }
         RateLimitPer::Session => {
-            let cookie = req.headers().get("cookie").and_then(|v| v.to_str().ok());
-            extract_session_cookie(cookie).unwrap_or_else(|| client_ip(req, trust_proxy))
+            let cookie = req
+                .headers()
+                .get("cookie")
+                .and_then(|v| v.to_str().ok());
+            extract_session_cookie(cookie)
+                .unwrap_or_else(|| client_ip(req, trust_proxy))
         }
         RateLimitPer::App => "app".to_string(),
     }
@@ -1004,24 +977,26 @@ pub(crate) fn is_websocket_upgrade(req: &HttpRequest) -> bool {
 ///      always hashes to the same bucket; reconnects vary).
 ///   4. Client IP (last-resort fallback for unauthenticated callers
 ///      hitting subscriptions on `publicly_accessible` resources).
-pub(crate) fn subscription_affinity_key(req: &HttpRequest, trust_proxy: bool) -> String {
+pub(crate) fn subscription_affinity_key(
+    req: &HttpRequest,
+    trust_proxy: bool,
+) -> String {
     // `"Bearer "` ONLY - see the note in `compute_bucket_id`. This function is
     // stricter-looking but weaker: it takes no `identity_verified`, so it reads
     // the header unconditionally. Accepting a scheme the gate never validated
     // would let an entirely UNAUTHENTICATED caller choose their own affinity
     // key and so steer their own CHWBL worker.
-    if let Some(auth) = req
-        .headers()
-        .get("authorization")
-        .and_then(|v| v.to_str().ok())
-    {
+    if let Some(auth) = req.headers().get("authorization").and_then(|v| v.to_str().ok()) {
         if let Some(rest) = auth.strip_prefix("Bearer ") {
             if let Some(sub) = jwt_subject_unverified(rest.trim()) {
                 return format!("sub:{sub}");
             }
         }
     }
-    let cookie = req.headers().get("cookie").and_then(|v| v.to_str().ok());
+    let cookie = req
+        .headers()
+        .get("cookie")
+        .and_then(|v| v.to_str().ok());
     if let Some(token) = extract_session_cookie(cookie) {
         return format!("sess:{token}");
     }
@@ -1192,7 +1167,8 @@ async fn handle_request(
         if let Some(resp) = rpc_predispatch_not_found(&dispatch_path) {
             return resp;
         }
-        return HttpResponse::NotFound().json(&serde_json::json!({"error": "no resource matched"}));
+        return HttpResponse::NotFound()
+            .json(&serde_json::json!({"error": "no resource matched"}));
     };
 
     execute_resource_tree(
@@ -1369,31 +1345,32 @@ async fn execute_resource_tree(
     //    a 302 → the platform OP; API clients see a 401 with a `WWW-Authenticate`
     //    challenge so they can prompt the user out-of-band.
     let request_id = Uuid::new_v4();
-    let user_header_from_gate = match resolve_auth(
-        &req,
-        &state,
-        policy,
-        &request_id,
-        compiled_route.entry.oauth_client_id.as_deref(),
-        compiled_route.entry.sector_identifier.as_deref(),
-    )
-    .await
-    {
-        AuthOutcome::Allowed { user_header } => user_header,
-        AuthOutcome::Unauthenticated => {
-            return unauthenticated_response(
-                &req,
-                &state,
-                compiled_route.entry.oauth_client_id.as_deref(),
-            );
-        }
-        AuthOutcome::ClientNotProvisioned => {
-            return client_not_provisioned_response();
-        }
-        AuthOutcome::InsufficientScope { required } => {
-            return insufficient_scope_response(&required);
-        }
-    };
+    let user_header_from_gate =
+        match resolve_auth(
+            &req,
+            &state,
+            policy,
+            &request_id,
+            compiled_route.entry.oauth_client_id.as_deref(),
+            compiled_route.entry.sector_identifier.as_deref(),
+        )
+        .await
+        {
+            AuthOutcome::Allowed { user_header } => user_header,
+            AuthOutcome::Unauthenticated => {
+                return unauthenticated_response(
+                    &req,
+                    &state,
+                    compiled_route.entry.oauth_client_id.as_deref(),
+                );
+            }
+            AuthOutcome::ClientNotProvisioned => {
+                return client_not_provisioned_response();
+            }
+            AuthOutcome::InsufficientScope { required } => {
+                return insufficient_scope_response(&required);
+            }
+        };
 
     // 4. CSRF origin guard. Mutations with a declared csrf_origins list
     //    require the request's `Origin` to match.
@@ -1404,10 +1381,8 @@ async fn execute_resource_tree(
     //    is exactly the hole the vite emitter closed by always writing
     //    `kind` (see `ProcedureKind` in crates/zeroship-bundle/src/rule.rs). `None`
     //    now only reaches here from a hand-authored raw-JS manifest.
-    if matches!(
-        policy.kind,
-        Some(ProcedureKind::Mutation) | Some(ProcedureKind::Action)
-    ) || req.method() == ntex::http::Method::POST
+    if matches!(policy.kind, Some(ProcedureKind::Mutation) | Some(ProcedureKind::Action))
+        || req.method() == ntex::http::Method::POST
         || req.method() == ntex::http::Method::PUT
         || req.method() == ntex::http::Method::PATCH
         || req.method() == ntex::http::Method::DELETE
@@ -1442,10 +1417,13 @@ async fn execute_resource_tree(
             state.config.trust_proxy,
             user_header_from_gate.is_some(),
         );
-        if let Err(resp) = state
-            .per_rule_rate_limits
-            .check(app_id, rule_idx, rl.per, &bucket_id, rl)
-        {
+        if let Err(resp) = state.per_rule_rate_limits.check(
+            app_id,
+            rule_idx,
+            rl.per,
+            &bucket_id,
+            rl,
+        ) {
             return resp;
         }
     }
@@ -1488,8 +1466,7 @@ async fn execute_resource_tree(
         .await
         {
             IdempotencyOutcome::ReturnNow(mut resp) => {
-                if let (Some(cors), Some(origin)) = (policy.cors.as_ref(), origin_value.as_deref())
-                {
+                if let (Some(cors), Some(origin)) = (policy.cors.as_ref(), origin_value.as_deref()) {
                     if !origin.is_empty() {
                         inject_cors_response_headers(resp.headers_mut(), cors, origin);
                     }
@@ -1574,8 +1551,8 @@ async fn execute_resource_tree(
             }
         }
         ResolvedAction::Redirect { to, status } => {
-            let st =
-                ntex::http::StatusCode::from_u16(*status).unwrap_or(ntex::http::StatusCode::FOUND);
+            let st = ntex::http::StatusCode::from_u16(*status)
+                .unwrap_or(ntex::http::StatusCode::FOUND);
             (
                 HttpResponse::build(st)
                     .header("location", to.clone())
@@ -1718,18 +1695,14 @@ fn record_gateway_egress(state: &GateState, app_id: &AppId, response: &mut HttpR
     }
     if let BodySize::Sized(n) = response.body().size() {
         if n > 0 {
-            // TRANSITIONAL, and it is NOT `app_derivation::meter_key`.
-            //
-            // `zeroship_metering::meter::Meter::drain` parses this key back with
-            // `Uuid::parse_str` and, on failure, SKIPS AND EVICTS the counters
-            // behind a `tracing::warn!` - so an app whose key stops parsing
-            // serves traffic and is never billed, with the log noise decaying by
-            // design. Handing it the printed typed id would do exactly that.
-            // The meter key stays the uuid until the metering slice re-keys the
-            // map, and this `.uuid()` is what says so out loud.
-            state
-                .meter
-                .increment(&app_id.uuid().to_string(), "gateway_egress_bytes", n);
+            // `zeroship_metering::meter::Meter::drain` parses this key back
+            // with `AppId::parse` and, on failure, SKIPS AND EVICTS the
+            // counters behind a `tracing::warn!` - so an app whose key stops
+            // parsing serves traffic and is never billed, with the log noise
+            // decaying by design. The meter key is therefore the typed id's
+            // printed form, `app_id.as_str()`, which is exactly what
+            // `AppId::parse` admits.
+            state.meter.increment(app_id.as_str(), "gateway_egress_bytes", n);
         }
     }
 }
@@ -2032,12 +2005,11 @@ pub(super) async fn handle_idempotency_pre_dispatch(
 
     let decision = idempotency::pre_dispatch(
         state.idempotency_store.as_ref(),
-        // TRANSITIONAL. The dedupe namespace is a PERSISTED key space
-        // (`idem:{app_id}:{wire_id}:...`) with its own TTL, so its rendering is
-        // a storage decision rather than a routing one and it stays the uuid
-        // until that store is re-keyed. `capture_response` below unwraps the
-        // same way; the pair has to agree or every store misses its own read.
-        &app_id.uuid(),
+        // The dedupe namespace is a PERSISTED key space
+        // (`idem:{app_id}:{wire_id}:...`) keyed on the app's printed typed
+        // id. `capture_response` below is fed the same `app_id`; the pair
+        // has to agree or every store misses its own read.
+        app_id,
         wire_id,
         principal,
         idem_key.as_deref(),
@@ -2086,17 +2058,9 @@ pub(super) async fn handle_idempotency_pre_dispatch(
                 wall_start,
             ))
         }
-        Ok(idempotency::DedupeDecision::Proceed {
-            entry_key,
-            lock_key,
-            body_hash,
-            ttl_hours,
-        }) => IdempotencyOutcome::Proceed(InflightHandle {
-            entry_key,
-            lock_key,
-            body_hash,
-            ttl_hours,
-        }),
+        Ok(idempotency::DedupeDecision::Proceed { entry_key, lock_key, body_hash, ttl_hours }) => {
+            IdempotencyOutcome::Proceed(InflightHandle { entry_key, lock_key, body_hash, ttl_hours })
+        }
         Err(e) => {
             // Store error → log and fail closed. A degraded dedupe
             // backend must not silently let duplicate mutations
@@ -2130,13 +2094,15 @@ pub(super) async fn buffer_response_body(mut resp: HttpResponse) -> (HttpRespons
     use ntex::http::body::{Body, MessageBody};
     let mut body = resp.take_body();
     let mut buf: Vec<u8> = Vec::new();
-    std::future::poll_fn(|cx| loop {
-        match body.poll_next_chunk(cx) {
-            std::task::Poll::Ready(Some(Ok(chunk))) => buf.extend_from_slice(&chunk),
-            std::task::Poll::Ready(Some(Err(_))) | std::task::Poll::Ready(None) => {
-                return std::task::Poll::Ready(());
+    std::future::poll_fn(|cx| {
+        loop {
+            match body.poll_next_chunk(cx) {
+                std::task::Poll::Ready(Some(Ok(chunk))) => buf.extend_from_slice(&chunk),
+                std::task::Poll::Ready(Some(Err(_))) | std::task::Poll::Ready(None) => {
+                    return std::task::Poll::Ready(());
+                }
+                std::task::Poll::Pending => return std::task::Poll::Pending,
             }
-            std::task::Poll::Pending => return std::task::Poll::Pending,
         }
     })
     .await;
@@ -2279,7 +2245,7 @@ pub(super) async fn capture_response_for_idempotency(
         state.idempotency_store.as_ref(),
         // The write half of the pair `pre_dispatch` documents: same namespace,
         // so necessarily the same rendering.
-        &app_id.uuid(),
+        app_id,
         &handle.entry_key,
         &handle.lock_key,
         &handle.body_hash,
@@ -2400,7 +2366,8 @@ const RESERVED_HEADER_PREFIX: &str = "x-zs-";
 /// be forwarded into the worker dispatch envelope.
 fn is_reserved_header(name: &str) -> bool {
     let lower = name.to_ascii_lowercase();
-    lower.starts_with(RESERVED_HEADER_PREFIX) || RESERVED_HEADER_EXACT.iter().any(|r| *r == lower)
+    lower.starts_with(RESERVED_HEADER_PREFIX)
+        || RESERVED_HEADER_EXACT.iter().any(|r| *r == lower)
 }
 
 /// Collect inbound request headers as `[name, value]` pairs for the worker
@@ -2659,8 +2626,9 @@ fn client_not_provisioned_response() -> HttpResponse {
 ///   (and the `scope` string tells the client exactly which scopes to request).
 fn insufficient_scope_response(required: &[String]) -> HttpResponse {
     let scope_param = required.join(" ");
-    let challenge =
-        format!("Bearer realm=\"zeroship\", error=\"insufficient_scope\", scope=\"{scope_param}\"");
+    let challenge = format!(
+        "Bearer realm=\"zeroship\", error=\"insufficient_scope\", scope=\"{scope_param}\""
+    );
     HttpResponse::Forbidden()
         .header("www-authenticate", challenge.as_str())
         .json(&serde_json::json!({
@@ -2686,14 +2654,14 @@ async fn handle_auth_callback(
 ) -> HttpResponse {
     // Resolve the app by subdomain — same logic the manifest dispatcher uses
     // for normal requests — then key the gateway_sessions row by the app's
-    // STABLE UUID (`app_uuid`), NOT the slug. This is the canonical session
-    // key (the `app_id` column is UUID, bound natively); a slug-keyed row
-    // would never match on the real SPA→app request path. The slug can be
-    // renamed; the UUID is the immutable identity.
+    // STABLE id (`app_id`), NOT the slug. The `app_id` DATABASE column is
+    // UUID and bound natively, so the typed id is decoded for it below; a
+    // slug-keyed row would never match on the real SPA→app request path.
+    // The slug can be renamed; the app id is the immutable identity.
     let Some(app_name) = extract_app_name(&req, None) else {
         return render_callback_error("host header missing or unparseable");
     };
-    let Some((app_uuid, route)) = state.routes.lookup_by_name(&app_name) else {
+    let Some((app_id, route)) = state.routes.lookup_by_name(&app_name) else {
         return render_callback_error("app not found for this host");
     };
     // The interactive flow now issues the SAME signed `zeroship-sess+jwt` cookie the
@@ -2760,9 +2728,6 @@ async fn handle_auth_callback(
             return render_callback_error(oidc_callback_public_error(&e));
         }
     };
-    let Ok(global_user_id) = zeroship_core::UserId::parse(&claims.sub) else {
-        return render_callback_error("id_token sub is not a global user id");
-    };
 
     // 4. Create a per-origin session row. Check out a pooled connection
     //    for just this insert and release it on drop.
@@ -2786,10 +2751,10 @@ async fn handle_auth_callback(
     let session = match crate::sessions::create(
         &mut conn,
         &crate::sessions::NewSession {
-            user_id: &global_user_id,
-            // `zeroship.gateway_sessions.app_id` is a UUID column bound
-            // natively, so the route table's typed id is unwrapped for it.
-            app_id: app_uuid.uuid(),
+            user_id: &claims.sub,
+            // `zeroship.gateway_sessions.app_id` is a `text` column that
+            // holds the route table's typed id directly.
+            app_id: &app_id,
             email: claims.email.as_deref(),
             name: claims.name.as_deref(),
             avatar_url: claims.picture.as_deref(),
@@ -2820,6 +2785,9 @@ async fn handle_auth_callback(
     //    (the SAME mint path the SDK popup flow uses — one cookie shape, one
     //    verifier). `claims.sub` is the global user id; the helper derives the
     //    per-app `pws_` + relay alias before signing.
+    let Ok(global_user_id) = UserId::parse(&claims.sub) else {
+        return render_callback_error("id_token sub is not a global user id");
+    };
     let amr = claims.amr.clone().unwrap_or_default();
     let session_cookie = match crate::auth_token::issue_interactive_session_cookie(
         &state,
@@ -2914,10 +2882,13 @@ fn start_oidc_redirect(req: &HttpRequest, state: &Arc<GateState>, client_id: &st
     let scheme = state.config.origin_scheme;
     let redirect_uri = format!("{scheme}://{host}/__zeroship/auth/callback");
 
-    let (auth_url, stash) =
-        state
-            .oidc_rp
-            .build_authorize_redirect(client_id, &original_path, &redirect_uri);
+    let (auth_url, stash) = state
+        .oidc_rp
+        .build_authorize_redirect(
+            client_id,
+            &original_path,
+            &redirect_uri,
+        );
 
     let mut builder = HttpResponse::Found();
     builder.header("location", auth_url);
@@ -2985,16 +2956,6 @@ mod tests {
         .expect("broker secret")
     }
 
-    /// The typed app id for an app the control plane stores as `stored`.
-    ///
-    /// Exactly what `sync::update` mints at snapshot load, so a test that keys
-    /// a registry, the ring, or a route lookup builds the same key production
-    /// does. Spelling `AppId::from_uuid` here instead would compile and then
-    /// miss every one of them.
-    fn typed_app_id(stored: &Uuid) -> AppId {
-        zeroship_core::app_id::canonical_app_id_for(stored)
-    }
-
     fn manifest_with_resources(resources: HashMap<String, ResourceEntry>) -> Manifest {
         Manifest {
             version: 1,
@@ -3005,12 +2966,12 @@ mod tests {
 
     fn usage_value(
         events: &[zeroship_core::usage_event::UsageEvent],
-        app_id: Uuid,
+        app_id: &AppId,
         meter: &str,
     ) -> Option<u64> {
         events
             .iter()
-            .find(|event| event.subject.app == Some(app_id) && event.meter == meter)
+            .find(|event| event.subject.app.as_ref() == Some(app_id) && event.meter == meter)
             .map(|event| event.value)
     }
 
@@ -3018,12 +2979,14 @@ mod tests {
     /// to inspect idempotency-replayed and error-envelope bodies.
     async fn collect_body(mut body: ResponseBody<Body>) -> Vec<u8> {
         let mut out = Vec::new();
-        std::future::poll_fn(|cx| loop {
-            match body.poll_next_chunk(cx) {
-                std::task::Poll::Ready(Some(Ok(chunk))) => out.extend_from_slice(&chunk),
-                std::task::Poll::Ready(Some(Err(e))) => panic!("body error: {e}"),
-                std::task::Poll::Ready(None) => return std::task::Poll::Ready(()),
-                std::task::Poll::Pending => return std::task::Poll::Pending,
+        std::future::poll_fn(|cx| {
+            loop {
+                match body.poll_next_chunk(cx) {
+                    std::task::Poll::Ready(Some(Ok(chunk))) => out.extend_from_slice(&chunk),
+                    std::task::Poll::Ready(Some(Err(e))) => panic!("body error: {e}"),
+                    std::task::Poll::Ready(None) => return std::task::Poll::Ready(()),
+                    std::task::Poll::Pending => return std::task::Poll::Pending,
+                }
             }
         })
         .await;
@@ -3077,7 +3040,7 @@ mod tests {
         }
         async fn put_manifest(
             &self,
-            _app_id: &uuid::Uuid,
+            _app_id: &AppId,
             _deploy_hash: &str,
             _json: &[u8],
         ) -> Result<(), zeroship_bundle::BlobError> {
@@ -3085,21 +3048,21 @@ mod tests {
         }
         async fn get_manifest(
             &self,
-            _app_id: &uuid::Uuid,
+            _app_id: &AppId,
             _deploy_hash: &str,
         ) -> Result<bytes::Bytes, zeroship_bundle::BlobError> {
             Err(zeroship_bundle::BlobError::NotFound("unused".into()))
         }
         async fn delete_manifest(
             &self,
-            _app_id: &uuid::Uuid,
+            _app_id: &AppId,
             _deploy_hash: &str,
         ) -> Result<bool, zeroship_bundle::BlobError> {
             Ok(false)
         }
         async fn delete_app_manifests(
             &self,
-            _app_id: &uuid::Uuid,
+            _app_id: &AppId,
         ) -> Result<(), zeroship_bundle::BlobError> {
             Ok(())
         }
@@ -3112,13 +3075,14 @@ mod tests {
     /// this process, which is what these tests exercise. A replicated callee
     /// needs the Postgres store, and `crates/zeroship-control/tests/internal_service_auth_test.rs`
     /// is where that is measured against the real table.
-    fn control_credentialled_service_auth(
-    ) -> (Arc<zeroship_core::service_peers::ServiceAuth>, String) {
+    fn control_credentialled_service_auth()
+    -> (Arc<zeroship_core::service_peers::ServiceAuth>, String) {
         use zeroship_core::service_assertion::{
             InMemoryReplayStore, ServiceAssertionVerifier, ServiceSigningKey, ServiceTrustBundle,
         };
         use zeroship_core::service_peers::{
-            service_issuer, ServiceAuth, ServiceKeyring, CONTROL_SERVICE_NAME, GATEWAY_SERVICE_NAME,
+            service_issuer, ServiceAuth, ServiceKeyring, CONTROL_SERVICE_NAME,
+            GATEWAY_SERVICE_NAME,
         };
 
         let gateway_issuer = service_issuer(GATEWAY_SERVICE_NAME).expect("gateway issuer");
@@ -3138,16 +3102,19 @@ mod tests {
 
         let keyring = ServiceKeyring::from_parts(gateway_issuer.clone(), gateway_key, held)
             .expect("gateway keyring");
-        let verifier =
-            ServiceAssertionVerifier::new(trusted, std::sync::Arc::new(InMemoryReplayStore::new()));
-        let control =
-            ServiceKeyring::from_parts(control_issuer, control_key, ServiceTrustBundle::new())
-                .expect("control keyring");
+        let verifier = ServiceAssertionVerifier::new(
+            trusted,
+            std::sync::Arc::new(InMemoryReplayStore::new()),
+        );
+        let control = ServiceKeyring::from_parts(
+            control_issuer,
+            control_key,
+            ServiceTrustBundle::new(),
+        )
+        .expect("control keyring");
         let header = format!(
             "Bearer {}",
-            control
-                .mint_for(&gateway_issuer)
-                .expect("mint for the gateway")
+            control.mint_for(&gateway_issuer).expect("mint for the gateway")
         );
         (
             Arc::new(ServiceAuth::new(keyring, std::sync::Arc::new(verifier))),
@@ -3229,10 +3196,10 @@ mod tests {
         build_test_state_with_workers(vec!["http://0.0.0.0:0".into()])
     }
 
-    fn workflow_step_request(app_id: Uuid) -> Value {
+    fn workflow_step_request(app_id: &AppId) -> Value {
         serde_json::json!({
             "runId": "run_test",
-            "appId": app_id,
+            "appId": app_id.as_str(),
         })
     }
 
@@ -3255,14 +3222,14 @@ mod tests {
 
     fn install_workflow_route(
         state: &GateState,
-        app_id: Uuid,
+        app_id: &AppId,
         spend_state: zeroship_core::types::SpendState,
         account_state: zeroship_core::types::AccountState,
     ) {
         let mut entry = worker_spend_route(spend_state);
         entry.account_state = account_state;
         let mut routes = zeroship_core::types::RouteMap::new();
-        routes.insert(app_id, entry);
+        routes.insert(app_id.clone(), entry);
         state.routes.update_snapshot(
             zeroship_core::types::GatewaySnapshot {
                 routes,
@@ -3292,10 +3259,10 @@ mod tests {
         let mut state = build_test_state_with_workers(vec![worker.url("/")]);
         let (service_auth, control_header) = control_credentialled_service_auth();
         Arc::get_mut(&mut state).expect("sole owner").service_auth = service_auth;
-        let app_id = Uuid::new_v4();
+        let app_id = AppId::mint();
         install_workflow_route(
             &state,
-            app_id,
+            &app_id,
             zeroship_core::types::SpendState::Allow,
             zeroship_core::types::AccountState::Active,
         );
@@ -3310,7 +3277,7 @@ mod tests {
         let req = ntex::web::test::TestRequest::post()
             .uri("/__zeroship/internal/workflow-advance")
             .header("authorization", control_header.as_str())
-            .set_payload(serde_json::to_vec(&workflow_step_request(app_id)).unwrap())
+            .set_payload(serde_json::to_vec(&workflow_step_request(&app_id)).unwrap())
             .to_request();
         let resp = ntex::web::test::call_service(&app, req).await;
         assert_eq!(resp.status(), ntex::http::StatusCode::OK);
@@ -3319,13 +3286,13 @@ mod tests {
         assert_eq!(result["ack"], true);
         assert_eq!(result["runId"], "run_test");
         assert_eq!(result["registrations"][0]["runId"], "run_test");
-        assert_eq!(result["registrations"][0]["appId"], app_id.to_string());
+        assert_eq!(result["registrations"][0]["appId"], app_id.as_str());
         assert_eq!(result["registrations"][0]["terminal"], true);
 
         let seen = seen.lock().expect("seen lock");
         assert_eq!(seen.len(), 1);
         assert_eq!(seen[0]["runId"], "run_test");
-        assert_eq!(seen[0]["appId"], app_id.to_string());
+        assert_eq!(seen[0]["appId"], app_id.as_str());
         let keys = seen[0].as_object().expect("worker request object");
         assert_eq!(keys.len(), 2);
     }
@@ -3333,7 +3300,7 @@ mod tests {
     #[test]
     fn workflow_sleep_frontier_normalizes_duration_wake_at() {
         let request: WorkflowStepRequest =
-            serde_json::from_value(workflow_step_request(Uuid::new_v4())).unwrap();
+            serde_json::from_value(workflow_step_request(&AppId::mint())).unwrap();
         let worker_result = serde_json::json!({
             "kind": "Sleep",
             "runId": "run_test",
@@ -3360,7 +3327,7 @@ mod tests {
     #[test]
     fn workflow_wait_frontier_normalizes_timeout_and_max_signal_age() {
         let request: WorkflowStepRequest =
-            serde_json::from_value(workflow_step_request(Uuid::new_v4())).unwrap();
+            serde_json::from_value(workflow_step_request(&AppId::mint())).unwrap();
         let worker_result = serde_json::json!({
             "kind": "Wait",
             "runId": "run_test",
@@ -3391,7 +3358,7 @@ mod tests {
     #[test]
     fn workflow_step_completed_preserves_side_effect_step_kind() {
         let request: WorkflowStepRequest =
-            serde_json::from_value(workflow_step_request(Uuid::new_v4())).unwrap();
+            serde_json::from_value(workflow_step_request(&AppId::mint())).unwrap();
         let worker_result = serde_json::json!({
             "kind": "StepCompleted",
             "runId": "run_test",
@@ -3417,7 +3384,7 @@ mod tests {
     #[test]
     fn workflow_continue_as_new_preserves_seed_input() {
         let request: WorkflowStepRequest =
-            serde_json::from_value(workflow_step_request(Uuid::new_v4())).unwrap();
+            serde_json::from_value(workflow_step_request(&AppId::mint())).unwrap();
         let worker_result = serde_json::json!({
             "kind": "ContinueAsNew",
             "runId": "run_test",
@@ -3432,16 +3399,13 @@ mod tests {
         .expect("continue-as-new result");
 
         assert_eq!(result["outcomes"][0]["kind"], "ContinueAsNew");
-        assert_eq!(
-            result["outcomes"][0]["input"],
-            serde_json::json!({"generation": 1})
-        );
+        assert_eq!(result["outcomes"][0]["input"], serde_json::json!({"generation": 1}));
     }
 
     #[test]
     fn workflow_run_failed_batch_uses_batch_error_when_outcome_error_missing() {
         let request: WorkflowStepRequest =
-            serde_json::from_value(workflow_step_request(Uuid::new_v4())).unwrap();
+            serde_json::from_value(workflow_step_request(&AppId::mint())).unwrap();
         let worker_result = serde_json::json!({
             "kind": "RunFailed",
             "runId": "run_test",
@@ -3462,10 +3426,7 @@ mod tests {
         .expect("run failed result");
 
         assert_eq!(result["outcomes"][0]["kind"], "RunFailed");
-        assert_eq!(
-            result["outcomes"][0]["error"]["type"],
-            "NondeterministicError"
-        );
+        assert_eq!(result["outcomes"][0]["error"]["type"], "NondeterministicError");
         assert_eq!(
             result["outcomes"][0]["error"]["message"],
             "workflow journal mismatch at ordinal 0"
@@ -3475,7 +3436,7 @@ mod tests {
     #[test]
     fn workflow_batch_normalizes_only_trailing_suspension() {
         let request: WorkflowStepRequest =
-            serde_json::from_value(workflow_step_request(Uuid::new_v4())).unwrap();
+            serde_json::from_value(workflow_step_request(&AppId::mint())).unwrap();
         let worker_result = serde_json::json!({
             "runId": "run_test",
             "dispatchNonce": "wfd_test",
@@ -3521,7 +3482,7 @@ mod tests {
     #[test]
     fn workflow_batch_preserves_compensable_on_every_completed_step() {
         let request: WorkflowStepRequest =
-            serde_json::from_value(workflow_step_request(Uuid::new_v4())).unwrap();
+            serde_json::from_value(workflow_step_request(&AppId::mint())).unwrap();
         let worker_result = serde_json::json!({
             "runId": "run_test",
             "dispatchNonce": "wfd_test",
@@ -3571,7 +3532,7 @@ mod tests {
     #[test]
     fn workflow_legacy_checkpoints_preserve_compensation_metadata() {
         let request: WorkflowStepRequest =
-            serde_json::from_value(workflow_step_request(Uuid::new_v4())).unwrap();
+            serde_json::from_value(workflow_step_request(&AppId::mint())).unwrap();
         let worker_result = serde_json::json!({
             "runId": "run_test",
             "dispatchNonce": "wfd_test",
@@ -3689,10 +3650,10 @@ mod tests {
         let mut state = build_test_state_with_workers(Vec::new());
         let (service_auth, control_header) = control_credentialled_service_auth();
         Arc::get_mut(&mut state).expect("sole owner").service_auth = service_auth;
-        let app_id = Uuid::new_v4();
+        let app_id = AppId::mint();
         install_workflow_route(
             &state,
-            app_id,
+            &app_id,
             zeroship_core::types::SpendState::Block,
             zeroship_core::types::AccountState::Active,
         );
@@ -3707,7 +3668,7 @@ mod tests {
         let req = ntex::web::test::TestRequest::post()
             .uri("/__zeroship/internal/workflow-advance")
             .header("authorization", control_header.as_str())
-            .set_payload(serde_json::to_vec(&workflow_step_request(app_id)).unwrap())
+            .set_payload(serde_json::to_vec(&workflow_step_request(&app_id)).unwrap())
             .to_request();
         let resp = ntex::web::test::call_service(&app, req).await;
         assert_eq!(resp.status(), ntex::http::StatusCode::PAYMENT_REQUIRED);
@@ -3732,10 +3693,10 @@ mod tests {
         let mut state = build_test_state_with_workers(Vec::new());
         let (service_auth, control_header) = control_credentialled_service_auth();
         Arc::get_mut(&mut state).expect("sole owner").service_auth = service_auth;
-        let app_id = Uuid::new_v4();
+        let app_id = AppId::mint();
         install_workflow_route(
             &state,
-            app_id,
+            &app_id,
             zeroship_core::types::SpendState::Allow,
             zeroship_core::types::AccountState::Active,
         );
@@ -3750,7 +3711,7 @@ mod tests {
         for header in [None, Some("Bearer not-an-assertion".to_string())] {
             let mut req = ntex::web::test::TestRequest::post()
                 .uri("/__zeroship/internal/workflow-advance")
-                .set_payload(serde_json::to_vec(&workflow_step_request(app_id)).unwrap());
+                .set_payload(serde_json::to_vec(&workflow_step_request(&app_id)).unwrap());
             if let Some(value) = header.clone() {
                 req = req.header("authorization", value);
             }
@@ -3770,7 +3731,7 @@ mod tests {
             ntex::web::test::TestRequest::post()
                 .uri("/__zeroship/internal/workflow-advance")
                 .header("authorization", control_header.as_str())
-                .set_payload(serde_json::to_vec(&workflow_step_request(app_id)).unwrap())
+                .set_payload(serde_json::to_vec(&workflow_step_request(&app_id)).unwrap())
                 .to_request(),
         )
         .await;
@@ -3792,10 +3753,10 @@ mod tests {
         let mut state = build_test_state_with_workers(Vec::new());
         Arc::get_mut(&mut state).expect("sole owner").service_auth =
             std::sync::Arc::new(zeroship_core::service_peers::ServiceAuth::unconfigured());
-        let app_id = Uuid::new_v4();
+        let app_id = AppId::mint();
         install_workflow_route(
             &state,
-            app_id,
+            &app_id,
             zeroship_core::types::SpendState::Allow,
             zeroship_core::types::AccountState::Active,
         );
@@ -3812,7 +3773,7 @@ mod tests {
             &app,
             ntex::web::test::TestRequest::post()
                 .uri("/__zeroship/internal/workflow-advance")
-                .set_payload(serde_json::to_vec(&workflow_step_request(app_id)).unwrap())
+                .set_payload(serde_json::to_vec(&workflow_step_request(&app_id)).unwrap())
                 .to_request(),
         )
         .await;
@@ -3822,10 +3783,10 @@ mod tests {
     #[ntex::test]
     async fn public_vhost_workflow_advance_path_is_404() {
         let state = build_test_state_with_workers(Vec::new());
-        let app_id = Uuid::new_v4();
+        let app_id = AppId::mint();
         install_workflow_route(
             &state,
-            app_id,
+            &app_id,
             zeroship_core::types::SpendState::Allow,
             zeroship_core::types::AccountState::Active,
         );
@@ -3840,7 +3801,7 @@ mod tests {
         let req = ntex::web::test::TestRequest::post()
             .uri("/__zeroship/internal/workflow-advance")
             .header("host", "spend-app.zeroship.localhost")
-            .set_payload(serde_json::to_vec(&workflow_step_request(app_id)).unwrap())
+            .set_payload(serde_json::to_vec(&workflow_step_request(&app_id)).unwrap())
             .to_request();
         let resp = ntex::web::test::call_service(&app, req).await;
         assert_eq!(resp.status(), ntex::http::StatusCode::NOT_FOUND);
@@ -3857,10 +3818,7 @@ mod tests {
         let req = ntex::web::test::TestRequest::default()
             .header("cookie", "__Host-zeroship_app_session=abc")
             .to_http_request();
-        assert_eq!(
-            compute_bucket_id(&req, RateLimitPer::App, false, true),
-            "app"
-        );
+        assert_eq!(compute_bucket_id(&req, RateLimitPer::App, false, true), "app");
     }
 
     #[test]
@@ -3882,22 +3840,12 @@ mod tests {
     fn forward_url_preserves_query_string() {
         // GET query-RPC: the base64url input MUST survive into the worker URL.
         assert_eq!(
-            forward_url(
-                "http",
-                "app.localhost:8080",
-                "__zeroship/v1/listTodos",
-                Some("input=e30")
-            ),
+            forward_url("http", "app.localhost:8080", "__zeroship/v1/listTodos", Some("input=e30")),
             "http://app.localhost:8080/__zeroship/v1/listTodos?input=e30",
         );
         // Arbitrary app query params (search/pagination) survive too.
         assert_eq!(
-            forward_url(
-                "https",
-                "shop.zeroship.ai",
-                "products",
-                Some("q=shoes&page=2")
-            ),
+            forward_url("https", "shop.zeroship.ai", "products", Some("q=shoes&page=2")),
             "https://shop.zeroship.ai/products?q=shoes&page=2",
         );
     }
@@ -3905,9 +3853,15 @@ mod tests {
     #[test]
     fn forward_url_omits_empty_or_absent_query() {
         // No query → no trailing '?'.
-        assert_eq!(forward_url("http", "h", "p", None), "http://h/p",);
+        assert_eq!(
+            forward_url("http", "h", "p", None),
+            "http://h/p",
+        );
         // Empty query (e.g. a bare trailing '?') is treated as absent.
-        assert_eq!(forward_url("http", "h", "p", Some("")), "http://h/p",);
+        assert_eq!(
+            forward_url("http", "h", "p", Some("")),
+            "http://h/p",
+        );
     }
 
     #[test]
@@ -4066,7 +4020,7 @@ mod tests {
         use zeroship_bundle::RateLimit;
 
         let registry = PerRuleRateLimitRegistry::new();
-        let app = typed_app_id(&uuid::Uuid::nil());
+        let app = AppId::mint();
         let limit = RateLimit {
             rpm: None,
             rps: Some(1),
@@ -4190,7 +4144,8 @@ mod tests {
     fn jwt_with_sub(sub: &str) -> String {
         use base64::Engine as _;
         let b64 = |v: &serde_json::Value| {
-            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(serde_json::to_vec(v).unwrap())
+            base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .encode(serde_json::to_vec(v).unwrap())
         };
         let header = b64(&serde_json::json!({ "alg": "none", "typ": "JWT" }));
         let payload = b64(&serde_json::json!({ "sub": sub }));
@@ -4202,10 +4157,7 @@ mod tests {
         // RateLimitPer::User buckets by the authenticated JWT `sub` — the
         // wire scope that round-trips the console's `per: "user"` rules.
         let req = ntex::web::test::TestRequest::default()
-            .header(
-                "authorization",
-                format!("Bearer {}", jwt_with_sub("usr_alice")),
-            )
+            .header("authorization", format!("Bearer {}", jwt_with_sub("usr_alice")))
             .to_http_request();
         let id = compute_bucket_id(&req, RateLimitPer::User, false, true);
         assert_eq!(id, "sub:usr_alice");
@@ -4277,10 +4229,7 @@ mod tests {
             .header("cookie", "__Host-zeroship_app_session=device-2")
             .to_http_request();
         let req_bob = ntex::web::test::TestRequest::default()
-            .header(
-                "authorization",
-                format!("Bearer {}", jwt_with_sub("usr_bob")),
-            )
+            .header("authorization", format!("Bearer {}", jwt_with_sub("usr_bob")))
             .to_http_request();
         let a1 = compute_bucket_id(&req_a1, RateLimitPer::User, false, true);
         let a2 = compute_bucket_id(&req_a2, RateLimitPer::User, false, true);
@@ -4339,7 +4288,7 @@ mod tests {
     #[test]
     fn per_session_rule_cannot_be_evaded_by_rotating_the_cookie_value() {
         let reg = crate::enforce::PerRuleRateLimitRegistry::new();
-        let app_id = typed_app_id(&uuid::Uuid::nil());
+        let app_id = AppId::mint();
         let rl = RateLimit {
             rps: Some(1),
             rpm: None,
@@ -4401,21 +4350,14 @@ mod tests {
         // the registry's key uses, otherwise the second call would
         // hit a fresh bucket and pass.
         let reg = crate::enforce::PerRuleRateLimitRegistry::new();
-        let app_id = typed_app_id(&uuid::Uuid::nil());
-        let rl = RateLimit {
-            rps: Some(1),
-            rpm: None,
-            per: RateLimitPer::Ip,
-        };
+        let app_id = AppId::mint();
+        let rl = RateLimit { rps: Some(1), rpm: None, per: RateLimitPer::Ip };
         let req = ntex::web::test::TestRequest::default().to_http_request();
         let bucket_id = compute_bucket_id(&req, rl.per, false, true);
         assert!(reg.check(&app_id, 0, rl.per, &bucket_id, &rl).is_ok());
         // Second call with the same request → same bucket id → drained.
         let bucket_id2 = compute_bucket_id(&req, rl.per, false, true);
-        assert_eq!(
-            bucket_id, bucket_id2,
-            "bucket id is stable for same request"
-        );
+        assert_eq!(bucket_id, bucket_id2, "bucket id is stable for same request");
         let err = reg
             .check(&app_id, 0, rl.per, &bucket_id2, &rl)
             .expect_err("second call must 429 — bucket key matched");
@@ -4428,12 +4370,8 @@ mod tests {
         // RateLimitPer::Session must hit independent buckets even when
         // the IP is the same.
         let reg = crate::enforce::PerRuleRateLimitRegistry::new();
-        let app_id = typed_app_id(&uuid::Uuid::nil());
-        let rl = RateLimit {
-            rps: Some(1),
-            rpm: None,
-            per: RateLimitPer::Session,
-        };
+        let app_id = AppId::mint();
+        let rl = RateLimit { rps: Some(1), rpm: None, per: RateLimitPer::Session };
 
         let req_a = ntex::web::test::TestRequest::default()
             .header("cookie", "__Host-zeroship_app_session=user-a")
@@ -4532,11 +4470,7 @@ mod tests {
             "*".into(),
             ResourceEntry {
                 auth: Some(RequiredPrincipal::User),
-                rate_limit: Some(RateLimit {
-                    rpm: Some(600),
-                    rps: None,
-                    per: RateLimitPer::Ip,
-                }),
+                rate_limit: Some(RateLimit { rpm: Some(600), rps: None, per: RateLimitPer::Ip }),
                 ..Default::default()
             },
         );
@@ -4544,20 +4478,14 @@ mod tests {
             "rpc:expensive".into(),
             ResourceEntry {
                 kind: Some(ProcedureKind::Mutation),
-                rate_limit: Some(RateLimit {
-                    rpm: Some(10),
-                    rps: None,
-                    per: RateLimitPer::Ip,
-                }),
+                rate_limit: Some(RateLimit { rpm: Some(10), rps: None, per: RateLimitPer::Ip }),
                 r#override: vec!["rate_limit".into()],
                 ..Default::default()
             },
         );
         let m = manifest_with_resources(resources);
         let c = CompiledManifest::compile(&m);
-        let p = c
-            .lookup_resource("/__zeroship/v1/expensive")
-            .expect("matches");
+        let p = c.lookup_resource("/__zeroship/v1/expensive").expect("matches");
         assert_eq!(
             p.rate_limit.as_ref().unwrap().rpm,
             Some(10),
@@ -4630,7 +4558,7 @@ mod tests {
         let outcome = handle_idempotency_pre_dispatch(
             &req,
             &state,
-            &typed_app_id(&uuid::Uuid::new_v4()),
+            &AppId::mint(),
             "/__zeroship/v1/todos.add",
             &policy,
             None,
@@ -4660,7 +4588,7 @@ mod tests {
     #[compio::test]
     async fn idempotency_first_request_proceeds_holds_lock() {
         let state = make_minimal_state();
-        let app_id = typed_app_id(&uuid::Uuid::new_v4());
+        let app_id = AppId::mint();
         let req = ntex::web::test::TestRequest::default()
             .header("idempotency-key", "5c7f4a1b-8d2e-4c3f-9a6b-1e2d3c4b5a60")
             .to_http_request();
@@ -4683,7 +4611,7 @@ mod tests {
                 assert_eq!(
                     handle.entry_key,
                     crate::idempotency::entry_key(
-                        &app_id.uuid(),
+                        &app_id,
                         "todos.add",
                         crate::idempotency::Principal::Anon,
                         "5c7f4a1b-8d2e-4c3f-9a6b-1e2d3c4b5a60",
@@ -4698,7 +4626,7 @@ mod tests {
     #[compio::test]
     async fn idempotency_second_same_body_replays_cached_response() {
         let state = make_minimal_state();
-        let app_id = typed_app_id(&uuid::Uuid::new_v4());
+        let app_id = AppId::mint();
         let req = ntex::web::test::TestRequest::default()
             .header("idempotency-key", "7b1e9d40-3c5a-4f21-8e77-90ab12cd34ef")
             .to_http_request();
@@ -4775,7 +4703,7 @@ mod tests {
     #[compio::test]
     async fn idempotency_second_different_body_returns_409_already_exists() {
         let state = make_minimal_state();
-        let app_id = typed_app_id(&uuid::Uuid::new_v4());
+        let app_id = AppId::mint();
         let req_with_key = |body_label: &str| {
             ntex::web::test::TestRequest::default()
                 .header("idempotency-key", "0e3c5a91-77bd-4d2f-b418-6c9a0f5e2d31")
@@ -4836,10 +4764,7 @@ mod tests {
                 let bytes = collect_body(body).await;
                 let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
                 assert_eq!(v["code"], "ALREADY_EXISTS");
-                assert_eq!(
-                    v["details"]["reason"],
-                    "idempotency_key_reused_with_different_input"
-                );
+                assert_eq!(v["details"]["reason"], "idempotency_key_reused_with_different_input");
             }
             IdempotencyOutcome::Proceed(_) => panic!("must reject"),
         }
@@ -4860,7 +4785,7 @@ mod tests {
     async fn idempotency_per_procedure_ttl_flows_into_handle() {
         // A mutation pinned to 48h yields handle.ttl_hours = 48.
         let state = make_minimal_state();
-        let app_id = typed_app_id(&uuid::Uuid::new_v4());
+        let app_id = AppId::mint();
         let req = ntex::web::test::TestRequest::default()
             .header("idempotency-key", "7b1e9d40-3c5a-4f21-8e77-90ab12cd34ef")
             .to_http_request();
@@ -5043,9 +4968,11 @@ mod tests {
     /// MAY land on different workers (the spread is the whole point).
     #[test]
     fn select_with_affinity_is_sticky_for_same_principal() {
-        let workers: Vec<String> = (0..16).map(|i| format!("http://worker-{i}:8080")).collect();
+        let workers: Vec<String> = (0..16)
+            .map(|i| format!("http://worker-{i}:8080"))
+            .collect();
         let ring = crate::proxy::HashRing::new(workers, u32::MAX);
-        let app = typed_app_id(&uuid::Uuid::nil());
+        let app = AppId::mint();
 
         let (a, _) = ring.select_with_affinity(&app, "sub:alice");
         let (b, _) = ring.select_with_affinity(&app, "sub:alice");
@@ -5063,9 +4990,11 @@ mod tests {
     /// shift; same (app, principal) is the affinity contract.
     #[test]
     fn select_with_affinity_varies_with_principal() {
-        let workers: Vec<String> = (0..16).map(|i| format!("http://worker-{i}:8080")).collect();
+        let workers: Vec<String> = (0..16)
+            .map(|i| format!("http://worker-{i}:8080"))
+            .collect();
         let ring = crate::proxy::HashRing::new(workers, u32::MAX);
-        let app = typed_app_id(&uuid::Uuid::nil());
+        let app = AppId::mint();
 
         let mut hits = std::collections::HashSet::new();
         for u in 0..32 {
@@ -5074,11 +5003,7 @@ mod tests {
         }
         // 32 principals across 16 workers — should cover at least 4
         // distinct workers (very loose; the actual spread is uniform).
-        assert!(
-            hits.len() >= 4,
-            "affinity should distribute, hit count: {}",
-            hits.len()
-        );
+        assert!(hits.len() >= 4, "affinity should distribute, hit count: {}", hits.len());
     }
 
     /// Idempotency middleware should NOT apply to subscriptions even
@@ -5182,11 +5107,7 @@ mod tests {
         ] {
             assert_eq!(
                 extract_app_name(&req_with_host(host), None).as_deref(),
-                Some(if host.starts_with("AUTH") {
-                    "AUTH"
-                } else {
-                    "auth"
-                }),
+                Some(if host.starts_with("AUTH") { "AUTH" } else { "auth" }),
                 "{host} must resolve to an ordinary app name, not an internal upstream"
             );
         }
@@ -5210,10 +5131,7 @@ mod tests {
         // A request with no Host header resolves to no app at all, so it
         // cannot fall through to some default internal destination.
         assert_eq!(
-            extract_app_name(
-                &ntex::web::test::TestRequest::default().to_http_request(),
-                None
-            ),
+            extract_app_name(&ntex::web::test::TestRequest::default().to_http_request(), None),
             None
         );
     }
@@ -5338,9 +5256,7 @@ mod tests {
         // `redirect_uri` is the per-host callback path; origin_scheme=Http in
         // the test fixture selects the public scheme independently of cookies.
         assert!(
-            location.contains(
-                "redirect_uri=http%3A%2F%2Fmyapp.zeroship.localhost%2F__zeroship%2Fauth%2Fcallback"
-            ),
+            location.contains("redirect_uri=http%3A%2F%2Fmyapp.zeroship.localhost%2F__zeroship%2Fauth%2Fcallback"),
             "redirect_uri must include the per-host callback path; got {location:?}"
         );
         // Stash cookie set.
@@ -5429,8 +5345,9 @@ mod tests {
 
     #[test]
     fn oidc_callback_token_exchange_error_is_generic() {
-        let err =
-            oidc_rp::OidcRpError::TokenExchange("HTTP 500: op says postgres://internal".into());
+        let err = oidc_rp::OidcRpError::TokenExchange(
+            "HTTP 500: op says postgres://internal".into(),
+        );
         assert_eq!(
             oidc_callback_public_error(&err),
             "sign-in could not be completed",
@@ -5455,9 +5372,7 @@ mod tests {
     // against the flipped registry (degrade tightening) — no shims.
     // -----------------------------------------------------------------------
 
-    fn spend_route(
-        spend_state: zeroship_core::types::SpendState,
-    ) -> zeroship_core::types::RouteEntry {
+    fn spend_route(spend_state: zeroship_core::types::SpendState) -> zeroship_core::types::RouteEntry {
         zeroship_core::types::RouteEntry {
             name: "spend-app.zeroship.localhost".to_string(),
             plan_id: "free".to_string(),
@@ -5570,10 +5485,10 @@ mod tests {
     async fn over_limit_request_blocked_at_gateway() {
         use zeroship_core::types::SpendState;
         let state = build_idempotency_state();
-        let app_id = Uuid::new_v4();
+        let app_id = AppId::mint();
 
         let mut routes: zeroship_core::types::RouteMap = std::collections::HashMap::new();
-        routes.insert(app_id, worker_spend_route(SpendState::Block));
+        routes.insert(app_id.clone(), worker_spend_route(SpendState::Block));
         state.routes.update_snapshot(
             zeroship_core::types::GatewaySnapshot {
                 routes,
@@ -5629,10 +5544,10 @@ mod tests {
     async fn degraded_app_is_throttled_on_a_static_resource() {
         use zeroship_core::types::SpendState;
         let state = build_test_state_with_limits(vec!["http://0.0.0.0:0".into()], 1, 8, 100);
-        let app_id = Uuid::new_v4();
+        let app_id = AppId::mint();
 
         let mut routes: zeroship_core::types::RouteMap = std::collections::HashMap::new();
-        routes.insert(app_id, static_spend_route(SpendState::Degrade));
+        routes.insert(app_id.clone(), static_spend_route(SpendState::Degrade));
         state
             .routes
             .update(routes, &state.rate_limiters, &state.concurrency);
@@ -5671,10 +5586,10 @@ mod tests {
     async fn a_non_degraded_app_is_not_throttled_on_static() {
         use zeroship_core::types::SpendState;
         let state = build_test_state_with_limits(vec!["http://0.0.0.0:0".into()], 1, 8, 100);
-        let app_id = Uuid::new_v4();
+        let app_id = AppId::mint();
 
         let mut routes: zeroship_core::types::RouteMap = std::collections::HashMap::new();
-        routes.insert(app_id, static_spend_route(SpendState::Allow));
+        routes.insert(app_id.clone(), static_spend_route(SpendState::Allow));
         state
             .routes
             .update(routes, &state.rate_limiters, &state.concurrency);
@@ -5711,10 +5626,10 @@ mod tests {
     async fn over_limit_static_asset_blocked_at_gateway() {
         use zeroship_core::types::SpendState;
         let state = build_idempotency_state();
-        let app_id = Uuid::new_v4();
+        let app_id = AppId::mint();
 
         let mut routes: zeroship_core::types::RouteMap = std::collections::HashMap::new();
-        routes.insert(app_id, static_spend_route(SpendState::Block));
+        routes.insert(app_id.clone(), static_spend_route(SpendState::Block));
         state
             .routes
             .update(routes, &state.rate_limiters, &state.concurrency);
@@ -5751,9 +5666,9 @@ mod tests {
     async fn allowed_static_asset_passes_spend_gate() {
         use zeroship_core::types::SpendState;
         let state = build_idempotency_state();
-        let app_id = Uuid::new_v4();
+        let app_id = AppId::mint();
         let mut routes: zeroship_core::types::RouteMap = std::collections::HashMap::new();
-        routes.insert(app_id, static_spend_route(SpendState::Allow));
+        routes.insert(app_id.clone(), static_spend_route(SpendState::Allow));
         state
             .routes
             .update(routes, &state.rate_limiters, &state.concurrency);
@@ -5797,10 +5712,10 @@ mod tests {
         use zeroship_core::types::SpendState;
         let state = build_idempotency_state();
         let meter = Arc::clone(&state.meter);
-        let app_id = Uuid::new_v4();
+        let app_id = AppId::mint();
 
         let mut routes: zeroship_core::types::RouteMap = std::collections::HashMap::new();
-        routes.insert(app_id, static_spend_route(SpendState::Allow));
+        routes.insert(app_id.clone(), static_spend_route(SpendState::Allow));
         state
             .routes
             .update(routes, &state.rate_limiters, &state.concurrency);
@@ -5820,20 +5735,17 @@ mod tests {
         // The stub blob store has no bytes, so the static arm emits a 404
         // JSON error body — gateway-owned egress all the same.
         let served = collect_body(resp.take_body()).await;
-        assert!(
-            !served.is_empty(),
-            "the gateway-owned 404 body is non-empty"
-        );
+        assert!(!served.is_empty(), "the gateway-owned 404 body is non-empty");
 
         let events = meter.drain();
         assert_eq!(
-            usage_value(&events, app_id, "gateway_egress_bytes"),
+            usage_value(&events, &app_id, "gateway_egress_bytes"),
             Some(served.len() as u64),
             "static (gateway-owned) egress must be metered as gateway_egress_bytes \
              equal to the served body length",
         );
         assert_eq!(
-            usage_value(&events, app_id, "egress_bytes"),
+            usage_value(&events, &app_id, "egress_bytes"),
             None,
             "the gateway must NEVER touch the worker-owned egress_bytes metric",
         );
@@ -5852,10 +5764,10 @@ mod tests {
         use zeroship_core::types::SpendState;
         let state = build_idempotency_state();
         let meter = Arc::clone(&state.meter);
-        let app_id = Uuid::new_v4();
+        let app_id = AppId::mint();
 
         let mut routes: zeroship_core::types::RouteMap = std::collections::HashMap::new();
-        routes.insert(app_id, worker_spend_route(SpendState::Allow));
+        routes.insert(app_id.clone(), worker_spend_route(SpendState::Allow));
         state
             .routes
             .update(routes, &state.rate_limiters, &state.concurrency);
@@ -5875,7 +5787,7 @@ mod tests {
 
         let events = meter.drain();
         assert_eq!(
-            usage_value(&events, app_id, "gateway_egress_bytes"),
+            usage_value(&events, &app_id, "gateway_egress_bytes"),
             None,
             "the gateway must NOT meter a worker-proxied response body as \
              gateway_egress_bytes (no double-count vs the worker's egress_bytes)",
@@ -5932,10 +5844,10 @@ mod tests {
     async fn gateway_error_envelope_is_not_metered() {
         let state = build_idempotency_state();
         let meter = Arc::clone(&state.meter);
-        let app_id = Uuid::new_v4();
+        let app_id = AppId::mint();
 
         let mut routes: zeroship_core::types::RouteMap = std::collections::HashMap::new();
-        routes.insert(app_id, max_input_route(8));
+        routes.insert(app_id.clone(), max_input_route(8));
         state
             .routes
             .update(routes, &state.rate_limiters, &state.concurrency);
@@ -5967,22 +5879,19 @@ mod tests {
         // assertion below is about the DELIBERATE no-meter decision, not an
         // empty body.
         let body = collect_body(resp.take_body()).await;
-        assert!(
-            !body.is_empty(),
-            "the 413 envelope is a non-empty JSON body"
-        );
+        assert!(!body.is_empty(), "the 413 envelope is a non-empty JSON body");
 
         let events = meter.drain();
         // The gateway must record NOTHING for an error envelope: no
         // gateway_egress_bytes, and (the gateway never owns it) no egress_bytes.
         assert_eq!(
-            usage_value(&events, app_id, "gateway_egress_bytes"),
+            usage_value(&events, &app_id, "gateway_egress_bytes"),
             None,
             "a gateway error/4xx envelope is platform overhead and must NOT \
              be metered as gateway_egress_bytes",
         );
         assert_eq!(
-            usage_value(&events, app_id, "egress_bytes"),
+            usage_value(&events, &app_id, "egress_bytes"),
             None,
             "the gateway never touches egress_bytes",
         );
@@ -5993,11 +5902,11 @@ mod tests {
     /// instances using the same stable source must still emit distinct IDs.
     #[test]
     fn gateway_usage_event_ids_are_restart_unique() {
-        let app_id = Uuid::new_v4();
+        let app_id = AppId::mint();
         let first = zeroship_metering::Meter::with_source("gate-pod-3");
         let second = zeroship_metering::Meter::with_source("gate-pod-3");
-        first.increment(&app_id.to_string(), "gateway_egress_bytes", 1);
-        second.increment(&app_id.to_string(), "gateway_egress_bytes", 1);
+        first.increment(app_id.as_str(), "gateway_egress_bytes", 1);
+        second.increment(app_id.as_str(), "gateway_egress_bytes", 1);
 
         let first_event = first.drain().pop().expect("first usage event");
         let second_event = second.drain().pop().expect("second usage event");
@@ -6016,9 +5925,9 @@ mod tests {
     async fn allowed_request_passes_spend_gate() {
         use zeroship_core::types::SpendState;
         let state = build_idempotency_state();
-        let app_id = Uuid::new_v4();
+        let app_id = AppId::mint();
         let mut routes: zeroship_core::types::RouteMap = std::collections::HashMap::new();
-        routes.insert(app_id, worker_spend_route(SpendState::Allow));
+        routes.insert(app_id.clone(), worker_spend_route(SpendState::Allow));
         state
             .routes
             .update(routes, &state.rate_limiters, &state.concurrency);
@@ -6048,41 +5957,33 @@ mod tests {
     /// no-op. A non-degraded control app at the same limit admits both.
     #[compio::test]
     async fn degraded_route_tightens_concurrency() {
-        use crate::enforce::{
-            acquire_concurrency, ConcurrencyRegistry, RateLimitRegistry, DEGRADE_FACTOR,
-        };
+        use crate::enforce::{acquire_concurrency, ConcurrencyRegistry, RateLimitRegistry, DEGRADE_FACTOR};
         use zeroship_core::types::SpendState;
 
         let cache = crate::sync::RouteCache::new();
         let rate = RateLimitRegistry::new(1000, 2000);
         let concurrency = ConcurrencyRegistry::new(DEGRADE_FACTOR);
 
-        let degraded_app = Uuid::new_v4();
-        let normal_app = Uuid::new_v4();
+        let degraded_key = AppId::mint();
+        let normal_key = AppId::mint();
         let mut routes: zeroship_core::types::RouteMap = std::collections::HashMap::new();
         let mut degraded = spend_route(SpendState::Degrade);
         degraded.name = "degraded.zeroship.localhost".into();
         let mut normal = spend_route(SpendState::Allow);
         normal.name = "normal.zeroship.localhost".into();
-        routes.insert(degraded_app, degraded);
-        routes.insert(normal_app, normal);
+        routes.insert(degraded_key.clone(), degraded);
+        routes.insert(normal_key.clone(), normal);
 
         cache.update(routes, &rate, &concurrency);
-        // The route table arrives keyed by the stored uuid and the registries
-        // are keyed by the typed id `update` mints from it, so this asserts on
-        // the id the gateway actually enforces against - not on a second
-        // rendering that would silently miss every gauge.
-        let degraded_key = typed_app_id(&degraded_app);
-        let normal_key = typed_app_id(&normal_app);
+        // The route table and the rate/concurrency registries are both keyed
+        // on `AppId` end to end, so this asserts on the exact id the gateway
+        // enforces against.
         assert!(concurrency.is_degraded(&degraded_key));
         assert!(!concurrency.is_degraded(&normal_key));
 
         let g1 = acquire_concurrency(&concurrency, &degraded_key).expect("first admits");
         let r2 = acquire_concurrency(&concurrency, &degraded_key);
-        assert!(
-            r2.is_err(),
-            "degraded app's 2nd concurrent request must be rejected"
-        );
+        assert!(r2.is_err(), "degraded app's 2nd concurrent request must be rejected");
         if let Err(resp) = r2 {
             assert_eq!(resp.status(), ntex::http::StatusCode::TOO_MANY_REQUESTS);
         }
@@ -6097,21 +5998,16 @@ mod tests {
     /// rebuilt. Proves recovery is instant.
     #[compio::test]
     async fn degrade_clears_immediately_on_recovery() {
-        use crate::enforce::{
-            acquire_concurrency, ConcurrencyRegistry, RateLimitRegistry, DEGRADE_FACTOR,
-        };
+        use crate::enforce::{acquire_concurrency, ConcurrencyRegistry, RateLimitRegistry, DEGRADE_FACTOR};
         use zeroship_core::types::SpendState;
 
         let cache = crate::sync::RouteCache::new();
         let rate = RateLimitRegistry::new(1000, 2000);
         let concurrency = ConcurrencyRegistry::new(DEGRADE_FACTOR);
-        let app = Uuid::new_v4();
-        // The wire map is keyed by the stored uuid; the registry by the typed
-        // id `update` mints from it.
-        let key = typed_app_id(&app);
+        let key = AppId::mint();
 
         let mut routes: zeroship_core::types::RouteMap = std::collections::HashMap::new();
-        routes.insert(app, spend_route(SpendState::Degrade));
+        routes.insert(key.clone(), spend_route(SpendState::Degrade));
         cache.update(routes, &rate, &concurrency);
         assert!(concurrency.is_degraded(&key));
         let g1 = acquire_concurrency(&concurrency, &key).expect("first admits");
@@ -6122,7 +6018,7 @@ mod tests {
         drop(g1);
 
         let mut routes2: zeroship_core::types::RouteMap = std::collections::HashMap::new();
-        routes2.insert(app, spend_route(SpendState::Allow));
+        routes2.insert(key.clone(), spend_route(SpendState::Allow));
         cache.update(routes2, &rate, &concurrency);
         assert!(!concurrency.is_degraded(&key));
         let mut guards = Vec::new();
@@ -6191,15 +6087,10 @@ mod tests {
     async fn suspended_account_blocked_at_gateway() {
         use zeroship_core::types::{AccountState, SpendState};
         let state = build_idempotency_state();
-        let app_id = Uuid::new_v4();
+        let app_id = AppId::mint();
         let mut routes: zeroship_core::types::RouteMap = std::collections::HashMap::new();
-        routes.insert(
-            app_id,
-            account_worker_route(AccountState::Suspended, SpendState::Allow),
-        );
-        state
-            .routes
-            .update(routes, &state.rate_limiters, &state.concurrency);
+        routes.insert(app_id.clone(), account_worker_route(AccountState::Suspended, SpendState::Allow));
+        state.routes.update(routes, &state.rate_limiters, &state.concurrency);
 
         assert_402_code(drive_ping(state.clone()).await, "ACCOUNT_SUSPENDED").await;
     }
@@ -6211,15 +6102,10 @@ mod tests {
     async fn past_due_account_not_blocked_at_gateway() {
         use zeroship_core::types::{AccountState, SpendState};
         let state = build_idempotency_state();
-        let app_id = Uuid::new_v4();
+        let app_id = AppId::mint();
         let mut routes: zeroship_core::types::RouteMap = std::collections::HashMap::new();
-        routes.insert(
-            app_id,
-            account_worker_route(AccountState::PastDue, SpendState::Allow),
-        );
-        state
-            .routes
-            .update(routes, &state.rate_limiters, &state.concurrency);
+        routes.insert(app_id.clone(), account_worker_route(AccountState::PastDue, SpendState::Allow));
+        state.routes.update(routes, &state.rate_limiters, &state.concurrency);
 
         let resp = drive_ping(state.clone()).await;
         assert_ne!(
@@ -6235,15 +6121,10 @@ mod tests {
     async fn active_account_passes_gate() {
         use zeroship_core::types::{AccountState, SpendState};
         let state = build_idempotency_state();
-        let app_id = Uuid::new_v4();
+        let app_id = AppId::mint();
         let mut routes: zeroship_core::types::RouteMap = std::collections::HashMap::new();
-        routes.insert(
-            app_id,
-            account_worker_route(AccountState::Active, SpendState::Allow),
-        );
-        state
-            .routes
-            .update(routes, &state.rate_limiters, &state.concurrency);
+        routes.insert(app_id.clone(), account_worker_route(AccountState::Active, SpendState::Allow));
+        state.routes.update(routes, &state.rate_limiters, &state.concurrency);
 
         let resp = drive_ping(state.clone()).await;
         assert_ne!(
@@ -6265,30 +6146,20 @@ mod tests {
         // Suspended beats Allow spend.
         {
             let state = build_idempotency_state();
-            let app_id = Uuid::new_v4();
+            let app_id = AppId::mint();
             let mut routes: zeroship_core::types::RouteMap = std::collections::HashMap::new();
-            routes.insert(
-                app_id,
-                account_worker_route(AccountState::Suspended, SpendState::Allow),
-            );
-            state
-                .routes
-                .update(routes, &state.rate_limiters, &state.concurrency);
+            routes.insert(app_id.clone(), account_worker_route(AccountState::Suspended, SpendState::Allow));
+            state.routes.update(routes, &state.rate_limiters, &state.concurrency);
             assert_402_code(drive_ping(state.clone()).await, "ACCOUNT_SUSPENDED").await;
         }
 
         // Active account, Block spend → spend gate fires.
         {
             let state = build_idempotency_state();
-            let app_id = Uuid::new_v4();
+            let app_id = AppId::mint();
             let mut routes: zeroship_core::types::RouteMap = std::collections::HashMap::new();
-            routes.insert(
-                app_id,
-                account_worker_route(AccountState::Active, SpendState::Block),
-            );
-            state
-                .routes
-                .update(routes, &state.rate_limiters, &state.concurrency);
+            routes.insert(app_id.clone(), account_worker_route(AccountState::Active, SpendState::Block));
+            state.routes.update(routes, &state.rate_limiters, &state.concurrency);
             assert_402_code(drive_ping(state.clone()).await, "SPEND_LIMIT").await;
         }
 
@@ -6296,15 +6167,10 @@ mod tests {
         // evaluated first), so the code is ACCOUNT_SUSPENDED, not SPEND_LIMIT.
         {
             let state = build_idempotency_state();
-            let app_id = Uuid::new_v4();
+            let app_id = AppId::mint();
             let mut routes: zeroship_core::types::RouteMap = std::collections::HashMap::new();
-            routes.insert(
-                app_id,
-                account_worker_route(AccountState::Suspended, SpendState::Block),
-            );
-            state
-                .routes
-                .update(routes, &state.rate_limiters, &state.concurrency);
+            routes.insert(app_id.clone(), account_worker_route(AccountState::Suspended, SpendState::Block));
+            state.routes.update(routes, &state.rate_limiters, &state.concurrency);
             assert_402_code(drive_ping(state.clone()).await, "ACCOUNT_SUSPENDED").await;
         }
     }
@@ -6415,10 +6281,7 @@ mod tests {
             }
         });
 
-        MockWorker {
-            url: format!("http://127.0.0.1:{port}"),
-            served,
-        }
+        MockWorker { url: format!("http://127.0.0.1:{port}"), served }
     }
 
     /// A route with one `idempotent: true` mutation at wire-id
@@ -6514,7 +6377,7 @@ mod tests {
         let state = build_test_state_with_limits(vec![worker.url.clone()], 100, 100, 100);
         let mut routes: zeroship_core::types::RouteMap = std::collections::HashMap::new();
         routes.insert(
-            Uuid::new_v4(),
+            AppId::mint(),
             idempotent_mutation_route_with_oauth(oauth_client_id),
         );
         state
@@ -6547,12 +6410,7 @@ mod tests {
 
         // Request 1: the worker accepts and dies mid-request. The gateway
         // synthesizes its own 502.
-        let mut first = post_idempotent_mutation(
-            state.clone(),
-            "1a2b3c4d-0001-4111-8000-aaaabbbbcccc",
-            b"{\"t\":1}",
-        )
-        .await;
+        let mut first = post_idempotent_mutation(state.clone(), "1a2b3c4d-0001-4111-8000-aaaabbbbcccc", b"{\"t\":1}").await;
         assert_eq!(
             first.status(),
             ntex::http::StatusCode::BAD_GATEWAY,
@@ -6575,12 +6433,7 @@ mod tests {
         );
 
         // Request 2: same key, same body, worker healthy again.
-        let mut second = post_idempotent_mutation(
-            state.clone(),
-            "1a2b3c4d-0001-4111-8000-aaaabbbbcccc",
-            b"{\"t\":1}",
-        )
-        .await;
+        let mut second = post_idempotent_mutation(state.clone(), "1a2b3c4d-0001-4111-8000-aaaabbbbcccc", b"{\"t\":1}").await;
         assert_eq!(
             worker.served.load(Ordering::SeqCst),
             1,
@@ -6612,22 +6465,12 @@ mod tests {
         let worker = spawn_mock_worker(false, 201);
         let state = idempotency_state_for(&worker);
 
-        let mut first = post_idempotent_mutation(
-            state.clone(),
-            "1a2b3c4d-0002-4111-8000-aaaabbbbcccc",
-            b"{\"t\":1}",
-        )
-        .await;
+        let mut first = post_idempotent_mutation(state.clone(), "1a2b3c4d-0002-4111-8000-aaaabbbbcccc", b"{\"t\":1}").await;
         assert_eq!(first.status(), ntex::http::StatusCode::CREATED);
         assert_eq!(collect_body(first.take_body()).await, b"{\"id\":1}");
         assert_eq!(worker.served.load(Ordering::SeqCst), 1);
 
-        let mut second = post_idempotent_mutation(
-            state.clone(),
-            "1a2b3c4d-0002-4111-8000-aaaabbbbcccc",
-            b"{\"t\":1}",
-        )
-        .await;
+        let mut second = post_idempotent_mutation(state.clone(), "1a2b3c4d-0002-4111-8000-aaaabbbbcccc", b"{\"t\":1}").await;
         assert_eq!(
             worker.served.load(Ordering::SeqCst),
             1,
@@ -6670,25 +6513,12 @@ mod tests {
         let worker = spawn_mock_worker(false, 500);
         let state = idempotency_state_for(&worker);
 
-        let mut first = post_idempotent_mutation(
-            state.clone(),
-            "1a2b3c4d-0003-4111-8000-aaaabbbbcccc",
-            b"{\"t\":1}",
-        )
-        .await;
-        assert_eq!(
-            first.status(),
-            ntex::http::StatusCode::INTERNAL_SERVER_ERROR
-        );
+        let mut first = post_idempotent_mutation(state.clone(), "1a2b3c4d-0003-4111-8000-aaaabbbbcccc", b"{\"t\":1}").await;
+        assert_eq!(first.status(), ntex::http::StatusCode::INTERNAL_SERVER_ERROR);
         assert_eq!(collect_body(first.take_body()).await, b"{\"id\":1}");
         assert_eq!(worker.served.load(Ordering::SeqCst), 1);
 
-        let mut second = post_idempotent_mutation(
-            state.clone(),
-            "1a2b3c4d-0003-4111-8000-aaaabbbbcccc",
-            b"{\"t\":1}",
-        )
-        .await;
+        let mut second = post_idempotent_mutation(state.clone(), "1a2b3c4d-0003-4111-8000-aaaabbbbcccc", b"{\"t\":1}").await;
         assert_eq!(
             worker.served.load(Ordering::SeqCst),
             2,
@@ -6953,14 +6783,15 @@ mod tests {
         ));
         let issuer = crate::session_token::Issuer::new(&signing, TEST_SESSION_ISS.to_string())
             .expect("session issuer");
-        let state = build_test_state_inner(vec![worker.url.clone()], 100, 100, 100, Some(verifier));
+        let state =
+            build_test_state_inner(vec![worker.url.clone()], 100, 100, 100, Some(verifier));
         let mut routes: zeroship_core::types::RouteMap = std::collections::HashMap::new();
         routes.insert(
-            Uuid::new_v4(),
+            AppId::mint(),
             authenticated_idempotent_route(TEST_AUTH_HOST, RequiredPrincipal::User),
         );
         routes.insert(
-            Uuid::new_v4(),
+            AppId::mint(),
             authenticated_idempotent_route(TEST_ANON_HOST, RequiredPrincipal::Anonymous),
         );
         state.routes.update_snapshot(
@@ -6975,13 +6806,20 @@ mod tests {
         (state, issuer)
     }
 
-    /// Mint a signed session cookie for a distinct end user. Each call mints
-    /// a fresh global user id, so separate calls represent different people
+    /// Mint a signed session cookie for a distinct end user. `seed` picks
+    /// the global user id, so two different seeds are two different people
     /// with two different per-app `pws_…` subjects.
-    fn session_cookie_for(issuer: &crate::session_token::Issuer) -> String {
-        let global = zeroship_core::UserId::mint();
-        let sub =
-            zeroship_core::auth::derive_pairwise(&[0u8; 32], &global, "https://idem-auth.test");
+    fn session_cookie_for(issuer: &crate::session_token::Issuer, seed: u128) -> String {
+        let global = zeroship_core::user_id::UserId::parse(&format!(
+            "usr_{}",
+            zeroship_core::typed_id::uuid_to_base36(&Uuid::from_u128(seed))
+        ))
+        .expect("seed produces a valid typed user id");
+        let sub = zeroship_core::auth::derive_pairwise(
+            &[0u8; 32],
+            &global,
+            "https://idem-auth.test",
+        );
         issuer
             .issue(&crate::session_token::SessionMint {
                 app: TEST_OAUTH_CLIENT,
@@ -7040,18 +6878,12 @@ mod tests {
 
         let worker = spawn_mock_worker(false, 201);
         let (state, issuer) = authenticated_idempotency_state(&worker);
-        let cookie_a = session_cookie_for(&issuer);
-        let cookie_b = session_cookie_for(&issuer);
+        let cookie_a = session_cookie_for(&issuer, 1);
+        let cookie_b = session_cookie_for(&issuer, 2);
         let shared_key = "3f2504e0-4f89-41d3-9a0c-0305e82c3301";
 
-        let mut first = post_authenticated_mutation(
-            state.clone(),
-            TEST_AUTH_HOST,
-            &cookie_a,
-            shared_key,
-            b"{\"t\":1}",
-        )
-        .await;
+        let mut first =
+            post_authenticated_mutation(state.clone(), TEST_AUTH_HOST, &cookie_a, shared_key, b"{\"t\":1}").await;
         assert_eq!(
             first.status(),
             ntex::http::StatusCode::CREATED,
@@ -7060,14 +6892,8 @@ mod tests {
         assert_eq!(collect_body(first.take_body()).await, b"{\"id\":1}");
         assert_eq!(worker.served.load(Ordering::SeqCst), 1);
 
-        let mut second = post_authenticated_mutation(
-            state.clone(),
-            TEST_AUTH_HOST,
-            &cookie_b,
-            shared_key,
-            b"{\"t\":1}",
-        )
-        .await;
+        let mut second =
+            post_authenticated_mutation(state.clone(), TEST_AUTH_HOST, &cookie_b, shared_key, b"{\"t\":1}").await;
         assert_eq!(
             worker.served.load(Ordering::SeqCst),
             2,
@@ -7099,29 +6925,17 @@ mod tests {
 
         let worker = spawn_mock_worker(false, 201);
         let (state, issuer) = authenticated_idempotency_state(&worker);
-        let cookie_a = session_cookie_for(&issuer);
+        let cookie_a = session_cookie_for(&issuer, 1);
         let shared_key = "3f2504e0-4f89-41d3-9a0c-0305e82c3301";
 
-        let mut first = post_authenticated_mutation(
-            state.clone(),
-            TEST_AUTH_HOST,
-            &cookie_a,
-            shared_key,
-            b"{\"t\":1}",
-        )
-        .await;
+        let mut first =
+            post_authenticated_mutation(state.clone(), TEST_AUTH_HOST, &cookie_a, shared_key, b"{\"t\":1}").await;
         assert_eq!(first.status(), ntex::http::StatusCode::CREATED);
         assert_eq!(collect_body(first.take_body()).await, b"{\"id\":1}");
         assert_eq!(worker.served.load(Ordering::SeqCst), 1);
 
-        let mut second = post_authenticated_mutation(
-            state.clone(),
-            TEST_AUTH_HOST,
-            &cookie_a,
-            shared_key,
-            b"{\"t\":1}",
-        )
-        .await;
+        let mut second =
+            post_authenticated_mutation(state.clone(), TEST_AUTH_HOST, &cookie_a, shared_key, b"{\"t\":1}").await;
         assert_eq!(
             worker.served.load(Ordering::SeqCst),
             1,
@@ -7155,8 +6969,8 @@ mod tests {
 
         let worker = spawn_mock_worker(false, 201);
         let (state, issuer) = authenticated_idempotency_state(&worker);
-        let cookie_a = session_cookie_for(&issuer);
-        let cookie_b = session_cookie_for(&issuer);
+        let cookie_a = session_cookie_for(&issuer, 11);
+        let cookie_b = session_cookie_for(&issuer, 12);
         let shared_key = "018f9a1c-3d2b-7c4e-8f01-2a3b4c5d6e7f";
 
         let mut first = post_authenticated_mutation(
@@ -7271,7 +7085,7 @@ mod tests {
         let outcome = handle_idempotency_pre_dispatch(
             &req,
             &state,
-            &typed_app_id(&uuid::Uuid::new_v4()),
+            &AppId::mint(),
             "/__zeroship/v1/todos.add",
             &policy,
             // The gate said "allowed" but handed over no header — the

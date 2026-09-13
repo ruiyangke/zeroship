@@ -151,7 +151,7 @@ pub async fn unlink_preserving_credential(
     user_id: &UserId,
     provider: &str,
 ) -> Result<GuardedUnlink> {
-    let lock_key = crate::advisory_lock::identity_unlink_lock_key(&user_id);
+    let lock_key = crate::advisory_lock::identity_unlink_lock_key(user_id);
     crate::advisory_lock::with_advisory_lock(conn, lock_key, || async {
         unlink_preserving_credential_locked(conn, user_id, provider).await
     })

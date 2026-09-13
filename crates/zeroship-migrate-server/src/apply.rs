@@ -5,10 +5,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 use zeroship_core::app_derivation;
-use zeroship_core::app_id::AppId;
+use zeroship_id::AppId;
 use zeroship_core::database_role::{per_app_role_name, PerAppRoleNameError};
 use zeroship_core::schema_name::SchemaName;
-use zeroship_core::UserId;
+use zeroship_id::UserId;
 use zeroship_migrate::apply::journal::DeployRecoveryScope;
 use zeroship_migrate::{
     resolve_create_table_policy, Approval, ApprovalScope, DeclarativeApplyError, EngineError,
@@ -211,8 +211,10 @@ pub enum ApplyRequestError {
     /// The derived physical schema name was invalid.
     #[error("app schema name {schema:?} is not a legal identifier: {reason}")]
     SchemaName { schema: String, reason: String },
-    #[error("database {database_id} has not been created")]
-    DatabaseNotCreated { database_id: Uuid },
+    /// Rendered through `as_str` rather than `Display`: [`AppId`] deliberately
+    /// implements no `Display`, so every place an id becomes text is greppable.
+    #[error("database {} has not been created", database_id.as_str())]
+    DatabaseNotCreated { database_id: AppId },
     #[error("migration role provision: {0}")]
     ProvisionRole(#[from] ProvisionRoleError),
     #[error("runtime app role provision: {0}")]
@@ -273,7 +275,7 @@ pub enum ProvisionRuntimeRoleError {
 pub async fn apply_ir_documents(
     provision_dsn: &str,
     tmp_root: &Path,
-    app_id: &Uuid,
+    app_id: &AppId,
     request: &ApplyMigrationsRequest,
     policy_config: &ManagedPolicyConfig,
     schema_apply_store: &SchemaApplyStore,
@@ -292,16 +294,11 @@ pub async fn apply_ir_documents(
 
     // THE SERVICE'S ONE APP-ID-TO-SCHEMA DERIVATION. Everything downstream that
     // means "the physical schema" takes the [`SchemaName`], and everything that
-    // means "the tenant" keeps taking `app_id`. A `Uuid`'s `Display` is hex and
-    // hyphens, so `SchemaName::new` cannot refuse it today; the refusal is
+    // means "the tenant" keeps taking `app_id`. `schema_name` is the identity on
+    // the printed id today, so `SchemaName::new` cannot refuse it; the refusal is
     // handled rather than unwrapped because the day the schema stops being the
     // app id, this line is where the new derivation - and its failure - lands.
-    //
-    // THE NEW DERIVATION HAS LANDED, and this is it. `schema_name` returns
-    // `app_id.to_string()` today - the byte-for-byte spelling this line carried
-    // - and it is now the SAME function the rest of the tree will ask, rather
-    // than one of several sites that happen to agree.
-    let schema_text = app_derivation::schema_name(&AppId::from_uuid(app_id));
+    let schema_text = app_derivation::schema_name(app_id);
     let schema = SchemaName::new(&schema_text).map_err(|reason| ApplyRequestError::SchemaName {
         schema: schema_text.clone(),
         reason: reason.to_string(),
@@ -326,7 +323,7 @@ pub async fn apply_ir_documents(
         .get(0);
     if !schema_exists {
         return Err(ApplyRequestError::DatabaseNotCreated {
-            database_id: *app_id,
+            database_id: app_id.clone(),
         });
     }
 
@@ -391,7 +388,7 @@ pub async fn apply_ir_documents(
         // guard's newest ledger fact.
         schema_apply_store
             .record_submitted(SchemaApplyInput {
-                app_id: *app_id,
+                app_id,
                 migration_id,
                 principal_id,
                 request_body,
@@ -424,7 +421,7 @@ pub async fn apply_ir_documents(
                 // deployable again. Coverage, not emptiness, decides whether the row
                 // is safe to write.
                 match schema_apply_store
-                    .mark_applied(*app_id, migration_id, &outcome.applied)
+                    .mark_applied(app_id, migration_id, &outcome.applied)
                     .await
                 {
                     Ok(transition) => {
@@ -435,7 +432,7 @@ pub async fn apply_ir_documents(
                             // now contradicts the database it describes and only an
                             // operator can reconcile them.
                             tracing::error!(
-                                app_id = %app_id,
+                                app_id = app_id.as_str(),
                                 migration_id = %migration_id,
                                 "migrate-server: apply lost the terminal transition to a \
                                  concurrent failure - schema changes are committed but the row \
@@ -453,8 +450,7 @@ pub async fn apply_ir_documents(
                 }
             }
             Err(err) => {
-                mark_apply_failed(schema_apply_store, *app_id, migration_id, &err.to_string())
-                    .await;
+                mark_apply_failed(schema_apply_store, app_id, migration_id, &err.to_string()).await;
                 Err(err)
             }
         }
@@ -492,7 +488,7 @@ async fn run_apply(
     backend: &PostgresBackend<'_, CompioPgSession>,
     policy_config: &ManagedPolicyConfig,
     apply_policy: &EffectivePolicy,
-    app_id: &Uuid,
+    app_id: &AppId,
     schema: &SchemaName,
     prepared: &[PreparedIrDocument],
     exec_cfg: &ExecutorConfig,
@@ -506,14 +502,14 @@ async fn run_apply(
     // rendered-DDL guard is the fixed schema-bound no-inject confined charter.
     let sealed_policy = policy_config.seal_effective_for_app(apply_policy.clone())?;
     tracing::debug!(
-        app_id = %app_id,
+        app_id = app_id.as_str(),
         schema = %schema.as_str(),
         ceiling_id = %sealed_policy.ceiling_id,
         ceiling_version = sealed_policy.ceiling_version,
         "migrate-server: applying IR under sealed managed migration policy"
     );
     let applied_by = format!("migrate-server:{}", principal_id.as_str());
-    provision_runtime_app_role(session.client(), schema, role)
+    provision_runtime_app_role(session.client(), app_id, schema, role)
         .await
         .map_err(ApplyRequestError::ProvisionRuntimeRole)?;
     let applied = apply_sealed(
@@ -529,20 +525,17 @@ async fn run_apply(
     .await;
     // Re-run provisioning after the apply attempt so tables and sequences
     // created during it receive the runtime role's schema-wide DML grants.
-    let reprovisioned = provision_runtime_app_role(session.client(), schema, role)
+    let reprovisioned = provision_runtime_app_role(session.client(), app_id, schema, role)
         .await
         .map_err(ApplyRequestError::ProvisionRuntimeRole);
     let outcome = applied?;
     reprovisioned?;
-    // AMBIGUOUS, LEFT AT THE STATUS QUO AND FLAGGED. `reconcile_app_publication`
-    // spends its one `&str` parameter on BOTH identities: it names the
-    // publication from it (tenant-keyed - a publication is a change-stream
-    // subject, not a namespace) and it also filters `pg_class` by it as an
-    // `nspname` (schema-keyed). Splitting that parameter in two is a design call
-    // about publication cardinality, not a typing change, so this keeps handing
-    // it the tenant - the same bytes it received before, since the app id IS the
-    // schema today.
-    reconcile_app_publication(session.client(), &app_id.to_string()).await?;
+    // NO LONGER AMBIGUOUS. This used to hand `reconcile_app_publication` one
+    // `&str` that it spent on BOTH identities - the publication name (tenant-keyed)
+    // and the `pg_namespace.nspname` filter (schema-keyed) - because the app id
+    // and the schema were the same bytes. It now takes the tenant and asks
+    // `app_derivation` for each derived name in turn.
+    reconcile_app_publication(session.client(), app_id).await?;
     Ok(outcome)
 }
 
@@ -786,7 +779,7 @@ async fn apply_prepared_ir_documents(
 /// `async`, and `clippy::result_large_err` does not fire through a future.
 #[allow(clippy::result_large_err)]
 fn resolve_apply_policy(
-    app_id: &Uuid,
+    app_id: &AppId,
     request: &ApplyMigrationsRequest,
     policy_config: &ManagedPolicyConfig,
 ) -> Result<EffectivePolicy, ApplyRequestError> {
@@ -1004,7 +997,7 @@ fn validate_request_shape(request: &ApplyMigrationsRequest) -> Result<(), ApplyR
 /// lost race, which is the one that means the row and the database disagree.
 async fn mark_apply_failed(
     schema_apply_store: &SchemaApplyStore,
-    app_id: Uuid,
+    app_id: &AppId,
     migration_id: Uuid,
     message: &str,
 ) {
@@ -1018,7 +1011,7 @@ async fn mark_apply_failed(
             // that another path completed. The failure marking is correctly refused;
             // what would be wrong is letting it pass for a recorded one.
             tracing::warn!(
-                app_id = %app_id,
+                app_id = app_id.as_str(),
                 migration_id = %migration_id,
                 reason = message,
                 "migrate-server: failure lost the terminal transition to a completed \
@@ -1240,7 +1233,20 @@ pub const WORKER_ROLE: &str = "zeroship_worker";
 /// live. This statement converges the row it owns; catching a foreign inheriting
 /// row is `zeroship_worker`'s boot-time posture check, which refuses on ANY
 /// inheriting app-role membership regardless of who granted it.
-fn runtime_dependents_sql_for_role(schema: &SchemaName, runtime_role: &str) -> String {
+///
+/// # The journal schema is named by the seam, not composed here
+///
+/// This used to compose `format!("app_{}", schema.as_str())` - a SECOND spelling
+/// of a name whose first spelling is
+/// [`crate::provisioning::workflow_journal_schema_name`], and one derived from
+/// the SCHEMA rather than from the tenant. The two agreed only because the
+/// schema was the bare uuid and the journal schema was that uuid with an `app_`
+/// prefix. With the app id itself printed as `app_<base36>` the composition
+/// would have produced `app_app_<base36>` while the workflow plugin read
+/// somewhere else, and nothing would have failed: the deploy would write its
+/// journal where nothing looks for it. It takes the tenant and asks the one
+/// derivation.
+fn runtime_dependents_sql_for_role(app_id: &AppId, runtime_role: &str) -> String {
     let runtime_role_q = quote_ident(runtime_role);
     let worker_q = quote_ident(WORKER_ROLE);
     format!(
@@ -1251,8 +1257,9 @@ fn runtime_dependents_sql_for_role(schema: &SchemaName, runtime_role: &str) -> S
          END $runtime_dependents$;
          {journal}",
         worker_lit = quote_lit(WORKER_ROLE),
-        journal =
-            crate::provisioning::workflow_journal_schema_sql(&format!("app_{}", schema.as_str())),
+        journal = crate::provisioning::workflow_journal_schema_sql(
+            &crate::provisioning::workflow_journal_schema_name(app_id)
+        ),
     )
 }
 
@@ -1324,6 +1331,7 @@ impl RuntimeRoleProvisioningSql {
 /// The durable fix is to stop pre-interpolating and let the block quote its own
 /// identifiers with `format('%I', ...)`.
 pub fn runtime_role_provisioning_sql(
+    app_id: &AppId,
     schema: &SchemaName,
     migrator_role: &str,
 ) -> Result<RuntimeRoleProvisioningSql, PerAppRoleNameError> {
@@ -1366,7 +1374,7 @@ pub fn runtime_role_provisioning_sql(
     );
     // The migration identity creates no platform role here. It only delegates
     // to the narrow roles that the platform role migration precreated.
-    let dependents = runtime_dependents_sql_for_role(schema, &role_name);
+    let dependents = runtime_dependents_sql_for_role(app_id, &role_name);
     Ok(RuntimeRoleProvisioningSql {
         role_name,
         create_role,
@@ -1377,10 +1385,11 @@ pub fn runtime_role_provisioning_sql(
 
 async fn provision_runtime_app_role(
     conn: &compio_postgres::Client,
+    app_id: &AppId,
     schema: &SchemaName,
     migrator_role: &str,
 ) -> Result<(), ProvisionRuntimeRoleError> {
-    let provisioning = runtime_role_provisioning_sql(schema, migrator_role)?;
+    let provisioning = runtime_role_provisioning_sql(app_id, schema, migrator_role)?;
     for statement in provisioning.statements() {
         exec_retry(conn, statement).await?;
     }
@@ -1393,10 +1402,22 @@ mod tests {
 
     use super::*;
 
+    const FIXTURE_APP_ID: &str = "app_02xfboclmnln2ar6iblni0000";
+
+    fn fixture_app_id() -> AppId {
+        AppId::parse(FIXTURE_APP_ID).expect("the fixture app id must be canonical")
+    }
+
+    fn fixture_schema() -> SchemaName {
+        SchemaName::new(&app_derivation::schema_name(&fixture_app_id()))
+            .expect("an app id is a legal schema identifier")
+    }
+
     #[test]
     fn runtime_provisioning_does_not_narrow_table_access_by_name() {
         let provisioning = runtime_role_provisioning_sql(
-            &SchemaName::new("0191e7a2-b3c4-4d5e-8f90-123456789abc").expect("fixture schema"),
+            &fixture_app_id(),
+            &fixture_schema(),
             "zs_migrator_fixture",
         )
         .expect("test runtime role name");
@@ -1422,7 +1443,8 @@ mod tests {
     #[test]
     fn runtime_provisioning_delegates_only_precreated_narrow_roles() {
         let provisioning = runtime_role_provisioning_sql(
-            &SchemaName::new("0191e7a2-b3c4-4d5e-8f90-123456789abc").expect("fixture schema"),
+            &fixture_app_id(),
+            &fixture_schema(),
             "zs_migrator_fixture",
         )
         .expect("test runtime role name");
@@ -1433,7 +1455,7 @@ mod tests {
         // and so passed identically with and without the fence - the one shape
         // a regression guard for the fence must not have.
         assert!(sql.contains(
-            "GRANT \"app_0191e7a2-b3c4-4d5e-8f90-123456789abc_role\" \
+            "GRANT \"app_app_02xfboclmnln2ar6iblni0000_role\" \
              TO \"zeroship_worker\" WITH INHERIT FALSE"
         ));
         // Belt and braces against a re-grant that drops the option: a bare
@@ -1442,18 +1464,38 @@ mod tests {
             !sql.contains("TO \"zeroship_worker\";"),
             "an unqualified grant re-opens the ambient union across every app: {sql}"
         );
+        // THE JOURNAL SCHEMA IS THE APP'S OWN SCHEMA NOW. It was
+        // `app_<hyphenated uuid>` beside a data schema of the bare uuid; a
+        // printed app id already carries the `app_` prefix, so the one
+        // derivation names one schema for both. The literal below is that
+        // schema, NOT the old prefix-on-a-prefix, and it is spelled out so a
+        // regression to `format!("app_{}", schema)` - which would emit
+        // `app_app_...` and put the journal where the workflow plugin does not
+        // look - fails here.
         assert!(sql.contains(
-            "CREATE SCHEMA IF NOT EXISTS \"app_0191e7a2-b3c4-4d5e-8f90-123456789abc\" AUTHORIZATION \"zeroship_workflow_owner\""
+            "CREATE SCHEMA IF NOT EXISTS \"app_02xfboclmnln2ar6iblni0000\" \
+             AUTHORIZATION \"zeroship_workflow_owner\""
         ));
+        assert!(
+            !sql.contains("\"app_app_02xfboclmnln2ar6iblni0000\""),
+            "a doubled prefix means the journal schema was composed from the \
+             schema instead of asked of the seam: {sql}"
+        );
         assert!(!sql.contains("CREATE ROLE"));
     }
 
+    /// The refusal is derived from the SCHEMA, so the pair below is
+    /// deliberately mismatched: an overlong schema beside the ordinary fixture
+    /// tenant. Production always passes a schema derived from the app id it also
+    /// passes, and no app id yields a name this long, so the only way to reach
+    /// this arm is to decouple the two.
     #[test]
     fn runtime_provisioning_plan_refuses_overlong_role_names() {
-        let app_id = "a".repeat(55);
+        let overlong_schema = "a".repeat(55);
         assert_eq!(
             runtime_role_provisioning_sql(
-                &SchemaName::new(&app_id).expect("fixture schema"),
+                &fixture_app_id(),
+                &SchemaName::new(&overlong_schema).expect("fixture schema"),
                 "zs_migrator_fixture",
             ),
             Err(PerAppRoleNameError::TooLong {
@@ -1477,14 +1519,10 @@ mod tests {
     /// shape, and only a live apply covers the effect.
     #[test]
     fn the_apply_path_and_the_exported_helper_share_one_journal_statement() {
-        let app_id = uuid::Uuid::parse_str("0191e7a2-b3c4-4d5e-8f90-123456789abc").expect("uuid");
-        let schema = app_id.to_string();
-        let sql = runtime_role_provisioning_sql(
-            &SchemaName::new(&schema).expect("fixture schema"),
-            "zs_migrator_fixture",
-        )
-        .expect("test runtime role name")
-        .dependents;
+        let app_id = fixture_app_id();
+        let sql = runtime_role_provisioning_sql(&app_id, &fixture_schema(), "zs_migrator_fixture")
+            .expect("test runtime role name")
+            .dependents;
         let exported = crate::provisioning::workflow_journal_schema_sql(
             &crate::provisioning::workflow_journal_schema_name(&app_id),
         );
@@ -1629,7 +1667,7 @@ mod tests {
             .block_on(apply_ir_documents(
                 "postgres://unused",
                 Path::new("/tmp"),
-                &Uuid::new_v4(),
+                &AppId::mint(),
                 &request,
                 &policy_config,
                 &SchemaApplyStore::new("postgres://unused"),
@@ -1661,7 +1699,7 @@ mod tests {
             .block_on(apply_ir_documents(
                 "postgres://unused",
                 Path::new("/tmp"),
-                &Uuid::new_v4(),
+                &AppId::mint(),
                 &request,
                 &policy_config,
                 &SchemaApplyStore::new("postgres://unused"),
@@ -1696,11 +1734,16 @@ mod tests {
 /// through every other call.
 ///
 /// The `expect` is sound rather than optimistic: `scratch_schema` yields a
-/// hyphenated uuid, and `validate_schema` accepts ASCII alphanumerics, `_`
+/// printed app id, and `validate_schema` accepts ASCII alphanumerics, `_`
 /// and `-`. A panic here would mean that helper changed shape, which is a
 /// fixture bug worth failing loudly on.
 fn scratch_schema_name(raw: &str) -> SchemaName {
     SchemaName::new(raw).expect("a scratch schema is a valid schema name")
+}
+
+#[cfg(test)]
+fn scratch_app_id(schema: &str) -> AppId {
+    AppId::parse(schema).expect("a scratch schema is a printed app id")
 }
 
 #[cfg(test)]
@@ -1729,11 +1772,13 @@ mod live_audit_unmask_provisioning {
         client
     }
 
-    /// A scratch app schema whose name is a real `Uuid`, because
+    /// A scratch app schema derived from a real minted [`AppId`], because
     /// `provision_migrator` derives the migrator role from it and production
-    /// only ever passes an app id.
+    /// only ever passes an app id. `scratch_app_id` recovers the tenant from
+    /// what this returns, so the pair the provisioning call receives is one a
+    /// deploy could actually produce.
     fn scratch_schema() -> String {
-        Uuid::new_v4().to_string()
+        app_derivation::schema_name(&AppId::mint())
     }
 
     fn audit_table_ref(schema: &str) -> String {
@@ -1743,11 +1788,22 @@ mod live_audit_unmask_provisioning {
     /// Drop everything a case created, by name. Never a blanket sweep: this
     /// server is shared with other work.
     async fn teardown(admin: &compio_postgres::Client, schema: &str) {
+        // ONE SCHEMA, NOT TWO. This also dropped `app_<schema>`, because the
+        // workflow journal used to live in its own schema beside the data
+        // schema. The journal schema is now the tenant's own schema, so a
+        // second drop would name something nothing creates. The assertion
+        // makes that a checked fact rather than a remembered one: the day the
+        // two derivations diverge, this fails here rather than leaking a
+        // schema per run on a shared server.
+        assert_eq!(
+            crate::provisioning::workflow_journal_schema_name(&scratch_app_id(schema)),
+            schema,
+            "the journal schema no longer equals the data schema; teardown must drop both"
+        );
         let _ = admin
             .batch_execute(&format!(
-                "DROP SCHEMA IF EXISTS {} CASCADE; DROP SCHEMA IF EXISTS {} CASCADE;",
+                "DROP SCHEMA IF EXISTS {} CASCADE;",
                 quote_ident(schema),
-                quote_ident(&format!("app_{schema}")),
             ))
             .await;
         for role in [
@@ -1961,17 +2017,27 @@ mod live_audit_unmask_provisioning {
         provision_audit_unmask_table(&admin, &before)
             .await
             .expect("provision audit table (production order)");
-        provision_runtime_app_role(&admin, &scratch_schema_name(&before), &migrator_before)
-            .await
-            .expect("provision runtime role (production order)");
+        provision_runtime_app_role(
+            &admin,
+            &scratch_app_id(&before),
+            &scratch_schema_name(&before),
+            &migrator_before,
+        )
+        .await
+        .expect("provision runtime role (production order)");
 
         // ARM B - the inversion, differing in exactly one variable.
         let after = scratch_schema();
         teardown(&admin, &after).await;
         let migrator_after = provision_schema_and_migrator(&admin, &after).await;
-        provision_runtime_app_role(&admin, &scratch_schema_name(&after), &migrator_after)
-            .await
-            .expect("provision runtime role (inverted order)");
+        provision_runtime_app_role(
+            &admin,
+            &scratch_app_id(&after),
+            &scratch_schema_name(&after),
+            &migrator_after,
+        )
+        .await
+        .expect("provision runtime role (inverted order)");
         provision_audit_unmask_table(&admin, &after)
             .await
             .expect("provision audit table (inverted order)");
@@ -1982,15 +2048,25 @@ mod live_audit_unmask_provisioning {
         let between = scratch_schema();
         teardown(&admin, &between).await;
         let migrator_between = provision_schema_and_migrator(&admin, &between).await;
-        provision_runtime_app_role(&admin, &scratch_schema_name(&between), &migrator_between)
-            .await
-            .expect("provision runtime role (first apply-path call)");
+        provision_runtime_app_role(
+            &admin,
+            &scratch_app_id(&between),
+            &scratch_schema_name(&between),
+            &migrator_between,
+        )
+        .await
+        .expect("provision runtime role (first apply-path call)");
         provision_audit_unmask_table(&admin, &between)
             .await
             .expect("provision audit table (between the two calls)");
-        provision_runtime_app_role(&admin, &scratch_schema_name(&between), &migrator_between)
-            .await
-            .expect("provision runtime role (second apply-path call)");
+        provision_runtime_app_role(
+            &admin,
+            &scratch_app_id(&between),
+            &scratch_schema_name(&between),
+            &migrator_between,
+        )
+        .await
+        .expect("provision runtime role (second apply-path call)");
 
         let insert_priv = |schema: &str| {
             format!(
@@ -2068,11 +2144,22 @@ mod live_creator_schema_table_privileges {
     /// Drop everything a case created, by name. Roles are CLUSTER-wide, so a
     /// case that leaves one behind poisons the next run in any database here.
     async fn teardown(admin: &compio_postgres::Client, schema: &str) {
+        // ONE SCHEMA, NOT TWO. This also dropped `app_<schema>`, because the
+        // workflow journal used to live in its own schema beside the data
+        // schema. The journal schema is now the tenant's own schema, so a
+        // second drop would name something nothing creates. The assertion
+        // makes that a checked fact rather than a remembered one: the day the
+        // two derivations diverge, this fails here rather than leaking a
+        // schema per run on a shared server.
+        assert_eq!(
+            crate::provisioning::workflow_journal_schema_name(&scratch_app_id(schema)),
+            schema,
+            "the journal schema no longer equals the data schema; teardown must drop both"
+        );
         let _ = admin
             .batch_execute(&format!(
-                "DROP SCHEMA IF EXISTS {} CASCADE; DROP SCHEMA IF EXISTS {} CASCADE;",
+                "DROP SCHEMA IF EXISTS {} CASCADE;",
                 quote_ident(schema),
-                quote_ident(&format!("app_{schema}")),
             ))
             .await;
         for role in [
@@ -2190,16 +2277,21 @@ mod live_creator_schema_table_privileges {
         provision_audit_unmask_table(admin, schema)
             .await
             .expect("provision the audit table");
-        provision_runtime_app_role(admin, &scratch_schema_name(schema), &migrator)
-            .await
-            .expect("provision the runtime role");
+        provision_runtime_app_role(
+            admin,
+            &scratch_app_id(schema),
+            &scratch_schema_name(schema),
+            &migrator,
+        )
+        .await
+        .expect("provision the runtime role");
         migrator
     }
 
     #[compio::test]
     async fn the_runtime_role_can_use_every_table_in_its_bound_schema() {
         let admin = admin_client().await;
-        let schema = Uuid::new_v4().to_string();
+        let schema = app_derivation::schema_name(&AppId::mint());
         teardown(&admin, &schema).await;
         let migrator = provision_through_the_apply_path(&admin, &schema).await;
 
@@ -2221,9 +2313,14 @@ mod live_creator_schema_table_privileges {
             ))
             .await
             .expect("seed an inflight marker");
-        provision_runtime_app_role(&admin, &scratch_schema_name(&schema), &migrator)
-            .await
-            .expect("the apply path's second provisioning call");
+        provision_runtime_app_role(
+            &admin,
+            &scratch_app_id(&schema),
+            &scratch_schema_name(&schema),
+            &migrator,
+        )
+        .await
+        .expect("the apply path's second provisioning call");
 
         let tables = top_level_tables(&admin, &schema).await;
         assert!(!tables.is_empty(), "the apply path created no tables");
@@ -2359,7 +2456,7 @@ mod live_creator_schema_table_privileges {
     #[compio::test]
     async fn a_prefixed_table_created_later_keeps_schema_wide_dml() {
         let admin = admin_client().await;
-        let schema = Uuid::new_v4().to_string();
+        let schema = app_derivation::schema_name(&AppId::mint());
         teardown(&admin, &schema).await;
         let migrator = provision_through_the_apply_path(&admin, &schema).await;
 
@@ -2376,9 +2473,14 @@ mod live_creator_schema_table_privileges {
             .await
             .expect("create a prefixed table as the migrator");
 
-        provision_runtime_app_role(&admin, &scratch_schema_name(&schema), &migrator)
-            .await
-            .expect("re-provision the runtime role");
+        provision_runtime_app_role(
+            &admin,
+            &scratch_app_id(&schema),
+            &scratch_schema_name(&schema),
+            &migrator,
+        )
+        .await
+        .expect("re-provision the runtime role");
         for privilege in ["SELECT", "INSERT", "UPDATE", "DELETE"] {
             assert!(
                 has_privilege(&admin, &schema, "__zeroship_schema_backfills", privilege).await,
@@ -2450,27 +2552,39 @@ mod live_worker_role_fence {
         app_role: String,
         worker: String,
         schema: String,
+        /// The TENANT the production statement names its workflow journal
+        /// schema from. It is not derived from [`Fixture::schema`] and cannot
+        /// be: the journal schema comes from the app id through
+        /// [`crate::provisioning::workflow_journal_schema_name`], and an
+        /// [`AppId`] admits no case prefix.
+        app_id: AppId,
     }
 
     impl Fixture {
         fn new(case: &str) -> Self {
-            // Hyphen-free so every name below stays a bare identifier, and short
-            // enough that `app_<schema>` (the journal schema the production
-            // statement also creates) clears PostgreSQL's 63-byte identifier
-            // limit - a truncated name would collide across cases rather than
-            // fail.
+            // Hyphen-free so every name below stays a bare identifier.
             let unique = Uuid::new_v4().to_string().replace('-', "");
             Self {
                 case: case.to_string(),
                 app_role: format!("{PREFIX}_{case}_{unique}_role"),
                 worker: format!("{PREFIX}_{case}_{unique}_worker"),
                 schema: format!("{PREFIX}_{case}_{unique}_ns"),
+                app_id: AppId::mint(),
             }
         }
 
-        /// The `LIKE` pattern covering every object this case can create.
+        /// The `LIKE` pattern covering every PREFIXED object this case creates.
+        ///
+        /// It does NOT cover the workflow journal schema - see
+        /// [`Fixture::app_id`] and [`teardown`].
         fn like(&self) -> String {
             format!("{PREFIX}_{}_%", self.case)
+        }
+
+        /// The workflow journal schema the production statement creates, by the
+        /// one derivation rather than a second spelling of it.
+        fn journal_schema(&self) -> String {
+            crate::provisioning::workflow_journal_schema_name(&self.app_id)
         }
     }
 
@@ -2494,6 +2608,14 @@ mod live_worker_role_fence {
     /// the same server (two worktrees, one Postgres) still collide. Nothing
     /// short of a per-run database fixes that, and the sibling module carries
     /// the same exposure.
+    ///
+    /// SECOND RESIDUAL, NEW WITH THE TYPED ID. This used to also match
+    /// `app\_{like}`, because the journal schema was the case's own schema with
+    /// an `app_` prefix. It is now derived from the tenant
+    /// ([`Fixture::journal_schema`]) and carries no case prefix, so a case that
+    /// PANICS leaves exactly one `app_<base36>` schema behind. [`teardown`]
+    /// drops it by name on every run that reaches its end; nothing reaches a
+    /// leaked one, because the next `Fixture` mints a different tenant.
     async fn sweep(admin: &compio_postgres::Client, fx: &Fixture) {
         let _ = admin.batch_execute("RESET SESSION AUTHORIZATION").await;
         admin
@@ -2503,7 +2625,7 @@ mod live_worker_role_fence {
                  BEGIN
                    FOR target IN
                      SELECT nspname FROM pg_namespace
-                      WHERE nspname LIKE '{like}' OR nspname LIKE 'app\\_{like}'
+                      WHERE nspname LIKE '{like}'
                    LOOP
                      EXECUTE format('DROP SCHEMA IF EXISTS %I CASCADE', target);
                    END LOOP;
@@ -2548,13 +2670,15 @@ mod live_worker_role_fence {
     /// Drop everything a case created, by name. Never a blanket sweep: this
     /// server is shared with other work.
     ///
-    /// `app_<schema>` is the workflow journal schema the SECOND half of
-    /// `runtime_dependents_sql` creates. Leaving it behind would accumulate a
-    /// schema per run on a shared server, and it is easy to miss because
-    /// nothing in these cases mentions the journal.
+    /// [`Fixture::journal_schema`] is the workflow journal schema the SECOND
+    /// half of `runtime_dependents_sql` creates. Leaving it behind would
+    /// accumulate a schema per run on a shared server, and it is easy to miss
+    /// because nothing in these cases mentions the journal. It is asked of the
+    /// fixture rather than composed here, so it cannot name a schema the
+    /// statement did not create.
     async fn teardown(admin: &compio_postgres::Client, fx: &Fixture) {
         let _ = admin.batch_execute("RESET SESSION AUTHORIZATION").await;
-        for schema in [fx.schema.clone(), format!("app_{}", fx.schema)] {
+        for schema in [fx.schema.clone(), fx.journal_schema()] {
             let _ = admin
                 .batch_execute(&format!(
                     "DROP SCHEMA IF EXISTS {} CASCADE",
@@ -2583,7 +2707,7 @@ mod live_worker_role_fence {
     /// literal or the block silently no-ops and every assertion below would
     /// then be measuring the ABSENCE of a grant while reading as a fence.
     fn production_grant_for(fx: &Fixture) -> String {
-        let sql = runtime_dependents_sql_for_role(&scratch_schema_name(&fx.schema), &fx.app_role);
+        let sql = runtime_dependents_sql_for_role(&fx.app_id, &fx.app_role);
         assert!(
             sql.matches(WORKER_ROLE).count() >= 2,
             "expected the worker role as both a quoted ident and a literal: {sql}"

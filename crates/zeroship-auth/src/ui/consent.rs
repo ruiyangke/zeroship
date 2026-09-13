@@ -8,7 +8,6 @@ use serde_json::json;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
-use uuid::Uuid;
 use zeroship_authz::{self as authz, AuthzContext, Resource, Scope};
 use zeroship_core::typed_id::app_id_from_oauth_client_id;
 use zeroship_core::UserId;
@@ -223,7 +222,7 @@ async fn post_consent_accept_native(
         .map_err(AuthError::Db)?;
 
         if cumulative.iter().any(|s| s == "email")
-            && app_id_from_client_id(&ctx.client.client_id).is_some()
+            && app_id_from_oauth_client_id(&ctx.client.client_id).is_some()
         {
             match crate::store::relay::mint_alias_at_consent(
                 &lock_conn,
@@ -379,6 +378,12 @@ struct NativeConsentClient {
     client_name: Option<String>,
 }
 
+/// The consent challenge as the page and the classifier read it.
+///
+/// It carries no subject: the person is the caller's [`UserId`], which the
+/// handler passes to [`classify_and_authorize`] directly. A `String` copy here
+/// would be a second spelling of one identity, and the delegation gate keys
+/// `zeroship.principal_grants` on it.
 #[derive(Clone, Debug)]
 struct NativeConsentRequest {
     subject: UserId,
@@ -589,18 +594,25 @@ struct ScopeDef {
     description: Option<String>,
 }
 
-/// Resolve the per-app `client_id` (`oac_<base62-app-id>`) back to its app UUID.
+/// Resolve the per-app OAuth `client_id` (`oac_<body>`) back to its [`AppId`].
+///
 /// Returns `None` for any client that is not a per-app end-user client (the
 /// builder/console/admin clients, e.g. `zeroship-builder-…`), which have no
 /// `app_scope_defs` and only ever request identity + platform scopes.
 ///
-/// Delegates to the shared `zeroship_core::typed_id` decoder — the exact
-/// inverse of control's `client_id_for_app`, so the prefix can never drift
-/// between the minter (control) and this decoder (auth).
-fn app_id_from_client_id(client_id: &str) -> Option<Uuid> {
-    app_id_from_oauth_client_id(client_id)
-}
-
+/// **The derivation is a re-prefixing of one shared body, not a decode.** The
+/// two identifiers are `app_<body>` and `oac_<body>` over the SAME body:
+/// control's `client_id_for_app` carries it over verbatim from the app id's
+/// printed form. So the inverse swaps the tag back and asks [`AppId::parse`]
+/// to rule on the result, which refuses a body of the wrong length, outside
+/// the typed-id alphabet, or above the representable range - exactly the set
+/// the minter can never have produced.
+///
+/// Reconstructing a uuid from the body and re-encoding it would agree on every
+/// input today, and that agreement is the hazard: it derives the id from bits
+/// the printed form is authoritative over, so it would keep answering
+/// confidently if the two renderings ever stopped matching. The prefix constant
+/// is the shared one, so the minter and this cannot drift on the tag either.
 /// Load the app's declared end-user scopes from `zeroship.app_scope_defs`,
 /// keyed by `scope_id`. Empty for non-per-app clients (no `oac_` prefix) or an
 /// app that declared none. The auth PG client shares the database with the
@@ -610,7 +622,7 @@ async fn load_app_scope_defs(
     db: &compio_postgres::Client,
     client_id: &str,
 ) -> Result<HashMap<String, ScopeDef>, String> {
-    let Some(app_id) = app_id_from_client_id(client_id) else {
+    let Some(app_id) = app_id_from_oauth_client_id(client_id) else {
         return Ok(HashMap::new());
     };
     let rows = match db
@@ -618,7 +630,7 @@ async fn load_app_scope_defs(
             "SELECT scope_id, label, description \
              FROM zeroship.app_scope_defs \
              WHERE app_id = $1",
-            &[&app_id],
+            &[&app_id.as_str()],
         )
         .await
     {
@@ -969,6 +981,8 @@ fn render_error_forbidden(message: PublicErrorMessage) -> HttpResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use zeroship_core::typed_id::APP_OAUTH_CLIENT_PREFIX;
+    use zeroship_core::AppId;
 
     /// The accept form must offer no control the OP cannot act on. A "remember
     /// this choice" toggle in particular cannot be honoured: the grant row this
@@ -1250,17 +1264,60 @@ mod tests {
         ));
     }
 
+    /// The app id and its OAuth `client_id` share ONE body under two prefixes,
+    /// and this pins that the decoder recovers the app id the minter's body
+    /// belongs to.
+    ///
+    /// The two sides sit in different crates - control mints, this decodes - so
+    /// nothing makes the compiler compare them. What is compared here is the
+    /// shared encoder: `app_oauth_client_id` produces the `oac_` form, the app
+    /// id whose printed body is that same encoding is built beside it, and the
+    /// decoder must map the first onto the second.
     #[test]
-    fn app_id_round_trips_through_oac_client_id() {
-        let app = Uuid::new_v4();
-        // Mint via the shared core helper (the SAME path control uses) and decode
-        // via the consent classifier — they must round-trip, pinning the no-drift
-        // contract across the control (minter) / auth (decoder) crate boundary.
-        let client_id = zeroship_core::typed_id::app_oauth_client_id(&app);
-        assert!(client_id.starts_with("oac_"), "got {client_id}");
-        assert_eq!(app_id_from_client_id(&client_id), Some(app));
+    fn the_decoder_recovers_the_app_id_whose_body_the_client_id_carries() {
+        let embedded = AppId::mint();
+        let client_id = zeroship_core::typed_id::app_oauth_client_id(&embedded);
+        assert!(
+            client_id.starts_with(&format!("{APP_OAUTH_CLIENT_PREFIX}_")),
+            "got {client_id}"
+        );
+        // The decoder must hand back the SAME app id the client id was minted
+        // from, byte for byte - that identity is what makes an audience derived
+        // from either side agree.
+        assert_eq!(app_id_from_oauth_client_id(&client_id), Some(embedded));
+
         // Non-per-app clients (builder/console) resolve to None.
-        assert_eq!(app_id_from_client_id("zeroship-builder-abc"), None);
-        assert_eq!(app_id_from_client_id("oac_not-base62"), None);
+        assert_eq!(app_id_from_oauth_client_id("zeroship-builder-abc"), None);
+
+        // A body the minter can never have produced is refused rather than
+        // re-prefixed into an id nothing keys on. The wrong-length arms are
+        // DERIVED from a minted body rather than written out: a literal of some
+        // fixed width stops testing the length the moment the encoder's width
+        // moves, and starts passing for the opposite reason.
+        let minted = AppId::mint();
+        let body = minted
+            .as_str()
+            .strip_prefix(AppId::PREFIX)
+            .and_then(|rest| rest.strip_prefix('_'))
+            .expect("a printed app id is <PREFIX>_<body>");
+        for bad in [
+            format!("{APP_OAUTH_CLIENT_PREFIX}_"),
+            format!("{APP_OAUTH_CLIENT_PREFIX}_{body}0"),
+            format!("{APP_OAUTH_CLIENT_PREFIX}_{}", &body[..body.len() - 1]),
+            format!("{APP_OAUTH_CLIENT_PREFIX}_-{}", &body[1..]),
+        ] {
+            assert_eq!(
+                app_id_from_oauth_client_id(&bad),
+                None,
+                "must be refused: {bad}"
+            );
+        }
+        // The control for those four: the body they are mutations of is one the
+        // decoder accepts, so each refusal measures its own mutation rather
+        // than a decoder that refuses whatever it is handed.
+        assert_eq!(
+            app_id_from_oauth_client_id(&format!("{APP_OAUTH_CLIENT_PREFIX}_{body}")).as_ref(),
+            Some(&minted)
+        );
     }
 }

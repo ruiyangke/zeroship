@@ -17,6 +17,7 @@ pub mod config;
 pub mod control_client;
 pub mod cron;
 pub mod csrf;
+pub mod entity_ids;
 pub mod error;
 pub mod headers;
 pub mod identity;

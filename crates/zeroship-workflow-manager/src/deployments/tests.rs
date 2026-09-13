@@ -1,12 +1,12 @@
 use super::*;
 use std::{path::Path, process::Command, time::Duration};
 use testcontainers::{
+    Container, GenericImage, ImageExt,
     core::{IntoContainerPort, WaitFor},
     runners::SyncRunner,
-    Container, GenericImage, ImageExt,
 };
 use zeroship_core::schema_name::SchemaName;
-use zeroship_data_orm::{binding::DbBinding, encryption::ProjectKeySource, ConnectOptions};
+use zeroship_data_orm::{ConnectOptions, binding::DbBinding, encryption::ProjectKeySource};
 
 mod catalog;
 
@@ -32,7 +32,7 @@ async fn database(url: &str) -> Database {
 async fn seed(db: &Database, app: &AppId, hash: &str) -> String {
     let deployment = typed_id::generate("dep");
     let mut document = value!({
-        "id":deployment, "app_id":app.uuid().to_string(), "deploy_hash":hash,
+        "id":deployment, "app_id":app.as_str(), "deploy_hash":hash,
         "manifest_json":"{}", "activated_at":null,
         "retention_state":"available", "retention_lock":0
     });
@@ -68,7 +68,7 @@ async fn stored_hold_identity(database: &Database, holder: &HoldScope, deploymen
         .unwrap()
         .find::<StoredHoldIdentity>(
             holds::app_id
-                .eq(holder.app().uuid().to_string())
+                .eq(holder.app().as_str())
                 .unwrap()
                 .and(holds::deploy_id.eq(deployment).unwrap())
                 .and(holds::holder_id.eq(holder.holder().to_owned()).unwrap()),
@@ -287,9 +287,14 @@ async fn contract(url: &str) {
         value!({"state":"unknown"}),
         value!({"state":"released", "generation":0}),
     ] {
-        db.collection(models::app_deploy_holds::Entity::COLLECTION).unwrap()
-            .update(value!({"app_id":app.uuid().to_string(), "deploy_id":suspect, "holder_id":holder.holder()}), patch)
-            .await.unwrap();
+        db.collection(models::app_deploy_holds::Entity::COLLECTION)
+            .unwrap()
+            .update(
+                value!({"app_id":app.as_str(), "deploy_id":suspect, "holder_id":holder.holder()}),
+                patch,
+            )
+            .await
+            .unwrap();
         assert_conflict(
             transact(&db, async |tx| fence_reclamation(&tx, &app, &suspect).await).await,
         );
@@ -326,7 +331,7 @@ async fn authority_is_rechecked_before_committing(
             assert_eq!(result, Err(failure));
             assert_eq!(checks.get(), reject_at);
             let stored = database.collection(holds::Entity::COLLECTION).unwrap()
-                .count(value!({"app_id":app.uuid().to_string(), "deploy_id":deployment, "holder_id":holder.holder()}), value!({}))
+                .count(value!({"app_id":app.as_str(), "deploy_id":deployment, "holder_id":holder.holder()}), value!({}))
                 .await.unwrap();
             assert!(matches!(stored, Output::Count(0)));
         }

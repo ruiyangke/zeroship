@@ -17,7 +17,7 @@ use zeroship_control::{
     StripeStore,
 };
 use zeroship_core::auth_provider::{AuthProvider, SupabaseConfig, SupabaseProvider};
-use zeroship_core::UserId;
+use zeroship_core::{AppId, UserId};
 
 use crate::common;
 
@@ -81,7 +81,7 @@ struct Fixture {
     deploy_tmp_dir: PathBuf,
     users: Vec<UserId>,
     subjects: Vec<String>,
-    apps: Vec<Uuid>,
+    apps: Vec<AppId>,
 }
 
 impl Fixture {
@@ -244,7 +244,7 @@ impl Fixture {
         principal_id
     }
 
-    async fn create_owned_app(&mut self, owner_id: &UserId, label: &str) -> Uuid {
+    async fn create_owned_app(&mut self, owner_id: &UserId, label: &str) -> AppId {
         let record = self
             .state
             .registry
@@ -256,7 +256,7 @@ impl Fixture {
             )
             .await
             .expect("create owned app");
-        self.apps.push(record.id);
+        self.apps.push(record.id.clone());
         record.id
     }
 
@@ -279,13 +279,16 @@ impl Fixture {
                     "DELETE FROM zeroship.organization_members om \
                  USING zeroship.apps a JOIN zeroship.projects p ON p.id = a.project_id \
                  WHERE om.organization_id = p.organization_id AND a.id = $1",
-                    &[app_id],
+                    &[&app_id.as_str()],
                 )
                 .await;
             let _ = self
                 .state
                 .control_pg
-                .execute("DELETE FROM zeroship.apps WHERE id = $1", &[app_id])
+                .execute(
+                    "DELETE FROM zeroship.apps WHERE id = $1",
+                    &[&app_id.as_str()],
+                )
                 .await;
         }
         for subject in &self.subjects {
@@ -341,12 +344,13 @@ async fn raw_app_deploy_check(
     authz: AuthzGuard,
     state: web::types::State<Arc<AppState>>,
 ) -> web::HttpResponse {
+    let Ok(id) = AppId::parse(&path.into_inner()) else {
+        return web::HttpResponse::BadRequest().finish();
+    };
     match authz
         .require(
             Action::AppsDeploy,
-            Resource::App {
-                id: path.into_inner(),
-            },
+            Resource::App { id },
             &state,
         )
         .await
@@ -372,7 +376,7 @@ async fn gotrue_authenticated_token_resolves_linked_principal_and_deploy_grant()
     let token = gotrue_token(&subject, "authenticated");
 
     let req = test::TestRequest::post()
-        .uri(&format!("/raw-app/{app_id}/deploy-check"))
+        .uri(&format!("/raw-app/{}/deploy-check", app_id.as_str()))
         .header("authorization", bearer(&token))
         .to_request();
     let resp = test::call_service(&app, req).await;
@@ -414,7 +418,7 @@ async fn gotrue_token_linked_to_anonymized_user_returns_401() {
         .await
         .expect("anonymize GoTrue principal");
     let req = test::TestRequest::post()
-        .uri(&format!("/raw-app/{app_id}/deploy-check"))
+        .uri(&format!("/raw-app/{}/deploy-check", app_id.as_str()))
         .header("authorization", bearer(&token))
         .to_request();
     let status = test::call_service(&app, req).await.status();
@@ -483,7 +487,7 @@ async fn gotrue_principal_without_deploy_grant_is_forbidden() {
     let token = gotrue_token(&subject, "authenticated");
 
     let req = test::TestRequest::post()
-        .uri(&format!("/raw-app/{app_id}/deploy-check"))
+        .uri(&format!("/raw-app/{}/deploy-check", app_id.as_str()))
         .header("authorization", bearer(&token))
         .to_request();
     let status = test::call_service(&app, req).await.status();

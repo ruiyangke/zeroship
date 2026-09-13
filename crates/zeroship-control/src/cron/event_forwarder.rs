@@ -11,7 +11,7 @@ use std::time::Duration;
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use zeroship_stream::{StreamOffset, StreamRecord, StreamTransport};
 
-use uuid::Uuid;
+use zeroship_core::app_id::AppId;
 
 use crate::metering::provider::{BillingStack, ProviderError, UsageEvent};
 
@@ -251,7 +251,7 @@ pub enum EventForwarderError {
 pub trait OrganizationResolver: Send + Sync {
     async fn organization_for_app(
         &self,
-        app_id: Uuid,
+        app_id: &AppId,
     ) -> Result<Option<String>, EventForwarderError>;
 }
 
@@ -283,13 +283,13 @@ impl PgOrganizationResolver {
 impl OrganizationResolver for PgOrganizationResolver {
     async fn organization_for_app(
         &self,
-        app_id: Uuid,
+        app_id: &AppId,
     ) -> Result<Option<String>, EventForwarderError> {
         let rows = self
             .conn
             .query(
                 "SELECT a.organization_id FROM zeroship.apps a WHERE a.id = $1",
-                &[&app_id],
+                &[&app_id.as_str()],
             )
             .await
             .map_err(|e| {
@@ -369,7 +369,7 @@ pub async fn run_cycle(
 
     let mut events = Vec::with_capacity(records.len());
     let mut event_records = Vec::with_capacity(records.len());
-    let mut organization_cache = std::collections::HashMap::<Uuid, Option<String>>::new();
+    let mut organization_cache = std::collections::HashMap::<AppId, Option<String>>::new();
     let mut cycle = EventForwarderCycle {
         polled: records.len(),
         ..EventForwarderCycle::default()
@@ -383,14 +383,14 @@ pub async fn run_cycle(
                 // nothing to bill until this runs. Resolve app -> organization
                 // and dead-letter what we cannot attribute rather than mis-bill.
                 if event.subject.organization.is_none() {
-                    let organization = match event.subject.app {
+                    let organization = match event.subject.app.as_ref() {
                         Some(app_id) => {
-                            if let Some(cached) = organization_cache.get(&app_id) {
+                            if let Some(cached) = organization_cache.get(app_id) {
                                 cached.clone()
                             } else {
                                 let resolved =
                                     organization_resolver.organization_for_app(app_id).await?;
-                                organization_cache.insert(app_id, resolved.clone());
+                                organization_cache.insert(app_id.clone(), resolved.clone());
                                 resolved
                             }
                         }
@@ -533,7 +533,6 @@ mod tests {
         AggregateQuery, Capabilities, DedupContract, DedupKey, DedupTtl, IngestAck, Meter,
         MeteringProvider, UsageSubject,
     };
-    use uuid::Uuid;
     use zeroship_stream::{StreamError, StreamOffset, StreamRecord};
 
     use super::*;
@@ -673,16 +672,16 @@ mod tests {
 
     #[derive(Debug, Default)]
     struct MockOrganizationResolver {
-        mapping: std::collections::HashMap<Uuid, String>,
+        mapping: std::collections::HashMap<AppId, String>,
     }
 
     #[async_trait::async_trait(?Send)]
     impl OrganizationResolver for MockOrganizationResolver {
         async fn organization_for_app(
             &self,
-            app_id: Uuid,
+            app_id: &AppId,
         ) -> Result<Option<String>, EventForwarderError> {
-            Ok(self.mapping.get(&app_id).cloned())
+            Ok(self.mapping.get(app_id).cloned())
         }
     }
 
@@ -889,8 +888,8 @@ mod tests {
             event_id: event_id.to_string(),
             source: "worker-a".to_string(),
             subject: UsageSubject {
-                app: Some(Uuid::parse_str("aaaaaaaa-aaaa-7aaa-aaaa-aaaaaaaaaaaa").unwrap()),
-                organization: Some("org_0000000000000000000001".to_string()),
+                app: Some(AppId::mint()),
+                organization: Some("org_0000000000000000000000001".to_string()),
             },
             meter: "compute_units".to_string(),
             value: 10,
@@ -899,7 +898,7 @@ mod tests {
         }
     }
 
-    fn unattributed_event(event_id: &str, app: Uuid) -> UsageEvent {
+    fn unattributed_event(event_id: &str, app: AppId) -> UsageEvent {
         UsageEvent {
             event_id: event_id.to_string(),
             source: "worker-a".to_string(),
@@ -934,11 +933,11 @@ mod tests {
 
     #[compio::test]
     async fn run_cycle_attributes_unset_subject_and_deadletters_unresolvable_apps() {
-        let app_owned = Uuid::parse_str("aaaaaaaa-aaaa-7aaa-aaaa-aaaaaaaaaaaa").unwrap();
-        let app_orphan = Uuid::parse_str("cccccccc-cccc-7ccc-cccc-cccccccccccc").unwrap();
-        let owner = "org_0000000000000000000002".to_string();
+        let app_owned = AppId::mint();
+        let app_orphan = AppId::mint();
+        let owner = "org_0000000000000000000000002".to_string();
         let stream = fake_stream_of(vec![
-            unattributed_event("evt_owned", app_owned),
+            unattributed_event("evt_owned", app_owned.clone()),
             unattributed_event("evt_orphan", app_orphan),
         ]);
         let meter = Arc::new(RecordingMeter::default());
