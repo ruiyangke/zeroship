@@ -14,6 +14,8 @@ import {
   PROCEDURE_BINDINGS_PATH,
   RUNTIME_MODULE_SPECIFIER,
   VITE_RUNTIME_MODULE_ID,
+  DEV_RUNTIME_STATE_HEADER,
+  DEV_RUNTIME_FRESH_REQUIRED,
 } from "../src/constants.js";
 import { devServerPlugin } from "../src/dev-server.js";
 import { createProjectConfigHolder } from "../src/project-config/index.js";
@@ -266,6 +268,29 @@ describe("devServerPlugin", () => {
     }
   });
 
+  test("source edits replace a runtime whose initial entry failed", async () => {
+    const harness = await startHarness({
+      devServerPort: 3908,
+      serveRuntime: true,
+      freshRuntimeRequired: true,
+    });
+    try {
+      const firstRuntime = await harness.runtimeLog();
+      const failed = await fetch(`${harness.origin}/api/probe`);
+      assert.equal(failed.status, 500);
+      assert.equal(failed.headers.has(DEV_RUNTIME_STATE_HEADER), false);
+      assert.equal(await failed.text(), "module init failed");
+
+      await harness.queueHmrChange();
+      await waitFor(async () => {
+        assert.equal(await harness.runtimeSpawnCount(), 2);
+      });
+      assert.notEqual((await harness.runtimeLog()).pid, firstRuntime.pid);
+    } finally {
+      await harness.close();
+    }
+  });
+
   test("spawns the runtime with the default sqlite dev database and tears it down on close", async () => {
     const beforeExitListeners = process.listenerCount("exit");
     const beforeSigintListeners = process.listenerCount("SIGINT");
@@ -491,6 +516,7 @@ async function startHarness(options: {
   };
   rapidExitSpawns?: number;
   serveRuntime?: boolean;
+  freshRuntimeRequired?: boolean;
 } = {}): Promise<Harness> {
   const root = await fs.mkdtemp(join(tmpdir(), "zs-vite-dev-server-"));
   const serverEntry = resolve(root, "src/server.ts");
@@ -561,6 +587,9 @@ async function startHarness(options: {
       "}, null, 2));",
       `const rapidExitSpawns = ${options.rapidExitSpawns ?? 0};`,
       `const serveRuntime = ${options.serveRuntime === true};`,
+      `const freshRuntimeRequired = ${options.freshRuntimeRequired === true};`,
+      `const runtimeStateHeader = ${JSON.stringify(DEV_RUNTIME_STATE_HEADER)};`,
+      `const freshRequired = ${JSON.stringify(DEV_RUNTIME_FRESH_REQUIRED)};`,
       "const stop = () => {",
       "  writeFileSync(stopPath, 'stopped');",
       "  process.exit(0);",
@@ -574,7 +603,15 @@ async function startHarness(options: {
       "  const { createServer } = require('node:http');",
       "  const portArg = process.argv.find((arg) => arg.startsWith('--port='));",
       "  const port = Number(portArg.slice('--port='.length));",
-      "  createServer((_req, res) => { res.end('runtime-ok'); }).listen(port);",
+      "  createServer((_req, res) => {",
+      "    if (freshRuntimeRequired) {",
+      "      res.statusCode = 500;",
+      "      res.setHeader(runtimeStateHeader, freshRequired);",
+      "      res.end('module init failed');",
+      "    } else {",
+      "      res.end('runtime-ok');",
+      "    }",
+      "  }).listen(port);",
       "} else {",
       "  setInterval(() => {}, 1000);",
       "}",

@@ -17,6 +17,8 @@ import {
   PROCEDURE_BINDINGS_PATH,
   RUNTIME_MODULE_SPECIFIER,
   VITE_RUNTIME_MODULE_ID,
+  DEV_RUNTIME_STATE_HEADER,
+  DEV_RUNTIME_FRESH_REQUIRED,
   ENV_DEV,
   ENV_VITE_ORIGIN,
   ENV_ENTRY,
@@ -564,6 +566,8 @@ export function devServerPlugin(
   let devDb: DevDatabase | null = null;
   let disposeRuntime: (() => void) | null = null;
   let restartRuntimeForDescriptorChange: (() => void) | null = null;
+  let restartRuntimeAfterInitialFailure: (() => boolean) | null = null;
+  let initialStartupFailed = false;
 
   // Migration-first gen-types. The absolute migrations dir is resolved in
   // configureServer (once `root` is known) so the `hotUpdate` branch can match
@@ -834,6 +838,7 @@ export function devServerPlugin(
         let restartTimer: ReturnType<typeof setTimeout> | null = null;
         let healthyTimer: ReturnType<typeof setTimeout> | null = null;
         let descriptorRestartPending = false;
+        let initialFailureRestartPending = false;
         let spawnInFlight = false;
         let tornDown = false;
 
@@ -886,6 +891,14 @@ export function devServerPlugin(
               descriptorRestartPending = false;
               resetSupervisorForDescriptorChange();
               console.log("[zeroship] runtime descriptor changed - starting a fresh runtime");
+              runSpawn();
+              return;
+            }
+
+            if (initialFailureRestartPending) {
+              initialFailureRestartPending = false;
+              resetSupervisorForDescriptorChange();
+              console.log("[zeroship] source changed after startup failed - starting a fresh runtime");
               runSpawn();
               return;
             }
@@ -1047,6 +1060,7 @@ export function devServerPlugin(
               }
             );
             serverProcess = child;
+            initialStartupFailed = false;
 
             child.stdout?.on("data", (d: Buffer) => {
               const msg = d.toString().trim();
@@ -1091,7 +1105,7 @@ export function devServerPlugin(
         // a successful migration regeneration replaces the child instead of
         // mutating JavaScript globals in the live isolate.
         restartRuntimeForDescriptorChange = () => {
-          if (tornDown || descriptorRestartPending) return;
+          if (tornDown || descriptorRestartPending || initialFailureRestartPending) return;
 
           const child = serverProcess;
           if (
@@ -1117,6 +1131,31 @@ export function devServerPlugin(
               child.kill("SIGKILL");
             }
           }, 3000).unref();
+        };
+
+        restartRuntimeAfterInitialFailure = () => {
+          if (!initialStartupFailed) return false;
+          pendingHmrChanges.clear();
+          if (tornDown || descriptorRestartPending || initialFailureRestartPending) {
+            return true;
+          }
+
+          const child = serverProcess;
+          if (!child || child.exitCode !== null || child.signalCode !== null) {
+            resetSupervisorForDescriptorChange();
+            if (!spawnInFlight) runSpawn();
+            return true;
+          }
+
+          initialFailureRestartPending = true;
+          runtimeStatus.health = "failing";
+          child.kill("SIGTERM");
+          setTimeout(() => {
+            if (child.exitCode === null && child.signalCode === null) {
+              child.kill("SIGKILL");
+            }
+          }, 3000).unref();
+          return true;
         };
         if (server.httpServer?.listening) {
           runSpawn();
@@ -1146,6 +1185,7 @@ export function devServerPlugin(
           cleanupListeners();
           disposeRuntime = null;
           restartRuntimeForDescriptorChange = null;
+          restartRuntimeAfterInitialFailure = null;
         };
         disposeRuntime = dispose;
         server.httpServer?.once("close", dispose);
@@ -1203,7 +1243,15 @@ export function devServerPlugin(
             `http://localhost:${devPort}${url}`,
             { method: req.method, headers: req.headers },
             (proxyRes) => {
-              res.writeHead(proxyRes.statusCode ?? 502, proxyRes.headers);
+              if (
+                proxyRes.headers[DEV_RUNTIME_STATE_HEADER]
+                === DEV_RUNTIME_FRESH_REQUIRED
+              ) {
+                initialStartupFailed = true;
+              }
+              const responseHeaders = { ...proxyRes.headers };
+              delete responseHeaders[DEV_RUNTIME_STATE_HEADER];
+              res.writeHead(proxyRes.statusCode ?? 502, responseHeaders);
               proxyRes.pipe(res);
             }
           );
@@ -1261,6 +1309,7 @@ export function devServerPlugin(
         file.endsWith(".ts") || file.endsWith(".tsx") ||
         file.endsWith(".js") || file.endsWith(".jsx")
       ) {
+        if (restartRuntimeAfterInitialFailure?.()) return;
         // Server-module discovery is now path-based (no caches to
         // invalidate). Queue the change for HMR delivery to the V8
         // runtime — the runtime polls /__zeroship_hmr_check and
