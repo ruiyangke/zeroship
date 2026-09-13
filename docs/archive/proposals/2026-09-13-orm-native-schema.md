@@ -1,6 +1,6 @@
 # Native Rust ORM schema declarations
 
-**Status: Implementation in progress; integration verification pending.**
+**Status: Implemented.**
 
 Rust applications should declare their ORM schema in Rust and build with Cargo.
 The macro compiles those declarations into typed query APIs and native metadata.
@@ -9,21 +9,21 @@ that artifact into the same metadata representation before exposing the ORM.
 
 ## Problem
 
-The current [`schema!` macro](../../crates/zeroship-data-macros/src/schema.rs)
+The current [`schema!` macro](../../../crates/zeroship-data-macros/src/schema.rs)
 reads a migration runtime descriptor during compilation. It generates entities,
 columns, relation selectors, and write capabilities, then embeds serialized
 field definitions. Generated `Entity::schema()` parses those definitions on
 first use. A running Rust service does not need the file, but building its
 models requires the creator artifact pipeline.
 
-[`Database::from_schema`](../../crates/zeroship-data-orm/src/orm.rs) already
+[`Database::from_schema`](../../../crates/zeroship-data-orm/src/orm.rs) already
 accepts native field maps. However, `Database::entity` compares installed maps
 with generated maps by exact value equality. Changing only the macro syntax
 would leave descriptor interpretation and representational mismatches in place.
 
 The change therefore includes native authoring and canonical runtime metadata.
-The existing [ORM architecture](../architecture/data-orm.md) and
-[data authority boundaries](../architecture/data-system.md) continue to apply.
+The existing [ORM architecture](../../architecture/data-orm.md) and
+[data authority boundaries](../../architecture/data-system.md) continue to apply.
 
 ## Design
 
