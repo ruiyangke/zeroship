@@ -1,0 +1,24 @@
+error[E0599]: the method `push` exists for struct `zeroship_data_orm::orm::Field<document>`, but its trait bounds were not satisfied
+ --> tests/ui/array_operation_on_json.rs:4:48
+  |
+4 |   fn main() { let _ = schema::counters::document.push(Value::Null); }
+  |                                                  ^^^^ method cannot be called on `zeroship_data_orm::orm::Field<document>` due to unsatisfied trait bounds
+  |
+ ::: tests/ui/../fixtures/mutation_expressions_schema.rs
+  |
+  | /         ::zeroship_data_orm::orm::schema! {
+  | |             $visibility $module {
+  | |                 counters {
+  | |                     #[orm(primary_key)]
+... |
+  | |                     dates: Array<CalendarDate>,
+  | |                     document: Json,
+  | |____________________________- doesn't satisfy `document: ArrayColumn`
+  |
+  = note: the following trait bounds were not satisfied:
+          `document: ArrayColumn`
+note: the trait `ArrayColumn` must be implemented
+ --> src/orm/model/patch.rs
+  |
+  | pub trait ArrayColumn: Column {
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

@@ -55,6 +55,14 @@ fn generate(input: Input, orm: &syn::Path) -> syn::Result<TokenStream> {
             let write = writable.then(|| quote!(impl #orm::WritableColumn for #column {}));
             let update = (writable && field != "id")
                 .then(|| quote!(impl #orm::UpdatableColumn for #column {}));
+            let array = (definition.kind == Kind::Array).then(|| {
+                let item = type_marker(
+                    definition.items.unwrap_or(Kind::Json),
+                    &definition.name,
+                    orm,
+                );
+                quote!(impl #orm::ArrayColumn for #column { type ItemSqlType = #item; })
+            });
             let default = defaultable.then(|| quote!(impl #orm::DefaultableColumn for #column {}));
             if writable && !defaultable {
                 required.push(quote!(#orm::HasColumn<columns::#column>));
@@ -68,7 +76,7 @@ fn generate(input: Input, orm: &syn::Path) -> syn::Result<TokenStream> {
                     type SqlType = #sql_type;
                     const NAME: &'static str = #field;
                 }
-                #read #filter #write #update #default
+                #read #filter #write #update #default #array
             });
             constants.push(quote! {
                 #[allow(non_upper_case_globals)]
@@ -138,18 +146,23 @@ fn generate(input: Input, orm: &syn::Path) -> syn::Result<TokenStream> {
 }
 
 fn sql_type(column: &Column, orm: &syn::Path) -> TokenStream {
-    let marker = match column.kind {
-        Kind::Object | Kind::Array | Kind::Union | Kind::Json => "Json",
-        Kind::Enum | Kind::Literal => unreachable!("validated top-level column type"),
-        kind => kind.name(),
-    };
-    let marker = Ident::new(marker, column.name.span());
-    let ty = quote!(#orm::sql_types::#marker);
+    let ty = type_marker(column.kind, &column.name, orm);
     if column.nullable {
         quote!(#orm::sql_types::Nullable<#ty>)
     } else {
         ty
     }
+}
+
+fn type_marker(kind: Kind, name: &Ident, orm: &syn::Path) -> TokenStream {
+    let marker = match kind {
+        Kind::Object | Kind::Array | Kind::Union | Kind::Json | Kind::Enum | Kind::Literal => {
+            "Json"
+        }
+        kind => kind.name(),
+    };
+    let marker = Ident::new(marker, name.span());
+    quote!(#orm::sql_types::#marker)
 }
 
 fn column_schema(column: &Column, orm: &syn::Path) -> TokenStream {

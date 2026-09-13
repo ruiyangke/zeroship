@@ -36,9 +36,9 @@ pub trait FromRow<E: Entity>: Sized {
 pub trait Insertable<E: Entity> {
     fn into_record(self) -> Result<Record, DbError>;
 }
-/// Literal column assignments. The entity API supplies the update operation.
+/// Typed literal assignments and atomic mutation expressions.
 pub trait Changeset<E: Entity> {
-    fn into_changes(self) -> Result<Record, DbError>;
+    fn into_changes(self) -> Result<Patch<E>, DbError>;
 }
 pub trait EncodeValue<S> {
     fn encode_value(self) -> Result<Value, DbError>;
@@ -354,17 +354,6 @@ pub(crate) fn encode_members<C: Column, T: EncodeValue<C::SqlType>>(
     }
     Ok(encoded)
 }
-impl<C: UpdatableColumn> Field<C> {
-    pub fn set<T: EncodeValue<C::SqlType>>(self, value: T) -> Result<Patch<C::Entity>, DbError> {
-        let mut fields = Record::new();
-        encode_field::<C, _>(&mut fields, value)?;
-        Ok(Patch {
-            fields,
-            entity: PhantomData,
-        })
-    }
-}
-
 #[derive(Debug)]
 pub struct Filter<E> {
     predicate: ModelPredicate,
@@ -451,36 +440,9 @@ impl<E> std::ops::Not for Filter<E> {
         self.negate()
     }
 }
-#[derive(Debug)]
-pub struct Patch<E> {
-    fields: Record,
-    entity: PhantomData<fn() -> E>,
-}
-impl<E> Patch<E> {
-    /// Combine assignments to distinct columns.
-    ///
-    /// # Errors
-    /// Refuses duplicate columns before either patch can be executed.
-    pub fn and(mut self, other: Self) -> Result<Self, DbError> {
-        if other
-            .fields
-            .keys()
-            .any(|field| self.fields.contains_key(field))
-        {
-            return Err(DbError::validation(
-                "invalid_update",
-                "a field may be assigned only once per update",
-            ));
-        }
-        self.fields.extend(other.fields);
-        Ok(self)
-    }
-}
-impl<E: Entity> Changeset<E> for Patch<E> {
-    fn into_changes(self) -> Result<Record, DbError> {
-        Ok(self.fields)
-    }
-}
+mod patch;
+pub use patch::*;
+
 #[derive(Default, Debug)]
 pub struct FindOptions {
     pub limit: Option<i64>,
