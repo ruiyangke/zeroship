@@ -12,8 +12,6 @@ PG_PORT="5440"
 PG_USER="postgres"
 PG_PASS="zeroship"
 DSN="postgres://${PG_USER}:${PG_PASS}@${PG_HOST}:${PG_PORT}/${TEST_DB}"
-CONSENT_APP_ID="00000000-0000-0000-0000-000000000001"
-CONSENT_CLIENT_ID="oac_0000000000000000000001"
 CONSENT_REDIRECT_URI="http://127.0.0.1:9999/native-cb"
 
 # A setup failure is not a test result. This library gives observed ENOSPC
@@ -125,6 +123,12 @@ for command_name in cargo curl mktemp node pnpm playwright readlink seq; do
   command -v "$command_name" >/dev/null 2>&1 \
     || die "missing required command '$command_name'; run with nix develop"
 done
+
+CONSENT_IDS="$(node -e '
+  const fixture = require(process.argv[1]);
+  console.log(`${fixture.app_id} ${fixture.client_id}`);
+' "$ROOT/tests/fixtures/auth_ui_ids.json")"
+read -r CONSENT_APP_ID CONSENT_CLIENT_ID <<<"$CONSENT_IDS"
 
 PW_VERSION="$(playwright --version 2>&1 || true)"
 [ "$PW_VERSION" = "Version 1.58.2" ] \
