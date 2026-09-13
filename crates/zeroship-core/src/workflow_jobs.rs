@@ -7,9 +7,10 @@ pub use zeroship_id::workflow::{DeploymentId, JobId};
 
 use crate::{
     app_id::AppId,
-    workflow_coordination::{RequestId, Revision, RunId, UnixMillis, WorkerId},
+    workflow_coordination::{AssignedScope, RequestId, Revision, RunId, UnixMillis, WorkerId},
 };
 use serde::{Deserialize, Serialize};
+use std::num::NonZeroU64;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(
@@ -49,6 +50,14 @@ pub struct JobSpec {
     pub available_at: UnixMillis,
 }
 
+/// Worker publication carries placement identity, never a caller-chosen expiry.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SubmitJob {
+    pub scope: AssignedScope,
+    pub job: JobSpec,
+}
+
 /// A delivery lease does not replace the creator journal's execution fence.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -58,6 +67,16 @@ pub struct Delivery {
     pub assignment_revision: Revision,
     pub attempt: Revision,
     pub deadline: UnixMillis,
+}
+
+/// Remaining manager authority transferred without comparing database-zone clocks.
+/// The receiver anchors this duration before starting its request and rejects
+/// replies whose resulting monotonic deadline has already expired.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DeliveryLease {
+    pub delivery: Delivery,
+    pub remaining_ms: NonZeroU64,
 }
 
 /// Scheduling classification without customer results or free-form failures.

@@ -528,6 +528,14 @@ pub mod endpoints {
         "POST",
         "/v1/management/acknowledge",
     );
+    pub const WORKFLOW_JOB_SUBMIT: ServiceEndpoint =
+        ServiceEndpoint::new("workflow", "POST", "/v1/jobs/submit");
+    pub const WORKFLOW_JOB_CLAIM: ServiceEndpoint =
+        ServiceEndpoint::new("workflow", "POST", "/v1/jobs/claim");
+    pub const WORKFLOW_JOB_HEARTBEAT: ServiceEndpoint =
+        ServiceEndpoint::new("workflow", "POST", "/v1/jobs/heartbeat");
+    pub const WORKFLOW_JOB_SETTLE: ServiceEndpoint =
+        ServiceEndpoint::new("workflow", "POST", "/v1/jobs/settle");
     pub const WORKER_DISPATCH: ServiceEndpoint =
         ServiceEndpoint::new("worker", "POST", "/dispatch/{app_id}");
     pub const WORKER_WORKFLOW_ADVANCE: ServiceEndpoint = ServiceEndpoint::new(
@@ -633,6 +641,10 @@ pub fn service_allowlist() -> &'static [ServiceAuthorization] {
                     endpoints::WORKFLOW_WAKE,
                     endpoints::WORKFLOW_MANAGEMENT_POLL,
                     endpoints::WORKFLOW_MANAGEMENT_ACK,
+                    endpoints::WORKFLOW_JOB_SUBMIT,
+                    endpoints::WORKFLOW_JOB_CLAIM,
+                    endpoints::WORKFLOW_JOB_HEARTBEAT,
+                    endpoints::WORKFLOW_JOB_SETTLE,
                     endpoints::CDC_SUBSCRIBE,
                     // Host app reads are role-scoped: an authenticated worker
                     // may request any app's version, environment, and project

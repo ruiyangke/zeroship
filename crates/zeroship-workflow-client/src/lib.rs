@@ -6,9 +6,11 @@
 )]
 
 mod control;
+mod jobs;
 mod transport;
 
 pub use control::ControlCoordinator;
+pub use jobs::LeasedJob;
 pub use transport::Transport;
 
 use std::{collections::HashSet, sync::Arc, time::Duration};
