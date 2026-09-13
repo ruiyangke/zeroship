@@ -128,9 +128,7 @@ impl AppWorkflows {
         let mut tx = self.service.begin().await?;
         let policy = lock_app(&mut tx, &self.app).await?;
         let now = tx.now().await?;
-        if let Some(receipt) =
-            request_result(&mut tx, &self.app, request_id, "start", &digest, now).await?
-        {
+        if let Some(receipt) = request_result(&tx, &self.app, request_id, "start", &digest).await? {
             return Ok(receipt);
         }
         policy.admit()?;
@@ -190,13 +188,7 @@ impl AppWorkflows {
             }
         };
         store_request(
-            &mut tx,
-            &self.app,
-            request_id,
-            "start",
-            &digest,
-            &result,
-            deadline(now, policy.request_retention_ms)?,
+            &mut tx, &self.app, request_id, "start", &digest, &result, now,
         )
         .await?;
         tx.commit().await?;
@@ -237,8 +229,7 @@ impl AppWorkflows {
         let mut tx = self.service.begin().await?;
         let policy = lock_app(&mut tx, &self.app).await?;
         let now = tx.now().await?;
-        if let Some(receipt) =
-            request_result(&mut tx, &self.app, request_id, "signal", &digest, now).await?
+        if let Some(receipt) = request_result(&tx, &self.app, request_id, "signal", &digest).await?
         {
             return Ok(receipt);
         }
@@ -248,13 +239,7 @@ impl AppWorkflows {
         let result =
             super::signals::deliver(&mut tx, &self.app, run_id, &options, "app", now).await?;
         store_request(
-            &mut tx,
-            &self.app,
-            request_id,
-            "signal",
-            &digest,
-            &result,
-            deadline(now, policy.request_retention_ms)?,
+            &mut tx, &self.app, request_id, "signal", &digest, &result, now,
         )
         .await?;
         tx.commit().await?;
@@ -468,20 +453,12 @@ pub(crate) async fn insert_root_run(
     .await
 }
 pub(crate) async fn request_result<T: DeserializeOwned>(
-    tx: &mut Transaction,
+    tx: &Transaction,
     app: &AppId,
     id: &RequestId,
     operation: &str,
     digest: &str,
-    now: i64,
 ) -> Result<Option<T>, WorkflowServiceError> {
-    tx.database()
-        .collection(models::requests::Entity::COLLECTION)?
-        .execute(Operation::Purge {
-            filter: value!({"app_id":app.as_str(), "request_id":id.as_str(), "expires_at":{"$lte":now}}),
-            many: false,
-        })
-        .await?;
     let rows = tx
         .database()
         .entity::<models::requests::Entity>()?
@@ -512,13 +489,13 @@ pub(crate) async fn store_request<T: Serialize>(
     operation: &str,
     digest: &str,
     result: &T,
-    expires_at: i64,
+    created_at: i64,
 ) -> Result<(), WorkflowServiceError> {
     tx.database()
         .collection(models::requests::Entity::COLLECTION)?
         .insert(value!({
             "id":super::types::storage_id(), "app_id":app.as_str(), "request_id":id.as_str(), "operation":operation, "digest":digest,
-            "result":encode(result)?, "expires_at":expires_at,
+            "result":encode(result)?, "created_at":created_at,
         }))
         .await?;
     Ok(())

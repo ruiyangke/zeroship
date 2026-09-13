@@ -45,10 +45,16 @@ platform services may access only the Control database. Authenticated service
 contracts carry cross-boundary requests without sharing database credentials.
 `AppWorkflows::apply_management` commits coordinator lifecycle commands with
 durable customer-journal receipts. Repeated commands return their recorded
-outcome even after ordinary request cleanup or policy expiry. Changed command
+outcome after later lifecycle changes or policy expiry. Changed command
 bodies conflict; infrastructure failures remain retryable. Lifecycle rejection
 and database failure are separate paths, so a failed write cannot become a
 permanent denial. Receipt compaction awaits a coordinator redelivery contract.
+App-operation `RequestId` receipts also persist without an age-based expiry.
+Retries return their original result, and changed operation bodies conflict.
+Lifecycle changes do not free an accepted request identity for reuse. Replaying
+a signal-token request returns the original token, whose expiration and
+revocation still apply. Receipt retirement requires explicit admission fences;
+the journal does not infer them from elapsed time.
 `zeroship-workflow-manager::deployments::DeploymentHolds` accepts an authorized
 platform ORM database. Holds survive
 reconnection, and generation checks reject stale releases. The collector helpers

@@ -26,12 +26,19 @@ used by the local engine. The control plane uses the Rust engine directly.
 
 The replacement service accepts an `OrmStore` built from the host's `OrmContext`,
 `DbBinding` and `BackendHandle`. The ORM selects the configured database and owns
-transactions. Journal operations currently use its scoped SQL interface while
-model conversion proceeds. Rust and creator ORM access permits workflow table
+transactions. Journal operations use ORM collections and migration-derived Rust
+models. Rust and creator ORM access permits workflow table
 names within the bound customer schema; prefixes are not an authorization check.
 `AppWorkflows::into_backend` exposes a bounded client for V8 and Rust callers on
 other runtime threads; database operations remain on the engine's owning thread.
 The existing Control PostgreSQL store remains until production cutover.
+
+The replacement service retains accepted app-operation `RequestId` receipts in
+the creator journal. Retrying the same request returns its original result even
+after later lifecycle changes; changing its operation or body conflicts. These
+receipts have no time-based expiry. A signal-token retry returns the original
+token and preserves its expiration and revocation rules. Safe receipt retirement
+requires a protocol that fences future retries.
 
 A trusted Rust host can use `HttpWorkflowBackend` through `WorkflowBackend`
 to start runs, read status, signal, restart, or change lifecycle state. Construct

@@ -1,5 +1,5 @@
 use super::{
-    app::{deadline, emit, encode, lock_app, lock_run, parse_state, request_result, store_request},
+    app::{emit, encode, lock_app, lock_run, parse_state, request_result, store_request},
     models,
     store::Transaction,
     types::digest,
@@ -65,8 +65,7 @@ impl AppWorkflows {
         let mut tx = self.service.begin().await?;
         let policy = lock_app(&mut tx, &self.app).await?;
         let now = tx.now().await?;
-        if let Some(receipt) =
-            request_result(&mut tx, &self.app, request, "broadcast", &digest, now).await?
+        if let Some(receipt) = request_result(&tx, &self.app, request, "broadcast", &digest).await?
         {
             return Ok(receipt);
         }
@@ -81,7 +80,7 @@ impl AppWorkflows {
             "broadcast",
             &digest,
             &result,
-            deadline(now, policy.request_retention_ms)?,
+            now,
         )
         .await?;
         tx.commit().await?;

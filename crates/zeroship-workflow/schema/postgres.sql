@@ -115,11 +115,9 @@ CREATE UNIQUE INDEX IF NOT EXISTS "__zeroship_workflow_subscription_sequence_uni
 
 CREATE INDEX IF NOT EXISTS "__zeroship_workflow_subscriptions_topic_idx" ON "__zeroship_workflow_schema"."__zeroship_workflow_subscriptions" ("app_id", "topic", "id");
 
-CREATE TABLE "__zeroship_workflow_schema"."__zeroship_workflow_requests" ("id" text PRIMARY KEY NOT NULL, "app_id" text NOT NULL, "request_id" text NOT NULL, "operation" text NOT NULL, "digest" text NOT NULL, "result" text NOT NULL, "expires_at" bigint NOT NULL, CONSTRAINT "__zeroship_workflow_requests_app" FOREIGN KEY ("app_id") REFERENCES "__zeroship_workflow_schema"."__zeroship_workflow_app_state" ("app_id") ON DELETE RESTRICT);
+CREATE TABLE "__zeroship_workflow_schema"."__zeroship_workflow_requests" ("id" text PRIMARY KEY NOT NULL, "app_id" text NOT NULL, "request_id" text NOT NULL, "operation" text NOT NULL, "digest" text NOT NULL, "result" text NOT NULL, "created_at" bigint NOT NULL, CONSTRAINT "__zeroship_workflow_requests_app" FOREIGN KEY ("app_id") REFERENCES "__zeroship_workflow_schema"."__zeroship_workflow_app_state" ("app_id") ON DELETE RESTRICT);
 
 CREATE UNIQUE INDEX IF NOT EXISTS "__zeroship_workflow_requests_scope_key" ON "__zeroship_workflow_schema"."__zeroship_workflow_requests" ("app_id", "request_id");
-
-CREATE INDEX IF NOT EXISTS "__zeroship_workflow_requests_expiry_idx" ON "__zeroship_workflow_schema"."__zeroship_workflow_requests" ("expires_at");
 
 CREATE TABLE "__zeroship_workflow_schema"."__zeroship_workflow_management_receipts" ("id" text PRIMARY KEY NOT NULL, "app_id" text NOT NULL, "request_id" text NOT NULL, "digest" text NOT NULL, "outcome" text NOT NULL, "created_at" bigint NOT NULL, CONSTRAINT "__zeroship_workflow_management_receipts_app" FOREIGN KEY ("app_id") REFERENCES "__zeroship_workflow_schema"."__zeroship_workflow_app_state" ("app_id") ON DELETE RESTRICT);
 
@@ -154,4 +152,4 @@ CREATE TABLE "__zeroship_workflow_schema"."__zeroship_workflow_outbox" ("id" tex
 CREATE UNIQUE INDEX IF NOT EXISTS "__zeroship_workflow_outbox_scope_key" ON "__zeroship_workflow_schema"."__zeroship_workflow_outbox" ("app_id", "id");
 
 CREATE INDEX IF NOT EXISTS "__zeroship_workflow_outbox_delivery_idx" ON "__zeroship_workflow_schema"."__zeroship_workflow_outbox" ("delivered_at", "created_at");
-INSERT INTO "__zeroship_workflow_schema".__zeroship_workflow_schema_version (id, fingerprint) VALUES ('workflow', '2000a5620f86fb5124c06f1b7a82778e86a272638319904de522186b610fe090');
+INSERT INTO "__zeroship_workflow_schema".__zeroship_workflow_schema_version (id, fingerprint) VALUES ('workflow', 'cfaada33f09ebe8f501f603413eba151cfb909d530b5c1feef17187407be5556');

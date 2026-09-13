@@ -108,7 +108,7 @@ async fn assert_scoped_writes(store: OrmStore) {
             .insert(
                 value!({"id":typed_id::generate("wfr"), "app_id":app.as_str(),
             "request_id":request.as_str(), "operation":"start", "digest":"same-input",
-            "result":"null", "expires_at":1}),
+            "result":"null", "created_at":1}),
             )
             .await
             .unwrap();
@@ -116,7 +116,7 @@ async fn assert_scoped_writes(store: OrmStore) {
     assert!(requests
         .insert(value!({"id":typed_id::generate("wfr"), "app_id":a.as_str(),
         "request_id":request.as_str(), "operation":"start", "digest":"same-input",
-        "result":"null", "expires_at":1}))
+        "result":"null", "created_at":1}))
         .await
         .is_err());
     assert!(matches!(
