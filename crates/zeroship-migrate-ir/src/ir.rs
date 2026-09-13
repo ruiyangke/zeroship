@@ -1523,6 +1523,9 @@ pub struct ColumnReference {
     /// table-qualified default without dropping to table-level `foreignKeys`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    /// Logical ORM navigation name, independent of the database constraint.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relation: Option<String>,
 }
 
 /// The CLOSED target shape for an exclusion-constraint element. A target is
@@ -6140,6 +6143,7 @@ mod tests {
             unique: None,
             value_format: None,
             references: Some(ColumnReference {
+                relation: None,
                 table: "accounts".into(),
                 column: "id".into(),
                 on_delete: Some(RefAction::Cascade),
@@ -6169,6 +6173,7 @@ mod tests {
     #[test]
     fn typed_column_reference_explicit_constraint_name_round_trips() {
         let reference = ColumnReference {
+            relation: None,
             table: "accounts".into(),
             column: "id".into(),
             on_delete: None,

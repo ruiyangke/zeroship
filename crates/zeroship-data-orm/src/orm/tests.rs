@@ -14,6 +14,8 @@ mod dynamic_reads;
 mod encrypted_upsert;
 mod exact_decimal;
 mod fixtures;
+mod relations;
+mod typed_relations;
 mod generated_identity;
 mod identity;
 mod identity_contract;

@@ -193,6 +193,9 @@ pub struct FieldDescriptor {
     /// `<table>_<field>_fkey` derivation.
     #[serde(rename = "refName", default)]
     pub reference_name: Option<String>,
+    /// Logical ORM navigation name declared alongside the foreign key.
+    #[serde(default)]
+    pub relation: Option<String>,
     /// `ref` ON DELETE policy (`restrict` | `cascade` | `set null` | `no action`).
     /// `None` => the SQL/Postgres default `NO ACTION`, which renders as no clause.
     #[serde(rename = "onDelete", default)]
@@ -481,6 +484,9 @@ fn field_to_sdk_def(f: &FieldDescriptor) -> serde_json::Value {
         if let Some(name) = &f.reference_name {
             def.insert("refName".into(), serde_json::Value::String(name.clone()));
         }
+        if let Some(relation) = &f.relation {
+            def.insert("relation".into(), serde_json::Value::String(relation.clone()));
+        }
         if let Some(on_delete) = &f.on_delete {
             def.insert(
                 "onDelete".into(),
@@ -630,10 +636,7 @@ pub fn descriptor_to_sdk_schema(d: &CollectionDescriptor) -> serde_json::Value {
         if f.unique {
             def.insert("unique".into(), serde_json::Value::Bool(true));
         }
-        // FK metadata is already carried by `field_to_sdk_def`, independently
-        // from the local storage type. Legacy `type: "ref"` fields omit
-        // `refColumn` and retain the historical `id` target; typed migration
-        // references always carry it explicitly.
+        // Foreign-key and relation metadata come from `field_to_sdk_def`.
         if let Some(def_val) = &f.default {
             def.insert("default".into(), def_val.clone());
         }

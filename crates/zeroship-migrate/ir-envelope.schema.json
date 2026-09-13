@@ -2902,7 +2902,7 @@
           ]
         },
         "idPrefix": {
-          "description": "Internal platform-ID prefix for the\n`<prefix>_<25 base36 UUIDv7>` format. This is a DECLARED-ONLY hint DB\nintrospection cannot recover (the minted value is opaque text in the\ncatalog; the prefix is a mint-time input, not a stored column attribute).\nIt is used by internal platform descriptors; it is neither TypeID nor\npublic migration authoring. Carried so gen-types - and the runtime, once it\ndeletes the declared-schema cache - keep that internal brand.\nDefault-absent + `skip_serializing_if` so a column that declares no prefix is\nBYTE-IDENTICAL on the wire and in the checksum to the pre-facet image.\n\n[`crate::model::validate`]: crate::validate\n\nValidation is bounded\nat validate-time ([`crate::validate`]) to the internal prefix charset/length + the\nreserved-prefix deny-list (a hand-crafted IR envelope is the threat model).\n\nCamel-cased on the wire (`\"idPrefix\"`) - the op-region nested-field\nconvention (`ir_wire_contract`, asserted by\n`ir_column_facet_fields_are_camel_case`); this aligns the spelling with the\n`FieldDescriptor.id_prefix` (`#[serde(rename = \"idPrefix\")]`, `declarative.rs`)\n, so the same concept is spelled ONE way across the IR and the descriptor.",
+          "description": "Internal platform-ID prefix for the\n`<prefix>_<25 base36 UUIDv7>` format. This is a DECLARED-ONLY hint DB\nintrospection cannot recover (the minted value is opaque text in the\ncatalog; the prefix is a mint-time input, not a stored column attribute).\nIt is used by internal platform descriptors; it is neither TypeID nor\npublic migration authoring. Carried so gen-types - and\nthe runtime, once it deletes the declared-schema cache - keep that legacy\ninternal brand.\nDefault-absent + `skip_serializing_if` so a column that declares no prefix is\nBYTE-IDENTICAL on the wire and in the checksum to the pre-facet image.\n\n[`crate::model::validate`]: crate::validate\n\nValidation is bounded\nat validate-time ([`crate::validate`]) to the legacy internal prefix charset/length + the\nreserved-prefix deny-list (a hand-crafted IR envelope is the threat model).\n\nCamel-cased on the wire (`\"idPrefix\"`) - the op-region nested-field\nconvention (`ir_wire_contract`, asserted by\n`ir_column_facet_fields_are_camel_case`); this aligns the spelling with the\n`FieldDescriptor.id_prefix` (`#[serde(rename = \"idPrefix\")]`, `declarative.rs`)\n, so the same concept is spelled ONE way across the IR and the descriptor.",
           "type": [
             "string",
             "null"
@@ -4504,6 +4504,13 @@
         },
         "name": {
           "description": "Optional explicit foreign-key constraint name. Absent => the name is\nderived (`<table>_<column>_fkey`). Lets authors override the portable\ntable-qualified default without dropping to table-level `foreignKeys`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "relation": {
+          "description": "Logical ORM navigation name, independent of the database constraint.",
           "type": [
             "string",
             "null"

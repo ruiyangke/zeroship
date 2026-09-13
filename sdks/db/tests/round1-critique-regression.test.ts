@@ -448,11 +448,7 @@ describe("CRITICAL #1 — typed collections after installSchema", () => {
         { id: "usr_1", email: "alice@example.com", name: "Alice" },
       ],
       todos: [
-        // `naming.asIs` is the default (install-schema.ts:1067-1091), so the native
-        // returns the FK under the JS field name. This row used to say `user_id`,
-        // modelling the abandoned snakeCase default -- `relations.ts` reads
-        // `r[field]` i.e. `r.userId`, found undefined, and nulled every relation.
-        { id: "todo_10", userId: "usr_1", title: "buy milk" },
+        { id: "todo_10", userId: "usr_1", title: "buy milk", user: { id: "usr_1", email: "alice@example.com", name: "Alice" } },
       ],
     };
     const native = {
@@ -481,7 +477,7 @@ describe("CRITICAL #1 — typed collections after installSchema", () => {
     const db = installSchemaForTest(
       {
         users: { email: t.string().required(), name: t.string().required() },
-        todos: { userId: t.ref("users").required(), title: t.string().required() },
+        todos: { userId: t.ref("users", { relation: "user" }).required(), title: t.string().required() },
       },
       { native },
     );
@@ -494,12 +490,13 @@ describe("CRITICAL #1 — typed collections after installSchema", () => {
     assert.equal(typeof db.users, "object");
     assert.equal(typeof db.todos, "object");
 
-    const result = await db.todos.find({}, { with: { userId: true } });
+    const result = await db.todos.find({}, { with: { user: true } });
     assert.equal(result.error, null);
     assert.ok(result.data);
     assert.equal(result.data!.length, 1);
-    const joined = result.data![0] as { userId: { email: string } | null };
-    assert.ok(joined.userId, "expected the relation to be loaded");
-    assert.equal(joined.userId!.email, "alice@example.com");
+    const joined = result.data![0] as { user: { email: string } | null };
+    assert.ok(joined.user, "expected the relation to be loaded");
+    assert.equal(joined.user!.email, "alice@example.com");
+    assert.deepEqual(callLog, [{ table: "todos", filter: {} }]);
   });
 });

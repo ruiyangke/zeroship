@@ -844,6 +844,7 @@ mod tests {
 
     fn reference(table: &str) -> ColumnReference {
         ColumnReference {
+            relation: None,
             table: table.to_string(),
             column: "id".to_string(),
             on_delete: None,

@@ -440,6 +440,7 @@ fn mysql_refuses_a_column_reference_that_would_synthesize_a_text_key() {
     parent_id.unique = Some(true);
     let mut parent_id_ref = column("parent_id", ColType::Text);
     parent_id_ref.references = Some(ColumnReference {
+        relation: None,
         table: "parents".to_string(),
         column: "id".to_string(),
         on_delete: None,

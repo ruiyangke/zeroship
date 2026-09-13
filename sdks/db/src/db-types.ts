@@ -102,7 +102,7 @@ export type SchemaInput =
  * shape S.
  *
  * `AllSchemas` mirrors `Collection<S, N, AllSchemas>` — `installSchema`
- * passes the full schema map so `tx.x.find({...}, { with: { fk: true } })`
+ * passes the full schema map so `tx.x.find({...}, { with: { author: true } })`
  * resolves the joined field to the target collection's `Row<...>` at the
  * type layer. Default `Record<string, unknown>` keeps direct `TxCollection`
  * consumers compiling (joined fields degrade to `PlainObject`).
@@ -121,16 +121,17 @@ export type TxCollection<S = PlainObject, AllSchemas extends Record<string, unkn
       unmaskReason?: string;
     },
   ): Promise<Pick<Row<S>, K> | null>;
-  get<const W extends WithSpec<S>>(
+  get<const W extends WithSpec<S>, K extends string & keyof Row<S> = string & keyof Row<S>>(
     idOrFilter: RowId<S> | Filter<S>,
     opts: {
       with: ExactWithSpec<S, W>;
+      select?: K[];
       orderBy?: SortSpec<S>;
       actor?: Actor;
       unmask?: (string & keyof Row<S>)[];
       unmaskReason?: string;
     },
-  ): Promise<(Omit<Row<S>, keyof W> & WithRelations<S, W, AllSchemas>) | null>;
+  ): Promise<(Pick<Row<S>, K> & WithRelations<S, W, AllSchemas>) | null>;
   get(
     idOrFilter: RowId<S> | Filter<S>,
     opts?: {
@@ -149,7 +150,7 @@ export type TxCollection<S = PlainObject, AllSchemas extends Record<string, unkn
       unmask?: (string & keyof Row<S>)[];
       unmaskReason?: string;
     },
-  ): TxQuery<S, Omit<Row<S>, keyof W> & WithRelations<S, W, AllSchemas>, AllSchemas>;
+  ): TxQuery<S, Row<S> & WithRelations<S, W, AllSchemas>, AllSchemas>;
   find(
     filter?: Filter<S>,
     opts?: {
@@ -204,11 +205,11 @@ export type TxQuery<
   sort(s: SortInput<S>): TxQuery<S, P, AllSchemas>;
   limit(n: number): TxQuery<S, P, AllSchemas>;
   skip(n: number): TxQuery<S, P, AllSchemas>;
-  select<K extends SelectableField<S>>(field: K): TxQuery<S, Pick<Row<S>, K>, AllSchemas>;
-  select<K extends SelectableField<S>>(fields: readonly K[]): TxQuery<S, Pick<Row<S>, K>, AllSchemas>;
+  select<K extends SelectableField<S>>(field: K): TxQuery<S, Pick<Row<S>, K> & Omit<P, keyof Row<S>>, AllSchemas>;
+  select<K extends SelectableField<S>>(fields: readonly K[]): TxQuery<S, Pick<Row<S>, K> & Omit<P, keyof Row<S>>, AllSchemas>;
   select<const Selection extends SelectSpec<S>>(
     fields: Selection,
-  ): TxQuery<S, Pick<Row<S>, keyof Selection & keyof Row<S>>, AllSchemas>;
+  ): TxQuery<S, Pick<Row<S>, keyof Selection & keyof Row<S>> & Omit<P, keyof Row<S>>, AllSchemas>;
   after(id: RowId<S>): TxQuery<S, P, AllSchemas>;
   with<const W extends WithSpec<S>>(spec: ExactWithSpec<S, W>): TxQuery<S, Omit<P, keyof W> & WithRelations<S, W, AllSchemas>, AllSchemas>;
   paginate(opts: {

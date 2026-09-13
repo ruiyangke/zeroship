@@ -1,0 +1,30 @@
+error[E0271]: type mismatch resolving `<author as Relation>::Source == Entity`
+ --> tests/ui/cross_entity_relation.rs:7:23
+  |
+7 |         .with_related(schema::posts::relations::author);
+  |          ------------ ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ type mismatch resolving `<author as Relation>::Source == Entity`
+  |          |
+  |          required by a bound introduced by this call
+  |
+note: expected this to be `authors::Entity`
+ --> tests/ui/cross_entity_relation.rs:2:1
+  |
+2 | schema!(pub schema = "../fixtures/typed-relations.runtime.json");
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  = note: `posts::Entity` and `authors::Entity` have similar names, but are actually distinct types
+note: `posts::Entity` is defined in module `crate::schema::posts` of the current crate
+ --> tests/ui/cross_entity_relation.rs:2:1
+  |
+2 | schema!(pub schema = "../fixtures/typed-relations.runtime.json");
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+note: `authors::Entity` is defined in module `crate::schema::authors` of the current crate
+ --> tests/ui/cross_entity_relation.rs:2:1
+  |
+2 | schema!(pub schema = "../fixtures/typed-relations.runtime.json");
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+note: required by a bound in `EntityQuery::<E>::with_related`
+ --> src/orm/read_builder/entity_query.rs
+  |
+  |     pub fn with_related<R: Relation<Source = E>>(self, _: R) -> RelatedQuery<E, R> {
+  |                                     ^^^^^^^^^^ required by this bound in `EntityQuery::<E>::with_related`
+  = note: this error originates in the macro `schema` (in Nightly builds, run with -Z macro-backtrace for more info)
