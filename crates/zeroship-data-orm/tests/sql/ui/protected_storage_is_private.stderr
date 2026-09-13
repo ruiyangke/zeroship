@@ -12,7 +12,7 @@ note: the function `read_raw_column_value` is defined here
   | |     collection: &str,
   | |     raw_column: &str,
   | |     row_pk: &str,
-  | |     schema: &Value,
+  | |     schema: &crate::schema::FieldMap,
   | | ) -> Result<ScalarRead<Value>, DbError> {
   | |_______________________________________^
 
@@ -30,6 +30,6 @@ note: the function `read_raw_column_bytes` is defined here
   | |     collection: &str,
   | |     raw_column: &str,
   | |     row_pk: &str,
-  | |     schema: &Value,
+  | |     schema: &crate::schema::FieldMap,
   | | ) -> Result<ScalarRead<Vec<u8>>, DbError> {
   | |_________________________________________^
