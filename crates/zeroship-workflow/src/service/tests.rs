@@ -23,7 +23,7 @@ fn configured_policy(revision: i64, policy: AppPolicy) -> PolicySnapshot {
 
 mod background_scope;
 #[path = "../../../../tests/fixtures/workflow_deployments.rs"]
-mod deployment_fixture;
+pub(super) mod deployment_fixture;
 mod deployment_retention;
 mod deployments;
 mod delivery;
