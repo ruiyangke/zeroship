@@ -99,6 +99,50 @@ const fn settings() -> RolloutPolicy {
 }
 
 #[compio::test]
+async fn readiness_checks_source_join_and_ledger_identity_grants_with_an_empty_catalog() {
+    let platform = platform::Platform::new().await;
+    let source = connect_store(&platform.runtime_url).await;
+    let apps: i64 = platform
+        .admin
+        .query_one("SELECT count(*) FROM zeroship.apps", &[])
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(apps, 0, "readiness must not require a configured app");
+    source.ready().await.unwrap();
+
+    platform
+        .admin
+        .batch_execute("REVOKE SELECT (plan_id) ON zeroship.apps FROM zeroship_workflow")
+        .await
+        .unwrap();
+    assert_eq!(source.ready().await, Err(Error::Unavailable));
+    platform
+        .admin
+        .batch_execute("GRANT SELECT (plan_id) ON zeroship.apps TO zeroship_workflow")
+        .await
+        .unwrap();
+    source.ready().await.unwrap();
+
+    platform
+        .admin
+        .batch_execute(
+            "REVOKE SELECT ON zeroship.workflow_policy_ledger FROM zeroship_workflow; \
+             GRANT SELECT (revision, policy_json, source_validity_ms) \
+                ON zeroship.workflow_policy_ledger TO zeroship_workflow",
+        )
+        .await
+        .unwrap();
+    assert_eq!(source.ready().await, Err(Error::Unavailable));
+    platform
+        .admin
+        .batch_execute("GRANT SELECT ON zeroship.workflow_policy_ledger TO zeroship_workflow")
+        .await
+        .unwrap();
+    source.ready().await.unwrap();
+}
+
+#[compio::test]
 async fn authoritative_policy_requires_complete_inputs_and_preserves_publication_order() {
     let fixture = Fixture::new().await;
     let policy = AppPolicy::default();

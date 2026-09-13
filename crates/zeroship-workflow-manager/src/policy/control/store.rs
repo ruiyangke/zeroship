@@ -46,37 +46,17 @@ impl ControlPolicyStore {
     /// Refuses unavailable or incompatible source storage.
     pub async fn ready(&self) -> Result<(), Error> {
         async {
-            let app = self.database.entity::<apps::Entity>()?.alias("app")?;
-            self.database
-                .from(&app)
-                .select(app.row::<AppRecord>())?
-                .limit(1)?
-                .all()
-                .await?;
-            let plan = self.database.entity::<plans::Entity>()?.alias("plan")?;
-            self.database
-                .from(&plan)
-                .select(plan.row::<PlanRecord>())?
-                .limit(1)?
-                .all()
-                .await?;
-            let switches = self
-                .database
-                .entity::<rollout::Entity>()?
-                .alias("switches")?;
-            self.database
-                .from(&switches)
-                .select(switches.row::<RolloutRecord>())?
-                .limit(1)?
-                .all()
-                .await?;
+            read_source(&self.database, None).await?;
             let publication = self
                 .database
                 .entity::<ledger::Entity>()?
                 .alias("publication")?;
             self.database
                 .from(&publication)
-                .select(publication.row::<LedgerRecord>())?
+                .select((
+                    publication.column(ledger::id).select::<String>(),
+                    publication.row::<LedgerRecord>(),
+                ))?
                 .limit(1)?
                 .all()
                 .await?;
@@ -193,6 +173,41 @@ struct NewLedger {
     id: String,
 }
 
+async fn read_source(
+    tx: &Database,
+    app: Option<&AppId>,
+) -> Result<Vec<(AppRecord, PlanRecord, RolloutRecord)>, DbError> {
+    let app_source = tx.entity::<apps::Entity>()?.alias("app")?;
+    let plan_source = tx.entity::<plans::Entity>()?.alias("plan")?;
+    let switches = tx.entity::<rollout::Entity>()?.alias("switches")?;
+    let filter = match app {
+        Some(app) => app_source.column(apps::id).eq(app.as_str())?,
+        // Readiness must check the selector's grant even without a requested app.
+        None => app_source.column(apps::id).is_not_null(),
+    };
+    let query = tx
+        .from(&app_source)
+        .inner_join(
+            &plan_source,
+            app_source
+                .column(apps::plan_id)
+                .eq_column(plan_source.column(plans::id))?,
+        )?
+        .inner_join(&switches, switches.column(rollout::id).eq("global")?)?
+        .filter(filter)
+        .select((
+            app_source.row::<AppRecord>(),
+            plan_source.row::<PlanRecord>(),
+            switches.row::<RolloutRecord>(),
+        ))?;
+    let query = if app.is_none() {
+        query.limit(1)?
+    } else {
+        query
+    };
+    query.all().await
+}
+
 async fn publish(
     tx: &Database,
     app: &AppId,
@@ -209,26 +224,7 @@ async fn publish(
             ConflictTarget::new(ledger::id),
         )
         .await?;
-    let app_source = tx.entity::<apps::Entity>()?.alias("app")?;
-    let plan_source = tx.entity::<plans::Entity>()?.alias("plan")?;
-    let switches = tx.entity::<rollout::Entity>()?.alias("switches")?;
-    let rows = tx
-        .from(&app_source)
-        .inner_join(
-            &plan_source,
-            app_source
-                .column(apps::plan_id)
-                .eq_column(plan_source.column(plans::id))?,
-        )?
-        .inner_join(&switches, switches.column(rollout::id).eq("global")?)?
-        .filter(app_source.column(apps::id).eq(app.as_str())?)
-        .select((
-            app_source.row::<AppRecord>(),
-            plan_source.row::<PlanRecord>(),
-            switches.row::<RolloutRecord>(),
-        ))?
-        .all()
-        .await?;
+    let rows = read_source(tx, Some(app)).await?;
     let [(app_record, plan, switches)] = rows.as_slice() else {
         return Err(unavailable());
     };
