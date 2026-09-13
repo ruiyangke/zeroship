@@ -1,5 +1,5 @@
 const BASE36 = "0123456789abcdefghijklmnopqrstuvwxyz";
-const TYPED_ID_RE = /^([a-z]{3})_([0-9a-z]{25})$/;
+const TYPED_ID_RE = /^([a-z]{3,4})_([0-9a-z]{25})$/;
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -10,7 +10,7 @@ export interface ParsedTypedId {
 }
 
 function assertPrefix(prefix: string): void {
-  if (!/^[a-z]{3}$/.test(prefix)) {
+  if (!/^[a-z]{3,4}$/.test(prefix)) {
     throw new Error(`invalid typed-id prefix: ${prefix}`);
   }
 }

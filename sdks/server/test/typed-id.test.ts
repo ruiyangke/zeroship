@@ -34,6 +34,16 @@ describe("typed-id helpers", () => {
     });
   });
 
+  test("accepts the platform's three- and four-letter prefixes", () => {
+    const uuid = "00000000-0000-7000-8000-000000000001";
+
+    assert.equal(isTypedId(typedIdFromUuid("app", uuid), "app"), true);
+    assert.equal(isTypedId(typedIdFromUuid("cron", uuid), "cron"), true);
+    for (const prefix of ["ab", "abcde", "APP", "app_id"]) {
+      assert.throws(() => typedIdFromUuid(prefix, uuid));
+    }
+  });
+
   test("stable seed derivation is deterministic and typed", () => {
     const seed = "zeroship-builder:test-thread";
 

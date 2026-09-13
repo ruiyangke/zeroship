@@ -1,8 +1,26 @@
 export type MaybePromise<T> = T | Promise<T>;
 export type ValueProvider<T> = T | (() => MaybePromise<T>);
 
+/** A canonical creator app id. */
+export type AppId = `app_${string}`;
 /** A canonical platform user id: `usr_` followed by the fixed-width lowercase base36 UUIDv7 body. */
 export type UserId = `usr_${string}`;
+
+const APP_ID_PATTERN = /^app_([0-9a-z]{25})$/;
+
+/** Check the complete runtime shape and numeric range of an AppId. */
+export function isAppId(value: string): value is AppId {
+  const body = APP_ID_PATTERN.exec(value)?.[1];
+  if (body === undefined) return false;
+
+  let decoded = 0n;
+  for (const character of body) {
+    const digit = Number.parseInt(character, 36);
+    decoded = decoded * 36n + BigInt(digit);
+    if (decoded > (1n << 128n) - 1n) return false;
+  }
+  return true;
+}
 
 export interface ControlClientOptions {
   /** Control-plane origin, for example `http://localhost:9090`. */
@@ -77,7 +95,7 @@ export class ControlError extends Error {
 }
 
 export interface AppRecord {
-  id: string;
+  id: AppId;
   name: string;
   plan_id: string;
   deploy_hash: string | null;
@@ -148,7 +166,7 @@ export type EgressDestinationKind = "name" | "cidr";
 
 /** One egress rule for an app. */
 export interface EgressRule {
-  app_id: string;
+  app_id: AppId;
   verdict: EgressVerdict;
   kind: EgressDestinationKind;
   /** The exact DNS name, or the range in canonical CIDR form. */
@@ -199,7 +217,7 @@ export interface EgressRuleLimits {
 }
 
 export interface ListEgressRulesResult {
-  app_id: string;
+  app_id: AppId;
   rules: EgressRule[];
   requests: EgressRequest[];
   /** Manifest hints with no matching accept rule: what is still refused. */
@@ -269,7 +287,7 @@ export interface DeployOptions {
 }
 
 export interface WorkflowSignalTokenInput {
-  appId: string;
+  appId: AppId;
   types: string[];
   ttl: string;
 }
@@ -280,7 +298,7 @@ export interface WorkflowSignalTokenResult {
 }
 
 export interface WorkflowTopicBroadcastInput {
-  appId: string;
+  appId: AppId;
   type: string;
   payload?: unknown;
   idempotencyKey?: string;
@@ -515,7 +533,7 @@ export class ControlClient {
 
   readonly apps = {
     list: (): Promise<AppRecord[]> => this.request("/api/apps"),
-    get: (id: string): Promise<AppRecord> =>
+    get: (id: AppId): Promise<AppRecord> =>
       this.request(`/api/apps/${pathPart(id)}`),
     create: (input: CreateAppInput): Promise<AppRecord> =>
       this.request("/api/apps", {
@@ -525,9 +543,9 @@ export class ControlClient {
           plan_id: input.plan_id ?? "free",
         },
       }),
-    archive: (id: string): Promise<AppRecord> =>
+    archive: (id: AppId): Promise<AppRecord> =>
       this.request(`/api/apps/${pathPart(id)}/archive`, { method: "PUT" }),
-    unarchive: (id: string): Promise<AppRecord> =>
+    unarchive: (id: AppId): Promise<AppRecord> =>
       this.request(`/api/apps/${pathPart(id)}/archive`, { method: "DELETE" }),
     /**
      * End the app. Terminal, unlike `archive`, and the last step of the
@@ -539,10 +557,10 @@ export class ControlClient {
      * returns nothing because there is no record left to hand back that the
      * caller may act on.
      */
-    delete: (id: string): Promise<void> =>
+    delete: (id: AppId): Promise<void> =>
       this.request(`/api/apps/${pathPart(id)}`, { method: "DELETE" }),
     deploy: (
-      id: string,
+      id: AppId,
       artifact: DeployBody,
       options: DeployOptions = {},
     ): Promise<DeployAppResult> =>
@@ -551,53 +569,53 @@ export class ControlClient {
         body: artifact,
         contentType: options.contentType ?? "application/x-zship",
       }),
-    setPlan: (id: string, input: SetPlanInput): Promise<SetPlanResult> =>
+    setPlan: (id: AppId, input: SetPlanInput): Promise<SetPlanResult> =>
       this.request(`/api/apps/${pathPart(id)}/plan`, {
         method: "PUT",
         body: input,
       }),
-    usage: (id: string): Promise<UsageCounters> =>
+    usage: (id: AppId): Promise<UsageCounters> =>
       this.request(`/api/apps/${pathPart(id)}/usage`),
-    logs: (id: string): Promise<string[]> =>
+    logs: (id: AppId): Promise<string[]> =>
       this.request(`/api/apps/${pathPart(id)}/logs`),
   };
 
   readonly env = {
-    listVars: (appId: string): Promise<ListVarsResult> =>
+    listVars: (appId: AppId): Promise<ListVarsResult> =>
       this.request(`/api/apps/${pathPart(appId)}/vars`),
-    setVar: (appId: string, input: SetKeyValueInput): Promise<void> =>
+    setVar: (appId: AppId, input: SetKeyValueInput): Promise<void> =>
       this.request(`/api/apps/${pathPart(appId)}/vars`, {
         method: "POST",
         body: input,
         parseAs: "void",
       }),
-    deleteVar: (appId: string, key: string): Promise<void> =>
+    deleteVar: (appId: AppId, key: string): Promise<void> =>
       this.request(`/api/apps/${pathPart(appId)}/vars/${pathPart(key)}`, {
         method: "DELETE",
         parseAs: "void",
       }),
-    listSecrets: (appId: string): Promise<ListSecretsResult> =>
+    listSecrets: (appId: AppId): Promise<ListSecretsResult> =>
       this.request(`/api/apps/${pathPart(appId)}/secrets`),
-    setSecret: (appId: string, input: SetKeyValueInput): Promise<void> =>
+    setSecret: (appId: AppId, input: SetKeyValueInput): Promise<void> =>
       this.request(`/api/apps/${pathPart(appId)}/secrets`, {
         method: "POST",
         body: input,
         parseAs: "void",
       }),
-    deleteSecret: (appId: string, key: string): Promise<void> =>
+    deleteSecret: (appId: AppId, key: string): Promise<void> =>
       this.request(`/api/apps/${pathPart(appId)}/secrets/${pathPart(key)}`, {
         method: "DELETE",
         parseAs: "void",
       }),
-    listExpose: (appId: string): Promise<ListExposeResult> =>
+    listExpose: (appId: AppId): Promise<ListExposeResult> =>
       this.request(`/api/apps/${pathPart(appId)}/env/expose`),
-    setExpose: (appId: string, input: SetExposeInput): Promise<ListExposeResult> =>
+    setExpose: (appId: AppId, input: SetExposeInput): Promise<ListExposeResult> =>
       this.request(`/api/apps/${pathPart(appId)}/env/expose`, {
         method: "PUT",
         body: input,
       }),
     listAudit: (
-      appId: string,
+      appId: AppId,
       options: ListAuditOptions = {},
     ): Promise<ListAuditResult> =>
       this.request(`/api/apps/${pathPart(appId)}/audit`, {
@@ -625,14 +643,14 @@ export class ControlClient {
    * Same authority as `env`: `env:read` to list, `env:write` to change.
    */
   readonly egressRules = {
-    list: (appId: string): Promise<ListEgressRulesResult> =>
+    list: (appId: AppId): Promise<ListEgressRulesResult> =>
       this.request(`/api/apps/${pathPart(appId)}/egress-rules`),
-    set: (appId: string, input: EgressRuleInput): Promise<SetEgressRuleResult> =>
+    set: (appId: AppId, input: EgressRuleInput): Promise<SetEgressRuleResult> =>
       this.request(`/api/apps/${pathPart(appId)}/egress-rules`, {
         method: "POST",
         body: input,
       }),
-    remove: (appId: string, input: DeleteEgressRuleInput): Promise<void> =>
+    remove: (appId: AppId, input: DeleteEgressRuleInput): Promise<void> =>
       this.request(`/api/apps/${pathPart(appId)}/egress-rules`, {
         method: "DELETE",
         body: input,
