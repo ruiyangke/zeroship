@@ -1220,9 +1220,11 @@ Use main's shared ORM API and coordinate its changes with the ORM owner.
 This inventory defines responsibility and success semantics. Existing coordinator
 routes are registered in
 [`workflow-server/src/api.rs`](../../crates/zeroship-workflow-server/src/api.rs).
-Queue and activation entries below are target operations; their exact wire
+Authenticated job submission, claim, heartbeat and settlement routes are in
+[`workflow-server/src/api/jobs.rs`](../../crates/zeroship-workflow-server/src/api/jobs.rs).
+Activation and ingress-scope entries remain target operations; their exact wire
 envelopes and endpoint registration must land with their producers and consumers.
-An operation name here does not imply an available public HTTP route.
+The inventory includes required semantics beyond the currently available routes.
 
 | Operation | Authorized caller and receiving owner | Successful result |
 | --- | --- | --- |
