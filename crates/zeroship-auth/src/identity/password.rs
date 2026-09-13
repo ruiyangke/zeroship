@@ -1,7 +1,7 @@
 //! Argon2id password hashing + enumeration-resistant verification.
 //!
-//! Per proposal §8.1: OWASP 2026 second-recommended params
-//! (m = 19 MiB / 19456 KiB, t = 2, p = 1). Returns PHC strings.
+//! Real and dummy credentials use the same hashing configuration. The resulting
+//! PHC strings carry the algorithm, parameters, salt and password hash.
 //!
 //! Argon2 is CPU-bound and synchronous; callers running on the ntex
 //! event loop wrap calls in `compio::runtime::spawn_blocking` to avoid
@@ -69,8 +69,9 @@ pub fn verify(password: &str, phc: &str) -> Result<bool> {
 /// Pre-computed dummy hash for the missing-user branch of `/login`.
 ///
 /// Used by the login handler when no user matches the submitted email, so the
-/// failure path runs the same code and spends the same wall time as the real
-/// verify path. Defeats login-side email enumeration.
+/// failure path verifies a hash with the same parameters as a real credential.
+/// The credential verifier must still refuse an absent or ineligible account
+/// even when the submitted password matches this padding hash.
 ///
 /// Hashed once on first call and memoised.
 ///
@@ -85,12 +86,34 @@ pub fn dummy_hash() -> &'static str {
     D.get_or_init(|| hash("absent-user-padding").expect("dummy hash"))
 }
 
-/// Verify against the dummy hash. Always returns `Ok(false)` but spends the
-/// same wall time as a real verify call.
-///
-/// # Errors
-///
-/// Returns `AuthError::Internal` on argon2 misconfiguration (should not occur).
-pub fn verify_against_dummy(password: &str) -> Result<bool> {
-    verify(password, dummy_hash())
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn independently_salted_hashes_verify_only_the_matching_password() {
+        let password = "password hash roundtrip phrase";
+        let first = hash(password).unwrap();
+        let second = hash(password).unwrap();
+        assert_ne!(first, second);
+        for phc in [&first, &second] {
+            let parsed = PasswordHash::new(phc).unwrap();
+            assert_eq!(parsed.algorithm.as_str(), "argon2id");
+            assert!(verify(password, phc).unwrap());
+            assert!(!verify("incorrect password phrase", phc).unwrap());
+        }
+    }
+
+    #[test]
+    fn dummy_hash_uses_the_current_password_hash_parameters() {
+        let real = hash("real account password phrase").unwrap();
+        let real = PasswordHash::new(&real).unwrap();
+        let dummy = PasswordHash::new(dummy_hash()).unwrap();
+        assert_eq!(dummy.algorithm, real.algorithm);
+        assert_eq!(dummy.version, real.version);
+        assert_eq!(dummy.params, real.params);
+        assert_ne!(dummy.salt, real.salt);
+        assert_eq!(dummy.hash.unwrap().len(), real.hash.unwrap().len());
+        assert!(!verify("real account password phrase", dummy_hash()).unwrap());
+    }
 }

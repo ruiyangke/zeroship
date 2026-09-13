@@ -5,7 +5,6 @@
 pub mod auth_server;
 pub mod database;
 pub mod mock_control;
-pub mod mock_provider;
 
 use uuid::Uuid;
 
@@ -31,25 +30,10 @@ pub fn test_database_url() -> String {
 
 // ─── AuthConfig test fixture ─────────────────────────────────────────────
 //
-// Every test that boots an in-process auth server needs an `AuthConfig`.
-// Building one as a struct literal means re-listing 30+ fields verbatim,
-// and every new field added in a future phase forces a fixture-sync
-// commit across every test file. Driving the same `clap::Parser::parse_from`
-// path the CLI uses lets unset fields take their declared defaults
-// automatically — new fields land with their defaults, no fixture churn.
-//
-// `test_auth_config` bakes in the overrides every fixture needs:
-// random bind port and explicit test-only secret inputs. Federation-specific
-// tests build on the returned config by
-// mutating the OAuth fields directly (cheaper than parsing again with
-// 8 more CLI args).
-/// The console origin the test fixture admits via `frame-ancestors` on the
-/// framed login routes (immersive iframe login, design §4.3). The rewritten
-/// clickjacking test reads this from the booted config rather than hard-coding
-/// it, exercising the route-aware security headers against the live `/login`.
-#[allow(dead_code)]
-pub const TEST_CONSOLE_ORIGIN: &str = "http://localhost:5173";
-
+// Build AuthConfig through the CLI resolver so unset fields retain their
+// declared defaults. Fixtures provide an ephemeral bind address and explicit
+// secret inputs. Federation scenarios pass provider settings as CLI flags and
+// resolve provider credentials from a file owned during server construction.
 #[must_use]
 pub fn test_auth_config(db_url: &str) -> AuthConfig {
     test_auth_config_with(db_url, &[])
@@ -72,6 +56,18 @@ pub fn test_auth_config(db_url: &str) -> AuthConfig {
 /// produces.
 #[allow(dead_code)]
 pub fn test_auth_config_with(db_url: &str, extra: &[&str]) -> AuthConfig {
+    test_auth_config_at(db_url, "http://localhost:0", extra)
+}
+
+/// Resolve server settings against the address owned by the HTTP fixture.
+pub fn test_auth_config_at(db_url: &str, public_url: &str, extra: &[&str]) -> AuthConfig {
+    // The console uses another origin on the auth host so the production
+    // same-site filter admits it when the fixture binds an ephemeral address.
+    let mut console_origin = url::Url::parse(public_url).expect("fixture public URL");
+    console_origin
+        .set_port(Some(5173))
+        .expect("fixture console port");
+    let console_origin = console_origin.origin().ascii_serialization();
     let mut args: Vec<&str> = Vec::from([
         "zeroship-auth",
         "--addr",
@@ -80,13 +76,13 @@ pub fn test_auth_config_with(db_url: &str, extra: &[&str]) -> AuthConfig {
         // /consent) emit the relaxed `frame-ancestors` — the rewritten threat
         // model test pins this NEW contract.
         "--frame-ancestor-origins",
-        TEST_CONSOLE_ORIGIN,
+        &console_origin,
         "--mail-from-email",
         "test@zeroship.test",
         "--mail-from-name",
         "Test",
         "--public-url",
-        "http://localhost:0",
+        public_url,
     ]);
     args.extend_from_slice(extra);
     // `parse_from` runs the generated resolver, exactly as real boot does.
@@ -258,12 +254,6 @@ pub fn native_authorize_return_to(client_id: &str, redirect_uri: &str) -> String
 /// the right home for every app in this crate's tests: they are about OIDC,
 /// sessions, consent and account lifecycle, and an app here needs a place to
 /// exist rather than a creator.
-///
-/// A test whose subject IS the seat - `consent_ui_test`, which asserts on the
-/// consenting user's ROLE - writes the `organization_members` row itself,
-/// joining through `apps.project_id -> projects.organization_id`. That is the
-/// replacement for the deleted `zeroship.app_members` row, and the reason this
-/// helper deliberately seats nobody.
 pub async fn unowned_project(pg: &compio_postgres::Client) -> String {
     let organization_id = zeroship_core::typed_id::generate("org");
     let project_id = zeroship_core::typed_id::generate("prj");

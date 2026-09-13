@@ -9,3 +9,4 @@ mod rate_limit;
 mod session_visibility;
 mod sessions;
 mod totp;
+mod users;

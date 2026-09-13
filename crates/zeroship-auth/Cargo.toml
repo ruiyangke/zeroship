@@ -82,10 +82,8 @@ tempfile = { workspace = true }
 # keeps them runnable in sandboxes that block io_uring; production builds use
 # the normal workspace compio dependency above the dev-dependency boundary.
 compio = { workspace = true, features = ["polling"] }
-# `tests/signup_forgot_ratelimit_test.rs` defines an in-test mock `Mailer`
-# impl; the trait uses `async fn`, so `#[async_trait]` keeps the impl
-# object-safe. Only the tests need it now that the trait lives in
-# `zeroship-mailer`.
+# Integration fixtures capture mail through the asynchronous `Mailer` trait.
+# `async_trait` keeps those implementations compatible with its trait objects.
 async-trait = { workspace = true }
 # Used by the refresh-token tests to drive two requests concurrently on the
 # single-threaded ntex test runtime (`futures::join!`), which is how the
