@@ -1,16 +1,16 @@
 error[E0277]: the trait bound `Post: zeroship_data_orm::orm::FromRow<authors::Entity>` is not satisfied
-  --> tests/ui/wrong_related_row.rs:14:22
+  --> tests/ui/wrong_related_row.rs:15:22
    |
-14 |         .all::<Post, Post>();
+15 |         .all::<Post, Post>();
    |          ---         ^^^^ unsatisfied trait bound
    |          |
    |          required by a bound introduced by this call
    |
 help: the trait `FromRow<authors::Entity>` is not implemented for `Post`
       but trait `FromRow<posts::Entity>` is implemented for it
-  --> tests/ui/wrong_related_row.rs:3:10
+  --> tests/ui/wrong_related_row.rs:4:10
    |
- 3 | #[derive(FromRow)]
+ 4 | #[derive(FromRow)]
    |          ^^^^^^^
    = help: for that trait implementation, expected `posts::Entity`, found `authors::Entity`
 note: required by a bound in `RelatedQuery::<E, R>::all`

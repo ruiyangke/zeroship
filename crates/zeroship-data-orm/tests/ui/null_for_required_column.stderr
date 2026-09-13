@@ -1,7 +1,15 @@
-error[E0277]: the trait bound `Option<std::string::String>: EncodeValue<zeroship_data_orm::orm::sql_types::Text>` is not satisfied
- --> tests/ui/null_for_required_column.rs:3:46
+warning: unused import: `zeroship_data_orm::orm::*`
+ --> tests/ui/null_for_required_column.rs:1:5
   |
-3 | fn main() { let _ = schema::posts::title.set(None::<String>); }
+1 | use zeroship_data_orm::orm::*;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+error[E0277]: the trait bound `Option<std::string::String>: EncodeValue<zeroship_data_orm::orm::sql_types::Text>` is not satisfied
+ --> tests/ui/null_for_required_column.rs:4:46
+  |
+4 | fn main() { let _ = schema::posts::title.set(None::<String>); }
   |                                          --- ^^^^^^^^^^^^^^ the trait `EncodeValue<zeroship_data_orm::orm::sql_types::Text>` is not implemented for `Option<std::string::String>`
   |                                          |
   |                                          required by a bound introduced by this call

@@ -1,30 +1,60 @@
 error[E0271]: type mismatch resolving `<title as Column>::Entity == Entity`
- --> tests/ui/cross_entity_conflict_target.rs:5:58
+ --> tests/ui/cross_entity_conflict_target.rs:6:58
   |
-5 |     let _ = ConflictTarget::new(first::posts::title).and(second::posts::title);
+6 |     let _ = ConflictTarget::new(first::posts::title).and(second::posts::title);
   |                                                      --- ^^^^^^^^^^^^^^^^^^^^ type mismatch resolving `<title as Column>::Entity == Entity`
   |                                                      |
   |                                                      required by a bound introduced by this call
   |
 note: expected this to be `first::posts::Entity`
- --> tests/ui/cross_entity_conflict_target.rs:3:1
+ --> tests/ui/../fixtures/posts_schema.rs
   |
-3 | schema!(pub second = "../fixtures/schema.runtime.json");
-  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  | /         ::zeroship_data_orm::orm::schema! {
+  | |             $visibility $module {
+  | |                 $collection {
+  | |                     #[orm(primary_key, max_length = 255, assign(on = insert, by = typed_id), writable = false)]
+... |
+  | |         }
+  | |_________^
+  |
+ ::: tests/ui/cross_entity_conflict_target.rs:4:1
+  |
+4 |   posts_schema!(pub second);
+  |   ------------------------- in this macro invocation
   = note: `second::posts::Entity` and `first::posts::Entity` have similar names, but are actually distinct types
 note: `second::posts::Entity` is defined in module `crate::second::posts` of the current crate
- --> tests/ui/cross_entity_conflict_target.rs:3:1
+ --> tests/ui/../fixtures/posts_schema.rs
   |
-3 | schema!(pub second = "../fixtures/schema.runtime.json");
-  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  | /         ::zeroship_data_orm::orm::schema! {
+  | |             $visibility $module {
+  | |                 $collection {
+  | |                     #[orm(primary_key, max_length = 255, assign(on = insert, by = typed_id), writable = false)]
+... |
+  | |         }
+  | |_________^
+  |
+ ::: tests/ui/cross_entity_conflict_target.rs:4:1
+  |
+4 |   posts_schema!(pub second);
+  |   ------------------------- in this macro invocation
 note: `first::posts::Entity` is defined in module `crate::first::posts` of the current crate
- --> tests/ui/cross_entity_conflict_target.rs:2:1
+ --> tests/ui/../fixtures/posts_schema.rs
   |
-2 | schema!(pub first = "../fixtures/schema.runtime.json");
-  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  | /         ::zeroship_data_orm::orm::schema! {
+  | |             $visibility $module {
+  | |                 $collection {
+  | |                     #[orm(primary_key, max_length = 255, assign(on = insert, by = typed_id), writable = false)]
+... |
+  | |         }
+  | |_________^
+  |
+ ::: tests/ui/cross_entity_conflict_target.rs:3:1
+  |
+3 |   posts_schema!(pub first);
+  |   ------------------------ in this macro invocation
 note: required by a bound in `zeroship_data_orm::orm::ConflictTarget::<E>::and`
  --> src/orm/mutations.rs
   |
   |     pub fn and<C: Column<Entity = E>>(mut self, _field: Field<C>) -> Self {
   |                          ^^^^^^^^^^ required by this bound in `ConflictTarget::<E>::and`
-  = note: this error originates in the macro `schema` (in Nightly builds, run with -Z macro-backtrace for more info)
+  = note: this error originates in the macro `::zeroship_data_orm::orm::schema` which comes from the expansion of the macro `posts_schema` (in Nightly builds, run with -Z macro-backtrace for more info)
