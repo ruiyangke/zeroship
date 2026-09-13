@@ -3,7 +3,7 @@ use super::fixtures::*;
 
 use compio_postgres::{NoTls, Pool};
 
-use uuid::Uuid;
+use zeroship_core::AppId;
 
 #[compio::test]
 async fn workflow_journal_reprovision_restores_ordinary_app_table_access() {
@@ -16,12 +16,12 @@ async fn workflow_journal_reprovision_restores_ordinary_app_table_access() {
         let _ = connection.run().await;
     })
     .detach();
-    let app_id = Uuid::new_v4();
+    let app_id = AppId::mint();
     let app_schema = zeroship_workflow::store::pg::app_schema_for(&app_id);
     let tables = zeroship_workflow::store::pg::WorkflowTables::for_app_id(&app_id);
     let schema_role = zeroship_core::database_role::per_app_role_name(&app_schema)
         .expect("workflow schema must produce a valid PostgreSQL role name");
-    let uuid_role = zeroship_core::database_role::per_app_role_name(&app_id.to_string())
+    let app_id_role = zeroship_core::database_role::per_app_role_name(app_id.as_str())
         .expect("workflow app id must produce a valid PostgreSQL role name");
 
     let _ = pool
@@ -30,7 +30,7 @@ async fn workflow_journal_reprovision_restores_ordinary_app_table_access() {
             &[],
         )
         .await;
-    for role in [&schema_role, &uuid_role] {
+    for role in [&schema_role, &app_id_role] {
         let _ = pool
             .execute(&format!("DROP OWNED BY \"{role}\""), &[])
             .await;
@@ -104,7 +104,10 @@ async fn workflow_journal_reprovision_restores_ordinary_app_table_access() {
             owner, schema_role,
             "journal owner for {table} is an app role"
         );
-        assert_ne!(owner, uuid_role, "journal owner for {table} is an app role");
+        assert_ne!(
+            owner, app_id_role,
+            "journal owner for {table} is an app role"
+        );
     }
 
     let _ = pool
@@ -113,7 +116,7 @@ async fn workflow_journal_reprovision_restores_ordinary_app_table_access() {
             &[],
         )
         .await;
-    for role in [&schema_role, &uuid_role] {
+    for role in [&schema_role, &app_id_role] {
         let _ = pool
             .execute(&format!("DROP OWNED BY \"{role}\""), &[])
             .await;
