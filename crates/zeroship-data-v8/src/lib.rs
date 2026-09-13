@@ -27,6 +27,7 @@ use zeroship_data_orm::{backend, descriptor, metrics, transaction, tx_route};
 pub(crate) mod context;
 pub mod op_error;
 mod read_capture;
+mod startup_policy;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]
@@ -138,10 +139,20 @@ impl NativePlugin for DbPlugin {
         // than key it under a schema that cannot be addressed.
         let binding = v8_classes::db::binding_for_isolate(scope, app_id)
             .ok_or_else(|| format!("app id {app_id:?} is not a legal database schema name"))?;
+        startup_policy::initialize(scope, binding.clone());
         zeroship_data_orm::descriptor::install_collections(&binding, schemas)
             .map_err(|error| error.to_string())?;
         install_native_collection_properties(scope, namespace, &collection_names)?;
         Ok(())
+    }
+
+    fn finalize_runtime<'s>(
+        &self,
+        scope: &mut v8::PinScope<'s, '_>,
+        _namespace: v8::Local<'s, v8::Object>,
+        _descriptor: Option<&serde_json::Value>,
+    ) -> Result<(), String> {
+        startup_policy::finalize(scope)
     }
 
     fn register(&self, _: &mut NativeRegistrar) {
@@ -328,9 +339,10 @@ export default { fetch() { return new Response("ok"); } };
             specifier: "index.js".into(),
             source: r#"
 import { env } from "zeroship";
-const names = ["transaction", "constructor", "__platform"];
+const names = ["transaction", "constructor", "__platform", "declareMaskPolicy"];
 globalThis.__dbCollisionCollections = JSON.stringify({
     nativeTransactionSurvives: typeof env.db.transaction === "function",
+    policyDeclarationSurvives: typeof env.db.declareMaskPolicy === "function",
     collections: names.map((name) => ({
         name,
         hasFind: typeof env.db.collection(name).find === "function",
@@ -348,6 +360,7 @@ export default { fetch() { return new Response("ok"); } };
                 "transaction",
                 "constructor",
                 "__platform",
+                "declareMaskPolicy",
             ])))
             .build();
 
@@ -367,10 +380,12 @@ export default { fetch() { return new Response("ok"); } };
             serde_json::from_str::<serde_json::Value>(&observed).unwrap(),
             serde_json::json!({
                 "nativeTransactionSurvives": true,
+                "policyDeclarationSurvives": true,
                 "collections": [
                     {"name": "transaction", "hasFind": true},
                     {"name": "constructor", "hasFind": true},
                     {"name": "__platform", "hasFind": true},
+                    {"name": "declareMaskPolicy", "hasFind": true},
                 ],
             })
         );

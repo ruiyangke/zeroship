@@ -1,43 +1,16 @@
 # @zeroship/bootstrap
 
-Framework-internal coordination package for zeroship.
+Framework-internal dev dispatch and module normalization, pending retirement.
+Creator code must not import this package.
 
-**User code MUST NOT import this package.** It is consumed by:
+The Vite plugin still consumes module normalization, the dev entry, fetch
+routing and dev auth. The remaining workflow helpers belong to the coordinated
+workflow refactor. Production procedure invocation uses the native runtime.
 
-- The runtime crate (`crates/runtime`), via `include_str!` of files in
-  `dist/` so the dispatcher and DB-init orchestrator are spliced into
-  every isolate's bootstrap module.
-- The Vite plugin (`@zeroship/vite-plugin`), via `import` in
-  `src/dev-bootstrap/index.ts` so dev-mode dispatch + descriptor install
-  share the same logic as production.
+Database startup is owned by the runtime and DB plugin. The plugin supplies its
+SDK adapter module, prepares collection wrappers from the validated descriptor,
+and finalizes startup policy declarations. This package supplies no database
+installer, policy capability handle or readiness promise.
 
-The public surface here is "framework-stable" — it can change without
-deprecation as long as the runtime crate and Vite plugin are updated in
-lockstep.
-
-## What lives here
-
-- `dispatcher.ts` — `__zsDispatch(rpcDict, name, input, ctx)`. Owns
-  input parse / capability frame / stream framing / dev-only
-  output validation. Same logic for dev and prod.
-- `normalize.ts` — `normalizeUserModule(mod) → { fetch, rpc, userDefault }`.
-  Turns a user module namespace into the standard ZS shape.
-- `fetch-handler.ts` — WinterCG `fetch` wrapper that routes
-  `/__zeroship/v1/<id>` through the dispatcher and falls through to the
-  user's own `default.fetch`.
-- `runtime-entry.ts` — production mask-policy handoff embedded by the runtime.
-  It exposes policy readiness for the dispatcher. The native DB plugin prepares
-  SDK collections before creator evaluation.
-- `dev-entry.ts` — dev-mode equivalent that wires the dispatcher /
-  fetch handler / schema install around a user-supplied module loader
-  (e.g. Vite's ModuleRunner).
-
-## Build ordering
-
-`pnpm -F @zeroship/bootstrap build` MUST run before
-`cargo build -p zeroship-runtime`. The runtime crate's
-`crates/runtime/src/core/init.rs` does `include_str!` against
-`dist/runtime-entry.js` and `dist/dispatcher.js`; absent dist files
-fail the cargo build with a clear "file not found" message.
-
-Run `pnpm build` from the workspace root to ensure correct ordering.
+Build with `node --run build` before building the Vite plugin. The runtime core
+has no build dependency on this package; the DB adapter embeds its own SDK.

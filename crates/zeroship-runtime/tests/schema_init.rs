@@ -37,7 +37,6 @@ export function installSchema(env, descriptor, options) {
     });
     return { collections: {} };
 }
-export function _flushPendingMaskPolicy() { return null; }
 "#,
         }]
     }
@@ -58,7 +57,7 @@ export function _flushPendingMaskPolicy() { return null; }
 
     fn register(&self, r: &mut NativeRegistrar) {
         // Register one trivial op so the runtime materializes a non-null
-        // `env.db` object. runtime-entry's schema-install sentinel keys on
+        // `env.db` object. native plugin preparation keys on
         // `env.db != null` (the real DbPlugin always populates env.db); an
         // empty register() leaves env.db absent and the sentinel skips
         // install, which is unfaithful to "DB plugin present".
@@ -370,7 +369,7 @@ fn init_script_sources_schema_from_runtime_descriptor_when_present() {
     // `RuntimeSchemaDescriptor` (v2 `{ fields, options, indexes }` per collection), the
     // worker stamps it onto the runtime via `RuntimeBuilder::runtime_descriptor`
     // and `setup_globals` exposes it as `globalThis.__zsRuntimeDescriptor`. The
-    // bootstrap's `runtime-entry` must then install the schema FROM the
+    // native plugin preparation must then install the schema FROM the
     // descriptor — IGNORING `user.default.schema`.
     //
     // We give the user a throwing `default.schema` getter and inject a descriptor
@@ -451,7 +450,7 @@ export default defaultExport;
     );
     assert!(
         body.contains(r#"\"optionKeys\":[]"#),
-        "expected runtime-entry to pass no extra options, got: {body}"
+        "expected native preparation to pass no extra options, got: {body}"
     );
     assert!(
         body.contains(r#"\"hasDeclaredSchemas\":false"#),
@@ -529,7 +528,7 @@ export default {
     };
     assert!(
         body.contains(r#""json":null"#),
-        "without a descriptor, runtime-entry must install nothing and ignore default.schema: {body}"
+        "without a descriptor, native preparation must install nothing and ignore default.schema: {body}"
     );
 }
 

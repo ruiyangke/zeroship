@@ -1,18 +1,4 @@
-// Post-build step for `@zeroship/bootstrap`.
-//
-// The runtime crate (`crates/runtime/src/core/init.rs`) `include_str!`s
-// `dist/runtime-entry.js` and `dist/dispatcher.js` and SPLICES the
-// content into the bootstrap ES module between `import * as user from
-// "./__user__.js";` and the rest of the bootstrap body. The spliced
-// content must therefore be:
-//   - Pure top-level statements (no module-marker `export {}`).
-//   - No source-map URL comments (would resolve relative to the
-//     bootstrap's compiled name, not the original .ts file).
-//
-// tsc emits `export {};` for files that have no top-level imports or
-// exports (so TS treats them as modules). We strip that line — the
-// file is "module-like" from TS's POV but the emitted JS is consumed
-// as inline script by the runtime crate.
+// Emit the remaining dispatcher as an importable side-effect script.
 
 import { readFile, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
@@ -22,7 +8,6 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const distDir = resolve(__dirname, "../dist");
 
 const SPLICED_FILES = [
-  "runtime-entry.js",
   "dispatcher.js",
 ];
 

@@ -179,43 +179,7 @@ fn apply_matrix_schema_ahead_of_postgres(url: &str, app_id: &str, collection: &s
     });
 }
 
-const SHIM: &str = r#"
-async function _shimRpc(name, input, ctx) {
-    const fn = _procedures[name];
-    if (typeof fn !== "function") {
-        throw Object.assign(new Error("Method not found: " + name), { status: 404 });
-    }
-    let out = fn(input, ctx);
-    if (out && typeof out.then === "function") out = await out;
-    return out;
-}
-async function _zsRpcAndRespond(name, input) {
-    try {
-        const result = await _shimRpc(name, input);
-        return new Response(JSON.stringify({ json: result === undefined ? null : result }),
-            { status: 200, headers: { "content-type": "application/json" } });
-    } catch (err) {
-        const status = (err && Number.isInteger(err.status) && err.status >= 400 && err.status < 600) ? err.status : 500;
-        const body = { message: err?.message ?? String(err), name: err?.name ?? "Error" };
-        if (err && typeof err.code === "string") body.code = err.code;
-        return new Response(JSON.stringify(body), {
-            status, headers: { "content-type": "application/json" },
-        });
-    }
-}
-async function _zsFetch(request) {
-    const url = new URL(request.url);
-    const id = decodeURIComponent(url.pathname.slice("/__zeroship/v1/".length));
-    const text = await request.text();
-    let input;
-    if (text) {
-        const env = JSON.parse(text);
-        input = env && typeof env === "object" && "json" in env ? env.json : env;
-    }
-    return await _zsRpcAndRespond(id, input);
-}
-export default { fetch: _zsFetch, rpc: _shimRpc };
-"#;
+const SHIM: &str = r#"export default { rpc: _procedures };"#;
 
 const TYPED_DATE_ISO: &str = "2026-05-24T12:34:56.789Z";
 const TYPED_DATE_MS: i64 = 1_779_626_096_789;
@@ -630,4 +594,33 @@ pub fn expected_typed_projection() -> Value {
             }
         }
     })
+}
+
+/// Exercise ordinary database work and authorization refusal during module evaluation.
+pub fn run_startup_database_probe(url: &str, app_id: &str) -> Value {
+    let collection = format!("startup_probe_{}", MATRIX_COUNTER.fetch_add(1, Ordering::Relaxed));
+    apply_matrix_schema_ahead_of_runtime(url, app_id, &collection);
+    let source = r#"
+        import {env} from 'zeroship';
+        import {Collection} from 'zeroship:db/internal';
+        const table = env.db[__COLLECTION__];
+        const prepared = table instanceof Collection;
+        const inserted = await table.insert({title: 'startup row', flag: true, meta: {}, rank: 1});
+        if (inserted.error) throw inserted.error;
+        const rows = await table.find({title: 'startup row'});
+        if (rows.error) throw rows.error;
+        let unmask;
+        try { await env.db.collection(__COLLECTION__).find({}, {unmask: ['title']}); unmask = 'accepted'; }
+        catch (error) { unmask = error.code; }
+        env.db.declareMaskPolicy({support: ['pii'], auto: []});
+        export default {rpc: {inspect() {
+            return {prepared, titles: rows.data.map(row => row.title), unmask};
+        }}};
+    "#.replace("__COLLECTION__", &serde_json::to_string(&collection).unwrap());
+    let descriptor = runtime_descriptor(&collection, &matrix_schema());
+    let (status, body) = dispatch_zs_with_descriptor(url, &source, "inspect", app_id, &descriptor);
+    assert_eq!(status, 200, "{body}");
+    let result = extract_json(&body);
+    assert_eq!(result, value!({"prepared": true, "titles": ["startup row"], "unmask": "database_startup_pending"}));
+    result
 }

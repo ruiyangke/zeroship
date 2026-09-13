@@ -96,30 +96,9 @@ async function encodeWireOutput(value: unknown): Promise<string> {
  */
 export type LoadNormalized = () => Promise<NormalizedUserModule>;
 
-/**
- * Caller-supplied schema-readiness awaiter. Resolves once the cold-boot
- * mask-policy flush has settled. Called
- * AFTER `loadNormalized()` — which, on the dev path, is what populates
- * the module-local `schemaReady` promise — and BEFORE the user's
- * `default.fetch` runs. A rejected policy flush rejects
- * here; the caller may surface it however it likes. Optional: when
- * absent (e.g. unit tests, schema-less apps) the fetch is ungated, same
- * as before this gate existed.
- */
-export type AwaitSchemaReady = () => Promise<void> | undefined;
-
-/**
- * Create a WinterCG fetch handler bound to a normalised-user-module
- * loader. Returns the closure the platform exports as `default.fetch`.
- *
- * `awaitSchemaReady`, when supplied, gates the fall-through to the
- * user's `default.fetch` on schema readiness, symmetric with the RPC
- * dispatcher, which awaits the same mask-policy flush before the first
- * procedure.
- */
+/** Create a fetch handler bound to a normalized user module loader. */
 export function createFetchHandler(
   loadNormalized: LoadNormalized,
-  awaitSchemaReady?: AwaitSchemaReady,
 ): (request: Request, env: unknown, ctx: unknown) => Promise<Response> {
   return async function dispatchFetch(request: Request, env: unknown, ctx: unknown): Promise<Response> {
     const url = new URL(request.url);
@@ -173,20 +152,6 @@ export function createFetchHandler(
     }
     const userFetch = normalized.fetch;
     if (typeof userFetch === "function") {
-      // `loadNormalized()` above already populated the dev path's
-      // module-local `schemaReady`; await it before the user handler.
-      // A rejected mask-policy flush surfaces as a sanitized 500.
-      if (awaitSchemaReady) {
-        try {
-          const ready = awaitSchemaReady();
-          if (ready && typeof (ready as { then?: unknown }).then === "function") {
-            await ready;
-          }
-        } catch (e) {
-          const msg = e instanceof Error ? e.message : String(e);
-          return errResponse(500, "INTERNAL", `Schema initialization failed: ${msg}`);
-        }
-      }
       return userFetch.call(normalized.userDefault, request, env, ctx);
     }
     return new Response("Not Found", { status: 404 });

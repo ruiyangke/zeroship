@@ -73,8 +73,6 @@ export { validateDoc, checkPartial } from "./validate";
 // drive the dedup state the matching internal getter inspects.
 export { translateAggregatePipeline } from "./utils";
 
-// Mask-policy startup handoff consumed by the bootstrap package.
-export { _flushPendingMaskPolicy, _peekPendingMaskPolicy } from "./policy";
 export type { MaskPolicy } from "./policy";
 
 export {

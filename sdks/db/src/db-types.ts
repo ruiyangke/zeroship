@@ -271,7 +271,7 @@ export type Collections<T extends Record<string, SchemaInput>> = {
 };
 
 type DbMethodName = keyof Object
-  | "__platform"
+  | "declareMaskPolicy"
   | "__proto__"
   | "collection"
   | "from"

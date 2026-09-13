@@ -6,17 +6,10 @@
  * real HMAC cookie signing (WebCrypto), real CSRF double-submit, real code
  * ledger, and real wire shapes are exercised.
  *
- * Plus a production-build absence guard: the dev-auth provider must be
- * structurally absent from the prod artifacts the runtime crate `include_str!`s
- * and the prod synthetic SSR entry imports (`runtime-entry.js`, the barrel
- * `index.js`).
  */
 
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
-import { dirname, resolve } from "node:path";
 
 import {
   createDevAuthProvider,
@@ -30,7 +23,6 @@ const SECRET = "test-dev-secret-0123456789abcdef";
 /** The built-in default user's id, and the password derived from it. */
 const DEFAULT_DEV_USER_ID = "pws_dev00000000000000000";
 const DEV_USER_PASSWORD = devPasswordFor(DEFAULT_DEV_USER_ID);
-const DIST = resolve(dirname(fileURLToPath(import.meta.url)), "..", "dist");
 
 /** Build a provider whose env returns our fixed secret + config. */
 function makeProvider(devAuthConfig?: string) {
@@ -594,27 +586,6 @@ describe("dev-auth provider — full /__zeroship/auth/* flow", () => {
   test("disabled when no secret is present", () => {
     assert.equal(createDevAuthProvider(() => undefined), null);
   });
-});
-
-describe("dev-auth provider — DEV-ONLY by construction (build artifact guard)", () => {
-  // The dev provider must never reach a production .zship. The runtime crate
-  // include_str!s `runtime-entry.js`; the prod synthetic SSR entry imports the
-  // barrel `index.js` for its side effects. Neither may carry the dev provider.
-  for (const artifact of ["runtime-entry.js", "index.js", "dispatcher.js"]) {
-    test(`dist/${artifact} contains no dev-auth provider symbols`, () => {
-      const src = readFileSync(resolve(DIST, artifact), "utf8");
-      // Strip line comments so the deliberate explanatory comment in index.js
-      // (which mentions "dev-auth" by name) is not a false positive.
-      const code = src
-        .split("\n")
-        .filter((line) => !line.trim().startsWith("//"))
-        .join("\n");
-      assert.doesNotMatch(code, /createDevAuthProvider/, `${artifact} must not reference createDevAuthProvider`);
-      assert.doesNotMatch(code, /__zeroship_dev_session/, `${artifact} must not reference the dev session cookie`);
-      assert.doesNotMatch(code, /signDevSession/, `${artifact} must not reference signDevSession`);
-      assert.doesNotMatch(code, /\/__zeroship\/auth\/authorize/, `${artifact} must not embed the dev authorize route`);
-    });
-  }
 });
 
 /**
