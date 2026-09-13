@@ -1,5 +1,3 @@
-import type { ModuleRunner } from "vite/module-runner";
-
 interface EvaluatedModuleNodeLike {
   id: string;
   importers: Set<string>;
@@ -17,13 +15,14 @@ interface ModuleRunnerLike {
 
 interface PollHmrChangesOptions {
   pollUrl: string;
-  getCurrentRunner: () => ModuleRunnerLike | null;
   fetchImpl?: typeof fetch;
-  clearKind?: () => number;
-  restoreKind?: (token: number) => void;
   log?: (message: string) => void;
-  pendingChanged?: Set<string>;
-  onBeforeInvalidate?: (changed: string[]) => void;
+  onChange?: (update: HmrUpdate) => void;
+}
+
+export interface HmrUpdate {
+  changed: string[];
+  bindingsVersion?: string;
 }
 
 function collectAffectedModules(
@@ -68,74 +67,52 @@ export function invalidateChangedFiles(
 
 export async function pollHmrChanges({
   pollUrl,
-  getCurrentRunner,
   fetchImpl = fetch,
-  clearKind,
-  restoreKind,
   log,
-  pendingChanged = new Set<string>(),
-  onBeforeInvalidate,
-}: PollHmrChangesOptions): Promise<number> {
-  const token = typeof clearKind === "function" ? clearKind() : -1;
+  onChange,
+}: PollHmrChangesOptions): Promise<HmrUpdate> {
   try {
     const resp = await fetchImpl(pollUrl);
-    const payload = await resp.json() as { changed?: unknown };
+    if (!resp.ok) throw new Error(`HMR poll failed with HTTP ${resp.status}`);
+    const payload = await resp.json() as {
+      changed?: unknown;
+      bindingsVersion?: unknown;
+    };
+    const changed: string[] = [];
     if (Array.isArray(payload.changed)) {
       for (const file of payload.changed) {
         if (typeof file === "string") {
-          pendingChanged.add(file);
+          changed.push(file);
         }
       }
     }
-
-    if (pendingChanged.size === 0) {
-      return 0;
-    }
-
-    const changed = [...pendingChanged];
-    pendingChanged.clear();
-    onBeforeInvalidate?.(changed);
-
-    const runner = getCurrentRunner();
-    if (!runner) {
-      return 0;
-    }
-
-    const invalidated = invalidateChangedFiles(runner, changed);
-    if (invalidated > 0) {
+    const update: HmrUpdate = {
+      changed,
+      ...(typeof payload.bindingsVersion === "string"
+        ? { bindingsVersion: payload.bindingsVersion }
+        : {}),
+    };
+    if (changed.length > 0) {
       log?.(`[zeroship:hmr] ${changed.length} module(s) updated`);
     }
-    return invalidated;
+    onChange?.(update);
+    return update;
   } catch {
     // Vite not ready or restarting — silently ignore
-    return 0;
-  } finally {
-    if (token >= 0 && typeof restoreKind === "function") {
-      restoreKind(token);
-    }
+    return { changed: [] };
   }
 }
 
 export function startHmrPoll(
   pollUrl: string,
-  getCurrentRunner: () => ModuleRunner | null,
+  onChange: (update: HmrUpdate) => void,
   log?: (message: string) => void,
-  onBeforeInvalidate?: (changed: string[]) => void,
 ): () => void {
-  const pendingChanged = new Set<string>();
-  const readGlobal = globalThis as {
-    __zsClearKind?: () => number;
-    __zsExitKind?: (token: number) => void;
-  };
   const handle = setInterval(() => {
     void pollHmrChanges({
       pollUrl,
-      getCurrentRunner,
-      clearKind: readGlobal.__zsClearKind,
-      restoreKind: readGlobal.__zsExitKind,
       log,
-      pendingChanged,
-      onBeforeInvalidate,
+      onChange,
     });
   }, 500);
 

@@ -1,125 +1,138 @@
-/** ModuleRunner and HMR integration, pending the native dev entry loader. */
-import { createRunner } from "./transport";
+/** ModuleRunner-backed entry snapshots for the native development loader. */
 import type { ModuleRunner } from "vite/module-runner";
-import { devEntry } from "@zeroship/bootstrap/dev";
 import {
   ENV_VITE_ORIGIN,
   HMR_POLL_PATH,
+  PROCEDURE_BINDINGS_PATH,
 } from "../constants.js";
-import { startHmrPoll } from "./hmr";
-import { createDevRpcRegistry } from "./rpc-registry";
+import { buildDevEntrySnapshot, type DevServerBindingSnapshot } from "./entry";
+import { invalidateChangedFiles, startHmrPoll, type HmrUpdate } from "./hmr";
+import { createRunner } from "./transport";
 
-const ENTRY = (globalThis as { process?: { env?: { ZEROSHIP_ENTRY?: string } } }).process?.env?.ZEROSHIP_ENTRY!;
+const processEnv = (globalThis as {
+  process?: { env?: Record<string, string | undefined> };
+}).process?.env;
+const ENTRY = processEnv?.ZEROSHIP_ENTRY;
+const VITE_ORIGIN = processEnv?.[ENV_VITE_ORIGIN];
 
 let runner: ModuleRunner | null = null;
 let runnerPromise: Promise<ModuleRunner> | null = null;
 let stopHmrPoll: (() => void) | null = null;
 
-// Procedure registry — transform-appended `__registerModule(file, handlers)`
-// calls land here. Each module owns its current wire-id set, so a hot
-// update can prune the previous registrations before the module is
-// re-imported. That makes rename/delete stop resolving immediately.
-const registry = createDevRpcRegistry();
-(globalThis as Record<string, unknown>).__registerModule = (
-  moduleId: string,
-  handlers: Record<string, (input: unknown, ctx: unknown) => unknown>,
-) => {
-  registry.replaceModule(moduleId, handlers);
-};
-(globalThis as Record<string, unknown>).__lookup = (name: string) =>
-  registry.registry.get(name);
-
 async function getRunner(): Promise<ModuleRunner> {
   if (runner) return runner;
   if (runnerPromise) return runnerPromise;
-  runnerPromise = createRunner().then((r) => {
-    runner = r;
+  runnerPromise = createRunner().then((created) => {
+    runner = created;
     console.log(`[zeroship:dev] ModuleRunner ready, entry: ${ENTRY}`);
-    return r;
-  }).catch((err) => {
+    return created;
+  }).catch((error) => {
     runnerPromise = null;
-    throw err;
+    throw error;
   });
   return runnerPromise;
 }
 
-const entry = devEntry({
-  async loadUserModule() {
-    const r = await getRunner();
-    try {
-      return await r.import(ENTRY);
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      if (msg.includes("is in the optimize deps directory")) {
-        console.log("[zeroship:dev] deps re-optimized, resetting runner");
-        runner = null;
-        runnerPromise = null;
-        const fresh = await getRunner();
-        return await fresh.import(ENTRY);
-      }
-      throw err;
+function resetRunner(): void {
+  runner = null;
+  runnerPromise = null;
+}
+
+function isDependencyRefresh(error: unknown): boolean {
+  return error instanceof Error && error.message.includes("is in the optimize deps directory");
+}
+
+async function readBindingSnapshot(): Promise<DevServerBindingSnapshot> {
+  if (!VITE_ORIGIN) throw new Error(`[zeroship] ${ENV_VITE_ORIGIN} not set`);
+  const response = await fetch(`${VITE_ORIGIN}${PROCEDURE_BINDINGS_PATH}`);
+  const payload = await response.json() as {
+    version?: unknown;
+    bindings?: unknown;
+    error?: { message?: unknown };
+  };
+  if (!response.ok) {
+    const message = typeof payload.error?.message === "string"
+      ? payload.error.message
+      : `procedure binding request failed with HTTP ${response.status}`;
+    throw new Error(message);
+  }
+  if (typeof payload.version !== "string" || !Array.isArray(payload.bindings)) {
+    throw new TypeError("invalid procedure binding response");
+  }
+  return payload as DevServerBindingSnapshot;
+}
+
+export function createDevEntryLoader(invalidate: () => void): () => Promise<unknown> {
+  if (typeof invalidate !== "function") {
+    throw new TypeError("development entry invalidation callback must be a function");
+  }
+  if (!ENTRY) throw new Error("[zeroship] ZEROSHIP_ENTRY not set");
+  if (!VITE_ORIGIN) throw new Error(`[zeroship] ${ENV_VITE_ORIGIN} not set`);
+  const entry = ENTRY;
+  const viteOrigin = VITE_ORIGIN;
+
+  const pendingChanged = new Set<string>();
+  let bindingVersion: string | null = null;
+  let loadStarted = false;
+
+  const receiveHmr = (update: HmrUpdate) => {
+    for (const file of update.changed) pendingChanged.add(file);
+    const bindingsChanged =
+      bindingVersion !== null &&
+      update.bindingsVersion !== undefined &&
+      update.bindingsVersion !== bindingVersion;
+    if (update.bindingsVersion !== undefined && bindingVersion !== null) {
+      bindingVersion = update.bindingsVersion;
     }
-  },
-  registry: registry.registry,
+    if (loadStarted && (update.changed.length > 0 || bindingsChanged)) invalidate();
+  };
 
-});
-
-// Kick off connection immediately + start HMR poll.
-getRunner()
-  .then(() => ensureHmrPollStarted())
-  .catch((e) => console.error("[zeroship:dev] Runner init failed:", e));
-
-/**
- * Poll Vite for changed files every 500ms and invalidate the
- * ModuleRunner's evaluated-module cache for each changed path. Causes
- * the next import() to re-fetch from Vite (which re-transforms).
- *
- * The runtime doesn't support outbound WebSocket connections (V8 server-
- * side only), so we can't use Vite's WS-based HMR. HTTP poll is the
- * dev-only fallback.
- */
-function ensureHmrPollStarted() {
-  if (stopHmrPoll) return;
-
-  const viteOrigin = (globalThis as { process?: { env?: Record<string, string | undefined> } })
-    .process?.env?.[ENV_VITE_ORIGIN];
-  if (!viteOrigin) return;
-
-  const pollUrl = `${viteOrigin}${HMR_POLL_PATH}`;
-  stopHmrPoll = startHmrPoll(
-    pollUrl,
-    () => runner,
-    console.log,
-    (files) => {
-      for (const file of files) {
-        registry.pruneModule(file);
-      }
-    },
-  );
-
-  const proc = (globalThis as {
-    process?: {
-      once?: (event: string, listener: () => void) => void;
-    };
-  }).process;
-  if (typeof proc?.once === "function") {
-    proc.once("exit", () => {
+  if (!stopHmrPoll) {
+    stopHmrPoll = startHmrPoll(`${viteOrigin}${HMR_POLL_PATH}`, receiveHmr, console.log);
+    const proc = (globalThis as {
+      process?: { once?: (event: string, listener: () => void) => void };
+    }).process;
+    proc?.once?.("exit", () => {
       stopHmrPoll?.();
       stopHmrPoll = null;
     });
   }
-}
 
-// Function-shape `default.rpc` per the ZS standard
-// (`docs/reference/zeroship-standard.md`): dev's namespace may change per
-// request so the dict resolves on every call. Dispatch
-// live in `@zeroship/bootstrap`; this module only owns the runner +
-// registry + HMR poll.
-//
-// `loadWorkflow` is the workflow analogue of the function-shape `rpc`: the
-// creator's Workflow classes are not in THIS module's namespace (they live
-// behind the module runner), so the runtime's workflow dispatch resolves them
-// through this async hook instead of a static dict. Omitting it is what made
-// every `pnpm dev` workflow run fail with `Workflow not found` while the same
-// class ran fine under a raw `zeroship serve`.
-export default { fetch: entry.fetch, rpc: entry.rpc, loadWorkflow: entry.loadWorkflow };
+  async function loadWith(current: ModuleRunner): Promise<unknown> {
+    const changed = [...pendingChanged];
+    pendingChanged.clear();
+    if (changed.length > 0) invalidateChangedFiles(current, changed);
+    const userModule = await current.import(entry);
+    let bindings = await readBindingSnapshot();
+    const seenVersions = new Set<string>();
+    while (true) {
+      if (seenVersions.has(bindings.version)) {
+        throw new Error("procedure bindings changed cyclically while loading the entry");
+      }
+      seenVersions.add(bindings.version);
+      // Development resolves lazy bindings now so an older retained snapshot
+      // cannot import replacement code after its ModuleRunner graph is invalidated.
+      const snapshot = await buildDevEntrySnapshot(current, userModule, bindings.bindings);
+      const currentBindings = await readBindingSnapshot();
+      if (currentBindings.version === bindings.version) {
+        bindingVersion = bindings.version;
+        return snapshot;
+      }
+      bindings = currentBindings;
+    }
+  }
+
+  return async function loadEntry(): Promise<unknown> {
+    loadStarted = true;
+    let current = await getRunner();
+    try {
+      return await loadWith(current);
+    } catch (error) {
+      if (!isDependencyRefresh(error)) throw error;
+      console.log("[zeroship:dev] dependencies refreshed, resetting ModuleRunner");
+      resetRunner();
+      current = await getRunner();
+      return loadWith(current);
+    }
+  };
+}

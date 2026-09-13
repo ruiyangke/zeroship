@@ -7,6 +7,10 @@
 import * as vite from "vite";
 import type { FetchFunctionOptions, FetchResult } from "vite/module-runner";
 import { getNodeCompatId, getCustomPolyfillCode, isRuntimeNative } from "./node-compat.js";
+import {
+  RUNTIME_MODULE_SPECIFIER,
+  VITE_RUNTIME_MODULE_ID,
+} from "./constants.js";
 
 const NODEISH_IMPORT_RE = /^(crypto|buffer|path|util|events|stream|os|url|http|https|fs|assert|process|async_hooks|timers|string_decoder|querystring|punycode|net|tls|dns|zlib|worker_threads|diagnostics_channel|perf_hooks|module)(\/.+)?$/;
 
@@ -47,7 +51,9 @@ export class ZeroshipDevEnvironment extends vite.DevEnvironment {
   ): Promise<vite.FetchResult> {
     // Preserve the runtime's reserved specifier. Vite's ordinary external
     // resolution would turn it into the local Node stub's file URL.
-    if (id === "zeroship") return { externalize: id, type: "builtin" };
+    if (id === RUNTIME_MODULE_SPECIFIER || id === VITE_RUNTIME_MODULE_ID) {
+      return { externalize: id, type: "builtin" };
+    }
 
     // Check if this is a node:* or bare builtin we can polyfill
     const isNodeish = id.startsWith("node:") || NODEISH_IMPORT_RE.test(id);
