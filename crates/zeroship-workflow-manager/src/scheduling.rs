@@ -20,10 +20,7 @@ use zeroship_core::{
     workflow_jobs::{DeploymentId, JobId, JobOperation, JobSpec},
     workflow_schedules::{ActivateSchedules, RegisterSchedules, ScheduleDescriptor, ScheduleId},
 };
-use zeroship_data_orm::{
-    orm::{Database, Entity, FindOptions, FromRow, Operation, Output},
-    value,
-};
+use zeroship_data_orm::orm::{Database, FindOptions, FromRow, Insertable};
 use zeroship_workflow_calendar::{ScheduleCatchUp, ScheduleTiming};
 
 #[derive(Clone, Copy, Debug)]
@@ -121,6 +118,62 @@ struct Occurrence {
     activation_id: String,
 }
 
+#[derive(Insertable)]
+#[orm(entity = schedule_deployments)]
+struct NewPrepared<'a> {
+    id: &'a str,
+    app_id: &'a str,
+    definition: &'a str,
+    interpretation: String,
+    created_at: i64,
+}
+
+#[derive(Insertable)]
+#[orm(entity = schedule_activations)]
+struct NewActivation<'a> {
+    id: &'a str,
+    app_id: &'a str,
+    deployment_id: &'a str,
+    revision: i64,
+    activated_at: i64,
+}
+
+#[derive(Insertable)]
+#[orm(entity = schedule_scopes)]
+struct NewScope<'a> {
+    id: &'a str,
+    revision: i64,
+    activation_id: &'a str,
+}
+
+#[derive(Insertable)]
+#[orm(entity = schedules)]
+struct NewSchedule<'a> {
+    id: String,
+    app_id: &'a str,
+    name: &'a str,
+    activation_id: &'a str,
+    revision: i64,
+    definition: &'a str,
+    next_at: Option<i64>,
+    anchor_at: i64,
+    catch_up_until: Option<i64>,
+    catch_up_remaining: Option<i64>,
+}
+
+#[derive(Insertable)]
+#[orm(entity = schedule_occurrences)]
+struct NewOccurrence<'a> {
+    id: &'a str,
+    app_id: &'a str,
+    schedule_id: &'a str,
+    revision: i64,
+    scheduled_at: i64,
+    run_id: &'a str,
+    job_id: &'a str,
+    activation_id: &'a str,
+}
+
 impl Scheduler {
     /// # Errors
     /// Refuses empty bounds and values outside the ORM's portable range.
@@ -148,19 +201,31 @@ impl Scheduler {
         self.validate(&request)?;
         let definition =
             String::from_utf8(self.queue.encode(&request)?).map_err(|_| Error::Invalid)?;
-        self.queue.transact(|tx| async move {
-            queue::register_scope_in(&tx, &request.app_id).await?;
-            queue::lock_scope(&tx, &request.app_id).await?;
-            if let Some(existing) = prepared(&tx, &request.app_id, &request.deployment_id).await? {
-                return if existing.definition == definition { Ok(()) } else { Err(Error::Conflict) };
-            }
-            tx.collection(schedule_deployments::Entity::COLLECTION)?.insert(value!({
-                "id":request.deployment_id.as_str(), "app_id":request.app_id.as_str(),
-                "definition":definition, "interpretation":zeroship_workflow_calendar::interpretation(),
-                "created_at":self.queue.clock.now().await?,
-            })).await?;
-            Ok(())
-        }).await
+        self.queue
+            .transact(|tx| async move {
+                queue::register_scope_in(&tx, &request.app_id).await?;
+                queue::lock_scope(&tx, &request.app_id).await?;
+                if let Some(existing) =
+                    prepared(&tx, &request.app_id, &request.deployment_id).await?
+                {
+                    return if existing.definition == definition {
+                        Ok(())
+                    } else {
+                        Err(Error::Conflict)
+                    };
+                }
+                tx.entity::<schedule_deployments::Entity>()?
+                    .insert::<_, Prepared>(NewPrepared {
+                        id: request.deployment_id.as_str(),
+                        app_id: request.app_id.as_str(),
+                        definition: &definition,
+                        interpretation: zeroship_workflow_calendar::interpretation(),
+                        created_at: self.queue.clock.now().await?,
+                    })
+                    .await?;
+                Ok(())
+            })
+            .await
     }
 
     fn validate(&self, request: &RegisterSchedules) -> Result<(), Error> {
@@ -203,62 +268,123 @@ impl Scheduler {
     /// # Errors
     /// Rejects unprepared deployments, stale/conflicting revisions, changed calendar
     /// interpretation and failed storage. Preparation alone grants no activation.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "activation retains its lock, publication and schedule replacement in one transaction"
+    )]
     pub async fn activate(&self, request: &ActivateSchedules) -> Result<JobSpec, Error> {
         let budget = Budget::new(self.queue.options.transaction_timeout);
         loop {
-            let result = self.queue.transact_for(budget.clone(), |tx| async move {
-            queue::lock_scope(&tx, &request.app_id).await?;
-            let existing = tx.entity::<schedule_activations::Entity>()?.find::<Activation>(
-                schedule_activations::app_id.eq(request.app_id.as_str())?
-                    .and(schedule_activations::revision.eq(request.revision.get())?),
-                one(),
-            ).await?.into_iter().next();
-            if let Some(existing) = existing {
-                if existing.deployment_id != request.deployment_id.as_str() { return Err(Error::Conflict); }
-                return Ok(Retention::Ready(activation_job(&tx, &request.app_id, &existing).await?.spec()?));
-            }
-            let active = active(&tx, &request.app_id).await?;
-            if active.as_ref().is_some_and(|active| active.revision >= request.revision.get()) {
-                return Err(Error::Conflict);
-            }
-            let prepared = prepared(&tx, &request.app_id, &request.deployment_id).await?.ok_or(Error::Denied)?;
-            check_interpretation(&prepared)?;
-            let metadata = metadata(&prepared, &request.app_id, &request.deployment_id)?;
-            self.validate(&metadata)?;
-            if !retention::prepared(&tx, &request.app_id, &request.deployment_id).await? {
-                return Ok(Retention::Acquire(request.deployment_id.clone()));
-            }
-            let now = self.queue.clock.now().await?;
-            let job = JobSpec {
-                id: JobId::mint(), app_id: request.app_id.clone(), deployment_id: request.deployment_id.clone(),
-                operation: JobOperation::Activate { revision: request.revision },
-                available_at: now.try_into().map_err(|_| Error::Storage)?,
-            };
-            self.queue.insert(&tx, &job, now).await?;
-            tx.collection(schedule_activations::Entity::COLLECTION)?.insert(value!({
-                "id":job.id.as_str(), "app_id":request.app_id.as_str(),
-                "deployment_id":request.deployment_id.as_str(), "revision":request.revision.get(), "activated_at":now,
-            })).await?;
-            if let Some(active) = active {
-                changed(&tx.collection(schedule_scopes::Entity::COLLECTION)?.execute(Operation::Update {
-                    filter:value!({"id":request.app_id.as_str(), "revision":active.revision, "activation_id":active.activation_id}),
-                    patch:value!({"revision":request.revision.get(), "activation_id":job.id.as_str()}), many:true,
-                }).await?)?;
-            } else {
-                tx.collection(schedule_scopes::Entity::COLLECTION)?.insert(value!({
-                    "id":request.app_id.as_str(), "revision":request.revision.get(), "activation_id":job.id.as_str(),
-                })).await?;
-            }
-            tx.collection(schedules::Entity::COLLECTION)?.execute(Operation::Update {
-                filter:value!({"app_id":request.app_id.as_str()}),
-                patch:value!({"next_at":null, "catch_up_until":null, "catch_up_remaining":null}), many:true,
-            }).await?;
-            for descriptor in &metadata.schedules {
-                self.install(&tx, request, &job.id, descriptor, now).await?;
-            }
-            recovery::ensure_in(&tx, &request.app_id, &request.deployment_id, request.revision, now).await?;
-            Ok(Retention::Ready(job))
-        }).await?;
+            let result = self
+                .queue
+                .transact_for(budget.clone(), |tx| async move {
+                    queue::lock_scope(&tx, &request.app_id).await?;
+                    let existing = tx
+                        .entity::<schedule_activations::Entity>()?
+                        .find::<Activation>(
+                            schedule_activations::app_id
+                                .eq(request.app_id.as_str())?
+                                .and(schedule_activations::revision.eq(request.revision.get())?),
+                            one(),
+                        )
+                        .await?
+                        .into_iter()
+                        .next();
+                    if let Some(existing) = existing {
+                        if existing.deployment_id != request.deployment_id.as_str() {
+                            return Err(Error::Conflict);
+                        }
+                        return Ok(Retention::Ready(
+                            activation_job(&tx, &request.app_id, &existing)
+                                .await?
+                                .spec()?,
+                        ));
+                    }
+                    let active = active(&tx, &request.app_id).await?;
+                    if active
+                        .as_ref()
+                        .is_some_and(|active| active.revision >= request.revision.get())
+                    {
+                        return Err(Error::Conflict);
+                    }
+                    let prepared = prepared(&tx, &request.app_id, &request.deployment_id)
+                        .await?
+                        .ok_or(Error::Denied)?;
+                    check_interpretation(&prepared)?;
+                    let metadata = metadata(&prepared, &request.app_id, &request.deployment_id)?;
+                    self.validate(&metadata)?;
+                    if !retention::prepared(&tx, &request.app_id, &request.deployment_id).await? {
+                        return Ok(Retention::Acquire(request.deployment_id.clone()));
+                    }
+                    let now = self.queue.clock.now().await?;
+                    let job = JobSpec {
+                        id: JobId::mint(),
+                        app_id: request.app_id.clone(),
+                        deployment_id: request.deployment_id.clone(),
+                        operation: JobOperation::Activate {
+                            revision: request.revision,
+                        },
+                        available_at: now.try_into().map_err(|_| Error::Storage)?,
+                    };
+                    self.queue.insert(&tx, &job, now).await?;
+                    tx.entity::<schedule_activations::Entity>()?
+                        .insert::<_, Activation>(NewActivation {
+                            id: job.id.as_str(),
+                            app_id: request.app_id.as_str(),
+                            deployment_id: request.deployment_id.as_str(),
+                            revision: request.revision.get(),
+                            activated_at: now,
+                        })
+                        .await?;
+                    if let Some(active) = active {
+                        changed(
+                            tx.entity::<schedule_scopes::Entity>()?
+                                .update_many(
+                                    schedule_scopes::id
+                                        .eq(request.app_id.as_str())?
+                                        .and(schedule_scopes::revision.eq(active.revision)?)
+                                        .and(
+                                            schedule_scopes::activation_id
+                                                .eq(active.activation_id.as_str())?,
+                                        ),
+                                    schedule_scopes::revision.set(request.revision.get())?.and(
+                                        schedule_scopes::activation_id.set(job.id.as_str())?,
+                                    )?,
+                                )
+                                .await?,
+                        )?;
+                    } else {
+                        tx.entity::<schedule_scopes::Entity>()?
+                            .insert::<_, Active>(NewScope {
+                                id: request.app_id.as_str(),
+                                revision: request.revision.get(),
+                                activation_id: job.id.as_str(),
+                            })
+                            .await?;
+                    }
+                    tx.entity::<schedules::Entity>()?
+                        .update_many(
+                            schedules::app_id.eq(request.app_id.as_str())?,
+                            schedules::next_at
+                                .set(None::<i64>)?
+                                .and(schedules::catch_up_until.set(None::<i64>)?)?
+                                .and(schedules::catch_up_remaining.set(None::<i64>)?)?,
+                        )
+                        .await?;
+                    for descriptor in &metadata.schedules {
+                        self.install(&tx, request, &job.id, descriptor, now).await?;
+                    }
+                    recovery::ensure_in(
+                        &tx,
+                        &request.app_id,
+                        &request.deployment_id,
+                        request.revision,
+                        now,
+                    )
+                    .await?;
+                    Ok(Retention::Ready(job))
+                })
+                .await?;
             match result {
                 Retention::Ready(job) => return Ok(job),
                 Retention::Acquire(deployment) => {
@@ -294,27 +420,40 @@ impl Scheduler {
             .schedule
             .next_after(now, now)
             .map_err(|_| Error::Invalid)?;
-        let mut document = value!({
-            "activation_id":job.as_str(), "revision":activation.revision.get(), "definition":definition,
-            "next_at":next, "anchor_at":now, "catch_up_until":null, "catch_up_remaining":null,
-        });
-        let collection = tx.collection(schedules::Entity::COLLECTION)?;
+        let collection = tx.entity::<schedules::Entity>()?;
         if let Some(previous) = previous {
             changed(
-                &collection
-                    .execute(Operation::Update {
-                        filter: value!({"id":previous.id, "app_id":activation.app_id.as_str()}),
-                        patch: document,
-                        many: true,
-                    })
+                collection
+                    .update_many(
+                        schedules::id
+                            .eq(previous.id.as_str())?
+                            .and(schedules::app_id.eq(activation.app_id.as_str())?),
+                        schedules::activation_id
+                            .set(job.as_str())?
+                            .and(schedules::revision.set(activation.revision.get())?)?
+                            .and(schedules::definition.set(definition.as_str())?)?
+                            .and(schedules::next_at.set(Some(next))?)?
+                            .and(schedules::anchor_at.set(now)?)?
+                            .and(schedules::catch_up_until.set(None::<i64>)?)?
+                            .and(schedules::catch_up_remaining.set(None::<i64>)?)?,
+                    )
                     .await?,
             )?;
         } else {
-            let fields = document.as_object_mut().ok_or(Error::Storage)?;
-            fields.insert("id".into(), value!(ScheduleId::mint().as_str()));
-            fields.insert("app_id".into(), value!(activation.app_id.as_str()));
-            fields.insert("name".into(), value!(descriptor.name));
-            collection.insert(document).await?;
+            collection
+                .insert::<_, Schedule>(NewSchedule {
+                    id: ScheduleId::mint().as_str().into(),
+                    app_id: activation.app_id.as_str(),
+                    name: &descriptor.name,
+                    activation_id: job.as_str(),
+                    revision: activation.revision.get(),
+                    definition: &definition,
+                    next_at: Some(next),
+                    anchor_at: now,
+                    catch_up_until: None,
+                    catch_up_remaining: None,
+                })
+                .await?;
         }
         Ok(())
     }
@@ -327,19 +466,16 @@ impl Scheduler {
     pub async fn due(&self, after: Option<&ScheduleId>) -> Result<Vec<DueSchedule>, Error> {
         self.queue
             .transact(|tx| async move {
-                let source = tx.entity::<schedules::Entity>()?.alias("s")?;
-                let mut filters = vec![source
-                    .column(schedules::next_at)
-                    .lte(Some(self.queue.clock.now().await?))?];
+                let mut filter = schedules::next_at.lte(Some(self.queue.clock.now().await?))?;
                 if let Some(after) = after {
-                    filters.push(source.column(schedules::id).gt(after.as_str())?);
+                    filter = filter.and(schedules::id.gt(after.as_str())?);
                 }
-                tx.from(&source)
-                    .filter(zeroship_data_orm::sql::Predicate::And(filters))
-                    .order_by(source.column(schedules::id).asc())
-                    .select(source.row::<Due>())?
+                tx.entity::<schedules::Entity>()?
+                    .query()
+                    .filter(filter)
+                    .order_by(schedules::id.asc())
                     .limit(i64::from(self.options.page_size))?
-                    .all()
+                    .all::<Due>()
                     .await?
                     .into_iter()
                     .map(|row| {
@@ -361,46 +497,100 @@ impl Scheduler {
     /// Rejects a foreign/missing schedule, changed interpretation and storage failures.
     /// Failure preserves the previous cursor; retry cannot mint another committed occurrence.
     pub async fn dispatch(&self, app: &AppId, id: &ScheduleId) -> Result<Page, Error> {
-        self.queue.transact(|tx| async move {
-            queue::lock_scope(&tx, app).await?;
-            let record = schedule(&tx, app, id).await?.ok_or(Error::Denied)?;
-            let now = self.queue.clock.now().await?;
-            let Some(mut at) = record.next_at.filter(|at| *at <= now) else { return Ok(Page { jobs:vec![], more:false }); };
-            let activation = load_activation(&tx, app, &record.activation_id).await?;
-            if activation.revision != record.revision { return Err(Error::Storage); }
-            activation_job(&tx, app, &activation).await?;
-            let deployment = DeploymentId::parse(&activation.deployment_id).map_err(|_| Error::Storage)?;
-            let prepared = prepared(&tx, app, &deployment).await?.ok_or(Error::Storage)?;
-            check_interpretation(&prepared)?;
-            let metadata = metadata(&prepared, app, &deployment)?;
-            let definition: ScheduleDescriptor = serde_json::from_str(&record.definition).map_err(|_| Error::Storage)?;
-            if definition.name != record.name || descriptor(&metadata, &record.name)? != &definition { return Err(Error::Storage); }
-            let allowance = match definition.catch_up {
-                ScheduleCatchUp::Skip => 1,
-                ScheduleCatchUp::Backfill { max } => i64::try_from(max).map_err(|_| Error::Storage)?,
-            };
-            let (boundary, mut remaining) = match (record.catch_up_until, record.catch_up_remaining) {
-                (Some(boundary), Some(remaining)) if boundary >= at && remaining > 0 && remaining <= allowance => (boundary, remaining),
-                (None, None) if allowance > 0 => (now, allowance.min(i64::try_from(self.options.max_backfill).map_err(|_| Error::Invalid)?)),
-                _ => return Err(Error::Storage),
-            };
-            let mut jobs = Vec::new();
-            while at <= boundary && remaining > 0 && jobs.len() < self.options.page_size as usize {
-                let job = self.occurrence(&tx, app, id, &record, &definition, &deployment, at, now).await?;
-                jobs.push(job);
-                at = definition.schedule.next_after(at, record.anchor_at).map_err(|_| Error::Storage)?;
-                remaining -= 1;
-            }
-            if remaining == 0 && at <= boundary {
-                at = definition.schedule.next_after(boundary, record.anchor_at).map_err(|_| Error::Storage)?;
-            }
-            let more = at <= boundary;
-            changed(&tx.collection(schedules::Entity::COLLECTION)?.execute(Operation::Update {
-                filter:value!({"id":id.as_str(), "app_id":app.as_str(), "activation_id":record.activation_id, "revision":record.revision}),
-                patch:value!({"next_at":at, "catch_up_until":more.then_some(boundary), "catch_up_remaining":more.then_some(remaining)}), many:true,
-            }).await?)?;
-            Ok(Page { jobs, more })
-        }).await
+        self.queue
+            .transact(|tx| async move {
+                queue::lock_scope(&tx, app).await?;
+                let record = schedule(&tx, app, id).await?.ok_or(Error::Denied)?;
+                let now = self.queue.clock.now().await?;
+                let Some(mut at) = record.next_at.filter(|at| *at <= now) else {
+                    return Ok(Page {
+                        jobs: vec![],
+                        more: false,
+                    });
+                };
+                let activation = load_activation(&tx, app, &record.activation_id).await?;
+                if activation.revision != record.revision {
+                    return Err(Error::Storage);
+                }
+                activation_job(&tx, app, &activation).await?;
+                let deployment =
+                    DeploymentId::parse(&activation.deployment_id).map_err(|_| Error::Storage)?;
+                let prepared = prepared(&tx, app, &deployment)
+                    .await?
+                    .ok_or(Error::Storage)?;
+                check_interpretation(&prepared)?;
+                let metadata = metadata(&prepared, app, &deployment)?;
+                let definition: ScheduleDescriptor =
+                    serde_json::from_str(&record.definition).map_err(|_| Error::Storage)?;
+                if definition.name != record.name
+                    || descriptor(&metadata, &record.name)? != &definition
+                {
+                    return Err(Error::Storage);
+                }
+                let allowance = match definition.catch_up {
+                    ScheduleCatchUp::Skip => 1,
+                    ScheduleCatchUp::Backfill { max } => {
+                        i64::try_from(max).map_err(|_| Error::Storage)?
+                    }
+                };
+                let (boundary, mut remaining) =
+                    match (record.catch_up_until, record.catch_up_remaining) {
+                        (Some(boundary), Some(remaining))
+                            if boundary >= at && remaining > 0 && remaining <= allowance =>
+                        {
+                            (boundary, remaining)
+                        }
+                        (None, None) if allowance > 0 => (
+                            now,
+                            allowance.min(
+                                i64::try_from(self.options.max_backfill)
+                                    .map_err(|_| Error::Invalid)?,
+                            ),
+                        ),
+                        _ => return Err(Error::Storage),
+                    };
+                let mut jobs = Vec::new();
+                while at <= boundary
+                    && remaining > 0
+                    && jobs.len() < self.options.page_size as usize
+                {
+                    let job = self
+                        .occurrence(&tx, app, id, &record, &definition, &deployment, at, now)
+                        .await?;
+                    jobs.push(job);
+                    at = definition
+                        .schedule
+                        .next_after(at, record.anchor_at)
+                        .map_err(|_| Error::Storage)?;
+                    remaining -= 1;
+                }
+                if remaining == 0 && at <= boundary {
+                    at = definition
+                        .schedule
+                        .next_after(boundary, record.anchor_at)
+                        .map_err(|_| Error::Storage)?;
+                }
+                let more = at <= boundary;
+                changed(
+                    tx.entity::<schedules::Entity>()?
+                        .update_many(
+                            schedules::id
+                                .eq(id.as_str())?
+                                .and(schedules::app_id.eq(app.as_str())?)
+                                .and(schedules::activation_id.eq(record.activation_id.as_str())?)
+                                .and(schedules::revision.eq(record.revision)?),
+                            schedules::next_at
+                                .set(Some(at))?
+                                .and(schedules::catch_up_until.set(more.then_some(boundary))?)?
+                                .and(
+                                    schedules::catch_up_remaining.set(more.then_some(remaining))?,
+                                )?,
+                        )
+                        .await?,
+                )?;
+                Ok(Page { jobs, more })
+            })
+            .await
     }
 
     #[expect(
@@ -462,10 +652,18 @@ impl Scheduler {
             available_at: at.try_into().map_err(|_| Error::Storage)?,
         };
         self.queue.insert(tx, &job, now).await?;
-        tx.collection(schedule_occurrences::Entity::COLLECTION)?.insert(value!({
-            "id":request.as_str(), "app_id":app.as_str(), "schedule_id":id.as_str(), "revision":record.revision,
-            "scheduled_at":at, "run_id":run.as_str(), "job_id":job.id.as_str(), "activation_id":record.activation_id,
-        })).await?;
+        tx.entity::<schedule_occurrences::Entity>()?
+            .insert::<_, Occurrence>(NewOccurrence {
+                id: request.as_str(),
+                app_id: app.as_str(),
+                schedule_id: id.as_str(),
+                revision: record.revision,
+                scheduled_at: at,
+                run_id: run.as_str(),
+                job_id: job.id.as_str(),
+                activation_id: &record.activation_id,
+            })
+            .await?;
         Ok(job)
     }
 }
@@ -685,8 +883,8 @@ fn one() -> FindOptions {
         ..Default::default()
     }
 }
-const fn changed(output: &Output) -> Result<(), Error> {
-    if matches!(output, Output::Count(1)) {
+const fn changed(count: i64) -> Result<(), Error> {
+    if count == 1 {
         Ok(())
     } else {
         Err(Error::Storage)
