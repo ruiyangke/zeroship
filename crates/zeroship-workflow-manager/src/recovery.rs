@@ -9,7 +9,7 @@ use std::time::Duration;
 use zeroship_core::{
     app_id::AppId,
     workflow_coordination::Revision,
-    workflow_jobs::{DeploymentId, JobId, JobOperation, JobSpec},
+    workflow_jobs::{DeploymentId, JobId, JobOperation, JobOutcome, JobSpec},
 };
 use zeroship_data_orm::{
     orm::{Database, Entity, FindOptions, FromRow, Operation, Output},
@@ -198,4 +198,21 @@ async fn load(tx: &Database, app: &AppId) -> Result<Option<Stored>, Error> {
         .await?
         .into_iter()
         .next())
+}
+
+/// The queue calls this only for a fresh settlement under its app lock. A page
+/// with more work advances the manager's deadline without retiring responsibility.
+pub(crate) async fn settled_page(
+    tx: &Database,
+    job: &JobSpec,
+    outcome: JobOutcome,
+    now: i64,
+) -> Result<(), Error> {
+    if matches!(job.operation, JobOperation::Reconcile {}) && outcome == JobOutcome::Waiting {
+        tx.collection(recovery_scopes::Entity::COLLECTION)?.execute(Operation::Update {
+            filter:value!({"id":job.app_id.as_str(), "pending_job_id":job.id.as_str(), "next_due_at":{"$gt":now}}),
+            patch:value!({"next_due_at":now}), many:true,
+        }).await?;
+    }
+    Ok(())
 }
