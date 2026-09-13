@@ -25,17 +25,9 @@ COMPOSE_FILE="${ZEROSHIP_COMPOSE_FILE:-$ROOT/deploy/compose/docker-compose.yml}"
 # ---------------------------------------------------------------------------
 # THE COORDINATES OF THE TEST BACKENDS. This block is their one definition.
 #
-# They used to be written out per harness: run_auth_suite.sh:65-68 and
-# run_billing_suite.sh:124-127 each carried the same four `${PG_x:-...}` lines,
-# the DSN was spelled a fifth time in this file's closing banner, and the two
-# driver suites carried a sixth and seventh copy as Rust constants. Seven copies
-# of one address is how a run ends up against the wrong server with the wrong
-# password, which is what happened three times in one day.
-#
-# Everything else now reads these through the generated overlay written below.
-# The environment names remain as the OVERRIDE tier - that is how a caller
-# points a run at a server of their own, and it is the same relationship the
-# platform services have with their own TOML.
+# Remaining shared-backend runners read these coordinates through the generated
+# overlay. Environment overrides select an operator-owned server. Native tests
+# with owned containers do not use this provisioning path.
 # ---------------------------------------------------------------------------
 PG_HOST="${PG_HOST:-127.0.0.1}"
 PG_PORT="${PG_PORT:-5440}"

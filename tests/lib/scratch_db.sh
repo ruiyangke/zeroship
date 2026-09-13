@@ -3,21 +3,9 @@
 # scratch_db.sh - a per-run database name, so two suites cannot destroy each
 # other.
 #
-# WHY THIS EXISTS
-# ---------------
-# run_auth_suite.sh and run_billing_suite.sh each begin by running
-# `DROP DATABASE IF EXISTS <name> WITH (FORCE); CREATE DATABASE <name>;`
-# against a FIXED name. WITH (FORCE) terminates every other backend on that
-# database first, so the drop always succeeds - including when the other
-# backend is a second suite run that is fifteen minutes into its own work.
-#
-# MEASURED 2026-08-16: one agent's auth run dropped `zeroship_auth_test` out
-# from under another agent's auth run. The victim did not error on the drop; it
-# reported ordinary-looking test failures, and three of them naming a
-# deterministic signing key were investigated as product defects before the
-# collision was found. A fixed name plus a warning comment does not fix that,
-# because the warning is read after the run, by the person holding the wrong
-# failures.
+# Reusing a fixed database name and dropping it with FORCE can terminate
+# another suite's connections and turn fixture collisions into apparent product
+# failures. Each run must own the database it creates and removes.
 #
 # So the name carries a per-run token and the run drops what it created. Two
 # concurrent runs then touch disjoint databases by construction: pid is unique

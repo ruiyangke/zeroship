@@ -246,39 +246,27 @@ cargo test -p compio-postgres -- --test-threads=1
 ./tests/e2e_platform.sh
 ```
 
-### The database the live-Postgres gates run against
+### Test database ownership
 
-`tests/run_auth_suite.sh` does not create a database per run and does not take
-one from your environment. It uses
-`zeroship_auth_test_<hash of db/migrations-ts/*.ts>` — created if absent,
-migrated, and never dropped. Three things follow, and they are the point:
+`cargo xtask test auth` builds the platform migration host and runs the auth,
+authn, authz, mailer and gateway packages. Their Rust fixtures own PostgreSQL
+containers, SMTP listeners, HTTP servers and temporary files. Docker must be
+available; no `PG_TEST_URL` or generated test overlay selects their databases.
+Ordinary `cargo test -p <package>` runs the same required cases once the
+migration host has been built.
 
-- two agents on the same commit **share** that database and can run the suite
-  at the same time. The tests already scope their fixtures per run; what the
-  fresh database was buying was schema freshness, which is a property of the
-  branch, not of who launched the run.
-- a branch that adds or edits a migration gets its own database automatically,
-  because its migrations hash differently. Nobody passes a flag.
-- a database whose hash no branch produces is provably dead, which is what lets
-  `tests/sweep_test_databases.sh` reclaim it without guessing.
-
-`tests/run_worker_suite.sh` uses the same scheme under its own prefix
-(`zeroship_worker_test_<hash>`), and additionally takes `--dsn <url>` for a
-server you control outright — the way to exercise it without writing to a
-shared one.
+The worker shell runner still uses a database named after its migration set,
+`zeroship_worker_test_<hash>`. It creates and migrates that database if needed
+and retains it for other runs using the same schema. The runner also accepts
+`--dsn <url>` for an explicitly selected server.
 
 ```bash
-tests/run_auth_suite.sh                        # the shared, schema-keyed database
-tests/run_auth_suite.sh --database mine        # a private one you name and own
-tests/run_worker_suite.sh                      # the same, for zeroship-worker
-tests/run_worker_suite.sh --dsn postgres://... # a server you control
-tests/sweep_test_databases.sh                  # what is reclaimable (dry run)
-tests/sweep_test_databases.sh --apply          # reclaim it
+cargo xtask test auth
+tests/run_worker_suite.sh
+tests/run_worker_suite.sh --dsn postgres://...
+tests/sweep_test_databases.sh          # inspect reclaimable shared databases
+tests/sweep_test_databases.sh --apply  # reclaim them
 ```
-
-`TEST_DB=... tests/run_auth_suite.sh` is **refused**, not honoured: the
-override is a flag so a gate cannot be redirected by a variable left in a shell
-nobody remembers exporting it in.
 
 `tests/run_billing_suite.sh` still takes a private database per run.
 `cargo xtask test workflow` owns PostgreSQL through Testcontainers. Its control
