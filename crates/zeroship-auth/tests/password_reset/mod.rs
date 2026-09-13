@@ -7,6 +7,7 @@
 
 mod fixtures;
 mod landing;
+mod request;
 
 use crate::common::database::Database;
 use ntex::web::test;

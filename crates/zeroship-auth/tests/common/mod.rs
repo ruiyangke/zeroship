@@ -254,12 +254,6 @@ pub fn native_authorize_return_to(client_id: &str, redirect_uri: &str) -> String
 /// the right home for every app in this crate's tests: they are about OIDC,
 /// sessions, consent and account lifecycle, and an app here needs a place to
 /// exist rather than a creator.
-///
-/// A test whose subject IS the seat - `consent_ui_test`, which asserts on the
-/// consenting user's ROLE - writes the `organization_members` row itself,
-/// joining through `apps.project_id -> projects.organization_id`. That is the
-/// replacement for the deleted `zeroship.app_members` row, and the reason this
-/// helper deliberately seats nobody.
 pub async fn unowned_project(pg: &compio_postgres::Client) -> String {
     let organization_id = zeroship_core::typed_id::generate("org");
     let project_id = zeroship_core::typed_id::generate("prj");
