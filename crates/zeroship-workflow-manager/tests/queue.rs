@@ -44,6 +44,16 @@ case!(
     submission_and_competing_claims
 );
 case!(
+    sqlite_authorized_submission_scope_replay_and_rollback,
+    postgres_authorized_submission_scope_replay_and_rollback,
+    authorized_submission_scope_replay_and_rollback
+);
+case!(
+    sqlite_authorized_submission_bounds_pending_authorization,
+    postgres_authorized_submission_bounds_pending_authorization,
+    authorized_submission_bounds_pending_authorization
+);
+case!(
     sqlite_concurrent_scope_registration_preserves_identity_and_queue,
     postgres_concurrent_scope_registration_preserves_identity_and_queue,
     concurrent_scope_registration_preserves_identity_and_queue
@@ -164,6 +174,273 @@ async fn blocked_manager(admin: &compio_postgres::Client, predicate: &str) {
     })
     .await
     .expect("manager operation must reach the database lock");
+}
+
+async fn authorized_submission_scope_replay_and_rollback(fixture: &Fixture) {
+    let queue = queue(fixture, Options::default()).await;
+    let app = AppId::mint();
+    let foreign = AppId::mint();
+    queue.register_scope(&app).await.unwrap();
+    queue.register_scope(&foreign).await.unwrap();
+    let authority = assignment(fixture, &app).await;
+    let foreign_spec = job(&foreign);
+    let checks = Cell::new(0);
+    assert_eq!(
+        queue
+            .submit_authorized(&authority, &foreign_spec, |_| {
+                checks.set(checks.get() + 1);
+                ready(Ok(authority.clone()))
+            })
+            .await,
+        Err(Error::Denied)
+    );
+    assert_eq!(checks.get(), 0);
+    assert!(stored(fixture, &foreign_spec.id).await.is_none());
+
+    let spec = job(&app);
+    for reject_at in [1, 2] {
+        checks.set(0);
+        assert_eq!(
+            queue
+                .submit_authorized(&authority, &spec, |tx| {
+                    checks.set(checks.get() + 1);
+                    submission_authorization(tx, &authority, &spec, checks.get(), reject_at)
+                })
+                .await,
+            Err(Error::Denied)
+        );
+        assert_eq!(checks.get(), reject_at);
+        assert!(stored(fixture, &spec.id).await.is_none());
+        assert_authorization_rolled_back(fixture, &app).await;
+    }
+
+    let expired = Assignment {
+        expires_at: 0.try_into().unwrap(),
+        ..authority.clone()
+    };
+    assert_eq!(
+        queue
+            .submit_authorized(&expired, &spec, |_| ready(Ok(authority.clone())))
+            .await,
+        Err(Error::Denied)
+    );
+    for observed in [
+        expired,
+        Assignment {
+            app_id: foreign,
+            ..authority.clone()
+        },
+        Assignment {
+            worker_id: WorkerId::mint(),
+            ..authority.clone()
+        },
+        Assignment {
+            revision: 2.try_into().unwrap(),
+            ..authority.clone()
+        },
+    ] {
+        assert_eq!(
+            queue
+                .submit_authorized(&authority, &spec, |_| ready(Ok(observed.clone())))
+                .await,
+            Err(Error::Denied)
+        );
+        assert!(stored(fixture, &spec.id).await.is_none());
+    }
+
+    assert_eq!(
+        queue
+            .submit_authorized(&authority, &spec, |_| ready(Ok(authority.clone())))
+            .await,
+        Ok(spec.clone())
+    );
+    let original = stored(fixture, &spec.id).await.unwrap();
+    assert_eq!(original["state"], value!("ready"));
+    checks.set(0);
+    assert_eq!(
+        queue
+            .submit_authorized(&authority, &spec, |tx| {
+                checks.set(checks.get() + 1);
+                let spec = &spec;
+                let authority = authority.clone();
+                async move {
+                    assert_transaction_job(&tx, spec, "ready").await?;
+                    Ok(authority)
+                }
+            })
+            .await,
+        Ok(spec.clone())
+    );
+    assert_eq!(checks.get(), 2);
+    assert_eq!(stored(fixture, &spec.id).await, Some(original.clone()));
+    assert_eq!(
+        queue
+            .submit_authorized(&authority, &spec, |_| ready(Err(Error::Denied)))
+            .await,
+        Err(Error::Denied)
+    );
+    let changed = JobSpec {
+        available_at: 1.try_into().unwrap(),
+        ..spec.clone()
+    };
+    assert_eq!(
+        queue
+            .submit_authorized(&authority, &changed, |_| ready(Ok(authority.clone())))
+            .await,
+        Err(Error::Conflict)
+    );
+    assert_eq!(stored(fixture, &spec.id).await, Some(original));
+}
+
+async fn submission_authorization(
+    tx: Database,
+    authority: &Assignment,
+    spec: &JobSpec,
+    check: i64,
+    reject_at: i64,
+) -> Result<Assignment, Error> {
+    assert!((1..=2).contains(&check));
+    let Output::Rows { rows, .. } = tx
+        .collection("jobs")?
+        .find(
+            value!({"app_id":spec.app_id.as_str(),"id":spec.id.as_str()}),
+            value!({"limit":1}),
+        )
+        .await?
+    else {
+        panic!("submission authorization query returned a count");
+    };
+    if check == 1 {
+        assert!(rows.is_empty(), "initial authorization precedes insertion");
+    } else {
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["state"], value!("ready"));
+    }
+    let written = tx
+        .collection("queue_scopes")?
+        .execute(Operation::Update {
+            filter: value!({"id":authority.app_id.as_str(),"lock_version":check-1}),
+            patch: value!({"$inc":{"lock_version":1}}),
+            many: true,
+        })
+        .await?;
+    assert!(
+        matches!(written, Output::Count(1)),
+        "authorization must share the insertion transaction"
+    );
+    if check == reject_at {
+        Err(Error::Denied)
+    } else {
+        Ok(authority.clone())
+    }
+}
+
+async fn authorized_submission_bounds_pending_authorization(fixture: &Fixture) {
+    for short_assignment in [false, true] {
+        let queue = queue(
+            fixture,
+            Options {
+                transaction_timeout: if short_assignment {
+                    Duration::from_secs(30)
+                } else {
+                    Duration::from_secs(1)
+                },
+                ..Options::default()
+            },
+        )
+        .await;
+        let app = AppId::mint();
+        queue.register_scope(&app).await.unwrap();
+        let authority = assignment(fixture, &app).await;
+        let mut observed = authority.clone();
+        if short_assignment {
+            observed.expires_at = (now(fixture).await + 1_000).try_into().unwrap();
+        }
+        let spec = job(&app);
+        let checks = Cell::new(0);
+        let result = compio::time::timeout(
+            Duration::from_secs(5),
+            queue.submit_authorized(&authority, &spec, |tx| {
+                checks.set(checks.get() + 1);
+                let check = checks.get();
+                let observed = observed.clone();
+                let spec = &spec;
+                async move {
+                    if check == 1 {
+                        Ok(observed)
+                    } else {
+                        assert_eq!(check, 2);
+                        assert_transaction_job(&tx, spec, "ready").await?;
+                        std::future::pending().await
+                    }
+                }
+            }),
+        )
+        .await
+        .expect("submission must honor transaction and observed assignment budgets");
+        assert_eq!(result, Err(Error::Timeout));
+        assert_eq!(checks.get(), 2, "timeout must occur after insertion");
+        assert!(stored(fixture, &spec.id).await.is_none());
+        assert_eq!(
+            queue
+                .submit_authorized(&authority, &spec, |_| ready(Ok(authority.clone())))
+                .await,
+            Ok(spec)
+        );
+    }
+}
+
+#[compio::test]
+async fn postgres_authorized_submission_rechecks_revocation_after_app_lock() {
+    let fixture = Fixture::new(Backend::Postgres).await;
+    let queue = queue(&fixture, Options::default()).await;
+    let app = AppId::mint();
+    queue.register_scope(&app).await.unwrap();
+    let authority = assignment(&fixture, &app).await;
+    let spec = job(&app);
+    let revoked = Cell::new(false);
+    let checks = Cell::new(0);
+    let Admin::Postgres(admin) = &fixture.admin else {
+        unreachable!()
+    };
+    admin.batch_execute("BEGIN").await.unwrap();
+    let locked = admin
+        .query(
+            "SELECT id FROM workflow_manager.queue_scopes WHERE id=$1 FOR UPDATE",
+            &[&app.as_str()],
+        )
+        .await
+        .unwrap();
+    assert_eq!(locked.len(), 1);
+    let release = async {
+        blocked_manager(
+            admin,
+            "l.locktype='transactionid' AND a.query LIKE '%queue_scopes%' \
+             AND pg_backend_pid()=ANY(pg_blocking_pids(a.pid))",
+        )
+        .await;
+        assert_eq!(checks.get(), 0, "authorization must follow the app lock");
+        revoked.set(true);
+        admin.batch_execute("ROLLBACK").await.unwrap();
+    };
+    let submit = queue.submit_authorized(&authority, &spec, |_| {
+        checks.set(checks.get() + 1);
+        assert!(
+            revoked.get(),
+            "callback must observe revocation after waiting"
+        );
+        ready(Err(Error::Denied))
+    });
+    let (result, ()) = futures::join!(submit, release);
+    assert_eq!(result, Err(Error::Denied));
+    assert_eq!(checks.get(), 1);
+    assert!(stored(&fixture, &spec.id).await.is_none());
+    assert_eq!(
+        queue
+            .submit_authorized(&authority, &spec, |_| ready(Ok(authority.clone())))
+            .await,
+        Ok(spec)
+    );
 }
 
 #[compio::test]
