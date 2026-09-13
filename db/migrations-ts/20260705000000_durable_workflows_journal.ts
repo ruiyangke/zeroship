@@ -14,6 +14,7 @@ const journalTables = [
   "workflow_subscriptions",
   "workflow_schedules",
   "workflow_rollout_config",
+  "workflow_policy_ledger",
 ];
 
 function zs(name) {
@@ -348,12 +349,28 @@ export default {
         id: t.text().notNull().default("global"),
         dispatch_paused: t.boolean().notNull().default(false),
         ingress_disabled: t.boolean().notNull().default(false),
+        source_validity_ms: t.bigInt().notNull(),
         updated_at: t.timestamp().notNull().default(now()),
         updated_by: t.text(),
       },
       primaryKey: ["id"],
     });
     zs("workflow_rollout_config").check("workflow_rollout_config_id_check").add({ expr: (c) => c("id").eq("global") });
+    zs("workflow_rollout_config").check("workflow_rollout_config_validity_check").add({ expr: (c) => c("source_validity_ms").gt(0) });
+
+    zs("workflow_policy_ledger").create({
+      columns: {
+        id: t.text().notNull(),
+        revision: t.bigInt().notNull().default(0),
+        policy_json: t.json(),
+        source_validity_ms: t.bigInt(),
+      },
+      primaryKey: ["id"],
+    });
+    zs("workflow_policy_ledger").check("workflow_policy_ledger_publication_check").add({
+      expr: (c) => c("revision").eq(0).and(c("policy_json").isNull(), c("source_validity_ms").isNull())
+        .or(c("revision").gt(0).and(c("policy_json").isNotNull(), c("source_validity_ms").isNotNull(), c("source_validity_ms").gt(0))),
+    });
 
     zs("app_deploys").foreignKey("app_deploys_app_id_fkey").add({ columns: ["app_id"], references: { table: "apps", columns: ["id"] }, onDelete: "cascade" });
     zs("workflow_runs").foreignKey("workflow_runs_app_id_fkey").add({ columns: ["app_id"], references: { table: "apps", columns: ["id"] }, onDelete: "cascade" });

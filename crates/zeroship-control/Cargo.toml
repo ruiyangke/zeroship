@@ -7,6 +7,10 @@ description = "zeroship control plane — admin API, internal API, Postgres, VFS
 # their Testcontainers fixtures; shared service suites remain grouped.
 autotests = false
 
+[[test]]
+name = "workflow_policy_catalog"
+path = "tests/workflow_policy_catalog.rs"
+
 [[package.metadata.zeroship-config.targets]]
 target = "zeroship-control"
 class = "platform"
@@ -21,11 +25,6 @@ reason = "Standalone Stripe mock used only by billing and metering end-to-end te
 target = "dev-provision"
 class = "test-dev-tool"
 reason = "Development and CI provisioning helper that is never deployed as a service."
-
-[[package.metadata.zeroship-config.targets]]
-target = "workflow-test-environment"
-class = "test-dev-tool"
-reason = "Native Testcontainers owner used only by workflow integration tests."
 
 [[example]]
 name = "workflow-test-environment"

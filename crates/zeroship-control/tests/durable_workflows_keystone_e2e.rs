@@ -863,8 +863,8 @@ async fn set_dispatch_paused(fx: &Fixture, paused: bool) {
     fx.pg
         .execute(
             "INSERT INTO zeroship.workflow_rollout_config \
-                (id, dispatch_paused, ingress_disabled, updated_by) \
-             VALUES ('global', $1, false, 'dw24-e2e') \
+                (id, dispatch_paused, ingress_disabled, source_validity_ms, updated_by) \
+             VALUES ('global', $1, false, 30000, 'dw24-e2e') \
              ON CONFLICT (id) DO UPDATE SET \
                 dispatch_paused = EXCLUDED.dispatch_paused, \
                 updated_at = now(), \
@@ -879,8 +879,8 @@ async fn set_ingress_disabled(fx: &Fixture, disabled: bool) {
     fx.pg
         .execute(
             "INSERT INTO zeroship.workflow_rollout_config \
-                (id, dispatch_paused, ingress_disabled, updated_by) \
-             VALUES ('global', false, $1, 'dw24-e2e') \
+                (id, dispatch_paused, ingress_disabled, source_validity_ms, updated_by) \
+             VALUES ('global', false, $1, 30000, 'dw24-e2e') \
              ON CONFLICT (id) DO UPDATE SET \
                 ingress_disabled = EXCLUDED.ingress_disabled, \
                 updated_at = now(), \

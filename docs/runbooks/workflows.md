@@ -74,12 +74,22 @@ describe the current Control-hosted implementation.
 
 ## Dispatch Pause
 
+The workflow manager's policy provider requires a provisioned global
+`source_validity_ms` and complete `plans.workflow_policy_json` values. Choose the
+finite validity as an operator bound on stale authority, then use native
+`ControlPolicyStore::set_rollout` and `set_plan_policy`, or explicit SQL
+provisioning. Plan policy follows the closed `AppPolicy` contract in
+`crates/zeroship-core/src/workflow_policy.rs`. Missing fields are not defaulted.
+The SQL placeholders below require that chosen validity when inserting the global
+row; updates preserve its current bound. Manager and worker caches retain their
+original lease deadlines, so a switch update does not prove execution quiescence.
+
 Use this when the replay engine is suspect.
 
 ```sql
 INSERT INTO zeroship.workflow_rollout_config
-       (id, dispatch_paused, ingress_disabled, updated_by)
-VALUES ('global', true, false, :operator)
+       (id, dispatch_paused, ingress_disabled, source_validity_ms, updated_by)
+VALUES ('global', true, false, :source_validity_ms, :operator)
 ON CONFLICT (id) DO UPDATE SET
   dispatch_paused = true,
   updated_at = now(),
@@ -104,8 +114,8 @@ Use this when the public signal edge is suspect.
 
 ```sql
 INSERT INTO zeroship.workflow_rollout_config
-       (id, dispatch_paused, ingress_disabled, updated_by)
-VALUES ('global', false, true, :operator)
+       (id, dispatch_paused, ingress_disabled, source_validity_ms, updated_by)
+VALUES ('global', false, true, :source_validity_ms, :operator)
 ON CONFLICT (id) DO UPDATE SET
   ingress_disabled = true,
   updated_at = now(),

@@ -8,6 +8,8 @@ use zeroship_core::{
     workflow_policy::{AppPolicy, PolicyLease},
 };
 
+pub mod control;
+
 /// A provider's immutable, finite observation of complete authoritative policy.
 /// Cloning retains source validity; observing cached data must not renew it.
 #[derive(Clone, Debug)]

@@ -96,6 +96,7 @@
   "workflow_subscriptions": "zeroship_platform",
   "workflow_schedules": "zeroship_platform",
   "workflow_rollout_config": "zeroship_platform",
+  "workflow_policy_ledger": "zeroship_platform",
   "workflow_deploy_notifications": "zeroship_platform",
   "workflow_scheduler_timers": "zeroship_platform",
   "workflow_scheduler_inflight": "zeroship_platform",

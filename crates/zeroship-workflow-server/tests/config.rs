@@ -20,6 +20,7 @@ fn config_check_validates_toml_and_flags_without_opening_dependencies() {
             "batch_limit":3,
             "driver_interval_ms":250,
             "driver_lane_timeout_ms":1500,
+            "policy_cache_entries":7,
         }}))
         .unwrap(),
     )
@@ -60,6 +61,7 @@ fn config_check_validates_toml_and_flags_without_opening_dependencies() {
     .unwrap();
     assert_eq!(*settings.batch_limit.get(), 2);
     let options = ServerOptions::resolve(&settings).unwrap();
+    assert_eq!(options.policy_cache_entries.get(), 7);
     assert_eq!(options.driver.page_limit, 2);
     assert_eq!(
         options.driver_interval,
@@ -76,12 +78,14 @@ fn config_check_validates_toml_and_flags_without_opening_dependencies() {
         .output()
         .unwrap();
     assert!(!missing.status.success());
-    assert!(WorkflowSettingsSources::try_parse_from([
-        "zeroship-workflow-server",
-        "--database-url",
-        "secret"
-    ])
-    .is_err());
+    assert!(
+        WorkflowSettingsSources::try_parse_from([
+            "zeroship-workflow-server",
+            "--database-url",
+            "secret"
+        ])
+        .is_err()
+    );
     let invalid = Command::new(env!("CARGO_BIN_EXE_zeroship-workflow-server"))
         .env_clear()
         .args(["--check-config", "--config"])
@@ -90,7 +94,11 @@ fn config_check_validates_toml_and_flags_without_opening_dependencies() {
         .output()
         .unwrap();
     assert!(!invalid.status.success());
-    for flag in ["--driver-interval-ms", "--driver-lane-timeout-ms"] {
+    for flag in [
+        "--driver-interval-ms",
+        "--driver-lane-timeout-ms",
+        "--policy-cache-entries",
+    ] {
         let invalid = Command::new(env!("CARGO_BIN_EXE_zeroship-workflow-server"))
             .env_clear()
             .args(["--check-config", "--config"])
@@ -101,12 +109,10 @@ fn config_check_validates_toml_and_flags_without_opening_dependencies() {
         assert!(!invalid.status.success(), "accepted {flag}=0");
     }
     for flag in ["--payload-url", "--max-running", "--lease-ms"] {
-        assert!(WorkflowSettingsSources::try_parse_from([
-            "zeroship-workflow-server",
-            flag,
-            "unused"
-        ])
-        .is_err());
+        assert!(
+            WorkflowSettingsSources::try_parse_from(["zeroship-workflow-server", flag, "unused"])
+                .is_err()
+        );
     }
 }
 

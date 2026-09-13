@@ -34,6 +34,12 @@ export default {
       sql: "GRANT SELECT (id,status,public_key) ON zeroship.worker_instances TO zeroship_workflow",
       reason: "the coordinator verifies enrolled worker identity without customer-data access",
     });
+    raw({
+      sql: "GRANT SELECT (id,plan_id,workflows_enabled,archived_at) ON zeroship.apps TO zeroship_workflow; GRANT SELECT (id,workflows_allowed,archived,workflow_policy_json) ON zeroship.plans TO zeroship_workflow",
+      reason: "workflow policy observations read only Control-owned contributors",
+    });
+    grant({ privileges: ["select"], on: { kind: "table", schema: "zeroship", names: ["workflow_rollout_config"] }, to: ["zeroship_workflow"] });
+    grant({ privileges: ["select", "insert", "update"], on: { kind: "table", schema: "zeroship", names: ["workflow_policy_ledger"] }, to: ["zeroship_workflow"] });
     grant({
       privileges: ["select", "insert", "update", "delete"],
       on: { kind: "table", schema: "service_authn", names: ["service_assertion_replay"] },

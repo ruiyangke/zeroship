@@ -104,6 +104,7 @@ const typedIdColumnsByTable: Readonly<Record<string, readonly string[]>> = {
   // Workflow identities and immutable deployment references.
   app_deploy_holds: ["app_id", "deploy_id", "holder_id"],
   workflow_broadcasts: ["app_id", "id", "deploy_id"],
+  workflow_policy_ledger: ["id"],
   workflow_runs: ["app_id", "id", "dispatch_nonce", "parent_run_id", "deploy_id"],
   workflow_schedules: ["app_id", "id", "deploy_id"],
   workflow_scheduler_inflight: ["app_id", "run_id"],

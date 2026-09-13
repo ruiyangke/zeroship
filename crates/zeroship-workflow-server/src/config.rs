@@ -2,8 +2,8 @@
 
 use std::path::{Path, PathBuf};
 use zeroship_core::config::{
-    zeroship_config, BootstrapControl, CheckFormat, CommandControl, ObservabilityControls,
-    Operational, OverlaySelector, Secret,
+    BootstrapControl, CheckFormat, CommandControl, ObservabilityControls, Operational,
+    OverlaySelector, Secret, zeroship_config,
 };
 use zeroship_core::observability::LogFormat;
 
@@ -48,6 +48,9 @@ pub struct WorkflowSettings {
     /// Maximum connections per HTTP thread.
     #[config(name = "workflow.max_connections", default = 1024)]
     pub max_connections: Operational<usize>,
+    /// Maximum cached app policy observations per HTTP thread.
+    #[config(name = "workflow.policy_cache_entries", default = 1024)]
+    pub policy_cache_entries: Operational<usize>,
     /// Maximum metadata JSON request size.
     #[config(name = "workflow.max_request_bytes", default = crate::api::DEFAULT_MAX_REQUEST_BYTES)]
     pub max_request_bytes: Operational<usize>,

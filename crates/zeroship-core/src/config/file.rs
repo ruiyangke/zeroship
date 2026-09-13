@@ -121,6 +121,8 @@ pub struct FileConfig {
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct ControlSection {
+    /// Workflow coordinator origin used by Control's metadata client.
+    pub workflow_coordinator_url: Option<String>,
     /// `PostgreSQL` DSN for control-plane data. A DSN grammar admits userinfo,
     /// so it is secret-classed regardless of whether a given value carries a
     /// password.
@@ -374,6 +376,8 @@ pub struct WorkflowSection {
     pub http_threads: Option<usize>,
     /// Maximum connections per HTTP thread.
     pub max_connections: Option<usize>,
+    /// Maximum cached app policy observations per HTTP thread.
+    pub policy_cache_entries: Option<usize>,
     /// Maximum metadata JSON request size.
     pub max_request_bytes: Option<usize>,
     /// Metadata database connections per HTTP thread.
