@@ -1,5 +1,6 @@
 use super::{
     models,
+    policy::CapturedPolicy,
     store::{OrmStore, Row, Transaction},
     types::{digest, AppPolicy, DeployRegistration, RequestId},
 };
@@ -122,6 +123,19 @@ impl AppWorkflows {
         name: &str,
         options: StartOptions,
     ) -> Result<StartedRun, WorkflowServiceError> {
+        let captured = CapturedPolicy::capture(&self.service.policies, &self.app);
+        captured
+            .run(self.start_captured(request_id, name, options, &captured))
+            .await
+    }
+
+    async fn start_captured(
+        &self,
+        request_id: &RequestId,
+        name: &str,
+        options: StartOptions,
+        captured: &CapturedPolicy,
+    ) -> Result<StartedRun, WorkflowServiceError> {
         validation::workflow_name(name)?;
         validation::start(&options)?;
         let digest = digest(&(name, &options))?;
@@ -131,7 +145,9 @@ impl AppWorkflows {
         if let Some(receipt) = request_result(&tx, &self.app, request_id, "start", &digest).await? {
             return Ok(receipt);
         }
+        captured.recheck(&self.service.policies, &self.app)?;
         policy.admit()?;
+        captured.check(&self.service.policies, &self.app)?;
         if encode(&options.input)?.len() > policy.max_input_bytes {
             return Err(WorkflowServiceError::PayloadTooLarge);
         }
@@ -194,6 +210,7 @@ impl AppWorkflows {
             &mut tx, &self.app, request_id, "start", &digest, &result, now,
         )
         .await?;
+        captured.check(&self.service.policies, &self.app)?;
         tx.commit().await?;
         Ok(result)
     }
@@ -226,27 +243,36 @@ impl AppWorkflows {
         run_id: &str,
         options: SignalOptions,
     ) -> Result<DeliveredSignal, WorkflowServiceError> {
-        validate_run(run_id)?;
-        validation::signal_type(&options.signal_type)?;
-        let digest = digest(&(run_id, &options))?;
-        let mut tx = self.service.begin().await?;
-        let policy = lock_app(&mut tx, &self.app).await?;
-        let now = tx.now().await?;
-        if let Some(receipt) = request_result(&tx, &self.app, request_id, "signal", &digest).await?
-        {
-            return Ok(receipt);
-        }
-        if encode(&options.payload)?.len() > policy.max_input_bytes {
-            return Err(WorkflowServiceError::PayloadTooLarge);
-        }
-        let result =
-            super::signals::deliver(&mut tx, &self.app, run_id, &options, "app", now).await?;
-        store_request(
-            &mut tx, &self.app, request_id, "signal", &digest, &result, now,
-        )
-        .await?;
-        tx.commit().await?;
-        Ok(result)
+        let captured = CapturedPolicy::capture(&self.service.policies, &self.app);
+        captured
+            .run(async {
+                validate_run(run_id)?;
+                validation::signal_type(&options.signal_type)?;
+                let digest = digest(&(run_id, &options))?;
+                let mut tx = self.service.begin().await?;
+                let policy = lock_app(&mut tx, &self.app).await?;
+                let now = tx.now().await?;
+                if let Some(receipt) =
+                    request_result(&tx, &self.app, request_id, "signal", &digest).await?
+                {
+                    return Ok(receipt);
+                }
+                captured.check(&self.service.policies, &self.app)?;
+                if encode(&options.payload)?.len() > policy.max_input_bytes {
+                    return Err(WorkflowServiceError::PayloadTooLarge);
+                }
+                let result =
+                    super::signals::deliver(&mut tx, &self.app, run_id, &options, "app", now)
+                        .await?;
+                store_request(
+                    &mut tx, &self.app, request_id, "signal", &digest, &result, now,
+                )
+                .await?;
+                captured.check(&self.service.policies, &self.app)?;
+                tx.commit().await?;
+                Ok(result)
+            })
+            .await
     }
 }
 

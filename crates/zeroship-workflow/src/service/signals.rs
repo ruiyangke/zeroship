@@ -1,6 +1,7 @@
 use super::{
     app::{emit, encode, lock_app, lock_run, parse_state, request_result, store_request},
     models,
+    policy::CapturedPolicy,
     store::Transaction,
     types::digest,
     AppWorkflows, RequestId, WorkflowService,
@@ -59,32 +60,40 @@ impl AppWorkflows {
         topic: &str,
         options: SignalOptions,
     ) -> Result<AcceptedBroadcast, WorkflowServiceError> {
-        validate_topic(topic)?;
-        validation::signal_type(&options.signal_type)?;
-        let digest = digest(&(topic, &options))?;
-        let mut tx = self.service.begin().await?;
-        let policy = lock_app(&mut tx, &self.app).await?;
-        let now = tx.now().await?;
-        if let Some(receipt) = request_result(&tx, &self.app, request, "broadcast", &digest).await?
-        {
-            return Ok(receipt);
-        }
-        if encode(&options.payload)?.len() > policy.max_input_bytes {
-            return Err(WorkflowServiceError::PayloadTooLarge);
-        }
-        let result = publish(&mut tx, &self.app, topic, &options, "app", now).await?;
-        store_request(
-            &mut tx,
-            &self.app,
-            request,
-            "broadcast",
-            &digest,
-            &result,
-            now,
-        )
-        .await?;
-        tx.commit().await?;
-        Ok(result)
+        let captured = CapturedPolicy::capture(&self.service.policies, &self.app);
+        captured
+            .run(async {
+                validate_topic(topic)?;
+                validation::signal_type(&options.signal_type)?;
+                let digest = digest(&(topic, &options))?;
+                let mut tx = self.service.begin().await?;
+                let policy = lock_app(&mut tx, &self.app).await?;
+                let now = tx.now().await?;
+                if let Some(receipt) =
+                    request_result(&tx, &self.app, request, "broadcast", &digest).await?
+                {
+                    return Ok(receipt);
+                }
+                captured.check(&self.service.policies, &self.app)?;
+                if encode(&options.payload)?.len() > policy.max_input_bytes {
+                    return Err(WorkflowServiceError::PayloadTooLarge);
+                }
+                let result = publish(&mut tx, &self.app, topic, &options, "app", now).await?;
+                store_request(
+                    &mut tx,
+                    &self.app,
+                    request,
+                    "broadcast",
+                    &digest,
+                    &result,
+                    now,
+                )
+                .await?;
+                captured.check(&self.service.policies, &self.app)?;
+                tx.commit().await?;
+                Ok(result)
+            })
+            .await
     }
 }
 

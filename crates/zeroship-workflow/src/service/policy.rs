@@ -2,7 +2,7 @@
 
 use super::AppPolicy;
 use crate::WorkflowServiceError;
-use std::{collections::BTreeMap, sync::RwLock, time::Instant};
+use std::{collections::BTreeMap, future::Future, sync::RwLock, time::Instant};
 use zeroship_core::{app_id::AppId, workflow_coordination::Revision};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -104,6 +104,59 @@ impl PolicyAuthority {
             return Err(unavailable());
         }
         Ok(())
+    }
+}
+
+/// Capture before journal I/O, while allowing an exact committed request to be
+/// read even when fresh mutation authority is unavailable.
+pub(super) struct CapturedPolicy(Result<PolicyAuthority, WorkflowServiceError>);
+
+impl CapturedPolicy {
+    pub(super) fn capture(policies: &HostPolicies, app: &AppId) -> Self {
+        Self(policies.authority(app))
+    }
+
+    /// A once-live operation must not turn a concurrent revocation into a
+    /// durable policy refusal. Initial denials retain the operation's semantics.
+    pub(super) fn recheck(
+        &self,
+        policies: &HostPolicies,
+        app: &AppId,
+    ) -> Result<(), WorkflowServiceError> {
+        self.0
+            .as_ref()
+            .map_or(Ok(()), |authority| authority.check(policies, app))
+    }
+
+    pub(super) fn check(
+        &self,
+        policies: &HostPolicies,
+        app: &AppId,
+    ) -> Result<(), WorkflowServiceError> {
+        self.0.as_ref().map_err(Clone::clone)?.check(policies, app)
+    }
+
+    pub(super) fn run<'a, T: 'a>(
+        &'a self,
+        operation: impl Future<Output = Result<T, WorkflowServiceError>> + 'a,
+    ) -> futures::future::LocalBoxFuture<'a, Result<T, WorkflowServiceError>> {
+        Box::pin(async move {
+            if let Some(deadline) = self
+                .0
+                .as_ref()
+                .ok()
+                .and_then(|authority| authority.deadline)
+            {
+                compio::time::timeout(
+                    deadline.saturating_duration_since(Instant::now()),
+                    operation,
+                )
+                .await
+                .map_err(|_| unavailable())?
+            } else {
+                operation.await
+            }
+        })
     }
 }
 
