@@ -1009,7 +1009,7 @@ in would have made this one unreviewable.
 | Issuer identifiers, minter, verifier, `ReplayStore` trait, in-memory store | `crates/zeroship-core/src/service_assertion.rs` |
 | Postgres `jti` store | `crates/zeroship-authn/src/service_replay.rs` |
 | The replay table and its grants, in the `service_authn` schema | `db/migrations-ts/20260816000100_service_assertion_replay.ts` |
-| Security-property tests | `crates/zeroship-core/tests/service_assertion_test.rs` (27), `crates/zeroship-authn/tests/service_replay_pg_test.rs` (4, live PG) |
+| Security-property tests | `crates/zeroship-core/tests/service_assertion_test.rs`, `crates/zeroship-authn/tests/replay.rs` (owned PostgreSQL, migrated service roles) |
 
 ### 14.0 CORRECTED 2026-08-17: the replay table is not in the `zeroship` schema
 
