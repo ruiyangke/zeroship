@@ -1597,24 +1597,9 @@ export function transformPlugin(state: TransformState): Plugin {
             `  } catch (_) { /* @zeroship/server not installed — RPC dispatch still works. */ }\n` +
             `}\n`
           );
-          // Emit one module-scoped registration call so the dev-bootstrap
-          // can replace this module's whole wire-id set atomically. That
-          // lets HMR drop stale ids when a handler is renamed or deleted.
-          const registerEntries = serverFns
-            .map((fn) => {
-              const wid = wireIdFor(fn);
-              return `${JSON.stringify(wid)}: ${fn.name}`;
-            })
-            .join(", ");
-          const registerCall =
-            `if (typeof globalThis.__registerModule === "function") ` +
-            `globalThis.__registerModule(${JSON.stringify(id)}, { ${registerEntries} });`;
-
           s.append(
             `\n\n// zeroship: SSR hooks\n` +
-            `${ssrPatches}\n` +
-            `\n// zeroship: dev-bootstrap registry (harmless no-op outside dev)\n` +
-            `${registerCall}\n`
+            `${ssrPatches}\n`
           );
           return {
             code: s.toString(),

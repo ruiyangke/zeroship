@@ -11,6 +11,9 @@ import {
   ENV_RUNTIME_DESCRIPTOR,
   HMR_POLL_PATH,
   MODULE_FETCH_PATH,
+  PROCEDURE_BINDINGS_PATH,
+  RUNTIME_MODULE_SPECIFIER,
+  VITE_RUNTIME_MODULE_ID,
 } from "../src/constants.js";
 import { devServerPlugin } from "../src/dev-server.js";
 import { createProjectConfigHolder } from "../src/project-config/index.js";
@@ -111,6 +114,31 @@ describe("devServerPlugin", () => {
       assert.equal(typeof payload.result?.code, "string");
       assert.match(payload.result?.code ?? "", /__vite_ssr_|new Response/);
       assert.equal(payload.result?.id, harness.serverEntry);
+    } finally {
+      await harness.close();
+    }
+  });
+
+  test("advertises the runtime-owned module to the module runner", async () => {
+    const harness = await startHarness();
+    try {
+      const resp = await fetch(`${harness.origin}${MODULE_FETCH_PATH}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          type: "custom",
+          event: "vite:invoke",
+          data: {
+            id: "builtins-1",
+            name: "getBuiltins",
+            data: [],
+          },
+        }),
+      });
+      assert.equal(resp.status, 200);
+      assert.deepEqual(await resp.json(), {
+        result: [RUNTIME_MODULE_SPECIFIER, VITE_RUNTIME_MODULE_ID],
+      });
     } finally {
       await harness.close();
     }
@@ -217,13 +245,21 @@ describe("devServerPlugin", () => {
 
       const first = await fetch(`${harness.origin}${HMR_POLL_PATH}`);
       assert.equal(first.status, 200);
-      assert.deepEqual(await first.json(), {
-        changed: [harness.serverEntry],
-      });
+      const firstPayload = await first.json() as {
+        changed?: unknown;
+        bindingsVersion?: unknown;
+      };
+      assert.deepEqual(firstPayload.changed, [harness.serverEntry]);
+      assert.equal(typeof firstPayload.bindingsVersion, "string");
 
       const second = await fetch(`${harness.origin}${HMR_POLL_PATH}`);
       assert.equal(second.status, 200);
-      assert.deepEqual(await second.json(), { changed: [] });
+      const secondPayload = await second.json() as {
+        changed?: unknown;
+        bindingsVersion?: unknown;
+      };
+      assert.deepEqual(secondPayload.changed, []);
+      assert.equal(secondPayload.bindingsVersion, firstPayload.bindingsVersion);
       assert.equal(await harness.runtimeSpawnCount(), 1, "ordinary HMR keeps the runtime alive");
     } finally {
       await harness.close();
@@ -256,11 +292,12 @@ describe("devServerPlugin", () => {
       // half is crates/zeroship-cli/tests/parent_death_test.rs; the two of them meeting
       // on a real dev server is step 7d of tests/golden_path.sh.
       assert.equal(runtime.env.ZEROSHIP_DIE_WITH_PARENT, String(process.pid));
-      assert.deepEqual(runtime.argv.slice(0, 4), [
+      assert.deepEqual(runtime.argv.slice(0, 5), [
         "serve",
         BOOTSTRAP_SHIM_PATH,
         "--port=3901",
         "--workers=1",
+        "--dev-entry-loader=createDevEntryLoader",
       ]);
     } finally {
       await harness.close();
@@ -269,6 +306,22 @@ describe("devServerPlugin", () => {
     assert.equal(process.listenerCount("exit"), beforeExitListeners);
     assert.equal(process.listenerCount("SIGINT"), beforeSigintListeners);
     assert.equal(process.listenerCount("SIGTERM"), beforeSigtermListeners);
+  });
+
+  test("serves versioned procedure bindings to the runtime loader", async () => {
+    const harness = await startHarness();
+    try {
+      const response = await fetch(`${harness.origin}${PROCEDURE_BINDINGS_PATH}`);
+      assert.equal(response.status, 200);
+      const payload = await response.json() as {
+        version?: unknown;
+        bindings?: unknown;
+      };
+      assert.equal(typeof payload.version, "string");
+      assert.deepEqual(payload.bindings, []);
+    } finally {
+      await harness.close();
+    }
   });
 
   test("injects the in-process generated runtime descriptor into the spawned dev runtime", async () => {

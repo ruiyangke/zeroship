@@ -5,6 +5,8 @@ import {
   rpcRegistryPlugin,
   buildServerEntrySource,
   pickEntryWireId,
+  serverBindingSnapshotFromState,
+  serverBindingVersionFromState,
   serverBindingsFromState,
   SERVER_ENTRY_VIRTUAL_ID,
   SERVER_ENTRY_RESOLVED_ID,
@@ -308,4 +310,46 @@ test("transform records become explicit procedure bindings", () => {
       lazy: true,
     },
   ]]);
+});
+
+test("binding snapshots are stable and reject duplicate wire ids", () => {
+  const procedure = (filePath: string, exportName: string, id: string) => ({
+    filePath,
+    exportName,
+    moduleSlug: exportName,
+    kind: "query" as const,
+    isStream: false,
+    config: { id },
+  });
+  const first = serverBindingSnapshotFromState({
+    discoveredProcedures: [
+      procedure("/app/z.ts", "last", "z"),
+      procedure("/app/a.ts", "first", "a"),
+    ],
+  });
+  const reordered = serverBindingSnapshotFromState({
+    discoveredProcedures: [
+      procedure("/app/a.ts", "first", "a"),
+      procedure("/app/z.ts", "last", "z"),
+    ],
+  });
+  assert.deepEqual(first, reordered);
+  assert.throws(
+    () => serverBindingSnapshotFromState({
+      discoveredProcedures: [
+        procedure("/app/a.ts", "first", "same"),
+        procedure("/app/z.ts", "last", "same"),
+      ],
+    }),
+    /duplicate procedure id.*a\.ts::first.*z\.ts::last/,
+  );
+  assert.equal(
+    typeof serverBindingVersionFromState({
+      discoveredProcedures: [
+        procedure("/app/a.ts", "first", "same"),
+        procedure("/app/z.ts", "last", "same"),
+      ],
+    }),
+    "string",
+  );
 });

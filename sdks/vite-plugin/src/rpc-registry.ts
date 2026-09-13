@@ -3,6 +3,7 @@
 // normalizes the user's exports. Workflow collection remains with its owner.
 
 import type { Plugin } from "vite";
+import { createHash } from "node:crypto";
 import type { TransformState } from "./transform.js";
 
 /** A discovered procedure, keyed by <sourceFile>::<exportName> in the binding map. */
@@ -13,6 +14,11 @@ export interface ServerBinding {
   kind: "query" | "mutation" | "action" | "stream" | "subscription";
   /** Return the actual procedure through a dynamic import when Rust requests it. */
   lazy?: boolean;
+}
+
+export interface ServerBindingSnapshot {
+  version: string;
+  bindings: ServerBinding[];
 }
 
 export const SERVER_ENTRY_VIRTUAL_ID = "virtual:zeroship/_server-entry";
@@ -43,6 +49,49 @@ export function serverBindingsFromState(
     });
   }
   return bindings;
+}
+
+/** Produce the stable host response consumed by the development loader. */
+export function serverBindingSnapshotFromState(
+  state: Pick<TransformState, "discoveredProcedures">,
+): ServerBindingSnapshot {
+  const bindings = sortedServerBindings(state);
+  const owners = new Map<string, ServerBinding>();
+  for (const binding of bindings) {
+    const previous = owners.get(binding.wireId);
+    if (previous) {
+      throw new Error(
+        `duplicate procedure id ${JSON.stringify(binding.wireId)}: ` +
+        `${previous.sourceFile}::${previous.exportName} and ` +
+        `${binding.sourceFile}::${binding.exportName}`,
+      );
+    }
+    owners.set(binding.wireId, binding);
+  }
+  return {
+    version: hashServerBindings(bindings),
+    bindings,
+  };
+}
+
+/** Track binding changes even while an invalid duplicate set cannot load. */
+export function serverBindingVersionFromState(
+  state: Pick<TransformState, "discoveredProcedures">,
+): string {
+  return hashServerBindings(sortedServerBindings(state));
+}
+
+function sortedServerBindings(
+  state: Pick<TransformState, "discoveredProcedures">,
+): ServerBinding[] {
+  return [...serverBindingsFromState(state).values()].sort((left, right) =>
+    left.sourceFile.localeCompare(right.sourceFile) ||
+    left.exportName.localeCompare(right.exportName)
+  );
+}
+
+function hashServerBindings(bindings: readonly ServerBinding[]): string {
+  return createHash("sha256").update(JSON.stringify(bindings)).digest("hex");
 }
 
 // These statements only normalize exports. The host owns schema preparation,

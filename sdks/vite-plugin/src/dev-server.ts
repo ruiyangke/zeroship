@@ -14,6 +14,9 @@ import http from "node:http";
 import {
   MODULE_FETCH_PATH,
   HMR_POLL_PATH,
+  PROCEDURE_BINDINGS_PATH,
+  RUNTIME_MODULE_SPECIFIER,
+  VITE_RUNTIME_MODULE_ID,
   ENV_DEV,
   ENV_VITE_ORIGIN,
   ENV_ENTRY,
@@ -41,6 +44,10 @@ import {
   type ResolvedProjectConfig,
 } from "./project-config/index.js";
 import type { TransformState } from "./transform.js";
+import {
+  serverBindingSnapshotFromState,
+  serverBindingVersionFromState,
+} from "./rpc-registry.js";
 import { resolveDevDatabase, type DevDatabase } from "./dev-db.js";
 import {
   RUNTIME_DESCRIPTOR_FILE,
@@ -739,11 +746,10 @@ export function devServerPlugin(
                 args[2] ?? undefined,
               );
             } else {
-              // Return EMPTY builtins — our V8 runtime can't import node: modules
-              // natively. By returning [], the ModuleRunner will always call
-              // fetchModule() for every import, which lets our fetchModule override
-              // intercept node:* and return polyfill code.
-              result = [];
+              // The runner externalizes the runtime-owned module directly to
+              // its evaluator. Node-shaped imports still pass through
+              // fetchModule(), where the environment supplies their adapters.
+              result = [RUNTIME_MODULE_SPECIFIER, VITE_RUNTIME_MODULE_ID];
             }
 
             // Return in the format the runner expects: { result } or { error }
@@ -758,7 +764,28 @@ export function devServerPlugin(
         }
       );
 
-      // 2. HMR poll endpoint ──────────────────────────────────────────────
+      // 2. Procedure binding endpoint ────────────────────────────────────
+
+      server.middlewares.use(
+        (
+          req: http.IncomingMessage,
+          res: http.ServerResponse,
+          next: () => void
+        ) => {
+          if (requestPath(req) !== PROCEDURE_BINDINGS_PATH || req.method !== "GET") {
+            return next();
+          }
+          try {
+            writeJson(res, 200, serverBindingSnapshotFromState(state));
+          } catch (error) {
+            writeJson(res, 500, {
+              error: { message: error instanceof Error ? error.message : String(error) },
+            });
+          }
+        }
+      );
+
+      // 3. HMR poll endpoint ──────────────────────────────────────────────
       //
       // The V8 runtime polls this every 500ms to discover changed files.
       // Returns the pending set and clears it atomically. Empty array = no
@@ -778,12 +805,13 @@ export function devServerPlugin(
           const changed = [...pendingHmrChanges];
           pendingHmrChanges.clear();
 
+          const bindingsVersion = serverBindingVersionFromState(state);
           res.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "no-store" });
-          res.end(JSON.stringify({ changed }));
+          res.end(JSON.stringify({ changed, bindingsVersion }));
         }
       );
 
-      // 3. Spawn zeroship runtime ────────────────────────────────────────────
+      // 4. Spawn zeroship runtime ────────────────────────────────────────────
       //
       // Deferred until Vite's HTTP server is actually listening so the child
       // gets a stable origin for module fetches and HMR polling.
@@ -1005,7 +1033,13 @@ export function devServerPlugin(
             const spawnedAt = Date.now();
             const child = spawn(
               cmd,
-              ["serve", bootstrapPath, `--port=${devPort}`, "--workers=1"],
+              [
+                "serve",
+                bootstrapPath,
+                `--port=${devPort}`,
+                "--workers=1",
+                "--dev-entry-loader=createDevEntryLoader",
+              ],
               {
                 cwd: root,
                 stdio: ["ignore", "pipe", "pipe"],

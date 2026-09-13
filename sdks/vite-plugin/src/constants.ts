@@ -1,8 +1,11 @@
 // sdks/vite-plugin/src/constants.ts
 
-/** HTTP endpoints used by the dev bootstrap for module fetch + HMR polling. */
+/** HTTP endpoints used by the dev host and its runtime module loader. */
 export const MODULE_FETCH_PATH = "/__zeroship_fetch";
 export const HMR_POLL_PATH = "/__zeroship_hmr_check";
+export const PROCEDURE_BINDINGS_PATH = "/__zeroship_bindings";
+export const RUNTIME_MODULE_SPECIFIER = "zeroship";
+export const VITE_RUNTIME_MODULE_ID = "/@id/zeroship";
 
 /** Environment variable names passed to the zeroship child process. */
 export const ENV_DEV = "ZEROSHIP_DEV";
@@ -90,4 +93,3 @@ export const RUNTIME_RESTART_MAX_MS = 8_000;
 
 /** Lines of the child runtime's own output retained to explain a failure. */
 export const RUNTIME_LOG_TAIL_LINES = 20;
-
