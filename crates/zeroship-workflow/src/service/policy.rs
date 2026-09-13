@@ -82,15 +82,15 @@ pub struct HostPolicies {
     entries: RwLock<BTreeMap<AppId, PolicySnapshot>>,
 }
 
-/// Authority captured for a management attempt. Refreshing the host snapshot
+/// Authority captured for a journal operation. Refreshing the host snapshot
 /// does not extend an operation already waiting on customer storage.
-pub(super) struct ManagementAuthority {
+pub(super) struct PolicyAuthority {
     revision: Revision,
     pub(super) deadline: Option<Instant>,
     pub(super) policy: AppPolicy,
 }
 
-impl ManagementAuthority {
+impl PolicyAuthority {
     pub(super) fn check(
         &self,
         policies: &HostPolicies,
@@ -99,7 +99,7 @@ impl ManagementAuthority {
         if self
             .deadline
             .is_some_and(|deadline| deadline <= Instant::now())
-            || policies.management_authority(app)?.revision != self.revision
+            || policies.authority(app)?.revision != self.revision
         {
             return Err(unavailable());
         }
@@ -108,10 +108,7 @@ impl ManagementAuthority {
 }
 
 impl HostPolicies {
-    pub(super) fn management_authority(
-        &self,
-        app: &AppId,
-    ) -> Result<ManagementAuthority, WorkflowServiceError> {
+    pub(super) fn authority(&self, app: &AppId) -> Result<PolicyAuthority, WorkflowServiceError> {
         let entries = self.entries.read().map_err(|_| unavailable())?;
         let snapshot = entries.get(app).ok_or_else(unavailable)?;
         let deadline = match snapshot.validity {
@@ -119,7 +116,7 @@ impl HostPolicies {
             Validity::Until(deadline) if deadline > Instant::now() => Some(deadline),
             Validity::Until(_) => return Err(unavailable()),
         };
-        let authority = ManagementAuthority {
+        let authority = PolicyAuthority {
             revision: snapshot.revision,
             deadline,
             policy: snapshot.policy.clone(),

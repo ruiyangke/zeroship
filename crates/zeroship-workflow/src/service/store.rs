@@ -259,7 +259,8 @@ impl Transaction {
                 "SELECT CAST(FLOOR(EXTRACT(EPOCH FROM clock_timestamp()) * 1000) AS BIGINT) AS now"
             }
             SQLITE_FAMILY => {
-                "SELECT CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER) AS now"
+                "SELECT CAST(strftime('%s','now') AS INTEGER) * 1000 \
+                    + CAST(substr(strftime('%f','now'),4,3) AS INTEGER) AS now"
             }
             _ => return Err(schema::incompatible()),
         };

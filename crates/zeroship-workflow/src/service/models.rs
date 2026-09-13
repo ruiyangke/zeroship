@@ -10,6 +10,7 @@ pub use journal::{
     __zeroship_workflow_deployment_holds as deployment_holds,
     __zeroship_workflow_deploys as deploys, __zeroship_workflow_generations as generations,
     __zeroship_workflow_job_publications as job_publications,
+    __zeroship_workflow_job_receipts as job_receipts,
     __zeroship_workflow_management_receipts as management_receipts,
     __zeroship_workflow_occurrences as occurrences, __zeroship_workflow_outbox as outbox,
     __zeroship_workflow_payload_refs as payload_refs, __zeroship_workflow_payloads as payloads,
@@ -127,6 +128,10 @@ pub struct TaskRecord {
     pub state: String,
     pub completion_digest: Option<String>,
     pub receipt: Option<String>,
+    pub frontier_revision: i64,
+    pub job_id: Option<String>,
+    pub delivery_attempt: Option<i64>,
+    pub assignment_revision: Option<i64>,
 }
 
 #[derive(FromRow)]

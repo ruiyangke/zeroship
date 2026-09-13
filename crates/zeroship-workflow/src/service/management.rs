@@ -9,7 +9,7 @@ use super::{
     app::{decode, encode, lock_app},
     control::{self, Preparation},
     models,
-    policy::ManagementAuthority,
+    policy::PolicyAuthority,
     store::Transaction,
     types::{digest, storage_id},
     AppWorkflows,
@@ -64,7 +64,7 @@ impl AppWorkflows {
             }
             return decode(&receipt.outcome);
         }
-        let authority = self.service.policies.management_authority(&self.app)?;
+        let authority = self.service.policies.authority(&self.app)?;
         let deadline = authority.deadline;
         let attempt = Box::pin(self.apply_management_authorized(tx, command, &digest, &authority));
         if let Some(deadline) = deadline {
@@ -87,7 +87,7 @@ impl AppWorkflows {
         mut tx: Transaction,
         command: &ManageRun,
         digest: &str,
-        authority: &ManagementAuthority,
+        authority: &PolicyAuthority,
     ) -> Result<ManagementOutcome, WorkflowServiceError> {
         authority.check(&self.service.policies, &self.app)?;
         let policy = &authority.policy;

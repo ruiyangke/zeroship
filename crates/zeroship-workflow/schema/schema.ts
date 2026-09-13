@@ -108,11 +108,20 @@ export function workflowSchema(namespace) {
   }, ["app_id", "run_id", "generation", "ordinal"], [generationFk("steps")], [
     { name: "step_name_occurrence", columns: ["app_id", "run_id", "generation", "name", "occurrence"] },
   ]);
+  create("job_receipts", {
+    ...runIdentity(), id: text(), specification: text(), outcome: t.text(),
+    created_at: integer(), completed_at: t.bigInt(),
+  }, ["app_id", "id"], [appFk("job_receipts")]);
+  index("job_receipts", "run", ["app_id", "run_id"]);
   create("tasks", {
     ...generation(), id: text(), worker: text(), epoch: integer(), token_hash: text(),
     deadline: integer(), state: text(), completion_digest: t.text(), receipt: t.text(),
+    frontier_revision: integer().default(1), job_id: t.text(),
+    delivery_attempt: t.bigInt(), assignment_revision: t.bigInt(),
     created_at: integer(), finished_at: t.bigInt(),
-  }, ["id"], [generationFk("tasks")], [
+  }, ["id"], [generationFk("tasks"),
+    fk("task_job", ["app_id", "job_id"], "job_receipts", ["app_id", "id"]),
+  ], [
     { name: "task_scope_identity", columns: ["app_id", "run_id", "generation", "id"] },
     { name: "task_fence_identity", columns: ["app_id", "run_id", "generation", "epoch"] },
   ]);
@@ -198,10 +207,16 @@ export function workflowSchema(namespace) {
   // order and identity copies must use bytewise comparison; SQLite uses BINARY.
   dialect({
     postgres() {
-      raw({
-        sql: `ALTER TABLE "${namespace}"."job_publications" ${["id", "app_id", "run_id", "deploy_id"].map(column => `ALTER COLUMN "${column}" TYPE text COLLATE "C"`).join(", ")}`,
-        reason: "workflow publication identities require bytewise comparison",
-      });
+      for (const [name, columns] of Object.entries({
+        job_publications: ["id", "app_id", "run_id", "deploy_id"],
+        job_receipts: ["id", "app_id", "run_id"],
+        tasks: ["job_id"],
+      })) {
+        raw({
+          sql: `ALTER TABLE "${namespace}"."${name}" ${columns.map(column => `ALTER COLUMN "${column}" TYPE text COLLATE "C"`).join(", ")}`,
+          reason: "workflow delivery identities require bytewise comparison",
+        });
+      }
     },
     sqlite() {},
   });

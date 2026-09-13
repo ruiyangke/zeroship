@@ -99,13 +99,16 @@ case!(
     retention
 );
 
-struct Manager {
+pub(super) struct Manager {
     _directory: tempfile::TempDir,
     path: std::path::PathBuf,
-    queue: Queue,
+    pub(super) queue: Queue,
 }
 impl Manager {
-    async fn new(app: &AppId) -> Self {
+    pub(super) async fn new(app: &AppId) -> Self {
+        Self::with_options(app, Options::default()).await
+    }
+    pub(super) async fn with_options(app: &AppId, options: Options) -> Self {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("manager.sqlite");
         let connection = rusqlite::Connection::open(&path).unwrap();
@@ -117,7 +120,7 @@ impl Manager {
                 "../../../../zeroship-workflow-manager/schema/sqlite.sql"
             ))
             .unwrap();
-        let queue = Self::open(&path).await;
+        let queue = Self::open_with_options(&path, options).await;
         queue.register_scope(app).await.unwrap();
         Self {
             _directory: directory,
@@ -126,6 +129,9 @@ impl Manager {
         }
     }
     async fn open(path: &Path) -> Queue {
+        Self::open_with_options(path, Options::default()).await
+    }
+    async fn open_with_options(path: &Path, options: Options) -> Queue {
         Queue::connect(
             DbBinding::new(
                 "workflow_manager",
@@ -133,7 +139,7 @@ impl Manager {
                 SchemaName::new("main").unwrap(),
             ),
             &format!("sqlite:{}", path.display()),
-            Options::default(),
+            options,
         )
         .await
         .unwrap()
@@ -152,7 +158,7 @@ enum Reply {
     Lost,
     Changed,
 }
-struct Publisher {
+pub(super) struct Publisher {
     app: AppId,
     queue: Queue,
     reply: Cell<Reply>,
@@ -160,7 +166,7 @@ struct Publisher {
     gate: Option<(flume::Sender<()>, flume::Receiver<()>)>,
 }
 impl Publisher {
-    fn new(app: &AppId, queue: Queue) -> Self {
+    pub(super) fn new(app: &AppId, queue: Queue) -> Self {
         Self {
             app: app.clone(),
             queue,

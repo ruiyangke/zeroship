@@ -256,7 +256,7 @@ table has the `__zeroship_workflow_` prefix; none belongs in Control's schema.
 | `runs` | Run identity, lifecycle state, current generation, relationships and logical frontier revision, independent of the task lease epoch. |
 | `generations` | Pinned deployment, input, output/error references and generation lifecycle. |
 | `steps` | Replay history, checkpoints and compensation state. |
-| `tasks` | Existing customer execution claims, fences and completion receipts. Adapt to delivered jobs rather than use it as a second scheduler. |
+| `tasks` | Customer execution claims, frontier and lease fences, job/delivery identity and exact task completion receipts. |
 | `waits` | Recorded sleep, signal and child waits and their execution scope. |
 | `topics`, `broadcasts`, `signals`, `subscriptions` | Customer event bodies, ordering, targets, subscription state and fanout cursors. |
 | `requests` | Durable app-operation request identity, body digest and original result. Age alone cannot retire an accepted request. |
@@ -265,15 +265,17 @@ table has the `__zeroship_workflow_` prefix; none belongs in Control's schema.
 | `payloads`, `payload_refs` | Prepared upload metadata, ownership, integrity and committed references. |
 | `outbox` | Customer events and their payloads; distinct from manager queue metadata. |
 | `job_publications` | Immutable advance job specifications, generation/frontier/due-time identity and manager confirmation time. Pending records retain deployment dependencies and survive history removal. |
+| `job_receipts` | Immutable logical job specification and committed semantic outcome, retained independently of run history and delivery attempts. |
 
 Publication intents now use dedicated journal records. The scoped unique index
 binds run, generation, frontier revision and due time; `id` remains the sole
 primary key. A transition that advances an idle run invalidates its older
 frontier without retargeting already committed jobs. Task claim, heartbeat and
 release do not advance that logical revision. A new generation starts a fresh
-frontier. Delivered-job receipts and their binding to creator execution claims
-still require implementation, including rejecting superseded frontiers before
-execution and replaying the original semantic outcome across delivery attempts.
+frontier. Advance-job acceptance now binds creator claims to the logical job,
+delivery attempt and assignment revision. Superseded frontiers produce a durable
+rejection; a committed job replays its original semantic outcome across delivery
+attempts. Receipt records have no run/history foreign key and survive collection.
 There is no manager reader of these tables. A reconciliation job reads them
 through an app-bound worker, never through a platform connection.
 
@@ -363,6 +365,17 @@ rejects the reply if its previously confirmed local grant expired while waiting.
 Renewal also cannot restore a cancelled execution or extend the executor's
 original hard deadline. Creator frontier fencing remains required independently
 of these delivery leases.
+
+The customer engine consumes the trusted Rust `JobLease` contract, implemented
+by the native `DeliveryGrant` and authenticated client's `LeasedJob`. Native
+grant identity is private; a mutable wire `Delivery` alone is not execution
+authority. This trait is a trusted host composition seam, not a cryptographic
+boundary against arbitrary Rust implementations. Creator acceptance captures
+the grant and policy before opening its transaction. It translates remaining
+time into the creator clock conservatively and returns a private `DeliveredTask`
+capped by the actual task deadline. Full-operation timeouts bound database waits
+and commit acknowledgement. Expired calls can recover committed receipts through
+bounded reads, while fresh mutations still require live captured authority.
 
 ## Durable job protocol
 
@@ -530,6 +543,13 @@ Successor identities and content are generated once in the creator transaction.
 ACK publication and outbox reconciliation use the same IDs and immutable
 specifications. They may race; manager submission and settlement share the same
 deduplication domain. Neither path substitutes a fresh ID after a lost response.
+
+The current creator delivery API settles the semantic outcome with an empty
+successor list. Its committed successor intents use the independent publication
+path above. Passing those same persisted specifications in ACKs remains a
+consumer integration option; this implementation does not yet capture or confirm
+successors through settlement. Manager-dispatched reconciliation is still needed
+to make eventual publication a production guarantee.
 
 Creator state commits before its ACK. If the manager is unavailable or full,
 intents remain pending. Marking publication confirmed happens only after a
@@ -1154,6 +1174,18 @@ interfaces should match actual I/O; constructing an already loaded runtime can
 remain synchronous. `async-trait` is not an architectural requirement. Shipped
 I/O stays on compio; no additional async runtime is introduced.
 
+The delivered-job slot retains the current manager grant, creator `DeliveredTask`
+and executor handle together. It renews the manager grant first, then the creator
+claim, and updates the execution guard only when both succeed. The original hard
+execution deadline remains fixed through code loading, input reads, execution
+and joined shutdown. Payload preparation and final journal writes retain their
+own bounded finalization budget and live lease checks. Cancellation drains native
+operations before creator release or slot reuse. After a durable creator outcome,
+the slot retries immutable settlement metadata without running app code again.
+`WorkerCoordinator::release` releases an app assignment; it is not a job NACK.
+A deferred or abandoned job stops renewal and remains eligible for redelivery
+after its manager lease expires.
+
 Update Cargo declarations, configuration registration, schema generation,
 container build inputs, xtask selection and dependency gates with each move.
 The existing client's `cyper` carrier follows the client crate; do not retain
@@ -1457,12 +1489,24 @@ Remove those obsolete edges with the legacy journal provisioning paths.
 Creator publication contracts cover acceptance and checkpoint rollback, changed
 acknowledgements, lost replies, confirmation failure, concurrent publication,
 reopen, scope isolation and generation/frontier changes. Queue submission in
-these tests uses a separate native manager database. They do not prove the
-production scope-duty admission handshake or delivered-job receipt protocol.
+these tests uses a separate native manager database. Creator advance delivery
+now has exact-run acceptance, task renewal/release, atomic checkpoint/outcome
+receipts and retained semantic replay. The old poller excludes manager-owned
+runs both during candidate selection and again under the app lock; old task APIs
+refuse job-bound claims. This exclusion is temporary cutover protection, not a
+production execution mode to preserve.
+
+Native creator delivery tests use PostgreSQL containers and SQLite journals
+with a separate manager database. They cover competing frontiers, duplicate
+live acceptance, receipt-write rollback, shorter creator leases, expiry and
+policy changes during lock waits, stale completion/release after reclaim, and
+lost-ACK redelivery without another execution. Retained outcomes survive creator
+history removal and reopening. These contracts do not prove the production
+scope-duty admission handshake or the executor/queue consumer integration.
 
 Manager cron/timer discovery, scope deadline orchestration, capacity activation,
-creator delivered-job receipts and the simple worker consumer still require
-implementation and integration. Publication intents exist in the journal; their
+the simple worker consumer still require implementation and integration.
+Publication intents and advance-job receipts exist in the journal; their
 manager-dispatched reconciliation and settlement integration remain unwired. Existing customer
 scheduler/task polling and maintenance code remains a foundation to replace.
 Its existence does not satisfy manager-owned scheduling.

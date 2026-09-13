@@ -60,9 +60,20 @@ transitions. `AppWorkflows::pending_jobs` and `publish_job` publish under a boun
 app scope without holding a creator transaction across manager I/O. The entire
 returned specification must match before confirmation; retries preserve job
 identities, and pending intents retain deployment dependencies independently of
-run history. `AssignedPublisher` uses the authenticated worker client. Delivered
-job acceptance, semantic receipts and the manager-dispatched consumer remain
-cutover work; publication alone does not establish that production protocol.
+run history. `AssignedPublisher` uses the authenticated worker client.
+`service::delivery` accepts an advance job for its exact app, deployment, run,
+generation and frontier. Native manager grants and authenticated client leases
+implement the trusted Rust `JobLease` contract. The returned `DeliveredTask`
+keeps its delivery identity and monotonic creator deadline private. Duplicate
+live claims defer; completed jobs replay a retained semantic receipt without
+running app code. Completion commits history, the outcome and successor intents
+together. Renewal and mutation remain bounded by manager authority, creator
+policy and the original task lease, including database waits. An expired attempt
+can read its committed result but cannot admit new work. Receipt records survive
+history removal; their presence also excludes the run from the old poller until
+that path is removed. `JobReceipt::settlement` binds the outcome to the current
+delivery; successor publication currently uses the durable outbox independently.
+The manager-dispatched consumer and production cutover remain unfinished.
 `zeroship-workflow-manager::deployments::DeploymentHolds` accepts an authorized
 platform ORM database. Holds survive
 reconnection, and generation checks reject stale releases. The collector helpers

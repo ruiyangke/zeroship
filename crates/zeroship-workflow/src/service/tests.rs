@@ -26,6 +26,7 @@ mod background_scope;
 mod deployment_fixture;
 mod deployment_retention;
 mod deployments;
+mod delivery;
 mod frontier_models;
 mod graph;
 mod ingress_models;

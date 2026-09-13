@@ -23,7 +23,7 @@ impl JobLease for LeasedJob {
     }
 
     fn remaining(&self) -> Option<Duration> {
-        LeasedJob::remaining(self).ok()
+        Self::remaining(self).ok()
     }
 }
 

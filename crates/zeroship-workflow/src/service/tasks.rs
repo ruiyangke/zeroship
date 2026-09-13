@@ -43,6 +43,7 @@ impl WorkflowService {
             let run = db.entity::<models::runs::Entity>()?.alias("r")?;
             let app_state = db.entity::<models::app_state::Entity>()?.alias("a")?;
             let deploy = db.entity::<models::deploys::Entity>()?.alias("d")?;
+            let delivered = db.entity::<models::job_receipts::Entity>()?.alias("j")?;
             let mut candidates = Vec::new();
             // Select each assigned app's first eligible run before applying the
             // global fairness order. Unavailable code never fills the frontier.
@@ -64,7 +65,17 @@ impl WorkflowService {
                             deploy.column(models::deploys::state).eq("available")?,
                         ]),
                     )?
+                    .left_join(
+                        &delivered,
+                        Predicate::And(vec![
+                            run.column(models::runs::app_id)
+                                .eq_column(delivered.column(models::job_receipts::app_id))?,
+                            run.column(models::runs::id)
+                                .eq_column(delivered.column(models::job_receipts::run_id))?,
+                        ]),
+                    )?
                     .filter(Predicate::And(vec![
+                        delivered.column(models::job_receipts::id).is_null(),
                         run.column(models::runs::app_id).eq(app.as_str())?,
                         Predicate::compare(
                             Operand::Path(run.column(models::runs::due_at).asc().path),
@@ -108,6 +119,21 @@ impl WorkflowService {
                 remaining -= 1;
                 let mut tx = self.begin().await?;
                 let policy = lock_app(&mut tx, &app).await?;
+                // Acceptance can take ownership after candidate selection.
+                // Recheck under the same app lock before touching its frontier.
+                let delivered = tx
+                    .database()
+                    .collection(models::job_receipts::Entity::COLLECTION)?
+                    .count(
+                        value!({"app_id":app.as_str(), "run_id":id.clone()}),
+                        value!({}),
+                    )
+                    .await?;
+                if !matches!(delivered, Output::Count(0)) {
+                    tx.commit().await?;
+                    advanced = true;
+                    continue;
+                }
                 let mut run = lock_run(&mut tx, &app, &id).await?;
                 let now = tx.now().await?;
                 let task_rows = tx
@@ -155,84 +181,15 @@ impl WorkflowService {
                     tx.commit().await?;
                     continue;
                 }
-                // Missing code blocks execution, not lease recovery or control.
-                // Recheck under the app lock after any deployment-state race.
-                let available = tx
-                    .database()
-                    .entity::<models::deploys::Entity>()?
-                    .find::<models::DeploymentHash>(
-                        models::deploys::app_id
-                            .eq(app.as_str())?
-                            .and(models::deploys::id.eq(run.text("deploy_id")?)?)
-                            .and(models::deploys::state.eq("available")?),
-                        FindOptions {
-                            limit: Some(1),
-                            ..Default::default()
-                        },
-                    )
-                    .await?;
-                if available.is_empty() {
-                    tx.commit().await?;
-                    advanced = true;
-                    continue;
-                }
-                if !policy.admission || !policy.dispatch || policy.max_running == 0 {
-                    tx.commit().await?;
-                    continue;
-                }
-                let Output::Count(running) = task_rows
-                    .count(
-                        value!({"app_id":app.as_str(), "state":"leased", "deadline":{"$gt":now}}),
-                        value!({}),
-                    )
-                    .await?
-                else {
-                    return Err(WorkflowServiceError::Internal(
-                        "workflow count returned rows".into(),
-                    ));
-                };
-                if running >= policy.max_running {
-                    tx.commit().await?;
-                    continue;
-                }
-                run = lock_run(&mut tx, &app, &id).await?;
-                let invocation = frontier::invocation(&mut tx, &app, &run).await?;
-                let token = TaskToken::mint();
-                let task_id = typed_id::new_workflow_dispatch_id();
-                let generation = run.integer("generation")?;
-                let epoch = run.integer("lease_epoch")?.checked_add(1).ok_or_else(|| {
-                    WorkflowServiceError::ResourceExhausted("workflow lease epoch exhausted".into())
-                })?;
-                let expires = deadline(now, policy.lease_ms)?;
-                task_rows.insert(value!({
-                    "id":task_id.clone(), "app_id":app.as_str(), "run_id":id.clone(), "generation":generation,
-                    "worker":worker.as_str(), "epoch":epoch, "token_hash":token.hash(), "deadline":expires,
-                    "state":"leased", "created_at":now,
-                })).await?;
-                let state = if run.text("state")? == "compensating" {
-                    "compensating"
-                } else {
-                    "running"
-                };
-                let claimed = run_rows.execute(Operation::Update {
-                    filter:value!({"app_id":app.as_str(), "id":id, "generation":generation,
-                        "lease_epoch":run.integer("lease_epoch")?, "task_id":null}),
-                    patch:value!({"task_id":task_id.clone(), "lease_epoch":epoch, "due_at":expires, "state":state}),
-                    many:true,
-                }).await?;
-                if !matches!(claimed, Output::Count(1)) {
-                    return Err(stale_lease());
+                match assign(&mut tx, &app, &run, &policy, worker, now, policy.lease_ms).await? {
+                    ReadyClaim::Task(task) => {
+                        tx.commit().await?;
+                        return Ok(Some(*task));
+                    }
+                    ReadyClaim::Unavailable => advanced = true,
+                    ReadyClaim::Busy => {}
                 }
                 tx.commit().await?;
-                return Ok(Some(TaskAssignment {
-                    id: task_id,
-                    token,
-                    generation,
-                    epoch,
-                    deadline: expires,
-                    lease_ms: policy.lease_ms,
-                    invocation,
-                }));
             }
             if !advanced {
                 break;
@@ -249,6 +206,9 @@ impl WorkflowService {
     ) -> Result<Heartbeat, WorkflowServiceError> {
         let mut tx = self.begin().await?;
         let claim = authorized_task(&mut tx, worker, task_id, token).await?;
+        if claim.task.job_id.is_some() {
+            return Err(WorkflowServiceError::PermissionDenied);
+        }
         claim.validate_live()?;
         if !claim.policy.admission || !claim.policy.dispatch {
             let deadline = claim.task.deadline;
@@ -287,6 +247,9 @@ impl WorkflowService {
         let body_digest = digest(&execution)?;
         let mut tx = self.begin().await?;
         let claim = authorized_task(&mut tx, worker, task_id, token).await?;
+        if claim.task.job_id.is_some() {
+            return Err(WorkflowServiceError::PermissionDenied);
+        }
         if claim.task.state == "completed" {
             if claim.task.completion_digest.as_deref() != Some(&body_digest) {
                 return Err(WorkflowServiceError::Conflict(
@@ -300,33 +263,7 @@ impl WorkflowService {
             return Ok(receipt);
         }
         claim.validate_live()?;
-        let state = frontier::apply(
-            &mut tx,
-            &claim.app,
-            &claim.run,
-            &claim.policy,
-            execution,
-            claim.now,
-        )
-        .await?;
-        super::publication::advance(&tx, &claim.app, &claim.run.text("id")?, claim.now).await?;
-        claim.validate_at(tx.now().await?)?;
-        let receipt = CompletionReceipt {
-            task_id: task_id.into(),
-            app_id: claim.app.clone(),
-            run_id: claim.run.text("id")?,
-            generation: claim.task.generation,
-            state,
-            committed_at: claim.now,
-        };
-        claim
-            .update_task(
-                &tx,
-                value!({"state":"completed", "completion_digest":body_digest,
-            "receipt":encode(&receipt)?, "finished_at":claim.now}),
-            )
-            .await?;
-        claim.validate_at(tx.now().await?)?;
+        let receipt = complete_in(&mut tx, &claim, execution, &body_digest).await?;
         tx.commit().await?;
         Ok(receipt)
     }
@@ -340,6 +277,9 @@ impl WorkflowService {
     ) -> Result<(), WorkflowServiceError> {
         let mut tx = self.begin().await?;
         let claim = authorized_task(&mut tx, worker, task_id, token).await?;
+        if claim.task.job_id.is_some() {
+            return Err(WorkflowServiceError::PermissionDenied);
+        }
         if claim.task.state == "released" {
             return Ok(());
         }
@@ -374,6 +314,7 @@ impl AuthorizedTask {
             || self.run.optional_text("task_id")?.as_deref() != Some(self.task.id.as_str())
             || self.run.integer("generation")? != self.task.generation
             || self.run.integer("lease_epoch")? != self.task.epoch
+            || self.run.integer("frontier_revision")? != self.task.frontier_revision
             || self.run.text("id")? != self.task.run_id
             || self.app.as_str() != self.task.app_id
         {
@@ -382,7 +323,7 @@ impl AuthorizedTask {
         Ok(())
     }
 
-    async fn update_task(
+    pub(super) async fn update_task(
         &self,
         tx: &Transaction,
         patch: Value,
@@ -398,7 +339,11 @@ impl AuthorizedTask {
         Ok(())
     }
 
-    async fn update_run(&self, tx: &Transaction, patch: Value) -> Result<(), WorkflowServiceError> {
+    pub(super) async fn update_run(
+        &self,
+        tx: &Transaction,
+        patch: Value,
+    ) -> Result<(), WorkflowServiceError> {
         let changed = tx.database().collection(models::runs::Entity::COLLECTION)?.execute(Operation::Update {
             filter:value!({"app_id":self.app.as_str(), "id":self.task.run_id.clone(),
                 "generation":self.task.generation, "lease_epoch":self.task.epoch, "task_id":self.task.id.clone()}),
@@ -483,4 +428,137 @@ pub(crate) async fn authorized_task(
         run,
         now,
     })
+}
+
+/// Shared exact-run executor admission; the caller owns the app/run locks.
+pub(super) enum ReadyClaim {
+    Task(Box<TaskAssignment>),
+    Unavailable,
+    Busy,
+}
+
+pub(super) async fn assign(
+    tx: &mut Transaction,
+    app: &AppId,
+    run: &Row,
+    policy: &AppPolicy,
+    worker: &WorkerIdentity,
+    now: i64,
+    lease_ms: i64,
+) -> Result<ReadyClaim, WorkflowServiceError> {
+    let id = run.text("id")?;
+    let task_rows = tx
+        .database()
+        .collection(models::tasks::Entity::COLLECTION)?;
+    let run_rows = tx.database().collection(models::runs::Entity::COLLECTION)?;
+    // Missing code blocks execution, not lease recovery or control.
+    // Recheck under the app lock after any deployment-state race.
+    let available = tx
+        .database()
+        .entity::<models::deploys::Entity>()?
+        .find::<models::DeploymentHash>(
+            models::deploys::app_id
+                .eq(app.as_str())?
+                .and(models::deploys::id.eq(run.text("deploy_id")?)?)
+                .and(models::deploys::state.eq("available")?),
+            FindOptions {
+                limit: Some(1),
+                ..Default::default()
+            },
+        )
+        .await?;
+    if available.is_empty() {
+        return Ok(ReadyClaim::Unavailable);
+    }
+    if !policy.admission || !policy.dispatch || policy.max_running == 0 {
+        return Ok(ReadyClaim::Busy);
+    }
+    let Output::Count(running) = task_rows
+        .count(
+            value!({"app_id":app.as_str(), "state":"leased", "deadline":{"$gt":now}}),
+            value!({}),
+        )
+        .await?
+    else {
+        return Err(WorkflowServiceError::Internal(
+            "workflow count returned rows".into(),
+        ));
+    };
+    if running >= policy.max_running {
+        return Ok(ReadyClaim::Busy);
+    }
+    let run = lock_run(tx, app, &id).await?;
+    let invocation = frontier::invocation(tx, app, &run).await?;
+    let token = TaskToken::mint();
+    let task_id = typed_id::new_workflow_dispatch_id();
+    let generation = run.integer("generation")?;
+    let epoch = run.integer("lease_epoch")?.checked_add(1).ok_or_else(|| {
+        WorkflowServiceError::ResourceExhausted("workflow lease epoch exhausted".into())
+    })?;
+    let lease_ms = lease_ms.min(policy.lease_ms);
+    let expires = deadline(now, lease_ms)?;
+    task_rows.insert(value!({
+        "id":task_id.clone(), "app_id":app.as_str(), "run_id":id.clone(), "generation":generation,
+        "worker":worker.as_str(), "epoch":epoch, "token_hash":token.hash(), "deadline":expires,
+        "state":"leased", "created_at":now, "frontier_revision":run.integer("frontier_revision")?,
+    })).await?;
+    let state = if run.text("state")? == "compensating" {
+        "compensating"
+    } else {
+        "running"
+    };
+    let claimed = run_rows.execute(Operation::Update {
+        filter:value!({"app_id":app.as_str(), "id":id, "generation":generation,
+            "lease_epoch":run.integer("lease_epoch")?, "task_id":null}),
+        patch:value!({"task_id":task_id.clone(), "lease_epoch":epoch, "due_at":expires, "state":state}),
+        many:true,
+    }).await?;
+    if !matches!(claimed, Output::Count(1)) {
+        return Err(stale_lease());
+    }
+    Ok(ReadyClaim::Task(Box::new(TaskAssignment {
+        id: task_id,
+        token,
+        generation,
+        epoch,
+        deadline: expires,
+        lease_ms,
+        invocation,
+    })))
+}
+
+pub(super) async fn complete_in(
+    tx: &mut Transaction,
+    claim: &AuthorizedTask,
+    execution: WorkflowExecution,
+    body_digest: &str,
+) -> Result<CompletionReceipt, WorkflowServiceError> {
+    let state = frontier::apply(
+        tx,
+        &claim.app,
+        &claim.run,
+        &claim.policy,
+        execution,
+        claim.now,
+    )
+    .await?;
+    super::publication::advance(tx, &claim.app, &claim.run.text("id")?, claim.now).await?;
+    claim.validate_at(tx.now().await?)?;
+    let receipt = CompletionReceipt {
+        task_id: claim.task.id.clone(),
+        app_id: claim.app.clone(),
+        run_id: claim.run.text("id")?,
+        generation: claim.task.generation,
+        state,
+        committed_at: claim.now,
+    };
+    claim
+        .update_task(
+            tx,
+            value!({"state":"completed", "completion_digest":body_digest,
+        "receipt":encode(&receipt)?, "finished_at":claim.now}),
+        )
+        .await?;
+    claim.validate_at(tx.now().await?)?;
+    Ok(receipt)
 }

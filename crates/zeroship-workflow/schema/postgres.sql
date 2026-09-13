@@ -65,7 +65,15 @@ CREATE UNIQUE INDEX IF NOT EXISTS "__zeroship_workflow_steps_scope_key" ON "__ze
 
 CREATE UNIQUE INDEX IF NOT EXISTS "__zeroship_workflow_step_name_occurrence" ON "__zeroship_workflow_schema"."__zeroship_workflow_steps" ("app_id", "run_id", "generation", "name", "occurrence");
 
-CREATE TABLE "__zeroship_workflow_schema"."__zeroship_workflow_tasks" ("id" text PRIMARY KEY NOT NULL, "app_id" text NOT NULL, "run_id" text NOT NULL, "generation" bigint NOT NULL, "worker" text NOT NULL, "epoch" bigint NOT NULL, "token_hash" text NOT NULL, "deadline" bigint NOT NULL, "state" text NOT NULL, "completion_digest" text, "receipt" text, "created_at" bigint NOT NULL, "finished_at" bigint, CONSTRAINT "__zeroship_workflow_tasks_generation" FOREIGN KEY ("app_id", "run_id", "generation") REFERENCES "__zeroship_workflow_schema"."__zeroship_workflow_generations" ("app_id", "run_id", "generation") ON DELETE RESTRICT);
+CREATE TABLE "__zeroship_workflow_schema"."__zeroship_workflow_job_receipts" ("id" text PRIMARY KEY NOT NULL, "app_id" text NOT NULL, "run_id" text NOT NULL, "specification" text NOT NULL, "outcome" text, "created_at" bigint NOT NULL, "completed_at" bigint, CONSTRAINT "__zeroship_workflow_job_receipts_app" FOREIGN KEY ("app_id") REFERENCES "__zeroship_workflow_schema"."__zeroship_workflow_app_state" ("app_id") ON DELETE RESTRICT);
+
+CREATE UNIQUE INDEX IF NOT EXISTS "__zeroship_workflow_job_receipts_scope_key" ON "__zeroship_workflow_schema"."__zeroship_workflow_job_receipts" ("app_id", "id");
+
+CREATE INDEX IF NOT EXISTS "__zeroship_workflow_job_receipts_run_idx" ON "__zeroship_workflow_schema"."__zeroship_workflow_job_receipts" ("app_id", "run_id");
+
+CREATE TABLE "__zeroship_workflow_schema"."__zeroship_workflow_tasks" ("id" text PRIMARY KEY NOT NULL, "app_id" text NOT NULL, "run_id" text NOT NULL, "generation" bigint NOT NULL, "worker" text NOT NULL, "epoch" bigint NOT NULL, "token_hash" text NOT NULL, "deadline" bigint NOT NULL, "state" text NOT NULL, "completion_digest" text, "receipt" text, "frontier_revision" bigint NOT NULL DEFAULT 1, "job_id" text, "delivery_attempt" bigint, "assignment_revision" bigint, "created_at" bigint NOT NULL, "finished_at" bigint, CONSTRAINT "__zeroship_workflow_task_job" FOREIGN KEY ("app_id", "job_id") REFERENCES "__zeroship_workflow_schema"."__zeroship_workflow_job_receipts" ("app_id", id) ON DELETE RESTRICT, CONSTRAINT "__zeroship_workflow_tasks_generation" FOREIGN KEY ("app_id", "run_id", "generation") REFERENCES "__zeroship_workflow_schema"."__zeroship_workflow_generations" ("app_id", "run_id", "generation") ON DELETE RESTRICT);
+
+CREATE INDEX IF NOT EXISTS "__zeroship_workflow_task_job_idx" ON "__zeroship_workflow_schema"."__zeroship_workflow_tasks" ("app_id", "job_id");
 
 CREATE INDEX IF NOT EXISTS "__zeroship_workflow_tasks_generation_idx" ON "__zeroship_workflow_schema"."__zeroship_workflow_tasks" ("app_id", "run_id", "generation");
 
@@ -164,4 +172,8 @@ CREATE INDEX IF NOT EXISTS "__zeroship_workflow_job_publications_pending_idx" ON
 CREATE INDEX IF NOT EXISTS "__zeroship_workflow_job_publications_deployment_idx" ON "__zeroship_workflow_schema"."__zeroship_workflow_job_publications" ("app_id", "deploy_id", "confirmed_at");
 
 ALTER TABLE "__zeroship_workflow_schema"."__zeroship_workflow_job_publications" ALTER COLUMN "id" TYPE text COLLATE "C", ALTER COLUMN "app_id" TYPE text COLLATE "C", ALTER COLUMN "run_id" TYPE text COLLATE "C", ALTER COLUMN "deploy_id" TYPE text COLLATE "C";
-INSERT INTO "__zeroship_workflow_schema".__zeroship_workflow_schema_version (id, fingerprint) VALUES ('workflow', 'e052d13e862389af07b6565c05b4fc6bac91d5ee94adc26c4f3e523f07cad6d3');
+
+ALTER TABLE "__zeroship_workflow_schema"."__zeroship_workflow_job_receipts" ALTER COLUMN "id" TYPE text COLLATE "C", ALTER COLUMN "app_id" TYPE text COLLATE "C", ALTER COLUMN "run_id" TYPE text COLLATE "C";
+
+ALTER TABLE "__zeroship_workflow_schema"."__zeroship_workflow_tasks" ALTER COLUMN "job_id" TYPE text COLLATE "C";
+INSERT INTO "__zeroship_workflow_schema".__zeroship_workflow_schema_version (id, fingerprint) VALUES ('workflow', '5c73f388937aca2bbd023a00319ba01d1ffd6d855827c21394b1d5115e6ef70a');
