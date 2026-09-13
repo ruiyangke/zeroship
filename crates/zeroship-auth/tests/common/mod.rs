@@ -246,15 +246,10 @@ pub async fn unowned_project(pg: &compio_postgres::Client) -> String {
     project_id
 }
 
-/// A `Mailer` that keeps every message instead of transporting it.
+/// Capture rendered messages after the real suppression check succeeds.
 ///
-/// Any handler that mails now needs `State<Arc<dyn Mailer>>` registered, so a
-/// fixture standing one of those routes up on a bare `web::App` has to supply
-/// SOMETHING. This is that something, and it is deliberately not a silent sink:
-/// a test asserting a notice was sent needs to read the rendered message, and a
-/// test asserting one was NOT sent needs the same object to be empty. It does
-/// not consult `zeroship.email_suppressions` - suppression is the transport's
-/// job and no test here is about it.
+/// Fixtures can inspect successful delivery or its absence while retaining the
+/// mailer contract used by the production transports.
 #[derive(Debug, Default)]
 pub struct CapturingMailer {
     sent: std::sync::Mutex<Vec<zeroship_mailer::Email>>,
@@ -270,9 +265,10 @@ impl CapturingMailer {
 impl zeroship_mailer::Mailer for CapturingMailer {
     async fn send(
         &self,
-        _db: &compio_postgres::Client,
+        db: &compio_postgres::Client,
         msg: zeroship_mailer::Email,
     ) -> Result<zeroship_mailer::MessageId, zeroship_mailer::MailerError> {
+        zeroship_mailer::check_suppression(db, &msg.to.email).await?;
         let n = {
             let mut sent = self.sent.lock().expect("capturing mailer lock");
             sent.push(msg);
