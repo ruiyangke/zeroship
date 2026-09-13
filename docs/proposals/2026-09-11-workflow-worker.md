@@ -955,6 +955,14 @@ a queue dependency cannot release a journal dependency, or vice versa. The curre
 worker hold API and `HoldScope::for_app` are not yet authorization for queue-owned
 manager holds; extend that contract explicitly.
 
+The existing Control reclamation loop in
+[`deploy_retention.rs`](../../crates/zeroship-control/src/cron/deploy_retention.rs)
+still derives pins from creator journals. Its `reclaim_manifest_if_guarded`
+path does not consult the native `app_deploy_holds` ledger. Replace that loop
+with the shared hold/reclamation protocol before enabling production admission
+that relies on native holds. A tested hold API does not protect a bundle while
+an independent deletion path ignores it.
+
 Control remains the production owner of hold acquisition and reclamation APIs.
 Its native ledger lives in `zeroship-workflow-manager::deployments` for reuse by
 Control and the local host. Constructing the manager queue does not open deployment
@@ -1418,6 +1426,8 @@ outside the queue cutover.
   manager transaction domain and current enrollment checks.
 - Finalize the missing closed delivery, scope-recovery and retention contracts;
   add their manager models using the canonical migration/ORM pipeline.
+- Replace Control's journal-derived deployment reclamation with the native hold
+  and reclamation fence before admitting production dependencies through it.
 - Connect normal deployment registration, activation and queue holds to manager
   scheduling; move calendar ownership and remove the standalone scheduler host.
 - Add creator delivered-job acceptance, receipts and publication intents together
