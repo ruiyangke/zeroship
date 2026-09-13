@@ -1,7 +1,7 @@
 //! V8 host callback for dynamic imports.
 //!
 //! Imports resolve against the compiled module registry, then native module
-//! factories and embedded bootstrap sources. Resolved modules are cached so
+//! factories and the core `zeroship` facade. Resolved modules are cached so
 //! static and dynamic imports share identity. Arbitrary missing creator modules
 //! are rejected; this callback does not fetch source code.
 //!
@@ -13,7 +13,6 @@
 
 #![allow(unsafe_code)]
 
-use crate::core::bootstrap_modules;
 use crate::core::modules::{self, SharedRegistry};
 use crate::core::native_modules;
 
@@ -121,65 +120,6 @@ fn import_registered<'s>(
     resolver.get_promise(scope).then(scope, callback)
 }
 
-/// Resolve an embedded bootstrap module through [`bootstrap_modules`].
-///
-/// The runtime, not the bundle, owns these: it injects the code that
-/// imports them (`runtime-entry.js` spliced into the bootstrap `index.js`),
-/// so it must guarantee they resolve regardless of what the tree-shaken
-/// `.zship` carries (ISS-63).
-///
-/// Strategy: compile the requested module AND its transitive
-/// runtime-provided dependency closure into the per-isolate registry, then
-/// instantiate with the SAME [`modules::resolve_callback`] the static graph
-/// uses — so the bootstrap module's own `import ... from "@zeroship/db/internal"`
-/// / `"zeroship"` lines resolve against the registry we just populated. The
-/// requested module is left cached in the registry, so a later static OR
-/// dynamic import of the same specifier hits path 1.
-///
-/// Returns `None` if `spec` isn't a runtime-provided module (caller falls
-/// through to the not-found rejection) or if compilation fails (treated as
-/// a not-found miss — a compile error here means the embedded dist drifted,
-/// which the resolution tests catch).
-fn resolve_bootstrap_module<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
-    spec: &str,
-) -> Option<v8::Local<'s, v8::Module>> {
-    if !bootstrap_modules::is_bootstrap_module(spec) {
-        return None;
-    }
-    let registry = scope.get_slot::<SharedRegistry>()?.clone();
-
-    // Walk the transitive runtime-provided closure (DFS) and compile each
-    // member into the registry if absent. `zeroship` is frequently already
-    // present because creator code statically imports it. Compiling a member doesn't evaluate it — that
-    // happens during the entry's `instantiate_module` + `evaluate` below,
-    // exactly as `load_modules` does for the static graph.
-    let mut stack: Vec<&str> = vec![spec];
-    let mut seen: Vec<&str> = Vec::new();
-    while let Some(cur) = stack.pop() {
-        if seen.contains(&cur) {
-            continue;
-        }
-        seen.push(cur);
-
-        let already = registry.borrow().get(cur).is_some();
-        if !already {
-            let source = bootstrap_modules::source_for(cur)?;
-            let module = modules::compile_module(scope, cur, source).ok()?;
-            registry.borrow_mut().insert(cur.to_string(), module);
-        }
-        for dep in bootstrap_modules::deps_of(cur) {
-            stack.push(dep);
-        }
-    }
-
-    // Hand back the requested module. The host callback instantiates it
-    // through `modules::resolve_callback`, which now finds every transitive
-    // import in the registry.
-    let g = registry.borrow().get(spec)?.clone();
-    Some(v8::Local::new(scope, &g))
-}
-
 /// Reject `resolver` with `TypeError(message)` and return its promise.
 fn reject_typeerror<'s>(
     scope: &v8::PinScope<'s, '_>,
@@ -215,7 +155,12 @@ pub(crate) fn host_import_module_dynamically_callback<'s>(
         return import_registered(scope, resolver, specifier);
     }
 
-    if resolve_bootstrap_module(scope, &spec).is_some() {
+    if spec == "zeroship" {
+        // The core facade has no imports. Plugin adapters are already in the
+        // registry and own their source delivery independently of this module.
+        let module = modules::compile_module(scope, &spec, crate::init::ZEROSHIP_MODULE_JS).ok()?;
+        let module = v8::Local::new(scope, module);
+        cache_into_registry(scope, &spec, module);
         return import_registered(scope, resolver, specifier);
     }
 

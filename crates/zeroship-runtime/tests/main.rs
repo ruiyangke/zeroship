@@ -135,7 +135,6 @@ mod async_local_storage;
 mod auth_plugin;
 mod base64;
 mod blob_native;
-mod bootstrap_install_schema_resolve;
 mod call_fetch_handler;
 mod capability;
 mod close_event;

@@ -44,20 +44,9 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      # The SDK dist files BEFORE any cargo command, and this is not stylistic.
-      # zeroship-runtime `include_str!`s sdks/bootstrap/dist/runtime-entry.js,
-      # sdks/db/dist/internal.js
-      # (crates/runtime/src/core/init.rs:391 and
-      # crates/runtime/src/core/bootstrap_modules.rs:59,65). Those three are
-      # build outputs, gitignored, and have never been tracked in any ref, so a
-      # fresh checkout does not have them. There is no build.rs and no cache
-      # that supplies them. Measured 2026-08-13 on a clean worktree:
-      # `cargo check -p zeroship-runtime` fails with three
-      # `couldn't read ...: No such file or directory` errors.
-      #
-      # `cargo check --workspace` compiles zeroship-runtime because it is a
-      # plain `crates/*` member with no `default-members` narrowing, so this job
-      # could not have passed a fresh checkout without these steps.
+      # Build SDK sources before Cargo: zeroship-runtime embeds bootstrap's
+      # runtime entry, and zeroship-data-v8 embeds the DB internal adapter.
+      # These gitignored build outputs are absent from a fresh checkout.
       - uses: actions/setup-node@v4
         with:
           node-version: 22

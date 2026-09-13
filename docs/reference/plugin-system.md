@@ -32,6 +32,10 @@ native modules and `zeroship`; it cannot statically import creator modules.
 Module delivery grants no additional authority. Privileged finalization remains
 in native lifecycle hooks; adapter JavaScript uses the app-scoped primitives.
 
+The [DB adapter](../../crates/zeroship-data-v8/src/lib.rs) supplies the DB SDK
+internal entry as `zeroship:db/internal`. Its source and build dependency belong
+to `zeroship-data-v8`; the runtime core loads the registered module graph.
+
 ## Current plugin styles
 
 There are two active patterns in the tree:
