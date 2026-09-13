@@ -101,7 +101,7 @@ function makeMockNative(options?: { ready?: (name: string) => Promise<void> }) {
   // through this array, even though every element pushed in is always
   // a `makeFakeSub()` result and genuinely carries it at runtime.
   const subs: Record<string, (FakeSub & { closes: number })[]> = {};
-  const calls = { find: 0, openSubscription: 0, ready: 0 };
+  const calls = { find: 0, findCollections: [] as string[], openSubscription: 0, ready: 0 };
 
   const native = {
     // The bootstrap callback context makes db.live reject without sharing
@@ -111,6 +111,7 @@ function makeMockNative(options?: { ready?: (name: string) => Promise<void> }) {
       return {
         async find(_filter: AnyRec, _opts: AnyRec) {
           calls.find += 1;
+          calls.findCollections.push(name);
           return [...(rowsByTable[name] ?? [])];
         },
         async insert(row: AnyRec) {
@@ -491,69 +492,29 @@ describe("db.live — reactive query layer", () => {
     live.close();
   });
 
-  test("live + with: { fk: true } re-runs on BOTH watched and joined-target tables", async () => {
-    // Locks the contract: a queryFn that joins `todos` to `users` via
-    // `with: { userId: true }` must auto-detect BOTH tables and trigger
-    // a rerun when EITHER mutates. The relation loader calls
-    // `targetCol.find(...)` which in turn calls
-    // `trackCollectionAccess(this._name)` — so the tracker picks up
-    // `users` even though the queryFn never names it.
+  test("live tracks native relation targets even when parent rows are empty", async () => {
     const ctx = makeMockNative();
     installEnv(ctx.native as unknown as { collection: (n: string) => { openSubscription: () => FakeSub } });
-    const db = installSchemaForTest(
-      {
-        users: { name: t.string().required() },
-        todos: { userId: t.ref("users"), title: t.string().required() },
-      },
-      { native: ctx.native },
-    );
-    // `id` is platform-minted (`RowInput<S>` forbids passing one) -
-    // capture it from the insert result and thread it into the FK,
-    // same as a real caller would.
-    const { data: alice } = await db.users.insert({ name: "Alice" });
-    if (!alice) throw new Error("insert(users) failed");
-    // The fixture declares an unbranded string key; the reference expects a users ID.
-    const aliceId = alice.id as Id<"users">;
-    await db.todos.insert({ userId: aliceId, title: "buy milk" });
-
-    const live = db.live(() => db.todos.find({}, { with: { userId: true } }));
-
-    // Drain initial result.
-    const first = await live.next();
-    assert.equal(Array.isArray(first.value), true);
-
-    // Both tables should have been auto-subscribed. The `users` sub is
-    // the key claim — it's only opened if the relation loader's
-    // `targetCol.find` fired through `trackCollectionAccess`.
-    await new Promise((r) => setTimeout(r, 5));
-    assert.equal(
-      (ctx.subs["todos"] ?? []).length,
-      1,
-      "live + with must subscribe to the parent table (todos)",
-    );
-    assert.equal(
-      (ctx.subs["users"] ?? []).length,
-      1,
-      "live + with must subscribe to the joined-target table (users) — if this fails, _loadRelations is not tracking",
-    );
-
-    // Mutation on `todos` triggers a rerun.
-    await db.todos.insert({ userId: aliceId, title: "write tests" });
-    ctx.fire("todos");
-    const afterTodos = await live.next();
-    assert.equal(afterTodos.done, false);
-
-    // Mutation on `users` (the joined target) ALSO triggers a rerun.
-    const findsBefore = ctx.calls.find;
-    ctx.fire("users");
-    // Wait for the rerun to land in the queue.
-    const afterUsers = await live.next();
-    assert.equal(afterUsers.done, false);
-    assert.ok(
-      ctx.calls.find > findsBefore,
-      "an event on the joined-target table must trigger a queryFn rerun",
-    );
-    live.close();
+    const db = installSchemaForTest({
+      users: { name: t.string().required() },
+      todos: { userId: t.ref("users", { relation: "user" }), title: t.string().required() },
+    }, { native: ctx.native });
+    const live = db.live(() => db.todos.find({}, { with: { user: true } }));
+    try {
+      assert.deepEqual((await live.next()).value, []);
+      assert.equal(ctx.subs.todos.length, 1);
+      assert.equal(ctx.subs.users.length, 1);
+      assert.ok(ctx.calls.findCollections.length > 0);
+      assert.deepEqual(new Set(ctx.calls.findCollections), new Set(["todos"]));
+      for (const table of ["todos", "users"]) {
+        const before = ctx.calls.find;
+        ctx.fire(table);
+        assert.equal((await live.next()).done, false);
+        assert.equal(ctx.calls.find, before + 1);
+      }
+    } finally {
+      live.close();
+    }
   });
 
   test("tables: [] subscribes to nothing (static one-shot) — R3 IMPORTANT-4", async () => {

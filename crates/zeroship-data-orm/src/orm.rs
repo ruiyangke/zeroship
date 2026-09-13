@@ -120,7 +120,6 @@ impl Database {
         })
     }
 
-
     fn check_scope(&self) -> Result<(), DbError> {
         check_scope(self.scope.as_ref())
     }
@@ -370,19 +369,20 @@ fn decode_rows<E: Entity, R: FromRow<E>>(output: Output) -> Result<Vec<R>, DbErr
 mod codecs;
 mod model;
 mod mutations;
+mod relations;
 pub use mutations::ConflictTarget;
 mod transactions;
 pub use crate::error::IsolationLevel;
-pub use transactions::TransactionOptions;
-pub use codecs::{sql_types, Decimal, Point, Protected};
+pub use codecs::{Decimal, Point, Protected, sql_types};
 pub use model::*;
+pub use transactions::TransactionOptions;
 pub mod read;
 pub use read::{ReadJoin, ReadProjection, ReadQuery, ReadSource};
 mod read_builder;
 mod read_input;
 pub use crate::value::Record;
 pub use read_builder::*;
-pub use zeroship_data_macros::{schema, Changeset, FromRow, Insertable};
+pub use zeroship_data_macros::{Changeset, FromRow, Insertable, schema};
 
 /// Implementation support for generated metadata.
 #[doc(hidden)]
@@ -473,6 +473,7 @@ enum Plan {
     Find {
         filter: Value,
         plan: Box<crud::FindPlan>,
+        relations: Option<Box<relations::FindRelations>>,
     },
     Insert(Value),
     InsertMany(Value),
@@ -546,11 +547,22 @@ impl PreparedOperation {
                     *query,
                 )?))
             }
-            Operation::Find { filter, options } => {
+            Operation::Find {
+                filter,
+                mut options,
+            } => {
+                let relations = relations::FindRelations::new(
+                    &binding,
+                    route.sql_registration(),
+                    collection,
+                    &mut options,
+                )?
+                .map(Box::new);
                 let plan = crud::plan_find(&binding, collection, &filter, &options)?;
                 Plan::Find {
                     filter,
                     plan: Box::new(plan),
+                    relations,
                 }
             }
             Operation::Insert { document } => Plan::Insert(document),
@@ -717,10 +729,26 @@ impl PreparedOperation {
         let route = route.bind(backend)?;
         let result = match plan {
             Plan::Read(plan) => Box::pin(plan.execute(&binding, &route)).await?,
-            Plan::Find { filter, plan } => {
-                Box::pin(crud::run_find(binding, collection, route, filter, *plan))
-                    .await?
-                    .into()
+            Plan::Find {
+                filter,
+                plan,
+                relations,
+            } => {
+                if let Some(relations) = &relations {
+                    relations.validate_schemas(&binding)?;
+                }
+                let mut result = Box::pin(crud::run_find(
+                    binding.clone(),
+                    collection,
+                    route.clone(),
+                    filter,
+                    *plan,
+                ))
+                .await?;
+                if let Some(relations) = relations {
+                    Box::pin(relations.apply(&binding, &route, &mut result)).await?;
+                }
+                result.into()
             }
             Plan::Insert(document) => Box::pin(crud::run_insert(
                 binding, collection, route, document, actor_id,

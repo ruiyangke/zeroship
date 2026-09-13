@@ -18,7 +18,7 @@ export default {
 
     table("users").create({
       columns: {
-        workspaceId: t.text().notNull().references("workspaces", "id"),
+        workspaceId: t.text().notNull().references("workspaces", "id", { relation: "workspace" }),
         handle: t.text().notNull().unique(),
         fullName: t.text().notNull(),
         email: t.text().notNull().unique(),
@@ -31,8 +31,8 @@ export default {
 
     table("tasks").create({
       columns: {
-        workspaceId: t.text().notNull().references("workspaces", "id"),
-        ownerId: t.text().notNull().references("users", "id"),
+        workspaceId: t.text().notNull().references("workspaces", "id", { relation: "workspace" }),
+        ownerId: t.text().notNull().references("users", "id", { relation: "owner" }),
         title: t.text().notNull(),
         description: t.text().notNull(),
         status: t.text().notNull().default("open"),
@@ -49,7 +49,7 @@ export default {
 
     table("places").create({
       columns: {
-        workspaceId: t.text().notNull().references("workspaces", "id"),
+        workspaceId: t.text().notNull().references("workspaces", "id", { relation: "workspace" }),
         name: t.text().notNull(),
         description: t.text().notNull(),
         category: t.text().notNull(),

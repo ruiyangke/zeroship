@@ -544,6 +544,10 @@ pub fn render_schema_export(
     // ONE recovery feeds both the serialized artifact and the structured export: the
     // `FieldDef` map is a map over the typed collections, not a second traversal.
     let collections = folded.project_collection_descriptors(vendors);
+    for descriptor in collections.values() {
+        crate::model::relations::validate_descriptor_relations(descriptor)
+            .map_err(GenTypesError::RuntimeMetadata)?;
+    }
     let field_defs = crate::render::fold::single_fold::field_defs_from_collections(&collections);
 
     // (a) RuntimeSchemaDescriptor v2 - fields plus their physical storage mapping and
@@ -1093,6 +1097,7 @@ fn lifted_column_references(
         }
         if let ColType::Ref { references: target } = &column.ty {
             let mut reference = ColumnReference {
+                relation: None,
                 table: target.clone(),
                 column: "id".to_string(),
                 on_delete: None,
@@ -1166,6 +1171,7 @@ fn lifted_column_references(
         references.insert(
             columns[0].clone(),
             ColumnReference {
+                relation: None,
                 table: references_table.clone(),
                 column: references_columns[0].clone(),
                 on_delete: *on_delete,
@@ -1379,6 +1385,9 @@ fn render_expr(expr: &Expr) -> String {
 
 fn render_reference_options(reference: &ColumnReference) -> String {
     let mut options = Vec::new();
+    if let Some(relation) = &reference.relation {
+        options.push(format!("relation: {}", js_str(relation)));
+    }
     if let Some(name) = &reference.name {
         options.push(format!("name: {}", js_str(name)));
     }
@@ -1895,6 +1904,7 @@ mod tests {
     fn renders_typed_reference_on_the_local_physical_column() {
         let local = column("account_id", ColType::Uuid);
         let reference = ColumnReference {
+            relation: None,
             table: "accounts".to_string(),
             column: "id".to_string(),
             on_delete: Some(RefAction::Cascade),
@@ -1911,6 +1921,7 @@ mod tests {
     fn renders_explicit_typed_reference_constraint_name() {
         let local = column("account_id", ColType::Uuid);
         let reference = ColumnReference {
+            relation: None,
             table: "accounts".to_string(),
             column: "id".to_string(),
             on_delete: Some(RefAction::Cascade),
@@ -1927,6 +1938,7 @@ mod tests {
     fn a_second_fk_on_one_local_column_stays_table_level() {
         let mut local = column("account_id", ColType::Uuid);
         local.references = Some(ColumnReference {
+            relation: None,
             table: "accounts".to_string(),
             column: "id".to_string(),
             on_delete: None,

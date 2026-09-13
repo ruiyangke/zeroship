@@ -8,6 +8,7 @@ pub mod load;
 // Engine-side dialect-support + vendor-capability computation for the closed `Op`
 // wire type (the logic that could not ride the `Op` type into the leaf crate).
 pub mod op_support;
+pub(crate) mod relations;
 pub mod schema_model;
 pub use zeroship_migrate_backend::snapshot;
 pub mod support;

@@ -500,6 +500,7 @@ export function model<S extends Record<string, unknown>>(
   native: NativeDb,
   namingStrategy: NamingStrategy = naming.asIs,
   declaredIndexes: readonly NamedIndexSpec[] = [],
+  schemas: Readonly<Record<string, NormalizedSchema>> = {},
 ): Collection<S> {
   if (typeof name !== "string" || name.trim().length === 0) {
     throw Object.assign(
@@ -521,6 +522,7 @@ export function model<S extends Record<string, unknown>>(
   return new Collection<S>(name, normalized, native, {
     naming: namingStrategy,
     indexes: declaredIndexes,
+    schemas,
   });
 }
 
@@ -670,20 +672,9 @@ function createTxCollection<S>(
     },
     find: ((filter: Filter<S> = {} as Filter<S>, opts?: { with?: WithSpec<S> } & TxReadHints<S>): TxQuery<S, Row<S>> => {
       requireActiveTransaction(active);
-      const query = (opts?.with !== undefined
-        ? (collection as unknown as {
-            find(f: Filter<S>, o: { with: WithSpec<S> } & TxReadHints<S> & { [TRANSACTION_READ]?: boolean }): Query<S, Row<S>>;
-          }).find(filter, {
-            ...opts,
-            with: opts.with,
-            [TRANSACTION_READ]: true,
-          })
-        : (collection as unknown as {
-            find(f: Filter<S>, o?: TxReadHints<S> & { [TRANSACTION_READ]?: boolean }): Query<S, Row<S>>;
-          }).find(filter, {
-            ...opts,
-            [TRANSACTION_READ]: true,
-          }));
+      const query = (collection as unknown as {
+        find(f: Filter<S>, o?: { with?: WithSpec<S> } & TxReadHints<S>): Query<S, Row<S>>;
+      }).find(filter, opts);
       return createTxQuery<S>(query, active);
     }) as TxCollection<S>["find"],
     async upsert(row: RowInput<S>, options: UpsertOptions<S>) {
@@ -961,15 +952,8 @@ function _installSchemaInner<const T extends Record<string, SchemaInput>>(
         native,
         namingStrategy,
         opts.indexes,
+        descriptorFields ?? {},
       ) as Collection<unknown, string, T>;
-  }
-
-  const resolveCollection = (n: string): Collection<unknown> | undefined =>
-    (collections as Record<string, Collection<unknown>>)[n];
-  for (const col of Object.values(collections)) {
-    (col as unknown as {
-      _setResolveCollection(fn: (name: string) => Collection<unknown> | undefined): void;
-    })._setResolveCollection(resolveCollection);
   }
 
   function liveImpl<R>(

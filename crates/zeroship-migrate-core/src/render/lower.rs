@@ -9610,6 +9610,10 @@ pub(crate) fn ir_column_to_field(c: &IrColumn) -> FieldDescriptor {
         references,
         reference_column,
         reference_name,
+        relation: c
+            .references
+            .as_ref()
+            .and_then(|reference| reference.relation.clone()),
         on_delete: c
             .references
             .as_ref()

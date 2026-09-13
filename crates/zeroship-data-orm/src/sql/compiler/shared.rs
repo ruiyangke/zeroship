@@ -1,11 +1,11 @@
 use super::{CompileError, CompiledQuery, SqlWriter};
 use crate::sql::{
+    CompareOp, MembershipOp, PatternOp,
     statement::{
         ArithmeticOperator, ArrayOperator, Column, Delete, Expression, Insert, MutationScope,
         ResolvedOperand, ResolvedPredicate, ResolvedPredicateValue, SelectStatement, Statement,
         StorageType, Table, Update, Upsert, VectorSearchStatement,
     },
-    CompareOp, MembershipOp, PatternOp,
 };
 use crate::value::Value;
 
@@ -57,6 +57,17 @@ impl Requirements {
                         .iter()
                         .map(|join| predicate_binds(&join.on))
                         .sum::<usize>()
+                        + parts
+                            .projection
+                            .iter()
+                            .map(|selected| operand_binds(&selected.expression))
+                            .sum::<usize>()
+                        + parts.group_by.iter().map(operand_binds).sum::<usize>()
+                        + parts
+                            .order_by
+                            .iter()
+                            .map(|order| operand_binds(&order.expression))
+                            .sum::<usize>()
                         + predicate_binds(&parts.predicate)
                         + predicate_binds(&parts.having)
                         + usize::from(parts.limit.is_some())
@@ -176,18 +187,29 @@ fn expression_binds(expression: &Expression) -> usize {
     ))
 }
 
+fn operand_binds(operand: &ResolvedOperand) -> usize {
+    usize::from(matches!(operand, ResolvedOperand::Comparison(_)))
+}
+
 pub(crate) fn predicate_binds(predicate: &ResolvedPredicate) -> usize {
     match predicate {
         ResolvedPredicate::And(children) | ResolvedPredicate::Or(children) => {
             children.iter().map(predicate_binds).sum()
         }
         ResolvedPredicate::Not(child) => predicate_binds(child),
-        ResolvedPredicate::Compare { rhs, .. } => {
-            usize::from(matches!(rhs, ResolvedPredicateValue::Bind { .. }))
+        ResolvedPredicate::Compare { lhs, rhs, .. } => {
+            operand_binds(lhs)
+                + match rhs {
+                    ResolvedPredicateValue::Operand(rhs) => operand_binds(rhs),
+                    ResolvedPredicateValue::Bind { .. } => 1,
+                }
         }
-        ResolvedPredicate::Pattern { escape, .. } => 1 + usize::from(escape.is_some()),
-        ResolvedPredicate::Membership { values, .. } => values.len(),
-        ResolvedPredicate::IsNull { .. } | ResolvedPredicate::Const(_) => 0,
+        ResolvedPredicate::Pattern { lhs, escape, .. } => {
+            operand_binds(lhs) + 1 + usize::from(escape.is_some())
+        }
+        ResolvedPredicate::Membership { lhs, values, .. } => operand_binds(lhs) + values.len(),
+        ResolvedPredicate::IsNull { operand, .. } => operand_binds(operand),
+        ResolvedPredicate::Const(_) => 0,
     }
 }
 
@@ -455,7 +477,10 @@ pub(crate) fn compile_upsert(
                 storage: condition.column.storage(),
                 value: condition.value,
             },
-            |writer| write_current(writer, &condition.column),
+            |writer| {
+                write_current(writer, &condition.column);
+                Ok(())
+            },
         )?;
     }
     write_returning(&mut writer, &parts.returning);
@@ -539,7 +564,7 @@ pub(crate) fn compile_vector_search(
         &mut writer,
         syntax,
         &ResolvedOperand::Column(parts.identity),
-    );
+    )?;
     writer.sql.push_str(" LIMIT ");
     writer.write_param(Value::from(parts.limit))?;
     Ok(writer.finish())
@@ -576,7 +601,7 @@ pub(crate) fn compile_select(
     }
     for (index, selected) in parts.projection.into_iter().enumerate() {
         comma(&mut writer, index);
-        write_operand(&mut writer, syntax, &selected.expression);
+        write_operand(&mut writer, syntax, &selected.expression)?;
         writer.sql.push_str(" AS ");
         writer.identifier(selected.alias.as_str());
     }
@@ -599,7 +624,7 @@ pub(crate) fn compile_select(
         writer.sql.push_str(" GROUP BY ");
         for (index, expression) in parts.group_by.iter().enumerate() {
             comma(&mut writer, index);
-            write_operand(&mut writer, syntax, expression);
+            write_operand(&mut writer, syntax, expression)?;
         }
     }
     if !matches!(parts.having, ResolvedPredicate::Const(true)) {
@@ -610,7 +635,7 @@ pub(crate) fn compile_select(
         writer.sql.push_str(" ORDER BY ");
         for (index, order) in parts.order_by.iter().enumerate() {
             comma(&mut writer, index);
-            write_operand(&mut writer, syntax, &order.expression);
+            write_operand(&mut writer, syntax, &order.expression)?;
             writer.sql.push_str(match order.direction {
                 crate::sql::Direction::Ascending => " ASC",
                 crate::sql::Direction::Descending => " DESC",
@@ -749,7 +774,7 @@ pub(crate) fn write_predicate(
                 writer.sql.push(')');
                 return Ok(());
             }
-            write_operand(writer, syntax, &lhs);
+            write_operand(writer, syntax, &lhs)?;
             writer.sql.push_str(if op == MembershipOp::In {
                 " IN ("
             } else {
@@ -767,7 +792,7 @@ pub(crate) fn write_predicate(
             value,
             escape,
         } => {
-            write_operand(writer, syntax, &lhs);
+            write_operand(writer, syntax, &lhs)?;
             let insensitive = matches!(op, PatternOp::ILike | PatternOp::NotILike);
             let negated = matches!(op, PatternOp::NotLike | PatternOp::NotILike);
             if negated {
@@ -790,7 +815,7 @@ pub(crate) fn write_predicate(
             }
         }
         ResolvedPredicate::IsNull { operand, negated } => {
-            write_operand(writer, syntax, &operand);
+            write_operand(writer, syntax, &operand)?;
             writer
                 .sql
                 .push_str(if negated { " IS NOT NULL" } else { " IS NULL" });
@@ -805,7 +830,7 @@ fn write_comparison(
     storage: StorageType,
     op: CompareOp,
     rhs: ResolvedPredicateValue,
-    write_lhs: impl FnOnce(&mut SqlWriter),
+    write_lhs: impl FnOnce(&mut SqlWriter) -> Result<(), CompileError>,
 ) -> Result<(), CompileError> {
     if matches!(op, CompareOp::Eq | CompareOp::Ne) {
         if storage == StorageType::Json && syntax.structural_json_equality {
@@ -827,7 +852,7 @@ fn write_comparison(
             );
         }
     }
-    write_lhs(writer);
+    write_lhs(writer)?;
     writer.sql.push_str(match op {
         CompareOp::Eq => " = ",
         CompareOp::Ne => " != ",
@@ -837,8 +862,10 @@ fn write_comparison(
         CompareOp::Gte => " >= ",
     });
     match rhs {
-        ResolvedPredicateValue::Operand(rhs) => write_operand(writer, syntax, &rhs),
-        ResolvedPredicateValue::Bind { storage, value } => write_bind(writer, syntax, storage, value)?,
+        ResolvedPredicateValue::Operand(rhs) => write_operand(writer, syntax, &rhs)?,
+        ResolvedPredicateValue::Bind { storage, value } => {
+            write_bind(writer, syntax, storage, value)?
+        }
     }
     Ok(())
 }
@@ -846,7 +873,7 @@ fn write_comparison(
 fn write_exact_decimal_equality(
     writer: &mut SqlWriter,
     syntax: Syntax,
-    write_lhs: impl FnOnce(&mut SqlWriter),
+    write_lhs: impl FnOnce(&mut SqlWriter) -> Result<(), CompileError>,
     rhs: ResolvedPredicateValue,
     negated: bool,
 ) -> Result<(), CompileError> {
@@ -854,10 +881,10 @@ fn write_exact_decimal_equality(
         writer.sql.push_str("NOT ");
     }
     writer.sql.push_str("zeroship_decimal_equal(");
-    write_lhs(writer);
+    write_lhs(writer)?;
     writer.sql.push_str(", ");
     match rhs {
-        ResolvedPredicateValue::Operand(rhs) => write_operand(writer, syntax, &rhs),
+        ResolvedPredicateValue::Operand(rhs) => write_operand(writer, syntax, &rhs)?,
         ResolvedPredicateValue::Bind { storage, value } => {
             write_bind(writer, syntax, storage, value)?;
         }
@@ -869,7 +896,7 @@ fn write_exact_decimal_equality(
 fn write_structural_json_equality(
     writer: &mut SqlWriter,
     syntax: Syntax,
-    write_lhs: impl FnOnce(&mut SqlWriter),
+    write_lhs: impl FnOnce(&mut SqlWriter) -> Result<(), CompileError>,
     rhs: ResolvedPredicateValue,
     negated: bool,
 ) -> Result<(), CompileError> {
@@ -877,10 +904,10 @@ fn write_structural_json_equality(
         writer.sql.push_str("NOT ");
     }
     writer.sql.push_str("zeroship_json_equal(");
-    write_lhs(writer);
+    write_lhs(writer)?;
     writer.sql.push_str(", ");
     match rhs {
-        ResolvedPredicateValue::Operand(rhs) => write_operand(writer, syntax, &rhs),
+        ResolvedPredicateValue::Operand(rhs) => write_operand(writer, syntax, &rhs)?,
         ResolvedPredicateValue::Bind { storage, value } => {
             write_bind(writer, syntax, storage, value)?;
         }
@@ -889,9 +916,31 @@ fn write_structural_json_equality(
     Ok(())
 }
 
-pub(crate) fn write_operand(writer: &mut SqlWriter, syntax: Syntax, operand: &ResolvedOperand) {
+pub(crate) fn write_operand(
+    writer: &mut SqlWriter,
+    syntax: Syntax,
+    operand: &ResolvedOperand,
+) -> Result<(), CompileError> {
     match operand {
         ResolvedOperand::Column(column) => write_column_reference(writer, column),
+        ResolvedOperand::Comparison(comparison) => {
+            writer.sql.push('(');
+            write_comparison(
+                writer,
+                syntax,
+                comparison.column.storage(),
+                comparison.op,
+                ResolvedPredicateValue::Bind {
+                    storage: comparison.column.storage(),
+                    value: comparison.value.clone(),
+                },
+                |writer| {
+                    write_column_reference(writer, &comparison.column);
+                    Ok(())
+                },
+            )?;
+            writer.sql.push(')');
+        }
         ResolvedOperand::Aggregate {
             function,
             column,
@@ -903,7 +952,7 @@ pub(crate) fn write_operand(writer: &mut SqlWriter, syntax: Syntax, operand: &Re
                 writer.sql.push_str("DISTINCT ");
             }
             if let Some(column) = column {
-                write_operand(writer, syntax, &ResolvedOperand::Column(column.clone()));
+                write_operand(writer, syntax, &ResolvedOperand::Column(column.clone()))?;
             } else {
                 writer.sql.push('*');
             }
@@ -913,6 +962,7 @@ pub(crate) fn write_operand(writer: &mut SqlWriter, syntax: Syntax, operand: &Re
             }
         }
     }
+    Ok(())
 }
 
 pub(crate) fn write_column_reference(writer: &mut SqlWriter, column: &Column) {
