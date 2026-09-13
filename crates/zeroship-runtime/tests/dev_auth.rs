@@ -16,7 +16,7 @@
 //! verifies here. We assert BOTH server-side identity surfaces resolve the dev
 //! user:
 //!   1. `env.auth.getUser()`  — the kernel `AuthPlugin` per-request state.
-//!   2. `currentUser()`       — the RPC ctx (`__zeroshipGetRpcCtx().user`).
+//!   2. `currentUser()`       — the native RPC context accessor.
 //!
 //! Both are fed by the SAME `user_json`, exactly as the gateway header is in
 //! production.
