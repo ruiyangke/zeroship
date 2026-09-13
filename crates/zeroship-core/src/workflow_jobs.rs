@@ -71,6 +71,7 @@ pub struct Delivery {
 }
 
 /// Remaining manager authority transferred without comparing database-zone clocks.
+///
 /// The receiver anchors this duration before starting its request and rejects
 /// replies whose resulting monotonic deadline has already expired.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -81,6 +82,7 @@ pub struct DeliveryLease {
 }
 
 /// Host-authorized delivery with a deadline on the host's monotonic clock.
+///
 /// Native manager grants and authenticated client replies implement this seam;
 /// a serialized delivery alone cannot supply execution authority. Implementors
 /// must preserve the original expiration when cloned or repeatedly observed.

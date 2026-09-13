@@ -6,7 +6,7 @@ use crate::{
 use std::time::{Duration, Instant};
 
 #[test]
-fn management_authority_preserves_raw_admission_near_lease_expiry() {
+fn authority_preserves_raw_admission_near_lease_expiry() {
     let app = AppId::mint();
     let policies = HostPolicies::default();
     let policy = AppPolicy::default();
@@ -23,7 +23,7 @@ fn management_authority_preserves_raw_admission_near_lease_expiry() {
                 PolicySnapshot::lease(1.try_into().unwrap(), policy.clone(), until).unwrap(),
             )
             .unwrap();
-        let authority = match policies.management_authority(&app) {
+        let authority = match policies.authority(&app) {
             Ok(authority) => authority,
             Err(WorkflowServiceError::Unavailable(_)) if Instant::now() >= until => continue,
             Err(error) => panic!("unexpected management authority failure: {error}"),
@@ -41,7 +41,7 @@ fn management_authority_preserves_raw_admission_near_lease_expiry() {
 }
 
 #[test]
-fn management_authority_keeps_the_original_deadline_after_refresh() {
+fn authority_keeps_the_original_deadline_after_refresh() {
     let app = AppId::mint();
     let policies = HostPolicies::default();
     let until = Instant::now() + Duration::from_secs(30);
@@ -51,7 +51,7 @@ fn management_authority_keeps_the_original_deadline_after_refresh() {
             PolicySnapshot::lease(1.try_into().unwrap(), AppPolicy::default(), until).unwrap(),
         )
         .unwrap();
-    let mut authority = policies.management_authority(&app).unwrap();
+    let mut authority = policies.authority(&app).unwrap();
     authority.check(&policies, &app).unwrap();
     let refreshed_until = until + Duration::from_secs(30);
     policies
@@ -63,7 +63,7 @@ fn management_authority_keeps_the_original_deadline_after_refresh() {
         .unwrap();
     assert_eq!(authority.deadline, Some(until));
     authority.check(&policies, &app).unwrap();
-    let refreshed = policies.management_authority(&app).unwrap();
+    let refreshed = policies.authority(&app).unwrap();
     assert_eq!(refreshed.deadline, Some(refreshed_until));
     refreshed.check(&policies, &app).unwrap();
 
@@ -78,13 +78,13 @@ fn management_authority_keeps_the_original_deadline_after_refresh() {
 }
 
 #[test]
-fn management_authority_retries_when_the_host_revision_changes() {
+fn authority_retries_when_the_host_revision_changes() {
     let app = AppId::mint();
     let policies = HostPolicies::default();
     policies
         .install(&app, configured_policy(1, AppPolicy::default()))
         .unwrap();
-    let authority = policies.management_authority(&app).unwrap();
+    let authority = policies.authority(&app).unwrap();
     authority.check(&policies, &app).unwrap();
     policies
         .install(&app, configured_policy(2, AppPolicy::default()))
@@ -94,24 +94,24 @@ fn management_authority_retries_when_the_host_revision_changes() {
         Err(WorkflowServiceError::Unavailable(_))
     ));
     policies
-        .management_authority(&app)
+        .authority(&app)
         .unwrap()
         .check(&policies, &app)
         .unwrap();
 }
 
 #[test]
-fn management_authority_requires_a_present_unexpired_host_snapshot() {
+fn authority_requires_a_present_unexpired_host_snapshot() {
     let app = AppId::mint();
     let policies = HostPolicies::default();
     assert!(matches!(
-        policies.management_authority(&app),
+        policies.authority(&app),
         Err(WorkflowServiceError::Unavailable(_))
     ));
     policies
         .install(&app, configured_policy(1, AppPolicy::default()))
         .unwrap();
-    let authority = policies.management_authority(&app).unwrap();
+    let authority = policies.authority(&app).unwrap();
     authority.check(&policies, &app).unwrap();
     assert!(matches!(
         authority.check(&HostPolicies::default(), &app),
@@ -125,7 +125,7 @@ fn management_authority_requires_a_present_unexpired_host_snapshot() {
         )
         .unwrap();
     assert!(matches!(
-        policies.management_authority(&app),
+        policies.authority(&app),
         Err(WorkflowServiceError::Unavailable(_))
     ));
     assert!(matches!(
@@ -135,7 +135,7 @@ fn management_authority_requires_a_present_unexpired_host_snapshot() {
 }
 
 #[test]
-fn management_authority_preserves_an_explicit_configured_admission_denial() {
+fn authority_preserves_an_explicit_configured_admission_denial() {
     let app = AppId::mint();
     let policies = HostPolicies::default();
     let policy = AppPolicy {
@@ -145,7 +145,7 @@ fn management_authority_preserves_an_explicit_configured_admission_denial() {
     policies
         .install(&app, configured_policy(1, policy.clone()))
         .unwrap();
-    let authority = policies.management_authority(&app).unwrap();
+    let authority = policies.authority(&app).unwrap();
     assert_eq!(authority.deadline, None);
     assert_eq!(authority.policy, policy);
     authority.check(&policies, &app).unwrap();

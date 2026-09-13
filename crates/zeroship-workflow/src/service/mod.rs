@@ -9,6 +9,7 @@ pub mod capability;
 mod control;
 mod deployment_retention;
 mod deployments;
+pub mod delivery;
 mod deploys;
 pub use deployments::AppDeployments;
 mod frontier;
