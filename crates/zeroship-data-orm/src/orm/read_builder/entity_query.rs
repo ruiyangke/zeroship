@@ -190,7 +190,7 @@ impl<E: Entity> EntityQuery<E> {
         }
         Ok(ReadBuilder {
             schemas: vec![SchemaExpectation {
-                collection: E::COLLECTION,
+                collection: E::COLLECTION.into(),
                 schema: self.entity.schema,
                 scope: self.entity.collection.database.scope.clone(),
             }],
