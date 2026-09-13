@@ -875,7 +875,7 @@ mod tests {
 
         match sub.pop() {
             Some(crate::cdc::broker::SubscriptionMessage::Change(ev)) => {
-                assert_eq!(ev.pk.as_deref(), Some("usr_02HXTESTSUBSCRIPTIONID"));
+                assert_eq!(ev.pk.as_deref(), Some("usr_02hxtestsubscriptionid000"));
                 assert_eq!(
                     ev.new_tuple.get("id").map(String::as_str),
                     Some("usr_02hxtestsubscriptionid000")
