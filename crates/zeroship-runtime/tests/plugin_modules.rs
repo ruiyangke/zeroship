@@ -119,6 +119,44 @@ fn dynamic_only_adapter_import_instantiates_its_dependency_graph() {
 }
 
 #[test]
+fn dynamic_core_facade_import_resolves_without_plugin_adapters() {
+    let runtime = runtime(
+        r#"
+        export default { async fetch() {
+            const { env } = await import("zeroship");
+            return Response.json({ value: env.fixture.value() });
+        } };
+    "#,
+        &[],
+        vec![],
+    );
+    let (status, body) = call(&runtime);
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&body).unwrap(),
+        serde_json::json!({"value":42})
+    );
+}
+
+#[test]
+fn runtime_without_db_plugin_does_not_supply_the_db_sdk() {
+    let runtime = runtime(
+        r#"
+        export default { async fetch() {
+            try { await import("zeroship:db/internal"); }
+            catch (error) { return new Response(error.message); }
+            return new Response('unexpected DB adapter');
+        } };
+    "#,
+        &[],
+        vec![],
+    );
+    let (status, body) = call(&runtime);
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body, "Cannot find module 'zeroship:db/internal'");
+}
+
+#[test]
 fn dynamic_adapter_import_waits_for_top_level_await_and_reuses_evaluation() {
     let runtime = runtime(
         r#"

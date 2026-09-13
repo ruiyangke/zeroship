@@ -17,6 +17,7 @@ use zeroship_runtime::channel::CancelFlag;
 use zeroship_runtime::runtime::Runtime;
 use zeroship_runtime::{EnvSnapshot, FetchOutcome, ModuleEntry, RequestCtx, init_v8};
 use zeroship_runtime::{NativePlugin, NativeRegistrar};
+use zeroship_runtime::plugin::JavaScriptModule;
 
 struct DummyDbPlugin;
 
@@ -27,6 +28,24 @@ impl NativePlugin for DummyDbPlugin {
 
     fn name(&self) -> &str {
         "dummy-db"
+    }
+
+    fn javascript_modules(&self) -> &'static [JavaScriptModule] {
+        &[JavaScriptModule {
+            specifier: "zeroship:db/internal",
+            source: r#"
+export function installSchema(env, descriptor, options) {
+    if (env.__dummyNoop() !== undefined) throw new Error('installer received a different DB handle');
+    globalThis.__zsCapturedSchema = JSON.stringify({
+        keys: Object.keys(descriptor.collections),
+        optionKeys: options ? Object.keys(options) : [],
+        hasDeclaredSchemas: !!(options && Object.prototype.hasOwnProperty.call(options, "declaredSchemas")),
+    });
+    return { collections: {} };
+}
+export function _flushPendingMaskPolicy() { return null; }
+"#,
+        }]
     }
 
     fn register(&self, r: &mut NativeRegistrar) {
@@ -358,46 +377,7 @@ export default {
 };
 "#;
 
-    // Stage 7: the bootstrap dynamically imports
-    // `@zeroship/db/internal` (the framework-internal
-    // package that owns installSchema post-refactor). Stub it as a
-    // bundle module so the dynamic import resolves. The stub captures the
-    // schema keys it was handed; verifying installSchema was CALLED from the
-    // descriptor is the assertion that matters here.
-    let stub_bootstrap = r#"
-export function installSchema(_env, descriptor) {
-    globalThis.__zsCapturedSchema = JSON.stringify({
-        keys: Object.keys(descriptor.collections),
-    });
-    return { collections: {} };
-}
-"#;
-
-    // After installSchema, runtime-entry flushes the pending mask policy
-    // via `await import("@zeroship/db/internal")` and RE-THROWS on failure
-    // (a missing module would reject module init). Stub it so the import
-    // resolves; `_flushPendingMaskPolicy` returns null (no policy to flush).
-    let stub_db_internal = r#"
-export function _flushPendingMaskPolicy() { return null; }
-"#;
-
-    // The pre-init module imports the stub packages so the bundle eagerly
-    // compiles them (the later dynamic imports then hit the registry path).
-    let pre_init = r#"
-import "@zeroship/db/internal";
-"#;
-
-    let user_with_preinit = format!("{pre_init}\n{user_src}");
-    let modules = vec![
-        ModuleEntry {
-            specifier: "index.js".into(),
-            source: user_with_preinit,
-        },
-        ModuleEntry {
-            specifier: "@zeroship/db/internal".into(),
-            source: format!("{stub_bootstrap}\n{stub_db_internal}"),
-        },
-    ];
+    let modules = vec![ModuleEntry { specifier: "index.js".into(), source: user_src.into() }];
 
     let descriptor = r#"{"version":2,"collections":{"posts":{"fields":{"id":{"type":"id","idPrefix":"post"},"title":{"type":"string","required":true}},"options":{"softDelete":false,"versioning":false,"strictness":"strict"},"indexes":[]}}}"#;
 
@@ -481,34 +461,7 @@ Object.defineProperty(defaultExport, "schema", {
 export default defaultExport;
 "#;
 
-    let stub_bootstrap = r#"
-export function installSchema(_env, descriptor, _options) {
-    globalThis.__zsCapturedSchema = JSON.stringify({
-        keys: Object.keys(descriptor.collections),
-        optionKeys: _options ? Object.keys(_options) : [],
-        hasDeclaredSchemas: !!(_options && Object.prototype.hasOwnProperty.call(_options, "declaredSchemas")),
-    });
-    return { collections: {} };
-}
-"#;
-    let stub_db_internal = r#"
-export function _flushPendingMaskPolicy() { return null; }
-"#;
-    let pre_init = r#"
-import "@zeroship/db/internal";
-"#;
-
-    let user_with_preinit = format!("{pre_init}\n{user_src}");
-    let modules = vec![
-        ModuleEntry {
-            specifier: "index.js".into(),
-            source: user_with_preinit,
-        },
-        ModuleEntry {
-            specifier: "@zeroship/db/internal".into(),
-            source: format!("{stub_bootstrap}\n{stub_db_internal}"),
-        },
-    ];
+    let modules = vec![ModuleEntry { specifier: "index.js".into(), source: user_src.into() }];
 
     // The bundled descriptor: a DIFFERENT collection (`posts`) than the
     // declared `todos`, carrying platform system fields the fold materialised.
@@ -560,7 +513,7 @@ fn init_script_does_not_fallback_to_default_schema_without_descriptor() {
     // **Migration-first cutover (P5 S3).** An app that ships no descriptor is
     // treated as schema-less by the runtime entry. Even if a stale
     // `default.schema` exists, the bootstrap must not read it or import
-    // `@zeroship/db/internal`.
+    // `zeroship:db/internal`.
     init_v8();
 
     let user_src = r#"

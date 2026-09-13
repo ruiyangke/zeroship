@@ -8,12 +8,8 @@
 // (`scripts/post-build.mjs`) strips the `export {};` line so the file
 // content is pure top-level JS suitable for splicing.
 //
-// Stage 7 of the @zeroship/db refactor moved `installSchema` into the
-// `@zeroship/bootstrap` package. This entry dynamic-imports that package
-// (runtime-provided — `crates/zeroship-runtime/src/core/bootstrap_modules.rs`
-// satisfies the specifier, so the import resolves synchronously through
-// the microtask checkpoint `load_modules` invokes after
-// `module.evaluate()`).
+// DbPlugin supplies the compiled DB SDK adapter under zeroship:db/internal.
+// The runtime owns module resolution independently of the creator artifact.
 //
 // Schema install MUST NOT block module evaluation. `installSchema`
 // plants the typed `Collection` wrappers on `env.db` SYNCHRONOUSLY (so
@@ -141,7 +137,7 @@ if (!deferredInstall && hasDescriptor && schema && typeof schema === "object") {
   const envDb = envObj && envObj.db;
 
   if (envDb != null) {
-    const sdk = await import("@zeroship/db/internal") as {
+    const sdk = await import("zeroship:db/internal") as {
       installSchema?: (
         env: unknown,
         descriptor: unknown,
@@ -157,7 +153,7 @@ if (!deferredInstall && hasDescriptor && schema && typeof schema === "object") {
       globalThis.__zsSchemaReady = (async () => {
         // Seal the app declaration before dispatch. Install an empty policy
         // when none was declared so runtime code cannot add one later.
-        const policyMod = await import("@zeroship/db/internal") as {
+        const policyMod = await import("zeroship:db/internal") as {
           _flushPendingMaskPolicy?: () => Record<string, readonly string[]> | null;
         };
         const pending = typeof policyMod._flushPendingMaskPolicy === "function"

@@ -78,10 +78,7 @@ fn resolve_specifier(specifier: &str, sources: &HashMap<String, String>) -> Opti
 
 /// Compile a single module from source.
 ///
-/// `pub(crate)` so the dynamic-import host callback can compile
-/// runtime-provided JS modules (e.g. `@zeroship/db/internal`)
-/// on demand and feed them through the same registry the static
-/// `resolve_callback` reads.
+/// Shared with the dynamic-import callback for the core `zeroship` facade.
 pub(crate) fn compile_module(
     scope: &mut v8::PinScope,
     specifier: &str,
@@ -259,7 +256,7 @@ pub fn load_modules(
     //
     // The registry borrow is released BEFORE `module.evaluate()`: a
     // top-level `await import(...)` in the entry (e.g. the bootstrap
-    // `runtime-entry.js`'s `import("@zeroship/db/internal")`)
+    // `runtime-entry.js`'s `import("zeroship:db/internal")`)
     // fires the dynamic-import host callback synchronously during evaluate
     // AND during the microtask checkpoint below. That callback may
     // `borrow_mut()` the registry to cache a freshly-resolved module — so
@@ -345,12 +342,8 @@ pub fn load_modules(
 
 /// V8 resolve callback — lookups only, never compiles.
 ///
-/// All transitively imported modules are pre-compiled before
-/// `instantiate_module`. `pub(crate)` so the dynamic-import host callback
-/// can reuse the exact same lookup when instantiating a runtime-provided
-/// module (e.g. `@zeroship/db/internal`), whose own static
-/// imports (`@zeroship/db/internal`, `zeroship`) must resolve against the
-/// registry the host callback pre-populated.
+/// All transitively imported modules are compiled before instantiation.
+/// Dynamic imports reuse this lookup for plugin adapter dependency graphs.
 pub(crate) fn resolve_callback<'a>(
     context: v8::Local<'a, v8::Context>,
     specifier: v8::Local<'a, v8::String>,
