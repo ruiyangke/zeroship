@@ -423,6 +423,27 @@ export default { fetch() { return new Response("ok"); } };
             descriptor::collection_schema(&binding, "users").unwrap(),
             schema
         );
+        let mut invalid_reference = runtime_descriptor;
+        invalid_reference["collections"]["users"]["fields"]["owner_id"] = value!({
+            "type":"string", "refTarget":"undeclared", "refColumn":"id", "relation":"owner"
+        });
+        let replacement_namespace = plugin.build_instance(scope, APP).unwrap();
+        let error = plugin
+            .bind_runtime_descriptor(
+                scope,
+                APP,
+                replacement_namespace,
+                Some(&serde_json::to_value(&invalid_reference).unwrap()),
+            )
+            .expect_err("missing relation targets must fail before creator evaluation");
+        assert!(
+            error.contains("reference target collection is not declared"),
+            "{error}"
+        );
+        assert_eq!(
+            descriptor::collection_schema(&binding, "users").unwrap(),
+            schema
+        );
     }
 
     #[test]
