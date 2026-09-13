@@ -1,7 +1,10 @@
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use testcontainers::core::{IntoContainerPort, WaitFor};
 use testcontainers::{runners::SyncRunner, Container, GenericImage, ImageExt};
+
+mod migrations;
 
 pub struct Postgres {
     _container: Container<GenericImage>,
@@ -35,4 +38,16 @@ impl Postgres {
     pub fn url(&self) -> &str {
         &self.url
     }
+
+    fn migrated() -> Self {
+        let postgres = Self::start();
+        migrations::apply(postgres.url());
+        postgres
+    }
+}
+
+static MIGRATED: OnceLock<Postgres> = OnceLock::new();
+
+pub fn migrated_url() -> String {
+    MIGRATED.get_or_init(Postgres::migrated).url().to_owned()
 }
