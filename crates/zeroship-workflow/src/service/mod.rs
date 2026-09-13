@@ -1,5 +1,6 @@
 //! Workflow engine embedded in customer workers and local development.
 
+mod activation;
 mod app;
 mod backend;
 mod bundle;

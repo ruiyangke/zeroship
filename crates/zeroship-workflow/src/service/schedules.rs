@@ -74,12 +74,7 @@ impl ScheduleRegistration {
     }
 }
 
-/// Deployment reconciliation shares activation's transaction. Re-delivery of
-/// the active deployment preserves its due frontier; replacing a deployment starts
-/// its schedule frontier at activation, without inventing earlier occurrences.
-pub(crate) async fn reconcile(
-    tx: &mut Transaction,
-    app: &AppId,
+pub(super) fn validate_deployment(
     deploy: &DeployRegistration,
     policy: &AppPolicy,
     now: i64,
@@ -98,6 +93,25 @@ pub(crate) async fn reconcile(
             ));
         }
     }
+    Ok(())
+}
+
+/// Deployment reconciliation shares activation's transaction. Re-delivery of
+/// the active deployment preserves its due frontier; replacing a deployment starts
+/// its schedule frontier at activation, without inventing earlier occurrences.
+pub(super) async fn reconcile(
+    tx: &Transaction,
+    app: &AppId,
+    deploy: &DeployRegistration,
+    policy: &AppPolicy,
+    now: i64,
+) -> Result<(), WorkflowServiceError> {
+    validate_deployment(deploy, policy, now)?;
+    let names = deploy
+        .schedules
+        .iter()
+        .map(|registration| &registration.name)
+        .collect::<std::collections::BTreeSet<_>>();
     let db = tx.database();
     let schedules = db.collection(models::schedules::Entity::COLLECTION)?;
     let source = db.entity::<models::schedules::Entity>()?.alias("s")?;

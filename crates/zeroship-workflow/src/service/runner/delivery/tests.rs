@@ -1,4 +1,5 @@
 use super::*;
+mod activation;
 mod consumer;
 use crate::{
     operations::{RunState, StartOptions},

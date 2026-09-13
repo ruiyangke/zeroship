@@ -208,7 +208,7 @@ impl<T: JobTransport> DeliverySlot<T> {
         })
     }
 
-    /// Execute an advance or reconciliation delivery, or replay its committed receipt.
+    /// Execute a supported delivery, or replay its committed receipt.
     /// Dropping this future cancels execution. Drain before reusing the slot.
     ///
     /// # Errors
@@ -220,6 +220,13 @@ impl<T: JobTransport> DeliverySlot<T> {
         lease: T::Lease,
     ) -> Result<DeliveryOutcome, WorkflowServiceError> {
         self.drain_interrupted().await;
+        if matches!(
+            lease.delivery().job.operation,
+            JobOperation::Activate { .. }
+        ) {
+            let receipt = bounded(self.options.execution_timeout, app.activate_job(&lease)).await?;
+            return self.acknowledge(receipt, &lease).await;
+        }
         if matches!(lease.delivery().job.operation, JobOperation::Reconcile {}) {
             let publisher = Submission {
                 transport: self.transport.as_ref(),

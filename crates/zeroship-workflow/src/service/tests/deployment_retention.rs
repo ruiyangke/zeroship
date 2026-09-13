@@ -284,12 +284,12 @@ async fn dependencies_contract(store: Rc<OrmStore>) {
     service.activate_deploy(&app, &first).await.unwrap();
 }
 
-struct GatedReply {
-    inner: deployment_fixture::OwnedClient,
+struct GatedReply<C> {
+    inner: C,
     ready: flume::Sender<()>,
     resume: flume::Receiver<()>,
 }
-impl GatedReply {
+impl<C> GatedReply<C> {
     async fn deliver(&self, receipt: HoldReceipt) -> Result<HoldReceipt, WorkflowServiceError> {
         self.ready.send_async(()).await.unwrap();
         self.resume.recv_async().await.unwrap();
@@ -297,7 +297,7 @@ impl GatedReply {
     }
 }
 #[async_trait::async_trait(?Send)]
-impl DeploymentHoldClient for GatedReply {
+impl<C: DeploymentHoldClient> DeploymentHoldClient for GatedReply<C> {
     fn scope(&self) -> &HoldScope {
         self.inner.scope()
     }
@@ -334,9 +334,15 @@ async fn postgres_old_acknowledgements_cannot_reopen_reacquired_holds() {
 }
 async fn stale_contract(store: Rc<OrmStore>) {
     let (service, app, _, platform) = registered_service(store).await;
-    let deployment = platform.deploy(&app).await;
     let client = platform.client(&app);
-    for release in [false, true] {
+    for (release, resolve_hash) in [(false, false), (false, true), (true, false)] {
+        let deployment = platform.deploy(&app).await;
+        if release {
+            service
+                .acquire_deployment_hold(&app, &deployment.id, &deployment.hash, &client)
+                .await
+                .unwrap();
+        }
         let (ready, reached) = flume::bounded(1);
         let (resume, resumed) = flume::bounded(1);
         let gated = GatedReply {
@@ -351,6 +357,16 @@ async fn stale_contract(store: Rc<OrmStore>) {
             if release {
                 running
                     .release_deployment_hold(&running_app, &deploy.id, &gated)
+                    .await
+            } else if resolve_hash {
+                running
+                    .acquire_deployment_hold_checked(
+                        &running_app,
+                        &deploy.id,
+                        None,
+                        &gated,
+                        &|| Ok(()),
+                    )
                     .await
             } else {
                 running
@@ -397,6 +413,11 @@ async fn stale_contract(store: Rc<OrmStore>) {
             .unwrap()
             .is_empty());
     }
+    let deployment = platform.deploy(&app).await;
+    service
+        .acquire_deployment_hold(&app, &deployment.id, &deployment.hash, &client)
+        .await
+        .unwrap();
     service
         .release_deployment_hold(&app, &deployment.id, &client)
         .await
@@ -586,4 +607,251 @@ async fn schedule_contract(store: Rc<OrmStore>) {
         .await
         .unwrap()
         .is_empty());
+}
+
+struct NoPlatformIo(HoldScope);
+
+#[async_trait::async_trait(?Send)]
+impl DeploymentHoldClient for NoPlatformIo {
+    fn scope(&self) -> &HoldScope {
+        &self.0
+    }
+
+    async fn acquire(
+        &self,
+        _deployment: &str,
+        _generation: HoldGeneration,
+    ) -> Result<HoldReceipt, WorkflowServiceError> {
+        panic!("journal validation must finish without a platform acquisition")
+    }
+
+    async fn release(
+        &self,
+        _deployment: &str,
+        _generation: HoldGeneration,
+    ) -> Result<HoldReceipt, WorkflowServiceError> {
+        panic!("journal validation must finish without a platform release")
+    }
+}
+
+#[compio::test]
+async fn sqlite_only_acquiring_deployment_holds_allow_unresolved_hashes() {
+    let dir = tempfile::tempdir().unwrap();
+    unresolved_hash_contract(Rc::new(
+        sqlite_store(&dir.path().join("customer.sqlite")).await,
+    ))
+    .await;
+}
+
+#[compio::test]
+async fn postgres_only_acquiring_deployment_holds_allow_unresolved_hashes() {
+    let fixture = PostgresFixture::start().await;
+    unresolved_hash_contract(Rc::new(fixture.store.clone())).await;
+}
+
+async fn unresolved_hash_contract(store: Rc<OrmStore>) {
+    let (service, app, _, platform) = registered_service(store).await;
+    let deployment = platform.deploy(&app).await;
+    let client = platform.client(&app);
+    let lost = LostReplies {
+        inner: client.clone(),
+        acquire: Cell::new(true),
+        release: Cell::new(false),
+    };
+    assert!(matches!(
+        service
+            .acquire_deployment_hold_checked(&app, &deployment.id, None, &lost, &|| Ok(()))
+            .await,
+        Err(WorkflowServiceError::Unavailable(_))
+    ));
+    let no_io = NoPlatformIo(client.scope().clone());
+    let filter = json!({"app_id":app.as_str(), "deploy_id":deployment.id});
+    for state in ["held", "releasing", "released"] {
+        let tx = service.begin().await.unwrap();
+        journal_update(
+            &tx,
+            "deployment_holds",
+            filter.clone(),
+            json!({"state":state, "deploy_hash":null}),
+        )
+        .await;
+        tx.commit().await.unwrap();
+
+        assert!(matches!(
+            service
+                .acquire_deployment_hold_checked(&app, &deployment.id, None, &no_io, &|| Ok(()))
+                .await,
+            Err(WorkflowServiceError::Internal(_))
+        ));
+        assert!(matches!(
+            service
+                .reconcile_deployment_hold(&app, &deployment.id, &no_io)
+                .await,
+            Err(WorkflowServiceError::Internal(_))
+        ));
+        assert!(matches!(
+            service
+                .release_deployment_hold(&app, &deployment.id, &no_io)
+                .await,
+            Err(WorkflowServiceError::Internal(_))
+        ));
+        let tx = service.begin().await.unwrap();
+        assert!(matches!(
+            crate::service::deployment_retention::admission_generation(
+                &tx,
+                &app,
+                &deployment.id,
+                &deployment.hash,
+                client.scope(),
+            )
+            .await,
+            Err(WorkflowServiceError::Internal(_))
+        ));
+        let rows = journal_rows(&tx, "deployment_holds", filter.clone()).await;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].text("state").unwrap(), state);
+        assert_eq!(rows[0].optional_text("deploy_hash").unwrap(), None);
+        tx.commit().await.unwrap();
+        platform.assert_held(&app, &deployment.id).await;
+    }
+
+    let tx = service.begin().await.unwrap();
+    journal_update(
+        &tx,
+        "deployment_holds",
+        filter,
+        json!({"state":"acquiring"}),
+    )
+    .await;
+    tx.commit().await.unwrap();
+    let held = service
+        .reconcile_deployment_hold(&app, &deployment.id, &client)
+        .await
+        .unwrap();
+    assert_eq!(held.state, HoldState::Held);
+    assert_eq!(held.deploy_hash, deployment.hash);
+    assert_eq!(
+        service
+            .acquire_deployment_hold_checked(&app, &deployment.id, None, &no_io, &|| Ok(()))
+            .await
+            .unwrap(),
+        held
+    );
+}
+
+#[compio::test]
+async fn sqlite_concurrent_hold_resolution_preserves_the_bound_hash() {
+    let dir = tempfile::tempdir().unwrap();
+    concurrent_resolution_contract(Rc::new(
+        sqlite_store(&dir.path().join("customer.sqlite")).await,
+    ))
+    .await;
+}
+
+#[compio::test]
+async fn postgres_concurrent_hold_resolution_preserves_the_bound_hash() {
+    let fixture = PostgresFixture::start().await;
+    concurrent_resolution_contract(Rc::new(fixture.store.clone())).await;
+}
+
+async fn concurrent_resolution_contract(store: Rc<OrmStore>) {
+    let (service, app, _, platform) = registered_service(store).await;
+    let client = platform.client(&app);
+    for conflicting in [false, true] {
+        let deployment = platform.deploy(&app).await;
+        let (ready, reached) = flume::bounded(1);
+        let (resume, resumed) = flume::bounded(1);
+        let corrupt: fn(&mut HoldReceipt) = if conflicting {
+            |receipt| {
+                receipt.deploy_hash = if receipt.deploy_hash.starts_with('a') {
+                    "b".repeat(64)
+                } else {
+                    "a".repeat(64)
+                };
+            }
+        } else {
+            |_| {}
+        };
+        let gated = GatedReply {
+            inner: MismatchedReceipt {
+                inner: client.clone(),
+                corrupt,
+            },
+            ready,
+            resume: resumed,
+        };
+        let running = service.clone();
+        let running_app = app.clone();
+        let deploy_id = deployment.id.clone();
+        let attempt = compio::runtime::spawn(async move {
+            running
+                .acquire_deployment_hold_checked(&running_app, &deploy_id, None, &gated, &|| Ok(()))
+                .await
+        });
+        compio::time::timeout(Duration::from_secs(10), reached.recv_async())
+            .await
+            .unwrap()
+            .unwrap();
+        let filter = json!({"app_id":app.as_str(), "deploy_id":deployment.id});
+        let tx = service.begin().await.unwrap();
+        let rows = journal_rows(&tx, "deployment_holds", filter.clone()).await;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].text("state").unwrap(), "acquiring");
+        assert_eq!(rows[0].optional_text("deploy_hash").unwrap(), None);
+        tx.commit().await.unwrap();
+
+        let held = compio::time::timeout(
+            Duration::from_secs(10),
+            service.acquire_deployment_hold(&app, &deployment.id, &deployment.hash, &client),
+        )
+        .await
+        .expect("pending platform reply must not retain the journal lock")
+        .unwrap();
+        resume.send_async(()).await.unwrap();
+        let delayed = attempt.await.unwrap();
+        if conflicting {
+            assert!(matches!(delayed, Err(WorkflowServiceError::Conflict(_))));
+        } else {
+            assert_eq!(delayed.unwrap(), held);
+        }
+        let tx = service.begin().await.unwrap();
+        let rows = journal_rows(&tx, "deployment_holds", filter).await;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].text("state").unwrap(), "held");
+        assert_eq!(rows[0].text("deploy_hash").unwrap(), held.deploy_hash);
+        assert_eq!(
+            rows[0].integer("generation").unwrap(),
+            held.generation.get()
+        );
+        assert_eq!(
+            crate::service::deployment_retention::admission_generation(
+                &tx,
+                &app,
+                &deployment.id,
+                &deployment.hash,
+                client.scope(),
+            )
+            .await
+            .unwrap(),
+            held.generation.get()
+        );
+        tx.commit().await.unwrap();
+        platform.assert_held(&app, &deployment.id).await;
+        let reopened = WorkflowService::open(service.store.clone(), service.policies.clone())
+            .await
+            .unwrap();
+        assert_eq!(
+            reopened
+                .acquire_deployment_hold_checked(
+                    &app,
+                    &deployment.id,
+                    None,
+                    &NoPlatformIo(client.scope().clone()),
+                    &|| Ok(()),
+                )
+                .await
+                .unwrap(),
+            held
+        );
+    }
 }

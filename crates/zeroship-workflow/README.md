@@ -73,8 +73,16 @@ can read its committed result but cannot admit new work. Receipt records survive
 history removal; their presence also excludes the run from the old poller until
 that path is removed. `JobReceipt::settlement` binds the outcome to the current
 delivery; successor publication currently uses the durable outbox independently.
-`runner::delivery::DeliverySlot` consumes an already authorized advance job using
-the existing executor and payload pipeline. Its host supplies `JobTransport`;
+`AppWorkflows::activate_job` resolves the deployment hash through its scoped
+hold receipt, verifies the normal bundle, and commits readiness, selection and
+the logical job receipt together. Activation history remains independently
+ready for queued jobs when a newer revision becomes selected. Exact retries
+read the committed receipt without loading or reacquiring the artifact.
+Captured delivery and policy authority fence app-lock waits, external I/O and
+commits. Activation runs no creator code and schedules no occurrences.
+`runner::delivery::DeliverySlot` routes activation and reconciliation jobs to
+bounded journal operations and advance jobs to the existing executor and
+payload pipeline. Its host supplies `JobTransport`;
 the authenticated worker client implements that metadata interface. The slot
 renews manager and creator authority together, retains interrupted execution
 until native shutdown joins, and retries exact settlement after a committed
@@ -172,7 +180,9 @@ production composition and the remaining platform retention cutover.
 reconciles a durable hold, verifies the app-scoped manifest and its referenced
 modules and descriptor, then selects the deployment under the customer app lock.
 Failed preparation preserves the previous selection. The host serializes
-deployment selection updates. `retain_deploy` verifies repaired artifacts
+deployment selection updates. Once a manager activation selects a revision,
+direct local activation cannot replace it, and the old local calendar is
+disabled for that app. `retain_deploy` verifies repaired artifacts
 without changing which deployment new runs and schedules select. Publication
 and repair use the normal app deployment store.
 
