@@ -915,7 +915,7 @@ export default {
     // Use the production-shaped constructor (with a meter) to prove that even
     // when the worker HAS a meter, no `env.meter` surface is exposed.
     let (status, body, _meter) =
-        run_app_metered(backend, APP, "00000000-0000-7000-8000-0000000000f6");
+        run_app_metered(backend, APP, zeroship_core::AppId::mint().as_str());
     assert_eq!(status, 200, "env.meter probe non-200; body: {body}");
     assert!(
         body.contains(r#""ok":true"#),
@@ -989,9 +989,7 @@ fn run_app_metered(
     (status, body, meter)
 }
 
-/// 3 writes (set, set, incr) + 2 reads (get, get-miss) — the handler returns
-/// ok:true. APP_ID is a real UUID so `Meter::drain` (which keys by parsed
-/// UUID) surfaces the exact per-app counts.
+/// Exercise successful reads and writes through the metered KV binding.
 const KV_METER_APP: &str = r#"
 export default {
     async fetch(request, env, ctx) {
@@ -1008,14 +1006,33 @@ export default {
 "#;
 
 #[test]
+fn metering_rejects_non_app_identity_before_binding() {
+    init_v8();
+    let (_dir, store) = redb_backend();
+    let meter = Arc::new(zeroship_metering::Meter::new());
+    let plugin = KvBinding::new(store, Some(Arc::clone(&meter)));
+    let mut isolate = v8::Isolate::new(v8::CreateParams::default());
+    v8::scope!(let handle_scope, &mut isolate);
+    let context = v8::Context::new(handle_scope, Default::default());
+    let scope = &mut v8::ContextScope::new(handle_scope, context);
+    let user = zeroship_core::UserId::mint();
+    for invalid in ["00000000-0000-7000-8000-000000000001", user.as_str()] {
+        v8::tc_scope!(let tc, scope);
+        assert!(plugin.build_instance(tc, invalid).is_none());
+        assert!(tc.has_caught());
+    }
+    assert!(meter.drain().is_empty());
+}
+
+#[test]
 fn metering_kv_ops_counts_are_exact_and_per_app() {
     let (_dir, backend) = redb_backend();
-    let app_id = "00000000-0000-7000-8000-0000000000a1";
+    let id = zeroship_core::AppId::mint();
+    let app_id = id.as_str();
     let (status, body, meter) = run_app_metered(backend, KV_METER_APP, app_id);
     assert_ok(status, &body);
 
     let events = meter.drain();
-    let id = zeroship_core::app_id::AppId::parse(app_id).unwrap();
     assert_eq!(
         usage_value(&events, &id, "kv_writes"),
         Some(3),
@@ -1047,12 +1064,12 @@ export default {
     let redis = support::containers::standalone(&server);
     server.stop().unwrap();
     let backend = KvStore::open(&KvConfig::Redis { redis }).unwrap();
-    let app_id = "00000000-0000-7000-8000-0000000000b2";
+    let id = zeroship_core::AppId::mint();
+    let app_id = id.as_str();
     let (status, body, meter) = run_app_metered(backend, APP, app_id);
     assert_ok(status, &body);
 
     let events = meter.drain();
-    let id = zeroship_core::app_id::AppId::parse(app_id).unwrap();
     // No successful op ⇒ no metric for this app at all (drain omits zero apps).
     assert!(
         !events.iter().any(|event| event.subject.app.as_ref() == Some(&id)),

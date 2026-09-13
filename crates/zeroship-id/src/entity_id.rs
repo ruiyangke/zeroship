@@ -1,5 +1,4 @@
-//! [`declare_entity_id`] - the shared shape of a typed entity id, and the
-//! compile-time proof that it kept its absences.
+//! [`declare_entity_id`] defines the shared shape of a typed entity id.
 //!
 //! # Why a macro
 //!
@@ -9,19 +8,9 @@
 //! assertion would print exactly what a complete one prints. Generating them
 //! means a new entity id cannot be declared without them.
 //!
-//! [`crate::app_id::AppId`] was hand-written until the id became text, because
-//! it also held the uuid its column stored and handed the embedded bits to two
-//! call sites. Neither turned out to need them, the column is text, and `AppId`
-//! is declared here like the rest. There is no id in the tree with a second
-//! field and no reason to add one: a value derived from the bits does not move
-//! when the printed form does, which is what makes such a derivation fail
-//! quietly rather than loudly.
-//!
 //! # The absences, and the failure each prevents
 //!
-//! Following `zeroship_schema::schema_name::SchemaName` and
-//! [`crate::app_id::AppId`], a typed entity id is characterised by what it
-//! refuses:
+//! A typed entity id is characterised by what it refuses:
 //!
 //! - **No `Display`, no `ToString`.** An id reaching a format string is a
 //!   decision. Rendering goes through `as_str`, which is greppable.
@@ -407,7 +396,7 @@ macro_rules! declare_entity_id {
                         "one character long",
                     ),
                     (
-                        format!("{}_ZZZZZZZZZZZZZZZZZZZZZZ", $name::PREFIX),
+                        format!("{}_{}", $name::PREFIX, "z".repeat($crate::typed_id::BODY_LEN)),
                         "the right length, above the representable range",
                     ),
                     (
@@ -426,6 +415,20 @@ macro_rules! declare_entity_id {
                 // its own mutation rather than a parser that refuses whatever
                 // it is handed.
                 assert!($name::parse(minted.as_str()).is_ok());
+
+                let overflow = format!(
+                    "{}_{}",
+                    $name::PREFIX,
+                    "z".repeat($crate::typed_id::BODY_LEN)
+                );
+                assert!(
+                    matches!(
+                        $name::parse(&overflow),
+                        Err($crate::typed_id::ParseError::Malformed(message))
+                            if message == "base36 overflow"
+                    ),
+                    "an in-alphabet value above u128 must reach the overflow check"
+                );
             }
 
             /// Ordering is byte order over the printed id, which is creation
@@ -453,10 +456,14 @@ macro_rules! declare_entity_id {
                 let back: $name = serde_json::from_str(&json).expect("deserialize");
                 assert_eq!(id, back);
 
+                let foreign = id.as_str().replacen($name::PREFIX, "zzz", 1);
+                let error = serde_json::from_str::<$name>(
+                    &serde_json::to_string(&foreign).expect("serialize foreign id")
+                )
+                .expect_err("a foreign prefix must fail decoding");
                 assert!(
-                    serde_json::from_str::<$name>("\"zzz_0000000000000000000000\"").is_err(),
-                    "a foreign prefix on the wire must be a decode failure, not \
-                     a silently accepted key"
+                    error.to_string().contains("expected prefix"),
+                    "the foreign id must reach the prefix boundary: {error}"
                 );
                 assert!(
                     serde_json::from_str::<$name>(

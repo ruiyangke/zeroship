@@ -395,7 +395,11 @@ pub async fn complete(
     rows.first()
         .map(|row| {
             Ok(CompletedReset {
-                user_id: crate::user_id::from_row(row, "user_id", "password reset complete")?,
+                user_id: crate::entity_ids::user_id_with_context(
+                    row,
+                    "user_id",
+                    "password reset complete",
+                )?,
                 email: row.get("email"),
             })
         })

@@ -37,9 +37,9 @@ DO $cleanup$ BEGIN
 END $cleanup$;
 
 CREATE SCHEMA i3zs;
-CREATE TABLE i3zs.app_secrets         (app_id uuid);
-CREATE TABLE i3zs.gateway_sessions    (app_id uuid);
-CREATE TABLE i3zs.app_session_anchors (app_id uuid);
+CREATE TABLE i3zs.app_secrets         (app_id text);
+CREATE TABLE i3zs.gateway_sessions    (app_id text);
+CREATE TABLE i3zs.app_session_anchors (app_id text);
 CREATE TABLE i3zs.app_user_identities (app_client_id text);
 
 -- Migration principal WITHOUT CREATEROLE (restricted-CI / managed-DB case).

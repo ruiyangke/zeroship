@@ -431,12 +431,7 @@ pub async fn get_invoice_detail(
         let weights_snapshot: serde_json::Value = r.get("weights_snapshot");
         let (compute_units, billable_units) =
             derive_line_cu(&usage_snapshot, &weights_snapshot, included_units);
-        let raw_app_id: String = r.get("app_id");
-        let app_id = AppId::parse(&raw_app_id).map_err(|e| {
-            RegistryError::Database(format!(
-                "get_invoice_detail: invoice_lines row has a malformed app id {raw_app_id:?}: {e}"
-            ))
-        })?;
+        let app_id = crate::app_id::from_row(r, "app_id", "get_invoice_detail invoice line")?;
         lines.push(InvoiceLineDetail {
             app_id,
             segment_no: r.get("segment_no"),
@@ -1144,12 +1139,7 @@ async fn unbilled_priced_periods<C: GenericClient + Sync>(
         .map_err(|e| RegistryError::Database(e.to_string()))?;
     let mut app_ids = Vec::with_capacity(app_rows.len());
     for r in &app_rows {
-        let raw: String = r.get("app_id");
-        let app_id = AppId::parse(&raw).map_err(|e| {
-            RegistryError::Database(format!(
-                "unbilled_priced_periods: apps row has a malformed app id {raw:?}: {e}"
-            ))
-        })?;
+        let app_id = crate::app_id::from_row(r, "app_id", "unbilled_priced_periods app")?;
         app_ids.push(app_id);
     }
 

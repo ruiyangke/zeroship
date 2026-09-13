@@ -35,6 +35,8 @@
 
 use std::path::PathBuf;
 
+use zeroship_core::AppId;
+
 use crate::project_config::{self, ProjectConfig, Resolved};
 use crate::{
     app_id_or_refuse, flag_str, parse_app_id, parse_flag, resolve_bearer_token, run_curl,
@@ -178,7 +180,7 @@ pub(crate) fn check_unknown_migrate_flags(args: &[String]) -> Result<(), String>
                  falling back to its default would apply migrations to \
                  http://localhost:9090 instead of the control plane you named. \
                  Usage: zeroship migrate [path-to-migrations.ir.json] \
-                 [--app=<name|uuid>] [--control=<url>] [--token=<token>] \
+                 [--app=<id>] [--app-name=<name>] [--control=<url>] [--token=<token>] \
                  [--config=<path>] [--env=<name>] [--yes]"
             ));
         }
@@ -198,7 +200,7 @@ pub(crate) trait MigrateClient {
     fn apply(
         &mut self,
         control_url: &str,
-        app_id: &str,
+        app_id: &AppId,
         token: &str,
         body: &str,
     ) -> Result<ControlResponse, String>;
@@ -208,15 +210,15 @@ pub(crate) trait MigrateClient {
 
 struct CurlMigrateClient;
 
-fn migration_apply_url(control_url: &str, app_id: &str) -> String {
-    format!("{control_url}/v1/apps/{app_id}/migrations/apply")
+fn migration_apply_url(control_url: &str, app_id: &AppId) -> String {
+    format!("{control_url}/v1/apps/{}/migrations/apply", app_id.as_str())
 }
 
 impl MigrateClient for CurlMigrateClient {
     fn apply(
         &mut self,
         control_url: &str,
-        app_id: &str,
+        app_id: &AppId,
         token: &str,
         body: &str,
     ) -> Result<ControlResponse, String> {
@@ -322,7 +324,7 @@ fn resolve_app_id_by_name<C: MigrateClient>(
     control_url: &str,
     token: &str,
     name: &str,
-) -> Result<String, String> {
+) -> Result<AppId, String> {
     let list = client.list_apps(control_url, token)?;
     if list.status != 200 {
         return Err(format!(
@@ -374,6 +376,12 @@ mod tests {
         v.iter().map(|s| s.to_string()).collect()
     }
 
+    const APP_ID: &str = "app_034klb07lrb9jgma6imvmx000";
+
+    fn app_id(raw: &str) -> AppId {
+        AppId::parse(raw).expect("test app id must be canonical")
+    }
+
     #[derive(Debug, Clone, PartialEq, Eq)]
     enum FakeCall {
         Apply(String),
@@ -409,11 +417,12 @@ mod tests {
         fn apply(
             &mut self,
             _control_url: &str,
-            app_id: &str,
+            app_id: &AppId,
             _token: &str,
             _body: &str,
         ) -> Result<ControlResponse, String> {
-            self.calls.push(FakeCall::Apply(app_id.to_string()));
+            self.calls
+                .push(FakeCall::Apply(app_id.as_str().to_string()));
             self.applies
                 .pop_front()
                 .ok_or_else(|| "unexpected apply call".to_string())
@@ -434,8 +443,8 @@ mod tests {
     /// An id goes straight to the apply endpoint - no lookup, so a creator
     /// whose token cannot list apps can still migrate the one they own.
     #[test]
-    fn uuid_app_applies_without_a_lookup() {
-        let app = "11111111-1111-4111-8111-111111111111";
+    fn typed_app_applies_without_a_lookup() {
+        let app = app_id(APP_ID);
         let mut client = FakeMigrateClient::default().with_apply(
             200,
             r#"{"migration_id":"0197f8a1-2b3c-7d4e-8f90-1a2b3c4d5e6f","applied":["20260101000000_create_todos"],"skipped":[],"pending_contract":[]}"#,
@@ -444,7 +453,7 @@ mod tests {
         let outcome = apply_migrations(
             &mut client,
             "http://control.test",
-            &AppTarget::Id(app.to_string()),
+            &AppTarget::Id(app),
             "tok",
             "{}",
         )
@@ -452,17 +461,14 @@ mod tests {
 
         assert_eq!(outcome.applied, 1);
         assert_eq!(outcome.skipped, 0);
-        assert_eq!(client.calls, vec![FakeCall::Apply(app.to_string())]);
+        assert_eq!(client.calls, vec![FakeCall::Apply(APP_ID.to_string())]);
     }
 
     #[test]
     fn apply_url_uses_the_migration_service_route_on_the_control_origin() {
         assert_eq!(
-            migration_apply_url(
-                "https://control.zeroship.ai",
-                "11111111-1111-4111-8111-111111111111",
-            ),
-            "https://control.zeroship.ai/v1/apps/11111111-1111-4111-8111-111111111111/migrations/apply",
+            migration_apply_url("https://control.zeroship.ai", &app_id(APP_ID)),
+            "https://control.zeroship.ai/v1/apps/app_034klb07lrb9jgma6imvmx000/migrations/apply",
         );
     }
 
@@ -472,7 +478,7 @@ mod tests {
         let mut client = FakeMigrateClient::default()
             .with_list(
                 200,
-                r#"[{"id":"22222222-2222-4222-8222-222222222222","name":"todos"}]"#,
+                r#"[{"id":"app_034klb07lrb9jgma6imvmx000","name":"todos"}]"#,
             )
             .with_apply(200, r#"{"applied":[],"skipped":["a","b"]}"#);
 
@@ -489,10 +495,7 @@ mod tests {
         assert_eq!(outcome.skipped, 2);
         assert_eq!(
             client.calls,
-            vec![
-                FakeCall::List,
-                FakeCall::Apply("22222222-2222-4222-8222-222222222222".to_string()),
-            ]
+            vec![FakeCall::List, FakeCall::Apply(APP_ID.to_string()),]
         );
     }
 
@@ -521,7 +524,7 @@ mod tests {
     /// a generic message reproduces the failure this command exists to end.
     #[test]
     fn service_error_body_reaches_the_user() {
-        let app = "11111111-1111-4111-8111-111111111111";
+        let app = app_id(APP_ID);
         let mut client = FakeMigrateClient::default().with_apply(
             422,
             r#"{"error":"migration_malformed","detail":"malformed IR document (20260101000000_create_todos.ir.json): unknown op"}"#,
@@ -530,7 +533,7 @@ mod tests {
         let err = apply_migrations(
             &mut client,
             "http://control.test",
-            &AppTarget::Id(app.to_string()),
+            &AppTarget::Id(app),
             "tok",
             "{}",
         )

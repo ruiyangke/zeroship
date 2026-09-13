@@ -41,7 +41,7 @@ pub struct BackupCode {
 
 fn row_to_credential(row: &compio_postgres::Row) -> Result<TotpCredential> {
     Ok(TotpCredential {
-        user_id: crate::user_id::from_row(row, "user_id", "totp credential")?,
+        user_id: crate::entity_ids::user_id_with_context(row, "user_id", "totp credential")?,
         encrypted_secret: row.get::<_, Vec<u8>>("encrypted_secret"),
         confirmed_at: row.try_get("confirmed_at").ok(),
     })

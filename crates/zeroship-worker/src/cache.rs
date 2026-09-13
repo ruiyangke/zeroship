@@ -341,7 +341,7 @@ pub fn record_request(
                 let Some(entry_app_id) = cache
                     .as_ref()
                     .and_then(|cache| cache.isolates.get(app_id))
-                    .map(|entry| entry.app_id.as_str())
+                    .map(|entry| &entry.app_id)
                 else {
                     return false;
                 };
@@ -349,13 +349,7 @@ pub fn record_request(
                 true
             });
             if !recorded {
-                meter.record_request(
-                    app_id.as_str(),
-                    cpu_us,
-                    wall_us,
-                    egress_bytes,
-                    ingress_bytes,
-                );
+                meter.record_request(app_id, cpu_us, wall_us, egress_bytes, ingress_bytes);
             }
         }
     });
@@ -367,7 +361,7 @@ pub fn record_request(
 pub fn record_workflow_step(app_id: &AppId) {
     METER.with(|m| {
         if let Some(meter) = m.borrow().as_ref() {
-            meter.increment(app_id.as_str(), "workflow_steps", 1);
+            meter.increment(app_id, "workflow_steps", 1);
         }
     });
 }
@@ -378,8 +372,8 @@ pub fn record_workflow_step(app_id: &AppId) {
 pub fn record_workflow_blob_write(app_id: &AppId, bytes: u64) {
     METER.with(|m| {
         if let Some(meter) = m.borrow().as_ref() {
-            meter.increment(app_id.as_str(), "storage_ops", 1);
-            meter.increment(app_id.as_str(), "storage_bytes", bytes);
+            meter.increment(app_id, "storage_ops", 1);
+            meter.increment(app_id, "storage_bytes", bytes);
         }
     });
 }
@@ -407,10 +401,10 @@ pub fn record_stream_delta(app_id: &AppId, egress_bytes_delta: u64, stream_wall_
     METER.with(|m| {
         if let Some(meter) = m.borrow().as_ref() {
             if egress_bytes_delta > 0 {
-                meter.increment(app_id.as_str(), "egress_bytes", egress_bytes_delta);
+                meter.increment(app_id, "egress_bytes", egress_bytes_delta);
             }
             if stream_wall_us_delta > 0 {
-                meter.increment(app_id.as_str(), "stream_wall_us", stream_wall_us_delta);
+                meter.increment(app_id, "stream_wall_us", stream_wall_us_delta);
             }
         }
     });

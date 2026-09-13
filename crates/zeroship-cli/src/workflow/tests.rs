@@ -7,26 +7,6 @@ use zeroship_workflow::{
 };
 
 #[test]
-fn project_identity_survives_restart_and_concurrent_initialization() {
-    let root = tempfile::tempdir().unwrap();
-    let peers: Vec<_> = (0..8)
-        .map(|_| {
-            let path = root.path().to_owned();
-            std::thread::spawn(move || project_identity(&path).unwrap())
-        })
-        .collect();
-    let app = project_identity(root.path()).unwrap();
-    for peer in peers {
-        assert_eq!(peer.join().unwrap(), app);
-    }
-    assert_eq!(project_identity(root.path()).unwrap(), app);
-    let other = tempfile::tempdir().unwrap();
-    assert_ne!(project_identity(other.path()).unwrap(), app);
-    std::fs::write(root.path().join(".zeroship/app-id"), "malformed").unwrap();
-    assert!(project_identity(root.path()).is_err());
-}
-
-#[test]
 fn local_configuration_rejects_unknown_and_invalid_limits() {
     assert!(toml::from_str::<LocalConfig>("unknown = true").is_err());
     assert!(toml::from_str::<LocalConfig>("bundle = 'built.zship'").is_err());
@@ -62,7 +42,7 @@ fn publish(path: &Path, version: &str) {
 
 async fn client(root: &Path, app: &AppId) -> (WorkflowService, AppWorkflows) {
     let service = WorkflowService::open(
-        Rc::new(test_storage(root).open().await.unwrap()),
+        Rc::new(test_storage(root, app).open().await.unwrap()),
         Arc::new(HostPolicies::default()),
     )
     .await
@@ -103,18 +83,21 @@ async fn local_worker_retains_code_across_app_rebuild_and_restart_without_http()
     let bundle = root.path().join("app.zship");
     publish(&bundle, "original");
     let config = LocalConfig::default();
+    let app = zeroship_core::app_id::local_dev_app_id();
     let env = [("APP_ID".into(), "untrusted-variable".into())].into();
     let host = LocalHost::start(
         root.path(),
+        app.clone(),
         config.clone(),
         Some(bundle.clone()),
-        test_storage(root.path()),
+        test_storage(root.path(), &app),
         env,
         vec![],
         RuntimeLimits::default(),
     )
     .unwrap();
-    let app = host.app.clone();
+    assert_eq!(host.app, app);
+    assert!(!root.path().join(".zeroship/app-id").exists());
     let (_service, api) = client(root.path(), &app).await;
     let old = api
         .start(&RequestId::mint(), "Example", StartOptions::default())
@@ -128,9 +111,10 @@ async fn local_worker_retains_code_across_app_rebuild_and_restart_without_http()
     std::fs::remove_dir_all(root.path().join("src")).unwrap();
     let host = LocalHost::start(
         root.path(),
+        app.clone(),
         config.clone(),
         Some(bundle.clone()),
-        test_storage(root.path()),
+        test_storage(root.path(), &app),
         HashMap::new(),
         vec![],
         RuntimeLimits::default(),
@@ -146,9 +130,10 @@ async fn local_worker_retains_code_across_app_rebuild_and_restart_without_http()
     std::fs::remove_file(&bundle).unwrap();
     let host = LocalHost::start(
         root.path(),
+        app.clone(),
         config,
         None,
-        test_storage(root.path()),
+        test_storage(root.path(), &app),
         HashMap::new(),
         vec![],
         RuntimeLimits::default(),
@@ -177,7 +162,7 @@ async fn local_worker_retains_code_across_app_rebuild_and_restart_without_http()
     drop(host);
 }
 
-fn test_storage(root: &Path) -> HostStorage {
+fn test_storage(root: &Path, app: &AppId) -> HostStorage {
     HostStorage {
         connection: zeroship_data_orm::connection::ConnectionFactory::for_url(&format!(
             "sqlite:{}",
@@ -186,9 +171,12 @@ fn test_storage(root: &Path) -> HostStorage {
         .unwrap(),
         keys: zeroship_data_orm::encryption::ProjectKeySource::unavailable(),
         binding: zeroship_data_orm::binding::DbBinding::new(
-            "default",
+            app.as_str(),
             "test-deployment",
-            zeroship_core::schema_name::SchemaName::new("default").unwrap(),
+            zeroship_core::schema_name::SchemaName::new(
+                &zeroship_core::app_derivation::schema_name(app),
+            )
+            .unwrap(),
         ),
         objects: zeroship_storage::StorageStore::from_backend(Arc::new(
             zeroship_storage::LocalFs::new(root.join(".zeroship/storage")),

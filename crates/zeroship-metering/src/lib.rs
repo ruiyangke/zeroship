@@ -25,6 +25,7 @@
 //! emits without re-deriving the app and cannot meter another app.
 
 use std::sync::Arc;
+use zeroship_core::AppId;
 
 pub mod meter;
 pub mod outbox;
@@ -55,7 +56,7 @@ pub use outbox::{
 #[derive(Clone)]
 pub struct MeterHandle {
     meter: Arc<Meter>,
-    app_id: String,
+    app_id: AppId,
 }
 
 impl std::fmt::Debug for MeterHandle {
@@ -70,20 +71,18 @@ impl MeterHandle {
     /// each plugin's `build_instance(scope, app_id)` — never a value JS
     /// supplies.
     #[must_use]
-    pub fn new(meter: Arc<Meter>, app_id: impl Into<String>) -> Self {
-        Self { meter, app_id: app_id.into() }
+    pub fn new(meter: Arc<Meter>, app_id: AppId) -> Self {
+        Self { meter, app_id }
     }
 
-    /// Emit `n` of `metric` against this handle's app. A synchronous,
-    /// lock-free atomic bump — adds no await and cannot fail the op it
-    /// rides on, so producers call it in the op's success arm.
+    /// Record successful work against the bound app without asynchronous I/O.
     pub fn record(&self, metric: &str, n: u64) {
         self.meter.increment(&self.app_id, metric, n);
     }
 
     /// The app this handle meters (for tests / diagnostics).
     #[must_use]
-    pub fn app_id(&self) -> &str {
+    pub fn app_id(&self) -> &AppId {
         &self.app_id
     }
 }
@@ -91,13 +90,26 @@ impl MeterHandle {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use uuid::Uuid;
+
+    #[test]
+    fn meter_preserves_the_typed_app_identity_through_drain() {
+        let app = zeroship_core::AppId::mint();
+        let meter = Arc::new(Meter::new());
+        let handle = MeterHandle::new(Arc::clone(&meter), app.clone());
+        let bound: &zeroship_core::AppId = handle.app_id();
+        assert_eq!(bound, &app);
+        meter.increment(&app, "requests", 1);
+        handle.record("db_reads", 2);
+        let events = meter.drain();
+        assert_eq!(events.len(), 2);
+        assert!(events.iter().all(|event| event.subject.app.as_ref() == Some(&app)));
+    }
 
     #[test]
     fn handle_records_scoped_to_its_app() {
         let meter = Arc::new(Meter::new());
-        let a = zeroship_core::app_id::AppId::mint().as_str().to_string();
-        let b = zeroship_core::app_id::AppId::mint().as_str().to_string();
+        let a = AppId::mint();
+        let b = AppId::mint();
 
         let ha = MeterHandle::new(Arc::clone(&meter), a.clone());
         let hb = MeterHandle::new(Arc::clone(&meter), b.clone());
@@ -107,10 +119,8 @@ mod tests {
         hb.record("db_writes", 5);
 
         let events = meter.drain();
-        let ia = zeroship_core::app_id::AppId::parse(&a).unwrap();
-        let ib = zeroship_core::app_id::AppId::parse(&b).unwrap();
-        assert_eq!(event_value(&events, &ia, "db_writes"), Some(3));
-        assert_eq!(event_value(&events, &ib, "db_writes"), Some(5));
+        assert_eq!(event_value(&events, &a, "db_writes"), Some(3));
+        assert_eq!(event_value(&events, &b, "db_writes"), Some(5));
     }
 
     fn event_value(

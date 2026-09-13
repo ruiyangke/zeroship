@@ -1,7 +1,7 @@
 //! PostgreSQL role names shared by the migration and data planes.
 //!
-//! PostgreSQL stores at most 63 bytes of an identifier under its default
-//! `NAMEDATALEN`. It truncates a longer name with only a notice, so a role name
+//! PostgreSQL limits identifier length through `NAMEDATALEN`. It truncates a
+//! longer name with only a notice, so a role name
 //! used as an authorization fence must be refused rather than shortened. A
 //! truncation could otherwise make a newly derived name resolve to a role that
 //! was meant to be reaped.
@@ -23,17 +23,15 @@ pub enum PerAppRoleNameError {
 
 /// Compose the per-app PostgreSQL role name.
 ///
-/// The input remains a string because current production callers use zeroship
-/// typed IDs, hyphenated UUIDs, and derived app-schema identifiers. The full
-/// name is preserved byte-for-byte so distinct inputs cannot collapse onto one
-/// role.
+/// The input is the physical schema name. It can differ from the platform
+/// AppId; preserving its spelling keeps distinct schemas in distinct roles.
 ///
 /// # Errors
 ///
 /// Returns [`PerAppRoleNameError::TooLong`] rather than allowing PostgreSQL to
 /// silently truncate a name beyond [`POSTGRES_IDENTIFIER_MAX_BYTES`].
-pub fn per_app_role_name(app_id: &str) -> Result<String, PerAppRoleNameError> {
-    let role = format!("app_{app_id}_role");
+pub fn per_app_role_name(schema_name: &str) -> Result<String, PerAppRoleNameError> {
+    let role = format!("app_{schema_name}_role");
     if role.len() > POSTGRES_IDENTIFIER_MAX_BYTES {
         return Err(PerAppRoleNameError::TooLong {
             actual_bytes: role.len(),
@@ -48,20 +46,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn per_app_role_name_keeps_the_current_shape() {
+    fn per_app_role_name_uses_the_physical_schema() {
         assert_eq!(per_app_role_name("app_demo").unwrap(), "app_app_demo_role");
         assert_eq!(
-            per_app_role_name("0191e7a2-b3c4-4d5e-8f90-123456789abc").unwrap(),
-            "app_0191e7a2-b3c4-4d5e-8f90-123456789abc_role"
+            per_app_role_name("creator_data").unwrap(),
+            "app_creator_data_role"
         );
     }
 
     #[test]
-    fn per_app_role_name_does_not_collapse_distinct_app_ids() {
+    fn per_app_role_name_does_not_collapse_distinct_schemas() {
         assert_ne!(
             per_app_role_name("app-demo").unwrap(),
             per_app_role_name("app_demo").unwrap(),
-            "hyphen and underscore app ids must map to distinct quoted roles"
+            "hyphen and underscore schema names must map to distinct quoted roles"
         );
     }
 

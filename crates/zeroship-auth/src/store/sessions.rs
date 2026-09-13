@@ -89,7 +89,7 @@ pub async fn create(conn: &Client, params: &CreateSession<'_>) -> Result<Session
         .ok_or_else(|| AuthError::Db("sessions create: empty return".into()))?;
     Ok(Session {
         id: row.get("id"),
-        user_id: crate::user_id::from_row(row, "user_id", "sessions create")?,
+        user_id: crate::entity_ids::user_id_with_context(row, "user_id", "sessions create")?,
         auth_method: row.get("auth_method"),
         amr: row.get("amr"),
         acr: row.try_get("acr").ok(),
@@ -130,7 +130,11 @@ pub async fn validate(conn: &Client, id: uuid::Uuid) -> Result<Option<Session>> 
         .map(|row| {
             Ok(Session {
                 id: row.get("id"),
-                user_id: crate::user_id::from_row(row, "user_id", "sessions validate")?,
+                user_id: crate::entity_ids::user_id_with_context(
+                    row,
+                    "user_id",
+                    "sessions validate",
+                )?,
                 auth_method: row.get("auth_method"),
                 amr: row.get("amr"),
                 acr: row.try_get("acr").ok(),

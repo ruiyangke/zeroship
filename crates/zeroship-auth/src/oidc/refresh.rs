@@ -908,11 +908,15 @@ pub(super) async fn revoke_sessions_for_subject_in_transaction(
     let mut person_ids = Vec::new();
     let mut session_ids = Vec::new();
     for row in rows {
-        let person_id = crate::user_id::from_row(&row, "person_id", "session person_id is invalid")
-            .map_err(|err| {
-                tracing::error!(error = %err, "access-token revoke: person_id decode failed");
-                OAuthError::server_error("revoke unavailable")
-            })?;
+        let person_id = crate::entity_ids::user_id_with_context(
+            &row,
+            "person_id",
+            "session person_id is invalid",
+        )
+        .map_err(|err| {
+            tracing::error!(error = %err, "access-token revoke: person_id decode failed");
+            OAuthError::server_error("revoke unavailable")
+        })?;
         person_ids.push(person_id);
         session_ids.push(row.get::<_, String>("id"));
     }

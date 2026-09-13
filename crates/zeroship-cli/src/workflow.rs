@@ -6,7 +6,6 @@ use futures::{channel::oneshot, FutureExt};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
-    io::Write,
     path::{Path, PathBuf},
     rc::Rc,
     sync::{
@@ -89,6 +88,7 @@ pub struct LocalHost {
 impl LocalHost {
     pub fn start(
         root: &Path,
+        app: AppId,
         config: LocalConfig,
         deployment: Option<PathBuf>,
         storage: HostStorage,
@@ -97,7 +97,6 @@ impl LocalHost {
         limits: RuntimeLimits,
     ) -> Result<Self, String> {
         let config = config.validate()?;
-        let app = project_identity(root)?;
         let deployment = crate::deployment::AppDeployment::new(root, deployment.as_deref())?;
         let worker_app = app.clone();
         let (ready, receive) = std::sync::mpsc::sync_channel(1);
@@ -183,38 +182,6 @@ impl Drop for WorkerLiveness {
             std::process::exit(1);
         }
     }
-}
-
-fn project_identity(root: &Path) -> Result<AppId, String> {
-    let state = root.join(".zeroship");
-    std::fs::create_dir_all(&state).map_err(|error| format!("create project state: {error}"))?;
-    let path = state.join("app-id");
-    if !path.exists() {
-        let app = AppId::mint();
-        let mut pending =
-            tempfile::NamedTempFile::new_in(&state).map_err(|error| error.to_string())?;
-        pending
-            .write_all(app.as_str().as_bytes())
-            .map_err(|error| error.to_string())?;
-        pending
-            .as_file()
-            .sync_all()
-            .map_err(|error| error.to_string())?;
-        match pending.persist_noclobber(&path) {
-            Ok(_) => std::fs::File::open(&state)
-                .and_then(|dir| dir.sync_all())
-                .map_err(|error| error.to_string())?,
-            Err(error) if error.error.kind() == std::io::ErrorKind::AlreadyExists => {}
-            Err(error) => return Err(error.to_string()),
-        }
-    }
-    read_project_identity(root)
-}
-
-fn read_project_identity(root: &Path) -> Result<AppId, String> {
-    let encoded = std::fs::read_to_string(root.join(".zeroship/app-id"))
-        .map_err(|error| format!("read persisted project identity: {error}"))?;
-    AppId::parse(encoded.trim()).map_err(|_| "invalid persisted project app identity".into())
 }
 
 async fn initialize(

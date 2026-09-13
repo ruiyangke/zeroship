@@ -1285,14 +1285,8 @@ fn name_reads_as_an_app_id(name: &str) -> bool {
 // ---------------------------------------------------------------------------
 
 /// Convert a query row into an `AppRecord`.
-///
-/// Columns: id (UUID), name (TEXT), plan_id (UUID), deploy_hash (TEXT | NULL),
-///          archived_at (TEXT | NULL), created_at (TEXT), updated_at (TEXT).
 fn row_to_record(row: &compio_postgres::Row) -> Result<AppRecord, RegistryError> {
-    let id_raw: String = row.get("id");
-    let id = AppId::parse(&id_raw).map_err(|e| {
-        RegistryError::Database(format!("apps.id {id_raw} is not a canonical app id: {e}"))
-    })?;
+    let id = crate::app_id::from_row(row, "id", "app")?;
     Ok(AppRecord {
         id,
         name: row.get("name"),

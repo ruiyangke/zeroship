@@ -77,14 +77,18 @@ Workflow execution reads from the retained app bundle store without making
 separate executable copies. Background maintenance retries interrupted deployment
 hold operations after restart without requiring an HTTP request.
 
-The CLI persists its trusted workflow app identity in `.zeroship/app-id`. The
-journal uses the app database selected by `DATABASE_URL`, and payloads use the
-app's normal storage configuration. With default SQLite configuration, the ORM
-places the app tables and workflow journal in `.zeroship/zs-default.sqlite`;
-object storage defaults to `.zeroship/storage`. There is no dedicated workflow
-database or object directory. `APP_ID` does not authorize workflow access.
-Restart preserves identity and rediscovers durable work. Incompatible journals
-are refused without resetting them, and initialization preserves business tables.
+The CLI resolves one app identity for HTTP handlers, workflow execution and app
+storage. A configured `APP_ID` must be canonical; when absent, the CLI uses the
+shared `local_dev_app_id()` identity. Restart with the same configuration selects
+the same app and rediscovers its durable work.
+
+The journal uses the app database selected by `DATABASE_URL`, and payloads use
+the app's normal storage configuration. With default SQLite configuration, the
+ORM places the app tables and workflow journal in `.zeroship/zs-<app_id>.sqlite`;
+object storage defaults to `.zeroship/storage`. Workflow execution uses this
+host-selected identity without a separate identity file, database or object
+directory. Incompatible journals are refused without resetting them, and
+initialization preserves business tables.
 
 `--workflow-config=workflow.toml` configures native execution limits. Its optional
 `worker` and `payloads` tables configure `WorkerOptions` and `TaskPayloadLimits`.

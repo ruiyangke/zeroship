@@ -31,6 +31,13 @@ pub fn user_id(row: &Row, column: &str) -> Result<UserId> {
     parse_user_id(raw, column)
 }
 
+pub(crate) fn user_id_with_context(row: &Row, column: &str, context: &str) -> Result<UserId> {
+    let raw = row
+        .try_get::<_, String>(column)
+        .map_err(|error| AuthError::Db(format!("{context}: read user id: {error}")))?;
+    parse_user_id(&raw, context)
+}
+
 /// Read a nullable `usr_` column. A SQL NULL is `Ok(None)`; a present
 /// but unparseable value is still an error.
 ///
@@ -90,4 +97,22 @@ pub fn parse_user_id(raw: &str, origin: &str) -> Result<UserId> {
 /// [`AuthError::Db`] naming `origin`.
 pub fn parse_app_id(raw: &str, origin: &str) -> Result<AppId> {
     AppId::parse(raw).map_err(|err| AuthError::Db(format!("{origin} is not an app id: {err}")))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn user_id_accepts_only_the_user_entity_prefix() {
+        let user_id = UserId::mint();
+        assert_eq!(
+            parse_user_id(user_id.as_str(), "session row").unwrap(),
+            user_id
+        );
+
+        let wrong_entity = AppId::mint();
+        let error = parse_user_id(wrong_entity.as_str(), "session row").unwrap_err();
+        assert!(error.to_string().contains("session row is not a user id"));
+    }
 }

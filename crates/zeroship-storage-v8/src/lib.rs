@@ -88,6 +88,18 @@ impl NativePlugin for StorageBinding {
         scope: &mut v8::PinScope<'s, '_>,
         app_id: &str,
     ) -> Option<v8::Local<'s, v8::Object>> {
+        let meter = match self.meter.as_ref() {
+            Some(meter) => match zeroship_core::AppId::parse(app_id) {
+                Ok(app) => Some(zeroship_metering::MeterHandle::new(Arc::clone(meter), app)),
+                Err(error) => {
+                    let message = v8::String::new(scope, &error.to_string())?;
+                    let exception = v8::Exception::type_error(scope, message);
+                    scope.throw_exception(exception);
+                    return None;
+                }
+            },
+            None => None,
+        };
         let namespace = match Namespace::app(app_id) {
             Ok(namespace) => namespace,
             Err(error) => {
@@ -99,10 +111,7 @@ impl NativePlugin for StorageBinding {
         };
         scope.set_slot(StorageContext {
             storage: self.store.namespace(namespace),
-            meter: self
-                .meter
-                .as_ref()
-                .map(|meter| zeroship_metering::MeterHandle::new(Arc::clone(meter), app_id)),
+            meter,
             streams: Rc::new(live_streams::LiveStreams::new(app_id)),
         });
         Some(v8::Object::new(scope))

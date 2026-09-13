@@ -8,6 +8,7 @@ use std::{
     process::{Child, Command, Stdio},
     time::{Duration, Instant},
 };
+use zeroship_core::app_id::{local_dev_app_id, AppId};
 
 struct Host {
     child: Child,
@@ -15,7 +16,7 @@ struct Host {
     log: tempfile::NamedTempFile,
 }
 impl Host {
-    fn start(root: &Path) -> Self {
+    fn start(root: &Path, app: Option<&AppId>) -> Self {
         let port = TcpListener::bind("127.0.0.1:0")
             .unwrap()
             .local_addr()
@@ -27,11 +28,14 @@ impl Host {
             .current_dir(root)
             .args(["serve", "app.zship", "--workers=1"])
             .arg(format!("--port={port}"))
-            .env("APP_ID", "untrusted-variable")
+            .env_remove("APP_ID")
             .env("ZEROSHIP_WORKFLOW_SQLITE_PATH", root.join("unused.sqlite"))
             .stdin(Stdio::null())
             .stdout(Stdio::from(log.reopen().unwrap()))
             .stderr(Stdio::from(log.reopen().unwrap()));
+        if let Some(app) = app {
+            command.env("APP_ID", app.as_str());
+        }
         for key in [
             "DATABASE_URL",
             "ZEROSHIP_KV_CONFIG_FILE",
@@ -138,6 +142,16 @@ impl Drop for Host {
 
 #[test]
 fn cli_resumes_a_workflow_from_retained_code_after_process_death() {
+    resume_after_process_death(None);
+}
+
+#[test]
+fn cli_resumes_a_workflow_with_a_configured_app_identity() {
+    resume_after_process_death(Some(&AppId::mint()));
+}
+
+fn resume_after_process_death(configured_app: Option<&AppId>) {
+    let expected_app = configured_app.cloned().unwrap_or_else(local_dev_app_id);
     let root = tempfile::tempdir().unwrap();
     let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
     let workspace = manifest.parent().unwrap().parent().unwrap();
@@ -154,33 +168,33 @@ fn cli_resumes_a_workflow_from_retained_code_after_process_death() {
         "{}",
         String::from_utf8_lossy(&compiled.stderr)
     );
-    let mut host = Host::start(root.path());
+    let mut host = Host::start(root.path(), configured_app);
     assert_eq!(
         host.request("/version").unwrap(),
         json!({"version":"original:lazy"})
     );
     assert!(!root.path().join("unused.sqlite").exists());
-    assert!(root.path().join(".zeroship/zs-default.sqlite").exists());
+    let database = root
+        .path()
+        .join(".zeroship")
+        .join(format!("zs-{}.sqlite", expected_app.as_str()));
+    assert!(database.exists());
     assert!(!root.path().join(".zeroship/workflows.sqlite").exists());
     assert!(!root.path().join(".zeroship/workflow-objects").exists());
     let started = host.request("/start").unwrap();
     let run = started["id"].as_str().unwrap();
     let status = format!("/status?id={run}");
     host.until(&status, |value| value["state"] == "waiting");
-    let identity = std::fs::read_to_string(root.path().join(".zeroship/app-id")).unwrap();
-    assert!(zeroship_core::app_id::AppId::parse(&identity).is_ok());
-    assert_ne!(identity, "untrusted-variable");
+    assert!(!root.path().join(".zeroship/app-id").exists());
     drop(host);
     std::fs::remove_dir_all(root.path().join("src")).unwrap();
-    let mut host = Host::start(root.path());
+    let mut host = Host::start(root.path(), configured_app);
     assert_eq!(
         host.request("/version").unwrap(),
         json!({"version":"original:lazy"})
     );
-    assert_eq!(
-        std::fs::read_to_string(root.path().join(".zeroship/app-id")).unwrap(),
-        identity
-    );
+    assert!(database.exists());
+    assert!(!root.path().join(".zeroship/app-id").exists());
     host.request(&format!("/signal?id={run}")).unwrap();
     let completed = host.until(&status, |value| value["state"] == "completed");
     assert_eq!(completed["output"], "original:original:lazy");
