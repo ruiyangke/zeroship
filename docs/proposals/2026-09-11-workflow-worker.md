@@ -28,7 +28,8 @@ statements marked as target or required work here are not claims of shipment.
 Read by concern:
 
 - [Components and private zones](#components-and-private-zones),
-  [worker identity and placement](#worker-identity-registration-and-placement).
+  [worker identity and placement](#worker-identity-registration-and-placement),
+  [policy bindings and leases](#policy-bindings-and-authenticated-leases).
 - [Storage and transactions](#storage-inventory-and-schema-ownership),
   [delivery protocol](#durable-job-protocol), [lifecycle state](#lifecycle-state-and-authority).
 - [Trigger sequences](#trigger-lifecycles),
@@ -56,6 +57,8 @@ Terms used throughout:
 | Publication intent | A creator transaction's durable instruction to publish metadata after commit; stored in an outbox. |
 | Recovery responsibility | The manager's obligation to revisit an app even when it cannot see unpublished creator work. |
 | Deployment hold | A durable reference preventing normal bundle reclamation while queued work or creator history still needs its code. |
+| Policy binding | A trusted host's immutable association between an app handle and a local authority generation; replacement retires existing handles. |
+| Policy lease | Authenticated, time-bounded permission to apply a policy under an exact worker key and assignment. |
 
 ## Components and private zones
 
@@ -204,6 +207,217 @@ remain cutover work. Bootstrap credentials must not allow a revoked deployment
 to restore authority by enrolling a fresh identity. The approved bootstrap trust
 source, replacement authorization and revocation freshness contract must be
 finalized with the authentication owner; registration alone does not solve them.
+
+## Policy bindings and authenticated leases
+
+**Target; implementation pending verification.** The creator engine currently
+accepts trusted `PolicySnapshot` values and fences operations with captured policy
+revisions and deadlines. An app lookup alone does not distinguish a retired host
+context from its replacement. Immutable native bindings, authenticated policy
+lease transport and the authoritative Control policy source remain required work.
+The names below describe the intended API contract, not available methods.
+
+### Native binding identity and policy revision
+
+Keep these identities independent:
+
+| Identity | Authority and change rule |
+| --- | --- |
+| Source policy revision | Control's monotonic revision for the complete effective app policy. A revision identifies immutable policy values. |
+| Assignment revision | The manager's placement fence for this app and worker. Policy refresh cannot change or renew it. |
+| Host binding generation | An opaque, process-local identity allocated by the trusted host when it replaces an app binding. It is unrelated to run generation or policy revision. |
+| Refresh ticket | A local ordering token for a metadata request under a particular binding. It grants no journal authority by itself. |
+
+`HostPolicies` issues a `PolicyBinding` capability containing its registry identity,
+app identity and opaque generation. Explicit replacement retires the previous
+generation before the replacement can admit work. Revocation retains a tombstone;
+neither a late refresh nor a clone of the retired capability can recreate it.
+An operation through a retired capability also cannot revoke its replacement.
+Generation and ticket identities must not wrap or be reused. The customer engine
+does not store these capabilities in creator tables or reconstruct them from SQL.
+
+The production host associates a binding with the exact authorized app, worker,
+enrolled signing key and assignment revision. Changing any part of that association
+requires explicit replacement. Native `zeroship-workflow` does not need service-key
+types: its opaque binding is the local fence, while the host/client validates the
+transport identities before installing a snapshot through that binding.
+
+Construct `AppWorkflows` from a `PolicyBinding`, replacing the ambient
+`for_app(AppId)` accessor. The handle retains that exact binding; cloning it does
+not resolve current authority by app ID. `AppBackend`, `ConsumerScope`, runtime
+contexts and queued backend calls preserve the same capability. A retained V8
+handle or old consumer cannot start a fresh mutation by borrowing a replacement's
+policy. An app selector in a signal capability likewise cannot create a binding;
+the trusted ingress host selects an existing authorized handle.
+
+Keep policy revision and content high water across local binding replacement and
+revocation. Installing a lower source revision fails; changed policy under an equal
+revision conflicts. Equal revision with identical values is valid for a newly
+authorized binding even when its assignment differs. This permits unchanged policy
+to serve a replacement without allowing the retired handle to refresh itself.
+After a process restart, the host must obtain fresh trusted authority; customer
+state and previously serialized metadata cannot restore a binding.
+
+Local configuration uses the same capability lifecycle with an explicitly
+nonexpiring configuration snapshot. Remote and configured authority are distinct
+binding modes. Missing or expired remote metadata never falls back to configured
+defaults. Refreshing the current binding is different from replacing it, so normal
+refresh does not force healthy handles to acquire a new local identity.
+
+### Ordered refresh and captured operations
+
+Create a refresh ticket before starting metadata I/O. It captures the current
+binding generation and expected transport association. Beginning a newer refresh
+supersedes older tickets. Installation atomically verifies the current binding,
+ticket, expected association, policy revision/content and remaining validity, then
+consumes the ticket. Ticket comparison and snapshot installation occur under the
+same host-state synchronization. Retrying transport uses a new ticket and assertion;
+it cannot apply a response through a ticket already consumed or superseded.
+
+```text
+Host binding                 Metadata exchange                 Journal handle
+     |                              |                                |
+     |-- capture refresh ticket --->|                                |
+     |-- replace / revoke binding   |                                |
+     |                              |                                |
+     |<-- delayed valid response ---|                                |
+     |    reject retired ticket     |                                |
+     |                              |                 old mutation --|
+     |<----------------------------- check retained binding ---------|
+     |------------------------------ unavailable; no new authority -->|
+```
+
+Within the current binding, a fresh response with unchanged policy may extend the
+deadline for subsequent operations. A newer accepted response may also shorten it.
+An older response must not reverse that shortening, restore a prior policy or undo
+revocation. Serial refresh is a valid host optimization, but cancellation and
+replacement still require the ticket fence because an outstanding response can
+outlive its initiating loop.
+
+Expiry alone does not replace a binding. A fresh authenticated response may admit
+new operations under the same still-current binding after an earlier snapshot
+expired. Explicit revocation requires a new host-authorized binding; refresh cannot
+undo it. Neither case revives an operation captured under expired authority.
+
+Capture binding generation, source revision and original monotonic deadline before
+journal waits. `PolicyAuthority` validates the retained binding and revision, its
+original deadline and the current snapshot's validity after waits and before fresh
+mutation commits. A later refresh cannot extend an operation already in progress;
+replacement, revocation or a newer policy invalidates its captured authority.
+Accepted shortening must remain a monotonic cap on existing operations, even if
+a later refresh extends the current snapshot before those operations next poll.
+The host must retain that cap or invalidate affected captures; checking only the
+latest snapshot would lose an intervening fence. Host invalidation closes new
+admission and signals active work to cancel; execution still must join before its
+slot is reused. Renewing policy cannot resurrect an expired or cancelled execution,
+and never changes its independent hard execution deadline.
+
+Structural app locking and receipt readback are separate from live mutation
+authorization. An exact, already committed app/request or job receipt may be read
+through the narrowly scoped replay path after its grant expires. It cannot install
+policy, advance a frontier, publish new effects or capture a replacement binding.
+Every operation without a matching receipt must establish current bound authority
+before mutation. Once-live invalidation is retryable `Unavailable`; it must not
+become a durable customer `Denied` outcome. Explicit policy values that disable an
+operation remain distinct from missing or expired authority.
+
+An operation's deadline includes database waits and commit acknowledgement. A
+timeout before terminal dispatch requires rollback; a dispatched COMMIT may still
+finish and must be resolved through its immutable receipt. Policy replacement
+does not retract an already dispatched database commit. Publication and delivery
+ACK use their own current metadata authority; reading a creator receipt alone
+does not authorize a manager write.
+
+### Authoritative source and authenticated exchange
+
+Control owns the complete effective policy, including app lifecycle, entitlement,
+operator switches and applicable limits. Its policy revision must describe a
+consistent observation of all contributing values. Changes that affect policy
+advance that revision atomically with their authoritative state, or use an
+equivalent durable revisioned projection whose original source validity is explicit.
+A content hash without ordered source authority cannot distinguish a delayed
+observation from a new desired state.
+
+The manager obtains this policy through a trusted provider in the platform zone.
+The provider may read Control-owned storage or consume authenticated Control
+metadata; it never reads a creator journal. A provider grant contains the exact
+app, immutable source revision and values, and a finite original validity bound.
+Cached values retain that bound. Repeated worker requests, manager restart or
+rereading an unchanged projection cannot refresh source authority. Only a new
+authoritative source observation may issue a new validity bound. Unknown source
+freshness, inconsistent revisions and unavailable source storage fail closed with
+retryable infrastructure failure.
+
+The exact Control source representation, contributing-writer coverage and revision
+publication mechanism remain unresolved prerequisites for production transport.
+The existing app/plan/rollout reads do not supply this contract. Selecting a live
+platform provider avoids a policy outbox only if it establishes the required
+consistent revision and validity itself; it does not waive those requirements.
+
+The worker requests a lease using `AssignedScope`: app ID and assignment revision.
+The server authenticates the enrolled instance before buffering the body. Worker
+identity and signing-key thumbprint come from the verified assertion context, not
+request selectors. The proposed closed response binds:
+
+```text
+appId
+workerId + signingKeyId
+assignmentRevision
+policyRevision + closed policy values
+remainingMs
+```
+
+`signingKeyId` is the thumbprint of the exact enrolled key used for verification.
+It is metadata, not a credential. The client compares it with the key that signed
+the request, and verifies app, worker and assignment revision before returning a
+private validated lease handle. Policy values are a closed, validated native
+contract shared through `zeroship-core`; the metadata client and manager do not
+depend on the customer engine. No database address, credential, customer input or
+history is admitted into the envelope. Existing TLS, endpoint/audience assertions,
+replay protection, bounded bodies and closed failures apply.
+
+Under the manager's app-before-worker lock order, verify current placement and
+source authority, then revalidate the originally authenticated enrolled key after
+waits and before issuing the grant. A replaced key is not equivalent to another
+active key on the same instance. Cap authority by the original verified source
+deadline, assignment/registration validity and configured policy-lease ceiling.
+Later checks can shorten the issuing attempt's bound. Requesting policy never
+renews registration or placement, and unavailable enrollment is not a permanent
+policy refusal.
+
+Convert to `remainingMs` only after charging manager clock queries, lock waits,
+source I/O and transaction settlement. Use the same conservative clock-resolution
+and monotonic conversion rules as delivery grants. The client anchors its deadline
+before sending the HTTP request, validates a positive representable remaining
+duration and rejects a reply already exhausted by the exchange. It does not compare
+Control or manager wall-clock timestamps with worker or creator database time.
+Cloning a lease preserves its deadline. Installing it consumes the original
+request's refresh ticket; client validation alone cannot bind it to a replacement.
+
+### Archive acknowledgement and verification
+
+Calendar disable acknowledges the manager's durable calendar fence. Policy
+publication acknowledges a desired source revision. Neither result proves that
+workers observed revocation, stopped creator mutations or joined executions.
+Control must not report execution quiescence from either acknowledgement.
+
+With finite leases, partitioned workers eventually lose permission for fresh
+mutations, provided the manager cannot renew from stale source authority. Expiry
+is an eventual admission fence, not an acknowledgement from an unreachable worker
+or proof that a dispatched commit rolled back. An explicit quiescence acknowledgement
+requires a separate protocol that accounts for affected bindings, stops renewal,
+joins their active work and resolves uncertain outcomes. That protocol remains
+open; archive responses must distinguish desired state, manager acknowledgement
+and any later verified quiescence result.
+
+Required native regressions cover retired `AppWorkflows` and `AppBackend` handles
+starting fresh calls, equal-policy-revision replacement, delayed refresh tickets,
+shortened grants, revocation during lock waits, and exact receipt replay without
+new authority. Transport tests cover app/worker/key/assignment substitution, key
+replacement during issuance, stale source renewal, delayed responses and unrelated
+absolute clocks. Host tests deny workers Control DB access and deny platform
+processes creator access. Binding and transport remain pending until these paths
+are implemented and verified; local captured-policy tests alone do not prove them.
 
 ## Storage inventory and schema ownership
 
@@ -416,6 +630,7 @@ Keep the following identities distinct:
 | App request | Reuse for retried start/signal/management acceptance; changed body conflicts. |
 | Logical job | Reuse across publication retries, successor submission and delivery attempts. |
 | Assignment revision | Changes when placement changes; registration renewal cannot restore an old revision. |
+| Host policy binding/source revision | Binding replacement retires existing handles; policy refresh preserves source revision only for identical values and cannot reinstall a retired binding. |
 | Delivery attempt | Changes on redelivery; a stale attempt cannot settle the new attempt. |
 | Run generation/frontier | Fences customer history and identifies the next admissible transition. |
 | Wait/event/occurrence | Identifies the semantic trigger even if several delivery attempts observe it. |
@@ -1369,6 +1584,7 @@ The inventory includes required semantics beyond the currently available routes.
 | Poll/renew/release assignment | Enrolled worker to manager. | Only that worker's authorized scopes and current revision outcomes; release does not retire the app's recovery duty. |
 | Register/activate deployment | Control to manager. | Idempotent immutable schedule metadata and monotonic activation state; dispatch readiness remains distinct. |
 | Disable calendar | Control to manager. | Durable app revision fence and historical receipt; accepted jobs, recovery and creator policy remain independent. |
+| Obtain policy lease | Enrolled worker under its current assignment to manager. | Validated policy bound to the exact app, worker key and placement revision, capped by original source freshness and remaining authority. Target protocol; transport remains pending. |
 | Establish/close ingress scope | Trusted creator host through manager policy. | Durable recovery responsibility or an explicit fenced drain result. A worker cannot create authority for an arbitrary app. |
 | Submit job/intents | Assigned worker or native manager scheduling logic to manager queue. | Receipt for the stable immutable specification; changed content under the same job identity conflicts. |
 | Claim job | Enrolled worker with current assignment to manager queue. | A persisted delivery attempt and bounded authority, or no eligible work. |
@@ -1569,6 +1785,8 @@ Control database credentials or another holder's platform authority.
 | ACK and outbox both publish successors | Shared immutable IDs deduplicate; changed successor content conflicts atomically. |
 | Manager COMMIT is uncertain | Retry exact settlement; the stored receipt determines whether it committed. |
 | Placement changes or enrollment is revoked during a lock wait | Fresh authorization rejects new mutation; database clock and original budget remain binding. |
+| An old app handle or delayed policy reply survives binding replacement | The retained binding/ticket fails; neither captures the replacement's authority. |
+| A manager's cached policy source expires | Further leases fail closed; worker polling cannot refresh stale source validity. |
 | Old heartbeat reply is lost | Retry can observe/renew a still-live stored lease; it cannot revive locally expired execution or restore elapsed budget. |
 | Old delivery tries to settle a replacement | Attempt and assignment fences reject it; settled-receipt replay admits no new writes. |
 | Concurrent cron replicas or delayed activation | Occurrence/cursor transaction and activation revision prevent duplicate or retargeted work. |
@@ -1649,7 +1867,11 @@ deadline bounds the entire attempt, including database cancellation; a concurren
 host refresh cannot extend that attempt. Native tests force policy replacement
 after staged writes and expiry during a blocked write, and verify rollback and
 durable receipt replay. These local fences do not establish assignment-bound
-remote policy delivery or a distributed archive acknowledgement.
+remote policy delivery or a distributed archive acknowledgement. The native
+binding and authenticated lease contract is specified in
+[policy bindings and leases](#policy-bindings-and-authenticated-leases); its
+capabilities, source authority and transport remain pending implementation and
+verification.
 
 Workflow provisioning preserves an existing creator schema's migrator ownership.
 Native PostgreSQL container tests exercise both provisioning orders, repeated
@@ -1841,6 +2063,7 @@ through the replacement before deleting the old source.
 | --- | --- |
 | Enrollment bootstrap and revocation | A revoked worker cannot regain equivalent authority by automatic enrollment. Finalize bootstrap trust, replacement authorization and registry freshness with auth ownership. |
 | Placement eligibility and capacity provider | Only platform-authorized app/zone combinations may be assigned. Select the trusted eligibility source and host adapter's durable request/progress contract. |
+| Policy source and archive acknowledgement | Implement the binding/lease contract above; select the authoritative effective-policy revision and freshness provider, cover its contributing writers, and define evidence for execution quiescence separately from calendar acknowledgement or lease expiry. |
 | Complete job envelopes | Keep closed metadata. Finalize activation, event/fanout, continuation cursors, management lifecycle revisions and operation-specific deployment prerequisites before their consumers are wired. |
 | Normal deployment publication | Bind activation revision issuance to a stable deploy command and immutable body. Artifact identity alone cannot distinguish a delayed retry from an intentional rollback. Compose mutable deployment side effects with command acceptance, connect archive/stage/restore to the durable handoff, and keep the calendar's activation origin explicit across delayed delivery. |
 | Scope retirement | Define ingress epoch closure and durable drain evidence. Registration expiry and empty polling cannot retire unpublished-work responsibility. |
@@ -1855,6 +2078,9 @@ outside the queue cutover.
 
 ### Dependency-ordered completion
 
+- Bind creator handles to immutable host authority generations and ordered refresh
+  tickets; then supply the revisioned Control source and authenticated policy lease
+  transport before production workers depend on remote policy.
 - Finalize the missing closed delivery, scope-recovery and retention contracts;
   add their manager models using the canonical migration/ORM pipeline.
 - Connect normal deployment registration, activation and queue holds to manager
