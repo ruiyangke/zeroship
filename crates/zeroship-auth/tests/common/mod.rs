@@ -34,13 +34,6 @@ pub fn test_database_url() -> String {
 // declared defaults. Fixtures provide an ephemeral bind address and explicit
 // secret inputs. Federation scenarios pass provider settings as CLI flags and
 // resolve provider credentials from a file owned during server construction.
-/// The console origin the test fixture admits via `frame-ancestors` on the
-/// framed login routes (immersive iframe login, design §4.3). The rewritten
-/// clickjacking test reads this from the booted config rather than hard-coding
-/// it, exercising the route-aware security headers against the live `/login`.
-#[allow(dead_code)]
-pub const TEST_CONSOLE_ORIGIN: &str = "http://localhost:5173";
-
 #[must_use]
 pub fn test_auth_config(db_url: &str) -> AuthConfig {
     test_auth_config_with(db_url, &[])
@@ -68,6 +61,13 @@ pub fn test_auth_config_with(db_url: &str, extra: &[&str]) -> AuthConfig {
 
 /// Resolve server settings against the address owned by the HTTP fixture.
 pub fn test_auth_config_at(db_url: &str, public_url: &str, extra: &[&str]) -> AuthConfig {
+    // The console uses another origin on the auth host so the production
+    // same-site filter admits it when the fixture binds an ephemeral address.
+    let mut console_origin = url::Url::parse(public_url).expect("fixture public URL");
+    console_origin
+        .set_port(Some(5173))
+        .expect("fixture console port");
+    let console_origin = console_origin.origin().ascii_serialization();
     let mut args: Vec<&str> = Vec::from([
         "zeroship-auth",
         "--addr",
@@ -76,7 +76,7 @@ pub fn test_auth_config_at(db_url: &str, public_url: &str, extra: &[&str]) -> Au
         // /consent) emit the relaxed `frame-ancestors` — the rewritten threat
         // model test pins this NEW contract.
         "--frame-ancestor-origins",
-        TEST_CONSOLE_ORIGIN,
+        &console_origin,
         "--mail-from-email",
         "test@zeroship.test",
         "--mail-from-name",

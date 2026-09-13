@@ -39,6 +39,10 @@ const CSP_DIRECTIVES: [&str; 6] = [
 async fn every_security_header_is_present_on_a_ui_route() {
     Database::run(async |database| {
         let fx = AuthServer::start(database).await;
+        assert!(
+            !fx.config.frame_ancestor_origins().is_empty(),
+            "the framing fixture must admit its configured console origin"
+        );
 
         let url = format!("{}/login", fx.auth_base);
         let resp = fx
