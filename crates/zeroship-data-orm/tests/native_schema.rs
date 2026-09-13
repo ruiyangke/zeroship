@@ -318,3 +318,31 @@ fn scalar_defaults_preserve_native_bytes_and_temporal_values() {
         assert!(schema_with_default(kind, true, value).validate().is_err());
     }
 }
+
+#[test]
+fn artifact_binary_defaults_decode_into_native_metadata() {
+    for (encoded, bytes) in [("AP8=", vec![0, 255]), ("", vec![])] {
+        let artifact = Schema::from_runtime_descriptor(&value!({
+            "version": 2,
+            "collections": {"settings": {"fields": {
+                "id": {"type": "string", "required": true, "primaryKey": true},
+                "value": {"type": "bytes", "required": true, "default": encoded}
+            }}}
+        }))
+        .unwrap();
+        artifact.validate().unwrap();
+        assert_eq!(
+            artifact,
+            schema_with_default(LogicalType::Bytes, true, Value::Bytes(bytes))
+        );
+    }
+
+    assert!(Schema::from_runtime_descriptor(&value!({
+        "version": 2,
+        "collections": {"settings": {"fields": {
+            "id": {"type": "string", "required": true, "primaryKey": true},
+            "value": {"type": "bytes", "default": "invalid base64!"}
+        }}}
+    }))
+    .is_err());
+}

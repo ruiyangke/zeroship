@@ -134,6 +134,16 @@ fn column(value: &Value, depth: usize) -> Result<ColumnSchema, DbError> {
         Some(_) => return Err(invalid("unsupported vector distance metric")),
     };
     field.default = value.get("default").cloned();
+    if field.logical_type == LogicalType::Bytes {
+        if let Some(Value::String(encoded)) = &field.default {
+            use base64::Engine as _;
+            field.default = Some(Value::Bytes(
+                base64::engine::general_purpose::STANDARD
+                    .decode(encoded)
+                    .map_err(|_| invalid("binary default must be valid base64"))?,
+            ));
+        }
+    }
     field.generated = value.get("generated").cloned();
     field.identity = value.get("identity").cloned();
     field.literal_value = value.get("literalValue").cloned();
