@@ -754,7 +754,6 @@ required now, like Postgres, for the same reason
 ### The surviving test-only names
 
 `PG_TEST_URL`
-`AUTH_TEST_SMTP_SINK`
 
 `ZEROSHIP_SESSION_SECRET`, `ZEROSHIP_SESSION_SECRET_PREV` and
 `ZEROSHIP_SESSION_NONCE_CAPACITY` were on that list until 2026-09-04 and
@@ -775,19 +774,8 @@ CI also sets `PG_CONTAINER` `PG_HOST` `PG_PORT` `PG_USER` `PG_PASS`
 `POSTGRES_USER` `POSTGRES_PASSWORD` `REDPANDA_BROKERS` `ZS_FRESHNESS_STRICT`.
 `PG_HOST`/`PG_PORT`/`PG_USER`/`PG_PASS` are INPUTS to
 `tests/provision_test_backends.sh`, which writes what they resolve to into the
-overlay; no harness carries its own copy of the defaults any more. That script
-takes `SMTP_HOST`/`SMTP_PORT`/`SMTP_UI_PORT`/
-`SMTP_CONTAINER`/`SMTP_IMAGE` the same way. The SMTP ones are the sink's
-coordinates rather than a variable any test reads: the sink is named to test
-code only by `AUTH_TEST_SMTP_SINK`, and by the compiled default it falls back
-to.
-
-`AUTH_TEST_SMTP_SINK` (`host:port`) is the same shape one tier down: it
-redirects `zeroship-mailer`'s plaintext-transport test at a sink of your own.
-Unset, the test dials the address `tests/provision_test_backends.sh` runs mailpit
-on, and FAILS naming that script if nothing answers. It was the one standing
-allowlist entry in the deleted skip census, on the ground that no script could
-stand a sink up; provisioning one is what retired the exemption.
+overlay. Mailer tests own their PostgreSQL and Mailpit containers through
+Testcontainers; they accept no database or SMTP address override.
 
 `PG_TEST_URL` redirects PostgreSQL suites; it does not enable them. The shared
 suites resolve their default from the generated overlay. Standalone driver

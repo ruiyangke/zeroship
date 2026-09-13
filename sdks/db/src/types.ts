@@ -806,7 +806,7 @@ export type TypeName = PrimitiveTypeName | DescriptorOnlyTypeName | "array" | "r
 export type VectorMetric = "cosine" | "l2" | "innerProduct";
 
 /** Union of all values that can serve as a field default. */
-export type FieldDefaultValue = string | number | boolean | Date | null | PlainObject | string[] | number[] | boolean[];
+export type FieldDefaultValue = string | number | boolean | Date | Uint8Array | null | PlainObject | string[] | number[] | boolean[];
 
 /**
  * Foreign-key action policy for `t.ref()` (proposal B2).

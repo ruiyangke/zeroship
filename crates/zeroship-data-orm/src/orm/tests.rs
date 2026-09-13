@@ -26,6 +26,7 @@ mod joins;
 mod json;
 mod lifecycle;
 mod nested_temporal;
+mod nested_values;
 mod protected_projections;
 mod protected_updates;
 mod relations;

@@ -2,12 +2,12 @@
 # ============================================================================
 # provision_test_backends.sh - stand up the backends the test suites REQUIRE.
 #
-# Provisions the shared PostgreSQL and SMTP services used by the shell suites.
-# KV and Redis driver tests own their servers through Testcontainers.
+# Provisions the shared PostgreSQL service still used by the shell suites.
+# Mailer, auth, authn, KV and Redis driver tests own their servers through
+# Testcontainers.
 #
 # PostgreSQL comes from deploy/compose so its logical-decoding and prepared-
-# transaction settings match the service definition. Mailpit is a disposable
-# SMTP sink for zeroship-mailer's plaintext transport test.
+# transaction settings match the service definition.
 #
 # Usage:
 #   tests/provision_test_backends.sh          # start and wait
@@ -15,8 +15,7 @@
 #
 # Both forms write deploy/ops/zeroship.test.toml in the platform config schema.
 # The file is generated and gitignored because database credentials are secrets.
-# PG_* inputs select PostgreSQL; SMTP_* inputs select the sink. Test suites may
-# override their targets with PG_TEST_URL and AUTH_TEST_SMTP_SINK.
+# PG_* inputs select PostgreSQL; shared suites may override it with PG_TEST_URL.
 # ============================================================================
 set -euo pipefail
 
@@ -43,16 +42,7 @@ PG_PORT="${PG_PORT:-5440}"
 PG_USER="${PG_USER:-postgres}"
 PG_PASS="${PG_PASS:-zeroship}"
 PG_DB="${PG_DB:-zeroship}"
-# The SMTP sink. `SMTP_UI_PORT` is mailpit's web inbox, which is how a developer
-# reads what a failing send actually delivered; the suites never dial it.
-SMTP_HOST="${SMTP_HOST:-127.0.0.1}"
-SMTP_PORT="${SMTP_PORT:-1025}"
-SMTP_UI_PORT="${SMTP_UI_PORT:-8025}"
-SMTP_CONTAINER="${SMTP_CONTAINER:-zeroship-test-smtp-sink}"
-SMTP_IMAGE="${SMTP_IMAGE:-axllent/mailpit:latest}"
-
 PG_DSN="postgres://${PG_USER}:${PG_PASS}@${PG_HOST}:${PG_PORT}/${PG_DB}"
-SMTP_SINK="${SMTP_HOST}:${SMTP_PORT}"
 
 TEST_OVERLAY="$ROOT/deploy/ops/zeroship.test.toml"
 
@@ -175,52 +165,12 @@ if [ "$CHECK_ONLY" -eq 0 ]; then
        that container is what your tests have been running against - stop it
        (docker stop <name>) and re-run, so the server under test is the one
        this repo defines."
-
-  # The sink, and only when nothing already answers on its port. A developer who
-  # runs their own mailpit, or a second worktree that started this one, keeps
-  # it: the test dials an ADDRESS, and a second container fighting for the port
-  # would take the working one down. `docker start` before `docker run` so a
-  # stopped container from a previous run is reused rather than colliding by
-  # name.
-  echo "==> SMTP sink (${SMTP_IMAGE}) on ${SMTP_SINK}"
-  if port_open "$SMTP_HOST" "$SMTP_PORT"; then
-    echo "  ok   something already answers on ${SMTP_SINK}; left alone"
-  elif docker start "$SMTP_CONTAINER" >/dev/null 2>&1; then
-    echo "  ok   restarted ${SMTP_CONTAINER}"
-  else
-    docker run -d --name "$SMTP_CONTAINER" \
-      -p "${SMTP_PORT}:1025" -p "${SMTP_UI_PORT}:8025" "$SMTP_IMAGE" >/dev/null \
-      || fatal "could not start an SMTP sink on ${SMTP_SINK}.
-       crates/zeroship-mailer's plaintext transport test dials that address and
-       FAILS without it, and tests/run_auth_suite.sh runs that package. Start
-       one yourself and re-run, or point the test elsewhere with
-       AUTH_TEST_SMTP_SINK=host:port."
-  fi
 fi
 
 echo "==> waiting for the backends (bound: ${READY_TIMEOUT_SECONDS}s each)"
 wait_for_backend postgres "$PG_HOST" "$PG_PORT" "PostgreSQL" \
   || fatal "PostgreSQL never came up on ${PG_HOST}:${PG_PORT} within ${READY_TIMEOUT_SECONDS}s.
        docker compose -f $COMPOSE_FILE logs postgres"
-
-# The sink is waited on in BOTH forms, including `--check`, and that is the same
-# relationship `--check` has with PostgreSQL above: the caller may own the
-# container (a GitHub `services:` entry does), but this script is what says the
-# address is real. A port probe rather than a healthcheck - there is no compose
-# service to inspect, and mailpit answering its SMTP port is the whole contract.
-smtp_deadline=$(( $(date +%s) + READY_TIMEOUT_SECONDS ))
-while ! port_open "$SMTP_HOST" "$SMTP_PORT"; do
-  if [ "$(date +%s)" -ge "$smtp_deadline" ]; then
-    fatal "no SMTP sink answered on ${SMTP_SINK} within ${READY_TIMEOUT_SECONDS}s.
-       crates/zeroship-mailer's plaintext transport test dials that address and
-       FAILS without it - there is no variable that turns that back into a skip.
-       Start one:
-         docker run -d --name ${SMTP_CONTAINER} -p ${SMTP_PORT}:1025 -p ${SMTP_UI_PORT}:8025 ${SMTP_IMAGE}
-       or point the test at your own with AUTH_TEST_SMTP_SINK=host:port."
-  fi
-  sleep 1
-done
-echo "  ok   SMTP sink answering on ${SMTP_SINK}"
 
 # These settings checks are not decoration. A Postgres that answers on 5440 is
 # not necessarily THIS Postgres: on a shared development machine the port is
@@ -345,8 +295,6 @@ echo "  ok   wrote ${TEST_OVERLAY#"$ROOT/"}"
 
 cat <<EOF
 
-Backends ready. ${TEST_OVERLAY#"$ROOT/"} names PostgreSQL, and the sink's
-address is the default the mailer test falls back to:
+Backend ready. ${TEST_OVERLAY#"$ROOT/"} names PostgreSQL:
   postgres   $PG_DSN
-  smtp sink  $SMTP_SINK   (inbox: http://${SMTP_HOST}:${SMTP_UI_PORT})
 EOF
