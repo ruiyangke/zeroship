@@ -1,35 +1,24 @@
-//! OIDC Back-Channel Logout OP emission tests.
+//! The native logout route notifies a participating relying party.
 
-use crate::common::database::Database;
+use super::fixtures::{BrowserSession, account, assert_logged_out, issuer};
+use crate::common::{auth_server::AuthServer, database::Database};
 
 use std::sync::{Arc, Mutex};
 
-use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use compio_postgres::Client;
-use jsonwebtoken::{decode, decode_header, Algorithm, DecodingKey, Validation};
+use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode, decode_header};
 use ntex::web::{self, HttpResponse};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use uuid::Uuid;
-use zeroship_auth::oidc::{backchannel_logout, Issuer, LogoutTokenClaims, LOGOUT_TOKEN_TYP};
-use zeroship_auth::store::sessions as session_store;
-
-const ISSUER: &str = "https://auth.zeroship.test/oauth2";
-
-fn test_issuer() -> Issuer {
-    let signing = ed25519_dalek::SigningKey::from_bytes(&[19; 32]);
-    Issuer::from_signing_key(&signing, [9u8; 32], ISSUER.to_string()).expect("issuer")
-}
+use zeroship_auth::oidc::{LOGOUT_TOKEN_TYP, LogoutTokenClaims, backchannel_logout};
 
 #[ntex::test]
-async fn logout_emission_posts_signed_logout_token_with_sid() {
+async fn logout_posts_a_signed_token_for_the_submitting_session_and_its_rp() {
     Database::run(async |database| {
         let seed = database.connect().await;
-        let db = database.connect_as_auth().await;
-        let issuer = test_issuer();
-        issuer
-            .publish_active_key(&db)
-            .await
-            .expect("publish active OP key");
+        let issuer = issuer();
+        let server = AuthServer::with_issuer(database, issuer.clone()).await;
         let captured = Arc::new(Mutex::new(Vec::<String>::new()));
         let rp_state = captured.clone();
         let rp = web::test::server(move || {
@@ -43,31 +32,18 @@ async fn logout_emission_posts_signed_logout_token_with_sid() {
         .await;
         let backchannel_logout_uri = rp.url("/bcl");
 
-        let user_id = seed_user(&seed).await;
+        let user = account(&server, "creator@example.test").await;
+        let mut browser = BrowserSession::login(&server, &user).await;
         let client_id = format!("oac_bcl_emit_{}", Uuid::new_v4().simple());
         seed_oauth_client(&seed, &client_id, &backchannel_logout_uri).await;
-        let session = session_store::create(
-            &db,
-            &session_store::CreateSession {
-                user_id: user_id.clone(),
-                auth_method: "pwd",
-                amr: vec!["pwd".to_string()],
-                acr: None,
-                expected_credential_version: None,
-                idle_minutes: zeroship_auth::sessions::login::IDLE_MINUTES,
-                absolute_hours: zeroship_auth::sessions::login::ABSOLUTE_HOURS,
-            },
-        )
-        .await
-        .expect("create OP session");
-        let sid = session.id.to_string();
+        let sid = browser.id.to_string();
         // Record the pairwise subject the OP gives this client's user.
         let sub =
-            issuer.pairwise_subject(&user_id, &format!("https://{client_id}.zeroship.localhost"));
+            issuer.pairwise_subject(&user.id, &format!("https://{client_id}.zeroship.localhost"));
 
         backchannel_logout::record_rp_participation(
-            &db,
-            &user_id,
+            server.pg.as_ref(),
+            &user.id,
             &sid,
             &client_id,
             &sub,
@@ -76,11 +52,10 @@ async fn logout_emission_posts_signed_logout_token_with_sid() {
         .await
         .expect("record RP participation");
 
-        let report = backchannel_logout::emit_for_session(&db, &issuer, session.id)
-            .await
-            .expect("emit BCL");
-        assert_eq!(report.attempted, 1);
-        assert_eq!(report.delivered, 1);
+        let csrf = browser.confirmation(&server).await;
+        assert!(captured.lock().unwrap().is_empty());
+        assert_logged_out(&browser.logout(&server, &csrf).await);
+        browser.assert_revoked(&server).await;
         let token = {
             let tokens = captured.lock().expect("captured lock");
             assert_eq!(
@@ -135,34 +110,19 @@ async fn capture_logout_token(
     state: web::types::State<Arc<Mutex<Vec<String>>>>,
     body: ntex::util::Bytes,
 ) -> HttpResponse {
-    let token = url::form_urlencoded::parse(&body)
-        .find_map(|(key, value)| (key == "logout_token").then(|| value.into_owned()));
-    match token {
-        Some(token) => {
-            state.lock().expect("capture lock").push(token);
-            HttpResponse::NoContent().finish()
-        }
-        None => HttpResponse::BadRequest().body("missing logout_token"),
-    }
+    let Some(token) = url::form_urlencoded::parse(&body)
+        .find_map(|(key, value)| (key == "logout_token").then(|| value.into_owned()))
+    else {
+        return HttpResponse::BadRequest().body("missing logout_token");
+    };
+    state.lock().expect("capture lock").push(token);
+    HttpResponse::NoContent().finish()
 }
 
 fn raw_claims(token: &str) -> Value {
     let payload = token.split('.').nth(1).expect("JWT payload segment");
     let decoded = URL_SAFE_NO_PAD.decode(payload).expect("payload b64url");
     serde_json::from_slice(&decoded).expect("payload json")
-}
-
-async fn seed_user(db: &Client) -> zeroship_core::UserId {
-    let user_id = zeroship_core::UserId::mint();
-    let email = format!("bcl-emit-{}@zeroship.test", Uuid::new_v4().simple());
-    db.execute(
-        "INSERT INTO zeroship.users (id, email, email_verified_at, name) \
-         VALUES ($1, $2::citext, NOW(), 'BCL Emit User')",
-        &[&user_id.as_str(), &email],
-    )
-    .await
-    .expect("seed user");
-    user_id
 }
 
 async fn seed_oauth_client(db: &Client, client_id: &str, backchannel_logout_uri: &str) {
