@@ -2016,6 +2016,32 @@ drives publication, creator execution, checkpointing and exact ACK retry through
 separate ORM databases. These tests use a deterministic executor; they do not
 establish V8, authenticated network or production host composition.
 
+`runner::assignments::AssignmentBindings` now composes the authenticated worker
+client, remote policy bindings and consumer snapshots. It reads assignment pages
+until an empty page, with a cumulative scope bound and a deadline for the complete
+scan. Failed, oversized or superseded scans preserve installed bindings. Pages
+are not a transactional snapshot: fresh scoped policy and job exchanges remain
+the authority, and a later scan discovers concurrent placement changes.
+
+Unchanged assignments retain their policy generation and live consumer identity.
+Complete scans retire removed or replaced generations before preparation I/O.
+An injected `CreatorFactory` resolves independently authorized creator resources;
+the reconciler verifies its returned app and exact policy binding. Each app's
+renewal, policy refresh and setup progress independently, with setup bounded by
+its captured original policy deadline. Cancelled setup is retryable, and a late
+completion cannot reinstall a retired association. Closure cancels preparation
+and revokes local admission; it does not release placement or discharge durable
+recovery responsibility, and the host must still join consumer execution.
+
+This native composition leaves registration/refresh scheduling and the production
+creator resource provider with the host. It does not replace enrollment bootstrap,
+zone eligibility, normal deployment recovery handoff or the private-zone cutover.
+Native HTTP tests verify signed endpoint assertions and replay rejection while
+creator fixtures open isolated SQLite journals. They cover failed and superseded
+scans, exact factory authority, replacement, cancellation, closure and independent
+policy refresh while another app's setup is stalled. Runner tests separately
+retain execution capacity until native shutdown joins.
+
 Native manager scheduling now prepares immutable deployment descriptors, records
 monotonic activation and publishes due cron/interval occurrences through the ORM.
 Activation and recovery responsibility commit together. Occurrence publication

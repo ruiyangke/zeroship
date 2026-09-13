@@ -177,6 +177,10 @@ impl std::fmt::Debug for ConsumerBindings {
 }
 
 impl ConsumerBindings {
+    pub(crate) fn limit(&self) -> usize {
+        self.0.borrow().limit
+    }
+
     /// Replace the complete authorized snapshot atomically. Reusing a cloned
     /// `ConsumerScope` keeps its executions; a new binding joins old execution
     /// before its occupied slot may claim again. Other free slots remain usable.

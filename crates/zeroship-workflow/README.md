@@ -110,9 +110,17 @@ rotates between eligible apps and bounds claim I/O, idle polling and error retri
 The consumer performs no calendar evaluation, journal discovery or independent
 maintenance. Native tests connect it to the ORM coordinator and queue using a
 separate manager database, including a lost settlement acknowledgement.
-The consumer handles advance and reconciliation jobs. Other delivered operation
-handlers, authenticated placement refresh, production manager recovery dispatch
-and ordinary worker/CLI composition remain required before replacing the existing runner.
+`runner::assignments::AssignmentBindings` connects authenticated manager placement
+to those bindings. It reads through an empty assignment page before changing the
+snapshot, preserves unchanged policy generations, and retires removals before
+opening replacement creator resources. `CreatorFactory` resolves resources from
+trusted host configuration and must return the exact supplied policy binding.
+Renewal, policy refresh and preparation progress independently across apps under
+operation bounds and original policy deadlines. Closing the reconciler revokes
+local authority synchronously; the host separately joins consumer execution.
+Production registration/refresh loops, trusted creator resource providers,
+remaining delivered operation handlers and ordinary worker/CLI composition remain
+required before replacing the existing runner.
 `service::reconciliation` persists the selected publication page and its progress
 in the creator job receipt. It reserves each item before attempting publication,
 so retries reach later items even when an earlier request stalls. Confirmation
