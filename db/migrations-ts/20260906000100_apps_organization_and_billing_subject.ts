@@ -123,7 +123,7 @@ export default {
       .add({ type: t.text().notNull() });
     table("apps", { schema: "zeroship" })
       .check("apps_organization_id_shape")
-      .add({ expr: (col) => col("organization_id").regex("^org_[0-9A-Za-z]{22}$") });
+      .add({ expr: (col) => col("organization_id").regex("^org_[0-9a-z]{25}$") });
     // Two scans, two leading columns. `(project_id, organization_id)` answers
     // "the apps of this project" and backs the parent key the next file adds;
     // `(organization_id)` answers "the apps of this organization", which is the

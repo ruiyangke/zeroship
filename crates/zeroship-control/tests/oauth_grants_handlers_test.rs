@@ -16,7 +16,7 @@ use zeroship_control::{
     api, oauth_grants_handlers, AppState, EnvStore, Quota, RateLimiter, Registry, SecretString,
     StripeStore,
 };
-use zeroship_core::UserId;
+use zeroship_core::{AppId, UserId};
 
 use crate::common;
 
@@ -705,13 +705,13 @@ async fn revoke_cascade_revokes_relay_alias_so_inbound_bounces() {
 /// to derive the per-app `pws_` before writing the token-family marker.
 /// `app_oauth_clients.app_id` FKs `zeroship.apps`, so we seed a minimal app row
 /// first. Returns the seeded `app_id` so the caller can clean it up.
-async fn insert_app_oauth_client(state: &AppState, client_id: &str, sector: &str) -> Uuid {
-    let app_id = Uuid::new_v4();
+async fn insert_app_oauth_client(state: &AppState, client_id: &str, sector: &str) -> AppId {
+    let app_id = AppId::mint();
     // This case is about the OAuth client row, not about who owns the app.
     let project = common::unowned_project(&state.control_pg).await;
     // `apps.plan_id` FKs `zeroship.plans`; the column default is the literal
     // string 'free', but the catalog's built-in free tier is keyed by the
-    // derived `pln_<base62>` id (`free_plan_id()`), NOT 'free'. Seed it
+    // derived canonical plan id (`free_plan_id()`), NOT 'free'. Seed it
     // explicitly so the insert satisfies `apps_plan_fk`. The fixture already
     // seeded the built-in plans (`seed_plans`), so this id is present.
     state
@@ -720,8 +720,8 @@ async fn insert_app_oauth_client(state: &AppState, client_id: &str, sector: &str
             "INSERT INTO zeroship.apps (id, name, plan_id, project_id, organization_id) \
              SELECT $1, $2, $3, p.id, p.organization_id FROM zeroship.projects p WHERE p.id = $4",
             &[
-                &app_id,
-                &format!("app-{}", app_id.simple()),
+                &app_id.as_str(),
+                &format!("app-{}", app_id.as_str()),
                 &zeroship_control::plan_catalog::free_plan_id(),
                 &project,
             ],
@@ -733,7 +733,7 @@ async fn insert_app_oauth_client(state: &AppState, client_id: &str, sector: &str
         .execute(
             "INSERT INTO zeroship.app_oauth_clients (app_id, client_id, sector_identifier) \
              VALUES ($1, $2, $3)",
-            &[&app_id, &client_id, &sector],
+            &[&app_id.as_str(), &client_id, &sector],
         )
         .await
         .expect("insert app_oauth_clients row");
@@ -866,7 +866,10 @@ async fn revoke_grant_writes_token_family_marker_that_rejects_live_token() {
     // The apps row FKs app_oauth_clients (deleted above) — drop it last.
     fx.state
         .control_pg
-        .execute("DELETE FROM zeroship.apps WHERE id = $1", &[&app_id])
+        .execute(
+            "DELETE FROM zeroship.apps WHERE id = $1",
+            &[&app_id.as_str()],
+        )
         .await
         .ok();
     caller.cleanup(&fx.state).await;
@@ -1099,7 +1102,10 @@ async fn revoke_vs_reconsent_race_grant_absent_implies_alias_inert() {
             .ok();
         fx.state
             .control_pg
-            .execute("DELETE FROM zeroship.apps WHERE id = $1", &[&app_id])
+            .execute(
+                "DELETE FROM zeroship.apps WHERE id = $1",
+                &[&app_id.as_str()],
+            )
             .await
             .ok();
     }
@@ -1190,7 +1196,10 @@ async fn revoke_vs_reconsent_race_grant_absent_implies_alias_inert() {
             .ok();
         fx.state
             .control_pg
-            .execute("DELETE FROM zeroship.apps WHERE id = $1", &[&app_id])
+            .execute(
+                "DELETE FROM zeroship.apps WHERE id = $1",
+                &[&app_id.as_str()],
+            )
             .await
             .ok();
     }
@@ -1263,7 +1272,10 @@ async fn app_archive_preserves_relay_identities() {
     fx.cleanup_clients(std::slice::from_ref(&client_id)).await;
     fx.state
         .control_pg
-        .execute("DELETE FROM zeroship.apps WHERE id = $1", &[&app_uuid])
+        .execute(
+            "DELETE FROM zeroship.apps WHERE id = $1",
+            &[&app_uuid.as_str()],
+        )
         .await
         .ok();
     cleanup_user(&fx.state, &user_a).await;
@@ -1306,7 +1318,7 @@ async fn app_archive_returns_200_with_retained_record() {
         .await;
 
     let req = test::TestRequest::put()
-        .uri(&format!("/api/apps/{app_id}/archive"))
+        .uri(&format!("/api/apps/{}/archive", app_id.as_str()))
         .header("authorization", caller.bearer())
         .to_request();
     let resp = test::call_service(&app, req).await;
@@ -1317,14 +1329,17 @@ async fn app_archive_returns_200_with_retained_record() {
     assert!(body.get("archived_at").and_then(Value::as_str).is_some());
     assert_eq!(
         body.get("id").and_then(Value::as_str),
-        Some(app_id.to_string().as_str())
+        Some(app_id.as_str())
     );
 
     caller.cleanup(&fx.state).await;
     cleanup_user(&fx.state, &caller.user_id).await;
     fx.state
         .control_pg
-        .execute("DELETE FROM zeroship.apps WHERE id = $1", &[&app_id])
+        .execute(
+            "DELETE FROM zeroship.apps WHERE id = $1",
+            &[&app_id.as_str()],
+        )
         .await
         .ok();
 

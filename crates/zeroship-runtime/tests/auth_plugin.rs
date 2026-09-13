@@ -229,7 +229,7 @@ fn get_user_exposes_scopes_to_app_code() {
 fn get_user_id_is_the_per_app_pairwise_pws() {
     // The gateway projects the global UUID to this opaque per-app id; app
     // code only ever sees the pws_.
-    const PAIRWISE_USER_JSON: &str = r#"{"id":"pws_3Qk7xWf2bN0aLpZrT9cD","email":"alias@relay.zeroship.ai","name":"Jane Doe","email_verified":true,"scopes":["openid"]}"#;
+    const PAIRWISE_USER_JSON: &str = r#"{"id":"pws_3qk7xwf2bn0alpzrt9cd","email":"alias@relay.zeroship.ai","name":"Jane Doe","email_verified":true,"scopes":["openid"]}"#;
     let runtime = build_runtime_with_auth(
         r#"
         export default {
@@ -248,7 +248,7 @@ fn get_user_id_is_the_per_app_pairwise_pws() {
     let (status, body) = dispatch_with_user(&runtime, Some(PAIRWISE_USER_JSON.to_string()));
     assert_eq!(status, 200, "body: {body}");
     let v: serde_json::Value = serde_json::from_str(&body).expect("body is JSON");
-    assert_eq!(v["id"], "pws_3Qk7xWf2bN0aLpZrT9cD", "body: {body}");
+    assert_eq!(v["id"], "pws_3qk7xwf2bn0alpzrt9cd", "body: {body}");
     assert_eq!(v["idIsString"], true, "User.id must be an opaque string: {body}");
     assert_eq!(v["isPws"], true, "env.auth.getUser().id must be the pws_: {body}");
 }

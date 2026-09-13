@@ -1,7 +1,7 @@
 //! Registration in the normal deployment catalog, independent of a customer journal.
 
 use super::Error;
-use super::{deploys, invalid_storage, DeploymentHolds};
+use super::{DeploymentHolds, deploys, invalid_storage};
 use std::{future::Future, pin::Pin};
 use zeroship_core::{app_id::AppId, typed_id};
 use zeroship_data_orm::{
@@ -45,7 +45,7 @@ impl DeploymentHolds {
                 .collection(deploys::Entity::COLLECTION)?
                 .insert(value!({
                     "id":typed_id::generate("dep"),
-                    "app_id":app.uuid().to_string(),
+                    "app_id":app.as_str(),
                     "deploy_hash":hash,
                     "manifest_json":manifest_json,
                     "activated_at":null
@@ -67,7 +67,7 @@ impl DeploymentHolds {
                 .entity::<deploys::Entity>()?
                 .find::<RegisteredDeployment>(
                     deploys::app_id
-                        .eq(app.uuid().to_string())?
+                        .eq(app.as_str())?
                         .and(deploys::deploy_hash.eq(hash)?),
                     FindOptions::default(),
                 )

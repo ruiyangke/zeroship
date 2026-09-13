@@ -115,12 +115,11 @@ use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
-use uuid::Uuid;
 use zeroship_authz::{Action as AuthzAction, Resource};
 use zeroship_core::invite_id::InviteId;
 use zeroship_core::organization_id::OrganizationId;
 use zeroship_core::project_id::ProjectId;
-use zeroship_core::UserId;
+use zeroship_core::{AppId, UserId};
 use zeroship_mailer::templates::OrganizationInvite;
 use zeroship_mailer::{Address, Email};
 
@@ -975,7 +974,7 @@ fn row_to_project(row: &compio_postgres::Row) -> ProjectRecord {
 /// Returns [`OrganizationError::Db`] when the query fails.
 pub async fn organization_of_app<C: GenericClient + Sync>(
     pg: &C,
-    app_id: Uuid,
+    app_id: &AppId,
 ) -> Result<Option<String>, OrganizationError> {
     let rows = pg
         .query(
@@ -984,7 +983,7 @@ pub async fn organization_of_app<C: GenericClient + Sync>(
             // `projects(id, organization_id)`, so the two cannot disagree and the
             // join proved nothing the constraint does not already enforce.
             "SELECT a.organization_id FROM zeroship.apps a WHERE a.id = $1",
-            &[&app_id],
+            &[&app_id.as_str()],
         )
         .await
         .map_err(|err| db_error(&err, "resolve organization of app"))?;
@@ -2755,7 +2754,7 @@ pub async fn delete_project(
 pub async fn delete_app(
     registry: &Registry,
     principal: &UserId,
-    app_id: Uuid,
+    app_id: &AppId,
     source_ip: Option<&str>,
 ) -> Result<(), OrganizationError> {
     let mut conn = registry.conn().await?;
@@ -2772,7 +2771,7 @@ pub async fn delete_app(
     // have crossed the marker.
     tx.query_one(
         "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
-        &[&zeroship_core::app_derivation::lifecycle_lock_seed_for_stored_uuid(&app_id)],
+        &[&zeroship_core::app_derivation::lifecycle_lock_seed(app_id)],
     )
     .await
     .map_err(|err| db_error(&err, "lock app lifecycle"))?;
@@ -2796,7 +2795,12 @@ pub async fn delete_app(
     let rows = tx
         .query(
             &sql,
-            &[&app_id, &organization_id, &principal.as_str(), &ROLE_ADMIN],
+            &[
+                &app_id.as_str(),
+                &organization_id,
+                &principal.as_str(),
+                &ROLE_ADMIN,
+            ],
         )
         .await
         .map_err(|err| db_error(&err, "delete app"))?;
@@ -2817,7 +2821,7 @@ pub async fn delete_app(
     for table in ["app_vars", "app_secrets", "app_env_expose"] {
         tx.execute(
             &format!("DELETE FROM zeroship.{table} WHERE app_id = $1"),
-            &[&app_id],
+            &[&app_id.as_str()],
         )
         .await
         .map_err(|err| db_error(&err, "purge deleted app environment"))?;
@@ -2836,7 +2840,7 @@ pub async fn delete_app(
         &json!({
             "organization_id": organization_id,
             "project_id": project_id,
-            "app_id": app_id,
+            "app_id": app_id.as_str(),
             "name": name,
         }),
     )
@@ -2867,7 +2871,7 @@ struct AppOwnership {
 /// caller can be shown to have authority over.
 async fn lock_app_organization<C: GenericClient + Sync>(
     tx: &C,
-    app_id: Uuid,
+    app_id: &AppId,
 ) -> Result<AppOwnership, OrganizationError> {
     let rows = tx
         .query(
@@ -2876,7 +2880,7 @@ async fn lock_app_organization<C: GenericClient + Sync>(
                JOIN zeroship.projects p ON p.organization_id = o.id \
                JOIN zeroship.apps a ON a.project_id = p.id \
               WHERE a.id = $1 FOR UPDATE OF o",
-            &[&app_id],
+            &[&app_id.as_str()],
         )
         .await
         .map_err(|err| db_error(&err, "lock app organization"))?;
@@ -3677,7 +3681,7 @@ async fn classify_app_deletion_refusal<C: GenericClient + Sync>(
     tx: &C,
     organization_id: &str,
     principal: &UserId,
-    app_id: Uuid,
+    app_id: &AppId,
 ) -> OrganizationError {
     let sql = format!(
         "SELECT (SELECT COUNT(*) FROM zeroship.apps a \
@@ -3692,7 +3696,12 @@ async fn classify_app_deletion_refusal<C: GenericClient + Sync>(
     let rows = match tx
         .query(
             &sql,
-            &[&organization_id, &principal.as_str(), &app_id, &ROLE_ADMIN],
+            &[
+                &organization_id,
+                &principal.as_str(),
+                &app_id.as_str(),
+                &ROLE_ADMIN,
+            ],
         )
         .await
     {

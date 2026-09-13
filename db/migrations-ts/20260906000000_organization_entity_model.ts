@@ -152,7 +152,7 @@ export default {
     });
     table("organizations", { schema: "zeroship" })
       .check("organizations_id_shape")
-      .add({ expr: (col) => col("id").regex("^org_[0-9A-Za-z]{22}$") });
+      .add({ expr: (col) => col("id").regex("^org_[0-9a-z]{25}$") });
     table("organizations", { schema: "zeroship" })
       .unique("organizations_slug_key")
       .add({ columns: ["slug"] });
@@ -200,7 +200,7 @@ export default {
     });
     table("projects", { schema: "zeroship" })
       .check("projects_id_shape")
-      .add({ expr: (col) => col("id").regex("^prj_[0-9A-Za-z]{22}$") });
+      .add({ expr: (col) => col("id").regex("^prj_[0-9a-z]{25}$") });
     // A project slug is organization-local. Only `apps.name` stays globally
     // unique, because it is the Host label the gateway routes on.
     table("projects", { schema: "zeroship" })
@@ -413,7 +413,7 @@ export default {
     });
     table("organization_invites", { schema: "zeroship" })
       .check("organization_invites_id_shape")
-      .add({ expr: (col) => col("id").regex("^ivt_[0-9A-Za-z]{22}$") });
+      .add({ expr: (col) => col("id").regex("^ivt_[0-9a-z]{25}$") });
     table("organization_invites", { schema: "zeroship" })
       .unique("organization_invites_token_key")
       .add({ columns: ["token_hash"] });
@@ -495,7 +495,7 @@ export default {
       .add({ type: t.text().notNull() });
     table("apps", { schema: "zeroship" })
       .check("apps_project_id_shape")
-      .add({ expr: (col) => col("project_id").regex("^prj_[0-9A-Za-z]{22}$") });
+      .add({ expr: (col) => col("project_id").regex("^prj_[0-9a-z]{25}$") });
     // RESTRICT: an app is the deployable unit and a project delete must not take
     // one silently. There is no `apps.organization_id` -- the organization is
     // reached through the project, and one path cannot disagree with itself.
@@ -535,7 +535,7 @@ export default {
     // altering them to a collated `text` would destroy their case-insensitive
     // comparison.
     const typedIdColumnsByTable: Readonly<Record<string, readonly string[]>> = {
-      organizations: ["id", "personal_owner_id", "created_by"],
+      organizations: ["id", "created_by", "personal_owner_id"],
       projects: ["id", "organization_id", "created_by"],
       organization_members: ["organization_id", "user_id", "added_by", "changed_by"],
       project_members: ["project_id", "organization_id", "user_id", "added_by", "changed_by"],

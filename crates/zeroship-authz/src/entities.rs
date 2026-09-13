@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::str::FromStr;
 
 use cedar_policy::{Entities, Entity, EntityUid, RestrictedExpression};
-use zeroship_core::UserId;
+use zeroship_id::UserId;
 
 use crate::authority::Authority;
 use crate::{AuthzError, Resource};
@@ -74,9 +74,8 @@ fn user_entity(principal_id: &UserId, authority: &Authority) -> Result<Entity, A
 /// Returns [`AuthzError::CedarEntities`] when Cedar rejects the uid.
 pub(crate) fn resource_entity_uid(resource: &Resource) -> Result<EntityUid, AuthzError> {
     match resource {
-        Resource::App { id } | Resource::Project { id } | Resource::Organization { id } => {
-            uid(resource.cedar_type(), id)
-        }
+        Resource::App { id } => uid(resource.cedar_type(), id.as_str()),
+        Resource::Project { id } | Resource::Organization { id } => uid(resource.cedar_type(), id),
         Resource::Any => uid(resource.cedar_type(), "*"),
     }
 }
@@ -111,11 +110,9 @@ pub(crate) fn cedar_string(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use uuid::Uuid;
-    use zeroship_core::UserId;
 
     fn principal() -> UserId {
-        UserId::parse("usr_0000000000000000000001").expect("valid user id fixture")
+        UserId::mint()
     }
 
     fn authority() -> Authority {
@@ -135,13 +132,13 @@ mod tests {
         for resource in [
             Resource::Any,
             Resource::App {
-                id: Uuid::nil().to_string(),
+                id: zeroship_id::AppId::mint(),
             },
             Resource::Project {
-                id: "prj_0123456789abcdefghijkl".to_owned(),
+                id: "prj_0000123456789abcdefghijkl".to_owned(),
             },
             Resource::Organization {
-                id: "org_0123456789abcdefghijkl".to_owned(),
+                id: "org_0000123456789abcdefghijkl".to_owned(),
             },
         ] {
             let entities = assemble_entities(&principal(), &authority(), &resource)

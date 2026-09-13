@@ -77,7 +77,7 @@ impl AppDeployment {
         }
         let (result, archive) = file.read_exact_at(vec![0; size], 0).await.into();
         result.map_err(|_| unavailable())?;
-        let ingested = zeroship_bundle::ingest(&self.blobs, &app.uuid(), &archive)
+        let ingested = zeroship_bundle::ingest(&self.blobs, app, &archive)
             .await
             .map_err(|_| unavailable())?;
         let deploy_hash = ingested.deploy_hash;

@@ -701,7 +701,7 @@ export function checkExpressionSurfaceTypechecks(): void {
     expr: (col) => col("created_at").extract("epoch").gt(0),
   });
   table("oauth_authorization_codes").check("user_id_fmt").add({
-    expr: (col) => col("user_id").regex("^usr_[0-9A-Za-z]{20,40}$"),
+    expr: (col) => col("user_id").regex("^usr_[0-9a-z]{25}$"),
   });
   table("oauth_authorization_codes").check("data_size").add({
     expr: (col) => col("data").columnSize().lt(1000),

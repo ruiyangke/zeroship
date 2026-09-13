@@ -21,7 +21,7 @@ mod common;
 
 use compio_postgres::{connect, Client, NoTls};
 use uuid::Uuid;
-use zeroship_core::UserId;
+use zeroship_core::user_id::UserId;
 use zeroship_gateway::identities;
 
 #[allow(clippy::future_not_send)]
@@ -95,10 +95,7 @@ async fn cleanup(client: &Client, client_id: &str, user_id: &UserId) {
         )
         .await;
     let _ = client
-        .execute(
-            "DELETE FROM zeroship.users WHERE id = $1",
-            &[&user_id.as_str()],
-        )
+        .execute("DELETE FROM zeroship.users WHERE id = $1", &[&user_id.as_str()])
         .await;
     let _ = client
         .execute(
@@ -183,10 +180,16 @@ async fn upsert_refuses_to_rebind_a_stored_pairwise_subject() {
     // the same user genuinely projects to under two sector identifiers, which
     // is exactly the configuration drift the guard exists to refuse.
     let salt = zeroship_core::auth::derive_pairwise_salt(b"identities-rebind-fixture-salt");
-    let subject_a =
-        zeroship_core::auth::derive_pairwise(&salt, &user_id, "https://rebind-a.zeroship.test");
-    let subject_b =
-        zeroship_core::auth::derive_pairwise(&salt, &user_id, "https://rebind-b.zeroship.test");
+    let subject_a = zeroship_core::auth::derive_pairwise(
+        &salt,
+        &user_id,
+        "https://rebind-a.zeroship.test",
+    );
+    let subject_b = zeroship_core::auth::derive_pairwise(
+        &salt,
+        &user_id,
+        "https://rebind-b.zeroship.test",
+    );
     assert_ne!(
         subject_a, subject_b,
         "the fixture must offer the guard two genuinely different subjects"

@@ -841,9 +841,9 @@ pub fn oidc_at_hash(access_token: &str) -> String {
 /// The witness alone says "SOME session was validated". This makes it say "THIS
 /// person's session was validated", which is what MINT-READS-ROW means: a
 /// caller holding a proof for one session must not be able to mint a credential
-/// naming another person. It is a runtime check because the identifier crosses
-/// the boundary as a string - the type says a read happened, this says what the
-/// read was about, and both are needed.
+/// naming another person. It is a runtime check because a proof and a mint are
+/// two values of the same type - the type says a read happened, this says what
+/// the read was about, and both are needed.
 ///
 /// Every live call site passes the session's own person id, so a failure here
 /// is a programming error rather than a request-shaped one, and it is reported

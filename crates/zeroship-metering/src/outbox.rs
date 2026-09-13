@@ -430,7 +430,7 @@ impl UsageOutbox {
                 .iter()
                 .map(|event| OutboxFailure {
                     event_id: event.event_id.clone(),
-                    app_id: event.subject.app,
+                    app_id: event.subject.app.clone(),
                     meter: event.meter.clone(),
                     error: format!("wal append: {error}"),
                 })
@@ -467,7 +467,7 @@ impl UsageOutbox {
                         .iter()
                         .map(|event| OutboxFailure {
                             event_id: event.event_id.clone(),
-                            app_id: event.subject.app,
+                            app_id: event.subject.app.clone(),
                             meter: event.meter.clone(),
                             error: format!("wal read: {error}"),
                         })
@@ -496,7 +496,7 @@ impl UsageOutbox {
 
         for pending_event in pending {
             let event = &pending_event.event;
-            let Some(app_id) = event.subject.app else {
+            let Some(app_id) = event.subject.app.clone() else {
                 let failure = OutboxFailure {
                     event_id: event.event_id.clone(),
                     app_id: None,
@@ -518,13 +518,13 @@ impl UsageOutbox {
                 Err(error) => {
                     let failure = OutboxFailure {
                         event_id: event.event_id.clone(),
-                        app_id: Some(app_id),
+                        app_id: Some(app_id.clone()),
                         meter: event.meter.clone(),
                         error: format!("serialize usage event: {error}"),
                     };
                     tracing::warn!(
                         event_id = %failure.event_id,
-                        app_id = %app_id,
+                        app_id = app_id.as_str(),
                         meter = %failure.meter,
                         error = %failure.error,
                         "meter outbox publish failed"
@@ -534,7 +534,10 @@ impl UsageOutbox {
                 }
             };
 
-            let key = app_id.to_string();
+            // The partition key is the printed typed id. It is stable per app, so
+            // one app's usage stays on one partition and the consumer keeps per-app
+            // ordering.
+            let key = app_id.as_str();
             match self
                 .stream
                 .publish(&self.topic, key.as_bytes(), &payload)
@@ -548,7 +551,7 @@ impl UsageOutbox {
                         Err(error) => {
                             let failure = OutboxFailure {
                                 event_id: event.event_id.clone(),
-                                app_id: Some(app_id),
+                                app_id: Some(app_id.clone()),
                                 meter: event.meter.clone(),
                                 error: format!("wal trim: {error}"),
                             };
@@ -556,7 +559,7 @@ impl UsageOutbox {
                                 stream = self.stream.id(),
                                 topic = %self.topic,
                                 event_id = %failure.event_id,
-                                app_id = %app_id,
+                                app_id = app_id.as_str(),
                                 meter = %failure.meter,
                                 error = %failure.error,
                                 "meter outbox published but failed to trim WAL; event will replay"
@@ -568,7 +571,7 @@ impl UsageOutbox {
                 Err(error) => {
                     let failure = OutboxFailure {
                         event_id: event.event_id.clone(),
-                        app_id: Some(app_id),
+                        app_id: Some(app_id.clone()),
                         meter: event.meter.clone(),
                         error: error.to_string(),
                     };
@@ -576,7 +579,7 @@ impl UsageOutbox {
                         stream = self.stream.id(),
                         topic = %self.topic,
                         event_id = %failure.event_id,
-                        app_id = %app_id,
+                        app_id = app_id.as_str(),
                         meter = %failure.meter,
                         error = %failure.error,
                         "meter outbox publish failed"
@@ -779,7 +782,7 @@ pub struct OutboxPublishResult {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OutboxFailure {
     pub event_id: String,
-    pub app_id: Option<uuid::Uuid>,
+    pub app_id: Option<zeroship_core::app_id::AppId>,
     pub meter: String,
     pub error: String,
 }
@@ -856,6 +859,7 @@ pub fn spawn_disabled_drain_task(meter: Arc<Meter>, interval: Duration, reason: 
 
 #[cfg(test)]
 mod tests {
+    use zeroship_core::app_id::AppId;
     use std::sync::Mutex;
 
     use uuid::Uuid;
@@ -1122,7 +1126,7 @@ mod tests {
 
         let first = UsageWal::open(&path).expect("open wal");
         first
-            .append(&[usage_event(Uuid::now_v7(), "requests", 7)])
+            .append(&[usage_event(&AppId::mint(), "requests", 7)])
             .expect("append");
         assert_eq!(first.load_pending().expect("pending").pending.len(), 1);
         drop(first);
@@ -1143,17 +1147,17 @@ mod tests {
     fn drain_produces_usage_events_and_outbox_publishes_by_app() {
         compio::runtime::Runtime::new().unwrap().block_on(async {
             let meter = Meter::with_source("worker-test");
-            let app_a = Uuid::new_v4();
-            let app_b = Uuid::new_v4();
-            meter.increment(&app_a.to_string(), "requests", 2);
-            meter.increment(&app_a.to_string(), "db_reads", 5);
-            meter.increment(&app_b.to_string(), "kv_writes", 3);
+            let app_a = AppId::mint();
+            let app_b = AppId::mint();
+            meter.increment(app_a.as_str(), "requests", 2);
+            meter.increment(app_a.as_str(), "db_reads", 5);
+            meter.increment(app_b.as_str(), "kv_writes", 3);
 
             let events = meter.drain();
             assert_eq!(events.len(), 3);
-            assert_event(&events, app_a, "requests", 2);
-            assert_event(&events, app_a, "db_reads", 5);
-            assert_event(&events, app_b, "kv_writes", 3);
+            assert_event(&events, &app_a, "requests", 2);
+            assert_event(&events, &app_a, "db_reads", 5);
+            assert_event(&events, &app_b, "kv_writes", 3);
             for event in &events {
                 assert!(!event.event_id.is_empty());
                 assert_eq!(event.source, "worker-test");
@@ -1176,9 +1180,9 @@ mod tests {
             let published = stream.published.lock().unwrap().clone();
             assert_eq!(published.len(), events.len());
             for published in published {
-                let app_id = published.event.subject.app.expect("app id present");
+                let app_id = published.event.subject.app.clone().expect("app id present");
                 assert_eq!(published.topic, "usage-events-test");
-                assert_eq!(published.key, app_id.to_string().as_bytes());
+                assert_eq!(published.key, app_id.as_str().as_bytes());
                 assert!(events.contains(&published.event));
             }
 
@@ -1201,8 +1205,8 @@ mod tests {
     fn publish_failure_retains_event_and_retries_next_attempt() {
         compio::runtime::Runtime::new().unwrap().block_on(async {
             let meter = Meter::with_source("worker-test");
-            let app = Uuid::new_v4();
-            meter.increment(&app.to_string(), "requests", 2);
+            let app = AppId::mint();
+            meter.increment(app.as_str(), "requests", 2);
             let events = meter.drain();
             assert_eq!(events.len(), 1);
 
@@ -1266,9 +1270,9 @@ mod tests {
     fn wal_append_failure_retains_drained_counts_for_verbatim_retry() {
         compio::runtime::Runtime::new().unwrap().block_on(async {
             let meter = Meter::with_source("worker-test");
-            let app = Uuid::new_v4();
-            meter.increment(&app.to_string(), "requests", 7);
-            meter.increment(&app.to_string(), "db_reads", 3);
+            let app = AppId::mint();
+            meter.increment(app.as_str(), "requests", 7);
+            meter.increment(app.as_str(), "db_reads", 3);
 
             let events = meter.drain();
             assert_eq!(events.len(), 2);
@@ -1355,7 +1359,7 @@ mod tests {
             let mut drained = Vec::new();
             for value in 1..=3u64 {
                 let meter = Meter::with_source("worker-test");
-                meter.increment(&Uuid::new_v4().to_string(), "requests", value);
+                meter.increment(AppId::mint().as_str(), "requests", value);
                 let events = meter.drain();
                 assert_eq!(events.len(), 1);
                 let result = outbox.publish_events(&events).await;
@@ -1400,7 +1404,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("poison.redb");
         let wal = UsageWal::open(&path).expect("open wal");
-        wal.append(&[usage_event(Uuid::now_v7(), "requests", 7)])
+        wal.append(&[usage_event(&AppId::mint(), "requests", 7)])
             .expect("append");
 
         let tx = wal.db.begin_write().expect("begin write");
@@ -1426,12 +1430,12 @@ mod tests {
         println!("ruled on 1 healthy and 1 poisoned entry");
     }
 
-    fn usage_event(app_id: Uuid, meter: &str, value: u64) -> UsageEvent {
+    fn usage_event(app_id: &AppId, meter: &str, value: u64) -> UsageEvent {
         UsageEvent {
             event_id: Uuid::now_v7().to_string(),
             source: "test".to_string(),
             subject: zeroship_core::usage_event::UsageSubject {
-                app: Some(app_id),
+                app: Some(app_id.clone()),
                 organization: Some(zeroship_core::typed_id::generate("org")),
             },
             meter: meter.to_string(),
@@ -1441,10 +1445,10 @@ mod tests {
         }
     }
 
-    fn assert_event(events: &[UsageEvent], app_id: Uuid, meter: &str, value: u64) {
+    fn assert_event(events: &[UsageEvent], app_id: &AppId, meter: &str, value: u64) {
         let event = events
             .iter()
-            .find(|event| event.subject.app == Some(app_id) && event.meter == meter)
+            .find(|event| event.subject.app.as_ref() == Some(app_id) && event.meter == meter)
             .expect("usage event exists");
         assert_eq!(event.value, value);
     }

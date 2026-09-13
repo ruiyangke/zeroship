@@ -1,10 +1,10 @@
 use serde_json::{json, Value};
 use std::sync::Arc;
-use uuid::Uuid;
 use zeroship_bundle::{
     ingest, sha256_hex, verify_deployment_manifest, BlobStore, ExecutableError, LoadedWorker,
     LocalDiskBlobStore, Manifest,
 };
+use zeroship_id::AppId;
 
 fn archive(manifest: &Value, blobs: &[(&str, &[u8])]) -> Vec<u8> {
     let mut tar = tar::Builder::new(Vec::new());
@@ -25,7 +25,7 @@ fn archive(manifest: &Value, blobs: &[(&str, &[u8])]) -> Vec<u8> {
 struct Fixture {
     _directory: tempfile::TempDir,
     store: Arc<dyn BlobStore>,
-    app: Uuid,
+    app: AppId,
     manifest: Manifest,
     manifest_json: String,
     hash: String,
@@ -36,7 +36,7 @@ impl Fixture {
         let directory = tempfile::tempdir().unwrap();
         let store: Arc<dyn BlobStore> =
             Arc::new(LocalDiskBlobStore::new(directory.path().into()).unwrap());
-        let app = Uuid::now_v7();
+        let app = AppId::mint();
         let entry = b"import value from './part.js'; export default value;";
         let part = b"export default 'original';";
         let descriptor = br#"{"version":2,"collections":{}}"#;
@@ -205,7 +205,7 @@ async fn worker_loading_rejects_corrupt_missing_and_oversized_sources() {
 async fn local_manifest_reads_refuse_oversized_files_before_loading_the_body() {
     let directory = tempfile::tempdir().unwrap();
     let store = LocalDiskBlobStore::new(directory.path().into()).unwrap();
-    let app = Uuid::now_v7();
+    let app = AppId::mint();
     let hash = "a".repeat(64);
     store.put_manifest(&app, &hash, b"{}").await.unwrap();
     assert_eq!(
@@ -215,7 +215,7 @@ async fn local_manifest_reads_refuse_oversized_files_before_loading_the_body() {
     let path = directory
         .path()
         .join("manifests")
-        .join(app.to_string())
+        .join(app.as_str())
         .join(format!("{hash}.json"));
     std::fs::OpenOptions::new()
         .write(true)

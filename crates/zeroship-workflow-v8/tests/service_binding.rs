@@ -69,7 +69,7 @@ impl Fixture {
         }
     }
 
-    fn runtime(&self, app: &AppWorkflows, identity: Option<uuid::Uuid>, source: &str) -> Runtime {
+    fn runtime(&self, app: &AppWorkflows, identity: Option<AppId>, source: &str) -> Runtime {
         zeroship_runtime::init_v8();
         let mut builder = Runtime::builder()
             .modules(vec![ModuleEntry {
@@ -123,7 +123,7 @@ async fn binding_uses_host_identity_for_lifecycle_operations() {
     let fixture = Fixture::new().await;
     let result = fetch(fixture.runtime(
         &fixture.app,
-        Some(fixture.app.app_id().uuid()),
+        Some(fixture.app.app_id().clone()),
         r"
         export default { async fetch(_request, env) {
             const run = await env.workflows.Example.start({input:{secret:'app-a'}});
@@ -191,17 +191,21 @@ async fn binding_reads_outputs_and_denies_foreign_run_handles() {
         serde_json::to_string(&run.id).unwrap()
     );
     let owner =
-        fetch(fixture.runtime(&fixture.app, Some(fixture.app.app_id().uuid()), &source)).await;
+        fetch(fixture.runtime(&fixture.app, Some(fixture.app.app_id().clone()), &source)).await;
     assert_eq!(owner, json!({"output":{"secret":"app-a"}}));
-    let stranger =
-        fetch(fixture.runtime(&fixture.other, Some(fixture.other.app_id().uuid()), &source)).await;
+    let stranger = fetch(fixture.runtime(
+        &fixture.other,
+        Some(fixture.other.app_id().clone()),
+        &source,
+    ))
+    .await;
     assert_eq!(stranger, json!({"code":"workflow_not_found"}));
 }
 
 #[compio::test]
 async fn mismatched_or_missing_host_identity_rejects_before_creator_evaluation() {
     let fixture = Fixture::new().await;
-    for identity in [Some(fixture.app.app_id().uuid()), None] {
+    for identity in [Some(fixture.app.app_id().clone()), None] {
         // APP_ID agrees with this binding; only the immutable host slot differs.
         let runtime = fixture.runtime(
             &fixture.other,

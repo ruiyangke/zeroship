@@ -6,6 +6,7 @@ use zeroship_authz::{
     load_platform_policies, lower, policy_hash, Action, Condition, Effect, Policy, Resource,
     Statement,
 };
+use zeroship_id::AppId;
 
 #[test]
 fn wrapper_lowers_to_valid_cedar_source() {
@@ -14,9 +15,7 @@ fn wrapper_lowers_to_valid_cedar_source() {
         statements: vec![Statement {
             effect: Effect::Allow,
             actions: vec![Action::AppsDeploy],
-            resources: vec![Resource::App {
-                id: "blog".to_owned(),
-            }],
+            resources: vec![Resource::App { id: AppId::mint() }],
             conditions: vec![Condition::TimeWindow {
                 start: "09:00".to_owned(),
                 end: "17:00".to_owned(),
@@ -43,17 +42,13 @@ fn multiple_statements_become_multiple_policies() {
             Statement {
                 effect: Effect::Allow,
                 actions: vec![Action::AppsDeploy],
-                resources: vec![Resource::App {
-                    id: "blog".to_owned(),
-                }],
+                resources: vec![Resource::App { id: AppId::mint() }],
                 conditions: vec![],
             },
             Statement {
                 effect: Effect::Deny,
                 actions: vec![Action::EnvWrite],
-                resources: vec![Resource::App {
-                    id: "acme".to_owned(),
-                }],
+                resources: vec![Resource::App { id: AppId::mint() }],
                 conditions: vec![],
             },
         ],
@@ -72,9 +67,7 @@ fn condition_ip_range_lowers_correctly() {
         statements: vec![Statement {
             effect: Effect::Allow,
             actions: vec![Action::AppsDeploy],
-            resources: vec![Resource::App {
-                id: "blog".to_owned(),
-            }],
+            resources: vec![Resource::App { id: AppId::mint() }],
             conditions: vec![Condition::IpRange {
                 cidrs: vec!["10.0.0.0/8".to_owned(), "192.168.0.0/16".to_owned()],
             }],
@@ -96,21 +89,38 @@ fn condition_ip_range_lowers_correctly() {
 /// lowering no longer exists, and `Condition` is `#[serde(tag = "kind")]`, so a
 /// wrapper carrying either kind has to be REFUSED rather than dropped: a
 /// silently ignored condition widens the statement it was meant to narrow.
+///
+/// The app id in the fixture is a MINTED one, and the empty-conditions control
+/// below is what makes that load-bearing rather than tidy. `Resource::App`
+/// decodes through `AppId::parse`, so the placeholder this fixture used to carry
+/// would refuse the whole wrapper on the RESOURCE - and every assertion here
+/// would have gone on passing while proving nothing about the conditions.
 #[test]
 fn deleted_mfa_conditions_do_not_deserialize() {
-    for gone in [
-        json!({"kind": "require_mfa"}),
-        json!({"kind": "mfa_within", "seconds": 600}),
-    ] {
-        let wrapper = json!({
+    let app = AppId::mint();
+    let wrapper_with = |conditions: serde_json::Value| {
+        json!({
             "name": "test",
             "statements": [{
                 "effect": "allow",
                 "actions": ["apps:deploy"],
-                "resources": [{"type": "app", "id": "blog"}],
-                "conditions": [gone]
+                "resources": [{"type": "app", "id": app.as_str()}],
+                "conditions": conditions
             }]
-        });
+        })
+    };
+
+    // The control: one variable changed. Everything but the condition list is
+    // what the refusals below carry, and it must DECODE.
+    let control = wrapper_with(json!([]));
+    Policy::from_json_value(&control)
+        .expect("the fixture minus the deleted condition must still decode");
+
+    for gone in [
+        json!({"kind": "require_mfa"}),
+        json!({"kind": "mfa_within", "seconds": 600}),
+    ] {
+        let wrapper = wrapper_with(json!([gone]));
         assert!(
             Policy::from_json_value(&wrapper).is_err(),
             "{wrapper} must not rebuild a condition the lowering no longer has"
@@ -125,9 +135,7 @@ fn time_window_lowers_to_utc_minute_predicate() {
         statements: vec![Statement {
             effect: Effect::Allow,
             actions: vec![Action::AppsRead],
-            resources: vec![Resource::App {
-                id: "blog".to_owned(),
-            }],
+            resources: vec![Resource::App { id: AppId::mint() }],
             conditions: vec![Condition::TimeWindow {
                 start: "09:00".to_owned(),
                 end: "17:00".to_owned(),
@@ -138,9 +146,7 @@ fn time_window_lowers_to_utc_minute_predicate() {
 
     let source = lower(&policy);
 
-    assert!(source.contains(
-        "(context.now_minute_utc >= 540 && context.now_minute_utc < 1020)"
-    ));
+    assert!(source.contains("(context.now_minute_utc >= 540 && context.now_minute_utc < 1020)"));
     assert!(!source.contains("lowers to true"));
     PolicySet::from_str(&source).expect("lowered policy should parse as Cedar");
 }

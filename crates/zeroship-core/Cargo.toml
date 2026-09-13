@@ -33,6 +33,7 @@ aes-gcm = { workspace = true }
 ed25519-dalek = { workspace = true, features = ["pkcs8"] }
 zeroize = { version = "1", features = ["derive"] }
 zeroship-bundle = { workspace = true }
+zeroship-id = { workspace = true }
 # OIDC verifier — JWKS cache + ID-token verification used by both
 # gateway (P3-U3) and control plane (P3-U7) as OIDC RPs.
 jsonwebtoken = { workspace = true }

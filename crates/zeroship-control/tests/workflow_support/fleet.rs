@@ -18,6 +18,7 @@ use zeroship_core::service_assertion::{
     ServiceSigningKey, ServiceTrustBundle, TransportAssertionVerifier,
 };
 use zeroship_core::service_peers::{service_issuer, ServiceAuth, ServiceKeyring};
+use zeroship_core::AppId;
 use zeroship_core::UserId;
 
 pub const CONTROL_KEY: &str = "test-control-key";
@@ -126,7 +127,7 @@ pub struct Fleet {
     pub control_url: String,
     pub gateway_url: String,
     pub worker_url: String,
-    pub app_id: Uuid,
+    pub app_id: AppId,
     pub deploy_id: String,
     pub blob_root: PathBuf,
 }
@@ -181,7 +182,7 @@ impl Fleet {
             control_url: format!("http://127.0.0.1:{}", port()),
             gateway_url: format!("http://127.0.0.1:{}", port()),
             worker_url: format!("http://127.0.0.1:{}", port()),
-            app_id: Uuid::nil(),
+            app_id: AppId::mint(),
             deploy_id: String::new(),
         };
         fs::create_dir_all(&fleet.blob_root).unwrap();
@@ -387,18 +388,18 @@ impl Fleet {
             "workflow provisioning failed: {}",
             String::from_utf8_lossy(&output.stderr)
         );
-        fleet.app_id = String::from_utf8_lossy(&output.stdout)
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let app_id = stdout
             .lines()
             .find_map(|line| line.strip_prefix("app_id="))
-            .expect("provision app id")
-            .parse()
-            .unwrap();
+            .expect("provision app id");
+        fleet.app_id = AppId::parse(app_id).expect("canonical provisioned app id");
         let (pg, connection) =
             compio_postgres::connect(&fleet.database.url(), compio_postgres::NoTls)
                 .await
                 .unwrap();
         let driver = compio::runtime::spawn(connection.run());
-        zeroship_migrate_server::provisioning::provision_database(&pg, &fleet.app_id.to_string())
+        zeroship_migrate_server::provisioning::provision_database(&pg, fleet.app_id.as_str())
             .await
             .unwrap();
         let request = serde_json::from_slice(
@@ -447,12 +448,12 @@ impl Fleet {
         );
         pg.execute(
             "UPDATE zeroship.apps SET workflows_enabled = true WHERE id = $1",
-            &[&fleet.app_id],
+            &[&fleet.app_id.as_str()],
         )
         .await
         .unwrap();
         pg.batch_execute("UPDATE zeroship.plans SET workflows_allowed = true; INSERT INTO zeroship.workflow_rollout_config (id, dispatch_paused, ingress_disabled, updated_by) VALUES ('global', false, false, 'workflow-fixture') ON CONFLICT (id) DO UPDATE SET dispatch_paused = false, ingress_disabled = false").await.unwrap();
-        fleet.deploy_id = pg.query_one("SELECT id FROM zeroship.app_deploys WHERE app_id = $1 ORDER BY activated_at DESC, created_at DESC, id DESC LIMIT 1", &[&fleet.app_id]).await.unwrap().get(0);
+        fleet.deploy_id = pg.query_one("SELECT id FROM zeroship.app_deploys WHERE app_id = $1 ORDER BY activated_at DESC, created_at DESC, id DESC LIMIT 1", &[&fleet.app_id.as_str()]).await.unwrap().get(0);
         drop(pg);
         driver.await.unwrap().unwrap();
         fleet

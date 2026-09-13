@@ -39,14 +39,15 @@ enum Fault {
 impl Fault {
     async fn install(&self, last_retained: i32) {
         match self {
-            Self::Sqlite(path) => rusqlite::Connection::open(path)
-                .unwrap()
-                .execute_batch(&format!(
+            Self::Sqlite(path) => sqlite_ddl(
+                path,
+                format!(
                     "CREATE TRIGGER restart_copy_fault BEFORE INSERT ON __zeroship_workflow_payload_refs
                      WHEN NEW.generation=2 AND NEW.slot='step' AND NEW.ordinal={last_retained}
                      BEGIN SELECT RAISE(ABORT,'restart copy fault'); END;"
-                ))
-                .unwrap(),
+                ),
+            )
+            .await,
             Self::Postgres(url) => connect(url)
                 .await
                 .batch_execute(&format!(
@@ -63,10 +64,9 @@ impl Fault {
 
     async fn remove(&self) {
         match self {
-            Self::Sqlite(path) => rusqlite::Connection::open(path)
-                .unwrap()
-                .execute_batch("DROP TRIGGER restart_copy_fault")
-                .unwrap(),
+            Self::Sqlite(path) => {
+                sqlite_ddl(path, "DROP TRIGGER restart_copy_fault".into()).await;
+            }
             Self::Postgres(url) => connect(url)
                 .await
                 .batch_execute(
@@ -77,6 +77,16 @@ impl Fault {
                 .unwrap(),
         }
     }
+}
+
+async fn sqlite_ddl(path: &std::path::Path, sql: String) {
+    let path = path.to_owned();
+    // A rejected operation drops its transaction asynchronously. Keep the
+    // runtime free to finish rollback while the fixture waits for the writer.
+    compio::runtime::spawn_blocking(move || rusqlite::Connection::open(path)?.execute_batch(&sql))
+        .await
+        .unwrap()
+        .unwrap();
 }
 
 async fn contract(store: Rc<OrmStore>, fault: Fault) {

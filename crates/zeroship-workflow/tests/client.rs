@@ -1,5 +1,5 @@
 use serde_json::{json, Value};
-use uuid::Uuid;
+use zeroship_core::AppId;
 use zeroship_workflow::operations::{RestartOptions, RestartTarget, StartOptions};
 use zeroship_workflow::{app_scoped_token, WorkflowClientConfig, WorkflowHttpMethod};
 
@@ -7,21 +7,21 @@ const TEST_CONTROL_KEY: &str = "test-control-key";
 
 #[test]
 fn derives_the_app_scoped_token_with_the_shared_core_helper() {
-    let app_id = Uuid::new_v4().to_string();
-    let token = app_scoped_token(TEST_CONTROL_KEY, &app_id);
+    let app_id = AppId::mint();
+    let token = app_scoped_token(TEST_CONTROL_KEY, app_id.as_str());
     assert_eq!(
         token,
-        zeroship_core::auth::derive_app_scoped_control_token(TEST_CONTROL_KEY, &app_id)
+        zeroship_core::auth::derive_app_scoped_control_token(TEST_CONTROL_KEY, app_id.as_str())
     );
     assert!(zeroship_core::auth::validate_app_scoped_control_token(
         &token,
         TEST_CONTROL_KEY,
-        &app_id
+        app_id.as_str()
     ));
     assert!(!zeroship_core::auth::validate_app_scoped_control_token(
         &token,
         "wrong-key",
-        &app_id
+        app_id.as_str()
     ));
 }
 

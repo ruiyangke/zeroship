@@ -24,7 +24,7 @@ pub async fn insert(
     auth_method: Option<&str>,
     detail: &Value,
 ) -> Result<()> {
-    let user_id = user_id.map(UserId::as_str);
+    let actor_user_id = user_id.map(UserId::as_str);
     conn.execute(
         "INSERT INTO zeroship.audit_events \
             (event_type, outcome, actor_user_id, client_id, request_id, ip, user_agent, auth_method, detail) \
@@ -32,7 +32,7 @@ pub async fn insert(
         &[
             &event_type,
             &outcome,
-            &user_id,
+            &actor_user_id,
             &client_id,
             &request_id,
             &ip,

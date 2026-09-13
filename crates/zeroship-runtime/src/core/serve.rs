@@ -46,7 +46,7 @@ use futures::{FutureExt, pin_mut};
 pub struct ServerOptions {
     pub port: u16,
     /// Trusted logical app identity supplied by the host.
-    pub app_id: Option<uuid::Uuid>,
+    pub app_id: Option<zeroship_core::app_id::AppId>,
     /// Number of worker threads. 0 = auto-detect from available parallelism.
     pub workers: usize,
     /// Per-request CPU time limit (enforced by V8 interrupt).
@@ -239,7 +239,7 @@ pub fn start_server(modules: Vec<ModuleEntry>, options: ServerOptions) -> ! {
             let wall_timeout = options.wall_timeout;
             let heap_limit_bytes = options.heap_limit_bytes;
             let port = options.port;
-            let app_id = options.app_id;
+            let app_id = options.app_id.clone();
             let worker_env = options.env_vars.clone();
             let worker_plugins = options.plugins.clone();
             let handle = std::thread::Builder::new()
@@ -1834,7 +1834,7 @@ async fn accept_loop(
 #[allow(clippy::too_many_arguments)]
 fn run_single_worker(
     port: u16,
-    app_id: Option<uuid::Uuid>,
+    app_id: Option<zeroship_core::app_id::AppId>,
     use_reuseport: bool,
     worker_id: Option<usize>,
     cpu_limit: Option<Duration>,

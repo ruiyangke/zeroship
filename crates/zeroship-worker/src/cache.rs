@@ -4,21 +4,20 @@ use std::hash::{Hash, Hasher};
 use std::rc::Rc;
 use std::sync::Arc;
 
-use uuid::Uuid;
-
 use zeroship_bundle::compiled::CompiledManifest;
 use zeroship_bundle::Manifest;
-use zeroship_core::types::{AppNetPolicy, AppRuntimeLimits};
-use zeroship_storage::StorageBackendConfig;
+use zeroship_core::app_id::AppId;
 use zeroship_core::net_policy::{EgressRule, Verdict};
-use zeroship_runtime::{EnvSnapshot, ModuleEntry, NetPolicy};
+use zeroship_core::types::{AppNetPolicy, AppRuntimeLimits};
 use zeroship_runtime::plugin::NativePlugin;
 use zeroship_runtime::runtime::{Runtime, RuntimeLimits};
+use zeroship_runtime::{EnvSnapshot, ModuleEntry, NetPolicy};
+use zeroship_storage::StorageBackendConfig;
 
 struct IsolateEntry {
     runtime: Runtime,
     last_used: std::time::Instant,
-    app_id: String,
+    app_id: AppId,
     /// The deploy's DECLARED route policy, compiled once at load.
     ///
     /// It lives on the isolate entry rather than in a map of its own so its
@@ -33,7 +32,7 @@ struct IsolateEntry {
 }
 
 struct AppCache {
-    isolates: HashMap<Uuid, IsolateEntry>,
+    isolates: HashMap<AppId, IsolateEntry>,
     workflow_isolates: HashMap<PinnedWorkflowKey, IsolateEntry>,
     max_size: usize,
     max_pinned_isolates_per_app: usize,
@@ -41,12 +40,12 @@ struct AppCache {
 
 #[derive(Clone, Debug, Eq)]
 pub struct PinnedWorkflowKey {
-    app_id: Uuid,
+    app_id: AppId,
     deploy_hash: String,
 }
 
 impl PinnedWorkflowKey {
-    fn new(app_id: Uuid, deploy_hash: impl Into<String>) -> Self {
+    fn new(app_id: AppId, deploy_hash: impl Into<String>) -> Self {
         Self {
             app_id,
             deploy_hash: deploy_hash.into(),
@@ -204,7 +203,10 @@ pub fn db_url() -> Option<String> {
 /// Project material held by the installed database service for this host.
 pub fn project_keys() -> Option<Arc<zeroship_data_orm::encryption::SuppliedProjectKeys>> {
     DB_SERVICE.with(|service| {
-        service.borrow().as_ref().map(|service| service.project_keys().clone())
+        service
+            .borrow()
+            .as_ref()
+            .map(|service| service.project_keys().clone())
     })
 }
 
@@ -288,12 +290,10 @@ fn create_plugins() -> Vec<Arc<dyn NativePlugin>> {
     }
     if let Some(cfg) = STORAGE_BACKEND.with(|s| s.borrow().clone()) {
         match zeroship_storage::StorageStore::open(&cfg) {
-            Ok(backend) => plugins.push(Arc::new(
-                zeroship_storage_v8::StorageBinding::new(
-                    backend,
-                    meter.clone(),
-                ),
-            )),
+            Ok(backend) => plugins.push(Arc::new(zeroship_storage_v8::StorageBinding::new(
+                backend,
+                meter.clone(),
+            ))),
             Err(e) => {
                 // Credentials were validated at boot (see worker main); a
                 // failure here means the env changed under us. Degrade the
@@ -328,7 +328,7 @@ fn create_plugins() -> Vec<Arc<dyn NativePlugin>> {
 /// - `egress_bytes` — response body bytes the worker produced,
 /// - `ingress_bytes` — request body bytes the worker received.
 pub fn record_request(
-    app_id: &Uuid,
+    app_id: &AppId,
     cpu_us: u64,
     wall_us: u64,
     egress_bytes: u64,
@@ -338,19 +338,24 @@ pub fn record_request(
         if let Some(meter) = m.borrow().as_ref() {
             let recorded = CACHE.with(|c| {
                 let cache = c.borrow();
-                let Some(app_id) = cache
+                let Some(entry_app_id) = cache
                     .as_ref()
                     .and_then(|cache| cache.isolates.get(app_id))
                     .map(|entry| entry.app_id.as_str())
                 else {
                     return false;
                 };
-                meter.record_request(app_id, cpu_us, wall_us, egress_bytes, ingress_bytes);
+                meter.record_request(entry_app_id, cpu_us, wall_us, egress_bytes, ingress_bytes);
                 true
             });
             if !recorded {
-                let id = app_id.to_string();
-                meter.record_request(&id, cpu_us, wall_us, egress_bytes, ingress_bytes);
+                meter.record_request(
+                    app_id.as_str(),
+                    cpu_us,
+                    wall_us,
+                    egress_bytes,
+                    ingress_bytes,
+                );
             }
         }
     });
@@ -359,10 +364,10 @@ pub fn record_request(
 /// Observability-only durable-workflow step volume. Billing parity rides the
 /// fixed `requests` counter from `record_request`; this custom metric lets
 /// operators inspect workflow replay volume without double-counting it.
-pub fn record_workflow_step(app_id: &Uuid) {
+pub fn record_workflow_step(app_id: &AppId) {
     METER.with(|m| {
         if let Some(meter) = m.borrow().as_ref() {
-            meter.increment(&app_id.to_string(), "workflow_steps", 1);
+            meter.increment(app_id.as_str(), "workflow_steps", 1);
         }
     });
 }
@@ -370,12 +375,11 @@ pub fn record_workflow_step(app_id: &Uuid) {
 /// Record a successful workflow output blob write. The workflow blob store is
 /// a trusted platform storage path, so it uses the same storage usage counters
 /// as the native storage primitive.
-pub fn record_workflow_blob_write(app_id: &Uuid, bytes: u64) {
+pub fn record_workflow_blob_write(app_id: &AppId, bytes: u64) {
     METER.with(|m| {
         if let Some(meter) = m.borrow().as_ref() {
-            let id = app_id.to_string();
-            meter.increment(&id, "storage_ops", 1);
-            meter.increment(&id, "storage_bytes", bytes);
+            meter.increment(app_id.as_str(), "storage_ops", 1);
+            meter.increment(app_id.as_str(), "storage_bytes", bytes);
         }
     });
 }
@@ -396,25 +400,24 @@ pub fn record_workflow_blob_write(app_id: &Uuid, bytes: u64) {
 /// re-incremented per delta. `stream_wall_us` is a distinct metric from the
 /// unary `wall_us` (the held-open duration is priced/observed on its own).
 /// No-op when the meter is unset (degraded config) or both deltas are zero.
-pub fn record_stream_delta(app_id: &Uuid, egress_bytes_delta: u64, stream_wall_us_delta: u64) {
+pub fn record_stream_delta(app_id: &AppId, egress_bytes_delta: u64, stream_wall_us_delta: u64) {
     if egress_bytes_delta == 0 && stream_wall_us_delta == 0 {
         return;
     }
     METER.with(|m| {
         if let Some(meter) = m.borrow().as_ref() {
-            let id = app_id.to_string();
             if egress_bytes_delta > 0 {
-                meter.increment(&id, "egress_bytes", egress_bytes_delta);
+                meter.increment(app_id.as_str(), "egress_bytes", egress_bytes_delta);
             }
             if stream_wall_us_delta > 0 {
-                meter.increment(&id, "stream_wall_us", stream_wall_us_delta);
+                meter.increment(app_id.as_str(), "stream_wall_us", stream_wall_us_delta);
             }
         }
     });
 }
 
 /// Get or create a V8 runtime for an app. Returns None if the app isn't loaded.
-pub fn get_runtime(app_id: &Uuid) -> Option<Runtime> {
+pub fn get_runtime(app_id: &AppId) -> Option<Runtime> {
     CACHE.with(|c| {
         let mut cache = c.borrow_mut();
         let cache = cache.as_mut()?;
@@ -434,7 +437,7 @@ pub fn get_runtime(app_id: &Uuid) -> Option<Runtime> {
 /// `last_used` on the whole cache each pass, in whatever order the map iterated.
 /// Recency then reflected the last sweep rather than real traffic, and eviction
 /// could take a hot app while keeping an idle one.
-pub fn get_limits(app_id: &Uuid) -> Option<RuntimeLimits> {
+pub fn get_limits(app_id: &AppId) -> Option<RuntimeLimits> {
     CACHE.with(|c| {
         let cache = c.borrow();
         limits_without_touching_recency(cache.as_ref()?, app_id)
@@ -442,12 +445,15 @@ pub fn get_limits(app_id: &Uuid) -> Option<RuntimeLimits> {
 }
 
 /// The read above, over a borrowed cache so the no-touch property is testable.
-fn limits_without_touching_recency(cache: &AppCache, app_id: &Uuid) -> Option<RuntimeLimits> {
-    cache.isolates.get(app_id).map(|entry| entry.runtime.limits())
+fn limits_without_touching_recency(cache: &AppCache, app_id: &AppId) -> Option<RuntimeLimits> {
+    cache
+        .isolates
+        .get(app_id)
+        .map(|entry| entry.runtime.limits())
 }
 
-pub fn get_workflow_runtime(app_id: &Uuid, deploy_hash: &str) -> Option<Runtime> {
-    let key = PinnedWorkflowKey::new(*app_id, deploy_hash);
+pub fn get_workflow_runtime(app_id: &AppId, deploy_hash: &str) -> Option<Runtime> {
+    let key = PinnedWorkflowKey::new(app_id.clone(), deploy_hash);
     CACHE.with(|c| {
         let mut cache = c.borrow_mut();
         let cache = cache.as_mut()?;
@@ -498,33 +504,41 @@ fn app_visible_env_vars(app_id: &str, deploy_hash: Option<&str>) -> HashMap<Stri
 }
 
 fn build_runtime(
-    app_id: Uuid,
+    app_id: &AppId,
     modules: Vec<ModuleEntry>,
     app_limits: AppRuntimeLimits,
     app_net_policy: AppNetPolicy,
     deploy_hash: Option<&str>,
     runtime_descriptor: Option<&str>,
     env: &EnvSnapshot,
-) -> Result<(Runtime, String), String> {
+) -> Result<Runtime, String> {
     let plugins = plugin_set();
     let meter = METER.with(|m| m.borrow().clone());
-    let app_id_string = app_id.to_string();
-    let env_vars = app_visible_env_vars(&app_id_string, deploy_hash);
+    let env_vars = app_visible_env_vars(app_id.as_str(), deploy_hash);
 
     let limits = runtime_limits_from_app(&app_limits);
-    let net_policy = net_policy_from_app(&app_id, &app_net_policy);
+    let net_policy = net_policy_from_app(app_id, &app_net_policy);
     let mut builder = Runtime::builder()
         .modules(modules)
         .env_vars(env_vars)
         .limits(limits)
         .plugins(plugins)
-        .app_id(app_id)
         .net_policy(net_policy)
-        .runtime_descriptor(runtime_descriptor.map(str::to_string));
+        .runtime_descriptor(runtime_descriptor.map(str::to_string))
+        // The builder is what binds BOTH app-scoped behaviours, and skipping it
+        // silently loses each in a different way. It stamps `state.meter` -
+        // read by `RuntimeInner::bill_pump_cpu` for async/pump CPU and by
+        // `node:net` for socket egress/ingress - keyed by `app_id.as_str()`,
+        // the same rendering `env.{db,kv,storage}` read off `APP_ID` above. It
+        // also sets `RuntimeInner::app_id`, which gates the eviction-time
+        // `AbortController` fan-out: without it an evicted isolate's in-flight
+        // controllers never fire, and nothing errors.
+        .app_id(app_id.clone());
     if let Some(meter) = meter {
         builder = builder.meter(meter);
     }
     let runtime = builder.build();
+
     runtime
         .initialize(env)
         .map_err(|e| format!("failed to initialize app runtime: {e}"))?;
@@ -532,7 +546,7 @@ fn build_runtime(
     // Exit isolate so other isolates can be created/entered on this thread.
     runtime.exit_isolate();
 
-    Ok((runtime, app_id_string))
+    Ok(runtime)
 }
 
 /// Load an app from its verified module graph, with the entry module first.
@@ -546,7 +560,7 @@ fn build_runtime(
 /// nothing and therefore refuses nothing.
 #[allow(clippy::too_many_arguments)]
 pub fn load_app(
-    app_id: Uuid,
+    app_id: AppId,
     modules: Vec<ModuleEntry>,
     app_limits: AppRuntimeLimits,
     app_net_policy: AppNetPolicy,
@@ -555,8 +569,8 @@ pub fn load_app(
     manifest: &Manifest,
     env: &EnvSnapshot,
 ) -> Result<(), String> {
-    let (runtime, app_id_string) = build_runtime(
-        app_id,
+    let runtime = build_runtime(
+        &app_id,
         modules,
         app_limits,
         app_net_policy,
@@ -577,7 +591,7 @@ pub fn load_app(
             && !evict_lru(cache)
         {
             tracing::warn!(
-                app_id = %app_id,
+                app_id = app_id.as_str(),
                 max_size = cache.max_size,
                 "worker: isolate cache full and every isolate is leased; load deferred"
             );
@@ -588,11 +602,11 @@ pub fn load_app(
         // capacity is available and the runtime is about to become reachable.
         runtime.start_pump();
         cache.isolates.insert(
-            app_id,
+            app_id.clone(),
             IsolateEntry {
                 runtime,
                 last_used: std::time::Instant::now(),
-                app_id: app_id_string,
+                app_id,
                 policy,
             },
         );
@@ -608,7 +622,7 @@ pub fn load_app(
 /// returns, and a refused request must not count as traffic for eviction
 /// purposes any more than the reconcile loop's metadata reads do
 /// (`get_limits` above carries the same property, for the same reason).
-pub fn get_declared_policy(app_id: &Uuid) -> Option<Rc<CompiledManifest>> {
+pub fn get_declared_policy(app_id: &AppId) -> Option<Rc<CompiledManifest>> {
     CACHE.with(|c| {
         let cache = c.borrow();
         Some(cache.as_ref()?.isolates.get(app_id)?.policy.clone())
@@ -627,7 +641,7 @@ pub fn get_declared_policy(app_id: &Uuid) -> Option<Rc<CompiledManifest>> {
 /// future dispatch path to reach for one and find `None`.
 #[allow(clippy::too_many_arguments)]
 pub fn load_pinned_workflow_app(
-    app_id: Uuid,
+    app_id: AppId,
     deploy_hash: &str,
     modules: Vec<ModuleEntry>,
     app_limits: AppRuntimeLimits,
@@ -636,9 +650,9 @@ pub fn load_pinned_workflow_app(
     manifest: &Manifest,
     env: &EnvSnapshot,
 ) -> Result<(), String> {
-    let key = PinnedWorkflowKey::new(app_id, deploy_hash);
-    let (runtime, app_id_string) = build_runtime(
-        app_id,
+    let key = PinnedWorkflowKey::new(app_id.clone(), deploy_hash);
+    let runtime = build_runtime(
+        &app_id,
         modules,
         app_limits,
         app_net_policy,
@@ -659,12 +673,14 @@ pub fn load_pinned_workflow_app(
             while pinned_count_for_app(cache, &app_id) >= cache.max_pinned_isolates_per_app {
                 if !evict_pinned_lru_for_app(cache, &app_id) {
                     tracing::warn!(
-                        app_id = %app_id,
+                        app_id = app_id.as_str(),
                         deploy_hash = %deploy_hash,
                         max_pinned_isolates_per_app = cache.max_pinned_isolates_per_app,
                         "worker: pinned workflow isolate cache full and every isolate is leased"
                     );
-                    return Err("pinned workflow isolate cache full and every isolate is leased".into());
+                    return Err(
+                        "pinned workflow isolate cache full and every isolate is leased".into(),
+                    );
                 }
             }
         }
@@ -675,7 +691,7 @@ pub fn load_pinned_workflow_app(
             IsolateEntry {
                 runtime,
                 last_used: std::time::Instant::now(),
-                app_id: app_id_string,
+                app_id,
                 policy,
             },
         );
@@ -704,7 +720,7 @@ pub fn runtime_limits_from_app(limits: &AppRuntimeLimits) -> RuntimeLimits {
 /// a dropped ACCEPT narrows what the app can reach, so the failure mode is the
 /// app's own traffic breaking. A dropped REJECT would WIDEN it, which is why an
 /// unparseable REJECT denies the app outright instead.
-pub fn net_policy_from_app(app_id: &Uuid, app_net: &AppNetPolicy) -> NetPolicy {
+pub fn net_policy_from_app(app_id: &AppId, app_net: &AppNetPolicy) -> NetPolicy {
     if app_net.egress.is_empty() {
         return NetPolicy::Denied;
     }
@@ -715,7 +731,7 @@ pub fn net_policy_from_app(app_id: &Uuid, app_net: &AppNetPolicy) -> NetPolicy {
             Ok(rule) => rules.push(rule),
             Err(err) => {
                 tracing::error!(
-                    app_id = %app_id,
+                    app_id = app_id.as_str(),
                     verdict = entry.verdict.as_str(),
                     destination = %entry.destination,
                     port = entry.port,
@@ -724,7 +740,7 @@ pub fn net_policy_from_app(app_id: &Uuid, app_net: &AppNetPolicy) -> NetPolicy {
                 );
                 if entry.verdict == Verdict::Reject {
                     tracing::error!(
-                        app_id = %app_id,
+                        app_id = app_id.as_str(),
                         "worker: an unparseable REJECT rule would widen reach if skipped; \
                          denying raw TCP"
                     );
@@ -742,7 +758,7 @@ pub fn net_policy_from_app(app_id: &Uuid, app_net: &AppNetPolicy) -> NetPolicy {
         Ok(policy) => policy,
         Err(err) => {
             tracing::error!(
-                app_id = %app_id,
+                app_id = app_id.as_str(),
                 error = %err,
                 "worker: egress rule set rejected at load; denying raw TCP"
             );
@@ -753,19 +769,21 @@ pub fn net_policy_from_app(app_id: &Uuid, app_net: &AppNetPolicy) -> NetPolicy {
 
 /// Remove an app from the cache.
 #[allow(dead_code)]
-pub fn evict_app(app_id: &Uuid) {
+pub fn evict_app(app_id: &AppId) {
     CACHE.with(|c| {
         let mut cache = c.borrow_mut();
         if let Some(cache) = cache.as_mut() {
             cache.isolates.remove(app_id);
-            cache.workflow_isolates.retain(|key, _| &key.app_id != app_id);
+            cache
+                .workflow_isolates
+                .retain(|key, _| &key.app_id != app_id);
         }
     });
 }
 
 /// Check if an app is loaded.
 #[allow(dead_code)]
-pub fn has_app(app_id: &Uuid) -> bool {
+pub fn has_app(app_id: &AppId) -> bool {
     CACHE.with(|c| {
         let cache = c.borrow();
         cache
@@ -778,8 +796,8 @@ pub fn has_app(app_id: &Uuid) -> bool {
 ///
 /// Used by the mandatory workflow handler tests.
 #[cfg(test)]
-pub fn has_pinned_workflow_app(app_id: &Uuid, deploy_hash: &str) -> bool {
-    let key = PinnedWorkflowKey::new(*app_id, deploy_hash);
+pub fn has_pinned_workflow_app(app_id: &AppId, deploy_hash: &str) -> bool {
+    let key = PinnedWorkflowKey::new(app_id.clone(), deploy_hash);
     CACHE.with(|c| {
         let cache = c.borrow();
         cache
@@ -789,12 +807,12 @@ pub fn has_pinned_workflow_app(app_id: &Uuid, deploy_hash: &str) -> bool {
 }
 
 /// Get all app IDs currently loaded in the cache.
-pub fn all_app_ids() -> Vec<Uuid> {
+pub fn all_app_ids() -> Vec<AppId> {
     CACHE.with(|c| {
         let cache = c.borrow();
         cache
             .as_ref()
-            .map(|c| c.isolates.keys().copied().collect())
+            .map(|c| c.isolates.keys().cloned().collect())
             .unwrap_or_default()
     })
 }
@@ -824,20 +842,20 @@ pub struct LoadedMeta {
 }
 
 thread_local! {
-    static LOADED_META: RefCell<HashMap<Uuid, LoadedMeta>> = RefCell::new(HashMap::new());
+    static LOADED_META: RefCell<HashMap<AppId, LoadedMeta>> = RefCell::new(HashMap::new());
 }
 
-pub fn get_loaded_meta(app_id: &Uuid) -> Option<LoadedMeta> {
+pub fn get_loaded_meta(app_id: &AppId) -> Option<LoadedMeta> {
     LOADED_META.with(|m| m.borrow().get(app_id).cloned())
 }
 
-pub fn set_loaded_meta(app_id: Uuid, meta: LoadedMeta) {
+pub fn set_loaded_meta(app_id: AppId, meta: LoadedMeta) {
     LOADED_META.with(|m| {
         m.borrow_mut().insert(app_id, meta);
     });
 }
 
-pub fn remove_loaded_meta(app_id: &Uuid) {
+pub fn remove_loaded_meta(app_id: &AppId) {
     LOADED_META.with(|m| {
         m.borrow_mut().remove(app_id);
     });
@@ -856,40 +874,36 @@ fn evict_lru(cache: &mut AppCache) -> bool {
                 entry.last_used,
             )
         })
-        .map(|(id, _)| *id)
+        .map(|(id, _)| id.clone())
     else {
         return false;
     };
 
     {
-        tracing::info!(app_id = %oldest_id, "worker: evicting LRU isolate");
+        tracing::info!(app_id = oldest_id.as_str(), "worker: evicting LRU isolate");
         crate::metrics::inc(&crate::metrics::LRU_EVICTIONS_TOTAL);
 
-        // Fire every in-flight `AbortController` for this app BEFORE
-        // removing the isolate. User code awaiting a fetch /
-        // `setTimeout` / `addEventListener("abort")` gets one V8 turn
-        // to observe the cancellation; the synchronous abort dispatch
-        // runs inside `with_scope`. The current implementation stops at
-        // abort fan-out; a drain timer and explicit disposed state can
-        // be added later if eviction needs to become more graceful.
+        // Fire every in-flight `AbortController` before removing the isolate.
         if let Some(entry) = cache.isolates.get(&oldest_id) {
             let active_sockets = entry.runtime.active_native_socket_count();
             if active_sockets > 0 {
                 let closed = entry.runtime.close_native_sockets_for_eviction();
                 tracing::info!(
-                    app_id = %oldest_id,
+                    app_id = oldest_id.as_str(),
                     active_sockets,
                     closed,
                     "worker: closing native sockets before isolate eviction"
                 );
             }
             entry.runtime.with_scope(|scope| {
-                zeroship_runtime::rpc::abort::entered_for_eviction(scope, oldest_id);
+                zeroship_runtime::rpc::entered_for_eviction(scope, &oldest_id);
             });
         }
 
         cache.isolates.remove(&oldest_id);
-        LOADED_META.with(|m| { m.borrow_mut().remove(&oldest_id); });
+        LOADED_META.with(|m| {
+            m.borrow_mut().remove(&oldest_id);
+        });
         // Env in `SharedEnvs` is process-wide and may still be needed
         // by other threads — DON'T evict it here. The version_poll_loop
         // GCs SharedEnvs against the known-app set every cycle, so an
@@ -898,7 +912,7 @@ fn evict_lru(cache: &mut AppCache) -> bool {
     true
 }
 
-fn pinned_count_for_app(cache: &AppCache, app_id: &Uuid) -> usize {
+fn pinned_count_for_app(cache: &AppCache, app_id: &AppId) -> usize {
     cache
         .workflow_isolates
         .keys()
@@ -906,13 +920,13 @@ fn pinned_count_for_app(cache: &AppCache, app_id: &Uuid) -> usize {
         .count()
 }
 
-fn evict_pinned_lru_for_app(cache: &mut AppCache, app_id: &Uuid) -> bool {
+fn evict_pinned_lru_for_app(cache: &mut AppCache, app_id: &AppId) -> bool {
     refresh_socket_activity(cache);
 
     let Some(oldest_key) = cache
         .workflow_isolates
         .iter()
-        .filter(|(key, entry)| key.app_id == *app_id && !entry.runtime.is_isolate_leased())
+        .filter(|(key, entry)| &key.app_id == app_id && !entry.runtime.is_isolate_leased())
         .min_by_key(|(_, entry)| {
             (
                 entry.runtime.active_native_socket_count() > 0,
@@ -925,7 +939,7 @@ fn evict_pinned_lru_for_app(cache: &mut AppCache, app_id: &Uuid) -> bool {
     };
 
     tracing::info!(
-        app_id = %oldest_key.app_id,
+        app_id = oldest_key.app_id.as_str(),
         deploy_hash = %oldest_key.deploy_hash,
         "worker: evicting pinned workflow LRU isolate"
     );
@@ -936,7 +950,7 @@ fn evict_pinned_lru_for_app(cache: &mut AppCache, app_id: &Uuid) -> bool {
         if active_sockets > 0 {
             let closed = entry.runtime.close_native_sockets_for_eviction();
             tracing::info!(
-                app_id = %oldest_key.app_id,
+                app_id = oldest_key.app_id.as_str(),
                 deploy_hash = %oldest_key.deploy_hash,
                 active_sockets,
                 closed,
@@ -944,7 +958,7 @@ fn evict_pinned_lru_for_app(cache: &mut AppCache, app_id: &Uuid) -> bool {
             );
         }
         entry.runtime.with_scope(|scope| {
-            zeroship_runtime::rpc::abort::entered_for_eviction(scope, oldest_key.app_id);
+            zeroship_runtime::rpc::entered_for_eviction(scope, &oldest_key.app_id);
         });
     }
 
@@ -1041,11 +1055,11 @@ mod tests {
         runtime
     }
 
-    fn entry(app_id: Uuid, runtime: Runtime, last_used: Instant) -> IsolateEntry {
+    fn entry(app_id: AppId, runtime: Runtime, last_used: Instant) -> IsolateEntry {
         IsolateEntry {
             runtime,
             last_used,
-            app_id: app_id.to_string(),
+            app_id,
             // These fixtures exercise eviction and recency, never policy. An
             // empty resource tree declares nothing, so it cannot make an
             // eviction arm pass or fail for an auth reason.
@@ -1057,8 +1071,7 @@ mod tests {
         let env = EnvSnapshot::empty();
         let ctx = zeroship_runtime::RequestCtx::new(zeroship_runtime::CancelFlag::new());
         runtime.enter_isolate();
-        let outcome =
-            runtime.call_fetch_handler("GET", "http://localhost/", &[], "", &env, ctx);
+        let outcome = runtime.call_fetch_handler("GET", "http://localhost/", &[], "", &env, ctx);
         runtime.exit_isolate();
 
         match outcome {
@@ -1147,9 +1160,11 @@ mod tests {
             compio::runtime::Runtime::new()
                 .expect("compio runtime")
                 .block_on(async {
-                    let (runtime, _app) = build_runtime(
-                        Uuid::new_v4(),
-                        crate::cache::test_modules(br#"export default { fetch() { return new Response("ok"); } }"#),
+                    let runtime = build_runtime(
+                        &AppId::mint(),
+                        crate::cache::test_modules(
+                            br#"export default { fetch() { return new Response("ok"); } }"#,
+                        ),
                         AppRuntimeLimits::default(),
                         AppNetPolicy::default(),
                         Some("deploy_build_runtime_guard"),
@@ -1481,7 +1496,10 @@ mod tests {
             // and there is NO `meter` namespace (metering is infrastructure).
             assert!(has("auth"));
             assert!(has("workflows"));
-            assert!(!has("meter"), "metering is infrastructure: no env.meter namespace");
+            assert!(
+                !has("meter"),
+                "metering is infrastructure: no env.meter namespace"
+            );
             assert!(!has("kv"), "kv absent when unconfigured");
             assert!(!has("storage"), "storage absent when unconfigured");
             assert!(!has("db"), "db absent when unconfigured");
@@ -1492,14 +1510,14 @@ mod tests {
 
     #[test]
     fn net_policy_from_app_defaults_to_denied_when_no_grants() {
-        let app_id = Uuid::new_v4();
+        let app_id = AppId::mint();
         let policy = net_policy_from_app(&app_id, &AppNetPolicy::default());
         assert!(matches!(policy, NetPolicy::Denied));
     }
 
     #[test]
     fn net_policy_from_app_builds_a_rule_set_from_projection_rows() {
-        let app_id = Uuid::new_v4();
+        let app_id = AppId::mint();
         let policy = net_policy_from_app(
             &app_id,
             &AppNetPolicy {
@@ -1524,7 +1542,9 @@ mod tests {
                 // the case are gone and one destination is one rule.
                 assert_eq!(
                     rules.name_phase("db.example.com", 5432),
-                    zeroship_core::net_policy::NamePhase::Resolve { name_accepted: true }
+                    zeroship_core::net_policy::NamePhase::Resolve {
+                        name_accepted: true
+                    }
                 );
                 assert_eq!(
                     rules.name_phase("other.example.com", 5432),
@@ -1537,7 +1557,7 @@ mod tests {
 
     #[test]
     fn net_policy_from_app_skips_bad_entries_and_keeps_good_ones() {
-        let app_id = Uuid::new_v4();
+        let app_id = AppId::mint();
         let policy = net_policy_from_app(
             &app_id,
             &AppNetPolicy {
@@ -1562,7 +1582,9 @@ mod tests {
         };
         assert_eq!(
             rules.name_phase("smtp.example.com", 587),
-            zeroship_core::net_policy::NamePhase::Resolve { name_accepted: true },
+            zeroship_core::net_policy::NamePhase::Resolve {
+                name_accepted: true
+            },
             "one malformed ACCEPT row must not brick the other valid rules"
         );
         assert_eq!(
@@ -1576,7 +1598,7 @@ mod tests {
     /// widens it, and only one of those directions is safe to fail into.
     #[test]
     fn net_policy_from_app_denies_when_a_reject_row_is_unparseable() {
-        let app_id = Uuid::new_v4();
+        let app_id = AppId::mint();
         let policy = net_policy_from_app(
             &app_id,
             &AppNetPolicy {
@@ -1612,7 +1634,7 @@ mod tests {
     /// WIDEN it", is a comment with nothing behind it.
     #[test]
     fn net_policy_from_app_keeps_a_valid_reject_row() {
-        let app_id = Uuid::new_v4();
+        let app_id = AppId::mint();
         let policy = net_policy_from_app(
             &app_id,
             &AppNetPolicy {
@@ -1654,7 +1676,7 @@ mod tests {
     /// at load exactly as the API would have refused it at authoring time.
     #[test]
     fn net_policy_from_app_drops_wildcard_rows() {
-        let app_id = Uuid::new_v4();
+        let app_id = AppId::mint();
         let policy = net_policy_from_app(
             &app_id,
             &AppNetPolicy {
@@ -1692,7 +1714,7 @@ mod tests {
 
     #[test]
     fn net_policy_from_app_cannot_produce_trusted() {
-        let app_id = Uuid::new_v4();
+        let app_id = AppId::mint();
         let policy = net_policy_from_app(
             &app_id,
             &AppNetPolicy {
@@ -1717,7 +1739,7 @@ mod tests {
             let runtime = compio::runtime::Runtime::new().expect("compio runtime");
 
             runtime.block_on(async {
-                let app_id = Uuid::new_v4();
+                let app_id = AppId::mint();
                 init_cache(
                     4,
                     4,
@@ -1731,8 +1753,10 @@ mod tests {
                     },
                 );
                 load_app(
-                    app_id,
-                    crate::cache::test_modules(br#"export default { fetch() { return new Response("ok"); } }"#),
+                    app_id.clone(),
+                    crate::cache::test_modules(
+                        br#"export default { fetch() { return new Response("ok"); } }"#,
+                    ),
                     AppRuntimeLimits::default(),
                     AppNetPolicy {
                         egress: vec![zeroship_core::types::NetEgressEntry {
@@ -1757,7 +1781,9 @@ mod tests {
                 };
                 assert_eq!(
                     rules.name_phase("db.example.com", 5432),
-                    zeroship_core::net_policy::NamePhase::Resolve { name_accepted: true }
+                    zeroship_core::net_policy::NamePhase::Resolve {
+                        name_accepted: true
+                    }
                 );
                 // The port is part of the rule, so the same host on another
                 // port is refused before DNS.
@@ -1780,7 +1806,7 @@ mod tests {
                 use zeroship_bundle::{BlobStore, LocalDiskBlobStore, RuntimeDescriptorEntry, WorkerCode};
 
                 zeroship_runtime::init::init_v8();
-                let app_id = Uuid::new_v4();
+                let app_id = AppId::mint();
                 init_cache(4, 4, KernelConfig {
                     control_url: "http://127.0.0.1:1".into(),
                     control_key: String::new(),
@@ -1814,11 +1840,11 @@ mod tests {
                     assert_eq!(executable.modules[0].specifier, "app/z-entry.js");
                     assert_eq!(serde_json::from_str::<serde_json::Value>(executable.descriptor.as_deref().unwrap()).unwrap(), serde_json::from_str::<serde_json::Value>(descriptor).unwrap());
                     if deployment == "original" {
-                        load_pinned_workflow_app(app_id, deployment, executable.modules,
+                        load_pinned_workflow_app(app_id.clone(), deployment, executable.modules,
                             AppRuntimeLimits::default(), AppNetPolicy::default(),
                             executable.descriptor.as_deref(), &manifest, &EnvSnapshot::empty()).unwrap();
                     } else {
-                        load_app(app_id, executable.modules, AppRuntimeLimits::default(),
+                        load_app(app_id.clone(), executable.modules, AppRuntimeLimits::default(),
                             AppNetPolicy::default(), Some(deployment), executable.descriptor.as_deref(),
                             &manifest, &EnvSnapshot::empty()).unwrap();
                     }
@@ -1838,7 +1864,7 @@ mod tests {
 
             runtime.block_on(async {
                 zeroship_runtime::init::init_v8();
-                let app_id = Uuid::new_v4();
+                let app_id = AppId::mint();
                 init_cache(
                     4,
                     4,
@@ -1853,7 +1879,7 @@ mod tests {
                 );
 
                 load_app(
-                    app_id,
+                    app_id.clone(),
                     crate::cache::test_modules(br#"export default { fetch() { return new Response("last-good"); } }"#),
                     AppRuntimeLimits::default(),
                     AppNetPolicy::default(),
@@ -1868,7 +1894,7 @@ mod tests {
                 assert_eq!(fetch_body(&before).await, (200, "last-good".to_string()));
 
                 let err = load_app(
-                    app_id,
+                    app_id.clone(),
                     crate::cache::test_modules(br#"export default { fetch() { return new Response("bad-new"); } }"#),
                     AppRuntimeLimits::default(),
                     AppNetPolicy::default(),
@@ -1910,7 +1936,7 @@ mod tests {
 
             runtime.block_on(async {
                 zeroship_runtime::init::init_v8();
-                let app_id = Uuid::new_v4();
+                let app_id = AppId::mint();
                 init_cache(
                     4,
                     4,
@@ -1925,7 +1951,7 @@ mod tests {
                 );
 
                 let err = load_app(
-                    app_id,
+                    app_id.clone(),
                     crate::cache::test_modules(br#"export default { fetch() { return new Response("bad-first"); } }"#),
                     AppRuntimeLimits::default(),
                     AppNetPolicy::default(),
@@ -1962,7 +1988,7 @@ mod tests {
         std::thread::spawn(|| {
             let runtime = compio::runtime::Runtime::new().expect("compio runtime");
             runtime.block_on(async {
-                let app_id = Uuid::new_v4();
+                let app_id = AppId::mint();
                 init_cache(
                     4,
                     4,
@@ -1976,8 +2002,10 @@ mod tests {
                     },
                 );
                 load_app(
-                    app_id,
-                    crate::cache::test_modules(br#"export default { fetch() { return new Response("ok"); } }"#),
+                    app_id.clone(),
+                    crate::cache::test_modules(
+                        br#"export default { fetch() { return new Response("ok"); } }"#,
+                    ),
                     AppRuntimeLimits::default(),
                     AppNetPolicy::default(),
                     None,
@@ -1991,14 +2019,29 @@ mod tests {
                 let stamped = Instant::now() - Duration::from_secs(600);
                 CACHE.with(|c| {
                     let mut cache = c.borrow_mut();
-                    cache.as_mut().unwrap().isolates.get_mut(&app_id).unwrap().last_used = stamped;
+                    cache
+                        .as_mut()
+                        .unwrap()
+                        .isolates
+                        .get_mut(&app_id)
+                        .unwrap()
+                        .last_used = stamped;
                 });
 
-                assert!(get_limits(&app_id).is_some(), "the limits read must find the app");
+                assert!(
+                    get_limits(&app_id).is_some(),
+                    "the limits read must find the app"
+                );
 
                 let after = CACHE.with(|c| {
                     let cache = c.borrow();
-                    cache.as_ref().unwrap().isolates.get(&app_id).unwrap().last_used
+                    cache
+                        .as_ref()
+                        .unwrap()
+                        .isolates
+                        .get(&app_id)
+                        .unwrap()
+                        .last_used
                 });
                 assert_eq!(
                     after, stamped,
@@ -2016,8 +2059,8 @@ mod tests {
     fn evict_lru_prefers_idle_socketless_isolate_over_active_socketed_isolate() {
         std::thread::spawn(|| {
             let now = Instant::now();
-            let socketed_id = Uuid::new_v4();
-            let socketless_id = Uuid::new_v4();
+            let socketed_id = AppId::mint();
+            let socketless_id = AppId::mint();
             let socketed = test_runtime();
             {
                 let state = socketed.state();
@@ -2033,12 +2076,20 @@ mod tests {
                 max_pinned_isolates_per_app: 4,
             };
             cache.isolates.insert(
-                socketed_id,
-                entry(socketed_id, socketed, now - Duration::from_secs(600)),
+                socketed_id.clone(),
+                entry(
+                    socketed_id.clone(),
+                    socketed,
+                    now - Duration::from_secs(600),
+                ),
             );
             cache.isolates.insert(
-                socketless_id,
-                entry(socketless_id, socketless, now - Duration::from_secs(1)),
+                socketless_id.clone(),
+                entry(
+                    socketless_id.clone(),
+                    socketless,
+                    now - Duration::from_secs(1),
+                ),
             );
 
             assert!(evict_lru(&mut cache));
@@ -2063,8 +2114,8 @@ mod tests {
     fn evict_lru_never_evicts_leased_isolate() {
         std::thread::spawn(|| {
             let now = Instant::now();
-            let leased_id = Uuid::new_v4();
-            let victim_id = Uuid::new_v4();
+            let leased_id = AppId::mint();
+            let victim_id = AppId::mint();
             let leased = test_runtime();
             let lease = leased.lease_isolate();
             assert_eq!(leased.isolate_lease_count(), 1);
@@ -2076,10 +2127,16 @@ mod tests {
                 max_pinned_isolates_per_app: 4,
             };
             cache.isolates.insert(
-                leased_id,
-                entry(leased_id, leased.clone(), now - Duration::from_secs(600)),
+                leased_id.clone(),
+                entry(
+                    leased_id.clone(),
+                    leased.clone(),
+                    now - Duration::from_secs(600),
+                ),
             );
-            cache.isolates.insert(victim_id, entry(victim_id, victim, now));
+            cache
+                .isolates
+                .insert(victim_id.clone(), entry(victim_id.clone(), victim, now));
 
             assert!(evict_lru(&mut cache));
             assert!(
@@ -2101,7 +2158,7 @@ mod tests {
     fn evict_lru_closes_socketed_isolate_before_removal() {
         std::thread::spawn(|| {
             let now = Instant::now();
-            let app_id = Uuid::new_v4();
+            let app_id = AppId::mint();
             let runtime = test_net_runtime();
             let state = runtime.state();
             let socket_id = zeroship_runtime::node::net::state::alloc_native_socket_id(&state)
@@ -2116,9 +2173,14 @@ mod tests {
                 max_size: 1,
                 max_pinned_isolates_per_app: 4,
             };
-            cache
-                .isolates
-                .insert(app_id, entry(app_id, runtime.clone(), now - Duration::from_secs(60)));
+            cache.isolates.insert(
+                app_id.clone(),
+                entry(
+                    app_id.clone(),
+                    runtime.clone(),
+                    now - Duration::from_secs(60),
+                ),
+            );
 
             assert!(evict_lru(&mut cache));
             assert!(!cache.isolates.contains_key(&app_id));

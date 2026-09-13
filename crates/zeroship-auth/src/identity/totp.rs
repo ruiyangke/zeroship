@@ -26,10 +26,10 @@
 use base64::Engine as _;
 use rand::RngCore;
 use totp_rs::{Algorithm, Secret, TotpUrlError, TOTP};
+use zeroship_core::UserId;
 
 use crate::error::{AuthError, Result};
 use crate::identity::password;
-use zeroship_core::UserId;
 
 /// RFC 6238 step (seconds).
 pub const STEP_SECS: u64 = 30;

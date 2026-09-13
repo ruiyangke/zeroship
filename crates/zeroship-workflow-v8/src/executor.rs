@@ -144,7 +144,7 @@ impl TaskExecution for V8Execution {
         let interrupt = loaded.runtime.interrupt_handle();
         self.budget.on_interrupt(move || interrupt.cancel())?;
         self.budget.check()?;
-        if loaded.runtime.app_id() != Some(self.payloads.app_id().uuid()) {
+        if loaded.runtime.app_id() != Some(self.payloads.app_id()) {
             return Err(WorkflowServiceError::InvalidRequest(
                 "workflow loader returned another app's runtime".into(),
             ));

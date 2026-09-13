@@ -26,7 +26,7 @@ test("blob replay reads through the bound native run and memoizes the bytes", as
   let reads = 0;
   Object.defineProperty(globalThis, "__zs_env", { configurable: true, value: () => ({
     workflows: { WorkflowUnderTest: { get(runId: string) {
-      assert.equal(runId, "run_0123456789ABCDEFGHIJKL");
+      assert.equal(runId, "run_0000000000000000000000001");
       return { async readStepOutput(name: string, occurrence: number) {
         assert.equal(name, "payload");
         assert.equal(occurrence, 0);
@@ -59,14 +59,14 @@ test("blob replay reads through the bound native run and memoizes the bytes", as
 
 function envelope(journal: Array<Record<string, unknown>> = []): Record<string, unknown> {
   return {
-    runId: "run_0123456789ABCDEFGHIJKL",
+    runId: "run_0000000000000000000000001",
     nonce: "nonce_1",
     workflowName: "WorkflowUnderTest",
     input: { orderId: "ord_1" },
     trigger: {
       input: { orderId: "ord_1" },
       startedAt: "2026-07-05T00:00:00.000Z",
-      runId: "run_0123456789ABCDEFGHIJKL",
+      runId: "run_0000000000000000000000001",
       workflowName: "WorkflowUnderTest",
     },
     journal,

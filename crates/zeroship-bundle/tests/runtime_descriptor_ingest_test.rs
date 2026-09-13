@@ -14,6 +14,7 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
+use zeroship_id::AppId;
 
 use serde_json::json;
 use uuid::Uuid;
@@ -80,7 +81,7 @@ fn base_manifest() -> Manifest {
 async fn stored_manifest_preserves_the_fields_used_for_deployment_identity() {
     let root = tmpdir();
     let store: Arc<dyn BlobStore> = Arc::new(LocalDiskBlobStore::new(root.clone()).unwrap());
-    let app = Uuid::now_v7();
+    let app = AppId::mint();
     let original = json!({
         "version":1,
         "metadata":{"built_at":"fixture"},
@@ -128,7 +129,7 @@ async fn descriptor_survives_pack_then_ingest_byte_identical() {
 
     let store: Arc<dyn BlobStore> =
         Arc::new(LocalDiskBlobStore::new(tmpdir()).expect("local store"));
-    let app_id = Uuid::now_v7();
+    let app_id = AppId::mint();
 
     let success = ingest(&store, &app_id, &archive)
         .await
@@ -165,7 +166,7 @@ async fn workflow_declarations_survive_pack_then_ingest() {
     let archive = pack(&manifest, &[]);
     let store: Arc<dyn BlobStore> =
         Arc::new(LocalDiskBlobStore::new(tmpdir()).expect("local store"));
-    let app_id = Uuid::now_v7();
+    let app_id = AppId::mint();
 
     let success = ingest(&store, &app_id, &archive)
         .await
@@ -190,7 +191,7 @@ async fn absent_descriptor_ingests_to_none() {
 
     let store: Arc<dyn BlobStore> =
         Arc::new(LocalDiskBlobStore::new(tmpdir()).expect("local store"));
-    let app_id = Uuid::now_v7();
+    let app_id = AppId::mint();
 
     let success = ingest(&store, &app_id, &archive)
         .await
@@ -222,7 +223,7 @@ async fn legacy_manifest_migrations_key_is_rejected() {
 
     let store: Arc<dyn BlobStore> =
         Arc::new(LocalDiskBlobStore::new(tmpdir()).expect("local store"));
-    let app_id = Uuid::now_v7();
+    let app_id = AppId::mint();
 
     let err = ingest(&store, &app_id, &archive)
         .await
@@ -255,7 +256,7 @@ async fn descriptor_blob_missing_from_tar_is_rejected() {
 
     let store: Arc<dyn BlobStore> =
         Arc::new(LocalDiskBlobStore::new(tmpdir()).expect("local store"));
-    let app_id = Uuid::now_v7();
+    let app_id = AppId::mint();
 
     let err = ingest(&store, &app_id, &archive)
         .await

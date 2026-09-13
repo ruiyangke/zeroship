@@ -1,6 +1,6 @@
 //! Per-app brokered OAuth client lifecycle.
 //!
-//! Each hosted creator app gets its own stable `oac_<base62-app-id>` OAuth
+//! Each hosted creator app gets its own stable `oac_<base36-app-id>` OAuth
 //! client. The platform OP treats these clients as gateway-brokered: app code
 //! and browsers never hold a client secret, while the gateway derives and
 //! presents the per-app broker secret from the shared platform broker master.
@@ -53,10 +53,10 @@
 
 use compio_postgres::Client;
 use rand::RngCore as _;
-use uuid::Uuid;
-use zeroship_core::auth::hash_client_secret;
 use zeroship_authz::Scope;
 use zeroship_bundle::ScopeDef;
+use zeroship_core::app_id::AppId;
+use zeroship_core::auth::hash_client_secret;
 use zeroship_core::typed_id::app_oauth_client_id;
 use zeroship_core::UserId;
 
@@ -129,11 +129,17 @@ fn error_with_source_chain(err: &dyn std::error::Error) -> String {
 // Pure derivations (no I/O — directly unit-testable)
 // ---------------------------------------------------------------------------
 
-/// Deterministic, stable-for-app-life OAuth `client_id`: `oac_<base62-app-id>`.
-/// Delegates to the shared `zeroship_core::typed_id` minter so the auth-side
-/// decoder (`app_id_from_oauth_client_id`) is the exact inverse.
+/// Deterministic, stable-for-app-life OAuth `client_id`: `oac_<base36-app-id>`.
+///
+/// The base36 body is carried over VERBATIM from the app id's own printed
+/// form rather than re-derived from its bits: `AppId` keeps no route to them
+/// (see `zeroship_core::entity_id`), and the body is already exactly the
+/// bytes `zeroship_core::typed_id::app_oauth_client_id` would have encoded,
+/// since the two ids share one body under different prefixes. The auth-side
+/// decoder (`app_id_from_oauth_client_id`) stays the exact inverse either way
+/// - it reads the body, not the prefix that produced it.
 #[must_use]
-pub fn client_id_for_app(app_id: &Uuid) -> String {
+pub fn client_id_for_app(app_id: &AppId) -> String {
     app_oauth_client_id(app_id)
 }
 
@@ -228,7 +234,10 @@ pub fn build_scope_allowlist(declared: &[ScopeDef]) -> String {
 }
 
 /// The two same-origin OAuth callback paths registered per host (spec §1.1).
-const CALLBACK_PATHS: [&str; 2] = ["/__zeroship/auth/popup-callback", "/__zeroship/auth/callback"];
+const CALLBACK_PATHS: [&str; 2] = [
+    "/__zeroship/auth/popup-callback",
+    "/__zeroship/auth/callback",
+];
 
 /// Compute the full desired redirect_uri set for a host list. Two URIs per host
 /// (popup-callback + callback). Order is stable (host order, then
@@ -398,7 +407,7 @@ fn generate_client_secret_hash() -> String {
 /// that would exceed [`MAX_REDIRECT_URIS`], or an invalid declared scope.
 pub async fn ensure_app_client(
     pg: &mut Client,
-    app_id: &Uuid,
+    app_id: &AppId,
     app_name: &str,
     scheme: &str,
     hosts: &[String],
@@ -458,7 +467,7 @@ pub async fn ensure_app_client(
 /// [`AppOauthClientError`] on DB failure or an invalid host list.
 pub async fn sync_app_redirect_uris(
     pg: &mut Client,
-    app_id: &Uuid,
+    app_id: &AppId,
     app_name: &str,
     scheme: &str,
     hosts: &[String],
@@ -513,7 +522,7 @@ pub async fn sync_app_redirect_uris(
 /// threshold; every field is still required and read exactly once.
 #[derive(Debug)]
 struct ClientRowInput<'a> {
-    app_id: &'a Uuid,
+    app_id: &'a AppId,
     client_id: &'a str,
     client_name: &'a str,
     sector: &'a str,
@@ -550,10 +559,7 @@ async fn upsert_db_rows(pg: &mut Client, input: ClientRowInput<'_>) -> Result<()
             .unwrap_or(sector),
     );
 
-    let tx = pg
-        .transaction()
-        .await
-        .map_err(db_error)?;
+    let tx = pg.transaction().await.map_err(db_error)?;
 
     // zeroship.oauth_clients — the FK target + skip_consent reader.
     // `skip_consent` is FALSE for every creator (per-app end-user) client
@@ -597,7 +603,7 @@ async fn upsert_db_rows(pg: &mut Client, input: ClientRowInput<'_>) -> Result<()
          ON CONFLICT (app_id) DO UPDATE SET \
             sector_identifier = EXCLUDED.sector_identifier, \
             updated_at = NOW()",
-        &[app_id, &client_id, &sector],
+        &[&app_id.as_str(), &client_id, &sector],
     )
     .await
     .map_err(db_error)?;
@@ -608,7 +614,7 @@ async fn upsert_db_rows(pg: &mut Client, input: ClientRowInput<'_>) -> Result<()
     // manifest. Same transaction ⇒ atomic with the allowlist mirror above.
     tx.execute(
         "DELETE FROM zeroship.app_scope_defs WHERE app_id = $1",
-        &[app_id],
+        &[&app_id.as_str()],
     )
     .await
     .map_err(db_error)?;
@@ -616,15 +622,18 @@ async fn upsert_db_rows(pg: &mut Client, input: ClientRowInput<'_>) -> Result<()
         tx.execute(
             "INSERT INTO zeroship.app_scope_defs (app_id, scope_id, label, description) \
              VALUES ($1, $2, $3, $4)",
-            &[app_id, &scope.id, &scope.label, &scope.description],
+            &[
+                &app_id.as_str(),
+                &scope.id,
+                &scope.label,
+                &scope.description,
+            ],
         )
         .await
         .map_err(db_error)?;
     }
 
-    tx.commit()
-        .await
-        .map_err(db_error)?;
+    tx.commit().await.map_err(db_error)?;
     Ok(())
 }
 
@@ -654,21 +663,26 @@ mod tests {
 
     #[test]
     fn client_id_is_deterministic_and_oac_prefixed() {
-        let app = Uuid::parse_str("018f3a4b-5c6d-7e8f-9a0b-1c2d3e4f5a6b").unwrap();
+        let app = AppId::mint();
         let a = client_id_for_app(&app);
         let b = client_id_for_app(&app);
         assert_eq!(a, b, "stable for app life");
         assert!(a.starts_with("oac_"), "got {a}");
-        // oac_ + 22 base62 chars.
-        assert_eq!(a.len(), 26, "got {a}");
+        // The width is derived, not spelled: a literal stops testing the width
+        // the moment the encoder moves and starts passing for another reason.
+        assert_eq!(
+            a.len(),
+            "oac".len() + 1 + zeroship_core::typed_id::BODY_LEN,
+            "got {a}"
+        );
         // Distinct from the app_ entity typed_id namespace.
         assert!(!a.starts_with("app_"));
     }
 
     #[test]
     fn distinct_apps_get_distinct_client_ids() {
-        let a = client_id_for_app(&Uuid::new_v4());
-        let b = client_id_for_app(&Uuid::new_v4());
+        let a = client_id_for_app(&AppId::mint());
+        let b = client_id_for_app(&AppId::mint());
         assert_ne!(a, b);
     }
 
@@ -696,7 +710,9 @@ mod tests {
         let uris = redirect_uris_for_hosts("https", &hosts).unwrap();
         assert_eq!(uris.len(), 4);
         assert!(uris.contains(&"https://apex.zeroship.ai/__zeroship/auth/callback".to_string()));
-        assert!(uris.contains(&"https://custom.example.com/__zeroship/auth/popup-callback".to_string()));
+        assert!(
+            uris.contains(&"https://custom.example.com/__zeroship/auth/popup-callback".to_string())
+        );
     }
 
     #[test]
@@ -709,7 +725,9 @@ mod tests {
 
     #[test]
     fn redirect_uris_enforce_host_cap() {
-        let hosts: Vec<String> = (0..=MAX_HOSTS).map(|i| format!("h{i}.zeroship.ai")).collect();
+        let hosts: Vec<String> = (0..=MAX_HOSTS)
+            .map(|i| format!("h{i}.zeroship.ai"))
+            .collect();
         assert_eq!(hosts.len(), MAX_HOSTS + 1);
         let err = redirect_uris_for_hosts("https", &hosts).unwrap_err();
         assert!(matches!(
@@ -721,7 +739,9 @@ mod tests {
 
     #[test]
     fn redirect_uris_at_cap_yield_102() {
-        let hosts: Vec<String> = (0..MAX_HOSTS).map(|i| format!("h{i}.zeroship.ai")).collect();
+        let hosts: Vec<String> = (0..MAX_HOSTS)
+            .map(|i| format!("h{i}.zeroship.ai"))
+            .collect();
         let uris = redirect_uris_for_hosts("https", &hosts).unwrap();
         assert_eq!(uris.len(), MAX_REDIRECT_URIS);
         assert_eq!(uris.len(), 102);
@@ -774,8 +794,7 @@ mod tests {
             ],
         )
         .unwrap();
-        let des =
-            redirect_uris_for_hosts("https", &["apex.zeroship.ai".to_string()]).unwrap();
+        let des = redirect_uris_for_hosts("https", &["apex.zeroship.ai".to_string()]).unwrap();
         let out = reconcile_redirect_uris(&cur, &des).expect("a diff");
         assert_eq!(out, des);
         assert_eq!(out.len(), 2);
@@ -818,11 +837,13 @@ mod tests {
         // reconcile against the merged set is a no-op (order-insensitive).
         let existing = redirect_uris_for_hosts(
             "https",
-            &["apex.zeroship.ai".to_string(), "custom.example.com".to_string()],
+            &[
+                "apex.zeroship.ai".to_string(),
+                "custom.example.com".to_string(),
+            ],
         )
         .unwrap();
-        let desired =
-            redirect_uris_for_hosts("https", &["apex.zeroship.ai".to_string()]).unwrap();
+        let desired = redirect_uris_for_hosts("https", &["apex.zeroship.ai".to_string()]).unwrap();
         let merged = merge_preserving_existing(&existing, &desired);
         assert_eq!(
             reconcile_redirect_uris(&existing, &merged),
@@ -875,7 +896,11 @@ mod tests {
         );
         for scope in Scope::ALL {
             let id = scope.as_str();
-            let scopes = vec![ScopeDef { id: id.to_string(), label: "x".into(), description: None }];
+            let scopes = vec![ScopeDef {
+                id: id.to_string(),
+                label: "x".into(),
+                description: None,
+            }];
             assert!(
                 validate_app_scopes(&scopes).is_err(),
                 "platform scope {id} must be rejected as an app-declared scope"
@@ -885,17 +910,38 @@ mod tests {
 
     #[test]
     fn validate_rejects_reserved_prefixes_and_identity() {
-        for id in ["platform:admin", "org:owner", "openid", "profile", "email", "offline_access"] {
-            let scopes = vec![ScopeDef { id: id.to_string(), label: "x".into(), description: None }];
-            assert!(validate_app_scopes(&scopes).is_err(), "reserved {id} must be rejected");
+        for id in [
+            "platform:admin",
+            "org:owner",
+            "openid",
+            "profile",
+            "email",
+            "offline_access",
+        ] {
+            let scopes = vec![ScopeDef {
+                id: id.to_string(),
+                label: "x".into(),
+                description: None,
+            }];
+            assert!(
+                validate_app_scopes(&scopes).is_err(),
+                "reserved {id} must be rejected"
+            );
         }
     }
 
     #[test]
     fn validate_rejects_malformed_ids() {
         for id in ["Read:Billing", "read billing", "1read", ":read", "read:"] {
-            let scopes = vec![ScopeDef { id: id.to_string(), label: "x".into(), description: None }];
-            assert!(validate_app_scopes(&scopes).is_err(), "malformed {id} must be rejected");
+            let scopes = vec![ScopeDef {
+                id: id.to_string(),
+                label: "x".into(),
+                description: None,
+            }];
+            assert!(
+                validate_app_scopes(&scopes).is_err(),
+                "malformed {id} must be rejected"
+            );
         }
     }
 
@@ -904,8 +950,16 @@ mod tests {
         // The mirror image of the platform-collision test: read:billing (note
         // the order) is NOT in the platform vocabulary, so it is accepted.
         let scopes = vec![
-            ScopeDef { id: "read:billing".into(), label: "View billing".into(), description: None },
-            ScopeDef { id: "write:projects".into(), label: "Manage".into(), description: None },
+            ScopeDef {
+                id: "read:billing".into(),
+                label: "View billing".into(),
+                description: None,
+            },
+            ScopeDef {
+                id: "write:projects".into(),
+                label: "Manage".into(),
+                description: None,
+            },
         ];
         validate_app_scopes(&scopes).expect("non-colliding app scopes accepted");
     }
@@ -915,8 +969,16 @@ mod tests {
     #[test]
     fn allowlist_appends_declared_after_baseline() {
         let declared = vec![
-            ScopeDef { id: "read:billing".into(), label: "x".into(), description: None },
-            ScopeDef { id: "write:projects".into(), label: "y".into(), description: None },
+            ScopeDef {
+                id: "read:billing".into(),
+                label: "x".into(),
+                description: None,
+            },
+            ScopeDef {
+                id: "write:projects".into(),
+                label: "y".into(),
+                description: None,
+            },
         ];
         assert_eq!(
             build_scope_allowlist(&declared),
@@ -928,5 +990,4 @@ mod tests {
     fn allowlist_empty_declared_is_baseline() {
         assert_eq!(build_scope_allowlist(&[]), BASE_SCOPE);
     }
-
 }

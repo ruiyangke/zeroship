@@ -86,24 +86,12 @@ pub async fn authorize(req: HttpRequest, state: State<Arc<GateState>>) -> HttpRe
         }
     }
     let Some(stt) = q.state.as_deref().filter(|s| !s.is_empty()) else {
-        return error_response(
-            HttpResponse::BadRequest(),
-            "invalid_request",
-            "state required",
-        );
+        return error_response(HttpResponse::BadRequest(), "invalid_request", "state required");
     };
     let Some(nonce) = q.nonce.as_deref().filter(|s| !s.is_empty()) else {
-        return error_response(
-            HttpResponse::BadRequest(),
-            "invalid_request",
-            "nonce required",
-        );
+        return error_response(HttpResponse::BadRequest(), "invalid_request", "nonce required");
     };
-    let requested_scope = q
-        .scope
-        .as_deref()
-        .filter(|s| !s.is_empty())
-        .unwrap_or("openid");
+    let requested_scope = q.scope.as_deref().filter(|s| !s.is_empty()).unwrap_or("openid");
     let scope = scope_with_offline_access(requested_scope);
 
     // `prompt` is a PASSTHROUGH (spec §1.2): omitted in the common case so
@@ -167,10 +155,8 @@ pub async fn authorize(req: HttpRequest, state: State<Arc<GateState>>) -> HttpRe
 /// this list byte-identical to that registration set: a `redirect_uri` override
 /// is accepted only when it exactly equals one of these paths on this app's own
 /// origin (RFC 6749 §3.1.2.3 exact-match). The first entry is the default.
-const REGISTERED_CALLBACK_PATHS: [&str; 2] = [
-    "/__zeroship/auth/popup-callback",
-    "/__zeroship/auth/callback",
-];
+const REGISTERED_CALLBACK_PATHS: [&str; 2] =
+    ["/__zeroship/auth/popup-callback", "/__zeroship/auth/callback"];
 
 /// This app's default redirect_uri — the first registered callback path.
 fn default_redirect_uri(scheme: &str, host: &str) -> String {
@@ -189,11 +175,7 @@ fn is_registered_redirect_uri(scheme: &str, host: &str, supplied: &str) -> bool 
 
 fn scope_with_offline_access(scope: &str) -> String {
     let trimmed = scope.trim();
-    let mut out = if trimmed.is_empty() {
-        "openid".to_string()
-    } else {
-        trimmed.to_string()
-    };
+    let mut out = if trimmed.is_empty() { "openid".to_string() } else { trimmed.to_string() };
     if !out.split_whitespace().any(|s| s == "offline_access") {
         out.push_str(" offline_access");
     }
@@ -383,7 +365,7 @@ pub async fn signout(req: HttpRequest, body: Bytes, state: State<Arc<GateState>>
         // against the wrong app resolves to `None` here, so this READ both
         // loads the anchor AND enforces the former post-hoc
         // `anchor.app_id == route.app_id` check.
-        match anchors::read_live(&mut conn, route.app_id, anchor_id).await {
+        match anchors::read_live(&mut conn, &route.app_id, anchor_id).await {
             Ok(Some(a)) => a,
             Ok(None) => return signout_cleared(&route.host),
             Err(e) => {
@@ -403,9 +385,16 @@ pub async fn signout(req: HttpRequest, body: Bytes, state: State<Arc<GateState>>
     // (client_id, sub), §8.5). When the sector is missing we cannot derive the
     // pws_; the family marker is then best-effort skipped (the anchor delete +
     // cookie clear still happen).
-    let pws_sub = route.sector_identifier.as_deref().map(|sector| {
-        zeroship_core::auth::derive_pairwise(&state.pairwise_salt, &anchor.global_user_id, sector)
-    });
+    let pws_sub = route
+        .sector_identifier
+        .as_deref()
+        .map(|sector| {
+            zeroship_core::auth::derive_pairwise(
+                &state.pairwise_salt,
+                &anchor.global_user_id,
+                sector,
+            )
+        });
 
     // The encrypted families to revoke at OP + the anchor rows to delete.
     // For `local`: just this anchor's family + this row. For `global`: every
@@ -429,9 +418,12 @@ pub async fn signout(req: HttpRequest, body: Bytes, state: State<Arc<GateState>>
         //     anchor delete below, so the two `&conn`/`&mut conn` borrows never
         //     overlap.
         if let Some(pws_sub) = pws_sub.as_deref() {
-            if let Err(e) =
-                zeroship_authz::wrapper_revocation::revoke_family(&conn, &anchor.client_id, pws_sub)
-                    .await
+            if let Err(e) = zeroship_authz::wrapper_revocation::revoke_family(
+                &conn,
+                &anchor.client_id,
+                pws_sub,
+            )
+            .await
             {
                 tracing::warn!(error = %e, "/signout: family-marker upsert failed");
             }
@@ -449,7 +441,7 @@ pub async fn signout(req: HttpRequest, body: Bytes, state: State<Arc<GateState>>
         // (c) Delete the anchor row(s) and collect the family ciphertexts
         //     for the (best-effort) OP revoke fan-out.
         if want_global {
-            match anchors::delete_all_for_user(&mut conn, route.app_id, &anchor.global_user_id)
+            match anchors::delete_all_for_user(&mut conn, &route.app_id, &anchor.global_user_id)
                 .await
             {
                 Ok(deleted) => {
@@ -468,7 +460,7 @@ pub async fn signout(req: HttpRequest, body: Bytes, state: State<Arc<GateState>>
             }
         } else {
             families.push((anchor.refresh_token_enc.clone(), anchor.client_id.clone()));
-            if let Err(e) = anchors::delete(&mut conn, route.app_id, anchor_id).await {
+            if let Err(e) = anchors::delete(&mut conn, &route.app_id, anchor_id).await {
                 tracing::error!(error = %e, "/signout(local): anchor delete failed");
                 return error_response(
                     HttpResponse::InternalServerError(),
@@ -582,32 +574,20 @@ mod tests {
             html.contains("tgt.postMessage(msg, location.origin)"),
             "callback must post to the resolved launcher at location.origin: {html}"
         );
-        assert!(
-            !html.contains(", '*')"),
-            "must never postMessage to '*': {html}"
-        );
+        assert!(!html.contains(", '*')"), "must never postMessage to '*': {html}");
         // The relay reads from location.search at runtime — the gateway does
         // NOT interpolate any query param into the body.
-        assert!(
-            html.contains("new URLSearchParams(location.search)"),
-            "{html}"
-        );
+        assert!(html.contains("new URLSearchParams(location.search)"), "{html}");
         // No DOM-write sink (innerHTML/document.write) for any value.
         assert!(!html.contains("innerHTML"), "no innerHTML sink: {html}");
-        assert!(
-            !html.contains("document.write"),
-            "no document.write sink: {html}"
-        );
+        assert!(!html.contains("document.write"), "no document.write sink: {html}");
         // The exact message type the SDK matches on.
         assert!(html.contains("zs:authorization_response"), "{html}");
         // Both COOP-fallback channels are present.
         assert!(html.contains("new BroadcastChannel('zs:auth')"), "{html}");
         assert!(html.contains("@@zsauth@@::relay::"), "{html}");
         // The script is nonce-tagged (CSP-safe inline).
-        assert!(
-            html.contains(&format!("<script nonce=\"{nonce}\">")),
-            "{html}"
-        );
+        assert!(html.contains(&format!("<script nonce=\"{nonce}\">")), "{html}");
     }
 
     #[test]
@@ -698,10 +678,7 @@ mod tests {
         assert_eq!(b.scope.as_deref(), Some("global"));
         // Form body.
         let req = TestRequest::default()
-            .header(
-                http::header::CONTENT_TYPE,
-                "application/x-www-form-urlencoded",
-            )
+            .header(http::header::CONTENT_TYPE, "application/x-www-form-urlencoded")
             .to_http_request();
         let b = parse_signout_body(&req, b"scope=global");
         assert_eq!(b.scope.as_deref(), Some("global"));
@@ -743,7 +720,8 @@ mod tests {
         //     prefix check (`starts_with("https://app.zeroship.ai/")`) yet is
         //     NOT a registered callback — it must be rejected.
         assert!(
-            "https://app.zeroship.ai/evil".starts_with("https://app.zeroship.ai/"),
+            "https://app.zeroship.ai/evil"
+                .starts_with("https://app.zeroship.ai/"),
             "precondition: the malicious URI DID pass the old prefix check",
         );
         assert!(
@@ -786,10 +764,7 @@ mod tests {
         // registered. Pin the exact strings.
         assert_eq!(
             REGISTERED_CALLBACK_PATHS,
-            [
-                "/__zeroship/auth/popup-callback",
-                "/__zeroship/auth/callback"
-            ],
+            ["/__zeroship/auth/popup-callback", "/__zeroship/auth/callback"],
         );
     }
 

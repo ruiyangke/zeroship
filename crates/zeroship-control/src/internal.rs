@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use ntex::web;
 use ntex::web::types::{Path, State};
-use uuid::Uuid;
+use zeroship_core::app_id::AppId;
 use zeroship_core::readiness::ReadinessGate;
 use zeroship_core::service_assertion::{
     thumbprint_key_id, AssertionError, ReplayStore, ServiceAssertionVerifier, ServiceIssuer,
@@ -52,9 +52,7 @@ pub fn control_service_issuer() -> Result<ServiceIssuer, AssertionError> {
 pub fn control_replay_store(
     control_pg: Arc<compio_postgres::Client>,
 ) -> Arc<dyn ReplayStore + Send + Sync> {
-    Arc::new(zeroship_authn::service_replay::SharedClientReplayStore::new(
-        control_pg,
-    ))
+    Arc::new(zeroship_authn::service_replay::SharedClientReplayStore::new(control_pg))
 }
 
 /// Refuse a caller that has not proved WHICH SERVICE it is, or that holds no
@@ -104,8 +102,7 @@ pub(crate) async fn check_service_auth(
                 web::HttpResponse::ServiceUnavailable()
                     .json(&serde_json::json!({"error":"service unavailable"}))
             } else {
-                web::HttpResponse::Unauthorized()
-                    .json(&serde_json::json!({"error":"unauthorized"}))
+                web::HttpResponse::Unauthorized().json(&serde_json::json!({"error":"unauthorized"}))
             })
         }
     }
@@ -260,10 +257,7 @@ async fn verify_worker_instance(
 /// the four processes that hold that file; adding a fifth holder is how a
 /// narrow need for one route becomes a grant on all of them, which is what
 /// happened when the erasure preflight briefly landed here.
-fn check_auth(
-    req: &web::HttpRequest,
-    state: &AppState,
-) -> Option<web::HttpResponse> {
+fn check_auth(req: &web::HttpRequest, state: &AppState) -> Option<web::HttpResponse> {
     let header = req
         .headers()
         .get("authorization")
@@ -275,7 +269,10 @@ fn check_auth(
         // GET to /internal/* could leak decrypted secrets to the network.
         Some(key)
             if !state.control_key.is_empty()
-                && zeroship_core::auth::constant_time_eq(key, state.control_key.expose_secret()) =>
+                && zeroship_core::auth::constant_time_eq(
+                    key,
+                    state.control_key.expose_secret(),
+                ) =>
         {
             None
         }
@@ -356,22 +353,19 @@ pub async fn get_app_env(
     // user principal. It presents its own ed25519 assertion under the full
     // profile; a shared bearer no longer opens this door, which matters most
     // here because the response body is the app's DECRYPTED environment.
-    if let Some(resp) =
-        check_service_auth(&req, &state, endpoints::CONTROL_APP_ENV).await
-    {
+    if let Some(resp) = check_service_auth(&req, &state, endpoints::CONTROL_APP_ENV).await {
         return resp;
     }
-    let Ok(id) = Uuid::parse_str(&app_id) else {
-        return web::HttpResponse::BadRequest()
-            .json(&serde_json::json!({"error": "bad app_id"}));
+    let Ok(id) = AppId::parse(&app_id) else {
+        return web::HttpResponse::BadRequest().json(&serde_json::json!({"error": "bad app_id"}));
     };
-    match state.env_store.merged_env_for_worker(id).await {
+    match state.env_store.merged_env_for_worker(&id).await {
         Ok(value) => web::HttpResponse::Ok().json(&value),
         Err(crate::env_store::EnvError::AppNotFound) => {
             web::HttpResponse::NotFound().json(&serde_json::json!({"error":"app not found"}))
         }
         Err(e) => {
-            tracing::error!(app_id = %id, error = %e, "control-internal: env fetch error");
+            tracing::error!(app_id = %id.as_str(), error = %e, "control-internal: env fetch error");
             web::HttpResponse::InternalServerError()
                 .json(&serde_json::json!({"error":"internal error"}))
         }
@@ -385,19 +379,24 @@ pub async fn get_app_data_key(
     state: State<Arc<AppState>>,
     app_id: Path<String>,
 ) -> web::HttpResponse {
-    if let Some(response) = check_service_auth(&req, &state, endpoints::CONTROL_APP_DATA_KEY).await {
+    if let Some(response) = check_service_auth(&req, &state, endpoints::CONTROL_APP_DATA_KEY).await
+    {
         return response;
     }
-    let Ok(id) = Uuid::parse_str(&app_id) else {
+    let Ok(id) = AppId::parse(&app_id) else {
         return web::HttpResponse::BadRequest().json(&serde_json::json!({"error":"bad app_id"}));
     };
-    match crate::project_keys::for_app(&state.registry, state.env_store.cipher(), id).await {
-        Ok(key) => web::HttpResponse::Ok().header("cache-control", "no-store").json(&key),
-        Err(crate::project_keys::KeyError::AppNotFound) =>
-            web::HttpResponse::NotFound().json(&serde_json::json!({"error":"app not found"})),
+    match crate::project_keys::for_app(&state.registry, state.env_store.cipher(), &id).await {
+        Ok(key) => web::HttpResponse::Ok()
+            .header("cache-control", "no-store")
+            .json(&key),
+        Err(crate::project_keys::KeyError::AppNotFound) => {
+            web::HttpResponse::NotFound().json(&serde_json::json!({"error":"app not found"}))
+        }
         Err(crate::project_keys::KeyError::Storage(error)) => {
-            tracing::error!(app_id = %id, %error, "control-internal: project key delivery failed");
-            web::HttpResponse::InternalServerError().json(&serde_json::json!({"error":"internal error"}))
+            tracing::error!(app_id = %id.as_str(), %error, "control-internal: project key delivery failed");
+            web::HttpResponse::InternalServerError()
+                .json(&serde_json::json!({"error":"internal error"}))
         }
     }
 }
@@ -426,18 +425,13 @@ pub async fn enrol_worker_instance(
     state: State<Arc<AppState>>,
     body: web::types::Json<crate::worker_enrolment::WorkerEnrolmentRequest>,
 ) -> web::HttpResponse {
-    if let Some(resp) =
-        check_service_auth(&req, &state, endpoints::CONTROL_WORKER_ENROL).await
-    {
+    if let Some(resp) = check_service_auth(&req, &state, endpoints::CONTROL_WORKER_ENROL).await {
         return resp;
     }
     crate::worker_enrolment::enrol(&state, req.peer_addr(), body.into_inner()).await
 }
 
-pub async fn get_versions(
-    req: web::HttpRequest,
-    state: State<Arc<AppState>>,
-) -> web::HttpResponse {
+pub async fn get_versions(req: web::HttpRequest, state: State<Arc<AppState>>) -> web::HttpResponse {
     // Internal endpoint, no user authz: workers authenticate with the
     // control-key shared secret and there is no user principal.
     if let Some(resp) = check_auth(&req, &state) {
@@ -460,28 +454,26 @@ pub async fn get_app_version(
     if let Some(resp) = check_service_auth(&req, &state, endpoints::CONTROL_APP).await {
         return resp;
     }
-    let uid = match app_id.parse::<Uuid>() {
+    let uid = match AppId::parse(&app_id) {
         Ok(u) => u,
         Err(_) => {
             return web::HttpResponse::BadRequest()
-                .json(&serde_json::json!({"error":"invalid uuid"}))
+                .json(&serde_json::json!({"error":"invalid app id"}))
         }
     };
     match state.registry.get_versions().await {
         Ok(versions) => match versions.get(&uid) {
             Some(info) => web::HttpResponse::Ok().json(info),
-            None => web::HttpResponse::NotFound()
-                .json(&serde_json::json!({"error":"app not found"})),
+            None => {
+                web::HttpResponse::NotFound().json(&serde_json::json!({"error":"app not found"}))
+            }
         },
         Err(e) => web::HttpResponse::InternalServerError()
             .json(&serde_json::json!({"error": e.to_string()})),
     }
 }
 
-pub async fn get_routes(
-    req: web::HttpRequest,
-    state: State<Arc<AppState>>,
-) -> web::HttpResponse {
+pub async fn get_routes(req: web::HttpRequest, state: State<Arc<AppState>>) -> web::HttpResponse {
     // Internal endpoint, no user authz: gateways authenticate with the
     // control-key shared secret and there is no user principal.
     if let Some(resp) = check_auth(&req, &state) {

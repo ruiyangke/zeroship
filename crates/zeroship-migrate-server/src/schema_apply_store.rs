@@ -32,13 +32,28 @@
 //! The `planned`/`pending_approval`/`approved` lifecycle and its audit log were
 //! removed on 2026-08-28. A creator approves their own destructive ops; the
 //! operator-approval capability is gone deliberately, not by oversight.
+//!
+//! # `app_id` is bound as `text`, and that is a requirement on the column
+//!
+//! Every statement here binds [`AppId::as_str`] and casts the placeholder to
+//! `text`. [`AppId`] exposes no route to any embedded bits, so text against text
+//! is the only comparison these statements can make, and a database whose
+//! `zeroship.app_schema_applies.app_id` is still `uuid` fails them outright with
+//! a type error. That is the loud failure, and it is the one to want: the two
+//! terminal transitions are `UPDATE ... WHERE app_id = $1`, and a comparison
+//! that merely matched no row would be reported as
+//! [`TerminalTransition::Lost`] - a lost race, indistinguishable from the
+//! benign case this store is built to tolerate.
 
 use std::convert::TryFrom;
 
 use compio_postgres::{Client, NoTls};
 use serde_json::Value;
 use uuid::Uuid;
-use zeroship_core::UserId;
+use zeroship_id::{AppId, UserId};
+
+#[cfg(test)]
+use zeroship_id::{OrganizationId, ProjectId};
 
 use crate::policy::ManagedPosture;
 
@@ -111,9 +126,9 @@ impl SchemaApplyStore {
                 "INSERT INTO zeroship.app_schema_applies \
                     (app_id, migration_id, status, request_body, effective_profile, \
                      ceiling_id, ceiling_version, descriptor_sha256, submitted_by) \
-                 VALUES ($1, $2, 'submitted', $3::jsonb, $4::jsonb, $5, $6, $7, $8)",
+                 VALUES ($1::text, $2, 'submitted', $3::jsonb, $4::jsonb, $5, $6, $7, $8)",
                 &[
-                    &input.app_id,
+                    &input.app_id.as_str(),
                     &input.migration_id,
                     &input.request_body,
                     &effective_profile,
@@ -140,7 +155,7 @@ impl SchemaApplyStore {
     /// on any database failure.
     pub async fn mark_applied(
         &self,
-        app_id: Uuid,
+        app_id: &AppId,
         migration_id: Uuid,
         applied_versions: &[String],
     ) -> Result<TerminalTransition, SchemaApplyStoreError> {
@@ -152,8 +167,8 @@ impl SchemaApplyStore {
                 "UPDATE zeroship.app_schema_applies \
                     SET status = 'applied', applied_at = NOW(), applied_versions = $3::jsonb, \
                         last_error = NULL \
-                  WHERE app_id = $1 AND migration_id = $2 AND status <> 'failed'",
-                &[&app_id, &migration_id, &applied],
+                  WHERE app_id = $1::text AND migration_id = $2 AND status <> 'failed'",
+                &[&app_id.as_str(), &migration_id, &applied],
             )
             .await
             .map_err(SchemaApplyStoreError::Query)?;
@@ -172,7 +187,7 @@ impl SchemaApplyStore {
     /// database failure.
     pub async fn mark_failed(
         &self,
-        app_id: Uuid,
+        app_id: &AppId,
         migration_id: Uuid,
         message: &str,
     ) -> Result<TerminalTransition, SchemaApplyStoreError> {
@@ -181,8 +196,8 @@ impl SchemaApplyStore {
             .execute(
                 "UPDATE zeroship.app_schema_applies \
                     SET status = 'failed', last_error = $3 \
-                  WHERE app_id = $1 AND migration_id = $2 AND status <> 'applied'",
-                &[&app_id, &migration_id, &message],
+                  WHERE app_id = $1::text AND migration_id = $2 AND status <> 'applied'",
+                &[&app_id.as_str(), &migration_id, &message],
             )
             .await
             .map_err(SchemaApplyStoreError::Query)?;
@@ -223,7 +238,7 @@ impl SchemaApplyStore {
 /// The fields `record_submitted` writes.
 #[derive(Debug, Clone)]
 pub struct SchemaApplyInput<'a> {
-    pub app_id: Uuid,
+    pub app_id: &'a AppId,
     pub migration_id: Uuid,
     pub principal_id: &'a UserId,
     pub request_body: Value,
@@ -319,7 +334,7 @@ mod tests {
 
     async fn insert_transition_row(
         client: &Client,
-        app_id: Uuid,
+        app_id: &AppId,
         migration_id: Uuid,
         principal_id: &UserId,
         status: &str,
@@ -330,20 +345,25 @@ mod tests {
                     (app_id, migration_id, status, request_body, effective_profile, \
                      ceiling_id, ceiling_version, descriptor_sha256, applied_versions, \
                      submitted_by, submitted_at, applied_at, last_error) \
-                 VALUES ($1, $2, $3, '{\"marker\":\"original\"}'::jsonb, \
+                 VALUES ($1::text, $2, $3, '{\"marker\":\"original\"}'::jsonb, \
                          '{\"require_rls\":true}'::jsonb, 'test-ceiling', 7, \
                          repeat('a', 64), '[\"mig_original\"]'::jsonb, $4, \
                          TIMESTAMPTZ '2026-08-01 01:02:03+00', \
                          CASE WHEN $3 = 'applied' \
                               THEN TIMESTAMPTZ '2026-08-01 03:04:05+00' END, \
                          CASE WHEN $3 = 'failed' THEN 'original failure' END)",
-                &[&app_id, &migration_id, &status, &principal_id.as_str()],
+                &[
+                    &app_id.as_str(),
+                    &migration_id,
+                    &status,
+                    &principal_id.as_str(),
+                ],
             )
             .await
             .expect("insert transition test row");
     }
 
-    async fn seed_transition_dependencies(client: &Client, app_id: Uuid, principal_id: &UserId) {
+    async fn seed_transition_dependencies(client: &Client, app_id: &AppId, principal_id: &UserId) {
         let plan_id = "pln_schema_apply_transition_test";
         client
             .execute(
@@ -365,19 +385,19 @@ mod tests {
             )
             .await
             .expect("seed transition test user");
-        let app_name = format!("schema-apply-{}", app_id.simple());
+        let app_name = format!("schema-apply-{}", app_id.as_str());
         // An app needs a project and a project needs an organization:
         // `apps.project_id` is NOT NULL against a RESTRICT foreign key. This
         // fixture is about the apply-record state machine, not about who may
         // apply, so the organization is left member-less.
-        let organization_id = zeroship_core::typed_id::generate("org");
-        let project_id = zeroship_core::typed_id::generate("prj");
+        let organization_id = OrganizationId::mint();
+        let project_id = ProjectId::mint();
         client
             .execute(
                 "INSERT INTO zeroship.organizations (id, slug, name, billing_email) \
                  VALUES ($1, $2, 'Schema Apply Fixture', 'fixture@zeroship.test')",
                 &[
-                    &organization_id,
+                    &organization_id.as_str(),
                     &format!("schema-apply-org-{}", Uuid::new_v4().simple()),
                 ],
             )
@@ -387,16 +407,16 @@ mod tests {
             .execute(
                 "INSERT INTO zeroship.projects (id, organization_id, slug, name) \
                  VALUES ($1, $2, 'default', 'Default')",
-                &[&project_id, &organization_id],
+                &[&project_id.as_str(), &organization_id.as_str()],
             )
             .await
             .expect("seed transition test project");
         client
             .execute(
                 "INSERT INTO zeroship.apps (id, name, plan_id, project_id, organization_id) \
-                 SELECT $1, $2, $3, p.id, p.organization_id \
+                 SELECT $1::text, $2, $3, p.id, p.organization_id \
                    FROM zeroship.projects p WHERE p.id = $4",
-                &[&app_id, &app_name, &plan_id, &project_id],
+                &[&app_id.as_str(), &app_name, &plan_id, &project_id.as_str()],
             )
             .await
             .expect("seed transition test app");
@@ -416,18 +436,18 @@ mod tests {
     async fn terminal_status_transitions_do_not_clobber_each_other_pg() {
         let client = test_client().await;
         let store = SchemaApplyStore::new(test_dsn());
-        let app_id = Uuid::now_v7();
+        let app_id = AppId::mint();
         let principal_id = UserId::mint();
         let applied_id = Uuid::now_v7();
         let failed_id = Uuid::now_v7();
 
-        seed_transition_dependencies(&client, app_id, &principal_id).await;
-        insert_transition_row(&client, app_id, applied_id, &principal_id, "applied").await;
-        insert_transition_row(&client, app_id, failed_id, &principal_id, "failed").await;
+        seed_transition_dependencies(&client, &app_id, &principal_id).await;
+        insert_transition_row(&client, &app_id, applied_id, &principal_id, "applied").await;
+        insert_transition_row(&client, &app_id, failed_id, &principal_id, "failed").await;
 
         // An error path firing after a successful apply must not erase it.
         let outcome = store
-            .mark_failed(app_id, applied_id, "late error on an applied migration")
+            .mark_failed(&app_id, applied_id, "late error on an applied migration")
             .await
             .expect("call must not error");
         assert_eq!(
@@ -438,8 +458,8 @@ mod tests {
         let row = client
             .query_one(
                 "SELECT status FROM zeroship.app_schema_applies \
-                  WHERE app_id = $1 AND migration_id = $2",
-                &[&app_id, &applied_id],
+                  WHERE app_id = $1::text AND migration_id = $2",
+                &[&app_id.as_str(), &applied_id],
             )
             .await
             .expect("read the applied row");
@@ -451,7 +471,7 @@ mod tests {
 
         // And the converse: a failed migration must not silently become applied.
         let outcome = store
-            .mark_applied(app_id, failed_id, &["mig_late".to_string()])
+            .mark_applied(&app_id, failed_id, &["mig_late".to_string()])
             .await
             .expect("call must not error");
         assert_eq!(
@@ -462,8 +482,8 @@ mod tests {
         let row = client
             .query_one(
                 "SELECT status FROM zeroship.app_schema_applies \
-                  WHERE app_id = $1 AND migration_id = $2",
-                &[&app_id, &failed_id],
+                  WHERE app_id = $1::text AND migration_id = $2",
+                &[&app_id.as_str(), &failed_id],
             )
             .await
             .expect("read the failed row");
@@ -478,9 +498,9 @@ mod tests {
         // discarded row count was. A transition that WINS must say `Recorded`, or
         // `Lost` carries no information.
         let winning_id = Uuid::now_v7();
-        insert_transition_row(&client, app_id, winning_id, &principal_id, "submitted").await;
+        insert_transition_row(&client, &app_id, winning_id, &principal_id, "submitted").await;
         let outcome = store
-            .mark_applied(app_id, winning_id, &["mig_winner".to_string()])
+            .mark_applied(&app_id, winning_id, &["mig_winner".to_string()])
             .await
             .expect("call must not error");
         assert_eq!(
@@ -491,8 +511,8 @@ mod tests {
         let row = client
             .query_one(
                 "SELECT status, applied_versions FROM zeroship.app_schema_applies \
-                  WHERE app_id = $1 AND migration_id = $2",
-                &[&app_id, &winning_id],
+                  WHERE app_id = $1::text AND migration_id = $2",
+                &[&app_id.as_str(), &winning_id],
             )
             .await
             .expect("read the winning row");
@@ -519,15 +539,15 @@ mod tests {
     async fn an_apply_that_advanced_nothing_still_records_an_applied_row_pg() {
         let client = test_client().await;
         let store = SchemaApplyStore::new(test_dsn());
-        let app_id = Uuid::now_v7();
+        let app_id = AppId::mint();
         let principal_id = UserId::mint();
         let migration_id = Uuid::now_v7();
 
-        seed_transition_dependencies(&client, app_id, &principal_id).await;
-        insert_transition_row(&client, app_id, migration_id, &principal_id, "submitted").await;
+        seed_transition_dependencies(&client, &app_id, &principal_id).await;
+        insert_transition_row(&client, &app_id, migration_id, &principal_id, "submitted").await;
 
         let outcome = store
-            .mark_applied(app_id, migration_id, &[])
+            .mark_applied(&app_id, migration_id, &[])
             .await
             .expect("call must not error");
         assert_eq!(outcome, TerminalTransition::Recorded);
@@ -535,8 +555,8 @@ mod tests {
             .query_one(
                 "SELECT status, applied_versions, applied_at IS NOT NULL AS stamped \
                    FROM zeroship.app_schema_applies \
-                  WHERE app_id = $1 AND migration_id = $2",
-                &[&app_id, &migration_id],
+                  WHERE app_id = $1::text AND migration_id = $2",
+                &[&app_id.as_str(), &migration_id],
             )
             .await
             .expect("read the row");

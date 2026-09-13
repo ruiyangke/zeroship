@@ -119,12 +119,21 @@ impl CollectionFixture {
         fields: Value,
         columns: &str,
     ) -> Self {
+        Self::postgres_from_table_definition_with_pool_size(collection, fields, columns, 4).await
+    }
+
+    pub async fn postgres_from_table_definition_with_pool_size(
+        collection: &str,
+        fields: Value,
+        columns: &str,
+        pool_size: usize,
+    ) -> Self {
         let server = crate::tests::fixtures::postgres::Postgres::start();
         crate::tests::fixtures::reset_engine();
         let backend = Rc::new(
             crate::backend::postgres::PostgresBackend::connect(
                 &server.url(),
-                4,
+                pool_size,
                 ProjectKeySource::unavailable(),
             )
             .await

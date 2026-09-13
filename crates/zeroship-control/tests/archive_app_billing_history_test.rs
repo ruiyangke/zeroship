@@ -102,7 +102,7 @@ async fn archive_preserves_finalized_invoice_history() {
     let organization: String = client
         .query(
             "SELECT organization_id FROM zeroship.apps WHERE id = $1",
-            &[&app.id],
+            &[&app.id.as_str()],
         )
         .await
         .expect("read app organization")[0]
@@ -131,7 +131,7 @@ async fn archive_preserves_finalized_invoice_history() {
                (invoice_id, app_id, segment_no, plan_id, included_units, \
                 fx_pico_cents_per_unit, base_fee_cents, amount_cents, usage_snapshot, weights_snapshot) \
              VALUES ($1, $2, 0, $3, 0, 1000, 0, 100, '{}'::jsonb, '{}'::jsonb)",
-            &[&invoice_id, &app.id, &plan_id],
+            &[&invoice_id, &app.id.as_str(), &plan_id],
         )
         .await
         .expect("seed invoice line");
@@ -181,7 +181,7 @@ async fn archive_preserves_custom_metric_and_usage() {
         .execute(
             "INSERT INTO zeroship.billing_metrics (metric, kind, unit, owner_app) \
              VALUES ($1, 'custom', 'unit', $2)",
-            &[&metric, &app.id],
+            &[&metric, &app.id.as_str()],
         )
         .await
         .expect("seed custom metric");
@@ -189,7 +189,7 @@ async fn archive_preserves_custom_metric_and_usage() {
         .execute(
             "INSERT INTO zeroship.usage_aggregates (app_id, period, metric, total) \
              VALUES ($1, $2::date, $3, 42)",
-            &[&app.id, &first_of_this_month(), &metric],
+            &[&app.id.as_str(), &first_of_this_month(), &metric],
         )
         .await
         .expect("seed usage aggregate");
@@ -230,7 +230,12 @@ async fn archive_with_plan_change_history_is_idempotent_and_reversible() {
             "INSERT INTO zeroship.plan_change_events \
                (id, app_id, period, from_plan_id, to_plan_id, usage_at_change) \
              VALUES ($1, $2, $3::date, NULL, $4, '{}'::jsonb)",
-            &[&event_id, &app.id, &first_of_this_month(), &plan_id],
+            &[
+                &event_id,
+                &app.id.as_str(),
+                &first_of_this_month(),
+                &plan_id,
+            ],
         )
         .await
         .expect("seed immutable plan-change history");
@@ -414,7 +419,12 @@ async fn restore_requires_a_staged_deploy_matching_the_latest_applied_schema() {
                  applied_at, descriptor_sha256) \
              VALUES ($1, $2, 'applied', '{}'::jsonb, '{}'::jsonb, 'test-ceiling', 1, \
                      '[]'::jsonb, $3, now(), $4)",
-            &[&app.id, &Uuid::now_v7(), &owner.as_str(), &descriptor_hash],
+            &[
+                &app.id.as_str(),
+                &Uuid::now_v7(),
+                &owner.as_str(),
+                &descriptor_hash,
+            ],
         )
         .await
         .expect("record applied schema descriptor");
@@ -490,7 +500,7 @@ fn manifest_json(deploy_hash: &str, compiler: &str) -> String {
     serde_json::to_string(&manifest).expect("serialize manifest")
 }
 
-async fn count(client: &Client, table: &str, column: &str, app_id: &Uuid) -> i64 {
+async fn count(client: &Client, table: &str, column: &str, app_id: &zeroship_core::AppId) -> i64 {
     assert!(table
         .bytes()
         .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'.'));
@@ -498,7 +508,11 @@ async fn count(client: &Client, table: &str, column: &str, app_id: &Uuid) -> i64
         .bytes()
         .all(|b| b.is_ascii_alphanumeric() || b == b'_'));
     let sql = format!("SELECT COUNT(*)::bigint AS n FROM {table} WHERE {column} = $1");
-    client.query(&sql, &[app_id]).await.expect("count query")[0].get("n")
+    client
+        .query(&sql, &[&app_id.as_str()])
+        .await
+        .expect("count query")[0]
+        .get("n")
 }
 
 fn first_of_this_month() -> chrono::NaiveDate {

@@ -119,14 +119,11 @@ The independently managed Database and Grant records described below remain plan
 
 ## Identity, and what a creator may see
 
-Every entity carries a typed id - UUIDv7, base62, three-letter prefix
-(`crates/zeroship-core/src/typed_id.rs`). `ds_...` for a Datastore, `dbs_...` for a Database.
-(`dbs`, not `db`, for consistency: every prefix in `typed_id.rs` is three letters and its doc
-comments state the shape `^[a-z]{3}_[A-Za-z0-9]{22}$`. Note that shape is a CONVENTION, not a
-parser constraint - `parse` is `split_once('_')` plus a base62 decode of the remainder
-(`crates/zeroship-core/src/typed_id.rs:139-145`), so `db_<22 chars>` would parse fine. Choose `dbs`
-because the tree is
-uniform, not because the parser refuses two letters.)
+Every entity carries a typed id: a UUIDv7 encoded as fixed-width lowercase
+base36 with an entity prefix. The concrete newtypes in
+`crates/zeroship-id/` enforce their own prefixes and the shared decoder
+enforces the canonical body. Datastores use `ds_...`; databases use
+`dbs_...`.
 
 **Both ids are internal. Neither is exposed to creators.**
 

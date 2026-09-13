@@ -1,47 +1,54 @@
-//! Typed IDs — UUIDv7 with entity-type prefix and base62 encoding.
+//! Typed IDs — UUIDv7 with an entity-type prefix and base36 encoding.
 //!
-//! Format: `{prefix}_{base62(uuidv7)}` — e.g. `usr_0Bk3Np4qR5sT7uV8wYz1A`
+//! Format: `{prefix}_{base36(uuidv7)}` — e.g. `usr_0k3m9qw1x7ry2bn5td8vc4h`
 //!
 //! - UUIDv7: timestamp-ordered, globally unique, sortable by creation time
-//! - Base62: `0-9A-Za-z`, 22 chars for 128 bits, case-sensitive
+//! - Base36: `0-9a-z`, 25 chars for 128 bits, single-case
 //! - Prefix: entity type (`usr`, `app`, `ses`) for debuggability
-//! - Storage: MOSTLY the typed-id STRING, not a raw UUID. A 2026-08-10
-//!   pre-fix measurement found 312 text `id` columns inheriting `en_US.utf8`.
-//!   Creator entity-id DDL now pins byte ordering, and the finite platform
-//!   entity-id population is pinned by its own schema migration. See [`BASE62`].
+//! - Storage: the typed-id STRING, not a raw UUID. Text `id` columns inherit
+//!   the database's default collation unless told otherwise, so the entity-id
+//!   DDL pins byte ordering. See [`BASE36`].
 
-/// Base62 alphabet — sorted so that under a BYTE-ordering collation,
-/// lexicographic order matches numeric order for the high bits (timestamp),
-/// preserving UUIDv7 sort order.
+/// Base36 alphabet — ascending in byte value, so under a BYTE-ordering
+/// collation lexicographic order matches numeric order for the high bits
+/// (the UUIDv7 timestamp) and ids sort by creation time.
 ///
-/// The qualifier is load-bearing. The property holds under SQLite BINARY and
-/// PostgreSQL `COLLATE "C"`; it does not hold under the database's
-/// `en_US.utf8` default, which interleaves base62's uppercase and lowercase
-/// runs. Before entity-id DDL pinned byte ordering, the defect was measured
-/// over 50 batches of 6 ids each:
+/// # It is single-case on purpose, and that is a correctness property
 ///
-/// ```text
-///                                       dev SQLite   deployed Postgres
-///   ids 20ms apart, ORDER BY id wrong:      0/50            9/50
-///   ids 100ms apart, ORDER BY id wrong:     0/50           42/50
-/// ```
+/// An app id IS a PostgreSQL schema name, a DNS label, and a scope segment in
+/// the migration policy language. Every one of those folds case: PostgreSQL
+/// lowercases an unquoted identifier, DNS is case-insensitive, and the policy
+/// language models PostgreSQL. A mixed-case body therefore has two spellings
+/// wherever it is written unquoted, and the two are compared in different
+/// places by different rules.
 ///
-/// The failures are BURSTY in wall-clock time, not independent per run: the
-/// timestamp digit at the discriminating position sweeps this alphabet, so
-/// while it sits in a same-case run every query is right, and while it
-/// straddles the case boundary every query is wrong. Re-running a failing
-/// ordering test is therefore not evidence the failure was spurious.
+/// That is not hypothetical. Under a mixed-case body the migration policy
+/// folded the scope while the grant lookup used raw bytes, so the two never
+/// matched and EVERY creator `createTable` was denied - measured at both
+/// spellings of one id. A single-case alphabet removes the class rather than
+/// patching the sites: there is one spelling, so folding is the identity.
 ///
-/// The schema contract therefore pins bytewise collation on sortable entity-id
-/// columns. The encoder alone cannot provide this guarantee to a database.
-const BASE62: &[u8; 62] = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+/// # The collation contract still stands
+///
+/// Byte-ascending is necessary but not sufficient: it holds under SQLite
+/// BINARY and PostgreSQL `COLLATE "C"`, and NOT under a locale default like
+/// `en_US.utf8`, which does not order ASCII bytewise. Every column holding one
+/// of these ids therefore pins `COLLATE "C"`, including the foreign-key copies
+/// nothing orders - a join against a collated id cannot use a copy's index
+/// when the two collations differ, and that degrades silently rather than
+/// erroring. The encoder alone cannot give a database this guarantee.
+const BASE36: &[u8; 36] = b"0123456789abcdefghijklmnopqrstuvwxyz";
 
-/// Reverse lookup table: ASCII byte → base62 digit (255 = invalid)
+/// Body width of an encoded 128-bit id.
+///
+/// Padding to a fixed width preserves numeric order under bytewise collation.
+pub const BODY_LEN: usize = 25;
+/// Reverse lookup table: ASCII byte → base36 digit (255 = invalid)
 const fn build_decode_table() -> [u8; 128] {
     let mut table = [255u8; 128];
     let mut i = 0;
-    while i < 62 {
-        table[BASE62[i] as usize] = i as u8;
+    while i < 36 {
+        table[BASE36[i] as usize] = i as u8;
         i += 1;
     }
     table
@@ -49,33 +56,37 @@ const fn build_decode_table() -> [u8; 128] {
 
 const DECODE: [u8; 128] = build_decode_table();
 
-/// Encode 128-bit UUID bytes to 22-char base62 string.
-pub fn uuid_to_base62(uuid: &uuid::Uuid) -> String {
+/// Encode 128-bit UUID bytes as a fixed-width 25-char base36 string.
+///
+/// Twenty-five is the minimum width that holds 128 bits: 36^24 < 2^128 <= 36^25.
+/// Fixed width is what makes the encoding order-preserving - a shorter id would
+/// sort before a longer one whatever their numeric values.
+pub fn uuid_to_base36(uuid: &uuid::Uuid) -> String {
     let bytes = uuid.as_bytes();
-    // Treat as a 128-bit big-endian integer and repeatedly divide by 62
+    // Treat as a 128-bit big-endian integer and repeatedly divide by 36.
     let mut n = u128::from_be_bytes(*bytes);
-    let mut buf = [0u8; 22];
-    for i in (0..22).rev() {
-        buf[i] = BASE62[(n % 62) as usize];
-        n /= 62;
+    let mut buf = [0u8; BODY_LEN];
+    for i in (0..BODY_LEN).rev() {
+        buf[i] = BASE36[(n % 36) as usize];
+        n /= 36;
     }
-    String::from_utf8(buf.to_vec()).expect("base62 chars are valid UTF-8")
+    String::from_utf8(buf.to_vec()).expect("base36 chars are valid UTF-8")
 }
 
-/// Encode an arbitrary byte slice as a base62 string by treating it as a
-/// big-endian integer and repeatedly dividing by 62.
+/// Encode an arbitrary byte slice as a base36 string by treating it as a
+/// big-endian integer and repeatedly dividing by 36.
 ///
-/// Unlike [`uuid_to_base62`] (fixed 22-char width for a 128-bit UUID), this
+/// Unlike [`uuid_to_base36`] (fixed 25-char width for a 128-bit UUID), this
 /// handles inputs of any length, so it can encode an HMAC tag. The output
 /// length is not fixed; callers that want a bounded id should truncate the
 /// returned string (e.g. the pairwise-subject derivation takes the first 20
 /// chars). Empty input yields an empty string.
 #[must_use]
-pub fn base62_encode_bytes(bytes: &[u8]) -> String {
+pub fn base36_encode_bytes(bytes: &[u8]) -> String {
     if bytes.is_empty() {
         return String::new();
     }
-    // Big-endian byte-array long division by 62, collecting remainders.
+    // Big-endian byte-array long division by 36, collecting remainders.
     let mut digits = bytes.to_vec();
     let mut out = Vec::new();
     // Strip leading zero bytes only after the loop preserves value; we loop
@@ -85,40 +96,39 @@ pub fn base62_encode_bytes(bytes: &[u8]) -> String {
         let mut all_zero = true;
         for d in &mut digits {
             let cur = (rem << 8) | u16::from(*d);
-            let q = cur / 62;
-            rem = cur % 62;
+            let q = cur / 36;
+            rem = cur % 36;
             *d = u8::try_from(q).unwrap_or(0);
             if *d != 0 {
                 all_zero = false;
             }
         }
-        out.push(BASE62[rem as usize]);
+        out.push(BASE36[rem as usize]);
         if all_zero {
             break;
         }
     }
     out.reverse();
-    String::from_utf8(out).expect("base62 chars are valid UTF-8")
+    String::from_utf8(out).expect("base36 chars are valid UTF-8")
 }
 
-/// Decode 22-char base62 string to UUID bytes.
-pub fn base62_to_uuid(s: &str) -> Result<uuid::Uuid, String> {
-    if s.len() != 22 {
-        return Err(format!("expected 22 base62 chars, got {}", s.len()));
+/// Decode a 25-char base36 string to UUID bytes.
+pub fn base36_to_uuid(s: &str) -> Result<uuid::Uuid, String> {
+    if s.len() != BODY_LEN {
+        return Err(format!("expected {BODY_LEN} base36 chars, got {}", s.len()));
     }
     let mut n: u128 = 0;
     for &b in s.as_bytes() {
         if b >= 128 {
-            return Err(format!("invalid base62 character: {}", b as char));
+            return Err(format!("invalid base36 character: {}", b as char));
         }
         let digit = DECODE[b as usize];
         if digit == 255 {
-            return Err(format!("invalid base62 character: {}", b as char));
+            return Err(format!("invalid base36 character: {}", b as char));
         }
-        n = n
-            .checked_mul(62)
+        n = n.checked_mul(36)
             .and_then(|n| n.checked_add(digit as u128))
-            .ok_or_else(|| "base62 overflow".to_string())?;
+            .ok_or_else(|| "base36 overflow".to_string())?;
     }
     Ok(uuid::Uuid::from_bytes(n.to_be_bytes()))
 }
@@ -128,10 +138,10 @@ pub fn new_v7() -> uuid::Uuid {
     uuid::Uuid::now_v7()
 }
 
-/// Generate a typed ID: `{prefix}_{base62(uuidv7)}`
+/// Generate a typed ID: `{prefix}_{base36(uuidv7)}`
 pub fn generate(prefix: &str) -> String {
     let uuid = new_v7();
-    format!("{}_{}", prefix, uuid_to_base62(&uuid))
+    format!("{}_{}", prefix, uuid_to_base36(&uuid))
 }
 
 /// Parse a typed ID: extract the prefix and decode to UUID.
@@ -139,7 +149,7 @@ pub fn parse(typed_id: &str) -> Result<(&str, uuid::Uuid), String> {
     let (prefix, encoded) = typed_id
         .split_once('_')
         .ok_or_else(|| format!("invalid typed ID (no prefix): {typed_id}"))?;
-    let uuid = base62_to_uuid(encoded)?;
+    let uuid = base36_to_uuid(encoded)?;
     Ok((prefix, uuid))
 }
 
@@ -155,7 +165,7 @@ pub enum ParseError {
     /// path-traversal-hardening boundary check (Invariant 2 in
     /// `docs/archive/sandbox-pg-state.md`).
     WrongPrefix { expected: String, got: String },
-    /// The id failed to parse — wrong shape, invalid base62, missing
+    /// The id failed to parse — wrong shape, invalid base36, missing
     /// underscore, etc. Carries the same string the underlying [`parse`]
     /// would have returned.
     Malformed(String),
@@ -186,7 +196,10 @@ impl std::error::Error for ParseError {}
 /// smuggle `..` — or another entity type's id — through it.
 ///
 /// Returns the embedded UUID on success.
-pub fn parse_with_prefix(typed_id: &str, expected_prefix: &str) -> Result<uuid::Uuid, ParseError> {
+pub fn parse_with_prefix(
+    typed_id: &str,
+    expected_prefix: &str,
+) -> Result<uuid::Uuid, ParseError> {
     let (got, uuid) = parse(typed_id).map_err(ParseError::Malformed)?;
     if got != expected_prefix {
         return Err(ParseError::WrongPrefix {
@@ -205,8 +218,9 @@ pub fn to_uuid_string(typed_id: &str) -> Result<String, String> {
 
 /// Encode a UUID string (hyphenated) to typed ID with the given prefix.
 pub fn from_uuid_string(prefix: &str, uuid_str: &str) -> Result<String, String> {
-    let uuid = uuid::Uuid::parse_str(uuid_str).map_err(|e| format!("invalid UUID: {e}"))?;
-    Ok(format!("{}_{}", prefix, uuid_to_base62(&uuid)))
+    let uuid = uuid::Uuid::parse_str(uuid_str)
+        .map_err(|e| format!("invalid UUID: {e}"))?;
+    Ok(format!("{}_{}", prefix, uuid_to_base36(&uuid)))
 }
 
 // ---------------------------------------------------------------------------
@@ -217,9 +231,9 @@ pub const USER_PREFIX: &str = "usr";
 /// App entity typed-id prefix. There is no `new_app_id` free function beside
 /// the other `new_*_id` minters: an app id's ONLY minter is
 /// [`crate::app_id::AppId::mint`], because the value seeds the per-app schema
-/// name, both role names, the publication digest, the encryption salt and the
-/// app-secret AAD, and a `String` returned from here would reach all of them
-/// with no type to say which rendering each one wanted.
+/// name, both role names, the publication digest and the encryption salt, and a
+/// `String` returned from here would reach all of them with no type saying
+/// which of those it was.
 pub const APP_PREFIX: &str = "app";
 
 /// Immutable normal app deployment identity.
@@ -265,13 +279,13 @@ pub const PROJECT_PREFIX: &str = "prj";
 /// as a hash, never this value.
 pub const INVITE_PREFIX: &str = "ivt";
 /// Wake-job typed-id prefix. Three chars to preserve the common
-/// `^[a-z]{3}_[A-Za-z0-9]{22}$` shape. The PostgreSQL
+/// `^[a-z]{3}_[0-9a-z]{25}$` shape. The PostgreSQL
 /// `wake_jobs.wake_id` column stores the full typed-id string
-/// (`wak_<base62>`).
+/// (`wak_<base36>`).
 pub const WAKE_PREFIX: &str = "wak";
 
 /// Per-app OAuth `client_id` prefix: the
-/// deterministic, stable-for-app-life OAuth client id is `oac_<base62-app-id>`.
+/// deterministic, stable-for-app-life OAuth client id is `oac_<base36-app-id>`.
 /// Distinct from [`APP_PREFIX`] (the app *entity* typed_id) on purpose — the
 /// OAuth `client_id` is a derived identifier, not a typed_id.
 ///
@@ -282,63 +296,63 @@ pub const WAKE_PREFIX: &str = "wak";
 pub const APP_OAUTH_CLIENT_PREFIX: &str = "oac";
 
 /// Pricing-plan typed-id prefix. Three chars to preserve the common
-/// `^[a-z]{3}_[A-Za-z0-9]{22}$` shape. The `zeroship.plans.id` column stores
-/// the full typed-id string (`pln_<base62>`); `apps.plan_id` is an FK into it,
+/// `^[a-z]{3}_[0-9a-z]{25}$` shape. The `zeroship.plans.id` column stores
+/// the full typed-id string (`pln_<base36>`); `apps.plan_id` is an FK into it,
 /// preventing free-text self-escalation. The catalog mints ids via
 /// [`new_plan_id`] and the built-in tiers are seeded with real `pln_…` ids
 /// at control bootstrap.
 pub const PLAN_PREFIX: &str = "pln";
 
 /// Invoice typed-id prefix (billing schema redesign). Three chars to match the
-/// global `^[a-z]{3}_[A-Za-z0-9]{22}$` shape every other entity uses
+/// global `^[a-z]{3}_[0-9a-z]{25}$` shape every other entity uses
 /// (R16-API2). The `zeroship.invoices.id` column stores the full typed-id
-/// string (`inv_<base62>`); the provider-ref + line side tables FK into it.
+/// string (`inv_<base36>`); the provider-ref + line side tables FK into it.
 pub const INVOICE_PREFIX: &str = "inv";
 
 /// Invoice-payment typed-id prefix. Three chars to
-/// match the global `^[a-z]{3}_[A-Za-z0-9]{22}$` shape every other entity uses
+/// match the global `^[a-z]{3}_[0-9a-z]{25}$` shape every other entity uses
 /// (R16-API2). `ipy` (NOT the design's 4-char `ipay`, which would break the
 /// 3-char invariant) and disjoint from `inv` so a payment id can never be
 /// confused with the invoice it FKs into. The `zeroship.invoice_payments.id`
-/// column stores the full typed-id string (`ipy_<base62>`), minted in Rust by
-/// the payment-confirmation webhook (no SQL `DEFAULT` — there is no in-DB base62
+/// column stores the full typed-id string (`ipy_<base36>`), minted in Rust by
+/// the payment-confirmation webhook (no SQL `DEFAULT` — there is no in-DB base36
 /// generator).
 pub const INVOICE_PAYMENT_PREFIX: &str = "ipy";
 
 /// Credit-ledger typed-id prefix. Three chars to
-/// match the global `^[a-z]{3}_[A-Za-z0-9]{22}$` shape every other entity uses
+/// match the global `^[a-z]{3}_[0-9a-z]{25}$` shape every other entity uses
 /// (R16-API2), and disjoint from `inv`/`ipy` so a credit-entry id can never be
 /// confused with the invoice it relates to. The `zeroship.credit_ledger.id`
-/// column stores the full typed-id string (`crd_<base62>`), minted in Rust by the
+/// column stores the full typed-id string (`crd_<base36>`), minted in Rust by the
 /// operator grant endpoint and the reconciler's per-grant `consumed` writes (no
-/// SQL `DEFAULT` — there is no in-DB base62 generator).
+/// SQL `DEFAULT` — there is no in-DB base36 generator).
 pub const CREDIT_PREFIX: &str = "crd";
 
 /// Refund typed-id prefix. Three chars to match the
-/// global `^[a-z]{3}_[A-Za-z0-9]{22}$` shape every other entity uses
+/// global `^[a-z]{3}_[0-9a-z]{25}$` shape every other entity uses
 /// (R16-API2), and disjoint from `inv`/`ipy`/`crd` so a refund id can never be
 /// confused with the invoice it FKs into or the credit grant a `refund_to_credit`
 /// refund appends. The `zeroship.refunds.id` column stores the full typed-id
-/// string (`ref_<base62>`), minted in Rust by the operator `POST
+/// string (`ref_<base36>`), minted in Rust by the operator `POST
 /// /invoices/{id}/refunds` endpoint + the void+reissue true-up bridge (no SQL
-/// `DEFAULT` — there is no in-DB base62 generator).
+/// `DEFAULT` — there is no in-DB base36 generator).
 pub const REFUND_PREFIX: &str = "ref";
 
 /// Plan-change-event typed-id prefix (full usage-segment
-/// proration). Three chars to match the global `^[a-z]{3}_[A-Za-z0-9]{22}$` shape
+/// proration). Three chars to match the global `^[a-z]{3}_[0-9a-z]{25}$` shape
 /// every other entity uses (R16-API2), and disjoint from `inv`/`ipy`/`crd`/`ref`/`pln`
 /// so a plan-change-event id can never be confused with the plan it names or the
 /// invoice line its segment becomes. The `zeroship.plan_change_events.id` column
-/// stores the full typed-id string (`pce_<base62>`), minted in Rust by `set_plan`
+/// stores the full typed-id string (`pce_<base36>`), minted in Rust by `set_plan`
 /// when it appends a proration-timeline row (no SQL `DEFAULT` — there is no in-DB
-/// base62 generator).
+/// base36 generator).
 pub const PLAN_CHANGE_EVENT_PREFIX: &str = "pce";
 
 /// Spend-state-history surrogate-id prefix.
-/// Three chars to match the global `^[a-z]{3}_[A-Za-z0-9]{22}$` shape (R16-API2). The
+/// Three chars to match the global `^[a-z]{3}_[0-9a-z]{25}$` shape (R16-API2). The
 /// `zeroship.spend_state_history.id` column stores the full typed-id string
-/// (`she_<base62>`), minted in Rust by `spend.rs::persist_transition` (no SQL
-/// `DEFAULT` — there is no in-DB base62 generator, and a bare `gen_random_uuid()`
+/// (`she_<base36>`), minted in Rust by `spend.rs::persist_transition` (no SQL
+/// `DEFAULT` — there is no in-DB base36 generator, and a bare `gen_random_uuid()`
 /// would not carry the `she_` prefix the notify dedup key relies on).
 ///
 /// The surrogate id IS the `billing_notifications.transition_id` for spend-driven
@@ -353,9 +367,9 @@ pub const PLAN_CHANGE_EVENT_PREFIX: &str = "pce";
 /// broken links on every doc build.
 pub const SPEND_HISTORY_PREFIX: &str = "she";
 
-/// Organization-billing-status-history surrogate-id prefix. Three chars to match the global `^[a-z]{3}_[A-Za-z0-9]{22}$` shape
+/// Organization-billing-status-history surrogate-id prefix. Three chars to match the global `^[a-z]{3}_[0-9a-z]{25}$` shape
 /// (R16-API2). The `zeroship.organization_billing_status_history.id` column stores the full
-/// typed-id string (`obh_<base62>`), minted in Rust by `account_status.rs::append_history`
+/// typed-id string (`obh_<base36>`), minted in Rust by `account_status.rs::append_history`
 /// (no SQL `DEFAULT` — see [`SPEND_HISTORY_PREFIX`]).
 ///
 /// The surrogate id IS the `billing_notifications.transition_id` for the dunning-driven
@@ -364,8 +378,8 @@ pub const SPEND_HISTORY_PREFIX: &str = "she";
 pub const ORGANIZATION_BILLING_HISTORY_PREFIX: &str = "obh";
 
 /// Billing-dispute typed-id prefix.
-/// Three chars to match the global `^[a-z]{3}_[A-Za-z0-9]{22}$` shape (R16-API2). The
-/// `zeroship.billing_disputes.id` column stores the full typed-id string (`dsp_<base62>`),
+/// Three chars to match the global `^[a-z]{3}_[0-9a-z]{25}$` shape (R16-API2). The
+/// `zeroship.billing_disputes.id` column stores the full typed-id string (`dsp_<base36>`),
 /// minted in Rust by the `charge.dispute.created` webhook branch.
 ///
 /// The id IS the `billing_notifications.transition_id` for the `disputed` kind. Its
@@ -376,80 +390,98 @@ pub const ORGANIZATION_BILLING_HISTORY_PREFIX: &str = "obh";
 /// Stripe-side dispute id (`du_…`/`dp_…`), which is a provider ref, not a typed_id.
 pub const DISPUTE_PREFIX: &str = "dsp";
 
-/// Mint the per-app OAuth `client_id` for an app: `oac_<base62-app-id>`.
-/// Deterministic and stable for the life of the app (spec §1.1).
+/// Mint the per-app OAuth `client_id` for an app: `oac_<body>`.
+///
+/// The client id carries the app id's OWN BODY, not a re-encoding of its bits.
+/// That is what lets [`app_id_from_oauth_client_id`] hand back an `AppId` whose
+/// printed form is byte-identical to the one the app was minted with - and a
+/// derived audience (`app:<printed id>`) therefore agrees with whoever built it
+/// from the app id directly. Deterministic and stable for the life of the app.
 #[must_use]
-pub fn app_oauth_client_id(app_id: &uuid::Uuid) -> String {
-    format!("{APP_OAUTH_CLIENT_PREFIX}_{}", uuid_to_base62(app_id))
+pub fn app_oauth_client_id(app_id: &crate::app_id::AppId) -> String {
+    let body = app_id.as_str().strip_prefix(APP_PREFIX).and_then(|s| s.strip_prefix('_'))
+        .expect("an AppId always prints as app_<body>");
+    format!("{APP_OAUTH_CLIENT_PREFIX}_{body}")
 }
 
-/// Decode a per-app OAuth `client_id` (`oac_<base62-app-id>`) back to its app
-/// UUID. Returns `None` for any client id that is not a per-app end-user client
-/// (a missing `oac_` prefix or a non-base62 tail), e.g. the builder/console
-/// clients. The exact inverse of [`app_oauth_client_id`].
+/// Decode a per-app OAuth `client_id` (`oac_<body>`) back to its [`AppId`].
+///
+/// Returns `None` for any client id that is not a per-app end-user client - a
+/// missing `oac_` prefix, or a body that is not a legal app-id body - e.g. the
+/// builder/console clients. The exact inverse of [`app_oauth_client_id`].
+///
+/// It returns the TYPED id rather than the bits, and that is the point: a caller
+/// deriving an audience renders `app:<printed id>`, which is what every other
+/// producer of that audience renders. Handing back a `Uuid` here is how the
+/// gateway came to expect `app:<hyphenated uuid>` while the OP emitted
+/// `app:app_<body>` - two spellings of one app, agreeing at compile time and
+/// disagreeing only against a live token.
 #[must_use]
-pub fn app_id_from_oauth_client_id(client_id: &str) -> Option<uuid::Uuid> {
-    let encoded = client_id
-        .strip_prefix(APP_OAUTH_CLIENT_PREFIX)?
-        .strip_prefix('_')?;
-    base62_to_uuid(encoded).ok()
+pub fn app_id_from_oauth_client_id(client_id: &str) -> Option<crate::app_id::AppId> {
+    let body = client_id.strip_prefix(APP_OAUTH_CLIENT_PREFIX)?.strip_prefix('_')?;
+    crate::app_id::AppId::parse(&format!("{APP_PREFIX}_{body}")).ok()
 }
 
-/// Generate a new session ID: `ses_{base62(uuidv7)}`
+/// Generate a new user ID: `usr_{base36(uuidv7)}`
+pub fn new_user_id() -> String {
+    generate(USER_PREFIX)
+}
+
+/// Generate a new session ID: `ses_{base36(uuidv7)}`
 pub fn new_session_id() -> String {
     generate(SESSION_PREFIX)
 }
 
-/// Generate a new grant ID: `grt_{base62(uuidv7)}`. One row per (person,
+/// Generate a new grant ID: `grt_{base36(uuidv7)}`. One row per (person,
 /// audience) in `zeroship.grants`; the `id` column stores the full typed-id
 /// string under a `grants_id_shape` CHECK, with no SQL `DEFAULT` because there
-/// is no in-database base62 generator.
+/// is no in-database base36 generator.
 pub fn new_grant_id() -> String {
     generate(GRANT_PREFIX)
 }
 
-/// Generate a new wake-job ID: `wak_{base62(uuidv7)}`. Used by the
+/// Generate a new wake-job ID: `wak_{base36(uuidv7)}`. Used by the
 /// C-7-LT async wake state machine to mint the polling handle handed
 /// back to the client on `POST /admin/sandboxes/{id}/wake`.
 pub fn new_wake_id() -> String {
     generate(WAKE_PREFIX)
 }
 
-/// Generate a new pricing-plan ID: `pln_{base62(uuidv7)}`. Minted by the
+/// Generate a new pricing-plan ID: `pln_{base36(uuidv7)}`. Minted by the
 /// plan-catalog `upsert` and by the bootstrap seeder for the built-in
 /// tiers.
 pub fn new_plan_id() -> String {
     generate(PLAN_PREFIX)
 }
 
-/// Generate a new invoice ID: `inv_{base62(uuidv7)}`. Minted by the
+/// Generate a new invoice ID: `inv_{base36(uuidv7)}`. Minted by the
 /// billing reconciler when it claims a `(organization, period)` invoice row.
 pub fn new_invoice_id() -> String {
     generate(INVOICE_PREFIX)
 }
 
-/// Generate a new invoice-payment ID: `ipy_{base62(uuidv7)}`. Minted by the
+/// Generate a new invoice-payment ID: `ipy_{base36(uuidv7)}`. Minted by the
 /// payment-confirmation webhook when it appends a `charge` row recording the
 /// cash actually collected against a finalized invoice.
 pub fn new_invoice_payment_id() -> String {
     generate(INVOICE_PAYMENT_PREFIX)
 }
 
-/// Generate a new credit-ledger entry ID: `crd_{base62(uuidv7)}`. Minted by the
+/// Generate a new credit-ledger entry ID: `crd_{base36(uuidv7)}`. Minted by the
 /// operator `POST /billing/credit` grant endpoint and by the billing reconciler
 /// when it appends a per-grant `consumed` entry at finalize.
 pub fn new_credit_id() -> String {
     generate(CREDIT_PREFIX)
 }
 
-/// Generate a new refund ID: `ref_{base62(uuidv7)}`. Minted by the operator
+/// Generate a new refund ID: `ref_{base36(uuidv7)}`. Minted by the operator
 /// `POST /api/invoices/{id}/refunds` endpoint and by the void+reissue true-up
 /// bridge.
 pub fn new_refund_id() -> String {
     generate(REFUND_PREFIX)
 }
 
-/// Generate a new plan-change-event ID: `pce_{base62(uuidv7)}`. Minted by
+/// Generate a new plan-change-event ID: `pce_{base36(uuidv7)}`. Minted by
 /// `api.rs::set_plan` when it appends a proration-timeline row recording a plan
 /// change with its server-derived frozen base fees + cumulative `usage_at_change`
 /// snapshot, for full usage-segment proration.
@@ -457,7 +489,7 @@ pub fn new_plan_change_event_id() -> String {
     generate(PLAN_CHANGE_EVENT_PREFIX)
 }
 
-/// Generate a new spend-state-history surrogate ID: `she_{base62(uuidv7)}`. Minted by
+/// Generate a new spend-state-history surrogate ID: `she_{base36(uuidv7)}`. Minted by
 /// `spend.rs::persist_transition` when it appends a `spend_state_history` row; the value
 /// becomes the `billing_notifications.transition_id` for spend-driven notification kinds
 /// for spend-driven notification kinds.
@@ -465,7 +497,7 @@ pub fn new_spend_history_id() -> String {
     generate(SPEND_HISTORY_PREFIX)
 }
 
-/// Generate a new organization-billing-status-history surrogate ID: `obh_{base62(uuidv7)}`.
+/// Generate a new organization-billing-status-history surrogate ID: `obh_{base36(uuidv7)}`.
 /// Minted by `account_status.rs::append_history` when it appends a
 /// `organization_billing_status_history` row; the value becomes the
 /// `billing_notifications.transition_id` for the dunning-driven kinds.
@@ -473,12 +505,12 @@ pub fn new_organization_billing_history_id() -> String {
     generate(ORGANIZATION_BILLING_HISTORY_PREFIX)
 }
 
-/// Generate a new billing-dispute ID: `dsp_{base62(uuidv7)}`. Minted in Rust by the
+/// Generate a new billing-dispute ID: `dsp_{base36(uuidv7)}`. Minted in Rust by the
 /// `charge.dispute.created` webhook branch in `stripe_handlers` when it records a
 /// chargeback. The `zeroship.billing_disputes.id` column
 /// stores the full typed-id string; the value becomes the
 /// `billing_notifications.transition_id` for the `disputed` notification kind (no SQL
-/// `DEFAULT` — there is no in-DB base62 generator, and a bare `gen_random_uuid()` would
+/// `DEFAULT` — there is no in-DB base36 generator, and a bare `gen_random_uuid()` would
 /// not carry the `dsp_` prefix the notify dedup key + disjointness assertion rely on).
 ///
 /// Distinct from the Stripe-side dispute id (`du_…`/`dp_…`, stored separately in
@@ -490,8 +522,8 @@ pub fn new_dispute_id() -> String {
 }
 
 /// Payout-failure surrogate-id prefix (billing webhook follow-ups: `payout.failed`).
-/// Three chars to match the global `^[a-z]{3}_[A-Za-z0-9]{22}$` shape (R16-API2). The
-/// `zeroship.payout_failures.id` column stores the full typed-id string (`pof_<base62>`),
+/// Three chars to match the global `^[a-z]{3}_[0-9a-z]{25}$` shape (R16-API2). The
+/// `zeroship.payout_failures.id` column stores the full typed-id string (`pof_<base36>`),
 /// minted in Rust by the `payout.failed` webhook branch in `stripe_handlers`.
 ///
 /// The id IS the `billing_notifications.transition_id` for the `payout_failed` kind. Its
@@ -501,16 +533,16 @@ pub fn new_dispute_id() -> String {
 /// `tests::notification_source_prefixes_are_pairwise_disjoint`.
 pub const PAYOUT_FAILURE_PREFIX: &str = "pof";
 
-/// Generate a new payout-failure ID: `pof_{base62(uuidv7)}`.
+/// Generate a new payout-failure ID: `pof_{base36(uuidv7)}`.
 pub fn new_payout_failure_id() -> String {
     generate(PAYOUT_FAILURE_PREFIX)
 }
 
 /// Connect-checkout-failure surrogate-id prefix (billing webhook follow-ups:
 /// `payment_intent.payment_failed`). Three chars to match the global
-/// `^[a-z]{3}_[A-Za-z0-9]{22}$` shape (R16-API2). The
+/// `^[a-z]{3}_[0-9a-z]{25}$` shape (R16-API2). The
 /// `zeroship.connect_checkout_failures.id` column stores the full typed-id string
-/// (`cof_<base62>`), minted in Rust by the `payment_intent.payment_failed` webhook branch.
+/// (`cof_<base36>`), minted in Rust by the `payment_intent.payment_failed` webhook branch.
 ///
 /// The id IS the `billing_notifications.transition_id` for the `checkout_failed` kind. Its
 /// prefix MUST be pairwise-disjoint from every other notification source
@@ -518,41 +550,41 @@ pub fn new_payout_failure_id() -> String {
 /// `tests::notification_source_prefixes_are_pairwise_disjoint`.
 pub const CHECKOUT_FAILURE_PREFIX: &str = "cof";
 
-/// Generate a new connect-checkout-failure ID: `cof_{base62(uuidv7)}`.
+/// Generate a new connect-checkout-failure ID: `cof_{base36(uuidv7)}`.
 pub fn new_checkout_failure_id() -> String {
     generate(CHECKOUT_FAILURE_PREFIX)
 }
 
 /// Stripe-reconciliation-finding surrogate-id prefix (#28 Stripe reconciliation cron).
-/// Three chars to match the global `^[a-z]{3}_[A-Za-z0-9]{22}$` shape (R16-API2). The
+/// Three chars to match the global `^[a-z]{3}_[0-9a-z]{25}$` shape (R16-API2). The
 /// `zeroship.billing_reconciliation_findings.id` column stores the full typed-id string
-/// (`rcf_<base62>`), minted in Rust by the `stripe_reconcile` cron when it records a
+/// (`rcf_<base36>`), minted in Rust by the `stripe_reconcile` cron when it records a
 /// drift finding. NOT a notification source (it is never a `billing_notifications.
 /// transition_id`), so it carries no pairwise-disjointness obligation against the notify
 /// source prefixes — it is a plain audit row id.
 pub const RECONCILE_FINDING_PREFIX: &str = "rcf";
 
-/// Generate a new reconciliation-finding ID: `rcf_{base62(uuidv7)}`.
+/// Generate a new reconciliation-finding ID: `rcf_{base36(uuidv7)}`.
 pub fn new_reconcile_finding_id() -> String {
     generate(RECONCILE_FINDING_PREFIX)
 }
 
 /// Workflow-run typed-id prefix. `zeroship.workflow_runs.id` stores the full
-/// `run_<base62>` string because workflow runs are creator-visible handles.
+/// `run_<base36>` string because workflow runs are creator-visible handles.
 pub const WORKFLOW_RUN_PREFIX: &str = "run";
 
 /// Logical workflow queue job identity, independent of its delivery attempt.
 pub const WORKFLOW_JOB_PREFIX: &str = "wjb";
 
 /// Workflow-signal typed-id prefix. `zeroship.workflow_signals.id` stores the
-/// full `sig_<base62>` string.
+/// full `sig_<base36>` string.
 pub const WORKFLOW_SIGNAL_PREFIX: &str = "sig";
 
 /// Workflow cron handle typed-id prefix, distinct from the workflow-schedule prefix.
 pub const WORKFLOW_CRON_PREFIX: &str = "cron";
 
 /// Workflow-schedule typed-id prefix. `zeroship.workflow_schedules.id` stores
-/// the full `sch_<base62>` string.
+/// the full `sch_<base36>` string.
 pub const WORKFLOW_SCHEDULE_PREFIX: &str = "sch";
 
 /// Workflow dispatch/batch typed-id prefix. Deliberately `wfd`, not `dsp`
@@ -580,143 +612,47 @@ pub const WORKFLOW_BROADCAST_PREFIX: &str = "wbc";
 
 /// Stateless per-run/per-topic signal capability token prefix. Unlike normal
 /// row ids, `wst_…` is not UUID-backed; it encodes signed claims.
+/// The claims, the signer and the verifier live in
+/// `zeroship_core::workflow_signal_token`: they need HMAC, base64 and JSON,
+/// and this crate is a leaf that carries `uuid` and `serde` only. The PREFIX
+/// stays here so the reservation table below rules on it with every other one.
 pub const WORKFLOW_SIGNAL_TOKEN_PREFIX: &str = "wst";
-
-/// Canonical claims signed into a stateless `wst_…` workflow signal token.
-///
-/// Exactly one of `run_id` or `topic` must be set. Expiration enforcement and
-/// signal-epoch lookup happen at the control-plane ingress terminus; this codec
-/// only defines the signed string shape and verifies integrity.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct WorkflowSignalTokenClaims {
-    pub app_id: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub run_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub topic: Option<String>,
-    pub types: Vec<String>,
-    pub exp: i64,
-    pub epoch: i64,
-}
-
-impl WorkflowSignalTokenClaims {
-    fn validate_shape(&self) -> Result<(), String> {
-        match (self.run_id.as_ref(), self.topic.as_ref()) {
-            (Some(_), None) | (None, Some(_)) => {}
-            _ => {
-                return Err(
-                    "workflow signal token claims must set exactly one of run_id or topic"
-                        .to_string(),
-                )
-            }
-        }
-        if self.app_id.is_empty() {
-            return Err("workflow signal token app_id must not be empty".to_string());
-        }
-        if self.types.is_empty() {
-            return Err("workflow signal token types must not be empty".to_string());
-        }
-        Ok(())
-    }
-}
-
-/// Sign canonical workflow signal-token claims as `wst_<claims>.<hmac>`.
-///
-/// The payload and HMAC are base64url-no-pad. The HMAC covers the encoded
-/// payload bytes, so callers can verify without reparsing first.
-pub fn sign_workflow_signal_token(
-    claims: &WorkflowSignalTokenClaims,
-    key: &[u8],
-) -> Result<String, String> {
-    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
-    use hmac::{Hmac, Mac};
-
-    claims.validate_shape()?;
-    let payload = serde_json::to_vec(claims)
-        .map_err(|e| format!("serialize workflow signal token claims: {e}"))?;
-    let payload_b64 = URL_SAFE_NO_PAD.encode(payload);
-
-    let mut mac = Hmac::<sha2::Sha256>::new_from_slice(key)
-        .map_err(|e| format!("workflow signal token hmac key: {e}"))?;
-    mac.update(payload_b64.as_bytes());
-    let sig_b64 = URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes());
-    Ok(format!(
-        "{WORKFLOW_SIGNAL_TOKEN_PREFIX}_{payload_b64}.{sig_b64}"
-    ))
-}
-
-/// Verify and decode a `wst_…` workflow signal token.
-pub fn verify_workflow_signal_token(
-    token: &str,
-    key: &[u8],
-) -> Result<WorkflowSignalTokenClaims, String> {
-    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
-    use hmac::{Hmac, Mac};
-
-    let body = token
-        .strip_prefix(WORKFLOW_SIGNAL_TOKEN_PREFIX)
-        .and_then(|s| s.strip_prefix('_'))
-        .ok_or_else(|| {
-            format!("workflow signal token must start with {WORKFLOW_SIGNAL_TOKEN_PREFIX}_")
-        })?;
-    let (payload_b64, sig_b64) = body
-        .split_once('.')
-        .ok_or_else(|| "workflow signal token missing signature separator".to_string())?;
-    let sig = URL_SAFE_NO_PAD
-        .decode(sig_b64)
-        .map_err(|e| format!("decode workflow signal token signature: {e}"))?;
-
-    let mut mac = Hmac::<sha2::Sha256>::new_from_slice(key)
-        .map_err(|e| format!("workflow signal token hmac key: {e}"))?;
-    mac.update(payload_b64.as_bytes());
-    mac.verify_slice(&sig)
-        .map_err(|_| "workflow signal token signature mismatch".to_string())?;
-
-    let payload = URL_SAFE_NO_PAD
-        .decode(payload_b64)
-        .map_err(|e| format!("decode workflow signal token claims: {e}"))?;
-    let claims: WorkflowSignalTokenClaims = serde_json::from_slice(&payload)
-        .map_err(|e| format!("parse workflow signal token claims: {e}"))?;
-    claims.validate_shape()?;
-    Ok(claims)
-}
-
-/// Generate a new workflow-run ID: `run_{base62(uuidv7)}`.
+/// Generate a new workflow-run ID: `run_{base36(uuidv7)}`.
 pub fn new_workflow_run_id() -> String {
     generate(WORKFLOW_RUN_PREFIX)
 }
 
-/// Generate a new workflow-signal ID: `sig_{base62(uuidv7)}`.
+/// Generate a new workflow-signal ID: `sig_{base36(uuidv7)}`.
 pub fn new_workflow_signal_id() -> String {
     generate(WORKFLOW_SIGNAL_PREFIX)
 }
 
-/// Generate a new workflow cron ID: `cron_{base62(uuidv7)}`.
+/// Generate a new workflow cron ID: `cron_{base36(uuidv7)}`.
 pub fn new_workflow_cron_id() -> String {
     generate(WORKFLOW_CRON_PREFIX)
 }
 
-/// Generate a new workflow-schedule ID: `sch_{base62(uuidv7)}`.
+/// Generate a new workflow-schedule ID: `sch_{base36(uuidv7)}`.
 pub fn new_workflow_schedule_id() -> String {
     generate(WORKFLOW_SCHEDULE_PREFIX)
 }
 
-/// Generate a new workflow dispatch/batch ID: `wfd_{base62(uuidv7)}`.
+/// Generate a new workflow dispatch/batch ID: `wfd_{base36(uuidv7)}`.
 pub fn new_workflow_dispatch_id() -> String {
     generate(WORKFLOW_DISPATCH_PREFIX)
 }
 
-/// Generate a new workflow signal-key ID: `wsk_{base62(uuidv7)}`.
+/// Generate a new workflow signal-key ID: `wsk_{base36(uuidv7)}`.
 pub fn new_workflow_signal_key_id() -> String {
     generate(WORKFLOW_SIGNAL_KEY_PREFIX)
 }
 
-/// Generate a new workflow subscription ID: `wsb_{base62(uuidv7)}`.
+/// Generate a new workflow subscription ID: `wsb_{base36(uuidv7)}`.
 pub fn new_workflow_subscription_id() -> String {
     generate(WORKFLOW_SUBSCRIPTION_PREFIX)
 }
 
-/// Generate a new workflow broadcast ID: `wbc_{base62(uuidv7)}`.
+/// Generate a new workflow broadcast ID: `wbc_{base36(uuidv7)}`.
 pub fn new_workflow_broadcast_id() -> String {
     generate(WORKFLOW_BROADCAST_PREFIX)
 }
@@ -725,14 +661,14 @@ pub fn new_workflow_broadcast_id() -> String {
 /// audit facts, not notification transition sources.
 pub const PROVIDER_DEAD_LETTER_PREFIX: &str = "pdl";
 
-/// Generate a new provider-dead-letter ID: `pdl_{base62(uuidv7)}`.
+/// Generate a new provider-dead-letter ID: `pdl_{base36(uuidv7)}`.
 pub fn new_provider_dead_letter_id() -> String {
     generate(PROVIDER_DEAD_LETTER_PREFIX)
 }
 
 /// Worker-instance typed-id prefix: one row in `zeroship.worker_instances` per
 /// live worker PROCESS. Three chars to match the global
-/// `^[a-z]{3}_[A-Za-z0-9]{22}$` shape, and disjoint from every prefix above —
+/// `^[a-z]{3}_[0-9a-z]{25}$` shape, and disjoint from every prefix above —
 /// notably from `wak` (wake jobs), which is the only other `w`-leading
 /// three-char prefix, and from the `w`-leading workflow family
 /// (`wfd`/`wsk`/`wsb`/`wbc`/`wst`).
@@ -749,10 +685,10 @@ pub fn new_provider_dead_letter_id() -> String {
 /// revocation, and a countable event.
 pub const WORKER_INSTANCE_PREFIX: &str = "wkr";
 
-/// Generate a new worker-instance ID: `wkr_{base62(uuidv7)}`. Minted by the
+/// Generate a new worker-instance ID: `wkr_{base36(uuidv7)}`. Minted by the
 /// control plane when it accepts an enrolment; the `zeroship.worker_instances.id`
 /// column stores the full typed-id string under a `worker_instances_id_shape`
-/// CHECK, with no SQL `DEFAULT` because there is no in-database base62 generator.
+/// CHECK, with no SQL `DEFAULT` because there is no in-database base36 generator.
 pub fn new_worker_instance_id() -> String {
     generate(WORKER_INSTANCE_PREFIX)
 }
@@ -762,59 +698,56 @@ mod tests {
     use super::*;
 
     #[test]
-    fn roundtrip_base62() {
+    fn roundtrip_base36() {
         let uuid = uuid::Uuid::now_v7();
-        let encoded = uuid_to_base62(&uuid);
-        assert_eq!(encoded.len(), 22);
-        let decoded = base62_to_uuid(&encoded).unwrap();
+        let encoded = uuid_to_base36(&uuid);
+        assert_eq!(encoded.len(), 25);
+        let decoded = base36_to_uuid(&encoded).unwrap();
         assert_eq!(uuid, decoded);
     }
 
     #[test]
-    fn base62_encode_bytes_only_base62_chars() {
-        // The HMAC-tag encoder must emit only base62 alphabet chars and be
+    fn base36_encode_bytes_only_base36_chars() {
+        // The HMAC-tag encoder must emit only base36 alphabet chars and be
         // deterministic + injective enough that distinct tags differ.
-        let a = base62_encode_bytes(&[0xde, 0xad, 0xbe, 0xef, 0x01, 0x02]);
-        let b = base62_encode_bytes(&[0xde, 0xad, 0xbe, 0xef, 0x01, 0x03]);
+        let a = base36_encode_bytes(&[0xde, 0xad, 0xbe, 0xef, 0x01, 0x02]);
+        let b = base36_encode_bytes(&[0xde, 0xad, 0xbe, 0xef, 0x01, 0x03]);
         assert_ne!(a, b);
-        assert_eq!(
-            a,
-            base62_encode_bytes(&[0xde, 0xad, 0xbe, 0xef, 0x01, 0x02])
-        );
-        assert!(a.bytes().all(|c| BASE62.contains(&c)), "{a}");
-        assert!(base62_encode_bytes(&[]).is_empty());
+        assert_eq!(a, base36_encode_bytes(&[0xde, 0xad, 0xbe, 0xef, 0x01, 0x02]));
+        assert!(a.bytes().all(|c| BASE36.contains(&c)), "{a}");
+        assert!(base36_encode_bytes(&[]).is_empty());
         // A full 32-byte HMAC tag yields >= 20 chars (enough to truncate to
         // the pairwise body length).
         let tag = [0xffu8; 32];
-        assert!(base62_encode_bytes(&tag).len() >= 20);
+        assert!(base36_encode_bytes(&tag).len() >= 20);
     }
 
     #[test]
     fn roundtrip_typed_id() {
-        let id = crate::UserId::mint();
-        assert!(id.as_str().starts_with("usr_"));
-        assert_eq!(id.as_str().len(), 26); // "usr_" + 22
-        let (prefix, uuid) = parse(id.as_str()).unwrap();
+        let id = new_user_id();
+        assert!(id.starts_with("usr_"));
+        assert_eq!(id.len(), 29); // "usr_" + 25
+        let (prefix, uuid) = parse(&id).unwrap();
         assert_eq!(prefix, "usr");
         let back = from_uuid_string("usr", &uuid.to_string()).unwrap();
-        assert_eq!(id.as_str(), back);
+        assert_eq!(id, back);
     }
 
     #[test]
     fn app_oauth_client_id_round_trips() {
-        let app = uuid::Uuid::now_v7();
+        let app = crate::app_id::AppId::mint();
         let client_id = app_oauth_client_id(&app);
         assert!(client_id.starts_with("oac_"), "got {client_id}");
-        // oac_ + 22 base62 chars.
-        assert_eq!(client_id.len(), 26, "got {client_id}");
+        // oac_ + 25 base36 chars.
+        assert_eq!(client_id.len(), 29, "got {client_id}");
         // Distinct from the app_ entity typed_id namespace.
         assert!(!client_id.starts_with("app_"));
         // The decode is the exact inverse of the mint — the single-source-of-
         // truth that keeps control (minter) and auth (decoder) from drifting.
-        assert_eq!(app_id_from_oauth_client_id(&client_id), Some(app));
+        assert_eq!(app_id_from_oauth_client_id(&client_id), Some(app.clone()));
         // Non-per-app clients (builder/console) and malformed tails → None.
         assert_eq!(app_id_from_oauth_client_id("zeroship-builder-abc"), None);
-        assert_eq!(app_id_from_oauth_client_id("oac_not-base62"), None);
+        assert_eq!(app_id_from_oauth_client_id("oac_not-base36"), None);
         // The bare prefix with no underscore must not decode.
         assert_eq!(app_id_from_oauth_client_id("oacsomething"), None);
     }
@@ -832,57 +765,64 @@ mod tests {
         assert!(id2 > id1, "id2 ({id2}) should sort after id1 ({id1})");
     }
 
-    /// The companion to `sort_order_preserved_under_byte_ordering`: it pins why
-    /// the schema's bytewise collation is necessary. `BASE62` is ascending in
-    /// byte value, but it interleaves cases, and a locale collation such as
-    /// `en_US.utf8` reorders exactly those pairs.
+    /// The companion to `sort_order_preserved_under_byte_ordering`: it pins the
+    /// two properties of the alphabet everything else rests on.
     ///
-    /// The `Q`/`a` pair below is not invented: it is the discriminating
-    /// character pair from a batch measured to sort wrongly on a live
-    /// `en_US.utf8` Postgres (task #255) — `todo_0344lHcQ…` vs `todo_0344lHca…`.
+    /// **Ascending in byte value**, so a bytewise collation sorts ids by
+    /// creation time. This is necessary and not sufficient - it holds under
+    /// SQLite BINARY and PostgreSQL `COLLATE "C"`, and NOT under a locale
+    /// default, which is why every column holding one of these ids pins the
+    /// collation. This test cannot prove what a database does; it proves the
+    /// encoder gives the database something a bytewise collation can order.
     ///
-    /// WHAT THIS TEST DOES NOT CATCH: it does not run a real collation, so it
-    /// cannot prove Postgres disagrees — only that the alphabet contains the
-    /// inversion that would make it disagree. The disagreement itself was
-    /// measured against a live en_US.utf8 database and is recorded on #255,
-    /// not reproduced here. It also says nothing about which tier is *correct*.
+    /// **Single-case**, which is a correctness property rather than a style
+    /// choice. An app id IS a PostgreSQL schema name, a DNS label, and a scope
+    /// segment in the migration policy language, and every one of those folds
+    /// case. A mixed-case body therefore has two spellings wherever it is
+    /// written unquoted, compared in different places by different rules - and
+    /// under the previous mixed-case alphabet the policy scope folded while the
+    /// grant lookup used raw bytes, so EVERY creator `createTable` was denied.
+    /// With one case there is one spelling and folding is the identity.
     #[test]
-    fn base62_requires_byte_ordering_across_case_runs() {
+    fn the_alphabet_is_ascending_and_single_case() {
         assert!(
-            BASE62.windows(2).all(|w| w[0] < w[1]),
-            "BASE62 must be ascending in byte value; database ordering relies on it"
+            BASE36.windows(2).all(|w| w[0] < w[1]),
+            "BASE36 must be ascending in byte value; database ordering relies on it"
         );
 
-        // Both characters are reachable in a real id.
-        let q = BASE62
+        let uppercase: Vec<char> = BASE36
             .iter()
-            .position(|&c| c == b'Q')
-            .expect("'Q' must be reachable in a real id");
-        let a = BASE62
-            .iter()
-            .position(|&c| c == b'a')
-            .expect("'a' must be reachable in a real id");
+            .filter(|c| c.is_ascii_uppercase())
+            .map(|c| *c as char)
+            .collect();
+        assert!(
+            uppercase.is_empty(),
+            "BASE36 must contain no uppercase letter; found {uppercase:?}. \
+             An id is a schema name, a DNS label and a policy scope segment, and \
+             each of those folds case - a second spelling is a second identity."
+        );
 
-        // Byte order: 'Q' (0x51) before 'a' (0x61). Asserted against
-        // BASE62's own contents rather than the two literals, so it is a claim
-        // a reordering of the alphabet would break; `assert!(b'Q' < b'a')` only
-        // restates ASCII and can never fail.
-        assert!(q < a, "BASE62 must place 'Q' before 'a' in byte order");
-
-        // A locale's case-folded primary order can put 'a' before 'q'.
-        assert!(b'a'.to_ascii_lowercase() < b'Q'.to_ascii_lowercase());
+        // The property that follows, stated over a real id rather than over the
+        // alphabet: folding a minted id changes nothing, so any consumer that
+        // folds agrees with one that does not.
+        let id = generate("usr");
+        assert_eq!(
+            id.to_ascii_lowercase(),
+            id,
+            "a minted id must be unchanged by a case fold"
+        );
     }
 
     #[test]
     fn parse_invalid() {
         assert!(parse("nounderscore").is_err());
-        assert!(base62_to_uuid("short").is_err());
-        assert!(base62_to_uuid("!@#$%^&*()_+{}|:<>?!ab").is_err());
+        assert!(base36_to_uuid("short").is_err());
+        assert!(base36_to_uuid("!@#$%^&*()_+{}|:<>?!ab").is_err());
     }
 
     #[test]
     fn all_prefixes() {
-        let u = crate::UserId::mint();
+        let u = new_user_id();
         // The app id has no `new_app_id` free function; its one minter is the
         // typed `AppId`. Swept here anyway so the registry arm stays complete
         // and so APP_PREFIX keeps a caller that proves what it spells.
@@ -890,49 +830,37 @@ mod tests {
         let s = new_session_id();
         let w = new_wake_id();
         let p = new_plan_id();
-        assert!(u.as_str().starts_with("usr_"));
+        assert!(u.starts_with("usr_"));
         assert!(a.as_str().starts_with("app_"));
         assert!(s.starts_with("ses_"));
         assert!(w.starts_with("wak_"));
         assert!(p.starts_with("pln_"));
-        // pln_ + 22 base62 chars = 26, and it round-trips through parse().
-        assert_eq!(p.len(), 26);
-        assert_eq!(
-            PLAN_PREFIX.len(),
-            3,
-            "plan prefix must be 3 chars (R16-API2)"
-        );
+        // pln_ + 25 base36 chars = 29, and it round-trips through parse().
+        assert_eq!(p.len(), 29);
+        assert_eq!(PLAN_PREFIX.len(), 3, "plan prefix must be 3 chars (R16-API2)");
         let (prefix, _) = parse(&p).expect("new_plan_id must roundtrip");
         assert_eq!(prefix, "pln");
     }
 
     /// The wake-job prefix is 3 chars. `wak_` (not `wake_`) preserves the
-    /// `^[a-z]{3}_[A-Za-z0-9]{22}$` shape dashboards/log filters key
+    /// `^[a-z]{3}_[0-9a-z]{25}$` shape dashboards/log filters key
     /// on. Re-asserted as an invariant test so a future "looks like
     /// 4 chars would be clearer" suggestion fails CI.
     #[test]
     fn wake_prefix_is_three_chars() {
-        assert_eq!(
-            WAKE_PREFIX.len(),
-            3,
-            "wake prefix must be 3 chars (R16-API2)"
-        );
+        assert_eq!(WAKE_PREFIX.len(), 3, "wake prefix must be 3 chars (R16-API2)");
         let w = new_wake_id();
-        assert_eq!(w.len(), 26, "wak_ + 22 base62 = 26 chars");
+        assert_eq!(w.len(), 29, "wak_ + 25 base36 = 29 chars");
         let (prefix, _) = parse(&w).expect("new_wake_id must roundtrip");
         assert_eq!(prefix, "wak");
     }
 
     #[test]
     fn invoice_prefix_is_three_chars_and_roundtrips() {
-        assert_eq!(
-            INVOICE_PREFIX.len(),
-            3,
-            "invoice prefix must be 3 chars (R16-API2)"
-        );
+        assert_eq!(INVOICE_PREFIX.len(), 3, "invoice prefix must be 3 chars (R16-API2)");
         let i = new_invoice_id();
         assert!(i.starts_with("inv_"));
-        assert_eq!(i.len(), 26, "inv_ + 22 base62 = 26 chars");
+        assert_eq!(i.len(), 29, "inv_ + 25 base36 = 29 chars");
         let (prefix, _) = parse(&i).expect("new_invoice_id must roundtrip");
         assert_eq!(prefix, "inv");
     }
@@ -946,25 +874,18 @@ mod tests {
         );
         let p = new_invoice_payment_id();
         assert!(p.starts_with("ipy_"));
-        assert_eq!(p.len(), 26, "ipy_ + 22 base62 = 26 chars");
+        assert_eq!(p.len(), 29, "ipy_ + 25 base36 = 29 chars");
         let (prefix, _) = parse(&p).expect("new_invoice_payment_id must roundtrip");
         assert_eq!(prefix, "ipy");
-        assert_ne!(
-            prefix, INVOICE_PREFIX,
-            "payment id must be disjoint from invoice id"
-        );
+        assert_ne!(prefix, INVOICE_PREFIX, "payment id must be disjoint from invoice id");
     }
 
     #[test]
     fn refund_prefix_is_three_chars_and_disjoint() {
-        assert_eq!(
-            REFUND_PREFIX.len(),
-            3,
-            "refund prefix must be 3 chars (R16-API2)"
-        );
+        assert_eq!(REFUND_PREFIX.len(), 3, "refund prefix must be 3 chars (R16-API2)");
         let r = new_refund_id();
         assert!(r.starts_with("ref_"));
-        assert_eq!(r.len(), 26, "ref_ + 22 base62 = 26 chars");
+        assert_eq!(r.len(), 29, "ref_ + 25 base36 = 29 chars");
         let (prefix, _) = parse(&r).expect("new_refund_id must roundtrip");
         assert_eq!(prefix, "ref");
         // Disjoint from every sibling money-record prefix so a refund id can never
@@ -983,7 +904,7 @@ mod tests {
         );
         let p = new_plan_change_event_id();
         assert!(p.starts_with("pce_"));
-        assert_eq!(p.len(), 26, "pce_ + 22 base62 = 26 chars");
+        assert_eq!(p.len(), 29, "pce_ + 25 base36 = 29 chars");
         let (prefix, _) = parse(&p).expect("new_plan_change_event_id must roundtrip");
         assert_eq!(prefix, "pce");
         // Disjoint from every sibling money/plan-record prefix so a plan-change-event
@@ -1004,9 +925,8 @@ mod tests {
         ] {
             let id = mk();
             assert!(id.starts_with(&format!("{want}_")), "got {id}");
-            assert_eq!(id.len(), 26, "{want}_ + 22 base62 = 26 chars: {id}");
-            let (prefix, _) =
-                parse(&id).unwrap_or_else(|e| panic!("{want} id must roundtrip: {e}"));
+            assert_eq!(id.len(), 29, "{want}_ + 25 base36 = 29 chars: {id}");
+            let (prefix, _) = parse(&id).unwrap_or_else(|e| panic!("{want} id must roundtrip: {e}"));
             assert_eq!(prefix, want);
             assert_eq!(want.len(), 3, "{want} prefix must be 3 chars (R16-API2)");
         }
@@ -1024,16 +944,10 @@ mod tests {
     fn notification_source_prefixes_are_pairwise_disjoint() {
         // `DISPUTE_PREFIX` MUST still equal the `"dsp"` literal this test reserved
         // before the const existed, so the dedup key stays disjoint and stable.
-        assert_eq!(
-            DISPUTE_PREFIX, "dsp",
-            "DISPUTE_PREFIX must remain 'dsp' (notify dedup key)"
-        );
+        assert_eq!(DISPUTE_PREFIX, "dsp", "DISPUTE_PREFIX must remain 'dsp' (notify dedup key)");
         let sources = [
             ("spend_state_history", SPEND_HISTORY_PREFIX),
-            (
-                "organization_billing_status_history",
-                ORGANIZATION_BILLING_HISTORY_PREFIX,
-            ),
+            ("organization_billing_status_history", ORGANIZATION_BILLING_HISTORY_PREFIX),
             ("invoices", INVOICE_PREFIX),
             ("refunds", REFUND_PREFIX),
             ("disputes", DISPUTE_PREFIX),
@@ -1056,53 +970,24 @@ mod tests {
     #[test]
     fn workflow_prefixes_roundtrip() {
         let cases = [
-            (
-                new_workflow_run_id as fn() -> String,
-                WORKFLOW_RUN_PREFIX,
-                26usize,
-            ),
-            (
-                new_workflow_signal_id as fn() -> String,
-                WORKFLOW_SIGNAL_PREFIX,
-                26,
-            ),
-            (
-                new_workflow_cron_id as fn() -> String,
-                WORKFLOW_CRON_PREFIX,
-                27,
-            ),
-            (
-                new_workflow_schedule_id as fn() -> String,
-                WORKFLOW_SCHEDULE_PREFIX,
-                26,
-            ),
-            (
-                new_workflow_dispatch_id as fn() -> String,
-                WORKFLOW_DISPATCH_PREFIX,
-                26,
-            ),
-            (
-                new_workflow_signal_key_id as fn() -> String,
-                WORKFLOW_SIGNAL_KEY_PREFIX,
-                26,
-            ),
-            (
-                new_workflow_subscription_id as fn() -> String,
-                WORKFLOW_SUBSCRIPTION_PREFIX,
-                26,
-            ),
-            (
-                new_workflow_broadcast_id as fn() -> String,
-                WORKFLOW_BROADCAST_PREFIX,
-                26,
-            ),
+            (new_workflow_run_id as fn() -> String, WORKFLOW_RUN_PREFIX),
+            (new_workflow_signal_id as fn() -> String, WORKFLOW_SIGNAL_PREFIX),
+            (new_workflow_cron_id as fn() -> String, WORKFLOW_CRON_PREFIX),
+            (new_workflow_schedule_id as fn() -> String, WORKFLOW_SCHEDULE_PREFIX),
+            (new_workflow_dispatch_id as fn() -> String, WORKFLOW_DISPATCH_PREFIX),
+            (new_workflow_signal_key_id as fn() -> String, WORKFLOW_SIGNAL_KEY_PREFIX),
+            (new_workflow_subscription_id as fn() -> String, WORKFLOW_SUBSCRIPTION_PREFIX),
+            (new_workflow_broadcast_id as fn() -> String, WORKFLOW_BROADCAST_PREFIX),
         ];
-        for (mk, want, len) in cases {
+        for (mk, want) in cases {
             let id = mk();
             assert!(id.starts_with(&format!("{want}_")), "got {id}");
-            assert_eq!(id.len(), len, "{want}_ + base62 length mismatch: {id}");
-            let (prefix, _) =
-                parse(&id).unwrap_or_else(|e| panic!("{want} id must roundtrip: {e}"));
+            assert_eq!(
+                id.len(),
+                want.len() + 1 + BODY_LEN,
+                "{want}_ + base36 length mismatch: {id}"
+            );
+            let (prefix, _) = parse(&id).unwrap_or_else(|e| panic!("{want} id must roundtrip: {e}"));
             assert_eq!(prefix, want);
         }
     }
@@ -1139,38 +1024,11 @@ mod tests {
     }
 
     #[test]
-    fn workflow_signal_token_codec_roundtrips_and_rejects_tamper() {
-        let claims = WorkflowSignalTokenClaims {
-            app_id: "app_0123456789ABCDEFGHIJKL".to_string(),
-            run_id: Some("run_0123456789ABCDEFGHIJKL".to_string()),
-            topic: None,
-            types: vec!["approved".to_string(), "payment.succeeded".to_string()],
-            exp: 1_899_999_999,
-            epoch: 7,
-        };
-        let token = sign_workflow_signal_token(&claims, b"bearer-signing-secret")
-            .expect("claims should sign");
-        assert!(token.starts_with("wst_"), "got {token}");
-        let decoded = verify_workflow_signal_token(&token, b"bearer-signing-secret")
-            .expect("signed token should verify");
-        assert_eq!(decoded, claims);
-
-        let mut tampered = token.clone();
-        tampered.push('A');
-        assert!(verify_workflow_signal_token(&tampered, b"bearer-signing-secret").is_err());
-        assert!(verify_workflow_signal_token(&token, b"wrong-secret").is_err());
-    }
-
-    #[test]
     fn dispute_prefix_is_three_chars_and_disjoint() {
-        assert_eq!(
-            DISPUTE_PREFIX.len(),
-            3,
-            "dispute prefix must be 3 chars (R16-API2)"
-        );
+        assert_eq!(DISPUTE_PREFIX.len(), 3, "dispute prefix must be 3 chars (R16-API2)");
         let d = new_dispute_id();
         assert!(d.starts_with("dsp_"), "got {d}");
-        assert_eq!(d.len(), 26, "dsp_ + 22 base62 = 26 chars");
+        assert_eq!(d.len(), 29, "dsp_ + 25 base36 = 29 chars");
         let (prefix, _) = parse(&d).expect("new_dispute_id must roundtrip");
         assert_eq!(prefix, "dsp");
         // Disjoint from every sibling money/notification-source prefix.
@@ -1198,7 +1056,7 @@ mod tests {
         );
         let w = new_worker_instance_id();
         assert!(w.starts_with("wkr_"), "got {w}");
-        assert_eq!(w.len(), 26, "wkr_ + 22 base62 = 26 chars");
+        assert_eq!(w.len(), 29, "wkr_ + 25 base36 = 29 chars");
         let (prefix, _) = parse(&w).expect("new_worker_instance_id must roundtrip");
         assert_eq!(prefix, "wkr");
 
@@ -1219,10 +1077,7 @@ mod tests {
             ("refunds", REFUND_PREFIX),
             ("plan_change_events", PLAN_CHANGE_EVENT_PREFIX),
             ("spend_state_history", SPEND_HISTORY_PREFIX),
-            (
-                "organization_billing_status_history",
-                ORGANIZATION_BILLING_HISTORY_PREFIX,
-            ),
+            ("organization_billing_status_history", ORGANIZATION_BILLING_HISTORY_PREFIX),
             ("billing_disputes", DISPUTE_PREFIX),
             ("payout_failures", PAYOUT_FAILURE_PREFIX),
             ("connect_checkout_failures", CHECKOUT_FAILURE_PREFIX),
@@ -1256,8 +1111,9 @@ mod tests {
 
     #[test]
     fn parse_with_prefix_rejects_wrong_prefix() {
-        let id = crate::UserId::mint();
-        let err = parse_with_prefix(id.as_str(), "sbx").expect_err("wrong prefix must error");
+        let id = new_user_id(); // prefix = "usr"
+        let err =
+            parse_with_prefix(&id, "sbx").expect_err("wrong prefix must error");
         match err {
             ParseError::WrongPrefix { expected, got } => {
                 assert_eq!(expected, "sbx");
@@ -1273,15 +1129,16 @@ mod tests {
         let err = parse_with_prefix("garbage", "sbx").expect_err("malformed must error");
         assert!(matches!(err, ParseError::Malformed(_)));
 
-        // Invalid base62 after a real prefix.
-        let err =
-            parse_with_prefix("sbx_!!!notbase62!!!", "sbx").expect_err("invalid base62 must error");
+        // Invalid base36 after a real prefix.
+        let err = parse_with_prefix("sbx_!!!notbase36!!!", "sbx")
+            .expect_err("invalid base36 must error");
         assert!(matches!(err, ParseError::Malformed(_)));
     }
 
     #[test]
     fn parse_with_prefix_rejects_empty() {
-        let err = parse_with_prefix("", "sbx").expect_err("empty input must error");
+        let err =
+            parse_with_prefix("", "sbx").expect_err("empty input must error");
         assert!(matches!(err, ParseError::Malformed(_)));
     }
 }

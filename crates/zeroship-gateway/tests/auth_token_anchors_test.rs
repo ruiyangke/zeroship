@@ -31,7 +31,8 @@ use std::sync::{Arc, Mutex};
 use ed25519_dalek::SigningKey;
 use ntex::web::{self, test};
 use uuid::Uuid;
-use zeroship_core::UserId;
+use zeroship_core::app_id::AppId;
+use zeroship_core::user_id::UserId;
 
 use zeroship_gateway::{
     anchors, backchannel_logout,
@@ -64,7 +65,7 @@ const INITIAL_REFRESH_TOKEN: &str = "rt_initial_seed";
 struct MockOP {
     signing: SigningKey,
     kid: String,
-    /// The global user ID every token's `sub` carries.
+    /// The global user id every token's `sub` carries.
     user_id: UserId,
     client_id: String,
     /// Count of `grant_type=refresh_token` calls — the single-flight proof.
@@ -144,8 +145,8 @@ impl MockOP {
     /// `at+jwt` per RFC 9068 and rejects anything else before it looks at a
     /// single claim.
     fn sign_with_typ(&self, claims: serde_json::Value, typ: &str) -> String {
-        use ed25519_dalek::pkcs8::EncodePrivateKey;
         use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
+        use ed25519_dalek::pkcs8::EncodePrivateKey;
         let der = self.signing.to_pkcs8_der().expect("pkcs8");
         let key = EncodingKey::from_ed_der(der.as_bytes());
         let mut header = Header::new(Algorithm::EdDSA);
@@ -286,10 +287,7 @@ async fn boot_mock_op(op: Arc<MockOP>) -> (String, ntex::web::test::TestServer) 
         async move {
             web::App::new()
                 .state(h)
-                .service(
-                    web::resource("/oauth2/.well-known/jwks.json")
-                        .route(web::get().to(jwks_endpoint)),
-                )
+                .service(web::resource("/oauth2/.well-known/jwks.json").route(web::get().to(jwks_endpoint)))
                 .service(web::resource("/oauth2/token").route(web::post().to(token_endpoint)))
         }
     })
@@ -321,7 +319,10 @@ async fn token_endpoint(
             _ => {}
         }
     }
-    let expected_secret = zeroship_core::auth::derive_broker_secret(TEST_BROKER_MASTER, &client_id);
+    let expected_secret = zeroship_core::auth::derive_broker_secret(
+        TEST_BROKER_MASTER,
+        &client_id,
+    );
     if client_id != h.client_id || client_secret != expected_secret {
         return web::HttpResponse::Unauthorized()
             .header("content-type", "application/json")
@@ -343,17 +344,14 @@ async fn token_endpoint(
             let id_token = h.id_token(&access_token);
             web::HttpResponse::Ok()
                 .header("content-type", "application/json")
-                .body(
-                    serde_json::json!({
-                        "access_token": access_token,
-                        "id_token": id_token,
-                        "refresh_token": INITIAL_REFRESH_TOKEN,
-                        "token_type": "Bearer",
-                        "expires_in": 3600,
-                        "scope": "openid email profile offline_access",
-                    })
-                    .to_string(),
-                )
+                .body(serde_json::json!({
+                    "access_token": access_token,
+                    "id_token": id_token,
+                    "refresh_token": INITIAL_REFRESH_TOKEN,
+                    "token_type": "Bearer",
+                    "expires_in": 3600,
+                    "scope": "openid email profile offline_access",
+                }).to_string())
         }
         "refresh_token" => {
             let delay = h.refresh_delay_ms.load(Ordering::SeqCst);
@@ -417,7 +415,8 @@ async fn token_endpoint(
                 .header("content-type", "application/json")
                 .body(body.to_string())
         }
-        _ => web::HttpResponse::BadRequest().body(r#"{"error":"unsupported_grant_type"}"#),
+        _ => web::HttpResponse::BadRequest()
+            .body(r#"{"error":"unsupported_grant_type"}"#),
     }
 }
 
@@ -467,7 +466,7 @@ impl zeroship_bundle::BlobStore for StubBlobStore {
     }
     async fn put_manifest(
         &self,
-        _app_id: &uuid::Uuid,
+        _app_id: &AppId,
         _deploy_hash: &str,
         _json: &[u8],
     ) -> Result<(), zeroship_bundle::BlobError> {
@@ -475,21 +474,21 @@ impl zeroship_bundle::BlobStore for StubBlobStore {
     }
     async fn get_manifest(
         &self,
-        _app_id: &uuid::Uuid,
+        _app_id: &AppId,
         _deploy_hash: &str,
     ) -> Result<bytes::Bytes, zeroship_bundle::BlobError> {
         Err(zeroship_bundle::BlobError::NotFound("unused".into()))
     }
     async fn delete_manifest(
         &self,
-        _app_id: &uuid::Uuid,
+        _app_id: &AppId,
         _deploy_hash: &str,
     ) -> Result<bool, zeroship_bundle::BlobError> {
         Ok(false)
     }
     async fn delete_app_manifests(
         &self,
-        _app_id: &uuid::Uuid,
+        _app_id: &AppId,
     ) -> Result<(), zeroship_bundle::BlobError> {
         Ok(())
     }
@@ -502,13 +501,13 @@ const PAIRWISE_TEST_SALT_SEED: &str = "pairwise-test-salt";
 const BCL_REFRESH_APP_HOST: &str = "bcl-refresh.zeroship.ai";
 const BCL_REFRESH_APP_NAME: &str = "bcl-refresh";
 const BCL_REFRESH_CLIENT_ID: &str = "oac_bcl_refresh";
-const BCL_REFRESH_APP_UUID: &str = "00000000-0000-7000-8000-0000000000bb";
-/// The app's STABLE UUID — the `RouteMap` key. Fixed (not random) so the
+const BCL_REFRESH_APP_ID: &str = "app_0000000000000000000000002";
+/// The app's STABLE typed id — the `RouteMap` key. Fixed (not random) so the
 /// live-dispatch regression test can assert that the `/token`-minted
-/// `gateway_sessions` row is keyed by THIS UUID (not the `myapp` slug), which
+/// `gateway_sessions` row is keyed by THIS id (not the `myapp` slug), which
 /// is exactly what lets the cookie validate on the real SPA→app dispatch arm
-/// (the `app_id` column is UUID, bound natively).
-const APP_UUID: &str = "00000000-0000-7000-8000-0000000000aa";
+/// (the `app_id` column is `text`, holding `app_id.as_str()`).
+const APP_ID: &str = "app_0000000000000000000000001";
 
 fn test_pairwise_salt() -> [u8; 32] {
     zeroship_core::crypto::derive_key(PAIRWISE_TEST_SALT_SEED)
@@ -525,7 +524,14 @@ fn test_pairwise_subject(user_id: &UserId, app_host: &str) -> String {
 /// Build a `GateState` whose `OidcRp` dials the loopback mock OP and
 /// whose route cache has one provisioned app (`myapp` → `oac_myapp`).
 fn build_state(op_base: &str, db: Option<zeroship_gateway::db::DbConfig>) -> Arc<GateState> {
-    build_state_with_route(op_base, db, APP_UUID, APP_NAME, APP_HOST, CLIENT_ID)
+    build_state_with_route(
+        op_base,
+        db,
+        APP_ID,
+        APP_NAME,
+        APP_HOST,
+        CLIENT_ID,
+    )
 }
 
 fn build_state_with_route(
@@ -541,8 +547,9 @@ fn build_state_with_route(
     let disk = DiskBlobCache::new(tmp, 1024 * 1024).expect("disk cache");
 
     let signing_key = SigningKey::from_bytes(&[7u8; 32]);
-    let session_issuer = session_token::Issuer::new(&signing_key, "https://api.zeroship.ai".into())
-        .expect("session issuer");
+    let session_issuer =
+        session_token::Issuer::new(&signing_key, "https://api.zeroship.ai".into())
+            .expect("session issuer");
     let session_verifier = session_token::Verifier::new(
         &signing_key.verifying_key(),
         "https://api.zeroship.ai".into(),
@@ -614,7 +621,7 @@ fn build_route_map_for(
     use zeroship_core::types::RouteEntry;
     let mut m = std::collections::HashMap::new();
     m.insert(
-        Uuid::parse_str(app_uuid).expect("fixed app uuid"),
+        AppId::parse(app_uuid).expect("fixed app id"),
         RouteEntry {
             name: app_name.into(),
             plan_id: "free".into(),
@@ -793,10 +800,7 @@ async fn session_get_fast_path_honors_valid_pairwise_cookie_db_free() {
     let op = Arc::new(MockOP::new(CLIENT_ID));
     let (base, _srv) = boot_mock_op(op).await;
     let state = build_state(&base, None);
-    assert!(
-        state.db.is_none(),
-        "fixture must have no DB for the DB-free proof"
-    );
+    assert!(state.db.is_none(), "fixture must have no DB for the DB-free proof");
 
     let pws = format!("pws_{}", &Uuid::new_v4().simple().to_string()[..20]);
     let scopes = vec!["openid".to_string(), "email".to_string()];
@@ -809,16 +813,9 @@ async fn session_get_fast_path_honors_valid_pairwise_cookie_db_free() {
         .header("cookie", cookie)
         .to_request();
     let resp = test::call_service(&app, req).await;
-    assert_eq!(
-        resp.status().as_u16(),
-        200,
-        "valid pws_ cookie must be honored DB-free"
-    );
+    assert_eq!(resp.status().as_u16(), 200, "valid pws_ cookie must be honored DB-free");
     let body = read_json(resp).await;
-    assert_eq!(
-        body["user"]["id"], pws,
-        "fast path projects the cookie's pws_ sub"
-    );
+    assert_eq!(body["user"]["id"], pws, "fast path projects the cookie's pws_ sub");
     assert_eq!(
         body["user"]["email"], "relay-alias@zeroship.ai",
         "relay alias projected straight from the cookie claim"
@@ -827,7 +824,7 @@ async fn session_get_fast_path_honors_valid_pairwise_cookie_db_free() {
 
 /// REGRESSION (review minor #3): the GET `/session` fast path must run the SAME
 /// `is_pairwise_subject` defense the dispatch arm runs. A signed cookie whose
-/// `sub` is NOT a `pws_…` (a mint bug / global-ID leak) must NOT be projected
+/// `sub` is NOT a `pws_…` (a mint bug / global-UUID leak) must NOT be projected
 /// by the fast path; with no anchor cookie present it falls through to
 /// `login_required` (401). Pre-fix the fast path projected ANY locally-valid
 /// cookie, so a non-`pws_` sub would have 200'd with that sub — the exact stale /
@@ -838,15 +835,15 @@ async fn session_get_fast_path_rejects_non_pairwise_sub() {
     let (base, _srv) = boot_mock_op(op).await;
     let state = build_state(&base, None);
 
-    // A global user ID (NO `pws_` prefix) — what a broken minter or a
+    // A global-UUID-shaped sub (NO `pws_` prefix) — what a broken minter or a
     // global-identity leak would carry. Locally signature-valid, but it must
     // never be honored as identity.
-    let global_like = UserId::mint();
+    let global_like = Uuid::new_v4().to_string();
     assert!(
-        !zeroship_core::auth::is_pairwise_subject(global_like.as_str()),
-        "sanity: a global user ID is not a pws_ subject"
+        !zeroship_core::auth::is_pairwise_subject(&global_like),
+        "sanity: a bare UUID is not a pws_ subject"
     );
-    let cookie = issue_session_cookie(&state, global_like.as_str(), &[]);
+    let cookie = issue_session_cookie(&state, &global_like, &[]);
 
     let app = test::init_service(anchors_app!(state)).await;
     let req = test::TestRequest::get()
@@ -861,16 +858,12 @@ async fn session_get_fast_path_rejects_non_pairwise_sub() {
     // mode) that yields a 503 `db_unavailable` rather than the stale projection.
     // Either way it is decidedly NOT a successful identity read. Pre-fix the fast
     // path projected ANY locally-valid cookie, so this would have 200'd with the
-    // global-ID-shaped sub.
+    // global-UUID-shaped sub.
     let status = resp.status().as_u16();
-    assert_ne!(
-        status, 200,
-        "a non-pws_ cookie must never be projected (200) by the fast path"
-    );
+    assert_ne!(status, 200, "a non-pws_ cookie must never be projected (200) by the fast path");
     let body = read_json(resp).await;
     assert_ne!(
-        body["user"]["id"],
-        global_like.as_str(),
+        body["user"]["id"], global_like,
         "the non-pws_ sub must never appear in a projected user body"
     );
 }
@@ -1233,14 +1226,14 @@ async fn seed_user(dsn: &str, user_id: &UserId) {
              SELECT $1, $2, p.id, p.organization_id FROM zeroship.projects p WHERE p.id = $3 \
              ON CONFLICT (id) DO NOTHING",
             &[
-                &Uuid::parse_str(APP_UUID).expect("app uuid"),
+                &APP_ID,
                 &format!("anchor-test-{APP_NAME}"),
-                &project_id,
+                &project_id
             ],
         )
         .await
         .expect("seed app");
-    let email = format!("anchor-{}@zeroship.test", user_id.as_str());
+    let email = format!("anchor-{}@zeroship.test", Uuid::new_v4().simple());
     client
         .execute(
             "INSERT INTO zeroship.users (id, email, name, email_verified_at) \
@@ -1256,7 +1249,7 @@ async fn seed_user(dsn: &str, user_id: &UserId) {
 /// never reaches the browser response or the user projection.
 const REAL_EMAIL: &str = "user@example.com";
 
-/// Seed an active relay alias for `(CLIENT_ID, &user_id)` in the row maintained
+/// Seed an active relay alias for `(CLIENT_ID, user_id)` in the row maintained
 /// by pairwise projection and populated with the alias at consent. The
 /// email-claim swap reads THIS and projects it instead of the real email.
 async fn seed_relay_alias(dsn: &str, user_id: &UserId, relay_email: &str) {
@@ -1277,7 +1270,7 @@ async fn seed_relay_alias_for(
         let _ = conn.run().await;
     })
     .detach();
-    let pairwise_sub = test_pairwise_subject(&user_id, app_host);
+    let pairwise_sub = test_pairwise_subject(user_id, app_host);
     client
         .execute(
             "INSERT INTO zeroship.app_user_identities \
@@ -1328,10 +1321,7 @@ async fn cleanup(dsn: &str, user_id: &UserId) {
         )
         .await;
     let _ = client
-        .execute(
-            "DELETE FROM zeroship.users WHERE id = $1",
-            &[&user_id.as_str()],
-        )
+        .execute("DELETE FROM zeroship.users WHERE id = $1", &[&user_id.as_str()])
         .await;
 }
 
@@ -1341,7 +1331,7 @@ async fn token_exchange_is_identity_only_and_sets_both_cookies() {
     // sets the live __Host-zeroship_app_session cookie, the reload-recovery
     // __Host-zeroship_app_anchor cookie, and the breadcrumb. NO access_token, NO
     // scope, NO id_token, NO token_type, NO scopes on the user. A
-    // gateway_sessions row is created. The global user ID never reaches the
+    // gateway_sessions row is created. The global UUID never reaches the
     // browser.
     let dsn = db_url();
     let op = Arc::new(MockOP::new(CLIENT_ID));
@@ -1366,9 +1356,7 @@ async fn token_exchange_is_identity_only_and_sets_both_cookies() {
 
     // Cache-Control: no-store.
     assert_eq!(
-        resp.headers()
-            .get("cache-control")
-            .and_then(|v| v.to_str().ok()),
+        resp.headers().get("cache-control").and_then(|v| v.to_str().ok()),
         Some("no-store")
     );
 
@@ -1381,10 +1369,7 @@ async fn token_exchange_is_identity_only_and_sets_both_cookies() {
     assert!(session_cookie.contains("SameSite=Lax"));
     assert!(session_cookie.contains("Secure"));
     // Short-lived signed cookie (~15m), NOT the old 12h opaque id.
-    assert!(
-        session_cookie.contains("Max-Age=900"),
-        "short signed-cookie TTL: {session_cookie}"
-    );
+    assert!(session_cookie.contains("Max-Age=900"), "short signed-cookie TTL: {session_cookie}");
     let session_token = session_cookie
         .split(';')
         .next()
@@ -1395,25 +1380,19 @@ async fn token_exchange_is_identity_only_and_sets_both_cookies() {
         .to_string();
 
     // The reload-recovery anchor cookie (Strict, HttpOnly, Secure) + breadcrumb.
-    let anchor_cookie =
-        set_cookie_with_prefix(&resp, "__Host-zeroship_app_anchor=").expect("anchor cookie set");
+    let anchor_cookie = set_cookie_with_prefix(&resp, "__Host-zeroship_app_anchor=")
+        .expect("anchor cookie set");
     assert!(anchor_cookie.contains("HttpOnly"));
     assert!(anchor_cookie.contains("SameSite=Strict"));
     assert!(anchor_cookie.contains("Secure"));
     let breadcrumb = set_cookie_with_prefix(&resp, "zs.myapp.zeroship.ai.is.authenticated=")
         .expect("breadcrumb set");
-    assert!(
-        !breadcrumb.contains("HttpOnly"),
-        "breadcrumb must be JS-readable"
-    );
+    assert!(!breadcrumb.contains("HttpOnly"), "breadcrumb must be JS-readable");
 
     let body: serde_json::Value = read_json(resp).await;
 
     // IDENTITY-ONLY: no token fields anywhere in the body (assert ABSENT).
-    assert!(
-        body.get("access_token").is_none(),
-        "no access_token in body"
-    );
+    assert!(body.get("access_token").is_none(), "no access_token in body");
     assert!(body.get("token_type").is_none(), "no token_type in body");
     assert!(body.get("expires_in").is_none(), "no expires_in in body");
     assert!(body.get("scope").is_none(), "no scope in body");
@@ -1425,7 +1404,7 @@ async fn token_exchange_is_identity_only_and_sets_both_cookies() {
     );
     assert!(body["expires_at"].is_i64(), "expires_at must be present");
 
-    // User.id is the per-app pws_ (§6.3), never the global user ID.
+    // User.id is the per-app pws_ (§6.3), never the global UUID.
     let expected_pws = zeroship_core::auth::derive_pairwise(
         &state.pairwise_salt,
         &user_id,
@@ -1434,50 +1413,45 @@ async fn token_exchange_is_identity_only_and_sets_both_cookies() {
     assert!(expected_pws.starts_with("pws_"), "{expected_pws}");
     assert_eq!(body["user"]["id"], expected_pws);
     assert_ne!(body["user"]["id"], user_id.as_str());
-    // The global user ID must NOT appear anywhere in the SPA-facing body.
+    // The global UUID must NOT appear anywhere in the SPA-facing body.
     let raw_body = serde_json::to_string(&body).unwrap();
     assert!(
         !raw_body.contains(user_id.as_str()),
-        "global user ID must NOT appear in the identity body"
+        "global UUID must NOT appear in the identity body"
     );
 
     // The signed session cookie verifies LOCALLY (BFF R1b) under the state's
     // session verifier, with `app == CLIENT_ID` and a per-app `pws_` subject —
     // identity + scopes are self-contained, no DB read. The cookie carries the
-    // pws_ (never the global user ID).
+    // pws_ (never the global UUID).
     let claims = state
         .session_verifier
         .as_ref()
         .expect("session verifier")
         .verify(&session_token, CLIENT_ID)
         .expect("signed session cookie verifies locally");
-    assert_eq!(
-        claims.app, CLIENT_ID,
-        "cookie app binds to the route client_id"
-    );
+    assert_eq!(claims.app, CLIENT_ID, "cookie app binds to the route client_id");
     assert_eq!(claims.sub, expected_pws, "cookie sub is the per-app pws_");
     assert!(
         !session_token.contains(user_id.as_str()),
-        "global user ID must NOT appear in the signed session cookie"
+        "global UUID must NOT appear in the signed session cookie"
     );
 
     // The gateway_sessions ROW is still WRITTEN as the revocation/audit record
     // (kept on login), bound to the GLOBAL user_id internally and keyed by the
     // canonical app UUID — but it is NO LONGER read on the per-request path.
     {
-        let pool =
-            zeroship_gateway::db::checkout(&zeroship_gateway::db::DbConfig::new(dsn.clone(), 4))
-                .await
-                .expect("pool");
+        let pool = zeroship_gateway::db::checkout(
+            &zeroship_gateway::db::DbConfig::new(dsn.clone(), 4),
+        )
+        .await
+        .expect("pool");
         let conn = pool.acquire().await.expect("conn");
         let rows = conn
             .query(
                 "SELECT user_id, app_id FROM zeroship.gateway_sessions \
                  WHERE user_id = $1 AND app_id = $2",
-                &[
-                    &user_id.as_str(),
-                    &Uuid::parse_str(APP_UUID).expect("fixed app uuid"),
-                ],
+                &[&user_id.as_str(), &APP_ID],
             )
             .await
             .expect("audit row query");
@@ -1500,7 +1474,7 @@ async fn token_exchange_swaps_email_for_relay_alias() {
     let op = Arc::new(MockOP::new(CLIENT_ID));
     seed_user(&dsn, &op.user_id).await;
     let user_id = op.user_id.clone();
-    let relay_email = format!("{}@relay.zeroship.localhost", user_id.as_str());
+    let relay_email = format!("{}@relay.zeroship.localhost", Uuid::new_v4().simple());
     seed_relay_alias(&dsn, &user_id, &relay_email).await;
     let (base, _srv) = boot_mock_op(op.clone()).await;
     let db = zeroship_gateway::db::DbConfig::new(dsn.clone(), 8);
@@ -1602,13 +1576,16 @@ async fn anchor_abs_expiry_is_created_at_plus_30d_not_slid() {
     // abs_expires_at ≈ created_at + 30d (set once at create).
     let pool = zeroship_gateway::db::checkout(&db_cfg).await.expect("pool");
     let mut conn = pool.acquire().await.expect("conn");
-    let refresh_enc =
-        zeroship_core::crypto::encrypt(&zeroship_core::crypto::derive_key("k"), b"aad", b"rt_seed")
-            .unwrap();
+    let refresh_enc = zeroship_core::crypto::encrypt(
+        &zeroship_core::crypto::derive_key("k"),
+        b"aad",
+        b"rt_seed",
+    )
+    .unwrap();
     let anchor = anchors::create(
         &mut conn,
         &anchors::NewAnchor {
-            app_id: Uuid::parse_str(APP_UUID).expect("fixed app uuid"),
+            app_id: &AppId::parse(APP_ID).expect("fixed app id"),
             client_id: CLIENT_ID,
             global_user_id: &user_id,
             refresh_token_enc: &refresh_enc,
@@ -1637,12 +1614,12 @@ async fn session_mint_recovers_after_reload_one_refresh() {
     // valid. /session?mint=1 rotates the server-held family at OP exactly
     // ONCE, RE-creates the gateway_sessions row, RE-sets __Host-zeroship_app_session,
     // and returns the identity projection — with NO JWT and NO real email in
-    // the body, and the pws_ id (never the global user ID).
+    // the body, and the pws_ id (never the global UUID).
     let dsn = db_url();
     let op = Arc::new(MockOP::new(CLIENT_ID));
     seed_user(&dsn, &op.user_id).await;
     let user_id = op.user_id.clone();
-    let relay_email = format!("{}@relay.zeroship.localhost", user_id.as_str());
+    let relay_email = format!("{}@relay.zeroship.localhost", Uuid::new_v4().simple());
     seed_relay_alias(&dsn, &user_id, &relay_email).await;
     let (base, _srv) = boot_mock_op(op.clone()).await;
     let db_cfg = zeroship_gateway::db::DbConfig::new(dsn.clone(), 8);
@@ -1660,8 +1637,8 @@ async fn session_mint_recovers_after_reload_one_refresh() {
         .to_request();
     let resp = test::call_service(&app, req).await;
     assert_eq!(resp.status().as_u16(), 200);
-    let anchor_cookie =
-        set_cookie_with_prefix(&resp, "__Host-zeroship_app_anchor=").expect("anchor cookie");
+    let anchor_cookie = set_cookie_with_prefix(&resp, "__Host-zeroship_app_anchor=")
+        .expect("anchor cookie");
     let anchor_pair = anchor_cookie.split(';').next().unwrap().to_string();
 
     // 2. Simulate a lapsed gateway session: revoke it so the cookie arm misses
@@ -1713,29 +1690,17 @@ async fn session_mint_recovers_after_reload_one_refresh() {
         &user_id,
         &format!("https://{APP_HOST}"),
     );
-    // /session projects the user id as the pws_, NOT the global user ID.
+    // /session projects the user id as the pws_, NOT the global UUID.
     assert_eq!(body["user"]["id"], expected_pws);
     assert_ne!(body["user"]["id"], user_id.as_str());
     // NO JWT in the body, and the relay-swapped email (never the real one).
-    assert!(
-        body.get("access_token").is_none(),
-        "no access_token in reload-recovery body"
-    );
-    assert!(
-        body.get("id_token").is_none(),
-        "no id_token in reload-recovery body"
-    );
+    assert!(body.get("access_token").is_none(), "no access_token in reload-recovery body");
+    assert!(body.get("id_token").is_none(), "no id_token in reload-recovery body");
     assert!(body["expires_at"].is_i64());
     assert_eq!(body["user"]["email"], serde_json::json!(relay_email));
     let raw_body = serde_json::to_string(&body).unwrap();
-    assert!(
-        !raw_body.contains(REAL_EMAIL),
-        "real email absent from reload-recovery body"
-    );
-    assert!(
-        !raw_body.contains(user_id.as_str()),
-        "global user ID absent from reload-recovery body"
-    );
+    assert!(!raw_body.contains(REAL_EMAIL), "real email absent from reload-recovery body");
+    assert!(!raw_body.contains(user_id.as_str()), "global UUID absent from reload-recovery body");
 
     // Exactly ONE OP refresh happened on the family rotation.
     assert_eq!(
@@ -1762,10 +1727,7 @@ async fn session_mint_recovers_after_reload_one_refresh() {
         Some(ROTATED_AVATAR),
         "re-signed cookie carries the rotated id_token avatar (not degraded to NULL)"
     );
-    assert_eq!(
-        new_claims.app, CLIENT_ID,
-        "re-signed cookie binds to the route client_id"
-    );
+    assert_eq!(new_claims.app, CLIENT_ID, "re-signed cookie binds to the route client_id");
 
     // The gateway_sessions ROW is RE-WRITTEN as the audit/revocation record
     // (carrying the rotated name + avatar), keyed by the canonical app UUID.
@@ -1777,26 +1739,15 @@ async fn session_mint_recovers_after_reload_one_refresh() {
                 "SELECT name, avatar_url FROM zeroship.gateway_sessions \
                  WHERE user_id = $1 AND app_id = $2 AND revoked_at IS NULL \
                  ORDER BY issued_at DESC LIMIT 1",
-                &[
-                    &user_id.as_str(),
-                    &Uuid::parse_str(APP_UUID).expect("fixed app uuid"),
-                ],
+                &[&user_id.as_str(), &APP_ID],
             )
             .await
             .expect("audit row query");
         let row = rows.first().expect("a fresh audit row was re-written");
         let name: Option<String> = row.try_get("name").ok();
         let avatar: Option<String> = row.try_get("avatar_url").ok();
-        assert_eq!(
-            name.as_deref(),
-            Some(ROTATED_NAME),
-            "audit row name = rotated"
-        );
-        assert_eq!(
-            avatar.as_deref(),
-            Some(ROTATED_AVATAR),
-            "audit row avatar = rotated"
-        );
+        assert_eq!(name.as_deref(), Some(ROTATED_NAME), "audit row name = rotated");
+        assert_eq!(avatar.as_deref(), Some(ROTATED_AVATAR), "audit row avatar = rotated");
     }
 
     cleanup_identities(&dsn, &user_id).await;
@@ -1818,13 +1769,13 @@ async fn backchannel_logout_revokes_refreshed_session_with_sid_logout_token() {
     let _email = seed_app_and_client_for(
         &dsn,
         &user_id,
-        BCL_REFRESH_APP_UUID,
+        BCL_REFRESH_APP_ID,
         BCL_REFRESH_APP_NAME,
         BCL_REFRESH_APP_HOST,
         BCL_REFRESH_CLIENT_ID,
     )
     .await;
-    let relay_email = format!("{}@relay.zeroship.localhost", user_id.as_str());
+    let relay_email = format!("{}@relay.zeroship.localhost", Uuid::new_v4().simple());
     seed_relay_alias_for(
         &dsn,
         BCL_REFRESH_CLIENT_ID,
@@ -1838,13 +1789,13 @@ async fn backchannel_logout_revokes_refreshed_session_with_sid_logout_token() {
     let state = build_state_with_route(
         &base,
         Some(db_cfg.clone()),
-        BCL_REFRESH_APP_UUID,
+        BCL_REFRESH_APP_ID,
         BCL_REFRESH_APP_NAME,
         BCL_REFRESH_APP_HOST,
         BCL_REFRESH_CLIENT_ID,
     );
     let app = test::init_service(anchors_bcl_app!(state.clone())).await;
-    let app_id = Uuid::parse_str(BCL_REFRESH_APP_UUID).expect("fixed app uuid");
+    let app_id = BCL_REFRESH_APP_ID;
 
     // 1. Login: real code exchange -> session row with sid + reload anchor.
     let req = test::TestRequest::post()
@@ -1903,7 +1854,7 @@ async fn backchannel_logout_revokes_refreshed_session_with_sid_logout_token() {
         let client = connect_pg(&dsn).await;
         let row = client
             .query_one(
-                "SELECT id, sid FROM zeroship.gateway_sessions \
+                "SELECT id AS session_id, sid FROM zeroship.gateway_sessions \
                  WHERE user_id = $1 AND app_id = $2 AND revoked_at IS NULL \
                  ORDER BY issued_at DESC LIMIT 1",
                 &[&user_id.as_str(), &app_id],
@@ -1916,7 +1867,10 @@ async fn backchannel_logout_revokes_refreshed_session_with_sid_logout_token() {
             Some(op.sid.as_str()),
             "refreshed session row must preserve sid even though refresh returned no id_token"
         );
-        row.get::<_, Uuid>("id")
+        // `gateway_sessions.id` is its own uuid primary key, unrelated to
+        // either identity domain — aliased so it reads distinctly from the
+        // `app_id`/`user_id` columns bound above.
+        row.get::<_, Uuid>("session_id")
     };
 
     // 3. Global/session logout arrives as a real signed BCL logout_token carrying
@@ -1945,7 +1899,7 @@ async fn backchannel_logout_revokes_refreshed_session_with_sid_logout_token() {
         let revoked: bool = row.get("revoked");
         assert!(revoked, "BCL must revoke the refreshed gateway session row");
         assert!(
-            anchors::read_live(&mut conn, app_id, anchor_id)
+            anchors::read_live(&mut conn, &AppId::parse(app_id).expect("fixed app id"), anchor_id)
                 .await
                 .expect("post-BCL anchor read")
                 .is_none(),
@@ -2014,7 +1968,7 @@ async fn session_mint_persists_rotated_refresh_token_for_next_rotation() {
     op.enforce_refresh_reuse_detection();
     seed_user(&dsn, &op.user_id).await;
     let user_id = op.user_id.clone();
-    let relay_email = format!("{}@relay.zeroship.localhost", user_id.as_str());
+    let relay_email = format!("{}@relay.zeroship.localhost", Uuid::new_v4().simple());
     seed_relay_alias(&dsn, &user_id, &relay_email).await;
     let (base, _srv) = boot_mock_op(op.clone()).await;
     let db_cfg = zeroship_gateway::db::DbConfig::new(dsn.clone(), 8);
@@ -2032,11 +1986,7 @@ async fn session_mint_persists_rotated_refresh_token_for_next_rotation() {
         .set_payload("grant_type=authorization_code&code=c&code_verifier=v")
         .to_request();
     let resp = test::call_service(&app, req).await;
-    assert_eq!(
-        resp.status().as_u16(),
-        200,
-        "initial session mint must succeed"
-    );
+    assert_eq!(resp.status().as_u16(), 200, "initial session mint must succeed");
     let anchor_cookie =
         set_cookie_with_prefix(&resp, "__Host-zeroship_app_anchor=").expect("anchor cookie");
     let anchor_pair = anchor_cookie.split(';').next().unwrap().to_string();
@@ -2064,16 +2014,19 @@ async fn session_mint_persists_rotated_refresh_token_for_next_rotation() {
         let mut conn = pool.acquire().await.expect("conn");
         let anchor = anchors::read_live(
             &mut conn,
-            Uuid::parse_str(APP_UUID).expect("fixed app uuid"),
+            &AppId::parse(APP_ID).expect("fixed app id"),
             anchor_id,
         )
         .await
         .expect("read rotated anchor")
         .expect("anchor remains live after rotation");
         let aad = format!("zs-anchor-refresh:{CLIENT_ID}:{}", user_id.as_str()).into_bytes();
-        let plaintext =
-            zeroship_core::crypto::decrypt(&state.anchor_enc_key, &aad, &anchor.refresh_token_enc)
-                .expect("decrypt stored refresh token");
+        let plaintext = zeroship_core::crypto::decrypt(
+            &state.anchor_enc_key,
+            &aad,
+            &anchor.refresh_token_enc,
+        )
+        .expect("decrypt stored refresh token");
         let stored = String::from_utf8(plaintext).expect("stored refresh token utf8");
         assert_eq!(
             stored, "rt_rotated_1",
@@ -2091,17 +2044,10 @@ async fn session_mint_persists_rotated_refresh_token_for_next_rotation() {
         .header("cookie", anchor_pair)
         .to_request();
     let resp = test::call_service(&app, req).await;
-    assert_eq!(
-        resp.status().as_u16(),
-        200,
-        "second rotation must use the rotated refresh token"
-    );
+    assert_eq!(resp.status().as_u16(), 200, "second rotation must use the rotated refresh token");
     assert_eq!(
         op.presented_refresh_tokens(),
-        vec![
-            INITIAL_REFRESH_TOKEN.to_string(),
-            "rt_rotated_1".to_string()
-        ],
+        vec![INITIAL_REFRESH_TOKEN.to_string(), "rt_rotated_1".to_string()],
         "second rotation must present the first rotation's NEW refresh token"
     );
 
@@ -2118,7 +2064,7 @@ async fn session_mint_invalid_grant_deletes_anchor_and_requires_login() {
     let op = Arc::new(MockOP::new(CLIENT_ID));
     seed_user(&dsn, &op.user_id).await;
     let user_id = op.user_id.clone();
-    let relay_email = format!("{}@relay.zeroship.localhost", user_id.as_str());
+    let relay_email = format!("{}@relay.zeroship.localhost", Uuid::new_v4().simple());
     seed_relay_alias(&dsn, &user_id, &relay_email).await;
     let (base, _srv) = boot_mock_op(op.clone()).await;
     let db_cfg = zeroship_gateway::db::DbConfig::new(dsn.clone(), 8);
@@ -2134,11 +2080,7 @@ async fn session_mint_invalid_grant_deletes_anchor_and_requires_login() {
         .set_payload("grant_type=authorization_code&code=c&code_verifier=v")
         .to_request();
     let resp = test::call_service(&app, req).await;
-    assert_eq!(
-        resp.status().as_u16(),
-        200,
-        "initial session mint must succeed"
-    );
+    assert_eq!(resp.status().as_u16(), 200, "initial session mint must succeed");
     let anchor_cookie =
         set_cookie_with_prefix(&resp, "__Host-zeroship_app_anchor=").expect("anchor cookie");
     let anchor_pair = anchor_cookie.split(';').next().unwrap().to_string();
@@ -2154,11 +2096,7 @@ async fn session_mint_invalid_grant_deletes_anchor_and_requires_login() {
         .header("cookie", anchor_pair)
         .to_request();
     let resp = test::call_service(&app, req).await;
-    assert_eq!(
-        resp.status().as_u16(),
-        401,
-        "invalid_grant must require login"
-    );
+    assert_eq!(resp.status().as_u16(), 401, "invalid_grant must require login");
     assert!(
         set_cookie_with_prefix(&resp, "__Host-zeroship_app_session=").is_none(),
         "invalid_grant must not mint a fresh live session cookie"
@@ -2188,7 +2126,7 @@ async fn session_mint_invalid_grant_deletes_anchor_and_requires_login() {
         let mut conn = pool.acquire().await.expect("conn");
         let anchor = anchors::read_live(
             &mut conn,
-            Uuid::parse_str(APP_UUID).expect("fixed app uuid"),
+            &AppId::parse(APP_ID).expect("fixed app id"),
             anchor_id,
         )
         .await
@@ -2213,7 +2151,7 @@ async fn session_steady_state_reads_gateway_session_without_op() {
     let op = Arc::new(MockOP::new(CLIENT_ID));
     seed_user(&dsn, &op.user_id).await;
     let user_id = op.user_id.clone();
-    let relay_email = format!("{}@relay.zeroship.localhost", user_id.as_str());
+    let relay_email = format!("{}@relay.zeroship.localhost", Uuid::new_v4().simple());
     seed_relay_alias(&dsn, &user_id, &relay_email).await;
     let (base, _srv) = boot_mock_op(op.clone()).await;
     let db_cfg = zeroship_gateway::db::DbConfig::new(dsn.clone(), 8);
@@ -2254,10 +2192,7 @@ async fn session_steady_state_reads_gateway_session_without_op() {
     );
     assert_eq!(body["user"]["id"], expected_pws);
     assert_eq!(body["user"]["email"], serde_json::json!(relay_email));
-    assert!(
-        body.get("access_token").is_none(),
-        "no JWT in steady-state body"
-    );
+    assert!(body.get("access_token").is_none(), "no JWT in steady-state body");
     assert!(body["expires_at"].is_i64());
     let raw_body = serde_json::to_string(&body).unwrap();
     assert!(!raw_body.contains(REAL_EMAIL), "real email absent");
@@ -2287,7 +2222,7 @@ async fn session_minted_cookie_verifies_locally_bound_to_route_client() {
     let op = Arc::new(MockOP::new(CLIENT_ID));
     seed_user(&dsn, &op.user_id).await;
     let user_id = op.user_id.clone();
-    let relay_email = format!("{}@relay.zeroship.localhost", user_id.as_str());
+    let relay_email = format!("{}@relay.zeroship.localhost", Uuid::new_v4().simple());
     seed_relay_alias(&dsn, &user_id, &relay_email).await;
     let (base, _srv) = boot_mock_op(op.clone()).await;
     let db_cfg = zeroship_gateway::db::DbConfig::new(dsn.clone(), 8);
@@ -2324,18 +2259,12 @@ async fn session_minted_cookie_verifies_locally_bound_to_route_client() {
         &user_id,
         &format!("https://{APP_HOST}"),
     );
-    assert_eq!(
-        claims.app, CLIENT_ID,
-        "cookie binds to the route client_id (app claim)"
-    );
+    assert_eq!(claims.app, CLIENT_ID, "cookie binds to the route client_id (app claim)");
     assert_eq!(claims.sub, expected_pws, "cookie sub is the per-app pws_");
-    assert_eq!(
-        claims.email, relay_email,
-        "cookie carries the relay alias, never the real email"
-    );
+    assert_eq!(claims.email, relay_email, "cookie carries the relay alias, never the real email");
     assert!(
         !session_token.contains(user_id.as_str()),
-        "global user ID must not appear in the signed cookie"
+        "global UUID must not appear in the signed cookie"
     );
 
     // 3. A DIFFERENT client_id MUST fail — a cookie minted for app A cannot
@@ -2371,7 +2300,15 @@ async fn connect_pg(dsn: &str) -> compio_postgres::Client {
 /// Deliberately seeds NO `app_user_identities` row — that is the row the REAL
 /// mint must write itself; pre-seeding it is exactly what masked H1 (F1).
 async fn seed_app_and_client(dsn: &str, user_id: &UserId) -> String {
-    seed_app_and_client_for(dsn, user_id, APP_UUID, APP_NAME, APP_HOST, CLIENT_ID).await
+    seed_app_and_client_for(
+        dsn,
+        user_id,
+        APP_ID,
+        APP_NAME,
+        APP_HOST,
+        CLIENT_ID,
+    )
+    .await
 }
 
 async fn seed_app_and_client_for(
@@ -2413,9 +2350,9 @@ async fn seed_app_and_client_for(
              SELECT $1, $2, p.id, p.organization_id FROM zeroship.projects p WHERE p.id = $3 \
              ON CONFLICT (id) DO NOTHING",
             &[
-                &Uuid::parse_str(app_uuid).expect("app uuid"),
+                &app_uuid,
                 &format!("{app_name}-{}", user_id.as_str()),
-                &project_id,
+                &project_id
             ],
         )
         .await
@@ -2451,10 +2388,7 @@ async fn cleanup_f1(dsn: &str, user_id: &UserId) {
         )
         .await;
     let _ = client
-        .execute(
-            "DELETE FROM zeroship.users WHERE id = $1",
-            &[&user_id.as_str()],
-        )
+        .execute("DELETE FROM zeroship.users WHERE id = $1", &[&user_id.as_str()])
         .await;
 }
 
@@ -2527,15 +2461,17 @@ async fn cookie_mint_writes_identity_so_reset_evicts_cookie_session() {
     // 2. The mint MUST have written the per-app identity row (F1 core gap).
     //    Pre-fix the cookie mint never wrote it → this assertion FAILS.
     {
-        let pool =
-            zeroship_gateway::db::checkout(&zeroship_gateway::db::DbConfig::new(dsn.clone(), 4))
-                .await
-                .expect("pool");
+        let pool = zeroship_gateway::db::checkout(
+            &zeroship_gateway::db::DbConfig::new(dsn.clone(), 4),
+        )
+        .await
+        .expect("pool");
         let mut conn = pool.acquire().await.expect("conn");
-        let persisted =
-            zeroship_gateway::identities::lookup_pairwise_sub(&mut conn, CLIENT_ID, &user_id)
-                .await
-                .expect("identity lookup");
+        let persisted = zeroship_gateway::identities::lookup_pairwise_sub(
+            &mut conn, CLIENT_ID, &user_id,
+        )
+        .await
+        .expect("identity lookup");
         assert_eq!(
             persisted.as_deref(),
             Some(expected_pws.as_str()),
@@ -2551,15 +2487,15 @@ async fn cookie_mint_writes_identity_so_reset_evicts_cookie_session() {
         .await
         .expect("issue reset token");
     let new_hash = "$argon2id$v=19$m=19456,t=2,p=1$c2FsdHNhbHQ$Zm9vYmFyZm9vYmFyZm9vYmFy";
-    let completed =
-        zeroship_auth::identity::password_reset::complete(&auth_client, &issued.raw, new_hash)
-            .await
-            .expect("complete reset")
-            .expect("reset must resolve to the seeded user");
-    assert_eq!(
-        completed.user_id, user_id,
-        "reset must target the seeded user"
-    );
+    let completed = zeroship_auth::identity::password_reset::complete(
+        &auth_client,
+        &issued.raw,
+        new_hash,
+    )
+    .await
+    .expect("complete reset")
+    .expect("reset must resolve to the seeded user");
+    assert_eq!(completed.user_id, user_id, "reset must target the seeded user");
 
     // 4. The reset MUST have written the family marker for the cookie's
     //    (CLIENT_ID, pws_) — the SOLE gate the per-request cookie arm consults.
@@ -2664,10 +2600,11 @@ async fn interactive_cookie_mint_writes_identity_so_reset_evicts_session() {
     // 2. The interactive mint MUST have persisted the per-app identity row —
     //    the 0.0 core gap. Pre-fix the interactive minter never wrote it → FAILS.
     {
-        let pool =
-            zeroship_gateway::db::checkout(&zeroship_gateway::db::DbConfig::new(dsn.clone(), 4))
-                .await
-                .expect("pool");
+        let pool = zeroship_gateway::db::checkout(
+            &zeroship_gateway::db::DbConfig::new(dsn.clone(), 4),
+        )
+        .await
+        .expect("pool");
         let mut conn = pool.acquire().await.expect("conn");
         let persisted =
             zeroship_gateway::identities::lookup_pairwise_sub(&mut conn, CLIENT_ID, &user_id)
@@ -2693,10 +2630,7 @@ async fn interactive_cookie_mint_writes_identity_so_reset_evicts_session() {
             .await
             .expect("complete reset")
             .expect("reset must resolve to the seeded user");
-    assert_eq!(
-        completed.user_id, user_id,
-        "reset must target the seeded user"
-    );
+    assert_eq!(completed.user_id, user_id, "reset must target the seeded user");
 
     // 4. THE PRODUCTION GATE: the per-request cookie arm rejects the cookie iff
     //    `is_family_revoked_since(client_id, pws_, iat)` is TRUE. After the reset
@@ -2760,7 +2694,7 @@ async fn mint_racing_concurrent_reset_fails_closed_no_fresh_cookie() {
     let op = Arc::new(MockOP::new(CLIENT_ID));
     let user_id = op.user_id.clone();
     let email = seed_app_and_client(&dsn, &user_id).await;
-    let relay_email = format!("{}@relay.zeroship.localhost", user_id.as_str());
+    let relay_email = format!("{}@relay.zeroship.localhost", Uuid::new_v4().simple());
     seed_relay_alias(&dsn, &user_id, &relay_email).await;
 
     let (base, _srv) = boot_mock_op(op.clone()).await;
@@ -2865,10 +2799,7 @@ async fn mint_racing_concurrent_reset_fails_closed_no_fresh_cookie() {
         .await
         .expect("count markers")
         .get(0);
-    assert_eq!(
-        marker_count, 1,
-        "the reset must have written the family marker"
-    );
+    assert_eq!(marker_count, 1, "the reset must have written the family marker");
 
     cleanup_f1(&dsn, &user_id).await;
 }

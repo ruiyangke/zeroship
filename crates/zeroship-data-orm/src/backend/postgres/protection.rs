@@ -7,13 +7,24 @@ use async_trait::async_trait;
 impl crate::protection::Catalog for PostgresBackend {
     async fn introspect_schema(
         &self,
-        app_id: &str,
+        _app_id: &str,
+        schema: &crate::sql::SchemaName,
+        session: Option<&crate::driver::Session>,
     ) -> Result<crate::sql::catalog::LiveSchema, DbError> {
-        // The PG-tier reader returns its local `SchemaError`; the sibling
-        // translator re-creates the exact `coded_sql("diff: …", e)` shape, so
-        // SQLSTATE classification and the operator-facing message stay
-        // unchanged while the schema snapshot remains vendor-neutral.
-        pg_introspect::read_live_schema(self.pool(), app_id)
+        let pooled;
+        let client = if let Some(session) = session {
+            session
+                .get::<compio_postgres::PoolConnection>()
+                .ok_or_else(|| DbError::internal("catalog received a non-PostgreSQL session"))?
+        } else {
+            pooled = self
+                .pool()
+                .acquire()
+                .await
+                .map_err(|error| pg_error::classify(&error))?;
+            &pooled
+        };
+        pg_introspect::read_live_schema(client, schema.as_str())
             .await
             .map_err(pg_error::classify_schema_error)
     }

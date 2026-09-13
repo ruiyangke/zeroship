@@ -20,6 +20,11 @@ tracing = { workspace = true }
 compio-s3 = { workspace = true }
 futures = { workspace = true }
 tempfile = { workspace = true }
+# The typed app id the blob layout is keyed on. This is why `zeroship-id` is a
+# leaf: a blob prefix that disagrees with the tenant it belongs to orphans every
+# object under it, and this crate sits BELOW `zeroship-core` (which names
+# `Manifest`), so the fence has to come from something below them both.
+zeroship-id = { workspace = true }
 
 [dev-dependencies]
 compio = { workspace = true, features = ["fs", "macros", "runtime"] }

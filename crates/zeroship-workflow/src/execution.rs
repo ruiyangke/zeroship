@@ -38,7 +38,7 @@ pub struct WorkflowTrigger {
 impl From<&StepRequest> for WorkflowInvocation {
     fn from(request: &StepRequest) -> Self {
         Self {
-            app_id: request.app_id.to_string(),
+            app_id: request.app_id.as_str().to_owned(),
             deploy_id: request.deploy_id.clone(),
             deploy_hash: request.deploy_hash.clone(),
             run_id: request.run_id.clone(),
@@ -103,7 +103,9 @@ impl WorkflowExecution {
     }
 }
 
-pub(crate) fn decode_runtime_outcomes(mut value: Value) -> Result<Vec<Value>, WorkflowServiceError> {
+pub(crate) fn decode_runtime_outcomes(
+    mut value: Value,
+) -> Result<Vec<Value>, WorkflowServiceError> {
     let error = value.get_mut("error").map(Value::take);
     let outcomes = value.get_mut("outcomes").map(Value::take);
     let Some(Value::Array(outcomes)) = outcomes else {

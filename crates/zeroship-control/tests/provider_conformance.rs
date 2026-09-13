@@ -14,10 +14,11 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use zeroship_control::metering::provider::{
-    assert_capability_consistency, AggregateQuery, BillingPeriod, Capabilities, DedupKey,
-    DedupTtl, CorrectionCapability, IngestAck, InvoiceRef, LiteStore, MeteringProvider,
+    assert_capability_consistency, AggregateQuery, BillingPeriod, Capabilities,
+    CorrectionCapability, DedupKey, DedupTtl, IngestAck, InvoiceRef, LiteStore, MeteringProvider,
     PlatformSecretResolver, ProviderCtx, ProviderError, SubjectRef, UsageEvent, UsageSubject,
 };
+use zeroship_core::app_id::AppId;
 
 const METER: &str = "compute_units";
 const SECOND_METER: &str = "db_reads";
@@ -143,7 +144,6 @@ async fn run_provider_conformance(adapter: Adapter) {
     if fx.provider.as_invoicer().is_some() {
         assert_invoice_close_idempotent(&fx).await;
     }
-
 }
 
 async fn build_fixture(adapter: Adapter) -> Fixture {
@@ -169,12 +169,8 @@ async fn build_fixture(adapter: Adapter) -> Fixture {
         }
         Adapter::Lite => {
             let store = Arc::new(FakeLiteStore::default());
-            let provider = build_provider(
-                adapter.id(),
-                serde_json::json!({}),
-                Some(store.clone()),
-            )
-            .expect("lite provider builds");
+            let provider = build_provider(adapter.id(), serde_json::json!({}), Some(store.clone()))
+                .expect("lite provider builds");
             Fixture {
                 adapter,
                 provider,
@@ -251,11 +247,7 @@ fn build_provider(
 ) -> Result<Arc<dyn MeteringProvider>, ProviderError> {
     let registry = zeroship_control::metering::provider::builtin_registry();
     let store: Option<Arc<dyn LiteStore>> = store.map(|s| s as Arc<dyn LiteStore>);
-    let ctx = ProviderCtx::new(
-        raw_config,
-        Arc::new(PlatformSecretResolver),
-        store,
-    );
+    let ctx = ProviderCtx::new(raw_config, Arc::new(PlatformSecretResolver), store);
     registry.build(id, &ctx)
 }
 
@@ -280,7 +272,12 @@ fn assert_forwarding_model_matches_docs(fx: &Fixture, adapter: Adapter) {
 
 fn assert_capabilities_consistent(provider: &Arc<dyn MeteringProvider>, expected: Capabilities) {
     assert_capability_consistency(provider.as_ref()).expect("capabilities/downcasts consistent");
-    assert_eq!(provider.capabilities(), expected, "{} capability matrix drift", provider.id());
+    assert_eq!(
+        provider.capabilities(),
+        expected,
+        "{} capability matrix drift",
+        provider.id()
+    );
     assert_eq!(
         provider.capabilities().contains(Capabilities::METER),
         provider.as_meter().is_some()
@@ -308,7 +305,10 @@ fn assert_dedup_contract_matches_docs(provider: &Arc<dyn MeteringProvider>) {
         }
         "stripe_meters" => {
             assert_eq!(dedup.key, DedupKey::Identifier);
-            assert_eq!(dedup.ttl, DedupTtl::Bounded(Duration::from_secs(24 * 60 * 60)));
+            assert_eq!(
+                dedup.ttl,
+                DedupTtl::Bounded(Duration::from_secs(24 * 60 * 60))
+            );
         }
         "stripe_invoice" => {
             assert_eq!(dedup.key, DedupKey::NotApplicable);
@@ -415,12 +415,14 @@ async fn assert_meter_retry_idempotency(fx: &Fixture) {
     assert_eq!(first_primary, 15);
     assert_eq!(first_secondary, 24);
     assert_eq!(
-        second_primary, first_primary,
+        second_primary,
+        first_primary,
         "{} double-counted a retry for the primary meter",
         fx.provider.id()
     );
     assert_eq!(
-        second_secondary, first_secondary,
+        second_secondary,
+        first_secondary,
         "{} double-counted a retry for the secondary meter",
         fx.provider.id()
     );
@@ -468,13 +470,19 @@ async fn assert_dedup_ttl_switchover(fx: &Fixture) {
     forward_under_contract(fx.provider.as_ref(), &batch, &q, false)
         .await
         .expect("initial forward");
-    assert_eq!(meter.read_aggregate(&q).await.expect("initial aggregate"), 17);
+    assert_eq!(
+        meter.read_aggregate(&q).await.expect("initial aggregate"),
+        17
+    );
 
     forward_under_contract(fx.provider.as_ref(), &batch, &q, false)
         .await
         .expect("within-window refoward");
     assert_eq!(
-        meter.read_aggregate(&q).await.expect("within-window aggregate"),
+        meter
+            .read_aggregate(&q)
+            .await
+            .expect("within-window aggregate"),
         17,
         "{} did not dedup within its declared window",
         fx.provider.id()
@@ -490,14 +498,16 @@ async fn assert_dedup_ttl_switchover(fx: &Fixture) {
     let accepted_after = fx.backend.accepted_ingests();
     let aggregate = meter.read_aggregate(&q).await.expect("stale aggregate");
     assert_eq!(
-        aggregate, 17,
+        aggregate,
+        17,
         "{} stale replay doubled the aggregate past its DedupContract ttl",
         fx.provider.id()
     );
 
     if matches!(fx.provider.dedup().ttl, DedupTtl::Bounded(_)) {
         assert_eq!(
-            accepted_after, accepted_before,
+            accepted_after,
+            accepted_before,
             "{} stale bounded replay was blindly re-ingested",
             fx.provider.id()
         );
@@ -549,7 +559,12 @@ async fn assert_invoice_close_idempotent(fx: &Fixture) {
         .close_period(&subject, PERIOD)
         .await
         .expect("retry close period");
-    assert_eq!(second, first, "{} close_period is not idempotent", fx.provider.id());
+    assert_eq!(
+        second,
+        first,
+        "{} close_period is not idempotent",
+        fx.provider.id()
+    );
 
     if !matches!(fx.adapter, Adapter::Lago | Adapter::StripeMeters) {
         assert!(
@@ -592,11 +607,7 @@ async fn assert_fail_closed_config(adapter: Adapter) {
             );
         }
         Adapter::Lite => {
-            let err = expect_provider_error(build_provider(
-                "lite",
-                serde_json::json!({}),
-                None,
-            ));
+            let err = expect_provider_error(build_provider("lite", serde_json::json!({}), None));
             assert!(err.to_string().contains("LiteStore is required"));
         }
         Adapter::OpenMeter => {
@@ -625,11 +636,7 @@ async fn assert_fail_closed_config(adapter: Adapter) {
             );
         }
         Adapter::StripeMeters => {
-            assert_provider_config_fails(
-                "stripe_meters",
-                serde_json::json!({}),
-                None,
-            );
+            assert_provider_config_fails("stripe_meters", serde_json::json!({}), None);
             assert_provider_config_fails(
                 "stripe_meters",
                 serde_json::json!({
@@ -653,11 +660,7 @@ async fn assert_fail_closed_config(adapter: Adapter) {
             );
         }
         Adapter::StripeInvoice => {
-            assert_provider_config_fails(
-                "stripe_invoice",
-                serde_json::json!({}),
-                None,
-            );
+            assert_provider_config_fails("stripe_invoice", serde_json::json!({}), None);
             assert_provider_config_fails(
                 "stripe_invoice",
                 serde_json::json!({
@@ -712,7 +715,7 @@ async fn assert_stripe_meters_missing_metric_fails_closed(fx: &Fixture) {
 /// A deterministic ORGANIZATION id for one conformance label.
 ///
 /// Deterministic because several assertions in this file re-derive the same
-/// subject and expect the store to have seen it; base62 over the label digest
+/// subject and expect the store to have seen it; base36 over the label digest
 /// because an organization id is text with a fixed prefix, not a uuid.
 fn subject_ref(label: &str) -> SubjectRef {
     let digest = Sha256::digest(format!("provider-conformance-{label}").as_bytes());
@@ -720,7 +723,7 @@ fn subject_ref(label: &str) -> SubjectRef {
     bytes.copy_from_slice(&digest[..16]);
     SubjectRef(format!(
         "org_{}",
-        zeroship_core::typed_id::uuid_to_base62(&Uuid::from_bytes(bytes))
+        zeroship_core::typed_id::uuid_to_base36(&Uuid::from_bytes(bytes))
     ))
 }
 
@@ -746,7 +749,7 @@ fn events_for_meter(
         .iter()
         .enumerate()
         .map(|(idx, value)| {
-            let app = stable_uuid(&format!("provider-conformance-{label}-app"));
+            let app = stable_app_id(&format!("provider-conformance-{label}-app"));
             let mut dims = BTreeMap::new();
             dims.insert("period_start".to_string(), PERIOD.start.to_string());
             dims.insert("period_end".to_string(), PERIOD.end.to_string());
@@ -771,6 +774,14 @@ fn stable_uuid(label: &str) -> Uuid {
     let mut bytes = [0u8; 16];
     bytes.copy_from_slice(&digest[..16]);
     Uuid::from_bytes(bytes)
+}
+
+/// A deterministic APP id for one conformance label, on the same construction
+/// [`subject_ref`] uses for organizations: base36 over a label digest, because
+/// an app id is text with a fixed prefix, not a uuid.
+fn stable_app_id(label: &str) -> AppId {
+    let encoded = zeroship_core::typed_id::uuid_to_base36(&stable_uuid(label));
+    AppId::parse(&format!("app_{encoded}")).expect("stable app id is canonical")
 }
 
 #[derive(Default)]
@@ -824,7 +835,7 @@ impl LiteStore for FakeLiteStore {
         })
     }
 
-    async fn owned_app_ids(&self, _organization: &str) -> Result<Vec<Uuid>, ProviderError> {
+    async fn owned_app_ids(&self, _organization: &str) -> Result<Vec<AppId>, ProviderError> {
         Ok(Vec::new())
     }
 
@@ -866,9 +877,7 @@ impl LiteStore for FakeLiteStore {
         let invoice = invoices.entry(key).or_insert_with(|| {
             InvoiceRef(Some(format!(
                 "in_fake_{}_{}_{}",
-                organization,
-                period.start,
-                period.end
+                organization, period.start, period.end
             )))
         });
         Ok(invoice.clone())
@@ -884,9 +893,7 @@ impl LiteStore for FakeLiteStore {
         let invoice = invoices.entry(key).or_insert_with(|| {
             InvoiceRef(Some(format!(
                 "in_adjustment_{}_{}_{}",
-                organization,
-                note.period.start,
-                note.correction_seq
+                organization, note.period.start, note.correction_seq
             )))
         });
         Ok(invoice.clone())
@@ -933,7 +940,10 @@ impl MockHttpProvider {
     }
 
     fn expire_dedup_window(&self) {
-        self.state.lock().expect("mock state poisoned").dedupe_enabled = false;
+        self.state
+            .lock()
+            .expect("mock state poisoned")
+            .dedupe_enabled = false;
     }
 
     fn accepted_ingests(&self) -> usize {
@@ -1141,8 +1151,14 @@ fn handle_openmeter_request(req: &RecordedRequest, state: &Arc<Mutex<MockHttpSta
             Ok(v) => v,
             Err(_) => return http_json(400, r#"{"error":{"code":"invalid_json"}}"#),
         };
-        let source = json.get("source").and_then(serde_json::Value::as_str).unwrap_or("");
-        let id = json.get("id").and_then(serde_json::Value::as_str).unwrap_or("");
+        let source = json
+            .get("source")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("");
+        let id = json
+            .get("id")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("");
         let meter = json
             .get("type")
             .and_then(serde_json::Value::as_str)

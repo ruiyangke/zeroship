@@ -7,7 +7,8 @@
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
-use uuid::Uuid;
+
+use crate::app_id::AppId;
 
 /// The app/organization subject stamped by the trusted runtime.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -15,7 +16,7 @@ pub struct UsageSubject {
     /// The app that consumed the metered resource. An export event emitted at
     /// organization grain may omit it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub app: Option<Uuid>,
+    pub app: Option<AppId>,
     /// The organization billed for this usage (`org_…`).
     ///
     /// `None` on the wire the WORKER writes, and that is not a defect: the

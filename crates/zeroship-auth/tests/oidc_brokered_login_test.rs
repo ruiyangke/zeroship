@@ -53,7 +53,7 @@ struct Fixture {
     db: Client,
     issuer: Arc<Issuer>,
     client_id: String,
-    app_id: Uuid,
+    app_id: zeroship_core::AppId,
     user_id: zeroship_core::UserId,
     session_cookie: String,
 }
@@ -71,7 +71,7 @@ impl Fixture {
         let issuer = Arc::new(test_issuer().with_broker_secrets(broker_secrets));
 
         let user_id = zeroship_core::UserId::mint();
-        let app_id = Uuid::new_v4();
+        let app_id = zeroship_core::AppId::mint();
         let client_prefix = if kind.is_brokered() {
             "oac_p5a"
         } else {
@@ -79,7 +79,7 @@ impl Fixture {
         };
         let client_id = format!("{client_prefix}_{}", Uuid::new_v4().simple());
         let app_name = format!("p5a-brokered-{}", Uuid::new_v4().simple());
-        seed_user_client(&db, &user_id, app_id, &app_name, &client_id, kind).await;
+        seed_user_client(&db, &user_id, &app_id, &app_name, &client_id, kind).await;
 
         let session = session_store::create(
             &db,
@@ -166,7 +166,7 @@ async fn brokered_code_exchange_with_derived_secret_yields_global_sub_id_token_a
             &jwks,
             &token.access_token,
             fx.issuer.issuer(),
-            &format!("app:{}", fx.app_id),
+            &format!("app:{}", fx.app_id.as_str()),
             ACCESS_TOKEN_TYP,
         )
         .expect("verify access token");
@@ -335,7 +335,7 @@ fn test_issuer() -> Issuer {
 async fn seed_user_client(
     db: &Client,
     user_id: &zeroship_core::UserId,
-    app_id: Uuid,
+    app_id: &zeroship_core::AppId,
     app_name: &str,
     client_id: &str,
     kind: ClientKind,
@@ -363,7 +363,7 @@ async fn seed_user_client(
     db.execute(
         "INSERT INTO zeroship.apps (id, name, project_id, organization_id) \
          SELECT $1, $2, p.id, p.organization_id FROM zeroship.projects p WHERE p.id = $3",
-        &[&app_id, &app_name, &project_id],
+        &[&app_id.as_str(), &app_name, &project_id],
     )
     .await
     .expect("seed app");
@@ -395,7 +395,7 @@ async fn seed_user_client(
     db.execute(
         "INSERT INTO zeroship.app_oauth_clients (app_id, client_id, sector_identifier) \
          VALUES ($1, $2, $3)",
-        &[&app_id, &client_id, &SECTOR],
+        &[&app_id.as_str(), &client_id, &SECTOR],
     )
     .await
     .expect("seed app oauth client");

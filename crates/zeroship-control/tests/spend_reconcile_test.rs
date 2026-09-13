@@ -21,6 +21,7 @@ use zeroship_control::cron::spend_reconcile;
 use zeroship_control::{
     AppState, EnvStore, Quota, RateLimiter, Registry, SecretString, StripeStore,
 };
+use zeroship_core::AppId;
 
 fn db_url() -> String {
     common::require_control_db()
@@ -89,7 +90,7 @@ async fn build_state(db_url: &str, label: &str) -> Fixture {
         env_store,
         stripe_store,
         blob_store,
-            workflow_blob_store,
+        workflow_blob_store,
         control_key: SecretString::new("test-control-key".to_string()),
         master_key: SecretString::new(TEST_MASTER_KEY.to_string()),
         stripe_webhook_secret: SecretString::new(String::new()),
@@ -109,7 +110,10 @@ async fn build_state(db_url: &str, label: &str) -> Fixture {
         expected_oauth_audience: "control.zeroship.ai".to_string(),
         static_policies: zeroship_authz::load_platform_policies()
             .expect("bundled authz policies parse"),
-        auth_provider: zeroship_control::platform_auth_provider("https://auth.zeroship.test/oauth2", Some(common::platform_jwks_url())),
+        auth_provider: zeroship_control::platform_auth_provider(
+            "https://auth.zeroship.test/oauth2",
+            Some(common::platform_jwks_url()),
+        ),
         // No platform deploy-token mint here: that is control's OUTBOUND
         // destination for the device flow, and no fixture below drives one.
         provider_registry: zeroship_control::metering::provider::builtin_registry(),
@@ -137,7 +141,7 @@ async fn build_state(db_url: &str, label: &str) -> Fixture {
 /// Seed a plan charging 1 cent/request with `limit` default, then an app on it.
 /// CU pricing: global weight `requests` = 1 CU/op × fx 10^12 pico-cents/CU
 /// (= 1 cent/CU) ⇒ 1 request = 1 cent.
-async fn make_over_limit_app(state: &AppState, limit: i64) -> Uuid {
+async fn make_over_limit_app(state: &AppState, limit: i64) -> AppId {
     state
         .control_pg
         .execute(
@@ -181,13 +185,15 @@ async fn make_over_limit_app(state: &AppState, limit: i64) -> Uuid {
 async fn reconcile_tick_writes_enriched_spend_audit() {
     let url = db_url();
     let fx = build_state(&url, "audit").await;
-    let _sweep = SWEEP_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _sweep = SWEEP_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
 
     // 100-cent cap, 1 cent/request, 100 requests ⇒ 100% ⇒ Allow→Block.
     let app = make_over_limit_app(&fx.state, 100).await;
     common::seed_usage_delta(
         &fx.state.control_pg,
-        app,
+        &app,
         zeroship_control::metering::current_period_start_unix(),
         "requests",
         100,
@@ -204,7 +210,7 @@ async fn reconcile_tick_writes_enriched_spend_audit() {
         .query(
             "SELECT action, detail::text AS detail FROM zeroship.app_audit \
              WHERE app_id = $1 AND action = 'spend_state_change'",
-            &[&app],
+            &[&app.as_str()],
         )
         .await
         .expect("read audit");
@@ -213,8 +219,14 @@ async fn reconcile_tick_writes_enriched_spend_audit() {
     let v: serde_json::Value = serde_json::from_str(&detail).expect("detail is JSON");
     assert_eq!(v["from"], "allow", "records the from-state");
     assert_eq!(v["to"], "block", "records the to-state");
-    assert_eq!(v["spend_cents"], 100, "audit detail carries spend_cents (#8)");
-    assert_eq!(v["limit_cents"], 100, "audit detail carries limit_cents (#8)");
+    assert_eq!(
+        v["spend_cents"], 100,
+        "audit detail carries spend_cents (#8)"
+    );
+    assert_eq!(
+        v["limit_cents"], 100,
+        "audit detail carries limit_cents (#8)"
+    );
 
     // Teardown: the fixture holds the only handle to this test's Postgres
     // connection, and locals are dropped only after the body returns - by which
@@ -235,12 +247,14 @@ async fn reconcile_tick_writes_enriched_spend_audit() {
 async fn reconcile_tick_skips_when_advisory_lock_held() {
     let url = db_url();
     let fx = build_state(&url, "lock").await;
-    let _sweep = SWEEP_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _sweep = SWEEP_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
 
     let app = make_over_limit_app(&fx.state, 100).await;
     common::seed_usage_delta(
         &fx.state.control_pg,
-        app,
+        &app,
         zeroship_control::metering::current_period_start_unix(),
         "requests",
         100,
@@ -262,11 +276,17 @@ async fn reconcile_tick_skips_when_advisory_lock_held() {
         .query("SELECT pg_try_advisory_lock($1) AS locked", &[&key])
         .await
         .expect("acquire lock");
-    assert!(got[0].get::<_, bool>("locked"), "side conn acquires the lock");
+    assert!(
+        got[0].get::<_, bool>("locked"),
+        "side conn acquires the lock"
+    );
 
     // The cron tick must NOT run the sweep — the lock is held elsewhere.
     let n = spend_reconcile::tick(&fx.state).await.expect("tick skips");
-    assert_eq!(n, 0, "tick skips when the advisory lock is held by another holder");
+    assert_eq!(
+        n, 0,
+        "tick skips when the advisory lock is held by another holder"
+    );
 
     // No transition was persisted (the sweep never ran).
     let state_rows = fx
@@ -274,11 +294,14 @@ async fn reconcile_tick_skips_when_advisory_lock_held() {
         .control_pg
         .query(
             "SELECT 1 FROM zeroship.app_spend_state WHERE app_id = $1",
-            &[&app],
+            &[&app.as_str()],
         )
         .await
         .expect("read state");
-    assert!(state_rows.is_empty(), "no spend state written while the lock was held");
+    assert!(
+        state_rows.is_empty(),
+        "no spend state written while the lock was held"
+    );
 
     // Release the lock; now a tick proceeds and transitions the app.
     holder
@@ -286,7 +309,10 @@ async fn reconcile_tick_skips_when_advisory_lock_held() {
         .await
         .expect("unlock");
     let n2 = spend_reconcile::tick(&fx.state).await.expect("tick runs");
-    assert!(n2 >= 1, "after release, the sweep runs and transitions our app");
+    assert!(
+        n2 >= 1,
+        "after release, the sweep runs and transitions our app"
+    );
 
     drop(holder);
     drop(fx);
@@ -309,41 +335,49 @@ async fn reconcile_tick_skips_when_advisory_lock_held() {
 async fn reconcile_walks_spend_bands_and_holds_deadband() {
     let url = db_url();
     let fx = build_state(&url, "band-walk").await;
-    let _sweep = SWEEP_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _sweep = SWEEP_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
 
     let app = make_over_limit_app(&fx.state, 100).await;
 
     // Position this period's priced spend (1 cent/request ⇒ requests total = spend cents).
     let set_spend = |cents: i64| {
         let pg = fx.state.control_pg.clone();
+        let app = app.clone();
         async move {
             pg.execute(
                 "INSERT INTO zeroship.usage_aggregates (app_id, period, metric, total) \
                  VALUES ($1, date_trunc('month', NOW())::date, 'requests', $2) \
                  ON CONFLICT (app_id, period, metric) DO UPDATE SET total = EXCLUDED.total, updated_at = NOW()",
-                &[&app, &cents],
+                &[&app.as_str(), &cents],
             )
             .await
             .expect("set usage");
         }
     };
-    let state_of = |app: Uuid| {
+    let state_of = |app: &AppId| {
         let pg = fx.state.control_pg.clone();
+        let app = app.clone();
         async move {
-            pg.query("SELECT state::text AS s FROM zeroship.app_spend_state WHERE app_id = $1", &[&app])
-                .await
-                .expect("read state")
-                .first()
-                .map(|r| r.get::<_, String>("s"))
+            pg.query(
+                "SELECT state::text AS s FROM zeroship.app_spend_state WHERE app_id = $1",
+                &[&app.as_str()],
+            )
+            .await
+            .expect("read state")
+            .first()
+            .map(|r| r.get::<_, String>("s"))
         }
     };
-    let hist_into = |app: Uuid, to: &'static str| {
+    let hist_into = |app: &AppId, to: &'static str| {
         let pg = fx.state.control_pg.clone();
+        let app = app.clone();
         async move {
             pg.query(
                 "SELECT COUNT(*)::bigint AS n FROM zeroship.spend_state_history \
                   WHERE app_id = $1 AND to_state = $2::text::zeroship.spend_state",
-                &[&app, &to],
+                &[&app.as_str(), &to],
             )
             .await
             .expect("count hist")[0]
@@ -354,34 +388,62 @@ async fn reconcile_walks_spend_bands_and_holds_deadband() {
     // Allow→Warn (80%).
     set_spend(80).await;
     assert!(spend_reconcile::tick(&fx.state).await.expect("tick") >= 1);
-    assert_eq!(state_of(app).await.as_deref(), Some("warn"), "→warn at 80%");
+    assert_eq!(
+        state_of(&app).await.as_deref(),
+        Some("warn"),
+        "→warn at 80%"
+    );
 
     // Warn→Degrade (95%).
     set_spend(95).await;
     assert!(spend_reconcile::tick(&fx.state).await.expect("tick") >= 1);
-    assert_eq!(state_of(app).await.as_deref(), Some("degrade"), "→degrade at 95%");
+    assert_eq!(
+        state_of(&app).await.as_deref(),
+        Some("degrade"),
+        "→degrade at 95%"
+    );
 
     // Degrade→Block (100%).
     set_spend(100).await;
     assert!(spend_reconcile::tick(&fx.state).await.expect("tick") >= 1);
-    assert_eq!(state_of(app).await.as_deref(), Some("block"), "→block at 100%");
+    assert_eq!(
+        state_of(&app).await.as_deref(),
+        Some("block"),
+        "→block at 100%"
+    );
 
     // Deadband HOLD: drop to 96% (≥ block_entry 100 − deadband 5 = 95) → HOLD Block,
     // no transition. (limit_changed=false, so the deadband governs the relaxation.)
-    let hist_block_before = hist_into(app, "block").await;
+    let hist_block_before = hist_into(&app, "block").await;
     set_spend(96).await;
     let _ = spend_reconcile::tick(&fx.state).await.expect("tick");
-    assert_eq!(state_of(app).await.as_deref(), Some("block"), "deadband holds Block at 96%");
     assert_eq!(
-        hist_into(app, "block").await,
+        state_of(&app).await.as_deref(),
+        Some("block"),
+        "deadband holds Block at 96%"
+    );
+    assert_eq!(
+        hist_into(&app, "block").await,
         hist_block_before,
         "the deadband HOLD writes NO new transition row (anti-flap)",
     );
 
     // Each restrictive band was entered exactly once across the walk.
-    assert_eq!(hist_into(app, "warn").await, 1, "exactly one →warn transition");
-    assert_eq!(hist_into(app, "degrade").await, 1, "exactly one →degrade transition");
-    assert_eq!(hist_into(app, "block").await, 1, "exactly one →block transition");
+    assert_eq!(
+        hist_into(&app, "warn").await,
+        1,
+        "exactly one →warn transition"
+    );
+    assert_eq!(
+        hist_into(&app, "degrade").await,
+        1,
+        "exactly one →degrade transition"
+    );
+    assert_eq!(
+        hist_into(&app, "block").await,
+        1,
+        "exactly one →block transition"
+    );
 
     drop(fx);
     common::drain_pg().await;

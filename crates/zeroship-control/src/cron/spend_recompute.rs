@@ -11,7 +11,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
-use uuid::Uuid;
+use zeroship_core::app_id::AppId;
 use zeroship_core::usage_event::UsageEvent;
 use zeroship_stream::{StreamRecord, StreamTransport};
 
@@ -308,7 +308,7 @@ pub async fn recompute_usage_aggregates(
 
     let batch_max = cfg.batch_max.max(1);
     let mut cycle = SpendRecomputeCycle::default();
-    let mut totals = HashMap::<(Uuid, String), i64>::new();
+    let mut totals = HashMap::<(AppId, String), i64>::new();
     let mut seen_event_ids = HashSet::<String>::new();
 
     // A Kafka-wire broker's fetch is asynchronous: right after `rewind`'s
@@ -380,8 +380,8 @@ pub async fn recompute_usage_aggregates(
         .collect();
     aggregates.sort_by(|a, b| {
         a.app_id
-            .as_bytes()
-            .cmp(b.app_id.as_bytes())
+            .as_str()
+            .cmp(b.app_id.as_str())
             .then_with(|| a.metric.cmp(&b.metric))
     });
     cycle.aggregates = aggregates.len();
@@ -401,7 +401,7 @@ pub async fn recompute_usage_aggregates(
     // because a decrease is also what a legitimate dedup fix or bad-event purge produces.
     for drop in &write.decreased {
         tracing::error!(
-            app_id = %drop.app_id,
+            app_id = %drop.app_id.as_str(),
             metric = %drop.metric,
             prior_total = drop.prior_total,
             new_total = drop.new_total,
@@ -414,14 +414,14 @@ pub async fn recompute_usage_aggregates(
 }
 
 fn apply_event(
-    totals: &mut HashMap<(Uuid, String), i64>,
+    totals: &mut HashMap<(AppId, String), i64>,
     event: &UsageEvent,
     period_start: i64,
 ) -> Applied {
     if period_start_unix(event.event_time) != period_start {
         return Applied::OtherPeriod;
     }
-    let Some(app_id) = event.subject.app else {
+    let Some(app_id) = event.subject.app.clone() else {
         tracing::warn!(
             event_id = %event.event_id,
             meter = %event.meter,
@@ -445,13 +445,13 @@ fn apply_event(
         return Applied::ZeroValue;
     }
 
-    let total = totals.entry((app_id, event.meter.clone())).or_insert(0);
+    let total = totals.entry((app_id.clone(), event.meter.clone())).or_insert(0);
     match total.checked_add(value) {
         Some(sum) => *total = sum,
         None => {
             *total = i64::MAX;
             tracing::warn!(
-                app_id = %app_id,
+                app_id = %app_id.as_str(),
                 meter = %event.meter,
                 "spend_recompute: aggregate total overflow — saturating to i64::MAX for conservative enforcement"
             );
@@ -528,7 +528,7 @@ mod tests {
     /// coverage.
     #[test]
     fn a_usage_event_from_another_period_is_not_counted() {
-        let app = uuid::Uuid::new_v4();
+        let app = AppId::mint();
         let organization = zeroship_core::typed_id::generate("org");
         let period = period_start_unix(1_783_468_800);
         let previous = period_start_unix(period - 1);
@@ -538,7 +538,7 @@ mod tests {
             event_id: id.to_string(),
             source: "worker-test".to_string(),
             subject: zeroship_core::usage_event::UsageSubject {
-                app: Some(app),
+                app: Some(app.clone()),
                 organization: Some(organization.clone()),
             },
             meter: "requests".to_string(),
@@ -554,7 +554,7 @@ mod tests {
             Applied::Yes,
             "an in-period event must be counted"
         );
-        assert_eq!(totals.get(&(app, "requests".to_string())), Some(&100));
+        assert_eq!(totals.get(&(app.clone(), "requests".to_string())), Some(&100));
 
         // Asserts the REASON, not just the refusal. Under the old `bool` this
         // read the same as an event with no app subject or a zero value - and
@@ -587,6 +587,7 @@ mod live_db_tests {
 
     use chrono::TimeZone;
     use compio_postgres::{connect, NoTls};
+    use uuid::Uuid;
     use zeroship_core::types::SpendState;
     use zeroship_core::usage_event::UsageSubject;
     use zeroship_stream::{StreamError, StreamOffset};
@@ -652,7 +653,7 @@ mod live_db_tests {
         client: &compio_postgres::Client,
         plan_id: &str,
         label: &str,
-    ) -> Uuid {
+    ) -> AppId {
         let name = format!("{label}-{}", Uuid::new_v4());
         // A LIVE app needs a project and a project needs an organization:
         // `apps_live_app_has_project` (`project_id IS NOT NULL OR deleted_at IS
@@ -680,7 +681,7 @@ mod live_db_tests {
             )
             .await
             .expect("seed fixture project");
-        client
+        let row = client
             .query(
                 "INSERT INTO zeroship.apps (name, plan_id, project_id, organization_id) \
                  SELECT $1, $2, p.id, p.organization_id FROM zeroship.projects p \
@@ -688,8 +689,12 @@ mod live_db_tests {
                 &[&name, &plan_id, &project_id],
             )
             .await
-            .expect("insert app")[0]
-            .get("id")
+            .expect("insert app")
+            .into_iter()
+            .next()
+            .expect("insert app returns one row");
+        let id_raw: String = row.get("id");
+        AppId::parse(&id_raw).expect("inserted app id is canonical")
     }
 
     async fn seed_pricing(client: &compio_postgres::Client) -> String {
@@ -762,11 +767,11 @@ mod live_db_tests {
         let block_app = seed_priced_app(&client, &plan_id, "recompute-block").await;
         let organization = zeroship_core::typed_id::generate("org");
         let stream = FakeStream::new(vec![
-            event("evt_warn_a", warn_app, &organization, 30, period + 10),
-            event("evt_warn_b", warn_app, &organization, 50, period + 11),
-            event("evt_degrade", degrade_app, &organization, 95, period + 12),
-            event("evt_block", block_app, &organization, 100, period + 13),
-            event("evt_old_period", block_app, &organization, 999, period.saturating_sub(60)),
+            event("evt_warn_a", &warn_app, &organization, 30, period + 10),
+            event("evt_warn_b", &warn_app, &organization, 50, period + 11),
+            event("evt_degrade", &degrade_app, &organization, 95, period + 12),
+            event("evt_block", &block_app, &organization, 100, period + 13),
+            event("evt_old_period", &block_app, &organization, 999, period.saturating_sub(60)),
         ]);
         let cfg = SpendRecomputeConfig {
             interval: Duration::from_secs(1),
@@ -787,17 +792,17 @@ mod live_db_tests {
         assert_eq!(first.skipped_no_app, 0);
         assert_eq!(first.aggregates, 3);
         assert_eq!(first.written, 3);
-        assert_total(&client, warn_app, period, 80).await;
-        assert_total(&client, degrade_app, period, 95).await;
-        assert_total(&client, block_app, period, 100).await;
+        assert_total(&client, &warn_app, period, 80).await;
+        assert_total(&client, &degrade_app, period, 95).await;
+        assert_total(&client, &block_app, period, 100).await;
 
         let second = recompute_usage_aggregates(&registry, &stream, period, &cfg)
             .await
             .expect("second recompute");
         assert_eq!(second.written, 3);
-        assert_total(&client, warn_app, period, 80).await;
-        assert_total(&client, degrade_app, period, 95).await;
-        assert_total(&client, block_app, period, 100).await;
+        assert_total(&client, &warn_app, period, 80).await;
+        assert_total(&client, &degrade_app, period, 95).await;
+        assert_total(&client, &block_app, period, 100).await;
 
         let transitions = SpendEngine::new(registry)
             .evaluate_all()
@@ -806,9 +811,9 @@ mod live_db_tests {
         assert!(transitions.iter().any(|t| t.app_id == warn_app));
         assert!(transitions.iter().any(|t| t.app_id == degrade_app));
         assert!(transitions.iter().any(|t| t.app_id == block_app));
-        assert_state(&client, warn_app, SpendState::Warn).await;
-        assert_state(&client, degrade_app, SpendState::Degrade).await;
-        assert_state(&client, block_app, SpendState::Block).await;
+        assert_state(&client, &warn_app, SpendState::Warn).await;
+        assert_state(&client, &degrade_app, SpendState::Degrade).await;
+        assert_state(&client, &block_app, SpendState::Block).await;
     }
 
     #[compio::test]
@@ -833,12 +838,12 @@ mod live_db_tests {
         };
 
         // Cycle 1: real usage lands.
-        let populated = FakeStream::new(vec![event("evt_real", app, &organization, 100, period + 10)]);
+        let populated = FakeStream::new(vec![event("evt_real", &app, &organization, 100, period + 10)]);
         let first = recompute_usage_aggregates(&registry, &populated, period, &cfg)
             .await
             .expect("populated recompute");
         assert_eq!(first.written, 1);
-        assert_total(&client, app, period, 100).await;
+        assert_total(&client, &app, period, 100).await;
 
         // Cycle 2: an EMPTY stream must NOT wipe the snapshot.
         let empty = FakeStream::new(vec![]);
@@ -847,7 +852,7 @@ mod live_db_tests {
             .expect("empty recompute");
         assert_eq!(second.polled, 0);
         assert_eq!(second.written, 0, "an empty cycle writes nothing");
-        assert_total(&client, app, period, 100).await; // snapshot preserved
+        assert_total(&client, &app, period, 100).await; // snapshot preserved
     }
 
     #[compio::test]
@@ -860,9 +865,9 @@ mod live_db_tests {
         let app = seed_priced_app(&client, &plan_id, "recompute-dedup").await;
         let organization = zeroship_core::typed_id::generate("org");
         let stream = FakeStream::new(vec![
-            event("evt_duplicate_replay", app, &organization, 40, period + 10),
-            event("evt_duplicate_replay", app, &organization, 40, period + 10),
-            event("evt_distinct", app, &organization, 2, period + 11),
+            event("evt_duplicate_replay", &app, &organization, 40, period + 10),
+            event("evt_duplicate_replay", &app, &organization, 40, period + 10),
+            event("evt_distinct", &app, &organization, 2, period + 11),
         ]);
         let cfg = SpendRecomputeConfig {
             interval: Duration::from_secs(1),
@@ -883,7 +888,7 @@ mod live_db_tests {
         assert_eq!(cycle.skipped_other_period, 0);
         assert_eq!(cycle.aggregates, 1);
         assert_eq!(cycle.written, 1);
-        assert_total(&client, app, period, 42).await;
+        assert_total(&client, &app, period, 42).await;
     }
 
     #[compio::test]
@@ -896,14 +901,14 @@ mod live_db_tests {
         let app = seed_priced_app(&client, &plan_id, "recompute-poison").await;
         let organization = zeroship_core::typed_id::generate("org");
         let stream = FakeStream::from_records(vec![
-            record_from_event(0, event("evt_before_poison", app, &organization, 10, period + 10)),
+            record_from_event(0, event("evt_before_poison", &app, &organization, 10, period + 10)),
             StreamRecord {
                 partition: 0,
                 offset: 1,
                 key: b"poison".to_vec(),
                 payload: b"{not-json".to_vec(),
             },
-            record_from_event(2, event("evt_after_poison", app, &organization, 7, period + 11)),
+            record_from_event(2, event("evt_after_poison", &app, &organization, 7, period + 11)),
         ]);
         let cfg = SpendRecomputeConfig {
             interval: Duration::from_secs(1),
@@ -923,7 +928,7 @@ mod live_db_tests {
         assert_eq!(cycle.skipped_undecodable, 1);
         assert_eq!(cycle.aggregates, 1);
         assert_eq!(cycle.written, 1);
-        assert_total(&client, app, period, 17).await;
+        assert_total(&client, &app, period, 17).await;
     }
 
     #[compio::test]
@@ -941,8 +946,8 @@ mod live_db_tests {
         let app = seed_priced_app(&client, &plan_id, "recompute-prev").await;
         let organization = zeroship_core::typed_id::generate("org");
         let stream = FakeStream::new(vec![
-            event("evt_prev_unsettled", app, &organization, 41, previous + 10),
-            event("evt_current_unsettled", app, &organization, 59, current + 10),
+            event("evt_prev_unsettled", &app, &organization, 41, previous + 10),
+            event("evt_current_unsettled", &app, &organization, 59, current + 10),
         ]);
         let cfg = SpendRecomputeConfig {
             interval: Duration::from_secs(1),
@@ -964,8 +969,8 @@ mod live_db_tests {
         assert_eq!(cycle.skipped_duplicate, 0);
         assert_eq!(cycle.aggregates, 2);
         assert_eq!(cycle.written, 2);
-        assert_total(&client, app, previous, 41).await;
-        assert_total(&client, app, current, 59).await;
+        assert_total(&client, &app, previous, 41).await;
+        assert_total(&client, &app, current, 59).await;
     }
 
     impl FakeStream {
@@ -986,12 +991,12 @@ mod live_db_tests {
         }
     }
 
-    fn event(id: &str, app: Uuid, organization: &str, value: u64, event_time: i64) -> UsageEvent {
+    fn event(id: &str, app: &AppId, organization: &str, value: u64, event_time: i64) -> UsageEvent {
         UsageEvent {
             event_id: id.to_string(),
             source: "worker-test".to_string(),
             subject: UsageSubject {
-                app: Some(app),
+                app: Some(app.clone()),
                 organization: Some(organization.to_owned()),
             },
             meter: "requests".to_string(),
@@ -1010,28 +1015,28 @@ mod live_db_tests {
         }
     }
 
-    async fn assert_total(client: &compio_postgres::Client, app: Uuid, period: i64, total: i64) {
+    async fn assert_total(client: &compio_postgres::Client, app: &AppId, period: i64, total: i64) {
         let rows = client
             .query(
                 "SELECT total FROM zeroship.usage_aggregates \
                  WHERE app_id = $1 AND period = $2::date AND metric = 'requests'",
-                &[&app, &period_date(period)],
+                &[&app.as_str(), &period_date(period)],
             )
             .await
             .expect("read aggregate");
-        assert_eq!(rows.len(), 1, "one usage_aggregates row for {app}");
+        assert_eq!(rows.len(), 1, "one usage_aggregates row for {}", app.as_str());
         assert_eq!(rows[0].get::<_, i64>("total"), total);
     }
 
-    async fn assert_state(client: &compio_postgres::Client, app: Uuid, want: SpendState) {
+    async fn assert_state(client: &compio_postgres::Client, app: &AppId, want: SpendState) {
         let rows = client
             .query(
                 "SELECT state::text AS state FROM zeroship.app_spend_state WHERE app_id = $1",
-                &[&app],
+                &[&app.as_str()],
             )
             .await
             .expect("read spend state");
-        assert_eq!(rows.len(), 1, "one app_spend_state row for {app}");
+        assert_eq!(rows.len(), 1, "one app_spend_state row for {}", app.as_str());
         let state: String = rows[0].get("state");
         assert_eq!(parse_spend_state(&state), want);
     }

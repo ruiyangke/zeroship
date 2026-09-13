@@ -67,7 +67,7 @@ pairwise_salt = "urn:zeroship:file:/etc/zeroship/secrets/pairwise_salt"
 #
 # To skip consent for the console, set this to the console's per-app PKCE client
 # id, which `zeroship-control --bootstrap-console` prints:
-#   client_id_for_app(console_app_id(console_host))  => "oac_<base62>"
+#   client_id_for_app(console_app_id(console_host))  => "oac_<base36>"
 # e.g. for console.zeroship.ai:
 # trusted_oauth_clients = ["oac_<your-console-client-id>"]
 trusted_oauth_clients = []

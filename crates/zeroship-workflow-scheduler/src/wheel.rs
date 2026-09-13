@@ -1,17 +1,16 @@
+use zeroship_core::app_id::AppId;
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use flume::{Receiver, Sender};
-use uuid::Uuid;
-
 use crate::store::{TimerRow, WorkflowSchedulerStore, WorkflowSchedulerStoreError};
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct TimerEntry {
     pub run_id: String,
-    pub app_id: Uuid,
+    pub app_id: AppId,
     pub wake_at: DateTime<Utc>,
     pub generation: i64,
 }

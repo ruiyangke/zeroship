@@ -34,6 +34,7 @@ use zeroship_control::stripe_client::{Period, StripeApi, StripeClient, STRIPE_AP
 use zeroship_control::{
     AppState, EnvStore, Quota, RateLimiter, Registry, SecretString, StripeStore,
 };
+use zeroship_core::AppId;
 
 fn db_url() -> String {
     common::require_control_db()
@@ -119,7 +120,10 @@ struct MockState {
 enum MockFault {
     #[default]
     None,
-    FailAfterInvoiceItems { fail_after: usize, seen: usize },
+    FailAfterInvoiceItems {
+        fail_after: usize,
+        seen: usize,
+    },
     PostThenCrashInvoiceItem,
     CrashOnFinalize,
     FinalizeAlreadyFinalized,
@@ -267,7 +271,9 @@ async fn start_mock_stripe() -> MockStripe {
 
     compio::runtime::spawn(async move {
         loop {
-            let Ok((stream, _peer)) = listener.accept().await else { break };
+            let Ok((stream, _peer)) = listener.accept().await else {
+                break;
+            };
             let conn_state = Arc::clone(&accept_state);
             compio::runtime::spawn(async move {
                 serve_conn(stream, conn_state).await;
@@ -417,7 +423,10 @@ fn handle_mock_request(req: &RecordedRequest, state: &Arc<Mutex<MockState>>) -> 
                     r#"{{"id":"{}","object":"invoiceitem","metadata":{{"zs_item_key":"{k}"}}}}"#,
                     it.id
                 ),
-                None => format!(r#"{{"id":"{}","object":"invoiceitem","metadata":{{}}}}"#, it.id),
+                None => format!(
+                    r#"{{"id":"{}","object":"invoiceitem","metadata":{{}}}}"#,
+                    it.id
+                ),
             })
             .collect();
         drop(st);
@@ -496,8 +505,7 @@ fn handle_mock_request(req: &RecordedRequest, state: &Arc<Mutex<MockState>>) -> 
                 );
             }
             MockFault::FinalizeReturnsFixedId(fixed_id) => {
-                let json =
-                    format!(r#"{{"id":"{fixed_id}","object":"invoice","status":"open"}}"#);
+                let json = format!(r#"{{"id":"{fixed_id}","object":"invoice","status":"open"}}"#);
                 if let Some(key) = req.idempotency_key.clone() {
                     st.idempotency_replies
                         .entry(key)
@@ -525,13 +533,16 @@ fn handle_mock_request(req: &RecordedRequest, state: &Arc<Mutex<MockState>>) -> 
             let err = r#"{"error":{"type":"invalid_request_error","code":"parameter_unknown","message":"Received unknown parameter: currency","param":"currency"}}"#;
             return http_json(400, err);
         }
-        let target = form_param(&req.body, "payment_intent")
-            .or_else(|| form_param(&req.body, "charge"));
+        let target =
+            form_param(&req.body, "payment_intent").or_else(|| form_param(&req.body, "charge"));
         if target.is_none() {
             let err = r#"{"error":{"type":"invalid_request_error","code":"parameter_missing","message":"Missing payment_intent or charge"}}"#;
             return http_json(400, err);
         }
-        return http_200_json(&format!(r#"{{"id":"re_mock_{}","object":"refund","status":"succeeded"}}"#, short()));
+        return http_200_json(&format!(
+            r#"{{"id":"re_mock_{}","object":"refund","status":"succeeded"}}"#,
+            short()
+        ));
     }
 
     let new_item_id = format!("ii_mock_{}", short());
@@ -553,11 +564,17 @@ fn handle_mock_request(req: &RecordedRequest, state: &Arc<Mutex<MockState>>) -> 
     } else if req.path.starts_with("/v1/invoiceitems") {
         format!(r#"{{"id":"{new_item_id}","object":"invoiceitem"}}"#)
     } else if req.path.contains("/finalize") {
-        format!(r#"{{"id":"in_mock_final_{}","object":"invoice","status":"open"}}"#, short())
+        format!(
+            r#"{{"id":"in_mock_final_{}","object":"invoice","status":"open"}}"#,
+            short()
+        )
     } else if is_invoice_create {
         format!(r#"{{"id":"{new_invoice_id}","object":"invoice","status":"draft"}}"#)
     } else if req.path.starts_with("/v1/invoices") {
-        format!(r#"{{"id":"in_mock_{}","object":"invoice","status":"draft"}}"#, short())
+        format!(
+            r#"{{"id":"in_mock_{}","object":"invoice","status":"draft"}}"#,
+            short()
+        )
     } else {
         r#"{"id":"obj_mock","object":"unknown"}"#.to_string()
     };
@@ -565,10 +582,9 @@ fn handle_mock_request(req: &RecordedRequest, state: &Arc<Mutex<MockState>>) -> 
     {
         let mut st = state.lock().unwrap();
         // Record a created invoice item so the GET-list (adopt) path can find it.
-        let post_then_crash =
-            matches!(st.fault, MockFault::PostThenCrashInvoiceItem)
-                && req.method == "POST"
-                && req.path.starts_with("/v1/invoiceitems");
+        let post_then_crash = matches!(st.fault, MockFault::PostThenCrashInvoiceItem)
+            && req.method == "POST"
+            && req.path.starts_with("/v1/invoiceitems");
         if req.method == "POST" && req.path.starts_with("/v1/invoiceitems") {
             let customer = form_param(&req.body, "customer").unwrap_or_default();
             let key = form_param(&req.body, "metadata[zs_item_key]");
@@ -588,8 +604,7 @@ fn handle_mock_request(req: &RecordedRequest, state: &Arc<Mutex<MockState>>) -> 
         // the customer's pending item amounts and clearing them off the pending list.
         if is_invoice_create {
             let customer = form_param(&req.body, "customer").unwrap_or_default();
-            let include = form_param(&req.body, "pending_invoice_items_behavior")
-                .as_deref()
+            let include = form_param(&req.body, "pending_invoice_items_behavior").as_deref()
                 == Some("include");
             let swept_total = if include {
                 let total: i64 = st
@@ -616,7 +631,9 @@ fn handle_mock_request(req: &RecordedRequest, state: &Arc<Mutex<MockState>>) -> 
         }
         st.requests.push(req.clone());
         if let Some(key) = req.idempotency_key.clone() {
-            st.idempotency_replies.entry(key).or_insert_with(|| json.clone());
+            st.idempotency_replies
+                .entry(key)
+                .or_insert_with(|| json.clone());
         }
         if post_then_crash {
             return http_json(
@@ -794,7 +811,10 @@ async fn build_fixture(db_url: &str, label: &str) -> Fixture {
         expected_oauth_audience: "control.zeroship.ai".to_string(),
         static_policies: zeroship_authz::load_platform_policies()
             .expect("bundled authz policies parse"),
-        auth_provider: zeroship_control::platform_auth_provider("https://auth.zeroship.test/oauth2", Some(common::platform_jwks_url())),
+        auth_provider: zeroship_control::platform_auth_provider(
+            "https://auth.zeroship.test/oauth2",
+            Some(common::platform_jwks_url()),
+        ),
         // No platform deploy-token mint here: that is control's OUTBOUND
         // destination for the device flow, and no fixture below drives one.
         provider_registry: zeroship_control::metering::provider::builtin_registry(),
@@ -889,14 +909,14 @@ async fn make_plan(state: &AppState) -> String {
 /// one organization and asserted against another would simply never be billed -
 /// the test would go green on an empty sweep. Placing it in the caller's
 /// organization is what keeps the assertion attached to anything.
-async fn make_owned_app(state: &AppState, plan_id: &str, organization: &str) -> Uuid {
+async fn make_owned_app(state: &AppState, plan_id: &str, organization: &str) -> AppId {
     let name = format!("bill-{}", Uuid::new_v4());
     common::seed_app_in_organization(&state.control_pg, &name, plan_id, organization).await
 }
 
 /// Seed usage directly at a given period_start (the CLOSED period the
 /// reconciler bills).
-async fn ingest_at(state: &AppState, app: Uuid, requests: u64, period_start: i64, seq: u64) {
+async fn ingest_at(state: &AppState, app: &AppId, requests: u64, period_start: i64, seq: u64) {
     let _ = seq;
     common::seed_usage_delta(
         &state.control_pg,
@@ -914,7 +934,7 @@ async fn ingest_at(state: &AppState, app: Uuid, requests: u64, period_start: i64
 /// a MANY-metric app through the REAL reconcile (not a stub).
 async fn ingest_custom_metrics(
     state: &AppState,
-    app: Uuid,
+    app: &AppId,
     metrics: &[(String, u64)],
     period_start: i64,
     seq: u64,
@@ -926,7 +946,7 @@ async fn ingest_custom_metrics(
                 "INSERT INTO zeroship.billing_metrics (metric, kind, unit, owner_app, last_seen_at) \
                  VALUES ($1, 'custom', 'unit', $2, NOW()) \
                  ON CONFLICT (metric) DO UPDATE SET last_seen_at = NOW()",
-                &[name, &app],
+                &[name, &app.as_str()],
             )
             .await
             .expect("seed custom metric");
@@ -1080,7 +1100,7 @@ async fn confirmed_lines_count(state: &AppState, organization: &str) -> i64 {
 async fn read_line_snapshot(
     state: &AppState,
     organization: &str,
-    app: Uuid,
+    app: &AppId,
 ) -> (i64, i64, i64, i64, serde_json::Value, serde_json::Value) {
     let row = state
         .control_pg
@@ -1090,7 +1110,7 @@ async fn read_line_snapshot(
              FROM zeroship.invoice_lines l \
              JOIN zeroship.invoices i ON i.id = l.invoice_id \
              WHERE i.organization_id = $1 AND l.app_id = $2",
-            &[&organization, &app],
+            &[&organization, &app.as_str()],
         )
         .await
         .expect("read line snapshot")
@@ -1124,7 +1144,9 @@ async fn read_line_snapshot(
 async fn reconcile_creates_invoice_items_per_app_from_real_aggregates() {
     let url = db_url();
     let fx = build_fixture(&url, "items").await;
-    let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _recon = RECONCILE_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let now = now_for_closed_period().await;
     let period = prev_period(now);
 
@@ -1134,10 +1156,17 @@ async fn reconcile_creates_invoice_items_per_app_from_real_aggregates() {
     let app1 = make_owned_app(&fx.state, &plan, organization).await;
     let app2 = make_owned_app(&fx.state, &plan, organization).await;
     // Customer must exist (set lazily by billing/setup in prod; here directly).
-    fx.state.stripe_store.set_customer(organization, &format!("cus_test_items_{}", Uuid::new_v4().simple())).await.unwrap();
+    fx.state
+        .stripe_store
+        .set_customer(
+            organization,
+            &format!("cus_test_items_{}", Uuid::new_v4().simple()),
+        )
+        .await
+        .unwrap();
 
-    ingest_at(&fx.state, app1, 500, period, 1).await; // 500c
-    ingest_at(&fx.state, app2, 250, period, 2).await; // 250c
+    ingest_at(&fx.state, &app1, 500, period, 1).await; // 500c
+    ingest_at(&fx.state, &app2, 250, period, 2).await; // 250c
 
     let billed = billing_reconcile::tick_with(&fx.state, &dummy_passthrough(&fx), now)
         .await
@@ -1145,8 +1174,16 @@ async fn reconcile_creates_invoice_items_per_app_from_real_aggregates() {
     assert_eq!(billed, 1, "one organization billed");
 
     // Two invoice-item creates (one per app) + one invoice create + one finalize.
-    assert_eq!(fx.mock.count_path("POST", "/v1/invoiceitems"), 2, "one item per app");
-    assert_eq!(fx.mock.count_path("POST", "/v1/invoices"), 2, "create + finalize (both POST /v1/invoices…)");
+    assert_eq!(
+        fx.mock.count_path("POST", "/v1/invoiceitems"),
+        2,
+        "one item per app"
+    );
+    assert_eq!(
+        fx.mock.count_path("POST", "/v1/invoices"),
+        2,
+        "create + finalize (both POST /v1/invoices…)"
+    );
 
     // invoices records the finalized invoice + the summed total (750c).
     let inv = read_invoice(&fx.state, organization, period).await;
@@ -1156,7 +1193,9 @@ async fn reconcile_creates_invoice_items_per_app_from_real_aggregates() {
         "one finalized invoice totalling the summed charge across both apps",
     );
     assert!(
-        finalized_invoice_id(&fx.state, organization, period).await.is_some(),
+        finalized_invoice_id(&fx.state, organization, period)
+            .await
+            .is_some(),
         "provider invoice id recorded after finalize",
     );
 
@@ -1186,7 +1225,9 @@ async fn reconcile_creates_invoice_items_per_app_from_real_aggregates() {
 async fn single_segment_item_carries_cu_and_full_metadata_amount_unchanged() {
     let url = db_url();
     let fx = build_fixture(&url, "cu1seg").await;
-    let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _recon = RECONCILE_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let now = now_for_closed_period().await;
     let period = prev_period(now);
 
@@ -1196,11 +1237,14 @@ async fn single_segment_item_carries_cu_and_full_metadata_amount_unchanged() {
     let app = make_owned_app(&fx.state, &plan, organization).await;
     fx.state
         .stripe_store
-        .set_customer(organization, &format!("cus_cu1_{}", Uuid::new_v4().simple()))
+        .set_customer(
+            organization,
+            &format!("cus_cu1_{}", Uuid::new_v4().simple()),
+        )
         .await
         .unwrap();
 
-    ingest_at(&fx.state, app, 750, period, 1).await;
+    ingest_at(&fx.state, &app, 750, period, 1).await;
 
     let billed = billing_reconcile::tick_with(&fx.state, &dummy_passthrough(&fx), now)
         .await
@@ -1219,29 +1263,52 @@ async fn single_segment_item_carries_cu_and_full_metadata_amount_unchanged() {
         desc.contains("750 compute units"),
         "description must show the CU count; got: {desc}",
     );
-    assert!(desc.starts_with("Infra usage — app"), "keeps the existing prefix; got: {desc}");
+    assert!(
+        desc.starts_with("Infra usage — app"),
+        "keeps the existing prefix; got: {desc}"
+    );
 
     // (2) the metadata carries the FULL derivation.
-    assert_eq!(form_param(&item.body, "metadata[compute_units]").as_deref(), Some("750"));
-    assert_eq!(form_param(&item.body, "metadata[billable_units]").as_deref(), Some("750"));
-    assert_eq!(form_param(&item.body, "metadata[included_units]").as_deref(), Some("0"));
+    assert_eq!(
+        form_param(&item.body, "metadata[compute_units]").as_deref(),
+        Some("750")
+    );
+    assert_eq!(
+        form_param(&item.body, "metadata[billable_units]").as_deref(),
+        Some("750")
+    );
+    assert_eq!(
+        form_param(&item.body, "metadata[included_units]").as_deref(),
+        Some("0")
+    );
     assert_eq!(
         form_param(&item.body, "metadata[fx_pico_cents_per_unit]").as_deref(),
         Some("1000000000000"),
         "FX frozen on the item metadata (1 cent/CU = 10^12 pico-cents)",
     );
-    assert_eq!(form_param(&item.body, "metadata[base_fee_cents]").as_deref(), Some("0"));
-    assert_eq!(form_param(&item.body, "metadata[segment]").as_deref(), Some("full"));
+    assert_eq!(
+        form_param(&item.body, "metadata[base_fee_cents]").as_deref(),
+        Some("0")
+    );
+    assert_eq!(
+        form_param(&item.body, "metadata[segment]").as_deref(),
+        Some("full")
+    );
     assert_eq!(
         form_param(&item.body, "metadata[usage]").as_deref(),
         Some("requests=750:750"),
         "per-metric raw:cu blob present",
     );
     // The zs_item_key adopt-path metadata is still there (not clobbered).
-    assert!(form_param(&item.body, "metadata[zs_item_key]").is_some(), "adopt-path key preserved");
+    assert!(
+        form_param(&item.body, "metadata[zs_item_key]").is_some(),
+        "adopt-path key preserved"
+    );
 
     // (3) the AUTHORITATIVE amount is UNCHANGED (== the frozen line amount_cents).
-    let amount: i64 = form_param(&item.body, "amount").and_then(|a| a.parse().ok()).expect("amount");
+    let amount: i64 = form_param(&item.body, "amount")
+        .and_then(|a| a.parse().ok())
+        .expect("amount");
     let line_amount: i64 = fx
         .state
         .control_pg
@@ -1249,13 +1316,19 @@ async fn single_segment_item_carries_cu_and_full_metadata_amount_unchanged() {
             "SELECT l.amount_cents FROM zeroship.invoice_lines l \
              JOIN zeroship.invoices i ON i.id = l.invoice_id \
              WHERE i.organization_id = $1 AND l.app_id = $2",
-            &[&organization, &app],
+            &[&organization, &app.as_str()],
         )
         .await
         .expect("read line amount")[0]
         .get::<_, i64>("amount_cents");
-    assert_eq!(amount, line_amount, "Stripe amount == frozen line amount_cents");
-    assert_eq!(amount, 750, "amount is the authoritative ChargeBreakdown.total_cents, untouched");
+    assert_eq!(
+        amount, line_amount,
+        "Stripe amount == frozen line amount_cents"
+    );
+    assert_eq!(
+        amount, 750,
+        "amount is the authoritative ChargeBreakdown.total_cents, untouched"
+    );
 
     drop(fx);
     common::drain_pg().await;
@@ -1280,7 +1353,9 @@ async fn single_segment_item_carries_cu_and_full_metadata_amount_unchanged() {
 async fn many_metric_item_respects_description_and_metadata_length_caps() {
     let url = db_url();
     let fx = build_fixture(&url, "cucap").await;
-    let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _recon = RECONCILE_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let now = now_for_closed_period().await;
     let period = prev_period(now);
 
@@ -1290,15 +1365,23 @@ async fn many_metric_item_respects_description_and_metadata_length_caps() {
     let app = make_owned_app(&fx.state, &plan, organization).await;
     fx.state
         .stripe_store
-        .set_customer(organization, &format!("cus_cucap_{}", Uuid::new_v4().simple()))
+        .set_customer(
+            organization,
+            &format!("cus_cucap_{}", Uuid::new_v4().simple()),
+        )
         .await
         .unwrap();
 
     // 80 long-named custom metrics, each a distinct non-trivial raw → distinct CU.
     let metrics: Vec<(String, u64)> = (0..80)
-        .map(|i| (format!("a_reasonably_long_custom_metric_name_index_{i:04}"), 1_000 + i as u64))
+        .map(|i| {
+            (
+                format!("a_reasonably_long_custom_metric_name_index_{i:04}"),
+                1_000 + i as u64,
+            )
+        })
         .collect();
-    ingest_custom_metrics(&fx.state, app, &metrics, period, 1).await;
+    ingest_custom_metrics(&fx.state, &app, &metrics, period, 1).await;
 
     let billed = billing_reconcile::tick_with(&fx.state, &dummy_passthrough(&fx), now)
         .await
@@ -1319,8 +1402,14 @@ async fn many_metric_item_respects_description_and_metadata_length_caps() {
         desc.chars().count(),
         zeroship_control::pricing::INVOICE_ITEM_DESC_MAX,
     );
-    assert!(desc.chars().count() < 500, "well under Stripe's 500-char line-item limit");
-    assert!(desc.contains("compute units"), "description still surfaces the CU; got: {desc}");
+    assert!(
+        desc.chars().count() < 500,
+        "well under Stripe's 500-char line-item limit"
+    );
+    assert!(
+        desc.contains("compute units"),
+        "description still surfaces the CU; got: {desc}"
+    );
 
     // (d) EVERY metadata value is ≤ 500 chars (Stripe's per-value cap).
     let mut saw_usage = false;
@@ -1380,21 +1469,38 @@ async fn every_stripe_call_pins_the_api_version() {
         .with_base_url(mock.base_url.clone());
 
     // POST: succeeds only if the pinned version was sent.
-    let cus = client.create_customer("pin@test.invalid", "organization-pin").await;
-    assert!(cus.is_ok(), "create_customer (POST) must succeed with the pinned version: {cus:?}");
+    let cus = client
+        .create_customer("pin@test.invalid", "organization-pin")
+        .await;
+    assert!(
+        cus.is_ok(),
+        "create_customer (POST) must succeed with the pinned version: {cus:?}"
+    );
 
     // GET: list pending items by key (returns None against the empty mock).
-    let got = client.find_invoice_item_by_key(&cus.unwrap(), "zs_key_pin").await;
-    assert!(got.is_ok(), "find_invoice_item_by_key (GET) must succeed with the pinned version: {got:?}");
+    let got = client
+        .find_invoice_item_by_key(&cus.unwrap(), "zs_key_pin")
+        .await;
+    assert!(
+        got.is_ok(),
+        "find_invoice_item_by_key (GET) must succeed with the pinned version: {got:?}"
+    );
 
     // DELETE: a missing item converges to Ok (the mock returns a Stripe-shaped obj;
     // the client treats resource_missing as success — here it's a 200 from the mock).
     let del = client.delete_invoice_item("ii_pin_missing").await;
-    assert!(del.is_ok(), "delete_invoice_item (DELETE) must succeed with the pinned version: {del:?}");
+    assert!(
+        del.is_ok(),
+        "delete_invoice_item (DELETE) must succeed with the pinned version: {del:?}"
+    );
 
     // Every recorded request pinned the EXACT version on every method.
     let reqs = mock.requests();
-    assert!(reqs.len() >= 3, "POST + GET + DELETE recorded, got {}", reqs.len());
+    assert!(
+        reqs.len() >= 3,
+        "POST + GET + DELETE recorded, got {}",
+        reqs.len()
+    );
     let mut saw = (false, false, false);
     for r in &reqs {
         assert_eq!(
@@ -1412,7 +1518,11 @@ async fn every_stripe_call_pins_the_api_version() {
             _ => {}
         }
     }
-    assert_eq!(saw, (true, true, true), "all three HTTP methods exercised + pinned");
+    assert_eq!(
+        saw,
+        (true, true, true),
+        "all three HTTP methods exercised + pinned"
+    );
 }
 
 /// THE no-double-bill guarantee. Run the tick TWICE for the same (organization,
@@ -1428,7 +1538,9 @@ async fn every_stripe_call_pins_the_api_version() {
 async fn reconcile_is_idempotent_per_period() {
     let url = db_url();
     let fx = build_fixture(&url, "idem").await;
-    let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _recon = RECONCILE_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let now = now_for_closed_period().await;
     let period = prev_period(now);
 
@@ -1436,8 +1548,15 @@ async fn reconcile_is_idempotent_per_period() {
     let organization = organization.as_str();
     let plan = make_plan(&fx.state).await;
     let app = make_owned_app(&fx.state, &plan, organization).await;
-    fx.state.stripe_store.set_customer(organization, &format!("cus_test_idem_{}", Uuid::new_v4().simple())).await.unwrap();
-    ingest_at(&fx.state, app, 300, period, 1).await; // 300c
+    fx.state
+        .stripe_store
+        .set_customer(
+            organization,
+            &format!("cus_test_idem_{}", Uuid::new_v4().simple()),
+        )
+        .await
+        .unwrap();
+    ingest_at(&fx.state, &app, 300, period, 1).await; // 300c
 
     let billed1 = billing_reconcile::tick_with(&fx.state, &dummy_passthrough(&fx), now)
         .await
@@ -1487,12 +1606,27 @@ async fn stripe_client_uses_cyper_and_sends_idempotency_key() {
     // Drive the REAL client directly against the mock.
     let client = StripeClient::new(SecretString::new("sk_test_mock".to_string()))
         .with_base_url(fx.mock.base_url.clone());
-    let period = Period { start: 1_700_000_000, end: 1_702_000_000 };
+    let period = Period {
+        start: 1_700_000_000,
+        end: 1_702_000_000,
+    };
     let item = client
-        .create_invoice_item("cus_x", 1234, "usd", "infra", period, "billitem:k1", "billitem:k1", &[])
+        .create_invoice_item(
+            "cus_x",
+            1234,
+            "usd",
+            "infra",
+            period,
+            "billitem:k1",
+            "billitem:k1",
+            &[],
+        )
         .await
         .expect("create invoice item");
-    assert!(item.starts_with("ii_mock_"), "parsed the ii_ id from the mock JSON");
+    assert!(
+        item.starts_with("ii_mock_"),
+        "parsed the ii_ id from the mock JSON"
+    );
     let draft = client
         .create_invoice("cus_x", &Uuid::new_v4().to_string(), "billrun:k2")
         .await
@@ -1502,19 +1636,54 @@ async fn stripe_client_uses_cyper_and_sends_idempotency_key() {
     assert_eq!(invoice, draft, "finalize preserves the Stripe invoice id");
 
     let reqs = fx.mock.requests();
-    let item_req = reqs.iter().find(|r| r.method == "POST" && r.path.starts_with("/v1/invoiceitems")).expect("item req");
-    assert_eq!(item_req.idempotency_key.as_deref(), Some("billitem:k1"), "item idempotency key sent");
-    assert_eq!(item_req.authorization.as_deref(), Some("Bearer sk_test_mock"), "bearer auth sent");
+    let item_req = reqs
+        .iter()
+        .find(|r| r.method == "POST" && r.path.starts_with("/v1/invoiceitems"))
+        .expect("item req");
+    assert_eq!(
+        item_req.idempotency_key.as_deref(),
+        Some("billitem:k1"),
+        "item idempotency key sent"
+    );
+    assert_eq!(
+        item_req.authorization.as_deref(),
+        Some("Bearer sk_test_mock"),
+        "bearer auth sent"
+    );
     // Form body carries the bracketed period params (proves form encoding).
-    assert!(item_req.body.contains("period%5Bstart%5D=1700000000"), "period[start] form-encoded; body={}", item_req.body);
+    assert!(
+        item_req.body.contains("period%5Bstart%5D=1700000000"),
+        "period[start] form-encoded; body={}",
+        item_req.body
+    );
     assert!(item_req.body.contains("amount=1234"), "amount in form body");
     // The deterministic lookup key is stamped into metadata for the >24h adopt path (C1).
-    assert!(item_req.body.contains("metadata%5Bzs_item_key%5D=billitem%3Ak1"), "zs_item_key metadata sent; body={}", item_req.body);
+    assert!(
+        item_req
+            .body
+            .contains("metadata%5Bzs_item_key%5D=billitem%3Ak1"),
+        "zs_item_key metadata sent; body={}",
+        item_req.body
+    );
 
-    let invoice_create = reqs.iter().find(|r| r.path == "/v1/invoices").expect("invoice create");
-    assert_eq!(invoice_create.idempotency_key.as_deref(), Some("billrun:k2"), "invoice idempotency key sent");
-    let finalize = reqs.iter().find(|r| r.path.contains("/finalize")).expect("finalize");
-    assert_eq!(finalize.idempotency_key.as_deref(), Some(format!("finalize:{draft}").as_str()), "finalize idempotency key keyed on draft id");
+    let invoice_create = reqs
+        .iter()
+        .find(|r| r.path == "/v1/invoices")
+        .expect("invoice create");
+    assert_eq!(
+        invoice_create.idempotency_key.as_deref(),
+        Some("billrun:k2"),
+        "invoice idempotency key sent"
+    );
+    let finalize = reqs
+        .iter()
+        .find(|r| r.path.contains("/finalize"))
+        .expect("finalize");
+    assert_eq!(
+        finalize.idempotency_key.as_deref(),
+        Some(format!("finalize:{draft}").as_str()),
+        "finalize idempotency key keyed on draft id"
+    );
 
     drop(fx);
     common::drain_pg().await;
@@ -1537,7 +1706,10 @@ async fn create_invoice_sweeps_pending_items_via_include_behavior() {
     let client = StripeClient::new(SecretString::new("sk_test_mock".to_string()))
         .with_base_url(fx.mock.base_url.clone());
     let cus = format!("cus_d1_{}", Uuid::new_v4().simple());
-    let period = Period { start: 1_700_000_000, end: 1_702_000_000 };
+    let period = Period {
+        start: 1_700_000_000,
+        end: 1_702_000_000,
+    };
 
     // Two pending items on the customer (totalling 2000c).
     client
@@ -1562,7 +1734,9 @@ async fn create_invoice_sweeps_pending_items_via_include_behavior() {
         .find(|r| r.method == "POST" && r.path == "/v1/invoices")
         .expect("invoice create recorded");
     assert!(
-        create.body.contains("pending_invoice_items_behavior=include"),
+        create
+            .body
+            .contains("pending_invoice_items_behavior=include"),
         "create_invoice must send pending_invoice_items_behavior=include; body={}",
         create.body
     );
@@ -1604,8 +1778,16 @@ async fn invoice_settlement_ids_requires_expand_and_reads_pi_ch() {
         .invoice_settlement_ids(&inv)
         .await
         .expect("settlement ids");
-    assert_eq!(pi.as_deref(), Some("pi_d2real"), "pi_ resolved from expanded payment_intent.id");
-    assert_eq!(ch.as_deref(), Some("ch_d2real"), "ch_ resolved from payment_intent.latest_charge");
+    assert_eq!(
+        pi.as_deref(),
+        Some("pi_d2real"),
+        "pi_ resolved from expanded payment_intent.id"
+    );
+    assert_eq!(
+        ch.as_deref(),
+        Some("ch_d2real"),
+        "ch_ resolved from payment_intent.latest_charge"
+    );
 
     // Prove the expand is load-bearing: the client's GET carried the expand path.
     // (The mock surfaces the ids ONLY under this expand — exactly mirroring real
@@ -1617,8 +1799,11 @@ async fn invoice_settlement_ids_requires_expand_and_reads_pi_ch() {
         .find(|r| r.method == "GET" && r.path.starts_with(&format!("/v1/invoices/{inv}")))
         .expect("expanded invoice GET recorded");
     assert!(
-        get.path.contains("expand%5B%5D=payments.data.payment.payment_intent")
-            || get.path.contains("expand[]=payments.data.payment.payment_intent"),
+        get.path
+            .contains("expand%5B%5D=payments.data.payment.payment_intent")
+            || get
+                .path
+                .contains("expand[]=payments.data.payment.payment_intent"),
         "the settlement fetch must EXPAND payments.data.payment.payment_intent; path={}",
         get.path
     );
@@ -1660,12 +1845,19 @@ async fn create_refund_omits_currency_and_targets_pi_directly() {
         !body.contains("currency="),
         "create_refund must NOT send `currency` (400 parameter_unknown); body={body}",
     );
-    assert!(body.contains("payment_intent=pi_real123"), "refunds the pi_ directly; body={body}");
-    assert!(!body.contains("expand"), "no expand fetch needed when given a pi_ directly");
+    assert!(
+        body.contains("payment_intent=pi_real123"),
+        "refunds the pi_ directly; body={body}"
+    );
+    assert!(
+        !body.contains("expand"),
+        "no expand fetch needed when given a pi_ directly"
+    );
 
     // (b) Refund an in_ → the expanded fetch resolves its settling pi_, then refunds.
     let inv = format!("in_refund_{}", Uuid::new_v4().simple());
-    fx.mock.register_paid_invoice(&inv, "cus_r", "pi_frominvoice", Some("ch_frominvoice"));
+    fx.mock
+        .register_paid_invoice(&inv, "cus_r", "pi_frominvoice", Some("ch_frominvoice"));
     let re2 = client
         .create_refund(&inv, 100, "usd", "idem-refund-in")
         .await
@@ -1703,12 +1895,24 @@ async fn setup_session_creates_customer_once() {
         .with_base_url(fx.mock.base_url.clone());
     // Mirror the handler's ensure-then-session flow twice.
     for _ in 0..2 {
-        let existing = fx.state.stripe_store.get_customer(organization).await.unwrap();
+        let existing = fx
+            .state
+            .stripe_store
+            .get_customer(organization)
+            .await
+            .unwrap();
         let customer = match existing {
             Some(c) => c,
             None => {
-                let cus = client.create_customer("c@example.test", organization).await.unwrap();
-                fx.state.stripe_store.set_customer(organization, &cus).await.unwrap();
+                let cus = client
+                    .create_customer("c@example.test", organization)
+                    .await
+                    .unwrap();
+                fx.state
+                    .stripe_store
+                    .set_customer(organization, &cus)
+                    .await
+                    .unwrap();
                 cus
             }
         };
@@ -1723,9 +1927,21 @@ async fn setup_session_creates_customer_once() {
         1,
         "the customer is created exactly once across two setups (reuse on the second)",
     );
-    assert_eq!(fx.mock.count_path("POST", "/v1/checkout/sessions"), 2, "a session per setup");
-    let stored = fx.state.stripe_store.get_customer(organization).await.unwrap();
-    assert!(stored.is_some(), "customer id persisted to billing_customer_refs");
+    assert_eq!(
+        fx.mock.count_path("POST", "/v1/checkout/sessions"),
+        2,
+        "a session per setup"
+    );
+    let stored = fx
+        .state
+        .stripe_store
+        .get_customer(organization)
+        .await
+        .unwrap();
+    assert!(
+        stored.is_some(),
+        "customer id persisted to billing_customer_refs"
+    );
 
     drop(fx);
     common::drain_pg().await;
@@ -1740,7 +1956,9 @@ async fn setup_session_creates_customer_once() {
 async fn reconcile_groups_apps_by_owner_via_the_organization() {
     let url = db_url();
     let fx = build_fixture(&url, "owner").await;
-    let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _recon = RECONCILE_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let now = now_for_closed_period().await;
     let period = prev_period(now);
 
@@ -1749,7 +1967,14 @@ async fn reconcile_groups_apps_by_owner_via_the_organization() {
     let plan = make_plan(&fx.state).await;
     let owned_a = make_owned_app(&fx.state, &plan, organization).await;
     let owned_b = make_owned_app(&fx.state, &plan, organization).await;
-    fx.state.stripe_store.set_customer(organization, &format!("cus_test_owner_{}", Uuid::new_v4().simple())).await.unwrap();
+    fx.state
+        .stripe_store
+        .set_customer(
+            organization,
+            &format!("cus_test_owner_{}", Uuid::new_v4().simple()),
+        )
+        .await
+        .unwrap();
 
     // An app in an organization with NO member rows — must be skipped (no
     // billable organization). `seed_app` mints exactly that: a fresh organization
@@ -1761,17 +1986,24 @@ async fn reconcile_groups_apps_by_owner_via_the_organization() {
     )
     .await;
 
-    ingest_at(&fx.state, owned_a, 100, period, 1).await; // 100c
-    ingest_at(&fx.state, owned_b, 200, period, 2).await; // 200c
-    ingest_at(&fx.state, unowned, 999, period, 3).await; // would be 999c — must NOT bill
+    ingest_at(&fx.state, &owned_a, 100, period, 1).await; // 100c
+    ingest_at(&fx.state, &owned_b, 200, period, 2).await; // 200c
+    ingest_at(&fx.state, &unowned, 999, period, 3).await; // would be 999c — must NOT bill
 
     let billed = billing_reconcile::tick_with(&fx.state, &dummy_passthrough(&fx), now)
         .await
         .expect("tick");
-    assert_eq!(billed, 1, "one organization billed (the unowned app is skipped)");
+    assert_eq!(
+        billed, 1,
+        "one organization billed (the unowned app is skipped)"
+    );
 
     // One invoice item per OWNED app (2), not 3.
-    assert_eq!(fx.mock.count_path("POST", "/v1/invoiceitems"), 2, "two owned apps → two items");
+    assert_eq!(
+        fx.mock.count_path("POST", "/v1/invoiceitems"),
+        2,
+        "two owned apps → two items"
+    );
 
     // The organization's invoice total spans both owned apps (300c), excluding unowned.
     let inv = read_invoice(&fx.state, organization, period).await;
@@ -1795,7 +2027,9 @@ async fn reconcile_groups_apps_by_owner_via_the_organization() {
 async fn crashed_run_with_null_invoice_id_is_redriven() {
     let url = db_url();
     let fx = build_fixture(&url, "crash").await;
-    let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _recon = RECONCILE_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let now = now_for_closed_period().await;
     let period = prev_period(now);
 
@@ -1803,8 +2037,15 @@ async fn crashed_run_with_null_invoice_id_is_redriven() {
     let organization = organization.as_str();
     let plan = make_plan(&fx.state).await;
     let app = make_owned_app(&fx.state, &plan, organization).await;
-    fx.state.stripe_store.set_customer(organization, &format!("cus_test_crash_{}", Uuid::new_v4().simple())).await.unwrap();
-    ingest_at(&fx.state, app, 400, period, 1).await; // 400c
+    fx.state
+        .stripe_store
+        .set_customer(
+            organization,
+            &format!("cus_test_crash_{}", Uuid::new_v4().simple()),
+        )
+        .await
+        .unwrap();
+    ingest_at(&fx.state, &app, 400, period, 1).await; // 400c
 
     // Simulate the crash window: the invoice row exists (claimed, draft) but is
     // not yet finalized.
@@ -1843,12 +2084,17 @@ async fn crashed_run_with_null_invoice_id_is_redriven() {
 
     // The invoice is now finalized + carries the provider invoice id.
     assert_eq!(
-        read_invoice(&fx.state, organization, period).await.map(|(s, _)| s).as_deref(),
+        read_invoice(&fx.state, organization, period)
+            .await
+            .map(|(s, _)| s)
+            .as_deref(),
         Some("finalized"),
         "the draft invoice is finalized after re-drive",
     );
     assert!(
-        finalized_invoice_id(&fx.state, organization, period).await.is_some(),
+        finalized_invoice_id(&fx.state, organization, period)
+            .await
+            .is_some(),
         "provider invoice id filled in",
     );
 
@@ -1871,7 +2117,9 @@ async fn crashed_run_with_null_invoice_id_is_redriven() {
 async fn missing_default_fx_aborts_sweep_and_bills_no_one() {
     let url = db_url();
     let fx = build_fixture(&url, "nofx").await;
-    let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _recon = RECONCILE_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let now = now_for_closed_period().await;
     let period = prev_period(now);
 
@@ -1908,8 +2156,15 @@ async fn missing_default_fx_aborts_sweep_and_bills_no_one() {
         .await
         .expect("seed inheriting plan");
     let app = make_owned_app(&fx.state, &plan_id, organization).await;
-    fx.state.stripe_store.set_customer(organization, &format!("cus_test_nofx_{}", Uuid::new_v4().simple())).await.unwrap();
-    ingest_at(&fx.state, app, 600, period, 1).await; // would be 600c IF priceable
+    fx.state
+        .stripe_store
+        .set_customer(
+            organization,
+            &format!("cus_test_nofx_{}", Uuid::new_v4().simple()),
+        )
+        .await
+        .unwrap();
+    ingest_at(&fx.state, &app, 600, period, 1).await; // would be 600c IF priceable
 
     // Capture the shared singleton so we can RESTORE it before any assertion —
     // the pricing_config row is fleet-wide shared state across test binaries, so
@@ -1917,7 +2172,10 @@ async fn missing_default_fx_aborts_sweep_and_bills_no_one() {
     let saved_fx: Option<i64> = fx
         .state
         .control_pg
-        .query("SELECT fx_pico_cents_per_unit FROM zeroship.pricing_config WHERE id = 'global'", &[])
+        .query(
+            "SELECT fx_pico_cents_per_unit FROM zeroship.pricing_config WHERE id = 'global'",
+            &[],
+        )
         .await
         .expect("read saved fx")
         .first()
@@ -1926,7 +2184,10 @@ async fn missing_default_fx_aborts_sweep_and_bills_no_one() {
     // Remove the global default FX so the inheriting plan cannot resolve it.
     fx.state
         .control_pg
-        .execute("DELETE FROM zeroship.pricing_config WHERE id = 'global'", &[])
+        .execute(
+            "DELETE FROM zeroship.pricing_config WHERE id = 'global'",
+            &[],
+        )
         .await
         .expect("delete global pricing_config");
 
@@ -1966,7 +2227,10 @@ async fn missing_default_fx_aborts_sweep_and_bills_no_one() {
     );
     assert_eq!(items, 0, "no item posted");
     assert_eq!(invoices, 0, "no invoice created");
-    assert!(runs.is_empty(), "no invoice row — bill no one when the platform can't price");
+    assert!(
+        runs.is_empty(),
+        "no invoice row — bill no one when the platform can't price"
+    );
 
     drop(fx);
     common::drain_pg().await;
@@ -1996,7 +2260,9 @@ fn dummy_passthrough(fx: &Fixture) -> StripeClient {
 async fn partial_post_then_crash_does_not_double_bill_app_a() {
     let url = db_url();
     let fx = build_fixture(&url, "partial").await;
-    let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _recon = RECONCILE_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let now = now_for_closed_period().await;
     let period = prev_period(now);
 
@@ -2005,9 +2271,16 @@ async fn partial_post_then_crash_does_not_double_bill_app_a() {
     let plan = make_plan(&fx.state).await;
     let app_a = make_owned_app(&fx.state, &plan, organization).await;
     let app_b = make_owned_app(&fx.state, &plan, organization).await;
-    fx.state.stripe_store.set_customer(organization, &format!("cus_test_partial_{}", Uuid::new_v4().simple())).await.unwrap();
-    ingest_at(&fx.state, app_a, 100, period, 1).await; // 100c
-    ingest_at(&fx.state, app_b, 200, period, 2).await; // 200c
+    fx.state
+        .stripe_store
+        .set_customer(
+            organization,
+            &format!("cus_test_partial_{}", Uuid::new_v4().simple()),
+        )
+        .await
+        .unwrap();
+    ingest_at(&fx.state, &app_a, 100, period, 1).await; // 100c
+    ingest_at(&fx.state, &app_b, 200, period, 2).await; // 200c
 
     // First drive: crashes after the first invoice item posts.
     fx.mock.fail_after_invoice_items(1);
@@ -2015,10 +2288,17 @@ async fn partial_post_then_crash_does_not_double_bill_app_a() {
     fx.mock.clear_fault();
     // The sweep swallows per-organization errors → Ok(0) (nobody fully billed), but
     // exactly ONE item must have posted + been ledgered.
-    assert_eq!(res.expect("tick swallows the per-organization error"), 0, "no organization fully billed on the crashed drive");
+    assert_eq!(
+        res.expect("tick swallows the per-organization error"),
+        0,
+        "no organization fully billed on the crashed drive"
+    );
 
     let created_after_crash = fx.mock.count_created("POST", "/v1/invoiceitems");
-    assert_eq!(created_after_crash, 1, "exactly one item posted before the crash");
+    assert_eq!(
+        created_after_crash, 1,
+        "exactly one item posted before the crash"
+    );
     // Claim-then-call (C1): the line (snapshot intent) is written BEFORE each
     // Stripe POST, so after the crash app A is CONFIRMED (has a
     // billing_line_provider_refs row) and app B is INTENT-only (a line with NO
@@ -2037,7 +2317,10 @@ async fn partial_post_then_crash_does_not_double_bill_app_a() {
     let billed = billing_reconcile::tick_with(&fx.state, &dummy_passthrough(&fx), now)
         .await
         .expect("re-drive tick");
-    assert_eq!(billed, 1, "the organization is now fully billed on the re-drive");
+    assert_eq!(
+        billed, 1,
+        "the organization is now fully billed on the re-drive"
+    );
 
     // THE guarantee: total CREATED items == 2 (A once + B once), NOT 3 — even
     // though Stripe's key window expired. The ledger, not Stripe, enforced this.
@@ -2048,9 +2331,15 @@ async fn partial_post_then_crash_does_not_double_bill_app_a() {
     );
 
     // Both apps now have lines, and the invoice is finalized.
-    assert_eq!(lines_count(&fx.state, organization).await, 2, "both apps lined after the re-drive");
+    assert_eq!(
+        lines_count(&fx.state, organization).await,
+        2,
+        "both apps lined after the re-drive"
+    );
     assert!(
-        finalized_invoice_id(&fx.state, organization, period).await.is_some(),
+        finalized_invoice_id(&fx.state, organization, period)
+            .await
+            .is_some(),
         "invoice finalized",
     );
 
@@ -2074,7 +2363,9 @@ async fn partial_post_then_crash_does_not_double_bill_app_a() {
 async fn post_then_crash_before_ledger_does_not_double_bill_after_24h() {
     let url = db_url();
     let fx = build_fixture(&url, "c1crash").await;
-    let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _recon = RECONCILE_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let now = now_for_closed_period().await;
     let period = prev_period(now);
 
@@ -2082,21 +2373,40 @@ async fn post_then_crash_before_ledger_does_not_double_bill_after_24h() {
     let organization = organization.as_str();
     let plan = make_plan(&fx.state).await;
     let app = make_owned_app(&fx.state, &plan, organization).await;
-    fx.state.stripe_store.set_customer(organization, &format!("cus_test_c1crash_{}", Uuid::new_v4().simple())).await.unwrap();
-    ingest_at(&fx.state, app, 500, period, 1).await; // 500c
+    fx.state
+        .stripe_store
+        .set_customer(
+            organization,
+            &format!("cus_test_c1crash_{}", Uuid::new_v4().simple()),
+        )
+        .await
+        .unwrap();
+    ingest_at(&fx.state, &app, 500, period, 1).await; // 500c
 
     // First drive: the item posts to Stripe, then we crash before the ledger
     // confirms it.
     fx.mock.post_then_crash_invoice_item();
     let res = billing_reconcile::tick_with(&fx.state, &dummy_passthrough(&fx), now).await;
     fx.mock.clear_fault();
-    assert_eq!(res.expect("sweep swallows the per-organization error"), 0, "no organization fully billed on the crashed drive");
+    assert_eq!(
+        res.expect("sweep swallows the per-organization error"),
+        0,
+        "no organization fully billed on the crashed drive"
+    );
 
     // The item DID post to Stripe exactly once on the crashed drive.
-    assert_eq!(fx.mock.count_created("POST", "/v1/invoiceitems"), 1, "item posted once before the crash");
+    assert_eq!(
+        fx.mock.count_created("POST", "/v1/invoiceitems"),
+        1,
+        "item posted once before the crash"
+    );
     // The line (snapshot intent) exists (claim-then-call) but has NO provider-ref
     // yet (the post was unconfirmed at crash time).
-    assert_eq!(lines_count(&fx.state, organization).await, 1, "claim-then-call wrote one line before the POST");
+    assert_eq!(
+        lines_count(&fx.state, organization).await,
+        1,
+        "claim-then-call wrote one line before the POST"
+    );
     assert_eq!(
         confirmed_lines_count(&fx.state, organization).await,
         0,
@@ -2111,7 +2421,10 @@ async fn post_then_crash_before_ledger_does_not_double_bill_after_24h() {
     let billed = billing_reconcile::tick_with(&fx.state, &dummy_passthrough(&fx), now)
         .await
         .expect("re-drive tick");
-    assert_eq!(billed, 1, "the organization is fully billed on the re-drive");
+    assert_eq!(
+        billed, 1,
+        "the organization is fully billed on the re-drive"
+    );
 
     // THE guarantee: the app's invoice item was CREATED exactly once across both
     // drives — even though Stripe's key window expired. The ledger + metadata
@@ -2129,10 +2442,16 @@ async fn post_then_crash_before_ledger_does_not_double_bill_after_24h() {
         "invoice finalized with the real amount, not $0",
     );
     assert!(
-        finalized_invoice_id(&fx.state, organization, period).await.is_some(),
+        finalized_invoice_id(&fx.state, organization, period)
+            .await
+            .is_some(),
         "provider invoice id recorded",
     );
-    assert_eq!(lines_count(&fx.state, organization).await, 1, "still exactly one line (no duplicate)");
+    assert_eq!(
+        lines_count(&fx.state, organization).await,
+        1,
+        "still exactly one line (no duplicate)"
+    );
     assert_eq!(
         confirmed_lines_count(&fx.state, organization).await,
         1,
@@ -2152,7 +2471,9 @@ async fn post_then_crash_before_ledger_does_not_double_bill_after_24h() {
 async fn post_then_crash_redrive_within_24h_is_idempotent() {
     let url = db_url();
     let fx = build_fixture(&url, "c1within").await;
-    let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _recon = RECONCILE_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let now = now_for_closed_period().await;
     let period = prev_period(now);
 
@@ -2160,13 +2481,24 @@ async fn post_then_crash_redrive_within_24h_is_idempotent() {
     let organization = organization.as_str();
     let plan = make_plan(&fx.state).await;
     let app = make_owned_app(&fx.state, &plan, organization).await;
-    fx.state.stripe_store.set_customer(organization, &format!("cus_test_c1within_{}", Uuid::new_v4().simple())).await.unwrap();
-    ingest_at(&fx.state, app, 320, period, 1).await; // 320c
+    fx.state
+        .stripe_store
+        .set_customer(
+            organization,
+            &format!("cus_test_c1within_{}", Uuid::new_v4().simple()),
+        )
+        .await
+        .unwrap();
+    ingest_at(&fx.state, &app, 320, period, 1).await; // 320c
 
     fx.mock.post_then_crash_invoice_item();
     let _ = billing_reconcile::tick_with(&fx.state, &dummy_passthrough(&fx), now).await;
     fx.mock.clear_fault();
-    assert_eq!(fx.mock.count_created("POST", "/v1/invoiceitems"), 1, "item posted once before crash");
+    assert_eq!(
+        fx.mock.count_created("POST", "/v1/invoiceitems"),
+        1,
+        "item posted once before crash"
+    );
 
     // Re-drive WITHIN 24h: dedupe stays ON. Stripe replays the original item.
     let billed = billing_reconcile::tick_with(&fx.state, &dummy_passthrough(&fx), now)
@@ -2184,7 +2516,9 @@ async fn post_then_crash_redrive_within_24h_is_idempotent() {
         "billed the real amount; invoice finalized",
     );
     assert!(
-        finalized_invoice_id(&fx.state, organization, period).await.is_some(),
+        finalized_invoice_id(&fx.state, organization, period)
+            .await
+            .is_some(),
         "provider invoice id recorded",
     );
 
@@ -2208,7 +2542,9 @@ async fn post_then_crash_redrive_within_24h_is_idempotent() {
 async fn archived_app_open_invoice_finalizes_original_draft_after_24h() {
     let url = db_url();
     let fx = build_fixture(&url, "c2crash").await;
-    let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _recon = RECONCILE_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let now = now_for_closed_period().await;
     let period = prev_period(now);
 
@@ -2216,27 +2552,54 @@ async fn archived_app_open_invoice_finalizes_original_draft_after_24h() {
     let organization = organization.as_str();
     let plan = make_plan(&fx.state).await;
     let app = make_owned_app(&fx.state, &plan, organization).await;
-    fx.state.stripe_store.set_customer(organization, &format!("cus_test_c2crash_{}", Uuid::new_v4().simple())).await.unwrap();
-    ingest_at(&fx.state, app, 700, period, 1).await; // 700c
+    fx.state
+        .stripe_store
+        .set_customer(
+            organization,
+            &format!("cus_test_c2crash_{}", Uuid::new_v4().simple()),
+        )
+        .await
+        .unwrap();
+    ingest_at(&fx.state, &app, 700, period, 1).await; // 700c
 
     // First drive: items post, draft is created + persisted, then finalize crashes.
     fx.mock.crash_on_finalize();
     let res = billing_reconcile::tick_with(&fx.state, &dummy_passthrough(&fx), now).await;
     fx.mock.clear_fault();
-    assert_eq!(res.expect("sweep swallows the per-organization error"), 0, "not fully billed (finalize crashed)");
+    assert_eq!(
+        res.expect("sweep swallows the per-organization error"),
+        0,
+        "not fully billed (finalize crashed)"
+    );
 
     // The item posted, the draft was created exactly once and PERSISTED.
-    assert_eq!(fx.mock.count_created("POST", "/v1/invoiceitems"), 1, "item posted once");
-    assert_eq!(fx.mock.count_created_exact("POST", "/v1/invoices"), 1, "exactly one draft created (no finalize yet)");
-    let persisted_draft = draft_invoice_id(&fx.state, organization, period).await;
-    assert!(persisted_draft.is_some(), "the draft invoice id was persisted BEFORE finalize (C2)");
     assert_eq!(
-        read_invoice(&fx.state, organization, period).await.map(|(s, _)| s).as_deref(),
+        fx.mock.count_created("POST", "/v1/invoiceitems"),
+        1,
+        "item posted once"
+    );
+    assert_eq!(
+        fx.mock.count_created_exact("POST", "/v1/invoices"),
+        1,
+        "exactly one draft created (no finalize yet)"
+    );
+    let persisted_draft = draft_invoice_id(&fx.state, organization, period).await;
+    assert!(
+        persisted_draft.is_some(),
+        "the draft invoice id was persisted BEFORE finalize (C2)"
+    );
+    assert_eq!(
+        read_invoice(&fx.state, organization, period)
+            .await
+            .map(|(s, _)| s)
+            .as_deref(),
         Some("draft"),
         "invoice still draft (not finalized yet)",
     );
     assert!(
-        finalized_invoice_id(&fx.state, organization, period).await.is_none(),
+        finalized_invoice_id(&fx.state, organization, period)
+            .await
+            .is_none(),
         "no finalized provider ref yet",
     );
 
@@ -2256,7 +2619,10 @@ async fn archived_app_open_invoice_finalizes_original_draft_after_24h() {
     let billed = billing_reconcile::tick_with(&fx.state, &dummy_passthrough(&fx), now)
         .await
         .expect("re-drive tick");
-    assert_eq!(billed, 1, "the organization is fully billed on the re-drive");
+    assert_eq!(
+        billed, 1,
+        "the organization is fully billed on the re-drive"
+    );
 
     // THE guarantee: still exactly ONE draft created across both drives (no new
     // empty draft), and the finalize targeted the ORIGINAL draft id.
@@ -2285,7 +2651,9 @@ async fn archived_app_open_invoice_finalizes_original_draft_after_24h() {
         "finalized the real amount, NOT a $0 empty invoice",
     );
     assert!(
-        finalized_invoice_id(&fx.state, organization, period).await.is_some(),
+        finalized_invoice_id(&fx.state, organization, period)
+            .await
+            .is_some(),
         "completed with the finalized provider invoice id",
     );
 
@@ -2336,7 +2704,9 @@ async fn billing_setup_requires_money_authority_at_the_named_organization() {
     .await;
 
     let app = test::init_service(
-        web::App::new().state(fx.state.clone()).configure(billing_setup_route),
+        web::App::new()
+            .state(fx.state.clone())
+            .configure(billing_setup_route),
     )
     .await;
 
@@ -2344,15 +2714,23 @@ async fn billing_setup_requires_money_authority_at_the_named_organization() {
     // Status only: a retained `WebResponse` keeps the app state - and its
     // Postgres client - alive past the teardown below.
     let req = test::TestRequest::post()
-        .uri(&format!("/api/organizations/{organization_a}/billing/setup"))
+        .uri(&format!(
+            "/api/organizations/{organization_a}/billing/setup"
+        ))
         .header("authorization", principal.bearer())
         .to_request();
     let status = test::call_service(&app, req).await.status();
-    assert_eq!(status, StatusCode::OK, "a seated principal may set up its organization's card");
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "a seated principal may set up its organization's card"
+    );
 
     // (2) Not seated at B: refused, and B gains no customer.
     let req = test::TestRequest::post()
-        .uri(&format!("/api/organizations/{organization_b}/billing/setup"))
+        .uri(&format!(
+            "/api/organizations/{organization_b}/billing/setup"
+        ))
         .header("authorization", principal.bearer())
         .to_request();
     let status = test::call_service(&app, req).await.status();
@@ -2361,8 +2739,16 @@ async fn billing_setup_requires_money_authority_at_the_named_organization() {
         StatusCode::FORBIDDEN,
         "no seat at B means no money authority at B",
     );
-    let stored_b = fx.state.stripe_store.get_customer(&organization_b).await.unwrap();
-    assert!(stored_b.is_none(), "no customer created for the organization the caller cannot reach");
+    let stored_b = fx
+        .state
+        .stripe_store
+        .get_customer(&organization_b)
+        .await
+        .unwrap();
+    assert!(
+        stored_b.is_none(),
+        "no customer created for the organization the caller cannot reach"
+    );
 
     principal.cleanup(&fx.state).await;
 
@@ -2402,7 +2788,9 @@ fn force_reconcile_route(cfg: &mut web::ServiceConfig) {
 async fn force_reconcile_endpoint_is_operator_gated_and_drives_a_chosen_period() {
     let url = db_url();
     let fx = build_fixture(&url, "force").await;
-    let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _recon = RECONCILE_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let now = now_for_closed_period().await;
     let period = prev_period(now);
 
@@ -2410,11 +2798,20 @@ async fn force_reconcile_endpoint_is_operator_gated_and_drives_a_chosen_period()
     let organization = organization.as_str();
     let plan = make_plan(&fx.state).await;
     let app = make_owned_app(&fx.state, &plan, organization).await;
-    fx.state.stripe_store.set_customer(organization, &format!("cus_test_force_{}", Uuid::new_v4().simple())).await.unwrap();
-    ingest_at(&fx.state, app, 600, period, 1).await; // 600c in the CLOSED period
+    fx.state
+        .stripe_store
+        .set_customer(
+            organization,
+            &format!("cus_test_force_{}", Uuid::new_v4().simple()),
+        )
+        .await
+        .unwrap();
+    ingest_at(&fx.state, &app, 600, period, 1).await; // 600c in the CLOSED period
 
     let svc = test::init_service(
-        web::App::new().state(fx.state.clone()).configure(force_reconcile_route),
+        web::App::new()
+            .state(fx.state.clone())
+            .configure(force_reconcile_route),
     )
     .await;
 
@@ -2456,12 +2853,17 @@ async fn force_reconcile_endpoint_is_operator_gated_and_drives_a_chosen_period()
 
     // And it recorded a finalized invoice for THAT period.
     assert_eq!(
-        read_invoice(&fx.state, organization, period).await.map(|(s, _)| s).as_deref(),
+        read_invoice(&fx.state, organization, period)
+            .await
+            .map(|(s, _)| s)
+            .as_deref(),
         Some("finalized"),
         "one finalized invoice for the reconciled period",
     );
     assert!(
-        finalized_invoice_id(&fx.state, organization, period).await.is_some(),
+        finalized_invoice_id(&fx.state, organization, period)
+            .await
+            .is_some(),
         "the reconciled invoice carries a finalized provider invoice id",
     );
 
@@ -2487,19 +2889,21 @@ async fn force_reconcile_endpoint_is_operator_gated_and_drives_a_chosen_period()
 async fn finalized_line_replays_persisted_amount_bit_for_bit_via_bill_organization() {
     let url = db_url();
     let fx = build_fixture(&url, "c1replay").await;
-    let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _recon = RECONCILE_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let now = now_for_closed_period().await;
     let period = prev_period(now);
 
     let organization = make_organization(&fx.state, "c1replay").await;
     let organization = organization.as_str();
     let plan = make_plan(&fx.state).await; // seeds `requests` = 1 CU/op, fx 1c/CU
-    // Seed a SECOND global weight for a metric the app will NOT use, so the frozen
-    // weights_snapshot is a strict SUPERSET of the app's usage keys. Pre-fix (the
-    // snapshot filtered to usage.keys()) this metric would be ABSENT from the
-    // frozen map; the C1 fix freezes the full map. Either way the replay must equal
-    // amount_cents (an unused weight contributes 0), but freezing the full map is
-    // what makes the snapshot equal to the real charge INPUT.
+                                           // Seed a SECOND global weight for a metric the app will NOT use, so the frozen
+                                           // weights_snapshot is a strict SUPERSET of the app's usage keys. Pre-fix (the
+                                           // snapshot filtered to usage.keys()) this metric would be ABSENT from the
+                                           // frozen map; the C1 fix freezes the full map. Either way the replay must equal
+                                           // amount_cents (an unused weight contributes 0), but freezing the full map is
+                                           // what makes the snapshot equal to the real charge INPUT.
     fx.state
         .control_pg
         .execute(
@@ -2523,10 +2927,13 @@ async fn finalized_line_replays_persisted_amount_bit_for_bit_via_bill_organizati
     let app = make_owned_app(&fx.state, &plan, organization).await;
     fx.state
         .stripe_store
-        .set_customer(organization, &format!("cus_c1replay_{}", Uuid::new_v4().simple()))
+        .set_customer(
+            organization,
+            &format!("cus_c1replay_{}", Uuid::new_v4().simple()),
+        )
         .await
         .unwrap();
-    ingest_at(&fx.state, app, 640, period, 1).await; // 640 requests → 640 CU → 640c
+    ingest_at(&fx.state, &app, 640, period, 1).await; // 640 requests → 640 CU → 640c
 
     // Drive the REAL bill_organization path (via the sweep) against live PG + mock.
     let billed = billing_reconcile::tick_with(&fx.state, &dummy_passthrough(&fx), now)
@@ -2541,7 +2948,7 @@ async fn finalized_line_replays_persisted_amount_bit_for_bit_via_bill_organizati
 
     // Read the PERSISTED line snapshot back (what bill_organization wrote).
     let (included, fx_pico, base, amount, usage_json, weights_json) =
-        read_line_snapshot(&fx.state, organization, app).await;
+        read_line_snapshot(&fx.state, organization, &app).await;
 
     // The frozen weights snapshot is the FULL global map — it includes the unused
     // `cpu_us` weight (C1: superset), not just the applied `requests`.
@@ -2594,7 +3001,9 @@ async fn finalized_line_replays_persisted_amount_bit_for_bit_via_bill_organizati
 async fn refinalize_already_finalized_converges_locally() {
     let url = db_url();
     let fx = build_fixture(&url, "m2converge").await;
-    let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _recon = RECONCILE_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let now = now_for_closed_period().await;
     let period = prev_period(now);
 
@@ -2604,10 +3013,13 @@ async fn refinalize_already_finalized_converges_locally() {
     let app = make_owned_app(&fx.state, &plan, organization).await;
     fx.state
         .stripe_store
-        .set_customer(organization, &format!("cus_m2converge_{}", Uuid::new_v4().simple()))
+        .set_customer(
+            organization,
+            &format!("cus_m2converge_{}", Uuid::new_v4().simple()),
+        )
         .await
         .unwrap();
-    ingest_at(&fx.state, app, 450, period, 1).await; // 450c
+    ingest_at(&fx.state, &app, 450, period, 1).await; // 450c
 
     // First drive: items + draft post for real, but finalize reports the invoice
     // is ALREADY finalized on Stripe (the crash-after-finalize window). The drive
@@ -2621,7 +3033,10 @@ async fn refinalize_already_finalized_converges_locally() {
     let billed = billing_reconcile::tick_with(&fx.state, &dummy_passthrough(&fx), now)
         .await
         .expect("tick converges on already-finalized (no error loop)");
-    assert!(billed >= 1, "the re-finalize converges (at least this organization billed)");
+    assert!(
+        billed >= 1,
+        "the re-finalize converges (at least this organization billed)"
+    );
 
     // The DB is now finalized at the real amount — NOT stranded at 'draft'.
     assert_eq!(
@@ -2631,8 +3046,12 @@ async fn refinalize_already_finalized_converges_locally() {
     );
     // The invoice provider-ref was recorded (M1's atomic pair), so lookup is
     // auditable. The recorded id is the draft id (finalize does not change the id).
-    let persisted_draft = draft_invoice_id(&fx.state, organization, period).await.expect("draft id persisted");
-    let finalized = finalized_invoice_id(&fx.state, organization, period).await.expect("finalized ref recorded");
+    let persisted_draft = draft_invoice_id(&fx.state, organization, period)
+        .await
+        .expect("draft id persisted");
+    let finalized = finalized_invoice_id(&fx.state, organization, period)
+        .await
+        .expect("finalized ref recorded");
     assert_eq!(
         finalized, persisted_draft,
         "the recorded finalized id is the draft id (Stripe finalize does not change the id)",
@@ -2666,7 +3085,9 @@ async fn refinalize_already_finalized_converges_locally() {
 async fn finalize_and_invoice_ref_commit_atomically() {
     let url = db_url();
     let fx = build_fixture(&url, "m1atomic").await;
-    let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _recon = RECONCILE_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     // Use a DISTINCT closed period (~5 months back) so this test's PERMANENT
     // draft-invoice leftover (the finalize is intentionally never allowed to
     // commit) can never be swept by a sibling reconcile test billing the
@@ -2680,10 +3101,13 @@ async fn finalize_and_invoice_ref_commit_atomically() {
     let app = make_owned_app(&fx.state, &plan, organization).await;
     fx.state
         .stripe_store
-        .set_customer(organization, &format!("cus_m1atomic_{}", Uuid::new_v4().simple()))
+        .set_customer(
+            organization,
+            &format!("cus_m1atomic_{}", Uuid::new_v4().simple()),
+        )
         .await
         .unwrap();
-    ingest_at(&fx.state, app, 350, period, 1).await; // 350c
+    ingest_at(&fx.state, &app, 350, period, 1).await; // 350c
 
     // Pre-seed a SEPARATE finalized invoice that already owns the fixed external_id
     // under (provider='stripe', ref_kind='invoice') — so the decorated finalize's
@@ -2692,7 +3116,10 @@ async fn finalize_and_invoice_ref_commit_atomically() {
     let other_organization = make_organization(&fx.state, "m1other").await;
     fx.state
         .stripe_store
-        .set_customer(&other_organization, &format!("cus_m1other_{}", Uuid::new_v4().simple()))
+        .set_customer(
+            &other_organization,
+            &format!("cus_m1other_{}", Uuid::new_v4().simple()),
+        )
         .await
         .unwrap();
     let other_inv = zeroship_core::typed_id::new_invoice_id();
@@ -2739,7 +3166,9 @@ async fn finalize_and_invoice_ref_commit_atomically() {
         "finalize+ref are atomic: a failed ref INSERT rolls back the finalize (no half-commit)",
     );
     assert!(
-        finalized_invoice_id(&fx.state, organization, period).await.is_none(),
+        finalized_invoice_id(&fx.state, organization, period)
+            .await
+            .is_none(),
         "no finalized invoice ref — and since the invoice is not finalized, the partial \
          'finalized-without-ref' state never occurs (lookup_invoice_id can't strand at None)",
     );
@@ -2790,8 +3219,15 @@ async fn customer_and_connect_account_creation_carry_a_deterministic_idempotency
 
     let reqs = mock.requests();
 
-    let customers: Vec<_> = reqs.iter().filter(|r| r.path.starts_with("/v1/customers")).collect();
-    assert_eq!(customers.len(), 2, "expected both customer POSTs recorded: {reqs:?}");
+    let customers: Vec<_> = reqs
+        .iter()
+        .filter(|r| r.path.starts_with("/v1/customers"))
+        .collect();
+    assert_eq!(
+        customers.len(),
+        2,
+        "expected both customer POSTs recorded: {reqs:?}"
+    );
     assert!(
         customers[0].idempotency_key.is_some(),
         "customer creation must send an Idempotency-Key; without it two concurrent \

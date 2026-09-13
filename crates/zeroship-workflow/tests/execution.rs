@@ -8,7 +8,7 @@ fn replay_input_keeps_claim_credentials_in_the_host() {
     let config = WorkflowEngineConfig::default();
     let request = StepRequest {
         run_id: "run_claimed".into(),
-        app_id: uuid::Uuid::now_v7(),
+        app_id: zeroship_core::AppId::mint(),
         workflow_name: "Checkout".into(),
         deploy_id: "dep_pinned".into(),
         deploy_hash: "snapshot-pinned".into(),
@@ -31,6 +31,7 @@ fn replay_input_keeps_claim_credentials_in_the_host() {
     let text = encoded.to_string();
     assert!(!text.contains(&request.dispatch_nonce));
     assert!(!text.contains(&request.owner_id));
+    assert_eq!(encoded["appId"], request.app_id.as_str());
     assert_eq!(encoded["deployHash"], request.deploy_hash);
     assert_eq!(encoded["trigger"]["runId"], request.run_id);
     assert_eq!(encoded["trigger"]["input"], request.input.unwrap());

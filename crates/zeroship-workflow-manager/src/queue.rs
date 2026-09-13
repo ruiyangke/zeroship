@@ -21,7 +21,6 @@ use std::{
 };
 use zeroship_core::{
     app_id::AppId,
-    typed_id,
     workflow_coordination::{Assignment, WorkerId},
     workflow_jobs::{Delivery, JobSpec, Settlement, SettlementReceipt},
 };
@@ -114,7 +113,7 @@ impl Queue {
             tx.collection(queue_scopes::Entity::COLLECTION)?
                 .execute(Operation::Upsert {
                     document: value!({
-                        "id":format!("wqs_{}", typed_id::uuid_to_base62(&app.uuid())),
+                        "id":format!("wqs_{}", app.as_str().trim_start_matches("app_")),
                         "app_id":app.as_str()
                     }),
                     conflict_fields: value!(["app_id"]),

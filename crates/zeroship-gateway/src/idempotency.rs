@@ -49,6 +49,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
+use zeroship_core::app_id::AppId;
+
 // ---------------------------------------------------------------------------
 // Public constants — exercised by tests, kept here so they stay one source.
 // ---------------------------------------------------------------------------
@@ -165,16 +167,18 @@ impl Principal<'_> {
     }
 }
 
-pub fn entry_key(app_id: &Uuid, wire_id: &str, principal: Principal<'_>, idem_key: &str) -> String {
+pub fn entry_key(app_id: &AppId, wire_id: &str, principal: Principal<'_>, idem_key: &str) -> String {
     format!(
-        "idem:{app_id}:{wire_id}:{}:{idem_key}",
+        "idem:{}:{wire_id}:{}:{idem_key}",
+        app_id.as_str(),
         principal.key_segment()
     )
 }
 
-pub fn lock_key(app_id: &Uuid, wire_id: &str, principal: Principal<'_>, idem_key: &str) -> String {
+pub fn lock_key(app_id: &AppId, wire_id: &str, principal: Principal<'_>, idem_key: &str) -> String {
     format!(
-        "idem-lock:{app_id}:{wire_id}:{}:{idem_key}",
+        "idem-lock:{}:{wire_id}:{}:{idem_key}",
+        app_id.as_str(),
         principal.key_segment()
     )
 }
@@ -225,7 +229,7 @@ pub trait IdempotencyStore: Send + Sync + std::fmt::Debug {
 
     /// Set a stored response with absolute expiry. Existing values
     /// (including locks under different keys) are NOT considered.
-    async fn put_entry(&self, app_id: &Uuid, key: &str, value: &StoredResponse) -> Result<(), String>;
+    async fn put_entry(&self, app_id: &AppId, key: &str, value: &StoredResponse) -> Result<(), String>;
 
     /// Atomic `SET NX EX`: returns `true` if the lock was acquired,
     /// `false` if a lock already existed. TTL guards against orphaned
@@ -280,7 +284,7 @@ pub struct InMemoryIdempotencyStore {
     /// FIFO order of `(app_id, key)` pairs for the live-key cap. Pushed
     /// on every `put_entry`; popped when an app exceeds
     /// `MAX_LIVE_KEYS_PER_APP`.
-    fifo: Mutex<HashMap<Uuid, Vec<String>>>,
+    fifo: Mutex<HashMap<AppId, Vec<String>>>,
 }
 
 #[derive(Debug, Clone)]
@@ -319,7 +323,7 @@ impl InMemoryIdempotencyStore {
         })
     }
 
-    fn lock_fifo(&self) -> MutexGuard<'_, HashMap<Uuid, Vec<String>>> {
+    fn lock_fifo(&self) -> MutexGuard<'_, HashMap<AppId, Vec<String>>> {
         self.fifo.lock().unwrap_or_else(|poisoned| {
             tracing::error!("idempotency fifo mutex poisoned; recovering map");
             poisoned.into_inner()
@@ -355,7 +359,7 @@ impl IdempotencyStore for InMemoryIdempotencyStore {
         }
     }
 
-    async fn put_entry(&self, app_id: &Uuid, key: &str, value: &StoredResponse) -> Result<(), String> {
+    async fn put_entry(&self, app_id: &AppId, key: &str, value: &StoredResponse) -> Result<(), String> {
         let rec = EntryRecord {
             value: value.clone(),
             expires_at_ms: value.ttl_until,
@@ -367,7 +371,7 @@ impl IdempotencyStore for InMemoryIdempotencyStore {
             // Track this key in the per-app FIFO queue. Inserting an
             // existing key counts once: we only push if it's not
             // already in the queue (the storage layer dedupes by key).
-            let queue = fifo.entry(*app_id).or_default();
+            let queue = fifo.entry(app_id.clone()).or_default();
             if !queue.iter().any(|k| k == key) {
                 queue.push(key.to_string());
             }
@@ -387,7 +391,7 @@ impl IdempotencyStore for InMemoryIdempotencyStore {
         if let Some(k) = evicted_key {
             tracing::warn!(
                 key = %k,
-                app_id = %app_id,
+                app_id = app_id.as_str(),
                 max_live_keys = MAX_LIVE_KEYS_PER_APP,
                 "idempotency: evicted oldest entry (max live keys exceeded)"
             );
@@ -463,7 +467,7 @@ pub enum DedupeDecision {
 #[allow(clippy::too_many_arguments)]
 pub async fn pre_dispatch(
     store: &dyn IdempotencyStore,
-    app_id: &Uuid,
+    app_id: &AppId,
     wire_id: &str,
     principal: Principal<'_>,
     idempotency_key: Option<&str>,
@@ -539,7 +543,7 @@ pub async fn pre_dispatch(
 #[allow(clippy::too_many_arguments)]
 pub async fn capture_response(
     store: &dyn IdempotencyStore,
-    app_id: &Uuid,
+    app_id: &AppId,
     entry_key: &str,
     lock_key: &str,
     body_hash: &str,
@@ -640,8 +644,8 @@ fn now_ms() -> u64 {
 mod tests {
     use super::*;
 
-    fn fixture_app() -> Uuid {
-        Uuid::new_v4()
+    fn fixture_app() -> AppId {
+        AppId::mint()
     }
 
     fn run_async<F: std::future::Future>(f: F) -> F::Output {
@@ -941,7 +945,7 @@ mod tests {
             let ek_clone = ek.clone();
             let lk_clone = lk.clone();
             let body_hash_clone = body_hash.clone();
-            let app_clone = app;
+            let app_clone = app.clone();
             compio::runtime::spawn(async move {
                 compio::time::sleep(Duration::from_millis(100)).await;
                 let mut h = HashMap::new();
@@ -1079,7 +1083,7 @@ mod tests {
     // ---------------------------------------------------------------
 
     /// Seed a stored response for `principal` under `k1`/`{"x":1}`.
-    async fn seed_entry(store: &InMemoryIdempotencyStore, app: &Uuid, principal: Principal<'_>) {
+    async fn seed_entry(store: &InMemoryIdempotencyStore, app: &AppId, principal: Principal<'_>) {
         let dec = pre_dispatch(store, app, "todos.add", principal, Some("k1"), b"{\"x\":1}", 24, 1000)
             .await
             .unwrap();

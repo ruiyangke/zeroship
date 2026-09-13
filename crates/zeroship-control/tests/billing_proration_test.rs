@@ -27,6 +27,7 @@ use zeroship_control::stripe_client::StripeClient;
 use zeroship_control::{
     AppState, EnvStore, Quota, RateLimiter, Registry, SecretString, StripeStore,
 };
+use zeroship_core::AppId;
 
 fn db_url() -> String {
     common::require_control_db()
@@ -125,7 +126,9 @@ async fn start_mock_stripe() -> MockStripe {
     let accept_state = Arc::clone(&state);
     compio::runtime::spawn(async move {
         loop {
-            let Ok((stream, _peer)) = listener.accept().await else { break };
+            let Ok((stream, _peer)) = listener.accept().await else {
+                break;
+            };
             let conn_state = Arc::clone(&accept_state);
             compio::runtime::spawn(async move {
                 serve_conn(stream, conn_state).await;
@@ -184,7 +187,13 @@ fn try_parse_request(buf: &[u8]) -> Option<(RecordedRequest, usize)> {
     }
     let body = String::from_utf8_lossy(&buf[body_start..body_start + content_length]).to_string();
     Some((
-        RecordedRequest { method, path, idempotency_key, body, replayed: false },
+        RecordedRequest {
+            method,
+            path,
+            idempotency_key,
+            body,
+            replayed: false,
+        },
         body_start + content_length,
     ))
 }
@@ -220,7 +229,9 @@ fn handle_mock_request(req: &RecordedRequest, state: &Arc<Mutex<MockState>>) -> 
             st.invoice_items.retain(|(iid, _, _)| iid != &id);
             st.requests.push(req.clone());
         }
-        return http_200_json(&format!(r#"{{"id":"{id}","object":"invoiceitem","deleted":true}}"#));
+        return http_200_json(&format!(
+            r#"{{"id":"{id}","object":"invoiceitem","deleted":true}}"#
+        ));
     }
     if req.method == "GET" && req.path.starts_with("/v1/invoiceitems") {
         let customer = query_param(&req.path, "customer");
@@ -247,9 +258,15 @@ fn handle_mock_request(req: &RecordedRequest, state: &Arc<Mutex<MockState>>) -> 
     } else if req.path.starts_with("/v1/invoiceitems") {
         format!(r#"{{"id":"{new_item_id}","object":"invoiceitem"}}"#)
     } else if req.path.contains("/finalize") {
-        format!(r#"{{"id":"in_mock_final_{}","object":"invoice","status":"open"}}"#, short())
+        format!(
+            r#"{{"id":"in_mock_final_{}","object":"invoice","status":"open"}}"#,
+            short()
+        )
     } else if req.path.starts_with("/v1/invoices") {
-        format!(r#"{{"id":"in_mock_{}","object":"invoice","status":"draft"}}"#, short())
+        format!(
+            r#"{{"id":"in_mock_{}","object":"invoice","status":"draft"}}"#,
+            short()
+        )
     } else {
         r#"{"id":"obj_mock","object":"unknown"}"#.to_string()
     };
@@ -262,7 +279,9 @@ fn handle_mock_request(req: &RecordedRequest, state: &Arc<Mutex<MockState>>) -> 
         }
         st.requests.push(req.clone());
         if let Some(key) = req.idempotency_key.clone() {
-            st.idempotency_replies.entry(key).or_insert_with(|| json.clone());
+            st.idempotency_replies
+                .entry(key)
+                .or_insert_with(|| json.clone());
         }
     }
     http_200_json(&json)
@@ -416,7 +435,10 @@ async fn build_fixture(db_url: &str, label: &str) -> Fixture {
         expected_oauth_audience: "control.zeroship.ai".to_string(),
         static_policies: zeroship_authz::load_platform_policies()
             .expect("bundled authz policies parse"),
-        auth_provider: zeroship_control::platform_auth_provider("https://auth.zeroship.test/oauth2", Some(common::platform_jwks_url())),
+        auth_provider: zeroship_control::platform_auth_provider(
+            "https://auth.zeroship.test/oauth2",
+            Some(common::platform_jwks_url()),
+        ),
         // No platform deploy-token mint here: that is control's OUTBOUND
         // destination for the device flow, and no fixture below drives one.
         provider_registry: zeroship_control::metering::provider::builtin_registry(),
@@ -431,7 +453,12 @@ async fn build_fixture(db_url: &str, label: &str) -> Fixture {
         ),
     });
 
-    Fixture { state, mock, blob_root, deploy_tmp_dir }
+    Fixture {
+        state,
+        mock,
+        blob_root,
+        deploy_tmp_dir,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -513,13 +540,13 @@ async fn seed_plan(
 /// one organization and asserted against another would simply never be billed -
 /// the test would go green on an empty sweep. Placing it in the caller's
 /// organization is what keeps the assertion attached to anything.
-async fn make_owned_app(state: &AppState, plan_id: &str, organization: &str) -> Uuid {
+async fn make_owned_app(state: &AppState, plan_id: &str, organization: &str) -> AppId {
     let name = format!("pror-{}", Uuid::new_v4());
     common::seed_app_in_organization(&state.control_pg, &name, plan_id, organization).await
 }
 
 /// Ingest usage at a given period_start (the CLOSED period the reconciler bills).
-async fn ingest_at(state: &AppState, app: Uuid, requests: u64, period_start: i64, seq: u64) {
+async fn ingest_at(state: &AppState, app: &AppId, requests: u64, period_start: i64, seq: u64) {
     let _ = seq;
     common::seed_usage_delta(
         &state.control_pg,
@@ -560,14 +587,17 @@ fn dummy_passthrough(fx: &Fixture) -> StripeClient {
 /// is the identical code path the handler runs — no shim.
 async fn record_plan_change_like_set_plan(
     state: &AppState,
-    app: Uuid,
+    app: &AppId,
     organization: &str,
     to_plan: &str,
     now_unix: i64,
 ) -> PlanChangeOutcome {
     let from_plan_id: Option<String> = state
         .control_pg
-        .query("SELECT plan_id FROM zeroship.apps WHERE id = $1", &[&app])
+        .query(
+            "SELECT plan_id FROM zeroship.apps WHERE id = $1",
+            &[&app.as_str()],
+        )
         .await
         .expect("read app plan")
         .first()
@@ -575,7 +605,7 @@ async fn record_plan_change_like_set_plan(
 
     proration::record_plan_change_tx(
         &state.registry,
-        &app,
+        app,
         organization,
         from_plan_id.as_deref(),
         to_plan,
@@ -591,7 +621,7 @@ async fn record_plan_change_like_set_plan(
 async fn read_segment_lines(
     state: &AppState,
     organization: &str,
-    app: Uuid,
+    app: &AppId,
 ) -> Vec<(i16, String, i64, i64, i64, i64, serde_json::Value)> {
     state
         .control_pg
@@ -602,7 +632,7 @@ async fn read_segment_lines(
              JOIN zeroship.invoices i ON i.id = l.invoice_id \
              WHERE i.organization_id = $1 AND l.app_id = $2 \
              ORDER BY l.segment_no",
-            &[&organization, &app],
+            &[&organization, &app.as_str()],
         )
         .await
         .expect("read segment lines")
@@ -621,7 +651,7 @@ async fn read_segment_lines(
         .collect()
 }
 
-async fn confirmed_item_refs(state: &AppState, organization: &str, app: Uuid) -> i64 {
+async fn confirmed_item_refs(state: &AppState, organization: &str, app: &AppId) -> i64 {
     state
         .control_pg
         .query(
@@ -629,7 +659,7 @@ async fn confirmed_item_refs(state: &AppState, organization: &str, app: Uuid) ->
              JOIN zeroship.invoices i ON i.id = r.invoice_id \
              WHERE i.organization_id = $1 AND r.app_id = $2 \
                AND r.provider = 'stripe' AND r.ref_kind = 'invoice_item'",
-            &[&organization, &app],
+            &[&organization, &app.as_str()],
         )
         .await
         .expect("count refs")[0]
@@ -638,14 +668,14 @@ async fn confirmed_item_refs(state: &AppState, organization: &str, app: Uuid) ->
 
 async fn read_event(
     state: &AppState,
-    app: Uuid,
+    app: &AppId,
 ) -> Option<(chrono::NaiveDate, serde_json::Value, Option<String>, String)> {
     state
         .control_pg
         .query(
             "SELECT period, usage_at_change, from_plan_id, to_plan_id \
              FROM zeroship.plan_change_events WHERE app_id = $1 ORDER BY effective_at DESC LIMIT 1",
-            &[&app],
+            &[&app.as_str()],
         )
         .await
         .expect("read event")
@@ -681,7 +711,9 @@ async fn read_event(
 async fn two_segment_change_with_different_fx_posts_two_items_two_lines() {
     let url = db_url();
     let fx = build_fixture(&url, "twoseg").await;
-    let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _recon = RECONCILE_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let now = now_for_closed_period().await;
     let period = prev_period(now);
     let days_in_period = proration::days_in_period(period);
@@ -698,12 +730,15 @@ async fn two_segment_change_with_different_fx_posts_two_items_two_lines() {
     let app = make_owned_app(&fx.state, &free, organization).await;
     fx.state
         .stripe_store
-        .set_customer(organization, &format!("cus_test_twoseg_{}", Uuid::new_v4().simple()))
+        .set_customer(
+            organization,
+            &format!("cus_test_twoseg_{}", Uuid::new_v4().simple()),
+        )
         .await
         .unwrap();
 
     // Usage at the change instant: 4000 cumulative; then upgrade to Pro on day 11.
-    ingest_at(&fx.state, app, 4_000, period, 1).await;
+    ingest_at(&fx.state, &app, 4_000, period, 1).await;
     // Pin the change to day 11 of the CLOSED period.
     use chrono::{Datelike, TimeZone};
     let pstart = chrono::Utc.timestamp_opt(period, 0).single().unwrap();
@@ -711,13 +746,14 @@ async fn two_segment_change_with_different_fx_posts_two_items_two_lines() {
         .with_ymd_and_hms(pstart.year(), pstart.month(), 11, 0, 0, 0)
         .unwrap()
         .timestamp();
-    let outcome = record_plan_change_like_set_plan(&fx.state, app, organization, &pro, day11).await;
+    let outcome =
+        record_plan_change_like_set_plan(&fx.state, &app, organization, &pro, day11).await;
     assert!(
         matches!(outcome, PlanChangeOutcome::Recorded { .. }),
         "the change is recorded (under the cap)"
     );
     // More usage accrues under Pro: cumulative reaches 30000 by period end.
-    ingest_at(&fx.state, app, 26_000, period, 2).await;
+    ingest_at(&fx.state, &app, 26_000, period, 2).await;
 
     let billed = billing_reconcile::tick_with(&fx.state, &dummy_passthrough(&fx), now)
         .await
@@ -737,7 +773,7 @@ async fn two_segment_change_with_different_fx_posts_two_items_two_lines() {
     assert!(keys.iter().any(|k| k.ends_with(":0")), "segment 0 key");
     assert!(keys.iter().any(|k| k.ends_with(":1")), "segment 1 key");
 
-    let lines = read_segment_lines(&fx.state, organization, app).await;
+    let lines = read_segment_lines(&fx.state, organization, &app).await;
     assert_eq!(lines.len(), 2, "two invoice_lines rows (segment 0 and 1)");
 
     // Re-derive the worked-example numbers for a 30-day month. (The closed period
@@ -753,12 +789,24 @@ async fn two_segment_change_with_different_fx_posts_two_items_two_lines() {
     // Segment usage = cumulative deltas (telescopes to 30000).
     let seg0_usage: HashMap<String, i64> = serde_json::from_value(seg0.6.clone()).unwrap();
     let seg1_usage: HashMap<String, i64> = serde_json::from_value(seg1.6.clone()).unwrap();
-    assert_eq!(seg0_usage.get("requests"), Some(&4_000), "seg0 delta = 4000−0");
-    assert_eq!(seg1_usage.get("requests"), Some(&26_000), "seg1 delta = 30000−4000");
+    assert_eq!(
+        seg0_usage.get("requests"),
+        Some(&4_000),
+        "seg0 delta = 4000−0"
+    );
+    assert_eq!(
+        seg1_usage.get("requests"),
+        Some(&26_000),
+        "seg1 delta = 30000−4000"
+    );
 
     // Each segment priced under ITS OWN FX (frozen on the line).
     assert_eq!(seg0.3, one_cent, "segment 0 FX = 1 cent/CU (Free)");
-    assert_eq!(seg1.3, one_cent * 2, "segment 1 FX = 2 cents/CU (Pro) — per-plan FX varies");
+    assert_eq!(
+        seg1.3,
+        one_cent * 2,
+        "segment 1 FX = 2 cents/CU (Pro) — per-plan FX varies"
+    );
 
     // The full worked-example amounts ONLY hold for a 30-day month; the closed
     // period is whatever month preceded `now`. Assert them when applicable.
@@ -771,7 +819,10 @@ async fn two_segment_change_with_different_fx_posts_two_items_two_lines() {
         // Free overage: max(0, 4000−333)=3667 CU × 1c = 3667.
         assert_eq!(seg0.5, 3_667, "segment 0 amount (Free, 1c/CU)");
         // Pro overage: max(0, 26000−6667)=19333 CU × 2c = 38666 + base 2000 = 40666.
-        assert_eq!(seg1.5, 40_666, "segment 1 amount (Pro, 2c/CU + base) — FX-correct");
+        assert_eq!(
+            seg1.5, 40_666,
+            "segment 1 amount (Pro, 2c/CU + base) — FX-correct"
+        );
         let inv = fx
             .state
             .control_pg
@@ -781,12 +832,19 @@ async fn two_segment_change_with_different_fx_posts_two_items_two_lines() {
             )
             .await
             .unwrap();
-        assert_eq!(inv[0].get::<_, i64>("total_cents"), 3_667 + 40_666, "invoice subtotal across segments");
+        assert_eq!(
+            inv[0].get::<_, i64>("total_cents"),
+            3_667 + 40_666,
+            "invoice subtotal across segments"
+        );
     }
 
     // Structural invariants hold for ANY month length:
     let total_days_quota_ok = seg0.4 + seg1.4 <= 3_000; // Σ base ≤ one full Pro fee
-    assert!(total_days_quota_ok, "Σ prorated base ≤ one full base fee (base-fee invariant)");
+    assert!(
+        total_days_quota_ok,
+        "Σ prorated base ≤ one full base fee (base-fee invariant)"
+    );
 
     // Teardown: the fixture holds a Postgres connection, and locals are dropped
     // only after the body returns - by which point the runtime is gone and the
@@ -815,7 +873,9 @@ async fn two_segment_change_with_different_fx_posts_two_items_two_lines() {
 async fn each_proration_segment_item_shows_its_own_cu_and_usage() {
     let url = db_url();
     let fx = build_fixture(&url, "segcu").await;
-    let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _recon = RECONCILE_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let now = now_for_closed_period().await;
     let period = prev_period(now);
 
@@ -829,19 +889,22 @@ async fn each_proration_segment_item_shows_its_own_cu_and_usage() {
     let app = make_owned_app(&fx.state, &free, organization).await;
     fx.state
         .stripe_store
-        .set_customer(organization, &format!("cus_test_segcu_{}", Uuid::new_v4().simple()))
+        .set_customer(
+            organization,
+            &format!("cus_test_segcu_{}", Uuid::new_v4().simple()),
+        )
         .await
         .unwrap();
 
-    ingest_at(&fx.state, app, 4_000, period, 1).await;
+    ingest_at(&fx.state, &app, 4_000, period, 1).await;
     use chrono::{Datelike, TimeZone};
     let pstart = chrono::Utc.timestamp_opt(period, 0).single().unwrap();
     let day11 = chrono::Utc
         .with_ymd_and_hms(pstart.year(), pstart.month(), 11, 0, 0, 0)
         .unwrap()
         .timestamp();
-    record_plan_change_like_set_plan(&fx.state, app, organization, &pro, day11).await;
-    ingest_at(&fx.state, app, 26_000, period, 2).await;
+    record_plan_change_like_set_plan(&fx.state, &app, organization, &pro, day11).await;
+    ingest_at(&fx.state, &app, 26_000, period, 2).await;
 
     let billed = billing_reconcile::tick_with(&fx.state, &dummy_passthrough(&fx), now)
         .await
@@ -855,7 +918,9 @@ async fn each_proration_segment_item_shows_its_own_cu_and_usage() {
             .find(|r| {
                 r.method == "POST"
                     && r.path.starts_with("/v1/invoiceitems")
-                    && r.idempotency_key.as_deref().is_some_and(|k| k.ends_with(seg))
+                    && r.idempotency_key
+                        .as_deref()
+                        .is_some_and(|k| k.ends_with(seg))
             })
             .cloned()
             .unwrap_or_else(|| panic!("no item POST for segment key suffix {seg}"))
@@ -865,8 +930,14 @@ async fn each_proration_segment_item_shows_its_own_cu_and_usage() {
 
     // Segment 0 (Free): 4000 CU, usage delta requests=4000.
     let d0 = form_param(&seg0.body, "description").unwrap_or_default();
-    assert!(d0.contains("4,000 compute units"), "seg0 description shows 4000 CU; got: {d0}");
-    assert_eq!(form_param(&seg0.body, "metadata[compute_units]").as_deref(), Some("4000"));
+    assert!(
+        d0.contains("4,000 compute units"),
+        "seg0 description shows 4000 CU; got: {d0}"
+    );
+    assert_eq!(
+        form_param(&seg0.body, "metadata[compute_units]").as_deref(),
+        Some("4000")
+    );
     assert_eq!(
         form_param(&seg0.body, "metadata[usage]").as_deref(),
         Some("requests=4000:4000"),
@@ -875,8 +946,14 @@ async fn each_proration_segment_item_shows_its_own_cu_and_usage() {
 
     // Segment 1 (Pro): 26000 CU, usage delta requests=26000.
     let d1 = form_param(&seg1.body, "description").unwrap_or_default();
-    assert!(d1.contains("26,000 compute units"), "seg1 description shows 26000 CU; got: {d1}");
-    assert_eq!(form_param(&seg1.body, "metadata[compute_units]").as_deref(), Some("26000"));
+    assert!(
+        d1.contains("26,000 compute units"),
+        "seg1 description shows 26000 CU; got: {d1}"
+    );
+    assert_eq!(
+        form_param(&seg1.body, "metadata[compute_units]").as_deref(),
+        Some("26000")
+    );
     assert_eq!(
         form_param(&seg1.body, "metadata[usage]").as_deref(),
         Some("requests=26000:26000"),
@@ -884,7 +961,7 @@ async fn each_proration_segment_item_shows_its_own_cu_and_usage() {
     );
 
     // The authoritative AMOUNT on each item is unchanged (== the frozen line amount).
-    let lines = read_segment_lines(&fx.state, organization, app).await;
+    let lines = read_segment_lines(&fx.state, organization, &app).await;
     let amt0: i64 = lines[0].5;
     let amt1: i64 = lines[1].5;
     assert_eq!(
@@ -898,8 +975,14 @@ async fn each_proration_segment_item_shows_its_own_cu_and_usage() {
         "seg1 Stripe amount == frozen line amount_cents",
     );
     // And the metadata segment labels distinguish the two.
-    assert!(form_param(&seg0.body, "metadata[segment]").is_some(), "seg0 carries a segment label");
-    assert!(form_param(&seg1.body, "metadata[segment]").is_some(), "seg1 carries a segment label");
+    assert!(
+        form_param(&seg0.body, "metadata[segment]").is_some(),
+        "seg0 carries a segment label"
+    );
+    assert!(
+        form_param(&seg1.body, "metadata[segment]").is_some(),
+        "seg1 carries a segment label"
+    );
 
     drop(fx);
     common::drain_pg().await;
@@ -922,11 +1005,21 @@ async fn segment_partition_invariants_hold() {
     let mut prices = HashMap::new();
     prices.insert(
         "p_a".to_string(),
-        PlanPrice { base_fee_cents: 1000, included_units: 500, fx_pico_cents_per_unit: Some(FX_SCALE as u64), spend_limit_default_cents: 0 },
+        PlanPrice {
+            base_fee_cents: 1000,
+            included_units: 500,
+            fx_pico_cents_per_unit: Some(FX_SCALE as u64),
+            spend_limit_default_cents: 0,
+        },
     );
     prices.insert(
         "p_b".to_string(),
-        PlanPrice { base_fee_cents: 1000, included_units: 500, fx_pico_cents_per_unit: Some(FX_SCALE as u64), spend_limit_default_cents: 0 },
+        PlanPrice {
+            base_fee_cents: 1000,
+            included_units: 500,
+            fx_pico_cents_per_unit: Some(FX_SCALE as u64),
+            spend_limit_default_cents: 0,
+        },
     );
     let mut end = HashMap::new();
     end.insert("requests".to_string(), 9_999i64);
@@ -944,8 +1037,14 @@ async fn segment_partition_invariants_hold() {
     let total_days: u32 = segs.iter().map(|s| s.end_day - s.start_day).sum();
     assert_eq!(total_days, dim, "Σ segment_days == days_in_period exactly");
     let total_base: u64 = segs.iter().map(|s| s.base_fee_cents).sum();
-    assert!(total_base <= 1_000, "Σ prorated base ≤ one full fee (same plan family)");
-    let total_delta: i64 = segs.iter().map(|s| *s.usage_delta.get("requests").unwrap_or(&0)).sum();
+    assert!(
+        total_base <= 1_000,
+        "Σ prorated base ≤ one full fee (same plan family)"
+    );
+    let total_delta: i64 = segs
+        .iter()
+        .map(|s| *s.usage_delta.get("requests").unwrap_or(&0))
+        .sum();
     assert_eq!(total_delta, 9_999, "telescoped usage == period total");
 }
 
@@ -958,7 +1057,9 @@ async fn segment_partition_invariants_hold() {
 async fn no_change_yields_exactly_one_segment_zero_line() {
     let url = db_url();
     let fx = build_fixture(&url, "nochange").await;
-    let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _recon = RECONCILE_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let now = now_for_closed_period().await;
     let period = prev_period(now);
 
@@ -973,26 +1074,38 @@ async fn no_change_yields_exactly_one_segment_zero_line() {
         .set_customer(organization, &format!("cus_nc_{}", Uuid::new_v4().simple()))
         .await
         .unwrap();
-    ingest_at(&fx.state, app, 750, period, 1).await; // 750c, no plan change
+    ingest_at(&fx.state, &app, 750, period, 1).await; // 750c, no plan change
 
     let billed = billing_reconcile::tick_with(&fx.state, &dummy_passthrough(&fx), now)
         .await
         .expect("tick");
     assert_eq!(billed, 1);
 
-    assert_eq!(fx.mock.count_created("POST", "/v1/invoiceitems"), 1, "exactly one item");
+    assert_eq!(
+        fx.mock.count_created("POST", "/v1/invoiceitems"),
+        1,
+        "exactly one item"
+    );
     let keys = fx.mock.item_idempotency_keys();
     assert_eq!(keys.len(), 1);
     assert!(keys[0].ends_with(":0"), "single segment is segment_no 0");
 
-    let lines = read_segment_lines(&fx.state, organization, app).await;
+    let lines = read_segment_lines(&fx.state, organization, &app).await;
     assert_eq!(lines.len(), 1, "exactly one line");
     assert_eq!(lines[0].0, 0, "segment_no 0");
     assert_eq!(lines[0].1, plan, "the app's current plan");
     assert_eq!(lines[0].5, 750, "full-period charge");
     let usage: HashMap<String, i64> = serde_json::from_value(lines[0].6.clone()).unwrap();
-    assert_eq!(usage.get("requests"), Some(&750), "full-period usage (delta from 0)");
-    assert_eq!(confirmed_item_refs(&fx.state, organization, app).await, 1, "one provider-ref");
+    assert_eq!(
+        usage.get("requests"),
+        Some(&750),
+        "full-period usage (delta from 0)"
+    );
+    assert_eq!(
+        confirmed_item_refs(&fx.state, organization, &app).await,
+        1,
+        "one provider-ref"
+    );
 
     drop(fx);
     common::drain_pg().await;
@@ -1007,7 +1120,9 @@ async fn no_change_yields_exactly_one_segment_zero_line() {
 async fn reconcile_rerun_does_not_double_post_segments() {
     let url = db_url();
     let fx = build_fixture(&url, "rerun").await;
-    let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _recon = RECONCILE_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let now = now_for_closed_period().await;
     let period = prev_period(now);
 
@@ -1023,15 +1138,15 @@ async fn reconcile_rerun_does_not_double_post_segments() {
         .set_customer(organization, &format!("cus_rr_{}", Uuid::new_v4().simple()))
         .await
         .unwrap();
-    ingest_at(&fx.state, app, 1_000, period, 1).await;
+    ingest_at(&fx.state, &app, 1_000, period, 1).await;
     use chrono::{Datelike, TimeZone};
     let pstart = chrono::Utc.timestamp_opt(period, 0).single().unwrap();
     let mid = chrono::Utc
         .with_ymd_and_hms(pstart.year(), pstart.month(), 15, 0, 0, 0)
         .unwrap()
         .timestamp();
-    record_plan_change_like_set_plan(&fx.state, app, organization, &pro, mid).await;
-    ingest_at(&fx.state, app, 2_000, period, 2).await; // cumulative 3000
+    record_plan_change_like_set_plan(&fx.state, &app, organization, &pro, mid).await;
+    ingest_at(&fx.state, &app, 2_000, period, 2).await; // cumulative 3000
 
     let billed1 = billing_reconcile::tick_with(&fx.state, &dummy_passthrough(&fx), now)
         .await
@@ -1049,7 +1164,7 @@ async fn reconcile_rerun_does_not_double_post_segments() {
         2,
         "no double-post: each segment item created exactly once across two runs"
     );
-    let lines = read_segment_lines(&fx.state, organization, app).await;
+    let lines = read_segment_lines(&fx.state, organization, &app).await;
     assert_eq!(lines.len(), 2, "still exactly two lines");
 
     drop(fx);
@@ -1065,7 +1180,9 @@ async fn reconcile_rerun_does_not_double_post_segments() {
 async fn set_plan_snapshots_server_side_and_finalized_period_attributes_next() {
     let url = db_url();
     let fx = build_fixture(&url, "snap").await;
-    let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _recon = RECONCILE_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let now = chrono::Utc::now().timestamp();
 
     seed_weight(&fx.state).await;
@@ -1078,13 +1195,13 @@ async fn set_plan_snapshots_server_side_and_finalized_period_attributes_next() {
 
     // CURRENT-period usage the snapshot must capture (server-side).
     let current_period = zeroship_control::metering::current_period_start_unix();
-    ingest_at(&fx.state, app, 1234, current_period, 1).await;
+    ingest_at(&fx.state, &app, 1234, current_period, 1).await;
 
-    let outcome = record_plan_change_like_set_plan(&fx.state, app, organization, &pro, now).await;
+    let outcome = record_plan_change_like_set_plan(&fx.state, &app, organization, &pro, now).await;
     assert!(matches!(outcome, PlanChangeOutcome::Recorded { .. }));
 
     let (ev_period, usage_at_change, from_plan, to_plan) =
-        read_event(&fx.state, app).await.expect("event recorded");
+        read_event(&fx.state, &app).await.expect("event recorded");
     let usage: HashMap<String, i64> = serde_json::from_value(usage_at_change).unwrap();
     assert_eq!(
         usage.get("requests"),
@@ -1094,9 +1211,17 @@ async fn set_plan_snapshots_server_side_and_finalized_period_attributes_next() {
     // The row freezes NO base fee — segment pricing reads the
     // live catalog at reconcile time. The audit trail is the plan ids; the base fees
     // are recoverable from the catalog by those ids.
-    assert_eq!(from_plan.as_deref(), Some(free.as_str()), "from_plan_id = Free (audit trail)");
+    assert_eq!(
+        from_plan.as_deref(),
+        Some(free.as_str()),
+        "from_plan_id = Free (audit trail)"
+    );
     assert_eq!(to_plan, pro, "to_plan_id = Pro (audit trail)");
-    assert_eq!(ev_period, period_d(current_period), "attributed to the current open period");
+    assert_eq!(
+        ev_period,
+        period_d(current_period),
+        "attributed to the current open period"
+    );
 
     // Now FINALIZE the current period's invoice, then change again: the new event
     // must attribute to the NEXT period (the finalized bill is frozen).
@@ -1121,19 +1246,28 @@ async fn set_plan_snapshots_server_side_and_finalized_period_attributes_next() {
         .await
         .expect("finalize current-period invoice");
 
-    let back_to_free = record_plan_change_like_set_plan(&fx.state, app, organization, &free, now).await;
-    assert!(matches!(back_to_free, PlanChangeOutcome::Recorded { period, .. }
+    let back_to_free =
+        record_plan_change_like_set_plan(&fx.state, &app, organization, &free, now).await;
+    assert!(
+        matches!(back_to_free, PlanChangeOutcome::Recorded { period, .. }
         if period == proration::next_period_date(period_d(current_period))),
-        "a change in an already-finalized period attributes to the NEXT period");
+        "a change in an already-finalized period attributes to the NEXT period"
+    );
     // And apps.plan_id flipped immediately regardless of attribution.
     let cur: String = fx
         .state
         .control_pg
-        .query("SELECT plan_id FROM zeroship.apps WHERE id = $1", &[&app])
+        .query(
+            "SELECT plan_id FROM zeroship.apps WHERE id = $1",
+            &[&app.as_str()],
+        )
         .await
         .unwrap()[0]
         .get("plan_id");
-    assert_eq!(cur, free, "the plan flip applies immediately even past a finalized period");
+    assert_eq!(
+        cur, free,
+        "the plan flip applies immediately even past a finalized period"
+    );
     let _ = now;
 
     drop(fx);
@@ -1149,7 +1283,9 @@ async fn set_plan_snapshots_server_side_and_finalized_period_attributes_next() {
 async fn past_cap_flips_plan_and_tail_prices_under_running_plan() {
     let url = db_url();
     let fx = build_fixture(&url, "cap").await;
-    let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _recon = RECONCILE_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let now = now_for_closed_period().await;
     let period = prev_period(now);
 
@@ -1164,7 +1300,10 @@ async fn past_cap_flips_plan_and_tail_prices_under_running_plan() {
     let app = make_owned_app(&fx.state, &cheap, organization).await;
     fx.state
         .stripe_store
-        .set_customer(organization, &format!("cus_cap_{}", Uuid::new_v4().simple()))
+        .set_customer(
+            organization,
+            &format!("cus_cap_{}", Uuid::new_v4().simple()),
+        )
         .await
         .unwrap();
 
@@ -1180,7 +1319,7 @@ async fn past_cap_flips_plan_and_tail_prices_under_running_plan() {
         // flips") — this burns the per-period cap without touching the expensive plan,
         // which is flipped to separately below, past the cap.
         let to = &cheap;
-        record_plan_change_like_set_plan(&fx.state, app, organization, to, when).await;
+        record_plan_change_like_set_plan(&fx.state, &app, organization, to, when).await;
     }
     // Count recorded events: capped at MAX_PLAN_CHANGES_PER_PERIOD.
     let n_events: i64 = fx
@@ -1189,7 +1328,7 @@ async fn past_cap_flips_plan_and_tail_prices_under_running_plan() {
         .query(
             "SELECT COUNT(*)::bigint AS n FROM zeroship.plan_change_events \
              WHERE app_id = $1 AND period = $2::date",
-            &[&app, &period_d(period)],
+            &[&app.as_str(), &period_d(period)],
         )
         .await
         .unwrap()[0]
@@ -1202,7 +1341,8 @@ async fn past_cap_flips_plan_and_tail_prices_under_running_plan() {
         .with_ymd_and_hms(pstart.year(), pstart.month(), 20, 0, 0, 0)
         .unwrap()
         .timestamp();
-    let outcome = record_plan_change_like_set_plan(&fx.state, app, organization, &pricey, late).await;
+    let outcome =
+        record_plan_change_like_set_plan(&fx.state, &app, organization, &pricey, late).await;
     assert!(
         matches!(outcome, PlanChangeOutcome::FlippedNoSnapshotCapHit),
         "past the cap: flip the plan, record no snapshot"
@@ -1213,30 +1353,39 @@ async fn past_cap_flips_plan_and_tail_prices_under_running_plan() {
         .query(
             "SELECT COUNT(*)::bigint AS n FROM zeroship.plan_change_events \
              WHERE app_id = $1 AND period = $2::date",
-            &[&app, &period_d(period)],
+            &[&app.as_str(), &period_d(period)],
         )
         .await
         .unwrap()[0]
         .get("n");
-    assert_eq!(n_events_after, MAX_PLAN_CHANGES_PER_PERIOD, "no new snapshot past the cap");
+    assert_eq!(
+        n_events_after, MAX_PLAN_CHANGES_PER_PERIOD,
+        "no new snapshot past the cap"
+    );
     let running: String = fx
         .state
         .control_pg
-        .query("SELECT plan_id FROM zeroship.apps WHERE id = $1", &[&app])
+        .query(
+            "SELECT plan_id FROM zeroship.apps WHERE id = $1",
+            &[&app.as_str()],
+        )
         .await
         .unwrap()[0]
         .get("plan_id");
-    assert_eq!(running, pricey, "apps.plan_id flipped to the expensive plan");
+    assert_eq!(
+        running, pricey,
+        "apps.plan_id flipped to the expensive plan"
+    );
 
     // Usage AFTER the cap (the tail). Bill it: the LAST segment must price under
     // the EXPENSIVE running plan (5c/CU), not the cheap recorded one (1c/CU).
-    ingest_at(&fx.state, app, 1_000, period, 1).await;
+    ingest_at(&fx.state, &app, 1_000, period, 1).await;
     let billed = billing_reconcile::tick_with(&fx.state, &dummy_passthrough(&fx), now)
         .await
         .expect("tick");
     assert_eq!(billed, 1);
 
-    let lines = read_segment_lines(&fx.state, organization, app).await;
+    let lines = read_segment_lines(&fx.state, organization, &app).await;
     let last = lines.last().expect("at least one segment");
     assert_eq!(
         last.3,
@@ -1257,7 +1406,9 @@ async fn past_cap_flips_plan_and_tail_prices_under_running_plan() {
 async fn end_missing_metric_does_not_credit_the_bill() {
     let url = db_url();
     let fx = build_fixture(&url, "floor").await;
-    let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _recon = RECONCILE_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let now = now_for_closed_period().await;
     let period = prev_period(now);
 
@@ -1270,7 +1421,10 @@ async fn end_missing_metric_does_not_credit_the_bill() {
     let app = make_owned_app(&fx.state, &free, organization).await;
     fx.state
         .stripe_store
-        .set_customer(organization, &format!("cus_floor_{}", Uuid::new_v4().simple()))
+        .set_customer(
+            organization,
+            &format!("cus_floor_{}", Uuid::new_v4().simple()),
+        )
         .await
         .unwrap();
 
@@ -1280,14 +1434,14 @@ async fn end_missing_metric_does_not_credit_the_bill() {
     // period-end be that same value — so the post-change segment's delta is 0, not
     // negative). Concretely: ingest 5000, change plan (snapshot {requests:5000}),
     // ingest NOTHING more ⇒ period-end requests stays 5000 ⇒ seg1 delta = 0.
-    ingest_at(&fx.state, app, 5_000, period, 1).await;
+    ingest_at(&fx.state, &app, 5_000, period, 1).await;
     use chrono::{Datelike, TimeZone};
     let pstart = chrono::Utc.timestamp_opt(period, 0).single().unwrap();
     let mid = chrono::Utc
         .with_ymd_and_hms(pstart.year(), pstart.month(), 15, 0, 0, 0)
         .unwrap()
         .timestamp();
-    record_plan_change_like_set_plan(&fx.state, app, organization, &pro, mid).await;
+    record_plan_change_like_set_plan(&fx.state, &app, organization, &pro, mid).await;
     // No further ingest: period-end requests == 5000 (== the snapshot).
 
     let billed = billing_reconcile::tick_with(&fx.state, &dummy_passthrough(&fx), now)
@@ -1295,15 +1449,21 @@ async fn end_missing_metric_does_not_credit_the_bill() {
         .expect("tick");
     assert_eq!(billed, 1, "billed (segment 0 has the 5000 usage)");
 
-    let lines = read_segment_lines(&fx.state, organization, app).await;
+    let lines = read_segment_lines(&fx.state, organization, &app).await;
     // Segment 0 charged 5000c; segment 1's delta is 0 ⇒ $0 ⇒ NO line (skipped),
     // and crucially NO negative usage that would CREDIT the bill.
     let total: i64 = lines.iter().map(|l| l.5).sum();
-    assert_eq!(total, 5_000, "segment 1's zero/floored delta never credits the bill");
+    assert_eq!(
+        total, 5_000,
+        "segment 1's zero/floored delta never credits the bill"
+    );
     for l in &lines {
         let usage: HashMap<String, i64> = serde_json::from_value(l.6.clone()).unwrap();
         for (_m, v) in usage {
-            assert!(v >= 0, "no negative usage_snapshot delta on any segment line");
+            assert!(
+                v >= 0,
+                "no negative usage_snapshot delta on any segment line"
+            );
         }
     }
 
@@ -1323,7 +1483,9 @@ async fn end_missing_metric_does_not_credit_the_bill() {
 async fn segment_pricing_reflects_catalog_at_reconcile_time() {
     let url = db_url();
     let fx = build_fixture(&url, "catalogtime").await;
-    let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _recon = RECONCILE_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let now = now_for_closed_period().await;
     let period = prev_period(now);
 
@@ -1343,15 +1505,15 @@ async fn segment_pricing_reflects_catalog_at_reconcile_time() {
         .await
         .unwrap();
 
-    ingest_at(&fx.state, app, 4_000, period, 1).await;
+    ingest_at(&fx.state, &app, 4_000, period, 1).await;
     use chrono::{Datelike, TimeZone};
     let pstart = chrono::Utc.timestamp_opt(period, 0).single().unwrap();
     let day11 = chrono::Utc
         .with_ymd_and_hms(pstart.year(), pstart.month(), 11, 0, 0, 0)
         .unwrap()
         .timestamp();
-    record_plan_change_like_set_plan(&fx.state, app, organization, &pro, day11).await;
-    ingest_at(&fx.state, app, 26_000, period, 2).await;
+    record_plan_change_like_set_plan(&fx.state, &app, organization, &pro, day11).await;
+    ingest_at(&fx.state, &app, 26_000, period, 2).await;
 
     // OPERATOR mid-month edit: raise Pro's base fee in the catalog AFTER the change
     // was recorded but BEFORE the reconcile. There is no per-change freeze, so the
@@ -1371,8 +1533,11 @@ async fn segment_pricing_reflects_catalog_at_reconcile_time() {
         .expect("tick");
     assert_eq!(billed, 1);
 
-    let lines = read_segment_lines(&fx.state, organization, app).await;
-    let pro_line = lines.iter().find(|l| l.1 == pro).expect("a Pro segment line");
+    let lines = read_segment_lines(&fx.state, organization, &app).await;
+    let pro_line = lines
+        .iter()
+        .find(|l| l.1 == pro)
+        .expect("a Pro segment line");
     if days_in_period == 30 {
         // Pro base day-weighted 20/30 of the RECONCILE-time fee (9000), not 3000:
         // round_half_up(9000×20/30) = 6000.
@@ -1384,12 +1549,14 @@ async fn segment_pricing_reflects_catalog_at_reconcile_time() {
     } else {
         // For any month length, the prorated base must EXCEED the change-time-derived
         // value, proving it tracked the catalog edit rather than a frozen snapshot.
-        let change_time_derived = (3_000i64 * i64::from(days_in_period - 10)) / i64::from(days_in_period);
+        let change_time_derived =
+            (3_000i64 * i64::from(days_in_period - 10)) / i64::from(days_in_period);
         assert!(
             pro_line.4 > change_time_derived,
             "Pro segment base ({}) reflects the raised reconcile-time catalog fee, not the \
              change-time value (~{})",
-            pro_line.4, change_time_derived
+            pro_line.4,
+            change_time_derived
         );
     }
 
@@ -1410,7 +1577,9 @@ async fn segment_pricing_reflects_catalog_at_reconcile_time() {
 async fn shrinking_redrive_removes_orphaned_segment_and_stripe_item() {
     let url = db_url();
     let fx = build_fixture(&url, "orphan").await;
-    let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _recon = RECONCILE_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let now = now_for_closed_period().await;
     let period = prev_period(now);
 
@@ -1422,8 +1591,12 @@ async fn shrinking_redrive_removes_orphaned_segment_and_stripe_item() {
     let organization = organization.as_str();
     let app = make_owned_app(&fx.state, &plan, organization).await;
     let customer = format!("cus_orphan_{}", Uuid::new_v4().simple());
-    fx.state.stripe_store.set_customer(organization, &customer).await.unwrap();
-    ingest_at(&fx.state, app, 1_000, period, 1).await; // 1000c, one segment
+    fx.state
+        .stripe_store
+        .set_customer(organization, &customer)
+        .await
+        .unwrap();
+    ingest_at(&fx.state, &app, 1_000, period, 1).await; // 1000c, one segment
 
     // SEED a crash-window draft: a draft invoice claim, a REAL segment_no=0 line,
     // AND an ORPHAN segment_no=1 line + its provider-ref, plus a matching pending
@@ -1448,7 +1621,7 @@ async fn shrinking_redrive_removes_orphaned_segment_and_stripe_item() {
                     fx_pico_cents_per_unit, base_fee_cents, amount_cents, \
                     usage_snapshot, weights_snapshot) \
                  VALUES ($1, $2, $3, $4, 0, $5, 0, $6, '{}'::jsonb, '{}'::jsonb)",
-                &[&inv_id, &app, &seg, &plan, &one_cent, &amount],
+                &[&inv_id, &app.as_str(), &seg, &plan, &one_cent, &amount],
             )
             .await
             .expect("seed line");
@@ -1456,8 +1629,7 @@ async fn shrinking_redrive_removes_orphaned_segment_and_stripe_item() {
     // The orphan segment 1 was "posted": register a Stripe item with its
     // deterministic metadata key so the orphan-reconciler can DELETE it, and a
     // provider-ref so the reconciler knows its external id directly.
-    let orphan_key =
-        billing_reconcile::invoice_item_idempotency_key(organization, &app, period, 1);
+    let orphan_key = billing_reconcile::invoice_item_idempotency_key(organization, &app, period, 1);
     let orphan_item_id = fx.mock.preload_invoice_item(&customer, &orphan_key);
     fx.state
         .control_pg
@@ -1465,7 +1637,7 @@ async fn shrinking_redrive_removes_orphaned_segment_and_stripe_item() {
             "INSERT INTO zeroship.billing_line_provider_refs \
                (invoice_id, app_id, segment_no, provider, ref_kind, external_id) \
              VALUES ($1, $2, 1, 'stripe', 'invoice_item', $3)",
-            &[&inv_id, &app, &orphan_item_id],
+            &[&inv_id, &app.as_str(), &orphan_item_id],
         )
         .await
         .expect("seed orphan provider-ref");
@@ -1484,8 +1656,12 @@ async fn shrinking_redrive_removes_orphaned_segment_and_stripe_item() {
     );
 
     // Exactly the current segment set (segment 0 only) persists.
-    let lines = read_segment_lines(&fx.state, organization, app).await;
-    assert_eq!(lines.len(), 1, "exactly one segment line persists (orphan removed)");
+    let lines = read_segment_lines(&fx.state, organization, &app).await;
+    assert_eq!(
+        lines.len(),
+        1,
+        "exactly one segment line persists (orphan removed)"
+    );
     assert_eq!(lines[0].0, 0, "the surviving line is segment 0");
 
     // DB subtotal == Stripe item total (no orphaned item left to diverge).
@@ -1499,10 +1675,13 @@ async fn shrinking_redrive_removes_orphaned_segment_and_stripe_item() {
         .await
         .unwrap()[0]
         .get("total_cents");
-    assert_eq!(inv_total, 1_000, "finalized subtotal is the single real segment");
+    assert_eq!(
+        inv_total, 1_000,
+        "finalized subtotal is the single real segment"
+    );
     // The orphan's provider-ref is gone too.
     assert_eq!(
-        confirmed_item_refs(&fx.state, organization, app).await,
+        confirmed_item_refs(&fx.state, organization, &app).await,
         1,
         "only the surviving segment's provider-ref remains"
     );
@@ -1521,7 +1700,9 @@ async fn shrinking_redrive_removes_orphaned_segment_and_stripe_item() {
 async fn corrupt_usage_snapshot_skips_app_instead_of_overbilling() {
     let url = db_url();
     let fx = build_fixture(&url, "corrupt").await;
-    let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _recon = RECONCILE_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let now = now_for_closed_period().await;
     let period = prev_period(now);
 
@@ -1534,11 +1715,14 @@ async fn corrupt_usage_snapshot_skips_app_instead_of_overbilling() {
     let app = make_owned_app(&fx.state, &pro, organization).await;
     fx.state
         .stripe_store
-        .set_customer(organization, &format!("cus_corrupt_{}", Uuid::new_v4().simple()))
+        .set_customer(
+            organization,
+            &format!("cus_corrupt_{}", Uuid::new_v4().simple()),
+        )
         .await
         .unwrap();
     // Big cumulative usage so a silent {}-start would over-bill from 0.
-    ingest_at(&fx.state, app, 50_000, period, 1).await;
+    ingest_at(&fx.state, &app, 50_000, period, 1).await;
 
     // Directly INSERT a plan_change_events row with a CORRUPT usage_at_change: a
     // JSON ARRAY is valid JSONB but does NOT deserialize into {metric: int}. (We
@@ -1556,7 +1740,7 @@ async fn corrupt_usage_snapshot_skips_app_instead_of_overbilling() {
             "INSERT INTO zeroship.plan_change_events \
                (id, app_id, period, from_plan_id, to_plan_id, effective_at, usage_at_change) \
              VALUES ($1, $2, $3::date, $4, $5, $6, '[1,2,3]'::jsonb)",
-            &[&ev_id, &app, &period_d(period), &free, &pro, &mid],
+            &[&ev_id, &app.as_str(), &period_d(period), &free, &pro, &mid],
         )
         .await
         .expect("seed corrupt event");
@@ -1566,7 +1750,10 @@ async fn corrupt_usage_snapshot_skips_app_instead_of_overbilling() {
     let billed = billing_reconcile::tick_with(&fx.state, &dummy_passthrough(&fx), now)
         .await
         .expect("tick returns (per-organization error is logged + skipped)");
-    assert_eq!(billed, 0, "the organization with a corrupt snapshot is NOT billed (no over-bill)");
+    assert_eq!(
+        billed, 0,
+        "the organization with a corrupt snapshot is NOT billed (no over-bill)"
+    );
     assert_eq!(
         fx.mock.count_created("POST", "/v1/invoiceitems"),
         0,
@@ -1583,7 +1770,10 @@ async fn corrupt_usage_snapshot_skips_app_instead_of_overbilling() {
         .await
         .unwrap()[0]
         .get("n");
-    assert_eq!(finalized, 0, "no finalized invoice for the skipped organization");
+    assert_eq!(
+        finalized, 0,
+        "no finalized invoice for the skipped organization"
+    );
 
     drop(fx);
     common::drain_pg().await;

@@ -18,6 +18,7 @@ use zeroship_control::metering::provider::{
     UsageSubject,
 };
 use zeroship_control::Registry;
+use zeroship_core::AppId;
 use zeroship_stream::{adapters, StreamConfig, StreamRegistry};
 
 /// These tests seed events that already carry an organization subject, so the
@@ -28,7 +29,7 @@ struct NoopOrganizationResolver;
 impl event_forwarder::OrganizationResolver for NoopOrganizationResolver {
     async fn organization_for_app(
         &self,
-        _app: uuid::Uuid,
+        _app: &AppId,
     ) -> Result<Option<String>, event_forwarder::EventForwarderError> {
         Ok(None)
     }
@@ -59,9 +60,9 @@ async fn memory_forwarder_and_recompute_consumers_do_not_interfere() {
         .unwrap()
         .timestamp();
     let events = vec![
-        event("evt_f1_a", app, &organization, "requests", 10, period + 10),
-        event("evt_f1_b", app, &organization, "requests", 5, period + 20),
-        event("evt_f1_c", app, &organization, "db_reads", 7, period + 30),
+        event("evt_f1_a", &app, &organization, "requests", 10, period + 10),
+        event("evt_f1_b", &app, &organization, "requests", 5, period + 20),
+        event("evt_f1_c", &app, &organization, "db_reads", 7, period + 30),
     ];
 
     let suffix = unique_suffix();
@@ -88,7 +89,13 @@ async fn memory_forwarder_and_recompute_consumers_do_not_interfere() {
         forwarder_stream
             .publish(
                 &topic,
-                event.subject.app.unwrap().to_string().as_bytes(),
+                event
+                    .subject
+                    .app
+                    .as_ref()
+                    .expect("usage event has app")
+                    .as_str()
+                    .as_bytes(),
                 &payload,
             )
             .await
@@ -96,9 +103,8 @@ async fn memory_forwarder_and_recompute_consumers_do_not_interfere() {
     }
 
     let provider = Arc::new(RecordingProvider::default());
-    let stack = zeroship_control::metering::provider::BillingStack::with_meter_for_tests(
-        provider.clone(),
-    );
+    let stack =
+        zeroship_control::metering::provider::BillingStack::with_meter_for_tests(provider.clone());
     let dead_letters = NoopDeadLetters;
     let forward_cfg = event_forwarder::EventForwarderConfig {
         batch_max: 100,
@@ -119,7 +125,11 @@ async fn memory_forwarder_and_recompute_consumers_do_not_interfere() {
     assert_eq!(forwarded.polled, events.len());
     assert_eq!(forwarded.ingested, events.len());
     assert_eq!(forwarded.committed, events.len());
-    assert_eq!(provider.events(), events, "provider saw each usage event once");
+    assert_eq!(
+        provider.events(),
+        events,
+        "provider saw each usage event once"
+    );
 
     let recompute_cfg = spend_recompute::SpendRecomputeConfig {
         interval: Duration::from_secs(1),
@@ -146,8 +156,8 @@ async fn memory_forwarder_and_recompute_consumers_do_not_interfere() {
     assert_eq!(recomputed.skipped_zero_value, 0);
     assert_eq!(recomputed.aggregates, 2);
     assert_eq!(recomputed.written, 2);
-    assert_total(&client, app, period, "requests", 15).await;
-    assert_total(&client, app, period, "db_reads", 7).await;
+    assert_total(&client, &app, period, "requests", 15).await;
+    assert_total(&client, &app, period, "db_reads", 7).await;
 
     let fresh_forwarder_stream = streams.build_forwarder().expect("fresh forwarder stream");
     let replay = event_forwarder::run_cycle(
@@ -240,7 +250,7 @@ async fn control_direct_usage_event_survives_repeated_snapshot_recompute() {
     let direct_event: UsageEvent =
         serde_json::from_slice(&records[0].payload).expect("decode direct usage event");
     assert_eq!(direct_event.source, "zeroship-control");
-    assert_eq!(direct_event.subject.app, Some(app));
+    assert_eq!(direct_event.subject.app, Some(app.clone()));
     assert_eq!(
         direct_event.subject.organization, None,
         "the control-plane producer leaves the subject for the forwarder to fill in"
@@ -271,7 +281,7 @@ async fn control_direct_usage_event_survives_repeated_snapshot_recompute() {
     .await
     .expect("first spend recompute");
     assert_eq!(first.polled, 1);
-    assert_total(&client, app, period, "storage_ops", 7).await;
+    assert_total(&client, &app, period, "storage_ops", 7).await;
 
     let second = spend_recompute::recompute_usage_aggregates(
         &registry,
@@ -282,7 +292,7 @@ async fn control_direct_usage_event_survives_repeated_snapshot_recompute() {
     .await
     .expect("repeated spend recompute");
     assert_eq!(second.polled, 1);
-    assert_total(&client, app, period, "storage_ops", 7).await;
+    assert_total(&client, &app, period, "storage_ops", 7).await;
 
     drop(metering);
     drop(client);
@@ -306,7 +316,7 @@ async fn memory_forwarder_redelivers_uncommitted_tail_after_mid_batch_failure() 
     let initial_stream = stream_registry
         .build("memory", &config)
         .expect("initial memory stream");
-    let app = Uuid::new_v4();
+    let app = AppId::mint();
     let organization = zeroship_core::typed_id::generate("org");
     let period = chrono::Utc
         .with_ymd_and_hms(2042, 5, 1, 0, 0, 0)
@@ -316,7 +326,7 @@ async fn memory_forwarder_redelivers_uncommitted_tail_after_mid_batch_failure() 
         .map(|i| {
             event(
                 &format!("evt_f4_crash_{i}"),
-                app,
+                &app,
                 &organization,
                 "requests",
                 1,
@@ -328,7 +338,13 @@ async fn memory_forwarder_redelivers_uncommitted_tail_after_mid_batch_failure() 
         initial_stream
             .publish(
                 &topic,
-                event.subject.app.unwrap().to_string().as_bytes(),
+                event
+                    .subject
+                    .app
+                    .as_ref()
+                    .expect("usage event has app")
+                    .as_str()
+                    .as_bytes(),
                 &serde_json::to_vec(event).expect("usage event serializes"),
             )
             .await
@@ -442,11 +458,11 @@ async fn pg_dead_letter_sink_persists_provider_reject_and_decode_failure() {
     let reject_stack = zeroship_control::metering::provider::BillingStack::with_meter_for_tests(
         reject_provider_for_stack,
     );
-    let app = Uuid::new_v4();
+    let app = AppId::mint();
     let organization = zeroship_core::typed_id::generate("org");
     let event = event(
         "evt_f4_pg_reject",
-        app,
+        &app,
         &organization,
         "requests",
         1,
@@ -455,7 +471,7 @@ async fn pg_dead_letter_sink_persists_provider_reject_and_decode_failure() {
     reject_stream
         .publish(
             &reject_topic,
-            app.to_string().as_bytes(),
+            app.as_str().as_bytes(),
             &serde_json::to_vec(&event).expect("usage event serializes"),
         )
         .await
@@ -727,7 +743,7 @@ async fn assert_dead_letter_row(
     );
 }
 
-async fn seed_app(client: &compio_postgres::Client) -> Uuid {
+async fn seed_app(client: &compio_postgres::Client) -> AppId {
     let plan_id = format!("pln_f1_{}", Uuid::new_v4().simple());
     client
         .execute(
@@ -740,17 +756,12 @@ async fn seed_app(client: &compio_postgres::Client) -> Uuid {
         )
         .await
         .expect("seed plan");
-    common::seed_app(
-        client,
-        &format!("f1-{}", Uuid::new_v4().simple()),
-        &plan_id,
-    )
-    .await
+    common::seed_app(client, &format!("f1-{}", Uuid::new_v4().simple()), &plan_id).await
 }
 
 fn event(
     id: &str,
-    app: Uuid,
+    app: &AppId,
     organization: &str,
     meter: &str,
     value: u64,
@@ -760,7 +771,7 @@ fn event(
         event_id: format!("{}-{}", id, Uuid::new_v4().simple()),
         source: "worker-test".to_string(),
         subject: UsageSubject {
-            app: Some(app),
+            app: Some(app.clone()),
             organization: Some(organization.to_owned()),
         },
         meter: meter.to_string(),
@@ -772,7 +783,7 @@ fn event(
 
 async fn assert_total(
     client: &compio_postgres::Client,
-    app: Uuid,
+    app: &AppId,
     period: i64,
     metric: &str,
     total: i64,
@@ -781,11 +792,16 @@ async fn assert_total(
         .query(
             "SELECT total FROM zeroship.usage_aggregates \
              WHERE app_id = $1 AND period = $2::date AND metric = $3",
-            &[&app, &period_date(period), &metric],
+            &[&app.as_str(), &period_date(period), &metric],
         )
         .await
         .expect("read aggregate");
-    assert_eq!(rows.len(), 1, "one usage_aggregates row for {app}/{metric}");
+    assert_eq!(
+        rows.len(),
+        1,
+        "one usage_aggregates row for {}/{metric}",
+        app.as_str()
+    );
     assert_eq!(rows[0].get::<_, i64>("total"), total);
 }
 
@@ -803,6 +819,5 @@ fn period_date(period_start_unix: i64) -> chrono::NaiveDate {
         .timestamp_opt(period_start_unix, 0)
         .single()
         .expect("valid period timestamp");
-    chrono::NaiveDate::from_ymd_opt(dt.year(), dt.month(), 1)
-        .expect("valid billing period date")
+    chrono::NaiveDate::from_ymd_opt(dt.year(), dt.month(), 1).expect("valid billing period date")
 }

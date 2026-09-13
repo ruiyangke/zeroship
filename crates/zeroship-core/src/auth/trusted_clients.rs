@@ -13,7 +13,7 @@
 //! There is intentionally **no** compiled-in trusted client. The console's
 //! OAuth `client_id` is host-derived and not knowable here (core has no
 //! console host), so the deployment MUST set `[auth].trusted_oauth_clients` to
-//! the console's `oac_<base62>` client id — i.e.
+//! the console's `oac_<base36>` client id — i.e.
 //! `client_id_for_app(console_app_id(console_host))`, which
 //! `zeroship-control --bootstrap-console` prints at boot. The **control plane**
 //! resolves this set (via [`resolve_trusted_oauth_clients`] /
@@ -39,7 +39,7 @@ use crate::config::AuthSection;
 ///
 /// **Empty by design (fail-closed).** No client is trusted unless the shared
 /// `[auth].trusted_oauth_clients` file overlay names it. The console's
-/// `oac_<base62>` client id is host-derived and unknowable in core, so the
+/// `oac_<base36>` client id is host-derived and unknowable in core, so the
 /// deployment must list it explicitly (see the module doc). Returning a
 /// non-empty default here would silently trust a hard-coded client id and is a
 /// security footgun.

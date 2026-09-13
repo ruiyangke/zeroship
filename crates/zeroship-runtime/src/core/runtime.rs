@@ -78,6 +78,7 @@
 
 #![allow(unsafe_code)]
 
+use zeroship_core::app_id::AppId;
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::future::Future;
@@ -305,7 +306,7 @@ pub struct Runtime {
     /// so per-isolate registries (RPC abort, future telemetry) can key
     /// entries by the same Uuid the cache uses. `None` for single-tenant
     /// callers (the bench server, the dev `serve` CLI, most tests).
-    app_id: Option<uuid::Uuid>,
+    app_id: Option<AppId>,
 }
 
 /// Test-only strong-count probe over the inner `Rc<RefCell<RuntimeInner>>`.
@@ -395,8 +396,8 @@ impl Runtime {
     /// Multi-tenant identity, if the builder was supplied one.
     /// Used by `crate::rpc::abort` to key the in-flight controller
     /// registry by `(app_id, request_id)`.
-    pub fn app_id(&self) -> Option<uuid::Uuid> {
-        self.app_id
+    pub fn app_id(&self) -> Option<&AppId> {
+        self.app_id.as_ref()
     }
 
     /// Test-only: consume this handle and return a strong-count probe for
@@ -676,7 +677,7 @@ pub struct RuntimeBuilder {
     env_vars: HashMap<String, String>,
     limits: RuntimeLimits,
     plugins: Vec<Arc<dyn NativePlugin>>,
-    app_id: Option<uuid::Uuid>,
+    app_id: Option<AppId>,
     meter: Option<Arc<zeroship_metering::Meter>>,
     net_policy: NetPolicy,
     /// Override for PHASE 2 of the egress evaluator. `None` leaves the
@@ -762,7 +763,7 @@ impl RuntimeBuilder {
     /// to key the per-thread isolate cache, so eviction can fire all
     /// in-flight `AbortController`s for a single app via
     /// `crate::rpc::abort::entered_for_eviction`.
-    pub fn app_id(mut self, id: uuid::Uuid) -> Self {
+    pub fn app_id(mut self, id: AppId) -> Self {
         self.app_id = Some(id);
         self
     }
@@ -843,7 +844,7 @@ impl RuntimeBuilder {
             limits.wall_timeout,
             limits.heap_limit_bytes,
             self.plugins,
-            app_id,
+            app_id.clone(),
             self.meter,
             self.net_policy,
             self.egress_resolver,
@@ -1058,7 +1059,7 @@ pub(crate) struct RuntimeInner {
     /// every in-flight `AbortController` with `crate::rpc::abort` keyed
     /// by `(app_id, request_id)` so the worker's eviction sweep can
     /// fire them. `None` for single-tenant callers.
-    app_id: Option<uuid::Uuid>,
+    app_id: Option<AppId>,
 
     /// Net depth of `enter_isolate`/`exit_isolate` pairs. Tracks whether
     /// the V8 isolate is currently the topmost-entered on its thread.
@@ -1140,7 +1141,7 @@ impl RuntimeInner {
         wall_timeout: Option<Duration>,
         heap_limit_bytes: Option<usize>,
         plugins: Vec<Arc<dyn NativePlugin>>,
-        app_id: Option<uuid::Uuid>,
+        app_id: Option<AppId>,
         meter: Option<Arc<zeroship_metering::Meter>>,
         net_policy: NetPolicy,
         egress_resolver: Option<Rc<dyn crate::transport::egress::EgressResolver>>,
@@ -1261,9 +1262,13 @@ impl RuntimeInner {
         );
 
         // Create RuntimeState (no server_handle -- compio, not tokio)
+        // The meter key is the PRINTED typed id. `Meter::drain` parses it back and
+        // drops the counters if it cannot, so any other rendering loses this
+        // app's billing telemetry silently - no error, just missing invoice lines.
         let meter_handle = app_id
+            .as_ref()
             .zip(meter)
-            .map(|(id, meter)| zeroship_metering::MeterHandle::new(meter, id.to_string()));
+            .map(|(id, meter)| zeroship_metering::MeterHandle::new(meter, id.as_str().to_string()));
         let state: SharedState = Rc::new(RefCell::new(RuntimeState::new(
             env_vars,
             None,
@@ -1280,7 +1285,7 @@ impl RuntimeInner {
         // `setup_globals` can expose it as `globalThis.__zsRuntimeDescriptor`.
         state.borrow_mut().runtime_descriptor = runtime_descriptor;
         isolate.set_slot(state.clone());
-        isolate.set_slot(crate::plugin::RuntimeAppIdentity(app_id));
+        isolate.set_slot(crate::plugin::RuntimeAppIdentity(app_id.clone()));
 
         let context = {
             v8::scope!(let handle_scope, &mut isolate);
@@ -2342,7 +2347,7 @@ impl RuntimeInner {
                     );
                     let (rpc_ctx_object, mut local_abort_guard) = match mint_result {
                         Ok((ctx_obj, controller)) => {
-                            let guard = match (self.app_id, controller) {
+                            let guard = match (self.app_id.as_ref(), controller) {
                                 (Some(aid), Some(c)) => Some(crate::rpc::abort::register_in_flight(
                                     scope,
                                     aid,

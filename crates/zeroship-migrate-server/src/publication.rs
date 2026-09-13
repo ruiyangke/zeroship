@@ -1,13 +1,18 @@
 //! Migration-owned logical publication reconciliation.
 
 use compio_postgres::Client;
-use zeroship_core::replication_names::{publication_name, ReplicationNameError};
+use zeroship_core::app_derivation;
+use zeroship_id::AppId;
 
 /// A failure to reconcile an app publication after its schema migration.
+///
+/// There is no invalid-name arm any more. The publication used to be named from
+/// an untyped `&str` through `zeroship_core::replication_names::publication_name`,
+/// whose two refusals are an empty id and an embedded NUL; an [`AppId`] can be
+/// neither, so [`app_derivation::publication_name`] is infallible and the arm
+/// had no producer left.
 #[derive(Debug, thiserror::Error)]
 pub enum PublicationError {
-    #[error("invalid app id for publication: {0}")]
-    InvalidName(#[from] ReplicationNameError),
     #[error("publication reconciliation database error: {0}")]
     Database(#[from] compio_postgres::Error),
 }
@@ -67,12 +72,13 @@ fn publication_membership_sql(
 /// visibility; partition children remain represented by their top-level table.
 pub async fn reconcile_app_publication(
     client: &Client,
-    app_id: &str,
+    app: &AppId,
 ) -> Result<(), PublicationError> {
-    let publication = publication_name(app_id)?;
+    let publication = app_derivation::publication_name(app);
+    let schema = app_derivation::schema_name(app);
     client.batch_execute("BEGIN").await?;
 
-    let result = reconcile_in_transaction(client, app_id, &publication).await;
+    let result = reconcile_in_transaction(client, &schema, &publication).await;
     match result {
         Ok(()) => {
             client.batch_execute("COMMIT").await?;
@@ -87,7 +93,7 @@ pub async fn reconcile_app_publication(
 
 async fn reconcile_in_transaction(
     client: &Client,
-    app_id: &str,
+    schema: &str,
     publication: &str,
 ) -> Result<(), PublicationError> {
     client
@@ -98,7 +104,7 @@ async fn reconcile_in_transaction(
         .await?;
 
     let rows = client
-        .query_text_params(creator_table_query(), &[app_id])
+        .query_text_params(creator_table_query(), &[schema])
         .await?;
     let tables = rows
         .iter()
@@ -111,7 +117,7 @@ async fn reconcile_in_transaction(
         )
         .await?
         .is_empty();
-    let sql = publication_membership_sql(publication, app_id, &tables, exists);
+    let sql = publication_membership_sql(publication, schema, &tables, exists);
     if !sql.is_empty() {
         client.batch_execute(&sql).await?;
     }
@@ -165,9 +171,10 @@ mod tests {
         })
         .detach();
 
-        let schema = Uuid::new_v4().to_string();
+        let app = AppId::mint();
+        let schema = app_derivation::schema_name(&app);
         let schema_q = quote_ident(&schema);
-        let publication = publication_name(&schema).expect("fixture publication name");
+        let publication = app_derivation::publication_name(&app);
         let publication_q = quote_ident(&publication);
         client
             .batch_execute(&format!(
@@ -181,7 +188,7 @@ mod tests {
             .await
             .expect("create publication fixtures");
 
-        reconcile_app_publication(&client, &schema)
+        reconcile_app_publication(&client, &app)
             .await
             .expect("reconcile app publication");
         let initial_tables = client
@@ -224,7 +231,7 @@ mod tests {
             ))
             .await
             .expect("create a table after publication creation");
-        reconcile_app_publication(&client, &schema)
+        reconcile_app_publication(&client, &app)
             .await
             .expect("reconcile existing app publication");
         let reconciled_tables = client
@@ -264,7 +271,7 @@ mod tests {
             ))
             .await
             .expect("seed stale publication membership");
-        reconcile_app_publication(&client, &schema)
+        reconcile_app_publication(&client, &app)
             .await
             .expect("reconcile an empty creator schema");
         let empty_membership = client

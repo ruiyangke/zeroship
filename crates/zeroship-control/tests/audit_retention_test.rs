@@ -69,20 +69,23 @@ async fn app_audit_is_append_only_but_retention_sweep_deletes_old() {
     conn.execute(
         "INSERT INTO zeroship.app_audit (app_id, action, resource, occurred_at) \
          VALUES ($1, 'old', 'r', now() - interval '2 years')",
-        &[&app],
+        &[&app.as_str()],
     )
     .await
     .expect("seed old");
     conn.execute(
         "INSERT INTO zeroship.app_audit (app_id, action, resource) VALUES ($1, 'new', 'r')",
-        &[&app],
+        &[&app.as_str()],
     )
     .await
     .expect("seed new");
 
     // Un-flagged DELETE is rejected by the append-only tamper trigger.
     let blocked = conn
-        .execute("DELETE FROM zeroship.app_audit WHERE app_id = $1", &[&app])
+        .execute(
+            "DELETE FROM zeroship.app_audit WHERE app_id = $1",
+            &[&app.as_str()],
+        )
         .await;
     assert!(
         blocked.is_err(),
@@ -98,7 +101,7 @@ async fn app_audit_is_append_only_but_retention_sweep_deletes_old() {
     let remaining: i64 = conn
         .query_one(
             "SELECT count(*) FROM zeroship.app_audit WHERE app_id = $1",
-            &[&app],
+            &[&app.as_str()],
         )
         .await
         .expect("count")

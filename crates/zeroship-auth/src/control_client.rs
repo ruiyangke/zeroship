@@ -217,6 +217,8 @@ pub async fn erasure_preflight(
     principal: &zeroship_core::UserId,
 ) -> Result<ErasurePreflight, PreflightError> {
     let authorization = control_authorization(keyring)?;
+    // The path segment carries the printed typed id, which is what
+    // `zeroship.users.id` holds and what control keys every dependent table on.
     let url = format!(
         "{}/internal/principals/{}/erasure-preflight",
         control_url.trim_end_matches('/'),

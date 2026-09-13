@@ -1,36 +1,37 @@
 use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
 use std::path::PathBuf;
-use std::sync::{mpsc, Arc, Mutex, OnceLock, RwLock};
+use std::sync::{Arc, Mutex, OnceLock, RwLock, mpsc};
 use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
-use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use compio_postgres::{Client, NoTls};
-use ed25519_dalek::pkcs8::EncodePrivateKey;
 use ed25519_dalek::SigningKey;
-use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
+use ed25519_dalek::pkcs8::EncodePrivateKey;
+use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
 use ntex::http::StatusCode;
-use ntex::web::{self, test, HttpResponse};
-use serde_json::{json, Value};
+use ntex::web::{self, HttpResponse, test};
+use serde_json::{Value, json};
 use uuid::Uuid;
 use zeroship_authz::{Action, Scope};
+use zeroship_id::{AppId, OrganizationId, ProjectId, UserId};
+use zeroship_core::app_derivation;
 use zeroship_core::device_grant::{PLATFORM_CLI_CLIENT_ID, PLATFORM_CLI_ISSUABLE_SCOPES};
-use zeroship_core::UserId;
 use zeroship_migrate::{
-    effective_policy_from_charter_toml, ExecutorConfig, MigrationBackend, ProjectLockAcquisition,
+    ExecutorConfig, MigrationBackend, ProjectLockAcquisition, effective_policy_from_charter_toml,
 };
 use zeroship_migrate_postgres::PostgresBackend;
-use zeroship_migrate_server::apply::{apply_ir_documents, ApplyMigrationsRequest};
+use zeroship_migrate_server::MigrationServiceState;
+use zeroship_migrate_server::apply::{ApplyMigrationsRequest, apply_ir_documents};
 use zeroship_migrate_server::auth::{
     AuthError, Authenticator, ControlPlaneAuthenticator, VerifiedCaller,
 };
-use zeroship_migrate_server::policy::{ManagedPolicyConfig, MIGRATE_POLICY_FILENAME};
+use zeroship_migrate_server::policy::{MIGRATE_POLICY_FILENAME, ManagedPolicyConfig};
 use zeroship_migrate_server::rate_limit::{MutationRateLimiter, PostgresMutationRateLimiter};
 use zeroship_migrate_server::schema_apply_store::SchemaApplyStore;
 use zeroship_migrate_server::session::CompioPgSession;
-use zeroship_migrate_server::MigrationServiceState;
 
 const TEST_POLICY_SEAL_KEY: &[u8] = b"migrated integration policy seal key";
 
@@ -55,7 +56,7 @@ fn tmpdir(label: &str) -> PathBuf {
 struct TestCaller {
     principal_id: UserId,
     actions: HashSet<Action>,
-    owned_apps: HashSet<Uuid>,
+    owned_apps: HashSet<AppId>,
 }
 
 #[derive(Debug, Default)]
@@ -106,7 +107,7 @@ impl StaticAuthenticator {
         token: impl Into<String>,
         principal_id: &UserId,
         scopes: impl IntoIterator<Item = Scope>,
-        owned_apps: impl IntoIterator<Item = Uuid>,
+        owned_apps: impl IntoIterator<Item = AppId>,
     ) {
         self.insert_actions(
             token,
@@ -121,7 +122,7 @@ impl StaticAuthenticator {
         token: impl Into<String>,
         principal_id: &UserId,
         actions: impl IntoIterator<Item = Action>,
-        owned_apps: impl IntoIterator<Item = Uuid>,
+        owned_apps: impl IntoIterator<Item = AppId>,
     ) {
         let caller = TestCaller {
             principal_id: principal_id.clone(),
@@ -140,7 +141,7 @@ impl Authenticator for StaticAuthenticator {
     async fn verify_action(
         &self,
         token: &str,
-        app_id: Uuid,
+        app_id: &AppId,
         required_action: Action,
         _request_ip: Option<IpAddr>,
         request_id: &str,
@@ -151,7 +152,7 @@ impl Authenticator for StaticAuthenticator {
             .push(request_id.to_owned());
         let callers = self.callers.lock().expect("static auth lock");
         let caller = callers.get(token).ok_or(AuthError::Unauthorized)?;
-        if !caller.actions.contains(&required_action) || !caller.owned_apps.contains(&app_id) {
+        if !caller.actions.contains(&required_action) || !caller.owned_apps.contains(app_id) {
             return Err(AuthError::Forbidden);
         }
         Ok(VerifiedCaller {
@@ -211,8 +212,8 @@ async fn assert_platform_schema_present(conn: &Client) {
     );
 }
 
-async fn cleanup_app(conn: &Client, app_id: &Uuid) {
-    let schema = app_id.to_string();
+async fn cleanup_app(conn: &Client, app_id: &AppId) {
+    let schema = app_derivation::schema_name(app_id);
     // The vendor crate, not the composition root: `migrator_role_name` lives at
     // `zeroship_migrate_postgres::role`, which is how `src/apply.rs:19` in this
     // same crate already spells it. The old path did not resolve, so this test
@@ -220,16 +221,18 @@ async fn cleanup_app(conn: &Client, app_id: &Uuid) {
     // before reaching it.
     let role = zeroship_migrate_postgres::role::migrator_role_name(&schema).unwrap();
     let q = |s: &str| format!("\"{}\"", s.replace('"', "\"\""));
-    // THE WORKFLOW JOURNAL SCHEMA IS THE THIRD ONE, and it was leaking. A
-    // successful apply runs `runtime_dependents_sql`, which creates `app_<uuid>`
-    // beside `<uuid>`; this teardown dropped only the latter two.
+    // THE WORKFLOW JOURNAL SCHEMA WAS THE THIRD ONE, and it was leaking. A
+    // successful apply runs `runtime_dependents_sql`, which used to create
+    // `app_<uuid>` beside `<uuid>`; this teardown dropped only the latter two.
+    // It is now the app schema itself, so the journal drop is the third entry
+    // below and names the derivation rather than composing a prefix.
     let _ = conn
         .batch_execute(&format!(
             "DROP SCHEMA IF EXISTS {} CASCADE; \
              DROP SCHEMA IF EXISTS {} CASCADE; \
              DROP SCHEMA IF EXISTS {} CASCADE;",
             q(&format!("{schema}_migrations")),
-            q(&format!("app_{schema}")),
+            q(&zeroship_migrate_server::provisioning::workflow_journal_schema_name(app_id)),
             q(&schema),
         ))
         .await;
@@ -260,19 +263,22 @@ async fn cleanup_app(conn: &Client, app_id: &Uuid) {
     let _ = conn
         .execute(
             "DELETE FROM zeroship.authz_decisions WHERE resource_id = $1",
-            &[&app_id.to_string()],
+            &[&app_id.as_str()],
         )
         .await;
     let _ = conn
         .execute(
             "DELETE FROM zeroship.organization_members om \
                  USING zeroship.apps a JOIN zeroship.projects p ON p.id = a.project_id \
-                 WHERE om.organization_id = p.organization_id AND a.id = $1",
-            &[app_id],
+                 WHERE om.organization_id = p.organization_id AND a.id = $1::text",
+            &[&app_id.as_str()],
         )
         .await;
     let _ = conn
-        .execute("DELETE FROM zeroship.apps WHERE id = $1", &[app_id])
+        .execute(
+            "DELETE FROM zeroship.apps WHERE id = $1::text",
+            &[&app_id.as_str()],
+        )
         .await;
 }
 
@@ -321,8 +327,8 @@ async fn cleanup_user(conn: &Client, user_id: &UserId) {
         .await;
 }
 
-async fn seed_app(conn: &Client, app_id: Uuid, owner_id: &UserId) {
-    cleanup_app(conn, &app_id).await;
+async fn seed_app(conn: &Client, app_id: &AppId, owner_id: &UserId) {
+    cleanup_app(conn, app_id).await;
     cleanup_user(conn, owner_id).await;
     let plan_id = "pln_migrated_phase1";
     conn.execute(
@@ -342,19 +348,19 @@ async fn seed_app(conn: &Client, app_id: Uuid, owner_id: &UserId) {
     )
     .await
     .expect("seed user");
-    let name = format!("migrated-{}", app_id.simple());
+    let name = format!("migrated-{}", app_id.as_str());
     // An app needs a project and a project needs an organization:
     // `apps.project_id` is NOT NULL against a RESTRICT foreign key, and the
     // organization is where `owner_id` is seated below. The seat is written by
     // joining `apps.project_id -> projects.organization_id`, the app's one path
     // to a human, so the two rows have to exist before it.
-    let organization_id = zeroship_core::typed_id::generate("org");
-    let project_id = zeroship_core::typed_id::generate("prj");
+    let organization_id = OrganizationId::mint();
+    let project_id = ProjectId::mint();
     conn.execute(
         "INSERT INTO zeroship.organizations (id, slug, name, billing_email) \
          VALUES ($1, $2, 'Migrate Fixture', 'fixture@zeroship.test')",
         &[
-            &organization_id,
+            &organization_id.as_str(),
             &format!("migrated-org-{}", Uuid::new_v4().simple()),
         ],
     )
@@ -363,23 +369,23 @@ async fn seed_app(conn: &Client, app_id: Uuid, owner_id: &UserId) {
     conn.execute(
         "INSERT INTO zeroship.projects (id, organization_id, slug, name) \
          VALUES ($1, $2, 'default', 'Default')",
-        &[&project_id, &organization_id],
+        &[&project_id.as_str(), &organization_id.as_str()],
     )
     .await
     .expect("seed project");
     conn.execute(
         "INSERT INTO zeroship.apps (id, name, plan_id, project_id, organization_id) \
-         SELECT $1, $2, $3, p.id, p.organization_id FROM zeroship.projects p WHERE p.id = $4",
-        &[&app_id, &name, &plan_id, &project_id],
+         SELECT $1::text, $2, $3, p.id, p.organization_id FROM zeroship.projects p WHERE p.id = $4",
+        &[&app_id.as_str(), &name, &plan_id, &project_id.as_str()],
     )
     .await
     .expect("seed app");
     conn.execute(
         "INSERT INTO zeroship.organization_members (organization_id, user_id, role) \
              SELECT p.organization_id, $2, 'owner' FROM zeroship.apps a \
-               JOIN zeroship.projects p ON p.id = a.project_id WHERE a.id = $1 \
+               JOIN zeroship.projects p ON p.id = a.project_id WHERE a.id = $1::text \
              ON CONFLICT (organization_id, user_id) DO UPDATE SET role = EXCLUDED.role",
-        &[&app_id, &owner_id.as_str()],
+        &[&app_id.as_str(), &owner_id.as_str()],
     )
     .await
     .expect("seed app owner");
@@ -452,7 +458,7 @@ fn state_for_with_dsns(
 /// silently change the fixture bodies under assertions that compare `raw_toml`. So
 /// the literals stay readable and this guard carries the currency check.
 fn assert_policy_fixtures_are_current(policy_config: &ManagedPolicyConfig) {
-    let app_id = Uuid::now_v7();
+    let app_id = AppId::mint();
     let parse = |body: &str| {
         policy_config.parse_draft(&zeroship_migrate_server::policy::CreatorPolicyDraft {
             filename: MIGRATE_POLICY_FILENAME,
@@ -545,14 +551,14 @@ fn state_for_with_policy_config_and_edge(
 /// refusal test needs to seed the former while leaving the latter absent.
 async fn post_database_create<S, E>(
     service: &ntex::service::Pipeline<S>,
-    database_id: Uuid,
+    database_id: &AppId,
     token: Option<&str>,
 ) -> (StatusCode, Value)
 where
     S: ntex::Service<ntex::http::Request, Response = web::WebResponse, Error = E>,
     E: std::fmt::Debug,
 {
-    let uri = format!("/v1/databases/{database_id}");
+    let uri = format!("/v1/databases/{}", database_id.as_str());
     let request = match token {
         Some(token) => test::TestRequest::post()
             .uri(&uri)
@@ -567,8 +573,11 @@ where
     (status, body)
 }
 
-async fn create_database<S, E>(service: &ntex::service::Pipeline<S>, database_id: Uuid, token: &str)
-where
+async fn create_database<S, E>(
+    service: &ntex::service::Pipeline<S>,
+    database_id: &AppId,
+    token: &str,
+) where
     S: ntex::Service<ntex::http::Request, Response = web::WebResponse, Error = E>,
     E: std::fmt::Debug,
 {
@@ -580,7 +589,7 @@ where
     );
     assert_eq!(
         body,
-        json!({"database_id": database_id}),
+        json!({"database_id": database_id.as_str()}),
         "database create returned the wrong identity"
     );
 }
@@ -1027,10 +1036,10 @@ fn quote_ident(ident: &str) -> String {
 /// left on it would return 0 forever and every `>= 1` assertion below would fail
 /// while the code was correct. `journal_is_absent_at_the_unfenced_name` is the
 /// case that keeps this helper honest by pinning the OTHER direction.
-async fn journaled_count(conn: &Client, app_id: &Uuid) -> i64 {
+async fn journaled_count(conn: &Client, app_id: &AppId) -> i64 {
     let q = format!(
         "\"{}\".__zeroship_schema_migrations",
-        app_id.to_string().replace('"', "\"\"")
+        app_derivation::schema_name(app_id).replace('"', "\"\"")
     );
     let lit = q.replace('\'', "''");
     let present = conn
@@ -1079,12 +1088,17 @@ async fn probe_bool(conn: &Client, sql: &str) -> bool {
 #[ntex::test]
 async fn create_database_is_idempotent_and_provisions_only_schema_and_migrator_pg() {
     let conn = admin_conn().await;
-    let database_id = Uuid::now_v7();
+    let database_id = AppId::mint();
     let owner_id = UserId::mint();
-    seed_app(&conn, database_id, &owner_id).await;
+    seed_app(&conn, &database_id, &owner_id).await;
 
     let auth = Arc::new(StaticAuthenticator::new());
-    auth.insert("good-token", &owner_id, [Scope::AppsDeploy], [database_id]);
+    auth.insert(
+        "good-token",
+        &owner_id,
+        [Scope::AppsDeploy],
+        [database_id.clone()],
+    );
     let (state, tmp) = state_for(auth);
     let service = test::init_service(
         web::App::new()
@@ -1093,10 +1107,10 @@ async fn create_database_is_idempotent_and_provisions_only_schema_and_migrator_p
     )
     .await;
 
-    let first = post_database_create(&service, database_id, Some("good-token")).await;
-    let second = post_database_create(&service, database_id, Some("good-token")).await;
+    let first = post_database_create(&service, &database_id, Some("good-token")).await;
+    let second = post_database_create(&service, &database_id, Some("good-token")).await;
 
-    let schema = database_id.to_string();
+    let schema = app_derivation::schema_name(&database_id);
     let migrator_role =
         zeroship_migrate_postgres::role::migrator_role_name(&schema).expect("migrator role name");
     let runtime_role =
@@ -1117,15 +1131,14 @@ async fn create_database_is_idempotent_and_provisions_only_schema_and_migrator_p
         ),
     )
     .await;
-    let workflow_schema = format!("app_{schema}");
-    let workflow_schema_exists = probe_bool(
-        &conn,
-        &format!(
-            "SELECT EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = '{}')",
-            workflow_schema.replace('\'', "''")
-        ),
-    )
-    .await;
+    // THE WORKFLOW JOURNAL SCHEMA IS NO LONGER A WITNESS HERE, and deleting the
+    // probe is the honest move rather than an omission. It was `app_<uuid>`
+    // beside a data schema of `<uuid>`, so its absence proved that create had
+    // not done apply-owned work. The journal schema is now
+    // `provisioning::workflow_journal_schema_name` of the tenant, which is the
+    // DATA schema this same test asserts create DOES make - so the probe would
+    // now be asserting that one name is both present and absent. The runtime
+    // role and the audit table below still witness the same boundary.
     let runtime_role_exists = probe_bool(
         &conn,
         &format!(
@@ -1142,8 +1155,8 @@ async fn create_database_is_idempotent_and_provisions_only_schema_and_migrator_p
     let audit_table_exists = relation_exists(&conn, &audit).await;
     let ledger_rows: i64 = conn
         .query_one(
-            "SELECT count(*)::int8 FROM zeroship.app_schema_applies WHERE app_id = $1",
-            &[&database_id],
+            "SELECT count(*)::int8 FROM zeroship.app_schema_applies WHERE app_id = $1::text",
+            &[&database_id.as_str()],
         )
         .await
         .expect("count create-only ledger rows")
@@ -1160,10 +1173,6 @@ async fn create_database_is_idempotent_and_provisions_only_schema_and_migrator_p
     assert!(
         migrator_role_exists,
         "create did not provision migrator role {migrator_role}"
-    );
-    assert!(
-        !workflow_schema_exists,
-        "create crossed into apply-owned workflow schema {workflow_schema}"
     );
     assert!(
         !runtime_role_exists,
@@ -1184,23 +1193,23 @@ async fn create_database_is_idempotent_and_provisions_only_schema_and_migrator_p
 #[ntex::test]
 async fn create_database_denials_leave_no_schema_role_or_ledger_pg() {
     let conn = admin_conn().await;
-    let database_id = Uuid::now_v7();
-    let other_app_id = Uuid::now_v7();
+    let database_id = AppId::mint();
+    let other_app_id = AppId::mint();
     let owner_id = UserId::mint();
-    seed_app(&conn, database_id, &owner_id).await;
+    seed_app(&conn, &database_id, &owner_id).await;
 
     let auth = Arc::new(StaticAuthenticator::new());
     auth.insert(
         "no-scope-token",
         &owner_id,
         [Scope::AppsRead],
-        [database_id],
+        [database_id.clone()],
     );
     auth.insert(
         "wrong-app-token",
         &owner_id,
         [Scope::AppsDeploy],
-        [other_app_id],
+        [other_app_id.clone()],
     );
     let (state, tmp) = state_for(auth);
     let service = test::init_service(
@@ -1210,11 +1219,11 @@ async fn create_database_denials_leave_no_schema_role_or_ledger_pg() {
     )
     .await;
 
-    let unauthenticated = post_database_create(&service, database_id, None).await;
-    let missing_scope = post_database_create(&service, database_id, Some("no-scope-token")).await;
-    let wrong_app = post_database_create(&service, database_id, Some("wrong-app-token")).await;
+    let unauthenticated = post_database_create(&service, &database_id, None).await;
+    let missing_scope = post_database_create(&service, &database_id, Some("no-scope-token")).await;
+    let wrong_app = post_database_create(&service, &database_id, Some("wrong-app-token")).await;
 
-    let schema = database_id.to_string();
+    let schema = app_derivation::schema_name(&database_id);
     let migrator_role =
         zeroship_migrate_postgres::role::migrator_role_name(&schema).expect("migrator role name");
     let schema_exists = probe_bool(
@@ -1235,8 +1244,8 @@ async fn create_database_denials_leave_no_schema_role_or_ledger_pg() {
     .await;
     let ledger_rows: i64 = conn
         .query_one(
-            "SELECT count(*)::int8 FROM zeroship.app_schema_applies WHERE app_id = $1",
-            &[&database_id],
+            "SELECT count(*)::int8 FROM zeroship.app_schema_applies WHERE app_id = $1::text",
+            &[&database_id.as_str()],
         )
         .await
         .expect("count denied-create ledger rows")
@@ -1279,15 +1288,20 @@ async fn create_database_denials_leave_no_schema_role_or_ledger_pg() {
 #[ntex::test]
 async fn apply_refuses_an_uncreated_database_before_provisioning_or_ledger_pg() {
     let conn = admin_conn().await;
-    let app_id = Uuid::now_v7();
+    let app_id = AppId::mint();
     let owner_id = UserId::mint();
-    seed_app(&conn, app_id, &owner_id).await;
+    seed_app(&conn, &app_id, &owner_id).await;
 
-    let schema = app_id.to_string();
+    let schema = app_derivation::schema_name(&app_id);
     let migrator_role =
         zeroship_migrate_postgres::role::migrator_role_name(&schema).expect("migrator role name");
     let auth = Arc::new(StaticAuthenticator::new());
-    auth.insert("good-token", &owner_id, [Scope::AppsDeploy], [app_id]);
+    auth.insert(
+        "good-token",
+        &owner_id,
+        [Scope::AppsDeploy],
+        [app_id.clone()],
+    );
     let (state, tmp) = state_for(auth);
     let svc = test::init_service(
         web::App::new()
@@ -1299,7 +1313,7 @@ async fn apply_refuses_an_uncreated_database_before_provisioning_or_ledger_pg() 
     let response = test::call_service(
         &svc,
         test::TestRequest::post()
-            .uri(&format!("/v1/apps/{app_id}/migrations/apply"))
+            .uri(&format!("/v1/apps/{}/migrations/apply", app_id.as_str()))
             .header("authorization", "Bearer good-token")
             .set_json(&create_notes_request())
             .to_request(),
@@ -1337,8 +1351,8 @@ async fn apply_refuses_an_uncreated_database_before_provisioning_or_ledger_pg() 
         .get(0);
     let ledger_rows: i64 = conn
         .query(
-            "SELECT count(*)::int8 FROM zeroship.app_schema_applies WHERE app_id = $1",
-            &[&app_id],
+            "SELECT count(*)::int8 FROM zeroship.app_schema_applies WHERE app_id = $1::text",
+            &[&app_id.as_str()],
         )
         .await
         .expect("count refused apply ledger rows")[0]
@@ -1356,7 +1370,7 @@ async fn apply_refuses_an_uncreated_database_before_provisioning_or_ledger_pg() 
     assert_eq!(body["error"], "database_not_created", "{body}");
     assert_eq!(
         body["remedy"],
-        format!("POST /v1/databases/{app_id}"),
+        format!("POST /v1/databases/{}", app_id.as_str()),
         "the body must name the explicit operation that makes a retry valid: {body}"
     );
     assert!(!schema_exists, "a refused apply created schema {schema}");
@@ -1443,12 +1457,17 @@ async fn as_app_runtime_identity(
 #[ntex::test]
 async fn a_created_then_migrated_database_is_usable_by_the_runtime_role_pg() {
     let conn = admin_conn().await;
-    let app_id = Uuid::now_v7();
+    let app_id = AppId::mint();
     let owner_id = UserId::mint();
-    seed_app(&conn, app_id, &owner_id).await;
+    seed_app(&conn, &app_id, &owner_id).await;
 
     let auth = Arc::new(StaticAuthenticator::new());
-    auth.insert("good-token", &owner_id, [Scope::AppsDeploy], [app_id]);
+    auth.insert(
+        "good-token",
+        &owner_id,
+        [Scope::AppsDeploy],
+        [app_id.clone()],
+    );
     let (state, tmp) = state_for(auth);
     let svc = test::init_service(
         web::App::new()
@@ -1456,17 +1475,17 @@ async fn a_created_then_migrated_database_is_usable_by_the_runtime_role_pg() {
             .configure(zeroship_migrate_server::configure),
     )
     .await;
-    create_database(&svc, app_id, "good-token").await;
+    create_database(&svc, &app_id, "good-token").await;
 
     let req = test::TestRequest::post()
-        .uri(&format!("/v1/apps/{app_id}/migrations/apply"))
+        .uri(&format!("/v1/apps/{}/migrations/apply", app_id.as_str()))
         .header("authorization", "Bearer good-token")
         .set_json(&create_notes_request())
         .to_request();
     let resp = test::call_service(&svc, req).await;
     assert_eq!(resp.status(), StatusCode::OK);
 
-    let schema = app_id.to_string();
+    let schema = app_derivation::schema_name(&app_id);
     let table = format!("{}.{}", quote_ident(&schema), quote_ident("notes"));
     let runtime_role =
         zeroship_core::database_role::per_app_role_name(&schema).expect("test app role name");
@@ -1591,12 +1610,17 @@ async fn a_created_then_migrated_database_is_usable_by_the_runtime_role_pg() {
 #[ntex::test]
 async fn a_real_apply_leaves_the_runtime_role_able_to_write_the_unmask_audit_row_pg() {
     let conn = admin_conn().await;
-    let app_id = Uuid::now_v7();
+    let app_id = AppId::mint();
     let owner_id = UserId::mint();
-    seed_app(&conn, app_id, &owner_id).await;
+    seed_app(&conn, &app_id, &owner_id).await;
 
     let auth = Arc::new(StaticAuthenticator::new());
-    auth.insert("good-token", &owner_id, [Scope::AppsDeploy], [app_id]);
+    auth.insert(
+        "good-token",
+        &owner_id,
+        [Scope::AppsDeploy],
+        [app_id.clone()],
+    );
     let (state, tmp) = state_for(auth);
     let svc = test::init_service(
         web::App::new()
@@ -1604,17 +1628,17 @@ async fn a_real_apply_leaves_the_runtime_role_able_to_write_the_unmask_audit_row
             .configure(zeroship_migrate_server::configure),
     )
     .await;
-    create_database(&svc, app_id, "good-token").await;
+    create_database(&svc, &app_id, "good-token").await;
 
     let req = test::TestRequest::post()
-        .uri(&format!("/v1/apps/{app_id}/migrations/apply"))
+        .uri(&format!("/v1/apps/{}/migrations/apply", app_id.as_str()))
         .header("authorization", "Bearer good-token")
         .set_json(&create_notes_request())
         .to_request();
     let resp = test::call_service(&svc, req).await;
     assert_eq!(resp.status(), StatusCode::OK);
 
-    let schema = app_id.to_string();
+    let schema = app_derivation::schema_name(&app_id);
     let table = zeroship_migrate_server::provisioning::AUDIT_UNMASK_TABLE;
     let audit = format!("{}.{}", quote_ident(&schema), quote_ident(table));
     let runtime_role =
@@ -1680,12 +1704,17 @@ async fn a_real_apply_leaves_the_runtime_role_able_to_write_the_unmask_audit_row
 #[ntex::test]
 async fn apply_api_accepts_apps_migrate_owner_and_applies_ir_pg() {
     let conn = admin_conn().await;
-    let app_id = Uuid::now_v7();
+    let app_id = AppId::mint();
     let owner_id = UserId::mint();
-    seed_app(&conn, app_id, &owner_id).await;
+    seed_app(&conn, &app_id, &owner_id).await;
 
     let auth = Arc::new(StaticAuthenticator::new());
-    auth.insert("good-token", &owner_id, [Scope::AppsDeploy], [app_id]);
+    auth.insert(
+        "good-token",
+        &owner_id,
+        [Scope::AppsDeploy],
+        [app_id.clone()],
+    );
     let (state, tmp) = state_for(auth);
     let svc = test::init_service(
         web::App::new()
@@ -1693,10 +1722,10 @@ async fn apply_api_accepts_apps_migrate_owner_and_applies_ir_pg() {
             .configure(zeroship_migrate_server::configure),
     )
     .await;
-    create_database(&svc, app_id, "good-token").await;
+    create_database(&svc, &app_id, "good-token").await;
 
     let req = test::TestRequest::post()
-        .uri(&format!("/v1/apps/{app_id}/migrations/apply"))
+        .uri(&format!("/v1/apps/{}/migrations/apply", app_id.as_str()))
         .header("authorization", "Bearer good-token")
         .set_json(&create_notes_request())
         .to_request();
@@ -1708,7 +1737,7 @@ async fn apply_api_accepts_apps_migrate_owner_and_applies_ir_pg() {
         "IR apply response should include applied journal versions: {body}"
     );
     assert!(
-        table_exists(&conn, &app_id.to_string(), "notes").await,
+        table_exists(&conn, &app_derivation::schema_name(&app_id), "notes").await,
         "notes table must exist in the per-app schema"
     );
     assert!(
@@ -1732,13 +1761,23 @@ async fn apply_api_accepts_apps_migrate_owner_and_applies_ir_pg() {
     assert!(
         !relation_exists(
             &conn,
-            &format!("\"{app_id}_migrations\".__zeroship_schema_migrations")
+            &format!(
+                "\"{}_migrations\".__zeroship_schema_migrations",
+                app_id.as_str()
+            )
         )
         .await,
         "the separate <app>_migrations meta schema must be gone"
     );
     assert!(
-        !relation_exists(&conn, &format!("\"{app_id}\".schema_migrations")).await,
+        !relation_exists(
+            &conn,
+            &format!(
+                "\"{}\".schema_migrations",
+                app_derivation::schema_name(&app_id)
+            )
+        )
+        .await,
         "the journal must NOT occupy the unfenced name a creator could declare"
     );
 
@@ -1862,12 +1901,17 @@ scope = "all"
 async fn project_lock_spans_every_file_and_the_terminal_ledger_write_pg() {
     let conn = admin_conn().await;
     let ledger_conn = admin_conn().await;
-    let app_id = Uuid::now_v7();
+    let app_id = AppId::mint();
     let owner_id = UserId::mint();
-    seed_app(&conn, app_id, &owner_id).await;
+    seed_app(&conn, &app_id, &owner_id).await;
 
     let auth = Arc::new(StaticAuthenticator::new());
-    auth.insert("good-token", &owner_id, [Scope::AppsDeploy], [app_id]);
+    auth.insert(
+        "good-token",
+        &owner_id,
+        [Scope::AppsDeploy],
+        [app_id.clone()],
+    );
     let (create_state, create_tmp) = state_for(auth);
     let create_service = test::init_service(
         web::App::new()
@@ -1875,7 +1919,7 @@ async fn project_lock_spans_every_file_and_the_terminal_ledger_write_pg() {
             .configure(zeroship_migrate_server::configure),
     )
     .await;
-    create_database(&create_service, app_id, "good-token").await;
+    create_database(&create_service, &app_id, "good-token").await;
 
     let tmp = tmpdir("project-lock-span");
     let policy_config = ManagedPolicyConfig::default_confined(TEST_POLICY_SEAL_KEY.to_vec(), 1)
@@ -1897,7 +1941,7 @@ async fn project_lock_spans_every_file_and_the_terminal_ledger_write_pg() {
 
     let notes = format!(
         "{}.{}",
-        quote_ident(&app_id.to_string()),
+        quote_ident(&app_derivation::schema_name(&app_id)),
         quote_ident("notes")
     );
     conn.batch_execute(&format!("BEGIN; LOCK TABLE {notes} IN ACCESS SHARE MODE;"))
@@ -1906,6 +1950,7 @@ async fn project_lock_spans_every_file_and_the_terminal_ledger_write_pg() {
 
     let apply_dsn = dsn();
     let apply_tmp = tmp.clone();
+    let apply_app_id = app_id.clone();
     let request: ApplyMigrationsRequest =
         serde_json::from_value(lock_span_request()).expect("deserialize lock-span apply request");
     let task_owner_id = owner_id.clone();
@@ -1916,7 +1961,7 @@ async fn project_lock_spans_every_file_and_the_terminal_ledger_write_pg() {
         apply_ir_documents(
             &apply_dsn,
             &apply_tmp,
-            &app_id,
+            &apply_app_id,
             &request,
             &policy_config,
             &schema_apply_store,
@@ -1951,7 +1996,7 @@ async fn project_lock_spans_every_file_and_the_terminal_ledger_write_pg() {
             "SELECT pg_try_advisory_lock( \
                     (h >> 32)::int4, ((h << 32) >> 32)::int4 \
                ) FROM (SELECT hashtextextended($1, 0) AS h) AS project_lock_key",
-            &[&app_id.to_string()],
+            &[&app_derivation::schema_name(&app_id)],
         )
         .await
         .expect("probe the apply's project advisory lock")
@@ -1964,7 +2009,7 @@ async fn project_lock_spans_every_file_and_the_terminal_ledger_write_pg() {
             "SELECT pg_advisory_unlock( \
                     (h >> 32)::int4, ((h << 32) >> 32)::int4 \
                ) FROM (SELECT hashtextextended($1, 0) AS h) AS project_lock_key",
-            &[&app_id.to_string()],
+            &[&app_derivation::schema_name(&app_id)],
         )
         .await
         .expect("release unexpectedly acquired project lock");
@@ -1978,10 +2023,10 @@ async fn project_lock_spans_every_file_and_the_terminal_ledger_write_pg() {
         let rows = ledger_conn
             .query(
                 "SELECT migration_id FROM zeroship.app_schema_applies \
-                  WHERE app_id = $1 AND status = 'submitted' \
+                  WHERE app_id = $1::text AND status = 'submitted' \
                   ORDER BY submitted_at DESC, migration_id DESC \
                   FOR UPDATE",
-                &[&app_id],
+                &[&app_id.as_str()],
             )
             .await
             .expect("lock the in-flight apply's submitted ledger row");
@@ -2031,7 +2076,7 @@ async fn project_lock_spans_every_file_and_the_terminal_ledger_write_pg() {
             "SELECT pg_try_advisory_lock( \
                     (h >> 32)::int4, ((h << 32) >> 32)::int4 \
                ) FROM (SELECT hashtextextended($1, 0) AS h) AS project_lock_key",
-            &[&app_id.to_string()],
+            &[&app_derivation::schema_name(&app_id)],
         )
         .await
         .expect("probe the project lock while mark_applied is blocked")
@@ -2044,7 +2089,7 @@ async fn project_lock_spans_every_file_and_the_terminal_ledger_write_pg() {
             "SELECT pg_advisory_unlock( \
                     (h >> 32)::int4, ((h << 32) >> 32)::int4 \
                ) FROM (SELECT hashtextextended($1, 0) AS h) AS project_lock_key",
-            &[&app_id.to_string()],
+            &[&app_derivation::schema_name(&app_id)],
         )
         .await
         .expect("release unexpectedly acquired terminal project lock");
@@ -2066,7 +2111,7 @@ async fn project_lock_spans_every_file_and_the_terminal_ledger_write_pg() {
                     AND table_name = 'notes' \
                     AND column_name = 'lock_span_file_two' \
              )",
-            &[&app_id.to_string()],
+            &[&app_derivation::schema_name(&app_id)],
         )
         .await
         .expect("observe the final file's completed schema effect")
@@ -2129,12 +2174,17 @@ async fn project_lock_spans_every_file_and_the_terminal_ledger_write_pg() {
 #[ntex::test]
 async fn a_destructive_migration_is_not_parked_for_operator_approval_pg() {
     let conn = admin_conn().await;
-    let app_id = Uuid::now_v7();
+    let app_id = AppId::mint();
     let owner_id = UserId::mint();
-    seed_app(&conn, app_id, &owner_id).await;
+    seed_app(&conn, &app_id, &owner_id).await;
 
     let auth = Arc::new(StaticAuthenticator::new());
-    auth.insert("good-token", &owner_id, [Scope::AppsDeploy], [app_id]);
+    auth.insert(
+        "good-token",
+        &owner_id,
+        [Scope::AppsDeploy],
+        [app_id.clone()],
+    );
     let (state, tmp) = state_for(auth);
     let svc = test::init_service(
         web::App::new()
@@ -2142,11 +2192,11 @@ async fn a_destructive_migration_is_not_parked_for_operator_approval_pg() {
             .configure(zeroship_migrate_server::configure),
     )
     .await;
-    create_database(&svc, app_id, "good-token").await;
+    create_database(&svc, &app_id, "good-token").await;
 
     let post = |body: Value| {
         test::TestRequest::post()
-            .uri(&format!("/v1/apps/{app_id}/migrations/apply"))
+            .uri(&format!("/v1/apps/{}/migrations/apply", app_id.as_str()))
             .header("authorization", "Bearer good-token")
             .set_json(&body)
             .to_request()
@@ -2196,12 +2246,17 @@ async fn a_destructive_migration_is_not_parked_for_operator_approval_pg() {
 #[ntex::test]
 async fn what_refuses_a_creator_migration_that_names_the_platform_journal_pg() {
     let conn = admin_conn().await;
-    let app_id = Uuid::now_v7();
+    let app_id = AppId::mint();
     let owner_id = UserId::mint();
-    seed_app(&conn, app_id, &owner_id).await;
+    seed_app(&conn, &app_id, &owner_id).await;
 
     let auth = Arc::new(StaticAuthenticator::new());
-    auth.insert("good-token", &owner_id, [Scope::AppsDeploy], [app_id]);
+    auth.insert(
+        "good-token",
+        &owner_id,
+        [Scope::AppsDeploy],
+        [app_id.clone()],
+    );
     let (state, tmp) = state_for(auth);
     let svc = test::init_service(
         web::App::new()
@@ -2209,11 +2264,11 @@ async fn what_refuses_a_creator_migration_that_names_the_platform_journal_pg() {
             .configure(zeroship_migrate_server::configure),
     )
     .await;
-    create_database(&svc, app_id, "good-token").await;
+    create_database(&svc, &app_id, "good-token").await;
 
     let post = |body: Value| {
         test::TestRequest::post()
-            .uri(&format!("/v1/apps/{app_id}/migrations/apply"))
+            .uri(&format!("/v1/apps/{}/migrations/apply", app_id.as_str()))
             .header("authorization", "Bearer good-token")
             .set_json(&body)
             .to_request()
@@ -2264,7 +2319,14 @@ async fn what_refuses_a_creator_migration_that_names_the_platform_journal_pg() {
              comment above is now wrong: {body}"
         );
         assert!(
-            relation_exists(&conn, &format!("\"{app_id}\".__zeroship_schema_migrations")).await,
+            relation_exists(
+                &conn,
+                &format!(
+                    "\"{}\".__zeroship_schema_migrations",
+                    app_derivation::schema_name(&app_id)
+                )
+            )
+            .await,
             "the journal must still exist after a refused {label}"
         );
     }
@@ -2276,11 +2338,16 @@ async fn what_refuses_a_creator_migration_that_names_the_platform_journal_pg() {
 
     // ARM 2: AN APP THAT HAS NEVER MIGRATED. The refusal must come from the name
     // gate rather than from colliding with a journal an earlier request created.
-    let fresh_id = Uuid::now_v7();
+    let fresh_id = AppId::mint();
     let fresh_owner = UserId::mint();
-    seed_app(&conn, fresh_id, &fresh_owner).await;
+    seed_app(&conn, &fresh_id, &fresh_owner).await;
     let fresh_auth = Arc::new(StaticAuthenticator::new());
-    fresh_auth.insert("good-token", &fresh_owner, [Scope::AppsDeploy], [fresh_id]);
+    fresh_auth.insert(
+        "good-token",
+        &fresh_owner,
+        [Scope::AppsDeploy],
+        [fresh_id.clone()],
+    );
     let (fresh_state, fresh_tmp) = state_for(fresh_auth);
     let fresh_svc = test::init_service(
         web::App::new()
@@ -2288,11 +2355,14 @@ async fn what_refuses_a_creator_migration_that_names_the_platform_journal_pg() {
             .configure(zeroship_migrate_server::configure),
     )
     .await;
-    create_database(&fresh_svc, fresh_id, "good-token").await;
+    create_database(&fresh_svc, &fresh_id, "good-token").await;
     assert!(
         !relation_exists(
             &conn,
-            &format!("\"{fresh_id}\".__zeroship_schema_migrations")
+            &format!(
+                "\"{}\".__zeroship_schema_migrations",
+                app_derivation::schema_name(&fresh_id)
+            )
         )
         .await,
         "this arm only means anything against an app with NO journal yet"
@@ -2300,7 +2370,7 @@ async fn what_refuses_a_creator_migration_that_names_the_platform_journal_pg() {
     let resp = test::call_service(
         &fresh_svc,
         test::TestRequest::post()
-            .uri(&format!("/v1/apps/{fresh_id}/migrations/apply"))
+            .uri(&format!("/v1/apps/{}/migrations/apply", fresh_id.as_str()))
             .header("authorization", "Bearer good-token")
             .set_json(&create_platform_journal_table_request())
             .to_request(),
@@ -2330,12 +2400,12 @@ async fn what_refuses_a_creator_migration_that_names_the_platform_journal_pg() {
 }
 
 /// Every applied `(descriptor_sha256, applied_at)` for an app, newest last.
-async fn applied_descriptors(conn: &Client, app_id: &Uuid) -> Vec<Option<String>> {
+async fn applied_descriptors(conn: &Client, app_id: &AppId) -> Vec<Option<String>> {
     conn.query(
         "SELECT descriptor_sha256 FROM zeroship.app_schema_applies \
-          WHERE app_id = $1 AND status = 'applied' \
+          WHERE app_id = $1::text AND status = 'applied' \
           ORDER BY applied_at ASC, submitted_at ASC, migration_id ASC",
-        &[app_id],
+        &[&app_id.as_str()],
     )
     .await
     .expect("query applied descriptors")
@@ -2346,12 +2416,12 @@ async fn applied_descriptors(conn: &Client, app_id: &Uuid) -> Vec<Option<String>
 
 /// Every applied row's `applied_versions`, newest last - the engine's own
 /// `outcome.applied` for that request.
-async fn applied_versions(conn: &Client, app_id: &Uuid) -> Vec<Value> {
+async fn applied_versions(conn: &Client, app_id: &AppId) -> Vec<Value> {
     conn.query(
         "SELECT applied_versions FROM zeroship.app_schema_applies \
-          WHERE app_id = $1 AND status = 'applied' \
+          WHERE app_id = $1::text AND status = 'applied' \
           ORDER BY applied_at ASC, submitted_at ASC, migration_id ASC",
-        &[app_id],
+        &[&app_id.as_str()],
     )
     .await
     .expect("query applied versions")
@@ -2370,11 +2440,11 @@ async fn applied_versions(conn: &Client, app_id: &Uuid) -> Vec<Value> {
 #[ntex::test]
 async fn a_post_ddl_failure_closes_the_schema_apply_ledger_row_pg() {
     let conn = admin_conn().await;
-    let app_id = Uuid::now_v7();
+    let app_id = AppId::mint();
     let owner_id = UserId::mint();
-    seed_app(&conn, app_id, &owner_id).await;
+    seed_app(&conn, &app_id, &owner_id).await;
 
-    let publication = zeroship_core::replication_names::publication_name(&app_id.to_string())
+    let publication = zeroship_core::replication_names::publication_name(app_id.as_str())
         .expect("app id is a valid publication seed");
     conn.batch_execute(&format!(
         "CREATE PUBLICATION {} FOR ALL TABLES",
@@ -2384,7 +2454,12 @@ async fn a_post_ddl_failure_closes_the_schema_apply_ledger_row_pg() {
     .expect("create the incompatible publication fixture");
 
     let auth = Arc::new(StaticAuthenticator::new());
-    auth.insert("good-token", &owner_id, [Scope::AppsDeploy], [app_id]);
+    auth.insert(
+        "good-token",
+        &owner_id,
+        [Scope::AppsDeploy],
+        [app_id.clone()],
+    );
     let (state, tmp) = state_for(auth);
     let svc = test::init_service(
         web::App::new()
@@ -2392,10 +2467,10 @@ async fn a_post_ddl_failure_closes_the_schema_apply_ledger_row_pg() {
             .configure(zeroship_migrate_server::configure),
     )
     .await;
-    create_database(&svc, app_id, "good-token").await;
+    create_database(&svc, &app_id, "good-token").await;
 
     let req = test::TestRequest::post()
-        .uri(&format!("/v1/apps/{app_id}/migrations/apply"))
+        .uri(&format!("/v1/apps/{}/migrations/apply", app_id.as_str()))
         .header("authorization", "Bearer good-token")
         .set_json(&create_notes_request())
         .to_request();
@@ -2403,12 +2478,12 @@ async fn a_post_ddl_failure_closes_the_schema_apply_ledger_row_pg() {
     let response_status = resp.status();
     let response_body: Value =
         serde_json::from_slice(&test::read_body(resp).await).expect("json body");
-    let ddl_committed = table_exists(&conn, &app_id.to_string(), "notes").await;
+    let ddl_committed = table_exists(&conn, &app_derivation::schema_name(&app_id), "notes").await;
     let ledger = conn
         .query(
             "SELECT status, last_error FROM zeroship.app_schema_applies \
-              WHERE app_id = $1 ORDER BY submitted_at ASC, migration_id ASC",
-            &[&app_id],
+              WHERE app_id = $1::text ORDER BY submitted_at ASC, migration_id ASC",
+            &[&app_id.as_str()],
         )
         .await
         .expect("query the failed apply ledger row")
@@ -2470,12 +2545,17 @@ async fn a_post_ddl_failure_closes_the_schema_apply_ledger_row_pg() {
 #[ntex::test]
 async fn a_truncated_history_cannot_move_the_schema_ledger_backwards_pg() {
     let conn = admin_conn().await;
-    let app_id = Uuid::now_v7();
+    let app_id = AppId::mint();
     let owner_id = UserId::mint();
-    seed_app(&conn, app_id, &owner_id).await;
+    seed_app(&conn, &app_id, &owner_id).await;
 
     let auth = Arc::new(StaticAuthenticator::new());
-    auth.insert("good-token", &owner_id, [Scope::AppsDeploy], [app_id]);
+    auth.insert(
+        "good-token",
+        &owner_id,
+        [Scope::AppsDeploy],
+        [app_id.clone()],
+    );
     let (state, tmp) = state_for(auth);
     let svc = test::init_service(
         web::App::new()
@@ -2483,10 +2563,10 @@ async fn a_truncated_history_cannot_move_the_schema_ledger_backwards_pg() {
             .configure(zeroship_migrate_server::configure),
     )
     .await;
-    create_database(&svc, app_id, "good-token").await;
+    create_database(&svc, &app_id, "good-token").await;
     let post = |body: Value| {
         test::TestRequest::post()
-            .uri(&format!("/v1/apps/{app_id}/migrations/apply"))
+            .uri(&format!("/v1/apps/{}/migrations/apply", app_id.as_str()))
             .header("authorization", "Bearer good-token")
             .set_json(&body)
             .to_request()
@@ -2517,9 +2597,9 @@ async fn a_truncated_history_cannot_move_the_schema_ledger_backwards_pg() {
         .query(
             "SELECT status, descriptor_sha256, applied_versions \
                FROM zeroship.app_schema_applies \
-              WHERE app_id = $1 \
+              WHERE app_id = $1::text \
               ORDER BY submitted_at ASC, migration_id ASC",
-            &[&app_id],
+            &[&app_id.as_str()],
         )
         .await
         .expect("read every ledger row for the rollback attempt")
@@ -2570,12 +2650,17 @@ async fn a_truncated_history_cannot_move_the_schema_ledger_backwards_pg() {
 #[ntex::test]
 async fn a_re_apply_that_applies_nothing_still_records_the_new_descriptor_pg() {
     let conn = admin_conn().await;
-    let app_id = Uuid::now_v7();
+    let app_id = AppId::mint();
     let owner_id = UserId::mint();
-    seed_app(&conn, app_id, &owner_id).await;
+    seed_app(&conn, &app_id, &owner_id).await;
 
     let auth = Arc::new(StaticAuthenticator::new());
-    auth.insert("good-token", &owner_id, [Scope::AppsDeploy], [app_id]);
+    auth.insert(
+        "good-token",
+        &owner_id,
+        [Scope::AppsDeploy],
+        [app_id.clone()],
+    );
     let (state, tmp) = state_for(auth);
     let svc = test::init_service(
         web::App::new()
@@ -2583,11 +2668,11 @@ async fn a_re_apply_that_applies_nothing_still_records_the_new_descriptor_pg() {
             .configure(zeroship_migrate_server::configure),
     )
     .await;
-    create_database(&svc, app_id, "good-token").await;
+    create_database(&svc, &app_id, "good-token").await;
 
     let post = |body: Value| {
         test::TestRequest::post()
-            .uri(&format!("/v1/apps/{app_id}/migrations/apply"))
+            .uri(&format!("/v1/apps/{}/migrations/apply", app_id.as_str()))
             .header("authorization", "Bearer good-token")
             .set_json(&body)
             .to_request()
@@ -2650,10 +2735,15 @@ async fn a_re_apply_that_applies_nothing_still_records_the_new_descriptor_pg() {
 
 #[ntex::test]
 async fn apply_api_5xx_detail_is_generic_and_does_not_leak_internals() {
-    let app_id = Uuid::now_v7();
+    let app_id = AppId::mint();
     let owner_id = UserId::mint();
     let auth = Arc::new(StaticAuthenticator::new());
-    auth.insert("good-token", &owner_id, [Scope::AppsDeploy], [app_id]);
+    auth.insert(
+        "good-token",
+        &owner_id,
+        [Scope::AppsDeploy],
+        [app_id.clone()],
+    );
     let bad_provision_dsn =
         "host=127.0.0.1 port=1 user=postgres password=zeroship dbname=zeroship_control_test"
             .to_string();
@@ -2666,7 +2756,7 @@ async fn apply_api_5xx_detail_is_generic_and_does_not_leak_internals() {
     .await;
 
     let req = test::TestRequest::post()
-        .uri(&format!("/v1/apps/{app_id}/migrations/apply"))
+        .uri(&format!("/v1/apps/{}/migrations/apply", app_id.as_str()))
         .header("authorization", "Bearer good-token")
         .set_json(&with_policy(create_notes_request(), tighter_policy()))
         .to_request();
@@ -2688,10 +2778,15 @@ async fn apply_api_5xx_detail_is_generic_and_does_not_leak_internals() {
 
 #[ntex::test]
 async fn apply_api_rejects_bearer_without_apps_migrate_scope() {
-    let app_id = Uuid::now_v7();
+    let app_id = AppId::mint();
     let owner_id = UserId::mint();
     let auth = Arc::new(StaticAuthenticator::new());
-    auth.insert("no-scope-token", &owner_id, [Scope::AppsRead], [app_id]);
+    auth.insert(
+        "no-scope-token",
+        &owner_id,
+        [Scope::AppsRead],
+        [app_id.clone()],
+    );
     let (state, tmp) = state_for(auth);
     let svc = test::init_service(
         web::App::new()
@@ -2701,7 +2796,7 @@ async fn apply_api_rejects_bearer_without_apps_migrate_scope() {
     .await;
 
     let req = test::TestRequest::post()
-        .uri(&format!("/v1/apps/{app_id}/migrations/apply"))
+        .uri(&format!("/v1/apps/{}/migrations/apply", app_id.as_str()))
         .header("authorization", "Bearer no-scope-token")
         .set_json(&create_notes_request())
         .to_request();
@@ -2713,15 +2808,15 @@ async fn apply_api_rejects_bearer_without_apps_migrate_scope() {
 
 #[ntex::test]
 async fn apply_api_rejects_bearer_for_different_app() {
-    let app_id = Uuid::now_v7();
-    let other_app = Uuid::now_v7();
+    let app_id = AppId::mint();
+    let other_app = AppId::mint();
     let owner_id = UserId::mint();
     let auth = Arc::new(StaticAuthenticator::new());
     auth.insert(
         "wrong-app-token",
         &owner_id,
         [Scope::AppsDeploy],
-        [other_app],
+        [other_app.clone()],
     );
     let (state, tmp) = state_for(auth);
     let svc = test::init_service(
@@ -2732,7 +2827,7 @@ async fn apply_api_rejects_bearer_for_different_app() {
     .await;
 
     let req = test::TestRequest::post()
-        .uri(&format!("/v1/apps/{app_id}/migrations/apply"))
+        .uri(&format!("/v1/apps/{}/migrations/apply", app_id.as_str()))
         .header("authorization", "Bearer wrong-app-token")
         .set_json(&create_notes_request())
         .to_request();
@@ -2745,12 +2840,17 @@ async fn apply_api_rejects_bearer_for_different_app() {
 #[ntex::test]
 async fn apply_api_rejects_confined_denied_vendor_op_pg() {
     let conn = admin_conn().await;
-    let app_id = Uuid::now_v7();
+    let app_id = AppId::mint();
     let owner_id = UserId::mint();
-    seed_app(&conn, app_id, &owner_id).await;
+    seed_app(&conn, &app_id, &owner_id).await;
 
     let auth = Arc::new(StaticAuthenticator::new());
-    auth.insert("good-token", &owner_id, [Scope::AppsDeploy], [app_id]);
+    auth.insert(
+        "good-token",
+        &owner_id,
+        [Scope::AppsDeploy],
+        [app_id.clone()],
+    );
     let (state, tmp) = state_for(auth);
     let svc = test::init_service(
         web::App::new()
@@ -2758,10 +2858,10 @@ async fn apply_api_rejects_confined_denied_vendor_op_pg() {
             .configure(zeroship_migrate_server::configure),
     )
     .await;
-    create_database(&svc, app_id, "good-token").await;
+    create_database(&svc, &app_id, "good-token").await;
 
     let req = test::TestRequest::post()
-        .uri(&format!("/v1/apps/{app_id}/migrations/apply"))
+        .uri(&format!("/v1/apps/{}/migrations/apply", app_id.as_str()))
         .header("authorization", "Bearer good-token")
         .set_json(&denied_vendor_request())
         .to_request();
@@ -2807,12 +2907,17 @@ async fn apply_api_rejects_confined_denied_vendor_op_pg() {
 #[ntex::test]
 async fn apply_api_reports_malformed_ir_as_creator_fault_pg() {
     let conn = admin_conn().await;
-    let app_id = Uuid::now_v7();
+    let app_id = AppId::mint();
     let owner_id = UserId::mint();
-    seed_app(&conn, app_id, &owner_id).await;
+    seed_app(&conn, &app_id, &owner_id).await;
 
     let auth = Arc::new(StaticAuthenticator::new());
-    auth.insert("good-token", &owner_id, [Scope::AppsDeploy], [app_id]);
+    auth.insert(
+        "good-token",
+        &owner_id,
+        [Scope::AppsDeploy],
+        [app_id.clone()],
+    );
     let (state, tmp) = state_for(auth);
     let svc = test::init_service(
         web::App::new()
@@ -2820,7 +2925,7 @@ async fn apply_api_reports_malformed_ir_as_creator_fault_pg() {
             .configure(zeroship_migrate_server::configure),
     )
     .await;
-    create_database(&svc, app_id, "good-token").await;
+    create_database(&svc, &app_id, "good-token").await;
 
     // A JSON object, so it clears validate_request_shape, but not an IR envelope.
     let malformed = json!({
@@ -2833,7 +2938,7 @@ async fn apply_api_reports_malformed_ir_as_creator_fault_pg() {
     });
 
     let req = test::TestRequest::post()
-        .uri(&format!("/v1/apps/{app_id}/migrations/apply"))
+        .uri(&format!("/v1/apps/{}/migrations/apply", app_id.as_str()))
         .header("authorization", "Bearer good-token")
         .set_json(&malformed)
         .to_request();
@@ -2854,7 +2959,7 @@ async fn apply_api_reports_malformed_ir_as_creator_fault_pg() {
     // request against this same fixture succeeds. Without it, "422" is also what a
     // service that rejected everything would return.
     let req = test::TestRequest::post()
-        .uri(&format!("/v1/apps/{app_id}/migrations/apply"))
+        .uri(&format!("/v1/apps/{}/migrations/apply", app_id.as_str()))
         .header("authorization", "Bearer good-token")
         .set_json(&create_notes_request())
         .to_request();
@@ -2872,10 +2977,15 @@ async fn apply_api_reports_malformed_ir_as_creator_fault_pg() {
 
 #[ntex::test]
 async fn apply_api_rejects_policy_draft_escalation_without_clamping() {
-    let app_id = Uuid::now_v7();
+    let app_id = AppId::mint();
     let owner_id = UserId::mint();
     let auth = Arc::new(StaticAuthenticator::new());
-    auth.insert("good-token", &owner_id, [Scope::AppsDeploy], [app_id]);
+    auth.insert(
+        "good-token",
+        &owner_id,
+        [Scope::AppsDeploy],
+        [app_id.clone()],
+    );
     let (state, tmp) = state_for(auth);
     let svc = test::init_service(
         web::App::new()
@@ -2885,7 +2995,7 @@ async fn apply_api_rejects_policy_draft_escalation_without_clamping() {
     .await;
 
     let req = test::TestRequest::post()
-        .uri(&format!("/v1/apps/{app_id}/migrations/apply"))
+        .uri(&format!("/v1/apps/{}/migrations/apply", app_id.as_str()))
         .header("authorization", "Bearer good-token")
         .set_json(&with_policy(create_notes_request(), escalating_policy()))
         .to_request();
@@ -2904,10 +3014,15 @@ async fn apply_api_rejects_policy_draft_escalation_without_clamping() {
 
 #[ntex::test]
 async fn apply_api_rejects_malformed_policy_draft_fail_closed() {
-    let app_id = Uuid::now_v7();
+    let app_id = AppId::mint();
     let owner_id = UserId::mint();
     let auth = Arc::new(StaticAuthenticator::new());
-    auth.insert("good-token", &owner_id, [Scope::AppsDeploy], [app_id]);
+    auth.insert(
+        "good-token",
+        &owner_id,
+        [Scope::AppsDeploy],
+        [app_id.clone()],
+    );
     let (state, tmp) = state_for(auth);
     let svc = test::init_service(
         web::App::new()
@@ -2917,7 +3032,7 @@ async fn apply_api_rejects_malformed_policy_draft_fail_closed() {
     .await;
 
     let req = test::TestRequest::post()
-        .uri(&format!("/v1/apps/{app_id}/migrations/apply"))
+        .uri(&format!("/v1/apps/{}/migrations/apply", app_id.as_str()))
         .header("authorization", "Bearer good-token")
         .set_json(&with_policy(create_notes_request(), malformed_policy()))
         .to_request();
@@ -2940,7 +3055,7 @@ async fn apply_api_rejects_malformed_policy_draft_fail_closed() {
 /// while a different source still owns an independent bucket.
 #[ntex::test]
 async fn apply_api_rate_limits_each_source_ip_across_the_shared_store_pg() {
-    let app_id = Uuid::now_v7();
+    let app_id = AppId::mint();
     let owner_id = UserId::mint();
     let bucket_keys = [
         "migrate:mutation:ip:203.0.113.41",
@@ -2957,7 +3072,12 @@ async fn apply_api_rate_limits_each_source_ip_across_the_shared_store_pg() {
             .expect("clear mutation rate-limit fixture");
     }
     let auth = Arc::new(StaticAuthenticator::new());
-    auth.insert("good-token", &owner_id, [Scope::AppsDeploy], [app_id]);
+    auth.insert(
+        "good-token",
+        &owner_id,
+        [Scope::AppsDeploy],
+        [app_id.clone()],
+    );
     let (first_state, first_tmp) = state_for_trusted_proxy(auth.clone()).await;
     let (second_state, second_tmp) = state_for_trusted_proxy(auth).await;
     let first_service = test::init_service(
@@ -2976,7 +3096,7 @@ async fn apply_api_rate_limits_each_source_ip_across_the_shared_store_pg() {
     let invalid_body = with_policy(create_notes_request(), malformed_policy());
     let post = |source_ip: &str| {
         test::TestRequest::post()
-            .uri(&format!("/v1/apps/{app_id}/migrations/apply"))
+            .uri(&format!("/v1/apps/{}/migrations/apply", app_id.as_str()))
             .header("authorization", "Bearer good-token")
             .header("x-forwarded-for", format!("198.51.100.1, {source_ip}"))
             .set_json(&invalid_body)
@@ -3038,10 +3158,15 @@ async fn apply_api_rate_limits_each_source_ip_across_the_shared_store_pg() {
 /// cannot accidentally publish an unthrottled DDL path.
 #[ntex::test]
 async fn rollback_route_passes_through_the_mutation_rate_limiter() {
-    let app_id = Uuid::now_v7();
+    let app_id = AppId::mint();
     let owner_id = UserId::mint();
     let auth = Arc::new(StaticAuthenticator::new());
-    auth.insert("good-token", &owner_id, [Scope::AppsDeploy], [app_id]);
+    auth.insert(
+        "good-token",
+        &owner_id,
+        [Scope::AppsDeploy],
+        [app_id.clone()],
+    );
     let (state, tmp) = state_for_with_policy_config_and_edge(
         auth,
         dsn(),
@@ -3059,7 +3184,7 @@ async fn rollback_route_passes_through_the_mutation_rate_limiter() {
     .await;
 
     let request = test::TestRequest::post()
-        .uri(&format!("/v1/apps/{app_id}/migrations/rollback"))
+        .uri(&format!("/v1/apps/{}/migrations/rollback", app_id.as_str()))
         .header("authorization", "Bearer good-token")
         .to_request();
     let response = test::call_service(&service, request).await;
@@ -3080,10 +3205,15 @@ async fn rollback_route_passes_through_the_mutation_rate_limiter() {
 /// migration bundle before authentication and throttling run.
 #[ntex::test]
 async fn apply_route_accepts_a_body_larger_than_ntexs_default_limit() {
-    let app_id = Uuid::now_v7();
+    let app_id = AppId::mint();
     let owner_id = UserId::mint();
     let auth = Arc::new(StaticAuthenticator::new());
-    auth.insert("good-token", &owner_id, [Scope::AppsDeploy], [app_id]);
+    auth.insert(
+        "good-token",
+        &owner_id,
+        [Scope::AppsDeploy],
+        [app_id.clone()],
+    );
     let (state, tmp) = state_for_with_policy_config_and_edge(
         auth,
         dsn(),
@@ -3106,7 +3236,7 @@ async fn apply_route_accepts_a_body_larger_than_ntexs_default_limit() {
     });
 
     let request = test::TestRequest::post()
-        .uri(&format!("/v1/apps/{app_id}/migrations/apply"))
+        .uri(&format!("/v1/apps/{}/migrations/apply", app_id.as_str()))
         .header("authorization", "Bearer good-token")
         .set_json(&body)
         .to_request();
@@ -3123,16 +3253,16 @@ async fn apply_route_accepts_a_body_larger_than_ntexs_default_limit() {
 #[ntex::test]
 async fn real_delegating_authenticator_accepts_apps_deploy_owner_bearer() {
     let conn = admin_conn().await;
-    let app_id = Uuid::now_v7();
+    let app_id = AppId::mint();
     let owner_id = UserId::mint();
-    seed_app(&conn, app_id, &owner_id).await;
+    seed_app(&conn, &app_id, &owner_id).await;
 
     let token = platform_token(&owner_id, "apps:deploy");
 
     let auth_conn = admin_conn().await;
     let authenticator = real_authenticator(auth_conn);
     let caller = authenticator
-        .verify_bearer(&token, app_id, Scope::AppsDeploy, "test-request-id")
+        .verify_bearer(&token, &app_id, Scope::AppsDeploy, "test-request-id")
         .await
         .expect("app owner holding apps:deploy verifies");
     assert_eq!(caller.principal_id, owner_id);
@@ -3147,9 +3277,9 @@ async fn real_delegating_authenticator_accepts_apps_deploy_owner_bearer() {
 #[ntex::test]
 async fn first_cli_apply_auth_materializes_defaults_and_honors_later_narrowing_pg() {
     let conn = admin_conn().await;
-    let app_id = Uuid::now_v7();
+    let app_id = AppId::mint();
     let owner_id = UserId::mint();
-    seed_app(&conn, app_id, &owner_id).await;
+    seed_app(&conn, &app_id, &owner_id).await;
 
     let scope = PLATFORM_CLI_ISSUABLE_SCOPES.join(" ");
     let token = platform_token_for_client(&owner_id, PLATFORM_CLI_CLIENT_ID, &scope);
@@ -3157,7 +3287,7 @@ async fn first_cli_apply_auth_materializes_defaults_and_honors_later_narrowing_p
     let authenticator = real_authenticator(auth_conn);
 
     authenticator
-        .verify_bearer(&token, app_id, Scope::AppsDeploy, "first-cli-apply")
+        .verify_bearer(&token, &app_id, Scope::AppsDeploy, "first-cli-apply")
         .await
         .expect("the unseeded CLI fallback authorizes its first apply");
 
@@ -3199,7 +3329,7 @@ async fn first_cli_apply_auth_materializes_defaults_and_honors_later_narrowing_p
     .await
     .expect("operator narrows apps:deploy");
     let error = authenticator
-        .verify_bearer(&token, app_id, Scope::AppsDeploy, "narrowed-cli-apply")
+        .verify_bearer(&token, &app_id, Scope::AppsDeploy, "narrowed-cli-apply")
         .await
         .expect_err("the already-issued bearer must observe live narrowing");
     assert!(matches!(error, AuthError::Forbidden));
@@ -3224,9 +3354,9 @@ async fn first_cli_apply_auth_materializes_defaults_and_honors_later_narrowing_p
 #[ntex::test]
 async fn real_delegating_authenticator_rejects_bearer_without_apps_deploy_scope() {
     let conn = admin_conn().await;
-    let app_id = Uuid::now_v7();
+    let app_id = AppId::mint();
     let owner_id = UserId::mint();
-    seed_app(&conn, app_id, &owner_id).await;
+    seed_app(&conn, &app_id, &owner_id).await;
 
     // The principal OWNS the app; only the scope is short. Cedar would allow an
     // owner `apps:deploy`, so the denial can only come from the token's own
@@ -3236,7 +3366,7 @@ async fn real_delegating_authenticator_rejects_bearer_without_apps_deploy_scope(
     let auth_conn = admin_conn().await;
     let authenticator = real_authenticator(auth_conn);
     let err = authenticator
-        .verify_bearer(&token, app_id, Scope::AppsDeploy, "test-request-id")
+        .verify_bearer(&token, &app_id, Scope::AppsDeploy, "test-request-id")
         .await
         .expect_err("bearer without apps:deploy must be denied");
     assert!(matches!(err, AuthError::Forbidden));
@@ -3252,25 +3382,25 @@ async fn real_delegating_authenticator_rejects_bearer_without_apps_deploy_scope(
 #[ntex::test]
 async fn real_delegating_authenticator_rejects_bearer_for_different_app_owner() {
     let conn = admin_conn().await;
-    let app_id = Uuid::now_v7();
+    let app_id = AppId::mint();
     let owner_id = UserId::mint();
-    let other_app_id = Uuid::now_v7();
+    let other_app_id = AppId::mint();
     let other_owner_id = UserId::mint();
-    seed_app(&conn, app_id, &owner_id).await;
-    seed_app(&conn, other_app_id, &other_owner_id).await;
+    seed_app(&conn, &app_id, &owner_id).await;
+    seed_app(&conn, &other_app_id, &other_owner_id).await;
 
     let token = platform_token(&owner_id, "apps:deploy");
 
     let auth_conn = admin_conn().await;
     let authenticator = real_authenticator(auth_conn);
     let caller = authenticator
-        .verify_bearer(&token, app_id, Scope::AppsDeploy, "test-request-id")
+        .verify_bearer(&token, &app_id, Scope::AppsDeploy, "test-request-id")
         .await
         .expect("the same bearer verifies for the app its subject owns");
     assert_eq!(caller.principal_id, owner_id);
 
     let err = authenticator
-        .verify_bearer(&token, other_app_id, Scope::AppsDeploy, "test-request-id")
+        .verify_bearer(&token, &other_app_id, Scope::AppsDeploy, "test-request-id")
         .await
         .expect_err("a bearer for one owner must not authorize a different owner's app");
     assert!(matches!(err, AuthError::Forbidden));
@@ -3288,7 +3418,7 @@ async fn real_delegating_authenticator_rejects_malformed_bearer() {
     let err = authenticator
         .verify_bearer(
             "not-a-jwt",
-            Uuid::now_v7(),
+            &AppId::mint(),
             Scope::AppsDeploy,
             "test-request-id",
         )
@@ -3310,12 +3440,17 @@ async fn real_delegating_authenticator_rejects_malformed_bearer() {
 #[ntex::test]
 async fn authz_receives_the_callers_request_id_pg() {
     let conn = admin_conn().await;
-    let app_id = Uuid::now_v7();
+    let app_id = AppId::mint();
     let owner_id = UserId::mint();
-    seed_app(&conn, app_id, &owner_id).await;
+    seed_app(&conn, &app_id, &owner_id).await;
 
     let auth = Arc::new(StaticAuthenticator::new());
-    auth.insert("good-token", &owner_id, [Scope::AppsDeploy], [app_id]);
+    auth.insert(
+        "good-token",
+        &owner_id,
+        [Scope::AppsDeploy],
+        [app_id.clone()],
+    );
     let (state, tmp) = state_for(auth.clone());
     let svc = test::init_service(
         web::App::new()
@@ -3332,7 +3467,7 @@ async fn authz_receives_the_callers_request_id_pg() {
     // rather than of the fixture.
     let caller_request_id = "req-from-the-caller-0001";
     let req = test::TestRequest::post()
-        .uri(&format!("/v1/apps/{app_id}/migrations/apply"))
+        .uri(&format!("/v1/apps/{}/migrations/apply", app_id.as_str()))
         .header("authorization", "Bearer good-token")
         .header("x-request-id", caller_request_id)
         .set_json(&create_notes_request())
@@ -3368,9 +3503,9 @@ async fn trusted_source_ip_reaches_the_authz_context_and_audit_row_pg() {
     )
     .await
     .expect("clear source-IP mutation bucket fixture");
-    let app_id = Uuid::now_v7();
+    let app_id = AppId::mint();
     let owner_id = UserId::mint();
-    seed_app(&conn, app_id, &owner_id).await;
+    seed_app(&conn, &app_id, &owner_id).await;
 
     let token = platform_token(&owner_id, "apps:deploy");
     let authenticator = Arc::new(real_authenticator(admin_conn().await));
@@ -3384,7 +3519,7 @@ async fn trusted_source_ip_reaches_the_authz_context_and_audit_row_pg() {
 
     let request_id = format!("migrated-source-ip-{}", Uuid::new_v4().simple());
     let req = test::TestRequest::post()
-        .uri(&format!("/v1/apps/{app_id}/migrations/apply"))
+        .uri(&format!("/v1/apps/{}/migrations/apply", app_id.as_str()))
         .header("authorization", format!("Bearer {token}"))
         .header("x-request-id", request_id.as_str())
         .header("x-forwarded-for", "198.51.100.9, 203.0.113.77")

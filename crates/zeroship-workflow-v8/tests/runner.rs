@@ -104,7 +104,7 @@ impl WorkflowRuntimeLoader for Loader {
                     self.service.for_app(app.clone()).into_backend(1).unwrap(),
                 )),
             ])
-            .app_id(app.uuid());
+            .app_id(app);
         if let Some(limit) = self.cpu_limit {
             builder = builder.cpu_limit(limit);
         }
@@ -950,7 +950,7 @@ async fn missing_executable_never_constructs_an_app_isolate() {
     assert!(fixture
         .deployments
         .source
-        .delete_manifest(&fixture.app.app_id().uuid(), &task.invocation.deploy_hash)
+        .delete_manifest(fixture.app.app_id(), &task.invocation.deploy_hash)
         .await
         .unwrap());
     tasks.release(&task.id, &task.token).await.unwrap();

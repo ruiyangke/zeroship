@@ -18,7 +18,7 @@ use uuid::Uuid;
 use zeroship_control::metering::{current_period_start_unix, Metering, UsageAggregate};
 use zeroship_control::spend::SpendEngine;
 use zeroship_control::Registry;
-use zeroship_core::types::SpendState;
+use zeroship_core::{types::SpendState, AppId};
 
 fn db_url() -> String {
     common::require_control_db()
@@ -53,7 +53,7 @@ async fn pg(db_url: &str) -> compio_postgres::Client {
 async fn make_app_on_priced_plan(
     client: &compio_postgres::Client,
     spend_limit_default_cents: i64,
-) -> (String, Uuid) {
+) -> (String, AppId) {
     // Ensure the `requests` weight is exactly 1 CU / op for this assertion,
     // independent of any future global seed re-tuning.
     client
@@ -84,12 +84,12 @@ async fn make_app_on_priced_plan(
     (plan_id, app)
 }
 
-async fn seed_requests(metering: &Metering, app: Uuid, requests: u64) {
+async fn seed_requests(metering: &Metering, app: &AppId, requests: u64) {
     let write = metering
         .replace_period_snapshot(
             current_period_start_unix(),
             &[UsageAggregate {
-                app_id: app,
+                app_id: app.clone(),
                 metric: "requests".to_string(),
                 total: i64::try_from(requests).expect("test requests fit i64"),
             }],
@@ -108,14 +108,11 @@ async fn seed_requests(metering: &Metering, app: Uuid, requests: u64) {
 }
 
 /// Read the persisted `(state, history_count)` for an app.
-async fn read_state(
-    client: &compio_postgres::Client,
-    app: &Uuid,
-) -> (Option<String>, i64) {
+async fn read_state(client: &compio_postgres::Client, app: &AppId) -> (Option<String>, i64) {
     let s = client
         .query(
             "SELECT state FROM zeroship.app_spend_state WHERE app_id = $1",
-            &[app],
+            &[&app.as_str()],
         )
         .await
         .unwrap();
@@ -123,7 +120,7 @@ async fn read_state(
     let h = client
         .query(
             "SELECT COUNT(*) AS n FROM zeroship.spend_state_history WHERE app_id = $1",
-            &[app],
+            &[&app.as_str()],
         )
         .await
         .unwrap();
@@ -153,7 +150,9 @@ async fn read_state(
 async fn period_rewrite_reports_a_total_that_shrank() {
     let url = db_url();
     let client = pg(&url).await;
-    let _sweep = SWEEP_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _sweep = SWEEP_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let registry = Registry::new(&url).await.expect("registry");
     let metering = Metering::new(registry);
     let (_plan, app) = make_app_on_priced_plan(&client, 100).await;
@@ -161,7 +160,7 @@ async fn period_rewrite_reports_a_total_that_shrank() {
 
     let agg = |total: i64| {
         vec![UsageAggregate {
-            app_id: app,
+            app_id: app.clone(),
             metric: "requests".to_string(),
             total,
         }]
@@ -221,7 +220,9 @@ async fn period_rewrite_reports_a_total_that_shrank() {
 async fn evaluate_all_persists_and_returns_transitions() {
     let url = db_url();
     let client = pg(&url).await;
-    let _sweep = SWEEP_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _sweep = SWEEP_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let registry = Registry::new(&url).await.expect("registry");
     let metering = Metering::new(registry.clone());
     let engine = SpendEngine::new(registry);
@@ -229,7 +230,7 @@ async fn evaluate_all_persists_and_returns_transitions() {
     // Plan limit = 100 cents; 1 cent per request. Ingest 100 requests into the
     // CURRENT period ⇒ spend = 100 cents = 100% ⇒ Block.
     let (_plan, app) = make_app_on_priced_plan(&client, 100).await;
-    seed_requests(&metering, app, 100).await;
+    seed_requests(&metering, &app, 100).await;
     // Sanity: usage landed in the current period.
     let period = current_period_start_unix();
     assert_eq!(metering.total(&app, period, "requests").await.unwrap(), 100);
@@ -244,7 +245,10 @@ async fn evaluate_all_persists_and_returns_transitions() {
 
     let (state, hist) = read_state(&client, &app).await;
     assert_eq!(state.as_deref(), Some("block"), "persisted state is block");
-    assert_eq!(hist, 1, "exactly one history row appended on the transition");
+    assert_eq!(
+        hist, 1,
+        "exactly one history row appended on the transition"
+    );
 
     // Idempotent: a second evaluation with unchanged usage/limit yields NO new
     // transition for our app and appends NO new history row.
@@ -280,14 +284,16 @@ async fn evaluate_all_persists_and_returns_transitions() {
 async fn transition_writes_state_and_history_atomically_and_consistent() {
     let url = db_url();
     let client = pg(&url).await;
-    let _sweep = SWEEP_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _sweep = SWEEP_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let registry = Registry::new(&url).await.expect("registry");
     let metering = Metering::new(registry.clone());
     let engine = SpendEngine::new(registry);
 
     // Limit 100 cents, 1 cent/request, 100 requests ⇒ 100% ⇒ Block.
     let (_plan, app) = make_app_on_priced_plan(&client, 100).await;
-    seed_requests(&metering, app, 100).await;
+    seed_requests(&metering, &app, 100).await;
 
     let transitions = engine.evaluate_all().await.expect("evaluate_all");
     let ours: Vec<_> = transitions.iter().filter(|t| t.app_id == app).collect();
@@ -298,7 +304,7 @@ async fn transition_writes_state_and_history_atomically_and_consistent() {
         .query(
             "SELECT state, spend_cents, eval_limit_cents \
              FROM zeroship.app_spend_state WHERE app_id = $1",
-            &[&app],
+            &[&app.as_str()],
         )
         .await
         .unwrap();
@@ -313,11 +319,15 @@ async fn transition_writes_state_and_history_atomically_and_consistent() {
         .query(
             "SELECT from_state, to_state, spend_cents, limit_cents \
              FROM zeroship.spend_state_history WHERE app_id = $1 ORDER BY at DESC",
-            &[&app],
+            &[&app.as_str()],
         )
         .await
         .unwrap();
-    assert_eq!(hist_rows.len(), 1, "exactly one history row on the transition");
+    assert_eq!(
+        hist_rows.len(),
+        1,
+        "exactly one history row on the transition"
+    );
     let h_to: String = hist_rows[0].get("to_state");
     let h_spend: i64 = hist_rows[0].get("spend_cents");
     let h_limit: Option<i64> = hist_rows[0].get("limit_cents");
@@ -327,7 +337,11 @@ async fn transition_writes_state_and_history_atomically_and_consistent() {
     // proving they were written together (atomic), not separately/partially.
     assert_eq!(state_spend, 100, "state row records the priced spend");
     assert_eq!(h_spend, state_spend, "history spend matches state spend");
-    assert_eq!(h_limit, Some(state_limit), "history limit matches state eval limit");
+    assert_eq!(
+        h_limit,
+        Some(state_limit),
+        "history limit matches state eval limit"
+    );
 
     drop(engine);
     drop(metering);
@@ -347,7 +361,9 @@ async fn overflowing_spend_is_skipped_not_clamped_and_blocked() {
     // Blocked an app that reconcile would skip (unbilled): the two disagreed.
     let url = db_url();
     let client = pg(&url).await;
-    let _sweep = SWEEP_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _sweep = SWEEP_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let registry = Registry::new(&url).await.expect("registry");
     let metering = Metering::new(registry.clone());
     let engine = SpendEngine::new(registry);
@@ -382,10 +398,10 @@ async fn overflowing_spend_is_skipped_not_clamped_and_blocked() {
         .await
         .expect("seed overflow plan");
     let name = format!("ovf-test-{}", Uuid::new_v4());
-    let app: Uuid = common::seed_app(&client, &name, &plan_id).await;
+    let app = common::seed_app(&client, &name, &plan_id).await;
 
     // Usage = i64::MAX requests in the current period.
-    seed_requests(&metering, app, i64::MAX as u64).await;
+    seed_requests(&metering, &app, i64::MAX as u64).await;
 
     // The sweep must NOT transition (skip) our app, and write NO state row for it.
     let transitions = engine.evaluate_all().await.expect("evaluate_all");
@@ -394,7 +410,10 @@ async fn overflowing_spend_is_skipped_not_clamped_and_blocked() {
         "an overflowing-spend app is SKIPPED (no transition), not clamped-and-Blocked",
     );
     let (state, hist) = read_state(&client, &app).await;
-    assert_eq!(state, None, "no app_spend_state row written for the skipped app");
+    assert_eq!(
+        state, None,
+        "no app_spend_state row written for the skipped app"
+    );
     assert_eq!(hist, 0, "no spend_state_history row for the skipped app");
 
     drop(engine);
@@ -412,13 +431,15 @@ async fn raising_limit_recovers_block_immediately() {
     // above the deadband (deadband would otherwise hold Block at a fixed cap).
     let url = db_url();
     let client = pg(&url).await;
-    let _sweep = SWEEP_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _sweep = SWEEP_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let registry = Registry::new(&url).await.expect("registry");
     let metering = Metering::new(registry.clone());
     let engine = SpendEngine::new(registry);
 
     let (_plan, app) = make_app_on_priced_plan(&client, 100).await;
-    seed_requests(&metering, app, 100).await;
+    seed_requests(&metering, &app, 100).await;
 
     // Tick 1: Block.
     engine.evaluate_all().await.unwrap();
@@ -459,7 +480,9 @@ async fn raising_limit_recovers_block_immediately() {
 async fn set_limit_writes_only_app_spend_limit_and_fleet_eval_reflects_it() {
     let url = db_url();
     let client = pg(&url).await;
-    let _sweep = SWEEP_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _sweep = SWEEP_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let registry = Registry::new(&url).await.expect("registry");
     let metering = Metering::new(registry.clone());
     let engine = SpendEngine::new(registry);
@@ -467,7 +490,7 @@ async fn set_limit_writes_only_app_spend_limit_and_fleet_eval_reflects_it() {
     // Plan default = 100c. Ingest 100 requests = 100c ⇒ at the plan default this
     // is 100% ⇒ Block.
     let (_plan, app) = make_app_on_priced_plan(&client, 100).await;
-    seed_requests(&metering, app, 100).await;
+    seed_requests(&metering, &app, 100).await;
 
     // Set a generous override BEFORE the first eval. It must land in the dedicated
     // CONFIG table `app_spend_limit` — NOT in `app_spend_state` (which has no
@@ -478,11 +501,15 @@ async fn set_limit_writes_only_app_spend_limit_and_fleet_eval_reflects_it() {
     let override_row = client
         .query(
             "SELECT spend_limit_cents FROM zeroship.app_spend_limit WHERE app_id = $1",
-            &[&app],
+            &[&app.as_str()],
         )
         .await
         .unwrap();
-    assert_eq!(override_row.len(), 1, "set_limit wrote an app_spend_limit row");
+    assert_eq!(
+        override_row.len(),
+        1,
+        "set_limit wrote an app_spend_limit row"
+    );
     assert_eq!(
         override_row[0].get::<_, Option<i64>>("spend_limit_cents"),
         Some(100_000),
@@ -518,14 +545,16 @@ async fn set_limit_writes_only_app_spend_limit_and_fleet_eval_reflects_it() {
 async fn transition_history_row_binds_non_null_period() {
     let url = db_url();
     let client = pg(&url).await;
-    let _sweep = SWEEP_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _sweep = SWEEP_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let registry = Registry::new(&url).await.expect("registry");
     let metering = Metering::new(registry.clone());
     let engine = SpendEngine::new(registry);
 
     // 100c cap, 100 requests ⇒ Block (a transition that writes history).
     let (_plan, app) = make_app_on_priced_plan(&client, 100).await;
-    seed_requests(&metering, app, 100).await;
+    seed_requests(&metering, &app, 100).await;
     engine.evaluate_all().await.unwrap();
 
     // `spend_state_history.period` is NOT NULL in the redesigned schema — the
@@ -536,14 +565,18 @@ async fn transition_history_row_binds_non_null_period() {
         .query(
             "SELECT period::date AS period FROM zeroship.spend_state_history \
              WHERE app_id = $1 ORDER BY at DESC LIMIT 1",
-            &[&app],
+            &[&app.as_str()],
         )
         .await
         .expect("read history period");
     assert_eq!(rows.len(), 1, "the transition wrote a history row");
     let period: chrono::NaiveDate = rows[0].get("period");
     use chrono::Datelike;
-    assert_eq!(period.day(), 1, "the history period is a first-of-month billing_period DATE");
+    assert_eq!(
+        period.day(),
+        1,
+        "the history period is a first-of-month billing_period DATE"
+    );
 
     drop(engine);
     drop(metering);

@@ -96,8 +96,8 @@ mod tests {
     #[test]
     fn handle_records_scoped_to_its_app() {
         let meter = Arc::new(Meter::new());
-        let a = Uuid::new_v4().to_string();
-        let b = Uuid::new_v4().to_string();
+        let a = zeroship_core::app_id::AppId::mint().as_str().to_string();
+        let b = zeroship_core::app_id::AppId::mint().as_str().to_string();
 
         let ha = MeterHandle::new(Arc::clone(&meter), a.clone());
         let hb = MeterHandle::new(Arc::clone(&meter), b.clone());
@@ -107,20 +107,20 @@ mod tests {
         hb.record("db_writes", 5);
 
         let events = meter.drain();
-        let ia = Uuid::parse_str(&a).unwrap();
-        let ib = Uuid::parse_str(&b).unwrap();
-        assert_eq!(event_value(&events, ia, "db_writes"), Some(3));
-        assert_eq!(event_value(&events, ib, "db_writes"), Some(5));
+        let ia = zeroship_core::app_id::AppId::parse(&a).unwrap();
+        let ib = zeroship_core::app_id::AppId::parse(&b).unwrap();
+        assert_eq!(event_value(&events, &ia, "db_writes"), Some(3));
+        assert_eq!(event_value(&events, &ib, "db_writes"), Some(5));
     }
 
     fn event_value(
         events: &[zeroship_core::usage_event::UsageEvent],
-        app_id: Uuid,
+        app_id: &zeroship_core::app_id::AppId,
         meter: &str,
     ) -> Option<u64> {
         events
             .iter()
-            .find(|event| event.subject.app == Some(app_id) && event.meter == meter)
+            .find(|event| event.subject.app.as_ref() == Some(app_id) && event.meter == meter)
             .map(|event| event.value)
     }
 }

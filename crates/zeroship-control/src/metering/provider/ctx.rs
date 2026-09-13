@@ -122,9 +122,8 @@ impl ProviderCtx {
             .get(id)
             .cloned()
             .unwrap_or_else(|| self.raw_config.clone());
-        serde_json::from_value(value).map_err(|e| {
-            ProviderError::Config(format!("{id}: provider config is invalid: {e}"))
-        })
+        serde_json::from_value(value)
+            .map_err(|e| ProviderError::Config(format!("{id}: provider config is invalid: {e}")))
     }
 }
 
@@ -159,11 +158,8 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("lago-api-key");
         std::fs::write(&path, format!("{LAGO_SEEDED_KEY}\n")).expect("write");
-        std::fs::set_permissions(
-            &path,
-            std::os::unix::fs::PermissionsExt::from_mode(0o600),
-        )
-        .expect("chmod");
+        std::fs::set_permissions(&path, std::os::unix::fs::PermissionsExt::from_mode(0o600))
+            .expect("chmod");
         let raw = format!("urn:zeroship:file:{}", path.display());
         assert_eq!(resolve(&raw).unwrap(), LAGO_SEEDED_KEY);
     }

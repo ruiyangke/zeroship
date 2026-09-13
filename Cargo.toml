@@ -191,6 +191,7 @@ rdkafka = { version = "0.36", default-features = false, features = ["cmake-build
 tempfile = "3"
 
 # Internal crates
+zeroship-id = { path = "crates/zeroship-id" }
 zeroship-core = { path = "crates/zeroship-core" }
 zeroship-bundle = { path = "crates/zeroship-bundle" }
 compio-postgres = { path = "libs/compio-postgres" }
