@@ -37,7 +37,9 @@ impl Coordinator {
                 if row.run_id != request.run_id.as_str() || row.actor != actor.as_str() || CommandFields::from_record(&row) != fields { return Err(Error::Conflict); }
                 return receipt(&row);
             }
-            let pending = count::<management::Entity>(&tx, value!({"app_id":request.app_id.as_str(),"outcome":null})).await?;
+            let pending = count::<management::Entity>(&tx,
+                management::app_id.eq(request.app_id.as_str())?.and(management::outcome.is_null()),
+            ).await?;
             if pending >= i64::try_from(self.options.max_pending_management).map_err(|_| Error::Invalid)? { return Err(Error::Capacity); }
             let now = self.queue.clock.now().await?;
             tx.collection(management::Entity::COLLECTION)?.insert(value!({
@@ -66,8 +68,10 @@ impl Coordinator {
                 budget.cap(sample, expires)?;
                 let pending = rows::<management::Entity, Management>(
                     &tx,
-                    value!({"app_id":request.app_id.as_str(),"outcome":null}),
-                    value!({"created_at":1,"request_id":1}),
+                    management::app_id
+                        .eq(request.app_id.as_str())?
+                        .and(management::outcome.is_null()),
+                    [management::created_at.asc(), management::request_id.asc()],
                     self.options.batch_limit,
                 )
                 .await?;
@@ -248,7 +252,9 @@ async fn record(
 ) -> Result<Option<Management>, Error> {
     one::<management::Entity, Management>(
         tx,
-        value!({"app_id":app.as_str(),"request_id":request.as_str()}),
+        management::app_id
+            .eq(app.as_str())?
+            .and(management::request_id.eq(request.as_str())?),
     )
     .await
 }

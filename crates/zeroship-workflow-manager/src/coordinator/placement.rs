@@ -80,10 +80,12 @@ impl Coordinator {
             let sample = self.queue.clock.sample().await?;
             if worker.state != "ready" || worker.expires_at <= sample.millis { return Err(Error::Denied); }
             budget.cap(sample, worker.expires_at)?;
-            let occupied = count::<assignments::Entity>(&tx, value!({
-                "worker_id":request.worker_id.as_str(), "app_id":{"$ne":request.app_id.as_str()},
-                "released":false, "expires_at":{"$gt":sample.millis}
-            })).await?;
+            let occupied = count::<assignments::Entity>(&tx,
+                assignments::worker_id.eq(request.worker_id.as_str())?
+                    .and(assignments::app_id.ne(request.app_id.as_str())?)
+                    .and(assignments::released.eq(false)?)
+                    .and(assignments::expires_at.gt(sample.millis)?),
+            ).await?;
             if occupied >= worker.capacity { return Err(Error::Capacity); }
             let rev = expected.unwrap_or(0).checked_add(1).ok_or(Error::Conflict)?;
             let expires = deadline(sample.millis, self.options.assignment_ttl)?;
@@ -135,7 +137,7 @@ impl Coordinator {
         self.queue
             .transact(|tx| async move {
                 let Some(registration) =
-                    one::<workers::Entity, Worker>(&tx, value!({"id":worker.as_str()})).await?
+                    one::<workers::Entity, Worker>(&tx, workers::id.eq(worker.as_str())?).await?
                 else {
                     return Ok(Vec::new());
                 };
@@ -143,15 +145,17 @@ impl Coordinator {
                 if registration.expires_at <= now {
                     return Ok(Vec::new());
                 }
-                let mut filter =
-                    value!({"worker_id":worker.as_str(),"released":false,"expires_at":{"$gt":now}});
+                let mut filter = assignments::worker_id
+                    .eq(worker.as_str())?
+                    .and(assignments::released.eq(false)?)
+                    .and(assignments::expires_at.gt(now)?);
                 if let Some(after) = after {
-                    filter["app_id"] = value!({"$gt":after.as_str()});
+                    filter = filter.and(assignments::app_id.gt(after.as_str())?);
                 }
                 rows::<assignments::Entity, Placement>(
                     &tx,
                     filter,
-                    value!({"app_id":1}),
+                    [assignments::app_id.asc()],
                     self.options.batch_limit,
                 )
                 .await?
@@ -242,15 +246,17 @@ impl Coordinator {
         let mut cursor = None;
         loop {
             let now = self.queue.clock.now().await?;
-            let mut filter =
-                value!({"app_id":app.as_str(),"released":false,"expires_at":{"$gt":now}});
-            if let Some(after) = cursor.as_ref() {
-                filter["worker_id"] = value!({"$gt":after});
+            let mut filter = assignments::app_id
+                .eq(app.as_str())?
+                .and(assignments::released.eq(false)?)
+                .and(assignments::expires_at.gt(now)?);
+            if let Some(after) = cursor.as_deref() {
+                filter = filter.and(assignments::worker_id.gt(after)?);
             }
             let placements = rows::<assignments::Entity, Placement>(
                 tx,
                 filter,
-                value!({"worker_id":1}),
+                [assignments::worker_id.asc()],
                 self.options.batch_limit,
             )
             .await?;
@@ -263,7 +269,8 @@ impl Coordinator {
                     continue;
                 }
                 if let Some(worker) =
-                    one::<workers::Entity, Worker>(tx, value!({"id":row.worker_id})).await?
+                    one::<workers::Entity, Worker>(tx, workers::id.eq(row.worker_id.as_str())?)
+                        .await?
                 {
                     let now = self.queue.clock.now().await?;
                     if worker.expires_at > now
@@ -292,7 +299,7 @@ async fn lock_worker(tx: &Database, worker: &WorkerId) -> Result<Worker, Error> 
             error
         }
     })?;
-    one::<workers::Entity, Worker>(tx, value!({"id":worker.as_str()}))
+    one::<workers::Entity, Worker>(tx, workers::id.eq(worker.as_str())?)
         .await?
         .ok_or(Error::Denied)
 }
@@ -304,7 +311,9 @@ async fn placement(
 ) -> Result<Option<Placement>, Error> {
     one::<assignments::Entity, Placement>(
         tx,
-        value!({"app_id":app.as_str(),"worker_id":worker.as_str()}),
+        assignments::app_id
+            .eq(app.as_str())?
+            .and(assignments::worker_id.eq(worker.as_str())?),
     )
     .await
 }
@@ -316,7 +325,9 @@ async fn receipt(
 ) -> Result<Option<PlacementReceipt>, Error> {
     one::<placement_receipts::Entity, PlacementReceipt>(
         tx,
-        value!({"app_id":app.as_str(),"request_id":request.as_str()}),
+        placement_receipts::app_id
+            .eq(app.as_str())?
+            .and(placement_receipts::request_id.eq(request.as_str())?),
     )
     .await
 }
