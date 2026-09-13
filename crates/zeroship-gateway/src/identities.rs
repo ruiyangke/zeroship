@@ -77,37 +77,6 @@ pub async fn upsert(
     Ok(())
 }
 
-/// Read the persisted `pairwise_sub` for `(app_client_id,
-/// global_user_id)`, or `None` when no (live) row exists. Used by tests
-/// and support tooling to confirm the mapping the gateway wrote.
-///
-/// # Errors
-/// [`GatewayError::Db`] on PG failure.
-pub async fn lookup_pairwise_sub(
-    conn: &mut Client,
-    app_client_id: &str,
-    global_user_id: &UserId,
-) -> Result<Option<String>> {
-    let tx = conn
-        .transaction()
-        .await
-        .map_err(|e| GatewayError::Db(format!("app_user_identities lookup begin: {e}")))?;
-    rls::set_tenant_client(&tx, app_client_id).await?;
-    let rows = tx
-        .query(
-            "SELECT pairwise_sub FROM zeroship.app_user_identities \
-             WHERE app_client_id = $1 AND global_user_id = $2",
-            &[&app_client_id, &global_user_id.as_str()],
-        )
-        .await
-        .map_err(|e| GatewayError::Db(format!("app_user_identities lookup: {e}")))?;
-    let sub = rows.first().map(|row| row.get("pairwise_sub"));
-    tx.commit()
-        .await
-        .map_err(|e| GatewayError::Db(format!("app_user_identities lookup commit: {e}")))?;
-    Ok(sub)
-}
-
 /// Read the ACTIVE relay alias (`relay_email`) for `(app_client_id,
 /// global_user_id)`, or `None` when no live alias exists.
 ///

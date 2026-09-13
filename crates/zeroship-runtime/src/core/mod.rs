@@ -21,6 +21,7 @@ pub mod serve;
 pub(crate) mod startup;
 pub mod state;
 pub(crate) mod tasks;
+mod zeroship_module;
 
 #[cfg(target_os = "linux")]
 pub mod cpu_timer;

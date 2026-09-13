@@ -66,9 +66,7 @@ impl ModuleRegistry {
     }
 
     fn check_source_import(&self, referrer: &str, resolved: &str) -> Result<(), String> {
-        if self.plugin_modules.contains(referrer)
-            && resolved != "zeroship"
-            && !self.plugin_modules.contains(resolved)
+        if self.plugin_modules.contains(referrer) && !self.plugin_modules.contains(resolved)
         {
             return Err(format!(
                 "Plugin module {referrer:?} cannot import creator module {resolved:?}"
@@ -108,7 +106,7 @@ fn resolve_specifier(
 
 /// Compile a single module from source.
 ///
-/// Shared with the dynamic-import callback for the core `zeroship` facade.
+/// Native synthetic modules are created separately by their runtime factories.
 pub(crate) fn compile_module(
     scope: &mut v8::PinScope,
     specifier: &str,
