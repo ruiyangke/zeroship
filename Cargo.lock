@@ -7842,12 +7842,16 @@ dependencies = [
  "cedar-policy",
  "compio",
  "compio-postgres",
+ "futures",
  "hex",
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "tempfile",
+ "testcontainers",
+ "toml 0.8.23",
  "tracing",
- "zeroship-core",
+ "url",
  "zeroship-id",
 ]
 

@@ -35,3 +35,6 @@ pub use policy::Policy;
 pub use resource::Resource;
 pub use scope::{parse_scope_string, scopes_to_policy, ParseScopeError, Scope};
 pub use statement::Statement;
+
+#[cfg(test)]
+mod tests;
