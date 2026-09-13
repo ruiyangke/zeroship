@@ -1,5 +1,6 @@
-//! Descriptor-directed temporal values and typed JSON containers.
+//! Schema-directed temporal values and typed JSON containers.
 use super::{CodecError, Value};
+use crate::schema::{ColumnSchema, FieldMap, LogicalType};
 
 const MAX_TYPED_DEPTH: usize = super::MAX_JSON_DEPTH;
 
@@ -10,8 +11,8 @@ fn invalid(field: &str, expected: &str) -> CodecError {
     )
 }
 
-fn scalar(kind: &str, field: &str, value: &mut Value) -> Result<(), CodecError> {
-    if kind == "calendarDate" {
+fn scalar(kind: LogicalType, field: &str, value: &mut Value) -> Result<(), CodecError> {
+    if kind == LogicalType::CalendarDate {
         if value
             .as_str()
             .is_none_or(|date| crate::sql::temporal::parse_calendar_date(date).is_none())
@@ -35,11 +36,8 @@ fn scalar(kind: &str, field: &str, value: &mut Value) -> Result<(), CodecError> 
     Ok(())
 }
 
-fn vector(field: &str, definition: &Value, value: &Value) -> Result<(), CodecError> {
-    let dimensions = definition
-        .get("vectorDims")
-        .and_then(Value::as_u64)
-        .and_then(|value| usize::try_from(value).ok());
+fn vector(field: &str, definition: &ColumnSchema, value: &Value) -> Result<(), CodecError> {
+    let dimensions = definition.vector_dims;
     let valid = value.as_array().is_some_and(|values| {
         !values.is_empty()
             && dimensions == Some(values.len())
@@ -80,21 +78,23 @@ fn geographic_point(field: &str, value: &Value) -> Result<(), CodecError> {
     }
 }
 
-fn temporal_item(definition: &Value) -> Option<&str> {
-    (definition["type"].as_str() == Some("array"))
-        .then(|| definition["items"].as_str())
+fn temporal_item(definition: &ColumnSchema) -> Option<LogicalType> {
+    (definition.logical_type == LogicalType::Array)
+        .then_some(definition.items)
         .flatten()
-        .filter(|kind| matches!(*kind, "date" | "timestamp" | "calendarDate"))
+        .filter(|kind| matches!(kind, LogicalType::Timestamp | LogicalType::CalendarDate))
 }
 
-fn array_item<'a>(field: &str, definition: &'a Value) -> Result<&'a str, CodecError> {
-    let item = match definition.get("items") {
-        None => "json",
-        Some(item) => item.as_str().unwrap_or(""),
-    };
+fn array_item(field: &str, definition: &ColumnSchema) -> Result<LogicalType, CodecError> {
+    let item = definition.items.unwrap_or(LogicalType::Json);
     if matches!(
         item,
-        "string" | "number" | "boolean" | "date" | "timestamp" | "calendarDate" | "json"
+        LogicalType::Text
+            | LogicalType::Number
+            | LogicalType::Boolean
+            | LogicalType::Timestamp
+            | LogicalType::CalendarDate
+            | LogicalType::Json
     ) {
         Ok(item)
     } else {
@@ -105,26 +105,26 @@ fn array_item<'a>(field: &str, definition: &'a Value) -> Result<&'a str, CodecEr
     }
 }
 
-fn invalid_element(field: &str, item: &str) -> CodecError {
+fn invalid_element(field: &str, item: LogicalType) -> CodecError {
     CodecError::validation(
         "invalid_array_element",
-        format!("column '{field}' requires {item} array elements"),
+        format!("column '{field}' requires {} array elements", item.as_str()),
     )
 }
 
-fn raw_element_matches(item: &str, value: &serde_json::value::RawValue) -> bool {
+fn raw_element_matches(item: LogicalType, value: &serde_json::value::RawValue) -> bool {
     match item {
-        "string" => value.get().starts_with('"'),
-        "number" => value
+        LogicalType::Text => value.get().starts_with('"'),
+        LogicalType::Number => value
             .get()
             .starts_with(|c: char| c == '-' || c.is_ascii_digit()),
-        "boolean" => matches!(value.get(), "true" | "false"),
-        "json" => true,
+        LogicalType::Boolean => matches!(value.get(), "true" | "false"),
+        LogicalType::Json => true,
         _ => false,
     }
 }
 
-fn validate_encoded_array(field: &str, item: &str, json: &str) -> Result<(), CodecError> {
+fn validate_encoded_array(field: &str, item: LogicalType, json: &str) -> Result<(), CodecError> {
     let raw: &serde_json::value::RawValue =
         serde_json::from_str(json).map_err(|_| invalid(field, "valid typed JSON"))?;
     if raw.get() == "null" {
@@ -140,25 +140,29 @@ fn validate_encoded_array(field: &str, item: &str, json: &str) -> Result<(), Cod
     Ok(())
 }
 
-fn prepare_array_element(field: &str, item: &str, value: &mut Value) -> Result<(), CodecError> {
-    if matches!(item, "date" | "timestamp" | "calendarDate") {
+fn prepare_array_element(
+    field: &str,
+    item: LogicalType,
+    value: &mut Value,
+) -> Result<(), CodecError> {
+    if matches!(item, LogicalType::Timestamp | LogicalType::CalendarDate) {
         return scalar(item, field, value);
     }
     let valid = match value {
         Value::Json(json) => serde_json::from_str::<&serde_json::value::RawValue>(json)
             .is_ok_and(|raw| raw_element_matches(item, raw)),
         _ => match item {
-            "string" => value.is_string(),
-            "number" => value.is_number(),
-            "boolean" => value.is_boolean(),
-            "json" => true,
+            LogicalType::Text => value.is_string(),
+            LogicalType::Number => value.is_number(),
+            LogicalType::Boolean => value.is_boolean(),
+            LogicalType::Json => true,
             _ => false,
         },
     };
     if !valid {
         return Err(invalid_element(field, item));
     }
-    if item == "json" {
+    if item == LogicalType::Json {
         super::validate_json_value(field, value)?;
     }
     Ok(())
@@ -168,13 +172,17 @@ fn prepare_array_element(field: &str, item: &str, value: &mut Value) -> Result<(
 ///
 /// # Errors
 /// Refuses invalid typed values, containers, or excessive nesting.
-pub fn prepare_value(field: &str, definition: &Value, value: &mut Value) -> Result<(), CodecError> {
+pub fn prepare_value(
+    field: &str,
+    definition: &ColumnSchema,
+    value: &mut Value,
+) -> Result<(), CodecError> {
     prepare_value_at(field, definition, value, 0)
 }
 
 fn prepare_value_at(
     field: &str,
-    definition: &Value,
+    definition: &ColumnSchema,
     value: &mut Value,
     depth: usize,
 ) -> Result<(), CodecError> {
@@ -184,7 +192,7 @@ fn prepare_value_at(
     if value.is_null() {
         return Ok(());
     }
-    let kind = definition["type"].as_str();
+    let kind = definition.logical_type;
     if crate::sql::descriptors::is_exact_decimal(definition) {
         let input = match value {
             Value::Decimal(value) | Value::String(value) if crate::sql::decimal::valid(value) => {
@@ -200,25 +208,28 @@ fn prepare_value_at(
         *value = Value::Decimal(encoded);
         return Ok(());
     }
-    if matches!(kind, Some("date" | "timestamp" | "calendarDate")) {
-        return scalar(kind.unwrap(), field, value);
+    if matches!(kind, LogicalType::Timestamp | LogicalType::CalendarDate) {
+        return scalar(kind, field, value);
     }
-    if matches!(kind, Some("boolean" | "bool")) && !value.is_boolean() {
+    if kind == LogicalType::Boolean && !value.is_boolean() {
         return Err(invalid(field, "a boolean"));
     }
-    if kind == Some("vector") {
+    if kind == LogicalType::Vector {
         return vector(field, definition, value);
     }
-    if kind == Some("geoPoint") {
+    if kind == LogicalType::GeoPoint {
         return geographic_point(field, value);
     }
-    if kind == Some("json") {
+    if kind == LogicalType::Json {
         return super::validate_json_value(field, value);
     }
-    if !matches!(kind, Some("array" | "object" | "union")) {
+    if !matches!(
+        kind,
+        LogicalType::Array | LogicalType::Object | LogicalType::Union
+    ) {
         return Ok(());
     }
-    if kind == Some("array") {
+    if kind == LogicalType::Array {
         let item = array_item(field, definition)?;
         if let Value::Json(json) = value {
             if temporal_item(definition).is_none() {
@@ -234,7 +245,7 @@ fn prepare_value_at(
         }
         *value = parsed;
     }
-    if kind == Some("array") {
+    if kind == LogicalType::Array {
         let item = array_item(field, definition)?;
         let values = value
             .as_array_mut()
@@ -244,25 +255,25 @@ fn prepare_value_at(
         }
         return Ok(());
     }
-    let shape = if kind == Some("union") {
-        let discriminator = definition["discriminator"]
-            .as_str()
+    let shape = if kind == LogicalType::Union {
+        let discriminator = definition
+            .discriminator
+            .as_deref()
             .ok_or_else(|| invalid(field, "a union discriminator"))?;
-        definition["variants"]
-            .as_array()
-            .and_then(|variants| {
-                variants.iter().find(|variant| {
-                    value.get(discriminator).is_some_and(|actual| {
-                        variant
-                            .get(discriminator)
-                            .and_then(|def| def.get("literalValue"))
-                            == Some(actual)
-                    })
+        definition
+            .variants
+            .iter()
+            .find(|variant| {
+                value.get(discriminator).is_some_and(|actual| {
+                    variant
+                        .get(discriminator)
+                        .and_then(|def| def.literal_value.as_ref())
+                        == Some(actual)
                 })
             })
             .ok_or_else(|| invalid(field, "a declared union variant"))?
     } else {
-        &definition["shape"]
+        &definition.shape
     };
     prepare_document_at(shape, value, field, depth + 1)
 }
@@ -271,7 +282,7 @@ fn prepare_value_at(
 ///
 /// # Errors
 /// Refuses invalid typed values, containers, or excessive nesting.
-pub fn prepare_document(schema: &Value, document: &mut Value) -> Result<(), CodecError> {
+pub fn prepare_document(schema: &FieldMap, document: &mut Value) -> Result<(), CodecError> {
     if !document.is_object() {
         return Ok(());
     }
@@ -279,7 +290,7 @@ pub fn prepare_document(schema: &Value, document: &mut Value) -> Result<(), Code
 }
 
 fn prepare_document_at(
-    schema: &Value,
+    schema: &FieldMap,
     document: &mut Value,
     prefix: &str,
     depth: usize,
@@ -306,10 +317,10 @@ fn prepare_document_at(
 /// Refuses an operand that does not satisfy the declared item type.
 pub fn prepare_array_operand(
     field: &str,
-    definition: &Value,
+    definition: &ColumnSchema,
     value: &mut Value,
 ) -> Result<(), CodecError> {
-    if definition["type"].as_str() != Some("array") {
+    if definition.logical_type != LogicalType::Array {
         return Ok(());
     }
     prepare_array_element(field, array_item(field, definition)?, value)
@@ -319,7 +330,7 @@ pub fn prepare_array_operand(
 ///
 /// # Errors
 /// Refuses invalid typed operands and unsupported temporal operations.
-pub fn prepare_update(schema: &Value, patch: &mut Value) -> Result<(), CodecError> {
+pub fn prepare_update(schema: &FieldMap, patch: &mut Value) -> Result<(), CodecError> {
     let Some(patch) = patch.as_object_mut() else {
         return Ok(());
     };
@@ -350,11 +361,11 @@ pub fn prepare_update(schema: &Value, patch: &mut Value) -> Result<(), CodecErro
                         prepare_value(field, definition, operand)?;
                     }
                     Operator::Increment | Operator::Decrement | Operator::Multiply => {
-                        let valid = match definition["type"].as_str() {
-                            Some("int" | "integer" | "bigInt") => {
+                        let valid = match definition.logical_type {
+                            LogicalType::Integer | LogicalType::BigInt => {
                                 matches!(operand, Value::Number(value) if value.as_i64().is_some())
                             }
-                            Some("number" | "float") => match operand {
+                            LogicalType::Number => match operand {
                                 Value::Number(_) => true,
                                 Value::Decimal(value) => crate::sql::decimal::valid(value),
                                 _ => false,
@@ -381,10 +392,11 @@ pub fn prepare_update(schema: &Value, patch: &mut Value) -> Result<(), CodecErro
 mod tests {
     use super::*;
     use crate::value;
+    macro_rules! column { ($($tokens:tt)*) => { ColumnSchema::from_descriptor(&value!($($tokens)*)).unwrap() }; }
 
     #[test]
     fn vector_and_geographic_writes_validate_the_declared_shape() {
-        let vector = value!({"type":"vector","vectorDims":2});
+        let vector = column!({"type":"vector","vectorDims":2});
         for mut value in [
             value!([]),
             value!([1.0]),
@@ -397,7 +409,7 @@ mod tests {
         let mut valid = value!([1.0, -2.0]);
         prepare_value("embedding", &vector, &mut valid).unwrap();
 
-        let point = value!({"type":"geoPoint"});
+        let point = column!({"type":"geoPoint"});
         for mut value in [
             value!({}),
             value!({"lat":0.0}),
@@ -413,7 +425,7 @@ mod tests {
 
     #[test]
     fn exact_decimal_inputs_are_quantized_before_protection() {
-        let definition = value!({"type":"number", "precision":30, "scale":2});
+        let definition = column!({"type":"number", "precision":30, "scale":2});
         let mut value = Value::String("9007199254740993.005".into());
         prepare_value("amount", &definition, &mut value).unwrap();
         assert_eq!(value, Value::Decimal("9007199254740993.01".into()));
@@ -424,7 +436,7 @@ mod tests {
 
     #[test]
     fn array_validation_preserves_native_buffers_and_encoded_numbers() {
-        let definition = value!({"type":"array","items":"string"});
+        let definition = column!({"type":"array","items":"string"});
         let text = String::from("native input");
         let address = text.as_ptr();
         let mut data = Value::Array(vec![Value::String(text)]);
@@ -435,7 +447,7 @@ mod tests {
         let mut data = Value::Json(json.into());
         prepare_value(
             "amounts",
-            &value!({"type":"array","items":"number"}),
+            &column!({"type":"array","items":"number"}),
             &mut data,
         )
         .unwrap();
@@ -452,7 +464,7 @@ mod tests {
         ] {
             let error = prepare_value(
                 "values",
-                &value!({"type":"array","items":item}),
+                &column!({"type":"array","items":item}),
                 &mut Value::Json(json.into()),
             )
             .unwrap_err();
@@ -465,35 +477,36 @@ mod tests {
             ));
         }
         for item in [value!("unknown"), value!(42), value!(null)] {
-            assert!(matches!(
-                prepare_value(
-                    "values",
-                    &value!({"type":"array","items":item}),
-                    &mut value!([])
-                ),
-                Err(CodecError::Validation {
-                    code: "invalid_array_item_type",
-                    ..
-                })
-            ));
+            assert!(ColumnSchema::from_descriptor(&value!({"type":"array","items":item})).is_err());
         }
+        let mut unsupported = ColumnSchema::new(LogicalType::Array);
+        unsupported.items = Some(LogicalType::GeoPoint);
+        assert!(matches!(
+            prepare_value("values", &unsupported, &mut value!([])),
+            Err(CodecError::Validation {
+                code: "invalid_array_item_type",
+                ..
+            })
+        ));
         for mut data in [
             value!([1, "text", null, [true]]),
             Value::Json("[1,\"text\",null,[true]]".into()),
         ] {
-            prepare_value("values", &value!({"type":"array"}), &mut data).unwrap();
+            prepare_value("values", &column!({"type":"array"}), &mut data).unwrap();
         }
     }
 
     #[test]
     fn documents_reject_storage_shaped_booleans_at_every_depth() {
-        let schema = value!({
+        let schema = crate::schema::CollectionSchema::from_fields(&value!({
             "active": {"type":"boolean"},
             "settings": {
                 "type":"object",
                 "shape":{"enabled":{"type":"boolean"}}
             }
-        });
+        }))
+        .unwrap()
+        .into_fields();
         for mut document in [
             value!({"active":1,"settings":{"enabled":true}}),
             value!({"active":true,"settings":{"enabled":1}}),
@@ -504,7 +517,11 @@ mod tests {
 
     #[test]
     fn temporal_arrays_reject_arithmetic_and_invalid_item_operations() {
-        let schema = value!({"instants":{"type":"array","items":"timestamp"}});
+        let schema = crate::schema::CollectionSchema::from_fields(
+            &value!({"instants":{"type":"array","items":"timestamp"}}),
+        )
+        .unwrap()
+        .into_fields();
         for mut patch in [
             value!({"instants":{"$inc":1}}),
             value!({"instants":{"$push":null}}),
@@ -519,10 +536,12 @@ mod tests {
 
     #[test]
     fn temporal_nesting_is_bounded_and_json_null_remains_json() {
-        let mut schema = value!({"type":"timestamp"});
+        let mut schema = ColumnSchema::new(LogicalType::Timestamp);
         let mut data = value!(0);
         for _ in 0..=MAX_TYPED_DEPTH {
-            schema = value!({"type":"object","shape":{"child":schema}});
+            let mut parent = ColumnSchema::new(LogicalType::Object);
+            parent.shape.insert("child".into(), schema);
+            schema = parent;
             data = value!({"child":data});
         }
         assert!(prepare_value("nested", &schema, &mut data).is_err());
@@ -530,7 +549,7 @@ mod tests {
         let mut data = Value::Json("null".into());
         prepare_value(
             "instants",
-            &value!({"type":"array","items":"date"}),
+            &column!({"type":"array","items":"date"}),
             &mut data,
         )
         .unwrap();

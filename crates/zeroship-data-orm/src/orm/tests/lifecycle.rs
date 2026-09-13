@@ -44,27 +44,21 @@ async fn lifecycle(mut fixture: CollectionFixture) {
         .unwrap());
     assert_eq!(updated["revision"], value!(2));
     assert_eq!(updated["born"], inserted["born"]);
-    assert!(
-        entries
-            .update(
-                value!({"id":key.clone(), "revision":1}),
-                value!({"title":"stale"})
-            )
-            .await
-            .is_err()
-    );
-    assert!(
-        entries
-            .update(value!({"id":key.clone()}), value!({"born":0}))
-            .await
-            .is_err()
-    );
-    assert!(
-        entries
-            .update(value!({"id":key.clone()}), value!({"removed":0}))
-            .await
-            .is_err()
-    );
+    assert!(entries
+        .update(
+            value!({"id":key.clone(), "revision":1}),
+            value!({"title":"stale"})
+        )
+        .await
+        .is_err());
+    assert!(entries
+        .update(value!({"id":key.clone()}), value!({"born":0}))
+        .await
+        .is_err());
+    assert!(entries
+        .update(value!({"id":key.clone()}), value!({"removed":0}))
+        .await
+        .is_err());
 
     let anonymous = fixture.database.collection("entries").unwrap();
     let updated = row(anonymous
@@ -167,16 +161,16 @@ async fn familiar_names_are_ordinary(fixture: CollectionFixture) {
             .as_ref()
             .clone()
     });
-    for definition in schema.as_object_mut().unwrap().values_mut() {
-        let field = definition.as_object_mut().unwrap();
-        for facet in ["assign", "softDelete", "concurrency", "writable"] {
-            field.shift_remove(facet);
-        }
+    for field in schema.values_mut() {
+        field.assignment = None;
+        field.soft_delete = false;
+        field.concurrency = false;
+        field.writable = true;
     }
     let db = Database::from_schema(
         original.binding.clone(),
         original.backend.clone(),
-        vec![("entries".into(), schema)],
+        Schema::new([("entries".into(), CollectionSchema::new(schema))]),
     )
     .unwrap()
     .with_actor(Some("request_actor".into()));

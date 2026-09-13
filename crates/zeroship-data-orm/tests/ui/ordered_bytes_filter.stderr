@@ -1,7 +1,15 @@
-error[E0599]: the method `lt` exists for struct `zeroship_data_orm::orm::Field<payload>`, but its trait bounds were not satisfied
- --> tests/ui/ordered_bytes_filter.rs:4:36
+warning: unused import: `zeroship_data_orm::orm::*`
+ --> tests/ui/ordered_bytes_filter.rs:1:5
   |
-4 |     let _ = schema::posts::payload.lt(Some(vec![1_u8]));
+1 | use zeroship_data_orm::orm::*;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+error[E0599]: the method `lt` exists for struct `zeroship_data_orm::orm::Field<payload>`, but its trait bounds were not satisfied
+ --> tests/ui/ordered_bytes_filter.rs:5:36
+  |
+5 |     let _ = schema::posts::payload.lt(Some(vec![1_u8]));
   |                                    ^^ method cannot be called on `zeroship_data_orm::orm::Field<payload>` due to unsatisfied trait bounds
   |
  ::: src/orm/codecs.rs

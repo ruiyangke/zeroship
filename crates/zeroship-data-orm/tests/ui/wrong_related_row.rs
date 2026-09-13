@@ -1,5 +1,6 @@
 use zeroship_data_orm::orm::*;
-schema!(pub schema = "../fixtures/typed-relations.runtime.json");
+include!("../fixtures/relations_schema.rs");
+relations_schema!(pub schema);
 #[derive(FromRow)]
 #[orm(entity = schema::posts)]
 struct Post {

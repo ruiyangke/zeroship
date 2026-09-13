@@ -11,6 +11,7 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 
+use crate::schema::FieldMap;
 use crate::sql::catalog::MaskKind;
 use crate::value::Value;
 
@@ -183,10 +184,8 @@ impl ReadSetEntry {
 ///
 /// # Masked columns
 ///
-/// `schema` is the collection's descriptor entry, and it is a `&Value` rather
-/// than an `Option` so "no schema" is unspellable: a caller without one cannot
-/// build a predicate at all, rather than building one that silently compares
-/// against the wrong thing.
+/// The collection's native schema determines how protected filter values
+/// compare with the stored row image.
 ///
 /// The WAL tuple carries what the row physically holds, and for a masked field
 /// that is the MASK under the field's own name. So a conjunct on a masked
@@ -206,7 +205,7 @@ impl ReadSetEntry {
 /// against a stored mask, never match, and the subscription would stop firing
 /// with no error anywhere - the failure mode this module's own contract calls
 /// unacceptable.
-pub fn normalise_filter(filter: &Value, schema: &Value) -> Option<Predicate> {
+pub fn normalise_filter(filter: &Value, schema: &FieldMap) -> Option<Predicate> {
     let Value::Object(map) = filter else {
         // null / array / scalar / etc. — caller policy: treat as
         // coarse-grained. The query builder rejects these too, so
@@ -281,7 +280,7 @@ pub fn normalise_filter(filter: &Value, schema: &Value) -> Option<Predicate> {
 
 /// The mask kind declared for `column`, or `None` when it is unmasked or opted
 /// out with `kind: "none"`.
-fn mask_kind_for_column(schema: &Value, column: &str) -> Option<MaskKind> {
+fn mask_kind_for_column(schema: &FieldMap, column: &str) -> Option<MaskKind> {
     let mask = crate::sql::descriptors::effective_mask(schema.get(column)?)?;
     // Unknown kinds widen fanout instead of applying the wrong transform.
     MaskKind::from_sql(mask.kind)
@@ -295,7 +294,6 @@ fn lower_operand(mask_kind: Option<MaskKind>, value: &Value) -> Value {
     };
     Value::String(apply_mask_kind(kind, &value_to_text(value)))
 }
-
 
 /// Thread-local read capture. The host supplies whether this dispatch records reads;
 /// the ORM does not query runtime procedure state.
@@ -473,7 +471,7 @@ pub fn snapshot_for(collection: &str) -> Vec<ReadSetEntry> {
 /// `schema` is the collection's descriptor entry; every call site already holds
 /// one because the read builder it just called takes the same value. It is
 /// needed to lower a predicate on a masked column - see [`normalise_filter`].
-pub fn record_if_active(collection: &str, filter: &Value, schema: &Value) {
+pub fn record_if_active(collection: &str, filter: &Value, schema: &FieldMap) {
     if !is_active() {
         return;
     }
@@ -510,22 +508,52 @@ mod tests {
 
     #[test]
     fn normalise_empty_filter_is_always_true() {
-        let p = normalise_filter(&value!({}), &value!({})).expect("empty filter normalises");
+        let p = normalise_filter(&value!({}), &FieldMap::new()).expect("empty filter normalises");
         assert!(p.matches(&row(&[])));
     }
 
     #[test]
+    fn native_and_decoded_masks_normalise_the_same_read_dependency() {
+        use crate::schema::{CollectionSchema, ColumnSchema, LogicalType, MaskSchema};
+        let mut column = ColumnSchema::new(LogicalType::Text);
+        column.mask = Some(MaskSchema {
+            kind: "last4".into(),
+            classification: "spi".into(),
+        });
+        let native = CollectionSchema::new([("ssn".into(), column)]).into_fields();
+        let decoded = CollectionSchema::from_fields(&value!({
+            "ssn": {
+                "type": "string", "required": true,
+                "mask": {"kind": "last4", "classification": "spi"}
+            }
+        }))
+        .unwrap()
+        .into_fields();
+        assert_eq!(native, decoded);
+        for schema in [native, decoded] {
+            let predicate = normalise_filter(&value!({"ssn": "123-45-6789"}), &schema)
+                .expect("masked equality retains the dependency");
+            assert!(predicate.matches(&row(&[("ssn", "***-**-6789")])));
+            assert!(!predicate.matches(&row(&[("ssn", "***-**-4321")])));
+            assert!(normalise_filter(&value!({"ssn": {"$gt": "123-45-6789"}}), &schema).is_none());
+        }
+    }
+
+    #[test]
     fn normalise_bare_equality() {
-        let p =
-            normalise_filter(&value!({ "userId": 42 }), &value!({})).expect("scalar normalises");
+        let p = normalise_filter(&value!({ "userId": 42 }), &FieldMap::new())
+            .expect("scalar normalises");
         assert!(p.matches(&row(&[("userId", "42")])));
         assert!(!p.matches(&row(&[("userId", "99")])));
     }
 
     #[test]
     fn normalise_multi_field_and() {
-        let p = normalise_filter(&value!({ "userId": 42, "status": "active" }), &value!({}))
-            .expect("conjunction normalises");
+        let p = normalise_filter(
+            &value!({ "userId": 42, "status": "active" }),
+            &FieldMap::new(),
+        )
+        .expect("conjunction normalises");
         assert!(p.matches(&row(&[("userId", "42"), ("status", "active")])));
         assert!(!p.matches(&row(&[("userId", "42"), ("status", "archived")])));
         assert!(!p.matches(&row(&[("userId", "1"), ("status", "active")])));
@@ -533,14 +561,15 @@ mod tests {
 
     #[test]
     fn normalise_explicit_eq_operator() {
-        let p = normalise_filter(&value!({ "userId": { "$eq": 42 } }), &value!({}))
+        let p = normalise_filter(&value!({ "userId": { "$eq": 42 } }), &FieldMap::new())
             .expect("op normalises");
         assert!(p.matches(&row(&[("userId", "42")])));
     }
 
     #[test]
     fn normalise_gt_range_query() {
-        let p = normalise_filter(&value!({ "createdAt": { "$gt": 1000 } }), &value!({})).unwrap();
+        let p =
+            normalise_filter(&value!({ "createdAt": { "$gt": 1000 } }), &FieldMap::new()).unwrap();
         assert!(p.matches(&row(&[("createdAt", "1500")])));
         assert!(!p.matches(&row(&[("createdAt", "500")])));
         assert!(!p.matches(&row(&[("createdAt", "1000")])));
@@ -550,7 +579,7 @@ mod tests {
     fn normalise_range_combination() {
         let p = normalise_filter(
             &value!({ "createdAt": { "$gte": 1000, "$lt": 2000 } }),
-            &value!({}),
+            &FieldMap::new(),
         )
         .unwrap();
         assert!(p.matches(&row(&[("createdAt", "1000")])));
@@ -561,19 +590,25 @@ mod tests {
 
     #[test]
     fn normalise_or_falls_back_coarse() {
-        let p = normalise_filter(&value!({ "$or": [ { "a": 1 }, { "b": 2 } ] }), &value!({}));
+        let p = normalise_filter(
+            &value!({ "$or": [ { "a": 1 }, { "b": 2 } ] }),
+            &FieldMap::new(),
+        );
         assert!(p.is_none(), "$or should collapse to coarse-grained");
     }
 
     #[test]
     fn normalise_in_falls_back_coarse() {
-        let p = normalise_filter(&value!({ "userId": { "$in": [1, 2, 3] } }), &value!({}));
+        let p = normalise_filter(
+            &value!({ "userId": { "$in": [1, 2, 3] } }),
+            &FieldMap::new(),
+        );
         assert!(p.is_none(), "$in should collapse to coarse-grained");
     }
 
     #[test]
     fn normalise_like_falls_back_coarse() {
-        let p = normalise_filter(&value!({ "name": { "$like": "j%" } }), &value!({}));
+        let p = normalise_filter(&value!({ "name": { "$like": "j%" } }), &FieldMap::new());
         assert!(p.is_none(), "$like should collapse to coarse-grained");
     }
 
@@ -582,13 +617,13 @@ mod tests {
         // Null/IS NULL semantics need a NULL-aware tuple representation;
         // the WAL consumer's text-encoded tuple can't distinguish "absent"
         // from "explicit NULL" so we conservatively bail out.
-        let p = normalise_filter(&value!({ "deletedAt": null }), &value!({}));
+        let p = normalise_filter(&value!({ "deletedAt": null }), &FieldMap::new());
         assert!(p.is_none());
     }
 
     #[test]
     fn normalise_array_filter_falls_back_coarse() {
-        let p = normalise_filter(&value!({ "tags": ["x", "y"] }), &value!({}));
+        let p = normalise_filter(&value!({ "tags": ["x", "y"] }), &FieldMap::new());
         assert!(p.is_none());
     }
 
@@ -606,7 +641,7 @@ mod tests {
 
     #[test]
     fn predicate_bool_eq() {
-        let p = normalise_filter(&value!({ "active": true }), &value!({})).unwrap();
+        let p = normalise_filter(&value!({ "active": true }), &FieldMap::new()).unwrap();
         assert!(p.matches(&row(&[("active", "true")])));
         assert!(!p.matches(&row(&[("active", "false")])));
     }
@@ -627,7 +662,7 @@ mod tests {
     fn read_set_entry_filters_by_predicate() {
         let entry = ReadSetEntry {
             collection: "messages".into(),
-            predicate: normalise_filter(&value!({ "userId": 42 }), &value!({})),
+            predicate: normalise_filter(&value!({ "userId": 42 }), &FieldMap::new()),
         };
         assert!(entry.matches(&row(&[("userId", "42")])));
         assert!(!entry.matches(&row(&[("userId", "99")])));
@@ -639,7 +674,7 @@ mod tests {
     #[test]
     fn record_no_op_when_inactive() {
         // No `Active::begin` — record should be a no-op.
-        record_if_active("messages", &value!({ "userId": 42 }), &value!({}));
+        record_if_active("messages", &value!({ "userId": 42 }), &FieldMap::new());
         assert!(!is_active());
     }
 
@@ -670,12 +705,12 @@ mod tests {
     #[test]
     fn ensure_capture_resets_on_a_new_dispatch_generation() {
         ensure_capture(1, true);
-        record_if_active("messages", &value!({ "userId": 42 }), &value!({}));
+        record_if_active("messages", &value!({ "userId": 42 }), &FieldMap::new());
         assert_eq!(snapshot_for("messages").len(), 1);
 
         // Same frame: the buffer is kept and appended to.
         ensure_capture(1, true);
-        record_if_active("messages", &value!({ "userId": 7 }), &value!({}));
+        record_if_active("messages", &value!({ "userId": 7 }), &FieldMap::new());
         assert_eq!(snapshot_for("messages").len(), 2, "same frame must append");
 
         // New frame: the buffer is discarded.
@@ -695,8 +730,8 @@ mod tests {
     #[test]
     fn snapshot_for_clones_and_filters_by_collection() {
         ensure_capture(10, true);
-        record_if_active("messages", &value!({ "userId": 42 }), &value!({}));
-        record_if_active("todos", &value!({ "done": false }), &value!({}));
+        record_if_active("messages", &value!({ "userId": 42 }), &FieldMap::new());
+        record_if_active("todos", &value!({ "done": false }), &FieldMap::new());
 
         assert_eq!(snapshot_for("messages").len(), 1);
         assert_eq!(
@@ -720,7 +755,7 @@ mod tests {
     #[test]
     fn snapshot_for_is_empty_when_that_collection_was_never_read() {
         ensure_capture(20, true);
-        record_if_active("messages", &value!({ "userId": 42 }), &value!({}));
+        record_if_active("messages", &value!({ "userId": 42 }), &FieldMap::new());
         assert!(
             snapshot_for("todos").is_empty(),
             "an unread collection yields nothing, so the caller must skip set_read_set"
@@ -735,7 +770,7 @@ mod tests {
     #[test]
     fn ensure_capture_is_inert_when_not_recording() {
         ensure_capture(30, false);
-        record_if_active("messages", &value!({ "userId": 42 }), &value!({}));
+        record_if_active("messages", &value!({ "userId": 42 }), &FieldMap::new());
         assert!(
             snapshot_for("messages").is_empty(),
             "a non-query frame must record nothing"

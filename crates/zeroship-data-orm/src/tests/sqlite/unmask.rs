@@ -227,7 +227,7 @@ fn cold_unmask_with_auto_actor_attaches_before_read() {
                 backend.key_store(),
                 app_id,
                 collection,
-                &schema,
+                &crate::tests::fixtures::native_fields(schema.clone()),
                 row_pk,
                 &mut doc,
             )
@@ -248,7 +248,7 @@ fn cold_unmask_with_auto_actor_attaches_before_read() {
             let bq = compile_insert(
                 &crate::sql::SchemaName::new(app_id).expect("fixture schema name"),
                 collection,
-                &schema,
+                &crate::tests::fixtures::native_fields(schema.clone()),
                 &doc,
             )
             .expect("compile insert");
@@ -652,7 +652,7 @@ fn unmask_with_user_role_in_policy_returns_plaintext() {
                 backend.key_store(),
                 app_id,
                 collection,
-                &schema,
+                &crate::tests::fixtures::native_fields(schema.clone()),
                 row_pk,
                 &mut doc,
             )
@@ -673,7 +673,7 @@ fn unmask_with_user_role_in_policy_returns_plaintext() {
             let bq = compile_insert(
                 &crate::sql::SchemaName::new(app_id).expect("fixture schema name"),
                 collection,
-                &schema,
+                &crate::tests::fixtures::native_fields(schema.clone()),
                 &doc,
             )
             .expect("compile insert");

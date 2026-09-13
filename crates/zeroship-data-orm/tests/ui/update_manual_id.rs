@@ -1,6 +1,7 @@
-use zeroship_data_orm::orm::{schema, Change, Changeset};
+use zeroship_data_orm::orm::{Change, Changeset};
 
-schema!(pub models = "../fixtures/manual-id.runtime.json");
+include!("../fixtures/manual_id_schema.rs");
+manual_id_schema!(pub models);
 use models::records;
 
 #[derive(Changeset)]

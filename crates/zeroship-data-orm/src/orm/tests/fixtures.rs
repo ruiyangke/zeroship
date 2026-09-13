@@ -1,5 +1,23 @@
 use super::*;
 
+pub fn post_migration_fields() -> Value {
+    let artifact: Value =
+        serde_json::from_str(include_str!("../../../tests/fixtures/schema.runtime.json")).unwrap();
+    artifact["collections"]["posts"]["fields"].clone()
+}
+
+pub fn predicate_migration_fields() -> Value {
+    let artifact: Value = serde_json::from_str(include_str!(
+        "../../../tests/fixtures/typed-predicates.runtime.json"
+    ))
+    .unwrap();
+    artifact["collections"]["predicate_rows"]["fields"].clone()
+}
+
+pub fn document_migration_fields() -> Value {
+    value!({"label":{"type":"string", "required":true}, "payload":{"type":"json", "required":true}})
+}
+
 /// A migrated collection and the resources that must outlive its queries.
 pub(super) struct CollectionFixture {
     pub database: Database,
@@ -14,6 +32,35 @@ pub(super) struct CollectionFixture {
 }
 
 impl CollectionFixture {
+    pub async fn sqlite_native(
+        collection: &str,
+        native: CollectionSchema,
+        migration: Value,
+    ) -> Self {
+        let mut fixture = Self::sqlite(collection, migration).await;
+        fixture.install_native(collection, native);
+        fixture
+    }
+
+    pub async fn postgres_native(
+        collection: &str,
+        native: CollectionSchema,
+        migration: Value,
+    ) -> Self {
+        let mut fixture = Self::postgres(collection, migration).await;
+        fixture.install_native(collection, native);
+        fixture
+    }
+
+    fn install_native(&mut self, collection: &str, native: CollectionSchema) {
+        self.database = Database::from_schema(
+            self.database.binding.clone(),
+            self.database.backend.clone(),
+            Schema::new([(collection.into(), native)]),
+        )
+        .unwrap();
+    }
+
     pub async fn wait_for_upsert_conflict(&self) {
         let backend = &self.postgres.as_ref().expect("PostgreSQL fixture").0;
         let app = self.database.binding.app_id();
@@ -58,10 +105,11 @@ impl CollectionFixture {
         let database = Database::from_schema(
             original.binding.clone(),
             original.backend.clone(),
-            vec![(
+            Schema::from_collections(vec![(
                 collection.into(),
                 crate::tests::fixtures::schema::generated_fields(fields),
-            )],
+            )])
+            .unwrap(),
         )
         .unwrap();
         Self {
@@ -101,7 +149,7 @@ impl CollectionFixture {
                 directory.path().join("control.sqlite").to_string_lossy(),
                 ProjectKeySource::unavailable(),
             ),
-            vec![(collection.into(), fields)],
+            Schema::from_collections(vec![(collection.into(), fields)]).unwrap(),
         )
         .await
         .unwrap();
@@ -165,7 +213,7 @@ impl CollectionFixture {
         let database = Database::from_schema(
             DbBinding::cold_start(&app),
             crate::backend_handle::BackendHandle::new(backend.clone()),
-            vec![(collection.into(), fields)],
+            Schema::from_collections(vec![(collection.into(), fields)]).unwrap(),
         )
         .unwrap();
         Self {
@@ -229,10 +277,11 @@ impl CollectionFixture {
         let database = Database::from_schema(
             DbBinding::cold_start(&app),
             crate::backend_handle::BackendHandle::new(backend.clone()),
-            vec![(
+            Schema::from_collections(vec![(
                 collection.into(),
                 crate::tests::fixtures::schema::generated_fields(fields),
-            )],
+            )])
+            .unwrap(),
         )
         .unwrap();
         Self {
@@ -341,7 +390,7 @@ impl CollectionFixture {
         self.database = Database::from_schema(
             self.database.binding.clone(),
             self.database.backend.clone(),
-            collections,
+            Schema::from_collections(collections).unwrap(),
         )
         .unwrap();
     }
@@ -374,17 +423,14 @@ impl CollectionFixture {
                     .await
                     .unwrap();
             }
-            let mut definition = fields.as_object_mut().unwrap().shift_remove(*old).unwrap();
-            definition["storage"] = value!({"valueColumn":new});
-            fields
-                .as_object_mut()
-                .unwrap()
-                .insert((*new).into(), definition);
+            let mut definition = fields.shift_remove(*old).unwrap();
+            definition.storage.value_column = Some((*new).into());
+            fields.insert((*new).into(), definition);
         }
         self.database = Database::from_schema(
             self.database.binding.clone(),
             self.database.backend.clone(),
-            vec![(collection.into(), fields)],
+            Schema::new([(collection.into(), CollectionSchema::new(fields))]),
         )
         .unwrap();
     }

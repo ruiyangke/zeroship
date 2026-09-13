@@ -28,12 +28,12 @@ fn manual_database(owner: &CollectionFixture) -> Database {
             .as_ref()
             .clone()
     });
-    fields["id"].as_object_mut().unwrap().shift_remove("assign");
-    fields["id"]["writable"] = Value::Bool(true);
+    fields["id"].assignment = None;
+    fields["id"].writable = true;
     Database::from_schema(
         owner.database.binding.clone(),
         owner.database.backend.clone(),
-        vec![("records".into(), fields)],
+        Schema::new([("records".into(), CollectionSchema::new(fields))]),
     )
     .unwrap()
 }

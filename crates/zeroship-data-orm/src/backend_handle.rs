@@ -186,13 +186,13 @@ pub(crate) async fn read_raw_column_value(
     collection: &str,
     raw_column: &str,
     row_pk: &str,
-    schema: &Value,
+    schema: &crate::schema::FieldMap,
 ) -> Result<ScalarRead<Value>, DbError> {
     let namespace = SchemaName::new(route.backend().namespace(route.app_id(), route.schema()))
         .map_err(|error| DbError::internal(format!("invalid backend namespace: {error}")))?;
     let key_column = "id";
-    let key_value = match schema[key_column]["type"].as_str() {
-        Some("int" | "integer" | "bigInt" | "bigint") => {
+    let key_value = match schema.get(key_column).map(|column| column.logical_type) {
+        Some(crate::schema::LogicalType::Integer | crate::schema::LogicalType::BigInt) => {
             Value::from(row_pk.parse::<i64>().map_err(|_| {
                 DbError::validation("invalid_row_identity", "row identity must be an integer")
             })?)
@@ -215,7 +215,7 @@ pub(crate) async fn read_raw_column_bytes(
     collection: &str,
     raw_column: &str,
     row_pk: &str,
-    schema: &Value,
+    schema: &crate::schema::FieldMap,
 ) -> Result<ScalarRead<Vec<u8>>, DbError> {
     match read_raw_column_value(route, collection, raw_column, row_pk, schema).await? {
         ScalarRead::NoRow => Ok(ScalarRead::NoRow),
@@ -315,7 +315,7 @@ mod routed_read_tests {
                 "people",
                 "__zs_raw__ssn",
                 "p1",
-                &schema,
+                &crate::tests::fixtures::native_fields(schema.clone()),
             )
             .await
             .expect("the pooled read itself must succeed");
@@ -336,7 +336,7 @@ mod routed_read_tests {
                 "people",
                 "__zs_raw__ssn",
                 "p1",
-                &schema,
+                &crate::tests::fixtures::native_fields(schema.clone()),
             )
             .await
             .expect("a routed read inside the transaction must reach the row");

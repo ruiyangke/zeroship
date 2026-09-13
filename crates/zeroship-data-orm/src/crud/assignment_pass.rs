@@ -1,5 +1,6 @@
 //! Apply the collection descriptor's assignments before SQL compilation.
 
+use crate::schema::FieldMap;
 use crate::value::Map;
 use crate::value::Value;
 use zeroship_migrate_policy::{AssignmentEvent, AssignmentGenerator};
@@ -39,14 +40,13 @@ pub fn derive_prefix_from_collection_name(collection: &str) -> String {
 
 /// Resolve and validate the prefix declared for this assigned column.
 pub fn prefix_for_collection(
-    schema: &Value,
+    schema: &FieldMap,
     collection: &str,
     column: &str,
 ) -> Result<String, DbError> {
     let prefix = schema
         .get(column)
-        .and_then(|id_def| id_def.get("idPrefix"))
-        .and_then(|p| p.as_str())
+        .and_then(|id_def| id_def.id_prefix.as_deref())
         .map(str::to_string)
         .unwrap_or_else(|| derive_prefix_from_collection_name(collection));
     crate::sql::mapping::validate_id_prefix(&prefix)?;
@@ -55,7 +55,7 @@ pub fn prefix_for_collection(
 
 pub fn apply_assignments_on_insert(
     doc: &mut Value,
-    schema: &Value,
+    schema: &FieldMap,
     collection: &str,
     actor_id: Option<&str>,
 ) -> Result<(), DbError> {
@@ -64,11 +64,11 @@ pub fn apply_assignments_on_insert(
 
 fn apply_assignments_on_insert_impl(
     doc: &mut Value,
-    schema: &Value,
+    schema: &FieldMap,
     collection: &str,
     actor_id: Option<&str>,
 ) -> Result<(), DbError> {
-    let plan = AssignmentPlan::from_schema(schema)?;
+    let plan = AssignmentPlan::from_schema(schema);
     let Some(obj) = doc.as_object_mut() else {
         return Ok(());
     };
@@ -78,7 +78,7 @@ fn apply_assignments_on_insert_impl(
 /// Apply the same assignment plan to every row in a batch.
 pub fn apply_assignments_on_insert_many(
     docs: &mut Value,
-    schema: &Value,
+    schema: &FieldMap,
     collection: &str,
     actor_id: Option<&str>,
 ) -> Result<(), DbError> {
@@ -87,12 +87,12 @@ pub fn apply_assignments_on_insert_many(
 
 fn apply_assignments_on_insert_many_impl(
     docs: &mut Value,
-    schema: &Value,
+    schema: &FieldMap,
     collection: &str,
     actor_id: Option<&str>,
 ) -> Result<(), DbError> {
     // Remove generated defaults consistently before the insert compiler unions columns.
-    let plan = AssignmentPlan::from_schema(schema)?;
+    let plan = AssignmentPlan::from_schema(schema);
     let Some(arr) = docs.as_array_mut() else {
         return Ok(());
     };
@@ -107,7 +107,7 @@ fn apply_assignments_on_insert_many_impl(
 fn inject_into_object(
     obj: &mut Map<String, Value>,
     plan: &AssignmentPlan,
-    schema: &Value,
+    schema: &FieldMap,
     collection: &str,
     actor_id: Option<&str>,
 ) -> Result<(), DbError> {
@@ -153,7 +153,7 @@ fn inject_into_object(
 // UPDATE-time validation and optimistic-concurrency extraction.
 // ---------------------------------------------------------------------------
 
-pub fn apply_assignments_on_update(patch: &mut Value, schema: &Value) -> Result<(), DbError> {
+pub fn apply_assignments_on_update(patch: &mut Value, schema: &FieldMap) -> Result<(), DbError> {
     if patch.get("id").is_some()
         || ["$set", "$inc", "$dec", "$mul"].iter().any(|op| {
             patch
@@ -166,7 +166,7 @@ pub fn apply_assignments_on_update(patch: &mut Value, schema: &Value) -> Result<
             "the collection identity cannot be changed after insertion",
         ));
     }
-    let plan = AssignmentPlan::from_schema(schema)?;
+    let plan = AssignmentPlan::from_schema(schema);
     let immutable: Vec<String> = plan.immutable_after_insert().map(str::to_string).collect();
     let reassigned: Vec<String> = plan.reassigned_on_write().map(str::to_string).collect();
 
@@ -223,7 +223,7 @@ pub(crate) struct ConcurrencyGuard {
 pub(crate) fn extract_concurrency_guard(
     filter: &Value,
     collection: &str,
-    schema: &Value,
+    schema: &FieldMap,
 ) -> Result<Option<ConcurrencyGuard>, DbError> {
     let Some(column) = crate::sql::lifecycle::concurrency_column(schema)? else {
         return Ok(None);
@@ -290,8 +290,8 @@ mod tests {
     use crate::sql::lifecycle::AssignedValue;
     use crate::value;
 
-    fn schema() -> Value {
-        value!({
+    fn schema() -> FieldMap {
+        crate::tests::fixtures::native_fields(value!({
             "key": {"type":"string", "primaryKey":true, "idPrefix":"note", "assign":{"by":"typedId", "on":"insert"}},
             "born": {"type":"date", "assign":{"by":"now", "on":"insert"}},
             "touched": {"type":"date", "assign":{"by":"now", "on":"write"}},
@@ -300,7 +300,7 @@ mod tests {
             "revision": {"type":"int", "concurrency":true, "default":1, "assign":{"by":"increment(1)", "on":"write"}},
             "removed": {"type":"date", "softDelete":true, "assign":{"by":"now", "on":"delete"}},
             "title":{"type":"string"}
-        })
+        }))
     }
 
     #[test]
@@ -315,7 +315,10 @@ mod tests {
             "version",
             "deleted_at",
         ] {
-            fields[name] = value!({"type":"string"});
+            fields.insert(
+                name.into(),
+                crate::schema::ColumnSchema::new(crate::schema::LogicalType::Text),
+            );
         }
         for actor in [None, Some("usr_editor")] {
             let mut document = value!({"title":"hello", "born":0, "touched":0, "revision":999, "removed":0,
@@ -351,7 +354,9 @@ mod tests {
 
     #[test]
     fn identity_is_supplied_by_the_database() {
-        let fields = value!({"sequence":{"type":"int", "assign":{"by":"identity", "on":"insert"}}});
+        let fields = crate::tests::fixtures::native_fields(
+            value!({"sequence":{"type":"int", "assign":{"by":"identity", "on":"insert"}}}),
+        );
         let mut doc = value!({"sequence":999});
         apply_assignments_on_insert(&mut doc, &fields, "items", None).unwrap();
         assert!(doc.as_object().unwrap().is_empty());
@@ -360,7 +365,7 @@ mod tests {
     #[test]
     fn prefix_validation_applies_to_the_assigned_column() {
         let mut fields = schema();
-        fields["key"]["idPrefix"] = value!("usr");
+        fields["key"].id_prefix = Some("usr".into());
         assert!(apply_assignments_on_insert(&mut value!({}), &fields, "notes", None).is_err());
         assert_eq!(derive_prefix_from_collection_name("posts"), "post");
         assert_eq!(derive_prefix_from_collection_name(""), "row");
@@ -390,7 +395,7 @@ mod tests {
             assert!(remaining.as_object().unwrap().is_empty());
         }
         let mut ordinary = value!({"version":"custom", "created_at":"custom"});
-        apply_assignments_on_update(&mut ordinary, &value!({})).unwrap();
+        apply_assignments_on_update(&mut ordinary, &FieldMap::new()).unwrap();
         assert_eq!(
             ordinary,
             value!({"version":"custom", "created_at":"custom"})
@@ -429,7 +434,7 @@ mod tests {
         )
         .is_err());
         assert_eq!(
-            extract_concurrency_guard(&value!({"version":7}), "notes", &value!({})).unwrap(),
+            extract_concurrency_guard(&value!({"version":7}), "notes", &FieldMap::new()).unwrap(),
             None
         );
 
@@ -442,7 +447,7 @@ mod tests {
     #[test]
     fn delete_restore_and_write_expressions_follow_assignment_events() {
         let fields = schema();
-        let plan = AssignmentPlan::from_schema(&fields).unwrap();
+        let plan = AssignmentPlan::from_schema(&fields);
         for (deleting, restoring) in [(false, false), (true, false), (false, true)] {
             let assignments =
                 plan.write_assignments(&fields, Some("usr_actor"), deleting, restoring);

@@ -1,12 +1,12 @@
-//! Typed mappings over native records and migration-derived column contracts.
+//! Typed mappings over native records and declared column contracts.
 use crate::value::{Record, Value};
 use std::marker::PhantomData;
 use zeroship_data_orm::error::DbError;
 
-/// Collection metadata generated from the deployment's runtime descriptor.
+/// Collection metadata generated from native Rust declarations.
 pub trait Entity: Sized + 'static {
     const COLLECTION: &'static str;
-    fn schema() -> &'static Value;
+    fn schema() -> &'static crate::schema::CollectionSchema;
 }
 pub trait Column: 'static {
     type Entity: Entity;

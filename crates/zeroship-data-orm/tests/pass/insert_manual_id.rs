@@ -1,6 +1,7 @@
-use zeroship_data_orm::orm::{schema, Insertable};
+use zeroship_data_orm::orm::Insertable;
 
-schema!(pub models = "../fixtures/manual-id.runtime.json");
+include!("../fixtures/manual_id_schema.rs");
+manual_id_schema!(pub models);
 use models::records;
 
 #[derive(Insertable)]

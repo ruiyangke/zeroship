@@ -1,4 +1,5 @@
 //! Shared update grammar. Assignments remain native values throughout parsing.
+use crate::schema::{ColumnSchema, LogicalType};
 use crate::sql::codecs::CodecError;
 use crate::value::{Record, Value};
 use std::collections::HashSet;
@@ -32,25 +33,25 @@ impl Operator {
     ///
     /// # Errors
     /// Refuses an operator unsupported by the declared field type.
-    pub fn validate_type(self, field: &str, definition: &Value) -> Result<(), CodecError> {
+    pub fn validate_type(self, field: &str, definition: &ColumnSchema) -> Result<(), CodecError> {
         use Operator::*;
-        let kind = definition["type"].as_str();
+        let kind = definition.logical_type;
         let supported = match self {
             Set => true,
             Increment | Decrement | Multiply => matches!(
                 kind,
-                Some("int" | "integer" | "bigInt" | "number" | "float")
+                LogicalType::Integer | LogicalType::BigInt | LogicalType::Number
             ),
-            Push | Pull | AddToSet => kind == Some("array"),
+            Push | Pull | AddToSet => kind == LogicalType::Array,
         };
         if !supported {
             let code = match kind {
-                Some("calendarDate") => "invalid_calendar_date_operation",
-                Some("date" | "timestamp") => "invalid_timestamp_operation",
-                Some("array")
+                LogicalType::CalendarDate => "invalid_calendar_date_operation",
+                LogicalType::Timestamp => "invalid_timestamp_operation",
+                LogicalType::Array
                     if matches!(
-                        definition["items"].as_str(),
-                        Some("calendarDate" | "date" | "timestamp")
+                        definition.items,
+                        Some(LogicalType::CalendarDate | LogicalType::Timestamp)
                     ) =>
                 {
                     "invalid_temporal_operation"
@@ -63,7 +64,7 @@ impl Operator {
                     "operation '{}' is not supported for column '{}' with type '{}'",
                     self.name(),
                     field,
-                    kind.unwrap_or("undeclared")
+                    kind.as_str()
                 ),
             ));
         }
