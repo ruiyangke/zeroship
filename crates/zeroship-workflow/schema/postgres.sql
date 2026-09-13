@@ -65,7 +65,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS "__zeroship_workflow_steps_scope_key" ON "__ze
 
 CREATE UNIQUE INDEX IF NOT EXISTS "__zeroship_workflow_step_name_occurrence" ON "__zeroship_workflow_schema"."__zeroship_workflow_steps" ("app_id", "run_id", "generation", "name", "occurrence");
 
-CREATE TABLE "__zeroship_workflow_schema"."__zeroship_workflow_job_receipts" ("id" text PRIMARY KEY NOT NULL, "app_id" text NOT NULL, "run_id" text NOT NULL, "specification" text NOT NULL, "outcome" text, "created_at" bigint NOT NULL, "completed_at" bigint, CONSTRAINT "__zeroship_workflow_job_receipts_app" FOREIGN KEY ("app_id") REFERENCES "__zeroship_workflow_schema"."__zeroship_workflow_app_state" ("app_id") ON DELETE RESTRICT);
+CREATE TABLE "__zeroship_workflow_schema"."__zeroship_workflow_job_receipts" ("id" text PRIMARY KEY NOT NULL, "app_id" text NOT NULL, "run_id" text, "specification" text NOT NULL, "outcome" text, "reconciliation" text, "reconciliation_next" bigint, "created_at" bigint NOT NULL, "completed_at" bigint, CONSTRAINT "__zeroship_workflow_job_receipts_app" FOREIGN KEY ("app_id") REFERENCES "__zeroship_workflow_schema"."__zeroship_workflow_app_state" ("app_id") ON DELETE RESTRICT);
 
 CREATE UNIQUE INDEX IF NOT EXISTS "__zeroship_workflow_job_receipts_scope_key" ON "__zeroship_workflow_schema"."__zeroship_workflow_job_receipts" ("app_id", "id");
 
@@ -171,9 +171,13 @@ CREATE INDEX IF NOT EXISTS "__zeroship_workflow_job_publications_pending_idx" ON
 
 CREATE INDEX IF NOT EXISTS "__zeroship_workflow_job_publications_deployment_idx" ON "__zeroship_workflow_schema"."__zeroship_workflow_job_publications" ("app_id", "deploy_id", "confirmed_at");
 
+CREATE TABLE "__zeroship_workflow_schema"."__zeroship_workflow_publication_scans" ("id" text PRIMARY KEY NOT NULL, "revision" bigint NOT NULL, "after_job" text, "upper_job" text, CONSTRAINT "__zeroship_workflow_publication_scan_app" FOREIGN KEY ("id") REFERENCES "__zeroship_workflow_schema"."__zeroship_workflow_app_state" ("app_id") ON DELETE RESTRICT);
+
 ALTER TABLE "__zeroship_workflow_schema"."__zeroship_workflow_job_publications" ALTER COLUMN "id" TYPE text COLLATE "C", ALTER COLUMN "app_id" TYPE text COLLATE "C", ALTER COLUMN "run_id" TYPE text COLLATE "C", ALTER COLUMN "deploy_id" TYPE text COLLATE "C";
 
 ALTER TABLE "__zeroship_workflow_schema"."__zeroship_workflow_job_receipts" ALTER COLUMN "id" TYPE text COLLATE "C", ALTER COLUMN "app_id" TYPE text COLLATE "C", ALTER COLUMN "run_id" TYPE text COLLATE "C";
 
+ALTER TABLE "__zeroship_workflow_schema"."__zeroship_workflow_publication_scans" ALTER COLUMN "id" TYPE text COLLATE "C", ALTER COLUMN "after_job" TYPE text COLLATE "C", ALTER COLUMN "upper_job" TYPE text COLLATE "C";
+
 ALTER TABLE "__zeroship_workflow_schema"."__zeroship_workflow_tasks" ALTER COLUMN "job_id" TYPE text COLLATE "C";
-INSERT INTO "__zeroship_workflow_schema".__zeroship_workflow_schema_version (id, fingerprint) VALUES ('workflow', '5c73f388937aca2bbd023a00319ba01d1ffd6d855827c21394b1d5115e6ef70a');
+INSERT INTO "__zeroship_workflow_schema".__zeroship_workflow_schema_version (id, fingerprint) VALUES ('workflow', '046948174b42551e3ea3f17f1dd01caa1d36a5b3bec85046c96d82a84e595f46');

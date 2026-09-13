@@ -87,13 +87,16 @@ impl DeliveredTask {
     }
 }
 
-struct CapturedLease {
+pub(super) struct CapturedLease {
     delivery: Delivery,
     expires: Instant,
     policy: PolicyAuthority,
 }
 impl CapturedLease {
-    fn capture(scope: &AppWorkflows, lease: &impl JobLease) -> Result<Self, WorkflowServiceError> {
+    pub(super) fn capture(
+        scope: &AppWorkflows,
+        lease: &impl JobLease,
+    ) -> Result<Self, WorkflowServiceError> {
         let started = Instant::now();
         let duration = remaining(lease)?;
         let policy = scope.service.policies.authority(&scope.app)?;
@@ -112,7 +115,7 @@ impl CapturedLease {
             policy,
         })
     }
-    fn check(&self, scope: &AppWorkflows) -> Result<(), WorkflowServiceError> {
+    pub(super) fn check(&self, scope: &AppWorkflows) -> Result<(), WorkflowServiceError> {
         remaining(self)?;
         self.policy.check(&scope.service.policies, &scope.app)
     }
@@ -130,20 +133,37 @@ impl JobLease for CapturedLease {
 
 #[derive(FromRow)]
 #[orm(entity = job_receipts)]
-struct Record {
-    run_id: String,
+pub(super) struct Record {
+    run_id: Option<String>,
     specification: String,
     outcome: Option<String>,
     completed_at: Option<i64>,
+    pub(super) reconciliation: Option<String>,
+    pub(super) reconciliation_next: Option<i64>,
 }
 
 impl Record {
-    fn receipt(&self, job: &JobSpec) -> Result<Option<JobReceipt>, WorkflowServiceError> {
+    pub(super) fn receipt(
+        &self,
+        job: &JobSpec,
+    ) -> Result<Option<JobReceipt>, WorkflowServiceError> {
         if decode::<JobSpec>(&self.specification)? != *job {
             return Err(conflict());
         }
-        if !matches!(&job.operation, JobOperation::Advance { run_id, .. } if run_id.as_str() == self.run_id)
-        {
+        let valid = match &job.operation {
+            JobOperation::Advance { run_id, .. } => {
+                self.run_id.as_deref() == Some(run_id.as_str())
+                    && self.reconciliation.is_none()
+                    && self.reconciliation_next.is_none()
+            }
+            JobOperation::Reconcile {} => {
+                self.run_id.is_none()
+                    && self.reconciliation.is_some()
+                    && self.reconciliation_next.is_some()
+            }
+            _ => false,
+        };
+        if !valid {
             return Err(invalid());
         }
         match (&self.outcome, self.completed_at) {
@@ -561,7 +581,10 @@ fn authorize_task(
 
 // Fresh attempts consume their captured authority even while BEGIN, locks or
 // COMMIT wait. Expired attempts can only reach the bounded receipt branches.
-fn attempt_budget(lease: Option<&CapturedLease>, task: Option<&DeliveredTask>) -> Duration {
+pub(super) fn attempt_budget(
+    lease: Option<&CapturedLease>,
+    task: Option<&DeliveredTask>,
+) -> Duration {
     let io_limit = Duration::from_secs(5);
     let Some(lease) = lease else {
         return io_limit;
@@ -642,7 +665,10 @@ pub(super) fn check_scope(app: &AppId, job: &JobSpec) -> Result<(), WorkflowServ
     Ok(())
 }
 
-async fn read(tx: &Transaction, job: &JobSpec) -> Result<Option<Record>, WorkflowServiceError> {
+pub(super) async fn read(
+    tx: &Transaction,
+    job: &JobSpec,
+) -> Result<Option<Record>, WorkflowServiceError> {
     Ok(tx
         .database()
         .entity::<job_receipts::Entity>()?

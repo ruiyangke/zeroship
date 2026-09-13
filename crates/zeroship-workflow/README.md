@@ -89,9 +89,19 @@ rotates between eligible apps and bounds claim I/O, idle polling and error retri
 The consumer performs no calendar evaluation, journal discovery or independent
 maintenance. Native tests connect it to the ORM coordinator and queue using a
 separate manager database, including a lost settlement acknowledgement.
-The consumer currently handles advance jobs. Other delivered operation handlers,
-authenticated placement refresh, manager recovery dispatch and ordinary worker/CLI
-composition remain required before replacing the existing runner.
+The consumer handles advance and reconciliation jobs. Other delivered operation
+handlers, authenticated placement refresh, production manager recovery dispatch
+and ordinary worker/CLI composition remain required before replacing the existing runner.
+`service::reconciliation` persists the selected publication page and its progress
+in the creator job receipt. It reserves each item before attempting publication,
+so retries reach later items even when an earlier request stalls. Confirmation
+checks the exact manager receipt under the original delivery and policy bounds.
+Page completion commits its receipt with an app-scoped scan cursor revision;
+competing jobs cannot move that cursor backwards. Failed items remain pending for
+the next bounded scan. A waiting page advances the manager's recovery deadline
+only when it settles the currently recorded recovery job. Completed scans retain
+periodic responsibility and provide no app-drain proof. The operation loads no
+app code and examines no other app or database.
 `zeroship-workflow-manager::deployments::DeploymentHolds` accepts an authorized
 platform ORM database. Holds survive
 reconnection, and generation checks reject stale releases. The collector helpers

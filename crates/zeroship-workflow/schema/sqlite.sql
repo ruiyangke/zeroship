@@ -59,7 +59,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS "__zeroship_workflow_steps_scope_key" ON "__ze
 
 CREATE UNIQUE INDEX IF NOT EXISTS "__zeroship_workflow_step_name_occurrence" ON "__zeroship_workflow_steps" ("app_id", "run_id", "generation", "name", "occurrence");
 
-CREATE TABLE "__zeroship_workflow_job_receipts" ("id" TEXT PRIMARY KEY NOT NULL, "app_id" TEXT NOT NULL, "run_id" TEXT NOT NULL, "specification" TEXT NOT NULL, "outcome" TEXT, "created_at" INTEGER NOT NULL, "completed_at" INTEGER, CONSTRAINT "__zeroship_workflow_job_receipts_app" FOREIGN KEY (app_id) REFERENCES "__zeroship_workflow_app_state"(app_id) ON DELETE RESTRICT);
+CREATE TABLE "__zeroship_workflow_job_receipts" ("id" TEXT PRIMARY KEY NOT NULL, "app_id" TEXT NOT NULL, "run_id" TEXT, "specification" TEXT NOT NULL, "outcome" TEXT, "reconciliation" TEXT, "reconciliation_next" INTEGER, "created_at" INTEGER NOT NULL, "completed_at" INTEGER, CONSTRAINT "__zeroship_workflow_job_receipts_app" FOREIGN KEY (app_id) REFERENCES "__zeroship_workflow_app_state"(app_id) ON DELETE RESTRICT);
 
 CREATE UNIQUE INDEX IF NOT EXISTS "__zeroship_workflow_job_receipts_scope_key" ON "__zeroship_workflow_job_receipts" ("app_id", "id");
 
@@ -165,5 +165,7 @@ CREATE INDEX IF NOT EXISTS "__zeroship_workflow_job_publications_pending_idx" ON
 
 CREATE INDEX IF NOT EXISTS "__zeroship_workflow_job_publications_deployment_idx" ON "__zeroship_workflow_job_publications" ("app_id", "deploy_id", "confirmed_at");
 
+CREATE TABLE "__zeroship_workflow_publication_scans" ("id" TEXT PRIMARY KEY NOT NULL, "revision" INTEGER NOT NULL, "after_job" TEXT, "upper_job" TEXT, CONSTRAINT "__zeroship_workflow_publication_scan_app" FOREIGN KEY (id) REFERENCES "__zeroship_workflow_app_state"(app_id) ON DELETE RESTRICT);
+
 SELECT 1;
-INSERT INTO "main".__zeroship_workflow_schema_version (id, fingerprint) VALUES ('workflow', '13127e33cf7297b222ff9597a89d2450fed7b0d2e5b28d98a0479ad8caa2e308');
+INSERT INTO "main".__zeroship_workflow_schema_version (id, fingerprint) VALUES ('workflow', '26f53aecac2356d5cbde1944c5809188d6dd4b4a57ecd2a5544128e8ff89e036');

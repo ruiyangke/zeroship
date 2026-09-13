@@ -9,6 +9,8 @@ use super::{CancelOnDrop, ExecutionGuard, TaskExecution, TaskExecutor};
 use crate::{
     service::{
         delivery::{DeliveredTask, JobAcceptance, JobReceipt},
+        publication::JobPublisher,
+        reconciliation::ReconciliationOptions,
         AppWorkflows, ControlIntent,
     },
     WorkflowServiceError,
@@ -22,7 +24,9 @@ use std::{
 };
 use zeroship_core::{
     workflow_coordination::{AssignedScope, FailureCode},
-    workflow_jobs::{Delivery, JobLease, Settlement, SettlementReceipt},
+    workflow_jobs::{
+        Delivery, JobLease, JobOperation, JobSpec, Settlement, SettlementReceipt, SubmitJob,
+    },
 };
 use zeroship_workflow_client::{LeasedJob, WorkerCoordinator};
 
@@ -35,6 +39,11 @@ pub trait JobTransport {
         &self,
         scope: &AssignedScope,
     ) -> impl Future<Output = Result<Option<Self::Lease>, WorkflowServiceError>>;
+    fn submit(
+        &self,
+        scope: &AssignedScope,
+        job: &JobSpec,
+    ) -> impl Future<Output = Result<JobSpec, WorkflowServiceError>>;
     fn heartbeat(
         &self,
         lease: &Self::Lease,
@@ -47,6 +56,19 @@ pub trait JobTransport {
 
 impl JobTransport for WorkerCoordinator {
     type Lease = LeasedJob;
+
+    async fn submit(
+        &self,
+        scope: &AssignedScope,
+        job: &JobSpec,
+    ) -> Result<JobSpec, WorkflowServiceError> {
+        self.submit_job(&SubmitJob {
+            scope: scope.clone(),
+            job: job.clone(),
+        })
+        .await
+        .map_err(metadata_error)
+    }
 
     async fn claim(
         &self,
@@ -71,10 +93,12 @@ pub struct DeliveryOptions {
     pub execution_timeout: Duration,
     pub operation_timeout: Duration,
     pub retry_delay: Duration,
+    pub reconciliation: ReconciliationOptions,
 }
 
 impl DeliveryOptions {
     pub(super) fn validate(self) -> Result<(), WorkflowServiceError> {
+        self.reconciliation.validate()?;
         if self.execution_timeout.is_zero()
             || self.operation_timeout.is_zero()
             || self.retry_delay.is_zero()
@@ -184,7 +208,7 @@ impl<T: JobTransport> DeliverySlot<T> {
         })
     }
 
-    /// Execute an advance delivery, or settle its previously committed receipt.
+    /// Execute an advance or reconciliation delivery, or replay its committed receipt.
     /// Dropping this future cancels execution. Drain before reusing the slot.
     ///
     /// # Errors
@@ -196,6 +220,21 @@ impl<T: JobTransport> DeliverySlot<T> {
         lease: T::Lease,
     ) -> Result<DeliveryOutcome, WorkflowServiceError> {
         self.drain_interrupted().await;
+        if matches!(lease.delivery().job.operation, JobOperation::Reconcile {}) {
+            let publisher = Submission {
+                transport: self.transport.as_ref(),
+                scope: AssignedScope {
+                    app_id: lease.delivery().job.app_id.clone(),
+                    assignment_revision: lease.delivery().assignment_revision,
+                },
+            };
+            let receipt = bounded(
+                self.options.execution_timeout,
+                app.reconcile_job(&lease, &publisher, self.options.reconciliation),
+            )
+            .await?;
+            return self.acknowledge(receipt, &lease).await;
+        }
         let accepted = app.accept_job(&lease).await?;
         let task = match accepted {
             JobAcceptance::Deferred => return Ok(DeliveryOutcome::Deferred),
@@ -302,6 +341,19 @@ impl<T: JobTransport> DeliverySlot<T> {
             creator: Box::new(receipt),
             manager,
         })
+    }
+}
+
+struct Submission<'a, T> {
+    transport: &'a T,
+    scope: AssignedScope,
+}
+impl<T: JobTransport> JobPublisher for Submission<'_, T> {
+    fn app_id(&self) -> &zeroship_core::app_id::AppId {
+        &self.scope.app_id
+    }
+    async fn submit(&self, job: &JobSpec) -> Result<JobSpec, WorkflowServiceError> {
+        self.transport.submit(&self.scope, job).await
     }
 }
 

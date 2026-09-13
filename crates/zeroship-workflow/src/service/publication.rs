@@ -177,16 +177,31 @@ impl AppWorkflows {
         id: &JobId,
         publisher: &impl JobPublisher,
     ) -> Result<JobSpec, WorkflowServiceError> {
+        self.publish_job_authorized(id, publisher, None).await
+    }
+
+    pub(super) async fn publish_job_authorized(
+        &self,
+        id: &JobId,
+        publisher: &impl JobPublisher,
+        authority: Option<&super::delivery::CapturedLease>,
+    ) -> Result<JobSpec, WorkflowServiceError> {
         if publisher.app_id() != &self.app {
             return Err(WorkflowServiceError::PermissionDenied);
         }
         self.service.policies.resolve(&self.app)?;
+        if let Some(authority) = authority {
+            authority.check(self)?;
+        }
         let tx = self.service.begin().await?;
         let intent = read(&tx, &self.app, id).await?;
         let job = intent.job(&self.app)?;
         tx.commit().await?;
         if intent.confirmed_at.is_some() {
             return Ok(job);
+        }
+        if let Some(authority) = authority {
+            authority.check(self)?;
         }
         if publisher.submit(&job).await? != job {
             return Err(WorkflowServiceError::Conflict(
@@ -195,6 +210,9 @@ impl AppWorkflows {
         }
         let mut tx = self.service.begin().await?;
         lock_app(&mut tx, &self.app).await?;
+        if let Some(authority) = authority {
+            authority.check(self)?;
+        }
         let current = read(&tx, &self.app, id).await?;
         if current.job(&self.app)? != job {
             return Err(invalid());
@@ -208,6 +226,9 @@ impl AppWorkflows {
                     value!({"confirmed_at":now}),
                 )
                 .await?;
+        }
+        if let Some(authority) = authority {
+            authority.check(self)?;
         }
         tx.commit().await?;
         Ok(job)

@@ -771,7 +771,6 @@
         },
         "run_id": {
           "type": "string",
-          "required": true,
           "readable": true,
           "filterable": true,
           "sortable": true,
@@ -799,6 +798,26 @@
           "projectable": true,
           "storage": {
             "valueColumn": "outcome"
+          }
+        },
+        "reconciliation": {
+          "type": "string",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "reconciliation"
+          }
+        },
+        "reconciliation_next": {
+          "type": "bigInt",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "reconciliation_next"
           }
         },
         "created_at": {
@@ -1365,6 +1384,59 @@
           ]
         }
       ]
+    },
+    "__zeroship_workflow_publication_scans": {
+      "fields": {
+        "id": {
+          "type": "string",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "id"
+          },
+          "primaryKey": true
+        },
+        "revision": {
+          "type": "bigInt",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "revision"
+          }
+        },
+        "after_job": {
+          "type": "string",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "after_job"
+          }
+        },
+        "upper_job": {
+          "type": "string",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "upper_job"
+          }
+        }
+      },
+      "options": {
+        "softDelete": false,
+        "versioning": false,
+        "strictness": "strict"
+      },
+      "indexes": []
     },
     "__zeroship_workflow_requests": {
       "fields": {
