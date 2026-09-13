@@ -1332,9 +1332,20 @@ normal-dependency ownership checks have passed. These checks do not establish a
 completed distributed workflow system.
 
 The ORM owner's cancellation fix passes the creator lifecycle and receipt tests
-with their database barriers still held. The broader creator management suite
-has exposed a default-stack overflow under investigation. Its complete native
-verification remains required; passing cancellation does not waive that failure.
+with their database barriers still held. The shared ORM typed-read allocation
+fix also passes the complete creator management module on the normal test
+thread stack, including its former overflow case. This establishes that module's
+behavior; the complete journal and distributed acceptance suites remain separate
+verification obligations.
+
+Workflow provisioning preserves an existing creator schema's migrator ownership.
+Native PostgreSQL container tests exercise both provisioning orders, repeated
+runtime provisioning and actual table creation through a confined migrator login.
+They also check the scoped app runtime role's data access and DDL/sibling denials.
+These scoped-role checks do not prove ambient worker-login isolation: existing
+platform migrations still grant the workflow owner role to worker and Control,
+and workflow provisioning still grants that role schema creation authority.
+Remove those obsolete edges with the legacy journal provisioning paths.
 
 Manager cron/timer discovery, durable scope deadlines, capacity activation,
 creator job receipts/publication intents, queue HTTP delivery and the simple
