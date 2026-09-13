@@ -1000,10 +1000,11 @@ async fn handle_request(
     match outcome {
         FetchOutcome::Response {
             status,
-            headers,
+            mut headers,
             body,
             logs: _,
         } => {
+            append_dev_runtime_state(runtime, &mut headers);
             let resp = build_http_response(status, &headers, &body);
             let BufResult(r, _) = stream.write_all(resp).await;
             r.is_ok()
@@ -1040,10 +1041,11 @@ async fn handle_request(
             match recv_with_timeout(&rx, runtime.wall_timeout(), &cf, runtime).await {
                 Some(Ok(SettledFetch::Response {
                     status,
-                    headers,
+                    mut headers,
                     body,
                     ..
                 })) => {
+                    append_dev_runtime_state(runtime, &mut headers);
                     let resp = build_http_response(status, &headers, &body);
                     let BufResult(r, _) = stream.write_all(resp).await;
                     r.is_ok()
@@ -1077,14 +1079,18 @@ async fn handle_request(
                         r#"{{"message":"{}","name":"Error"}}"#,
                         e.message.replace('"', "\\\"")
                     );
-                    let resp = build_http_response(e.status, &[], body.as_bytes());
+                    let mut headers = Vec::new();
+                    append_dev_runtime_state(runtime, &mut headers);
+                    let resp = build_http_response(e.status, &headers, body.as_bytes());
                     let BufResult(r, _) = stream.write_all(resp).await;
                     r.is_ok()
                 }
                 None => {
+                    let mut headers = Vec::new();
+                    append_dev_runtime_state(runtime, &mut headers);
                     let resp = build_http_response(
                         504,
-                        &[],
+                        &headers,
                         br#"{"message":"request timed out","name":"Error"}"#,
                     );
                     let BufResult(r, _) = stream.write_all(resp).await;
@@ -1092,6 +1098,18 @@ async fn handle_request(
                 }
             }
         }
+    }
+}
+
+const DEV_RUNTIME_STATE_HEADER: &str = "x-zeroship-dev-runtime";
+const DEV_RUNTIME_FRESH_REQUIRED: &str = "fresh-required";
+
+fn append_dev_runtime_state(runtime: &Runtime, headers: &mut Vec<(String, String)>) {
+    if runtime.dev_runtime_requires_fresh_start() {
+        headers.push((
+            DEV_RUNTIME_STATE_HEADER.into(),
+            DEV_RUNTIME_FRESH_REQUIRED.into(),
+        ));
     }
 }
 

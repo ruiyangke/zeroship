@@ -7,6 +7,10 @@ export const PROCEDURE_BINDINGS_PATH = "/__zeroship_bindings";
 export const RUNTIME_MODULE_SPECIFIER = "zeroship";
 export const VITE_RUNTIME_MODULE_ID = "/@id/zeroship";
 
+/** Standalone runtime signal consumed and removed by the Vite supervisor. */
+export const DEV_RUNTIME_STATE_HEADER = "x-zeroship-dev-runtime";
+export const DEV_RUNTIME_FRESH_REQUIRED = "fresh-required";
+
 /** Environment variable names passed to the zeroship child process. */
 export const ENV_DEV = "ZEROSHIP_DEV";
 export const ENV_VITE_ORIGIN = "ZEROSHIP_VITE_ORIGIN";

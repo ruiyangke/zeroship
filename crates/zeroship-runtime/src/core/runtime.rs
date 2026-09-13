@@ -450,6 +450,18 @@ impl Runtime {
         self.inner.borrow().notify_pump();
     }
 
+    /// Whether development startup has failed after touching the isolate.
+    ///
+    /// Creator evaluation and plugin finalization can run arbitrary callbacks
+    /// before they fail, so the dev host must replace this runtime rather than
+    /// retrying startup in the same isolate. A failed later entry generation
+    /// does not set this state: the last published snapshot remains valid and
+    /// another invalidation can retry through its existing loader.
+    pub(crate) fn dev_runtime_requires_fresh_start(&self) -> bool {
+        let inner = self.inner.borrow();
+        inner.dev_entry_factory.is_some() && matches!(inner.startup, StartupState::Failed(_))
+    }
+
     // ---- Methods that enter V8 — borrow internally -----------------------
 
     /// Kernel's sole dispatch primitive. Invokes the user's
