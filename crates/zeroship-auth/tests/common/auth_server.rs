@@ -40,7 +40,15 @@ impl AuthServer {
         database: &Database,
         mailer: Arc<dyn zeroship_mailer::Mailer>,
     ) -> Self {
-        Self::build(database, None, &[], Some(mailer), None, None).await
+        Self::configured_with_mailer(database, mailer, &[]).await
+    }
+
+    pub async fn configured_with_mailer(
+        database: &Database,
+        mailer: Arc<dyn zeroship_mailer::Mailer>,
+        extra: &[&str],
+    ) -> Self {
+        Self::build(database, None, extra, Some(mailer), None, None).await
     }
 
     pub async fn with_relay_mailer(
