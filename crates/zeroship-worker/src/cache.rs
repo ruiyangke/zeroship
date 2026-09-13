@@ -175,25 +175,6 @@ pub fn init_cache(max_size: usize, max_pinned_isolates_per_app: usize, kernel: K
     PLUGIN_SET.with(|p| *p.borrow_mut() = None);
 }
 
-/// Compose a `DbService` the way `main` does, for tests that need a kernel with
-/// the `db` namespace present.
-///
-/// Tests build one per fixture rather than sharing a process-wide instance,
-/// which is faithful: `main` builds exactly one, and a test that wants to prove
-/// the prototype is shared must build ONE service and hand it to both threads -
-/// not two services and hope.
-#[cfg(test)]
-pub(crate) fn test_db_service(url: &str) -> Arc<zeroship_data_v8::service::DbService> {
-    zeroship_data_v8::service::DbService::new(zeroship_data_v8::service::DbServiceConfig {
-        project_keys: Default::default(),
-        connection: zeroship_data_orm::connection::ConnectionFactory::for_url(url)
-            .expect("valid database configuration"),
-        cdc_relay: None,
-        meter: None,
-    })
-    .expect("test db service")
-}
-
 pub fn db_url() -> Option<String> {
     DB_SERVICE.with(|service| {
         service
@@ -804,20 +785,6 @@ pub fn has_app(app_id: &AppId) -> bool {
     })
 }
 
-/// Is a deploy-pinned workflow isolate resident for this (app, deploy)?
-///
-/// Used by the mandatory workflow handler tests.
-#[cfg(test)]
-pub fn has_pinned_workflow_app(app_id: &AppId, deploy_hash: &str) -> bool {
-    let key = PinnedWorkflowKey::new(app_id.clone(), deploy_hash);
-    CACHE.with(|c| {
-        let cache = c.borrow();
-        cache
-            .as_ref()
-            .is_some_and(|c| c.workflow_isolates.contains_key(&key))
-    })
-}
-
 /// Get all app IDs currently loaded in the cache.
 pub fn all_app_ids() -> Vec<AppId> {
     CACHE.with(|c| {
@@ -1124,7 +1091,7 @@ mod tests {
         std::thread::spawn(|| {
             // Composition happens first and is allowed exactly one parse; the
             // arm measures everything AFTER it.
-            let service = test_db_service("postgres://localhost/zs_unused_build");
+            let service = fixture::database_service("postgres://localhost/zs_unused_build");
             let parses = url_parse_count();
             let opens = backend_open_count();
 
@@ -1233,7 +1200,7 @@ mod tests {
                 .expect("the db namespace must be registered when a service is installed")
                 .clone()
         }
-        let service = test_db_service("postgres://localhost/zs_unused_shared");
+        let service = fixture::database_service("postgres://localhost/zs_unused_shared");
         let kernel = |service: Arc<zeroship_data_v8::service::DbService>| KernelConfig {
             control_url: "http://127.0.0.1:1".to_string(),
             control_key: "test-control-key".to_string(),
@@ -1294,7 +1261,7 @@ mod tests {
             let kernel = || KernelConfig {
                 control_url: "http://127.0.0.1:1".to_string(),
                 control_key: "test-control-key".to_string(),
-                db_service: Some(test_db_service("postgres://localhost/zs_unused")),
+                db_service: Some(fixture::database_service("postgres://localhost/zs_unused")),
                 kv_store: None,
                 storage_backend: None,
                 meter: Arc::new(zeroship_metering::Meter::new()),
@@ -1346,7 +1313,7 @@ mod tests {
             let with_db = || KernelConfig {
                 control_url: "http://127.0.0.1:1".to_string(),
                 control_key: "test-control-key".to_string(),
-                db_service: Some(test_db_service("postgres://localhost/zs_unused_sticky")),
+                db_service: Some(fixture::database_service("postgres://localhost/zs_unused_sticky")),
                 kv_store: None,
                 storage_backend: None,
                 meter: Arc::new(zeroship_metering::Meter::new()),
@@ -1406,7 +1373,7 @@ mod tests {
                 KernelConfig {
                     control_url: "http://127.0.0.1:1".to_string(),
                     control_key: "test-control-key".to_string(),
-                    db_service: Some(test_db_service("postgres://localhost/zs_unused")),
+                    db_service: Some(fixture::database_service("postgres://localhost/zs_unused")),
                     kv_store: Some(
                         zeroship_kv::KvStore::open(&zeroship_kv::KvConfig::Redis {
                             redis: zeroship_kv::RedisConfig::new(zeroship_kv::Topology::Standalone { endpoint: "127.0.0.1:6379".into() }),

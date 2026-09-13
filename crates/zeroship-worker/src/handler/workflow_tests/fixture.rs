@@ -4,7 +4,6 @@ use std::sync::{Arc, RwLock};
 use zeroship_bundle::{BlobStore, LocalDiskBlobStore};
 use zeroship_core::app_id::AppId;
 
-use super::super::tests::init_runtime;
 use crate::identity_fixture::service_auth;
 use super::journal::Journal;
 use crate::sync::SharedEnvs;
@@ -25,7 +24,7 @@ pub(super) struct Fixture<'db> {
 impl Fixture<'_> {
     pub async fn run(max_pinned: usize, test: impl AsyncFnOnce(&Fixture<'_>)) {
         Database::migrated(async |database| {
-            init_runtime();
+            zeroship_runtime::init::init_v8();
             let app_id = AppId::mint();
             let meter = Arc::new(zeroship_metering::Meter::new());
             let worker_url = database.url_as("zeroship_worker");
