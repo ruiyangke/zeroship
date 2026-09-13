@@ -1,12 +1,16 @@
 use super::*;
 
 pub fn post_migration_fields() -> Value {
-    let artifact: Value = serde_json::from_str(include_str!("../../../tests/fixtures/schema.runtime.json")).unwrap();
+    let artifact: Value =
+        serde_json::from_str(include_str!("../../../tests/fixtures/schema.runtime.json")).unwrap();
     artifact["collections"]["posts"]["fields"].clone()
 }
 
 pub fn predicate_migration_fields() -> Value {
-    let artifact: Value = serde_json::from_str(include_str!("../../../tests/fixtures/typed-predicates.runtime.json")).unwrap();
+    let artifact: Value = serde_json::from_str(include_str!(
+        "../../../tests/fixtures/typed-predicates.runtime.json"
+    ))
+    .unwrap();
     artifact["collections"]["predicate_rows"]["fields"].clone()
 }
 
@@ -28,13 +32,21 @@ pub(super) struct CollectionFixture {
 }
 
 impl CollectionFixture {
-    pub async fn sqlite_native(collection: &str, native: CollectionSchema, migration: Value) -> Self {
+    pub async fn sqlite_native(
+        collection: &str,
+        native: CollectionSchema,
+        migration: Value,
+    ) -> Self {
         let mut fixture = Self::sqlite(collection, migration).await;
         fixture.install_native(collection, native);
         fixture
     }
 
-    pub async fn postgres_native(collection: &str, native: CollectionSchema, migration: Value) -> Self {
+    pub async fn postgres_native(
+        collection: &str,
+        native: CollectionSchema,
+        migration: Value,
+    ) -> Self {
         let mut fixture = Self::postgres(collection, migration).await;
         fixture.install_native(collection, native);
         fixture
@@ -45,7 +57,8 @@ impl CollectionFixture {
             self.database.binding.clone(),
             self.database.backend.clone(),
             Schema::new([(collection.into(), native)]),
-        ).unwrap();
+        )
+        .unwrap();
     }
 
     pub async fn wait_for_upsert_conflict(&self) {
@@ -95,7 +108,8 @@ impl CollectionFixture {
             Schema::from_collections(vec![(
                 collection.into(),
                 crate::tests::fixtures::schema::generated_fields(fields),
-            )]).unwrap(),
+            )])
+            .unwrap(),
         )
         .unwrap();
         Self {
@@ -266,7 +280,8 @@ impl CollectionFixture {
             Schema::from_collections(vec![(
                 collection.into(),
                 crate::tests::fixtures::schema::generated_fields(fields),
-            )]).unwrap(),
+            )])
+            .unwrap(),
         )
         .unwrap();
         Self {

@@ -332,7 +332,7 @@ pub fn mask_sentinel_signature() -> &'static str {
     use std::sync::OnceLock;
     static SIG: OnceLock<String> = OnceLock::new();
     SIG.get_or_init(|| {
-        use aes_gcm::{AeadCore, Aes256Gcm, aead::OsRng};
+        use aes_gcm::{aead::OsRng, AeadCore, Aes256Gcm};
         // Two 12-byte GCM nonces → 24 bytes of OS entropy, hex-encoded.
         let a = Aes256Gcm::generate_nonce(&mut OsRng);
         let b = Aes256Gcm::generate_nonce(&mut OsRng);

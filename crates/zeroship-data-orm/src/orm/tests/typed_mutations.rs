@@ -33,8 +33,18 @@ fn document(label: &str, payload: Value) -> NewDocument {
 
 #[compio::test]
 async fn sqlite_fixture_databases_have_independent_broker_identities() {
-    let first = CollectionFixture::sqlite_native("documents", documents::Entity::schema().clone(), super::fixtures::document_migration_fields()).await;
-    let second = CollectionFixture::sqlite_native("documents", documents::Entity::schema().clone(), super::fixtures::document_migration_fields()).await;
+    let first = CollectionFixture::sqlite_native(
+        "documents",
+        documents::Entity::schema().clone(),
+        super::fixtures::document_migration_fields(),
+    )
+    .await;
+    let second = CollectionFixture::sqlite_native(
+        "documents",
+        documents::Entity::schema().clone(),
+        super::fixtures::document_migration_fields(),
+    )
+    .await;
     assert_ne!(first.sqlite_file, second.sqlite_file);
     assert_ne!(
         first.database.binding().app_id(),
@@ -66,7 +76,12 @@ async fn sqlite_fixture_databases_have_independent_broker_identities() {
 
 #[compio::test]
 async fn typed_insert_many_stops_consuming_at_the_shared_batch_budget() {
-    let fixture = CollectionFixture::sqlite_native("documents", documents::Entity::schema().clone(), super::fixtures::document_migration_fields()).await;
+    let fixture = CollectionFixture::sqlite_native(
+        "documents",
+        documents::Entity::schema().clone(),
+        super::fixtures::document_migration_fields(),
+    )
+    .await;
     let documents = fixture.database.entity::<documents::Entity>().unwrap();
     let limit = crate::budgets::MAX_INSERT_MANY_BATCH;
     let consumed = Cell::new(0);
@@ -84,13 +99,11 @@ async fn typed_insert_many_stops_consuming_at_the_shared_batch_budget() {
         .unwrap_err();
     assert!(matches!(error, DbError::ValidationFailed { .. }), "{error}");
     assert_eq!(consumed.get(), limit + 1);
-    assert!(
-        documents
-            .find::<Document>(Filter::all(), Default::default())
-            .await
-            .unwrap()
-            .is_empty()
-    );
+    assert!(documents
+        .find::<Document>(Filter::all(), Default::default())
+        .await
+        .unwrap()
+        .is_empty());
     let accepted: Vec<Document> = documents
         .insert_many(std::iter::repeat_with(|| document("within budget", value!({}))).take(limit))
         .await
@@ -166,15 +179,24 @@ fn delete_notification_intent_follows_the_schema_lifecycle() {
 
 #[compio::test]
 async fn sqlite_typed_bulk_and_lifecycle_mutations_share_orm_semantics() {
-    let fixture = CollectionFixture::sqlite_native("documents", documents::Entity::schema().clone(), super::fixtures::document_migration_fields()).await;
+    let fixture = CollectionFixture::sqlite_native(
+        "documents",
+        documents::Entity::schema().clone(),
+        super::fixtures::document_migration_fields(),
+    )
+    .await;
     exercise_mutations(&fixture.database).await;
     fixture.close().await;
 }
 
 #[compio::test]
 async fn postgres_typed_bulk_and_lifecycle_mutations_share_orm_semantics() {
-    let fixture =
-        CollectionFixture::postgres_native("documents", documents::Entity::schema().clone(), super::fixtures::document_migration_fields()).await;
+    let fixture = CollectionFixture::postgres_native(
+        "documents",
+        documents::Entity::schema().clone(),
+        super::fixtures::document_migration_fields(),
+    )
+    .await;
     exercise_mutations(&fixture.database).await;
     fixture.close().await;
 }
@@ -193,11 +215,9 @@ async fn exercise_mutations(db: &Database) {
         .unwrap();
     assert_eq!(inserted.len(), 3);
     assert_ne!(inserted[0].id, inserted[1].id);
-    assert!(
-        inserted
-            .iter()
-            .all(|row| row.created_by.as_deref() == Some("writer"))
-    );
+    assert!(inserted
+        .iter()
+        .all(|row| row.created_by.as_deref() == Some("writer")));
     assert_eq!(
         documents
             .update_many(
@@ -217,11 +237,9 @@ async fn exercise_mutations(db: &Database) {
         .unwrap();
     assert_eq!(changed.len(), 2);
     assert!(changed.iter().all(|row| row.version == 2));
-    assert!(
-        changed
-            .iter()
-            .all(|row| row.updated_by.as_deref() == Some("writer"))
-    );
+    assert!(changed
+        .iter()
+        .all(|row| row.updated_by.as_deref() == Some("writer")));
     assert_eq!(
         documents
             .delete_many(documents::payload.eq(value!({"$inc":2})).unwrap())
@@ -246,11 +264,9 @@ async fn exercise_mutations(db: &Database) {
         )
         .await
         .unwrap();
-    assert!(
-        deleted
-            .iter()
-            .all(|row| row.deleted_at.is_some() && row.version == 3)
-    );
+    assert!(deleted
+        .iter()
+        .all(|row| row.deleted_at.is_some() && row.version == 3));
     let restored: Document = documents
         .restore(documents::id.eq(inserted[0].id.clone()).unwrap())
         .await
@@ -258,13 +274,11 @@ async fn exercise_mutations(db: &Database) {
         .unwrap();
     assert!(restored.deleted_at.is_none());
     assert_eq!(restored.version, 4);
-    assert!(
-        documents
-            .restore::<Document>(documents::id.eq(restored.id.clone()).unwrap())
-            .await
-            .unwrap()
-            .is_none()
-    );
+    assert!(documents
+        .restore::<Document>(documents::id.eq(restored.id.clone()).unwrap())
+        .await
+        .unwrap()
+        .is_none());
     assert_eq!(
         documents
             .restore_many(documents::payload.eq(value!({"$inc":2})).unwrap())
@@ -279,13 +293,11 @@ async fn exercise_mutations(db: &Database) {
         .unwrap()
         .unwrap();
     assert_eq!(purged.label, "first");
-    assert!(
-        documents
-            .purge::<Document>(documents::id.eq(purged.id).unwrap())
-            .await
-            .unwrap()
-            .is_none()
-    );
+    assert!(documents
+        .purge::<Document>(documents::id.eq(purged.id).unwrap())
+        .await
+        .unwrap()
+        .is_none());
     assert_eq!(
         documents
             .purge_many(documents::payload.eq(value!({"$inc":2})).unwrap())
@@ -389,7 +401,12 @@ async fn exercise_mutations(db: &Database) {
 
 #[compio::test]
 async fn sqlite_typed_upserts_use_live_unique_targets_and_atomic_inserts() {
-    let fixture = CollectionFixture::sqlite_native("documents", documents::Entity::schema().clone(), super::fixtures::document_migration_fields()).await;
+    let fixture = CollectionFixture::sqlite_native(
+        "documents",
+        documents::Entity::schema().clone(),
+        super::fixtures::document_migration_fields(),
+    )
+    .await;
     fixture.add_unique_index("documents", &["label"]).await;
     fixture
         .add_unique_index("documents", &["label", "payload"])
@@ -400,8 +417,12 @@ async fn sqlite_typed_upserts_use_live_unique_targets_and_atomic_inserts() {
 
 #[compio::test]
 async fn postgres_typed_upserts_use_live_unique_targets_and_atomic_inserts() {
-    let fixture =
-        CollectionFixture::postgres_native("documents", documents::Entity::schema().clone(), super::fixtures::document_migration_fields()).await;
+    let fixture = CollectionFixture::postgres_native(
+        "documents",
+        documents::Entity::schema().clone(),
+        super::fixtures::document_migration_fields(),
+    )
+    .await;
     fixture.add_unique_index("documents", &["label"]).await;
     fixture
         .add_unique_index("documents", &["label", "payload"])
@@ -412,22 +433,18 @@ async fn postgres_typed_upserts_use_live_unique_targets_and_atomic_inserts() {
 
 async fn exercise_upserts(db: &Database) {
     let documents = db.entity::<documents::Entity>().unwrap();
-    assert!(
-        documents
-            .insert_many::<_, Document>([
-                document("duplicate", value!({"first":true})),
-                document("duplicate", value!({"second":true})),
-            ])
-            .await
-            .is_err()
-    );
-    assert!(
-        documents
-            .find::<Document>(Filter::all(), Default::default())
-            .await
-            .unwrap()
-            .is_empty()
-    );
+    assert!(documents
+        .insert_many::<_, Document>([
+            document("duplicate", value!({"first":true})),
+            document("duplicate", value!({"second":true})),
+        ])
+        .await
+        .is_err());
+    assert!(documents
+        .find::<Document>(Filter::all(), Default::default())
+        .await
+        .unwrap()
+        .is_empty());
     let inserted: Document = documents
         .upsert(
             document("upsert", value!({"initial":true})),
@@ -445,15 +462,13 @@ async fn exercise_upserts(db: &Database) {
     assert_eq!(updated.id, inserted.id);
     assert_eq!(updated.payload, value!({"$set":"literal"}));
     assert_eq!(updated.version, inserted.version + 1);
-    assert!(
-        documents
-            .upsert::<_, Document>(
-                document("invalid", value!({})),
-                ConflictTarget::new(documents::payload),
-            )
-            .await
-            .is_err()
-    );
+    assert!(documents
+        .upsert::<_, Document>(
+            document("invalid", value!({})),
+            ConflictTarget::new(documents::payload),
+        )
+        .await
+        .is_err());
     let error = documents
         .upsert::<_, Document>(
             document("invalid", value!({})),

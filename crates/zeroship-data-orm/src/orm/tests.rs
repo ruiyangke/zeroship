@@ -9,15 +9,13 @@ use test_schema::posts;
 
 mod aggregate_protection;
 mod bulk;
-mod conflicts;
 mod calendar_date;
 mod catalog_routing;
+mod conflicts;
 mod dynamic_reads;
 mod encrypted_upsert;
 mod exact_decimal;
 mod fixtures;
-mod relations;
-mod typed_relations;
 mod generated_identity;
 mod identity;
 mod identity_contract;
@@ -30,15 +28,17 @@ mod lifecycle;
 mod nested_temporal;
 mod protected_projections;
 mod protected_updates;
+mod relations;
 mod schema_updates;
 mod sql_registration;
 mod timestamp;
 mod transaction_options;
 mod typed_arrays;
-mod typed_predicates;
 mod typed_mutations;
-mod typed_updates;
+mod typed_predicates;
 mod typed_reads;
+mod typed_relations;
+mod typed_updates;
 mod update_operators;
 mod update_validation;
 mod upsert_contract;
@@ -160,7 +160,8 @@ async fn sqlite_search_values_round_trip_through_the_rust_orm() {
         Schema::from_collections(vec![(
             "places".into(),
             crate::tests::fixtures::schema::generated_fields(fields),
-        )]).unwrap(),
+        )])
+        .unwrap(),
     )
     .unwrap();
     let expected = value!({"embedding":[1.0, -0.5], "location":{"lat":37.0, "lng":-122.0}});
@@ -244,7 +245,10 @@ async fn postgres_native_models_round_trip() {
     let db = Database::connect(
         binding,
         crate::ConnectOptions::new(postgres.url(), ProjectKeySource::unavailable()),
-        Schema::new(vec![("posts".into(), <posts::Entity as Entity>::schema().clone())]),
+        Schema::new(vec![(
+            "posts".into(),
+            <posts::Entity as Entity>::schema().clone(),
+        )]),
     )
     .await
     .unwrap();
@@ -337,7 +341,10 @@ async fn platform_service_credentials_drive_orm_authority() {
     let db = Database::connect(
         binding,
         options,
-        Schema::new(vec![("posts".into(), <posts::Entity as Entity>::schema().clone())]),
+        Schema::new(vec![(
+            "posts".into(),
+            <posts::Entity as Entity>::schema().clone(),
+        )]),
     )
     .await
     .unwrap();
@@ -381,7 +388,10 @@ async fn platform_service_credentials_drive_orm_authority() {
         ),
         crate::ConnectOptions::new(service_url.as_str(), ProjectKeySource::unavailable())
             .connection_authority(),
-        Schema::new(vec![("posts".into(), <posts::Entity as Entity>::schema().clone())]),
+        Schema::new(vec![(
+            "posts".into(),
+            <posts::Entity as Entity>::schema().clone(),
+        )]),
     )
     .await
     .unwrap();

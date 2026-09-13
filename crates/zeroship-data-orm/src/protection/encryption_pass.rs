@@ -7,7 +7,7 @@ use crate::schema::FieldMap;
 use crate::value::Value;
 use zeroize::Zeroizing;
 
-use crate::encryption::{KeyStore, plaintext::PlaintextType};
+use crate::encryption::{plaintext::PlaintextType, KeyStore};
 use zeroship_data_orm::error::DbError;
 
 /// A logical field's encoded plaintext and mask input, staged before key lookup.

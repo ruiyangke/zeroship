@@ -1,7 +1,9 @@
 use crate::{metrics, protection, tx_lanes};
 
 pub(crate) fn native_fields(fields: crate::value::Value) -> crate::schema::FieldMap {
-    crate::schema::CollectionSchema::from_fields(&fields).unwrap().into_fields()
+    crate::schema::CollectionSchema::from_fields(&fields)
+        .unwrap()
+        .into_fields()
 }
 
 pub(crate) fn generated_schema(fields: crate::value::Value) -> crate::schema::FieldMap {
@@ -9,11 +11,7 @@ pub(crate) fn generated_schema(fields: crate::value::Value) -> crate::schema::Fi
 }
 
 /// Install a descriptor for an isolated test binding.
-pub(crate) fn cache_schema(
-    app_id: &str,
-    collection: &str,
-    schema: crate::value::Value,
-) {
+pub(crate) fn cache_schema(app_id: &str, collection: &str, schema: crate::value::Value) {
     cache_schema_for_deploy(
         &zeroship_data_orm::binding::DbBinding::cold_start(app_id),
         collection,
