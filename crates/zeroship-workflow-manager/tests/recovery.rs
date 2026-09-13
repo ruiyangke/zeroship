@@ -15,7 +15,7 @@ use support::{Admin, Backend, Fixture};
 use zeroship_core::{
     app_id::AppId,
     workflow_coordination::{Assignment, WorkerId},
-    workflow_jobs::{DeploymentId, JobOperation, JobOutcome, Settlement},
+    workflow_jobs::{DeploymentId, JobId, JobOperation, JobOutcome, JobSpec, Settlement},
 };
 use zeroship_data_orm::{
     orm::{Operation, Output},
@@ -61,6 +61,26 @@ case!(
     postgres_recovery_publication_and_deadline_roll_back_together,
     rollback
 );
+case!(
+    sqlite_waiting_recovery_pages_continue_without_replayed_deadline_changes,
+    postgres_waiting_recovery_pages_continue_without_replayed_deadline_changes,
+    waiting_pages
+);
+case!(
+    sqlite_completed_recovery_pages_preserve_periodic_responsibility,
+    postgres_completed_recovery_pages_preserve_periodic_responsibility,
+    completed_pages
+);
+case!(
+    sqlite_unrelated_reconciliation_cannot_accelerate_pending_recovery,
+    postgres_unrelated_reconciliation_cannot_accelerate_pending_recovery,
+    unrelated_page
+);
+case!(
+    sqlite_recovery_page_settlement_and_deadline_roll_back_together,
+    postgres_recovery_page_settlement_and_deadline_roll_back_together,
+    settlement_rollback
+);
 
 async fn host(fixture: &Fixture) -> (Recovery, Queue) {
     let queue = Queue::connect(
@@ -99,12 +119,41 @@ async fn snapshot(fixture: &Fixture, app: &AppId) -> Value {
 }
 
 async fn make_due(fixture: &Fixture, app: &AppId) {
+    set_deadline(fixture, app, 0).await;
+}
+
+async fn set_deadline(fixture: &Fixture, app: &AppId, deadline: i64) {
     let db = fixture.database().await;
-    db.collection("recovery_scopes")
+    let updated = db
+        .collection("recovery_scopes")
         .unwrap()
-        .update(value!({"id":app.as_str()}), value!({"next_due_at":0}))
+        .execute(Operation::Update {
+            filter: value!({"id":app.as_str()}),
+            patch: value!({"next_due_at":deadline}),
+            many: true,
+        })
         .await
         .unwrap();
+    assert!(matches!(updated, Output::Count(1)));
+}
+
+async fn stored_job(fixture: &Fixture, job: &JobSpec) -> Option<Value> {
+    let Output::Rows { mut rows, .. } = fixture
+        .database()
+        .await
+        .collection("jobs")
+        .unwrap()
+        .find(
+            value!({"app_id":job.app_id.as_str(), "id":job.id.as_str()}),
+            value!({"limit":1}),
+        )
+        .await
+        .unwrap()
+    else {
+        panic!("expected queue job rows")
+    };
+    assert!(rows.len() <= 1);
+    rows.pop()
 }
 
 async fn job_count(fixture: &Fixture, app: &AppId) -> i64 {
@@ -286,6 +335,201 @@ async fn pages(fixture: &Fixture) {
     make_due(fixture, &apps[0]).await;
     assert!(recovery.due(apps.last()).await.unwrap().is_empty());
     assert_eq!(recovery.due(None).await.unwrap()[0], apps[0]);
+}
+
+async fn waiting_pages(fixture: &Fixture) {
+    let (recovery, queue) = host(fixture).await;
+    let app = AppId::mint();
+    recovery
+        .ensure(&app, &DeploymentId::mint(), 1.try_into().unwrap())
+        .await
+        .unwrap();
+    let first = recovery.dispatch(&app).await.unwrap().unwrap();
+    set_deadline(fixture, &app, i64::MAX).await;
+    assert!(recovery.due(None).await.unwrap().is_empty());
+    let owner = assignment(&app);
+    let delivery = queue.claim(&owner).await.unwrap().unwrap();
+    assert_eq!(delivery.delivery().job, first);
+    let command = Settlement {
+        delivery: delivery.delivery().clone(),
+        outcome: JobOutcome::Waiting,
+        successors: vec![],
+    };
+    let receipt = queue.settle(&owner, &command).await.unwrap();
+    let completed = snapshot(fixture, &app).await;
+    assert_eq!(completed["pending_job_id"], value!(first.id.as_str()));
+    assert!(completed["next_due_at"].as_i64().unwrap() < i64::MAX);
+    assert_eq!(recovery.due(None).await.unwrap(), vec![app.clone()]);
+    let next = recovery.dispatch(&app).await.unwrap().unwrap();
+    assert_ne!(next.id, first.id);
+    assert_eq!(next.operation, JobOperation::Reconcile {});
+
+    set_deadline(fixture, &app, i64::MAX).await;
+    let pending = snapshot(fixture, &app).await;
+    assert_eq!(pending["pending_job_id"], value!(next.id.as_str()));
+    let (reopened, reopened_queue) = host(fixture).await;
+    let expired = Assignment {
+        expires_at: 0.try_into().unwrap(),
+        ..owner.clone()
+    };
+    assert_eq!(
+        reopened_queue.settle(&expired, &command).await.unwrap(),
+        receipt
+    );
+    assert_eq!(snapshot(fixture, &app).await, pending);
+    assert!(reopened.due(None).await.unwrap().is_empty());
+    assert_eq!(reopened.dispatch(&app).await.unwrap(), Some(next.clone()));
+
+    // An already-due obligation must not move later when another page finishes.
+    make_due(fixture, &app).await;
+    let delivery = reopened_queue.claim(&owner).await.unwrap().unwrap();
+    assert_eq!(delivery.delivery().job, next);
+    reopened_queue
+        .settle(
+            &owner,
+            &Settlement {
+                delivery: delivery.delivery().clone(),
+                outcome: JobOutcome::Waiting,
+                successors: vec![],
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(snapshot(fixture, &app).await["next_due_at"], value!(0));
+    assert_eq!(reopened.due(None).await.unwrap(), vec![app]);
+}
+
+async fn completed_pages(fixture: &Fixture) {
+    let (recovery, queue) = host(fixture).await;
+    let app = AppId::mint();
+    let deployment = DeploymentId::mint();
+    recovery
+        .ensure(&app, &deployment, 1.try_into().unwrap())
+        .await
+        .unwrap();
+    let first = recovery.dispatch(&app).await.unwrap().unwrap();
+    set_deadline(fixture, &app, i64::MAX).await;
+    let obligation = snapshot(fixture, &app).await;
+    let owner = assignment(&app);
+    let delivery = queue.claim(&owner).await.unwrap().unwrap();
+    assert_eq!(delivery.delivery().job, first);
+    queue
+        .settle(
+            &owner,
+            &Settlement {
+                delivery: delivery.delivery().clone(),
+                outcome: JobOutcome::Completed,
+                successors: vec![],
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(snapshot(fixture, &app).await, obligation);
+    assert!(recovery.due(None).await.unwrap().is_empty());
+    assert!(recovery.dispatch(&app).await.unwrap().is_none());
+
+    let (reopened, _) = host(fixture).await;
+    reopened
+        .ensure(&app, &deployment, 1.try_into().unwrap())
+        .await
+        .unwrap();
+    assert_eq!(snapshot(fixture, &app).await, obligation);
+    make_due(fixture, &app).await;
+    assert_eq!(reopened.due(None).await.unwrap(), vec![app.clone()]);
+    let next = reopened.dispatch(&app).await.unwrap().unwrap();
+    assert_ne!(next.id, first.id);
+    assert_eq!(next.deployment_id, deployment);
+    assert_eq!(next.operation, JobOperation::Reconcile {});
+}
+
+async fn unrelated_page(fixture: &Fixture) {
+    let (recovery, queue) = host(fixture).await;
+    let app = AppId::mint();
+    recovery
+        .ensure(&app, &DeploymentId::mint(), 1.try_into().unwrap())
+        .await
+        .unwrap();
+    let pending = recovery.dispatch(&app).await.unwrap().unwrap();
+    set_deadline(fixture, &app, i64::MAX).await;
+    let obligation = snapshot(fixture, &app).await;
+    let unrelated = JobSpec {
+        id: JobId::mint(),
+        available_at: 0.try_into().unwrap(),
+        ..pending.clone()
+    };
+    queue.submit(&unrelated).await.unwrap();
+    let owner = assignment(&app);
+    let delivery = queue.claim(&owner).await.unwrap().unwrap();
+    assert_eq!(delivery.delivery().job, unrelated);
+    queue
+        .settle(
+            &owner,
+            &Settlement {
+                delivery: delivery.delivery().clone(),
+                outcome: JobOutcome::Waiting,
+                successors: vec![],
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(snapshot(fixture, &app).await, obligation);
+    assert!(recovery.due(None).await.unwrap().is_empty());
+    assert_eq!(recovery.dispatch(&app).await.unwrap(), Some(pending));
+    assert_eq!(
+        stored_job(fixture, &unrelated).await.unwrap()["state"],
+        value!("settled")
+    );
+}
+
+async fn settlement_rollback(fixture: &Fixture) {
+    let (recovery, queue) = host(fixture).await;
+    let app = AppId::mint();
+    recovery
+        .ensure(&app, &DeploymentId::mint(), 1.try_into().unwrap())
+        .await
+        .unwrap();
+    let pending = recovery.dispatch(&app).await.unwrap().unwrap();
+    set_deadline(fixture, &app, i64::MAX).await;
+    let owner = assignment(&app);
+    let delivery = queue.claim(&owner).await.unwrap().unwrap();
+    assert_eq!(delivery.delivery().job, pending);
+    let successor = JobSpec {
+        id: JobId::mint(),
+        operation: JobOperation::Collect {},
+        available_at: 0.try_into().unwrap(),
+        ..pending.clone()
+    };
+    let command = Settlement {
+        delivery: delivery.delivery().clone(),
+        outcome: JobOutcome::Waiting,
+        successors: vec![successor.clone()],
+    };
+    let obligation = snapshot(fixture, &app).await;
+    let leased = stored_job(fixture, &pending).await.unwrap();
+    assert_eq!(leased["state"], value!("leased"));
+    assert!(stored_job(fixture, &successor).await.is_none());
+    fault(fixture, true).await;
+    assert!(queue.settle(&owner, &command).await.is_err());
+    assert_eq!(snapshot(fixture, &app).await, obligation);
+    assert_eq!(stored_job(fixture, &pending).await.unwrap(), leased);
+    assert!(stored_job(fixture, &successor).await.is_none());
+    assert!(recovery.due(None).await.unwrap().is_empty());
+
+    fault(fixture, false).await;
+    let receipt = queue.settle(&owner, &command).await.unwrap();
+    assert_eq!(
+        stored_job(fixture, &pending).await.unwrap()["state"],
+        value!("settled")
+    );
+    assert_eq!(
+        stored_job(fixture, &successor).await.unwrap()["state"],
+        value!("ready")
+    );
+    assert_eq!(recovery.due(None).await.unwrap(), vec![app.clone()]);
+    let settled = snapshot(fixture, &app).await;
+    assert_eq!(queue.settle(&owner, &command).await.unwrap(), receipt);
+    assert_eq!(snapshot(fixture, &app).await, settled);
+    assert_eq!(job_count(fixture, &app).await, 2);
 }
 
 async fn fault(fixture: &Fixture, install: bool) {

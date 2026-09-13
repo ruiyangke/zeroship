@@ -512,6 +512,8 @@ impl Queue {
                 }),
             )
             .await?;
+            crate::recovery::settled_page(&tx, &delivery.job, settlement.outcome, sample.millis)
+                .await?;
             let observed = authorize(tx.clone()).await?;
             let sample = self.clock.sample().await?;
             let authority = current(assignment, observed, sample.millis)?;
