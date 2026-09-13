@@ -58,6 +58,10 @@ async fn runtime_descriptor_invalid_utf8_is_a_load_error() {
     assert!(error.contains("invalid app executable"), "{error}");
 }
 
+#[expect(
+    clippy::future_not_send,
+    reason = "fixture blob I/O stays on its compio runtime"
+)]
 async fn executable_manifest(blobs: &Blobs) -> Manifest {
     let hash = blobs
         .put(b"export default { fetch() { return new Response('ok'); } };")

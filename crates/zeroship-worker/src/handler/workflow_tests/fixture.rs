@@ -149,7 +149,7 @@ fn pinned_loader_verifies_stored_manifest_content_and_app_scope() {
             let original = deploy_workflow_fixture(&config.blob_store, &app_id, "original").await;
             let replacement =
                 deploy_workflow_fixture(&config.blob_store, &app_id, "replacement").await;
-            load_pinned_workflow_on_demand(&config, &envs, &app_id, &original)
+            load_pinned_workflow_on_demand(config, envs, &app_id, &original)
                 .await
                 .unwrap();
             assert!(crate::cache::get_workflow_runtime(&app_id, &original).is_some());
@@ -167,7 +167,7 @@ fn pinned_loader_verifies_stored_manifest_content_and_app_scope() {
                 .join(app_id.as_str())
                 .join(format!("{original}.json"));
             std::fs::write(&path, serde_json::to_vec(&changed).unwrap()).unwrap();
-            let error = load_pinned_workflow_on_demand(&config, &envs, &app_id, &original)
+            let error = load_pinned_workflow_on_demand(config, envs, &app_id, &original)
                 .await
                 .unwrap_err();
             assert!(error.contains("manifest validation failed"));
@@ -175,12 +175,12 @@ fn pinned_loader_verifies_stored_manifest_content_and_app_scope() {
 
             std::fs::remove_file(path).unwrap();
             assert!(
-                load_pinned_workflow_on_demand(&config, &envs, &app_id, &original)
+                load_pinned_workflow_on_demand(config, envs, &app_id, &original)
                     .await
                     .is_err()
             );
             assert!(
-                load_pinned_workflow_on_demand(&config, &envs, &AppId::mint(), &replacement)
+                load_pinned_workflow_on_demand(config, envs, &AppId::mint(), &replacement)
                     .await
                     .is_err()
             );
