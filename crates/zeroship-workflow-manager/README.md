@@ -25,6 +25,17 @@ Claim and heartbeat return `DeliveryGrant`; converting it to a wire lease after
 commit charges elapsed time against the originally observed assignment authority.
 Worker publication cannot mint manager-owned activation, cron or management commands.
 
+`coordinator::Coordinator::policy_lease` verifies placement and the original
+enrolled key before consulting a trusted `policy::PolicySource`. Source I/O runs
+outside manager locks. Final admission locks the app before the worker and
+rechecks both authorities, preserving the original source and placement
+deadlines. The complete raw policy comes from `zeroship_core::workflow_policy`.
+Requesting a lease never renews placement or registration. `PolicyGrant` charges
+transaction settlement and revalidates the retained source observation when
+constructing the response. An unavailable or stale source is an infrastructure
+failure; valid disabled policy is returned unchanged. The provider contract
+exists, but the revisioned authoritative Control adapter remains unfinished.
+
 `scheduling::Scheduler` prepares immutable schedule metadata from normal app
 deployments. Activation selects future scheduling and commits its job and recovery
 responsibility together. Due dispatch persists occurrence identities, queue jobs

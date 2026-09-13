@@ -2,8 +2,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use zeroship_core::service_assertion::ROLE_PATH_SEGMENTS;
 use zeroship_core::service_identity::{
-    MechanismTag, ServiceEndpoint, ServiceIdentity, ServiceName, ServicePrincipal, TrustDomain,
-    authorize, endpoints, service_allowlist,
+    authorize, endpoints, service_allowlist, MechanismTag, ServiceEndpoint, ServiceIdentity,
+    ServiceName, ServicePrincipal, TrustDomain,
 };
 
 /// Every operation the catalog names, in one place for the table-wide guards.
@@ -23,6 +23,9 @@ const CATALOG: &[ServiceEndpoint] = &[
     endpoints::WORKFLOW_RECOVERY,
     endpoints::WORKFLOW_MANAGE,
     endpoints::WORKFLOW_MANAGEMENT_STATUS,
+    endpoints::WORKFLOW_SCHEDULE_REGISTER,
+    endpoints::WORKFLOW_SCHEDULE_ACTIVATE,
+    endpoints::WORKFLOW_SCHEDULE_DISABLE,
     endpoints::WORKFLOW_REGISTER,
     endpoints::WORKFLOW_ASSIGNMENTS,
     endpoints::WORKFLOW_RENEW,
@@ -30,6 +33,7 @@ const CATALOG: &[ServiceEndpoint] = &[
     endpoints::WORKFLOW_WAKE,
     endpoints::WORKFLOW_MANAGEMENT_POLL,
     endpoints::WORKFLOW_MANAGEMENT_ACK,
+    endpoints::WORKFLOW_POLICY_LEASE,
     endpoints::WORKFLOW_JOB_SUBMIT,
     endpoints::WORKFLOW_JOB_CLAIM,
     endpoints::WORKFLOW_JOB_HEARTBEAT,
@@ -205,6 +209,30 @@ fn endpoint_catalog_records_exact_measured_operations() {
             "/v1/jobs/submit",
         ),
         (
+            endpoints::WORKFLOW_POLICY_LEASE,
+            "workflow",
+            "POST",
+            "/v1/policy/lease",
+        ),
+        (
+            endpoints::WORKFLOW_SCHEDULE_REGISTER,
+            "workflow",
+            "POST",
+            "/v1/schedules/register",
+        ),
+        (
+            endpoints::WORKFLOW_SCHEDULE_ACTIVATE,
+            "workflow",
+            "POST",
+            "/v1/schedules/activate",
+        ),
+        (
+            endpoints::WORKFLOW_SCHEDULE_DISABLE,
+            "workflow",
+            "POST",
+            "/v1/schedules/disable",
+        ),
+        (
             endpoints::WORKFLOW_JOB_CLAIM,
             "workflow",
             "POST",
@@ -332,6 +360,9 @@ fn measured_allowlist_is_encoded_and_enforced_row_by_row() {
             endpoints::WORKFLOW_RECOVERY,
             endpoints::WORKFLOW_MANAGE,
             endpoints::WORKFLOW_MANAGEMENT_STATUS,
+            endpoints::WORKFLOW_SCHEDULE_REGISTER,
+            endpoints::WORKFLOW_SCHEDULE_ACTIVATE,
+            endpoints::WORKFLOW_SCHEDULE_DISABLE,
             endpoints::WORKER_APP_LOGS,
         ],
         all,
@@ -376,6 +407,7 @@ fn measured_allowlist_is_encoded_and_enforced_row_by_row() {
             endpoints::WORKFLOW_WAKE,
             endpoints::WORKFLOW_MANAGEMENT_POLL,
             endpoints::WORKFLOW_MANAGEMENT_ACK,
+            endpoints::WORKFLOW_POLICY_LEASE,
             endpoints::WORKFLOW_JOB_SUBMIT,
             endpoints::WORKFLOW_JOB_CLAIM,
             endpoints::WORKFLOW_JOB_HEARTBEAT,

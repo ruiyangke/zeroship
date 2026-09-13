@@ -7,11 +7,13 @@
 
 mod control;
 mod jobs;
+mod policy;
 mod queue_holds;
 mod transport;
 
 pub use control::ControlCoordinator;
 pub use jobs::LeasedJob;
+pub use policy::LeasedPolicy;
 pub use queue_holds::QueueDeploymentHolds;
 pub use transport::Transport;
 
@@ -74,6 +76,7 @@ pub enum Error {
 #[derive(Clone, Debug)]
 pub struct WorkerCoordinator {
     worker_id: WorkerId,
+    signing_key_id: String,
     transport: Transport,
 }
 
@@ -84,15 +87,17 @@ impl WorkerCoordinator {
     /// # Errors
     /// Rejects ambiguous endpoints, empty bounds and missing worker instance keys.
     pub fn new(url: &str, auth: Arc<ServiceAuth>, options: Options) -> Result<Self, Error> {
-        let (issuer, _) = auth.signing_identity().ok_or(Error::Unauthenticated)?;
+        let (issuer, key) = auth.signing_identity().ok_or(Error::Unauthenticated)?;
         let role = service_issuer(WORKER_SERVICE_NAME).map_err(|_| Error::InvalidConfig)?;
         if issuer.principal() != role.principal() {
             return Err(Error::Unauthenticated);
         }
         let worker_id = WorkerId::parse(issuer.instance().ok_or(Error::Unauthenticated)?)
             .map_err(|_| Error::Unauthenticated)?;
+        let signing_key_id = key.key_id();
         Ok(Self {
             worker_id,
+            signing_key_id,
             transport: Transport::new(
                 url,
                 auth,
@@ -105,6 +110,12 @@ impl WorkerCoordinator {
     #[must_use]
     pub const fn worker_id(&self) -> &WorkerId {
         &self.worker_id
+    }
+
+    /// Thumbprint of the immutable enrolled key used for this client's requests.
+    #[must_use]
+    pub fn signing_key_id(&self) -> &str {
+        &self.signing_key_id
     }
 
     /// # Errors

@@ -195,8 +195,25 @@ exact committed receipts and status remain scoped history reads. Explicit disabl
 policy remains distinct from unavailable authority. Execution retains the original
 policy capture through renewal and finalization; invalidation interrupts its
 watchdog and the runner joins native work before reusing capacity. Payload reads
-retain that capture through the returned body. Authenticated remote policy leases
-and their authoritative Control source remain separate integration work.
+retain that capture through the returned body.
+
+For an assigned remote host, `AssignedPolicies` binds a fixed worker client and
+assignment to a new policy generation:
+
+```rust,ignore
+let remote = AssignedPolicies::new(&policies, worker_client, assignment)?;
+remote.refresh().await?;
+let app = service.register_app(remote.binding()).await?;
+```
+
+Keep this handle for the unchanged association. Constructing a replacement
+retires old handles, while cloning preserves their generation. Each refresh
+reserves its ticket before HTTP and installs the validated client's original
+monotonic deadline. Delayed replies cannot replace newer refreshes or a new
+binding. Failed exchanges leave previous authority bounded by its existing
+deadline. The raw policy is shared through `zeroship_core::workflow_policy`;
+source revision and lease duration remain independent. The authoritative Control
+source and ordinary production assignment/refresh loop still require integration.
 Deploy selection also comes from the trusted host, through `activate_deploy`,
 without querying platform tables.
 

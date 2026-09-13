@@ -25,7 +25,7 @@ mod policy;
 pub mod publication;
 pub mod reconciliation;
 pub use payloads::{PayloadRead, PayloadSlot, StagedPayload};
-pub use policy::{HostPolicies, PolicyBinding, PolicyRefresh, PolicySnapshot};
+pub use policy::{AssignedPolicies, HostPolicies, PolicyBinding, PolicyRefresh, PolicySnapshot};
 pub mod runner;
 mod schedules;
 mod signals;
@@ -39,6 +39,7 @@ pub mod schema;
 pub mod store;
 mod types;
 pub use types::*;
+pub use zeroship_core::workflow_policy::AppPolicy;
 
 #[cfg(test)]
 mod tests;

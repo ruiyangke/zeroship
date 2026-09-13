@@ -9,6 +9,7 @@ use super::{
     types::digest,
     AppWorkflows, RequestId, WorkflowService,
 };
+use crate::service::policy::admit;
 use crate::{operations::SignalOptions, WorkflowServiceError};
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeSet, sync::Arc};
@@ -101,7 +102,7 @@ impl AppWorkflows {
                 }
                 captured.recheck()?;
                 let policy = &captured.authority()?.policy;
-                policy.admit()?;
+                admit(policy)?;
                 captured.check()?;
                 if options.lifetime_seconds <= 0
                     || options.lifetime_seconds > policy.max_signal_token_lifetime_seconds
@@ -271,7 +272,7 @@ impl AppWorkflows {
                 }
                 captured.recheck()?;
                 let policy = &captured.authority()?.policy;
-                policy.admit()?;
+                admit(policy)?;
                 captured.check()?;
                 if !policy.ingress {
                     return Err(WorkflowServiceError::PermissionDenied);

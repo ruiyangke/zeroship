@@ -2,8 +2,10 @@ use super::{
     models,
     policy::CapturedPolicy,
     store::{OrmStore, Row, Transaction},
-    types::{digest, AppPolicy, DeployRegistration, RequestId},
+    types::{digest, DeployRegistration, RequestId},
+    AppPolicy,
 };
+use crate::service::policy::admit;
 use crate::{
     operations::{
         ConflictPolicy, DeliveredSignal, RunState, RunStatus, SignalOptions, StartOptions,
@@ -255,7 +257,7 @@ impl AppWorkflows {
         }
         captured.recheck()?;
         let policy = &captured.authority()?.policy;
-        policy.admit()?;
+        admit(policy)?;
         captured.check()?;
         if encode(&options.input)?.len() > policy.max_input_bytes {
             return Err(WorkflowServiceError::PayloadTooLarge);

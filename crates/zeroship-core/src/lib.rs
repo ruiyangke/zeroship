@@ -43,6 +43,7 @@ pub mod worker_ring;
 pub mod workflow_coordination;
 pub mod workflow_deployments;
 pub mod workflow_jobs;
+pub mod workflow_policy;
 pub mod workflow_schedules;
 
 // The entity-id vocabulary lives in `zeroship-id`, a leaf that carries only

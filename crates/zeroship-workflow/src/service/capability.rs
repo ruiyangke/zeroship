@@ -9,6 +9,7 @@ use zeroship_core::{
     app_id::AppId,
     service_assertion::{ServiceIssuer, ServiceSigningKey, ServiceTrustBundle},
     typed_id,
+    workflow_policy::SIGNAL_CAPABILITY_MAX_LIFETIME_SECONDS,
 };
 
 pub const WORKFLOW_AUDIENCE: &str = "spiffe://zeroship.ai/svc/workflow";
@@ -16,7 +17,6 @@ const CONTROL_ISSUER: &str = "spiffe://zeroship.ai/svc/control";
 const APP_TYPE: &str = "zeroship-workflow-app+jwt";
 const SIGNAL_TYPE: &str = "zeroship-workflow-signal+jwt";
 pub const APP_CAPABILITY_MAX_LIFETIME_SECONDS: i64 = 300;
-pub const SIGNAL_CAPABILITY_MAX_LIFETIME_SECONDS: i64 = 604_800;
 const MAX_TOKEN_BYTES: usize = 16 * 1024;
 
 #[derive(Clone, Serialize, Deserialize)]

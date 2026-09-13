@@ -174,6 +174,7 @@ pub async fn run(settings: WorkflowSettings, options: ServerOptions) -> Result<(
                     Ok::<_, crate::coordinator::Error>(Rc::new(WorkflowHttpState {
                         service: Coordinator::connect(&url, coordinator, Rc::new(holds)).await?,
                         auth,
+                        policy_source: None,
                     }))
                 })
                 .configure(move |config| {

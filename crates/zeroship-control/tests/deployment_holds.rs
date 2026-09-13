@@ -277,6 +277,7 @@ impl Fixture {
                 let mut peers = ServiceTrustBundle::new();
                 peers.trust_signing_key(issuer, key.key_id(), key).unwrap();
                 let state = Rc::new(WorkflowHttpState {
+                    policy_source: None,
                     service: Coordinator::connect(
                         &url,
                         CoordinatorOptions {

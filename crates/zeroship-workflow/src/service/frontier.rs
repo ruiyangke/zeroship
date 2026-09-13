@@ -4,6 +4,7 @@ use super::{
     store::{Row, Transaction},
     AppPolicy, ControlIntent,
 };
+use crate::service::policy::admit;
 use crate::{
     engine::{fold_outcomes, RunUpdate, StepOutcome},
     operations::{RunState, StartOptions},
@@ -244,7 +245,7 @@ pub(crate) async fn apply(
                 "workflow cannot continue with unresolved work or compensation obligations",
             );
         }
-        policy.admit()?;
+        admit(policy)?;
         let deploy = active_deploy(tx, app).await?;
         let name = run.text("workflow_name")?;
         if !deploy.workflows.contains(&name) {

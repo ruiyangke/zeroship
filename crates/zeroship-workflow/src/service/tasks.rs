@@ -3,10 +3,10 @@ use super::{
     frontier, models,
     store::{Row, Transaction},
     types::{
-        digest, AppPolicy, CompletionReceipt, ControlIntent, Heartbeat, TaskAssignment, TaskToken,
+        digest, CompletionReceipt, ControlIntent, Heartbeat, TaskAssignment, TaskToken,
         WorkerIdentity,
     },
-    WorkflowService,
+    AppPolicy, WorkflowService,
 };
 use crate::{WorkflowExecution, WorkflowServiceError};
 use zeroship_core::{app_id::AppId, typed_id};

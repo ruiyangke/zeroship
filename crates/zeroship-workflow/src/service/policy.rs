@@ -1,5 +1,8 @@
 //! Trusted host policy snapshots. Customer SQL never supplies admission authority.
 
+mod remote;
+pub use remote::AssignedPolicies;
+
 use super::AppPolicy;
 use crate::WorkflowServiceError;
 use futures::{
@@ -15,6 +18,13 @@ use std::{
     time::Instant,
 };
 use zeroship_core::{app_id::AppId, workflow_coordination::Revision};
+
+pub(super) const fn admit(policy: &AppPolicy) -> Result<(), WorkflowServiceError> {
+    if !policy.admission {
+        return Err(WorkflowServiceError::PermissionDenied);
+    }
+    Ok(())
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Validity {

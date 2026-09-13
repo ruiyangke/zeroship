@@ -16,6 +16,7 @@ use super::{
     store::Transaction,
     AppWorkflows, DeployRegistration, ScheduleOverlap, ScheduleRegistration,
 };
+use crate::service::policy::admit;
 use crate::{operations::StartOptions, validation, WorkflowServiceError};
 use zeroship_core::{
     app_id::AppId,
@@ -267,7 +268,7 @@ impl AppWorkflows {
                     return Err(conflict());
                 }
                 let policy = authority.policy();
-                policy.admit()?;
+                admit(policy)?;
                 if encode(&registration.input)?.len() > policy.max_input_bytes {
                     return Err(WorkflowServiceError::PayloadTooLarge);
                 }
