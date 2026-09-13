@@ -247,7 +247,7 @@ echo "------------------------------------------------------------------"
 # visible: the target REFUSES when it cannot resolve one, so this gate goes red
 # on the run itself rather than on a marker counted afterwards.
 #
-# Gateway browser-session, anchor and rotation cases now run in the library
+# Gateway browser-auth, session, anchor and rotation cases run in the library
 # suite above. Their private fixtures own migrated PostgreSQL containers.
 # Remaining integration binaries still use this script's database.
 #
@@ -270,7 +270,6 @@ for spec in \
   "zeroship-authz:" \
   "zeroship-mailer:" \
   "zeroship-gateway:backchannel_logout_test" \
-  "zeroship-gateway:browser_auth_test" \
   "zeroship-gateway:oidc_rp_e2e" \
 ; do
   pkg="${spec%%:*}"
