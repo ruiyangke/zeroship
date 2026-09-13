@@ -1852,26 +1852,35 @@ App-bound WorkflowRun.readStepOutput(name, occurrence)
           V8 / Rust boundary
                    |
                    v
-Rust backend holds endpoint, app ID, and scoped token
+V8TaskExecutor installs a native TaskOutputReader
                    |
-          authenticated HTTP
+         app + task + policy authority
                    |
                    v
-Control verifies the token and reads that app's journal
+Creator ORM journal and creator object storage
 ```
 
-The worker's serialized replay envelope contains no output-read credential.
-The runtime and bootstrap readers obtain a run handle from the native
-`env.workflows` binding. Its Rust backend builds the output request using
-the host-bound app identity and token; JavaScript supplies the run and step
-coordinates. Control verifies the token and looks up the output in that app's
-journal. See `crates/zeroship-workflow-v8/src/v8_class.rs`,
-`crates/zeroship-workflow/src/client.rs`, and
-`crates/zeroship-control/src/workflow_instance_api.rs`.
+This is the native job consumer path implemented by `V8TaskExecutor` in
+`crates/zeroship-workflow-v8/src/executor.rs`. The serialized replay envelope
+contains no output-read credential. The embedded runtime interpreter obtains a
+run handle from `env.workflows`; its `readStepOutput` method uses the task reader
+for the executing run. The reader retains native task credentials, payload
+bounds and policy authority. JavaScript supplies only run and step coordinates.
+Loss of replay authority interrupts the isolate. See `TaskOutputReader` and
+`WorkflowRun::read_step_output` in `crates/zeroship-workflow-v8/src/v8_class.rs`.
 
-`crates/zeroship-control/tests/workflow_binding.rs` exercises binary output
-reads and rejects another app's run. The SDK journal accepts a host-provided
-reader callback; it does not carry an HTTP credential.
+`WorkflowCreatorFactory` constructs the payload handle and app backend from the
+same creator binding. Journal and object reads stay in creator storage; manager
+placement supplies no database credentials. Native worker factory tests execute
+blob-output replay through this path and reject a changed creator schema.
+
+Production worker composition still uses the legacy advancement path and its
+HTTP backend in `crates/zeroship-workflow/src/client.rs`. That backend sends an
+app-scoped token to `crates/zeroship-control/src/workflow_instance_api.rs` for
+output reads; `crates/zeroship-control/tests/workflow_binding.rs` covers its app
+isolation. Removing that path is part of the private-zone cutover in
+[the workflow proposal](../proposals/2026-09-11-workflow-worker.md). The SDK journal
+accepts a host-provided reader callback and carries no HTTP credential.
 
 ### 5.6 OIDC broker secret
 
