@@ -19,6 +19,7 @@ mod management;
 mod models;
 mod payloads;
 mod policy;
+pub mod publication;
 pub use payloads::{PayloadRead, PayloadSlot, StagedPayload};
 pub use policy::{HostPolicies, PolicySnapshot};
 pub mod runner;

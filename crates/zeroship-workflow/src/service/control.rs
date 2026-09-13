@@ -136,6 +136,8 @@ impl AppWorkflows {
 pub(super) struct TransitionPlan {
     state: RunState,
     patch: Option<Value>,
+    advance: bool,
+    now: i64,
 }
 
 pub(super) async fn prepare_transition(
@@ -189,7 +191,13 @@ pub(super) async fn prepare_transition(
             RunOperation::Cancel => value!({"control":"cancel", "due_at":now}),
         })
     };
-    Ok(Preparation::Ready(TransitionPlan { state, patch }))
+    let advance = patch.is_some() && run.optional_text("task_id")?.is_none();
+    Ok(Preparation::Ready(TransitionPlan {
+        state,
+        patch,
+        advance,
+        now,
+    }))
 }
 
 impl TransitionPlan {
@@ -204,6 +212,9 @@ impl TransitionPlan {
                 .collection(models::runs::Entity::COLLECTION)?
                 .update(value!({"app_id":app.as_str(), "id":run_id}), patch)
                 .await?;
+            if self.advance {
+                super::publication::advance(tx, app, run_id, self.now).await?;
+            }
         }
         Ok(TransitionedRun { state: self.state })
     }

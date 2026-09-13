@@ -282,8 +282,10 @@ impl RestartPlan {
         tx.database().collection(models::runs::Entity::COLLECTION)?.update(
             value!({"app_id":app.as_str(), "id":run_id}),
             value!({"generation":generation, "deploy_id":deploy.clone(), "state":"queued", "control":"none",
-                "due_at":now, "task_id":null, "terminal_at":null, "compensation_target":null, "signal_epoch":signal_epoch}),
+                "due_at":now, "task_id":null, "terminal_at":null, "compensation_target":null, "signal_epoch":signal_epoch,
+                "frontier_revision":1}),
         ).await?;
+        super::super::publication::record(tx, app, run_id, now).await?;
         let result = RestartedRun {
             run_id: run_id.into(),
             state: RunState::Queued,

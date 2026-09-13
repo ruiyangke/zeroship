@@ -9,6 +9,7 @@ pub use journal::{
     __zeroship_workflow_app_state as app_state, __zeroship_workflow_broadcasts as broadcasts,
     __zeroship_workflow_deployment_holds as deployment_holds,
     __zeroship_workflow_deploys as deploys, __zeroship_workflow_generations as generations,
+    __zeroship_workflow_job_publications as job_publications,
     __zeroship_workflow_management_receipts as management_receipts,
     __zeroship_workflow_occurrences as occurrences, __zeroship_workflow_outbox as outbox,
     __zeroship_workflow_payload_refs as payload_refs, __zeroship_workflow_payloads as payloads,

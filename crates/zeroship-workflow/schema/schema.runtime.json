@@ -588,6 +588,162 @@
         }
       ]
     },
+    "__zeroship_workflow_job_publications": {
+      "fields": {
+        "id": {
+          "type": "string",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "id"
+          },
+          "primaryKey": true
+        },
+        "app_id": {
+          "type": "string",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "app_id"
+          }
+        },
+        "run_id": {
+          "type": "string",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "run_id"
+          }
+        },
+        "deploy_id": {
+          "type": "string",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "deploy_id"
+          }
+        },
+        "generation": {
+          "type": "bigInt",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "generation"
+          }
+        },
+        "frontier_revision": {
+          "type": "bigInt",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "frontier_revision"
+          }
+        },
+        "available_at": {
+          "type": "bigInt",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "available_at"
+          }
+        },
+        "specification": {
+          "type": "string",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "specification"
+          }
+        },
+        "created_at": {
+          "type": "bigInt",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "created_at"
+          }
+        },
+        "confirmed_at": {
+          "type": "bigInt",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "confirmed_at"
+          }
+        }
+      },
+      "options": {
+        "softDelete": false,
+        "versioning": false,
+        "strictness": "strict"
+      },
+      "indexes": [
+        {
+          "name": "__zeroship_workflow_job_publications_scope_key",
+          "fields": [
+            "app_id",
+            "id"
+          ],
+          "unique": true
+        },
+        {
+          "name": "__zeroship_workflow_job_publication_frontier",
+          "fields": [
+            "app_id",
+            "run_id",
+            "generation",
+            "frontier_revision",
+            "available_at"
+          ],
+          "unique": true
+        },
+        {
+          "name": "__zeroship_workflow_job_publications_pending_idx",
+          "fields": [
+            "app_id",
+            "confirmed_at",
+            "id"
+          ]
+        },
+        {
+          "name": "__zeroship_workflow_job_publications_deployment_idx",
+          "fields": [
+            "app_id",
+            "deploy_id",
+            "confirmed_at"
+          ]
+        }
+      ]
+    },
     "__zeroship_workflow_management_receipts": {
       "fields": {
         "id": {
@@ -1314,6 +1470,18 @@
           "projectable": true,
           "storage": {
             "valueColumn": "lease_epoch"
+          }
+        },
+        "frontier_revision": {
+          "type": "bigInt",
+          "required": true,
+          "default": 1,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "frontier_revision"
           }
         },
         "key": {
