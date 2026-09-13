@@ -89,7 +89,7 @@ export async function capture(base: string, run: string): Promise<Capture> {
   for (const [label, operation, tag] of [["txCommit", "txCommit", "c"], ["txRoll", "txRollback", "r"], ["txNest", "txNested", "n"]]) {
     await row(label, `todos.${operation}`, { userId: tx, tag: `${tag}${run}` });
   }
-  for (const [index, [label, level]] of [["txIsoNone", null], ["txIsoSer", "serializable"], ["txIsoRR", "repeatableRead"], ["txIsoBad", "snapshot"]].entries()) {
+  for (const [index, [label, level]] of [["txIsoNone", null], ["txIsoSer", "serializable"], ["txIsoRR", "repeatable read"], ["txIsoBad", "snapshot"]].entries()) {
     await row(label as string, "todos.txIsolation", { userId: tx, tag: `i${index}${run}`, level });
   }
   for (const [label, tag, levels] of [["txD9", "d9", 9], ["txD10", "da", 10]] as const) {
