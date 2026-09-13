@@ -63,6 +63,11 @@ pub fn test_auth_config(db_url: &str) -> AuthConfig {
 /// produces.
 #[allow(dead_code)]
 pub fn test_auth_config_with(db_url: &str, extra: &[&str]) -> AuthConfig {
+    test_auth_config_at(db_url, "http://localhost:0", extra)
+}
+
+/// Resolve server settings against the address owned by the HTTP fixture.
+pub fn test_auth_config_at(db_url: &str, public_url: &str, extra: &[&str]) -> AuthConfig {
     let mut args: Vec<&str> = Vec::from([
         "zeroship-auth",
         "--addr",
@@ -77,7 +82,7 @@ pub fn test_auth_config_with(db_url: &str, extra: &[&str]) -> AuthConfig {
         "--mail-from-name",
         "Test",
         "--public-url",
-        "http://localhost:0",
+        public_url,
     ]);
     args.extend_from_slice(extra);
     // `parse_from` runs the generated resolver, exactly as real boot does.
