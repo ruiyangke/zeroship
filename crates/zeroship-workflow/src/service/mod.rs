@@ -5,7 +5,7 @@ mod app;
 mod backend;
 mod bundle;
 pub use backend::AppBackend;
-pub use bundle::BundleExecutable;
+pub use bundle::{BundleDeclarations, BundleExecutable};
 pub mod capability;
 mod control;
 mod cron;
