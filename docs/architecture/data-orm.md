@@ -119,6 +119,9 @@ Creator hosts decode their runtime artifact with `Schema::from_runtime_descripto
 Both enter the same validation and immutable registration path. Column types,
 capabilities, generators, references, and protection remain part of entity
 compatibility; equivalent artifact spellings normalize at the decoding boundary.
+Typed operations check their bound metadata during preparation and again before
+execution, including counts, existence checks, and mutations. A pending operation
+refuses replaced metadata with `orm_schema_mismatch` before accessing rows.
 Physical schema changes remain the migration engine's responsibility.
 
 Native platform services use the same `Database` API without a V8 adapter. The

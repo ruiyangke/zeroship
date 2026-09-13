@@ -193,6 +193,13 @@ struct SchemaExpectation {
     scope: Option<Rc<Cell<bool>>>,
 }
 
+impl SchemaExpectation {
+    fn validate(&self, database: &Database) -> Result<(), DbError> {
+        check_scope(self.scope.as_ref())?;
+        validate_bound_schema(database, self.collection, &self.schema)
+    }
+}
+
 #[derive(Debug, Clone)]
 struct ReadOrigin {
     database: Rc<()>,
@@ -222,6 +229,7 @@ pub(super) fn validate_bound_schema(
     collection: &str,
     expected: &std::sync::Arc<FieldMap>,
 ) -> Result<(), DbError> {
+    database.check_scope()?;
     database.context.with(|| {
         let current = crate::descriptor::collection_schema(&database.binding, collection)?;
         if std::sync::Arc::ptr_eq(&current, expected) || current.as_ref() == expected.as_ref() {
@@ -255,8 +263,7 @@ impl<P> ReadBuilder<P> {
     }
     fn validate_schemas(&self) -> Result<(), DbError> {
         for expected in &self.schemas {
-            check_scope(expected.scope.as_ref())?;
-            validate_bound_schema(&self.database, expected.collection, &expected.schema)?;
+            expected.validate(&self.database)?;
         }
         Ok(())
     }
@@ -366,7 +373,7 @@ impl<P: ReadSelection> ReadBuilder<P> {
                 return Err(error);
             }
             for expected in &self.schemas {
-                check_scope(expected.scope.as_ref())?;
+                expected.validate(&self.database)?;
             }
             self.selection.validate(&self.database, &sources)?;
             let Output::Rows { rows, .. } = work?.await? else {

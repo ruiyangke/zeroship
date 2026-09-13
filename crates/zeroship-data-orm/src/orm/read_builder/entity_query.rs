@@ -7,7 +7,7 @@ use super::{
     count_rows, read, sql_types, take, Column, Database, DbError, DecodeValue, Direction, Entity,
     EntityCollection, EntityProjection, Field, Filter, FindOptions, FromRow, Future, NullOrder,
     OrderKey, PhantomData, ReadBuilder, ReadOrigin, ReadProjection, ReadQuery, ReadSelection,
-    ReadSource, Record, RelatedQuery, Relation, RowLimit,
+    ReadSource, Record, RelatedQuery, Relation, RowLimit, SchemaExpectation,
 };
 
 /// An ordering key tied to its generated entity.
@@ -189,11 +189,15 @@ impl<E: Entity> EntityQuery<E> {
             });
         }
         Ok(ReadBuilder {
+            schemas: vec![SchemaExpectation {
+                collection: E::COLLECTION,
+                schema: self.entity.schema,
+                scope: self.entity.collection.database.scope.clone(),
+            }],
             database: self.entity.collection.database,
             query,
             selection: (),
             error: None,
-            schemas: Vec::new(),
         })
     }
 
