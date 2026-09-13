@@ -555,11 +555,8 @@ pub fn rehydrate_masked_values<'s, 'a>(
 ) -> Option<v8::Local<'s, v8::Value>> {
     let app_id = {
         let state = runtime_state(scope);
-        let env_vars = &state.borrow().env_vars;
-        env_vars
-            .get("APP_ID")
-            .cloned()
-            .unwrap_or_else(|| zeroship_core::app_id::LOCAL_DEV_APP_ID.to_string())
+        let app_id = state.borrow().app_id().map(str::to_owned);
+        app_id.unwrap_or_else(|| zeroship_core::app_id::LOCAL_DEV_APP_ID.to_string())
     };
     // Same identity `v8_classes::db::mint_db` captures, through the same one
     // helper: a pinned workflow isolate and a current isolate of one app hold
@@ -788,6 +785,42 @@ mod tests {
     use super::*;
 
     use zeroship_runtime::init_v8;
+
+    #[test]
+    fn rehydration_keeps_the_host_identity_after_metadata_changes() {
+        use std::{cell::RefCell, collections::HashMap, rc::Rc};
+        use zeroship_runtime::{RuntimeState, SharedState};
+
+        init_v8();
+        let app = zeroship_core::AppId::mint();
+        let other = zeroship_core::AppId::mint();
+        let state: SharedState = Rc::new(RefCell::new(RuntimeState::new(
+            HashMap::from([("APP_ID".into(), app.as_str().into())]),
+            None,
+            None,
+        )));
+        state
+            .borrow_mut()
+            .env_vars
+            .insert("APP_ID".into(), other.as_str().into());
+        let mut isolate = v8::Isolate::new(v8::CreateParams::default());
+        isolate.set_slot(state);
+        v8::scope!(let handles, &mut isolate);
+        let context = v8::Context::new(handles, Default::default());
+        let scope = &mut v8::ContextScope::new(handles, context);
+        let signed = build_sentinel(
+            scope,
+            Some(zeroship_data_orm::protection::mask_pass::mask_sentinel_signature()),
+        );
+        let value = rehydrate_masked_values(scope, signed.into()).unwrap();
+        let object = v8::Local::<v8::Object>::try_from(value).unwrap();
+        assert!(MaskedValue::is_instance(scope, object.into()));
+        let field = object.get_internal_field(scope, 0).unwrap();
+        let external = v8::Local::<v8::External>::try_from(field).unwrap();
+        // The live branded wrapper owns this allocation until V8 finalizes it.
+        let masked = unsafe { &*external.value().cast::<MaskedValue>() };
+        assert_eq!(masked.binding.app_id(), app.as_str());
+    }
 
     #[test]
     fn mask_rehydration_does_not_inspect_binary_fields() {
