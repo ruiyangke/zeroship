@@ -1,8 +1,9 @@
 //! Typed Rust aliases and model projections over the shared read operation.
 use super::*;
 
+mod composition;
 mod predicates;
-pub use predicates::JoinType;
+pub use composition::{IntoReadOperand, ReadOperand, ReadOrder, ReadPredicate};
 mod entity_query;
 pub use entity_query::{EntityQuery, FieldOrder};
 mod related;
@@ -76,18 +77,24 @@ impl<C: Column> SourceColumn<C> {
             .column(C::NAME)
             .expect("generated column and validated alias")
     }
-    pub fn asc(&self) -> OrderKey {
-        OrderKey {
-            path: self.path(),
-            direction: Direction::Ascending,
-            nulls: NullOrder::Last,
+    pub fn asc(&self) -> ReadOrder {
+        ReadOrder {
+            key: OrderKey {
+                path: self.path(),
+                direction: Direction::Ascending,
+                nulls: NullOrder::Last,
+            },
+            origin: self.origin.clone(),
         }
     }
-    pub fn desc(&self) -> OrderKey {
-        OrderKey {
-            path: self.path(),
-            direction: Direction::Descending,
-            nulls: NullOrder::First,
+    pub fn desc(&self) -> ReadOrder {
+        ReadOrder {
+            key: OrderKey {
+                path: self.path(),
+                direction: Direction::Descending,
+                nulls: NullOrder::First,
+            },
+            origin: self.origin.clone(),
         }
     }
 }
@@ -188,7 +195,7 @@ pub struct ReadBuilder<P = ()> {
 
 #[derive(Debug)]
 struct SchemaExpectation {
-    collection: &'static str,
+    collection: String,
     schema: std::sync::Arc<FieldMap>,
     scope: Option<Rc<Cell<bool>>>,
 }
@@ -196,7 +203,7 @@ struct SchemaExpectation {
 impl SchemaExpectation {
     fn validate(&self, database: &Database) -> Result<(), DbError> {
         check_scope(self.scope.as_ref())?;
-        validate_bound_schema(database, self.collection, &self.schema)
+        validate_bound_schema(database, &self.collection, &self.schema)
     }
 }
 
@@ -217,7 +224,7 @@ impl ReadOrigin {
             })
         {
             return Err(read::invalid(
-                "typed projections must belong to a registered read source",
+                "typed expressions must belong to a registered read source",
             ));
         }
         validate_bound_schema(database, &self.source.collection, &self.schema)
@@ -248,7 +255,7 @@ impl Database {
             error: (!Rc::ptr_eq(&self.identity, &source.database.identity))
                 .then(|| read::invalid("read sources must belong to the same database handle")),
             schemas: vec![SchemaExpectation {
-                collection: E::COLLECTION,
+                collection: E::COLLECTION.into(),
                 schema: source.schema.clone(),
                 scope: source.database.scope.clone(),
             }],
@@ -256,6 +263,21 @@ impl Database {
     }
 }
 impl<P> ReadBuilder<P> {
+    fn register_origins(
+        &mut self,
+        origins: Vec<ReadOrigin>,
+        sources: &[ReadSource],
+    ) -> Result<(), DbError> {
+        for origin in origins {
+            origin.validate(&self.database, sources)?;
+            self.schemas.push(SchemaExpectation {
+                collection: origin.source.collection,
+                schema: origin.schema,
+                scope: origin.scope,
+            });
+        }
+        Ok(())
+    }
     fn sources(&self) -> Vec<ReadSource> {
         std::iter::once(self.query.source.clone())
             .chain(self.query.joins.iter().map(|join| join.source.clone()))
@@ -270,7 +292,7 @@ impl<P> ReadBuilder<P> {
     fn join<E: Entity>(
         mut self,
         source: &EntityAlias<E>,
-        on: Predicate,
+        on: ReadPredicate,
         kind: JoinKind,
     ) -> Result<Self, DbError> {
         if !Rc::ptr_eq(&self.database.identity, &source.database.identity) {
@@ -284,33 +306,39 @@ impl<P> ReadBuilder<P> {
         source.database.check_scope()?;
         validate_bound_schema(&self.database, E::COLLECTION, &source.schema)?;
         self.schemas.push(SchemaExpectation {
-            collection: E::COLLECTION,
+            collection: E::COLLECTION.into(),
             schema: source.schema.clone(),
             scope: source.database.scope.clone(),
         });
+        let mut sources = self.sources();
+        sources.push(source.source.clone());
+        self.register_origins(on.origins, &sources)?;
         self.query.joins.push(ReadJoin {
             kind,
             source: source.source.clone(),
-            on,
+            on: on.expression,
         });
         Ok(self)
     }
     pub fn left_join<E: Entity>(
         self,
         source: &EntityAlias<E>,
-        on: Predicate,
+        on: ReadPredicate,
     ) -> Result<Self, DbError> {
         self.join(source, on, JoinKind::Left)
     }
     pub fn inner_join<E: Entity>(
         self,
         source: &EntityAlias<E>,
-        on: Predicate,
+        on: ReadPredicate,
     ) -> Result<Self, DbError> {
         self.join(source, on, JoinKind::Inner)
     }
-    pub fn filter(mut self, predicate: Predicate) -> Self {
-        self.query.filter = predicate;
+    pub fn filter(mut self, predicate: ReadPredicate) -> Self {
+        if let Err(error) = self.register_origins(predicate.origins, &self.sources()) {
+            self.error.get_or_insert(error);
+        }
+        self.query.filter = predicate.expression;
         self
     }
     pub fn group_by<C: ReadableColumn>(mut self, column: SourceColumn<C>) -> Self {
@@ -319,19 +347,25 @@ impl<P> ReadBuilder<P> {
             return self;
         }
         self.schemas.push(SchemaExpectation {
-            collection: C::Entity::COLLECTION,
+            collection: C::Entity::COLLECTION.into(),
             schema: column.origin.schema.clone(),
             scope: column.origin.scope.clone(),
         });
         self.query.group_by.push(column.path());
         self
     }
-    pub fn having(mut self, predicate: Predicate) -> Self {
-        self.query.having = predicate;
+    pub fn having(mut self, predicate: ReadPredicate) -> Self {
+        if let Err(error) = self.register_origins(predicate.origins, &self.sources()) {
+            self.error.get_or_insert(error);
+        }
+        self.query.having = predicate.expression;
         self
     }
-    pub fn order_by(mut self, key: OrderKey) -> Self {
-        self.query.order_by.push(key);
+    pub fn order_by(mut self, key: ReadOrder) -> Self {
+        if let Err(error) = self.register_origins(vec![key.origin], &self.sources()) {
+            self.error.get_or_insert(error);
+        }
+        self.query.order_by.push(key.key);
         self
     }
     pub fn limit(mut self, limit: i64) -> Result<Self, DbError> {

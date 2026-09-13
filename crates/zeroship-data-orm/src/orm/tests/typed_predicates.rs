@@ -1,6 +1,5 @@
 use super::fixtures::CollectionFixture;
 use super::*;
-use crate::sql::Predicate;
 
 include!("../../../tests/fixtures/predicates_schema.rs");
 predicates_schema!(pub predicate_schema);
@@ -241,7 +240,7 @@ async fn exercise(db: &Database) {
             vec!["b", "c"],
         ),
         (
-            Predicate::negate(source.column(rows::rank).eq(2).unwrap()).unwrap(),
+            source.column(rows::rank).eq(2).unwrap().negate(),
             vec!["a", "c"],
         ),
     ] {
