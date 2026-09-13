@@ -461,7 +461,8 @@ impl Scheduler {
                             .await?;
                     }
                     if let Some(previous) = restore {
-                        Self::restore(&tx, request, &job.id, &previous, &metadata).await?;
+                        Box::pin(Self::restore(&tx, request, &job.id, &previous, &metadata))
+                            .await?;
                     } else {
                         tx.entity::<schedules::Entity>()?
                             .update_many(
@@ -473,7 +474,7 @@ impl Scheduler {
                             )
                             .await?;
                         for descriptor in &metadata.schedules {
-                            self.install(&tx, request, &job.id, descriptor, now).await?;
+                            Box::pin(self.install(&tx, request, &job.id, descriptor, now)).await?;
                         }
                     }
                     recovery::ensure_in(
@@ -1113,25 +1114,17 @@ pub(crate) async fn due_in(
     descending: bool,
     limit: u32,
 ) -> Result<Vec<Due>, Error> {
-    use zeroship_data_orm::sql::{CompareOp, Literal, Operand, Predicate};
     let schedule = tx.entity::<schedules::Entity>()?.alias("schedule")?;
     let scope = tx.entity::<schedule_scopes::Entity>()?.alias("scope")?;
-    let mut filter = vec![
-        scope.column(schedule_scopes::enabled).eq(true)?,
-        Predicate::compare(
-            Operand::Path(schedule.column(schedules::next_at).asc().path),
-            CompareOp::Lte,
-            Operand::Lit(Literal::Int(now)),
-        ),
-    ];
-    for (value, comparison) in [(after, CompareOp::Gt), (upper, CompareOp::Lte)] {
-        if let Some(value) = value {
-            filter.push(Predicate::compare(
-                Operand::Path(schedule.column(schedules::id).asc().path),
-                comparison,
-                Operand::Lit(Literal::Text(value.into())),
-            ));
-        }
+    let mut filter = scope
+        .column(schedule_scopes::enabled)
+        .eq(true)?
+        .and(schedule.column(schedules::next_at).lte(Some(now))?);
+    if let Some(after) = after {
+        filter = filter.and(schedule.column(schedules::id).gt(after)?);
+    }
+    if let Some(upper) = upper {
+        filter = filter.and(schedule.column(schedules::id).lte(upper)?);
     }
     Ok(tx
         .from(&schedule)
@@ -1139,9 +1132,9 @@ pub(crate) async fn due_in(
             &scope,
             schedule
                 .column(schedules::app_id)
-                .eq_column(scope.column(schedule_scopes::id))?,
+                .eq(scope.column(schedule_scopes::id))?,
         )?
-        .filter(Predicate::And(filter))
+        .filter(filter)
         .order_by(if descending {
             schedule.column(schedules::id).desc()
         } else {
@@ -1222,7 +1215,6 @@ pub(crate) async fn candidate(
 ) -> Result<Option<String>, Error> {
     use crate::models::jobs;
     use zeroship_core::workflow_jobs::JobOutcome;
-    use zeroship_data_orm::sql::Predicate;
     let job = tx.entity::<jobs::Entity>()?.alias("j")?;
     let occurrence = tx.entity::<schedule_occurrences::Entity>()?.alias("o")?;
     let activation = tx.entity::<jobs::Entity>()?.alias("a")?;
@@ -1230,47 +1222,48 @@ pub(crate) async fn candidate(
         .from(&job)
         .left_join(
             &occurrence,
-            Predicate::And(vec![
-                job.column(jobs::app_id)
-                    .eq_column(occurrence.column(schedule_occurrences::app_id))?,
-                job.column(jobs::id)
-                    .eq_column(occurrence.column(schedule_occurrences::job_id))?,
-            ]),
+            job.column(jobs::app_id)
+                .eq(occurrence.column(schedule_occurrences::app_id))?
+                .and(
+                    job.column(jobs::id)
+                        .eq(occurrence.column(schedule_occurrences::job_id))?,
+                ),
         )?
         .left_join(
             &activation,
-            Predicate::And(vec![
-                occurrence
-                    .column(schedule_occurrences::app_id)
-                    .eq_column(activation.column(jobs::app_id))?,
-                occurrence
-                    .column(schedule_occurrences::activation_id)
-                    .eq_column(activation.column(jobs::id))?,
-            ]),
+            occurrence
+                .column(schedule_occurrences::app_id)
+                .eq(activation.column(jobs::app_id))?
+                .and(
+                    occurrence
+                        .column(schedule_occurrences::activation_id)
+                        .eq(activation.column(jobs::id))?,
+                ),
         )?
-        .filter(Predicate::And(vec![
-            job.column(jobs::app_id).eq(app.as_str())?,
-            Predicate::Or(vec![
-                Predicate::And(vec![
-                    job.column(jobs::state).eq("ready")?,
-                    job.column(jobs::available_at).lte(now)?,
-                ]),
-                Predicate::And(vec![
-                    job.column(jobs::state).eq("leased")?,
-                    job.column(jobs::lease_deadline).lte(Some(now))?,
-                ]),
-            ]),
-            Predicate::Or(vec![
-                occurrence.column(schedule_occurrences::id).is_null(),
-                Predicate::And(vec![
-                    activation.column(jobs::state).eq("settled")?,
-                    activation.column(jobs::outcome).eq(Some(
-                        serde_json::to_string(&JobOutcome::Completed)
-                            .map_err(|_| Error::Storage)?,
-                    ))?,
-                ]),
-            ]),
-        ]))
+        .filter(
+            job.column(jobs::app_id)
+                .eq(app.as_str())?
+                .and(
+                    job.column(jobs::state)
+                        .eq("ready")?
+                        .and(job.column(jobs::available_at).lte(now)?)
+                        .or(job
+                            .column(jobs::state)
+                            .eq("leased")?
+                            .and(job.column(jobs::lease_deadline).lte(Some(now))?)),
+                )
+                .and(
+                    occurrence
+                        .column(schedule_occurrences::id)
+                        .is_null()
+                        .or(activation.column(jobs::state).eq("settled")?.and(
+                            activation.column(jobs::outcome).eq(Some(
+                                serde_json::to_string(&JobOutcome::Completed)
+                                    .map_err(|_| Error::Storage)?,
+                            ))?,
+                        )),
+                ),
+        )
         .order_by(job.column(jobs::available_at).asc())
         .order_by(job.column(jobs::id).asc())
         .select(job.row::<Candidate>())?

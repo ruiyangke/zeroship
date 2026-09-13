@@ -1,4 +1,4 @@
-//! Creator outbox pages delivered by the manager, without local scheduling.
+//! Durable publication and hold intents delivered by the manager for recovery.
 
 #![expect(
     clippy::future_not_send,
@@ -8,18 +8,16 @@
 use super::{
     app::{decode, encode, lock_app_state},
     delivery::{self, CapturedLease, JobReceipt},
-    models::{job_publications, job_receipts, publication_scans},
+    models::{job_receipts, reconciliation_scans},
     publication::JobPublisher,
     store::Transaction,
     AppWorkflows,
 };
 use crate::WorkflowServiceError;
-use serde::{Deserialize, Serialize};
 use std::time::{Duration, Instant};
 use zeroship_core::workflow_jobs::{JobId, JobLease, JobOperation, JobOutcome, JobSpec};
 use zeroship_data_orm::{
-    orm::{Entity, FindOptions, FromRow, Operation, Output},
-    sql::Predicate,
+    orm::{Entity, Operation, Output},
     value,
 };
 
@@ -52,61 +50,8 @@ impl ReconciliationOptions {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Plan {
-    revision: i64,
-    after: Option<String>,
-    upper: Option<String>,
-    ids: Vec<String>,
-    more: bool,
-}
-impl Plan {
-    fn validate(&self) -> Result<(), WorkflowServiceError> {
-        if self.revision <= 0
-            || i64::try_from(self.ids.len()).map_err(|_| invalid())?
-                > zeroship_data_orm::sql::MAX_ROW_LIMIT
-            || self
-                .after
-                .as_ref()
-                .is_some_and(|after| self.upper.as_ref().is_none_or(|upper| after >= upper))
-        {
-            return Err(invalid());
-        }
-        let mut previous = self.after.as_deref();
-        for id in &self.ids {
-            if previous.is_some_and(|after| after >= id.as_str())
-                || self.upper.as_ref().is_none_or(|upper| id > upper)
-            {
-                return Err(invalid());
-            }
-            previous = Some(id);
-        }
-        if self.more
-            && self
-                .ids
-                .last()
-                .is_none_or(|last| self.upper.as_ref().is_none_or(|upper| last >= upper))
-        {
-            return Err(invalid());
-        }
-        Ok(())
-    }
-}
-
-#[derive(FromRow)]
-#[orm(entity = publication_scans)]
-struct Scan {
-    revision: i64,
-    after_job: Option<String>,
-    upper_job: Option<String>,
-}
-
-#[derive(FromRow)]
-#[orm(entity = job_publications)]
-struct PublicationId {
-    id: String,
-}
+mod scan;
+use scan::{pending_ids, scan, Phase, Plan, Scan};
 
 enum Admission {
     Page(Plan),
@@ -118,8 +63,9 @@ enum Progress {
 }
 
 impl AppWorkflows {
-    /// Visit a persisted page of this app's publication intents. Failed items
-    /// remain pending for a later scan. This operation runs no app code and does
+    /// Visit a persisted page of this app's publication or hold intents.
+    ///
+    /// Failed items remain pending for a later scan. This operation runs no app code and does
     /// not interpret a completed scan as proof that the app has drained.
     ///
     /// # Errors
@@ -165,23 +111,61 @@ impl AppWorkflows {
                         Progress::Item(id) => id,
                     };
                     let result = async {
-                        let id = JobId::parse(&id).map_err(|_| invalid())?;
-                        self.publish_job_authorized(&id, publisher, Some(&authority))
+                        self.reconcile_item(plan.phase, &id, publisher, &authority)
                             .await
                     };
                     let timeout = options.item_timeout.min(delivery::remaining(&authority)?);
                     match compio::time::timeout(timeout, Box::pin(result)).await {
-                        Ok(Ok(_)) => {}
+                        Ok(Ok(())) => {}
                         Ok(Err(error)) => tracing::warn!(
                             code = error.code(),
-                            "workflow reconciliation publication remains pending"
+                            "workflow reconciliation intent remains pending"
                         ),
-                        Err(_) => tracing::warn!("workflow reconciliation publication timed out"),
+                        Err(_) => tracing::warn!("workflow reconciliation intent timed out"),
                     }
                 }
             }),
         )
         .await
+    }
+
+    async fn reconcile_item(
+        &self,
+        phase: Phase,
+        id: &str,
+        publisher: &impl JobPublisher,
+        authority: &CapturedLease,
+    ) -> Result<(), WorkflowServiceError> {
+        authority.check(self)?;
+        match phase {
+            Phase::Publications => {
+                let id = JobId::parse(id).map_err(|_| invalid())?;
+                self.publish_job_authorized(&id, publisher, Some(authority))
+                    .await?;
+            }
+            Phase::DeploymentHolds => {
+                let source = self
+                    .service
+                    .deployments
+                    .as_ref()
+                    .ok_or_else(super::deployments::unavailable)?;
+                let client = source.client(self.app_id())?;
+                // The page selects existing intents. This operation revalidates
+                // their current generation and only confirms the matching RPC;
+                // it never decides to acquire or release a deployment.
+                self.service
+                    .reconcile_deployment_hold_checked(
+                        self.app_id(),
+                        id,
+                        None,
+                        None,
+                        client.as_ref(),
+                        &|| authority.check(self),
+                    )
+                    .await?;
+            }
+        }
+        Ok(())
     }
 
     async fn prepare_reconciliation(
@@ -210,26 +194,29 @@ impl AppWorkflows {
                 scan
             } else {
                 tx.database()
-                    .collection(publication_scans::Entity::COLLECTION)?
-                    .insert(value!({"id":self.app_id().as_str(), "revision":1}))
+                    .collection(reconciliation_scans::Entity::COLLECTION)?
+                    .insert(value!({"id":self.app_id().as_str(), "revision":1, "phase":Phase::Publications.as_str()}))
                     .await?;
                 Scan {
                     revision: 1,
-                    after_job: None,
-                    upper_job: None,
+                    phase: Phase::Publications.as_str().into(),
+                    after_id: None,
+                    upper_id: None,
                 }
             };
             if scan.revision <= 0
                 || scan
-                    .after_job
+                    .after_id
                     .as_ref()
-                    .is_some_and(|after| scan.upper_job.as_ref().is_none_or(|upper| after >= upper))
+                    .is_some_and(|after| scan.upper_id.as_ref().is_none_or(|upper| after >= upper))
             {
                 return Err(invalid());
             }
-            let upper = match scan.upper_job {
+            let phase = Phase::parse(&scan.phase)?;
+            let previous_upper = scan.upper_id.clone();
+            let upper = match scan.upper_id {
                 Some(upper) => Some(upper),
-                None => pending_ids(&tx, self.app_id().as_str(), None, None, 1, true)
+                None => pending_ids(&tx, self.app_id().as_str(), phase, None, None, 1, true)
                     .await?
                     .into_iter()
                     .next(),
@@ -238,7 +225,8 @@ impl AppWorkflows {
                 pending_ids(
                     &tx,
                     self.app_id().as_str(),
-                    scan.after_job.as_deref(),
+                    phase,
+                    scan.after_id.as_deref(),
                     Some(upper),
                     options.page_size,
                     false,
@@ -252,8 +240,10 @@ impl AppWorkflows {
                     .last()
                     .is_some_and(|last| upper.as_ref().is_some_and(|upper| last < upper));
             let plan = Plan {
+                phase,
                 revision: scan.revision,
-                after: scan.after_job,
+                after: scan.after_id,
+                previous_upper,
                 upper,
                 ids,
                 more,
@@ -293,6 +283,10 @@ impl AppWorkflows {
         if index > plan.ids.len() {
             return Err(invalid());
         }
+        let current = scan(&tx, self.app_id().as_str())
+            .await?
+            .ok_or_else(invalid)?;
+        plan.check_scan(&current)?;
         let progress = if let Some(id) = plan.ids.get(index) {
             // Reserve before I/O. Cancellation may skip this attempt, but the
             // intent stays pending for the next sweep; redelivery reaches its suffix.
@@ -307,12 +301,6 @@ impl AppWorkflows {
             changed_once(&changed)?;
             Progress::Item(id.clone())
         } else {
-            let current = scan(&tx, self.app_id().as_str())
-                .await?
-                .ok_or_else(invalid)?;
-            if current.revision < plan.revision {
-                return Err(invalid());
-            }
             if current.revision == plan.revision {
                 let revision = current.revision.checked_add(1).ok_or_else(invalid)?;
                 let after = if plan.more {
@@ -321,12 +309,17 @@ impl AppWorkflows {
                     None
                 };
                 let upper = if plan.more { plan.upper.clone() } else { None };
+                let phase = if plan.more {
+                    plan.phase
+                } else {
+                    plan.phase.next()
+                };
                 let changed = tx
                     .database()
-                    .collection(publication_scans::Entity::COLLECTION)?
+                    .collection(reconciliation_scans::Entity::COLLECTION)?
                     .execute(Operation::Update {
                         filter: value!({"id":self.app_id().as_str(), "revision":plan.revision}),
-                        patch: value!({"revision":revision, "after_job":after, "upper_job":upper}),
+                        patch: value!({"revision":revision, "phase":phase.as_str(), "after_id":after, "upper_id":upper}),
                         many: true,
                     })
                     .await?;
@@ -337,7 +330,7 @@ impl AppWorkflows {
                 delivery::finish(
                     &tx,
                     job,
-                    if plan.more {
+                    if plan.more || plan.phase == Phase::Publications {
                         JobOutcome::Waiting
                     } else {
                         JobOutcome::Completed
@@ -354,65 +347,6 @@ impl AppWorkflows {
         }
         Ok(progress)
     }
-}
-
-async fn scan(tx: &Transaction, app: &str) -> Result<Option<Scan>, WorkflowServiceError> {
-    Ok(tx
-        .database()
-        .entity::<publication_scans::Entity>()?
-        .find::<Scan>(
-            publication_scans::id.eq(app)?,
-            FindOptions {
-                limit: Some(1),
-                ..Default::default()
-            },
-        )
-        .await?
-        .into_iter()
-        .next())
-}
-
-async fn pending_ids(
-    tx: &Transaction,
-    app: &str,
-    after: Option<&str>,
-    upper: Option<&str>,
-    limit: u32,
-    descending: bool,
-) -> Result<Vec<String>, WorkflowServiceError> {
-    let source = tx
-        .database()
-        .entity::<job_publications::Entity>()?
-        .alias("p")?;
-    let mut predicates = vec![
-        source.column(job_publications::app_id).eq(app)?,
-        source
-            .column(job_publications::confirmed_at)
-            .eq(None::<i64>)?,
-    ];
-    if let Some(after) = after {
-        predicates.push(source.column(job_publications::id).gt(after)?);
-    }
-    if let Some(upper) = upper {
-        predicates.push(source.column(job_publications::id).lte(upper)?);
-    }
-    let order = if descending {
-        source.column(job_publications::id).desc()
-    } else {
-        source.column(job_publications::id).asc()
-    };
-    Ok(tx
-        .database()
-        .from(&source)
-        .filter(Predicate::And(predicates))
-        .order_by(order)
-        .select(source.row::<PublicationId>())?
-        .limit(i64::from(limit))?
-        .all()
-        .await?
-        .into_iter()
-        .map(|row| row.id)
-        .collect())
 }
 
 fn changed_once(output: &Output) -> Result<(), WorkflowServiceError> {

@@ -17,7 +17,6 @@ use std::{cell::Cell, rc::Rc, sync::Arc, time::Duration};
 use zeroship_core::{app_id::AppId, typed_id};
 use zeroship_data_orm::{
     orm::{Entity, FindOptions, FromRow, Operation, Output},
-    sql::{CompareOp, Literal, Operand, Predicate},
     value, Value,
 };
 use zeroship_storage::{
@@ -362,25 +361,22 @@ impl WorkflowService {
         let object = db.entity::<models::payloads::Entity>()?.alias("p")?;
         let candidates = db
             .from(&object)
-            .filter(Predicate::And(vec![
-                Predicate::Or(
-                    tx.host_app_ids()?
-                        .into_iter()
-                        .map(|app| object.column(models::payloads::app_id).eq(app.as_str()))
-                        .collect::<Result<Vec<_>, _>>()?,
-                ),
-                Predicate::Or(
-                    ["uploading", "staged", "deleting", "deleted"]
-                        .into_iter()
-                        .map(|state| object.column(models::payloads::state).eq(state))
-                        .collect::<Result<Vec<_>, _>>()?,
-                ),
-                Predicate::compare(
-                    Operand::Path(object.column(models::payloads::expires_at).asc().path),
-                    CompareOp::Lte,
-                    Operand::Lit(Literal::Int(now)),
-                ),
-            ]))
+            .filter(
+                object
+                    .column(models::payloads::app_id)
+                    .in_values(
+                        tx.host_app_ids()?
+                            .into_iter()
+                            .map(|app| app.as_str().to_owned()),
+                    )?
+                    .and(object.column(models::payloads::state).in_values([
+                        "uploading",
+                        "staged",
+                        "deleting",
+                        "deleted",
+                    ])?)
+                    .and(object.column(models::payloads::expires_at).lte(now)?),
+            )
             .order_by(object.column(models::payloads::expires_at).asc())
             .order_by(object.column(models::payloads::app_id).asc())
             .order_by(object.column(models::payloads::id).asc())
@@ -723,50 +719,54 @@ async fn owned_reference(
     let edge = db.entity::<models::payload_refs::Entity>()?.alias("r")?;
     let id = run.text("id")?;
     let generation = run.integer("generation")?;
-    let mut ownership = vec![Predicate::And(vec![
-        object.column(models::payloads::state).eq("referenced")?,
-        edge.column(models::payload_refs::run_id).eq(id.as_str())?,
-    ])];
+    let mut ownership = object
+        .column(models::payloads::state)
+        .eq("referenced")?
+        .and(edge.column(models::payload_refs::run_id).eq(id.as_str())?);
     if let Some(task) = run.optional_text("task_id")? {
-        ownership.push(Predicate::And(vec![
-            object.column(models::payloads::state).eq("staged")?,
-            object.column(models::payloads::run_id).eq(id.as_str())?,
-            object.column(models::payloads::generation).eq(generation)?,
-            object.column(models::payloads::task_id).eq(task.as_str())?,
-            Predicate::compare(
-                Operand::Path(object.column(models::payloads::expires_at).asc().path),
-                CompareOp::Gt,
-                Operand::Lit(Literal::Int(now)),
-            ),
-        ]));
+        ownership = ownership.or(object
+            .column(models::payloads::state)
+            .eq("staged")?
+            .and(object.column(models::payloads::run_id).eq(id.as_str())?)
+            .and(object.column(models::payloads::generation).eq(generation)?)
+            .and(object.column(models::payloads::task_id).eq(task.as_str())?)
+            .and(object.column(models::payloads::expires_at).gt(now)?));
     }
     let rows = db
         .from(&object)
         .left_join(
             &edge,
-            Predicate::And(vec![
-                object
-                    .column(models::payloads::app_id)
-                    .eq_column(edge.column(models::payload_refs::app_id))?,
-                object
-                    .column(models::payloads::id)
-                    .eq_column(edge.column(models::payload_refs::payload_id))?,
-                edge.column(models::payload_refs::run_id).eq(id.as_str())?,
-                edge.column(models::payload_refs::generation)
-                    .eq(generation)?,
-            ]),
+            object
+                .column(models::payloads::app_id)
+                .eq(edge.column(models::payload_refs::app_id))?
+                .and(
+                    object
+                        .column(models::payloads::id)
+                        .eq(edge.column(models::payload_refs::payload_id))?,
+                )
+                .and(edge.column(models::payload_refs::run_id).eq(id.as_str())?)
+                .and(
+                    edge.column(models::payload_refs::generation)
+                        .eq(generation)?,
+                ),
         )?
-        .filter(Predicate::And(vec![
-            object.column(models::payloads::app_id).eq(app.as_str())?,
+        .filter(
             object
-                .column(models::payloads::hash)
-                .eq(reference.hash.as_str())?,
-            object.column(models::payloads::size).eq(reference.size)?,
-            object
-                .column(models::payloads::content_type)
-                .eq(reference.content_type.as_deref())?,
-            Predicate::Or(ownership),
-        ]))
+                .column(models::payloads::app_id)
+                .eq(app.as_str())?
+                .and(
+                    object
+                        .column(models::payloads::hash)
+                        .eq(reference.hash.as_str())?,
+                )
+                .and(object.column(models::payloads::size).eq(reference.size)?)
+                .and(
+                    object
+                        .column(models::payloads::content_type)
+                        .eq(reference.content_type.as_deref())?,
+                )
+                .and(ownership),
+        )
         .order_by(object.column(models::payloads::id).asc())
         .select(object.row::<models::PayloadRecord>())?
         .limit(1)?
@@ -791,22 +791,25 @@ async fn reference_at(
     db.from(&edge)
         .inner_join(
             &object,
-            Predicate::And(vec![
-                edge.column(models::payload_refs::app_id)
-                    .eq_column(object.column(models::payloads::app_id))?,
-                edge.column(models::payload_refs::payload_id)
-                    .eq_column(object.column(models::payloads::id))?,
-            ]),
+            edge.column(models::payload_refs::app_id)
+                .eq(object.column(models::payloads::app_id))?
+                .and(
+                    edge.column(models::payload_refs::payload_id)
+                        .eq(object.column(models::payloads::id))?,
+                ),
         )?
-        .filter(Predicate::And(vec![
-            edge.column(models::payload_refs::app_id).eq(app.as_str())?,
-            edge.column(models::payload_refs::run_id).eq(run_id)?,
-            edge.column(models::payload_refs::generation)
-                .eq(generation)?,
-            edge.column(models::payload_refs::slot).eq(kind)?,
-            edge.column(models::payload_refs::ordinal).eq(ordinal)?,
-            object.column(models::payloads::state).eq("referenced")?,
-        ]))
+        .filter(
+            edge.column(models::payload_refs::app_id)
+                .eq(app.as_str())?
+                .and(edge.column(models::payload_refs::run_id).eq(run_id)?)
+                .and(
+                    edge.column(models::payload_refs::generation)
+                        .eq(generation)?,
+                )
+                .and(edge.column(models::payload_refs::slot).eq(kind)?)
+                .and(edge.column(models::payload_refs::ordinal).eq(ordinal)?)
+                .and(object.column(models::payloads::state).eq("referenced")?),
+        )
         .select(object.row::<models::PayloadRecord>())?
         .limit(1)?
         .all()

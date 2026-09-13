@@ -24,7 +24,7 @@ use zeroship_core::{
 };
 use zeroship_data_orm::{
     orm::{Entity, FindOptions, FromRow, Operation, Output},
-    sql::{CompareOp, Literal, Operand, Predicate, MAX_ROW_LIMIT},
+    sql::MAX_ROW_LIMIT,
     value,
 };
 use zeroship_workflow_client::WorkerCoordinator;
@@ -140,21 +140,17 @@ impl AppWorkflows {
                 captured.check()?;
                 let tx = self.service.begin().await?;
                 let source = tx.database().entity::<publications::Entity>()?.alias("p")?;
-                let mut predicates = vec![
-                    source.column(publications::app_id).eq(self.app.as_str())?,
-                    source.column(publications::confirmed_at).eq(None::<i64>)?,
-                ];
+                let mut predicate = source
+                    .column(publications::app_id)
+                    .eq(self.app.as_str())?
+                    .and(source.column(publications::confirmed_at).eq(None::<i64>)?);
                 if let Some(after) = after {
-                    predicates.push(Predicate::compare(
-                        Operand::Path(source.column(publications::id).asc().path),
-                        CompareOp::Gt,
-                        Operand::Lit(Literal::Text(after.as_str().into())),
-                    ));
+                    predicate = predicate.and(source.column(publications::id).gt(after.as_str())?);
                 }
                 let rows = tx
                     .database()
                     .from(&source)
-                    .filter(Predicate::And(predicates))
+                    .filter(predicate)
                     .order_by(source.column(publications::id).asc())
                     .select(source.row::<Intent>())?
                     .limit(i64::from(limit))?

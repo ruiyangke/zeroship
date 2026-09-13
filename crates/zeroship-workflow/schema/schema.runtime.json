@@ -1531,7 +1531,7 @@
         }
       ]
     },
-    "__zeroship_workflow_publication_scans": {
+    "__zeroship_workflow_reconciliation_scans": {
       "fields": {
         "id": {
           "type": "string",
@@ -1556,24 +1556,35 @@
             "valueColumn": "revision"
           }
         },
-        "after_job": {
+        "phase": {
           "type": "string",
+          "required": true,
           "readable": true,
           "filterable": true,
           "sortable": true,
           "projectable": true,
           "storage": {
-            "valueColumn": "after_job"
+            "valueColumn": "phase"
           }
         },
-        "upper_job": {
+        "after_id": {
           "type": "string",
           "readable": true,
           "filterable": true,
           "sortable": true,
           "projectable": true,
           "storage": {
-            "valueColumn": "upper_job"
+            "valueColumn": "after_id"
+          }
+        },
+        "upper_id": {
+          "type": "string",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "upper_id"
           }
         }
       },

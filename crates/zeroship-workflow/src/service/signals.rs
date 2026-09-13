@@ -18,7 +18,6 @@ use serde_json::json;
 use zeroship_core::{app_id::AppId, typed_id};
 use zeroship_data_orm::{
     orm::{Entity, FindOptions, FromRow, Operation, Output},
-    sql::{CompareOp, Literal, Operand, Predicate},
     value,
 };
 
@@ -196,19 +195,16 @@ impl WorkflowService {
         let broadcast = db.entity::<models::broadcasts::Entity>()?.alias("b")?;
         let pending = db
             .from(&broadcast)
-            .filter(Predicate::And(vec![
-                Predicate::Or(
-                    tx.host_app_ids()?
-                        .into_iter()
-                        .map(|app| {
-                            broadcast
-                                .column(models::broadcasts::app_id)
-                                .eq(app.as_str())
-                        })
-                        .collect::<Result<Vec<_>, _>>()?,
-                ),
-                broadcast.column(models::broadcasts::finished).eq(0_i64)?,
-            ]))
+            .filter(
+                broadcast
+                    .column(models::broadcasts::app_id)
+                    .in_values(
+                        tx.host_app_ids()?
+                            .into_iter()
+                            .map(|app| app.as_str().to_owned()),
+                    )?
+                    .and(broadcast.column(models::broadcasts::finished).eq(0_i64)?),
+            )
             .order_by(broadcast.column(models::broadcasts::created_at).asc())
             .order_by(broadcast.column(models::broadcasts::app_id).asc())
             .order_by(broadcast.column(models::broadcasts::id).asc())
@@ -254,70 +250,70 @@ impl WorkflowService {
                 .from(&subscription)
                 .inner_join(
                     &run,
-                    Predicate::And(vec![
-                        subscription
-                            .column(models::subscriptions::app_id)
-                            .eq_column(run.column(models::runs::app_id))?,
-                        subscription
-                            .column(models::subscriptions::run_id)
-                            .eq_column(run.column(models::runs::id))?,
-                        subscription
-                            .column(models::subscriptions::generation)
-                            .eq_column(run.column(models::runs::generation))?,
-                    ]),
+                    subscription
+                        .column(models::subscriptions::app_id)
+                        .eq(run.column(models::runs::app_id))?
+                        .and(
+                            subscription
+                                .column(models::subscriptions::run_id)
+                                .eq(run.column(models::runs::id))?,
+                        )
+                        .and(
+                            subscription
+                                .column(models::subscriptions::generation)
+                                .eq(run.column(models::runs::generation))?,
+                        ),
                 )?
                 .inner_join(
                     &wait,
-                    Predicate::And(vec![
-                        subscription
-                            .column(models::subscriptions::app_id)
-                            .eq_column(wait.column(models::waits::app_id))?,
-                        subscription
-                            .column(models::subscriptions::run_id)
-                            .eq_column(wait.column(models::waits::run_id))?,
-                        subscription
-                            .column(models::subscriptions::generation)
-                            .eq_column(wait.column(models::waits::generation))?,
-                        subscription
-                            .column(models::subscriptions::ordinal)
-                            .eq_column(wait.column(models::waits::ordinal))?,
-                    ]),
-                )?
-                .filter(Predicate::And(vec![
                     subscription
                         .column(models::subscriptions::app_id)
-                        .eq(app.as_str())?,
+                        .eq(wait.column(models::waits::app_id))?
+                        .and(
+                            subscription
+                                .column(models::subscriptions::run_id)
+                                .eq(wait.column(models::waits::run_id))?,
+                        )
+                        .and(
+                            subscription
+                                .column(models::subscriptions::generation)
+                                .eq(wait.column(models::waits::generation))?,
+                        )
+                        .and(
+                            subscription
+                                .column(models::subscriptions::ordinal)
+                                .eq(wait.column(models::waits::ordinal))?,
+                        ),
+                )?
+                .filter(
                     subscription
-                        .column(models::subscriptions::topic)
-                        .eq(broadcast.topic.as_str())?,
-                    Predicate::compare(
-                        Operand::Path(
+                        .column(models::subscriptions::app_id)
+                        .eq(app.as_str())?
+                        .and(
+                            subscription
+                                .column(models::subscriptions::topic)
+                                .eq(broadcast.topic.as_str())?,
+                        )
+                        .and(
                             subscription
                                 .column(models::subscriptions::sequence)
-                                .asc()
-                                .path,
-                        ),
-                        CompareOp::Gt,
-                        Operand::Lit(Literal::Int(broadcast.cursor)),
-                    ),
-                    Predicate::compare(
-                        Operand::Path(
+                                .gt(broadcast.cursor)?,
+                        )
+                        .and(
                             subscription
                                 .column(models::subscriptions::sequence)
-                                .asc()
-                                .path,
+                                .lte(broadcast.cutoff_sequence)?,
+                        )
+                        .and(
+                            wait.column(models::waits::signal_type)
+                                .eq(Some(broadcast.signal_type.as_str()))?,
+                        )
+                        .and(
+                            run.column(models::runs::state)
+                                .in_values(["completed", "failed", "cancelled"])?
+                                .negate(),
                         ),
-                        CompareOp::Lte,
-                        Operand::Lit(Literal::Int(broadcast.cutoff_sequence)),
-                    ),
-                    wait.column(models::waits::signal_type)
-                        .eq(Some(broadcast.signal_type.as_str()))?,
-                    Predicate::Not(Box::new(Predicate::Or(vec![
-                        run.column(models::runs::state).eq("completed")?,
-                        run.column(models::runs::state).eq("failed")?,
-                        run.column(models::runs::state).eq("cancelled")?,
-                    ]))),
-                ]))
+                )
                 .order_by(subscription.column(models::subscriptions::sequence).asc())
                 .select(subscription.row::<models::SubscriptionRecipient>())?
                 .limit(128)?

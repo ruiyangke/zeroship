@@ -564,7 +564,7 @@ table has the `__zeroship_workflow_` prefix; none belongs in Control's schema.
 | `outbox` | Customer events and their payloads; distinct from manager queue metadata. |
 | `job_publications` | Immutable advance job specifications, generation/frontier/due-time identity and manager confirmation time. Pending records retain deployment dependencies and survive history removal. |
 | `job_receipts` | Immutable logical job specification and committed semantic outcome, retained independently of run history and delivery attempts. App-wide reconciliation records a selected page and its durable attempt offset; its run identity is absent. |
-| `publication_scans` | App-owned publication scan revision, ordering cursor and captured upper boundary. It schedules no work and grants no ingress authority. |
+| `reconciliation_scans` | App-owned scan revision, publication/hold phase, ordering cursor and captured upper boundary. It schedules no work and grants no ingress authority. |
 
 Publication intents now use dedicated journal records. The scoped unique index
 binds run, generation, frontier revision and due time; `id` remains the sole
@@ -1360,27 +1360,38 @@ These native operations do not yet establish the authenticated activation-to-
 ingress handshake, run a host scheduler or provision missing worker capacity.
 The ingress epoch and drain evidence remain required before enabling that path.
 
-A reconciliation job processes an app-scoped page without loading app code. Its
-immutable job receipt captures selected publication IDs, the current scan revision
-and a stable upper boundary before external I/O. These cursors stay in creator
-storage; the manager receives only a closed outcome. Selection reads IDs rather
-than decoding the whole page's specifications, so a malformed intent does not
-prevent attempts on later IDs.
+A reconciliation job processes an app-scoped page without loading app code.
+The persisted scan alternates between publication intents and deployment-hold
+intents. Its immutable job receipt captures the phase, selected IDs, current scan
+revision and a stable upper boundary before external I/O. These cursors stay in
+creator storage; the manager receives only a closed outcome. Selection reads IDs
+rather than decoding the whole page's specifications or hold records, so a
+malformed intent does not prevent attempts on later IDs. Each phase has a captured
+boundary, so publication churn cannot indefinitely defer hold recovery.
 
 The receipt stores a durable offset. Reserving an item advances that offset under
-the app lock before attempting publication; cancellation may leave the item
-unpublished, but redelivery proceeds to its suffix. Each attempt is bounded and
-only an exact manager receipt can confirm publication. Failed or interrupted
-items remain pending for a later sweep. This separation prevents a repeatedly
-timing-out prefix from trapping all later intents in an immutable page.
+the app lock before attempting recovery; cancellation may leave the item
+pending, but redelivery proceeds to its suffix. Each attempt is bounded and
+only an exact manager receipt can confirm publication. A hold attempt rereads
+the existing durable intent under the app lock and verifies its generation, hash
+and requested state before and after the platform call. It never creates an
+acquisition or release decision. Missing clients and invalid intents fail only
+their reserved item; receipt replay needs no hold client or artifact. Exact
+committed receipts remain readable after policy or delivery expiry; absent or
+unfinished receipts still require live authority. Failed or interrupted items
+remain pending for a later sweep. This separation prevents a repeatedly timing-out
+prefix from trapping all later intents in an immutable page.
 
 Finishing the page commits its semantic receipt and scan cursor together. The
-scan revision changes even for an empty pass or wrap. A competing page whose
+scan revision changes even for an empty pass or phase switch. An equal-revision
+phase or cursor mismatch is refused before item I/O. A competing page whose
 revision was already advanced records its stable receipt without regressing the
-cursor. `Waiting` requests the next page through the manager's recovery deadline;
-`Completed` closes the captured scan and retains periodic responsibility. Neither
-means every intent was confirmed or the app drained. New intents behind the
-cursor or above the captured upper boundary join a subsequent scan. Fresh reads
+cursor or phase. Completing publication scanning switches to deployment holds;
+completing hold scanning wraps back to publications. Empty phases follow the same
+transitions. `Waiting` requests the next page or phase through the manager's
+recovery deadline; `Completed` closes the captured cycle and retains periodic
+responsibility. Neither means every intent was confirmed or the app drained. New
+intents behind the cursor or above the captured upper boundary join a subsequent scan. Fresh reads
 and writes remain bounded by the original manager grant and host policy; this
 native metadata turn does not renew itself or run an independent timer.
 
@@ -2193,8 +2204,9 @@ acquires its queue hold through Control outside Control's deployment transaction
 to avoid a callback waiting on the transaction that initiated it.
 Publication intents and advance-job receipts exist in the journal; their
 delivered reconciliation and queue settlement are integrated natively. Creator
-reconciliation tests exercise persisted progress, failed publication, policy
-replacement, concurrent scans and receipt rollback on PostgreSQL and SQLite.
+reconciliation tests exercise persisted progress, failed publication, lost hold
+replies, stale generations, malformed intents, policy replacement, concurrent
+scans, receipt rollback and expired-authority receipt replay on PostgreSQL and SQLite.
 Manager contracts cover continuation deadlines, periodic responsibility, old ACK
 replay and atomic rollback. Consumer tests connect manager-issued reconciliation
 to outbox publication and subsequent execution in separate ORM databases. The

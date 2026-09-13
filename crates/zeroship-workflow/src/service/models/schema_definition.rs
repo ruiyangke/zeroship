@@ -168,12 +168,13 @@ zeroship_data_orm::orm::schema! {
             expires_at: BigInt,
         }
 
-        __zeroship_workflow_publication_scans {
+        __zeroship_workflow_reconciliation_scans {
             #[orm(primary_key)]
             id: Text,
             revision: BigInt,
-            after_job: Nullable<Text>,
-            upper_job: Nullable<Text>,
+            phase: Text,
+            after_id: Nullable<Text>,
+            upper_id: Nullable<Text>,
         }
 
         __zeroship_workflow_requests {
@@ -359,7 +360,7 @@ mod tests {
     }
 
     #[test]
-    fn reconciliation_metadata_preserves_nullable_receipts_and_publication_cursors() {
+    fn reconciliation_metadata_preserves_nullable_receipts_and_phased_cursors() {
         use zeroship_data_orm::{orm::Entity, schema::LogicalType};
         let receipts = journal::__zeroship_workflow_job_receipts::Entity::schema();
         assert!(!receipts["run_id"].required);
@@ -370,10 +371,15 @@ mod tests {
             receipts["reconciliation_next"].logical_type,
             LogicalType::BigInt
         );
-        let scans = journal::__zeroship_workflow_publication_scans::Entity::schema();
+        let scans = journal::__zeroship_workflow_reconciliation_scans::Entity::schema();
         assert!(scans["id"].primary_key);
+        assert!(scans["revision"].required);
         assert_eq!(scans["revision"].logical_type, LogicalType::BigInt);
-        assert!(!scans["after_job"].required);
-        assert!(!scans["upper_job"].required);
+        assert!(scans["phase"].required);
+        assert_eq!(scans["phase"].logical_type, LogicalType::Text);
+        assert!(!scans["after_id"].required);
+        assert_eq!(scans["after_id"].logical_type, LogicalType::Text);
+        assert!(!scans["upper_id"].required);
+        assert_eq!(scans["upper_id"].logical_type, LogicalType::Text);
     }
 }

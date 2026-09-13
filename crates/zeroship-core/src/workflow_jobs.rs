@@ -98,8 +98,8 @@ pub trait JobLease {
 }
 
 /// Scheduling classification without customer results or free-form failures.
-/// For reconciliation, `Waiting` requests another page and `Completed` closes
-/// the scan. Neither result proves that all publication intents have drained.
+/// For reconciliation, `Waiting` requests another page or intent phase and
+/// `Completed` closes the scan cycle. Neither result proves that intents drained.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum JobOutcome {

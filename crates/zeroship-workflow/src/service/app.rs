@@ -20,7 +20,6 @@ use std::sync::Arc;
 use zeroship_core::{app_id::AppId, typed_id};
 use zeroship_data_orm::{
     orm::{Entity, FindOptions, Operation, Output},
-    sql::Predicate,
     value,
 };
 
@@ -442,19 +441,22 @@ pub(crate) async fn current_run(
         .from(&run)
         .inner_join(
             &generation,
-            Predicate::And(vec![
-                run.column(models::runs::app_id)
-                    .eq_column(generation.column(models::generations::app_id))?,
-                run.column(models::runs::id)
-                    .eq_column(generation.column(models::generations::run_id))?,
-                run.column(models::runs::generation)
-                    .eq_column(generation.column(models::generations::generation))?,
-            ]),
+            run.column(models::runs::app_id)
+                .eq(generation.column(models::generations::app_id))?
+                .and(
+                    run.column(models::runs::id)
+                        .eq(generation.column(models::generations::run_id))?,
+                )
+                .and(
+                    run.column(models::runs::generation)
+                        .eq(generation.column(models::generations::generation))?,
+                ),
         )?
-        .filter(Predicate::And(vec![
-            run.column(models::runs::app_id).eq(app.as_str())?,
-            run.column(models::runs::id).eq(id)?,
-        ]))
+        .filter(
+            run.column(models::runs::app_id)
+                .eq(app.as_str())?
+                .and(run.column(models::runs::id).eq(id)?),
+        )
         .select((
             run.row::<models::RunHead>(),
             generation.row::<models::GenerationOutcome>(),

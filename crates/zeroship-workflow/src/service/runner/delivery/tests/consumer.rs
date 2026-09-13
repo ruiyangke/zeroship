@@ -846,7 +846,7 @@ async fn manager_reconciliation_publishes_creator_work_before_the_consumer_execu
             .unwrap()
             .unwrap()
             .outcome,
-        JobOutcome::Completed
+        JobOutcome::Waiting
     );
     assert!(fixture.app.pending_jobs(None, 1).await.unwrap().is_empty());
     assert!(manager.claim(&manager.scope).await.unwrap().is_none());

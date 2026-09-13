@@ -20,10 +20,7 @@ use zeroship_core::{
     workflow_deployments::{HoldGeneration, HoldReceipt, HoldScope, HoldState},
     workflow_jobs::DeploymentId,
 };
-use zeroship_data_orm::{
-    orm::{Database, Filter, FromRow, Insertable},
-    sql::Predicate,
-};
+use zeroship_data_orm::orm::{Database, Filter, FromRow, Insertable};
 
 /// A host supplies a local catalog capability or authenticated Control transport.
 pub type HoldFuture<'a> = Pin<Box<dyn Future<Output = Result<HoldReceipt, Error>> + 'a>>;
@@ -540,28 +537,34 @@ async fn require_unused(
         .from(&schedule)
         .inner_join(
             &activation,
-            Predicate::And(vec![
-                schedule
-                    .column(schedules::app_id)
-                    .eq_column(activation.column(schedule_activations::app_id))?,
-                schedule
-                    .column(schedules::activation_id)
-                    .eq_column(activation.column(schedule_activations::id))?,
-            ]),
+            schedule
+                .column(schedules::app_id)
+                .eq(activation.column(schedule_activations::app_id))?
+                .and(
+                    schedule
+                        .column(schedules::activation_id)
+                        .eq(activation.column(schedule_activations::id))?,
+                ),
         )?
-        .filter(Predicate::And(vec![
-            schedule.column(schedules::app_id).eq(app.as_str())?,
-            activation
-                .column(schedule_activations::deployment_id)
-                .eq(deployment.as_str())?,
-            Predicate::Or(vec![
-                schedule.column(schedules::next_at).ne(None::<i64>)?,
-                schedule.column(schedules::catch_up_until).ne(None::<i64>)?,
-                schedule
-                    .column(schedules::catch_up_remaining)
-                    .ne(None::<i64>)?,
-            ]),
-        ]))
+        .filter(
+            schedule
+                .column(schedules::app_id)
+                .eq(app.as_str())?
+                .and(
+                    activation
+                        .column(schedule_activations::deployment_id)
+                        .eq(deployment.as_str())?,
+                )
+                .and(
+                    schedule
+                        .column(schedules::next_at)
+                        .ne(None::<i64>)?
+                        .or(schedule.column(schedules::catch_up_until).ne(None::<i64>)?)
+                        .or(schedule
+                            .column(schedules::catch_up_remaining)
+                            .ne(None::<i64>)?),
+                ),
+        )
         .select(schedule.row::<LiveSchedule>())?
         .limit(1)?
         .all()
