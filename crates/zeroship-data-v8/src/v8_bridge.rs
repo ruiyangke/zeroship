@@ -42,7 +42,7 @@ pub(crate) fn refuse_if_query_capability<'s>(
     op: &str,
 ) -> Option<v8::Local<'s, v8::Promise>> {
     if !matches!(
-        zeroship_runtime::rpc::current_kind(),
+        zeroship_runtime::rpc::current_kind(scope),
         Some(zeroship_runtime::rpc::ProcedureKind::Query)
     ) {
         return None;
@@ -73,13 +73,12 @@ pub(crate) fn refuse_if_query_capability<'s>(
 /// generation are ambient ADAPTER state, so the adapter resolves them once and
 /// passes them down. `read_set::ensure_capture` takes them as plain values.
 ///
-/// Cheap enough for the read hot path: two thread-local reads plus, on the
-/// first read of a frame, one small allocation.
-pub(crate) fn ensure_read_set_capture() {
+/// Resolve the owning continuation before the native operation is queued.
+pub(crate) fn ensure_read_set_capture(scope: &mut v8::PinScope) {
     crate::read_set::ensure_capture(
-        zeroship_runtime::rpc::dispatch_generation(),
+        zeroship_runtime::rpc::dispatch_generation(scope),
         matches!(
-            zeroship_runtime::rpc::current_kind(),
+            zeroship_runtime::rpc::current_kind(scope),
             Some(zeroship_runtime::rpc::ProcedureKind::Query)
         ),
     );
@@ -395,63 +394,79 @@ mod tests {
     use super::*;
     use zeroship_runtime::init_v8;
 
+    fn capability_scope(body: impl FnOnce(&mut v8::PinScope<'_, '_>)) {
+        init_v8();
+        let mut isolate = v8::Isolate::new(Default::default());
+        v8::scope!(let scope, &mut isolate);
+        let context = v8::Context::new(scope, Default::default());
+        let scope = &mut v8::ContextScope::new(scope, context);
+        body(scope);
+    }
+
     // Exercise procedure-kind capture through the production adapter entry point.
     // Each test receives a fresh thread-local capture buffer.
 
     #[test]
     fn capture_records_in_query_kind() {
         use crate::read_set::Predicate;
-        use zeroship_runtime::rpc::{KindGuard, ProcedureKind};
+        use zeroship_runtime::rpc::{with_kind, ProcedureKind};
 
-        let _kg = KindGuard::enter(ProcedureKind::Query);
-        ensure_read_set_capture();
-        crate::read_set::record_if_active(
-            "messages",
-            &zeroship_data_orm::value!({ "userId": 42 }),
-            &zeroship_data_orm::schema::FieldMap::new(),
-        );
-        crate::read_set::record_if_active(
-            "messages",
-            &zeroship_data_orm::value!({}),
-            &zeroship_data_orm::schema::FieldMap::new(),
-        );
+        capability_scope(|scope| {
+            with_kind(scope, ProcedureKind::Query, |scope| {
+                ensure_read_set_capture(scope);
+                crate::read_set::record_if_active(
+                    "messages",
+                    &zeroship_data_orm::value!({ "userId": 42 }),
+                    &zeroship_data_orm::schema::FieldMap::new(),
+                );
+                crate::read_set::record_if_active(
+                    "messages",
+                    &zeroship_data_orm::value!({}),
+                    &zeroship_data_orm::schema::FieldMap::new(),
+                );
 
-        let entries = crate::read_set::snapshot_for("messages");
-        assert_eq!(entries.len(), 2);
-        assert_eq!(entries[0].collection, "messages");
-        assert!(entries[0].predicate.is_some());
-        assert_eq!(entries[1].predicate, Some(Predicate::All(vec![])));
+                let entries = crate::read_set::snapshot_for("messages");
+                assert_eq!(entries.len(), 2);
+                assert_eq!(entries[0].collection, "messages");
+                assert!(entries[0].predicate.is_some());
+                assert_eq!(entries[1].predicate, Some(Predicate::All(vec![])));
+            });
+        });
     }
 
     #[test]
     fn capture_skipped_in_mutation_kind() {
-        use zeroship_runtime::rpc::{KindGuard, ProcedureKind};
+        use zeroship_runtime::rpc::{with_kind, ProcedureKind};
 
-        let _kg = KindGuard::enter(ProcedureKind::Mutation);
-        ensure_read_set_capture();
-        crate::read_set::record_if_active(
-            "messages",
-            &zeroship_data_orm::value!({ "userId": 42 }),
-            &zeroship_data_orm::schema::FieldMap::new(),
-        );
-        assert!(
-            crate::read_set::snapshot_for("messages").is_empty(),
-            "mutations must not record read-set"
-        );
+        capability_scope(|scope| {
+            with_kind(scope, ProcedureKind::Mutation, |scope| {
+                ensure_read_set_capture(scope);
+                crate::read_set::record_if_active(
+                    "messages",
+                    &zeroship_data_orm::value!({ "userId": 42 }),
+                    &zeroship_data_orm::schema::FieldMap::new(),
+                );
+                assert!(
+                    crate::read_set::snapshot_for("messages").is_empty(),
+                    "mutations must not record read-set"
+                );
+            });
+        });
     }
 
     #[test]
     fn capture_skipped_outside_any_procedure_kind() {
-        // No `KindGuard`, so `current_kind()` is `None` and the capture is
-        // installed inert rather than not installed at all.
-        ensure_read_set_capture();
-        assert!(crate::read_set::is_active(), "the capture is still opened");
-        crate::read_set::record_if_active(
-            "messages",
-            &zeroship_data_orm::value!({ "userId": 42 }),
-            &zeroship_data_orm::schema::FieldMap::new(),
-        );
-        assert!(crate::read_set::snapshot_for("messages").is_empty());
+        capability_scope(|scope| {
+            // Without a procedure frame the capture is inert.
+            ensure_read_set_capture(scope);
+            assert!(crate::read_set::is_active(), "the capture is still opened");
+            crate::read_set::record_if_active(
+                "messages",
+                &zeroship_data_orm::value!({ "userId": 42 }),
+                &zeroship_data_orm::schema::FieldMap::new(),
+            );
+            assert!(crate::read_set::snapshot_for("messages").is_empty());
+        });
     }
 
     #[test]

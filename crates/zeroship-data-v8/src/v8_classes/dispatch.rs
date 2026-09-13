@@ -46,7 +46,7 @@ pub(super) fn dispatch_operation<'s>(
     operation: Operation,
     mode: OutputMode,
 ) -> v8::Local<'s, v8::Promise> {
-    crate::v8_bridge::ensure_read_set_capture();
+    crate::v8_bridge::ensure_read_set_capture(scope);
     let state = runtime_state(scope);
     let route = crate::tx_scope::capture_route(scope, &binding);
     let prepared = route.and_then(|route| {
