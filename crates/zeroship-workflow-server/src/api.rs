@@ -4,6 +4,8 @@
     reason = "HTTP handlers and compio pools stay on their runtime thread"
 )]
 
+mod jobs;
+
 use crate::{coordinator::Error, SharedState};
 use ntex::{
     http::StatusCode,
@@ -28,6 +30,7 @@ pub fn configure(config: &mut web::ServiceConfig) {
     configure_with_limit(config, DEFAULT_MAX_REQUEST_BYTES);
 }
 pub fn configure_with_limit(config: &mut web::ServiceConfig, limit: usize) {
+    jobs::configure(config);
     config
         .state(web::types::JsonConfig::default().limit(limit))
         .service(web::resource("/healthz").route(web::get().to(health)))
@@ -335,7 +338,7 @@ async fn register(
             state
                 .service
                 .manager
-                .register(&actor, &command)
+                .register(actor.id(), &command)
                 .await
                 .map_err(Error::from)
         }
@@ -362,7 +365,7 @@ async fn assignments(
             state
                 .service
                 .manager
-                .assignments(&actor, command.after.as_ref())
+                .assignments(actor.id(), command.after.as_ref())
                 .await
                 .map_err(Error::from)
         }
@@ -389,7 +392,7 @@ async fn renew(
             state
                 .service
                 .manager
-                .renew(&actor, &command)
+                .renew(actor.id(), &command)
                 .await
                 .map_err(Error::from)
         }
@@ -416,7 +419,7 @@ async fn release(
             state
                 .service
                 .manager
-                .release(&actor, &command)
+                .release(actor.id(), &command)
                 .await
                 .map_err(Error::from)
         }
@@ -443,7 +446,7 @@ async fn wake(
             state
                 .service
                 .manager
-                .publish_wake(&actor, &command)
+                .publish_wake(actor.id(), &command)
                 .await
                 .map_err(Error::from)
         }
@@ -470,7 +473,7 @@ async fn management_poll(
             state
                 .service
                 .manager
-                .pending_management(&actor, &command)
+                .pending_management(actor.id(), &command)
                 .await
                 .map_err(Error::from)
         }
@@ -497,7 +500,7 @@ async fn management_ack(
             state
                 .service
                 .manager
-                .acknowledge_management(&actor, &command)
+                .acknowledge_management(actor.id(), &command)
                 .await
                 .map_err(Error::from)
         }

@@ -154,7 +154,7 @@ impl WorkerCoordinator {
     }
 }
 
-fn worker_publication(job: &JobSpec) -> Result<(), Error> {
+const fn worker_publication(job: &JobSpec) -> Result<(), Error> {
     if matches!(
         job.operation,
         JobOperation::Cron { .. } | JobOperation::Management { .. }

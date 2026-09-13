@@ -338,8 +338,25 @@ later checks can shorten an attempt's budget but cannot restore elapsed time.
 The deadline expires execution and new mutation admission. Cancellation before
 terminal dispatch must roll back. A timeout after COMMIT dispatch is ambiguous:
 settlement may finish, and the caller must read its durable receipt. It is never
-proof that the transaction rolled back. Cross-zone clock skew and transfer of
-remaining lease authority are a protocol decision still called out below.
+proof that the transaction rolled back.
+
+Delivery authority crosses zones as `DeliveryLease.remainingMs`. The manager
+captures a monotonic deadline when issuing the database lease, anchored before
+the database clock query and reduced by the clock sample's resolution. Later
+samples can only shorten that captured deadline.
+After commit, `DeliveryGrant::lease` subtracts all intervening elapsed time and
+refuses an exhausted grant. The client captures its own monotonic instant before
+starting the request and adds the returned remaining duration to that instant,
+conservatively charging the entire exchange. It never compares the manager's
+`Delivery.deadline` with a worker wall clock or creator database clock.
+
+A heartbeat commits under the previously stored delivery lease and the original
+transaction budget. Its successful new grant has its own deadline; capping that
+grant by the old transaction budget would prevent renewal. The client still
+rejects the reply if its previously confirmed local grant expired while waiting.
+Renewal also cannot restore a cancelled execution or extend the executor's
+original hard deadline. Creator frontier fencing remains required independently
+of these delivery leases.
 
 ## Durable job protocol
 
@@ -347,7 +364,8 @@ remaining lease authority are a protocol decision still called out below.
 
 The current closed contract lives in
 [`workflow_jobs.rs`](../../crates/zeroship-core/src/workflow_jobs.rs):
-`JobSpec`, `JobOperation`, `Delivery`, `Settlement` and `SettlementReceipt`.
+`SubmitJob`, `JobSpec`, `JobOperation`, `Delivery`, `DeliveryLease`, `Settlement`
+and `SettlementReceipt`.
 It defines advance, cron, management, reconciliation and collection operations.
 `JobOutcome` contains `Completed`, `Waiting` and `Rejected`; successor jobs carry
 further availability. These types are foundations, not a complete activation,
@@ -380,16 +398,16 @@ probe into another tenant's state through differing payloads or diagnostics.
 
 ### Authenticated delivery boundary
 
-The HTTP cutover must expose the following worker requests through the existing
-bounded, authenticated metadata transport. These are the required host contracts;
-the current queue library alone does not expose these production endpoints.
+The server and typed client expose the following worker requests through the
+bounded, authenticated metadata transport. Worker startup and the production
+consumer still need to use them at cutover.
 
 | Operation | Request metadata | Authority and reply checks |
 | --- | --- | --- |
-| Submit | Assigned app/revision and immutable job specification. | Current enrolled signer and stored placement; exact specification in the receipt. |
-| Claim | Assigned app/revision. | Current enrolled signer and stored placement; delivered app, worker and assignment revision must match. |
-| Heartbeat | Delivery identity. | Stored attempt and live lease; reply preserves the immutable job, worker, assignment revision and attempt. |
-| Settle | Delivery, closed outcome and immutable successors. | Active delivery authority for writes, or original-worker enrollment for an exact stored receipt; reply matches app, job, attempt and outcome. |
+| `POST /v1/jobs/submit` | Assigned app/revision and immutable job specification. | Current enrolled signer and stored placement; exact specification in the receipt. |
+| `POST /v1/jobs/claim` | Assigned app/revision. | Current enrolled signer and stored placement; delivered app, worker and assignment revision must match. |
+| `POST /v1/jobs/heartbeat` | Delivery identity. | Stored attempt and live lease; reply preserves the immutable job, worker, assignment revision and attempt. |
+| `POST /v1/jobs/settle` | Delivery, closed outcome and immutable successors. | Active delivery authority for writes, or original-worker enrollment for an exact stored receipt; reply matches app, job, attempt and outcome. |
 
 Derive worker identity from the verified instance signer. An echoed worker must
 match it. A request cannot supply its own assignment expiry. Resolve placement
@@ -1369,8 +1387,11 @@ and management now share the queue's ORM namespace and transaction handle.
 Canonical parent primary keys eliminate the conflicting duplicate identities in
 concurrent first registration. Native PostgreSQL/SQLite coordinator and queue
 contracts, authenticated server processes, actual platform migration/grants and
-normal-dependency ownership checks have passed. These checks do not establish a
-completed distributed workflow system.
+normal-dependency ownership checks have passed. Authenticated job submission,
+claim, renewal and settlement now have server routes and a typed client. Real
+HTTP tests cover scope denial, enrollment revocation and key replacement during
+lock waits, process restart and receipt replay after placement expiry. These
+checks do not establish a completed distributed workflow system.
 
 The ORM owner's cancellation fix passes the creator lifecycle and receipt tests
 with their database barriers still held. The shared ORM typed-read allocation
@@ -1389,8 +1410,8 @@ and workflow provisioning still grants that role schema creation authority.
 Remove those obsolete edges with the legacy journal provisioning paths.
 
 Manager cron/timer discovery, durable scope deadlines, capacity activation,
-creator job receipts/publication intents, queue HTTP delivery and the simple
-worker consumer still require implementation and integration. Existing customer
+creator job receipts/publication intents and the simple worker consumer still
+require implementation and integration. Existing customer
 scheduler/task polling and maintenance code remains a foundation to replace.
 Its existence does not satisfy manager-owned scheduling.
 
@@ -1407,7 +1428,6 @@ compatibility aliases or parallel legacy modes.
 | --- | --- |
 | Enrollment bootstrap and revocation | A revoked worker cannot regain equivalent authority by automatic enrollment. Finalize bootstrap trust, replacement authorization and registry freshness with auth ownership. |
 | Placement eligibility and capacity provider | Only platform-authorized app/zone combinations may be assigned. Select the trusted eligibility source and host adapter's durable request/progress contract. |
-| Cross-zone lease transfer | Queue and creator clocks are independent. Define remaining-authority transfer or an explicit skew bound and conservative conversion; absolute timestamps alone do not establish shared-clock safety. |
 | Complete job envelopes | Keep closed metadata. Finalize activation, event/fanout, continuation cursors, management lifecycle revisions and operation-specific deployment prerequisites before their consumers are wired. |
 | Scope retirement | Define ingress epoch closure and durable drain evidence. Registration expiry and empty polling cannot retire unpublished-work responsibility. |
 | Receipt retirement | Define admissibility fences and publication/settlement watermarks before deleting job deduplication state. Retain it until that proof exists. |

@@ -10,7 +10,6 @@ use zeroship_core::{
         AssignScope, AssignedScope, Assignment, PublishWakeHint, ReleaseScope, RequestId, Revision,
         UnixMillis, VerifyAssignment, WakeHintReceipt, WorkerId,
     },
-    workflow_jobs::Delivery,
 };
 use zeroship_data_orm::{
     orm::{Database, Entity},
@@ -37,25 +36,6 @@ impl Coordinator {
                     .await?;
                 budget.cap(sample, expires)?;
                 assignment(&row, Some(expires))
-            })
-            .await
-    }
-
-    /// Claim with placement checks inside the queue's existing transaction.
-    /// The host authenticates the worker independently of its placement record.
-    ///
-    /// # Errors
-    /// Rejects changed placement, expired authority and queue storage failures.
-    pub async fn claim(&self, assigned: &Assignment) -> Result<Option<Delivery>, Error> {
-        let request = VerifyAssignment {
-            app_id: assigned.app_id.clone(),
-            worker_id: assigned.worker_id.clone(),
-            assignment_revision: assigned.revision,
-        };
-        self.queue
-            .claim_authorized(assigned, |tx| {
-                let request = &request;
-                async move { self.verify_assignment_in(&tx, request).await }
             })
             .await
     }

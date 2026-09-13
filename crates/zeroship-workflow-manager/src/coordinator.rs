@@ -4,6 +4,7 @@
     reason = "manager ORM handles remain on their owning compio thread"
 )]
 
+mod jobs;
 mod management;
 mod placement;
 

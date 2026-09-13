@@ -10,4 +10,4 @@ mod queue;
 
 pub use error::Error;
 pub use models::collections;
-pub use queue::{Options, Queue};
+pub use queue::{DeliveryGrant, Options, Queue};

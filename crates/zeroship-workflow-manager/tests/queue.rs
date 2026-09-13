@@ -10,7 +10,7 @@ use std::{cell::Cell, future::ready, time::Duration};
 use support::{Admin, Backend, Fixture};
 use zeroship_core::{
     app_id::AppId,
-    workflow_coordination::{Assignment, RunId, WorkerId},
+    workflow_coordination::{Assignment, RunId, VerifyAssignment, WorkerId},
     workflow_jobs::{
         Delivery, DeploymentId, JobId, JobOperation, JobOutcome, JobSpec, Settlement,
         SettlementReceipt,
@@ -124,6 +124,14 @@ async fn assignment(fixture: &Fixture, app: &AppId) -> Assignment {
     }
 }
 
+fn identity(assignment: &Assignment) -> VerifyAssignment {
+    VerifyAssignment {
+        app_id: assignment.app_id.clone(),
+        worker_id: assignment.worker_id.clone(),
+        assignment_revision: assignment.revision,
+    }
+}
+
 fn job(app: &AppId) -> JobSpec {
     JobSpec {
         id: JobId::mint(),
@@ -176,6 +184,10 @@ async fn blocked_manager(admin: &compio_postgres::Client, predicate: &str) {
     .expect("manager operation must reach the database lock");
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "submission, rollback and receipt replay share the same job identity"
+)]
 async fn authorized_submission_scope_replay_and_rollback(fixture: &Fixture) {
     let queue = queue(fixture, Options::default()).await;
     let app = AppId::mint();
@@ -187,7 +199,7 @@ async fn authorized_submission_scope_replay_and_rollback(fixture: &Fixture) {
     let checks = Cell::new(0);
     assert_eq!(
         queue
-            .submit_authorized(&authority, &foreign_spec, |_| {
+            .submit_authorized(&identity(&authority), &foreign_spec, |_| {
                 checks.set(checks.get() + 1);
                 ready(Ok(authority.clone()))
             })
@@ -202,7 +214,7 @@ async fn authorized_submission_scope_replay_and_rollback(fixture: &Fixture) {
         checks.set(0);
         assert_eq!(
             queue
-                .submit_authorized(&authority, &spec, |tx| {
+                .submit_authorized(&identity(&authority), &spec, |tx| {
                     checks.set(checks.get() + 1);
                     submission_authorization(tx, &authority, &spec, checks.get(), reject_at)
                 })
@@ -220,7 +232,7 @@ async fn authorized_submission_scope_replay_and_rollback(fixture: &Fixture) {
     };
     assert_eq!(
         queue
-            .submit_authorized(&expired, &spec, |_| ready(Ok(authority.clone())))
+            .submit_authorized(&identity(&expired), &spec, |_| ready(Ok(expired.clone())))
             .await,
         Err(Error::Denied)
     );
@@ -241,7 +253,9 @@ async fn authorized_submission_scope_replay_and_rollback(fixture: &Fixture) {
     ] {
         assert_eq!(
             queue
-                .submit_authorized(&authority, &spec, |_| ready(Ok(observed.clone())))
+                .submit_authorized(&identity(&authority), &spec, |_| ready(
+                    Ok(observed.clone())
+                ))
                 .await,
             Err(Error::Denied)
         );
@@ -250,7 +264,9 @@ async fn authorized_submission_scope_replay_and_rollback(fixture: &Fixture) {
 
     assert_eq!(
         queue
-            .submit_authorized(&authority, &spec, |_| ready(Ok(authority.clone())))
+            .submit_authorized(&identity(&authority), &spec, |_| ready(Ok(
+                authority.clone()
+            )))
             .await,
         Ok(spec.clone())
     );
@@ -259,7 +275,7 @@ async fn authorized_submission_scope_replay_and_rollback(fixture: &Fixture) {
     checks.set(0);
     assert_eq!(
         queue
-            .submit_authorized(&authority, &spec, |tx| {
+            .submit_authorized(&identity(&authority), &spec, |tx| {
                 checks.set(checks.get() + 1);
                 let spec = &spec;
                 let authority = authority.clone();
@@ -275,7 +291,7 @@ async fn authorized_submission_scope_replay_and_rollback(fixture: &Fixture) {
     assert_eq!(stored(fixture, &spec.id).await, Some(original.clone()));
     assert_eq!(
         queue
-            .submit_authorized(&authority, &spec, |_| ready(Err(Error::Denied)))
+            .submit_authorized(&identity(&authority), &spec, |_| ready(Err(Error::Denied)))
             .await,
         Err(Error::Denied)
     );
@@ -285,7 +301,9 @@ async fn authorized_submission_scope_replay_and_rollback(fixture: &Fixture) {
     };
     assert_eq!(
         queue
-            .submit_authorized(&authority, &changed, |_| ready(Ok(authority.clone())))
+            .submit_authorized(&identity(&authority), &changed, |_| ready(Ok(
+                authority.clone()
+            )))
             .await,
         Err(Error::Conflict)
     );
@@ -360,7 +378,7 @@ async fn authorized_submission_bounds_pending_authorization(fixture: &Fixture) {
         let checks = Cell::new(0);
         let result = compio::time::timeout(
             Duration::from_secs(5),
-            queue.submit_authorized(&authority, &spec, |tx| {
+            queue.submit_authorized(&identity(&authority), &spec, |tx| {
                 checks.set(checks.get() + 1);
                 let check = checks.get();
                 let observed = observed.clone();
@@ -383,7 +401,9 @@ async fn authorized_submission_bounds_pending_authorization(fixture: &Fixture) {
         assert!(stored(fixture, &spec.id).await.is_none());
         assert_eq!(
             queue
-                .submit_authorized(&authority, &spec, |_| ready(Ok(authority.clone())))
+                .submit_authorized(&identity(&authority), &spec, |_| ready(Ok(
+                    authority.clone()
+                )))
                 .await,
             Ok(spec)
         );
@@ -423,7 +443,8 @@ async fn postgres_authorized_submission_rechecks_revocation_after_app_lock() {
         revoked.set(true);
         admin.batch_execute("ROLLBACK").await.unwrap();
     };
-    let submit = queue.submit_authorized(&authority, &spec, |_| {
+    let selector = identity(&authority);
+    let submit = queue.submit_authorized(&selector, &spec, |_| {
         checks.set(checks.get() + 1);
         assert!(
             revoked.get(),
@@ -437,7 +458,9 @@ async fn postgres_authorized_submission_rechecks_revocation_after_app_lock() {
     assert!(stored(&fixture, &spec.id).await.is_none());
     assert_eq!(
         queue
-            .submit_authorized(&authority, &spec, |_| ready(Ok(authority.clone())))
+            .submit_authorized(&identity(&authority), &spec, |_| ready(Ok(
+                authority.clone()
+            )))
             .await,
         Ok(spec)
     );
@@ -472,7 +495,9 @@ async fn postgres_blocked_candidate_read_uses_fresh_lease() {
         admin.batch_execute("COMMIT").await.unwrap();
     };
     let (delivery, ()) = futures::join!(queue.claim(&authority), release);
-    let delivery = delivery.unwrap().unwrap();
+    let grant = delivery.unwrap().unwrap();
+    assert!(grant.lease().unwrap().remaining_ms.get() > 0);
+    let delivery = grant.delivery;
     assert_eq!(delivery.job, spec);
     assert!(delivery.deadline.get() > now(&fixture).await);
     assert_eq!(
@@ -490,7 +515,7 @@ async fn postgres_shortened_authority_bounds_commit_wait_and_receipt_replays() {
     let spec = job(&app);
     queue.submit(&spec).await.unwrap();
     let authority = assignment(&fixture, &app).await;
-    let delivery = queue.claim(&authority).await.unwrap().unwrap();
+    let delivery = queue.claim(&authority).await.unwrap().unwrap().delivery;
     let successor = job(&app);
     let command = settlement(&delivery, vec![successor.clone()]);
     let Admin::Postgres(admin) = &fixture.admin else {
@@ -515,7 +540,7 @@ async fn postgres_shortened_authority_bounds_commit_wait_and_receipt_replays() {
     let settle = async {
         let result = queue
             .settle_authorized(
-                &authority,
+                &identity(&authority),
                 &command,
                 |_| {
                     checks.set(checks.get() + 1);
@@ -557,7 +582,7 @@ async fn postgres_shortened_authority_bounds_commit_wait_and_receipt_replays() {
     };
     let receipt = queue
         .settle_authorized(
-            &expired_authority,
+            &identity(&expired_authority),
             &command,
             |_| ready(Err(Error::Denied)),
             |_| ready(Ok(authority.worker_id.clone())),
@@ -606,7 +631,7 @@ async fn concurrent_scope_registration_preserves_identity_and_queue(fixture: &Fi
         let spec = job(&app);
         hosts[0].submit(&spec).await.unwrap();
         let authority = assignment(fixture, &app).await;
-        let delivery = hosts[1].claim(&authority).await.unwrap().unwrap();
+        let delivery = hosts[1].claim(&authority).await.unwrap().unwrap().delivery;
         assert_eq!(delivery.job, spec);
         assert_eq!(delivery.attempt.get(), 1);
         let written = database
@@ -628,7 +653,7 @@ async fn concurrent_scope_registration_preserves_identity_and_queue(fixture: &Fi
         register_scopes_together(fixture, &hosts, &app, round).await;
         assert_eq!(registered_scope(&database, &app).await, before_scope);
         assert_eq!(stored(fixture, &spec.id).await.unwrap(), before_job);
-        assert_eq!(hosts[2].claim(&authority).await.unwrap(), None);
+        assert!((hosts[2].claim(&authority).await.unwrap()).is_none());
         let command = settlement(&delivery, Vec::new());
         let receipt = hosts[3].settle(&authority, &command).await.unwrap();
         assert_eq!(
@@ -707,17 +732,17 @@ async fn submission_and_competing_claims(fixture: &Fixture) {
     assert_eq!(first.submit(&changed).await, Err(Error::Conflict));
     let authority = assignment(fixture, &app).await;
     let other_authority = assignment(fixture, &foreign).await;
-    assert_eq!(first.claim(&other_authority).await.unwrap(), None);
+    assert!((first.claim(&other_authority).await.unwrap()).is_none());
     let (a, b) = futures::join!(first.claim(&authority), second.claim(&authority));
     let deliveries: Vec<_> = [a.unwrap(), b.unwrap()].into_iter().flatten().collect();
     assert_eq!(deliveries.len(), 1);
-    let delivery = &deliveries[0];
+    let delivery = &deliveries[0].delivery;
     assert_eq!(delivery.job, spec);
     assert_eq!(delivery.attempt.get(), 1);
     assert!(delivery.deadline <= authority.expires_at);
     first.register_scope(&app).await.unwrap();
     first.submit(&spec).await.unwrap();
-    assert_eq!(second.claim(&authority).await.unwrap(), None);
+    assert!((second.claim(&authority).await.unwrap()).is_none());
     for foreign_authority in [
         Assignment {
             worker_id: WorkerId::mint(),
@@ -732,10 +757,10 @@ async fn submission_and_competing_claims(fixture: &Fixture) {
             ..authority.clone()
         },
     ] {
-        assert_eq!(
+        assert!(matches!(
             first.heartbeat(&foreign_authority, delivery).await,
             Err(Error::Denied)
-        );
+        ));
         assert_eq!(
             first
                 .settle(&foreign_authority, &settlement(delivery, vec![]))
@@ -745,10 +770,10 @@ async fn submission_and_competing_claims(fixture: &Fixture) {
     }
     let mut forged = delivery.clone();
     forged.attempt = 2.try_into().unwrap();
-    assert_eq!(
+    assert!(matches!(
         first.heartbeat(&authority, &forged).await,
         Err(Error::Conflict)
-    );
+    ));
     let mut foreign_successor = job(&foreign);
     foreign_successor.available_at = 0.try_into().unwrap();
     assert_eq!(
@@ -766,6 +791,10 @@ async fn submission_and_competing_claims(fixture: &Fixture) {
     assert_eq!(first.submit(&changed).await, Err(Error::Conflict));
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "lease expiry, replacement and lost renewal responses share queue state"
+)]
 async fn delayed_jobs_and_redelivery(fixture: &Fixture) {
     let queue = queue(
         fixture,
@@ -781,18 +810,22 @@ async fn delayed_jobs_and_redelivery(fixture: &Fixture) {
     let mut spec = job(&app);
     spec.available_at = (now(fixture).await + 400).try_into().unwrap();
     queue.submit(&spec).await.unwrap();
-    assert_eq!(queue.claim(&authority).await.unwrap(), None);
+    assert!((queue.claim(&authority).await.unwrap()).is_none());
     until(fixture, spec.available_at.get()).await;
-    let delivery = queue.claim(&authority).await.unwrap().unwrap();
+    let delivery = queue.claim(&authority).await.unwrap().unwrap().delivery;
     assert_eq!(delivery.job, spec);
-    let renewed = queue.heartbeat(&authority, &delivery).await.unwrap();
+    let renewed = queue
+        .heartbeat(&authority, &delivery)
+        .await
+        .unwrap()
+        .delivery;
     assert!(renewed.deadline >= delivery.deadline);
     assert!(renewed.deadline <= authority.expires_at);
     until(fixture, renewed.deadline.get()).await;
-    assert_eq!(
+    assert!(matches!(
         queue.heartbeat(&authority, &renewed).await,
         Err(Error::Conflict)
-    );
+    ));
     assert_eq!(
         queue
             .settle(&authority, &settlement(&renewed, vec![]))
@@ -807,14 +840,15 @@ async fn delayed_jobs_and_redelivery(fixture: &Fixture) {
         .claim(&replacement_authority)
         .await
         .unwrap()
-        .unwrap();
+        .unwrap()
+        .delivery;
     assert_eq!(redelivered.job, spec);
     assert_eq!(redelivered.attempt.get(), renewed.attempt.get() + 1);
     assert_ne!(redelivered.worker_id, renewed.worker_id);
-    assert_eq!(
+    assert!(matches!(
         queue.heartbeat(&authority, &renewed).await,
         Err(Error::Conflict)
-    );
+    ));
     assert_eq!(
         queue
             .settle(&authority, &settlement(&renewed, vec![]))
@@ -825,11 +859,14 @@ async fn delayed_jobs_and_redelivery(fixture: &Fixture) {
         expires_at: 0.try_into().unwrap(),
         ..replacement_authority.clone()
     };
-    assert_eq!(replacement.claim(&expired).await, Err(Error::Denied));
-    assert_eq!(
+    assert!(matches!(
+        replacement.claim(&expired).await,
+        Err(Error::Denied)
+    ));
+    assert!(matches!(
         replacement.heartbeat(&expired, &redelivered).await,
         Err(Error::Denied)
-    );
+    ));
 
     let bounded_app = AppId::mint();
     replacement.register_scope(&bounded_app).await.unwrap();
@@ -838,19 +875,32 @@ async fn delayed_jobs_and_redelivery(fixture: &Fixture) {
         ..assignment(fixture, &bounded_app).await
     };
     replacement.submit(&job(&bounded_app)).await.unwrap();
-    let delivery = replacement.claim(&bounded).await.unwrap().unwrap();
+    let delivery = replacement.claim(&bounded).await.unwrap().unwrap().delivery;
     assert_eq!(delivery.deadline, bounded.expires_at);
 
     let retry_app = AppId::mint();
     queue.register_scope(&retry_app).await.unwrap();
     let retry_authority = assignment(fixture, &retry_app).await;
     queue.submit(&job(&retry_app)).await.unwrap();
-    let original = queue.claim(&retry_authority).await.unwrap().unwrap();
+    let original = queue
+        .claim(&retry_authority)
+        .await
+        .unwrap()
+        .unwrap()
+        .delivery;
     compio::time::sleep(Duration::from_millis(200)).await;
-    let lost_reply = queue.heartbeat(&retry_authority, &original).await.unwrap();
+    let lost_reply = queue
+        .heartbeat(&retry_authority, &original)
+        .await
+        .unwrap()
+        .delivery;
     assert!(lost_reply.deadline > original.deadline);
     until(fixture, original.deadline.get()).await;
-    let retried = queue.heartbeat(&retry_authority, &original).await.unwrap();
+    let retried = queue
+        .heartbeat(&retry_authority, &original)
+        .await
+        .unwrap()
+        .delivery;
     assert!(retried.deadline >= lost_reply.deadline);
     queue
         .settle(&retry_authority, &settlement(&original, vec![]))
@@ -865,7 +915,7 @@ async fn atomic_successors_and_replayed_receipts(fixture: &Fixture) {
     let authority = assignment(fixture, &app).await;
     let parent = job(&app);
     queue.submit(&parent).await.unwrap();
-    let delivery = queue.claim(&authority).await.unwrap().unwrap();
+    let delivery = queue.claim(&authority).await.unwrap().unwrap().delivery;
     assert_eq!(
         queue
             .settle(&authority, &settlement(&delivery, vec![parent.clone()]))
@@ -925,9 +975,9 @@ async fn atomic_successors_and_replayed_receipts(fixture: &Fixture) {
         reopened.settle(&authority, &changed).await,
         Err(Error::Conflict)
     );
-    let next = reopened.claim(&authority).await.unwrap().unwrap();
+    let next = reopened.claim(&authority).await.unwrap().unwrap().delivery;
     assert_eq!(next.job, first);
-    assert_eq!(reopened.claim(&authority).await.unwrap(), None);
+    assert!((reopened.claim(&authority).await.unwrap()).is_none());
 }
 
 async fn assert_replay_authentication(
@@ -944,7 +994,7 @@ async fn assert_replay_authentication(
     assert_eq!(
         &queue
             .settle_authorized(
-                &expired,
+                &identity(&expired),
                 command,
                 |_| async { panic!("receipt replay must not require live placement") },
                 |tx| {
@@ -963,7 +1013,7 @@ async fn assert_replay_authentication(
     assert_eq!(
         queue
             .settle_authorized(
-                &expired,
+                &identity(&expired),
                 command,
                 |_| ready(Ok(expired.clone())),
                 |_| ready(Ok(WorkerId::mint()))
@@ -974,7 +1024,7 @@ async fn assert_replay_authentication(
     assert_eq!(
         queue
             .settle_authorized(
-                &expired,
+                &identity(&expired),
                 command,
                 |_| ready(Ok(expired.clone())),
                 |_| ready(Err(Error::Denied))
@@ -992,30 +1042,30 @@ async fn revocation_rolls_back_mutations(fixture: &Fixture) {
     let spec = job(&app);
     queue.submit(&spec).await.unwrap();
     let checks = Cell::new(0);
-    assert_eq!(
+    assert!(matches!(
         queue
-            .claim_authorized(&authority, |tx| {
+            .claim_authorized(&identity(&authority), |tx| {
                 checks.set(checks.get() + 1);
                 revoke_in_transaction(tx, &authority, &spec, ["ready", "leased"], checks.get())
             })
             .await,
         Err(Error::Denied)
-    );
+    ));
     let row = stored(fixture, &spec.id).await.unwrap();
     assert_eq!(row["state"], value!("ready"));
     assert_eq!(row["attempt"], value!(0));
     assert_authorization_rolled_back(fixture, &app).await;
-    let delivery = queue.claim(&authority).await.unwrap().unwrap();
+    let delivery = queue.claim(&authority).await.unwrap().unwrap().delivery;
     checks.set(0);
-    assert_eq!(
+    assert!(matches!(
         queue
-            .heartbeat_authorized(&authority, &delivery, |tx| {
+            .heartbeat_authorized(&identity(&authority), &delivery, |tx| {
                 checks.set(checks.get() + 1);
                 revoke_in_transaction(tx, &authority, &spec, ["leased", "leased"], checks.get())
             })
             .await,
         Err(Error::Denied)
-    );
+    ));
     assert_eq!(
         stored(fixture, &spec.id).await.unwrap()["lease_deadline"],
         value!(delivery.deadline.get())
@@ -1027,7 +1077,7 @@ async fn revocation_rolls_back_mutations(fixture: &Fixture) {
     assert_eq!(
         queue
             .settle_authorized(
-                &authority,
+                &identity(&authority),
                 &command,
                 |tx| {
                     checks.set(checks.get() + 1);
@@ -1135,7 +1185,7 @@ async fn cancellation_rolls_back_settlement(
     assert_eq!(
         blocked
             .settle_authorized(
-                authority,
+                &identity(authority),
                 command,
                 |_| {
                     checks.set(checks.get() + 1);
@@ -1183,7 +1233,7 @@ async fn claim_timeout_rolls_back(fixture: &Fixture) {
     let checks = Cell::new(0);
     let timed = compio::time::timeout(
         Duration::from_secs(1),
-        expiring.claim_authorized(&expiring_authority, |_| {
+        expiring.claim_authorized(&identity(&expiring_authority), |_| {
             checks.set(checks.get() + 1);
             let first = checks.get() == 1;
             let authority = expiring_authority.clone();
@@ -1198,7 +1248,7 @@ async fn claim_timeout_rolls_back(fixture: &Fixture) {
     )
     .await
     .expect("stored delivery expiry must shorten the transaction timeout");
-    assert_eq!(timed, Err(Error::Timeout));
+    assert!(matches!(timed, Err(Error::Timeout)));
     assert_eq!(
         stored(fixture, &expiring_spec.id).await.unwrap()["attempt"],
         value!(0)
@@ -1220,7 +1270,7 @@ async fn bounds_and_privileges(fixture: &Fixture) {
     let authority = assignment(fixture, &app).await;
     let spec = job(&app);
     queue.submit(&spec).await.unwrap();
-    let delivery = queue.claim(&authority).await.unwrap().unwrap();
+    let delivery = queue.claim(&authority).await.unwrap().unwrap().delivery;
     assert_eq!(
         queue
             .settle(
@@ -1329,4 +1379,74 @@ async fn assert_database_privileges(fixture: &Fixture) {
             Admin::Sqlite(_) => "main",
         }
     );
+}
+
+case!(
+    sqlite_delivery_grants_keep_their_original_monotonic_budget,
+    postgres_delivery_grants_keep_their_original_monotonic_budget,
+    delivery_grant_budget
+);
+
+async fn delivery_grant_budget(fixture: &Fixture) {
+    let queue = queue(
+        fixture,
+        Options {
+            lease: Duration::from_millis(900),
+            ..Options::default()
+        },
+    )
+    .await;
+    let app = AppId::mint();
+    queue.register_scope(&app).await.unwrap();
+    let authority = assignment(fixture, &app).await;
+    let stale = Assignment {
+        expires_at: 0.try_into().unwrap(),
+        ..authority.clone()
+    };
+    let selector = identity(&stale);
+    let spec = job(&app);
+    queue
+        .submit_authorized(&selector, &spec, |_| ready(Ok(authority.clone())))
+        .await
+        .unwrap();
+    assert!(matches!(queue.claim(&stale).await, Err(Error::Denied)));
+    let grant = queue
+        .claim_authorized(&selector, |_| ready(Ok(authority.clone())))
+        .await
+        .unwrap()
+        .unwrap();
+    let original = grant.lease().unwrap();
+    assert_eq!(original.delivery, grant.delivery);
+    assert!(original.remaining_ms.get() <= 900);
+    compio::time::sleep(Duration::from_millis(200)).await;
+    let delayed = grant.lease().unwrap();
+    assert_eq!(delayed.delivery, original.delivery);
+    assert!(delayed.remaining_ms < original.remaining_ms);
+    let renewed = queue
+        .heartbeat_authorized(&selector, &grant.delivery, |_| ready(Ok(authority.clone())))
+        .await
+        .unwrap();
+    let renewed_lease = renewed.lease().unwrap();
+    assert_eq!(renewed.delivery.attempt, grant.delivery.attempt);
+    assert!(renewed.delivery.deadline > grant.delivery.deadline);
+    let old_after_renewal = grant.lease().unwrap();
+    assert_eq!(old_after_renewal.delivery, original.delivery);
+    assert!(old_after_renewal.remaining_ms <= delayed.remaining_ms);
+    assert!(renewed_lease.remaining_ms > old_after_renewal.remaining_ms);
+    compio::time::sleep(Duration::from_millis(
+        old_after_renewal.remaining_ms.get() + 20,
+    ))
+    .await;
+    assert!(
+        grant.lease().is_err(),
+        "heartbeat must not refresh a previously issued grant"
+    );
+    assert!(
+        renewed.lease().is_ok(),
+        "the new grant carries the renewed budget"
+    );
+    queue
+        .settle(&authority, &settlement(&renewed.delivery, vec![]))
+        .await
+        .unwrap();
 }

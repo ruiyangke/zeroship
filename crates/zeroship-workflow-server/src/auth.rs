@@ -73,12 +73,37 @@ pub struct WorkflowAuth {
     workers: Arc<dyn WorkerRegistry>,
     replay: Arc<dyn ReplayStore + Send + Sync>,
 }
+
+/// An enrolled worker and the exact public key that verified this request.
+#[derive(Debug)]
+pub struct VerifiedWorker {
+    id: WorkerId,
+    public_key: [u8; 32],
+}
+
+impl VerifiedWorker {
+    #[must_use]
+    pub const fn id(&self) -> &WorkerId {
+        &self.id
+    }
+}
 impl std::fmt::Debug for WorkflowAuth {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("WorkflowAuth").finish_non_exhaustive()
     }
 }
 impl WorkflowAuth {
+    /// Recheck enrollment without reusing or verifying the request assertion again.
+    ///
+    /// # Errors
+    /// Refuses revocation, key replacement and unavailable registry storage.
+    pub async fn revalidate_worker(&self, worker: &VerifiedWorker) -> Result<WorkerId, Error> {
+        match self.workers.active_key(worker.id.as_str()).await? {
+            Some(public_key) if public_key == worker.public_key => Ok(worker.id.clone()),
+            _ => Err(Error::Denied),
+        }
+    }
+
     /// Control may verify placement only for an instance still enrolled as active.
     ///
     /// # Errors
@@ -127,7 +152,7 @@ impl WorkflowAuth {
         &self,
         header: Option<&str>,
         endpoint: ServiceEndpoint,
-    ) -> Result<WorkerId, Error> {
+    ) -> Result<VerifiedWorker, Error> {
         let issuer = presented_issuer(header).ok_or(Error::Unauthenticated)?;
         let role = service_issuer(WORKER_SERVICE_NAME).map_err(|_| Error::Unavailable)?;
         if issuer.principal() != role.principal() {
@@ -149,7 +174,10 @@ impl WorkflowAuth {
         verify_service_call(&verifier, header, AUDIENCE, endpoint)
             .await
             .map_err(|error| auth_error(&error))?;
-        Ok(worker)
+        Ok(VerifiedWorker {
+            id: worker,
+            public_key: public,
+        })
     }
 }
 const fn auth_error(error: &AuthError) -> Error {
