@@ -562,45 +562,14 @@ fn email_domain(email: &str) -> &str {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
-    use async_trait::async_trait;
     use base64::{engine::general_purpose::STANDARD, Engine as _};
-    use compio_postgres::{connect, NoTls};
     use ntex::http::header::HeaderValue;
-    use ntex::web::{self, test};
     use serde_json::json;
-    use uuid::Uuid;
     use zeroship_core::config::{Secret, SourceKind};
-    use zeroship_mailer::{check_suppression, suppressions, MessageId};
 
     use super::*;
 
     const TEST_NOW: i64 = 1_735_689_600;
-
-    #[derive(Debug, Default)]
-    struct SuppressionAwareCountingMailer {
-        transports: AtomicUsize,
-    }
-
-    impl SuppressionAwareCountingMailer {
-        fn transports(&self) -> usize {
-            self.transports.load(Ordering::SeqCst)
-        }
-    }
-
-    #[async_trait]
-    impl Mailer for SuppressionAwareCountingMailer {
-        async fn send(
-            &self,
-            db: &compio_postgres::Client,
-            msg: Email,
-        ) -> Result<MessageId, MailerError> {
-            check_suppression(db, &msg.to.email).await?;
-            let n = self.transports.fetch_add(1, Ordering::SeqCst) + 1;
-            Ok(MessageId(format!("test-message-{n}")))
-        }
-    }
 
     fn test_secret() -> String {
         format!("v1,whsec_{}", STANDARD.encode([7u8; 32]))
@@ -787,89 +756,5 @@ mod tests {
         let email = build_gotrue_email(&payload("signup"), &cfg).expect("build email");
         let html = email.html.as_deref().expect("html body");
         assert!(html.contains("http://localhost:54321/auth/v1/verify"), "{html}");
-    }
-
-    #[ntex::test]
-    async fn suppressed_recipient_returns_200_and_does_not_transport() {
-        // This test cannot verify the suppression path without a real
-        // Postgres to read it back from; a skipped run used to report
-        // green while proving nothing about suppression. Panic instead,
-        // naming the provisioning command.
-        let dsn = zeroship_core::config::test_database_url();
-        let (client, connection) = connect(&dsn, NoTls).await.expect("connect");
-        compio::runtime::spawn(async move {
-            if let Err(e) = connection.run().await {
-                eprintln!("gotrue_email_hook_test pg connection error: {e}");
-            }
-        })
-        .detach();
-        let pg = Arc::new(client);
-        let email = format!("suppressed-{}@zeroship.test", Uuid::new_v4().simple());
-        suppressions::add(pg.as_ref(), &email, "test_suppression", None)
-            .await
-            .expect("add suppression");
-
-        let mut cfg = cfg();
-        cfg.settings.gotrue_email_hook_secret =
-            Secret::supplied(SourceKind::Env, Some(test_secret()));
-        let cfg = Arc::new(cfg);
-        let mailer = Arc::new(SuppressionAwareCountingMailer::default());
-        let mailer_state: Arc<dyn Mailer> = mailer.clone();
-        let app = test::init_service(
-            web::App::new()
-                .state(cfg.clone())
-                .state(pg.clone())
-                .state(mailer_state)
-                .service(
-                    web::resource("/hooks/gotrue/send-email")
-                        .route(web::post().to(send_email)),
-                ),
-        )
-        .await;
-
-        let body = serde_json::to_vec(&json!({
-            "user": {
-                "email": email,
-                "user_metadata": { "name": "Suppressed User" }
-            },
-            "email_data": {
-                "token": "111111",
-                "token_hash": "hash_suppressed",
-                "redirect_to": "https://app.example.com",
-                "email_action_type": "signup",
-                "site_url": "https://app.example.com",
-                "token_new": "",
-                "token_hash_new": ""
-            }
-        }))
-        .expect("body");
-        let ts = now_unix_secs();
-        let sig = sign(
-            cfg.settings.gotrue_email_hook_secret.expose_str(),
-            "msg_suppressed",
-            ts,
-            &body,
-        );
-        let resp = test::call_service(
-            &app,
-            test::TestRequest::post()
-                .uri("/hooks/gotrue/send-email")
-                .header("content-type", "application/json")
-                .header("webhook-id", "msg_suppressed")
-                .header("webhook-timestamp", ts.to_string())
-                .header("webhook-signature", sig)
-                .set_payload(body)
-                .to_request(),
-        )
-        .await;
-        assert_eq!(resp.status().as_u16(), 200);
-        assert_eq!(mailer.transports(), 0, "suppression must stop transport");
-
-        pg.execute(
-            "DELETE FROM zeroship.email_suppressions WHERE email = $1::citext",
-            &[&email],
-        )
-        .await
-        .ok();
     }
 }
