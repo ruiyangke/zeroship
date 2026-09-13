@@ -9,10 +9,9 @@
 //! the per-app, RLS-scoped session-revocation path used by the OIDC
 //! Back-Channel Logout 1.0 handler.
 //!
-//! REFUSES when there is no test database, naming
-//! `tests/provision_test_backends.sh`, rather than skipping into a green -
+//! These handler fixtures require a configured, migrated PostgreSQL database.
 //! Store-level session contracts now live in `src/sessions/tests.rs` with
-//! an owned database; these handler fixtures still use the shared database.
+//! an owned database.
 //!
 //! Coverage:
 //!   - Seed two live sessions for the same user_id (different app_ids)
