@@ -1,0 +1,40 @@
+warning: unused import: `zeroship_data_orm::orm::*`
+ --> tests/ui/compare_cross_entity.rs:1:5
+  |
+1 | use zeroship_data_orm::orm::*;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+error[E0277]: the trait bound `zeroship_data_orm::orm::Field<other::posts::columns::title>: IntoFieldOperand<schema::posts::columns::title, _>` is not satisfied
+ --> tests/ui/compare_cross_entity.rs:5:45
+  |
+5 | fn main() { let _ = schema::posts::title.eq(other::posts::title); }
+  |                                          -- ^^^^^^^^^^^^^^^^^^^ unsatisfied trait bound
+  |                                          |
+  |                                          required by a bound introduced by this call
+  |
+  = help: the trait `IntoFieldOperand<schema::posts::columns::title, _>` is not implemented for `zeroship_data_orm::orm::Field<other::posts::columns::title>`
+help: the following other types implement trait `IntoFieldOperand<C, Kind>`
+ --> src/orm/model.rs
+  |
+  | / impl<C, D> IntoFieldOperand<C, ExpressionOperand> for Field<D>
+  | | where
+  | |     C: Column,
+  | |     D: FilterableColumn<Entity = C::Entity>,
+  | |     C::SqlType: ComparableSqlType,
+  | |     D::SqlType: ComparableSqlType<Base = <C::SqlType as ComparableSqlType>::Base>,
+  | |__________________________________________________________________________________^ `zeroship_data_orm::orm::Field<D>`
+...
+  | / impl<C, D> IntoFieldOperand<C, ExpressionOperand> for &Field<D>
+  | | where
+  | |     C: Column,
+  | |     D: FilterableColumn<Entity = C::Entity>,
+  | |     C::SqlType: ComparableSqlType,
+  | |     D::SqlType: ComparableSqlType<Base = <C::SqlType as ComparableSqlType>::Base>,
+  | |__________________________________________________________________________________^ `&zeroship_data_orm::orm::Field<D>`
+note: required by a bound in `zeroship_data_orm::orm::Field::<C>::eq`
+ --> src/orm/model.rs
+  |
+  |     pub fn eq<T: IntoFieldOperand<C, K>, K>(self, value: T) -> Result<Filter<C::Entity>, DbError> {
+  |                  ^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `Field::<C>::eq`

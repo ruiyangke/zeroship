@@ -169,6 +169,20 @@ fn resolve_model_inner(
             let (column, definition) = resolve_column(field, schema, table)?;
             comparison(column, field, definition, op, value, registration)?
         }
+        ModelPredicate::CompareColumn { field, op, other } => {
+            let (lhs, left) = resolve_column(field, schema, table)?;
+            let (rhs, right) = resolve_column(other, schema, table)?;
+            validate_comparison(left, op)?;
+            validate_comparison(right, op)?;
+            if left.logical_type != right.logical_type || lhs.storage() != rhs.storage() {
+                return Err(invalid("column comparisons require compatible types"));
+            }
+            ResolvedPredicate::Compare {
+                lhs: ResolvedOperand::Column(lhs),
+                op,
+                rhs: ResolvedPredicateValue::Operand(ResolvedOperand::Column(rhs)),
+            }
+        }
         ModelPredicate::Membership { field, op, values } => {
             let (column, definition) = resolve_column(field, schema, table)?;
             condition(
