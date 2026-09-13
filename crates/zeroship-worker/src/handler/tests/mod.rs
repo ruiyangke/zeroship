@@ -1,9 +1,7 @@
 use super::*;
 use crate::identity_fixture::{control_authorization, gateway_authorization, identity};
-pub(super) use fixture::usage_value;
-use fixture::{
-    dispatch_frame, empty_kernel, run_metered_dispatch, run_pre_dispatch_reject, Worker,
-};
+use crate::worker_fixture::{dispatch_frame, empty_kernel, usage_value, Worker};
+use fixture::{run_metered_dispatch, run_pre_dispatch_reject};
 use ntex::http::StatusCode;
 use ntex::web::{self, test};
 use std::sync::Arc;

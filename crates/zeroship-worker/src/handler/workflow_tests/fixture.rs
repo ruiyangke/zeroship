@@ -28,7 +28,7 @@ impl Fixture<'_> {
             let app_id = AppId::mint();
             let meter = Arc::new(zeroship_metering::Meter::new());
             let worker_url = database.url_as("zeroship_worker");
-            zeroship_worker::db_posture::validate_database_url(worker_url.as_str())
+            crate::db_posture::validate_database_url(worker_url.as_str())
                 .await
                 .unwrap();
             let kernel =
@@ -136,7 +136,8 @@ fn workflow_zship(source: &[u8]) -> Vec<u8> {
 
 #[test]
 fn pinned_loader_verifies_stored_manifest_content_and_app_scope() {
-    use super::super::{load_pinned_workflow_on_demand, tests::fixture::Worker};
+    use super::super::load_pinned_workflow_on_demand;
+    use crate::worker_fixture::Worker;
 
     std::thread::spawn(|| {
         compio::runtime::Runtime::new().unwrap().block_on(async {
