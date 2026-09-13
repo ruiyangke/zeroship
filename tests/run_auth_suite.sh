@@ -52,8 +52,8 @@
 # PROVISION FIRST. This script creates and migrates a DATABASE; it does not
 # create a SERVER, and it refuses rather than guessing if none is listening.
 # Stand one up with `tests/provision_test_backends.sh`, which brings up
-# deploy/compose's postgres on the port below - and the SMTP sink, which the
-# `zeroship-mailer` package run below needs and fails without.
+# deploy/compose's postgres on the port below.
+# Auth, authn and mailer tests own their required servers through Testcontainers.
 #
 # ENV (defaults target deploy/compose's postgres service, published on :5440)
 #   The comment here read "the dev compose Postgres on :5440" for months while
@@ -279,10 +279,7 @@ echo "------------------------------------------------------------------"
 # never executed. A private name for a value that already exists is a test that
 # does not run, and it looks exactly like a test that passes.
 
-# `zeroship-mailer` is run as a whole package and needs one backend more than a
-# database: its plaintext-transport test dials a real SMTP sink and fails
-# without one. tests/provision_test_backends.sh stands that sink up at the
-# address the test falls back to, so nothing is exported for it here.
+# Mailer runs as a whole package with owned PostgreSQL and SMTP fixtures.
 echo "==> Other database-gated binaries (authn, authz, mailer, gateway)"
 # `zeroship-authn` is here because it was in NO gate at all. Its PostgreSQL
 # integration targets announce a skip for every test that cannot reach their
@@ -327,35 +324,8 @@ for spec in \
 done
 
 echo "------------------------------------------------------------------"
-# THE SKIP CENSUS THAT STOOD HERE IS GONE, and so is the allowlist it consulted.
-#
-# It searched this log for a marker every skipping test wrote to stderr, failed
-# the run on any occurrence not named in `SKIP_ALLOWLIST`, and carried one
-# standing entry (`AUTH_TEST_SMTP_SINK`, a live SMTP sink nothing in the tree
-# stood up). An operator decision removed skipping from the workspace outright:
-# every backend guard now REFUSES - it fails the test, naming what was missing
-# and the command that provisions it - so there is no marker to count and
-# nothing for an allowlist to excuse.
-#
-# THE STANDING ENTRY BECAME A PROVISIONING STEP, which is the only honest way to
-# retire an exemption. `zeroship-mailer` is run below as a whole package, and its
-# plaintext-transport test dials a real sink; that sink is now one of the
-# backends `tests/provision_test_backends.sh` stands up, at the address the test
-# falls back to. An allowlist row saying "we cannot provide this" and a test that
-# fails for want of it are the same defect wearing different clothes - the fix
-# for both is to provide it.
-#
-# WHY COUNTING WAS THE WEAKER DESIGN, kept because it is the argument for what
-# replaced it. A census only sees a test that ANNOUNCES. The paragraph below
-# records the measurement that made that concrete here: seven OIDC targets
-# gated on `let Some(fx) = Fixture::boot(...) else { return; }` and returned in
-# silence, so 75 tests reported "ok" in ~0.00s against no database while the
-# census printed "0 skipped" and exited 0. Widening the marker cannot fix that;
-# only the test failing can.
-#
-# The floor below is what survives, and it now guards a narrower gap than it
-# used to - not because the floor changed, but because the silent-return arm it
-# was compensating for no longer exists.
+# Required backend tests fail if their fixtures cannot start. Mailer owns its
+# PostgreSQL and SMTP servers; it needs no shared SMTP address or provisioning.
 
 passed="$(grep -oE '^test result: ok\. [0-9]+ passed' "$LOG" | grep -oE '[0-9]+' | awk '{s+=$1} END {print s+0}')"
 

@@ -13,7 +13,7 @@
 //! base64 -w0 signature.bin
 //! ```
 //!
-//! For SignatureVersion 2, use `openssl dgst -sha256 -sign ...` with
+//! For `SignatureVersion` 2, use `openssl dgst -sha256 -sign ...` with
 //! the same `canonical.txt`.
 //!
 //! The exact `canonical.txt` shape MUST match what
@@ -126,8 +126,8 @@ fn verify_rejects_tampered_signature() {
     let mut sig: Vec<u8> = env.signature.bytes().collect();
     sig[0] = if sig[0] == b'A' { b'B' } else { b'A' };
     env.signature = String::from_utf8(sig).expect("ascii");
-    let err = verify_with_cert(&env, FIXTURE_CERT_PEM)
-        .expect_err("tampered signature must NOT verify");
+    let err =
+        verify_with_cert(&env, FIXTURE_CERT_PEM).expect_err("tampered signature must NOT verify");
     let msg = format!("{err}");
     assert!(
         msg.contains("rejected") || msg.contains("base64"),
@@ -139,8 +139,8 @@ fn verify_rejects_tampered_signature() {
 fn verify_rejects_tampered_message() {
     let mut env = fixture_envelope();
     env.message = "goodbye".into(); // different canonical string → bad sig
-    let err = verify_with_cert(&env, FIXTURE_CERT_PEM)
-        .expect_err("tampered message must NOT verify");
+    let err =
+        verify_with_cert(&env, FIXTURE_CERT_PEM).expect_err("tampered message must NOT verify");
     assert!(
         format!("{err}").contains("rejected"),
         "expected signature-rejection error"
