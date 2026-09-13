@@ -2,6 +2,55 @@ use super::fixtures::*;
 use zeroship_data_orm::value;
 
 #[test]
+fn native_transaction_isolation_refusals_keep_the_parent_usable() {
+    run(async {
+        let dir = tempfile::tempdir().unwrap();
+        apply_schema_ahead_of_runtime(
+            &dir,
+            &format!(
+                "CREATE TABLE \"{LOCAL_DEV_APP_ID}\".notes ({SYSTEM_COLUMNS_SQLITE}, title TEXT NOT NULL);"
+            ),
+        );
+        let source = sqlite_runtime_source(
+            "notes",
+            &value!({"title":{"type":"string", "required":true}}),
+            r#"
+const _procedures = {
+  async transactionIsolation() {
+    let entered = 0;
+    const unsupported = [];
+    for (const isolationLevel of ["read uncommitted", "read committed", "repeatable read"]) {
+      const result = await env.db.transaction(async () => { entered++; }, { isolationLevel });
+      unsupported.push(result.error?.code ?? "accepted");
+    }
+    let nestedCode;
+    await env.db.transaction(async outer => {
+      const nested = await env.db.transaction(async () => { entered++; }, { isolationLevel: "serializable" });
+      nestedCode = nested.error?.code ?? "accepted";
+      await env.db.transaction(async inner => {
+        await inner.collection(COLLECTION).insert({ title: "inner" });
+      });
+      await outer.collection(COLLECTION).insert({ title: "outer" });
+    }, { isolationLevel: "serializable" });
+    const rows = await env.db.collection(COLLECTION).find({}, { orderBy: { title: 1 } });
+    return { unsupported, nestedCode, entered, titles: rows.map(row => row.title) };
+  },
+};
+"#,
+        );
+        assert_eq!(
+            dispatch_sqlite_runtime(&dir, &source, "transactionIsolation"),
+            value!({"json":{
+                "unsupported":["unsupported_isolation_level", "unsupported_isolation_level", "unsupported_isolation_level"],
+                "nestedCode":"nested_isolation_level",
+                "entered":0,
+                "titles":["inner", "outer"],
+            }})
+        );
+    });
+}
+
+#[test]
 fn native_transaction_collections_expire_with_their_own_frame() {
     run(async {
         let dir = tempfile::tempdir().unwrap();

@@ -1,0 +1,32 @@
+error[E0277]: the trait bound `i64: EncodeValue<zeroship_data_orm::orm::sql_types::Text>` is not satisfied
+ --> tests/ui/wrong_membership_value.rs:4:34
+  |
+4 |     let _ = schema::posts::title.in_values([1_i64]);
+  |                                  ^^^^^^^^^ the trait `EncodeValue<zeroship_data_orm::orm::sql_types::Text>` is not implemented for `i64`
+  |
+help: the following other types implement trait `EncodeValue<S>`
+ --> src/orm/codecs.rs
+  |
+  |           impl EncodeValue<$sql> for $rust {
+  |           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  |           |
+  |           `i64` implements `EncodeValue<BigInt>`
+  |           `i64` implements `EncodeValue<zeroship_data_orm::orm::sql_types::Integer>`
+...
+  | / integer_codec!(
+  | |     Integer, i32, i8, i16, i32, i64, u8, u16, u32, u64, isize, usize
+  | | );
+  | |_- in this macro invocation
+  | / integer_codec!(
+  | |     BigInt, i64, i8, i16, i32, i64, u8, u16, u32, u64, isize, usize
+  | | );
+  | |_- in this macro invocation
+...
+  |   impl EncodeValue<Timestamp> for i64 {
+  |   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `i64` implements `EncodeValue<zeroship_data_orm::orm::sql_types::Timestamp>`
+note: required by a bound in `zeroship_data_orm::orm::Field::<C>::in_values`
+ --> src/orm/model.rs
+  |
+  |     pub fn in_values<T: EncodeValue<C::SqlType>>(
+  |                         ^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `Field::<C>::in_values`
+  = note: this error originates in the macro `integer_codec` (in Nightly builds, run with -Z macro-backtrace for more info)

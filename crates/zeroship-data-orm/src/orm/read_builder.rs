@@ -1,41 +1,62 @@
 //! Typed Rust aliases and model projections over the shared read operation.
 use super::*;
+
+mod predicates;
+pub use predicates::JoinType;
+mod entity_query;
+pub use entity_query::{EntityQuery, FieldOrder};
+mod scalars;
 use crate::sql::{
     CompareOp, Direction, FieldPath, JoinKind, NullOrder, Operand, OrderKey, Predicate, RowLimit,
 };
+pub use scalars::*;
 
 #[derive(Debug)]
 pub struct EntityAlias<E: Entity> {
     database: Database,
     source: ReadSource,
+    schema: std::sync::Arc<Value>,
     entity: PhantomData<fn() -> E>,
 }
 impl<E: Entity> EntityCollection<E> {
     pub fn alias(&self, alias: &str) -> Result<EntityAlias<E>, DbError> {
+        self.validate()?;
         read::ident(alias, crate::sql::IdentRole::Alias)?;
         Ok(EntityAlias {
             database: self.collection.database.clone(),
             source: ReadSource::new(E::COLLECTION, alias),
+            schema: self.schema.clone(),
             entity: PhantomData,
         })
     }
 }
 impl<E: Entity> EntityAlias<E> {
+    fn origin(&self) -> ReadOrigin {
+        ReadOrigin {
+            database: self.database.identity.clone(),
+            scope: self.database.scope.clone(),
+            source: self.source.clone(),
+            schema: self.schema.clone(),
+        }
+    }
     pub fn column<C: Column<Entity = E>>(&self, _: Field<C>) -> SourceColumn<C> {
         SourceColumn {
             source: self.source.clone(),
+            origin: self.origin(),
             entity: PhantomData,
         }
     }
     pub fn row<R: FromRow<E>>(&self) -> EntityProjection<E, R, false> {
         EntityProjection {
             source: self.source.alias.clone(),
+            origin: self.origin(),
             entity: PhantomData,
         }
     }
     pub fn optional_row<R: FromRow<E>>(&self) -> EntityProjection<E, R, true> {
         EntityProjection {
             source: self.source.alias.clone(),
+            origin: self.origin(),
             entity: PhantomData,
         }
     }
@@ -44,6 +65,7 @@ impl<E: Entity> EntityAlias<E> {
 #[derive(Debug)]
 pub struct SourceColumn<C: Column> {
     source: ReadSource,
+    origin: ReadOrigin,
     entity: PhantomData<fn() -> C>,
 }
 impl<C: Column> SourceColumn<C> {
@@ -67,67 +89,17 @@ impl<C: Column> SourceColumn<C> {
         }
     }
 }
-impl<C: FilterableColumn> SourceColumn<C> {
-    pub fn eq<T: EncodeValue<C::SqlType>>(&self, value: T) -> Result<Predicate, DbError> {
-        let value = value.encode_value()?;
-        let literal = crate::sql::Literal::try_from_value(value)
-            .map_err(|error| read::invalid(error.to_string()))?;
-        Ok(match literal {
-            Some(literal) => Predicate::Compare {
-                lhs: Operand::Path(self.path()),
-                op: CompareOp::Eq,
-                rhs: Operand::Lit(literal),
-            },
-            None => Predicate::IsNull {
-                operand: Operand::Path(self.path()),
-                negated: false,
-            },
-        })
-    }
-    pub fn eq_column<D: FilterableColumn>(
-        &self,
-        other: SourceColumn<D>,
-    ) -> Result<Predicate, DbError>
-    where
-        C::SqlType: JoinType,
-        D::SqlType: JoinType<Base = <C::SqlType as JoinType>::Base>,
-    {
-        Ok(Predicate::compare(
-            Operand::Path(self.path()),
-            CompareOp::Eq,
-            Operand::Path(other.path()),
-        ))
-    }
-}
-
-/// Comparable scalar types, independent of column nullability.
-pub trait JoinType {
-    type Base;
-}
-macro_rules! join_types { ($($t:ident),* $(,)?) => { $(impl JoinType for sql_types::$t { type Base = sql_types::$t; })* }; }
-join_types!(
-    Text,
-    Integer,
-    BigInt,
-    Number,
-    Boolean,
-    Bytes,
-    Timestamp,
-    CalendarDate,
-    Time
-);
-impl<T: JoinType> JoinType for sql_types::Nullable<T> {
-    type Base = T::Base;
-}
 
 #[derive(Debug)]
 pub struct EntityProjection<E: Entity, R, const OPTIONAL: bool> {
     source: String,
+    origin: ReadOrigin,
     entity: PhantomData<fn() -> (E, R)>,
 }
 
 pub trait ReadSelection {
     type Output;
+    fn validate(&self, database: &Database, sources: &[ReadSource]) -> Result<(), DbError>;
     fn projections(&self, next: &mut usize, output: &mut Vec<ReadProjection>);
     fn decode(&self, next: &mut usize, row: &mut Record) -> Result<Self::Output, DbError>;
 }
@@ -153,6 +125,9 @@ fn project<E: Entity, R: FromRow<E>>(
 }
 impl<E: Entity, R: FromRow<E>> ReadSelection for EntityProjection<E, R, false> {
     type Output = R;
+    fn validate(&self, database: &Database, sources: &[ReadSource]) -> Result<(), DbError> {
+        self.origin.validate(database, sources)
+    }
     fn projections(&self, next: &mut usize, output: &mut Vec<ReadProjection>) {
         project::<E, R>(&self.source, false, next, output);
     }
@@ -165,6 +140,9 @@ impl<E: Entity, R: FromRow<E>> ReadSelection for EntityProjection<E, R, false> {
 }
 impl<E: Entity, R: FromRow<E>> ReadSelection for EntityProjection<E, R, true> {
     type Output = Option<R>;
+    fn validate(&self, database: &Database, sources: &[ReadSource]) -> Result<(), DbError> {
+        self.origin.validate(database, sources)
+    }
     fn projections(&self, next: &mut usize, output: &mut Vec<ReadProjection>) {
         project::<E, R>(&self.source, true, next, output);
     }
@@ -180,6 +158,10 @@ macro_rules! tuple_selection {
     ($($t:ident:$index:tt),+) => {
         impl<$($t: ReadSelection),+> ReadSelection for ($($t,)+) {
             type Output = ($($t::Output,)+);
+            fn validate(&self, database: &Database, sources: &[ReadSource]) -> Result<(), DbError> {
+                $(self.$index.validate(database, sources)?;)+
+                Ok(())
+            }
             fn projections(&self, next: &mut usize, output: &mut Vec<ReadProjection>) { $(self.$index.projections(next, output);)+ }
             fn decode(&self, next: &mut usize, row: &mut Record) -> Result<Self::Output, DbError> { Ok(($(self.$index.decode(next, row)?,)+)) }
         }
@@ -188,6 +170,10 @@ macro_rules! tuple_selection {
 tuple_selection!(A:0, B:1);
 tuple_selection!(A:0, B:1, C:2);
 tuple_selection!(A:0, B:1, C:2, D:3);
+tuple_selection!(A:0, B:1, C:2, D:3, E:4);
+tuple_selection!(A:0, B:1, C:2, D:3, E:4, F:5);
+tuple_selection!(A:0, B:1, C:2, D:3, E:4, F:5, G:6);
+tuple_selection!(A:0, B:1, C:2, D:3, E:4, F:5, G:6, H:7);
 
 #[derive(Debug)]
 pub struct ReadBuilder<P = ()> {
@@ -195,6 +181,53 @@ pub struct ReadBuilder<P = ()> {
     query: ReadQuery,
     selection: P,
     error: Option<DbError>,
+    schemas: Vec<SchemaExpectation>,
+}
+
+#[derive(Debug)]
+struct SchemaExpectation {
+    collection: &'static str,
+    schema: std::sync::Arc<Value>,
+    scope: Option<Rc<Cell<bool>>>,
+}
+
+#[derive(Debug, Clone)]
+struct ReadOrigin {
+    database: Rc<()>,
+    scope: Option<Rc<Cell<bool>>>,
+    source: ReadSource,
+    schema: std::sync::Arc<Value>,
+}
+
+impl ReadOrigin {
+    fn validate(&self, database: &Database, sources: &[ReadSource]) -> Result<(), DbError> {
+        check_scope(self.scope.as_ref())?;
+        if !Rc::ptr_eq(&self.database, &database.identity)
+            || !sources.iter().any(|source| {
+                source.alias == self.source.alias && source.collection == self.source.collection
+            })
+        {
+            return Err(read::invalid(
+                "typed projections must belong to a registered read source",
+            ));
+        }
+        validate_bound_schema(database, &self.source.collection, &self.schema)
+    }
+}
+
+pub(super) fn validate_bound_schema(
+    database: &Database,
+    collection: &str,
+    expected: &std::sync::Arc<Value>,
+) -> Result<(), DbError> {
+    database.context.with(|| {
+        let current = crate::descriptor::collection_schema(&database.binding, collection)?;
+        if std::sync::Arc::ptr_eq(&current, expected) || current.as_ref() == expected.as_ref() {
+            Ok(())
+        } else {
+            Err(schema_mismatch_for(collection))
+        }
+    })
 }
 impl Database {
     pub fn from<E: Entity>(&self, source: &EntityAlias<E>) -> ReadBuilder {
@@ -204,10 +237,27 @@ impl Database {
             selection: (),
             error: (!Rc::ptr_eq(&self.identity, &source.database.identity))
                 .then(|| read::invalid("read sources must belong to the same database handle")),
+            schemas: vec![SchemaExpectation {
+                collection: E::COLLECTION,
+                schema: source.schema.clone(),
+                scope: source.database.scope.clone(),
+            }],
         }
     }
 }
 impl<P> ReadBuilder<P> {
+    fn sources(&self) -> Vec<ReadSource> {
+        std::iter::once(self.query.source.clone())
+            .chain(self.query.joins.iter().map(|join| join.source.clone()))
+            .collect()
+    }
+    fn validate_schemas(&self) -> Result<(), DbError> {
+        for expected in &self.schemas {
+            check_scope(expected.scope.as_ref())?;
+            validate_bound_schema(&self.database, expected.collection, &expected.schema)?;
+        }
+        Ok(())
+    }
     fn join<E: Entity>(
         mut self,
         source: &EntityAlias<E>,
@@ -222,6 +272,13 @@ impl<P> ReadBuilder<P> {
         if let Some(error) = self.error.take() {
             return Err(error);
         }
+        source.database.check_scope()?;
+        validate_bound_schema(&self.database, E::COLLECTION, &source.schema)?;
+        self.schemas.push(SchemaExpectation {
+            collection: E::COLLECTION,
+            schema: source.schema.clone(),
+            scope: source.database.scope.clone(),
+        });
         self.query.joins.push(ReadJoin {
             kind,
             source: source.source.clone(),
@@ -247,6 +304,23 @@ impl<P> ReadBuilder<P> {
         self.query.filter = predicate;
         self
     }
+    pub fn group_by<C: ReadableColumn>(mut self, column: SourceColumn<C>) -> Self {
+        if let Err(error) = column.origin.validate(&self.database, &self.sources()) {
+            self.error.get_or_insert(error);
+            return self;
+        }
+        self.schemas.push(SchemaExpectation {
+            collection: C::Entity::COLLECTION,
+            schema: column.origin.schema.clone(),
+            scope: column.origin.scope.clone(),
+        });
+        self.query.group_by.push(column.path());
+        self
+    }
+    pub fn having(mut self, predicate: Predicate) -> Self {
+        self.query.having = predicate;
+        self
+    }
     pub fn order_by(mut self, key: OrderKey) -> Self {
         self.query.order_by.push(key);
         self
@@ -255,7 +329,14 @@ impl<P> ReadBuilder<P> {
         self.query.limit = RowLimit::new(limit).map_err(|e| read::invalid(e.to_string()))?;
         Ok(self)
     }
+    pub fn offset(mut self, offset: i64) -> Result<Self, DbError> {
+        self.query.offset =
+            crate::sql::RowOffset::new(offset).map_err(|e| read::invalid(e.to_string()))?;
+        Ok(self)
+    }
     pub fn select<S: ReadSelection>(mut self, selection: S) -> Result<ReadBuilder<S>, DbError> {
+        self.validate_schemas()?;
+        selection.validate(&self.database, &self.sources())?;
         if let Some(error) = self.error {
             return Err(error);
         }
@@ -266,17 +347,26 @@ impl<P> ReadBuilder<P> {
             query: self.query,
             selection,
             error: None,
+            schemas: self.schemas,
         })
     }
 }
 impl<P: ReadSelection> ReadBuilder<P> {
     pub fn all(self) -> impl Future<Output = Result<Vec<P::Output>, DbError>> {
-        let work = self.database.read(self.query);
+        let sources = self.sources();
+        let work = self
+            .validate_schemas()
+            .and_then(|()| self.selection.validate(&self.database, &sources))
+            .map(|()| self.database.read(self.query));
         async move {
             if let Some(error) = self.error {
                 return Err(error);
             }
-            let Output::Rows { rows, .. } = work.await? else {
+            for expected in &self.schemas {
+                check_scope(expected.scope.as_ref())?;
+            }
+            self.selection.validate(&self.database, &sources)?;
+            let Output::Rows { rows, .. } = work?.await? else {
                 return Err(DbError::internal("read returned a count"));
             };
             rows.into_iter()

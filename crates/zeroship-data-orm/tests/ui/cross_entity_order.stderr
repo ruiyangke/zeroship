@@ -1,0 +1,25 @@
+error[E0308]: mismatched types
+ --> tests/ui/cross_entity_order.rs:7:19
+  |
+7 |         .order_by(other::readings::title.asc());
+  |          -------- ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ expected `posts::Entity`, found `readings::Entity`
+  |          |
+  |          arguments to this method are incorrect
+  |
+  = note: `readings::Entity` and `posts::Entity` have similar names, but are actually distinct types
+note: `readings::Entity` is defined in module `crate::other::readings` of the current crate
+ --> tests/ui/cross_entity_order.rs:3:1
+  |
+3 | schema!(pub other = "../fixtures/typed-reads.runtime.json");
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+note: `posts::Entity` is defined in module `crate::schema::posts` of the current crate
+ --> tests/ui/cross_entity_order.rs:2:1
+  |
+2 | schema!(pub schema = "../fixtures/schema.runtime.json");
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+note: method defined here
+ --> src/orm/read_builder/entity_query.rs
+  |
+  |     pub fn order_by(mut self, key: FieldOrder<E>) -> Self {
+  |            ^^^^^^^^
+  = note: this error originates in the macro `schema` (in Nightly builds, run with -Z macro-backtrace for more info)
