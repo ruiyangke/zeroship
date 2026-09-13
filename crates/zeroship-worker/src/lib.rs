@@ -17,6 +17,7 @@ pub mod logs;
 pub mod metrics;
 pub mod policy;
 pub mod sync;
+pub mod workflow_creator;
 pub mod workflow_runtime;
 
 /// Resolved process resources supplied to the worker's services.

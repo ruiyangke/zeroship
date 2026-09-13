@@ -34,6 +34,12 @@ The shared runner supplies `WorkflowInvocation` and receives `WorkflowExecution`
 Local and deployed hosts share journal types and outcome decoding. The host
 keeps lease credentials outside the invocation and binds returned outcomes to
 its claim before applying them.
+`AppWorkflows::tasks` retains the exact app and policy generation for task,
+payload and retained-artifact operations. A shared worker identity or valid task
+token cannot broaden that handle to another app. `HostPolicies::run_bound` lets
+native hosts prepare creator resources under the same registry and original
+policy deadline, with cancellation on revocation and no authority replacement
+through a later refresh.
 
 The shared engine is composed into the CLI; production worker and Control
 integration remain unfinished. The [revised design](../../docs/proposals/2026-09-11-workflow-worker.md)
@@ -130,6 +136,16 @@ release assignments or discharge manager recovery responsibility.
 Production enrollment, trusted creator resource providers, remaining delivered
 operation handlers and ordinary worker/CLI composition remain required before
 replacing the existing runner.
+`zeroship-worker::workflow_creator::WorkflowCreatorFactory` assembles the creator
+ORM journal, payload storage, retained app artifacts and V8 executor from an
+injected `WorkflowResourceProvider`. It verifies app and schema identity before
+opening the journal, and never provisions it. The task payload handle and V8
+backend derive from the same registered app. Runtime metadata can refresh env,
+limits, network rules and ordinary native peers, but the loader retains the
+original workflow backend and the factory pins the physical creator schema.
+The provider must resolve independently authorized deployment-host resources;
+manager placement IDs and revisions only select those resources and their
+retention client. Production resource provisioning and installation remain open.
 `service::reconciliation` persists the selected publication page and its progress
 in the creator job receipt. It reserves each item before attempting publication,
 so retries reach later items even when an earlier request stalls. Confirmation

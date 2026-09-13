@@ -23,7 +23,6 @@ use zeroship_workflow_v8::{LoadedWorkflow, WorkflowBinding, WorkflowRuntimeLoade
 pub struct WorkflowAppContext {
     pub app: AppId,
     pub schema: SchemaName,
-    pub backend: AppBackend,
     pub env_vars: HashMap<String, String>,
     pub env: EnvSnapshot,
     pub limits: RuntimeLimits,
@@ -55,23 +54,29 @@ pub trait WorkflowContextProvider {
 }
 
 /// Creates a fresh isolate for each execution; never shares an HTTP runtime.
+///
 /// The owning host initializes V8 and drives the executor on its compio thread.
+/// Runtime metadata may refresh, but the workflow backend retains the original
+/// creator policy binding for every isolate built by this loader.
 pub struct WorkerWorkflowRuntimeLoader {
     contexts: Rc<dyn WorkflowContextProvider>,
+    backend: AppBackend,
 }
 
 impl std::fmt::Debug for WorkerWorkflowRuntimeLoader {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("WorkerWorkflowRuntimeLoader")
+            .field("app", self.backend.app_id())
             .finish_non_exhaustive()
     }
 }
 
 impl WorkerWorkflowRuntimeLoader {
+    /// Retain workflow authority separately from refreshable app metadata.
     #[must_use]
-    pub fn new(contexts: Rc<dyn WorkflowContextProvider>) -> Self {
-        Self { contexts }
+    pub fn new(contexts: Rc<dyn WorkflowContextProvider>, backend: AppBackend) -> Self {
+        Self { contexts, backend }
     }
 
     fn build(
@@ -84,16 +89,14 @@ impl WorkerWorkflowRuntimeLoader {
         if !zeroship_bundle::validate_hash_format(&assignment.invocation.deploy_hash) {
             return Err(invalid("invalid workflow runtime deployment hash"));
         }
-        let mut context = self.contexts.resolve(&app)?;
-        if context.app != app || context.backend.app_id() != &app {
+        if self.backend.app_id() != &app {
             return Err(WorkflowServiceError::PermissionDenied);
         }
-        validate_peers(&context)?;
-        if matches!(context.net_policy, NetPolicy::Trusted { .. }) {
-            return Err(invalid(
-                "creator workflow cannot use trusted network policy",
-            ));
+        let mut context = self.contexts.resolve(&app)?;
+        if context.app != app {
+            return Err(WorkflowServiceError::PermissionDenied);
         }
+        validate_context(&context)?;
 
         // Native primitives and the runtime share the authorized app identity.
         context
@@ -105,7 +108,7 @@ impl WorkerWorkflowRuntimeLoader {
         );
         context
             .peers
-            .push(Arc::new(WorkflowBinding::service(context.backend)));
+            .push(Arc::new(WorkflowBinding::service(self.backend.clone())));
         let modules = std::iter::once(executable.entry())
             .chain(
                 executable
@@ -141,7 +144,12 @@ impl WorkerWorkflowRuntimeLoader {
     }
 }
 
-fn validate_peers(context: &WorkflowAppContext) -> Result<(), WorkflowServiceError> {
+pub(crate) fn validate_context(context: &WorkflowAppContext) -> Result<(), WorkflowServiceError> {
+    if matches!(context.net_policy, NetPolicy::Trusted { .. }) {
+        return Err(invalid(
+            "creator workflow cannot use trusted network policy",
+        ));
+    }
     let mut namespaces = std::collections::HashSet::new();
     for peer in &context.peers {
         let namespace = peer.namespace();
@@ -231,6 +239,7 @@ mod tests {
     struct Fixture {
         _directory: tempfile::TempDir,
         contexts: Rc<Contexts>,
+        backend: AppBackend,
         service: WorkflowService,
         policies: Arc<HostPolicies>,
         blobs: LocalDiskBlobStore,
@@ -267,14 +276,14 @@ mod tests {
             let service = WorkflowService::open(Rc::new(store), policies.clone())
                 .await
                 .unwrap();
+            let backend = service
+                .register_app(&binding)
+                .await
+                .unwrap()
+                .into_backend(1024)
+                .unwrap();
             let context = WorkflowAppContext {
                 schema: SchemaName::new(&tenant).unwrap(),
-                backend: service
-                    .register_app(&binding)
-                    .await
-                    .unwrap()
-                    .into_backend(1024)
-                    .unwrap(),
                 app,
                 env_vars: HashMap::from([
                     ("APP_ID".into(), "forged-app".into()),
@@ -296,6 +305,7 @@ mod tests {
             };
             Self {
                 contexts: Rc::new(Contexts(RefCell::new(context))),
+                backend,
                 service,
                 policies,
                 blobs: LocalDiskBlobStore::new(directory.path().join("bundles")).unwrap(),
@@ -304,7 +314,7 @@ mod tests {
         }
 
         fn loader(&self) -> WorkerWorkflowRuntimeLoader {
-            WorkerWorkflowRuntimeLoader::new(self.contexts.clone())
+            WorkerWorkflowRuntimeLoader::new(self.contexts.clone(), self.backend.clone())
         }
 
         fn assignment(&self) -> TaskAssignment {
@@ -422,11 +432,14 @@ mod tests {
             fixture.loader().load(&assignment, &executable),
             Err(WorkflowServiceError::PermissionDenied)
         ));
-        let dishonest = WorkerWorkflowRuntimeLoader::new(Rc::new(ForeignContext(
-            fixture.contexts.0.borrow().clone(),
-        )));
+        let mut foreign_context = fixture.contexts.0.borrow().clone();
+        foreign_context.app = AppId::mint();
+        let dishonest = WorkerWorkflowRuntimeLoader::new(
+            Rc::new(ForeignContext(foreign_context)),
+            fixture.backend.clone(),
+        );
         assert!(matches!(
-            dishonest.load(&assignment, &executable),
+            dishonest.load(&fixture.assignment(), &executable),
             Err(WorkflowServiceError::PermissionDenied)
         ));
         let assignment = fixture.assignment();
@@ -438,14 +451,15 @@ mod tests {
                 PolicySnapshot::configuration(1.try_into().unwrap(), AppPolicy::default()).unwrap(),
             )
             .unwrap();
-        fixture.contexts.0.borrow_mut().backend = fixture
+        let foreign_backend = fixture
             .service
             .bind_app(&foreign)
             .unwrap()
             .into_backend(1024)
             .unwrap();
         assert!(matches!(
-            fixture.loader().load(&assignment, &executable),
+            WorkerWorkflowRuntimeLoader::new(fixture.contexts.clone(), foreign_backend)
+                .load(&assignment, &executable),
             Err(WorkflowServiceError::PermissionDenied)
         ));
     }
@@ -525,6 +539,76 @@ mod tests {
         assert_eq!(new["netAvailable"], false);
         assert_eq!(new["app"], fixture.contexts.0.borrow().app.as_str());
         assert_eq!(new["deployment"], assignment.invocation.deploy_hash);
+    }
+
+    #[compio::test]
+    async fn metadata_refresh_cannot_replace_a_retired_workflow_backend() {
+        let fixture = Fixture::new().await;
+        let assignment = fixture.assignment();
+        fixture
+            .contexts
+            .0
+            .borrow_mut()
+            .env_vars
+            .insert("MISSING_RUN".into(), assignment.invocation.run_id.clone());
+        let executable = fixture
+            .executable(
+                r"
+            export default { async fetch(_request, env) {
+                try {
+                    await env.workflows.Example.get(process.env.MISSING_RUN)
+                        .signal({type:'wake', payload:null});
+                    return Response.json({color:env.COLOR, code:'unexpected_success'});
+                } catch (error) {
+                    return Response.json({color:env.COLOR, code:error.code});
+                }
+            }};
+        ",
+                None,
+            )
+            .await;
+        let loader = fixture.loader();
+        let (before, before_env) = loader.build(&assignment, &executable).unwrap();
+        before.exit_isolate();
+        assert_eq!(
+            fetch(before, &before_env).await,
+            json!({"color":"blue", "code":"workflow_not_found"})
+        );
+
+        let replacement = fixture
+            .policies
+            .bind(fixture.backend.app_id().clone())
+            .unwrap();
+        replacement
+            .begin_refresh()
+            .unwrap()
+            .install(
+                PolicySnapshot::configuration(1.try_into().unwrap(), AppPolicy::default()).unwrap(),
+            )
+            .unwrap();
+        let replacement_backend = fixture
+            .service
+            .register_app(&replacement)
+            .await
+            .unwrap()
+            .into_backend(1024)
+            .unwrap();
+        fixture.contexts.0.borrow_mut().env = EnvSnapshot::vars_only(json!({"COLOR":"green"}));
+
+        let (retired, retired_env) = loader.build(&assignment, &executable).unwrap();
+        retired.exit_isolate();
+        let fresh_loader =
+            WorkerWorkflowRuntimeLoader::new(fixture.contexts.clone(), replacement_backend);
+        let (fresh, fresh_env) = fresh_loader.build(&assignment, &executable).unwrap();
+        fresh.exit_isolate();
+        assert_eq!(
+            fetch(retired, &retired_env).await,
+            json!({"color":"green", "code":"workflow_unavailable"})
+        );
+        assert_eq!(
+            fetch(fresh, &fresh_env).await,
+            json!({"color":"green", "code":"workflow_not_found"})
+        );
     }
 
     async fn fetch(runtime: Runtime, env: &EnvSnapshot) -> Value {
