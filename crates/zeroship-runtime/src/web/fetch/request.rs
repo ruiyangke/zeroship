@@ -1033,8 +1033,7 @@ pub fn install_global<'s>(scope: &mut v8::PinScope<'s, '_>, global: v8::Local<v8
 
 /// Build a Request directly from raw HTTP wire data — bypasses the
 /// WebIDL §5.4 constructor entirely. Used by the kernel's fetch
-/// dispatch (`runtime.rs::call_fetch_handler`) instead of the JS
-/// helper `HTTP_CREATE_REQUEST_JS`.
+/// dispatch (`runtime.rs::call_fetch_handler`).
 ///
 /// What we skip relative to the spec constructor:
 ///   - `globalThis.Request` lookup (template comes from the macro's
