@@ -51,7 +51,7 @@ impl Job {
     }
 }
 
-#[derive(FromRow, serde::Deserialize)]
+#[derive(FromRow)]
 #[orm(entity = workers)]
 pub struct Worker {
     pub id: String,
@@ -60,13 +60,13 @@ pub struct Worker {
     pub expires_at: i64,
 }
 
-#[derive(FromRow, serde::Deserialize)]
+#[derive(FromRow)]
 #[orm(entity = queue_scopes)]
 pub struct Scope {
     pub id: String,
 }
 
-#[derive(FromRow, serde::Deserialize)]
+#[derive(FromRow)]
 #[orm(entity = assignments)]
 pub struct Placement {
     pub id: String,
@@ -79,7 +79,7 @@ pub struct Placement {
     pub next_due_at: Option<i64>,
 }
 
-#[derive(FromRow, serde::Deserialize)]
+#[derive(FromRow)]
 #[orm(entity = placement_receipts)]
 pub struct PlacementReceipt {
     pub operation: String,
@@ -90,7 +90,7 @@ pub struct PlacementReceipt {
     pub result_expires_at: i64,
 }
 
-#[derive(FromRow, serde::Deserialize)]
+#[derive(FromRow)]
 #[orm(entity = management)]
 pub struct Management {
     pub app_id: String,

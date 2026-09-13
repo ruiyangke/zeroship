@@ -16,7 +16,6 @@ use crate::{
     queue::{lock_scope, register_scope_in, Budget},
     Error, Queue,
 };
-use serde::de::DeserializeOwned;
 use std::time::Duration;
 use zeroship_core::{
     app_id::AppId,
@@ -25,7 +24,7 @@ use zeroship_core::{
     },
 };
 use zeroship_data_orm::{
-    orm::{Database, Entity, FromRow, Operation, Output},
+    orm::{Database, Entity, FieldOrder, Filter, FromRow, Operation, Output},
     value, Value,
 };
 
@@ -110,7 +109,7 @@ impl Coordinator {
             // The upsert holds the worker row. Sample after that wait.
             let expires = deadline(self.queue.clock.now().await?, self.options.worker_ttl)?;
             update::<workers::Entity>(&tx, value!({"id":worker.as_str()}), value!({"expires_at":expires})).await?;
-            let stored = one::<workers::Entity, Worker>(&tx, value!({"id":worker.as_str()})).await?.ok_or(Error::Storage)?;
+            let stored = one::<workers::Entity, Worker>(&tx, workers::id.eq(worker.as_str())?).await?.ok_or(Error::Storage)?;
             registered(&stored)
         }).await
     }
@@ -124,14 +123,16 @@ impl Coordinator {
         self.queue
             .transact(|tx| async move {
                 let now = self.queue.clock.now().await?;
-                let mut filter = value!({"state":"ready","expires_at":{"$gt":now}});
+                let mut filter = workers::state
+                    .eq("ready")?
+                    .and(workers::expires_at.gt(now)?);
                 if let Some(after) = after {
-                    filter["id"] = value!({"$gt":after.as_str()});
+                    filter = filter.and(workers::id.gt(after.as_str())?);
                 }
                 rows::<workers::Entity, Worker>(
                     &tx,
                     filter,
-                    value!({"id":1}),
+                    [workers::id.asc()],
                     self.options.batch_limit,
                 )
                 .await?
@@ -152,13 +153,15 @@ impl Coordinator {
                 let mut cursor = after.map(|app| app.as_str().to_owned());
                 let mut recovered = Vec::new();
                 loop {
-                    let filter = cursor
-                        .as_ref()
-                        .map_or_else(|| value!({}), |after| value!({"id":{"$gt":after}}));
+                    let filter = if let Some(after) = cursor.as_deref() {
+                        queue_scopes::id.gt(after)?
+                    } else {
+                        Filter::all()
+                    };
                     let scopes = rows::<queue_scopes::Entity, Scope>(
                         &tx,
                         filter,
-                        value!({"id":1}),
+                        [queue_scopes::id.asc()],
                         self.options.batch_limit,
                     )
                     .await?;
@@ -227,35 +230,32 @@ fn registered(row: &Worker) -> Result<RegisteredWorker, Error> {
     })
 }
 
-async fn rows<E: Entity, R: FromRow<E> + DeserializeOwned>(
+async fn rows<E: Entity, R: FromRow<E>>(
     tx: &Database,
-    filter: Value,
-    order: Value,
+    filter: Filter<E>,
+    order: impl IntoIterator<Item = FieldOrder<E>>,
     limit: usize,
 ) -> Result<Vec<R>, Error> {
-    let Output::Rows { rows, .. } = tx
-        .collection(E::COLLECTION)?
-        .find(
-            filter,
-            value!({"select":R::COLUMNS,"orderBy":order,"limit":limit}),
-        )
-        .await?
-    else {
-        return Err(Error::Storage);
-    };
-    rows.into_iter()
-        .map(|row| zeroship_data_orm::value::from_value(row).map_err(|_| Error::Storage))
-        .collect()
+    let mut query = tx.entity::<E>()?.query().filter(filter);
+    for field in order {
+        query = query.order_by(field);
+    }
+    Ok(query
+        .limit(i64::try_from(limit).map_err(|_| Error::Storage)?)?
+        .all::<R>()
+        .await?)
 }
 
-async fn one<E: Entity, R: FromRow<E> + DeserializeOwned>(
+async fn one<E: Entity, R: FromRow<E>>(
     tx: &Database,
-    filter: Value,
+    filter: Filter<E>,
 ) -> Result<Option<R>, Error> {
-    Ok(rows::<E, R>(tx, filter, value!({}), 1)
-        .await?
-        .into_iter()
-        .next())
+    Ok(tx
+        .entity::<E>()?
+        .query()
+        .filter(filter)
+        .first::<R>()
+        .await?)
 }
 
 async fn update<E: Entity>(tx: &Database, filter: Value, patch: Value) -> Result<(), Error> {
@@ -274,13 +274,9 @@ async fn update<E: Entity>(tx: &Database, filter: Value, patch: Value) -> Result
     }
 }
 
-async fn count<E: Entity>(tx: &Database, filter: Value) -> Result<i64, Error> {
-    match tx
-        .collection(E::COLLECTION)?
-        .count(filter, value!({}))
-        .await?
-    {
-        Output::Count(n) if n >= 0 => Ok(n),
+async fn count<E: Entity>(tx: &Database, filter: Filter<E>) -> Result<i64, Error> {
+    match tx.entity::<E>()?.count(filter).await? {
+        n if n >= 0 => Ok(n),
         _ => Err(Error::Storage),
     }
 }
