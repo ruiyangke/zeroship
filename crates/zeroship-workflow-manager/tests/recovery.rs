@@ -170,7 +170,13 @@ async fn durable_responsibility(fixture: &Fixture) {
         Some(accepted.clone())
     );
     let owner = assignment(&app);
-    let delivered = queue.claim(&owner).await.unwrap().unwrap().delivery;
+    let delivered = queue
+        .claim(&owner)
+        .await
+        .unwrap()
+        .unwrap()
+        .delivery()
+        .clone();
     let pending = snapshot(fixture, &app).await;
     queue.heartbeat(&owner, &delivered).await.unwrap();
     assert_eq!(snapshot(fixture, &app).await, pending);
@@ -220,7 +226,13 @@ async fn activation(fixture: &Fixture) {
         Some(original.clone())
     );
     let owner = assignment(&app);
-    let delivery = queue.claim(&owner).await.unwrap().unwrap().delivery;
+    let delivery = queue
+        .claim(&owner)
+        .await
+        .unwrap()
+        .unwrap()
+        .delivery()
+        .clone();
     assert_eq!(delivery.job.deployment_id, first);
     queue
         .settle(

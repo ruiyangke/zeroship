@@ -638,7 +638,8 @@ async fn claim_authority(fixture: &Fixture) {
         .await
         .unwrap()
         .unwrap()
-        .delivery;
+        .delivery()
+        .clone();
     assert_eq!(delivery.job, spec);
     assert_eq!(delivery.worker_id, worker);
     assert_eq!(delivery.assignment_revision, current.revision);
@@ -798,12 +799,12 @@ async fn worker_publication(fixture: &Fixture) {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(grant.lease().unwrap().delivery, grant.delivery);
+    assert_eq!(&grant.lease().unwrap().delivery, grant.delivery());
     for operation in manager_operations() {
         let mut successor = job(&assigned.app_id);
         successor.operation = operation;
         let command = Settlement {
-            delivery: grant.delivery.clone(),
+            delivery: grant.delivery().clone(),
             outcome: JobOutcome::Completed,
             successors: vec![successor.clone()],
         };
@@ -882,16 +883,16 @@ async fn delivery_enrollment(fixture: &Fixture) {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(grant.delivery.job, spec);
+    assert_eq!(grant.delivery().job, spec);
     assert!(matches!(
         coordinator
-            .heartbeat_job(&WorkerId::mint(), &grant.delivery, || ready(Ok(
+            .heartbeat_job(&WorkerId::mint(), grant.delivery(), || ready(Ok(
                 worker.clone()
             )))
             .await,
         Err(Error::Denied)
     ));
-    let mut foreign_delivery = grant.delivery.clone();
+    let mut foreign_delivery = grant.delivery().clone();
     foreign_delivery.worker_id = WorkerId::mint();
     assert!(matches!(
         coordinator
@@ -903,7 +904,7 @@ async fn delivery_enrollment(fixture: &Fixture) {
     checks.set(0);
     assert!(matches!(
         coordinator
-            .heartbeat_job(&worker, &grant.delivery, enrollment)
+            .heartbeat_job(&worker, grant.delivery(), enrollment)
             .await,
         Err(Error::Denied)
     ));
@@ -913,14 +914,14 @@ async fn delivery_enrollment(fixture: &Fixture) {
         before
     );
     let renewed = coordinator
-        .heartbeat_job(&worker, &grant.delivery, || ready(Ok(worker.clone())))
+        .heartbeat_job(&worker, grant.delivery(), || ready(Ok(worker.clone())))
         .await
         .unwrap();
-    assert_eq!(renewed.delivery.attempt, grant.delivery.attempt);
-    assert!(renewed.delivery.deadline >= grant.delivery.deadline);
+    assert_eq!(renewed.delivery().attempt, grant.delivery().attempt);
+    assert!(renewed.delivery().deadline >= grant.delivery().deadline);
     let successor = job(&assigned.app_id);
     let command = Settlement {
-        delivery: renewed.delivery,
+        delivery: renewed.delivery().clone(),
         outcome: JobOutcome::Completed,
         successors: vec![successor.clone()],
     };
