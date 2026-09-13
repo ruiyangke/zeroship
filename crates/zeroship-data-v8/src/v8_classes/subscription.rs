@@ -216,6 +216,9 @@ pub fn mint_subscription<'s>(
     app_id: &str,
     collection: &str,
 ) -> Result<v8::Local<'s, v8::Object>, OpError> {
+    let entries = crate::read_capture::current(scope)
+        .map_err(ToOpError::to_op_error)?
+        .snapshot_for(collection);
     // STEP 1 — fallible V8 alloc. Any `?` here returns BEFORE we touch
     // the broker, so the broker entry can never leak. Do every V8 op
     // that can return `None` up front; only after we've committed do
@@ -267,7 +270,6 @@ pub fn mint_subscription<'s>(
     // `mutation`/`action`, where capture is inert by design - would otherwise
     // attach an empty set and go permanently silent, which is strictly worse
     // than the coarse delivery it replaces.
-    let entries = crate::read_set::snapshot_for(collection);
     if !entries.is_empty() {
         broker_sub.set_read_set(entries);
     }

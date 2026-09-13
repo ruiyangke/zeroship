@@ -83,6 +83,127 @@ const DICT_RPC_EXPORT: &str = r#"
 export default { rpc: _procedures };
 "#;
 
+struct CapabilityProbe;
+
+impl zeroship_runtime::plugin::NativePlugin for CapabilityProbe {
+    fn namespace(&self) -> &str { "probe" }
+
+    fn register(&self, registrar: &mut zeroship_runtime::plugin::NativeRegistrar) {
+        registrar.add("kind", probe_kind);
+        registrar.add("generation", probe_generation);
+    }
+}
+
+fn probe_kind(
+    scope: &mut v8::PinScope,
+    _args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let kind = format!("{:?}", zeroship_runtime::rpc::current_kind(scope));
+    rv.set(v8::String::new(scope, &kind).unwrap().into());
+}
+
+fn probe_generation(
+    scope: &mut v8::PinScope,
+    _args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    rv.set_double(zeroship_runtime::rpc::dispatch_generation(scope) as f64);
+}
+
+fn capability_runtime() -> Runtime {
+    init_v8();
+    let runtime = Runtime::builder()
+        .plugin(CapabilityProbe)
+        .modules(vec![zeroship_runtime::ModuleEntry {
+            specifier: "index.js".into(),
+            source: r#"
+                import { env } from 'zeroship';
+                function procedure(kind) {
+                    const fn = async () => {
+                        const before = [env.probe.kind(), env.probe.generation()];
+                        await new Promise(resolve => setTimeout(resolve, 10));
+                        return { before, after: [env.probe.kind(), env.probe.generation()] };
+                    };
+                    fn.config = { kind };
+                    return fn;
+                }
+                export default {
+                    rpc: { query: procedure('query'), mutation: procedure('mutation') },
+                    fetch() { return Response.json({ outside: env.probe.kind() }); },
+                };
+            "#.into(),
+        }])
+        .build();
+    runtime.exit_isolate();
+    runtime
+}
+
+fn capability_request(runtime: &Runtime, path: &str) -> FetchOutcome {
+    runtime.enter_isolate();
+    let outcome = runtime.call_fetch_handler(
+        "POST", &format!("http://localhost/{path}"),
+        &[("content-type".into(), "application/json".into())],
+        r#"{"json":null}"#, &EnvSnapshot::empty(), RequestCtx::new(CancelFlag::new()),
+    );
+    runtime.exit_isolate();
+    outcome
+}
+
+async fn capability_response(runtime: &Runtime, outcome: FetchOutcome) -> serde_json::Value {
+    let (status, body) = match outcome {
+        FetchOutcome::Response { status, body, .. } => (status, body),
+        FetchOutcome::Pending { rx, .. } => {
+            runtime.start_pump();
+            match compio::time::timeout(Duration::from_secs(5), rx.recv()).await.unwrap().unwrap() {
+                SettledFetch::Response { status, body, .. } => (status, body),
+                _ => panic!("expected buffered capability response"),
+            }
+        }
+        _ => panic!("expected buffered capability response"),
+    };
+    assert_eq!(status, 200, "{}", String::from_utf8_lossy(&body));
+    serde_json::from_slice(&body).unwrap()
+}
+
+async fn check_interleaved_capabilities(query_runtime: &Runtime, mutation_runtime: &Runtime) {
+    query_runtime.initialize(&EnvSnapshot::empty()).await.unwrap();
+    mutation_runtime.initialize(&EnvSnapshot::empty()).await.unwrap();
+    query_runtime.start_pump();
+    mutation_runtime.start_pump();
+    let query = capability_request(query_runtime, "__zeroship/v1/query");
+    assert!(matches!(query, FetchOutcome::Pending { .. }));
+    let mutation = capability_request(mutation_runtime, "__zeroship/v1/mutation");
+    assert!(matches!(mutation, FetchOutcome::Pending { .. }));
+    let (query_body, mutation_body) = futures::join!(
+        capability_response(query_runtime, query),
+        capability_response(mutation_runtime, mutation),
+    );
+    for (body, kind) in [(&query_body, "Some(Query)"), (&mutation_body, "Some(Mutation)")] {
+        let value = &body["json"];
+        assert_eq!(value["before"][0], kind, "{body}");
+        assert_eq!(value["after"], value["before"], "continuation must retain its frame: {body}");
+    }
+    assert_ne!(query_body["json"]["before"][1], mutation_body["json"]["before"][1]);
+    for runtime in [query_runtime, mutation_runtime] {
+        let control = capability_response(runtime, capability_request(runtime, "context")).await;
+        assert_eq!(control["outside"], "None");
+    }
+}
+
+#[compio::test]
+async fn interleaved_procedures_retain_their_capability_frame() {
+    let runtime = capability_runtime();
+    check_interleaved_capabilities(&runtime, &runtime).await;
+}
+
+#[compio::test]
+async fn interleaved_isolates_retain_their_capability_frame() {
+    let query_runtime = capability_runtime();
+    let mutation_runtime = capability_runtime();
+    check_interleaved_capabilities(&query_runtime, &mutation_runtime).await;
+}
+
 /// A `mutation()` handler that calls `fetch()` must be refused with
 /// the `capability_violation` envelope. The native fetch callback
 /// fires the gate synchronously (BEFORE any HTTP work), so we don't
