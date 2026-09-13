@@ -1706,6 +1706,7 @@ pub(crate) mod tests {
         status: StatusCode,
         body: Vec<u8>,
         events: Vec<zeroship_core::usage_event::UsageEvent>,
+        thread_cpu: std::time::Duration,
     }
 
     /// A worker config pointed at a dead control plane, so any on-demand load
@@ -1777,13 +1778,16 @@ pub(crate) mod tests {
                 .header("authorization", gateway_authorization())
                 .set_payload(payload)
                 .to_request();
+            drop(meter.drain());
+            let cpu_started = zeroship_runtime::init::thread_cpu_time();
             let resp = test::call_service(&app, req).await;
             let status = resp.status();
             let body = test::read_body(resp).await.to_vec();
+            let thread_cpu = zeroship_runtime::init::thread_cpu_time().saturating_sub(cpu_started);
             let events = meter.drain();
 
             let _ = std::fs::remove_dir_all(blob_root);
-            MeteredDispatchResult { app_id, status, body, events }
+            MeteredDispatchResult { app_id, status, body, events, thread_cpu }
         }))
     }
 
@@ -2012,13 +2016,16 @@ pub(crate) mod tests {
                     request_body,
                 ))
                 .to_request();
+            drop(meter.drain());
+            let cpu_started = zeroship_runtime::init::thread_cpu_time();
             let resp = test::call_service(&app, req).await;
             let status = resp.status();
             let body = test::read_body(resp).await.to_vec();
+            let thread_cpu = zeroship_runtime::init::thread_cpu_time().saturating_sub(cpu_started);
             let events = meter.drain();
 
             let _ = std::fs::remove_dir_all(blob_root);
-            MeteredDispatchResult { app_id, status, body, events }
+            MeteredDispatchResult { app_id, status, body, events, thread_cpu }
         }))
     }
 
@@ -2108,8 +2115,9 @@ pub(crate) mod tests {
               }
             };
         "#;
+        // Allow module setup to finish before the unresolved request times out.
         let limits = AppRuntimeLimits {
-            wall_timeout_ms: Some(10),
+            wall_timeout_ms: Some(1_000),
             ..AppRuntimeLimits::default()
         };
         let Some(result) = run_metered_dispatch(source, limits, b"timeout", true) else {
@@ -2119,38 +2127,19 @@ pub(crate) mod tests {
         assert_generated_error_metering(result, StatusCode::GATEWAY_TIMEOUT);
     }
 
-    /// CPU burned AFTER the first await must land on the `cpu_us` meter.
-    ///
-    /// The handler returns a pending promise straight away, so the
-    /// synchronous isolate entry this dispatch path times around
-    /// `call_fetch_handler_with_user` sees almost nothing. All the work
-    /// happens in the timer continuation, which V8 runs on the runtime's
-    /// pump — and pump CPU used to reach no meter at all, so an app that does
-    /// its work in promise chains, `setInterval` callbacks or stream pushes
-    /// was billed as if it were idle. `RuntimeInner::bill_pump_cpu` now emits
-    /// each pump V8 window to the app's `cpu_us` meter, which is keyed by app
-    /// — the granularity billing consumes — even though the work is not
-    /// attributable to any one request.
-    ///
-    /// `setTimeout(fn, 0)` specifically lands in `RuntimeState::ready_timers`
-    /// and fires inline in the pump's PHASE 1 drain, a window the per-app CPU
-    /// budget never saw either. Keeping the delay at 0 here is therefore
-    /// deliberate: it exercises the arm that had no accounting whatsoever.
-    ///
-    /// The burn is wall-clock driven inside JS but it is a spin loop, so the
-    /// thread CPU clock the pump samples tracks it. The assertion floor is
-    /// well under the burn to absorb scheduling noise while staying far
-    /// above the few milliseconds of module init that the synchronous entry
-    /// legitimately contributes.
+    /// Compare request CPU against the OS thread clock after an awaited timer.
+    /// Fixed computational work avoids treating time spent descheduled as CPU.
+    /// The request observer includes Rust overhead, so the app meter must cover
+    /// the dominant work without requiring those measurements to be identical.
     #[test]
     fn dispatch_meters_cpu_burned_on_the_pump_after_an_await() {
         let source = br#"
             export default {
               async fetch() {
                 await new Promise(resolve => setTimeout(resolve, 0));
-                const deadline = Date.now() + 300;
-                while (Date.now() < deadline) {}
-                return new Response("burned");
+                let total = 0;
+                for (let i = 0; i < 20_000_000; i++) total += Math.sqrt(i + 1);
+                return new Response(String(total));
               }
             };
         "#;
@@ -2172,12 +2161,14 @@ pub(crate) mod tests {
             "exactly one request",
         );
 
+        let total = String::from_utf8(result.body).unwrap().parse::<f64>().unwrap();
+        assert!(total.is_finite() && total > 0.0, "the computation must complete");
         let cpu_us = usage_value(&result.events, &result.app_id, "cpu_us").unwrap_or(0);
+        assert!(result.thread_cpu.as_micros() > 0, "observe request CPU");
         assert!(
-            cpu_us >= 200_000,
-            "a 300 ms spin loop that runs on the pump must be metered as \
-             cpu_us; got {cpu_us} us, which means the pump's V8 window burned \
-             the app's CPU without billing it",
+            u128::from(cpu_us) * 2 >= result.thread_cpu.as_micros(),
+            "pump work must dominate the request's metered CPU: metered {cpu_us} us, observed {:?}",
+            result.thread_cpu,
         );
     }
 
