@@ -1,4 +1,14 @@
-use super::*;
+#![expect(
+    clippy::future_not_send,
+    reason = "ORM queries use thread-local compio sessions"
+)]
+
+use super::{
+    count_rows, read, sql_types, take, Column, Database, DbError, DecodeValue, Direction, Entity,
+    EntityCollection, EntityProjection, Field, Filter, FindOptions, FromRow, Future, NullOrder,
+    OrderKey, PhantomData, ReadBuilder, ReadOrigin, ReadProjection, ReadQuery, ReadSelection,
+    ReadSource, Record, RelatedQuery, Relation, RowLimit,
+};
 
 /// An ordering key tied to its generated entity.
 #[derive(Debug)]
@@ -10,18 +20,21 @@ pub struct FieldOrder<E> {
 }
 
 impl<E> FieldOrder<E> {
-    pub fn nulls_first(mut self) -> Self {
+    #[must_use]
+    pub const fn nulls_first(mut self) -> Self {
         self.nulls = NullOrder::First;
         self
     }
 
-    pub fn nulls_last(mut self) -> Self {
+    #[must_use]
+    pub const fn nulls_last(mut self) -> Self {
         self.nulls = NullOrder::Last;
         self
     }
 }
 
 impl<C: Column> Field<C> {
+    #[must_use]
     pub fn asc(self) -> FieldOrder<C::Entity> {
         FieldOrder {
             field: C::NAME,
@@ -31,6 +44,7 @@ impl<C: Column> Field<C> {
         }
     }
 
+    #[must_use]
     pub fn desc(self) -> FieldOrder<C::Entity> {
         FieldOrder {
             field: C::NAME,
@@ -51,9 +65,10 @@ pub struct EntityQuery<E: Entity> {
 }
 
 impl<E: Entity> EntityCollection<E> {
+    #[must_use]
     pub fn query(&self) -> EntityQuery<E> {
         EntityQuery {
-            entity: EntityCollection {
+            entity: Self {
                 collection: self.collection.clone(),
                 schema: self.schema.clone(),
                 entity: PhantomData,
@@ -67,41 +82,82 @@ impl<E: Entity> EntityCollection<E> {
     pub fn count(&self, filter: Filter<E>) -> impl Future<Output = Result<i64, DbError>> + use<E> {
         self.query().filter(filter).count()
     }
+
+    /// Test whether a visible row matches without loading model fields.
+    ///
+    /// # Errors
+    /// Refuses invalid filters, changed metadata, expired transactions, or database failures.
+    pub fn exists(
+        &self,
+        filter: Filter<E>,
+    ) -> impl Future<Output = Result<bool, DbError>> + use<E> {
+        self.query().filter(filter).exists()
+    }
+}
+
+#[derive(Debug)]
+struct Presence;
+
+impl ReadSelection for Presence {
+    type Output = bool;
+
+    fn validate(&self, database: &Database, _sources: &[ReadSource]) -> Result<(), DbError> {
+        database.check_scope()
+    }
+
+    fn projections(&self, next: &mut usize, output: &mut Vec<ReadProjection>) {
+        output.push(ReadProjection::Presence {
+            output: format!("p{next}"),
+        });
+        *next += 1;
+    }
+
+    fn decode(&self, next: &mut usize, row: &mut Record) -> Result<bool, DbError> {
+        <bool as DecodeValue<sql_types::Boolean>>::decode_value(take(next, row)?)
+    }
 }
 
 impl<E: Entity> EntityQuery<E> {
+    #[must_use]
     pub fn with_related<R: Relation<Source = E>>(self, _: R) -> RelatedQuery<E, R> {
         RelatedQuery::new(self)
     }
 
+    #[must_use]
     pub fn filter(mut self, filter: Filter<E>) -> Self {
         self.filter = filter;
         self
     }
 
+    #[must_use]
     pub fn order_by(mut self, key: FieldOrder<E>) -> Self {
         self.order.push(key);
         self
     }
 
+    /// # Errors
+    /// Refuses limits outside the supported row budget.
     pub fn limit(mut self, limit: i64) -> Result<Self, DbError> {
         RowLimit::new(limit).map_err(|error| read::invalid(error.to_string()))?;
         self.options.limit = Some(limit);
         Ok(self)
     }
 
+    /// # Errors
+    /// Refuses offsets outside the supported range.
     pub fn offset(mut self, offset: i64) -> Result<Self, DbError> {
         crate::sql::RowOffset::new(offset).map_err(|error| read::invalid(error.to_string()))?;
         self.options.offset = Some(offset);
         Ok(self)
     }
 
-    pub fn include_deleted(mut self) -> Self {
+    #[must_use]
+    pub const fn include_deleted(mut self) -> Self {
         self.options.include_deleted = true;
         self
     }
 
-    pub(in crate::orm) fn with_options(mut self, options: FindOptions) -> Self {
+    pub(in crate::orm) const fn with_options(mut self, options: FindOptions) -> Self {
         self.options = options;
         self
     }
@@ -141,6 +197,8 @@ impl<E: Entity> EntityQuery<E> {
         })
     }
 
+    /// # Errors
+    /// Refuses invalid queries, changed metadata, expired transactions, or failed row decoding.
     pub fn all<R: FromRow<E>>(self) -> impl Future<Output = Result<Vec<R>, DbError>> + use<E, R> {
         let work = self
             .into_builder()
@@ -166,6 +224,8 @@ impl<E: Entity> EntityQuery<E> {
         async move { work?.await }
     }
 
+    /// # Errors
+    /// Returns the same query and decoding failures as [`Self::all`].
     pub fn first<R: FromRow<E>>(
         mut self,
     ) -> impl Future<Output = Result<Option<R>, DbError>> + use<E, R> {
@@ -175,6 +235,9 @@ impl<E: Entity> EntityQuery<E> {
     }
 
     /// Count matching visible rows independently of ordering and page bounds.
+    ///
+    /// # Errors
+    /// Refuses invalid queries, changed metadata, expired transactions, or database failures.
     pub fn count(mut self) -> impl Future<Output = Result<i64, DbError>> + use<E> {
         self.options.limit = None;
         self.options.offset = None;
@@ -190,5 +253,20 @@ impl<E: Entity> EntityQuery<E> {
                 .next()
                 .ok_or_else(|| DbError::internal("count returned no row"))
         }
+    }
+
+    /// Test matching visible rows independently of ordering and page bounds.
+    ///
+    /// # Errors
+    /// Refuses invalid filters, changed metadata, expired transactions, or database failures.
+    pub fn exists(mut self) -> impl Future<Output = Result<bool, DbError>> + use<E> {
+        self.options.limit = Some(1);
+        self.options.offset = None;
+        self.order.clear();
+        let work = self
+            .into_builder()
+            .and_then(|builder| builder.select(Presence))
+            .map(ReadBuilder::all);
+        async move { Ok(!work?.await?.is_empty()) }
     }
 }
