@@ -4,7 +4,11 @@
 #![allow(clippy::future_not_send)]
 
 use crate::common::{self, CapturingMailer, auth_server::AuthServer};
-use zeroship_auth::{csrf, store::sessions};
+use zeroship_auth::{
+    csrf,
+    store::{sessions, users},
+};
+use zeroship_core::UserId;
 
 pub(super) struct RequestedLogin {
     pub csrf: String,
@@ -236,4 +240,38 @@ pub(super) async fn assert_login_rejected(response: cyper::Response) {
     );
     assert!(common::read_set_cookie(&response, "__Host-zsidp_session").is_none());
     assert!(response.text().await.unwrap().contains("session expired"));
+}
+
+pub(super) async fn soft_lock(server: &AuthServer, user_id: &UserId) {
+    for _ in 0..users::lockout::THRESHOLD {
+        users::record_login_failure(&server.pg, user_id)
+            .await
+            .unwrap();
+    }
+    let locked: bool = server
+        .pg
+        .query_one(
+            "SELECT locked_until > NOW() FROM zeroship.users WHERE id = $1",
+            &[&user_id.as_str()],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert!(locked, "recovery starts from a locked account");
+}
+
+pub(super) async fn assert_lock_cleared(server: &AuthServer, user_id: &UserId) {
+    let row = server
+        .pg
+        .query_one(
+            "SELECT failed_login_count, locked_until IS NULL FROM zeroship.users WHERE id = $1",
+            &[&user_id.as_str()],
+        )
+        .await
+        .unwrap();
+    assert_eq!(row.get::<_, i32>(0), 0);
+    assert!(
+        row.get::<_, bool>(1),
+        "magic login clears the password lock"
+    );
 }

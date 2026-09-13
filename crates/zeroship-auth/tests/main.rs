@@ -16,7 +16,6 @@
 mod common;
 
 mod account_deletion_test;
-mod account_lockout_test;
 mod audit_retention_test;
 mod check_config_smtp_test;
 mod cli_device_refresh_test;
@@ -41,6 +40,7 @@ mod oidc_login_consent_test;
 mod oidc_refresh_token_test;
 mod oidc_token_client_auth_test;
 mod oidc_userinfo_test;
+mod password_login;
 mod password_reset;
 mod password_test;
 mod postmark_webhook_test;
