@@ -1995,6 +1995,10 @@ native shutdown joins. A caller that abandons the consumer future must drain it
 before discarding it; restarting consumption also drains first. Other free slots
 may serve current bindings. Manager and creator fences remain authoritative when
 an old and replacement attempt overlap across different slots or workers.
+Retirement is retained by the `ConsumerScope` identity, including external clones.
+Reapplying a cached snapshot cannot restore a scope rejected by manager authority
+or removed by the host. Fresh host authorization creates a new binding; ordinary
+refreshes preserve live bindings and do not interrupt their execution.
 
 Claim selection rotates between eligible apps with per-app idle and failure
 delays. Concurrent claim I/O for the same app is serialized locally; execution

@@ -47,6 +47,7 @@ struct ScopeBinding {
     app: AppWorkflows,
     selection: AssignedScope,
     executor: Rc<dyn TaskExecutor>,
+    retired: Cell<bool>,
 }
 
 impl ConsumerScope {
@@ -66,7 +67,17 @@ impl ConsumerScope {
             app,
             selection,
             executor,
+            retired: Cell::new(false),
         })))
+    }
+
+    /// Removal, replacement and rejected assignment authority retire this local
+    /// binding permanently, including clones retained outside the consumer.
+    /// A trusted host must authenticate authority again before constructing a
+    /// replacement. Transient transport errors do not retire the binding.
+    #[must_use]
+    pub fn is_retired(&self) -> bool {
+        self.0.retired.get()
     }
 }
 
@@ -101,7 +112,6 @@ type Stop<'a> = Shared<LocalBoxFuture<'a, ()>>;
 
 struct Scope {
     binding: ConsumerScope,
-    revoked: Cell<bool>,
     revoke: RefCell<Option<oneshot::Sender<()>>>,
     stopped: Stop<'static>,
     claiming: Cell<bool>,
@@ -113,7 +123,6 @@ impl Scope {
         let (revoke, stopped) = oneshot::channel();
         Self {
             binding,
-            revoked: Cell::new(false),
             revoke: RefCell::new(Some(revoke)),
             stopped: async {
                 let _ = stopped.await;
@@ -126,7 +135,7 @@ impl Scope {
     }
 
     fn revoke(&self) {
-        self.revoked.set(true);
+        self.binding.0.retired.set(true);
         if let Some(revoke) = self.revoke.borrow_mut().take() {
             let _ = revoke.send(());
         }
@@ -171,6 +180,8 @@ impl ConsumerBindings {
     /// Replace the complete authorized snapshot atomically. Reusing a cloned
     /// `ConsumerScope` keeps its executions; a new binding joins old execution
     /// before its occupied slot may claim again. Other free slots remain usable.
+    /// Retired clones stay retired even if removed and later reinserted; renewed
+    /// authority requires a newly constructed `ConsumerScope`.
     /// This does not retire the manager's durable recovery responsibility.
     ///
     /// # Errors
@@ -194,7 +205,7 @@ impl ConsumerBindings {
             let scope = state
                 .scopes
                 .get(&app)
-                .filter(|old| !old.revoked.get() && Rc::ptr_eq(&old.binding.0, &binding.0))
+                .filter(|old| Rc::ptr_eq(&old.binding.0, &binding.0))
                 .cloned()
                 .unwrap_or_else(|| Rc::new(Scope::new(binding)));
             next.insert(app, scope);
@@ -212,7 +223,7 @@ impl ConsumerBindings {
         let mut state = self.0.borrow_mut();
         let now = Instant::now();
         let eligible = |(_, scope): &(&AppId, &Rc<Scope>)| {
-            !scope.revoked.get() && !scope.claiming.get() && scope.ready_at.get() <= now
+            !scope.binding.is_retired() && !scope.claiming.get() && scope.ready_at.get() <= now
         };
         let selected = state
             .scopes
@@ -379,7 +390,7 @@ async fn run_slot<T: JobTransport>(
             failed(&scope, options, &WorkflowServiceError::PermissionDenied);
             continue;
         }
-        if scope.revoked.get() {
+        if scope.binding.is_retired() {
             continue;
         }
         if lease

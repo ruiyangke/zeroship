@@ -16,6 +16,7 @@ struct Queue {
     events: flume::Sender<Event>,
     responses: flume::Receiver<Event>,
     claim_gate: RefCell<Option<oneshot::Receiver<()>>>,
+    claim_error: RefCell<Option<WorkflowServiceError>>,
 }
 impl Queue {
     fn new(jobs: impl IntoIterator<Item = Lease>) -> Rc<Self> {
@@ -27,6 +28,7 @@ impl Queue {
             events,
             responses,
             claim_gate: RefCell::new(None),
+            claim_error: RefCell::new(None),
         });
         for job in jobs {
             queue.push(job);
@@ -61,6 +63,9 @@ impl JobTransport for Queue {
         let gate = self.claim_gate.borrow_mut().take();
         if let Some(gate) = gate {
             let _ = gate.await;
+        }
+        if let Some(error) = self.claim_error.borrow_mut().take() {
+            return Err(error);
         }
         Ok(self
             .jobs
@@ -337,6 +342,73 @@ async fn unchanged_snapshot_does_not_cancel_execution_and_invalid_snapshot_is_at
     assert!(fixture.probe.creator_renewed.get());
     assert_eq!(fixture.probe.starts.get(), 1);
     assert_eq!(fixture.task_state().await, "completed");
+}
+
+#[compio::test]
+async fn cached_snapshots_cannot_restore_retired_assignment_authority() {
+    for error in [
+        WorkflowServiceError::PermissionDenied,
+        WorkflowServiceError::Unauthenticated,
+        WorkflowServiceError::Conflict("assignment retired".into()),
+    ] {
+        let first = Fixture::new(AppPolicy::default()).await;
+        let mut second = Fixture::new(AppPolicy::default()).await;
+        second.lease.delivery.worker_id = first.lease.delivery.worker_id.clone();
+        let queue = Queue::new([first.lease.clone(), second.lease.clone()]);
+        queue.claim_error.replace(Some(error));
+        let original = scope(&first, 1);
+        let survivor = scope(&second, 1);
+        let (mut host, bindings) = consumer(
+            queue.clone(),
+            &first.lease.delivery.worker_id,
+            1,
+            vec![original.clone()],
+        );
+        let shutdown = async {
+            while !original.is_retired() {
+                compio::time::sleep(Duration::from_millis(1)).await;
+            }
+            bindings
+                .replace(vec![original.clone(), survivor.clone()])
+                .unwrap();
+            queue.settlements(1).await;
+            assert_eq!(first.probe.starts.get(), 0);
+            assert_eq!(second.probe.starts.get(), 1);
+            assert!(original.is_retired());
+
+            // A host cache can outlive removal from the consumer's snapshot.
+            bindings.replace(vec![survivor.clone()]).unwrap();
+            bindings
+                .replace(vec![original.clone(), survivor.clone()])
+                .unwrap();
+            let claims_before = queue.claims.borrow().len();
+            while queue.claims.borrow().len() < claims_before + 2 {
+                compio::time::sleep(Duration::from_millis(1)).await;
+            }
+            assert_eq!(
+                queue
+                    .claims
+                    .borrow()
+                    .iter()
+                    .filter(|claim| &claim.app_id == first.app.app_id())
+                    .count(),
+                1,
+                "cached retired bindings cannot claim again"
+            );
+            assert_eq!(first.probe.starts.get(), 0);
+
+            // Trusted host acceptance creates a new local binding even when
+            // the manager still assigns the same placement revision.
+            let refreshed = scope(&first, 1);
+            assert!(!refreshed.is_retired());
+            bindings.replace(vec![refreshed, survivor.clone()]).unwrap();
+            queue.settlements(1).await;
+        };
+        finished(host.run_until(shutdown)).await;
+        assert_eq!(first.probe.starts.get(), 1);
+        assert_eq!(first.task_state().await, "completed");
+        assert!(original.is_retired());
+    }
 }
 
 #[compio::test]
