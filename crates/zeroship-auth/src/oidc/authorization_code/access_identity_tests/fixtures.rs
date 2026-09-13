@@ -1,4 +1,4 @@
-use super::super::{Issuer, OAuthClient, SessionKind, ValidatedSession, load_client, refresh};
+use super::super::{load_client, refresh, Issuer, OAuthClient, SessionKind, ValidatedSession};
 use crate::{session_store::SessionSecretKeys, store::users, test_database::Database};
 use compio_postgres::Transaction;
 use zeroship_core::UserId;
