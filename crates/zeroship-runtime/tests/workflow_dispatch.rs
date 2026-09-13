@@ -106,3 +106,5 @@ fn unawaited_step_frontier_fails_closed() {
         "workflow result: {result}"
     );
 }
+
+mod workflow_lookup;
