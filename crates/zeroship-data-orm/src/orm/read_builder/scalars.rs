@@ -1,11 +1,14 @@
 use super::*;
 use crate::sql::{AggregateFunc, AggregateRef};
 
+type LiteralEncoder = fn(Value) -> Result<Option<crate::sql::Literal>, DbError>;
+
 /// A scalar projection with a native result decoder and typed comparison input.
 #[derive(Debug)]
 pub struct ScalarSelection<S, R> {
     expression: Operand,
     decode: fn(Value) -> Result<R, DbError>,
+    encode_literal: LiteralEncoder,
     origin: Option<ReadOrigin>,
     sql_type: PhantomData<fn() -> S>,
 }
@@ -22,9 +25,18 @@ impl<S, R> ScalarSelection<S, R> {
         Self {
             expression,
             decode,
+            encode_literal: |value| {
+                crate::sql::Literal::try_from_value(value)
+                    .map_err(|error| read::invalid(error.to_string()))
+            },
             origin,
             sql_type: PhantomData,
         }
+    }
+
+    fn with_literal_encoder(mut self, encoder: LiteralEncoder) -> Self {
+        self.encode_literal = encoder;
+        self
     }
 
     fn compare<T: IntoReadOperand<S, K>, K>(
@@ -36,10 +48,7 @@ impl<S, R> ScalarSelection<S, R> {
             self.expression.clone(),
             op,
             self.origin.iter().cloned().collect(),
-            |value| {
-                crate::sql::Literal::try_from_value(value)
-                    .map_err(|error| read::invalid(error.to_string()))
-            },
+            self.encode_literal,
         )
     }
 
@@ -147,6 +156,7 @@ impl<C: ReadableColumn> SourceColumn<C> {
             R::decode_value,
             Some(self.origin.clone()),
         )
+        .with_literal_encoder(predicates::literal::<C>)
     }
 
     /// Decode a possibly absent joined column as an optional scalar.
@@ -158,6 +168,7 @@ impl<C: ReadableColumn> SourceColumn<C> {
             <Option<R> as DecodeValue<sql_types::Nullable<C::SqlType>>>::decode_value,
             Some(self.origin.clone()),
         )
+        .with_literal_encoder(predicates::literal::<C>)
     }
 
     fn aggregate(&self, function: AggregateFunc, distinct: bool) -> Operand {
