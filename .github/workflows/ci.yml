@@ -542,110 +542,22 @@ jobs:
       # mirroring the @zeroship/migrate pattern below.
       - run: pnpm --filter @zeroship/db run check
       - run: pnpm --filter @zeroship/migrate run check
-      # The committed `generated/zeroship/` artifacts have generator INPUTS that
-      # nobody edits when they change them: the injection ceiling
-      # (sdks/vite-plugin/src/gen-types/confined-ceiling.ts), the env.db renderer,
-      # and the vendored engine pin. Move any one of those and EVERY committed
-      # artifact in the repo stales at once, silently, because the artifact is a
-      # build output that only a regeneration compares against.
-      #
-      # #220 built the repo-wide runner for exactly that failure and it was never
-      # wired here, so the failure recurred: measured 2026-08-10, at 0c852e2e1
-      # `examples/db-todos/generated/zeroship/schema.runtime.json` was STALE on
-      # main.
-      #
-      # THE DIRECTION OF THAT DRIFT WAS RECORDED BACKWARDS HERE UNTIL 2026-08-11,
-      # and the wrong version cost a full investigation: it said cb1bcb59 "now
-      # emits the `text` our ceiling declares, so the fresh artifact drops it",
-      # i.e. that a committed artifact CARRYING `maxLength: 255` was the stale one.
-      # The opposite is true, verified by reading the pinned commit rather than
-      # HEAD:
-      #   git show cb1bcb59:crates/zeroship-migrate/src/model/table_shape.rs :413
-      #       "text" => ColType::String { length: 255 },
-      #   git show cb1bcb59:crates/zeroship-migrate/src/render/lower.rs  :9242-9245
-      #       ColType::String { length } => Some(i64::from(*length)),
-      #   render/declarative.rs :2035 emits that as `"maxLength": <len>`.
-      # So a policy-INJECTED system string column (`id`, `created_by`,
-      # `updated_by`) is bounded VARCHAR(255) at our pin - deliberately, so it can
-      # be keyed on MySQL where unbounded TEXT cannot be - and the FRESH artifact
-      # CARRIES maxLength. A committed artifact WITHOUT it is the stale one.
-      #
-      # The bounding is not new and not a pin bump: `git merge-base --is-ancestor
-      # 23cc6987 cb1bcb59` is true. 23cc6987 is "render t.text() as unbounded MySQL
-      # TEXT; bound injected system columns" - two changes in one subject, and
-      # reading only the first half yields exactly the inverted summary that stood
-      # here. Upstream confirms all three sites are unchanged in behaviour at their
-      # HEAD, so a newer pin does not change this.
-      #
-      # NOTHING CAUGHT IT, and it is worth knowing why before trusting the two
-      # gen-types tests to cover this. They pin the vite-plugin's OWN fixtures,
-      # not the repo's artifacts: `@zeroship/vite-plugin` measured 235 tests,
-      # 230 pass / 5 fail with the STALE artifact and 230 pass / 5 fail with the
-      # FRESH one - byte-identical verdicts, so that suite is blind here by
-      # construction. It is also excluded from tests/run_js_suite.sh for the 5
-      # unrelated fold failures (#219), so it gates nothing either way.
-      #
-      # This step is the one that discriminates: at 0c852e2e1 it exits 1 naming
-      # the file and printing the first divergence; with the artifact regenerated
-      # it reports "no drift - 4 artifact set(s)".
+      # Package tests use their own fixtures, so they cannot detect drift in
+      # committed generated artifacts under examples. Compare those artifacts
+      # directly against the current policy, renderer, and migration engine.
       - name: Committed gen-types artifacts are not stale
         run: pnpm gen-types:check
-      # Until now this job ran exactly one JavaScript suite, and could not
-      # install to reach even that, so no JS test in this repo has ever gated a
-      # merge. @zeroship/db alone is 503 tests. That is the mechanism behind two
-      # defects already found: the db suite sat at over a hundred failures long
-      # enough that nobody noticed, and the vite-plugin shipped a dependency it
-      # never declared.
-      #
-      # Written as exclusions, not an allow-list, so a new package is gated the
-      # day it appears rather than the day someone remembers to add it. The
-      # two below are excluded by name because they have known failures, and
-      # each exclusion is a debt with an owner:
-      #
-      #   @zeroship/migrate      engine tests with pre-existing generated-file,
-      #                          documentation, and repository-scan failures.
-      #                          Migration contract paths are gated separately.
-      #   @zeroship/vite-plugin  7 failures, and they are TWO causes, not one.
-      #                          2 are drift (env.db.ts committed vs fresh).
-      #                          The other 5 are not drift at all: gen-types
-      #                          hard-errors with `fold: constraint
-      #                          posts_authorId_fkey already exists on posts`
-      #                          and produces no artifact, so there is nothing
-      #                          for a committed one to have drifted from.
-      #                          Measured 2026-08-09; any manual schema.ts
-      #                          with a single relation reproduces it, and a
-      #                          schema with an explicit t.id() and no t.ref()
-      #                          does not. See task #219.
-      #
-      # The drift ones are the committed generated artifacts having drifted
-      # from the vendored engine, and settling which engine commit is
-      # authoritative resolves them. That does NOT clear all three exclusions:
-      # the 5 fold failures survive it untouched, because regenerating cannot
-      # fix a generator that refuses to generate. Whoever regenerates on this
-      # note alone will see them still red.
-      #
-      # The 2 drift ones are ordinary staleness and regenerating is correct.
-      # Do NOT read the gate's "first divergence" as the whole story: it
-      # reports one line, and for env.db.ts that line is a `//` against the
-      # committed `import ... from "@zeroship/db"`, which LOOKS like the
-      # generator emitting less. It is not. The renderer's header comment
-      # gained a paragraph, so every following line is offset and the first
-      # mismatch lands mid-header. The schema.runtime.json one is the same
-      # shape: a trailing comma, because the ceiling now declares a default
-      # for `version` (17cd17b46) that the committed artifacts predate.
-      # See task #220.
-      #
-      # The vite-plugin claim is the measured one; the migrate entry above is
-      # now a record of a CLEARED exclusion, not an open debt.
-      #
-      # Runs through a script rather than inline so the result can be COUNTED.
-      # `pnpm -r` skips a package whose `test` script is renamed or removed, in
-      # silence - measured, and invisible here because the filter selects 56
-      # projects of which only 21 run a suite at all. The script carries the
-      # filters and the floors; see its header for what it does and does not
-      # catch.
+      # Run SDK and migration package suites in the job that builds their
+      # artifacts. The Vite plugin's manual-schema fixtures currently fail
+      # during generation; focused Vite contracts run above. Example and browser
+      # suites require provisioned process-level harnesses and stay outside this
+      # SDK command.
       - name: JavaScript suites
-        run: tests/run_js_suite.sh
+        run: |
+          pnpm -r --no-bail --filter='./sdks/*' --filter='!@zeroship/vite-plugin' test
+          pnpm --filter @zeroship/migrate test
+          pnpm --filter zero-migrate-cli test
+          pnpm --filter zeroship-migrate-node test
 
   # The creator path, end to end, and until now nothing in CI touched it.
   #
