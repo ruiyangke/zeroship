@@ -22,6 +22,7 @@ use zeroship_data_orm::Value;
 
 mod catalog;
 mod error;
+pub mod latest;
 mod local;
 pub use error::Error;
 

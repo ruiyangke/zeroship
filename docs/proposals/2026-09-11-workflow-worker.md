@@ -1312,13 +1312,18 @@ partial restart is invalid. Derive these effective policies before constructing
 the delivery prerequisite; checking only an explicit deployment option would
 misclassify a default restart.
 
-The planned latest-deployment source uses native ORM over the platform catalog:
-join `zeroship.apps.deploy_hash` to the same app's available `app_deploys` row and
-return its typed deployment identity and validated hash. Calendar activation
-history and activation timestamps cannot select the ordinary live deployment.
-Give the manager only the source columns required by this query, with readiness
-checks for those grants. This source needs no creator database or run metadata;
-the creator checks workflow membership when preparing the frozen target.
+`deployments::latest::LatestDeploymentSource` now uses a native ORM join over the
+platform catalog: match `zeroship.apps.deploy_hash` to the same app's `app_deploys`
+row and return its typed deployment identity and validated hash only when
+available. Missing or unavailable targets refuse without a history fallback;
+malformed matched identities, hashes or retention states are storage failures.
+Calendar activation history and activation timestamps cannot select the ordinary
+live deployment. This reader acquires no lock or hold and grants no admission
+authority. PostgreSQL and SQLite tests exercise app isolation, moving pointers,
+unavailable targets, malformed storage and refusal of source writes. Give the
+manager only the source columns required by this query, with readiness checks for
+those grants. This source needs no creator database or run metadata; the creator
+checks workflow membership when preparing the frozen target.
 
 Latest is observed during the acceptance attempt. It does not promise that the
 app pointer remains unchanged at the later manager commit. Under the manager app
@@ -1328,8 +1333,8 @@ then reacquire the lock and repeat receipt matching before atomically inserting
 the resolved command, job, order and barrier. Require the confirmed hold for that
 same target before accepting. Source or retention failure before acceptance is
 retryable; a committed receipt bypasses current-deployment lookup. Preserve raw
-request identity separately from effective restart normalization. The source,
-grants and acceptance composition remain to be implemented.
+request identity separately from effective restart normalization. Platform grants,
+host readiness and acceptance composition with the reader remain to be implemented.
 
 For a started restart, "started" means the deployment of the source generation
 when that command applies, including a generation created by an earlier ordered
@@ -2026,9 +2031,10 @@ Deployment prerequisites belong to executable operations, with an optional nativ
 queue projection checked against the operation and immutable digest. Recovery
 keeps activation provenance without retaining its bundle; pending recovery jobs
 must decode as reconciliation. Closed management commands carry the management
-revision and resolved restart policy. Authoritative latest-target selection,
-ordered acceptance, lifecycle outcomes and delivered management/collection handlers
-remain pending.
+revision and resolved restart policy. The native current-deployment reader is
+implemented; its platform grants and composition into authoritative acceptance,
+ordered delivery, lifecycle outcomes and management/collection handlers remain
+pending.
 Canonical parent primary keys eliminate the conflicting duplicate identities in
 concurrent first registration. Native PostgreSQL/SQLite coordinator and queue
 contracts, authenticated server processes, actual platform migration/grants and
