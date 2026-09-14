@@ -1301,8 +1301,8 @@ database_url = "postgres://operator-mounted-secret"
         .is_err());
 
         // Does NOT cover the CLI `-file` flag arm, which is asserted below, nor
-        // whether a real binary routes --check-config to CheckConfig mode; that
-        // is the macro's job and tests/config_check_e2e.sh proves it end to end.
+        // whether a real binary routes --check-config to CheckConfig mode. The
+        // owning service crates cover that in process-level integration tests.
     }
 
     #[test]

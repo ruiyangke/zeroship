@@ -28,7 +28,7 @@ import { byteValue, decimal, ids, lit, table, t, uuidV4 } from "@zeroship/migrat
 import { noInjectPolicy } from "./policy.js";
 
 
-// The host suite's addon is resolved and freshness-checked in one place.
+// The host suite builds and resolves its addon in one place.
 import "./addon.js";
 import { MYSQL_URL_ENV, requireLiveDb } from "./live-db.js";
 

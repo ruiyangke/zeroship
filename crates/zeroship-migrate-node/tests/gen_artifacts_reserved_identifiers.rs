@@ -42,7 +42,7 @@ use zeroship_migrate_node::wire::GenArtifactsReply;
 /// The platform-wide injection fragment, taken from the SAME file the TypeScript
 /// ceiling is generated from. Rust `include_str!`s it; `policies/codegen.mjs` mirrors
 /// it into `packages/vite-plugin/src/gen-types/confined-system-shape.generated.ts`, and
-/// `tests/inject_policy_mirror_gate.sh` byte-compares the two.
+/// `pnpm gen-types:check` byte-compares the two.
 const CONFINED_SYSTEM_SHAPE_INJECT_TOML: &str =
     include_str!("../../../policies/confined-system-shape.inject.toml");
 

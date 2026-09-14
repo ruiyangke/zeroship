@@ -64,6 +64,28 @@ pub struct Page {
     pub more: bool,
 }
 
+/// An app's current calendar lifecycle state. The platform chooses the next
+/// activation revision above `revision`; retries of an accepted activation
+/// reuse their original revision instead.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Selection {
+    /// The highest activation or disable revision accepted for the app.
+    pub revision: Revision,
+    pub enabled: bool,
+    /// The most recently selected activation, retained while disabled.
+    pub activation: Option<SelectedActivation>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SelectedActivation {
+    /// The stable activation job that delivers creator readiness.
+    pub job: JobSpec,
+    pub deployment_id: DeploymentId,
+    pub revision: Revision,
+    /// The activation job settled as completed, so its occurrences may dispatch.
+    pub ready: bool,
+}
+
 #[derive(FromRow)]
 #[orm(entity = schedule_deployments)]
 struct Prepared {
@@ -497,6 +519,47 @@ impl Scheduler {
                 }
             }
         }
+    }
+
+    /// Read the app's current calendar selection and its activation readiness
+    /// under the app lock. An app without scheduling state has no selection.
+    ///
+    /// # Errors
+    /// Reports malformed stored selections and unavailable manager storage.
+    pub async fn selection(&self, app: &AppId) -> Result<Option<Selection>, Error> {
+        use zeroship_core::workflow_jobs::JobOutcome;
+        self.queue
+            .transact(|tx| async move {
+                match queue::lock_scope(&tx, app).await {
+                    Ok(()) => {}
+                    Err(Error::Denied) => return Ok(None),
+                    Err(error) => return Err(error),
+                }
+                let Some(scope) = active(&tx, app).await? else {
+                    return Ok(None);
+                };
+                let activation = if let Some(id) = &scope.activation_id {
+                    let activation = load_activation(&tx, app, id).await?;
+                    let job = activation_job(&tx, app, &activation).await?;
+                    let completed = serde_json::to_string(&JobOutcome::Completed {})
+                        .map_err(|_| Error::Storage)?;
+                    Some(SelectedActivation {
+                        deployment_id: DeploymentId::parse(&activation.deployment_id)
+                            .map_err(|_| Error::Storage)?,
+                        revision: activation.revision.try_into().map_err(|_| Error::Storage)?,
+                        ready: job.state == "settled" && job.outcome.as_deref() == Some(&completed),
+                        job: job.spec()?,
+                    })
+                } else {
+                    None
+                };
+                Ok(Some(Selection {
+                    revision: scope.revision.try_into().map_err(|_| Error::Storage)?,
+                    enabled: scope.enabled,
+                    activation,
+                }))
+            })
+            .await
     }
 
     async fn restore(

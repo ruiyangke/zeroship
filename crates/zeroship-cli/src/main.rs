@@ -338,7 +338,7 @@ fn cmd_serve(args: &[String]) {
         &std::env::current_dir().expect("project directory"),
         dev_app_id.clone(),
         workflow_config,
-        is_archive.then(|| input_path.clone()),
+        is_archive.then_some(input_path.as_path()),
         zeroship_workflow::service::store::HostStorage {
             connection: database.connection().clone(),
             keys: zeroship_data_orm::encryption::ProjectKeySource::supplied(
@@ -366,7 +366,7 @@ fn cmd_serve(args: &[String]) {
         eprintln!("[zeroship] workflows: {error}");
         std::process::exit(1);
     });
-    plugins.push(Arc::new(workflow_host.binding.clone()));
+    plugins.push(Arc::new(workflow_host.binding()));
     let modules = if is_archive && dev_bootstrap.is_none() {
         let executable = workflow_host
             .executable
@@ -394,7 +394,7 @@ fn cmd_serve(args: &[String]) {
         modules
     };
     eprintln!(
-        "[zeroship] workflow worker ready (app={})",
+        "[zeroship] workflow host ready (app={})",
         workflow_host.app.as_str()
     );
 
@@ -1269,11 +1269,8 @@ pub(crate) fn check_unknown_serve_flags(args: &[String]) -> Result<(), String> {
 /// This is the set `cmd_deploy` actually CONSUMES, read off the call sites
 /// rather than off the usage string: `--app=` and `--control=` via `flag_str`,
 /// `--token=` via `resolve_bearer_token`, `--no-create` via
-/// `deploy_auto_create`. Keeping it derived from behaviour matters because the
-/// usage string is a second expression of the same contract, and the gate that
-/// checks shipped deploy instructions (`tests/deploy_instructions_gate.sh`)
-/// already reads THAT - so if this list ever drifts, it should drift against
-/// the parser, not against the prose.
+/// `deploy_auto_create`. Keep this list aligned with those parser branches;
+/// native parser tests cover accepted and rejected argument forms.
 const DEPLOY_KNOWN_FLAGS: &[&str] = &[
     "--app",
     "--app-name",

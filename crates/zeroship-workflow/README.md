@@ -164,8 +164,8 @@ joining execution. Cancellation also retires the host; explicit `drain` joins
 retained slots, and the same host cannot become ready again. The host does not
 release assignments or discharge manager recovery responsibility.
 Production enrollment, trusted creator resource providers, remaining delivered
-operation handlers and ordinary worker/CLI composition remain required before
-replacing the existing runner.
+operation handlers and production worker composition remain required before
+replacing the production runner. The local CLI host already runs the consumer.
 `zeroship-worker::workflow_creator::WorkflowCreatorFactory` assembles the creator
 ORM journal, payload storage, retained app artifacts and V8 executor from an
 injected `WorkflowResourceProvider`. It verifies app and schema identity before
@@ -360,25 +360,19 @@ named occurrence in the run's current generation. The service resolves that
 generation under the restart fence and checks reference ownership before
 opening storage. `PayloadRead::into_bytes` verifies the stream within a host
 memory limit. `into_backend` adapts the app handle to `WorkflowBackend`;
-its bound identity cannot change between operations.
+its bound identity cannot change between operations. `AppBackend::with_commit_hint`
+tells the trusted host when a start, signal, transition or restart finished, so
+the host can publish that commit's pending intents at once; manager
+reconciliation still recovers any intent the host misses. The hint carries no
+customer data.
 Task hosts instead use `runner::TaskPayloadReader`: it captures the assignment's
 journal, resolves named occurrences in that snapshot and reads referenced
 objects through the live task lease. `WorkerTasks` implements the
-payload read/write contract alongside the local task protocol.
-Until local host composition uses the manager's delivery loop,
-`runner::WorkflowWorker` drives bounded task slots and expired
-payload collection on its host's compio thread. Background discovery selects
-only host-assigned apps before applying batch limits; customer journal rows
-cannot register apps with the host. Expired assignments still permit lease and
-payload cleanup, while current policy is checked again before mutation.
-The loop keeps working without a
-request isolate, retries failed attempts with a delay, and bounds task polling
-and maintenance I/O. Shutdown cancels active execution and waits for it to stop
-before releasing claims. A cancelled host future must be drained before its
-slots are discarded or reused. `WorkerOptions` supplies the host limits, and
-construction requires customer payload and executable storage. The CLI starts
-this loop on a dedicated thread and supplies a persisted project identity.
-Production worker composition remains unfinished.
+payload read/write contract alongside the task protocol that `RunnerSlot` and
+executor tests exercise. Hosts run workflow work only through delivered jobs:
+`zeroship serve` feeds `runner::consumer::JobConsumer` from the native manager
+and has no journal polling or maintenance loop. Production worker composition
+remains unfinished.
 `runner::PreparedExecution` decodes runtime outcomes, leaves small values inline
 and prepares task-scoped uploads for large or explicitly referenced results.
 It retains upload request identities across retries, checks returned descriptors

@@ -19,8 +19,11 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
+use zeroship_config_contract::contract::validate_contract;
 use zeroship_config_contract::metadata::{extract_workspace, TargetClass};
-use zeroship_config_contract::registry::{declared_binaries, platform_specs, DECLARING_BINARIES};
+use zeroship_config_contract::registry::{
+    declared_binaries, platform_read_sites, platform_specs, DECLARING_BINARIES,
+};
 
 // There is no list of exempt platform targets here any more, and there is not
 // meant to be one. Until 2026-08-21 this file carried
@@ -124,4 +127,13 @@ fn every_declaring_binary_actually_contributes_declarations() {
         "the binaries appearing in the LINKED declarations and the \
          DECLARING_BINARIES list disagree"
     );
+}
+
+#[test]
+fn platform_declarations_match_their_compiled_readers() {
+    let specs = platform_specs();
+    let read_sites = platform_read_sites();
+
+    validate_contract(&specs, &read_sites)
+        .expect("the platform declarations and compiled readers must agree");
 }

@@ -1,63 +1,71 @@
-//! The Redpanda adapter against a REAL broker.
-//!
-//! `REDPANDA_BROKERS` IS REQUIRED. These used to skip when it was unset, which
-//! made the only coverage of the durable usage-event transport green on every
-//! machine that had never started a broker. `brokers()` panics instead, and
-//! carries the `docker run` that stands one up.
+//! The Redpanda adapter against a real broker owned by this test binary.
 
 use std::collections::BTreeMap;
+use std::net::{Ipv4Addr, TcpListener};
+use std::sync::OnceLock;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use futures::executor::block_on;
 use serde_json::json;
+use testcontainers::core::{IntoContainerPort, WaitFor};
+use testcontainers::{runners::SyncRunner, Container, GenericImage, ImageExt};
 use zeroship_stream::adapters;
 use zeroship_stream::{StreamConfig, StreamOffset, StreamRegistry};
 
-/// The broker list these tests produce to and consume from.
-///
-/// NO SCRIPT IN THIS TREE PROVISIONS A STANDALONE BROKER for a `cargo test`
-/// run. `tests/provision_test_backends.sh` stands up postgres and redis only,
-/// and `tests/e2e_metering_billing.sh` starts a Redpanda of its own per run and
-/// tears it down again, so it cannot be borrowed. The recipe below is that
-/// script's, with a fixed port and container name.
-///
-/// # Panics
-///
-/// When `REDPANDA_BROKERS` is unset or empty, with that recipe.
+struct Redpanda {
+    _container: Container<GenericImage>,
+    brokers: String,
+}
+
+impl Redpanda {
+    fn start() -> Self {
+        let port = available_port();
+        let advertised = format!("external://127.0.0.1:{port}");
+        let container = GenericImage::new("docker.redpanda.com/redpandadata/redpanda", "v26.2.2")
+            .with_wait_for(WaitFor::message_on_stderr("Successfully started Redpanda!"))
+            .with_mapped_port(port, 19092.tcp())
+            .with_cmd([
+                "redpanda".to_owned(),
+                "start".to_owned(),
+                "--overprovisioned".to_owned(),
+                "--smp".to_owned(),
+                "1".to_owned(),
+                "--memory".to_owned(),
+                "512M".to_owned(),
+                "--reserve-memory".to_owned(),
+                "0M".to_owned(),
+                "--node-id".to_owned(),
+                "0".to_owned(),
+                "--check=false".to_owned(),
+                "--kafka-addr".to_owned(),
+                "external://0.0.0.0:19092".to_owned(),
+                "--advertise-kafka-addr".to_owned(),
+                advertised,
+                "--set".to_owned(),
+                "redpanda.auto_create_topics_enabled=true".to_owned(),
+            ])
+            .with_startup_timeout(Duration::from_secs(120))
+            .start()
+            .expect("stream tests require Docker and Redpanda");
+        Self {
+            _container: container,
+            brokers: format!("127.0.0.1:{port}"),
+        }
+    }
+}
+
+fn available_port() -> u16 {
+    TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+        .expect("bind an available Redpanda port")
+        .local_addr()
+        .expect("Redpanda listener address")
+        .port()
+}
+
+static REDPANDA: OnceLock<Redpanda> = OnceLock::new();
+
 fn brokers() -> String {
-    let configured = zeroship_core::test_env_os!("REDPANDA_BROKERS")
-        .map(|value| value.to_string_lossy().to_string())
-        .unwrap_or_default();
-    assert!(
-        !configured.trim().is_empty(),
-        "A Redpanda broker is unreachable, and this test requires it.\n\
-         \n\
-         \x20 backend: Redpanda (Kafka-family), the durable usage-event stream\n\
-         \x20 missing: REDPANDA_BROKERS is unset or empty\n\
-         \n\
-         NOTHING IN THIS REPOSITORY PROVISIONS A BROKER FOR A CARGO RUN.\n\
-         `tests/provision_test_backends.sh` stands up postgres and redis only,\n\
-         and `tests/e2e_metering_billing.sh` starts a broker of its own and\n\
-         removes it again, so it cannot be borrowed. Start one yourself:\n\
-         \n\
-         \x20 docker run --name zs-stream-test-redpanda -d -p 19092:19092 \\\n\
-         \x20   docker.redpanda.com/redpandadata/redpanda:latest \\\n\
-         \x20   redpanda start --overprovisioned --smp 1 --memory 512M \\\n\
-         \x20   --reserve-memory 0M --node-id 0 --check=false \\\n\
-         \x20   --kafka-addr external://0.0.0.0:19092 \\\n\
-         \x20   --advertise-kafka-addr external://127.0.0.1:19092 \\\n\
-         \x20   --set redpanda.auto_create_topics_enabled=true\n\
-         \x20 docker exec zs-stream-test-redpanda rpk cluster health --exit-when-healthy\n\
-         \n\
-         The advertised listener is load-bearing: without it the broker hands\n\
-         back an address the client cannot dial, and the produce hangs rather\n\
-         than failing. Auto-create is too - each test invents its own topic.\n\
-         Then re-run with REDPANDA_BROKERS=127.0.0.1:19092.\n\
-         \n\
-         There is no environment variable that makes this a skip. A broker this\n\
-         test cannot reach is a failed run, not a green one."
-    );
-    configured
+    REDPANDA.get_or_init(Redpanda::start).brokers.to_owned()
 }
 
 #[test]
@@ -140,7 +148,10 @@ fn redpanda_roundtrip_preserves_per_key_order_and_commits_offsets() {
         let verifier = registry
             .build("redpanda", &config)
             .expect("redpanda verifier transport builds");
-        let after_commit = verifier.poll(events.len()).await.expect("poll after commit");
+        let after_commit = verifier
+            .poll(events.len())
+            .await
+            .expect("poll after commit");
         assert!(
             after_commit.is_empty(),
             "committed offsets should prevent replay for the same consumer group"
@@ -195,7 +206,11 @@ fn redpanda_rewind_replays_from_retained_beginning_after_commit() {
             .build("redpanda", &config)
             .expect("redpanda verifier transport builds");
         assert!(
-            verifier.poll(3).await.expect("poll after commit").is_empty(),
+            verifier
+                .poll(3)
+                .await
+                .expect("poll after commit")
+                .is_empty(),
             "committed group should not replay before rewind"
         );
 

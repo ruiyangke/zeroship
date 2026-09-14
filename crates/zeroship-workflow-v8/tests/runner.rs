@@ -976,9 +976,194 @@ async fn missing_executable_never_constructs_an_app_isolate() {
     assert!(tasks.poll().await.unwrap().is_none());
 }
 
+/// A native manager queue delivering to one trusted worker, as the CLI host
+/// composes it over the fixture's local platform file.
+struct Manager {
+    coordinator: zeroship_workflow_manager::coordinator::Coordinator,
+    worker: zeroship_core::workflow_coordination::WorkerId,
+    scope: zeroship_core::workflow_coordination::AssignedScope,
+}
+
+impl Manager {
+    async fn new(fixture: &Fixture) -> Rc<Self> {
+        use zeroship_core::workflow_coordination::{
+            AssignScope, AssignedScope, RegisterWorker, RequestId, WorkerId, WorkerState,
+        };
+        use zeroship_workflow_manager::coordinator::{Coordinator, Options};
+        let queue = fixture
+            .deployments
+            .platform
+            .queue(zeroship_workflow_manager::Options::default())
+            .await
+            .unwrap();
+        let coordinator = Coordinator::new(queue, Options::default()).unwrap();
+        let worker = WorkerId::mint();
+        coordinator
+            .register(
+                &worker,
+                &RegisterWorker {
+                    capacity: 1.try_into().unwrap(),
+                    state: WorkerState::Ready,
+                },
+            )
+            .await
+            .unwrap();
+        let assignment = coordinator
+            .assign(&AssignScope {
+                request_id: RequestId::mint(),
+                app_id: fixture.app.app_id().clone(),
+                worker_id: worker.clone(),
+                expected_revision: None,
+            })
+            .await
+            .unwrap();
+        Rc::new(Self {
+            coordinator,
+            worker,
+            scope: AssignedScope {
+                app_id: assignment.app_id,
+                assignment_revision: assignment.revision,
+            },
+        })
+    }
+
+    fn consumer(
+        self: &Rc<Self>,
+        fixture: &Fixture,
+        slots: usize,
+    ) -> zeroship_workflow::service::runner::consumer::JobConsumer<Self> {
+        use zeroship_workflow::service::{
+            collection::CollectionOptions,
+            fanout::FanoutOptions,
+            propagation::PropagationOptions,
+            reconciliation::ReconciliationOptions,
+            runner::{
+                consumer::{ConsumerOptions, ConsumerScope, JobConsumer},
+                delivery::DeliveryOptions,
+            },
+        };
+        let tasks = Rc::new(
+            fixture
+                .app
+                .tasks(WorkerIdentity::new(self.worker.as_str().to_owned()).unwrap()),
+        );
+        let executor = Rc::new(
+            V8TaskExecutor::new(fixture.loader.clone(), tasks, TaskPayloadLimits::default())
+                .unwrap(),
+        );
+        let consumer = JobConsumer::new(
+            self.clone(),
+            self.worker.clone(),
+            ConsumerOptions {
+                slots,
+                max_scopes: 1,
+                idle_poll: Duration::from_millis(5),
+                error_backoff: Duration::from_millis(10),
+                delivery: DeliveryOptions {
+                    execution_timeout: Duration::from_secs(10),
+                    operation_timeout: Duration::from_secs(2),
+                    retry_delay: Duration::from_millis(5),
+                    reconciliation: ReconciliationOptions::default(),
+                    collection: CollectionOptions::default(),
+                    fanout: FanoutOptions::default(),
+                    propagation: PropagationOptions::default(),
+                },
+            },
+        )
+        .unwrap();
+        consumer
+            .bindings()
+            .replace(vec![ConsumerScope::new(
+                fixture.app.clone(),
+                self.scope.clone(),
+                executor,
+            )
+            .unwrap()])
+            .unwrap();
+        consumer
+    }
+
+    /// Stand in for the host's immediate publication after creator commits.
+    async fn publish(&self, app: &AppWorkflows) {
+        for job in app.pending_jobs(None, 64).await.unwrap() {
+            app.publish_job(&job.id, self).await.unwrap();
+        }
+    }
+}
+
+fn manager_error(error: zeroship_workflow_manager::Error) -> WorkflowServiceError {
+    WorkflowServiceError::Unavailable(error.to_string())
+}
+
+impl zeroship_workflow::service::runner::delivery::JobTransport for Manager {
+    type Lease = zeroship_workflow_manager::DeliveryGrant;
+
+    async fn claim(
+        &self,
+        scope: &zeroship_core::workflow_coordination::AssignedScope,
+    ) -> Result<Option<Self::Lease>, WorkflowServiceError> {
+        self.coordinator
+            .claim_job(&self.worker, scope, || async { Ok(self.worker.clone()) })
+            .await
+            .map_err(manager_error)
+    }
+
+    async fn submit(
+        &self,
+        scope: &zeroship_core::workflow_coordination::AssignedScope,
+        job: &zeroship_core::workflow_jobs::JobSpec,
+    ) -> Result<zeroship_core::workflow_jobs::JobSpec, WorkflowServiceError> {
+        self.coordinator
+            .submit_job(
+                &self.worker,
+                &zeroship_core::workflow_jobs::SubmitJob {
+                    scope: scope.clone(),
+                    job: job.clone(),
+                },
+                || async { Ok(self.worker.clone()) },
+            )
+            .await
+            .map_err(manager_error)
+    }
+
+    async fn heartbeat(&self, lease: &Self::Lease) -> Result<Self::Lease, WorkflowServiceError> {
+        self.coordinator
+            .heartbeat_job(&self.worker, lease.delivery(), || async {
+                Ok(self.worker.clone())
+            })
+            .await
+            .map_err(manager_error)
+    }
+
+    async fn settle(
+        &self,
+        settlement: &zeroship_core::workflow_jobs::Settlement,
+    ) -> Result<zeroship_core::workflow_jobs::SettlementReceipt, WorkflowServiceError> {
+        self.coordinator
+            .settle_job(&self.worker, settlement, || async {
+                Ok(self.worker.clone())
+            })
+            .await
+            .map_err(manager_error)
+    }
+}
+
+impl zeroship_workflow::service::publication::JobPublisher for Manager {
+    fn app_id(&self) -> &AppId {
+        &self.scope.app_id
+    }
+
+    async fn submit(
+        &self,
+        job: &zeroship_core::workflow_jobs::JobSpec,
+    ) -> Result<zeroship_core::workflow_jobs::JobSpec, WorkflowServiceError> {
+        zeroship_workflow::service::runner::delivery::JobTransport::submit(self, &self.scope, job)
+            .await
+    }
+}
+
 #[compio::test]
-async fn persistent_worker_resumes_v8_without_a_request_isolate() {
-    use zeroship_workflow::service::runner::{WorkerOptions, WorkflowWorker};
+async fn delivered_jobs_resume_v8_without_a_request_isolate() {
     let fixture = Fixture::new(
         r"
         export class Example {
@@ -996,32 +1181,13 @@ async fn persistent_worker_resumes_v8_without_a_request_isolate() {
         .start(&RequestId::mint(), "Example", StartOptions::default())
         .await
         .unwrap();
-    let tasks = Rc::new(
-        fixture
-            .service
-            .tasks(WorkerIdentity::new("background-worker".into()).unwrap()),
-    );
-    let executor = Rc::new(
-        V8TaskExecutor::new(
-            fixture.loader.clone(),
-            tasks.clone(),
-            TaskPayloadLimits::default(),
-        )
-        .unwrap(),
-    );
-    let mut worker = WorkflowWorker::new(
-        tasks,
-        executor,
-        WorkerOptions {
-            idle_poll_ms: 5,
-            ..WorkerOptions::default()
-        },
-    )
-    .unwrap();
+    let manager = Manager::new(&fixture).await;
+    let mut consumer = manager.consumer(&fixture, 1);
     compio::time::timeout(
-        Duration::from_secs(5),
-        worker.run_until(async {
+        Duration::from_secs(10),
+        consumer.run_until(async {
             while fixture.app.status(&run.id).await.unwrap().state != RunState::Waiting {
+                manager.publish(&fixture.app).await;
                 compio::time::sleep(Duration::from_millis(5)).await;
             }
             fixture.assert_disposed().await;
@@ -1038,12 +1204,13 @@ async fn persistent_worker_resumes_v8_without_a_request_isolate() {
                 .await
                 .unwrap();
             while fixture.app.status(&run.id).await.unwrap().state != RunState::Completed {
+                manager.publish(&fixture.app).await;
                 compio::time::sleep(Duration::from_millis(5)).await;
             }
         }),
     )
     .await
-    .expect("background worker did not resume its durable signal wait");
+    .expect("delivered jobs did not resume the durable signal wait");
     assert_eq!(
         fixture.app.status(&run.id).await.unwrap().output,
         Some(json!({"accepted":true}))
@@ -1052,8 +1219,7 @@ async fn persistent_worker_resumes_v8_without_a_request_isolate() {
 }
 
 #[compio::test]
-async fn concurrent_worker_shutdown_disposes_every_v8_isolate() {
-    use zeroship_workflow::service::runner::{WorkerOptions, WorkflowWorker};
+async fn consumer_shutdown_disposes_every_concurrent_v8_isolate() {
     let fixture = Fixture::new(
         r"
         import { env } from 'zeroship';
@@ -1079,32 +1245,12 @@ async fn concurrent_worker_shutdown_disposes_every_v8_isolate() {
                 .id,
         );
     }
-    let tasks = Rc::new(
-        fixture
-            .service
-            .tasks(WorkerIdentity::new("concurrent-worker".into()).unwrap()),
-    );
-    let executor = Rc::new(
-        V8TaskExecutor::new(
-            fixture.loader.clone(),
-            tasks.clone(),
-            TaskPayloadLimits::default(),
-        )
-        .unwrap(),
-    );
-    let mut worker = WorkflowWorker::new(
-        tasks,
-        executor,
-        WorkerOptions {
-            task_slots: runs.len(),
-            idle_poll_ms: 5,
-            ..WorkerOptions::default()
-        },
-    )
-    .unwrap();
+    let manager = Manager::new(&fixture).await;
+    manager.publish(&fixture.app).await;
+    let mut consumer = manager.consumer(&fixture, runs.len());
     compio::time::timeout(
-        Duration::from_secs(5),
-        worker.run_until(async {
+        Duration::from_secs(10),
+        consumer.run_until(async {
             while fixture.loader.markers.0.lock().unwrap().len() < runs.len() {
                 compio::time::sleep(Duration::from_millis(5)).await;
             }

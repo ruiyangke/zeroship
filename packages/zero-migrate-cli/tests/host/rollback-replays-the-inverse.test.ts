@@ -14,7 +14,7 @@
 // refusal that protects an operator from a fabricated reverse would be gone, and
 // these two arms are the only thing that tells the difference.
 //
-// GATES: `connectLivePg` (see `live-db.ts`) and `ZERO_MIGRATE_MYSQL_URL`.
+// The package runner owns the PostgreSQL and MySQL servers; SQLite runs in process.
 
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
@@ -30,7 +30,7 @@ import type { MigrationModule } from "@zeroship/migrate/internal/recorder";
 import { MYSQL_URL_ENV, connectLivePg, pgUrl, requireLiveDb } from "./live-db.js";
 import { noInjectPolicy } from "./policy.js";
 
-// The host suite's addon is resolved and freshness-checked in one place.
+// The host suite builds and resolves its addon in one place.
 import "./addon.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -407,6 +407,7 @@ export default {
         "--registry", join(dir, "registry.json"),
         "--owner-app", OWNER_APP,
         "--database-url", `sqlite:${appPath}`,
+        "--schema", "main",
       ],
       { cwd: dir, encoding: "utf8", env: { ...process.env, DATABASE_URL: "" } },
     );

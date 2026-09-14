@@ -140,7 +140,8 @@ fn enforce_gateway_credentials(
     }
 }
 
-/// A [`ReplayStore`] over the gateway's per-worker-thread Postgres pool.
+/// A [`ReplayStore`](zeroship_core::service_assertion::ReplayStore) over the
+/// gateway's per-worker-thread Postgres pool.
 ///
 /// The gateway is a callee on exactly one internal edge -
 /// `/__zeroship/internal/workflow-advance` - and that edge takes the FULL
@@ -677,6 +678,12 @@ fn main() -> std::io::Result<()> {
         meter: Arc::clone(&meter),
     });
 
+    let readiness = Arc::new(health::GatewayReadiness::new(
+        state.routes.sync_freshness_handle(),
+        std::time::Duration::from_secs(state.config.poll_interval_secs),
+        zeroship_core::config::dev_escape_active(),
+    ));
+
     sync::start_sync(state.clone());
 
     let bind_addr = format!("{bind_host}:{port}");
@@ -733,6 +740,7 @@ fn main() -> std::io::Result<()> {
     web::server(async move || {
         web::App::new()
             .state(state.clone())
+            .state(readiness.clone())
             .service(
                 // ntex's `{path:.*}` only matches a single segment;
                 // `{tail}*` is the tail-match syntax that handles
@@ -1187,7 +1195,7 @@ mod tests {
         assert!(GateSettings::resolve_config(boot, None).is_err());
 
         // Does NOT cover whether `main` routes `--check-config` to the report
-        // rather than to the server; that is `tests/config_check_e2e.sh`.
+        // rather than to the server; the config_env_tier integration target does.
     }
 
     /// A secret is reported by PRESENCE. The resolved declaration derives

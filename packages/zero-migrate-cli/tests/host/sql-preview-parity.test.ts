@@ -66,37 +66,16 @@ import { currentIrVersion, previewSql } from "zero-migrate-cli";
 const HERE = dirname(fileURLToPath(import.meta.url));
 const CRATE = resolve(HERE, "../../../../crates/zeroship-migrate");
 
-// The host suite's addon is resolved and freshness-checked in one place.
+// The host suite builds and resolves its addon in one place.
 import "./addon.js";
 
 // The label `render_ir_envelope_sql` prints for an op it refuses to render offline
 // (`zero_migrate::render::sql_preview::RUNTIME_RESOLVED`).
 const RUNTIME_RESOLVED = "-- [runtime-resolved]";
 
-/**
- * Read the charter `sql_preview.rs` renders under, from the Rust test-support
- * module that defines it. Sharing the literal rather than restating it keeps this
- * test on the SAME policy input as the expectations it borrows, so a charter change
- * can never silently make the two sides render different things.
- */
-function confinedCharter(): string {
-  const source = readFileSync(resolve(CRATE, "tests/support/mod.rs"), "utf8");
-  const open = 'pub const CONFINED_CHARTER_TOML: &str = r#"';
-  const start = source.indexOf(open);
-  assert.notEqual(
-    start,
-    -1,
-    "crates/zeroship-migrate/tests/support/mod.rs no longer declares CONFINED_CHARTER_TOML " +
-      "as a raw string literal; update this reader so the two sides keep sharing one charter",
-  );
-  const end = source.indexOf('"#;', start + open.length);
-  assert.notEqual(end, -1, "CONFINED_CHARTER_TOML literal is unterminated");
-  const charter = source.slice(start + open.length, end);
-  assert.match(charter, /^policy_version = 1$/m, "extracted charter looks like the TOML document");
-  return charter;
-}
-
-const CHARTER = confinedCharter();
+// Rust and TypeScript load the same data fixture directly. Neither test has to
+// parse the other language's source to recover it.
+const CHARTER = readFileSync(resolve(CRATE, "tests/fixtures/confined-charter.toml"), "utf8");
 
 /**
  * Author -> `buildEnvelope` -> `previewSql`. The same two calls `zero-migrate-cli`

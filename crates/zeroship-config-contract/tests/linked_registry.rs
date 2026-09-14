@@ -424,8 +424,8 @@ fn a_flag_control_accepts_the_workspace_boolean_grammar() {
     );
 
     // Does not cover: that clap applies this parser to the environment tier.
-    // Only a process-level test can show that, and tests/config_check_e2e.sh
-    // exercises the real binaries.
+    // The process-level check_config targets in the owning service crates
+    // exercise their real binaries.
 }
 
 #[test]
@@ -495,8 +495,8 @@ fn a_dry_run_resolves_a_secret_file_reference_without_opening_it() {
     // referenced path deliberately does not exist, so a resolver that opened it
     // could not return Ok - and the boot-mode partner below proves the path is
     // genuinely unreadable rather than the reference being ignored.
-    // Does not cover: a real binary routing --check-config to this mode. That is
-    // the macro's wiring, asserted end to end by tests/config_check_e2e.sh.
+    // Does not cover: a real binary routing --check-config to this mode. The
+    // owning service crates assert that wiring in their check_config targets.
     let overlay = toml::from_str::<toml::Value>(
         "[control]\ndatabase_url = \"urn:zeroship:file:/no/such/zeroship/contract/dsn\"\n",
     )

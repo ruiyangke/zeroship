@@ -236,8 +236,7 @@ impl GuardConfig {
     /// PostgreSQL's and reset any host-selected belt-off mode to `Enforced` for every
     /// other id, so that a posture built for the one backend with a parser could not
     /// follow a config onto a backend with no belt to skip. There is no belt-off mode
-    /// to reset now, and the comparison went with it - which is also how this crate's
-    /// `the_contract_names_no_vendor.rs` ratchet reached zero for this file.
+    /// to reset now, and the comparison went with it.
     #[must_use]
     pub fn for_dialect(mut self, dialect: DialectId) -> Self {
         self.dialect = dialect;

@@ -46,8 +46,7 @@ const SUPABASE_URL: &str = "https://project.supabase.test";
 const SUPABASE_ISSUER: &str = "https://project.supabase.test/auth/v1";
 
 fn db_url() -> String {
-    zeroship_core::config::test_database_url_opt()
-        .expect("a test database must be configured (zeroship_core::config::test_database_url_opt) so device_handlers_test runs against Postgres")
+    common::require_control_db()
 }
 
 fn tmpdir(label: &str) -> PathBuf {
