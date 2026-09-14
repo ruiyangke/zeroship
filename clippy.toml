@@ -21,15 +21,10 @@
 # population of reads is enumerable. These four methods take a `&str` and are
 # therefore the ways to read a name nothing has declared.
 #
-# This lint is compiler-RESOLVED, so it catches an aliased import that a text
-# search would not. What it does not catch is a read behind a cfg this build
-# disabled; crates/core/tests/config_env_access_gate.rs parses tracked source
-# and covers that.
-#
-# The only permitted local suppressions are crates/core/src/config/env.rs (the
-# one raw boundary) and libs/<crate>/tests/common/env.rs (the sealed test
-# accessors that publishable, zeroship-independent crates use instead). The
-# source gate rejects the attribute anywhere else.
+# This lint is compiler-resolved, so it catches aliased imports in every target
+# and feature selection that Clippy builds. Keep local suppressions confined to
+# the typed boundary in crates/zeroship-core/src/config/env.rs and the sealed
+# test accessors used by the standalone driver libraries.
 disallowed-methods = [
     { path = "std::env::var", reason = "use a typed key: zeroship_core::declared_env! or read_config_env!" },
     { path = "std::env::var_os", reason = "use a typed key: zeroship_core::declared_env_os!" },

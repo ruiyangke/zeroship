@@ -8034,7 +8034,6 @@ dependencies = [
  "xxhash-rust",
  "zeroize",
  "zeroship-bundle",
- "zeroship-config-contract",
  "zeroship-config-macros",
  "zeroship-id",
 ]

@@ -3,9 +3,9 @@
 //! Everything above it presents a typed key and a consumer token; the three
 //! functions here are the only place a `&str` name reaches `std::env`. That is
 //! what makes the claim "every first-party environment read is enumerable" a
-//! structural property rather than a convention: the source gate in
-//! `crates/zeroship-core/tests/config_env_access_gate.rs` exempts this file BY PATH and
-//! nothing else, so a read anywhere else fails the build.
+//! structural property rather than a convention. The workspace Clippy policy
+//! rejects direct `std::env` access, while these crate-private functions feed
+//! the typed configuration APIs.
 //!
 //! The truthiness helpers that used to live here took a `&str` name and read
 //! the environment themselves, which made them a second, unattributable read
