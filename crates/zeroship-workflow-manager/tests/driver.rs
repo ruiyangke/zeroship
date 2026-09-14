@@ -23,6 +23,7 @@ use std::{
 use support::{Admin, Backend, Fixture};
 use zeroship_core::{
     app_id::AppId,
+    typed_id,
     workflow_deployments::{HoldGeneration, HoldState},
     workflow_jobs::DeploymentId,
     workflow_schedules::{ActivateSchedules, RegisterSchedules, ScheduleDescriptor},
@@ -36,7 +37,7 @@ use zeroship_workflow_calendar::{
 };
 use zeroship_workflow_manager::{
     driver::{Driver, LaneReport, Options},
-    recovery::Recovery,
+    recovery::{DutyKind, Recovery},
     retention::{HoldClient, HoldFuture},
     scheduling::Scheduler,
     Error, Queue,
@@ -87,6 +88,12 @@ case!(
     postgres_driver_shares_lane_deadline_and_resumes_suffix,
     lane_timeout
 );
+case!(
+    sqlite_driver_collects_while_reconciliation_is_damaged,
+    postgres_driver_collects_while_reconciliation_is_damaged,
+    independent_duties
+);
+
 case!(
     sqlite_cancelled_driver_preserves_intent_and_cursor,
     postgres_cancelled_driver_preserves_intent_and_cursor,
@@ -246,8 +253,8 @@ async fn activate(
     .await;
     patch(
         fixture,
-        "recovery_scopes",
-        value!({"id":app.as_str()}),
+        "recovery_duties",
+        value!({"app_id":app.as_str()}),
         value!({"next_due_at":0}),
     )
     .await;
@@ -261,8 +268,8 @@ async fn obligation(fixture: &Fixture, queue: &Queue, app: &AppId) {
         .unwrap();
     patch(
         fixture,
-        "recovery_scopes",
-        value!({"id":app.as_str()}),
+        "recovery_duties",
+        value!({"app_id":app.as_str()}),
         value!({"next_due_at":0}),
     )
     .await;
@@ -283,12 +290,15 @@ async fn no_workers(fixture: &Fixture) {
     let (first, second) = futures::join!(driver.tick(), replica.tick());
     assert!(first.scheduling.failures.is_empty());
     assert!(second.scheduling.failures.is_empty());
-    assert!(first.recovery.failures.is_empty());
-    assert!(second.recovery.failures.is_empty());
+    assert!(first.reconciliation.failures.is_empty());
+    assert!(second.reconciliation.failures.is_empty());
     assert!(first.scheduling.completed + second.scheduling.completed > 0);
-    assert!(first.recovery.completed + second.recovery.completed > 0);
+    assert!(first.reconciliation.completed + second.reconciliation.completed > 0);
     let jobs = rows(fixture, "jobs", value!({"app_id":app.as_str()})).await;
-    assert_eq!(jobs.len(), 3);
+    assert!(first.collection.failures.is_empty());
+    assert!(second.collection.failures.is_empty());
+    assert!(first.collection.completed + second.collection.completed > 0);
+    assert_eq!(jobs.len(), 4);
     assert!(rows(fixture, "workers", value!({})).await.is_empty());
     assert!(rows(fixture, "assignments", value!({})).await.is_empty());
     let operations: Vec<_> = jobs
@@ -311,6 +321,9 @@ async fn no_workers(fixture: &Fixture) {
         op,
         zeroship_core::workflow_jobs::JobOperation::Reconcile { .. }
     )));
+    assert!(operations
+        .iter()
+        .any(|op| matches!(op, zeroship_core::workflow_jobs::JobOperation::Collect {})));
     patch(
         fixture,
         "schedules",
@@ -320,13 +333,13 @@ async fn no_workers(fixture: &Fixture) {
     .await;
     patch(
         fixture,
-        "recovery_scopes",
-        value!({"id":app.as_str()}),
+        "recovery_duties",
+        value!({"app_id":app.as_str()}),
         value!({"next_due_at":0}),
     )
     .await;
     let mut reopened = Driver::new(queue, options(2)).unwrap();
-    success(&reopened.tick().await.recovery, 1);
+    success(&reopened.tick().await.reconciliation, 1);
     assert_eq!(
         rows(fixture, "jobs", value!({"app_id":app.as_str()})).await,
         jobs
@@ -350,48 +363,63 @@ async fn finite_sweeps(fixture: &Fixture) {
         .unwrap()
         .insert(value!({
             "id":"!malformed", "deployment_id":DeploymentId::mint().as_str(),
-            "activation_revision":1, "next_due_at":0,
+            "activation_revision":1,
         }))
         .await
         .unwrap();
+    database.collection("recovery_duties").unwrap().insert(value!({
+        "id":typed_id::generate("wrd"), "app_id":"!malformed", "kind":"reconcile", "next_due_at":0,
+    })).await.unwrap();
     let mut driver = Driver::new(queue.clone(), options(1)).unwrap();
     let first = driver.tick().await;
-    assert_eq!(first.recovery.visited, 1);
-    assert_eq!(first.recovery.completed, 0);
-    assert_eq!(first.recovery.failures[0].id, "!malformed");
-    assert_eq!(first.recovery.failures[0].error, Error::Storage);
-    assert!(!first.recovery.sweep_complete);
+    assert_eq!(first.reconciliation.visited, 1);
+    assert_eq!(first.reconciliation.completed, 0);
+    assert_eq!(first.reconciliation.failures[0].id, "!malformed");
+    assert_eq!(first.reconciliation.failures[0].error, Error::Storage);
+    assert!(!first.reconciliation.sweep_complete);
     obligation(fixture, &queue, &apps[1]).await;
     let second = driver.tick().await;
-    success(&second.recovery, 1);
-    assert!(second.recovery.sweep_complete);
-    assert!(rows(fixture, "jobs", value!({"app_id":apps[1].as_str()}))
-        .await
-        .is_empty());
+    success(&second.reconciliation, 1);
+    assert!(second.reconciliation.sweep_complete);
+    assert!(rows(
+        fixture,
+        "jobs",
+        value!({"app_id":apps[1].as_str(),"operation_kind":"reconcile"})
+    )
+    .await
+    .is_empty());
     let third = driver.tick().await;
-    assert_eq!(third.recovery.failures[0].id, "!malformed");
+    assert_eq!(third.reconciliation.failures[0].id, "!malformed");
     let fourth = driver.tick().await;
-    success(&fourth.recovery, 1);
+    success(&fourth.reconciliation, 1);
     assert_eq!(
-        rows(fixture, "jobs", value!({"app_id":apps[1].as_str()}))
-            .await
-            .len(),
+        rows(
+            fixture,
+            "jobs",
+            value!({"app_id":apps[1].as_str(),"operation_kind":"reconcile"})
+        )
+        .await
+        .len(),
         1
     );
     patch(
         fixture,
-        "recovery_scopes",
-        value!({"id":apps[0].as_str()}),
+        "recovery_duties",
+        value!({"app_id":apps[0].as_str()}),
         value!({"next_due_at":0}),
     )
     .await;
     let fifth = driver.tick().await;
-    assert_eq!(fifth.recovery.failures[0].id, "!malformed");
-    success(&driver.tick().await.recovery, 1);
+    assert_eq!(fifth.reconciliation.failures[0].id, "!malformed");
+    success(&driver.tick().await.reconciliation, 1);
     assert_eq!(
-        rows(fixture, "jobs", value!({"app_id":apps[0].as_str()}))
-            .await
-            .len(),
+        rows(
+            fixture,
+            "jobs",
+            value!({"app_id":apps[0].as_str(),"operation_kind":"reconcile"})
+        )
+        .await
+        .len(),
         1
     );
 }
@@ -412,7 +440,8 @@ async fn calendar_pages(fixture: &Fixture) {
     let mut driver = Driver::new(queue, options(2)).unwrap();
     let report = driver.tick().await;
     success(&report.scheduling, 2);
-    success(&report.recovery, 1);
+    success(&report.reconciliation, 1);
+    success(&report.collection, 1);
     let occurrences = rows(
         fixture,
         "schedule_occurrences",
@@ -473,7 +502,8 @@ async fn scan_failure(fixture: &Fixture) {
         Some(Error::Storage | Error::Unavailable)
     ));
     assert!(!report.scheduling.sweep_complete);
-    success(&report.recovery, 1);
+    success(&report.reconciliation, 1);
+    success(&report.collection, 1);
     success(&report.retention, 0);
     success(&driver.tick().await.scheduling, 0);
 }
@@ -751,4 +781,79 @@ async fn lane_timeout(fixture: &Fixture) {
 }
 async fn cancellation(fixture: &Fixture) {
     interrupted(fixture, false).await;
+}
+
+async fn independent_duties(fixture: &Fixture) {
+    let client = FaultClient::new(support::synthetic_holds());
+    client.lose_acquire.set(true);
+    client.lose_release.set(true);
+    let queue = queue(fixture, client.clone()).await;
+    let app = AppId::mint();
+    obligation(fixture, &queue, &app).await;
+    let recovery = Recovery::new(queue.clone(), options(1).recovery).unwrap();
+    let pending = recovery
+        .dispatch(&app, DutyKind::Reconcile)
+        .await
+        .unwrap()
+        .unwrap();
+    let original = rows(fixture, "jobs", value!({"id":pending.id.as_str()})).await;
+    patch(
+        fixture,
+        "jobs",
+        value!({"id":pending.id.as_str()}),
+        value!({"spec_digest":"damaged"}),
+    )
+    .await;
+    patch(
+        fixture,
+        "recovery_duties",
+        value!({"app_id":app.as_str(),"kind":"reconcile"}),
+        value!({"next_due_at":0}),
+    )
+    .await;
+    let mut driver = Driver::new(queue.clone(), options(1)).unwrap();
+    let report = driver.tick().await;
+    assert_eq!(report.reconciliation.failures.len(), 1);
+    assert_eq!(report.reconciliation.failures[0].error, Error::Storage);
+    success(&report.collection, 1);
+    let collect = recovery
+        .dispatch(&app, DutyKind::Collect)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        collect.operation,
+        zeroship_core::workflow_jobs::JobOperation::Collect {}
+    ));
+    assert_eq!(collect.deployment_id(), None);
+    assert!(rows(fixture, "workers", value!({})).await.is_empty());
+    assert!(rows(fixture, "assignments", value!({})).await.is_empty());
+    assert!(rows(fixture, "deployment_holds", value!({}))
+        .await
+        .is_empty());
+    assert_eq!(client.calls.get(), 0);
+    let mut restarted = Driver::new(queue, options(1)).unwrap();
+    assert_eq!(
+        restarted.tick().await.reconciliation.failures[0].error,
+        Error::Storage
+    );
+    assert_eq!(
+        recovery.dispatch(&app, DutyKind::Collect).await.unwrap(),
+        Some(collect)
+    );
+    assert_eq!(
+        rows(fixture, "jobs", value!({"app_id":app.as_str()}))
+            .await
+            .len(),
+        2
+    );
+    patch(
+        fixture,
+        "jobs",
+        value!({"id":pending.id.as_str()}),
+        value!({"spec_digest":original[0]["spec_digest"].clone()}),
+    )
+    .await;
+    success(&restarted.tick().await.reconciliation, 1);
+    assert_eq!(client.calls.get(), 0);
 }

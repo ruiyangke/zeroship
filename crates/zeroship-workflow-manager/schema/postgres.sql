@@ -123,11 +123,17 @@ CREATE UNIQUE INDEX IF NOT EXISTS "schedule_occurrences_scope_key" ON "workflow_
 
 CREATE UNIQUE INDEX IF NOT EXISTS "schedule_occurrences_job_key" ON "workflow_manager"."schedule_occurrences" ("app_id", "job_id");
 
-CREATE TABLE "workflow_manager"."recovery_scopes" ("id" text PRIMARY KEY NOT NULL, "deployment_id" text NOT NULL, "activation_revision" bigint NOT NULL, "next_due_at" bigint NOT NULL, "pending_job_id" text, CONSTRAINT "recovery_job" FOREIGN KEY ("pending_job_id") REFERENCES "workflow_manager"."jobs" (id) ON DELETE RESTRICT, CONSTRAINT "recovery_scope" FOREIGN KEY ("id") REFERENCES "workflow_manager"."queue_scopes" (id) ON DELETE RESTRICT);
+CREATE TABLE "workflow_manager"."recovery_scopes" ("id" text PRIMARY KEY NOT NULL, "deployment_id" text NOT NULL, "activation_revision" bigint NOT NULL, CONSTRAINT "recovery_scope" FOREIGN KEY ("id") REFERENCES "workflow_manager"."queue_scopes" (id) ON DELETE RESTRICT);
 
-CREATE INDEX IF NOT EXISTS "recovery_job_idx" ON "workflow_manager"."recovery_scopes" ("pending_job_id");
+CREATE TABLE "workflow_manager"."recovery_duties" ("id" text PRIMARY KEY NOT NULL, "app_id" text NOT NULL, "kind" text NOT NULL, "next_due_at" bigint NOT NULL, "pending_job_id" text, CONSTRAINT "recovery_duty_job" FOREIGN KEY ("app_id", "pending_job_id") REFERENCES "workflow_manager"."jobs" ("app_id", id) ON DELETE RESTRICT, CONSTRAINT "recovery_duty_scope" FOREIGN KEY ("app_id") REFERENCES "workflow_manager"."recovery_scopes" (id) ON DELETE RESTRICT);
 
-CREATE INDEX IF NOT EXISTS "recovery_scopes_due_idx" ON "workflow_manager"."recovery_scopes" ("next_due_at", "id");
+CREATE INDEX IF NOT EXISTS "recovery_duty_job_idx" ON "workflow_manager"."recovery_duties" ("app_id", "pending_job_id");
+
+CREATE INDEX IF NOT EXISTS "recovery_duty_scope_idx" ON "workflow_manager"."recovery_duties" ("app_id");
+
+CREATE UNIQUE INDEX IF NOT EXISTS "recovery_duties_scope_key" ON "workflow_manager"."recovery_duties" ("app_id", "kind");
+
+CREATE INDEX IF NOT EXISTS "recovery_duties_due_idx" ON "workflow_manager"."recovery_duties" ("kind", "next_due_at", "app_id");
 
 ALTER TABLE "workflow_manager"."schema_version" ALTER COLUMN "id" TYPE text COLLATE "C";
 
@@ -147,7 +153,9 @@ ALTER TABLE "workflow_manager"."management_scopes" ALTER COLUMN "id" TYPE text C
 
 ALTER TABLE "workflow_manager"."jobs" ALTER COLUMN "id" TYPE text COLLATE "C", ALTER COLUMN "app_id" TYPE text COLLATE "C", ALTER COLUMN "deployment_id" TYPE text COLLATE "C", ALTER COLUMN "worker_id" TYPE text COLLATE "C", ALTER COLUMN "run_id" TYPE text COLLATE "C", ALTER COLUMN "management_request_id" TYPE text COLLATE "C";
 
-ALTER TABLE "workflow_manager"."recovery_scopes" ALTER COLUMN "id" TYPE text COLLATE "C", ALTER COLUMN "deployment_id" TYPE text COLLATE "C", ALTER COLUMN "pending_job_id" TYPE text COLLATE "C";
+ALTER TABLE "workflow_manager"."recovery_scopes" ALTER COLUMN "id" TYPE text COLLATE "C", ALTER COLUMN "deployment_id" TYPE text COLLATE "C";
+
+ALTER TABLE "workflow_manager"."recovery_duties" ALTER COLUMN "id" TYPE text COLLATE "C", ALTER COLUMN "app_id" TYPE text COLLATE "C", ALTER COLUMN "pending_job_id" TYPE text COLLATE "C";
 
 ALTER TABLE "workflow_manager"."schedule_deployments" ALTER COLUMN "id" TYPE text COLLATE "C", ALTER COLUMN "app_id" TYPE text COLLATE "C";
 
@@ -160,4 +168,4 @@ ALTER TABLE "workflow_manager"."schedule_scopes" ALTER COLUMN "id" TYPE text COL
 ALTER TABLE "workflow_manager"."schedules" ALTER COLUMN "id" TYPE text COLLATE "C", ALTER COLUMN "app_id" TYPE text COLLATE "C", ALTER COLUMN "name" TYPE text COLLATE "C", ALTER COLUMN "activation_id" TYPE text COLLATE "C";
 
 ALTER TABLE "workflow_manager"."schedule_occurrences" ALTER COLUMN "id" TYPE text COLLATE "C", ALTER COLUMN "app_id" TYPE text COLLATE "C", ALTER COLUMN "schedule_id" TYPE text COLLATE "C", ALTER COLUMN "run_id" TYPE text COLLATE "C", ALTER COLUMN "job_id" TYPE text COLLATE "C", ALTER COLUMN "activation_id" TYPE text COLLATE "C";
-INSERT INTO workflow_manager.schema_version (id, fingerprint) VALUES ('manager', '5352f85ddcba640c022f4a37a8ad9227acde0d6335146363cc41ebdff40b5cef');
+INSERT INTO workflow_manager.schema_version (id, fingerprint) VALUES ('manager', '863bb2a50204158529345d03f3daebbcc4c068f0fc483ce04505bbf7c9a0db58');

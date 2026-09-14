@@ -89,7 +89,8 @@ readiness. Due scans exclude disabled scopes before applying their page limits.
 This gate controls calendar publication; creator admission and executor shutdown
 have separate policy authority.
 
-`driver::Driver` visits bounded calendar, recovery and unfinished-hold pages.
+`driver::Driver` visits independent bounded calendar, reconciliation, collection
+and unfinished-hold pages.
 Each lane captures its upper identity and advances past an attempted candidate
 before I/O. A shared lane deadline bounds scans and candidate operations; failed
 items remain durable and retry after the finite sweep wraps. Cancellation retains
@@ -98,10 +99,13 @@ The driver needs no worker registration, placement or creator database. Retentio
 processing resumes acquiring/releasing intents; releasing a held deployment still
 requires the host's explicit release operation and its dependency checks.
 
-`recovery::Recovery` stores persistent scope responsibility and publishes due
-reconciliation into this queue. Repeated activation registration preserves its
-deadline; newer activation updates provenance while a pending job keeps its identity.
-Publication and the next deadline commit together. An unsettled job is reused
+`recovery::Recovery` retains activation provenance in `recovery_scopes` and
+independent Reconcile and Collect responsibilities in `recovery_duties`. Trusted
+activation establishes both duties atomically. Repeated registration validates the
+complete existing pair and preserves each deadline and pending identity; newer
+activation changes provenance only. Each publication and its own next deadline
+commit together. Waiting accelerates only the matching pending duty; completion
+and exact receipt replay preserve periodic responsibility. An unsettled job is reused
 across replicas and restarts, so absent workers cannot erase responsibility or
 accumulate replacement jobs. Bounded due pages include healthy scopes and must
 be swept repeatedly. Host scheduling, capacity provisioning and the ingress

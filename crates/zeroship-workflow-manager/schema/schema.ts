@@ -12,7 +12,8 @@ export const managerIdentityColumns = {
   management: ["id", "app_id", "request_id", "run_id"],
   management_scopes: ["id", "app_id", "run_id"],
   jobs: ["id", "app_id", "deployment_id", "worker_id", "run_id", "management_request_id"],
-  recovery_scopes: ["id", "deployment_id", "pending_job_id"],
+  recovery_scopes: ["id", "deployment_id"],
+  recovery_duties: ["id", "app_id", "pending_job_id"],
   schedule_deployments: ["id", "app_id"],
   schedule_activations: ["id", "app_id", "deployment_id"],
   schedule_disables: ["id", "app_id"],
@@ -172,13 +173,17 @@ export function workflowManagerSchema(namespace) {
   table("schedule_occurrences", { schema: namespace }).index("schedule_occurrences_job_key").add({ on: ["app_id", "job_id"], unique: true });
 
   create("recovery_scopes", {
-    deployment_id: text(), activation_revision: integer(), next_due_at: integer(),
-    pending_job_id: t.text(),
+    deployment_id: text(), activation_revision: integer(),
   }, ["id"], [
     fk("recovery_scope", ["id"], "queue_scopes", ["id"]),
-    fk("recovery_job", ["pending_job_id"], "jobs", ["id"]),
   ]);
-  index("recovery_scopes", "due", ["next_due_at", "id"]);
+  create("recovery_duties", {
+    app_id: text(), kind: text(), next_due_at: integer(), pending_job_id: t.text(),
+  }, ["app_id", "kind"], [
+    fk("recovery_duty_scope", ["app_id"], "recovery_scopes", ["id"]),
+    fk("recovery_duty_job", ["app_id", "pending_job_id"], "jobs", ["app_id", "id"]),
+  ]);
+  index("recovery_duties", "due", ["kind", "next_due_at", "app_id"]);
 
   // ColumnDef does not yet expose the engine's portable bytewise collation
   // facet. Keep this PostgreSQL-specific DDL in the migration recorder, where

@@ -6,10 +6,10 @@
 
 use crate::{
     models::{
-        recovery_scopes,
+        recovery_duties,
         schema::{deployment_holds, schedules},
     },
-    recovery::{self, Recovery},
+    recovery::{self, DutyKind, Recovery},
     scheduling::{self, Due as Scheduled, Scheduler},
     Error, Queue,
 };
@@ -90,7 +90,8 @@ pub struct LaneReport {
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct TickReport {
     pub scheduling: LaneReport,
-    pub recovery: LaneReport,
+    pub reconciliation: LaneReport,
+    pub collection: LaneReport,
     pub retention: LaneReport,
 }
 
@@ -106,7 +107,7 @@ pub struct Driver {
     scheduler: Scheduler,
     recovery: Recovery,
     options: Options,
-    cursors: [Cursor; 3],
+    cursors: [Cursor; 4],
     next_lane: usize,
 }
 
@@ -124,7 +125,7 @@ impl Driver {
     pub fn new(queue: Queue, options: Options) -> Result<Self, Error> {
         options.validate()?;
         queue.database.entity::<schedules::Entity>()?;
-        queue.database.entity::<recovery_scopes::Entity>()?;
+        queue.database.entity::<recovery_duties::Entity>()?;
         queue.database.entity::<deployment_holds::Entity>()?;
         Ok(Self {
             scheduler: Scheduler::new(queue.clone(), options.scheduling)?,
@@ -151,7 +152,8 @@ impl Driver {
             let result = self.lane(lane).await;
             match lane {
                 0 => report.scheduling = result,
-                1 => report.recovery = result,
+                1 => report.reconciliation = result,
+                2 => report.collection = result,
                 _ => report.retention = result,
             }
         }
@@ -169,16 +171,24 @@ impl Driver {
             )
             .await
             .map(|rows| rows.into_iter().map(Candidate::Scheduled).collect()),
-            1 => scan::<_, Recoverable>(
+            1 | 2 => scan::<_, Recoverable>(
                 &self.queue,
                 &mut self.cursors[lane],
                 deadline,
                 self.options.page_limit,
-                recovery_scopes::id,
-                |now| Ok(recovery_scopes::next_due_at.lte(now)?),
+                recovery_duties::app_id,
+                |now| {
+                    Ok(recovery_duties::kind
+                        .eq(lane_kind(lane).as_str())?
+                        .and(recovery_duties::next_due_at.lte(now)?))
+                },
             )
             .await
-            .map(|rows| rows.into_iter().map(Candidate::Recoverable).collect()),
+            .map(|rows| {
+                rows.into_iter()
+                    .map(|row| Candidate::Recoverable(lane_kind(lane), row))
+                    .collect()
+            }),
             _ => scan::<_, Hold>(
                 &self.queue,
                 &mut self.cursors[lane],
@@ -241,9 +251,9 @@ impl Driver {
                 let schedule = ScheduleId::parse(&row.id).map_err(|_| Error::Storage)?;
                 self.scheduler.dispatch(&app, &schedule).await?;
             }
-            Candidate::Recoverable(row) => {
-                let app = AppId::parse(&row.id).map_err(|_| Error::Storage)?;
-                self.recovery.dispatch(&app).await?;
+            Candidate::Recoverable(kind, row) => {
+                let app = AppId::parse(&row.app_id).map_err(|_| Error::Storage)?;
+                self.recovery.dispatch(&app, *kind).await?;
             }
             Candidate::Hold(row) => {
                 let app = AppId::parse(&row.app_id).map_err(|_| Error::Storage)?;
@@ -291,13 +301,13 @@ impl ScanRow for Scheduled {
 }
 
 #[derive(FromRow)]
-#[orm(entity = recovery_scopes)]
+#[orm(entity = recovery_duties)]
 struct Recoverable {
-    id: String,
+    app_id: String,
 }
 impl ScanRow for Recoverable {
     fn id(&self) -> &str {
-        &self.id
+        &self.app_id
     }
 }
 
@@ -316,16 +326,24 @@ impl ScanRow for Hold {
 
 enum Candidate {
     Scheduled(Scheduled),
-    Recoverable(Recoverable),
+    Recoverable(DutyKind, Recoverable),
     Hold(Hold),
 }
 impl Candidate {
     fn id(&self) -> &str {
         match self {
             Self::Scheduled(row) => row.id(),
-            Self::Recoverable(row) => row.id(),
+            Self::Recoverable(_, row) => row.id(),
             Self::Hold(row) => row.id(),
         }
+    }
+}
+
+const fn lane_kind(lane: usize) -> DutyKind {
+    if lane == 1 {
+        DutyKind::Reconcile
+    } else {
+        DutyKind::Collect
     }
 }
 

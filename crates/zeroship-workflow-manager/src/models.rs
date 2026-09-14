@@ -8,7 +8,7 @@ use zeroship_data_orm::{orm::FromRow, schema::Schema};
 mod schema_definition;
 pub use schema::{
     assignments, jobs, management, management_scopes, placement_receipts, queue_scopes,
-    recovery_scopes, workers,
+    recovery_duties, recovery_scopes, workers,
 };
 pub use schema_definition::schema;
 

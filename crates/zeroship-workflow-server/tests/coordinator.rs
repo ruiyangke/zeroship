@@ -88,7 +88,7 @@ impl Fixture {
                workflow_manager.schedule_deployments,workflow_manager.schedule_activations,
                workflow_manager.schedule_disables,workflow_manager.schedule_scopes,
                workflow_manager.schedules,workflow_manager.schedule_occurrences,
-               workflow_manager.recovery_scopes TO coordinator_test;"
+               workflow_manager.recovery_scopes,workflow_manager.recovery_duties TO coordinator_test;"
         ).await.unwrap();
         Self {
             _postgres: postgres,

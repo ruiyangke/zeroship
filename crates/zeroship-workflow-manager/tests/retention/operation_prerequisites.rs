@@ -9,6 +9,7 @@ use zeroship_core::{
 };
 use zeroship_workflow_manager::{
     coordinator::{Coordinator, Options as CoordinatorOptions},
+    recovery::DutyKind,
     retention::HoldFuture,
 };
 
@@ -75,13 +76,15 @@ async fn journal_jobs(fixture: &Fixture) {
         .ensure(&app, &provenance, 1.try_into().unwrap())
         .await
         .unwrap();
-    let pending = recovery.dispatch(&app).await.unwrap().unwrap();
-    assert_eq!(pending.deployment_id(), None);
-    assert_eq!(
-        recovery.dispatch(&app).await.unwrap(),
-        Some(pending.clone())
-    );
-    finish(&queue, &assignment(&app), &pending).await;
+    for kind in [DutyKind::Reconcile, DutyKind::Collect] {
+        let pending = recovery.dispatch(&app, kind).await.unwrap().unwrap();
+        assert_eq!(pending.deployment_id(), None);
+        assert_eq!(
+            recovery.dispatch(&app, kind).await.unwrap(),
+            Some(pending.clone())
+        );
+        finish(&queue, &assignment(&app), &pending).await;
+    }
     assert!(rows(fixture, "deployment_holds", value!({}))
         .await
         .is_empty());
@@ -533,7 +536,11 @@ async fn provenance_reclamation(fixture: &Fixture) {
         .ensure(&app, &provenance.id, 1.try_into().unwrap())
         .await
         .unwrap();
-    let pending = recovery.dispatch(&app).await.unwrap().unwrap();
+    let pending = recovery
+        .dispatch(&app, DutyKind::Reconcile)
+        .await
+        .unwrap()
+        .unwrap();
     let responsibility = rows(fixture, "recovery_scopes", value!({"id":app.as_str()})).await;
     assert_eq!(
         responsibility[0]["deployment_id"],
@@ -553,7 +560,7 @@ async fn provenance_reclamation(fixture: &Fixture) {
         .await
         .unwrap();
     assert_eq!(
-        recovery.dispatch(&app).await.unwrap(),
+        recovery.dispatch(&app, DutyKind::Reconcile).await.unwrap(),
         Some(pending.clone())
     );
     assert_eq!(
@@ -575,7 +582,11 @@ async fn provenance_reclamation(fixture: &Fixture) {
         )
         .await
         .unwrap();
-    let next = recovery.dispatch(&app).await.unwrap().unwrap();
+    let next = recovery
+        .dispatch(&app, DutyKind::Reconcile)
+        .await
+        .unwrap()
+        .unwrap();
     assert_ne!(next.id, pending.id);
     assert_eq!(next.deployment_id(), None);
     assert_eq!(faults.acquired.get(), acquired);
@@ -593,7 +604,11 @@ async fn pending_identity(fixture: &Fixture) {
         .ensure(&app, code.deployment_id().unwrap(), 1.try_into().unwrap())
         .await
         .unwrap();
-    let pending = recovery.dispatch(&app).await.unwrap().unwrap();
+    let pending = recovery
+        .dispatch(&app, DutyKind::Reconcile)
+        .await
+        .unwrap()
+        .unwrap();
     for settled in [false, true] {
         if settled {
             finish(&queue, &assignment(&app), &code).await;
@@ -601,21 +616,34 @@ async fn pending_identity(fixture: &Fixture) {
         let output = fixture
             .database()
             .await
-            .collection("recovery_scopes")
+            .collection("recovery_duties")
             .unwrap()
             .execute(zeroship_data_orm::orm::Operation::Update {
-                filter: value!({"id":app.as_str()}),
+                filter: value!({"app_id":app.as_str(),"kind":"reconcile"}),
                 patch: value!({"pending_job_id":code.id.as_str()}),
                 many: true,
             })
             .await
             .unwrap();
         assert!(matches!(output, Output::Count(1)));
-        let scope = rows(fixture, "recovery_scopes", value!({"id":app.as_str()})).await;
+        let scope = rows(
+            fixture,
+            "recovery_duties",
+            value!({"app_id":app.as_str(),"kind":"reconcile"}),
+        )
+        .await;
         let jobs = rows(fixture, "jobs", value!({"app_id":app.as_str()})).await;
-        assert_eq!(recovery.dispatch(&app).await, Err(Error::Storage));
         assert_eq!(
-            rows(fixture, "recovery_scopes", value!({"id":app.as_str()})).await,
+            recovery.dispatch(&app, DutyKind::Reconcile).await,
+            Err(Error::Storage)
+        );
+        assert_eq!(
+            rows(
+                fixture,
+                "recovery_duties",
+                value!({"app_id":app.as_str(),"kind":"reconcile"})
+            )
+            .await,
             scope
         );
         assert_eq!(
@@ -625,16 +653,16 @@ async fn pending_identity(fixture: &Fixture) {
         fixture
             .database()
             .await
-            .collection("recovery_scopes")
+            .collection("recovery_duties")
             .unwrap()
             .update(
-                value!({"id":app.as_str()}),
+                value!({"app_id":app.as_str(),"kind":"reconcile"}),
                 value!({"pending_job_id":pending.id.as_str()}),
             )
             .await
             .unwrap();
         assert_eq!(
-            recovery.dispatch(&app).await.unwrap(),
+            recovery.dispatch(&app, DutyKind::Reconcile).await.unwrap(),
             Some(pending.clone())
         );
     }
