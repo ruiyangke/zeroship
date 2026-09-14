@@ -102,13 +102,15 @@ export default {
     // ---- the closed authority ladder -------------------------------------
     table("organization_roles", { schema: "zeroship" }).create({
       columns: {
+        id: t.bigInt().notNull().identity(),
         role: t.text().notNull(),
         rank: t.int().notNull(),
         billing_rank: t.int().notNull(),
         label: t.text().notNull(),
       },
-      primaryKey: ["role"],
+      primaryKey: ["id"],
     });
+    table("organization_roles", { schema: "zeroship" }).unique("organization_roles_natural_key").add({ columns: ["role"] });
     // The anchor `organization_invites` consumes. An invite freezes the whole
     // triple in its own row so its escalation CHECK needs no subquery; this
     // unique is what stops the frozen copy drifting from the ladder.
@@ -239,6 +241,7 @@ export default {
     // filter.
     table("organization_members", { schema: "zeroship" }).create({
       columns: {
+        id: t.bigInt().notNull().identity(),
         organization_id: t.text().notNull(),
         user_id: t.text().notNull(),
         role: t.text().notNull(),
@@ -247,8 +250,9 @@ export default {
         changed_at: t.timestamp().notNull().default(now()),
         changed_by: t.text(),
       },
-      primaryKey: ["organization_id", "user_id"],
+      primaryKey: ["id"],
     });
+    table("organization_members", { schema: "zeroship" }).unique("organization_members_natural_key").add({ columns: ["organization_id", "user_id"] });
     table("organization_members", { schema: "zeroship" })
       .index("organization_members_user_idx")
       .add({ on: ["user_id"] });
@@ -307,6 +311,7 @@ export default {
     // organization at all. Both are unspellable rather than checked.
     table("project_members", { schema: "zeroship" }).create({
       columns: {
+        id: t.bigInt().notNull().identity(),
         project_id: t.text().notNull(),
         organization_id: t.text().notNull(),
         user_id: t.text().notNull(),
@@ -316,8 +321,9 @@ export default {
         changed_at: t.timestamp().notNull().default(now()),
         changed_by: t.text(),
       },
-      primaryKey: ["project_id", "user_id"],
+      primaryKey: ["id"],
     });
+    table("project_members", { schema: "zeroship" }).unique("project_members_natural_key").add({ columns: ["project_id", "user_id"] });
     // NO EXPLICIT INDEX ON THE TWO COMPOSITE EDGES. The primary key leads on
     // project_id, so neither composite foreign key is covered by it -- and the
     // engine emits an index for a composite foreign key of its own accord
