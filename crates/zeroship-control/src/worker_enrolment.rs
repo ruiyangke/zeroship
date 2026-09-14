@@ -149,6 +149,10 @@ const RETIRED_STATUS: &str = "gone";
 /// The status `zeroship.revoke_worker_enroller` writes on an enroller. Terminal.
 const REVOKED_STATUS: &str = "revoked";
 
+/// The status of an execution zone this deployment declares, the only member
+/// `execution_zones_status_check` admits.
+const DECLARED_ZONE_STATUS: &str = "active";
+
 /// Mint a ring key from the operating system's CSPRNG.
 ///
 /// The registrant contributes NOTHING to this value - not a seed, not a nonce,
@@ -886,7 +890,7 @@ async fn resolve_zones(
         let row = tx
             .query_opt(
                 "SELECT id FROM zeroship.execution_zones WHERE name = $1 AND status = $2",
-                &[&name, &ENROLLED_STATUS],
+                &[&name, &DECLARED_ZONE_STATUS],
             )
             .await
             .map_err(|error| format!("worker enroller import: read execution zones: {error}"))?;
