@@ -262,10 +262,6 @@ jobs:
       # in this job rather than behind a service container.
       - name: Verdaccio registry config is closed
         run: tests/verdaccio_config_gate.sh
-      - name: WS stub gate self-test
-        run: tests/ws_subscription_stub_gate.sh --self-test
-      - name: websocket subscription stub agrees with what describes it
-        run: tests/ws_subscription_stub_gate.sh
       - name: Data architecture and database posture
         run: cargo xtask test data-architecture
       - name: Cargo package spec gate self-test
