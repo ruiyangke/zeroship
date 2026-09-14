@@ -560,13 +560,15 @@ table has the `__zeroship_workflow_` prefix; none belongs in Control's schema.
 | `waits` | Recorded sleep, signal and child waits and their execution scope. |
 | `topics`, `broadcasts`, `signals`, `subscriptions` | Customer event bodies, accepted/completed topic ordering, app-scoped signal delivery order, targets, subscription state and fanout cursors. |
 | `fanout_pages` | Exact delivered broadcast page, committed cursor transition, semantic outcome and successor specifications linked to the retained job receipt and publication. |
+| `propagations` | Dependency propagation obligations: kind, source run and generation, cursor, next page revision and finished state. An unfinished cascade obligation fences its source generation's cascading children. |
+| `propagation_pages` | Exact delivered propagation page, cursor transition, closed result and successor specifications linked to the retained job receipt and publication. |
 | `requests` | Durable app-operation request identity, body digest and original result. Age alone cannot retire an accepted request. |
 | `management_receipts` | Exact delivered job identity, requested run, management revision and durable lifecycle outcome, independently scoped from app requests. |
 | `management_scopes` | Last applied management revision per app/requested run, linked to retained command history without requiring that the run exists. |
 | `schedules`, `occurrences` | Existing customer schedule definitions and accepted occurrences. Calendar discovery moves to the manager; customer acceptance, overlap state and input references remain customer-side. |
 | `payloads`, `payload_refs` | Prepared upload metadata, ownership, integrity and committed references. |
 | `outbox` | Customer events and their payloads; distinct from manager queue metadata. |
-| `job_publications` | Closed immutable Advance or Fanout specifications, validated operation-specific projections and manager confirmation time. Pending Advance records retain deployment dependencies; publications survive history removal. |
+| `job_publications` | Closed immutable Advance, Fanout or Propagate specifications, validated operation-specific projections and manager confirmation time. Pending Advance records retain deployment dependencies; publications survive history removal. |
 | `job_receipts` | Immutable logical job specification and committed semantic outcome, retained independently of run history and delivery attempts. App-wide reconciliation records a selected page and its durable attempt offset; its run identity is absent. |
 | `reconciliation_scans` | App-owned scan revision, publication/hold phase, ordering cursor and captured upper boundary. It schedules no work and grants no ingress authority. |
 | `collection_scans` | App-owned collection revision, expiry cutoff, ordering cursor and captured upper payload identity. |
@@ -690,9 +692,11 @@ The current closed contract lives in
 [`workflow_jobs.rs`](../../crates/zeroship-core/src/workflow_jobs.rs):
 `SubmitJob`, `JobSpec`, `JobOperation`, `Delivery`, `DeliveryLease`, `Settlement`
 and `SettlementReceipt`.
-It defines activation, advance, cron, management, reconciliation and collection operations.
+It defines activation, advance, cron, management, fanout, propagation,
+reconciliation and collection operations.
 Executable operations carry their deployment prerequisite inside the operation;
-journal-only commands, reconciliation and collection carry none. Management names
+journal-only commands, fanout, propagation, reconciliation and collection carry
+none. Management names
 its lifecycle revision and a closed resolved command, including the immutable
 target for a latest restart. Shared restart validation derives the effective
 policy before that target is selected.
@@ -1363,8 +1367,9 @@ result. Saving consumption updates the record and reference together; prefix
 replay copies them unchanged. Every native step uses this closed record shape,
 while the engine and V8 checkpoint contract remains unchanged.
 
-A terminal head wakes its parents by reading one bounded page at a time from
-that head's members through their accepted checkpoint references. The page
+A terminal head's delivered notify pages read its waiting parents one bounded
+page at a time from that head's members through their accepted checkpoint
+references. The page
 carries the member, generation and checkpoint rows it validates, so waking a
 parent costs no per-parent resolution and a completion never visits waits on
 other children. On PostgreSQL, a child checkpoint must name its accepted member
@@ -1381,12 +1386,94 @@ queries must resolve through the same head protocol. Retention preserves members
 and generations needed by heads, unresolved waits and result checkpoints; copied
 parent payload references remain independently owned.
 
-This identity slice can precede bounded dependency delivery. Existing synchronous
-failure/cancellation cascading and parent notification remain until their closed
-page protocol and effective cancellation fence are implemented. A delayed page
-must neither cancel a restarted generation nor let ordinary continuation escape
-an applicable cancellation. Durable parent completion records its propagation
+Failure/cancellation cascading and parent notification use the closed page
+protocol and effective cancellation fence defined next. A delayed page must
+neither cancel a restarted generation nor let ordinary continuation escape an
+applicable cancellation. Durable parent completion records its propagation
 obligation; it does not certify that every descendant has stopped.
+
+### Delivered dependency propagation
+
+Terminal and cancellation propagation across child relationships uses the same
+bounded delivery as topic fanout. The originating creator transition records a
+durable propagation obligation and its first page intent; delivered pages apply
+the effects. No creator transaction visits an unbounded set of children or
+parents, so large fan-out and fan-in progress page by page instead of failing
+against the transaction deadline.
+
+The closed code-free operation is `Propagate { propagation_id, revision }`, where
+`propagation_id` is the typed identity of one creator obligation and `revision`
+names its next bounded page. The manager sees no obligation kind, source run,
+cursor, affected run or count. Its scoped submission, delivery, fairness and
+settlement protocol applies unchanged. Propagate has no deployment prerequisite
+or run projection, acquires no hold and creates no maintenance duty, so an
+execution barrier cannot delay the cancellation it must finish. Workers publish
+it through the outbox like Fanout. `Waiting` confirms a committed successor page;
+`Completed` means the obligation is discharged.
+
+Each obligation has exactly one source generation and one kind:
+
+| Kind | Recorded when | Page effect |
+| --- | --- | --- |
+| Cascade | A generation settles as failed or cancelled, including entry into compensation, while some run names it as a cascading parent. | The next page of that generation's cascading children, in run identity order: live children record cancellation intent, and idle ones also receive an Advance intent. Terminal children are passed over. |
+| Notify | A continuation head's current generation becomes terminal while a current parent wait accepted a member of that head. | The next page of those waits, in wait identity order, through the head-directed member join: each idle parent is woken once per page with an Advance intent. |
+
+Settlement probes for a single cascading child and terminal completion for a
+single current waiting parent before recording anything; both probes read at
+most one row. Without one, no obligation is recorded, and none can become
+necessary later: a settled generation creates no further children, and a parent
+that accepts a terminal head resolves that wait when it next prepares. Repeated
+settlement of the same generation, such as cancelling a run that is already
+compensating, reuses its existing obligation.
+
+Creator storage adds two tables, each with `id` as its sole primary key:
+
+| Model | Durable identity and fields |
+| --- | --- |
+| `propagations` | Typed obligation identity, app, kind, source run and generation, cursor, next page revision, finished flag and creation time. App/source run/generation/kind is unique and also serves the cancellation fence lookup. |
+| `propagation_pages` | Job identity linked to the exact job receipt and publication, obligation and page revision, and the closed result: cursor transition, finished and superseded flags, affected count and successor specifications. App/obligation/revision is unique. |
+
+The publication journal gains Propagate projections: obligation identity and
+page revision are required for Propagate and absent for every other operation,
+and app/obligation/revision is unique. Cascade pages select through an index on
+the parent linkage, cascade flag and run identity, so each page is an index
+range scan. Notify pages reuse the head's member join, which returns one page
+in wait identity order; its database work still grows with the waits remaining
+behind the cursor.
+
+A delivered page captures original policy and delivery authority before journal
+I/O. Exact committed receipt replay is checked first under the app lock and
+needs no fresh authority. Fresh work requires the matching persisted
+publication, the obligation's current revision and an unfinished obligation.
+The first page starts at the initial cursor; a later page must follow the
+previous page's Waiting receipt, its committed cursor and its exact successor
+publication. The page commits its effects, their Advance intents, the obligation
+cursor and revision, the immutable page record, the job receipt and the next
+Propagate publication together. A failed page commits nothing, so redelivery
+repeats the same page. Historical receipts replay after later pages advance the
+obligation; text cursors are validated by equality with neighbouring pages,
+never by comparing identity order outside the database.
+
+A cascade page always addresses its recorded source generation. Restarting the
+source run creates another generation number, whose children fall outside
+every page and outside the fence. A notify page first checks that the head's
+current generation is still the terminal source. After a head restart the
+obligation completes as superseded without effects: parents keep waiting, and
+the restarted generation records its own obligation when it terminates.
+
+Pages reach children lazily, so an unfinished cascade obligation is also the
+effective cancellation fence. A cascading child whose parent generation has an
+unfinished cascade obligation is treated as cancelled by frontier preparation,
+task completion and heartbeat renewal, exactly as if its cancellation were
+recorded. Before any page reaches it, it cannot continue as new, resume into
+forward execution or commit a forward transition, whatever order continuation
+identities sort in. A completing child that creates new children settles with
+its own cascade obligation, so work created mid-propagation is reached through
+its owner. Restarting a cascading child while its parent's cascade is still
+propagating is a durable conflict, so a restarted generation never meets a
+pending page. Once the obligation finishes, every child it selected had recorded
+cancellation or was already terminal; a later restart is an explicit override
+that no remaining page can cancel.
 
 ### Management and delivery barriers
 
