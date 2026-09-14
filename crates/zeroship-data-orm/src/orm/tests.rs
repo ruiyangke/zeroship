@@ -15,6 +15,7 @@ mod conflicts;
 mod dynamic_reads;
 mod encrypted_upsert;
 mod exact_decimal;
+mod field_conversion;
 mod fixtures;
 mod generated_identity;
 mod identity;

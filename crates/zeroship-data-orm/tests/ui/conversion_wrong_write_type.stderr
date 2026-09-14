@@ -1,0 +1,35 @@
+error[E0277]: the trait bound `i64: EncodeValue<zeroship_data_orm::orm::sql_types::Text>` is not satisfied
+  --> tests/ui/conversion_wrong_write_type.rs:16:10
+   |
+16 | #[derive(Insertable)]
+   |          ^^^^^^^^^^ the trait `EncodeValue<zeroship_data_orm::orm::sql_types::Text>` is not implemented for `i64`
+   |
+help: the following other types implement trait `EncodeValue<S>`
+  --> src/orm/codecs.rs
+   |
+   |           impl EncodeValue<$sql> for $rust {
+   |           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |           |
+   |           `i64` implements `EncodeValue<zeroship_data_orm::orm::sql_types::BigInt>`
+   |           `i64` implements `EncodeValue<zeroship_data_orm::orm::sql_types::Integer>`
+...
+   | / integer_codec!(
+   | |     Integer, i32, i8, i16, i32, i64, u8, u16, u32, u64, isize, usize
+   | | );
+   | |_- in this macro invocation
+   | / integer_codec!(
+   | |     BigInt, i64, i8, i16, i32, i64, u8, u16, u32, u64, isize, usize
+   | | );
+   | |_- in this macro invocation
+...
+   |   impl EncodeValue<Timestamp> for i64 {
+   |   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `i64` implements `EncodeValue<zeroship_data_orm::orm::sql_types::Timestamp>`
+note: required by a bound in `encode_field_with`
+  --> src/orm/model.rs
+   |
+   | pub fn encode_field_with<C, T, U>(
+   |        ----------------- required by a bound in this function
+...
+   |     U: EncodeValue<C::SqlType>,
+   |        ^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `encode_field_with`
+   = note: this error originates in the derive macro `Insertable` which comes from the expansion of the macro `integer_codec` (in Nightly builds, run with -Z macro-backtrace for more info)

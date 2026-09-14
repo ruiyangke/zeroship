@@ -159,6 +159,16 @@ encoding happens at the database boundary. Custom domain types can implement
 logical type) without deriving Serde. `Protected<T>` retains a classified field's
 masked display when the protection pipeline withholds its value.
 
+For types defined in another library, use `#[orm(decode_with = path)]` on a
+read field and `#[orm(encode_with = path)]` on a write field. The caller's function
+converts between its domain type and a native codec type, returning
+`Result<_, DbError>`. The ORM still checks the column's logical type and adds
+field context to conversion errors. Both hooks can appear on a struct deriving
+`FromRow` and `Insertable`. Encoding hooks receive the inner value of
+`Defaulted::Value` or `Change::Set`; omitted fields do not invoke them. Nullable
+values remain `Option`, preserving explicit SQL NULL. Manual mappings can use
+`Row::take_with` and `encode_field_with` for the same behavior.
+
 `Database::entity` compares canonical field metadata with the installed schema
 and refuses a mismatch. A typed handle also refuses changes to that
 metadata after it was created. This checks the descriptor bound by the host;
