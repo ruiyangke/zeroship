@@ -128,6 +128,60 @@ async fn committed_offsets_shift_the_database_clock(
     }
 }
 
+// A patch whose only value names a field the descriptor reassigns on write is
+// refused without writing. The same value beside a caller expression is removed
+// and the expression still writes; the generator replaces the removed value.
+async fn reassigned_values_leave_caller_expressions(table: &EntityCollection<moments::Entity>) {
+    let reassigned = || {
+        Patch::<moments::Entity>::from_assignments(
+            [("touched".to_owned(), Value::Timestamp(0))].into(),
+        )
+    };
+    let before = table.query().first::<Moment>().await.unwrap().unwrap();
+    let error = Box::pin(table.update::<_, Moment>(moments::id.eq("row").unwrap(), reassigned()))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(
+            error,
+            DbError::ValidationFailed {
+                code: "invalid_update",
+                ..
+            }
+        ),
+        "{error:?}"
+    );
+    let refused = table.query().first::<Moment>().await.unwrap().unwrap();
+    assert_eq!(
+        (refused.deadline, refused.touched),
+        (before.deadline, before.touched)
+    );
+    let written = Box::pin(
+        table.update::<_, Moment>(
+            moments::id.eq("row").unwrap(),
+            reassigned()
+                .and(
+                    moments::deadline
+                        .set_expression(
+                            TimestampExpr::database_now()
+                                .minus(Duration::from_secs(3_600))
+                                .unwrap(),
+                        )
+                        .unwrap(),
+                )
+                .unwrap(),
+        ),
+    )
+    .await
+    .unwrap()
+    .expect("the row exists");
+    assert!(written.deadline < before.deadline, "the expression wrote");
+    assert_ne!(
+        written.touched, 0,
+        "the generator replaced the removed value"
+    );
+}
+
 async fn exercise(postgres: bool) {
     let owner = fixture(postgres).await;
     let table = owner.database.entity::<moments::Entity>().unwrap();
@@ -268,6 +322,7 @@ async fn exercise(postgres: bool) {
         7
     );
     Box::pin(committed_offsets_shift_the_database_clock(&table, postgres)).await;
+    Box::pin(reassigned_values_leave_caller_expressions(&table)).await;
     let ids = (0..crate::budgets::MAX_PER_ROW_UPDATE_TARGETS)
         .map(|index| format!("extra_{index}")).collect::<Vec<_>>();
     for batch in ids.chunks(crate::budgets::MAX_INSERT_MANY_BATCH) {
