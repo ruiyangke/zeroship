@@ -153,7 +153,7 @@ trap cleanup EXIT
 # shellcheck source=lib/binary_freshness.sh
 source "$ROOT/tests/lib/binary_freshness.sh"
 zs_check_binary_freshness "$ROOT" "$BIN" \
-  "crates/zeroship-runtime/src crates/zeroship-worker/src crates/zeroship-gateway/src crates/zeroship-control/src crates/zeroship-core/src crates/zeroship-cli/src sdks/rpc/src sdks/vite-plugin/src" \
+  "crates/zeroship-runtime/src crates/zeroship-worker/src crates/zeroship-gateway/src crates/zeroship-control/src crates/zeroship-core/src crates/zeroship-cli/src packages/rpc/src packages/vite-plugin/src" \
   "zeroship zeroship-worker zeroship-gate zeroship-control" \
   || { _zs_fresh_rc=$?; [ "$_zs_fresh_rc" -ne 0 ] && exit "$_zs_fresh_rc"; }
 
@@ -499,7 +499,7 @@ fi
 # only in SPELLING: a bare `process.env` chain versus a computed-key lookup no
 # bundler can match statically. The production `.zship` build runs
 # `ssr.target: "webworker"`, which statically rewrites `process.env` to `{}`;
-# `sdks/vite-plugin/src/build.ts` carries `define: { "process.env": "process.env" }`
+# `packages/vite-plugin/src/build.ts` carries `define: { "process.env": "process.env" }`
 # to defeat exactly that. If the two spellings disagree, the difference was
 # introduced by the BUILD, and any conclusion drawn from the bare reading alone
 # is about the bundler, not about the platform.

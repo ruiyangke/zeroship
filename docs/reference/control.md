@@ -11,7 +11,7 @@ runtime SDKs such as `@zeroship/db`, `@zeroship/kv`, `@zeroship/auth`, and
 
 The Rust API lives in `crates/zeroship-control/src/{api,env_handlers}.rs`, and
 the organization surface in `crates/zeroship-control/src/organizations.rs`.
-The TypeScript client lives in `sdks/control/src/index.ts`.
+The TypeScript client lives in `packages/control/src/index.ts`.
 
 ## Client setup
 

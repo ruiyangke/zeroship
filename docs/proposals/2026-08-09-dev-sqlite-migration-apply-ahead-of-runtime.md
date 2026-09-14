@@ -166,12 +166,12 @@ interface ApplyIrSqliteRequest {
   ]
   ```
 
-- **Wiring** (`sdks/vite-plugin/src/dev-server.ts`): chain the apply after
+- **Wiring** (`packages/vite-plugin/src/dev-server.ts`): chain the apply after
   `bootRegenDone = regenTypesDev(...)` and before `spawnRuntime` awaits it, and on
   the migration hot-update path. Log-not-throw (a bad migration must not crash the
   dev server). Idempotent — the `_mig` journal skips already-applied migrations.
 - Expose `applyIrSqlite` on the `MigrateAddon` interface in
-  `sdks/vite-plugin/src/gen-types/addon.ts` (types from `zeroship-migrate-node`), and add
+  `packages/vite-plugin/src/gen-types/addon.ts` (types from `zeroship-migrate-node`), and add
   an `applyMigrationsToDevSqlite()` helper that records envelopes, builds the
   `registry` from the descriptor's collection names (all → `default`), and calls the
   verb.
@@ -235,7 +235,7 @@ example migration):**
   `examples/db-hitcounter`). Note `t.ref()` is not in the vendored DSL — use
   `t.text().references(...)`.
 - [ ] gen-types `genArtifacts` calls pass `dialect: "postgres"`
-      (`sdks/vite-plugin/src/gen-types/index.ts`, both the MANUAL and GENERATED
+      (`packages/vite-plugin/src/gen-types/index.ts`, both the MANUAL and GENERATED
       calls). The runtime descriptor is otherwise dialect-neutral.
 - [ ] Any confined charter used at **apply** drops the declared-only
       `runtime.lock_timeout_ms` / `runtime.statement_timeout_ms` grants.
@@ -307,5 +307,5 @@ authority — the same category error as A.
   `crates/zeroship-data-v8/src/register_model/sqlite_engine.rs`.
 - The cross-app FK union check: `validate_cross_app_fk_targets` in
   `third_party/zero-migrate/crates/zeroship-migrate/src/render/declarative.rs`.
-- Dev DB paths: `sdks/vite-plugin/src/dev-db.ts` (`.zeroship/`), worker app files
+- Dev DB paths: `packages/vite-plugin/src/dev-db.ts` (`.zeroship/`), worker app files
   `zs-<app_id>.sqlite`.

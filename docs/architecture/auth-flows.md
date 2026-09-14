@@ -608,8 +608,8 @@ audits either refusal or success (`crates/zeroship-auth/src/ui/me.rs:153-212`).
 VERIFIED walk-through:
 
 1. The SDK creates PKCE, state, and nonce and stores the transaction client-side
-   (`sdks/auth/src/client.ts:294-321`,
-   `sdks/auth/src/internal/transaction.ts:1-27`). Gateway `/authorize` resolves
+   (`packages/auth/src/client.ts:294-321`,
+   `packages/auth/src/internal/transaction.ts:1-27`). Gateway `/authorize` resolves
    the route, requires S256, state, nonce, exact callback allowlisting, and adds
    `offline_access` (`crates/zeroship-gateway/src/browser_auth.rs:57-180`).
    Its process holds separate broker-master, pairwise-salt, anchor-encryption,
@@ -633,8 +633,8 @@ VERIFIED walk-through:
    (`crates/zeroship-auth/src/oidc/authorization_code.rs:694-861`,
    `crates/zeroship-auth/src/oidc/refresh.rs:30-35`).
 5. The SDK callback checks state and sends only code, verifier, and redirect URI
-   (`sdks/auth/src/client.ts:324-384`,
-   `sdks/auth/src/internal/transport.ts:170-204`). Gateway verifies the ID token
+   (`packages/auth/src/client.ts:324-384`,
+   `packages/auth/src/internal/transport.ts:170-204`). Gateway verifies the ID token
    with `expected_nonce=None`, then projects the pairwise subject and relay
    email (`crates/zeroship-gateway/src/auth_token.rs:446-550`). The missing nonce check is
    Finding 8.
@@ -648,7 +648,7 @@ VERIFIED walk-through:
    rotate the OP refresh family and re-sign a cookie
    (`crates/zeroship-gateway/src/auth_token.rs:710-969`). The browser never receives OP
    access or refresh tokens in this BFF flow
-   (`sdks/auth/src/internal/transport.ts:170-210`).
+   (`packages/auth/src/internal/transport.ts:170-210`).
 
 ### 1.14 App-origin Gateway signout
 
@@ -1594,7 +1594,7 @@ VERIFIED walk-through:
 
 1. The concrete `@zeroship/control` helpers post an app ID, signal types, and
    TTL to run- or topic-token endpoints using the bearer configured on that
-   client (`sdks/control/src/index.ts:275-299`). Control derives the asserted
+   client (`packages/control/src/index.ts:275-299`). Control derives the asserted
    app from the header only after verifying the app-scoped HMAC bearer; a
    platform OAuth or Supabase bearer does not satisfy this endpoint
    (`crates/zeroship-control/src/workflow_instance_api.rs:326-405`). The creator-facing
@@ -2112,7 +2112,7 @@ INFERRED consequences appear only where explicitly labeled in FINDINGS.
 | Google ID JWT plus access bearer | Google | Auth JWKS and claim verifier, including `at_hash` | Provider-defined and short | No local recall by Auth; expiry/provider governs | Establish verified Google subject and profile (`crates/zeroship-auth/src/identity/oauth/google.rs:166-210`) |
 | GitHub code and access bearer | GitHub | GitHub token and profile endpoints via Auth | Provider-defined; code is one use | Yes, provider controls credential | Establish verified GitHub subject and email (`crates/zeroship-auth/src/identity/oauth/github.rs:65-213`) |
 | Upstream OAuth client secret | Google or GitHub app registration | Provider token endpoint | Provider/config lifetime | Yes, provider rotation | Authenticate Auth during upstream code exchange (`crates/zeroship-auth/src/config.rs:164-223`, `crates/zeroship-auth/src/identity/oauth/google.rs:117-153`, `crates/zeroship-auth/src/identity/oauth/github.rs:112-155`) |
-| Browser PKCE, state, and nonce transaction | Browser SDK random generator | Gateway and Auth for PKCE; SDK for state; BFF nonce check is missing, Finding 8 | In-flight popup, normally at most 60s | Yes, completion, mismatch, timeout, or tab lifetime | Bind the browser redirect and code exchange, not resource access (`sdks/auth/src/client.ts:294-384`, `sdks/auth/src/internal/transaction.ts:1-27`, `crates/zeroship-gateway/src/browser_auth.rs:57-180`) |
+| Browser PKCE, state, and nonce transaction | Browser SDK random generator | Gateway and Auth for PKCE; SDK for state; BFF nonce check is missing, Finding 8 | In-flight popup, normally at most 60s | Yes, completion, mismatch, timeout, or tab lifetime | Bind the browser redirect and code exchange, not resource access (`packages/auth/src/client.ts:294-384`, `packages/auth/src/internal/transaction.ts:1-27`, `crates/zeroship-gateway/src/browser_auth.rs:57-180`) |
 | OP authorization code | Auth random generator | Auth token endpoint and DB | 60s, one use | No supported early revoke; consume or expiry | Exchange for OP tokens under exact bindings (`crates/zeroship-auth/src/oidc/authorization_code.rs:451-692`) |
 | App OP access JWT | Auth Ed25519 signer | Gateway, UserInfo, introspection, or revocation | 15m default | Yes, family marker where checked | Scoped app resource access; raw Gateway path has known lifecycle gap (`crates/zeroship-auth/src/oidc/issuer.rs:22-33`, `crates/zeroship-gateway/src/router/auth.rs:654-825`, `crates/zeroship-auth/src/oidc/introspect.rs:98-126`, `crates/zeroship-auth/src/oidc/refresh.rs:628-655`) |
 | OP ID JWT | Auth Ed25519 signer | OIDC client, including Gateway | 15m default | No, no per-token recall | Authentication response, not resource authority (`crates/zeroship-auth/src/oidc/issuer.rs:22-33`, `crates/zeroship-gateway/src/auth_token.rs:446-498`) |
@@ -2142,7 +2142,7 @@ to look like instead.
 
 | Component | Trusted to assert or hold | Must prove before accepting or forwarding |
 |---|---|---|
-| Browser | Password, TOTP, raw email token, PKCE verifier, state, nonce, and cookies in its origin | CSRF, state, PKCE, nonce where implemented, and possession of the presented human credential (`crates/zeroship-auth/src/server.rs:63-205`, `sdks/auth/src/client.ts:294-384`) |
+| Browser | Password, TOTP, raw email token, PKCE verifier, state, nonce, and cookies in its origin | CSRF, state, PKCE, nonce where implemented, and possession of the presented human credential (`crates/zeroship-auth/src/server.rs:63-205`, `packages/auth/src/client.ts:294-384`) |
 | CLI | Device code while polling, then the returned platform access JWT; the Unix writer forces mode 0600 | CLI checks platform provider and token presence; Control must validate pending-row state and approval, request a fixed `zeroship-cli` token, and verify subject, fixed client, audience, and scopes before returning it (`crates/zeroship-cli/src/auth.rs:164-217`, `crates/zeroship-cli/src/auth.rs:332-340`, `crates/zeroship-cli/src/auth.rs:451-465`, `crates/zeroship-control/src/device_handlers.rs:304-536`, `crates/zeroship-control/src/device_handlers.rs:673-813`) |
 | Auth | Human identity, lifecycle result, consent, OP claims, social-link policy, OP private key, provider secrets | Password/TOTP or upstream protocol, live session/user, client/redirect/scope/PKCE, consent, and signing-key issuance eligibility (`crates/zeroship-auth/src/identity/credentials.rs:81-344`, `crates/zeroship-auth/src/oidc/authorization_code.rs:283-861`, `crates/zeroship-auth/src/oidc/issuer.rs:766-799`) |
 | Google/GitHub | Provider subject and selected profile facts | Auth must verify their protocol response and apply its stricter email policy (`crates/zeroship-auth/src/identity/oauth/google.rs:67-210`, `crates/zeroship-auth/src/identity/oauth/github.rs:65-213`) |
@@ -2312,7 +2312,7 @@ RESOLVED BY DELETION, 2026-09-05: it disappeared. `AuthLevel` is now
 `RequiredPrincipal` with two variants, `Anonymous` and `User`
 (`crates/zeroship-bundle/src/rule.rs`), the gateway's three combined arms are
 plain `RequiredPrincipal::User`, and the build refuses `auth: "admin"` outright
-in every mode (`sdks/vite-plugin/src/manifest.ts`). Deletion rather than a
+in every mode (`packages/vite-plugin/src/manifest.ts`). Deletion rather than a
 predicate, because `docs/architecture/control-plane.md` records that there is no
 platform-admin principal for a predicate to test.
 
@@ -2396,15 +2396,15 @@ is not final.
 ### 8. MEDIUM: The BFF stores a nonce but never verifies it
 
 VERIFIED: the SDK generates, transmits, and stores a nonce
-(`sdks/auth/src/client.ts:294-321`,
-`sdks/auth/src/internal/transaction.ts:1-27`). Completion checks state and sends
+(`packages/auth/src/client.ts:294-321`,
+`packages/auth/src/internal/transaction.ts:1-27`). Completion checks state and sends
 code, verifier, and redirect URI, but no nonce
-(`sdks/auth/src/client.ts:324-384`,
-`sdks/auth/src/internal/transport.ts:170-204`). Gateway passes
+(`packages/auth/src/client.ts:324-384`,
+`packages/auth/src/internal/transport.ts:170-204`). Gateway passes
 `expected_nonce=None` to ID-token verification and comments that the SDK already
 guards it (`crates/zeroship-gateway/src/auth_token.rs:446-485`).
 
-Search method: `rg 'txn\.nonce|\.nonce' sdks/auth/src --glob '*.ts'` found nonce
+Search method: `rg 'txn\.nonce|\.nonce' packages/auth/src --glob '*.ts'` found nonce
 generation and storage but no read or comparison on completion. State and S256
 PKCE still provide material defenses, so this is ranked below the direct
 identity and revocation failures, but the asserted OIDC boundary is absent.
@@ -2522,13 +2522,13 @@ mint examples exceed Control's 24-hour maximum
 The workflows SDK declares `WorkflowRun.createSignalToken`, but its complete
 native run-method inventory and backend trait contain no such operation; the
 separate Control SDK helper is the only concrete client implementation
-(`sdks/workflows/src/index.ts`,
+(`packages/workflows/src/index.ts`,
 `crates/zeroship-workflow-v8/src/v8_class.rs`,
 `crates/zeroship-workflow/src/backend.rs`,
-`sdks/control/src/index.ts`). Search method:
+`packages/control/src/index.ts`). Search method:
 `rg -n 'createSignalToken|create_signal_token' crates/zeroship-workflow
 crates/zeroship-workflow-v8 crates/zeroship-runtime crates/zeroship-worker
-sdks/workflows/src sdks/control/src` found the
+packages/workflows/src packages/control/src` found the
 workflows interface and Control helper but no run-object implementation.
 
 The native acceptance helpers in
@@ -2844,7 +2844,7 @@ VERIFIED items, each paired with a positive live path or complete scoped search:
   old private key therefore remains resident unnecessarily.
 - Workflow replay still has the runtime's inline `__zsWorkflowDispatch`
   (`crates/zeroship-runtime/src/core/init.rs`) beside the SDK's internal journal
-  module (`sdks/workflows/src/journal.ts`). Their output readers use a host-bound
+  module (`packages/workflows/src/journal.ts`). Their output readers use a host-bound
   callback, and the control credential stays in Rust.
 - Auth implements a non-brokered stored `client_secret_post` branch, but
   Control's registration API accepts only Basic or public `none` and both

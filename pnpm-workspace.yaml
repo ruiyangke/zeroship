@@ -1,5 +1,4 @@
 packages:
-  - "sdks/*"
   - "examples/*"
   # Browser integration suite spanning examples.
   - "tests/e2e-browser"

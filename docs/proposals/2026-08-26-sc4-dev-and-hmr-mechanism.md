@@ -28,7 +28,7 @@ rather than in whatever the first implementer assumes.
 Today it is neither implemented nor rejected: it is **silently misapplied**.
 
 `migrate-dev.ts` resolves `databaseUrl` through `resolveDatabaseUrl`
-(`sdks/vite-plugin/src/cli/migrate-dev.ts:118-122`), whose precedence is shell
+(`packages/vite-plugin/src/cli/migrate-dev.ts:118-122`), whose precedence is shell
 `DATABASE_URL`, then project `.env`, then the SQLite default - so the value can
 legitimately be a Postgres URL. It then calls, with no branch on the scheme:
 
@@ -39,7 +39,7 @@ const reply = await applyMigrationsToDevSqlite({ root, migrationsDir, collection
 
 (`migrate-dev.ts:125-131`). The addon behind that call exposes only
 `applyIrSqlite`, which its own comment calls "the dev tier's schema authority"
-(`sdks/vite-plugin/src/gen-types/addon.ts:154`, declared at `:166`).
+(`packages/vite-plugin/src/gen-types/addon.ts:154`, declared at `:166`).
 
 So a developer who exports a Postgres `DATABASE_URL` gets their migrations
 applied to a **SQLite file**, and the command reports success. That is the worst
@@ -48,7 +48,7 @@ of the three possible behaviours.
 It is worse still than one command misbehaving, because the same URL reaches a
 second consumer that answers differently: the dev server passes
 `DATABASE_URL: databaseUrl` straight into the runtime child's environment
-(`sdks/vite-plugin/src/dev-server.ts:938`). So the migrations land in SQLite
+(`packages/vite-plugin/src/dev-server.ts:938`). So the migrations land in SQLite
 while the runtime is told to use Postgres - the developer ends up with a schema
 in one database and a runtime pointed at another, with no error from either
 side. That divergence is the strongest argument for rejecting at the source
@@ -67,7 +67,7 @@ rather than implementation because:
   error, whereas today's silent misapplication has to be discovered first.
 
 **The shared resolution point this decision needs already exists.** Both
-consumers go through one module, `sdks/vite-plugin/src/dev-database-url.ts`,
+consumers go through one module, `packages/vite-plugin/src/dev-database-url.ts`,
 whose header states that sharing the resolution is the whole point: the dev
 server imports `resolveDatabaseUrl` / `parseDotenvVars` / `logDatabaseUrlSource`
 (`dev-server.ts:56-59`, called at `:648` and `:928`) and the migrate CLI imports
@@ -82,7 +82,7 @@ promises a *typed* error and the decision says "named, actionable" - and no
 code, type or symbol for it appears in this document or in the set. Nor can an
 implementer copy the naming from the two names this document and the parent use
 as examples: **`SCHEMA_NOT_APPLIED` and `SCHEMA_METADATA_MISMATCH` occur zero
-times in `crates/` and `sdks/`** (measured 2026-08-28). They are specification
+times in `crates/` and `packages/`** (measured 2026-08-28). They are specification
 names - the parent introduces `SCHEMA_NOT_APPLIED` for a missing app file in
 section 3.13 (`design.md:930-933`) - not existing symbols an implementer can
 reach for. All three names have to be minted, in one place, as part of the
@@ -112,7 +112,7 @@ the matching migration has not been applied, DB operations fail with
 `SCHEMA_NOT_APPLIED` or `SCHEMA_METADATA_MISMATCH` rather than serving stale
 metadata.
 
-This also deletes `resetSchemaInstalled` (`sdks/vite-plugin/src/dev-bootstrap/index.ts:121`,
+This also deletes `resetSchemaInstalled` (`packages/vite-plugin/src/dev-bootstrap/index.ts:121`,
 `:185`), which exists only to make the old in-place mutation scheme work.
 
 ### Current position: the supervisor needs a specification, not an implementation
@@ -131,7 +131,7 @@ start building against this section.
 the HMR re-apply this decision deletes.** The dev descriptor is not frozen at
 isolate construction; the dev vector re-applies it, and the channel is live end
 to end (measured 2026-08-28). `HMR_POLL_PATH`
-(`sdks/vite-plugin/src/constants.ts:5`) is served at `dev-server.ts:757` and
+(`packages/vite-plugin/src/constants.ts:5`) is served at `dev-server.ts:757` and
 carries `runtimeDescriptorJson` at `:763-775`; that field is filled by the
 watcher's regen in the `hotUpdate` branch (`dev-server.ts:1136-1137`), a
 different process from the `pnpm migrate` CLI that applies the schema. On the
@@ -147,7 +147,7 @@ This is a security-scope decision that must not be left implicit.
 
 In dev the module graph is **Vite's**, not `ModuleRegistry`'s, and
 `__zeroshipNodeBuiltin` remains installed because Vite's `fetchModule` is its
-only consumer (`sdks/vite-plugin/src/environment.ts:64-68`; the bridge is
+only consumer (`packages/vite-plugin/src/environment.ts:64-68`; the bridge is
 installed unconditionally at `crates/zeroship-runtime/src/core/init.rs:2261-2268`,
 defined at `core/native_modules.rs:63-80`). The parent proposal deletes that
 bridge from the **production** vector only (`design.md:442-443`).
@@ -280,7 +280,7 @@ question; it does not answer it.
   The generation half is what makes this arm test Decision 2 at all. Today's
   in-place path already produces the removed-collection outcome without any
   restart: the dev bootstrap reapplies the descriptor and resets the latch
-  (`sdks/vite-plugin/src/dev-bootstrap/index.ts:103`) and `installSchema`
+  (`packages/vite-plugin/src/dev-bootstrap/index.ts:103`) and `installSchema`
   deletes stale names and defines the replacements
   (`sdks/bootstrap/src/install-schema.ts:1225`). So an arm asserting only
   absence **passes on the very mechanism this document rejected** - and would

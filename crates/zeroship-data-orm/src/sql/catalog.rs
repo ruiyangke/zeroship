@@ -116,7 +116,7 @@ pub enum MaskKind {
 impl MaskKind {
     /// Canonical SDK-wire string for this kind. Mirrors
     /// the discriminator the SDK emits in `def.mask.kind` (see
-    /// `sdks/db/src/types.ts`). Used by the diff layer to round-trip
+    /// `packages/db/src/types.ts`). Used by the diff layer to round-trip
     /// the live-introspection sentinel through `pg_description` (PG) /
     /// `sqlite_master.sql` (SQLite) and back into a `MaskKind`.
     #[must_use]

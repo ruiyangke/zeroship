@@ -26,11 +26,11 @@
 # ---------------------------------------------------------------------------
 # Stage 1 - build the JavaScript workspace and embedded database facade.
 # ---------------------------------------------------------------------------
-FROM node:22-bookworm AS sdks
+FROM node:22-bookworm AS js-packages
 WORKDIR /build
 RUN corepack enable
 # Rust, in the NODE stage. This looks wrong and is not.
-# sdks/vite-plugin imports `zeroship-migrate-node`, a Rust N-API addon, and that
+# packages/vite-plugin imports `zeroship-migrate-node`, a Rust N-API addon, and that
 # addon's build is `napi build --platform --release`. `napi` is @napi-rs/cli,
 # a NODE cli (its package.json:61 devDependency), and it compiles a Rust crate.
 # So the addon needs BOTH toolchains in ONE stage - which is why the obvious
@@ -52,7 +52,7 @@ RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
 ENV PATH="/root/.cargo/bin:${PATH}"
 # Workspace manifest + lockfile first for a cache-friendly install.
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
-# pnpm-workspace.yaml globs sdks/* and examples/*, and the lockfile pins
+# pnpm-workspace.yaml globs packages/* and examples/*, and the lockfile pins
 # importers for both. `pnpm install --frozen-lockfile` validates the on-disk
 # workspace against the lockfile, so every workspace package must be present
 # or the install fails. examples/ is tiny (no committed node_modules).
@@ -63,7 +63,6 @@ COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 # died with `"/apps": not found`. The console is NOT part of this image any
 # more and control no longer gets --bootstrap-console. Restoring it means
 # fetching the extracted builder repo, not re-adding this COPY.
-COPY sdks/ sdks/
 COPY examples/ examples/
 # pnpm-workspace.yaml lists packages/* and crates/zeroship-migrate-node as workspace
 # members, and the lockfile pins them as importers - so --frozen-lockfile needs
@@ -180,7 +179,7 @@ COPY crates/ crates/
 COPY libs/ libs/
 COPY deploy/policies/ deploy/policies/
 # Carry the database facade emitted by the Node stage into native compilation.
-COPY --from=sdks /build/sdks/ sdks/
+COPY --from=js-packages /build/crates/zeroship-data-v8/dist/ crates/zeroship-data-v8/dist/
 # NO `--bin` HERE, and that is the whole point of this comment.
 #
 # This line used to end `-p zeroship-migrate-adapter --bin
@@ -274,7 +273,7 @@ COPY db/migrations-ts /db/migrations-ts
 # `--target migrate`.
 #
 # WHY node:22-bookworm-slim AND NOT THE RUNTIME BASE. The addon is a native
-# `.node` compiled in the `sdks` stage, which is node:22-bookworm (glibc 2.36).
+# `.node` compiled in the `js-packages` stage, which is node:22-bookworm (glibc 2.36).
 # Staying on that base keeps the ABI the addon was built against rather than
 # relying on ubuntu 24.04's newer glibc to run it.
 #
@@ -306,19 +305,19 @@ COPY db/migrations-ts /db/migrations-ts
 #
 # Getting here took three build failures that no one had seen, because nothing had
 # ever built this: the missing Cargo workspace root, the addon's missing crate
-# closure, and `libs/`. See the `sdks` stage.
+# closure, and `libs/`. See the `js-packages` stage.
 #
 # ---------------------------------------------------------------------------
 FROM node:22-bookworm-slim AS migrate
 WORKDIR /app
-COPY --from=sdks /build/node_modules /app/node_modules
-COPY --from=sdks /build/packages /app/packages
-COPY --from=sdks /build/crates/zeroship-migrate-node /app/crates/zeroship-migrate-node
-COPY --from=sdks /build/package.json /build/pnpm-workspace.yaml /app/
-# The corpus, from the `sdks` stage rather than the build context, so its
+COPY --from=js-packages /build/node_modules /app/node_modules
+COPY --from=js-packages /build/packages /app/packages
+COPY --from=js-packages /build/crates/zeroship-migrate-node /app/crates/zeroship-migrate-node
+COPY --from=js-packages /build/package.json /build/pnpm-workspace.yaml /app/
+# The corpus, from the `js-packages` stage rather than the build context, so its
 # `node_modules/@zeroship/migrate` link comes with it. Copying it from the context
 # would bring the `.ts` files and NOTHING to resolve their import against.
-COPY --from=sdks /build/db/migrations-ts /app/db/migrations-ts
+COPY --from=js-packages /build/db/migrations-ts /app/db/migrations-ts
 # The two files that decide what a platform migration may do: the Platform charter
 # (the guard and executor posture) and the table-to-owner registry, without which
 # every op is refused as targeting a table owned by nobody.

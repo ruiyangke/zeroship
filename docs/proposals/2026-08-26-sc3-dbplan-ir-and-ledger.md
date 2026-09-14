@@ -304,7 +304,7 @@ which belongs to limits and metering.
 
 Today the builder emits **zero** SQL joins and relations are served by a batched
 second read: collect parents, deduplicate foreign keys, one `WHERE id IN (..)`
-per relation, stitch in memory (`sdks/db/src/collection/relations.ts`,
+per relation, stitch in memory (`packages/db/src/collection/relations.ts`,
 documented in `docs/reference/db.md`). That stays valid as a *lowering strategy*.
 It stops being the only one.
 
@@ -397,11 +397,11 @@ costly:
   *parent* rows before any relation load - `rows.length <= numItems` on the raw
   parent result - and the cursor is deliberately computed before relation loading
   so the captured `orderBy` value is the raw column rather than an overwritten
-  joined object (`sdks/db/src/query.ts`). A fused inner join drops childless
+  joined object (`packages/db/src/query.ts`). A fused inner join drops childless
   parents **before** `LIMIT`, so it returns a different page, a different
   `isDone`, and a different cursor. Same plan, two answers.
 - **Ordering by a child column.** The cursor is `{ orderBy, lastValues, lastId }`
-  (`sdks/db/src/query.ts`) - the *parent's* ordering values and the parent's id,
+  (`packages/db/src/query.ts`) - the *parent's* ordering values and the parent's id,
   with no slot for a child's. A fused join can order by a child column; the
   batched strategy cannot even express the resume point. The cursor format, not
   the SQL, is the limit.
@@ -520,7 +520,7 @@ migration side, or `deleted-with-<feature>`. `status` is `ported` or `unported`.
   never in `zeroship-schema` is invisible to it however exhaustive it is over
   what it does cover. The relation family is exactly that case: the string
   `relation` occurs **once** in `query.rs`, in a comment, and the batched loader
-  lives in TypeScript (`sdks/db/src/collection/relations.ts`). It has **no source
+  lives in TypeScript (`packages/db/src/collection/relations.ts`). It has **no source
   row to port**, so `unported` reaches zero without it and a ledger-only
   retirement would fire with a whole family unbuilt. The families are therefore a
   **separate checklist** with its own arm, not a derived consequence of the row

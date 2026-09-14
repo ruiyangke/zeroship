@@ -2,14 +2,14 @@
   "name": "zeroship",
   "version": "0.0.0",
   "private": true,
-  "description": "zeroship monorepo root — pnpm workspace for sdks/, apps/, examples/.",
+  "description": "zeroship monorepo root — pnpm workspace for packages/ and examples/.",
   "type": "module",
-  "main": "sdks/zeroship-stub/index.js",
+  "main": "packages/zeroship-stub/index.js",
   "exports": {
     ".": {
-      "types": "./sdks/zeroship-stub/index.d.ts",
-      "import": "./sdks/zeroship-stub/index.js",
-      "default": "./sdks/zeroship-stub/index.js"
+      "types": "./packages/zeroship-stub/index.d.ts",
+      "import": "./packages/zeroship-stub/index.js",
+      "default": "./packages/zeroship-stub/index.js"
     }
   },
   "packageManager": "pnpm@11.20.0",
@@ -19,11 +19,11 @@
   },
   "scripts": {
     "preinstall": "npx only-allow pnpm",
-    "build": "pnpm --filter zeroship-migrate-node build && pnpm --filter @zeroship/migrate build && pnpm --filter zero-migrate-cli build && pnpm --filter @zeroship/db build && pnpm build:data-v8-adapter && pnpm -r --filter './sdks/*' --filter '!@zeroship/db' build",
-    "build:data-v8-adapter": "pnpm --dir sdks/db exec tsup ../../crates/zeroship-data-v8/js/adapter.ts --format esm --platform neutral --target es2022 --out-dir ../../crates/zeroship-data-v8/dist --clean --external zeroship --no-config",
-    "publish:sdks": "deploy/scripts/publish-sdks.sh",
-    "test": "pnpm -r --filter './sdks/*' test",
-    "check": "pnpm -r --filter './sdks/*' check",
+    "build": "pnpm --filter zeroship-migrate-node build && pnpm --filter @zeroship/migrate build && pnpm --filter zero-migrate-cli build && pnpm --filter @zeroship/db build && pnpm build:data-v8-adapter && pnpm -r --filter './packages/*' --filter '!./packages/zero-migrate*' --filter '!@zeroship/db' build",
+    "build:data-v8-adapter": "pnpm --dir packages/db exec tsup ../../crates/zeroship-data-v8/js/adapter.ts --format esm --platform neutral --target es2022 --out-dir ../../crates/zeroship-data-v8/dist --clean --external zeroship --no-config",
+    "publish:packages": "deploy/scripts/publish-packages.sh",
+    "test": "pnpm -r --filter './packages/*' --filter '!./packages/zero-migrate*' test",
+    "check": "pnpm -r --filter './packages/*' --filter '!./packages/zero-migrate*' check",
     "gen-types": "pnpm --filter @zeroship/vite-plugin gen-types:all",
     "gen-types:check": "pnpm --filter @zeroship/vite-plugin gen-types:all -- --check"
   }

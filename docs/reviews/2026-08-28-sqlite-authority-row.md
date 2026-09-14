@@ -81,7 +81,7 @@ unconditionally after `installSchema` has run, with the reason stated at
 
 **On the dev tier the descriptor is deliberately mutable, and is re-applied on
 HMR.** `applyRuntimeDescriptorJson` sets and deletes the global
-(`sdks/vite-plugin/src/dev-bootstrap/index.ts:55-81`) and is wired to the HMR
+(`packages/vite-plugin/src/dev-bootstrap/index.ts:55-81`) and is wired to the HMR
 callback beside `entry.resetSchemaInstalled()`
 (`dev-bootstrap/index.ts:182-186`); `cache_schema` overwrites in place, and says
 why: "Idempotent: a re-register overwrites, which is what a dev re-deploy of the
@@ -342,7 +342,7 @@ lifecycle Fork C fences does not reach the SQLite tier:
   torn down is not implemented."
   (`crates/zeroship-data-v8/src/backend/sqlite/cdc.rs`).
 - **The dev app id is a literal.** `export const DEV_APP_ID = "default"`
-  (`sdks/vite-plugin/src/gen-types/dev-apply.ts:35`), used by both the migrate
+  (`packages/vite-plugin/src/gen-types/dev-apply.ts:35`), used by both the migrate
   command (`migrate-dev.ts:125`) and the dev server (`dev-server.ts:411`). On
   this tier same-id recreation is not an exotic operator action - it is
   `rm .zeroship/dev.sqlite && pnpm migrate`, done routinely. An incarnation
@@ -433,7 +433,7 @@ applied" from "this file exists and is empty". `ensure_attached` keys
 the row an unmigrated-but-present file surfaces as SQLite's `no such table`.
 
 That gap is already filled, better, and outside the data plane.
-`reportDevSchemaState` (`sdks/vite-plugin/src/dev-server.ts:392-443`) opens the
+`reportDevSchemaState` (`packages/vite-plugin/src/dev-server.ts:392-443`) opens the
 app file read-only, reads `sqlite_master`, diffs it against the descriptor's
 collection list, and names both the missing collections and the fixing command
 (`:439-443`). Its own doc comment states the design rule that makes this the

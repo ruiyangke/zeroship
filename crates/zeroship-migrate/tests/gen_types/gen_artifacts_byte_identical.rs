@@ -54,7 +54,7 @@ mod migrate_server_policy;
 const SCHEMA: &str = "public";
 const OWNER: &str = "app_test";
 const BUILD_SHAPE_MODULE: &str =
-    include_str!("../../../../sdks/vite-plugin/src/gen-types/confined-system-shape.generated.ts");
+    include_str!("../../../../packages/vite-plugin/src/gen-types/confined-system-shape.generated.ts");
 
 #[derive(Clone)]
 struct IrDocumentFixture {

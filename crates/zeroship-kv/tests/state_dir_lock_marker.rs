@@ -25,7 +25,7 @@ fn check_marker(source: &str, expected: &str) -> Result<(), String> {
 #[test]
 fn vite_recognizes_the_storage_lock_marker() {
     check_marker(
-        include_str!("../../../sdks/vite-plugin/src/dev-server.ts"),
+        include_str!("../../../packages/vite-plugin/src/dev-server.ts"),
         STATE_DIR_LOCK_MARKER,
     )
     .unwrap();
