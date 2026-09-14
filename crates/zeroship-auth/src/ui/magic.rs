@@ -45,6 +45,7 @@ use serde_json::json;
 use std::sync::Arc;
 use url::form_urlencoded;
 use zeroship_core::UserId;
+use zeroship_data_orm::Database;
 
 use crate::audit::{self, AuditEvent};
 use crate::config::AuthConfig;
@@ -480,6 +481,7 @@ pub async fn verify_redeem(
     form: ntex::web::types::Form<MagicRedeemForm>,
     cfg: ntex::web::types::State<Arc<AuthConfig>>,
     db: ntex::web::types::State<Arc<compio_postgres::Client>>,
+    orm: ntex::web::types::State<Database>,
 ) -> HttpResponse {
     if !valid_magic_csrf(&req, form.csrf.as_deref(), &cfg) {
         return render_error_page_with_status(
@@ -576,7 +578,7 @@ pub async fn verify_redeem(
     let same_device = cookie_nonce.as_deref() == Some(redeemed.csrf_nonce.as_str());
 
     // 3. Find-or-create the user.
-    let user_id = match find_or_create_magic_user(db.as_ref(), &redeemed.email).await {
+    let user_id = match find_or_create_magic_user(db.as_ref(), &orm, &redeemed.email).await {
         Ok(id) => id,
         Err(e) => {
             tracing::error!(error = %e, "magic_link find-or-create failed");
@@ -626,9 +628,9 @@ pub async fn verify_redeem(
     if same_device {
         same_device_finish(
             db.as_ref(),
+            &orm,
             &cfg,
-            &redeemed.token_hash,
-            &redeemed.reserved_at,
+            &redeemed,
             &user_id,
             &target,
             &req,
@@ -666,14 +668,16 @@ fn valid_magic_csrf(req: &HttpRequest, form_csrf: Option<&str>, _cfg: &AuthConfi
 #[allow(clippy::future_not_send)]
 async fn same_device_finish(
     db: &compio_postgres::Client,
+    orm: &Database,
     cfg: &AuthConfig,
-    token_hash: &[u8],
-    reserved_at: &chrono::DateTime<chrono::Utc>,
+    redeemed: &magic_link::RedeemedLoginToken,
     user_id: &UserId,
     target: &MagicTarget,
     req: &HttpRequest,
 ) -> HttpResponse {
     let MagicTarget::ReturnTo(native_return_to) = target;
+    let token_hash = &redeemed.token_hash;
+    let reserved_at = &redeemed.reserved_at;
 
     // A confirmed second factor gates this mint exactly as it gates `/login`.
     // The link is consumed BEFORE the challenge is rendered, so abandoning the
@@ -703,7 +707,7 @@ async fn same_device_finish(
                 },
             )
             .await;
-            return magic_challenge(cfg, db, user_id, native_return_to).await;
+            return magic_challenge(cfg, orm, user_id, native_return_to).await;
         }
         Ok(false) => {}
         Err(e) => {
@@ -788,11 +792,11 @@ async fn same_device_finish(
 #[allow(clippy::future_not_send)]
 async fn magic_challenge(
     cfg: &AuthConfig,
-    db: &compio_postgres::Client,
+    orm: &Database,
     user_id: &UserId,
     native_return_to: &str,
 ) -> HttpResponse {
-    let credential_version = match users::find_by_id(db, user_id).await {
+    let credential_version = match users::find_by_id(orm, user_id).await {
         Ok(Some(u)) => u.credential_version,
         Ok(None) => return render_error_page(PublicErrorMessage::SessionExpired),
         Err(e) => {
@@ -966,6 +970,7 @@ pub async fn complete(
     form: ntex::web::types::Form<MagicCompleteForm>,
     cfg: ntex::web::types::State<Arc<AuthConfig>>,
     db: ntex::web::types::State<Arc<compio_postgres::Client>>,
+    orm: ntex::web::types::State<Database>,
 ) -> HttpResponse {
     // 1. CSRF.
     let cookie_header = req
@@ -1110,7 +1115,7 @@ pub async fn complete(
 
     // 5. Find-or-create the user (must succeed — the redeem path
     //    already found-or-created, so this is effectively a lookup).
-    let user_id = match find_or_create_magic_user(db.as_ref(), &completion.email).await {
+    let user_id = match find_or_create_magic_user(db.as_ref(), &orm, &completion.email).await {
         Ok(id) => id,
         Err(e) => {
             tracing::error!(error = %e, "magic complete find-or-create failed");
@@ -1193,7 +1198,7 @@ pub async fn complete(
             )
             .await;
             let MagicTarget::ReturnTo(native_return_to) = &form_target;
-            return magic_challenge(&cfg, db.as_ref(), &user_id, native_return_to).await;
+            return magic_challenge(&cfg, &orm, &user_id, native_return_to).await;
         }
         Ok(false) => {}
         Err(e) => {
@@ -1306,11 +1311,19 @@ fn render_error_page_with_status(message: PublicErrorMessage, status: StatusCode
 /// Find a user by `email`, creating them with `email_verified_at = NOW()`
 /// if absent (clicking the magic link is itself proof of email
 /// ownership).
-async fn find_or_create_magic_user(db: &compio_postgres::Client, email: &str) -> Result<UserId> {
+#[allow(
+    clippy::future_not_send,
+    reason = "the native database belongs to this compio runtime"
+)]
+async fn find_or_create_magic_user(
+    db: &compio_postgres::Client,
+    orm: &Database,
+    email: &str,
+) -> Result<UserId> {
     email_validation::validate_email(email)
         .map_err(|_| AuthError::Internal("invalid email".into()))?;
 
-    if let Some(user) = users::find_by_email(db, email).await? {
+    if let Some(user) = users::find_by_email(orm, email).await? {
         if user.email_verified_at.is_none() {
             // Magic-link click counts as email verification — make
             // sure the row reflects that (no-op if already verified).
@@ -1325,7 +1338,7 @@ async fn find_or_create_magic_user(db: &compio_postgres::Client, email: &str) ->
         return Ok(user.id);
     }
     let name = email.split('@').next().unwrap_or("user");
-    let user = users::create(db, email, name, None).await?;
+    let user = users::create(orm, email, name, None).await?;
     db.execute(
         "UPDATE zeroship.users SET email_verified_at = NOW() WHERE id = $1",
         &[&user.id.as_str()],

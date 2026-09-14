@@ -55,9 +55,17 @@ fn write_owner_only(path: &std::path::Path, body: &[u8]) {
 }
 
 /// A person, a registered client and an app-audience grant in the case database.
-async fn seed(db: &Client, tag: &str) -> (zeroship_core::UserId, String, String) {
+#[allow(
+    clippy::future_not_send,
+    reason = "the fixture belongs to its compio runtime"
+)]
+async fn seed(
+    db: &Client,
+    orm: &zeroship_data_orm::Database,
+    tag: &str,
+) -> (zeroship_core::UserId, String, String) {
     let email = format!("session-object-{tag}@zeroship.test");
-    let user = users::create(db, &email, "Session Object", None)
+    let user = Box::pin(users::create(orm, &email, "Session Object", None))
         .await
         .expect("seed person");
     let person_id: zeroship_core::UserId = user.id;
@@ -128,10 +136,11 @@ fn tag() -> String {
 #[compio::test]
 async fn a_revoked_session_cannot_mint() {
     Database::run(async |database| {
+        let orm = database.orm().await;
         let db = database.connect_as_auth().await;
         let tag = tag();
         let keys = keys();
-        let (person_id, _client_id, grant_id) = seed(&db, &tag).await;
+        let (person_id, _client_id, grant_id) = seed(&db, &orm, &tag).await;
         let scopes = vec!["openid".to_string(), "offline_access".to_string()];
         let amr = vec!["pwd".to_string()];
 
@@ -170,10 +179,11 @@ async fn a_revoked_session_cannot_mint() {
 #[compio::test]
 async fn a_live_session_mints_where_a_revoked_one_does_not() {
     Database::run(async |database| {
+        let orm = database.orm().await;
         let db = database.connect_as_auth().await;
         let tag = tag();
         let keys = keys();
-        let (person_id, _client_id, grant_id) = seed(&db, &tag).await;
+        let (person_id, _client_id, grant_id) = seed(&db, &orm, &tag).await;
         let scopes = vec!["openid".to_string(), "offline_access".to_string()];
         let amr = vec!["pwd".to_string()];
 
@@ -220,10 +230,11 @@ async fn a_live_session_mints_where_a_revoked_one_does_not() {
 #[compio::test]
 async fn an_expired_session_cannot_mint_and_the_same_row_could_before() {
     Database::run(async |database| {
+        let orm = database.orm().await;
         let db = database.connect_as_auth().await;
         let tag = tag();
         let keys = keys();
-        let (person_id, _client_id, grant_id) = seed(&db, &tag).await;
+        let (person_id, _client_id, grant_id) = seed(&db, &orm, &tag).await;
         let scopes = vec!["openid".to_string()];
         let amr = vec!["pwd".to_string()];
 
@@ -280,10 +291,11 @@ async fn an_expired_session_cannot_mint_and_the_same_row_could_before() {
 #[compio::test]
 async fn a_suspended_grant_cannot_create_a_session() {
     Database::run(async |database| {
+        let orm = database.orm().await;
         let db = database.connect_as_auth().await;
         let tag = tag();
         let keys = keys();
-        let (person_id, _client_id, grant_id) = seed(&db, &tag).await;
+        let (person_id, _client_id, grant_id) = seed(&db, &orm, &tag).await;
         let scopes = vec!["openid".to_string()];
         let amr = vec!["pwd".to_string()];
         let subject = format!("pws_{tag}");
@@ -330,10 +342,11 @@ async fn a_suspended_grant_cannot_create_a_session() {
 #[compio::test]
 async fn a_stale_credential_epoch_cannot_create_a_session() {
     Database::run(async |database| {
+        let orm = database.orm().await;
         let db = database.connect_as_auth().await;
         let tag = tag();
         let keys = keys();
-        let (person_id, _client_id, grant_id) = seed(&db, &tag).await;
+        let (person_id, _client_id, grant_id) = seed(&db, &orm, &tag).await;
         let scopes = vec!["openid".to_string()];
         let amr = vec!["pwd".to_string()];
         let subject = format!("pws_{tag}");
@@ -366,10 +379,11 @@ async fn a_stale_credential_epoch_cannot_create_a_session() {
 #[compio::test]
 async fn advancing_the_credential_epoch_stops_the_next_mint() {
     Database::run(async |database| {
+        let orm = database.orm().await;
         let db = database.connect_as_auth().await;
         let tag = tag();
         let keys = keys();
-        let (person_id, _client_id, grant_id) = seed(&db, &tag).await;
+        let (person_id, _client_id, grant_id) = seed(&db, &orm, &tag).await;
         let scopes = vec!["openid".to_string()];
         let amr = vec!["pwd".to_string()];
 
@@ -416,10 +430,11 @@ async fn advancing_the_credential_epoch_stops_the_next_mint() {
 #[compio::test]
 async fn a_superseded_secret_replays_once_and_then_is_refused() {
     Database::run(async |database| {
+        let orm = database.orm().await;
         let db = database.connect_as_auth().await;
         let tag = tag();
         let keys = keys();
-        let (person_id, _client_id, grant_id) = seed(&db, &tag).await;
+        let (person_id, _client_id, grant_id) = seed(&db, &orm, &tag).await;
         let scopes = vec!["openid".to_string(), "offline_access".to_string()];
         let amr = vec!["pwd".to_string()];
 
@@ -490,10 +505,11 @@ async fn a_superseded_secret_replays_once_and_then_is_refused() {
 #[compio::test]
 async fn the_live_secret_is_not_replayable() {
     Database::run(async |database| {
+        let orm = database.orm().await;
         let db = database.connect_as_auth().await;
         let tag = tag();
         let keys = keys();
-        let (person_id, _client_id, grant_id) = seed(&db, &tag).await;
+        let (person_id, _client_id, grant_id) = seed(&db, &orm, &tag).await;
         let scopes = vec!["openid".to_string()];
         let amr = vec!["pwd".to_string()];
 
@@ -545,10 +561,11 @@ async fn the_live_secret_is_not_replayable() {
 #[compio::test]
 async fn a_session_with_no_secret_can_never_be_presented() {
     Database::run(async |database| {
+        let orm = database.orm().await;
         let db = database.connect_as_auth().await;
         let tag = tag();
         let keys = keys();
-        let (person_id, _client_id, grant_id) = seed(&db, &tag).await;
+        let (person_id, _client_id, grant_id) = seed(&db, &orm, &tag).await;
         let scopes = vec!["openid".to_string()];
         let amr = vec!["pwd".to_string()];
 
@@ -582,10 +599,11 @@ async fn a_session_with_no_secret_can_never_be_presented() {
 #[compio::test]
 async fn revoking_a_person_ends_every_live_session() {
     Database::run(async |database| {
+        let orm = database.orm().await;
         let db = database.connect_as_auth().await;
         let tag = tag();
         let keys = keys();
-        let (person_id, _client_id, grant_id) = seed(&db, &tag).await;
+        let (person_id, _client_id, grant_id) = seed(&db, &orm, &tag).await;
         let scopes = vec!["openid".to_string()];
         let amr = vec!["pwd".to_string()];
         let subject = format!("pws_{tag}");
@@ -637,9 +655,10 @@ async fn revoking_a_person_ends_every_live_session() {
 #[compio::test]
 async fn a_second_consent_advances_scopes_and_never_rewrites_the_subject() {
     Database::run(async |database| {
+        let orm = database.orm().await;
         let db = database.connect_as_auth().await;
         let tag = tag();
-        let (person_id, client_id, grant_id) = seed(&db, &tag).await;
+        let (person_id, client_id, grant_id) = seed(&db, &orm, &tag).await;
         let audience = Audience::App {
             client_id: client_id.clone(),
         };

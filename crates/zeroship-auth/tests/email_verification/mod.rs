@@ -10,8 +10,8 @@ use fixtures::{assert_failure_audit, assert_state, assert_success, issue, landin
 async fn landing_preserves_the_token_and_post_verifies_only_its_user_once() {
     Database::run(async |database| {
         let server = AuthServer::start(database).await;
-        let (user_id, token) = issue(&server.pg, "verify@example.test").await;
-        let (other_id, other_token) = issue(&server.pg, "other@example.test").await;
+        let (user_id, token) = issue(&server.pg, &server.orm, "verify@example.test").await;
+        let (other_id, other_token) = issue(&server.pg, &server.orm, "other@example.test").await;
         let csrf = landing(&server, &token).await;
         let cookie = format!("__Host-zsidp_csrf={csrf}");
         assert_state(&server.pg, &user_id, false).await;
@@ -55,7 +55,7 @@ async fn landing_preserves_the_token_and_post_verifies_only_its_user_once() {
 async fn missing_or_mismatched_csrf_preserves_the_token_for_a_valid_submission() {
     Database::run(async |database| {
         let server = AuthServer::start(database).await;
-        let (user_id, token) = issue(&server.pg, "csrf@example.test").await;
+        let (user_id, token) = issue(&server.pg, &server.orm, "csrf@example.test").await;
         let csrf = landing(&server, &token).await;
         for cookie in [None, Some("__Host-zsidp_csrf=wrong")] {
             let response = redeem(&server, &token, &csrf, cookie, "bad-csrf").await;
@@ -75,7 +75,7 @@ async fn missing_or_mismatched_csrf_preserves_the_token_for_a_valid_submission()
 async fn an_unknown_token_is_audited_without_consuming_an_existing_verification() {
     Database::run(async |database| {
         let server = AuthServer::start(database).await;
-        let (user_id, token) = issue(&server.pg, "unknown-token@example.test").await;
+        let (user_id, token) = issue(&server.pg, &server.orm, "unknown-token@example.test").await;
         let csrf = landing(&server, "never-issued").await;
         let cookie = format!("__Host-zsidp_csrf={csrf}");
         let response = redeem(

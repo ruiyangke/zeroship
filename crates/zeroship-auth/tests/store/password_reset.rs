@@ -7,9 +7,10 @@ use zeroship_auth::store::users;
 #[compio::test]
 async fn concurrent_issue_leaves_one_active_reset_token() {
     Database::run(async |database| {
+        let orm = database.orm().await;
         let client = database.connect_as_auth().await;
         let email = "reset@example.test";
-        let user = users::create(&client, email, "Reset", None).await.unwrap();
+        let user = users::create(&orm, email, "Reset", None).await.unwrap();
         let original = password_reset::issue(&client, email).await.unwrap();
         let mut locker = database.connect().await;
         let transaction = locker.transaction().await.expect("begin token lock");
@@ -81,9 +82,10 @@ async fn concurrent_issue_leaves_one_active_reset_token() {
 #[compio::test]
 async fn issue_then_redeem_roundtrip() {
     Database::run(async |database| {
+        let orm = database.orm().await;
         let client = database.connect_as_auth().await;
         let email = "reset@example.test";
-        users::create(&client, email, "Reset", None).await.unwrap();
+        users::create(&orm, email, "Reset", None).await.unwrap();
         let issued = password_reset::issue(&client, email).await.unwrap();
         assert!(!issued.raw.is_empty());
         let redeemed = password_reset::redeem(&client, &issued.raw)
@@ -102,10 +104,11 @@ async fn issue_then_redeem_roundtrip() {
 #[compio::test]
 async fn completion_obeys_transaction_rollback_and_commit() {
     Database::run(async |database| {
+        let orm = database.orm().await;
         let mut client = database.connect_as_auth().await;
         let old_hash = password::hash("old reset password phrase").unwrap();
         let new_hash = password::hash("new reset password phrase").unwrap();
-        let user = users::create(&client, "reset@example.test", "Reset", Some(&old_hash))
+        let user = users::create(&orm, "reset@example.test", "Reset", Some(&old_hash))
             .await
             .unwrap();
         let issued = password_reset::issue(&client, &user.email).await.unwrap();
@@ -176,18 +179,19 @@ async fn completion_obeys_transaction_rollback_and_commit() {
 #[compio::test]
 async fn completion_binds_the_user_at_issue_time_after_email_reassignment() {
     Database::run(async |database| {
+        let orm = database.orm().await;
         let client = database.connect_as_auth().await;
         let old_hash = password::hash("old reset password phrase").unwrap();
         let new_hash = password::hash("new reset password phrase").unwrap();
         let original = users::create(
-            &client,
+            &orm,
             "original@example.test",
             "Original",
             Some(&old_hash),
         )
         .await
         .unwrap();
-        let other = users::create(&client, "other@example.test", "Other", Some(&old_hash))
+        let other = users::create(&orm, "other@example.test", "Other", Some(&old_hash))
             .await
             .unwrap();
         let issued = password_reset::issue(&client, &original.email)
@@ -245,9 +249,10 @@ async fn completion_binds_the_user_at_issue_time_after_email_reassignment() {
 #[compio::test]
 async fn new_issue_supersedes_previous_reset_token() {
     Database::run(async |database| {
+        let orm = database.orm().await;
         let client = database.connect_as_auth().await;
         let email = "reset@example.test";
-        users::create(&client, email, "Reset", None).await.unwrap();
+        users::create(&orm, email, "Reset", None).await.unwrap();
         let first = password_reset::issue(&client, email).await.unwrap();
         let second = password_reset::issue(&client, email).await.unwrap();
         assert!(password_reset::redeem(&client, &first.raw)

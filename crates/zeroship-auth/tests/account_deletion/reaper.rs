@@ -17,11 +17,12 @@ use zeroship_auth::store::users;
 #[allow(clippy::future_not_send)]
 async fn reaper_erases_a_due_user_and_cascades() {
     Database::run(async |database| {
+        let orm = database.orm().await;
         let mut db = database.connect().await;
         let (_mock, control) = clear_control().await;
         let tag = Uuid::new_v4().simple().to_string();
         let email = format!("acctdel-hard-{tag}@zeroship.test");
-        let user = users::create(&db, &email, "Hard Delete", Some("phc"))
+        let user = users::create(&orm, &email, "Hard Delete", Some("phc"))
             .await
             .unwrap();
 
@@ -95,11 +96,12 @@ async fn reaper_erases_a_due_user_and_cascades() {
 #[allow(clippy::future_not_send)]
 async fn erasing_a_sole_owner_retains_the_organizations_invoice() {
     Database::run(async |database| {
+        let orm = database.orm().await;
         let mut db = database.connect().await;
         let (_mock, control) = clear_control().await;
         let tag = Uuid::new_v4().simple().to_string();
         let user = users::create(
-            &db,
+            &orm,
             &format!("acctdel-retain-{tag}@zeroship.test"),
             "Billed Human",
             None,
@@ -210,11 +212,12 @@ async fn erasing_a_sole_owner_retains_the_organizations_invoice() {
 #[allow(clippy::future_not_send)]
 async fn reaper_erases_a_user_holding_every_previously_blocking_reference() {
     Database::run(async |database| {
+        let orm = database.orm().await;
         let mut db = database.connect().await;
         let (_mock, control) = clear_control().await;
         let tag = Uuid::new_v4().simple().to_string();
         let victim = users::create(
-            &db,
+            &orm,
             &format!("acctdel-edges-{tag}@zeroship.test"),
             "Every Edge",
             None,
@@ -373,13 +376,14 @@ async fn reaper_erases_a_user_holding_every_previously_blocking_reference() {
 #[allow(clippy::future_not_send)]
 async fn reaper_erases_as_the_real_auth_role() {
     Database::run(async |database| {
+        let orm = database.orm().await;
         let db = database.connect().await;
         let (_mock, control) = clear_control().await;
         let mut as_auth = database.connect_as_auth().await;
 
         let tag = Uuid::new_v4().simple().to_string();
         let user = users::create(
-            &db,
+            &orm,
             &format!("acctdel-role-{tag}@zeroship.test"),
             "Real Role",
             None,
@@ -440,6 +444,7 @@ async fn reaper_erases_as_the_real_auth_role() {
 #[allow(clippy::future_not_send)]
 async fn reaper_refuses_and_records_when_the_preflight_names_a_blocker() {
     Database::run(async |database| {
+        let orm = database.orm().await;
         let mut db = database.connect().await;
         let mock = MockControl::start(Answer::Clear).await;
         let control = ControlAccess {
@@ -448,7 +453,7 @@ async fn reaper_refuses_and_records_when_the_preflight_names_a_blocker() {
         };
         let tag = Uuid::new_v4().simple().to_string();
         let user = users::create(
-            &db,
+            &orm,
             &format!("acctdel-blocked-{tag}@zeroship.test"),
             "Blocked",
             None,
@@ -522,6 +527,7 @@ async fn reaper_refuses_and_records_when_the_preflight_names_a_blocker() {
 #[allow(clippy::future_not_send)]
 async fn reaper_refuses_and_records_billing_when_the_organization_still_owes() {
     Database::run(async |database| {
+        let orm = database.orm().await;
         let mut db = database.connect().await;
         let mock = MockControl::start(Answer::Clear).await;
         let control = ControlAccess {
@@ -530,7 +536,7 @@ async fn reaper_refuses_and_records_billing_when_the_organization_still_owes() {
         };
         let tag = Uuid::new_v4().simple().to_string();
         let debtor = users::create(
-            &db,
+            &orm,
             &format!("acctdel-owes-{tag}@zeroship.test"),
             "Owes",
             None,
@@ -617,6 +623,7 @@ async fn reaper_refuses_and_records_billing_when_the_organization_still_owes() {
 #[allow(clippy::future_not_send)]
 async fn reaper_refuses_when_the_preflight_cannot_be_answered() {
     Database::run(async |database| {
+        let orm = database.orm().await;
         let mut db = database.connect().await;
         let mock = MockControl::start(Answer::Unavailable).await;
         let control = ControlAccess {
@@ -625,7 +632,7 @@ async fn reaper_refuses_when_the_preflight_cannot_be_answered() {
         };
         let tag = Uuid::new_v4().simple().to_string();
         let user = users::create(
-            &db,
+            &orm,
             &format!("acctdel-unavail-{tag}@zeroship.test"),
             "Unavailable",
             None,
@@ -676,6 +683,7 @@ async fn reaper_refuses_when_the_preflight_cannot_be_answered() {
 #[allow(clippy::future_not_send)]
 async fn reaper_refuses_when_the_control_plane_rejects_its_credential() {
     Database::run(async |database| {
+        let orm = database.orm().await;
         let mut db = database.connect().await;
         let mock = MockControl::start(Answer::Clear).await;
         let control = ControlAccess {
@@ -684,7 +692,7 @@ async fn reaper_refuses_when_the_control_plane_rejects_its_credential() {
         };
         let tag = Uuid::new_v4().simple().to_string();
         let user = users::create(
-            &db,
+            &orm,
             &format!("acctdel-nokey-{tag}@zeroship.test"),
             "No Key",
             None,
@@ -731,6 +739,7 @@ async fn reaper_refuses_when_the_control_plane_rejects_its_credential() {
 #[allow(clippy::future_not_send)]
 async fn a_new_blocking_reference_is_recorded_with_its_constraint() {
     Database::run(async |database| {
+        let orm = database.orm().await;
         let mut db = database.connect().await;
         let (_mock, control) = clear_control().await;
         let tag = Uuid::new_v4().simple().to_string();
@@ -746,7 +755,7 @@ async fn a_new_blocking_reference_is_recorded_with_its_constraint() {
         .expect("create probe table");
 
         let user = users::create(
-            &db,
+            &orm,
             &format!("acctdel-probe-{tag}@zeroship.test"),
             "Probe",
             None,
@@ -795,11 +804,12 @@ async fn a_new_blocking_reference_is_recorded_with_its_constraint() {
 #[allow(clippy::future_not_send)]
 async fn reaper_skips_cancelled_request() {
     Database::run(async |database| {
+        let orm = database.orm().await;
         let mut db = database.connect().await;
         let (_mock, control) = clear_control().await;
         let tag = Uuid::new_v4().simple().to_string();
         let email = format!("acctdel-skip-{tag}@zeroship.test");
-        let user = users::create(&db, &email, "Skip User", Some("phc"))
+        let user = users::create(&orm, &email, "Skip User", Some("phc"))
             .await
             .unwrap();
 
@@ -838,11 +848,12 @@ async fn reaper_skips_cancelled_request() {
 #[allow(clippy::future_not_send)]
 async fn reaper_ignores_a_schedule_without_a_deletion_request() {
     Database::run(async |database| {
+        let orm = database.orm().await;
         let mut db = database.connect().await;
         let (_mock, control) = clear_control().await;
         let tag = Uuid::new_v4().simple().to_string();
         let user = users::create(
-            &db,
+            &orm,
             &format!("acctdel-schedule-only-{tag}@zeroship.test"),
             "Schedule Only",
             Some("phc"),

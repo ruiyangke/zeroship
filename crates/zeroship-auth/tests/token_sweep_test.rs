@@ -8,6 +8,7 @@ use zeroship_auth::store::users;
 #[compio::test]
 async fn token_sweep_deletes_expired_rows_after_grace_and_keeps_fresh_rows() {
     Database::run(async |database| {
+        let orm = database.orm().await;
         let client = database.connect().await;
         let db_url = database.url().to_owned();
 
@@ -15,7 +16,7 @@ async fn token_sweep_deletes_expired_rows_after_grace_and_keeps_fresh_rows() {
         let login_email = format!("token-sweep-login-{tag}@zeroship.test");
         let reset_email = format!("token-sweep-reset-{tag}@zeroship.test");
         let verify_email = format!("token-sweep-verify-{tag}@zeroship.test");
-        let user = users::create(&client, &verify_email, "Token Sweep", None)
+        let user = users::create(&orm, &verify_email, "Token Sweep", None)
             .await
             .expect("seed user");
 

@@ -44,6 +44,7 @@ use crate::store::identities::{GuardedUnlink, Identity};
 use crate::store::users::UserRow;
 use crate::store::{identities, sessions, users};
 use crate::ui::{ErrorPage, LinkedIdentity, MePage, PublicErrorMessage};
+use zeroship_data_orm::Database;
 
 const MAX_PROVIDER_PATH_BYTES: usize = 64;
 
@@ -69,8 +70,9 @@ pub async fn get(
     req: HttpRequest,
     cfg: ntex::web::types::State<Arc<AuthConfig>>,
     db: ntex::web::types::State<Arc<compio_postgres::Client>>,
+    orm: ntex::web::types::State<Database>,
 ) -> HttpResponse {
-    let Some(user) = resolve_user(&req, db.as_ref()).await else {
+    let Some(user) = resolve_user(&req, db.as_ref(), &orm).await else {
         return redirect_to_login();
     };
 
@@ -103,6 +105,7 @@ pub async fn unlink(
     form: ntex::web::types::Form<UnlinkForm>,
     cfg: ntex::web::types::State<Arc<AuthConfig>>,
     db: ntex::web::types::State<Arc<compio_postgres::Client>>,
+    orm: ntex::web::types::State<Database>,
 ) -> HttpResponse {
     let provider = path.into_inner().0;
     if !valid_provider_path_segment(&provider) {
@@ -127,7 +130,7 @@ pub async fn unlink(
     }
 
     // 2. Session.
-    let Some(user) = resolve_user(&req, db.as_ref()).await else {
+    let Some(user) = resolve_user(&req, db.as_ref(), &orm).await else {
         return redirect_to_login();
     };
 
@@ -216,7 +219,11 @@ pub async fn unlink(
 /// Resolve the signed-in user from the request, or `None` if the cookie
 /// is missing/invalid/expired or the user row is gone.
 #[allow(clippy::future_not_send)]
-async fn resolve_user(req: &HttpRequest, db: &compio_postgres::Client) -> Option<UserRow> {
+async fn resolve_user(
+    req: &HttpRequest,
+    db: &compio_postgres::Client,
+    orm: &Database,
+) -> Option<UserRow> {
     let cookie_header = req
         .headers()
         .get(COOKIE)
@@ -225,7 +232,7 @@ async fn resolve_user(req: &HttpRequest, db: &compio_postgres::Client) -> Option
     let session_id = session_cookie::parse_cookie(cookie_header)?;
 
     let session = sessions::validate(db, session_id).await.ok().flatten()?;
-    users::find_by_id(db, &session.user_id).await.ok().flatten()
+    users::find_by_id(orm, &session.user_id).await.ok().flatten()
 }
 
 /// Pure predicate — extracted so the unit tests below can assert the

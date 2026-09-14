@@ -17,6 +17,7 @@ async fn password_confirmation_defers_identity_creation_until_the_second_factor_
         let subject = "123456789";
         let result = linker::resolve_or_link(
             &server.pg,
+            &server.orm,
             &ResolvedProfile {
                 provider: "github",
                 subject,

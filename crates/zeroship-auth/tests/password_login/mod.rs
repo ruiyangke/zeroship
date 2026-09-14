@@ -95,7 +95,7 @@ async fn password_failures_share_the_public_refusal_and_cannot_mint_sessions() {
         let locked = user(&server, "locked@example.test").await;
         let wrong = user(&server, "wrong@example.test").await;
         let disabled = user(&server, "disabled@example.test").await;
-        let oauth_only = users::create(&server.pg, "oauth@example.test", "OAuth only", None)
+        let oauth_only = users::create(&server.orm, "oauth@example.test", "OAuth only", None)
             .await
             .unwrap();
         lock_through_login(&server, &locked).await;
