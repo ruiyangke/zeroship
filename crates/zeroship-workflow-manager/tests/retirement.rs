@@ -86,6 +86,11 @@ case!(
     watermark
 );
 case!(
+    sqlite_publication_above_the_watermark_cancels_retirement,
+    postgres_publication_above_the_watermark_cancels_retirement,
+    published_watermark
+);
+case!(
     sqlite_closing_waits_for_leases_and_maintenance,
     postgres_closing_waits_for_leases_and_maintenance,
     preconditions
@@ -671,9 +676,9 @@ async fn settlement(fixture: &Fixture) {
     assert_eq!(tombstone[0]["state"], value!("retired"));
 }
 
-/// A job published or claimed after closing began can commit creator intents
-/// after the Close fence, because delivered work is not fenced by the ingress
-/// epoch. Its dispatch ticket above the watermark must cancel the retirement.
+/// A job claimed after closing began can commit creator intents after the Close
+/// fence, because delivered work is not fenced by the ingress epoch. Its
+/// dispatch ticket above the watermark must cancel the retirement.
 async fn watermark(fixture: &Fixture) {
     // Claimed after closing began, settled before the Close settles.
     let host = host(fixture).await;
@@ -697,20 +702,32 @@ async fn watermark(fixture: &Fixture) {
     assert_eq!(kept.state, ScopeState::Open, "retired above the watermark");
     assert_eq!(kept.ingress_epoch, revision(1));
     assert_eq!(duties(fixture, &host.app).await.len(), 2);
+    retire_without_later_work(fixture).await;
+}
 
-    // Published after closing began.
-    let host = self::host(fixture).await;
+/// A worker publication during closing, such as a delivered job's outbox
+/// retry, also holds a ticket above the watermark and cancels the retirement.
+async fn published_watermark(fixture: &Fixture) {
+    let host = host(fixture).await;
     let close = host.recovery.begin_close(&host.app).await.unwrap().unwrap();
     let grant = host.claim().await.unwrap();
     assert_eq!(grant.delivery().job, close);
     host.publish(&fanout(&host.app, FUTURE)).await.unwrap();
+    assert_eq!(host.state().await.state, ScopeState::Closing);
     host.settle(&grant, JobOutcome::Closed { drained: true })
         .await
         .unwrap();
-    assert_eq!(host.state().await.state, ScopeState::Open);
+    assert_eq!(
+        host.state().await.state,
+        ScopeState::Open,
+        "retired above the watermark"
+    );
+    retire_without_later_work(fixture).await;
+}
 
-    // Control: without work after closing began, the same evidence retires.
-    let host = self::host(fixture).await;
+/// Control: without work after closing began, the same evidence retires.
+async fn retire_without_later_work(fixture: &Fixture) {
+    let host = host(fixture).await;
     let earlier = fanout(&host.app, FUTURE);
     host.publish(&earlier).await.unwrap();
     assert_eq!(host.retire().await, revision(1));
