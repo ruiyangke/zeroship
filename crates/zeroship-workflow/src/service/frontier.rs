@@ -584,19 +584,50 @@ async fn compensate(
         .map(decode)
         .transpose()?;
     let failures = compensation_failures(tx, app, &id, generation).await?;
-    if failures.is_empty() {
-        return finish(
-            tx,
-            app,
-            run,
-            parse_state(&run.text("compensation_target")?)?,
-            None,
-            original,
-            now,
-        )
-        .await;
+    let steps = journal::load(tx, app, &id, generation).await?;
+    let state = if failures.is_empty() {
+        parse_state(&run.text("compensation_target")?)?
+    } else {
+        RunState::Failed
+    };
+    let error = compensated_error(original, &steps, failures);
+    finish(tx, app, run, state, None, Some(error), now).await
+}
+
+/// Attach the rollback summary to the failure that started compensation.
+///
+/// The original error keeps its type and message; `compensation` reports how
+/// many compensators ran, and `partial` outcomes list each failed step.
+fn compensated_error(
+    original: Option<Value>,
+    steps: &[crate::engine::StepCheckpoint],
+    failures: Vec<Value>,
+) -> Value {
+    let count = |state: &str| {
+        steps
+            .iter()
+            .filter(|step| step.compensation_state.as_deref() == Some(state))
+            .count()
+    };
+    let (completed, failed) = (count("completed"), count("failed"));
+    let mut summary = json!({
+        "total": completed + failed,
+        "completed": completed,
+        "failed": failed,
+        "outcome": if failures.is_empty() { "completed" } else { "partial" },
+    });
+    if !failures.is_empty() {
+        summary["failures"] = Value::Array(failures);
     }
-    finish(tx,app,run,RunState::Failed,None,Some(json!({"name":"WorkflowCompensationError","message":"workflow compensation did not fully succeed","cause":original,"failures":failures})),now).await
+    let mut error = match original {
+        Some(Value::Object(error)) => Value::Object(error),
+        Some(cause) => json!({
+            "type": "Error", "message": "workflow failed during compensation", "cause": cause,
+        }),
+        None => json!({"type": "Error", "message": "workflow compensation finished"}),
+    };
+    error["compensation"] = summary;
+    error
 }
 pub(crate) async fn finish(
     tx: &mut Transaction,
