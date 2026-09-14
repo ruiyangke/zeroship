@@ -58,9 +58,11 @@ export default {
     table("app_deploy_commands", { schema: "zeroship" })
       .check("app_deploy_commands_lifecycle_revision_check")
       .add({ expr: (col) => col("lifecycle_revision").isNull().or(col("lifecycle_revision").gt(0)) });
+    // Supports the app reference and the composite deployment reference added
+    // in 20260914000200_deploy_publication_references.ts.
     table("app_deploy_commands", { schema: "zeroship" })
-      .index("app_deploy_commands_app_idx")
-      .add({ on: ["app_id"] });
+      .index("app_deploy_commands_deployment_idx")
+      .add({ on: ["app_id", "deploy_id"] });
 
     table("app_lifecycle_intents", { schema: "zeroship" }).create({
       columns: {
@@ -107,9 +109,11 @@ export default {
     table("app_lifecycle_intents", { schema: "zeroship" })
       .index("app_lifecycle_intents_pending_idx")
       .add({ on: ["app_id", "revision"], where: (col) => col("state").eq("pending") });
+    // Supports the composite deployment reference and the collector's lookup
+    // of a pending activation for one deployment.
     table("app_lifecycle_intents", { schema: "zeroship" })
-      .index("app_lifecycle_intents_pending_deployment_idx")
-      .add({ on: ["app_id", "deploy_id"], where: (col) => col("state").eq("pending") });
+      .index("app_lifecycle_intents_deployment_idx")
+      .add({ on: ["app_id", "deploy_id"] });
 
     // Typed-id domains and their copies compare bytewise; see
     // 20260831000001_sortable_entity_id_collations.ts.
