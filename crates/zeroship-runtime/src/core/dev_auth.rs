@@ -13,7 +13,7 @@
 //!
 //! In **self-contained dev** (`pnpm dev` → the Vite plugin spawns
 //! `zeroship serve`) there is no gateway and no hosted OP. The dev-tier auth
-//! provider lives in JS (`@zeroship/bootstrap/dev` — `dev-auth.ts`): it serves
+//! provider lives in the Vite plugin (`dev-auth.ts`): it serves
 //! `/__zeroship/auth/{authorize,popup-callback,session,signout}` and mints a LOCAL
 //! signed session cookie `__zeroship_dev_session`. That cookie is the dev equivalent
 //! of the gateway's `__Host-zeroship_app_session` cookie — but the JS layer runs
@@ -179,7 +179,7 @@ fn verify_dev_session(secret: &[u8], token: &str) -> Option<String> {
 }
 
 /// Sign a dev session token for a given identity JSON. Mirrors the JS
-/// `signDevSession` in `@zeroship/bootstrap/dev` (`dev-auth.ts`) so the two
+/// `signDevSession` in the Vite plugin's `dev-auth.ts` so the two
 /// stay byte-compatible; exposed for the faithful integration test.
 #[must_use]
 pub fn sign_dev_session(secret: &[u8], user_json: &str) -> String {

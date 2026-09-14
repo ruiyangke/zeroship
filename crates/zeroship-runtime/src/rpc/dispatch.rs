@@ -4,9 +4,8 @@
 //! `ctx` itself is now a native `RpcCtx` v8_class with lazy accessors —
 //! see `crate::rpc::ctx_holder`. This file keeps the small surface that
 //! pumps the holder into V8's `ContinuationPreservedEmbedderData` slot
-//! for the duration of the user procedure, and exposes a private
-//! `globalThis.__zeroshipGetRpcCtx()` so `@zeroship/server` helpers can
-//! read it.
+//! for the duration of the user procedure. The native `zeroship` module reads
+//! the slot directly; creator code has no global callback for this state.
 //!
 //! ## Slot model — same primitive as `AsyncLocalStorage`
 //!
@@ -47,8 +46,8 @@ pub fn rpc_ctx_als_key<'s>(scope: &mut v8::PinScope<'s, '_>) -> v8::Local<'s, v8
     sym
 }
 
-/// Run `body` with `ctx_object` available to `__zeroshipGetRpcCtx()`
-/// through V8's CPED slot. The current Map is cloned so user-created
+/// Run `body` with `ctx_object` available through V8's CPED slot. The current
+/// Map is cloned so user-created
 /// `AsyncLocalStorage` entries survive and sibling continuations keep their
 /// own immutable snapshots.
 ///
@@ -81,10 +80,6 @@ pub fn with_rpc_context<'s, R>(
     result
 }
 
-// ---------------------------------------------------------------------------
-// globalThis.__zeroshipGetRpcCtx
-// ---------------------------------------------------------------------------
-
 pub(crate) fn current_rpc_ctx_object<'s>(
     scope: &mut v8::PinScope<'s, '_>,
 ) -> Option<v8::Local<'s, v8::Object>> {
@@ -97,31 +92,9 @@ pub(crate) fn current_rpc_ctx_object<'s>(
     v8::Local::<v8::Object>::try_from(value).ok()
 }
 
-/// Read the platform ctx holder from V8's current invocation frame.
-fn get_rpc_ctx_callback(
-    scope: &mut v8::PinScope,
-    _args: v8::FunctionCallbackArguments,
-    mut rv: v8::ReturnValue,
-) {
-    match current_rpc_ctx_object(scope) {
-        Some(holder) => rv.set(holder.into()),
-        None => rv.set(v8::undefined(scope).into()),
-    }
-}
-
-/// Wire `__zeroshipGetRpcCtx` onto `globalThis`. Called from
-/// `setup_globals`. Also installs the `RpcCtx` v8_class template in
-/// the isolate so `mint_rpc_ctx` can look up the cached template.
-pub fn install_globals<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
-    global: v8::Local<v8::Object>,
-) {
-    let f = v8::Function::new(scope, get_rpc_ctx_callback).unwrap();
-    let key = v8::String::new(scope, "__zeroshipGetRpcCtx").unwrap();
-    global.set(scope, key.into(), f.into());
-
-    // Pre-install the RpcCtx template (idempotent per isolate). The
-    // class is NOT bound on `globalThis` — it's a private holder that
-    // user code only reaches via the ctx accessors.
-    let _ = crate::rpc::ctx_holder::RpcCtx::install(scope);
-}
+mod procedure;
+mod call;
+pub(crate) mod response;
+pub(crate) mod stream;
+pub(crate) use call::{CallProgress, RpcCall};
+pub(crate) use procedure::ProcedureRegistry;

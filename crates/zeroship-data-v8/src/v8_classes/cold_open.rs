@@ -137,15 +137,23 @@ fn call_js_method<'s>(
     );
 }
 
+fn finalized_binding(scope: &mut v8::PinScope, app_id: &str) -> DbBinding {
+    let binding = crate::tests::fixtures::binding(app_id);
+    crate::startup_policy::initialize(scope, binding.clone());
+    crate::startup_policy::finalize(scope).expect("complete fixture startup");
+    binding
+}
+
 fn cold_collection<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     app_id: &str,
     name: &str,
 ) -> v8::Local<'s, v8::Object> {
+    let binding = finalized_binding(scope, app_id);
     super::collection::mint_collection(
         scope,
         name.to_string(),
-        crate::tests::fixtures::binding(app_id),
+        binding,
         None,
     )
     .expect("mint_collection")
@@ -182,70 +190,16 @@ fn a_bulk_unmask_dispatch_opens_the_cold_isolates_backend() {
     crate::tests::fixtures::reset_context();
 }
 
-/// Startup policy installation neither opens a backend nor touches its files.
-#[test]
-fn mask_policy_install_does_not_open_a_database() {
-    let dir = cold_sqlite_isolate();
-    cold_isolate!(let scope, let state);
-    let binding = crate::tests::fixtures::binding("app_cold_policy");
-    let platform = super::db_platform::mint_db_platform(scope, binding.clone()).unwrap();
-    let policy = js_json(scope, r#"{ "support": ["spi"] }"#);
-    call_js_method(scope, platform, "setMaskPolicy", &[policy]);
-    let settled = settle_pushed_ops(&state);
-    assert_eq!(settled.len(), 1);
-    assert!(rejection_code(&settled[0]).is_none());
-    assert!(crate::context::with(|context| context.backend()).is_none());
-    assert!(std::fs::read_dir(dir.path()).unwrap().next().is_none());
-    zeroship_data_orm::protection::mask_policy::install_mask_policy(
-        &binding,
-        zeroship_data_orm::value!({ "support": ["spi"] }),
-    )
-    .expect("V8 installed this policy");
-
-    let changed = js_json(scope, r#"{ "support": ["pii"] }"#);
-    call_js_method(scope, platform, "setMaskPolicy", &[changed]);
-    let settled = settle_pushed_ops(&state);
-    assert_eq!(
-        rejection_code(&settled[0]).as_deref(),
-        Some("mask_policy_immutable")
-    );
-    let next = DbBinding::new(binding.app_id(), "next_deploy", binding.schema().clone());
-    let next_platform = super::db_platform::mint_db_platform(scope, next.clone()).unwrap();
-    call_js_method(scope, next_platform, "setMaskPolicy", &[changed]);
-    let settled = settle_pushed_ops(&state);
-    assert!(rejection_code(&settled[0]).is_none());
-    zeroship_data_orm::protection::mask_policy::install_mask_policy(
-        &next,
-        zeroship_data_orm::value!({ "support": ["pii"] }),
-    )
-    .expect("V8 installed this policy");
-    zeroship_data_orm::protection::mask_policy::install_mask_policy(
-        &binding,
-        zeroship_data_orm::value!({ "support": ["spi"] }),
-    )
-    .expect("V8 installed this policy");
-    assert!(
-        zeroship_data_orm::protection::mask_policy::install_mask_policy(
-            &binding,
-            zeroship_data_orm::value!({ "support": ["pii"] })
-        )
-        .is_err(),
-        "the pinned policy remains immutable"
-    );
-    assert!(crate::context::with(|context| context.backend()).is_none());
-    assert!(std::fs::read_dir(dir.path()).unwrap().next().is_none());
-    crate::tests::fixtures::reset_context();
-}
-
 /// `MaskedValue::dispatch_unmask_single`, entered at `mv.unmask()`.
 #[test]
 fn a_masked_value_unmask_opens_the_cold_isolates_backend() {
     let _dir = cold_sqlite_isolate();
     cold_isolate!(let scope, let state);
 
+    let binding = finalized_binding(scope, "app_cold_mv");
     let masked = super::masked_value::mint_masked_value(
         scope,
-        crate::tests::fixtures::binding("app_cold_mv"),
+        binding,
         "users".to_string(),
         "usr_01".to_string(),
         "ssn".to_string(),
@@ -269,9 +223,10 @@ fn a_masked_value_multi_column_unmask_opens_the_cold_isolates_backend() {
     let _dir = cold_sqlite_isolate();
     cold_isolate!(let scope, let state);
 
+    let binding = finalized_binding(scope, "app_cold_mv_multi");
     let masked = super::masked_value::mint_masked_value(
         scope,
-        crate::tests::fixtures::binding("app_cold_mv_multi"),
+        binding,
         "users".to_string(),
         "usr_01".to_string(),
         "ssn".to_string(),

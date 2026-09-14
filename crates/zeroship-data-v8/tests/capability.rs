@@ -90,9 +90,8 @@ fn dispatch_zs(source: &str, name: &str) -> (u16, serde_json::Value) {
 }
 
 /// Export the procedure dictionary directly so the runtime-owned dispatcher
-/// installs the hidden capability frame. User modules cannot observe
-/// `globalThis.__zsEnterKind`; bootstrap captures that native callback in an
-/// internal bridge before deleting the global.
+/// installs the hidden capability frame. User modules cannot observe or alter
+/// that continuation-scoped native state.
 const DICT_RPC_EXPORT: &str = r#"
 export default { rpc: _procedures };
 "#;

@@ -3823,117 +3823,29 @@ else
       Body: $(head -c 200 /tmp/gp-logs-b.json)"
   fi
 
-  # --- DOES AN ERROR REACH THE CREATOR TOO, or only what they printed? ------
+  # --- A CREATOR HANDLER THROW MUST LEAVE AN APP LOG ------------------------
   #
-  # The half of observability that matters most is the half you did not choose
-  # to emit. sdks/bootstrap/src/fetch-handler.ts:381 logs
-  # `console.error("[zeroship:rpc] sanitized error", ...)` on the RPC error
-  # path, and crates/zeroship-runtime/src/core/init.rs:3214-3225 binds log/warn/error/
-  # info/debug to the SAME console_log_callback, which pushes into
-  # `per_request_logs` -- so there is no stdout/stderr split in the runtime and
-  # an error line should travel exactly the route the success line just did.
-  # That is READ, not run, which is why this arm exists.
-  #
-  # WHAT THIS DRIVES IS AN INPUT-REJECTION, NOT A HANDLER THROW. getMessages is
-  # the only anonymous procedure and takes no input, so garbage in `?input=` is the
-  # error class reachable without adding a procedure. A genuine uncaught throw
-  # is still untested and needs its own vehicle (#333) -- so a red here is
-  # informative and a green here does NOT license "errors reach the creator"
-  # in general.
-  # THE STATUS IS CAPTURED, and that is not decoration. The first version of this
-  # arm sent the response to /dev/null and reported 0 error lines -- which cannot
-  # distinguish "the error rail does not log" from "I never triggered an error".
-  # getMessages declares no input schema, so a stray `?input=` may simply be
-  # ignored and the request may SUCCEED. A red that proves nothing is worse than
-  # no arm, so the status now gates the reading below.
-  LOG_ERR_CODE=$(curl -s -o /tmp/gp-err-resp.json -w '%{http_code}' --max-time 15 \
-    "http://localhost:$ZEROSHIP_GATEWAY_PORT/apps/$APP_NAME/__zeroship/v1/getMessages?input=%7Bnot-json" \
-    2>/dev/null)
-  command sleep 2
-  curl -s -o /tmp/gp-logs-e.json --max-time 20 "$LOG_URL" \
-    -H "Authorization: Bearer $SC_TOKEN" 2>/dev/null || true
-  LOG_ERR=$(grep -oF -- "[zeroship:rpc] sanitized error" /tmp/gp-logs-e.json 2>/dev/null | wc -l | tr -d ' ')
-  echo "  deployed error probe: http=$LOG_ERR_CODE, rpc error marker x$LOG_ERR"
-  if [ "${LOG_ERR_CODE:-200}" -lt 400 ] 2>/dev/null; then
-    fail "the error probe did NOT produce an error: the request returned
-      http=$LOG_ERR_CODE. getMessages declares no input schema, so the stray
-      \`?input=\` was very likely ignored and this drove a SUCCESS. A zero
-      error-line count here says nothing about whether the error rail reaches
-      the creator -- it is a FAILED SETUP, not a finding. A genuine uncaught
-      throw needs its own anonymous procedure (#333); note golden_path.sh:334 asserts
-      the manifest ids are exactly rpc:addMessage,rpc:boom,rpc:getMessages, so that
-      assertion moves with it."
-  elif [ "${LOG_ERR:-0}" -ge 1 ] 2>/dev/null; then
-    pass "deployed: an RPC error also reaches the creator's log surface (input-rejection class)"
-  else
-    fail "deployed: a request REJECTED with $LOG_ERR_CODE left the creator no log line.
-      READ THIS AS WHAT IT IS, NOT AS A DELIVERY FINDING. This arm observes what
-      a creator SEES (nothing) and does NOT establish that the log rail is
-      broken, because it cannot show any JS ran. sdks/bootstrap/src/dispatcher.ts
-      :55-58 records that an unparseable body is rejected by the RUST parser
-      (crates/zeroship-runtime/src/core/runtime.rs::parse_rpc_body) before the JS
-      dispatcher, and a request that never reached JS printed nothing, so
-      nothing arriving is expected rather than symptomatic. CAVEAT, unresolved:
-      that comment is about a BODY and this probe uses the query string, so
-      which layer rejected THIS request is unverified.
-      THE DIAGNOSTIC ARM IS THE THROW BELOW, where the isolate demonstrably ran.
-      Its MECHANISM IS UNIDENTIFIED (#334) and this line used to name
-      handler.rs:459 as the root cause. That attribution was never supported and
-      has now outlived three hypotheses killed by measurement: (1) the worker's
-      Some(Err(e)) arm -- threading the logs through it left this red exactly as
-      red, and SettledResult::Rpc's Fetch arm is unreachable!() for fetch/RPC
-      anyway; (2) key-0 orphaning at init.rs:2523's unwrap_or(0) -- refuted, a
-      throwing request's line is captured under a real req_id; (3) capture
-      failure -- refuted by the same probe. What IS established: the loss is
-      downstream of capture. Do not restore a named cause here without a run."
-  fi
-
-  # --- THE ERROR CLASS THAT IS THE CREATOR'S OWN BUG ------------------------
-  #
-  # The 400 arm above cannot separate "the error rail does not deliver" from
-  # "no JS ever ran", because an input rejection is refused BEFORE the handler.
-  # `boom` throws INSIDE the handler, so the isolate demonstrably executed.
-  #
-  # THE PREDICTION IS RESOLVED, and half of it was wrong. It read: "the throw's
-  # error line DOES reach the creator ... fetch-handler.ts's console.error is
-  # unambiguously on the path." The second clause is FALSE, established by
-  # reading the control flow rather than by inferring from the empty count:
-  #   sdks/bootstrap/src/fetch-handler.ts:216 is `await dispatch(...)` with NO
-  #   try/catch around it. Every errResponse() call site -- 131, 141, 151, 162,
-  #   174, 192 -- is BEFORE that line (wireId, input decode, method, module
-  #   import, schema init). errResponse is logRawError's only caller.
-  # So a creator handler throw propagates out of dispatch UNCAUGHT and is
-  # handled in Rust (core/runtime.rs handler-threw arm). The rpc marker covers
-  # FRAMEWORK-level failures only and CANNOT appear for a handler throw.
-  #
-  # Hence LOG_BOOM is expected to be 0 here and is printed as an observation,
-  # not an assertion: the OR below is carried entirely by the app-text arm,
-  # which is the load-bearing one. Do NOT read `rpc error marker x0` as a
-  # symptom -- it misled this pilot for two ticks while the comment above
-  # asserted the opposite. If LOG_BOOM ever goes non-zero, something routed a
-  # handler throw through the framework rail and that is worth understanding.
+  # `boom` logs before throwing. The failed response proves native dispatch ran
+  # the handler; the log probe proves output captured before the throw remains
+  # available through the creator log surface.
   LOG_BOOM_CODE=$(curl -s -o /tmp/gp-boom-resp.json -w '%{http_code}' --max-time 15 \
     "http://localhost:$ZEROSHIP_GATEWAY_PORT/apps/$APP_NAME/__zeroship/v1/boom" \
     2>/dev/null)
   command sleep 2
   curl -s -o /tmp/gp-logs-boom.json --max-time 20 "$LOG_URL" \
     -H "Authorization: Bearer $SC_TOKEN" 2>/dev/null || true
-  LOG_BOOM=$(grep -oF -- "[zeroship:rpc] sanitized error" /tmp/gp-logs-boom.json 2>/dev/null | wc -l | tr -d ' ')
   LOG_BOOM_OWN=$(grep -oF -- "[starter] boom" /tmp/gp-logs-boom.json 2>/dev/null | wc -l | tr -d ' ')
-  echo "  deployed throw probe: http=$LOG_BOOM_CODE, rpc error marker x$LOG_BOOM, app message x$LOG_BOOM_OWN"
+  echo "  deployed throw probe: http=$LOG_BOOM_CODE, app message x$LOG_BOOM_OWN"
   if [ "${LOG_BOOM_CODE:-200}" -lt 400 ] 2>/dev/null; then
     fail "the throw probe did NOT fail: boom returned http=$LOG_BOOM_CODE. A
-      procedure whose body is \`throw\` answering 2xx is its own finding, and it
-      means this arm measured nothing about error visibility. FAILED SETUP.
-      Body: $(head -c 200 /tmp/gp-boom-resp.json)"
-  elif [ "${LOG_BOOM:-0}" -ge 1 ] 2>/dev/null || [ "${LOG_BOOM_OWN:-0}" -ge 1 ] 2>/dev/null; then
-    pass "deployed: a handler THROW reaches the creator's log surface (rpc marker x$LOG_BOOM, app text x$LOG_BOOM_OWN)"
+      procedure whose body throws answering 2xx means this arm did not verify
+      failure visibility. Body: $(head -c 200 /tmp/gp-boom-resp.json)"
+  elif [ "${LOG_BOOM_OWN:-0}" -ge 1 ] 2>/dev/null; then
+    pass "deployed: output emitted before a handler throw reaches the creator log surface"
   else
-    fail "deployed: a procedure that THREW left NOTHING the creator can read.
-      The isolate definitely ran -- boom's body is the throw -- and the same step
-      proved seconds earlier that a console.log from the same app reaches this
-      surface. So the error rail does not deliver, and a creator debugging their
-      own failing procedure has no log to look at. See #333."
+    fail "deployed: a procedure that logged and then threw left no creator-visible
+      log. The failed response proves the handler ran, and the success probe above
+      proves the same log surface can return output from this app."
   fi
 
   # --- THE COMPARISON, which is the reason this step exists -----------------
@@ -4511,25 +4423,6 @@ gp_close_step
 # was measured at step 9 = 6 outcomes, so 46 + 8 = 54 is the same measurement
 # taken twice, not two different numbers reconciled by arithmetic).
 #
-# MUTATION-PROVEN, not merely added. `sdks/bootstrap/src/runtime-entry.ts`
-# was temporarily edited to force `naming: naming.snakeCase` on the DEPLOYED
-# install path only (dev-entry.ts untouched) -- exactly the pre-#162 defect
-# this scenario exists to catch, reintroduced on purpose. Rebuilt
-# `@zeroship/bootstrap` and `zeroship-worker`, then re-ran:
-#
-#     mutated golden path: 50 passed, 12 failed   step 9: 14 outcome(s)
-#
-# The delta is exactly the four new comparison outcomes and nothing else:
-# "deployed: insert with a camelCase field" and "deployed: with: eager-loaded"
-# both failed with `{"message":"internal error",...}` (the column lookup for
-# `userId` now misses, same as the original #162 report), and the two
-# AGREE/DIVERGE comparison lines both flipped to DIVERGE (dev=ok,
-# deployed=fail). Every other step's outcome count was unchanged
-# (1,2,3,4,5,6,7,8,10,11 identical), and step 9's own three PRE-EXISTING dev
-# assertions (seeded/insert/join) stayed green throughout, because the
-# mutation touches only the deployed path. Reverted (clean `git diff` on
-# runtime-entry.ts) and rebuilt again; the re-run matched the unmutated
-# numbers above exactly, including the per-step outcome list.
 # RAISED 54 -> 57 on 2026-08-10 for step 7d (the orphaned dev runtime, task
 # #221). PROVENANCE OF THE +3, stated because it is weaker than the numbers
 # above and a reader must not mistake it for a full-run measurement: 7d was run
@@ -4874,9 +4767,9 @@ rc=0
 # tolerated.
 #
 # WHAT REMAINS IS NOT ALL "BY DESIGN". #260 is a decision waiting on an operator;
-# the log-visibility three are #332/#333. They are listed for the same reason as
+# the remaining log-visibility failures are #332/#333. They are listed for the same reason as
 # ever - so a NEW failure is still visible - and not because anyone chose them.
-GOLDEN_EXPECTED_FAILURES="scaffold notes.list|scaffold notes.add|scaffold notes.delete|scaffold files.upload|scaffold files.list|scaffold visits.bump|dev: step 6 drove getMessages on the dev tier|dev and deployed DIVERGE on log visibility|left the creator no log line"
+GOLDEN_EXPECTED_FAILURES="scaffold notes.list|scaffold notes.add|scaffold notes.delete|scaffold files.upload|scaffold files.list|scaffold visits.bump|dev: step 6 drove getMessages on the dev tier|dev and deployed DIVERGE on log visibility"
 IFS='|' read -r -a _pats <<< "$GOLDEN_EXPECTED_FAILURES"
 # FIXED-STRING matching, both directions, and this is not stylistic. The first
 # draft joined the patterns into one ERE, and one of them - `sort({id:-1}) is

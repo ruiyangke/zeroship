@@ -47,7 +47,9 @@ The HTTP upgrade handoff is:
 3. The runtime converts that to `FetchOutcome::WebSocketUpgrade`.
 4. The kernel-side server path completes the wire handshake and pumps frames.
 
-This is also the mechanism used by the bootstrap subscription fallback in [`crates/zeroship-runtime/src/core/init.rs`](../../crates/zeroship-runtime/src/core/init.rs).
+RPC subscriptions use a native upgrade path and do not construct a creator
+`Response`; see
+[`rpc/subscription.rs`](../../crates/zeroship-runtime/src/rpc/subscription.rs).
 
 ## Transport architecture
 
@@ -80,16 +82,22 @@ For `ws://`, reads and writes run as separate compio tasks on the same `TcpStrea
 
 `WebSocketPair` does not use the network stack. [`pair.rs`](../../crates/zeroship-runtime/src/web/websocket/pair.rs) moves queued frames directly onto the peer's event queue and reuses the same native dispatch path.
 
-## Subscription fallback
+## Subscription transport
 
-The bootstrap's fallback subscription transport currently uses `WebSocketPair` and the `zs.v1` subprotocol:
+The native RPC subscription transport uses the `zs.v1` subprotocol:
 
-- client must send a `hello` frame within 5 seconds
-- server sends `ping` every 30 seconds
-- missing `pong` for 60 seconds closes the socket
+- client must send a `hello` frame before `HELLO_TIMEOUT`
+- server sends `ping` on `PING_INTERVAL`
+- missing `pong` at `PONG_TIMEOUT` closes the socket
 - streamed frames are JSON envelopes carrying `data`, `error`, or `end`
 
-See [`crates/zeroship-runtime/src/core/init.rs`](../../crates/zeroship-runtime/src/core/init.rs) for the exact wire behavior.
+Rust resolves the string-keyed procedure, retains the returned iterator and
+pulls it under the captured request context. It requests the next item only
+after the kernel writer completes the prior frame, so socket progress controls
+producer progress. Disconnect closes the session and calls the iterator's
+`return()` method. See
+[`crates/zeroship-runtime/src/rpc/subscription.rs`](../../crates/zeroship-runtime/src/rpc/subscription.rs)
+for the exact wire behavior.
 
 ## Where sockets are served
 

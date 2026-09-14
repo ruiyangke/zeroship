@@ -14,11 +14,15 @@ import http from "node:http";
 import {
   MODULE_FETCH_PATH,
   HMR_POLL_PATH,
+  PROCEDURE_BINDINGS_PATH,
+  RUNTIME_MODULE_SPECIFIER,
+  VITE_RUNTIME_MODULE_ID,
+  DEV_RUNTIME_STATE_HEADER,
+  DEV_RUNTIME_FRESH_REQUIRED,
   ENV_DEV,
   ENV_VITE_ORIGIN,
   ENV_ENTRY,
   ENV_RUNTIME_DESCRIPTOR,
-  ENV_DEV_AUTH,
   ENV_DEV_AUTH_SECRET,
   ENV_DIE_WITH_PARENT,
   DEFAULT_DEV_PORT,
@@ -29,7 +33,8 @@ import {
   RUNTIME_RESTART_MAX_MS,
   RUNTIME_LOG_TAIL_LINES,
 } from "./constants.js";
-import { resolveDevAuthEnv, type DevAuthOption } from "./dev-auth-config.js";
+import { resolveDevAuth, type DevAuthOption } from "./dev-auth-config.js";
+import { createDevAuthProvider, serveDevAuthHttp } from "./dev-auth.js";
 import {
   ZeroshipDevEnvironment,
   createZeroshipEnvironmentOptions,
@@ -41,6 +46,10 @@ import {
   type ResolvedProjectConfig,
 } from "./project-config/index.js";
 import type { TransformState } from "./transform.js";
+import {
+  serverBindingSnapshotFromState,
+  serverBindingVersionFromState,
+} from "./rpc-registry.js";
 import { resolveDevDatabase, type DevDatabase } from "./dev-db.js";
 import {
   RUNTIME_DESCRIPTOR_FILE,
@@ -547,9 +556,13 @@ export function devServerPlugin(
   // Resolve the dev-tier auth env pair ONCE per dev-server lifetime. The secret
   // is stable across child restarts (the crash-restart handler re-spawns the
   // runtime) so cookies minted before a restart still verify afterward.
-  const devAuthEnv = resolveDevAuthEnv(options.devAuth, () =>
+  const devAuth = resolveDevAuth(options.devAuth, () =>
     randomBytes(32).toString("hex"),
   );
+  const devAuthProvider = createDevAuthProvider({
+    config: devAuth.config ?? undefined,
+    secret: devAuth.secret ?? undefined,
+  });
 
   let root = "";
   let isDev = false;
@@ -557,6 +570,8 @@ export function devServerPlugin(
   let devDb: DevDatabase | null = null;
   let disposeRuntime: (() => void) | null = null;
   let restartRuntimeForDescriptorChange: (() => void) | null = null;
+  let restartRuntimeAfterInitialFailure: (() => boolean) | null = null;
+  let initialStartupFailed = false;
 
   // Migration-first gen-types. The absolute migrations dir is resolved in
   // configureServer (once `root` is known) so the `hotUpdate` branch can match
@@ -621,6 +636,18 @@ export function devServerPlugin(
         port: devPort,
       };
 
+      server.middlewares.use(
+        async (
+          req: http.IncomingMessage,
+          res: http.ServerResponse,
+          next: () => void,
+        ) => {
+          const pathname = requestPath(req);
+          if (!devAuthProvider?.handles(pathname)) return next();
+          await serveDevAuthHttp(devAuthProvider, req, res);
+        },
+      );
+
       // 0. Migration-first gen-types — ensure the migrations dir is WATCHED so a
       //    change there fires `hotUpdate` (Vite only watches the module graph +
       //    root by default; a migrations dir holding `.ts` sources not imported
@@ -675,7 +702,7 @@ export function devServerPlugin(
       //
       // The runtime's ModuleRunner calls this to fetch transformed modules
       // from Vite's environment. V8 can't open the bidirectional transport
-      // Vite uses for browser HMR, so the dev bootstrap uses plain HTTP.
+      // Vite uses for browser HMR, so the ModuleRunner host uses plain HTTP.
 
       server.middlewares.use(
         async (
@@ -739,11 +766,10 @@ export function devServerPlugin(
                 args[2] ?? undefined,
               );
             } else {
-              // Return EMPTY builtins — our V8 runtime can't import node: modules
-              // natively. By returning [], the ModuleRunner will always call
-              // fetchModule() for every import, which lets our fetchModule override
-              // intercept node:* and return polyfill code.
-              result = [];
+              // The runner externalizes the runtime-owned module directly to
+              // its evaluator. Node-shaped imports still pass through
+              // fetchModule(), where the environment supplies their adapters.
+              result = [RUNTIME_MODULE_SPECIFIER, VITE_RUNTIME_MODULE_ID];
             }
 
             // Return in the format the runner expects: { result } or { error }
@@ -758,7 +784,28 @@ export function devServerPlugin(
         }
       );
 
-      // 2. HMR poll endpoint ──────────────────────────────────────────────
+      // 2. Procedure binding endpoint ────────────────────────────────────
+
+      server.middlewares.use(
+        (
+          req: http.IncomingMessage,
+          res: http.ServerResponse,
+          next: () => void
+        ) => {
+          if (requestPath(req) !== PROCEDURE_BINDINGS_PATH || req.method !== "GET") {
+            return next();
+          }
+          try {
+            writeJson(res, 200, serverBindingSnapshotFromState(state));
+          } catch (error) {
+            writeJson(res, 500, {
+              error: { message: error instanceof Error ? error.message : String(error) },
+            });
+          }
+        }
+      );
+
+      // 3. HMR poll endpoint ──────────────────────────────────────────────
       //
       // The V8 runtime polls this every 500ms to discover changed files.
       // Returns the pending set and clears it atomically. Empty array = no
@@ -778,12 +825,13 @@ export function devServerPlugin(
           const changed = [...pendingHmrChanges];
           pendingHmrChanges.clear();
 
+          const bindingsVersion = serverBindingVersionFromState(state);
           res.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "no-store" });
-          res.end(JSON.stringify({ changed }));
+          res.end(JSON.stringify({ changed, bindingsVersion }));
         }
       );
 
-      // 3. Spawn zeroship runtime ────────────────────────────────────────────
+      // 4. Spawn zeroship runtime ────────────────────────────────────────────
       //
       // Deferred until Vite's HTTP server is actually listening so the child
       // gets a stable origin for module fetches and HMR polling.
@@ -800,12 +848,13 @@ export function devServerPlugin(
 
       if (!existsSync(bootstrapPath)) {
         console.warn(
-          "[zeroship] dev-bootstrap.js not found — skipping runtime spawn (run the bootstrap bundler first)"
+          "[zeroship] dev-bootstrap.js not found — skipping runtime spawn (build the Vite plugin first)"
         );
       } else {
         let restartTimer: ReturnType<typeof setTimeout> | null = null;
         let healthyTimer: ReturnType<typeof setTimeout> | null = null;
         let descriptorRestartPending = false;
+        let initialFailureRestartPending = false;
         let spawnInFlight = false;
         let tornDown = false;
 
@@ -858,6 +907,14 @@ export function devServerPlugin(
               descriptorRestartPending = false;
               resetSupervisorForDescriptorChange();
               console.log("[zeroship] runtime descriptor changed - starting a fresh runtime");
+              runSpawn();
+              return;
+            }
+
+            if (initialFailureRestartPending) {
+              initialFailureRestartPending = false;
+              resetSupervisorForDescriptorChange();
+              console.log("[zeroship] source changed after startup failed - starting a fresh runtime");
               runSpawn();
               return;
             }
@@ -978,15 +1035,12 @@ export function devServerPlugin(
             [ENV_DIE_WITH_PARENT]: String(process.pid),
             [ENV_VITE_ORIGIN]: `http://localhost:${vitePort}`,
             ...(serverEntry ? { [ENV_ENTRY]: serverEntry } : {}),
-            // Dev-tier auth: when enabled, hand the child the dev-user config +
-            // the cookie HMAC secret. The runtime's `dev_auth.rs` reads the
-            // secret to verify the `__zeroship_dev_session` cookie → server-side
-            // identity; the bootstrap dev-auth provider reads both to serve
-            // `/__zeroship/auth/*` + sign the cookie. Omitted entirely when disabled.
-            ...(devAuthEnv.config !== null && devAuthEnv.secret !== null
+            // The Vite middleware owns the dev login surface. The child only
+            // receives its cookie HMAC secret so Rust can recover the request
+            // identity before creator dispatch.
+            ...(devAuthProvider !== null && devAuth.secret !== null
               ? {
-                  [ENV_DEV_AUTH]: devAuthEnv.config,
-                  [ENV_DEV_AUTH_SECRET]: devAuthEnv.secret,
+                  [ENV_DEV_AUTH_SECRET]: devAuth.secret,
                 }
               : {}),
           };
@@ -1005,7 +1059,13 @@ export function devServerPlugin(
             const spawnedAt = Date.now();
             const child = spawn(
               cmd,
-              ["serve", bootstrapPath, `--port=${devPort}`, "--workers=1"],
+              [
+                "serve",
+                bootstrapPath,
+                `--port=${devPort}`,
+                "--workers=1",
+                "--dev-entry-loader=createDevEntryLoader",
+              ],
               {
                 cwd: root,
                 stdio: ["ignore", "pipe", "pipe"],
@@ -1013,6 +1073,7 @@ export function devServerPlugin(
               }
             );
             serverProcess = child;
+            initialStartupFailed = false;
 
             child.stdout?.on("data", (d: Buffer) => {
               const msg = d.toString().trim();
@@ -1057,7 +1118,7 @@ export function devServerPlugin(
         // a successful migration regeneration replaces the child instead of
         // mutating JavaScript globals in the live isolate.
         restartRuntimeForDescriptorChange = () => {
-          if (tornDown || descriptorRestartPending) return;
+          if (tornDown || descriptorRestartPending || initialFailureRestartPending) return;
 
           const child = serverProcess;
           if (
@@ -1083,6 +1144,31 @@ export function devServerPlugin(
               child.kill("SIGKILL");
             }
           }, 3000).unref();
+        };
+
+        restartRuntimeAfterInitialFailure = () => {
+          if (!initialStartupFailed) return false;
+          pendingHmrChanges.clear();
+          if (tornDown || descriptorRestartPending || initialFailureRestartPending) {
+            return true;
+          }
+
+          const child = serverProcess;
+          if (!child || child.exitCode !== null || child.signalCode !== null) {
+            resetSupervisorForDescriptorChange();
+            if (!spawnInFlight) runSpawn();
+            return true;
+          }
+
+          initialFailureRestartPending = true;
+          runtimeStatus.health = "failing";
+          child.kill("SIGTERM");
+          setTimeout(() => {
+            if (child.exitCode === null && child.signalCode === null) {
+              child.kill("SIGKILL");
+            }
+          }, 3000).unref();
+          return true;
         };
         if (server.httpServer?.listening) {
           runSpawn();
@@ -1112,6 +1198,7 @@ export function devServerPlugin(
           cleanupListeners();
           disposeRuntime = null;
           restartRuntimeForDescriptorChange = null;
+          restartRuntimeAfterInitialFailure = null;
         };
         disposeRuntime = dispose;
         server.httpServer?.once("close", dispose);
@@ -1125,13 +1212,8 @@ export function devServerPlugin(
       // than being caught by Vite's index.html fallback. Forwarded path
       // prefixes:
       //   - /__zeroship/v1/<id>   ← spec wire (production + dev parity)
-      //   - /__zeroship/auth/*    ← platform BFF login (authorize,
-      //                     popup-callback, session[?mint=1], signout),
-      //                     answered by the child runtime's dev-auth
-      //                     provider (sdks/bootstrap/src/dev-auth.ts) — the
-      //                     same same-origin contract the gateway owns in
-      //                     prod. Without this the SDK's session mint hits
-      //                     Vite's SPA fallback and fails.
+      //   - /__zeroship/auth/*    ← forwarded only when dev auth is disabled,
+      //                     preserving creator ownership of those paths
       //   - /api/*         ← raw HTTP routes the user app exposes
       //   - /rpc, /_rpc    ← legacy wires kept for in-flight migrations
       server.middlewares.use(
@@ -1162,14 +1244,21 @@ export function devServerPlugin(
             return;
           }
 
-          // Forward path as-is — the dev-bootstrap's `default.fetch`
-          // dispatches /__zeroship/v1/<id> through `default.rpc`, mirroring
-          // production.
+          // Forward path as-is. The child runtime uses the same native RPC
+          // dispatcher for development entry snapshots and production entries.
           const proxyReq = http.request(
             `http://localhost:${devPort}${url}`,
             { method: req.method, headers: req.headers },
             (proxyRes) => {
-              res.writeHead(proxyRes.statusCode ?? 502, proxyRes.headers);
+              if (
+                proxyRes.headers[DEV_RUNTIME_STATE_HEADER]
+                === DEV_RUNTIME_FRESH_REQUIRED
+              ) {
+                initialStartupFailed = true;
+              }
+              const responseHeaders = { ...proxyRes.headers };
+              delete responseHeaders[DEV_RUNTIME_STATE_HEADER];
+              res.writeHead(proxyRes.statusCode ?? 502, responseHeaders);
               proxyRes.pipe(res);
             }
           );
@@ -1227,6 +1316,7 @@ export function devServerPlugin(
         file.endsWith(".ts") || file.endsWith(".tsx") ||
         file.endsWith(".js") || file.endsWith(".jsx")
       ) {
+        if (restartRuntimeAfterInitialFailure?.()) return;
         // Server-module discovery is now path-based (no caches to
         // invalidate). Queue the change for HMR delivery to the V8
         // runtime — the runtime polls /__zeroship_hmr_check and

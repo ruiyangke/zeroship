@@ -37,7 +37,7 @@ async function makeFixture(
 
 /**
  * A minimal, self-contained re-statement of the v2 RuntimeSchemaDescriptor
- * contract validated at runtime by `@zeroship/bootstrap`
+ * contract validated by native runtime dispatch
  * install-schema.ts:155-233. Throws on any violation.
  */
 function assertRuntimeDescriptorV2(descriptor: unknown): void {

@@ -56,19 +56,6 @@ pub fn run() -> Result<()> {
             &format!("{package} tests"),
         )?;
     }
-    checked(
-        Command::new("pnpm")
-            .current_dir(root().join("sdks/bootstrap"))
-            .args([
-                "exec",
-                "node",
-                "--import",
-                "tsx",
-                "--test",
-                "tests/workflow-dispatch-determinism.test.ts",
-            ]),
-        "workflow bootstrap determinism tests",
-    )?;
     for example in ["workflow-probe", "workflows-order"] {
         checked(
             Command::new("pnpm")

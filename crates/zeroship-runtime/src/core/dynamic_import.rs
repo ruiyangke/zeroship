@@ -150,6 +150,23 @@ pub(crate) fn host_import_module_dynamically_callback<'s>(
         return import_registered(scope, resolver, specifier);
     }
 
+    {
+        v8::tc_scope!(let tc, scope);
+        match modules::compile_dynamic_module(tc, &spec) {
+            Ok(Some(_)) => return import_registered(tc, resolver, specifier),
+            Ok(None) => {},
+            Err(message) => {
+                let error = tc.exception().unwrap_or_else(|| {
+                    let message = v8::String::new(tc, &message).unwrap();
+                    v8::Exception::type_error(tc, message)
+                });
+                tc.reset();
+                resolver.reject(tc, error);
+                return Some(resolver.get_promise(tc));
+            }
+        }
+    }
+
     if let Some(module) = native_modules::resolve_native(scope, &spec) {
         cache_into_registry(scope, &spec, module);
         return import_registered(scope, resolver, specifier);

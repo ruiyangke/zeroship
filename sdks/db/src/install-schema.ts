@@ -782,7 +782,7 @@ export interface InstallSchemaOptions {
 }
 
 const RESERVED_ENV_DB_NAMES = new Set<string>([
-  "__platform",
+  "declareMaskPolicy",
   "__proto__",
   "collection",
   "constructor",
@@ -811,8 +811,7 @@ export function installSchema<const T extends Record<string, SchemaInput>>(
     throw Object.assign(
       new Error(
         "@zeroship/db: installSchema called while a previous install is in flight — " +
-          "this helper must run from a single-threaded scope (the dev-bootstrap and " +
-          "production synthetic SSR entry both serialize).",
+          "this helper must run during native plugin preparation.",
       ),
       { code: "INSTALL_IN_FLIGHT" as const },
     );
