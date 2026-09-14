@@ -1559,6 +1559,65 @@ customer retention checks as explicit jobs. Such a job examines customer records
 only inside the worker. Its failure retains responsibility and references; it
 does not permit platform SQL to inspect the journal or declare the app drained.
 
+### Delivered payload collection
+
+This contract is being implemented across the manager, creator journal and server.
+
+Collection starts with abandoned payload preparations and deletion tombstones.
+The manager retains a periodic Collect duty independently of reconciliation.
+Activation establishes both duties in its platform transaction. Each duty owns
+its deadline and pending job identity; a failing reconciliation lane cannot
+postpone collection. Manager replicas publish and retain each job under the
+queue app lock. Fresh settlement of the exact pending job may advance only that
+duty when the result is `Waiting`. Receipt replay, unrelated maintenance jobs
+and another duty's settlement do not change it.
+
+`AppWorkflows::collect_job` consumes a code-free, app-bound delivery. It
+captures the original manager lease and host policy before journal I/O and keeps
+them through every transaction and object-store operation. A live policy with
+admission disabled permits cleanup. Missing, replaced or expired authority
+cannot authorize fresh deletion; an exact committed receipt remains readable
+without fresh authority or a configured object store.
+
+The creator journal owns `collection_scans` and immutable `collection_pages`,
+both under its `__zeroship_workflow_` table prefix. Each page has a scoped foreign
+key to its job receipt and no run reference. The manager's `recovery_scopes`
+retains activation provenance; `recovery_duties` owns independent per-app/kind
+deadlines and pending jobs, with a sole typed `id` primary key and scoped uniqueness.
+A scan captures an expiry cutoff and upper payload identity under the app lock,
+then pages candidate identities within that fixed range. Its revision, cursor
+and cutoff prevent later uploads or expiry changes from extending a sweep
+indefinitely. A page stores its exact job linkage, immutable plan and reserved
+item offset. Collection does not reuse reconciliation's fields or expose object
+identities and cursors to the manager.
+
+Before attempting an item, the worker advances the durable offset under the app
+lock. It then rereads that payload's current state, expiry and reference absence.
+Only eligible unreferenced objects may enter `deleting`; this state commits
+before external deletion and fences uploads and reference promotion. Object
+I/O runs outside the transaction. Confirmation reacquires the app lock, checks
+the original authority and matching deletion observation, and records a
+`deleted` tombstone with the policy's resweep deadline. Concurrent cleanup may
+observe that another attempt already advanced the tombstone and leave it alone.
+
+An uncertain or failed delete preserves the fence. Retained tombstones are
+periodically deleted again because an upload already dispatched by a dead
+writer may arrive after an earlier deletion. Collection never treats an absent
+object as permission to revive its payload record.
+
+Malformed records and failed or timed-out items remain eligible for another
+sweep. Their reserved offset lets redelivery continue to the page suffix.
+Finishing a page commits its semantic job receipt and scan progress together.
+Only the matching scan revision and cursor may advance current progress;
+an older competing page can settle without regressing it. `Waiting` means the
+captured sweep has another page, while `Completed` closes that sweep. Neither
+outcome proves every object was deleted or the app drained.
+
+This cleanup does not retire terminal history, creator request receipts,
+management history, job receipts or deployment holds. Those require their own
+retention and drain contracts. The existing local host collector remains until
+the ordinary local manager-and-consumer composition takes over its duty.
+
 ## Deployment pins, upgrades and retention
 
 Every run generation pins an immutable deployment ID and the normal manifest
@@ -2400,9 +2459,9 @@ empty queue or expired worker as permission to release held code or retire an
 ingress responsibility. Explicit release still checks all manager dependencies
 under the app lock. Automatic held-deployment release policy, capacity activation,
 and ordinary worker/CLI consumer composition remain to integrate.
-The consumer accepts activation, cron, advance and reconciliation jobs; the queue claim is not
-filtered by operation. Other delivered operation handlers must land before
-switching a host that receives management or collection jobs to this loop.
+The consumer accepts activation, cron, advance, reconciliation and management
+jobs; the queue claim is not filtered by operation. Collection delivery must
+land before switching a host that receives those jobs to this loop.
 The server injects an authenticated Control hold client into its native queue.
 Production deployment registration and activation publication still require
 host integration. The normal Control deployment transaction needs a durable
@@ -2479,8 +2538,9 @@ outside the queue cutover.
 - Connect normal deployment registration, activation and queue holds to manager
   scheduling through a durable Control publication intent; connect lifecycle
   commands to native disable/restore and remove the standalone scheduler host.
-- Finish creator management and collection job acceptance with durable receipts,
-  publication intents and lifecycle fences before enabling those deliveries.
+- Finish creator collection job acceptance with durable pages and receipts before
+  enabling its deliveries. Delivered management and its lifecycle fences are
+  implemented and verified.
 - Complete the ingress responsibility handshake before admitting new work through
   the production host; retain pending work through outage and restart.
 - Compose the bounded worker consumer, payload/retention jobs and trusted runtime
