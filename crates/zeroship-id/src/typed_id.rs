@@ -589,8 +589,9 @@ pub const WORKFLOW_SIGNAL_PREFIX: &str = "sig";
 /// Workflow cron handle typed-id prefix, distinct from the workflow-schedule prefix.
 pub const WORKFLOW_CRON_PREFIX: &str = "cron";
 
-/// Workflow-schedule typed-id prefix. `zeroship.workflow_schedules.id` stores
-/// the full `sch_<base36>` string.
+/// Workflow-schedule typed-id prefix: the logical schedule identity
+/// ([`crate::workflow::ScheduleId`]) the manager retains across deployment
+/// revisions.
 pub const WORKFLOW_SCHEDULE_PREFIX: &str = "sch";
 
 /// Workflow dispatch/batch typed-id prefix. Deliberately `wfd`, not `dsp`
@@ -639,11 +640,6 @@ pub fn new_workflow_signal_id() -> String {
 /// Generate a new workflow cron ID: `cron_{base36(uuidv7)}`.
 pub fn new_workflow_cron_id() -> String {
     generate(WORKFLOW_CRON_PREFIX)
-}
-
-/// Generate a new workflow-schedule ID: `sch_{base36(uuidv7)}`.
-pub fn new_workflow_schedule_id() -> String {
-    generate(WORKFLOW_SCHEDULE_PREFIX)
 }
 
 /// Generate a new workflow dispatch/batch ID: `wfd_{base36(uuidv7)}`.
@@ -982,7 +978,6 @@ mod tests {
             (new_workflow_run_id as fn() -> String, WORKFLOW_RUN_PREFIX),
             (new_workflow_signal_id as fn() -> String, WORKFLOW_SIGNAL_PREFIX),
             (new_workflow_cron_id as fn() -> String, WORKFLOW_CRON_PREFIX),
-            (new_workflow_schedule_id as fn() -> String, WORKFLOW_SCHEDULE_PREFIX),
             (new_workflow_dispatch_id as fn() -> String, WORKFLOW_DISPATCH_PREFIX),
             (new_workflow_signal_key_id as fn() -> String, WORKFLOW_SIGNAL_KEY_PREFIX),
             (new_workflow_subscription_id as fn() -> String, WORKFLOW_SUBSCRIPTION_PREFIX),
