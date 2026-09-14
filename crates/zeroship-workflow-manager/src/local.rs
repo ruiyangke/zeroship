@@ -1,11 +1,12 @@
 //! The local host's platform metadata file.
 //!
-//! One SQLite file holds the normal deployment catalog and the manager's queue,
-//! placement, scheduling and recovery records. Both schemas are migration
-//! compiler output. Bootstrap installs them together into an empty file and
-//! otherwise refuses a file whose stored DDL differs from that combination,
-//! without altering it. Production hosts bind their already provisioned
-//! platform databases instead; this module creates no customer tables.
+//! One `SQLite` file holds the normal deployment catalog and the manager's
+//! queue, placement, scheduling and recovery records. Both schemas are
+//! migration compiler output. Bootstrap installs them together into an empty
+//! file and otherwise refuses a file whose stored DDL differs from that
+//! combination, without altering it. Production hosts bind their already
+//! provisioned platform databases instead; this module creates no customer
+//! tables.
 
 #![expect(
     clippy::future_not_send,
