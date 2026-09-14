@@ -738,10 +738,11 @@ pub async fn delete_app(
     }
 }
 
-/// Streaming `.zship` ingest under a stable deploy command identity. Deploy
-/// bundles arrive as zstd-compressed tar archives carrying `manifest.json` +
-/// `blobs/<sha256>` entries; see `docs/reference/zship.md` for the wire format
-/// and ingestion algorithm.
+/// Streaming `.zship` ingest under a stable deploy command identity.
+///
+/// Deploy bundles arrive as zstd-compressed tar archives carrying
+/// `manifest.json` + `blobs/<sha256>` entries; see `docs/reference/zship.md`
+/// for the wire format and ingestion algorithm.
 ///
 /// The request names its deploy command in one `Idempotency-Key` header. An
 /// exact retry - same app, actor, content type and archive bytes under the same

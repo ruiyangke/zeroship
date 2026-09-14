@@ -15,9 +15,10 @@ pub const ZSHIP_CONTENT_TYPE: &str = "application/x-zship";
 /// The operation a deploy command receipt records.
 pub const DEPLOY_OPERATION: &str = "deploy";
 
-/// Normalize a request content type to the spelling receipts bind, or `None`
-/// for anything other than a `.zship` upload. Parameters such as a charset do
-/// not change the artifact, so they are not part of the binding.
+/// Normalize a request content type to the spelling receipts bind.
+///
+/// Anything other than a `.zship` upload is `None`. Parameters such as a
+/// charset do not change the artifact, so they are not part of the binding.
 #[must_use]
 pub fn normalize_content_type(value: &str) -> Option<&'static str> {
     value
@@ -58,10 +59,11 @@ pub enum DeploymentRejected {
     Schedules(String),
 }
 
-/// A manifest verified against its content hash, with the runtime descriptor
-/// schema admission compares and the allowlisted schedule projection the
-/// manager receives. Static schedule input and unknown fields stay in the
-/// manifest.
+/// A manifest verified against its content hash.
+///
+/// It carries the runtime descriptor schema admission compares and the
+/// allowlisted schedule projection the manager receives. Static schedule input
+/// and unknown fields stay in the manifest.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VerifiedDeployment {
     hash: String,

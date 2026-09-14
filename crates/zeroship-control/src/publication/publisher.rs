@@ -378,13 +378,9 @@ pub async fn run(state: Arc<AppState>, coordinator_url: String, tick: Duration) 
         }
         if let Some(publisher) = &mut publisher {
             match publisher.tick().await {
-                Ok(stats) if stats.attempted != 0 => tracing::info!(
-                    attempted = stats.attempted,
-                    acknowledged = stats.acknowledged,
-                    failed = stats.failed,
-                    deferred = stats.deferred,
-                    "lifecycle publisher visited pending intents"
-                ),
+                Ok(visited) if visited.attempted != 0 => {
+                    tracing::info!(?visited, "lifecycle publisher visited pending intents");
+                }
                 Ok(_) => {}
                 Err(error) => tracing::error!(%error, "lifecycle publication pass failed"),
             }

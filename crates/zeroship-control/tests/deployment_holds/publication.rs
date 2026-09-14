@@ -19,6 +19,7 @@ use zeroship_control::{
 };
 use zeroship_core::{
     UserId,
+    workflow_coordination::Revision,
     workflow_jobs::{DeploymentId, JobOperation, JobSpec},
     workflow_schedules::{ActivateSchedules, DisableSchedules, RegisterSchedules},
 };
@@ -186,7 +187,7 @@ async fn lifecycle_intents_reach_the_manager_in_revision_order() {
     let app = app(&fixture, "publication-order").await;
 
     let first = accept(&fixture, &app, &actor, scheduled("first", &["nightly"])).await;
-    assert_eq!(first.lifecycle_revision.map(|r| r.get()), Some(1));
+    assert_eq!(first.lifecycle_revision.map(Revision::get), Some(1));
     let archived = fixture.state.registry.archive_app(&app).await.unwrap();
     assert!(archived.unwrap().archived_at.is_some());
     // Archiving again invents no transition.
@@ -200,7 +201,7 @@ async fn lifecycle_intents_reach_the_manager_in_revision_order() {
     // An intentional rollback redeploys the first artifact as a new command.
     let rollback = accept(&fixture, &app, &actor, scheduled("first", &["nightly"])).await;
     assert_eq!(rollback.deploy_id, first.deploy_id);
-    assert_eq!(rollback.lifecycle_revision.map(|r| r.get()), Some(5));
+    assert_eq!(rollback.lifecycle_revision.map(Revision::get), Some(5));
 
     let expected = [
         (1, "activate", Some(first.deploy_id.as_str())),

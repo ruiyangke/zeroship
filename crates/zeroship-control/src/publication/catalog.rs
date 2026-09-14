@@ -255,10 +255,11 @@ impl ReceiptRow {
     }
 }
 
-/// Accept a deploy command: recheck its receipt, admit the schema, select the
-/// deployment, move the app pointer, publish an activation for an active app
-/// and record the receipt. An exact retry replays the stored result before
-/// any other check.
+/// Accept a deploy command in the caller's transaction.
+///
+/// Recheck its receipt, admit the schema, select the deployment, move the app
+/// pointer, publish an activation for an active app and record the receipt.
+/// An exact retry replays the stored result before any other check.
 ///
 /// # Errors
 /// Refuses absent or deleted apps, receipt conflicts, schema admission,
