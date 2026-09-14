@@ -154,9 +154,9 @@ tempfile = { workspace = true }
 # DECLARED ON THE DEV-DEPENDENCY, never routed through `[features]`, per
 # xtask/tests/repository_architecture.rs. Under resolver v3 a dev-dependency's
 # features unify into the normal edge WHENEVER A TEST TARGET IS IN THE UNIT GRAPH,
-# so `cargo test` gets it and a `--lib`/`--bins` build does not. Measured: the
-# shipped cdylib keeps 52 undefined `napi_*` symbols and a defined
-# `napi_register_module_v1`; tests/napi_symbol_shape_gate.sh holds both halves.
+# so `cargo test` gets it and a `--lib`/`--bins` build does not. The shipped
+# cdylib keeps its Node API imports undefined and exports
+# `napi_register_module_v1`; `tests/shipped_symbol_shape.rs` holds both halves.
 #
 # No Rust test process may call an N-API function. With no host loaded the napi-sys stub
 # prints `Node-API symbol ... has not been loaded` to stderr and returns 1 for a
