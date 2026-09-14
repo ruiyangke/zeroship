@@ -120,14 +120,28 @@ artifacts. The [worker design](../proposals/2026-09-11-workflow-worker.md) descr
 the remaining production retention cutover, which keeps platform bundle
 collection independent of customer SQL.
 
-The CLI runs background work on a dedicated workflow thread, independently of
-HTTP requests. `zeroship serve dist/app.zship` loads the app's server modules for
-HTTP and workflow execution. Vite builds and publishes the local app artifact
-automatically while serving client assets and live modules through its dev
-bridge. There is no workflow-only archive argument or TOML bundle setting.
+The CLI runs workflows through the same native manager and delivered jobs as a
+deployment, independently of HTTP requests. `zeroship serve dist/app.zship`
+loads the app's server modules for HTTP and workflow execution. Vite builds and
+publishes the local app artifact automatically while serving client assets and
+live modules through its dev bridge, and restarts the CLI when the artifact
+changes. There is no workflow-only archive argument or TOML bundle setting.
 Workflow execution reads from the retained app bundle store without making
-separate executable copies. Background maintenance retries interrupted deployment
-hold operations after restart without requiring an HTTP request.
+separate executable copies.
+
+A manager thread owns the local platform metadata file,
+`.zeroship/platform/metadata.sqlite`, which holds both the normal deployment
+catalog and the manager's queue, placement, scheduling and recovery records.
+Starting the CLI with an archive records that deployment, registers its
+schedules and activates it unless it is already selected; each restart with a
+new archive activates the new deployment while existing runs keep their pinned
+code. The creator applies the activation as a delivered job, and the CLI accepts
+requests only after that activation has committed. A second thread runs the
+ordinary job consumer over the app database with a trusted local worker
+identity. Starts, signals and settled jobs publish their pending jobs
+immediately; periodic manager reconciliation publishes anything a crash left
+behind, and periodic collection removes abandoned payload uploads. Restart keeps
+queued jobs, timers, receipts and retained bundles.
 
 The CLI resolves one app identity for HTTP handlers, workflow execution and app
 storage. A configured `APP_ID` must be canonical; when absent, the CLI uses the
@@ -140,13 +154,17 @@ ORM places the app tables and workflow journal in `.zeroship/zs-<app_id>.sqlite`
 object storage defaults to `.zeroship/storage`. Workflow execution uses this
 host-selected identity without a separate identity file, database or object
 directory. Incompatible journals are refused without resetting them, and
-initialization preserves business tables.
+initialization preserves business tables. An incompatible platform metadata file
+is likewise refused without being rewritten.
 
 `--workflow-config=workflow.toml` configures native execution limits. Its optional
-`worker` and `payloads` tables configure `WorkerOptions` and `TaskPayloadLimits`.
-Database paths and object storage belong to normal app configuration; workflow
-TOML rejects separate `journal` and `objects` settings. The CLI has no dedicated
-workflow reset command.
+`consumer` table bounds execution slots, claim polling, backoff, execution and
+per-operation time; `manager` bounds delivery leases, the worker's placement
+lifetime, maintenance cadence and lanes, and the reconciliation and collection
+interval; `payloads` configures `TaskPayloadLimits`. Database paths and object
+storage belong to normal app configuration; workflow TOML rejects separate
+`journal`, `objects` and database settings. The CLI has no dedicated workflow
+reset command.
 
 ## Testing
 
