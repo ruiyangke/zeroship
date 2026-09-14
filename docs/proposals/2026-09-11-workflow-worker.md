@@ -258,12 +258,12 @@ holds the operator procedure, revocation included. A gracefully stopped worker
 retires its own instance through `CONTROL_WORKER_RETIRE`. The worker's
 version poll and the `env.workflows` HTTP backend still authenticate with the
 shared control key rather than a worker credential, so revoking a unit does
-not take that credential from a process that already holds it; the poll moves
-to the instance-authenticated `CONTROL_VERSIONS` grant and the backend goes
-with the workflow-server cutover. Production startup registration, consumer
-wiring, zone eligibility (including the foreign key from
-`worker_enrollers.execution_zone_id`) and capacity activation remain cutover
-work.
+not take that credential from a process that already holds it. The poll is on
+the POLLED tier that `docs/proposals/2026-09-05-app-metadata-distribution.md`
+replaces, and the backend goes with the workflow-server cutover. Production
+startup registration, consumer wiring, zone eligibility (including the foreign
+key from `worker_enrollers.execution_zone_id`) and capacity activation remain
+cutover work.
 
 ## Policy bindings and authenticated leases
 
