@@ -88,18 +88,13 @@ jobs:
       # unify into normal dependencies and hide a broken shipped configuration.
       - name: Shipped Rust targets compile
         run: cargo check --locked --workspace --lib --bins
-      # The same shipped-vs-test feature split, one member down, read off the
-      # EMITTED OBJECT rather than off a comment. zeroship-migrate-node keeps
-      # `napi` as a default feature and links its test binaries through
-      # `napi/dyn-symbols` declared on the dev-dependency. Both halves are
-      # silent when broken: dyn-symbols reaching the shipped cdylib compiles
-      # and tests green while producing a .node that resolves N-API through its
-      # own loader (measured: `cargo test -p zeroship-migrate-node` exits 0 with
-      # all 12 blocks ok while the object's undefined `napi_*` count is 0
-      # instead of 52), and losing the dev-dependency returns a 1719-line
-      # linker wall that names a symbol but never the manifest.
+      # The owning crate checks the shipped-vs-test feature split against the
+      # emitted object. Its integration target links through the dev-only
+      # `napi/dyn-symbols`, then builds the shipped library configuration and
+      # verifies that the Node host must resolve the imported API while the
+      # addon exports its registrar.
       - name: napi addon symbol shape
-        run: tests/napi_symbol_shape_gate.sh
+        run: cargo test --locked -p zeroship-migrate-node --test shipped_symbol_shape
       # WPT BEFORE `cargo test`, for exactly the reason the SDK dist files are
       # built before any cargo command above, and discovered the same way.
       #
