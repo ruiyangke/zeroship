@@ -136,7 +136,7 @@ Architecture:
     + 1 v8::json::stringify. (The "json" string itself is interned
     via OneByteConst — no new alloc per request.)
 
-  Synthetic SSR entry (sdks/vite-plugin/src/rpc-registry.ts):
+  Synthetic SSR entry (packages/vite-plugin/src/rpc-registry.ts):
     - Emits `default.{ fetch, rpc }` only — fetchFast was dropped.
       rpc is standalone, NOT layered on top of fetchFast.
     - rpc handler is sync (not `async function`) — sync user handlers

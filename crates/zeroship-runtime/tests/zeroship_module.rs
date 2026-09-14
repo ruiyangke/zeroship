@@ -284,7 +284,7 @@ async fn request_accessors_reject_outside_an_invocation() {
 #[compio::test]
 async fn vite_module_runner_uses_the_same_native_exports() {
     let plugin_root =
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../sdks/vite-plugin");
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../packages/vite-plugin");
     let built = std::process::Command::new("node")
         .current_dir(plugin_root)
         .args([

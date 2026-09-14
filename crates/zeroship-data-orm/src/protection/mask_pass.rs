@@ -217,7 +217,7 @@ pub fn relocate_masked_columns(masks: &DerivedMasks, row: &mut Value) -> Result<
 /// class of bug the flip exists to make impossible, not a class that is
 /// impossible to reintroduce - is masked here rather than returned.
 ///
-/// The wire shape mirrors the SDK's `MaskedValueRepr` (sdks/db/src/
+/// The wire shape mirrors the SDK's `MaskedValueRepr` (packages/db/src/
 /// types.ts): a `sentinel: "__zsmask__"` discriminator plus `masked`
 /// (the user-facing string) and `classification` (drives unmask
 /// authorization). Per-row metadata (`{collection, row_pk,

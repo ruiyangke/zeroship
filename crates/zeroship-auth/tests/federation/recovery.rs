@@ -121,7 +121,7 @@ async fn callback_cannot_reenable_disabled_account(provider: Provider) {
             .assert_refused(&attempt.complete(&fixture).await, &["account_ineligible"])
             .await;
         assert!(
-            users::find_by_id(fixture.server.pg.as_ref(), &id)
+            users::find_by_id(&fixture.server.orm, &id)
                 .await
                 .unwrap()
                 .unwrap()

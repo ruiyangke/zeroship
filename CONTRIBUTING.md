@@ -22,11 +22,9 @@ the full stance.
   than trusting this list; a prose inventory has nothing that fails when it rots.
 - `libs/` - standalone, zeroship-independent driver libraries: `compio-postgres`,
   `compio-redis`, `compio-s3`. Publishable on their own.
-- `sdks/` - the `@zeroship/*` npm packages (a pnpm workspace): `db`, `kv`, `storage`,
-  `auth`, `rpc`, `ui`, `vite-plugin`, `control`, `payments`, `react`, `migrate`,
-  `workflows`, `server`, `types`, `mcp`, `eslint-config`, `eslint-plugin-workflow`,
-  `create-zeroship-app`, and `zeroship-stub`.
-  Same caveat as `crates/`: `ls sdks/` is the source of truth.
+- `packages/` - the npm workspace packages: the `@zeroship/*` SDKs and the
+  migration authoring, CLI, and driver packages. Run `ls packages/` for the
+  current inventory.
 - `db/` - the platform's own database schema, authored as `@zeroship/migrate`
   migrations in `db/migrations-ts/` (the sole platform migration source - no SQL/Flyway).
 - `deploy/` - everything about running/shipping: `Dockerfile`, `compose/`, `ops/`,
@@ -87,8 +85,8 @@ JavaScript:
 
 ```
 pnpm build
-pnpm check            # typecheck every sdks/* package
-pnpm test             # vitest across sdks/*
+pnpm check            # typecheck the @zeroship packages
+pnpm test             # vitest across the @zeroship packages
 ```
 
 Examples own their tests, fixtures, test configuration, and test dependencies

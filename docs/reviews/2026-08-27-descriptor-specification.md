@@ -409,7 +409,7 @@ in the proposed shape (section 3) are given in parentheses.
 | 1-4, 19a (type tokens for coercion and boolean lowering) | `fields[c].type` (already present) |
 | 19b, 20a, 21, 22, 10, 19c (encryption) | `fields[c].encrypted.{mode,keyId,wraps}` (already present) |
 | 9, 11, 20b, 19d, 25-30, 33-36 (masking) | `fields[c].mask.{kind,classification}` (already present) + **new** `fields[c].storage` (section 3.2) |
-| 12 (typed_id prefix) | `fields[c].idPrefix` (already present in the FieldDef vocabulary, `sdks/db/src/types.ts:974`; emitted at `crates/zeroship-migrate-core/src/render/declarative.rs:660`) |
+| 12 (typed_id prefix) | `fields[c].idPrefix` (already present in the FieldDef vocabulary, `packages/db/src/types.ts:974`; emitted at `crates/zeroship-migrate-core/src/render/declarative.rs:660`) |
 | 37 (vector dims), 20c, 45 | `fields[c].vectorDims`, `fields[c].vectorMetric` (already emitted, `declarative.rs:467-472`) |
 | 38 (geoPoint) | `fields[c].type == "geoPoint"` |
 | 20d (plain bytes) | `fields[c].type == "bytes"` + absence of `encrypted` |
@@ -596,7 +596,7 @@ TypeScript mirror at `sdks/bootstrap/src/install-schema.ts:139-152`):
 
 ### 3.3 Per field
 
-The existing `FieldDef` vocabulary (`sdks/db/src/types.ts:824-1000`) is kept
+The existing `FieldDef` vocabulary (`packages/db/src/types.ts:824-1000`) is kept
 verbatim - `type`, `required`, `unique`, `index`, `default`, `min`, `max`,
 `enum`, `pattern`, `refTarget`, `refColumn`, `onDelete`, `onUpdate`,
 `deferrable`, `shape`, `literalValue`, `variants`, `discriminator`,
@@ -786,7 +786,7 @@ B-tree-on-ciphertext equality lookup". Note, however, that **the filter path
 never encrypts the operand** - it cannot, because it has no schema - so that
 lookup does not work at HEAD either. The flip does not break a working feature;
 it forecloses one that is currently only a type-level brand
-(`sdks/db/src/types.ts:1016-1019`). The spec must state which of the two it
+(`packages/db/src/types.ts:1016-1019`). The spec must state which of the two it
 intends: route deterministic-equality filters to `storage.rawColumn` and encrypt
 the operand, or drop deterministic mode.
 
@@ -1135,9 +1135,9 @@ column-name lookup.
 - The ~200 test-only `use zeroship_data_v8::query::{...}` import blocks in
   `crates/zeroship-data-v8/tests/sqlite_integration.rs` and `crates/zeroship-data-v8/tests/integration.rs` were not expanded
   name by name `[delegated]`.
-- Non-Rust consumers beyond `sdks/db/src/types.ts`,
+- Non-Rust consumers beyond `packages/db/src/types.ts`,
   `sdks/bootstrap/src/install-schema.ts` and the confined-shape mirror. In
-  particular `sdks/db/tests/*.ts` (55 files) was grep-screened, not read: its
+  particular `packages/db/tests/*.ts` (55 files) was grep-screened, not read: its
   `__zsmask__` usage is the runtime `MaskedValue` wire sentinel, orthogonal to
   catalog introspection `[delegated]`.
 - `crates/zeroship-migrate-adapter/src/platform.rs:1172` mentions

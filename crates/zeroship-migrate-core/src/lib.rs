@@ -294,7 +294,7 @@ pub use guard::{GuardConfig, GuardError, GuardOutcome, MigrationGuard};
 // through the vendor registry, and it was already the door the napi addon and the
 // engine's own apply path used.
 //
-// The re-exports had no non-test caller in `crates/`, `sdks/` or `packages/`
+// The re-exports had no non-test caller in `crates/` or `packages/`
 // (measured, not assumed): `MysqlGuard` had zero callers anywhere, and the eight
 // `PgGuard`/`SqliteGuard` sites were all in this crate's own integration tests,
 // which now build the same guard the same way the engine does. So no behaviour left

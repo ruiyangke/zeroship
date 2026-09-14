@@ -71,7 +71,7 @@ jobs:
             echo "::error::root tsx probe failed for an unexpected reason"
             exit 1
           fi
-          pnpm --dir sdks/vite-plugin exec node --import tsx --eval ""
+          pnpm --dir packages/vite-plugin exec node --import tsx --eval ""
       - name: Project config schema and generator
         run: |
           node --test schema/codegen.test.mjs
@@ -82,7 +82,7 @@ jobs:
           cargo test --locked -p zeroship-cli --test deploy_test
       - name: Project config build behavior
         run: >-
-          pnpm --dir sdks/vite-plugin exec node --import tsx --test
+          pnpm --dir packages/vite-plugin exec node --import tsx --test
           test/project-config.test.ts test/zship.test.ts
       # Keep test targets out of this build: their dev-dependency features may
       # unify into normal dependencies and hide a broken shipped configuration.
@@ -545,7 +545,7 @@ jobs:
       # SDK command.
       - name: JavaScript suites
         run: |
-          pnpm -r --no-bail --filter='./sdks/*' --filter='!@zeroship/vite-plugin' test
+          pnpm -r --no-bail --filter='./packages/*' --filter='!@zeroship/vite-plugin' --filter='!@zeroship/migrate' --filter='!zero-migrate-cli' --filter='!zeroship-migrate-node' test
           pnpm --filter @zeroship/migrate test
           pnpm --filter zero-migrate-cli test
           pnpm --filter zeroship-migrate-node test
@@ -688,7 +688,7 @@ jobs:
       # scaffold and wall-probe inside the run; step 14 deliberately consumes a
       # PREBUILT examples/auth-notes-db/dist/app.zship (its own comment says so,
       # and it asserts the artifact is newer than its sources so that a
-      # forgotten rebuild cannot pass). Root `pnpm build` filters to ./sdks/*,
+      # forgotten rebuild cannot pass). Root `pnpm build` filters to the SDK packages,
       # and `dist` is gitignored, so on a fresh checkout that file is absent.
       #
       # MEASURED on a clean worktree 2026-08-21: step 14 produced ONE outcome -
@@ -711,7 +711,7 @@ jobs:
             -p zeroship-gateway -p zeroship-cli --bins
       # ZS_FRESHNESS_STRICT=1 because the harness's own freshness note says so:
       # step 1 runs `pnpm build` inside the example and consumes whatever
-      # sdks/vite-plugin/dist is already on disk, so a run over a stale dist is
+      # packages/vite-plugin/dist is already on disk, so a run over a stale dist is
       # green about a build that predates the change under test. It WARNS by
       # default (mtime is a weak proxy for provenance on a developer's machine);
       # in CI the dist is built two steps above, so a stale one means the build
@@ -1117,7 +1117,7 @@ jobs:
             examples/workflow-probe/tests/.artifacts/**
             examples/workflows-order/tests/.artifacts/**
       # examples/ are workspace packages (pnpm-workspace.yaml lists `examples/*`)
-      # but root `pnpm build` is `pnpm -r --filter './sdks/*' ...`, so it does
+      # but root `pnpm build` filters to `./packages/*`, so it does
       # NOT build them. Without this step the harness below reaches its own
       # prereq check and exits 1 with
       #   FAIL missing .../examples/kv-dashboard/dist/app.zship

@@ -51,7 +51,7 @@ ship it on **existing, already-shipped surfaces** — no new runtime op, no new 
    control-plane master/API key, set as an app env var the worker injects but never exposes to the
    browser — the same `env.*` server-only secret model creator apps already use).
 2. Console server code calls the control plane through the existing **`@zeroship/control`** SDK
-   (`docs/reference/control.md` · `sdks/control/`), passing that credential as its bearer. No
+   (`docs/reference/control.md` · `packages/control/`), passing that credential as its bearer. No
    `env.auth.getAccessToken`, no `fetchAs`, no `POST /internal/power-token`.
 3. The credential lives only in the console's server-side env; it never reaches the console browser
    (the BFF end-user session below is entirely separate from this control credential).

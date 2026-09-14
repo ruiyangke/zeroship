@@ -90,10 +90,10 @@ native collection, and converts native exceptions to the documented
 
 Relevant code:
 
-- `sdks/db/src/collection.ts:252`
-- `sdks/db/src/collection.ts:268`
-- `sdks/db/src/collection.ts:295`
-- `sdks/db/src/collection/crud.ts:196`
+- `packages/db/src/collection.ts:252`
+- `packages/db/src/collection.ts:268`
+- `packages/db/src/collection.ts:295`
+- `packages/db/src/collection/crud.ts:196`
 
 ### 4. Native V8 boundary
 

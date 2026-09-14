@@ -12,10 +12,11 @@ use zeroship_core::service_peers::ServiceKeyring;
 #[allow(clippy::future_not_send)]
 async fn the_emailed_link_cancels_deletion_without_a_session() {
     Database::run(async |database| {
+    let orm = database.orm().await;
     let db = database.connect().await;
     let control = MockControl::start(Answer::Clear).await;
     let fixture = DeletionServer::start(database, &control, control.keyring()).await;
-    let (user, session) = signed_in_user(&db).await;
+    let (user, session) = signed_in_user(&db, &orm).await;
 
     let requested = fixture.request_deletion(session.id).await;
     assert_eq!(requested.status().as_u16(), 302);
@@ -94,10 +95,11 @@ async fn the_emailed_link_cancels_deletion_without_a_session() {
 #[allow(clippy::future_not_send)]
 async fn the_cancel_route_refuses_a_token_it_never_issued() {
     Database::run(async |database| {
+        let orm = database.orm().await;
         let mut db = database.connect().await;
         let control = MockControl::start(Answer::Clear).await;
         let fixture = DeletionServer::start(database, &control, control.keyring()).await;
-        let (user, _) = signed_in_user(&db).await;
+        let (user, _) = signed_in_user(&db, &orm).await;
         users::request_deletion(&mut db, &user.id, account_reaper::GRACE_DAYS)
             .await
             .unwrap()
@@ -130,6 +132,7 @@ async fn the_cancel_route_refuses_a_token_it_never_issued() {
 #[allow(clippy::future_not_send)]
 async fn a_refused_preflight_leaves_the_account_and_session_active() {
     Database::run(async |database| {
+    let orm = database.orm().await;
     let db = database.connect().await;
     for (answer, trusted, status) in [
         (
@@ -157,7 +160,7 @@ async fn a_refused_preflight_leaves_the_account_and_session_active() {
             untrusted_auth_keyring()
         };
         let fixture = DeletionServer::start(database, &control, keyring).await;
-        let (user, session) = signed_in_user(&db).await;
+        let (user, session) = signed_in_user(&db, &orm).await;
         let response = fixture.request_deletion(session.id).await;
         assert_eq!(
             response.status().as_u16(),
@@ -201,9 +204,12 @@ async fn a_refused_preflight_leaves_the_account_and_session_active() {
 }
 
 #[allow(clippy::future_not_send)]
-async fn signed_in_user(db: &compio_postgres::Client) -> (users::UserRow, sessions::Session) {
+async fn signed_in_user(
+    db: &compio_postgres::Client,
+    orm: &zeroship_data_orm::Database,
+) -> (users::UserRow, sessions::Session) {
     let user = users::create(
-        db,
+        orm,
         &format!("acctdel-http-{}@zeroship.test", Uuid::new_v4().simple()),
         "Deletion request",
         None,
@@ -248,7 +254,7 @@ impl DeletionServer {
         settings.public_url = zeroship_core::config::Operational::new(base.clone());
         let cfg = Arc::new(zeroship_auth::config::AuthConfig::from_resolved(settings).unwrap());
         let db = Arc::new(database.connect_as_auth().await);
-        let refresh_pool = zeroship_auth::oidc::refresh::RefreshSessionPool::new(dsn, 2);
+        let refresh_pool = zeroship_auth::oidc::refresh::RefreshSessionPool::new(dsn.clone(), 2);
         let issuer = Arc::new(
             zeroship_auth::oidc::Issuer::from_signing_key(
                 &ed25519_dalek::SigningKey::from_bytes(&[22; 32]),
@@ -266,6 +272,7 @@ impl DeletionServer {
         let srv =
             ntex::web::test::server_with(ntex::web::test::config().listener(listener), move || {
                 let cfg = cfg.clone();
+                let dsn = dsn.clone();
                 let db = db.clone();
                 let refresh_pool = refresh_pool.clone();
                 let issuer = issuer.clone();
@@ -273,6 +280,9 @@ impl DeletionServer {
                 let mailer = mailer_state.clone();
                 async move {
                     ntex::web::App::new()
+                        .state_factory(async move || {
+                            zeroship_auth::store::native::connect(&dsn).await
+                        })
                         .state(cfg)
                         .state(db)
                         .state(refresh_pool)

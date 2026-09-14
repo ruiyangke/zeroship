@@ -80,7 +80,7 @@ fn removed_database_search_surface_has_no_producer_or_documented_api() {
         Some(true),
     );
     scan(
-        repo::files("sdks", EXTENSIONS),
+        repo::files("packages", EXTENSIONS),
         500,
         &migration,
         Some(false),

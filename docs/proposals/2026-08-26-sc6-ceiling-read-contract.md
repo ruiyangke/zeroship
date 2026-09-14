@@ -154,7 +154,7 @@ Its carrier is the artifact/init channel that already carries the runtime schema
 descriptor, immutable for the isolate's life. It is not a new channel and not a
 new trust standing.
 
-Not built. The shipped carrier is `defineMaskPolicy` (`sdks/db/src/policy.ts:120`),
+Not built. The shipped carrier is `defineMaskPolicy` (`packages/db/src/policy.ts:120`),
 drained at boot through `__platform.setMaskPolicy`
 (`crates/zeroship-data-v8/src/v8_classes/db_platform.rs`) into the
 per-isolate cache. The string `mask` appears **zero** times in
@@ -382,7 +382,7 @@ satisfy a deny-only arm **vacuously**, with every non-`auto` unmask bricked.
    unsupported. Uniqueness over the real value compounds it: on a
    randomised-encrypted field the raw column enforces **nothing**, because
    `canonical_aad` binds the row PK so identical plaintext yields different
-   ciphertext per row. `sdks/db/src/types.ts:1184-1199` refuses
+   ciphertext per row. `packages/db/src/types.ts:1184-1199` refuses
    `randomised` + `.unique()` for exactly that reason. A deterministic keyed
    lookup column would make equal plaintext produce an equal token by
    construction and turn a currently-refused declaration into a supportable one

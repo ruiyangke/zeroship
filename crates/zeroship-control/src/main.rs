@@ -840,7 +840,7 @@ fn main() -> std::io::Result<()> {
     // auth-schema service principal.
     //
     // Compose wiring (R5 cutover — DONE): the console `.zship` is built in the
-    // Docker `sdks` stage and COPYed to `/opt/zeroship/console/app.zship`; the
+    // Docker `js-packages` stage and COPYed to `/opt/zeroship/console/app.zship`; the
     // control service runs with `--bootstrap-console --console-host
     // console.zeroship.localhost --console-zship /opt/zeroship/console/app.zship`,
     // ordered after the `migrate` service. `deploy/ops/Caddyfile` routes

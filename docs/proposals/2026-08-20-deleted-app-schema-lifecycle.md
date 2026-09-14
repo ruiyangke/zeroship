@@ -314,8 +314,8 @@ tools, and the docs. Summary of what is there:
   `archived_at`-on-apps mention in the tree is an unbuilt line in an archived
   status doc (`docs/archive/superpowers/zeroship-builder-status.md:78`).
 - **No warning that deletion is permanent, anywhere a caller would see it.**
-  `sdks/control/src/index.ts:311` is a bare two-line method with no doc comment.
-  `sdks/mcp/src/index.ts:170` describes it as "Delete a zeroship app by UUID or
+  `packages/control/src/index.ts:311` is a bare two-line method with no doc comment.
+  `packages/mcp/src/index.ts:170` describes it as "Delete a zeroship app by UUID or
   name." There is no console UI in this tree to warn in, and no CLI `app delete`.
 - **`docs/architecture/control-plane.md` never mentions `DELETE /apps/{id}` at
   all**, and `docs/reference/control.md` never mentions `apps.delete`. Grep for

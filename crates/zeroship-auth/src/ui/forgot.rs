@@ -27,6 +27,7 @@ use crate::identity::{email as email_validation, password_reset};
 use crate::store::users;
 use crate::ui::ForgotPage;
 use sha2::{Digest, Sha256};
+use zeroship_data_orm::Database;
 use zeroship_authn::rate_limit::{self, Quota, RateLimitDecision};
 use zeroship_mailer::templates::{build_email, PasswordResetHtml, PasswordResetText};
 use zeroship_mailer::{Address, Mailer};
@@ -54,6 +55,7 @@ pub async fn post(
     form: Form<ForgotForm>,
     cfg: State<Arc<AuthConfig>>,
     db: State<Arc<compio_postgres::Client>>,
+    orm: State<Database>,
     mailer: State<Arc<dyn Mailer>>,
 ) -> HttpResponse {
     // 1. CSRF.
@@ -116,7 +118,7 @@ pub async fn post(
         }
     }
 
-    let user = users::find_by_email(db.as_ref(), &email_norm)
+    let user = users::find_by_email(&orm, &email_norm)
         .await
         .ok()
         .flatten();

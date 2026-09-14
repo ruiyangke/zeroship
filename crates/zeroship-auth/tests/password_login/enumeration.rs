@@ -47,7 +47,7 @@ async fn password_refusals_are_equivalent_even_when_the_dummy_hash_matches() {
         let server = AuthServer::start(database).await;
         let real = user(&server, "real@example.test").await;
         let locked = user(&server, "locked@example.test").await;
-        let oauth = users::create(&server.pg, "oauth@example.test", "OAuth only", None)
+        let oauth = users::create(&server.orm, "oauth@example.test", "OAuth only", None)
             .await
             .unwrap();
         lock_through_login(&server, &locked).await;
@@ -55,7 +55,7 @@ async fn password_refusals_are_equivalent_even_when_the_dummy_hash_matches() {
             refusal(login(&server, &real.email, WRONG_PASSWORD, "192.0.2.1").await).await;
         let missing = "absent@example.test";
         assert!(
-            users::find_by_email(&server.pg, missing)
+            users::find_by_email(&server.orm, missing)
                 .await
                 .unwrap()
                 .is_none()
@@ -85,7 +85,7 @@ async fn password_refusals_are_equivalent_even_when_the_dummy_hash_matches() {
         )
         .await;
         assert!(
-            users::find_by_email(&server.pg, missing)
+            users::find_by_email(&server.orm, missing)
                 .await
                 .unwrap()
                 .is_none()

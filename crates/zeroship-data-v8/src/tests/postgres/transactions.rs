@@ -1790,7 +1790,7 @@ const _procedures = { probeTxView };
     let (status, body) = dispatch_zs(&url, &src, "probeTxView", app);
     assert_eq!(status, 200, "probe should succeed: {body}");
     // `transaction()` resolves with the `{ data, error }` envelope documented at
-    // `sdks/db/src/db-types.ts:39`, so the probe's own object sits under `data`.
+    // `packages/db/src/db-types.ts:39`, so the probe's own object sits under `data`.
     let inner = body
         .get("json")
         .and_then(|v| v.get("data"))

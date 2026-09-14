@@ -194,7 +194,7 @@ from Vite's development middleware — no gateway or external auth service:
 - `signout` → clears the cookie; `204` (idempotent).
 
 Every wire shape is identical to prod, so the `@zeroship/auth` client is
-unchanged dev↔prod. `sdks/vite-plugin/src/dev-server.ts` mounts the provider
+unchanged dev↔prod. `packages/vite-plugin/src/dev-server.ts` mounts the provider
 before the proxy to the creator runtime. It remains available when creator
 module compilation or startup fails.
 
@@ -271,18 +271,18 @@ session cookie.
 Deriving it rather than configuring it keeps a property the
 dev-vs-deployed harness measures: the deployed signup policy refuses every
 credential the dev derivation emits. The implementation authorities are
-`devPasswordFor` in `sdks/vite-plugin/src/dev-auth.ts` and the production
+`devPasswordFor` in `packages/vite-plugin/src/dev-auth.ts` and the production
 password policy in `crates/zeroship-auth/src/ui/signup.rs`.
 
 The plugin retains the resolved user config in Vite middleware and passes a
 fresh `ZEROSHIP_DEV_AUTH_SECRET` to the spawned `zeroship serve` child
-(`sdks/vite-plugin/src/{dev-auth-config,dev-server,constants}.ts`).
+(`packages/vite-plugin/src/{dev-auth-config,dev-server,constants}.ts`).
 
 ## Dev-only by construction
 
 The dev-auth provider must never reach a production `.zship`:
 
-- It lives in `sdks/vite-plugin/src/dev-auth.ts` and is mounted only by the
+- It lives in `packages/vite-plugin/src/dev-auth.ts` and is mounted only by the
   Vite development server.
 - The generated server entry contains creator references only; it does not
   import the provider.
@@ -290,7 +290,7 @@ The dev-auth provider must never reach a production `.zship`:
   verification is enabled by the explicit development settings passed to
   `zeroship serve`.
 
-`sdks/vite-plugin/test/dev-auth.test.ts` exercises the provider and the
+`packages/vite-plugin/test/dev-auth.test.ts` exercises the provider and the
 production artifact boundary.
 
 ## Tests (the faithful path)
@@ -300,10 +300,10 @@ production artifact boundary.
   `env.auth.getUser()` and `currentUser()` resolve the dev user from the cookie,
   plus forgery rejection (wrong-secret cookie → anonymous). No gateway or
   external auth service.
-- `sdks/vite-plugin/test/dev-auth.test.ts` — exercises the real provider through
+- `packages/vite-plugin/test/dev-auth.test.ts` — exercises the real provider through
   the full `/__zeroship/auth/*` flow + the WebCrypto HMAC cookie roundtrip, and the
   production-build absence guard.
-- `sdks/auth/tests/dev-tier.test.ts` — the real `@zeroship/auth` client driving
+- `packages/auth/tests/dev-tier.test.ts` — the real `@zeroship/auth` client driving
   the real dev provider end-to-end (`signInWithOAuth` popup flow, `getUser`,
   `signOut`) — the contract-parity proof.
 
@@ -312,7 +312,7 @@ production artifact boundary.
 ```
 crates/zeroship-runtime/src/core/dev_auth.rs     cookie verify → user_json (dev-gated)
 crates/zeroship-runtime/src/core/serve.rs        handle_request calls resolve_dev_user_json
-sdks/vite-plugin/src/dev-auth.ts                 browser provider + cookie signing
-sdks/vite-plugin/src/dev-auth-config.ts          devAuth option → provider config + secret
-sdks/vite-plugin/src/dev-server.ts               routes browser auth and passes the secret to the child
+packages/vite-plugin/src/dev-auth.ts                 browser provider + cookie signing
+packages/vite-plugin/src/dev-auth-config.ts          devAuth option → provider config + secret
+packages/vite-plugin/src/dev-server.ts               routes browser auth and passes the secret to the child
 ```

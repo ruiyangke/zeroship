@@ -10,6 +10,9 @@
 // compiler resource limit, not a correctness guard.
 #![recursion_limit = "256"]
 
+#[cfg(test)]
+extern crate self as zeroship_auth;
+
 #[doc(hidden)]
 pub mod advisory_lock;
 pub mod audit;

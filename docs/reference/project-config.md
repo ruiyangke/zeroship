@@ -11,7 +11,7 @@ It is read by exactly two readers:
   `login` for `control` alone) - `crates/zeroship-cli/src/project_config/`
 - the **build toolchain** (`@zeroship/vite-plugin`, its `gen-types-all` script,
   and the `zeroship-dev-migrate` binary) -
-  `sdks/vite-plugin/src/project-config/`
+  `packages/vite-plugin/src/project-config/`
 
 Both readers are generated from one JSON Schema, `schema/project-v1.json`.
 They accept JSON comments and trailing commas, plus standard JSON escapes.
@@ -460,7 +460,7 @@ says so in its provenance lines.
 readers are generated from it:
 
 ```bash
-node schema/codegen.mjs   # -> sdks/vite-plugin/src/project-config/generated.ts
+node schema/codegen.mjs   # -> packages/vite-plugin/src/project-config/generated.ts
                           # -> crates/zeroship-cli/src/project_config/generated.rs
 ```
 

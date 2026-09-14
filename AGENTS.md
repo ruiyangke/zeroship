@@ -50,24 +50,24 @@ None of this is licence to measure less - measure more, and put the result in a 
 | **V8 runtime** (fetch, streams, WebSocket, modules) | `docs/architecture/runtime.md` · `crates/zeroship-runtime/` |
 | **Adding a native primitive** (`env.*`) | `docs/reference/plugin-system.md` · `crates/zeroship-runtime-macros/` · `crates/zeroship-{data,kv,storage}-v8/` |
 | **Control plane** (app CRUD, deploy, env, route registry) | `docs/architecture/control-plane.md` · `crates/zeroship-control/src/api.rs` · `crates/zeroship-control/src/registry.rs` |
-| **Control-plane TypeScript client** (`@zeroship/control`) | `docs/reference/control.md` · `sdks/control/` · `crates/zeroship-control/src/{api,env_handlers}.rs` |
+| **Control-plane TypeScript client** (`@zeroship/control`) | `docs/reference/control.md` · `packages/control/` · `crates/zeroship-control/src/{api,env_handlers}.rs` |
 | **Deploy artifact** (.zship + manifest + blob storage) | `docs/reference/zship.md` · `docs/architecture/blob-store.md` · `crates/zeroship-bundle/` (manifest types, BlobStore, pack/unpack) |
 | **Auth** (OIDC IdP + login UI + RPs) | `docs/reference/auth.md` · `crates/zeroship-auth/` · `crates/zeroship-gateway/src/oidc_rp.rs` · gates: `cargo xtask test auth` (owned PostgreSQL and service fixtures) + `tests/e2e_auth_ui.sh` (real Chromium against the real auth binary) |
 | **How data is stored, reached and isolated** (databases, datastores, grants, schema authority) | `docs/architecture/data-system.md` - read this before changing anything in the data plane |
 | **The DB SDK** (`@zeroship/db`) | `docs/reference/db.md` · `crates/zeroship-data-v8/` (adapter: V8 classes, per-isolate context, CDC) · `crates/zeroship-data-orm/` (engine: CRUD, transactions, exec, lanes) |
 | **The migration DSL** (`@zeroship/migrate`, portable op DSL) | `docs/reference/migrate-op-dsl.md` · `packages/zero-migrate/` (the one authoring package and recorder) · `crates/zeroship-migrate-server/` · `crates/zeroship-migrate*/` (the engine crates, in-sourced) · `db/migrations-ts/` (JS DSL; sole platform migration source — no SQL/Flyway) |
 | **The PLATFORM's own schema** (`db/migrations-ts/`) | `deploy/ops/db-migrate.sh` (the sanctioned applier) · `cargo xtask test migrations` (native corpus test in `crates/zeroship-migrate-node/tests/platform_corpus.rs`) · `policies/platform.policy.toml`. Platform and creator migrations both import the single **`@zeroship/migrate`** package in `packages/zero-migrate/`; the engine CLI and Vite plugin drain that package's one ambient recorder. This identity is load-bearing: importing a second implementation would record into another singleton and let the host drain empty. The 2026-08-28 outage was exactly that split; `docs/reviews/2026-08-28-migrate-dsl-fork-divergence.md` preserves the history. There is no alias and no second SDK package. |
-| **Object storage and SDK** (`@zeroship/storage`) | `docs/reference/storage.md` · `crates/zeroship-storage/` (Rust operations) · `crates/zeroship-storage-v8/` (V8 binding) · `sdks/storage/` |
-| **KV storage and SDK** (`@zeroship/kv`) | `docs/reference/kv.md` · `crates/zeroship-kv/` (storage) · `crates/zeroship-kv-v8/` (V8 binding) · `sdks/kv/` |
-| **The RPC SDK / server functions** (`@zeroship/rpc`) | `docs/reference/rpc.md` · `sdks/rpc/` · `sdks/vite-plugin/src/{transform,rpc-registry,manifest}.ts` · `crates/zeroship-runtime/src/rpc/` |
-| **Durable workflows** (`@zeroship/workflows`, `env.workflows`) | `docs/reference/workflows.md` · `sdks/workflows/` · `crates/zeroship-workflow/` (Rust engine/client) · `crates/zeroship-workflow-v8/` (binding/executor) · `crates/zeroship-control/src/{workflow_instance_api.rs,cron/workflow_engine.rs}` · `crates/zeroship-worker/src/handler.rs` |
+| **Object storage and SDK** (`@zeroship/storage`) | `docs/reference/storage.md` · `crates/zeroship-storage/` (Rust operations) · `crates/zeroship-storage-v8/` (V8 binding) · `packages/storage/` |
+| **KV storage and SDK** (`@zeroship/kv`) | `docs/reference/kv.md` · `crates/zeroship-kv/` (storage) · `crates/zeroship-kv-v8/` (V8 binding) · `packages/kv/` |
+| **The RPC SDK / server functions** (`@zeroship/rpc`) | `docs/reference/rpc.md` · `packages/rpc/` · `packages/vite-plugin/src/{transform,rpc-registry,manifest}.ts` · `crates/zeroship-runtime/src/rpc/` |
+| **Durable workflows** (`@zeroship/workflows`, `env.workflows`) | `docs/reference/workflows.md` · `packages/workflows/` · `crates/zeroship-workflow/` (Rust engine/client) · `crates/zeroship-workflow-v8/` (binding/executor) · `crates/zeroship-control/src/{workflow_instance_api.rs,cron/workflow_engine.rs}` · `crates/zeroship-worker/src/handler.rs` |
 | **Build a creator app + deploy** (the primary creator flow) | `docs/build-and-deploy-golden-path.md` · `examples/starter/` (scaffold + `CLAUDE.md`) · `tests/golden_path.sh` · `crates/zeroship-cli/` (`zeroship deploy`) |
-| **Creator project config** (`zeroship.jsonc`: app, control, build shape, migration paths, environments) | `docs/reference/project-config.md`, `schema/project-v1.json`, `crates/zeroship-cli/src/project_config/`, `sdks/vite-plugin/src/project-config/` |
+| **Creator project config** (`zeroship.jsonc`: app, control, build shape, migration paths, environments) | `docs/reference/project-config.md`, `schema/project-v1.json`, `crates/zeroship-cli/src/project_config/`, `packages/vite-plugin/src/project-config/` |
 | **zeroship deploy contract** (`default = { fetch?, rpc? }`, dispatcher, raw-JS deploys) | `docs/reference/zeroship-standard.md` · `crates/zeroship-runtime/src/core/runtime_startup.rs` · `crates/zeroship-runtime/src/rpc/dispatch.rs` |
-| **Framework-internal coordination** (startup, DB facade, dev entry loading) | `crates/zeroship-runtime/src/core/{runtime_startup,plugin_modules,dev_entry}.rs` · `crates/zeroship-data-v8/js/` · `sdks/vite-plugin/src/dev-bootstrap/` |
+| **Framework-internal coordination** (startup, DB facade, dev entry loading) | `crates/zeroship-runtime/src/core/{runtime_startup,plugin_modules,dev_entry}.rs` · `crates/zeroship-data-v8/js/` · `packages/vite-plugin/src/dev-bootstrap/` |
 | **Billing / metering / Stripe Connect** | `docs/reference/billing-metering.md` · `crates/zeroship-control/src/metering/provider/` · `crates/zeroship-stream/` · `crates/zeroship-control/src/cron/{event_forwarder,spend_recompute,billing_reconcile}.rs` |
 | **WebSocket** (RFC 6455 implementation) | `docs/reference/websocket-design.md` · `crates/zeroship-runtime/src/` (search `WebSocket`) |
-| **Vite plugin / build pipeline** (synthetic entry is a thin normaliser; runtime owns dispatch) | `docs/reference/vite-plugin.md` · `docs/reference/vite-environment-api.md` · `sdks/vite-plugin/src/rpc-registry.ts` |
+| **Vite plugin / build pipeline** (synthetic entry is a thin normaliser; runtime owns dispatch) | `docs/reference/vite-plugin.md` · `docs/reference/vite-environment-api.md` · `packages/vite-plugin/src/rpc-registry.ts` |
 | **Node.js compat** (npm packages in V8) | `docs/reference/node-compat.md` · `crates/zeroship-runtime/src/core/init.rs` |
 | **Benchmarks** | `crates/zeroship-runtime/benches/` · `docs/reference/zerobench.md` · `docs/archive/benchmarks/` |
 | **Local dev setup** | `docs/runbooks/local-dev.md` |
@@ -457,7 +457,7 @@ range yourself with `tests/commit_msg_gate.sh --range origin/main..HEAD`.
 # Build the JavaScript packages and host adapter before Cargo. The DB adapter embeds
 # `crates/zeroship-data-v8/dist/adapter.js`; root `pnpm build` supplies it.
 #
-# `sdks/vite-plugin` imports `zeroship-migrate-node`, a Rust N-API addon in
+# `packages/vite-plugin` imports `zeroship-migrate-node`, a Rust N-API addon in
 # `crates/zeroship-migrate-node` whose outputs are untracked and which `pnpm install`
 # does not build. Root `pnpm build` DOES build it -- it is the first
 # filter in the chain (package.json, `pnpm --filter zeroship-migrate-node
@@ -465,7 +465,7 @@ range yourself with `tests/commit_msg_gate.sh --range origin/main..HEAD`.
 # the addon needs Rust on PATH.
 #
 # THIS NOTE SAID THE OPPOSITE UNTIL 2026-08-11 -- that root `pnpm build`
-# "filters to ./sdks/* and so NEVER builds it", with a separate
+# "filters to the SDK package directory and so NEVER builds it", with a separate
 # `pnpm --filter zeroship-migrate-node build` line above the sequence. That
 # was true when written and stopped being true in d4a5fcd5d ("fix(build):
 # build the napi addon from the root pnpm build"), landed the same day.
@@ -606,11 +606,11 @@ Tests for the UI library run via Storybook Test Runner:
 ```bash
 pnpm --filter @zeroship/ui test-storybook          # against a running storybook
 pnpm --filter @zeroship/ui test-storybook:ci       # boots http-server + runs runner
-pnpm --filter @zeroship/ui test-storybook:coverage # + Istanbul report at sdks/ui/coverage/
+pnpm --filter @zeroship/ui test-storybook:coverage # + Istanbul report at packages/ui/coverage/
 ```
 
 Conventions for writing `play()` interactions and using
-@storybook/test live in `sdks/ui/.storybook/CONVENTIONS.md`.
+@storybook/test live in `packages/ui/.storybook/CONVENTIONS.md`.
 
 ---
 

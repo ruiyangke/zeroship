@@ -49,24 +49,24 @@ declared first-arg. Test: install-schema.test.ts + schema_init.rs — descriptor
 softDelete/versioning/indexes without a declared schema; missing descriptor no longer installs default.schema.
 
 **S4 — Vite synthetic entry + dev flow → descriptor-only.** Files:
-`sdks/vite-plugin/src/{rpc-registry,dev-server,build,migrations}.ts`. Synthetic default exports
+`packages/vite-plugin/src/{rpc-registry,dev-server,build,migrations}.ts`. Synthetic default exports
 `{ fetch, rpc }` (no schema / __zsDeclaredSchema); dev injects/loads generated schema.runtime.json. Test:
 rpc-registry.test.ts asserts no schema carrier; dev-server boot/hot-update regenerates descriptor.
 
 **S5 — activate generated env.db.ts types; retire `@zeroship/db/env` schema-alias path.** Files:
-`sdks/db/env.d.ts`, create-app template tsconfig, docs. Generated `generated/zeroship/env.db.ts` enters app
+`packages/db/env.d.ts`, create-app template tsconfig, docs. Generated `generated/zeroship/env.db.ts` enters app
 tsconfig.include; remove the `@zeroship/db/env` + `zeroship-schema` alias from templates. Strong env.db typing
 preserved, now from the fold. Test: template typecheck; gen-types --check; no duplicate Env.db augmentation.
 
 **S6 — bundle/runtime/worker fallback → hard error, not silent degrade.** Files:
 `crates/zeroship-bundle/src/manifest.rs`, `crates/zeroship-runtime/src/core/{init,runtime,state}.rs`,
-`crates/zeroship-worker/src/{sync,handler}.rs`, `sdks/vite-plugin/src/zship.ts`. Stop "falling back to default.schema";
+`crates/zeroship-worker/src/{sync,handler}.rs`, `packages/vite-plugin/src/zship.ts`. Stop "falling back to default.schema";
 a corrupt descriptor fails app load (hard boot error), not silent degrade; no-descriptor allowed only for
 schema-less apps. Test: runtime parse-failure; worker descriptor-fetch failure; zship-with-migrations requires
 descriptor.
 
 **S7 — contract/docs/templates/builder cleanup.** Files: `docs/reference/{zeroship-standard,db,migrate-op-dsl,
-vite-plugin,zship}.md`, `sdks/create-zeroship-app/template`, `apps/zeroship-builder`. Remove `default.schema`
+vite-plugin,zship}.md`, `packages/create-zeroship-app/template`, `apps/zeroship-builder`. Remove `default.schema`
 from the deploy contract; `schema.ts` is only optional migration-authoring input; builder emits migrations +
 generated types, not `export default { schema }`. Test: doc grep for `default.schema` leaves only
 historical/archive refs; create-app smoke; builder grep clean.

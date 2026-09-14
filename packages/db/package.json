@@ -1,0 +1,50 @@
+{
+  "name": "@zeroship/db",
+  "version": "0.1.0",
+  "description": "Typed database ORM SDK for zeroship",
+  "type": "module",
+  "license": "MIT",
+  "publishConfig": {
+    "registry": "http://localhost:4873"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/zeroship-dev/zeroship.git",
+    "directory": "packages/db"
+  },
+  "files": [
+    "dist",
+    "env.d.ts"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./env": {
+      "types": "./env.d.ts"
+    }
+  },
+  "scripts": {
+    "build": "tsup",
+    "typecheck": "tsc --noEmit",
+    "typecheck:tests": "tsc --noEmit -p tsconfig.tests.json",
+    "check": "npm run typecheck && npm run typecheck:tests",
+    "lint:pkg": "publint && attw --pack .",
+    "prepublishOnly": "npm run build && npm test",
+    "test": "pnpm build && NODE_ENV=test node --import tsx --test tests/*.test.ts"
+  },
+  "dependencies": {
+    "@zeroship/types": "workspace:*"
+  },
+  "devDependencies": {
+    "@arethetypeswrong/cli": "^0.18.2",
+    "@types/node": "catalog:",
+    "fflate": "0.8.2",
+    "publint": "^0.3.21",
+    "tsup": "^8.5.1",
+    "tsx": "catalog:",
+    "typescript": "catalog:",
+    "zeroship": "workspace:*"
+  }
+}

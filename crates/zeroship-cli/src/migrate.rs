@@ -13,7 +13,7 @@
 //! The file is the request body verbatim - the CLI
 //! does not build, parse or rewrite it, because recording a `.ts` migration
 //! means EVALUATING it, which needs Node, esbuild and the installed
-//! `zero-migrate` engine (`sdks/vite-plugin/src/gen-types/recorder.ts`). That
+//! `zero-migrate` engine (`packages/vite-plugin/src/gen-types/recorder.ts`). That
 //! work belongs to the build; shipping the result belongs here. Same division
 //! as `zeroship deploy`, which uploads a `.zship` it did not build.
 //!

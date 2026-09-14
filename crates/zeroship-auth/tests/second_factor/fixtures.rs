@@ -18,7 +18,7 @@ pub(super) const PASSWORD: &str = "second factor fixture password phrase";
 
 pub(super) async fn account(server: &AuthServer, email: &str) -> users::UserRow {
     let hash = password::hash(PASSWORD).unwrap();
-    users::create(&server.pg, email, "Second factor", Some(&hash))
+    Box::pin(users::create(&server.orm, email, "Second factor", Some(&hash)))
         .await
         .unwrap()
 }

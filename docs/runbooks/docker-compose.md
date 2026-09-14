@@ -140,7 +140,7 @@ service reaches it over HTTP via `SANDBOX_URL` / `SANDBOX_TOKEN`.
 ### Image build
 
 The single `Dockerfile` builds the platform services and the Node migration
-command in separate image stages. The `sdks` stage runs the root JavaScript
+command in separate image stages. The `js-packages` stage runs the root JavaScript
 build, including `crates/zeroship-data-v8/dist/adapter.js`, before Rust compilation because
 `zeroship-data-v8` embeds that DB facade. The Rust builder then compiles the
 native services with the SDK output and authorization policies. Runtime images
@@ -255,7 +255,7 @@ The AI builder is the **console** - a regular zeroship app, not a separate
 service. Control starts with `--bootstrap-console --console-host
 console.zeroship.localhost --console-zship /opt/zeroship/console/app.zship` in
 this stack. On first boot it ingests that prebuilt `.zship` (emitted by the
-image's `sdks` stage) and registers it as a public-PKCE gateway-fronted app, so
+image's `js-packages` stage) and registers it as a public-PKCE gateway-fronted app, so
 Caddy proxies `console.zeroship.localhost` to the gateway like any creator app.
 Its runtime config - `OPENAI_API_KEY`, `SANDBOX_URL`/`SANDBOX_TOKEN`,
 `ZEROSHIP_CONTROL_URL` - is forwarded from control's process env onto the seeded

@@ -56,6 +56,7 @@ async fn wait_until_blocked(observer: &Client, reaper_pid: i32, blocker_pid: i32
 #[allow(clippy::future_not_send)]
 async fn a_departure_after_the_preflight_cannot_leave_the_organization_ownerless() {
     Database::run(async |database| {
+        let orm = database.orm().await;
         let mut db = database.connect().await;
         let as_auth = database.connect_as_auth().await;
         let mut departing = database.connect().await;
@@ -66,7 +67,7 @@ async fn a_departure_after_the_preflight_cannot_leave_the_organization_ownerless
         let organization_id = zeroship_core::typed_id::generate("org");
         let slug = format!("acctdel-{}", &tag[..12]);
         let victim = users::create(
-            &db,
+            &orm,
             &format!("acctdel-race-victim-{tag}@zeroship.test"),
             "Victim",
             None,
@@ -74,7 +75,7 @@ async fn a_departure_after_the_preflight_cannot_leave_the_organization_ownerless
         .await
         .unwrap();
         let co_owner = users::create(
-            &db,
+            &orm,
             &format!("acctdel-race-peer-{tag}@zeroship.test"),
             "Co Owner",
             None,
@@ -241,6 +242,7 @@ async fn a_departure_after_the_preflight_cannot_leave_the_organization_ownerless
 #[allow(clippy::future_not_send)]
 async fn a_promotion_after_the_preflight_cannot_leave_the_organization_ownerless() {
     Database::run(async |database| {
+        let orm = database.orm().await;
         let mut db = database.connect().await;
         let as_auth = database.connect_as_auth().await;
         let mut transferring = database.connect().await;
@@ -251,7 +253,7 @@ async fn a_promotion_after_the_preflight_cannot_leave_the_organization_ownerless
         let organization_id = zeroship_core::typed_id::generate("org");
         let slug = format!("acctdel-{}", &tag[..12]);
         let victim = users::create(
-            &db,
+            &orm,
             &format!("acctdel-promo-victim-{tag}@zeroship.test"),
             "Victim",
             None,
@@ -259,7 +261,7 @@ async fn a_promotion_after_the_preflight_cannot_leave_the_organization_ownerless
         .await
         .unwrap();
         let sitting_owner = users::create(
-            &db,
+            &orm,
             &format!("acctdel-promo-owner-{tag}@zeroship.test"),
             "Sitting Owner",
             None,

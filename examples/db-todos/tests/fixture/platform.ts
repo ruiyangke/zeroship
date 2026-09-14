@@ -119,7 +119,7 @@ export class Platform {
   async start(): Promise<Target[]> {
     const { work, processes } = this;
     console.info("DB fixture: build platform binaries and database");
-    await processes.run("sdks", "pnpm", ["build"], root, process.env);
+    await processes.run("packages", "pnpm", ["build"], root, process.env);
     const artifacts = await processes.run("cargo", process.env.CARGO ?? "cargo", [
       "build", "--message-format=json", "--locked", "--bins",
       ...["zeroship-cli", "zeroship-worker", "zeroship-control", "zeroship-gateway", "zeroship-data-cdc-server", "zeroship-migrate-server"].flatMap((name) => ["-p", name]),
@@ -141,7 +141,7 @@ export class Platform {
     await processes.run("app-build", process.execPath, [vite, "build"], app);
     const bundle = join(app, "dist/app.zship");
     await checkManifest(bundle);
-    await processes.run("dev-migrate", process.execPath, [join(root, "sdks/vite-plugin/dist/cli/migrate-dev.js")], app);
+    await processes.run("dev-migrate", process.execPath, [join(root, "packages/vite-plugin/dist/cli/migrate-dev.js")], app);
 
     console.info("DB fixture: start backing containers and apply platform migrations");
     const postgres = await this.container(new GenericContainer("postgres:16")

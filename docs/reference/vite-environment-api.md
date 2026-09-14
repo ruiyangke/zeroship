@@ -137,7 +137,7 @@ detect a parent that died before the guard was armed. It is opt-in: a
 ## Main Files
 
 ```
-sdks/vite-plugin/
+packages/vite-plugin/
   src/
     index.ts
     transform.ts

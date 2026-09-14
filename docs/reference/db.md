@@ -423,7 +423,7 @@ end of the statement rather than firing per row.
 Add `onDelete: "cascade"` to the reference options for physical cascade,
 or `{ deferrable: true }` if you need cyclic refs insertable within one
 transaction — that is opt-in, not the default. Cross-app targets are refused;
-FKs stay inside the calling app. See `sdks/db/src/types.ts` for the builder,
+FKs stay inside the calling app. See `packages/db/src/types.ts` for the builder,
 and the next section for what does the refusing, which is not what this page
 said until 2026-08-20.
 
@@ -1225,7 +1225,7 @@ prepared.
 
 Native policy installation has no JavaScript capability handle or readiness
 global. Replication operations belong to the relay service. Public type
-contracts live in `sdks/types/db.d.ts`; the native DB binding lives in
+contracts live in `packages/types/db.d.ts`; the native DB binding lives in
 `crates/zeroship-data-v8/src/v8_classes/db.rs`.
 
 
@@ -1535,7 +1535,7 @@ not make it hidden or append-only.
 
 ## Encrypted and Masked Fields (Shipped Reference)
 
-This section resolves `docs/archive/sensitive-field-masking.md` against the shipped implementation in `sdks/db/src/types.ts`, `crates/zeroship-data-orm/src/sql/mapping.rs`, `crates/zeroship-data-orm/src/protection/mask_pass.rs`, `crates/zeroship-data-v8/src/v8_classes/masked_value.rs`, `crates/zeroship-data-orm/src/protection/unmask.rs`, `sdks/db/src/collection/masking.ts`, `sdks/db/src/policy.ts`.
+This section resolves `docs/archive/sensitive-field-masking.md` against the shipped implementation in `packages/db/src/types.ts`, `crates/zeroship-data-orm/src/sql/mapping.rs`, `crates/zeroship-data-orm/src/protection/mask_pass.rs`, `crates/zeroship-data-v8/src/v8_classes/masked_value.rs`, `crates/zeroship-data-orm/src/protection/unmask.rs`, `packages/db/src/collection/masking.ts`, `packages/db/src/policy.ts`.
 
 The migration engine records physical placement in each field's runtime
 `storage` mapping. Default reads use `storage.valueColumn`; authorized unmasking
@@ -1554,16 +1554,16 @@ encryption and byte passes, relocation follows the descriptor's `storage`
 mapping: the finished value moves to `storage.rawColumn` and the mask remains
 in `storage.valueColumn`. Null and absent values relocate nothing, and
 `kind: "none"` skips masking (`crates/zeroship-data-orm/src/protection/mask_pass.rs`).
-The mask kinds are defined together in `sdks/db/src/types.ts` and
+The mask kinds are defined together in `packages/db/src/types.ts` and
 `crates/zeroship-data-orm/src/protection/mask_pass.rs`.
 
-Default reads surface `MaskedValue<T>`, not plaintext. The Rust read path wraps a masked cell in the `__zsmask__` sentinel shape, then the runtime rehydrates that sentinel into a native `MaskedValue` v8 class before user code sees the row (`crates/zeroship-data-orm/src/protection/mask_pass.rs`, `crates/zeroship-data-v8/src/v8_classes/masked_value.rs`, `sdks/db/src/types.ts`). The shipped surface is intentionally coercion-safe: `masked` and `classification` are readable, `_meta` carries `{ collection, row_pk, column }`, and `toString()` / `toJSON()` return the masked string (`crates/zeroship-data-v8/src/v8_classes/masked_value.rs`, `sdks/db/src/types.ts`).
+Default reads surface `MaskedValue<T>`, not plaintext. The Rust read path wraps a masked cell in the `__zsmask__` sentinel shape, then the runtime rehydrates that sentinel into a native `MaskedValue` v8 class before user code sees the row (`crates/zeroship-data-orm/src/protection/mask_pass.rs`, `crates/zeroship-data-v8/src/v8_classes/masked_value.rs`, `packages/db/src/types.ts`). The shipped surface is intentionally coercion-safe: `masked` and `classification` are readable, `_meta` carries `{ collection, row_pk, column }`, and `toString()` / `toJSON()` return the masked string (`crates/zeroship-data-v8/src/v8_classes/masked_value.rs`, `packages/db/src/types.ts`).
 
-Plaintext reveal is always explicit. `await row.ssn.unmask({ actor?, reason? })` reveals one field on one row, and `await row.ssn.unmask(["ssn", "dob"], { actor, reason })` fans out across multiple columns on the same row (`crates/zeroship-data-v8/src/v8_classes/masked_value.rs`, `sdks/db/src/types.ts`). `Collection.bulkUnmask()` is the shipped multi-row path; it maps `(id, columns)` pairs to the native collection op and is atomic, so one unauthorized `(row, column)` pair rejects the whole call (`sdks/db/src/collection/masking.ts`, `crates/zeroship-data-orm/src/protection/unmask.rs`). The per-query hint `find(..., { unmask: [...], actor, reason })` promotes only the listed columns to plaintext while leaving other masked columns wrapped, and it writes audit only after a successful query (`crates/zeroship-data-orm/src/protection/unmask.rs`, `sdks/db/src/types.ts`).
+Plaintext reveal is always explicit. `await row.ssn.unmask({ actor?, reason? })` reveals one field on one row, and `await row.ssn.unmask(["ssn", "dob"], { actor, reason })` fans out across multiple columns on the same row (`crates/zeroship-data-v8/src/v8_classes/masked_value.rs`, `packages/db/src/types.ts`). `Collection.bulkUnmask()` is the shipped multi-row path; it maps `(id, columns)` pairs to the native collection op and is atomic, so one unauthorized `(row, column)` pair rejects the whole call (`packages/db/src/collection/masking.ts`, `crates/zeroship-data-orm/src/protection/unmask.rs`). The per-query hint `find(..., { unmask: [...], actor, reason })` promotes only the listed columns to plaintext while leaving other masked columns wrapped, and it writes audit only after a successful query (`crates/zeroship-data-orm/src/protection/unmask.rs`, `packages/db/src/types.ts`).
 
-`defineMaskPolicy()` is the app-scoped authorization declaration for unmasking. It validates the classifications (`public`, `pii`, `spi`, `phi`, `pci`, `internal`) and asks the native DB binding to capture the pending role-to-classification map. Declarations may be replaced during startup; after native finalization, further calls fail with `MASK_POLICY_IMMUTABLE`. The policy is held in memory for the app and deployment. No database backend persists it, and changes require redeployment (`sdks/db/src/policy.ts`). If an app never calls `defineMaskPolicy()`, the fallback is strict: only the `auto` actor can unmask. If the app does declare a policy, `auto` still keeps full access unless the policy explicitly lists `auto` with a narrower set (`sdks/db/src/policy.ts`).
+`defineMaskPolicy()` is the app-scoped authorization declaration for unmasking. It validates the classifications (`public`, `pii`, `spi`, `phi`, `pci`, `internal`) and asks the native DB binding to capture the pending role-to-classification map. Declarations may be replaced during startup; after native finalization, further calls fail with `MASK_POLICY_IMMUTABLE`. The policy is held in memory for the app and deployment. No database backend persists it, and changes require redeployment (`packages/db/src/policy.ts`). If an app never calls `defineMaskPolicy()`, the fallback is strict: only the `auto` actor can unmask. If the app does declare a policy, `auto` still keeps full access unless the policy explicitly lists `auto` with a narrower set (`packages/db/src/policy.ts`).
 
-`__zsmask__` is the read-side wire sentinel for a masked value payload (`sdks/db/src/types.ts`, `crates/zeroship-data-orm/src/protection/mask_pass.rs`, `crates/zeroship-data-v8/src/v8_classes/masked_value.rs`). Catalog sentinels record stored protection. The mask marker carries its kind and classification; the encryption marker records only that protection is present from the ORM's perspective. Runtime type and storage behavior always come from the installed descriptor (`crates/zeroship-data-orm/src/sql/mask_codec.rs`).
+`__zsmask__` is the read-side wire sentinel for a masked value payload (`packages/db/src/types.ts`, `crates/zeroship-data-orm/src/protection/mask_pass.rs`, `crates/zeroship-data-v8/src/v8_classes/masked_value.rs`). Catalog sentinels record stored protection. The mask marker carries its kind and classification; the encryption marker records only that protection is present from the ORM's perspective. Runtime type and storage behavior always come from the installed descriptor (`crates/zeroship-data-orm/src/sql/mask_codec.rs`).
 
 Column encryption is always randomised. Each write uses a fresh nonce and
 binds authentication to the app, collection, column and row identity.
