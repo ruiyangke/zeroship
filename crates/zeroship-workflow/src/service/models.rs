@@ -150,6 +150,12 @@ pub struct AppSignalEpoch {
 }
 
 #[derive(FromRow)]
+#[orm(entity = app_state)]
+pub struct ClosedEpoch {
+    pub closed_epoch: i64,
+}
+
+#[derive(FromRow)]
 #[orm(entity = topics)]
 pub struct TopicSignalEpoch {
     pub signal_epoch: i64,

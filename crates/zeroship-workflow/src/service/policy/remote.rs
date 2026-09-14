@@ -2,8 +2,14 @@
 
 use super::{HostPolicies, PolicyBinding, PolicyRefresh, PolicySnapshot};
 use crate::WorkflowServiceError;
-use std::sync::Arc;
-use zeroship_core::workflow_coordination::AssignedScope;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
+use zeroship_core::{
+    workflow_coordination::{AssignedScope, Revision},
+    workflow_policy::PolicyLeaseRequest,
+};
 use zeroship_workflow_client::{LeasedPolicy, WorkerCoordinator};
 
 /// A host-owned policy binding for the client's exact signer and app assignment.
@@ -15,6 +21,7 @@ pub struct AssignedPolicies {
     binding: PolicyBinding,
     client: WorkerCoordinator,
     scope: AssignedScope,
+    ingress_used: Arc<AtomicBool>,
 }
 
 impl AssignedPolicies {
@@ -35,6 +42,7 @@ impl AssignedPolicies {
             binding,
             client,
             scope,
+            ingress_used: Arc::new(AtomicBool::new(false)),
         })
     }
 
@@ -61,12 +69,51 @@ impl AssignedPolicies {
         reason = "the metadata client stays on its owning compio runtime"
     )]
     pub async fn refresh(&self) -> Result<(), WorkflowServiceError> {
+        self.exchange(None).await
+    }
+
+    /// Obtain an open ingress epoch above `after`, the epoch the journal refused.
+    /// The manager commits recovery responsibility before replying, so the
+    /// installed epoch covers every acceptance that captures it.
+    ///
+    /// # Errors
+    /// As [`Self::refresh`]; the manager also refuses establishment while
+    /// policy disables admission.
+    #[expect(
+        clippy::future_not_send,
+        reason = "the metadata client stays on its owning compio runtime"
+    )]
+    pub async fn establish(&self, after: Revision) -> Result<(), WorkflowServiceError> {
+        self.exchange(Some(after)).await
+    }
+
+    /// Report that this host accepted ingress since its previous exchange.
+    pub fn note_ingress(&self) {
+        self.ingress_used.store(true, Ordering::Relaxed);
+    }
+
+    #[expect(
+        clippy::future_not_send,
+        reason = "the metadata client stays on its owning compio runtime"
+    )]
+    async fn exchange(&self, establish_after: Option<Revision>) -> Result<(), WorkflowServiceError> {
         let ticket = self.binding.begin_refresh()?;
-        let lease = self
-            .client
-            .policy_lease(&self.scope)
-            .await
-            .map_err(transport_error)?;
+        let ingress_used = self.ingress_used.swap(false, Ordering::Relaxed);
+        let request = PolicyLeaseRequest {
+            scope: self.scope.clone(),
+            establish_after,
+            ingress_used,
+        };
+        let lease = match self.client.policy_lease(&request).await {
+            Ok(lease) => lease,
+            Err(error) => {
+                // An unacknowledged report is repeated by the next exchange.
+                if ingress_used {
+                    self.ingress_used.store(true, Ordering::Relaxed);
+                }
+                return Err(transport_error(error));
+            }
+        };
         self.install(ticket, &lease)
     }
 
@@ -84,11 +131,10 @@ impl AssignedPolicies {
             return Err(super::unavailable());
         }
         lease.remaining().map_err(transport_error)?;
-        ticket.install(PolicySnapshot::lease(
-            lease.revision(),
-            lease.policy().clone(),
-            lease.expires_at(),
-        )?)
+        ticket.install(
+            PolicySnapshot::lease(lease.revision(), lease.policy().clone(), lease.expires_at())?
+                .with_ingress_epoch(lease.ingress_epoch()),
+        )
     }
 }
 

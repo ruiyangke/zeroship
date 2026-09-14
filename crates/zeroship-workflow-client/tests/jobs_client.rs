@@ -116,14 +116,14 @@ impl Fixture {
     fn settlement(&self) -> Settlement {
         Settlement {
             delivery: self.delivery.clone(),
-            outcome: if matches!(self.delivery.job.operation, JobOperation::Management { .. }) {
-                JobOutcome::Management {
+            outcome: match self.delivery.job.operation {
+                JobOperation::Management { .. } => JobOutcome::Management {
                     outcome: ManagementOutcome::Applied {
                         state: RunState::Paused,
                     },
-                }
-            } else {
-                JobOutcome::Waiting {}
+                },
+                JobOperation::Close { .. } => JobOutcome::Closed { drained: true },
+                _ => JobOutcome::Waiting {},
             },
             successors: Vec::new(),
         }
@@ -363,6 +363,11 @@ fn manager_operations() -> Vec<JobOperation> {
             revision: 1.try_into().unwrap(),
             scheduled_at: 0.try_into().unwrap(),
         },
+        JobOperation::Close {
+            epoch: 1.try_into().unwrap(),
+        },
+        JobOperation::Reconcile {},
+        JobOperation::Collect {},
     ];
     operations.extend(
         commands

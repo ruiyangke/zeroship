@@ -77,6 +77,12 @@ fn operations() -> Vec<(JobOperation, Value)> {
             },
             json!({"kind":"propagate", "propagationId":propagation, "revision":1}),
         ),
+        (
+            JobOperation::Close {
+                epoch: 3.try_into().unwrap(),
+            },
+            json!({"kind":"close", "epoch":3}),
+        ),
         (JobOperation::Reconcile {}, json!({"kind":"reconcile"})),
         (JobOperation::Collect {}, json!({"kind":"collect"})),
     ];
@@ -119,14 +125,14 @@ fn operations() -> Vec<(JobOperation, Value)> {
 }
 
 fn settlement(operation: JobOperation) -> Settlement {
-    let outcome = if matches!(operation, JobOperation::Management { .. }) {
-        JobOutcome::Management {
+    let outcome = match operation {
+        JobOperation::Management { .. } => JobOutcome::Management {
             outcome: ManagementOutcome::Applied {
                 state: RunState::Paused,
             },
-        }
-    } else {
-        JobOutcome::Waiting {}
+        },
+        JobOperation::Close { .. } => JobOutcome::Closed { drained: true },
+        _ => JobOutcome::Waiting {},
     };
     let job = JobSpec {
         id: JobId::mint(),
@@ -166,6 +172,14 @@ fn outcomes() -> Vec<(JobOutcome, Value)> {
         (JobOutcome::Completed {}, json!({"kind":"completed"})),
         (JobOutcome::Waiting {}, json!({"kind":"waiting"})),
         (JobOutcome::Rejected {}, json!({"kind":"rejected"})),
+        (
+            JobOutcome::Closed { drained: true },
+            json!({"kind":"closed","drained":true}),
+        ),
+        (
+            JobOutcome::Closed { drained: false },
+            json!({"kind":"closed","drained":false}),
+        ),
     ];
     for (outcome, wire) in [
         (
@@ -186,13 +200,34 @@ fn outcomes() -> Vec<(JobOutcome, Value)> {
     cases
 }
 
+/// Management and closure each own a private outcome family; every other
+/// operation shares the ordinary scheduling outcomes.
+const fn operation_family(operation: &JobOperation) -> u8 {
+    match operation {
+        JobOperation::Management { .. } => 1,
+        JobOperation::Close { .. } => 2,
+        _ => 0,
+    }
+}
+
+const fn outcome_family(outcome: JobOutcome) -> u8 {
+    match outcome {
+        JobOutcome::Management { .. } => 1,
+        JobOutcome::Closed { .. } => 2,
+        _ => 0,
+    }
+}
+
 #[test]
 fn outcome_objects_preserve_closed_management_results_and_operation_families() {
+    let mut families = std::collections::BTreeSet::new();
     for (outcome, wire) in outcomes() {
         assert_eq!(round_trip(&outcome), wire);
         for (operation, _) in operations() {
-            let expected = matches!(operation, JobOperation::Management { .. })
-                == matches!(outcome, JobOutcome::Management { .. });
+            let expected = operation_family(&operation) == outcome_family(outcome);
+            if expected {
+                families.insert(outcome_family(outcome));
+            }
             assert_eq!(
                 outcome.valid_for(&operation),
                 expected,
@@ -213,6 +248,11 @@ fn outcome_objects_preserve_closed_management_results_and_operation_families() {
             }
         }
     }
+    assert_eq!(
+        families.into_iter().collect::<Vec<_>>(),
+        [0, 1, 2],
+        "every outcome family must meet a valid operation"
+    );
 }
 
 #[test]
@@ -930,4 +970,94 @@ fn propagate_names_only_an_opaque_obligation_page() {
     let mut missing = wire;
     missing.as_object_mut().unwrap().remove("propagationId");
     refuses::<JobOperation>(missing);
+}
+
+#[test]
+fn close_names_only_an_epoch_and_owns_the_closed_evidence_outcome() {
+    let operation = JobOperation::Close {
+        epoch: 7.try_into().unwrap(),
+    };
+    let wire = round_trip(&operation);
+    assert_eq!(wire, json!({"kind":"close", "epoch":7}));
+    let job = JobSpec {
+        id: JobId::mint(),
+        app_id: AppId::mint(),
+        operation,
+        available_at: 0.try_into().unwrap(),
+    };
+    assert_eq!(job.deployment_id(), None);
+    assert!(!job.produces_intents());
+    for drained in [false, true] {
+        assert!(JobOutcome::Closed { drained }.valid_for(&job.operation));
+    }
+    for outcome in [
+        JobOutcome::Completed {},
+        JobOutcome::Waiting {},
+        JobOutcome::Rejected {},
+        JobOutcome::Management {
+            outcome: ManagementOutcome::NotFound {},
+        },
+    ] {
+        assert!(!outcome.valid_for(&job.operation), "{outcome:?}");
+    }
+    for bad in [
+        json!(0),
+        json!(-1),
+        json!(u64::MAX),
+        json!(1.5),
+        json!("1"),
+        Value::Null,
+    ] {
+        let mut invalid = wire.clone();
+        invalid["epoch"] = bad;
+        refuses::<JobOperation>(invalid);
+    }
+    let mut maximum = wire.clone();
+    maximum["epoch"] = json!(i64::MAX);
+    round_trip(&serde_json::from_value::<JobOperation>(maximum).unwrap());
+    for field in [
+        "drained",
+        "watermark",
+        "state",
+        "closedEpoch",
+        "intents",
+        "deploymentId",
+        "runId",
+    ] {
+        let mut invalid = wire.clone();
+        invalid[field] = json!("private");
+        refuses::<JobOperation>(invalid);
+    }
+    let mut missing = wire;
+    missing.as_object_mut().unwrap().remove("epoch");
+    refuses::<JobOperation>(missing);
+    for bad in [
+        json!({"kind":"closed"}),
+        json!({"kind":"closed","drained":null}),
+        json!({"kind":"closed","drained":"true"}),
+        json!({"kind":"closed","drained":1}),
+        json!({"kind":"closed","drained":true,"pending":3}),
+    ] {
+        refuses::<JobOutcome>(bad);
+    }
+}
+
+#[test]
+fn only_intent_producing_operations_can_re_establish_responsibility() {
+    let mut producing = 0;
+    let mut maintenance = 0;
+    for (operation, _) in operations() {
+        let expected = !matches!(
+            operation,
+            JobOperation::Close { .. } | JobOperation::Reconcile {} | JobOperation::Collect {}
+        );
+        let job = settlement(operation).delivery.job;
+        assert_eq!(job.produces_intents(), expected, "{:?}", job.operation);
+        if expected {
+            producing += 1;
+        } else {
+            maintenance += 1;
+        }
+    }
+    assert!(producing > 0 && maintenance > 0);
 }

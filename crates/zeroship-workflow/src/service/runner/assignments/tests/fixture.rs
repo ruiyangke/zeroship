@@ -10,7 +10,7 @@ use zeroship_core::{
     service_peers::{ServiceAuth, ServiceKeyring},
     workflow_coordination::{Assignment, AUDIENCE},
     workflow_jobs::{JobSpec, Settlement, SettlementReceipt},
-    workflow_policy::{AppPolicy, PolicyLease},
+    workflow_policy::{AppPolicy, PolicyLease, PolicyLeaseRequest},
 };
 use zeroship_data_orm::{
     binding::DbBinding, connection::ConnectionFactory, encryption::ProjectKeySource,
@@ -121,7 +121,11 @@ impl Fixture {
     ) -> Exchange {
         Exchange::new(
             endpoints::WORKFLOW_POLICY_LEASE,
-            json!(scope),
+            json!(PolicyLeaseRequest {
+                scope: scope.clone(),
+                establish_after: None,
+                ingress_used: false,
+            }),
             json!(PolicyLease {
                 app_id: scope.app_id.clone(),
                 worker_id: self.worker.clone(),
@@ -129,6 +133,7 @@ impl Fixture {
                 assignment_revision: scope.assignment_revision,
                 policy_revision: revision.try_into().unwrap(),
                 policy,
+                ingress_epoch: Some(1.try_into().unwrap()),
                 remaining_ms: remaining.try_into().unwrap(),
             }),
         )
