@@ -475,6 +475,7 @@ async fn host_rejects_invalid_intervals_before_network_io() {
                         client.clone(),
                         fixture.policies.clone(),
                         UnexpectedCreator,
+                        ReadyApps::default(),
                         invalid
                     ),
                     Err(WorkflowServiceError::InvalidRequest(_))

@@ -59,7 +59,14 @@ impl Fixture {
         client: WorkerCoordinator,
         options: HostOptions,
     ) -> WorkerHost<UnexpectedCreator> {
-        WorkerHost::new(client, self.policies.clone(), UnexpectedCreator, options).unwrap()
+        WorkerHost::new(
+            client,
+            self.policies.clone(),
+            UnexpectedCreator,
+            ReadyApps::default(),
+            options,
+        )
+        .unwrap()
     }
 
     pub fn registrations(&self) -> Vec<RegisterWorker> {
