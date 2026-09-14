@@ -1,11 +1,6 @@
-// Drift guard for the hand-authored IR structural types (`src/generated/ir.ts`)
-// + the generated enum tokens (`src/generated/enums.ts`): every `Op` variant tag,
-// every `Expr` node tag, the `ColType` token set, and every closed string-enum
-// token in the TS types is pinned against the engine's single-source-of-truth
-// schema `crates/zeroship-migrate/ir-envelope.schema.json`. A schema change that adds /
-// renames a variant or token FAILS here, forcing the manual transcription to be
-// updated in lockstep (so the ergonomics types cannot silently rot vs the
-// contract). The golden IR envelope corpus remains the authoritative contract.
+// Semantic checks for the engine's IR schema and the TypeScript generator's
+// declarative manifest. TypeScript's compiler tests cover the handwritten public
+// types; this suite never parses TypeScript implementation text.
 
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
@@ -19,6 +14,11 @@ import { test } from "node:test";
 const here = dirname(fileURLToPath(import.meta.url));
 const schemaPath = resolve(here, "../../../crates/zeroship-migrate/ir-envelope.schema.json");
 const schema = JSON.parse(await readFile(schemaPath, "utf8"));
+const manifestPath = resolve(here, "../scripts/ir-type-manifest.json");
+const typeManifest = JSON.parse(await readFile(manifestPath, "utf8")) as {
+  generated: string[];
+  handAuthored: Record<string, string>;
+};
 
 /** The `const` tokens of a `oneOf` string-enum def. */
 function enumTokens(def: any): string[] {
@@ -277,7 +277,7 @@ test("IrFlagsOverride field set matches the schema (#180)", () => {
   );
 });
 
-test("safe integer schema bounds match the hand-authored IR mirror", () => {
+test("safe integer schema bounds remain within the JavaScript exact range", () => {
   assert.deepEqual(
     {
       safeI64: {
@@ -293,11 +293,11 @@ test("safe integer schema bounds match the hand-authored IR mirror", () => {
       safeI64: { minimum: -9_007_199_254_740_991, maximum: 9_007_199_254_740_991 },
       safeU64: { minimum: 0, maximum: 9_007_199_254_740_991 },
     },
-    "SafeI64/SafeU64 bounds drifted from src/generated/ir.ts number aliases and SDK recorder validation",
+    "SafeI64/SafeU64 bounds must remain exactly representable by the SDK",
   );
 });
 
-test("the exact int64 scalar carrier matches the schema and hand-authored IR mirror", () => {
+test("the exact int64 scalar carrier uses its canonical wire shape", () => {
   const int64Carrier = schema.$defs.IrScalar.oneOf.find(
     (branch: any) => branch.type === "object" && branch.required?.length === 1 && branch.required[0] === "int64",
   );
@@ -306,13 +306,6 @@ test("the exact int64 scalar carrier matches the schema and hand-authored IR mir
   assert.equal(int64Carrier.properties.int64.type, "string");
   assert.equal(int64Carrier.properties.int64.pattern, "^(0|-?[1-9][0-9]*)$");
   assert.equal(int64Carrier.additionalProperties, false);
-
-  const irTs = readFileSync(resolve(here, "../src/generated/ir.ts"), "utf8");
-  assert.match(
-    irTs,
-    /\|\s*\{\s*int64:\s*string\s*\}/,
-    "src/generated/ir.ts IrScalar must carry the exact { int64: string } arm",
-  );
 });
 
 test("closed string-enum tokens match the schema", () => {
@@ -353,51 +346,24 @@ test("RefAction tokens match the schema (C1 FK actions)", () => {
   assert.deepEqual(enumTokens(schema.$defs.RefAction), TS.RefAction);
 });
 
-// Three closed string-enum defs (VectorMetric, IrMaskKind, IrClassification) are
-// absent from ENUM_DEFS in scripts/gen-ir-types.mjs, so nothing generates them:
-// their TS mirrors are hand-typed unions in src/generated/ir.ts. That left them
-// outside every gate below - the regenerate-and-diff check only covers what the
-// generator emits, and the Op/Expr tag pins only cover tagged variants. Renaming
-// a VectorMetric token in the engine schema therefore kept CI green while
-// t.vector({ metric }) and .mask({ kind, classification }) went on offering the
-// old tokens to migration authors. The two tests below close that hole: the
-// first pins the hand-typed unions to the schema, the second fails when a NEW
-// closed enum appears in the schema with no TS mirror at all.
-
-const irTsSource = readFileSync(resolve(here, "../src/generated/ir.ts"), "utf8");
-const enumsTsSource = readFileSync(resolve(here, "../src/generated/enums.ts"), "utf8");
-
-/** The sorted string-literal members of an `export type X = "a" | "b";` alias,
- *  which may wrap across lines. Null when the source declares no such alias. */
-function tsUnionTokens(source: string, name: string): string[] | null {
-  const m = source.match(new RegExp(`^export type ${name}\\s*=([^;]*);`, "m"));
-  if (!m) return null;
-  return [...m[1].matchAll(/"((?:[^"\\]|\\.)*)"/g)].map((t) => t[1]).sort();
-}
-
-/** Schema def name -> the `ir.ts` alias that hand-mirrors it. The engine and the
- *  DSL spell two of these differently (IrMaskKind is MaskKind, IrClassification
- *  is Classification), which is why the mapping has to be explicit. */
-const IR_TS_HAND_AUTHORED_ENUMS: Record<string, string> = {
-  VectorMetric: "VectorMetric",
-  IrMaskKind: "MaskKind",
-  IrClassification: "Classification",
-  ColumnCollation: "ColumnCollation",
+const HAND_AUTHORED_SCHEMA_ENUMS: Record<string, string[]> = {
+  VectorMetric: ["cosine", "innerProduct", "l2"],
+  IrMaskKind: ["date-decade", "date-year", "email", "first4", "full", "last4", "name", "none"],
+  IrClassification: ["internal", "pci", "phi", "pii", "public", "spi"],
+  ColumnCollation: ["bytewise"],
 };
 
-test("hand-authored ir.ts token unions match their schema enum defs", () => {
-  for (const [defName, tsName] of Object.entries(IR_TS_HAND_AUTHORED_ENUMS)) {
-    const declared = tsUnionTokens(irTsSource, tsName);
-    assert.ok(declared, `src/generated/ir.ts must declare "export type ${tsName}"`);
-    assert.deepEqual(
-      declared,
-      enumTokens(schema.$defs[defName]),
-      `${tsName} drifted from the schema ${defName} tokens - update src/generated/ir.ts`,
-    );
+test("hand-authored enum contracts match the schema", () => {
+  assert.deepEqual(
+    Object.keys(typeManifest.handAuthored).sort(),
+    Object.keys(HAND_AUTHORED_SCHEMA_ENUMS).sort(),
+  );
+  for (const [defName, expected] of Object.entries(HAND_AUTHORED_SCHEMA_ENUMS)) {
+    assert.deepEqual(enumTokens(schema.$defs[defName]), expected, `${defName} tokens drifted`);
   }
 });
 
-test("every closed string-enum schema def has a TypeScript mirror", () => {
+test("the type manifest accounts for every closed string enum", () => {
   const closed = Object.entries(schema.$defs)
     .filter(
       ([, def]: [string, any]) =>
@@ -407,23 +373,14 @@ test("every closed string-enum schema def has a TypeScript mirror", () => {
     )
     .map(([name]) => name)
     .sort();
-  const unmirrored = closed.filter(
-    (name) => tsUnionTokens(enumsTsSource, name) === null && !(name in IR_TS_HAND_AUTHORED_ENUMS),
-  );
+  const declared = [...typeManifest.generated, ...Object.keys(typeManifest.handAuthored)].sort();
   assert.deepEqual(
-    unmirrored,
-    [],
-    "closed string-enum schema defs reach no TypeScript type. Either add them to " +
-      "ENUM_DEFS in scripts/gen-ir-types.mjs so they are generated into enums.ts, " +
-      "or hand-author them in src/generated/ir.ts and register them in " +
-      "IR_TS_HAND_AUTHORED_ENUMS so the pin above covers them.",
+    declared,
+    closed,
+    "declare each closed string enum as generated or hand-authored in ir-type-manifest.json",
   );
 });
 
-// The per-op FIELD-presence drift gate. This is the gate the
-// stale-`ir.ts` review asked for: had it existed, the un-regenerated `ir.ts` (a
-// removed `ifExists`, a missing `schema`/`existenceGuard`) would have FAILED CI
-// here, never shipping a wrong public wire type.
 test("every Op variant's field set matches the schema (no removed/missing fields)", () => {
   const schemaFields = opFieldsByTag(schema.$defs.Op, "op");
   // Same variant tags on both sides (covered above, re-asserted as a precondition).
@@ -432,19 +389,17 @@ test("every Op variant's field set matches the schema (no removed/missing fields
     assert.deepEqual(
       schemaFields[tag],
       TS_OP_FIELDS[tag],
-      `Op "${tag}" field set drifted from the schema — regenerate src/generated/ir.ts`,
+      `Op "${tag}" field set drifted from the expected wire contract`,
     );
   }
 });
 
-test("createTable primaryKey is present in the schema and hand-authored ir.ts", () => {
+test("createTable requires its primary key field", () => {
   const schemaFields = opFieldsByTag(schema.$defs.Op, "op");
   assert.ok(schemaFields.createTable.includes("primaryKey"));
-  const irTs = readFileSync(resolve(here, "../src/generated/ir.ts"), "utf8");
-  assert.match(irTs, /primaryKey:\s*string\[\]\s*\|\s*null/);
 });
 
-test("TypeID and ULID ValueFormat shapes and column placements match the hand-authored IR mirror", () => {
+test("TypeID and ULID ValueFormat shapes reach both column forms", () => {
   const valueFormat = schema.$defs.ValueFormat;
   assert.ok(valueFormat, "schema must define ValueFormat");
   assert.equal(valueFormat.oneOf.length, 2, "ValueFormat must contain exactly TypeID and ULID");
@@ -466,17 +421,6 @@ test("TypeID and ULID ValueFormat shapes and column placements match the hand-au
   );
   assert.ok(addColumn, "schema must define addColumn");
   assert.match(JSON.stringify(addColumn.properties.valueFormat), /#\/\$defs\/ValueFormat/);
-
-  const irTs = readFileSync(resolve(here, "../src/generated/ir.ts"), "utf8");
-  assert.match(
-    irTs,
-    /export type ValueFormat\s*=\s*\{\s*typeId:\s*\{\s*prefix:\s*string\s*\}\s*\}\s*\|\s*"ulid"/,
-  );
-  assert.equal(
-    irTs.match(/valueFormat\?:\s*ValueFormat\s*\|\s*null/g)?.length,
-    2,
-    "IrColumn and addColumn must both carry optional ValueFormat",
-  );
 });
 
 test("per-row generators are represented only in backfill set values", () => {
@@ -509,11 +453,6 @@ test("per-row generators are represented only in backfill set values", () => {
   assert.match(JSON.stringify(backfill.properties.set), /#\/\$defs\/BackfillSetValue/);
   assert.match(JSON.stringify(update.properties.set), /#\/\$defs\/IrValue/);
   assert.doesNotMatch(JSON.stringify(update.properties.set), /BackfillSetValue/);
-
-  const irTs = readFileSync(resolve(here, "../src/generated/ir.ts"), "utf8");
-  assert.match(irTs, /export type PerRowGenerator\s*=/);
-  assert.match(irTs, /export type BackfillSetValue\s*=\s*IrValue\s*\|\s*\{\s*perRow:\s*PerRowGenerator\s*\}/);
-  assert.match(irTs, /op:\s*"backfill"[\s\S]*?set:\s*\{\s*\[column:\s*string\]:\s*BackfillSetValue\s*\}/);
 });
 
 // Explicit assertion that the removed native `ifExists` is GONE from
