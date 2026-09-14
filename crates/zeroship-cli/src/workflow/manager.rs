@@ -347,10 +347,10 @@ impl LocalManager {
     }
 }
 
-const fn recovery_options(options: ManagerOptions) -> RecoveryOptions {
+fn recovery_options(options: ManagerOptions) -> RecoveryOptions {
     RecoveryOptions {
         interval: options.recovery_interval,
-        page_size: 128,
+        ..RecoveryOptions::default()
     }
 }
 

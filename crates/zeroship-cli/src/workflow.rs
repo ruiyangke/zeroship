@@ -101,7 +101,7 @@ pub struct ManagerConfig {
     /// Delivery lease; heartbeats renew it while a job executes.
     pub lease_ms: u64,
     /// Lifetime of this process's registration and placement. The host
-    /// renews both at a third of it.
+    /// renews both well within it (`LocalConfig::renew_interval`).
     pub placement_ttl_ms: u64,
     /// Delay between bounded calendar, recovery and hold maintenance passes.
     pub driver_interval_ms: u64,
@@ -157,8 +157,8 @@ impl LocalConfig {
                 manager.recovery_interval_ms,
             ]
             .contains(&0)
-            // Renewal at a third of the lifetime must still be positive.
-            || manager.placement_ttl_ms < 3
+            // The renewal interval derived from the lifetime must be positive.
+            || self.renew_interval().is_zero()
         {
             return Err("invalid local workflow limits".into());
         }
