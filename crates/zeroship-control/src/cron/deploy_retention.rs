@@ -4,6 +4,10 @@
     reason = "Control ORM and blob I/O use compio"
 )]
 
+use crate::publication::{
+    catalog::{ACTIVATE, PENDING},
+    models::catalog::{app_lifecycle_intents as intents, apps},
+};
 use crate::{AppState, config::ControlSettingsConsumer};
 use chrono::Utc;
 use std::{future::Future, sync::Arc, time::Duration};
@@ -15,7 +19,6 @@ use zeroship_data_orm::{
     encryption::ProjectKeySource,
     error::DbError,
     orm::{Database, FromRow},
-    schema::Schema,
 };
 use zeroship_workflow_manager::deployments::{self, Error, models::app_deploys as deploys};
 
@@ -60,19 +63,6 @@ pub struct DeployRetentionStats {
     pub finished: usize,
     pub failed: usize,
 }
-
-// Only platform fields needed to serialize with normal activation.
-zeroship_data_orm::orm::schema! {
-    catalog {
-        apps {
-            #[orm(primary_key)]
-            id: Text,
-            deploy_hash: Nullable<Text>,
-            env_version: BigInt,
-        }
-    }
-}
-use catalog::apps;
 
 #[derive(FromRow)]
 #[orm(entity = apps)]
@@ -127,8 +117,8 @@ impl Collector {
                 "invalid deployment collection bounds".into(),
             ));
         }
-        let mut collections = deployments::collections()?.into_collections();
-        collections.extend(catalog::schema().into_collections());
+        let collections =
+            crate::publication::models::collections().map_err(|_| invalid_storage())?;
         let database = compio::time::timeout(
             config.attempt_timeout,
             Database::connect(
@@ -139,7 +129,7 @@ impl Collector {
                 ),
                 ConnectOptions::new(url.to_owned(), ProjectKeySource::unavailable())
                     .connection_authority(),
-                Schema::new(collections),
+                collections,
             ),
         )
         .await
@@ -287,8 +277,29 @@ impl Collector {
             if current.deploy_hash.as_deref() == Some(deployment.deploy_hash.as_str()) {
                 return Ok(None);
             }
+            // An activation the manager has not acknowledged still needs this
+            // bundle: the manager acquires its queue hold only when it accepts
+            // the activation. Deploy and restore insert the intent under this
+            // same app lock, and acknowledging it is the update that removes
+            // this dependency once the queue hold exists.
+            let pending_activation = tx
+                .entity::<intents::Entity>()?
+                .query()
+                .filter(
+                    intents::app_id
+                        .eq(app.as_str())?
+                        .and(intents::deploy_id.eq(Some(candidate.id.as_str()))?)
+                        .and(intents::action.eq(ACTIVATE)?)
+                        .and(intents::state.eq(PENDING)?),
+                )
+                .exists()
+                .await?;
             match deployment.retention_state.as_str() {
                 "deleted" => return Ok(None),
+                // Activation refuses reclaiming storage, so a pending intent
+                // cannot legitimately name a fenced deployment.
+                "reclaiming" if pending_activation => return Err(invalid_storage()),
+                "available" if pending_activation => return Ok(None),
                 "reclaiming" => {}
                 "available" => {
                     if deployment.activated_at.is_none_or(|at| at > cutoff) {

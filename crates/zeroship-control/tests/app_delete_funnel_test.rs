@@ -552,7 +552,7 @@ async fn the_closure_funnel_terminates_for_a_sole_creator_who_deployed() {
 /// existed, and that is exactly why it was not enough: `unarchive_app` carries
 /// its `deleted_at IS NULL` in a PRECEDING READ, which answers the sequential
 /// question correctly and leaves the write itself matching `WHERE id = $1`.
-/// Meanwhile `set_deploy_with_manifest` restored `deploy_hash` and
+/// Meanwhile the deploy write restored `deploy_hash` and
 /// `manifest_json` that the delete had nulled, `set_plan` re-planned a corpse,
 /// and every env write rebuilt the environment the delete destroys on purpose.
 ///
@@ -581,14 +581,20 @@ async fn a_deleted_app_refuses_every_write_that_would_resurrect_it() {
         .expect("delete");
 
     // The delete nulled these. Nothing may put them back.
-    let redeployed = fx
-        .registry
-        .set_deploy_with_manifest(&dead.app, "sha256:resurrected", "{}", None)
-        .await
-        .expect("the deploy write must refuse, not error");
+    let redeployed = common::deployments::deploy(
+        &fx.registry,
+        &dead.app,
+        &dead.owner,
+        common::deployments::labelled("resurrected"),
+    )
+    .await;
     assert!(
-        !redeployed,
-        "a deploy landed on a deleted app and restored the manifest the delete cleared"
+        matches!(
+            redeployed,
+            Err(zeroship_control::publication::CatalogError::AppAbsent)
+        ),
+        "a deploy landed on a deleted app and restored the manifest the delete cleared: \
+         {redeployed:?}"
     );
     let (_, _, deploy_hash) = fx.app_state(&dead.app).await;
     assert!(
@@ -637,13 +643,14 @@ async fn a_deleted_app_refuses_every_write_that_would_resurrect_it() {
     );
 
     // THE CONTROL. Every one of those calls, on an app that is merely live.
-    assert!(
-        fx.registry
-            .set_deploy_with_manifest(&live.app, "sha256:ordinary", "{}", None)
-            .await
-            .expect("deploy on a live app"),
-        "the deploy fence refuses a live app too, so it is not discriminating"
-    );
+    common::deployments::deploy(
+        &fx.registry,
+        &live.app,
+        &live.owner,
+        common::deployments::labelled("ordinary"),
+    )
+    .await
+    .expect("the deploy fence refuses a live app too, so it is not discriminating");
     env.set_var(&live.app, "ORDINARY", "yes")
         .await
         .expect("a var on a live app");

@@ -1034,7 +1034,6 @@ struct NewRun<'a> {
     input: &'a Value,
     input_journal_bytes: i64,
     dedup_key: Option<&'a String>,
-    started_at: Option<DateTime<Utc>>,
 }
 
 async fn insert_run<C>(
@@ -1053,12 +1052,11 @@ where
         input,
         input_journal_bytes,
         dedup_key,
-        started_at,
     } = run;
     let sql = format!(
         "INSERT INTO {runs} \
             (id, workflow_name, app_id, deploy_id, state, input, journal_bytes, dedup_key, wake_at, started_at) \
-         VALUES ($1, $2, $3, $4, 'queued', $5, $6, $7, now(), COALESCE($8, now()))",
+         VALUES ($1, $2, $3, $4, 'queued', $5, $6, $7, now(), now())",
         runs = tables.runs
     );
     conn.execute(
@@ -1071,7 +1069,6 @@ where
             input,
             &input_journal_bytes,
             &dedup_key,
-            &started_at,
         ],
     )
     .await
@@ -1095,12 +1092,11 @@ where
         input,
         input_journal_bytes,
         dedup_key,
-        started_at,
     } = run;
     let sql = format!(
         "INSERT INTO {runs} \
                 (id, workflow_name, app_id, deploy_id, state, input, journal_bytes, dedup_key, wake_at, started_at) \
-             VALUES ($1, $2, $3, $4, 'queued', $5, $6, $7, now(), COALESCE($8, now())) \
+             VALUES ($1, $2, $3, $4, 'queued', $5, $6, $7, now(), now()) \
              ON CONFLICT (app_id, workflow_name, dedup_key) DO NOTHING \
              RETURNING id",
         runs = tables.runs
@@ -1116,7 +1112,6 @@ where
                 input,
                 &input_journal_bytes,
                 &dedup_key,
-                &started_at,
             ],
         )
         .await
@@ -1203,75 +1198,6 @@ where
         })
 }
 
-pub(crate) async fn start_scheduled_workflow_run<C>(
-    tx: &C,
-    app_id: &AppId,
-    workflow_name: &str,
-    deploy_id: &str,
-    input: &Value,
-    dedup_key: &str,
-    started_at: DateTime<Utc>,
-) -> Result<String, RegistryError>
-where
-    C: compio_postgres::GenericClient + Sync,
-{
-    validate_workflow_name(workflow_name).map_err(workflow_api_error_to_registry)?;
-    ensure_app_workflows_enabled(tx, app_id)
-        .await
-        .map_err(workflow_api_error_to_registry)?;
-    let tables = provision_workflow_journal(tx, app_id)
-        .await
-        .map_err(workflow_api_error_to_registry)?;
-    let key = normalize_key(Some(dedup_key.to_string()))
-        .map_err(workflow_api_error_to_registry)?
-        .ok_or_else(|| {
-            RegistryError::InvalidInput("scheduled workflow key is missing".to_string())
-        })?;
-    let input_journal_bytes = pg::json_column_size(tx, input)
-        .await
-        .map_err(WorkflowApiError::from)
-        .map_err(workflow_api_error_to_registry)?;
-    workflow_limits::lock_app_journal_accounting(tx, app_id).await?;
-    join_or_create_keyed_run(
-        tx,
-        &tables,
-        NewRun {
-            app_id,
-            workflow_name,
-            deploy_id,
-            input,
-            input_journal_bytes,
-            dedup_key: Some(&key),
-            started_at: Some(started_at),
-        },
-    )
-    .await
-    .map_err(workflow_api_error_to_registry)
-}
-
-fn workflow_api_error_to_registry(error: WorkflowApiError) -> RegistryError {
-    match error {
-        WorkflowApiError::BadRequest(msg) | WorkflowApiError::PayloadTooLarge(msg) => {
-            RegistryError::InvalidInput(msg)
-        }
-        WorkflowApiError::NotFound(msg) => RegistryError::NotFound(msg),
-        WorkflowApiError::Conflict(msg) | WorkflowApiError::Restart(msg) => {
-            RegistryError::Conflict(msg)
-        }
-        WorkflowApiError::JournalCapExceeded(msg)
-        | WorkflowApiError::LimitExceeded(msg)
-        | WorkflowApiError::RateLimitUnavailable(msg) => RegistryError::Conflict(msg),
-        WorkflowApiError::RateLimited { retry_after_secs } => RegistryError::Conflict(format!(
-            "scheduled workflow start rate limited; retry after {retry_after_secs:.0}s"
-        )),
-        WorkflowApiError::Unauthorized(msg) | WorkflowApiError::Forbidden(msg) => {
-            RegistryError::InvalidInput(msg)
-        }
-        WorkflowApiError::Unavailable(msg) => RegistryError::Conflict(msg),
-        WorkflowApiError::Database(msg) => RegistryError::Database(msg),
-    }
-}
-
 async fn create_run_inner(
     state: &AppState,
     app_id: AppId,
@@ -1313,7 +1239,6 @@ async fn create_run_inner(
                         input: &body.input,
                         input_journal_bytes,
                         dedup_key: Some(key),
-                        started_at: None,
                     },
                 )
                 .await?
@@ -1339,7 +1264,6 @@ async fn create_run_inner(
                         input: &body.input,
                         input_journal_bytes,
                         dedup_key: Some(key),
-                        started_at: None,
                     },
                     &candidate,
                 )
@@ -1403,7 +1327,6 @@ async fn create_run_inner(
                         input: &body.input,
                         input_journal_bytes,
                         dedup_key: Some(key),
-                        started_at: None,
                     },
                     &candidate,
                 )
@@ -1434,7 +1357,6 @@ async fn create_run_inner(
                 input: &body.input,
                 input_journal_bytes,
                 dedup_key: None,
-                started_at: None,
             },
             &candidate,
         )
@@ -1516,7 +1438,6 @@ async fn start_many_inner(
                             input: &item.input,
                             input_journal_bytes,
                             dedup_key: Some(key),
-                            started_at: None,
                         },
                     )
                     .await?;
@@ -1552,7 +1473,6 @@ async fn start_many_inner(
                             input: &item.input,
                             input_journal_bytes,
                             dedup_key: Some(key),
-                            started_at: None,
                         },
                         &run_id,
                     )
@@ -1615,7 +1535,6 @@ async fn start_many_inner(
                             input: &item.input,
                             input_journal_bytes,
                             dedup_key: Some(key),
-                            started_at: None,
                         },
                         &run_id,
                     )
@@ -1643,7 +1562,6 @@ async fn start_many_inner(
                     input: &item.input,
                     input_journal_bytes,
                     dedup_key: None,
-                    started_at: None,
                 },
                 &run_id,
             )

@@ -686,7 +686,7 @@ fn record_created_app(
 /// handler compares the artifact's `runtime_descriptor.hash` against the
 /// descriptor recorded on the app's newest applied migration and answers 409
 /// `schema_not_applied` when they disagree
-/// (`Registry::set_deploy_with_manifest`). This line is the warning on the way
+/// (`Registry::deploy`). This line is the warning on the way
 /// in; that refusal is the guarantee. Printing it after a 200, as this used to,
 /// named a step the deploy had already made it too late to take in order.
 fn print_migrate_reminder(
