@@ -13,6 +13,8 @@ mod deployment_commands;
 mod queue_holds;
 #[path = "deployment_holds/collector.rs"]
 mod collector;
+#[path = "deployment_holds/publication.rs"]
+mod publication;
 
 use ntex::{
     client::Client,
