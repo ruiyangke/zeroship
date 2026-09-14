@@ -17,7 +17,7 @@ use zeroship_core::{
     service_peers::{ServiceAuth, ServiceKeyring},
     workflow_coordination::{
         AssignScope, AssignedScope, FailureCode, ManageRun, ManagementOperation, ManagementStatus,
-        PublishWakeHint, RegisterWorker, RequestId, RunId, RunOperation, ScopePage,
+        RegisterWorker, RequestId, RunId, RunOperation, ScopePage,
         VerifyAssignment, WorkerId, WorkerPage, WorkerState, AUDIENCE,
     },
 };
@@ -484,7 +484,6 @@ async fn errors_are_closed_metadata_and_never_echo_remote_data() {
 #[compio::test]
 async fn scope_and_receipt_substitution_are_rejected() {
     let app = AppId::mint();
-    let other = AppId::mint();
     let scope = AssignedScope {
         app_id: app.clone(),
         assignment_revision: 1.try_into().unwrap(),
@@ -530,29 +529,6 @@ async fn scope_and_receipt_substitution_are_rejected() {
         },
     )
     .await;
-    for receipt in [
-        json!({"appId":other,"assignmentRevision":1,"revision":1}),
-        json!({"appId":app,"assignmentRevision":2,"revision":1}),
-        json!({"appId":app,"assignmentRevision":1,"revision":2}),
-    ] {
-        reply(
-            response(200, &receipt),
-            Options::default(),
-            async |client| {
-                let request = PublishWakeHint {
-                    app_id: app.clone(),
-                    assignment_revision: scope.assignment_revision,
-                    revision: 1.try_into().unwrap(),
-                    next_due_at: None,
-                };
-                assert_eq!(
-                    client.publish_wake(&request).await.unwrap_err(),
-                    Error::InvalidResponse
-                );
-            },
-        )
-        .await;
-    }
 }
 
 #[compio::test]

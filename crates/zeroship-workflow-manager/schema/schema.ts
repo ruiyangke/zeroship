@@ -6,7 +6,7 @@ export const managerIdentityColumns = {
   schema_version: ["id"],
   queue_scopes: ["id"],
   deployment_holds: ["id", "app_id", "deployment_id", "holder_id"],
-  workers: ["id"],
+  workers: ["id", "execution_zone_id"],
   assignments: ["id", "app_id", "worker_id"],
   placement_receipts: ["id", "app_id", "request_id", "worker_id"],
   management: ["id", "app_id", "request_id", "run_id"],
@@ -14,6 +14,9 @@ export const managerIdentityColumns = {
   jobs: ["id", "app_id", "deployment_id", "worker_id", "run_id", "management_request_id"],
   recovery_scopes: ["id", "deployment_id", "close_job_id"],
   recovery_duties: ["id", "app_id", "pending_job_id"],
+  capacity_demands: ["id", "execution_zone_id"],
+  capacity_targets: ["id"],
+  capacity_intents: ["id", "execution_zone_id"],
   schedule_deployments: ["id", "app_id"],
   schedule_activations: ["id", "app_id", "deployment_id"],
   schedule_disables: ["id", "app_id"],
@@ -62,10 +65,16 @@ export function workflowManagerSchema(namespace) {
     // state. A new row remains ineligible until registration sets its liveness.
     capacity: integer().default(1), state: text().default("ready"), expires_at: integer().default(0),
     lock_version: integer().default(0),
+    // Copied by registration from the zone of the enroller Control verified,
+    // never from the request. Placement still rereads Control's rows.
+    execution_zone_id: t.text(),
   }, ["id"]);
+  index("workers", "zone", ["execution_zone_id", "state", "expires_at", "id"]);
   create("assignments", {
+    // A refused placement stays released for the life of that worker
+    // instance, so the placement lane never offers the pair again.
     app_id: text(), worker_id: text(), revision: integer(), expires_at: integer(),
-    released: t.boolean().notNull(), wake_revision: t.bigInt(), next_due_at: t.bigInt(),
+    released: t.boolean().notNull(), refused: t.boolean().notNull(),
   }, ["app_id", "worker_id"], [
     fk("assignment_scope", ["app_id"], "queue_scopes", ["id"]),
     fk("assignment_worker", ["worker_id"], "workers", ["id"]),
@@ -74,7 +83,7 @@ export function workflowManagerSchema(namespace) {
   index("assignments", "expiry", ["expires_at", "app_id"]);
   create("placement_receipts", {
     app_id: text(), request_id: text(), operation: text(), worker_id: text(),
-    expected_revision: t.bigInt(), wake_revision: t.bigInt(),
+    expected_revision: t.bigInt(), reason: t.text(),
     result_revision: integer(), result_expires_at: integer(),
   }, ["app_id", "request_id"], [fk("receipt_scope", ["app_id"], "queue_scopes", ["id"])]);
   const jobs = table("jobs", { schema: namespace });
@@ -190,6 +199,31 @@ export function workflowManagerSchema(namespace) {
     fk("recovery_duty_job", ["app_id", "pending_job_id"], "jobs", ["app_id", "id"]),
   ]);
   index("recovery_duties", "due", ["kind", "next_due_at", "app_id"]);
+
+  // An app with claimable work that free eligible capacity could not absorb.
+  // Its id is the app. Every replica computes its zone's capacity target from
+  // these committed rows, so replicas agree on the target they request.
+  create("capacity_demands", {
+    execution_zone_id: text(), recorded_at: integer(),
+  }, ["id"], [fk("capacity_demand_scope", ["id"], "queue_scopes", ["id"])]);
+  index("capacity_demands", "zone", ["execution_zone_id", "id"]);
+  // The declarative capacity target of one execution zone, in placement
+  // slots. Its id is the zone. The revision advances only when the desired
+  // slots change, under this row's lock; a provider reply applies only to
+  // the revision and attempt it answered.
+  create("capacity_targets", {
+    revision: integer().default(0), desired: integer().default(0),
+    state: text().default("steady"), refusal: t.text(), observed: t.bigInt(),
+    attempt: integer().default(0), attempt_deadline: t.bigInt(), retry_at: t.bigInt(),
+    below_since: t.bigInt(), lock_version: integer().default(0),
+  }, ["id"]);
+  // The comparison contract: one imperative provisioning intent per
+  // owner-less app. Its id is the app; a generation fences replies and
+  // advances when a settled intent is needed again.
+  create("capacity_intents", {
+    execution_zone_id: text(), generation: integer(), state: text(),
+    refusal: t.text(), attempt: integer(), attempt_deadline: t.bigInt(), retry_at: t.bigInt(),
+  }, ["id"], [fk("capacity_intent_scope", ["id"], "queue_scopes", ["id"])]);
 
   // ColumnDef does not yet expose the engine's portable bytewise collation
   // facet. Keep this PostgreSQL-specific DDL in the migration recorder, where

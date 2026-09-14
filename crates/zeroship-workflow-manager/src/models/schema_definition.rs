@@ -10,8 +10,46 @@ zeroship_data_orm::orm::schema! {
             revision: BigInt,
             expires_at: BigInt,
             released: Boolean,
-            wake_revision: Nullable<BigInt>,
-            next_due_at: Nullable<BigInt>,
+            refused: Boolean,
+        }
+
+        capacity_demands {
+            #[orm(primary_key)]
+            id: Text,
+            execution_zone_id: Text,
+            recorded_at: BigInt,
+        }
+
+        capacity_intents {
+            #[orm(primary_key)]
+            id: Text,
+            execution_zone_id: Text,
+            generation: BigInt,
+            state: Text,
+            refusal: Nullable<Text>,
+            attempt: BigInt,
+            attempt_deadline: Nullable<BigInt>,
+            retry_at: Nullable<BigInt>,
+        }
+
+        capacity_targets {
+            #[orm(primary_key)]
+            id: Text,
+            #[orm(default = 0)]
+            revision: BigInt,
+            #[orm(default = 0)]
+            desired: BigInt,
+            #[orm(default = "steady")]
+            state: Text,
+            refusal: Nullable<Text>,
+            observed: Nullable<BigInt>,
+            #[orm(default = 0)]
+            attempt: BigInt,
+            attempt_deadline: Nullable<BigInt>,
+            retry_at: Nullable<BigInt>,
+            below_since: Nullable<BigInt>,
+            #[orm(default = 0)]
+            lock_version: BigInt,
         }
 
         deployment_holds {
@@ -80,7 +118,7 @@ zeroship_data_orm::orm::schema! {
             operation: Text,
             worker_id: Text,
             expected_revision: Nullable<BigInt>,
-            wake_revision: Nullable<BigInt>,
+            reason: Nullable<Text>,
             result_revision: BigInt,
             result_expires_at: BigInt,
         }
@@ -192,6 +230,7 @@ zeroship_data_orm::orm::schema! {
             expires_at: BigInt,
             #[orm(default = 0)]
             lock_version: BigInt,
+            execution_zone_id: Nullable<Text>,
         }
 
     }

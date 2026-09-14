@@ -28,6 +28,8 @@ type StoredIds = BTreeMap<(String, String, String), String>;
 
 #[path = "support/holds.rs"]
 mod holds;
+#[path = "support/zone.rs"]
+mod zone;
 
 struct Fixture {
     _postgres: Container<GenericImage>,
@@ -88,7 +90,9 @@ impl Fixture {
                workflow_manager.schedule_deployments,workflow_manager.schedule_activations,
                workflow_manager.schedule_disables,workflow_manager.schedule_scopes,
                workflow_manager.schedules,workflow_manager.schedule_occurrences,
-               workflow_manager.recovery_scopes,workflow_manager.recovery_duties TO coordinator_test;"
+               workflow_manager.recovery_scopes,workflow_manager.recovery_duties,
+               workflow_manager.capacity_demands,workflow_manager.capacity_targets,
+               workflow_manager.capacity_intents TO coordinator_test;"
         ).await.unwrap();
         Self {
             _postgres: postgres,
@@ -100,7 +104,7 @@ impl Fixture {
         self.options(Options::default()).await
     }
     async fn options(&self, options: Options) -> Coordinator {
-        Coordinator::connect(&self.runtime_url, options, holds::client())
+        Coordinator::connect(&self.runtime_url, options, holds::client(), zone::trusted())
             .await
             .unwrap()
     }
@@ -183,20 +187,12 @@ fn assigned(assignment: &Assignment) -> AssignedScope {
         assignment_revision: assignment.revision,
     }
 }
-fn wake(assignment: &Assignment, revision: i64) -> PublishWakeHint {
-    PublishWakeHint {
-        app_id: assignment.app_id.clone(),
-        assignment_revision: assignment.revision,
-        revision: revision.try_into().unwrap(),
-        next_due_at: None,
-    }
-}
-fn release(assignment: &Assignment, revision: i64) -> ReleaseScope {
+fn release(assignment: &Assignment, reason: ReleaseReason) -> ReleaseScope {
     ReleaseScope {
         request_id: RequestId::mint(),
         app_id: assignment.app_id.clone(),
         assignment_revision: assignment.revision,
-        wake_revision: revision.try_into().unwrap(),
+        reason,
     }
 }
 fn command(app: &AppId) -> ManageRun {
@@ -275,7 +271,7 @@ async fn replicas_fence_placement_retries_and_capacity() {
     assert_eq!(a.manager.assignments(&spare, None).await.unwrap().len(), 1);
 }
 #[compio::test]
-async fn wake_hints_and_release_require_current_ownership_and_a_responsible_peer() {
+async fn release_needs_neither_a_wake_hint_nor_a_responsible_peer() {
     let fixture = Fixture::new().await;
     let a = fixture.service().await;
     let b = fixture.service().await;
@@ -287,92 +283,68 @@ async fn wake_hints_and_release_require_current_ownership_and_a_responsible_peer
         .assign(&assignment_request(&app, &w1))
         .await
         .unwrap();
-    let first_release = release(&first, 1);
-    assert_eq!(
-        a.manager.release(&w1, &first_release).await,
-        Err(Error::Conflict)
-    );
-    assert_eq!(
-        a.manager.publish_wake(&w2, &wake(&first, 1)).await,
-        Err(Error::Denied)
-    );
-    let hint = a.manager.publish_wake(&w1, &wake(&first, 1)).await.unwrap();
-    assert_eq!(
-        b.manager.publish_wake(&w1, &wake(&first, 1)).await.unwrap(),
-        hint
-    );
-    assert_eq!(
-        b.manager.release(&w1, &first_release).await,
-        Err(Error::Conflict)
-    );
-    let mut changed = wake(&first, 1);
-    changed.next_due_at = Some(10.try_into().unwrap());
-    assert_eq!(
-        b.manager.publish_wake(&w1, &changed).await,
-        Err(Error::Conflict)
-    );
-    a.manager.publish_wake(&w1, &wake(&first, 2)).await.unwrap();
-    assert_eq!(
-        b.manager.publish_wake(&w1, &wake(&first, 1)).await,
-        Err(Error::Conflict)
-    );
     let second = b
         .manager
         .assign(&assignment_request(&app, &w2))
         .await
         .unwrap();
-    b.manager
-        .publish_wake(&w2, &wake(&second, 1))
-        .await
-        .unwrap();
     assert_eq!(
-        a.manager.release(&w1, &first_release).await,
-        Err(Error::Conflict)
-    );
-    let r1 = release(&first, 2);
-    let r2 = release(&second, 1);
-    let (released1, released2) =
-        futures::join!(a.manager.release(&w1, &r1), b.manager.release(&w2, &r2));
-    assert!(matches!(
-        (&released1, &released2),
-        (Ok(()), Err(Error::Conflict)) | (Err(Error::Conflict), Ok(()))
-    ));
-    let (old, worker, receipt) = if released1.is_ok() {
-        (&first, &w1, &r1)
-    } else {
-        (&second, &w2, &r2)
-    };
-    let released_ids = fixture.stored_ids().await;
-    assert_eq!(b.manager.release(worker, receipt).await, Ok(()));
-    assert_eq!(fixture.stored_ids().await, released_ids);
-    assert_eq!(
-        a.manager.renew(worker, &assigned(old)).await,
+        a.manager
+            .release(&w2, &release(&first, ReleaseReason::Relinquished))
+            .await,
         Err(Error::Denied)
     );
+    let r1 = release(&first, ReleaseReason::Relinquished);
+    let r2 = release(&second, ReleaseReason::Relinquished);
+    // Every owner may release at once: recovery responsibility stays with the
+    // manager, so no responsible peer has to remain.
+    let (released1, released2) =
+        futures::join!(a.manager.release(&w1, &r1), b.manager.release(&w2, &r2));
+    assert_eq!((released1, released2), (Ok(()), Ok(())));
+    let released_ids = fixture.stored_ids().await;
+    assert_eq!(b.manager.release(&w1, &r1).await, Ok(()));
+    assert_eq!(fixture.stored_ids().await, released_ids);
     assert_eq!(
-        a.manager.publish_wake(worker, &wake(old, 3)).await,
+        b.manager
+            .release(
+                &w1,
+                &ReleaseScope {
+                    reason: ReleaseReason::Refused,
+                    ..r1.clone()
+                }
+            )
+            .await,
+        Err(Error::Conflict)
+    );
+    assert_eq!(
+        a.manager.renew(&w1, &assigned(&first)).await,
         Err(Error::Denied)
     );
     let request = AssignScope {
-        expected_revision: Some(old.revision),
-        ..assignment_request(&app, worker)
+        expected_revision: Some(first.revision),
+        ..assignment_request(&app, &w1)
     };
     let replacement = a.manager.assign(&request).await.unwrap();
-    assert!(replacement.revision > old.revision);
+    assert!(replacement.revision > first.revision);
     assert_ids_retained(&released_ids, &fixture.stored_ids().await);
-    assert_eq!(b.manager.release(worker, receipt).await, Ok(()));
     assert_eq!(
-        b.manager.assignments(worker, None).await.unwrap(),
+        b.manager.assignments(&w1, None).await.unwrap(),
         vec![replacement.clone()]
     );
-    assert_eq!(
-        b.manager.publish_wake(worker, &wake(old, 4)).await,
-        Err(Error::Denied)
-    );
+    // A refused release tombstones the pair for this instance's life.
     a.manager
-        .publish_wake(worker, &wake(&replacement, 1))
+        .release(&w1, &release(&replacement, ReleaseReason::Refused))
         .await
         .unwrap();
+    assert_eq!(
+        a.manager
+            .assign(&AssignScope {
+                expected_revision: Some(replacement.revision),
+                ..assignment_request(&app, &w1)
+            })
+            .await,
+        Err(Error::Denied)
+    );
 
     let foreign = AppId::mint();
     let foreign_assignment = a
@@ -392,7 +364,7 @@ async fn wake_hints_and_release_require_current_ownership_and_a_responsible_peer
 }
 
 #[compio::test]
-async fn lost_assignments_require_rescan_without_published_wake_hints() {
+async fn lost_assignments_are_rescanned_as_recovery_scopes() {
     let fixture = Fixture::new().await;
     let service = fixture.service().await;
     let worker = register_worker(&service, 1).await;
@@ -449,6 +421,7 @@ async fn lost_assignments_require_rescan_without_published_wake_hints() {
         })
         .await
         .unwrap();
+    assert!(replacement.revision > assignment.revision);
     assert!(service
         .manager
         .recovery_scopes(None)
@@ -469,13 +442,6 @@ async fn lost_assignments_require_rescan_without_published_wake_hints() {
         .await
         .unwrap()
         .is_empty());
-    assert_eq!(
-        service
-            .manager
-            .publish_wake(&worker, &wake(&replacement, 1))
-            .await,
-        Err(Error::Denied)
-    );
     assert_eq!(
         service.manager.recovery_scopes(None).await.unwrap(),
         vec![app]
@@ -862,7 +828,13 @@ async fn metadata_schema_has_no_customer_authority_and_ids_are_bytewise() {
         .unwrap();
     assert_eq!(service.verify().await, Err(HostError::Unavailable));
     assert!(matches!(
-        Coordinator::connect(&fixture.runtime_url, Options::default(), holds::client()).await,
+        Coordinator::connect(
+            &fixture.runtime_url,
+            Options::default(),
+            holds::client(),
+            zone::trusted()
+        )
+        .await,
         Err(HostError::Unavailable)
     ));
 }

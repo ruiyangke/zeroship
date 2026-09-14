@@ -44,7 +44,7 @@ async fn native_worker_client_uses_the_authenticated_coordinator_api() {
         service_assertion::{ServiceTrustBundle, TransportAssertionVerifier},
         service_peers::{ServiceAuth, ServiceKeyring},
         workflow_coordination::{
-            AssignedScope, FailureCode, PublishWakeHint, RegisterWorker, ReleaseScope, ScopePage,
+            AssignedScope, FailureCode, RegisterWorker, ReleaseReason, ReleaseScope, ScopePage,
             WorkerState,
         },
     };
@@ -108,6 +108,9 @@ async fn native_worker_client_uses_the_authenticated_coordinator_api() {
 
     let mut apps = [AppId::mint(), AppId::mint()];
     apps.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+    for app in &apps {
+        fixture.seed_app(app).await;
+    }
     for app in &apps {
         let (status, _) = post(
             &http,
@@ -248,24 +251,39 @@ async fn native_worker_client_uses_the_authenticated_coordinator_api() {
     )
     .await;
 
-    let hint = PublishWakeHint {
-        app_id: scope.app_id.clone(),
-        assignment_revision: scope.assignment_revision,
-        revision: 1.try_into().unwrap(),
-        next_due_at: None,
-    };
-    let receipt = client.publish_wake(&hint).await.unwrap();
-    assert_eq!(client.publish_wake(&hint).await.unwrap(), receipt);
+    // Release carries no wake hint and needs no responsible peer: the manager
+    // keeps recovery responsibility for the app.
     let release = ReleaseScope {
         request_id: RequestId::mint(),
         app_id: scope.app_id.clone(),
         assignment_revision: scope.assignment_revision,
-        wake_revision: receipt.revision,
+        reason: ReleaseReason::Relinquished,
     };
+    client.release(&release).await.unwrap();
+    client.release(&release).await.unwrap();
     assert_eq!(
-        client.release(&release).await.unwrap_err(),
+        client
+            .release(&ReleaseScope {
+                reason: ReleaseReason::Refused,
+                ..release.clone()
+            })
+            .await
+            .unwrap_err(),
         Error::Refused(FailureCode::Conflict)
     );
+    assert_eq!(
+        client.renew(&scope).await.unwrap_err(),
+        Error::Refused(FailureCode::Denied)
+    );
+    assert_eq!(
+        client
+            .assignments(&ScopePage { after: None })
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    // Another enrolled instance of the same zone can take the released app.
     let backup = WorkerId::mint();
     let key = ServiceSigningKey::generate();
     fixture.admin.execute("INSERT INTO zeroship.worker_instances(id,ring_key,public_key,advertise_host,advertise_port,status,enroller_id) VALUES($1,$2,$3,'127.0.0.1',8080,'active',$4)",
@@ -286,20 +304,6 @@ async fn native_worker_client_uses_the_authenticated_coordinator_api() {
         "requestId":RequestId::mint(),"appId":scope.app_id,"workerId":backup,"expectedRevision":null
     })).await;
     assert_eq!(status, StatusCode::OK);
-    client.release(&release).await.unwrap();
-    client.release(&release).await.unwrap();
-    assert_eq!(
-        client.renew(&scope).await.unwrap_err(),
-        Error::Refused(FailureCode::Denied)
-    );
-    assert_eq!(
-        client
-            .assignments(&ScopePage { after: None })
-            .await
-            .unwrap()
-            .len(),
-        1
-    );
     client
         .register(&RegisterWorker {
             state: WorkerState::Draining,
@@ -543,7 +547,6 @@ async fn replicas_authenticate_metadata_and_keep_customer_execution_off_the_prot
         endpoints::WORKFLOW_ASSIGNMENTS,
         endpoints::WORKFLOW_RENEW,
         endpoints::WORKFLOW_RELEASE,
-        endpoints::WORKFLOW_WAKE,
         endpoints::WORKFLOW_JOB_CLAIM,
         endpoints::WORKFLOW_JOB_SETTLE,
     ] {
@@ -622,6 +625,7 @@ async fn replicas_authenticate_metadata_and_keep_customer_execution_off_the_prot
     );
 
     let app = AppId::mint();
+    fixture.seed_app(&app).await;
     let assign = json!({"requestId":RequestId::mint(),"appId":app,"workerId":worker,"expectedRevision":null});
     let path = endpoints::WORKFLOW_ASSIGN.path_template();
     assert_eq!(
@@ -907,21 +911,33 @@ async fn replicas_authenticate_metadata_and_keep_customer_execution_off_the_prot
             .unwrap();
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
-    let hint =
-        json!({"appId":app,"assignmentRevision":assignment.revision,"revision":1,"nextDueAt":null});
+    // The wake-hint route is gone, and a release carries a closed reason
+    // instead of a hint; the last owner may release.
     assert_eq!(
         post(
             &client,
             &first.url,
-            endpoints::WORKFLOW_WAKE.path_template(),
+            "/v1/wake-hints/publish",
             &assertion(&worker_issuer, &worker_key),
-            &hint
+            &json!({"appId":app,"assignmentRevision":assignment.revision,"revision":1})
         )
         .await
         .0,
-        StatusCode::OK
+        StatusCode::NOT_FOUND
     );
-    let release = json!({"appId":app,"requestId":RequestId::mint(),"assignmentRevision":assignment.revision,"wakeRevision":1});
+    let hinted = json!({"appId":app,"requestId":RequestId::mint(),"assignmentRevision":assignment.revision,"wakeRevision":1});
+    assert_eq!(
+        post(
+            &client,
+            &first.url,
+            endpoints::WORKFLOW_RELEASE.path_template(),
+            &assertion(&worker_issuer, &worker_key),
+            &hinted
+        )
+        .await,
+        (StatusCode::BAD_REQUEST, json!({"code":"invalid"}))
+    );
+    let release = json!({"appId":app,"requestId":RequestId::mint(),"assignmentRevision":assignment.revision,"reason":"relinquished"});
     assert_eq!(
         post(
             &client,
@@ -932,7 +948,7 @@ async fn replicas_authenticate_metadata_and_keep_customer_execution_off_the_prot
         )
         .await
         .0,
-        StatusCode::CONFLICT
+        StatusCode::OK
     );
     for path in [
         "/v1/tasks/poll".into(),

@@ -36,13 +36,15 @@ use zeroship_workflow::{
     WorkflowServiceError,
 };
 use zeroship_workflow_manager::{
+    capacity::{Contract, LocalCapacity},
     coordinator::{Coordinator, Options as CoordinatorOptions},
     deployments,
     driver::{Driver, Options as DriverOptions},
+    eligibility::{LocalEligibility, ZoneId},
     local::LocalPlatform,
     recovery::{Options as RecoveryOptions, Recovery},
     scheduling::{Options as SchedulingOptions, Scheduler, SelectedActivation},
-    DeliveryGrant, Error, Options as QueueOptions, Queue,
+    DeliveryGrant, Error, Options as QueueOptions,
 };
 
 const MAX_QUEUED_REQUESTS: usize = 64;
@@ -175,7 +177,6 @@ async fn drive(driver: &mut Driver, interval: Duration, stop: Shared<LocalBoxFut
 /// Platform state owned by the manager thread. It opens no creator database.
 struct LocalManager {
     platform: LocalPlatform,
-    queue: Queue,
     coordinator: Coordinator,
     scheduler: Scheduler,
     recovery: Recovery,
@@ -196,6 +197,8 @@ impl LocalManager {
             })
             .await
             .map_err(manager_error)?;
+        // The trusted in-process worker shares the host's single zone and
+        // performs no enrollment, so the local catalog needs no Control rows.
         let coordinator = Coordinator::new(
             queue.clone(),
             CoordinatorOptions {
@@ -203,6 +206,7 @@ impl LocalManager {
                 assignment_ttl: options.placement_ttl,
                 ..CoordinatorOptions::default()
             },
+            Rc::new(LocalEligibility::new(ZoneId::default_zone())),
         )
         .map_err(manager_error)?;
         let scheduler =
@@ -211,7 +215,6 @@ impl LocalManager {
             Recovery::new(queue.clone(), recovery_options(options)).map_err(manager_error)?;
         Ok(Self {
             platform,
-            queue,
             coordinator,
             scheduler,
             recovery,
@@ -221,13 +224,15 @@ impl LocalManager {
     }
 
     fn driver(&self) -> Result<Driver, WorkflowServiceError> {
+        // The in-process worker is the local host's capacity.
         Driver::new(
-            self.queue.clone(),
+            self.coordinator.clone(),
             DriverOptions {
                 recovery: recovery_options(self.options),
                 lane_timeout: self.options.lane_timeout,
                 ..DriverOptions::default()
             },
+            Contract::declarative(Rc::new(LocalCapacity)),
         )
         .map_err(manager_error)
     }

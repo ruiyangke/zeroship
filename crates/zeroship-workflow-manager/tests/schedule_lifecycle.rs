@@ -34,7 +34,7 @@ use zeroship_workflow_calendar::{
     IntervalAnchor, ScheduleCatchUp, ScheduleOverlap, ScheduleTiming,
 };
 use zeroship_workflow_manager::{
-    driver::{Driver, Options as DriverOptions},
+    driver::Options as DriverOptions,
     recovery::{DutyKind, Options as RecoveryOptions, Recovery},
     retention::HoldClient,
     scheduling::{Options, Scheduler},
@@ -484,15 +484,14 @@ async fn eligibility(fixture: &Fixture) {
     assert_eq!(page.len(), 1);
     assert_eq!(page[0].schedule_id, id);
     let before = snapshot(&db).await;
-    let mut driver = Driver::new(
-        queue,
+    let mut driver = support::local_driver(
+        &queue,
         DriverOptions {
             scheduling: options(),
             page_limit: 1,
             ..DriverOptions::default()
         },
-    )
-    .unwrap();
+    );
     let report = driver.tick().await;
     assert_eq!(report.scheduling.visited, 1);
     assert_eq!(report.scheduling.completed, 1);

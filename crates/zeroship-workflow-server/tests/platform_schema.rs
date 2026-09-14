@@ -4,14 +4,25 @@ mod holds;
 #[path = "support/platform.rs"]
 mod platform;
 
-use zeroship_workflow_server::coordinator::{Coordinator, Options};
+use std::rc::Rc;
+use zeroship_workflow_server::coordinator::{connect_eligibility, Coordinator, Options};
 
 #[ntex::test]
 async fn platform_role_can_coordinate_without_customer_or_journal_privileges() {
     let fixture = platform::Platform::new().await;
-    let service = Coordinator::connect(&fixture.runtime_url, Options::default(), holds::client())
-        .await
-        .unwrap();
+    let eligibility = Rc::new(
+        connect_eligibility(&fixture.runtime_url, Options::default())
+            .await
+            .unwrap(),
+    );
+    let service = Coordinator::connect(
+        &fixture.runtime_url,
+        Options::default(),
+        holds::client(),
+        eligibility,
+    )
+    .await
+    .unwrap();
     service.verify().await.unwrap();
     let runtime = platform::connect(&fixture.runtime_url).await;
     fixture
@@ -35,6 +46,9 @@ async fn platform_role_can_coordinate_without_customer_or_journal_privileges() {
         "SELECT id,deploy_hash FROM zeroship.apps",
         "SELECT id,app_id,deploy_hash,retention_state FROM zeroship.app_deploys",
         "SELECT id,status,public_key FROM zeroship.worker_instances",
+        "SELECT id,execution_zone_id,deleted_at FROM zeroship.apps",
+        "SELECT id,enroller_id FROM zeroship.worker_instances",
+        "SELECT id,execution_zone_id,status FROM zeroship.worker_enrollers",
         "SELECT replay_key FROM service_authn.service_assertion_replay",
     ] {
         runtime.batch_execute(sql).await.unwrap();
@@ -47,6 +61,10 @@ async fn platform_role_can_coordinate_without_customer_or_journal_privileges() {
         "SELECT * FROM zeroship.app_deploys",
         "SELECT * FROM zeroship.plans",
         "UPDATE zeroship.worker_instances SET status='active'",
+        "SELECT public_key FROM zeroship.worker_enrollers",
+        "SELECT id FROM zeroship.execution_zones",
+        "UPDATE zeroship.worker_enrollers SET status='active'",
+        "UPDATE zeroship.apps SET execution_zone_id='ezn_default000000000000000000'",
         "UPDATE zeroship.apps SET deploy_hash=NULL",
         "UPDATE zeroship.app_deploys SET retention_state='available'",
         "UPDATE workflow_manager.schema_version SET fingerprint='forged'",
