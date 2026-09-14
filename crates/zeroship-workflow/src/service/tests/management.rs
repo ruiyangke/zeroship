@@ -12,6 +12,8 @@ use zeroship_core::workflow_coordination::{
 };
 use zeroship_data_orm::{orm::Operation, value};
 
+mod atomic_application;
+
 #[compio::test]
 async fn sqlite_management_receipts_survive_app_receipt_loss_and_worker_reopen() {
     let directory = tempfile::tempdir().unwrap();

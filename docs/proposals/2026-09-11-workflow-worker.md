@@ -1317,9 +1317,14 @@ code. If preparation ever needs external I/O, persist the frozen source generati
 and target before releasing the lock. Latest restarts never re-resolve the current
 catalog on retry.
 
-Creator application must be a transaction-local operation: calling the existing
-self-committing management method and then writing a job receipt would leave a
-crash gap. A pause or cancellation outcome may record an applied intent while a
+Creator application now has the transaction-local `apply_management_authorized`
+helper in `crates/zeroship-workflow/src/service/management.rs`. Its caller owns the app
+lock, immutable receipt matching, delivery bookkeeping and commit, and must keep
+the original captured policy and delivery authority active through that commit.
+The public `apply_management` wrapper retains its original receipt replay and
+cancellation behavior. The delivered handler must use the helper: calling the
+public method and then writing a job receipt would leave a crash gap.
+A pause or cancellation outcome may record an applied intent while a
 task is leased. Its acknowledgement is not proof that execution stopped; the
 executor must observe that intent and stop and join before reporting quiescence.
 
@@ -1954,6 +1959,12 @@ The branch contains the customer-bound ORM journal, replay/lifecycle operations,
 durable creator management receipts, payload preparation, bounded runner, V8
 binding/executor, normal verified bundle loading and deployment-hold foundations.
 The local host currently composes that journal and runner.
+
+Creator management application can join a caller-owned transaction. Native
+PostgreSQL/SQLite tests exercise staged lifecycle changes, publication and
+management receipts across outer commit, abort and policy invalidation. This
+supplies the atomic application primitive; ordered management jobs, delivery
+receipts and manager settlement remain part of the pending protocol cutover.
 
 The crate split includes the metadata client, closed job/delivery contracts,
 manager ORM queue and platform deployment ledger. Native coordinator placement
