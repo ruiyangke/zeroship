@@ -23,8 +23,8 @@
 #
 # It is recorded rather than quietly deleted so the belief is closed instead of
 # deferred. The isolation is not restored and is not wanted: the package builds and
-# tests as a default member. `tests/shipped_config_gate.sh` also verifies the
-# shipped feature selection.
+# tests as a default member. CI also compiles the shipped library and binary
+# targets without test targets in the unit graph.
 [package]
 name = "zeroship-migrate-node"
 version.workspace = true
