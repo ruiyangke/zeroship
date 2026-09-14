@@ -291,6 +291,9 @@ impl Fixture {
                             )
                             .unwrap(),
                         )),
+                        Rc::new(zeroship_workflow_manager::eligibility::LocalEligibility::new(
+                            zeroship_workflow_manager::eligibility::ZoneId::default_zone(),
+                        )),
                     )
                     .await
                     .unwrap(),

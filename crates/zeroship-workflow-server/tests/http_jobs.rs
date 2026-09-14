@@ -94,12 +94,14 @@ impl Fixture {
         .await;
         let worker = Worker::new();
         enroll(&platform, &http, &server.url, &worker).await;
+        let app = AppId::mint();
+        platform.seed_app(&app).await;
         let (status, body) = post(
             &http,
             &server.url,
             endpoints::WORKFLOW_ASSIGN,
             &assertion(&control, &control_key, AUDIENCE),
-            &json!({"requestId":RequestId::mint(),"appId":AppId::mint(),
+            &json!({"requestId":RequestId::mint(),"appId":app,
                 "workerId":worker.id,"expectedRevision":null}),
         )
         .await;
@@ -765,12 +767,14 @@ async fn revoking_an_enroller_denies_its_worker_while_a_sibling_enroller_stays_a
     )
     .await;
     assert_eq!(register_status, StatusCode::OK, "{body}");
+    let app_g = AppId::mint();
+    fixture.platform.seed_app(&app_g).await;
     let (status, body) = post(
         &fixture.http,
         &fixture.server.url,
         endpoints::WORKFLOW_ASSIGN,
         &assertion(&fixture.control, &fixture.control_key, AUDIENCE),
-        &json!({"requestId":RequestId::mint(),"appId":AppId::mint(),
+        &json!({"requestId":RequestId::mint(),"appId":app_g,
             "workerId":worker_g.id,"expectedRevision":null}),
     )
     .await;

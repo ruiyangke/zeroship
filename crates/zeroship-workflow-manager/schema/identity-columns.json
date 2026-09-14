@@ -12,7 +12,8 @@
     "holder_id"
   ],
   "workers": [
-    "id"
+    "id",
+    "execution_zone_id"
   ],
   "assignments": [
     "id",
@@ -53,6 +54,17 @@
     "id",
     "app_id",
     "pending_job_id"
+  ],
+  "capacity_demands": [
+    "id",
+    "execution_zone_id"
+  ],
+  "capacity_targets": [
+    "id"
+  ],
+  "capacity_intents": [
+    "id",
+    "execution_zone_id"
   ],
   "schedule_deployments": [
     "id",

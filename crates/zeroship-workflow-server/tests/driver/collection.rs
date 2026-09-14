@@ -122,6 +122,7 @@ async fn enroll(
          VALUES($1,$2,$3,'127.0.0.1',8080,'active',$4)",
         &[&worker.as_str(), &vec![1_u8], &actor.key.verifying_key_bytes().to_vec(), &platform.default_enroller_id],
     ).await.unwrap();
+    platform.seed_app(app).await;
     post(
         http,
         url,

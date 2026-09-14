@@ -179,32 +179,26 @@ impl From<&Assignment> for VerifyAssignment {
     }
 }
 
+/// A worker gives up one of its own placements. Releasing never discharges
+/// the manager's recovery responsibility for the app.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ReleaseScope {
     pub request_id: RequestId,
     pub app_id: AppId,
     pub assignment_revision: Revision,
-    /// Confirmed hint after the worker quiesced its local scheduling writes.
-    pub wake_revision: Revision,
+    pub reason: ReleaseReason,
 }
 
-/// Persisted by the worker before publication; a hint cannot claim a run.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct PublishWakeHint {
-    pub app_id: AppId,
-    pub assignment_revision: Revision,
-    pub revision: Revision,
-    pub next_due_at: Option<UnixMillis>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct WakeHintReceipt {
-    pub app_id: AppId,
-    pub assignment_revision: Revision,
-    pub revision: Revision,
+/// Why a worker released a placement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReleaseReason {
+    /// The worker no longer serves the app, for example while draining.
+    Relinquished,
+    /// The worker's resource provider permanently denies this app. The manager
+    /// does not offer the app to this worker instance again.
+    Refused,
 }
 
 /// Only lifecycle metadata can enter the durable management queue.

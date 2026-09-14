@@ -996,7 +996,14 @@ impl Manager {
             .queue(zeroship_workflow_manager::Options::default())
             .await
             .unwrap();
-        let coordinator = Coordinator::new(queue, Options::default()).unwrap();
+        let coordinator = Coordinator::new(
+            queue,
+            Options::default(),
+            std::rc::Rc::new(zeroship_workflow_manager::eligibility::LocalEligibility::new(
+                zeroship_workflow_manager::eligibility::ZoneId::default_zone(),
+            )),
+        )
+        .unwrap();
         let worker = WorkerId::mint();
         coordinator
             .register(

@@ -36,7 +36,7 @@ use zeroship_workflow_calendar::{
     IntervalAnchor, ScheduleCatchUp, ScheduleOverlap, ScheduleTiming,
 };
 use zeroship_workflow_manager::{
-    driver::{Driver, LaneReport, Options},
+    driver::{LaneReport, Options},
     recovery::{DutyKind, Recovery},
     retention::{HoldClient, HoldFuture},
     scheduling::Scheduler,
@@ -285,8 +285,8 @@ async fn no_workers(fixture: &Fixture) {
         vec![descriptor("calendar", ScheduleCatchUp::Skip)],
     )
     .await;
-    let mut driver = Driver::new(queue.clone(), options(2)).unwrap();
-    let mut replica = Driver::new(queue.clone(), options(2)).unwrap();
+    let mut driver = support::local_driver(&queue, options(2));
+    let mut replica = support::local_driver(&queue, options(2));
     let (first, second) = futures::join!(driver.tick(), replica.tick());
     assert!(first.scheduling.failures.is_empty());
     assert!(second.scheduling.failures.is_empty());
@@ -338,7 +338,7 @@ async fn no_workers(fixture: &Fixture) {
         value!({"next_due_at":0}),
     )
     .await;
-    let mut reopened = Driver::new(queue, options(2)).unwrap();
+    let mut reopened = support::local_driver(&queue, options(2));
     success(&reopened.tick().await.reconciliation, 1);
     assert_eq!(
         rows(fixture, "jobs", value!({"app_id":app.as_str()})).await,
@@ -370,7 +370,7 @@ async fn finite_sweeps(fixture: &Fixture) {
     database.collection("recovery_duties").unwrap().insert(value!({
         "id":typed_id::generate("wrd"), "app_id":"!malformed", "kind":"reconcile", "next_due_at":0,
     })).await.unwrap();
-    let mut driver = Driver::new(queue.clone(), options(1)).unwrap();
+    let mut driver = support::local_driver(&queue, options(1));
     let first = driver.tick().await;
     assert_eq!(first.reconciliation.visited, 1);
     assert_eq!(first.reconciliation.completed, 0);
@@ -437,7 +437,7 @@ async fn calendar_pages(fixture: &Fixture) {
         ],
     )
     .await;
-    let mut driver = Driver::new(queue, options(2)).unwrap();
+    let mut driver = support::local_driver(&queue, options(2));
     let report = driver.tick().await;
     success(&report.scheduling, 2);
     success(&report.reconciliation, 1);
@@ -492,7 +492,7 @@ async fn scan_failure(fixture: &Fixture) {
     let queue = queue(fixture, support::synthetic_holds()).await;
     let app = AppId::mint();
     obligation(fixture, &queue, &app).await;
-    let mut driver = Driver::new(queue, options(2)).unwrap();
+    let mut driver = support::local_driver(&queue, options(2));
     rename_schedules(fixture, true).await;
     let report = driver.tick().await;
     rename_schedules(fixture, false).await;
@@ -651,7 +651,7 @@ async fn retention_replies(fixture: &Fixture) {
         Err(Error::Unavailable)
     );
     let before = client.calls.get();
-    let mut driver = Driver::new(queue.clone(), options(8)).unwrap();
+    let mut driver = support::local_driver(&queue, options(8));
     let report = driver.tick().await;
     success(&report.retention, 3);
     assert_eq!(client.calls.get() - before, 3);
@@ -699,8 +699,8 @@ async fn interrupted(fixture: &Fixture, expire: bool) {
     let first_id = intents[0]["deployment_id"].as_str().unwrap().to_owned();
     let second_id = intents[1]["deployment_id"].as_str().unwrap().to_owned();
     let (observed, resume, dropped) = client.gate();
-    let mut driver = Driver::new(
-        queue.clone(),
+    let mut driver = support::local_driver(
+        &queue,
         Options {
             lane_timeout: if expire {
                 Duration::from_secs(1)
@@ -709,8 +709,7 @@ async fn interrupted(fixture: &Fixture, expire: bool) {
             },
             ..options(2)
         },
-    )
-    .unwrap();
+    );
     let mut tick = Box::pin(driver.tick());
     match compio::time::timeout(Duration::from_secs(10), select(&mut tick, observed))
         .await
@@ -811,7 +810,7 @@ async fn independent_duties(fixture: &Fixture) {
         value!({"next_due_at":0}),
     )
     .await;
-    let mut driver = Driver::new(queue.clone(), options(1)).unwrap();
+    let mut driver = support::local_driver(&queue, options(1));
     let report = driver.tick().await;
     assert_eq!(report.reconciliation.failures.len(), 1);
     assert_eq!(report.reconciliation.failures[0].error, Error::Storage);
@@ -832,7 +831,7 @@ async fn independent_duties(fixture: &Fixture) {
         .await
         .is_empty());
     assert_eq!(client.calls.get(), 0);
-    let mut restarted = Driver::new(queue, options(1)).unwrap();
+    let mut restarted = support::local_driver(&queue, options(1));
     assert_eq!(
         restarted.tick().await.reconciliation.failures[0].error,
         Error::Storage

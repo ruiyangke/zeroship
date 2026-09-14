@@ -11,9 +11,11 @@ CREATE UNIQUE INDEX IF NOT EXISTS "deployment_holds_scope_key" ON "deployment_ho
 
 CREATE INDEX IF NOT EXISTS "deployment_holds_pending_idx" ON "deployment_holds" ("state", "app_id", "deployment_id");
 
-CREATE TABLE "workers" ("id" TEXT PRIMARY KEY NOT NULL, "capacity" INTEGER NOT NULL DEFAULT 1, "state" TEXT NOT NULL DEFAULT 'ready', "expires_at" INTEGER NOT NULL DEFAULT 0, "lock_version" INTEGER NOT NULL DEFAULT 0);
+CREATE TABLE "workers" ("id" TEXT PRIMARY KEY NOT NULL, "capacity" INTEGER NOT NULL DEFAULT 1, "state" TEXT NOT NULL DEFAULT 'ready', "expires_at" INTEGER NOT NULL DEFAULT 0, "lock_version" INTEGER NOT NULL DEFAULT 0, "execution_zone_id" TEXT);
 
-CREATE TABLE "assignments" ("id" TEXT PRIMARY KEY NOT NULL, "app_id" TEXT NOT NULL, "worker_id" TEXT NOT NULL, "revision" INTEGER NOT NULL, "expires_at" INTEGER NOT NULL, "released" INTEGER NOT NULL, "wake_revision" INTEGER, "next_due_at" INTEGER, CONSTRAINT "assignment_scope" FOREIGN KEY (app_id) REFERENCES queue_scopes(id) ON DELETE RESTRICT, CONSTRAINT "assignment_worker" FOREIGN KEY (worker_id) REFERENCES workers(id) ON DELETE RESTRICT);
+CREATE INDEX IF NOT EXISTS "workers_zone_idx" ON "workers" ("execution_zone_id", "state", "expires_at", "id");
+
+CREATE TABLE "assignments" ("id" TEXT PRIMARY KEY NOT NULL, "app_id" TEXT NOT NULL, "worker_id" TEXT NOT NULL, "revision" INTEGER NOT NULL, "expires_at" INTEGER NOT NULL, "released" INTEGER NOT NULL, "refused" INTEGER NOT NULL, CONSTRAINT "assignment_scope" FOREIGN KEY (app_id) REFERENCES queue_scopes(id) ON DELETE RESTRICT, CONSTRAINT "assignment_worker" FOREIGN KEY (worker_id) REFERENCES workers(id) ON DELETE RESTRICT);
 
 CREATE INDEX IF NOT EXISTS "assignment_scope_idx" ON "assignments" ("app_id");
 
@@ -25,7 +27,7 @@ CREATE INDEX IF NOT EXISTS "assignments_worker_idx" ON "assignments" ("worker_id
 
 CREATE INDEX IF NOT EXISTS "assignments_expiry_idx" ON "assignments" ("expires_at", "app_id");
 
-CREATE TABLE "placement_receipts" ("id" TEXT PRIMARY KEY NOT NULL, "app_id" TEXT NOT NULL, "request_id" TEXT NOT NULL, "operation" TEXT NOT NULL, "worker_id" TEXT NOT NULL, "expected_revision" INTEGER, "wake_revision" INTEGER, "result_revision" INTEGER NOT NULL, "result_expires_at" INTEGER NOT NULL, CONSTRAINT "receipt_scope" FOREIGN KEY (app_id) REFERENCES queue_scopes(id) ON DELETE RESTRICT);
+CREATE TABLE "placement_receipts" ("id" TEXT PRIMARY KEY NOT NULL, "app_id" TEXT NOT NULL, "request_id" TEXT NOT NULL, "operation" TEXT NOT NULL, "worker_id" TEXT NOT NULL, "expected_revision" INTEGER, "reason" TEXT, "result_revision" INTEGER NOT NULL, "result_expires_at" INTEGER NOT NULL, CONSTRAINT "receipt_scope" FOREIGN KEY (app_id) REFERENCES queue_scopes(id) ON DELETE RESTRICT);
 
 CREATE INDEX IF NOT EXISTS "receipt_scope_idx" ON "placement_receipts" ("app_id");
 
@@ -137,5 +139,13 @@ CREATE UNIQUE INDEX IF NOT EXISTS "recovery_duties_scope_key" ON "recovery_dutie
 
 CREATE INDEX IF NOT EXISTS "recovery_duties_due_idx" ON "recovery_duties" ("kind", "next_due_at", "app_id");
 
+CREATE TABLE "capacity_demands" ("id" TEXT PRIMARY KEY NOT NULL, "execution_zone_id" TEXT NOT NULL, "recorded_at" INTEGER NOT NULL, CONSTRAINT "capacity_demand_scope" FOREIGN KEY (id) REFERENCES queue_scopes(id) ON DELETE RESTRICT);
+
+CREATE INDEX IF NOT EXISTS "capacity_demands_zone_idx" ON "capacity_demands" ("execution_zone_id", "id");
+
+CREATE TABLE "capacity_targets" ("id" TEXT PRIMARY KEY NOT NULL, "revision" INTEGER NOT NULL DEFAULT 0, "desired" INTEGER NOT NULL DEFAULT 0, "state" TEXT NOT NULL DEFAULT 'steady', "refusal" TEXT, "observed" INTEGER, "attempt" INTEGER NOT NULL DEFAULT 0, "attempt_deadline" INTEGER, "retry_at" INTEGER, "below_since" INTEGER, "lock_version" INTEGER NOT NULL DEFAULT 0);
+
+CREATE TABLE "capacity_intents" ("id" TEXT PRIMARY KEY NOT NULL, "execution_zone_id" TEXT NOT NULL, "generation" INTEGER NOT NULL, "state" TEXT NOT NULL, "refusal" TEXT, "attempt" INTEGER NOT NULL, "attempt_deadline" INTEGER, "retry_at" INTEGER, CONSTRAINT "capacity_intent_scope" FOREIGN KEY (id) REFERENCES queue_scopes(id) ON DELETE RESTRICT);
+
 SELECT 1;
-INSERT INTO main.schema_version (id, fingerprint) VALUES ('manager', '92b9bf2a59887fbc17bf77c853145cac83db7256e9a8947c8547728bd91b3e7a');
+INSERT INTO main.schema_version (id, fingerprint) VALUES ('manager', 'ada7e69e96b7261ac7fa9a20cdd306a888dbe0469cbe7e231edddfd0952c580b');

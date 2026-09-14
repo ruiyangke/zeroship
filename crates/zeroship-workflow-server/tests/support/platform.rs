@@ -85,6 +85,49 @@ impl Platform {
         }
     }
 }
+impl Platform {
+    /// A live Control app in the deployment's seeded zone, created the way
+    /// Control creates one, so placement can read its zone and deletion.
+    /// Seeding an app that exists changes nothing.
+    #[allow(dead_code, reason = "not every host contract places apps")]
+    pub async fn seed_app(&self, app: &zeroship_core::AppId) {
+        let exists = self
+            .admin
+            .query("SELECT 1 FROM zeroship.apps WHERE id=$1", &[&app.as_str()])
+            .await
+            .unwrap();
+        if !exists.is_empty() {
+            return;
+        }
+        let organization = zeroship_core::OrganizationId::mint();
+        let project = zeroship_core::ProjectId::mint();
+        let name = app.as_str().replace('_', "-");
+        self.admin
+            .execute(
+                "INSERT INTO zeroship.organizations(id,slug,name,billing_email) \
+                 VALUES($1,$2,'Placement Test','placement@zeroship.test')",
+                &[&organization.as_str(), &name],
+            )
+            .await
+            .unwrap();
+        self.admin
+            .execute(
+                "INSERT INTO zeroship.projects(id,organization_id,slug,name) \
+                 VALUES($1,$2,'default','Placement Test')",
+                &[&project.as_str(), &organization.as_str()],
+            )
+            .await
+            .unwrap();
+        self.admin
+            .execute(
+                "INSERT INTO zeroship.apps(id,name,project_id,organization_id) VALUES($1,$2,$3,$4)",
+                &[&app.as_str(), &name, &project.as_str(), &organization.as_str()],
+            )
+            .await
+            .unwrap();
+    }
+}
+
 pub async fn connect(url: &str) -> compio_postgres::Client {
     let (client, connection) = compio_postgres::connect(url, compio_postgres::NoTls)
         .await

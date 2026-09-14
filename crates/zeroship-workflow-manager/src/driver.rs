@@ -5,8 +5,11 @@
 )]
 
 use crate::{
+    capacity::{self, Capacity, Contract, IntentState},
+    coordinator::Coordinator,
+    eligibility::ZoneId,
     models::{
-        recovery_duties,
+        capacity_demands, capacity_intents, capacity_targets, jobs, recovery_duties,
         schema::{deployment_holds, schedules},
     },
     recovery::{self, DutyKind, Recovery},
@@ -24,6 +27,7 @@ use zeroship_data_orm::orm::{sql_types::Text, Field, Filter, FilterableColumn, F
 pub struct Options {
     pub scheduling: scheduling::Options,
     pub recovery: recovery::Options,
+    pub capacity: capacity::Options,
     /// Maximum candidate records visited in each lane's turn.
     pub page_limit: u32,
     /// Shared deadline for a lane's scans and entire candidate page.
@@ -35,6 +39,7 @@ impl Default for Options {
         Self {
             scheduling: scheduling::Options::default(),
             recovery: recovery::Options::default(),
+            capacity: capacity::Options::default(),
             page_limit: 128,
             lane_timeout: Duration::from_secs(10),
         }
@@ -64,7 +69,7 @@ impl Options {
         {
             return Err(Error::Invalid);
         }
-        Ok(())
+        self.capacity.validate()
     }
 }
 
@@ -93,6 +98,14 @@ pub struct TickReport {
     pub reconciliation: LaneReport,
     pub collection: LaneReport,
     pub retention: LaneReport,
+    /// Apps with claimable work, placed on free eligible capacity or recorded
+    /// as unplaced demand.
+    pub placement: LaneReport,
+    /// Apps already recorded as unplaced, revisited until placed or idle.
+    pub unplaced: LaneReport,
+    /// Capacity requests: zone targets, or per-app intents in the comparison
+    /// contract.
+    pub capacity: LaneReport,
 }
 
 /// A host calls `tick` and owns cadence, cancellation and shutdown.
@@ -101,13 +114,20 @@ pub struct TickReport {
 /// candidates advance within a captured identity range and retry on another sweep.
 /// Existing operation transactions own publication, retention and commit fences.
 /// No placement or worker is required to generate due jobs.
+///
+/// The placement lanes key on claimable jobs. The recovery lanes turn every due
+/// duty into a pending job before them, and a closing scope's Close job is a
+/// job, so every scope that still holds responsibility gets an owner when its
+/// work falls due. Apps whose demand free capacity cannot absorb become the
+/// durable input of the capacity lane.
 #[derive(Debug)]
 pub struct Driver {
     queue: Queue,
     scheduler: Scheduler,
     recovery: Recovery,
+    capacity: Capacity,
     options: Options,
-    cursors: [Cursor; 4],
+    cursors: [Cursor; 7],
     next_lane: usize,
 }
 
@@ -118,23 +138,33 @@ struct Cursor {
 }
 
 impl Driver {
-    /// Construct every maintenance operation over the same platform queue.
+    /// Construct every maintenance operation over the coordinator's platform
+    /// queue. The coordinator carries the eligibility source placement reads;
+    /// the contract names the injected capacity provider.
     ///
     /// # Errors
     /// Rejects invalid maintenance options or incompatible native metadata.
-    pub fn new(queue: Queue, options: Options) -> Result<Self, Error> {
+    pub fn new(coordinator: Coordinator, options: Options, contract: Contract) -> Result<Self, Error> {
         options.validate()?;
+        let queue = coordinator.queue().clone();
         queue.database.entity::<schedules::Entity>()?;
         queue.database.entity::<recovery_duties::Entity>()?;
         queue.database.entity::<deployment_holds::Entity>()?;
         Ok(Self {
             scheduler: Scheduler::new(queue.clone(), options.scheduling)?,
             recovery: Recovery::new(queue.clone(), options.recovery)?,
+            capacity: Capacity::new(coordinator, contract, options.capacity)?,
             queue,
             options,
             cursors: Default::default(),
             next_lane: 0,
         })
+    }
+
+    /// The placement demand and capacity operations this driver runs.
+    #[must_use]
+    pub const fn capacity(&self) -> &Capacity {
+        &self.capacity
     }
 
     /// Visit bounded calendar, recovery and transitional-hold pages independently.
@@ -154,7 +184,10 @@ impl Driver {
                 0 => report.scheduling = result,
                 1 => report.reconciliation = result,
                 2 => report.collection = result,
-                _ => report.retention = result,
+                3 => report.retention = result,
+                4 => report.placement = result,
+                5 => report.unplaced = result,
+                _ => report.capacity = result,
             }
         }
         report
@@ -162,20 +195,20 @@ impl Driver {
 
     async fn lane(&mut self, lane: usize) -> LaneReport {
         let deadline = Deadline(Instant::now() + self.options.lane_timeout);
+        let declarative = matches!(self.capacity.contract(), Contract::Declarative(_));
+        let limit = self.options.page_limit;
+        let cursor = &mut self.cursors[lane];
+        // Each page reports the rows its scan fetched, which a deduplicated
+        // page can exceed; a full fetch means the sweep has more to visit.
         let page = match lane {
-            0 => scan_schedules(
-                &self.queue,
-                &mut self.cursors[lane],
-                deadline,
-                self.options.page_limit,
-            )
-            .await
-            .map(|rows| rows.into_iter().map(Candidate::Scheduled).collect()),
+            0 => scan_schedules(&self.queue, cursor, deadline, limit)
+                .await
+                .map(|rows| whole(rows.into_iter().map(Candidate::Scheduled).collect())),
             1 | 2 => scan::<_, Recoverable>(
                 &self.queue,
-                &mut self.cursors[lane],
+                cursor,
                 deadline,
-                self.options.page_limit,
+                limit,
                 recovery_duties::app_id,
                 |now| {
                     Ok(recovery_duties::kind
@@ -185,15 +218,17 @@ impl Driver {
             )
             .await
             .map(|rows| {
-                rows.into_iter()
-                    .map(|row| Candidate::Recoverable(lane_kind(lane), row))
-                    .collect()
+                whole(
+                    rows.into_iter()
+                        .map(|row| Candidate::Recoverable(lane_kind(lane), row))
+                        .collect(),
+                )
             }),
-            _ => scan::<_, Hold>(
+            3 => scan::<_, Hold>(
                 &self.queue,
-                &mut self.cursors[lane],
+                cursor,
                 deadline,
-                self.options.page_limit,
+                limit,
                 deployment_holds::id,
                 |_| {
                     Ok(deployment_holds::state
@@ -202,10 +237,76 @@ impl Driver {
                 },
             )
             .await
-            .map(|rows| rows.into_iter().map(Candidate::Hold).collect()),
+            .map(|rows| whole(rows.into_iter().map(Candidate::Hold).collect())),
+            // Claimable jobs by app, including leases a dead worker let lapse.
+            // Rows arrive in app order, so one app's jobs are adjacent.
+            4 => scan::<_, Claimable>(&self.queue, cursor, deadline, limit, jobs::app_id, |now| {
+                Ok(jobs::state
+                    .eq("ready")?
+                    .and(jobs::available_at.lte(now)?)
+                    .or(jobs::state
+                        .eq("leased")?
+                        .and(jobs::lease_deadline.lte(Some(now))?)))
+            })
+            .await
+            .map(|rows| {
+                let fetched = rows.len();
+                let mut apps: Vec<Candidate> = Vec::with_capacity(fetched);
+                for row in rows {
+                    if !matches!(apps.last(), Some(Candidate::Visit(last)) if *last == row.app_id)
+                    {
+                        apps.push(Candidate::Visit(row.app_id));
+                    }
+                }
+                (apps, fetched)
+            }),
+            5 if declarative => scan::<_, Demanded>(
+                &self.queue,
+                cursor,
+                deadline,
+                limit,
+                capacity_demands::id,
+                |_| Ok(Filter::all()),
+            )
+            .await
+            .map(|rows| whole(rows.into_iter().map(|row| Candidate::Visit(row.id)).collect())),
+            5 => scan::<_, Intended>(
+                &self.queue,
+                cursor,
+                deadline,
+                limit,
+                capacity_intents::id,
+                |_| Ok(capacity_intents::state.ne(IntentState::Settled.as_str())?),
+            )
+            .await
+            .map(|rows| whole(rows.into_iter().map(|row| Candidate::Visit(row.id)).collect())),
+            _ if declarative => scan::<_, Targeted>(
+                &self.queue,
+                cursor,
+                deadline,
+                limit,
+                capacity_targets::id,
+                |_| Ok(Filter::all()),
+            )
+            .await
+            .map(|rows| whole(rows.into_iter().map(|row| Candidate::Zone(row.id)).collect())),
+            _ => scan::<_, Intended>(
+                &self.queue,
+                cursor,
+                deadline,
+                limit,
+                capacity_intents::id,
+                |_| {
+                    Ok(capacity_intents::state
+                        .ne(IntentState::Settled.as_str())?
+                        .and(capacity_intents::state.ne(IntentState::Provisioned.as_str())?))
+                },
+            )
+            .await
+            .map(|rows| whole(rows.into_iter().map(|row| Candidate::Intent(row.id)).collect())),
         };
         let mut report = LaneReport::default();
-        let page: Vec<Candidate> = match page {
+        let (page, fetched) = match page {
             Ok(page) => page,
             Err(error) => {
                 report.scan_error = Some(error);
@@ -236,7 +337,7 @@ impl Driver {
         report.unvisited = page.len() - report.visited;
         let cursor = &mut self.cursors[lane];
         if !report.timed_out
-            && (page.len() < self.options.page_limit as usize || cursor.after == cursor.upper)
+            && (fetched < self.options.page_limit as usize || cursor.after == cursor.upper)
         {
             *cursor = Cursor::default();
             report.sweep_complete = true;
@@ -260,6 +361,17 @@ impl Driver {
                 let deployment =
                     DeploymentId::parse(&row.deployment_id).map_err(|_| Error::Storage)?;
                 self.queue.reconcile_deployment(&app, &deployment).await?;
+            }
+            Candidate::Visit(app) => {
+                let app = AppId::parse(app).map_err(|_| Error::Storage)?;
+                self.capacity.visit(&app).await?;
+            }
+            Candidate::Zone(zone) => {
+                self.capacity.reconcile(&ZoneId::parse(zone)?).await?;
+            }
+            Candidate::Intent(app) => {
+                let app = AppId::parse(app).map_err(|_| Error::Storage)?;
+                self.capacity.request(&app).await?;
             }
         }
         Ok(())
@@ -324,10 +436,60 @@ impl ScanRow for Hold {
     }
 }
 
+#[derive(FromRow)]
+#[orm(entity = jobs)]
+struct Claimable {
+    app_id: String,
+}
+impl ScanRow for Claimable {
+    fn id(&self) -> &str {
+        &self.app_id
+    }
+}
+
+#[derive(FromRow)]
+#[orm(entity = capacity_demands)]
+struct Demanded {
+    id: String,
+}
+impl ScanRow for Demanded {
+    fn id(&self) -> &str {
+        &self.id
+    }
+}
+
+#[derive(FromRow)]
+#[orm(entity = capacity_intents)]
+struct Intended {
+    id: String,
+}
+impl ScanRow for Intended {
+    fn id(&self) -> &str {
+        &self.id
+    }
+}
+
+#[derive(FromRow)]
+#[orm(entity = capacity_targets)]
+struct Targeted {
+    id: String,
+}
+impl ScanRow for Targeted {
+    fn id(&self) -> &str {
+        &self.id
+    }
+}
+
 enum Candidate {
     Scheduled(Scheduled),
     Recoverable(DutyKind, Recoverable),
     Hold(Hold),
+    /// An app to give an owner or to clear from demand.
+    Visit(String),
+    /// An execution zone whose capacity target to reconcile.
+    Zone(String),
+    /// An app whose comparison-contract intent to request.
+    Intent(String),
 }
 impl Candidate {
     fn id(&self) -> &str {
@@ -335,8 +497,15 @@ impl Candidate {
             Self::Scheduled(row) => row.id(),
             Self::Recoverable(_, row) => row.id(),
             Self::Hold(row) => row.id(),
+            Self::Visit(id) | Self::Zone(id) | Self::Intent(id) => id,
         }
     }
+}
+
+/// A page visited exactly as fetched.
+fn whole(candidates: Vec<Candidate>) -> (Vec<Candidate>, usize) {
+    let fetched = candidates.len();
+    (candidates, fetched)
 }
 
 const fn lane_kind(lane: usize) -> DutyKind {
