@@ -23,6 +23,7 @@ path = "tests/main.rs"
 
 [dependencies]
 zeroship-core = { workspace = true }
+zeroship-data-orm = { workspace = true }
 zeroship-authn = { workspace = true }
 zeroship-authz = { workspace = true }
 # Shared mailer crate (extracted from this crate's old `src/mailer/`): the

@@ -474,8 +474,8 @@ impl DbError {
         }
     }
 
-    /// Render a flat string for remaining non-V8 and test callers. New V8
-    /// boundary code should prefer `to_op_error()` so the typed code survives.
+    /// Consume the error and return its message body. Read [`Self::code`] first
+    /// when the caller also needs its classification.
     pub fn into_string(self) -> String {
         match self {
             DbError::SchemaRefused { envelope_json, .. } => envelope_json,
@@ -681,13 +681,8 @@ pub fn first_row_or_internal<'a, R>(rows: &'a [R], op: &'static str) -> Result<&
     })
 }
 
-/// `Display` renders the same body that `into_string` returns — the
-/// message body for the variant (or the JSON envelope for
-/// `SchemaRefused`). The `.code` is NOT emitted because Display is
-/// used by callers that want the human-readable text (log lines,
-/// `format!("{e}")` panics in tests, `serde_json::from_str(&e.to_string())`
-/// envelope round-trips); the code surfaces through `to_op_error()`
-/// at the V8 boundary, not through Display.
+/// Render the message body, preserving schema-refusal envelopes.
+/// Error classification is available separately through [`DbError::code`].
 impl std::fmt::Display for DbError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
