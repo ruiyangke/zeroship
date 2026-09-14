@@ -8428,6 +8428,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "url",
+ "zeroship-id",
  "zeroship-migrate",
  "zeroship-migrate-mysql",
  "zeroship-migrate-postgres",

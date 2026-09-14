@@ -20,7 +20,7 @@ import { table, t, grant, revoke, schema } from "@zeroship/migrate";
 // invariant: `zeroship_worker`, the login a process running creator code holds,
 // has no write privilege on ANY relation in `zeroship`.
 //
-// This table is not platform state. It is two columns, a key and an expiry,
+// This table records replay claims,
 // conferring nothing (see the grant note below on why a `jti` is not a
 // credential), and its writer set is different in kind: `zeroship` is written by
 // the control plane, while every service that VERIFIES an assertion writes here,
@@ -43,12 +43,8 @@ import { table, t, grant, revoke, schema } from "@zeroship/migrate";
 // the collision the first one hit. That bound is UNHELD since the file was
 // deleted; the widening above now rests on review alone.
 //
-// WHY THESE TWO COLUMNS AND NOTHING ELSE. The store answers one question --
-// "has this key been claimed, and is that claim still live" -- so it carries
-// the key and the instant the claim may be dropped. Nothing here is read back
-// INTO application code: the claim statement reports its verdict as an
-// affected row count and returns no rows. That is a statement about RETURNING,
-// and it is NOT a reason to withhold SELECT -- see the grant below.
+// The replay key and expiry determine whether a claim is still live. The
+// claim statement reports its verdict through the affected row count.
 //
 // `replay_key` is `<iss>|<jti>`, scoped by issuer so one service cannot burn
 // another service's `jti`, and so a single table is safe to share across
@@ -71,11 +67,13 @@ export default {
 
     table("service_assertion_replay", { schema: SCHEMA }).create({
       columns: {
+        id: t.bigInt().notNull().identity(),
         replay_key: t.text().notNull(),
         expires_at: t.timestamp().notNull(),
       },
-      primaryKey: ["replay_key"],
+      primaryKey: ["id"],
     });
+    table("service_assertion_replay", { schema: SCHEMA }).unique("service_assertion_replay_natural_key").add({ columns: ["replay_key"] });
 
     // The sweep is `DELETE ... WHERE expires_at <= now()`. Without this index it
     // is a sequential scan over every live claim.
