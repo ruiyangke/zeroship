@@ -237,15 +237,7 @@ impl LocalHost {
         limits: RuntimeLimits,
     ) -> Result<Self, String> {
         Self::start_with(
-            root,
-            app,
-            config,
-            deployment,
-            storage,
-            env_vars,
-            peers,
-            limits,
-            Production,
+            root, app, config, deployment, storage, env_vars, peers, limits, Production,
         )
     }
 

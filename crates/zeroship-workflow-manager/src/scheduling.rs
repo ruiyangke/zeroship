@@ -541,8 +541,8 @@ impl Scheduler {
                 let activation = if let Some(id) = &scope.activation_id {
                     let activation = load_activation(&tx, app, id).await?;
                     let job = activation_job(&tx, app, &activation).await?;
-                    let completed =
-                        serde_json::to_string(&JobOutcome::Completed {}).map_err(|_| Error::Storage)?;
+                    let completed = serde_json::to_string(&JobOutcome::Completed {})
+                        .map_err(|_| Error::Storage)?;
                     Some(SelectedActivation {
                         deployment_id: DeploymentId::parse(&activation.deployment_id)
                             .map_err(|_| Error::Storage)?,

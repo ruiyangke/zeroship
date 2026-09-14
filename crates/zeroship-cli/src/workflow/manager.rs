@@ -19,12 +19,7 @@ use futures::{
     StreamExt,
 };
 use std::{
-    future::ready,
-    num::NonZeroU32,
-    path::PathBuf,
-    rc::Rc,
-    thread::JoinHandle,
-    time::Duration,
+    future::ready, num::NonZeroU32, path::PathBuf, rc::Rc, thread::JoinHandle, time::Duration,
 };
 use zeroship_core::{
     app_id::AppId,
@@ -433,8 +428,10 @@ impl ManagerClient {
     /// # Errors
     /// Reports unavailable storage.
     pub async fn drain(&self) -> Result<(), WorkflowServiceError> {
-        self.call(|manager| async move { manager.register(WorkerState::Draining).await }.boxed_local())
-            .await
+        self.call(|manager| {
+            async move { manager.register(WorkerState::Draining).await }.boxed_local()
+        })
+        .await
     }
 
     /// Record an ingested normal deployment in the platform catalog.
@@ -638,7 +635,10 @@ impl JobTransport for LocalTransport {
         self.client.submit(scope, job).await
     }
 
-    async fn heartbeat(&self, lease: &DeliveryGrant) -> Result<DeliveryGrant, WorkflowServiceError> {
+    async fn heartbeat(
+        &self,
+        lease: &DeliveryGrant,
+    ) -> Result<DeliveryGrant, WorkflowServiceError> {
         let delivery: Delivery = lease.delivery().clone();
         self.client
             .call(move |manager| {
