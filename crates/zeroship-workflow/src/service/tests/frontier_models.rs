@@ -105,8 +105,14 @@ async fn compensation_contract(store: Rc<OrmStore>) {
         Err(WorkflowServiceError::NotFound(_))
     ));
     let error = status.error.unwrap();
-    assert_eq!(error["cause"], json!({"message":"original failure"}));
-    let failures = error["failures"].as_array().unwrap();
+    assert_eq!(error["message"], json!("original failure"));
+    let summary = &error["compensation"];
+    assert_eq!(summary["outcome"], json!("partial"));
+    assert_eq!(
+        (&summary["total"], &summary["completed"], &summary["failed"]),
+        (&json!(count), &json!(0), &json!(count))
+    );
+    let failures = summary["failures"].as_array().unwrap();
     assert_eq!(failures.len(), count as usize);
     for (failure, ordinal) in failures.iter().zip((0..count).rev()) {
         assert_eq!(

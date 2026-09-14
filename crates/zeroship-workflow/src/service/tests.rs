@@ -87,6 +87,7 @@ impl WorkflowService {
 
 mod activation;
 mod background_scope;
+mod compensation_summary;
 mod continuations;
 mod cron;
 mod delivery;
@@ -1266,14 +1267,16 @@ async fn review_contract(store: Rc<OrmStore>) {
         .unwrap();
     let status = scope.status(&run.id).await.unwrap();
     assert_eq!(status.state, RunState::Failed);
+    let error = status.error.as_ref().unwrap();
+    assert_eq!(error["message"], json!("trigger compensation"));
+    let summary = &error["compensation"];
+    assert_eq!(summary["outcome"], json!("partial"));
     assert_eq!(
-        status.error.as_ref().unwrap()["name"],
-        json!("WorkflowCompensationError")
+        (&summary["total"], &summary["completed"], &summary["failed"]),
+        (&json!(2), &json!(1), &json!(1))
     );
-    assert_eq!(
-        status.error.as_ref().unwrap()["failures"][0]["ordinal"],
-        json!(1)
-    );
+    assert_eq!(summary["failures"][0]["ordinal"], json!(1));
+    assert_eq!(summary["failures"][0]["error"]["message"], json!("exhausted"));
 
     // An app with a full execution allocation must not hide another app behind
     // its backlog in the candidate page.
