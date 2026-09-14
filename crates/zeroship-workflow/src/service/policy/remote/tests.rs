@@ -539,3 +539,43 @@ async fn establishment_superseded_by_a_refresh_exchanges_once_more() {
     )
     .await;
 }
+
+/// When refreshes supersede both of its exchanges, an establishment still
+/// succeeds once a refresh has installed an epoch above the refused one.
+#[compio::test]
+async fn establishment_superseded_twice_accepts_an_epoch_a_refresh_installed() {
+    let fixture = Fixture::new();
+    let (first, first_arrived, first_release) =
+        fixture.lease(Some(after(1)), false, Some(2)).gated();
+    let (second, second_arrived, second_release) =
+        fixture.lease(Some(after(1)), false, Some(2)).gated();
+    peer(
+        &fixture,
+        vec![
+            first,
+            fixture.lease(None, false, Some(1)),
+            second,
+            fixture.lease(None, false, Some(2)),
+        ],
+        async |client| {
+            let assigned = fixture.assigned(client);
+            let refreshing = assigned.clone();
+            let driver = async {
+                first_arrived.await.unwrap();
+                refreshing.refresh().await.unwrap();
+                first_release.send(()).unwrap();
+                second_arrived.await.unwrap();
+                refreshing.refresh().await.unwrap();
+                second_release.send(()).unwrap();
+            };
+            let (established, ()) =
+                futures::join!(assigned.establish(Some(1.try_into().unwrap())), driver);
+            established.unwrap();
+            assert_eq!(
+                assigned.binding().ingress_epoch(),
+                Some(2.try_into().unwrap())
+            );
+        },
+    )
+    .await;
+}
