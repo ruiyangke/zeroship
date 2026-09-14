@@ -1293,18 +1293,44 @@ without inventing a run. Carry the closed management outcome through queue
 settlement and commit it with the command outcome and matching barrier changes.
 Generic completion classifications cannot substitute for that lifecycle result.
 
-Code-free journal operations need an explicit deployment prerequisite contract;
-do not make cancellation depend on loading an unrelated current bundle. A restart
-target that creates a generation needs a frozen deployment choice and verified
-journal hold before its final fenced transaction. These envelope and prerequisite
-fields remain cutover work; the existing separate command inbox and ACK surface
-does not yet encode the complete protocol.
+Deployment prerequisites follow the effective management operation:
 
-`ManageRun` currently contains no deployment while `JobSpec` requires one.
-Management dispatch must resolve the deployment prerequisite from trusted platform
-metadata or use a deliberately defined operation-specific requirement. The manager
-must not query the customer journal to fill that gap. Exact activation and
-management envelope changes remain an explicit protocol decision.
+| Operation | Deployment choice and authority |
+| --- | --- |
+| Pause, resume, cancel | Journal-only operation with no deployment prerequisite. Cancellation cannot depend on loading an unrelated current bundle. |
+| Restart using the started deployment | Under the creator app/run lock, freeze the current source generation and its deployment identity/hash when the ordered command applies. Verify its existing held journal retention before committing the new generation. The manager does not need that deployment identity. |
+| Restart using the latest deployment | Resolve the target from trusted platform metadata when the manager accepts the command. Persist it in the immutable command identity and job. Creator preparation uses that exact deployment, and verifies its journal hold before the final fenced transaction. |
+
+The default full restart uses the latest deployment. A restart from a task uses
+the started deployment, and explicitly requesting the latest deployment for a
+partial restart is invalid. Derive these effective policies before constructing
+the delivery prerequisite; checking only an explicit deployment option would
+misclassify a default restart.
+
+For a started restart, "started" means the deployment of the source generation
+when that command applies, including a generation created by an earlier ordered
+restart. It does not mean the original-ever generation or a target guessed at
+Control submission. Existing generation retention protects the source while the
+command waits. Missing, releasing or mismatched retention is retryable
+infrastructure failure, with no permanent refusal and no substitution of active
+code. If preparation ever needs external I/O, persist the frozen source generation
+and target before releasing the lock. Latest restarts never re-resolve the current
+catalog on retry.
+
+Creator application must be a transaction-local operation: calling the existing
+self-committing management method and then writing a job receipt would leave a
+crash gap. A pause or cancellation outcome may record an applied intent while a
+task is leased. Its acknowledgement is not proof that execution stopped; the
+executor must observe that intent and stop and join before reporting quiescence.
+
+`ManageRun` currently contains no deployment while `JobSpec` requires one. The
+cutover must represent these operation-specific prerequisites explicitly, add
+the complete command and its revision, and carry the closed management outcome
+through the exact creator receipt and queue settlement. Queue ordering and barrier
+filters need native scalar linkage fields before limiting candidates. The existing
+separate inbox has no production consumer and should disappear with this handler
+cohort; it does not implement the delivered protocol. The manager must never query
+the customer journal to fill a deployment gap.
 
 ## Recovery responsibility and execution capacity
 
@@ -1817,8 +1843,24 @@ Scheduling and recovery process bounded pages and yield between app scopes.
 Management and reconciliation need progress even while execution admission is
 paused or saturated. Retry backoff and fair dispatch belong to manager/host policy;
 a hot app or repeated broken deployment must not starve other eligible work.
-Specific fairness and poisoned-job parking policy are still to be selected; silent
-delete-on-retry-exhaustion is not an acceptable policy.
+Within an app, the queue issues a persistent dispatch ticket when publishing a
+new job and on each successful claim. Both use the app's `dispatch_cursor` under
+the app lock and in the transaction that inserts or leases the job. Candidate
+selection filters due times, live leases and calendar prerequisites before ordering
+by `dispatch_order` and storage identity. A delivered job whose lease expires
+therefore retries behind already waiting work, and later arrivals receive later
+tickets so they cannot continually displace that retry. `available_at` remains
+immutable eligibility metadata; it is not rewritten to rotate work.
+
+Exact submission replay, heartbeat and settled acknowledgement replay allocate
+no ticket. Failed or cancelled claim transactions roll back the cursor and job
+together; a lost response after commit preserves the rotation across host restart.
+Counter exhaustion refuses the operation rather than wrapping or reusing tickets.
+This provides progress among successfully claimed jobs that later fail or expire.
+Failures before a successful claim, including invalid stored metadata or a missing
+retention prerequisite, still need an observable retry or parking policy. Cross-app
+host fairness and management priority remain separate policies. Silent deletion
+on retry exhaustion is not acceptable.
 
 ### Observability and trust limits
 
@@ -2251,7 +2293,7 @@ HTTP/RPC entry snapshots, and require no asynchronous `loadWorkflow` bridge.
 | Normal deployment publication | Bind activation revision issuance to a stable deploy command and immutable body. Artifact identity alone cannot distinguish a delayed retry from an intentional rollback. Compose mutable deployment side effects with command acceptance, connect archive/stage/restore to the durable handoff, and keep the calendar's activation origin explicit across delayed delivery. |
 | Scope retirement | Define ingress epoch closure and durable drain evidence. Registration expiry and empty polling cannot retire unpublished-work responsibility. |
 | Receipt retirement | Define admissibility fences and publication/settlement watermarks before deleting job deduplication state. Retain it until that proof exists. |
-| Dispatch fairness and persistent failure | Define fair progress and observable parking/retry policy without deleting accepted work or starving management/reconciliation. |
+| Dispatch fairness and persistent failure | Per-app dispatch tickets rotate successfully claimed jobs behind waiting work without changing due times. Define cross-app host fairness, management priority and observable parking/retry policy for failures before claim without deleting accepted work. |
 | Snapshot restore | Define restore epochs, fenced admission and cross-owner reconciliation with the storage owners; process-restart recovery alone cannot protect lost receipts or resurrected authority. |
 
 These are design decisions, not unspecified permission to improvise in separate
