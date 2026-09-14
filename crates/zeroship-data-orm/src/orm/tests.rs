@@ -965,8 +965,12 @@ struct RegisteredBackend {
 }
 #[async_trait::async_trait(?Send)]
 impl crate::executor::ScopedExecutor for RegisteredBackend {
-    async fn prepare_for_app(&self, app_id: &str) -> Result<(), DbError> {
-        self.inner.prepare_for_app(app_id).await
+    async fn prepare_for_app(
+        &self,
+        app_id: &str,
+        schema: &crate::sql::SchemaName,
+    ) -> Result<(), DbError> {
+        self.inner.prepare_for_app(app_id, schema).await
     }
     async fn query(
         &self,

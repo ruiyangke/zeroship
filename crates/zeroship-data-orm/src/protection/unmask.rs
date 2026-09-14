@@ -262,11 +262,17 @@ pub fn check_unmask_authorization(
 /// an unrouted one is handed the value the V8 dispatcher already opened. What
 /// is left here is the half that is genuinely about unmask - the per-app
 /// preparation - and it stays because these paths bypass `exec`.
-async fn prepare_unmask_backend(backend: &BackendHandle, app_id: &str) -> Result<(), DbError> {
-    // Asked, not downcast. What "ready for this app" means is the backend's
-    // business - SQLite must attach the app file, PostgreSQL needs nothing -
-    // and this path only needs it to have happened.
-    backend.prepare_for_app(app_id).await
+async fn prepare_unmask_backend(
+    backend: &BackendHandle,
+    binding: &DbBinding,
+) -> Result<(), DbError> {
+    // Asked, not downcast. What "ready for this binding" means is the
+    // backend's business - SQLite attaches the app file unless the binding
+    // addresses `main`, PostgreSQL needs nothing - and this path only needs it
+    // to have happened.
+    backend
+        .prepare_for_app(binding.app_id(), binding.schema())
+        .await
 }
 
 // ---------------------------------------------------------------------------
@@ -307,7 +313,7 @@ pub async fn dispatch_unmask(
             ),
         })?;
     args.column = mask_meta.canonical_column.clone();
-    prepare_unmask_backend(backend, app_id).await?;
+    prepare_unmask_backend(backend, binding).await?;
 
     // Authorize against the immutable declaration for this app and deploy.
     let allowed = check_unmask_authorization(binding, &args.actor, &mask_meta.classification)?;
@@ -710,7 +716,7 @@ pub async fn dispatch_bulk_unmask(
     // the isolate always has a URL, and the dev tier opens SQLite lazily - and
     // the alternative is handing the engine an `Option` it would have to
     // unwrap at a statement.
-    prepare_unmask_backend(backend, app_id).await?;
+    prepare_unmask_backend(backend, binding).await?;
     let mut unauthorized: Vec<(String, String)> = Vec::new(); // (row_pk, column)
     for (row_pk, columns) in &normalized_items {
         for (_, canonical_column) in columns {
@@ -942,7 +948,7 @@ pub async fn authorize_query_hint(
         classifications.push(mask_meta.classification);
     }
 
-    prepare_unmask_backend(backend, app_id).await?;
+    prepare_unmask_backend(backend, binding).await?;
     let mut unauthorized: Vec<String> = Vec::new();
     for (column, classification) in unmask_columns.iter().zip(&classifications) {
         if !check_unmask_authorization(binding, actor, classification)? {
@@ -1015,7 +1021,7 @@ pub async fn audit_query_hint_granted(
     // Re-resolve classifications for the audit row. Cheap — the descriptor
     // lookup is a HashMap read.
     let schema = crate::descriptor::collection_schema(binding, collection)?;
-    prepare_unmask_backend(backend, app_id).await?;
+    prepare_unmask_backend(backend, binding).await?;
     let mut classifications: Vec<String> = Vec::with_capacity(unmask_columns.len());
     for col in unmask_columns {
         let cls = lookup_mask_meta(&schema, col)
@@ -1055,9 +1061,8 @@ pub async fn dispatch_unmask_for_query(
     if unmask_columns.is_empty() {
         return Ok(());
     }
-    let app_id = binding.app_id();
     let schema = crate::descriptor::collection_schema(binding, collection)?;
-    prepare_unmask_backend(route.backend(), app_id).await?;
+    prepare_unmask_backend(route.backend(), binding).await?;
     for row in rows.iter_mut() {
         let Some(row_pk) = row.get("id").map(|v| match v {
             Value::String(s) => s.clone(),

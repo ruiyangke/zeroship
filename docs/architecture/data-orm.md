@@ -437,8 +437,11 @@ counts, and handles settlement, cancellation, cleanup, and discard.
 
 `executor::ScopedExecutor` resolves the app's physical SQL namespace and applies its authority
 on the connection that executes its statements. PostgreSQL uses a transaction
-with local role and timeout settings. SQLite attaches the database and selects
-its transaction lane before exposing a physical connection source.
+with local role and timeout settings. SQLite attaches the app's database file
+and selects its transaction lane before exposing a physical connection source.
+A SQLite binding on schema `main` addresses the file the backend opened: it
+attaches no `zs-<app>.sqlite`, and its catalog, protection floor and statements
+all read that file.
 
 `backend::Backend` is the host registration contract above the driver:
 
