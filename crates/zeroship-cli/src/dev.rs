@@ -115,23 +115,37 @@ fn cmd_dev_enroller(args: &[String]) -> Result<(), String> {
     let mut credential = None;
     let mut import_file = None;
     let mut zone = None;
-    for arg in &args[3..] {
-        let (name, value) = arg
+    // Both spellings `dev init` takes: `--name=value` and `--name value`.
+    let mut index = 3;
+    while index < args.len() {
+        let arg = &args[index];
+        let (name, inline_value) = arg
             .split_once('=')
-            .ok_or_else(|| format!("{arg:?} needs a value. {}", dev_enroller_usage()))?;
+            .map_or((arg.as_str(), None), |(name, value)| (name, Some(value)));
         let slot = match name {
             "--credential" => &mut credential,
             "--import-file" => &mut import_file,
             "--zone" => &mut zone,
+            "--help" => return Err(dev_enroller_usage().to_string()),
             _ => return Err(format!("unknown argument {arg:?}. {}", dev_enroller_usage())),
         };
         if slot.is_some() {
             return Err(format!("{name} was supplied more than once"));
         }
+        let value = if let Some(value) = inline_value {
+            value.to_owned()
+        } else {
+            index += 1;
+            args.get(index)
+                .filter(|value| !value.starts_with("--"))
+                .cloned()
+                .ok_or_else(|| format!("{name} requires a value"))?
+        };
         if value.is_empty() {
             return Err(format!("{name} requires a non-empty value"));
         }
-        *slot = Some(value.to_owned());
+        *slot = Some(value);
+        index += 1;
     }
     let (Some(credential), Some(import_file)) = (credential, import_file) else {
         return Err(dev_enroller_usage().to_string());
