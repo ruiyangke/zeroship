@@ -75,7 +75,11 @@ impl Fixture {
              GRANT SELECT ON workflow_manager.schema_version TO coordinator_test;
              GRANT SELECT,INSERT,UPDATE,DELETE ON workflow_manager.workers,
                workflow_manager.queue_scopes,workflow_manager.deployment_holds,workflow_manager.assignments,
-               workflow_manager.placement_receipts,workflow_manager.management,workflow_manager.jobs TO coordinator_test;"
+               workflow_manager.placement_receipts,workflow_manager.management,workflow_manager.jobs,
+               workflow_manager.schedule_deployments,workflow_manager.schedule_activations,
+               workflow_manager.schedule_disables,workflow_manager.schedule_scopes,
+               workflow_manager.schedules,workflow_manager.schedule_occurrences,
+               workflow_manager.recovery_scopes TO coordinator_test;"
         ).await.unwrap();
         Self {
             _postgres: postgres,
