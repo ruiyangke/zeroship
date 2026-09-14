@@ -89,6 +89,16 @@ paired!(
     references::late_upload
 );
 paired!(
+    sqlite_collect_racing_resweeps_leave_one_final_tombstone,
+    postgres_collect_racing_resweeps_leave_one_final_tombstone,
+    retirement::concurrent_resweep
+);
+paired!(
+    sqlite_collect_final_tombstone_leaves_the_payload_quota,
+    postgres_collect_final_tombstone_leaves_the_payload_quota,
+    retirement::quota
+);
+paired!(
     sqlite_collect_final_tombstone_lets_the_app_retire,
     postgres_collect_final_tombstone_lets_the_app_retire,
     retirement::retirement
