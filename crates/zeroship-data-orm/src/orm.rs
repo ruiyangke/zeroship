@@ -90,6 +90,7 @@ impl Database {
 
     pub fn collection(&self, name: &str) -> Result<Collection, DbError> {
         self.context.with(|| {
+            self.check_scope()?;
             crate::sql::mapping::validate_collection(name)?;
             crate::descriptor::collection_schema(&self.binding, name)?;
             Ok(Collection {
@@ -160,6 +161,24 @@ fn check_scope(scope: Option<&Rc<Cell<bool>>>) -> Result<(), DbError> {
         ));
     }
     Ok(())
+}
+
+/// A feature that only runs inside a transaction was requested on a handle
+/// that was not passed to a transaction callback.
+pub(crate) fn transaction_required(feature: &str) -> DbError {
+    DbError::validation_hinted(
+        "transaction_required",
+        format!("{feature} require a transaction handle"),
+        "Use the database handle passed to a transaction callback.",
+    )
+}
+
+/// The handle's backend cannot provide a requested feature.
+pub(crate) fn unsupported_backend_feature(feature: &str) -> DbError {
+    DbError::validation(
+        "unsupported_backend_feature",
+        format!("the configured database backend does not support {feature}"),
+    )
 }
 
 /// An ORM collection. Schema resolution and protection apply to every method.
@@ -555,6 +574,7 @@ impl PreparedOperation {
                 Plan::Read(Box::new(read::PreparedRead::new(
                     &binding,
                     route.sql_registration(),
+                    route.in_tx(),
                     *query,
                 )?))
             }

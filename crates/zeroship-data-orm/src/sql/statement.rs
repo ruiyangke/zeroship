@@ -474,11 +474,19 @@ pub struct SelectParts {
     pub lock: RowLock,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+/// Row locking requested by a select.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub enum RowLock {
     #[default]
     None,
-    Update,
+    /// Probe of the rows a protected write is about to change. Backends
+    /// without row locks render no locking clause, because their single
+    /// writer already serializes the write.
+    WriteTargets,
+    /// An exclusive lock the caller requires. An empty list locks the rows of
+    /// every source; otherwise only the named source aliases are locked.
+    /// Backends without row locks refuse the statement.
+    Required { of: Vec<Ident> },
 }
 
 #[derive(Debug)]
@@ -516,7 +524,11 @@ impl SelectStatement {
     }
 
     pub fn validate(&self) -> Result<(), CompileError> {
-        validate_select(&self.0)
+        validate_select(&self.0)?;
+        if self.1.is_some() && self.0.lock != RowLock::None {
+            return Err(invalid("row locking cannot be combined with a summary"));
+        }
+        Ok(())
     }
 }
 
@@ -929,11 +941,55 @@ fn validate_select(parts: &SelectParts) -> Result<(), CompileError> {
             validate_grouped_operand(&order.expression, &parts.group_by)?;
         }
     }
-    if parts.lock == RowLock::Update && (grouped || parts.distinct) {
+    if parts.lock != RowLock::None && (grouped || parts.distinct) {
         return Err(invalid("row locking requires an ungrouped select"));
+    }
+    if let RowLock::Required { of } = &parts.lock {
+        validate_locked_sources(parts, of)?;
     }
     if parts.limit.is_some_and(|value| value < 0) || parts.offset.is_some_and(|value| value < 0) {
         return Err(invalid("select pagination cannot be negative"));
+    }
+    Ok(())
+}
+
+/// Lock targets must name distinct sources that always produce a row.
+fn validate_locked_sources(parts: &SelectParts, of: &[Ident]) -> Result<(), CompileError> {
+    let nullable = |alias: &Ident| {
+        parts.joins.iter().any(|join| {
+            join.kind == super::JoinKind::Left && join.table.alias() == Some(alias)
+        })
+    };
+    if of.is_empty() {
+        if parts
+            .joins
+            .iter()
+            .any(|join| join.kind == super::JoinKind::Left)
+        {
+            return Err(invalid(
+                "an unqualified row lock cannot include the nullable side of a left join",
+            ));
+        }
+        return Ok(());
+    }
+    let mut targets = HashSet::new();
+    for alias in of {
+        let registered = parts.table.alias() == Some(alias)
+            || parts
+                .joins
+                .iter()
+                .any(|join| join.table.alias() == Some(alias));
+        if !registered {
+            return Err(invalid("row lock target is not a select source"));
+        }
+        if nullable(alias) {
+            return Err(invalid(
+                "row lock target is the nullable side of a left join",
+            ));
+        }
+        if !targets.insert(alias.as_str()) {
+            return Err(invalid("duplicate row lock target"));
+        }
     }
     Ok(())
 }

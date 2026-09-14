@@ -22,6 +22,7 @@ const SUPPORT: SqlSupport = SqlSupport {
     insert_generated_identity: true,
     identity_allocation: true,
     default_expression: true,
+    row_locks: true,
     max_bind_parameters: super::POSTGRES_BIND_LIMIT,
 };
 
@@ -32,7 +33,8 @@ const SYNTAX: super::shared::Syntax = super::shared::Syntax {
     timestamp_cast: "::timestamptz",
     vector_cast: "::vector",
     numeric_cast: "::numeric",
-    first_row_lock: " FOR UPDATE",
+    write_target_lock: " FOR UPDATE",
+    required_row_lock: Some(" FOR UPDATE"),
     insensitive_like: "ILIKE",
     insensitive_like_suffix: "",
     average_suffix: "::double precision",

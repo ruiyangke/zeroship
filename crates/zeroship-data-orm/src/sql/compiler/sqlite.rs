@@ -22,6 +22,7 @@ const SUPPORT: SqlSupport = SqlSupport {
     insert_generated_identity: true,
     identity_allocation: true,
     default_expression: false,
+    row_locks: false,
     max_bind_parameters: super::SQLITE_BIND_LIMIT,
 };
 
@@ -32,7 +33,8 @@ const SYNTAX: super::shared::Syntax = super::shared::Syntax {
     timestamp_cast: "",
     vector_cast: "",
     numeric_cast: "",
-    first_row_lock: "",
+    write_target_lock: "",
+    required_row_lock: None,
     insensitive_like: "LIKE",
     insensitive_like_suffix: " COLLATE NOCASE",
     average_suffix: "",

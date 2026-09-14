@@ -495,7 +495,7 @@ fn compile_target_probe(
         limit: Some(limit),
         offset: None,
         distinct: false,
-        lock: RowLock::Update,
+        lock: RowLock::WriteTargets,
     })?;
     registration
         .compile(Statement::Select(statement))
