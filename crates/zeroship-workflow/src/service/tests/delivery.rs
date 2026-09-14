@@ -57,7 +57,7 @@ async fn postgres_delivery_receipt_failure_rolls_back_checkpoint() {
             .await
             .unwrap()
             .outcome,
-        JobOutcome::Waiting
+        JobOutcome::Waiting {}
     );
     assert_eq!(scope.pending_jobs(None, 10).await.unwrap().len(), 1);
 }
@@ -141,7 +141,7 @@ async fn competing(store: Rc<OrmStore>) {
     let JobAcceptance::Settled(stale) = scope.accept_job(&duplicate).await.unwrap() else {
         panic!("expected obsolete frontier rejection")
     };
-    assert_eq!(stale.outcome, JobOutcome::Rejected);
+    assert_eq!(stale.outcome, JobOutcome::Rejected {});
     manager
         .queue
         .settle(&owner, &stale.settlement(&duplicate).unwrap())
@@ -340,7 +340,7 @@ async fn receipts(store: Rc<OrmStore>) {
         .await
         .unwrap();
     assert_eq!(receipt.job, job);
-    assert_eq!(receipt.outcome, JobOutcome::Completed);
+    assert_eq!(receipt.outcome, JobOutcome::Completed {});
     assert!(!serde_json::to_string(&receipt)
         .unwrap()
         .contains("creator-output"));
@@ -526,7 +526,7 @@ async fn checkpoint(store: Rc<OrmStore>) {
         )
         .await
         .unwrap();
-    assert_eq!(receipt.outcome, JobOutcome::Waiting);
+    assert_eq!(receipt.outcome, JobOutcome::Waiting {});
     let pending = scope.pending_jobs(None, 10).await.unwrap();
     assert_eq!(pending.len(), 1);
     assert!(

@@ -236,7 +236,7 @@ async fn durable_responsibility(fixture: &Fixture) {
     );
     let settlement = Settlement {
         delivery: delivered,
-        outcome: JobOutcome::Completed,
+        outcome: JobOutcome::Completed {},
         successors: vec![],
     };
     queue.settle(&owner, &settlement).await.unwrap();
@@ -289,7 +289,7 @@ async fn activation(fixture: &Fixture) {
             &owner,
             &Settlement {
                 delivery,
-                outcome: JobOutcome::Completed,
+                outcome: JobOutcome::Completed {},
                 successors: vec![],
             },
         )
@@ -353,7 +353,7 @@ async fn waiting_pages(fixture: &Fixture) {
     assert_eq!(delivery.delivery().job, first);
     let command = Settlement {
         delivery: delivery.delivery().clone(),
-        outcome: JobOutcome::Waiting,
+        outcome: JobOutcome::Waiting {},
         successors: vec![],
     };
     let receipt = queue.settle(&owner, &command).await.unwrap();
@@ -390,7 +390,7 @@ async fn waiting_pages(fixture: &Fixture) {
             &owner,
             &Settlement {
                 delivery: delivery.delivery().clone(),
-                outcome: JobOutcome::Waiting,
+                outcome: JobOutcome::Waiting {},
                 successors: vec![],
             },
         )
@@ -419,7 +419,7 @@ async fn completed_pages(fixture: &Fixture) {
             &owner,
             &Settlement {
                 delivery: delivery.delivery().clone(),
-                outcome: JobOutcome::Completed,
+                outcome: JobOutcome::Completed {},
                 successors: vec![],
             },
         )
@@ -470,7 +470,7 @@ async fn unrelated_page(fixture: &Fixture) {
             &owner,
             &Settlement {
                 delivery: delivery.delivery().clone(),
-                outcome: JobOutcome::Waiting,
+                outcome: JobOutcome::Waiting {},
                 successors: vec![],
             },
         )
@@ -506,7 +506,7 @@ async fn settlement_rollback(fixture: &Fixture) {
     };
     let command = Settlement {
         delivery: delivery.delivery().clone(),
-        outcome: JobOutcome::Waiting,
+        outcome: JobOutcome::Waiting {},
         successors: vec![successor.clone()],
     };
     let obligation = snapshot(fixture, &app).await;

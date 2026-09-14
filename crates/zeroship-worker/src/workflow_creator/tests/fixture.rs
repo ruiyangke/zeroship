@@ -238,7 +238,7 @@ impl Fixture {
         });
         assert_eq!(
             runtime.app.activate_job(&lease).await.unwrap().outcome,
-            JobOutcome::Completed
+            JobOutcome::Completed {}
         );
         self.deployments
             .assert_held(&self.scope.app_id, deployment.as_str())

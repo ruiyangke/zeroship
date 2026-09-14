@@ -324,7 +324,7 @@ async fn settle_until(queue: &Queue, assignment: &Assignment, target: &JobId, bl
                 assignment,
                 &Settlement {
                     delivery,
-                    outcome: JobOutcome::Completed,
+                    outcome: JobOutcome::Completed {},
                     successors: vec![],
                 },
             )

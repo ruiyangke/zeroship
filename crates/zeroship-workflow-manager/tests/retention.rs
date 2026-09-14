@@ -53,6 +53,8 @@ macro_rules! case {
 
 #[path = "retention/operation_prerequisites.rs"]
 mod operation_prerequisites;
+#[path = "retention/outcomes.rs"]
+mod outcomes;
 
 case!(
     sqlite_queue_holds_reconcile_lost_replies,
@@ -204,7 +206,7 @@ async fn finish(queue: &Queue, authority: &Assignment, expected: &JobSpec) -> Se
     assert_eq!(delivery.delivery().job, *expected);
     let settlement = Settlement {
         delivery: delivery.delivery().clone(),
-        outcome: JobOutcome::Completed,
+        outcome: JobOutcome::Completed {},
         successors: vec![],
     };
     queue.settle(authority, &settlement).await.unwrap();
@@ -503,7 +505,7 @@ async fn scheduling_retention(fixture: &Fixture) {
     let released = faults.released.get();
     let replay = queue.settle(&authority, &cron).await.unwrap();
     assert_eq!(replay.job_id, cron.delivery.job.id);
-    assert_eq!(replay.outcome, JobOutcome::Completed);
+    assert_eq!(replay.outcome, JobOutcome::Completed {});
     assert_eq!(
         faults.acquired.get(),
         acquired,

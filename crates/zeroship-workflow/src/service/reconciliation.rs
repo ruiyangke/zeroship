@@ -331,9 +331,9 @@ impl AppWorkflows {
                     &tx,
                     job,
                     if plan.more || plan.phase == Phase::Publications {
-                        JobOutcome::Waiting
+                        JobOutcome::Waiting {}
                     } else {
-                        JobOutcome::Completed
+                        JobOutcome::Completed {}
                     },
                     now,
                 )

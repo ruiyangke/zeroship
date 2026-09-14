@@ -432,6 +432,61 @@ async fn unsupported_management_and_collection_never_execute_or_settle() {
 }
 
 #[compio::test]
+async fn corrupted_management_outcome_cannot_reexecute_or_acknowledge_advance() {
+    use zeroship_core::workflow_coordination::ManagementOutcome;
+
+    let fixture = Fixture::new(AppPolicy::default()).await;
+    let mut slot = fixture.slot(Duration::from_secs(5));
+    let DeliveryOutcome::Settled { creator, .. } =
+        Box::pin(slot.run(&fixture.app, fixture.lease.clone()))
+            .await
+            .unwrap()
+    else {
+        panic!("original advance must complete")
+    };
+    assert_eq!(fixture.probe.starts.get(), 1);
+    let acknowledgements = fixture.metadata.requests.borrow().len();
+    let tx = fixture.service.begin().await.unwrap();
+    tx.database().collection("__zeroship_workflow_job_receipts").unwrap().update(
+        value!({"id":fixture.job.id.as_str(),"app_id":fixture.job.app_id.as_str()}),
+        value!({"outcome":serde_json::to_string(&JobOutcome::Management { outcome: ManagementOutcome::Denied {} }).unwrap()}),
+    ).await.unwrap();
+    tx.commit().await.unwrap();
+    assert!(matches!(
+        Box::pin(slot.run(&fixture.app, fixture.lease.clone())).await,
+        Err(WorkflowServiceError::Internal(_))
+    ));
+    assert_eq!(fixture.probe.starts.get(), 1);
+    assert_eq!(fixture.probe.stops.get(), 1);
+    assert_eq!(fixture.metadata.requests.borrow().len(), acknowledgements);
+    let tx = fixture.service.begin().await.unwrap();
+    tx.database()
+        .collection("__zeroship_workflow_job_receipts")
+        .unwrap()
+        .update(
+            value!({"id":fixture.job.id.as_str(),"app_id":fixture.job.app_id.as_str()}),
+            value!({"outcome":serde_json::to_string(&creator.outcome).unwrap()}),
+        )
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    let DeliveryOutcome::Settled {
+        creator: replay, ..
+    } = Box::pin(slot.run(&fixture.app, fixture.lease.clone()))
+        .await
+        .unwrap()
+    else {
+        panic!("repaired receipt must replay")
+    };
+    assert_eq!(replay, creator);
+    assert_eq!(fixture.probe.starts.get(), 1);
+    assert_eq!(
+        fixture.metadata.requests.borrow().len(),
+        acknowledgements + 1
+    );
+}
+
+#[compio::test]
 async fn lost_ack_and_new_attempt_replay_without_executing_again() {
     let fixture = Fixture::new(AppPolicy::default()).await;
     fixture.metadata.lose_ack.set(true);
@@ -441,7 +496,7 @@ async fn lost_ack_and_new_attempt_replay_without_executing_again() {
     else {
         panic!("expected committed settlement")
     };
-    assert_eq!(creator.outcome, JobOutcome::Completed);
+    assert_eq!(creator.outcome, JobOutcome::Completed {});
     assert_eq!(manager.job_id, fixture.job.id);
     assert_eq!(fixture.metadata.requests.borrow().len(), 2);
     assert_eq!(fixture.probe.starts.get(), 1);

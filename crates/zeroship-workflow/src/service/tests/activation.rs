@@ -206,10 +206,10 @@ async fn replay_and_order(store: Rc<OrmStore>) {
     let newest = Grant::new(&app, &new, 5);
     let newest_receipt = scope.activate_job(&newest).await.unwrap();
     assert_eq!(newest_receipt.job, newest.delivery.job);
-    assert_eq!(newest_receipt.outcome, JobOutcome::Completed);
+    assert_eq!(newest_receipt.outcome, JobOutcome::Completed {});
     let previous = Grant::new(&app, &old, 3);
     let old_receipt = scope.activate_job(&previous).await.unwrap();
-    assert_eq!(old_receipt.outcome, JobOutcome::Completed);
+    assert_eq!(old_receipt.outcome, JobOutcome::Completed {});
     assert_eq!(selected(&service, &app).await, new.id);
     assert_eq!(snapshot(&service, "activations", &app).await.len(), 2);
     assert_eq!(
@@ -245,7 +245,7 @@ async fn replay_and_order(store: Rc<OrmStore>) {
     assert_eq!(selected(&service, &app).await, new.id);
     let settlement = old_receipt.settlement(&retry).unwrap();
     assert_eq!(settlement.delivery.attempt, retry.delivery.attempt);
-    assert_eq!(settlement.outcome, JobOutcome::Completed);
+    assert_eq!(settlement.outcome, JobOutcome::Completed {});
     let run = scope
         .start(&RequestId::mint(), "Example", StartOptions::default())
         .await
@@ -341,7 +341,7 @@ async fn artifacts(store: Rc<OrmStore>) {
         .unwrap();
     assert_eq!(
         scope.activate_job(&grant.retry()).await.unwrap().outcome,
-        JobOutcome::Completed
+        JobOutcome::Completed {}
     );
     assert_eq!(selected(&service, &app).await, deployment.id);
 }
@@ -459,7 +459,7 @@ async fn authority(store: Rc<OrmStore>) {
     assert_unaccepted(&service, &scope, &grant).await;
     assert_eq!(
         scope.activate_job(&grant.retry()).await.unwrap().outcome,
-        JobOutcome::Completed
+        JobOutcome::Completed {}
     );
 }
 
@@ -484,7 +484,7 @@ async fn policy_lock(store: Rc<OrmStore>) {
     assert_unaccepted(&service, &scope, &grant).await;
     assert_eq!(
         scope.activate_job(&grant.retry()).await.unwrap().outcome,
-        JobOutcome::Completed
+        JobOutcome::Completed {}
     );
 }
 
@@ -597,7 +597,7 @@ async fn policy_hold(store: Rc<OrmStore>) {
     assert_eq!(holds[0]["deploy_hash"], value!(null));
     assert_eq!(
         scope.activate_job(&grant.retry()).await.unwrap().outcome,
-        JobOutcome::Completed
+        JobOutcome::Completed {}
     );
     let calls = client.calls.borrow();
     assert!(calls.len() >= 2);
@@ -633,7 +633,7 @@ async fn hold_replies(store: Rc<OrmStore>) {
             .await
             .unwrap()
             .outcome,
-        JobOutcome::Completed
+        JobOutcome::Completed {}
     );
     let holds = snapshot(&reopened, "deployment_holds", &app).await;
     assert_eq!(holds[0]["state"], value!("held"));
@@ -833,7 +833,7 @@ async fn rollback(store: Rc<OrmStore>, fault: ReceiptFault) {
     fault.set(false).await;
     assert_eq!(
         scope.activate_job(&grant.retry()).await.unwrap().outcome,
-        JobOutcome::Completed
+        JobOutcome::Completed {}
     );
     assert_eq!(selected(&service, &app).await, second.id);
 }

@@ -192,7 +192,7 @@ async fn activate(scope: &AppWorkflows, deploy: &DeployRegistration, revision: i
     );
     assert_eq!(
         scope.activate_job(&grant).await.unwrap().outcome,
-        JobOutcome::Completed
+        JobOutcome::Completed {}
     );
 }
 
@@ -253,7 +253,7 @@ async fn replay(store: Rc<OrmStore>) {
     activate(&scope, &deployment, 1).await;
     let grant = Grant::cron(&app, &deployment, &ScheduleId::mint(), 1, 1000);
     let receipt = scope.cron_job(&grant).await.unwrap();
-    assert_eq!(receipt.outcome, JobOutcome::Completed);
+    assert_eq!(receipt.outcome, JobOutcome::Completed {});
     let tx = service.begin().await.unwrap();
     let runs = journal_rows(&tx, "runs", json!({"app_id":app.as_str()})).await;
     assert_eq!(runs.len(), 1);
@@ -472,7 +472,7 @@ async fn overlap(store: Rc<OrmStore>) {
     finish_run(&service, &app, true).await;
     let skipped = Grant::cron(&app, &deployment, &schedule, 1, 2000);
     let skipped_receipt = scope.cron_job(&skipped).await.unwrap();
-    assert_eq!(skipped_receipt.outcome, JobOutcome::Rejected);
+    assert_eq!(skipped_receipt.outcome, JobOutcome::Rejected {});
     assert_eq!(count(&service, &app, "runs").await, 2);
     finish_run(&service, &app, false).await;
     assert_eq!(
@@ -482,7 +482,7 @@ async fn overlap(store: Rc<OrmStore>) {
     let next = Grant::cron(&app, &deployment, &schedule, 1, 3000);
     assert_eq!(
         scope.cron_job(&next).await.unwrap().outcome,
-        JobOutcome::Completed
+        JobOutcome::Completed {}
     );
     let tx = service.begin().await.unwrap();
     let rows = journal_rows(
@@ -573,7 +573,7 @@ async fn capacity(store: Rc<OrmStore>) {
         .unwrap();
     assert_eq!(
         scope.cron_job(&retry.retry()).await.unwrap().outcome,
-        JobOutcome::Completed
+        JobOutcome::Completed {}
     );
 }
 
@@ -881,7 +881,7 @@ async fn rollback(store: Rc<OrmStore>, fault: ReceiptFault) {
     fault.set(false).await;
     assert_eq!(
         scope.cron_job(&grant.retry()).await.unwrap().outcome,
-        JobOutcome::Completed
+        JobOutcome::Completed {}
     );
     for table in [
         "schedules",
@@ -1027,6 +1027,6 @@ async fn held_authority(store: Rc<OrmStore>, expire: bool) {
             .await
             .unwrap()
             .outcome,
-        JobOutcome::Completed
+        JobOutcome::Completed {}
     );
 }

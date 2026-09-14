@@ -531,6 +531,14 @@ impl Queue {
                             }
                             return Ok(Retention::Ready(receipt));
                         }
+                        if matches!(
+                            delivery.job.operation,
+                            zeroship_core::workflow_jobs::JobOperation::Management { .. }
+                        ) {
+                            // Management settlement must atomically link its command,
+                            // order and barrier before the queue can acknowledge it.
+                            return Err(Error::Unavailable);
+                        }
                         let observed = authorize(tx.clone()).await?;
                         let sample = self.clock.sample().await?;
                         cap_live_delivery(budget, assignment, observed, &job, sample)?;
@@ -590,6 +598,9 @@ impl Queue {
     ) -> Result<PreparedSettlement<'a>, Error> {
         let delivery = &settlement.delivery;
         bound(assignment, delivery)?;
+        if !settlement.outcome.valid_for(&delivery.job.operation) {
+            return Err(Error::Invalid);
+        }
         if settlement.successors.len() > self.options.max_successors {
             return Err(Error::Capacity);
         }

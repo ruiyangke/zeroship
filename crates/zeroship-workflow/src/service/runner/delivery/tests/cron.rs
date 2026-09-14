@@ -62,7 +62,7 @@ async fn cron_lost_ack_and_redelivery_publish_once_without_starting_executor() {
     else {
         panic!("cron acceptance must settle its receipt");
     };
-    assert_eq!(creator.outcome, JobOutcome::Completed);
+    assert_eq!(creator.outcome, JobOutcome::Completed {});
     assert_eq!(manager.job_id, lease.delivery.job.id);
     let publications = fixture.app.pending_jobs(None, 10).await.unwrap();
     assert_eq!(publications.len(), before.len() + 1);

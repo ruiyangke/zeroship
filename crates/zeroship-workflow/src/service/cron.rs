@@ -359,9 +359,9 @@ impl AppWorkflows {
                     })
                     .await?;
                 let outcome = if skip {
-                    JobOutcome::Rejected
+                    JobOutcome::Rejected {}
                 } else {
-                    JobOutcome::Completed
+                    JobOutcome::Completed {}
                 };
                 let receipt = delivery::finish(&tx, job, outcome, now).await?;
                 authority.check(self)?;
@@ -396,8 +396,8 @@ pub(super) async fn receipt(
         return Err(invalid());
     }
     match receipt.outcome {
-        JobOutcome::Completed if occurrence.run_id.as_deref() == Some(cron.run_id.as_str()) => {}
-        JobOutcome::Rejected if occurrence.run_id.is_none() => {}
+        JobOutcome::Completed {} if occurrence.run_id.as_deref() == Some(cron.run_id.as_str()) => {}
+        JobOutcome::Rejected {} if occurrence.run_id.is_none() => {}
         _ => return Err(invalid()),
     }
     Ok(Some(receipt))

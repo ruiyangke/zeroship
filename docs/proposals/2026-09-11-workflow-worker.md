@@ -690,8 +690,11 @@ journal-only commands, reconciliation and collection carry none. Management name
 its lifecycle revision and a closed resolved command, including the immutable
 target for a latest restart. Shared restart validation derives the effective
 policy before that target is selected.
-`JobOutcome` contains `Completed`, `Waiting` and `Rejected`; successor jobs carry
-further availability. Activation names its platform revision; cron names the
+`JobOutcome` is a closed tagged object: `Completed`, `Waiting`, `Rejected`, or
+`Management` containing the closed lifecycle outcome. Generic results belong to
+non-management jobs; a management job requires its lifecycle result. Unknown
+fields and the former string shape are refused. Successor jobs carry further
+availability. Activation names its platform revision; cron names the
 logical schedule identity and bundle declaration name alongside the occurrence's
 request, run, revision and instant. The input-free registration and activation
 envelopes live in `workflow_schedules.rs`. Creator activation and cron acceptance
@@ -1273,6 +1276,25 @@ the creator independently rejects gaps and changed identities, and records durab
 refusals in that same ordering. Its attempt captures the delivery lease and policy
 before waiting for the app lock or performing I/O.
 
+The following native models are planned for delivered management. They replace
+the separate worker inbox with queue linkage; the existing inbox does not yet
+provide these guarantees. Every table keeps `id` as its sole primary key and uses
+unique indexes for scoped domain identities.
+
+| Owner and model | Planned durable identity and fields |
+| --- | --- |
+| Manager `management` | Use the job identity as `id`, with scoped job linkage. Preserve the original request and actor separately from the resolved job command. Require run identity and management revision, unique app/request and app/run/revision, a derived `blocks_execution` field and the closed outcome. Remove the separate run-state and inbox-ACK fields when queue settlement owns acknowledgement. |
+| Manager `management_scopes` | Opaque typed `id`, unique app/run identity, accepted revision and settled revision. It has no creator-run foreign key. |
+| Manager `jobs` | Add native operation-kind and optional run-identity projections for relational eligibility. Validate them against the immutable specification and digest. The linked command supplies management revision. |
+| Creator `management_receipts` | Link its job identity to the exact job receipt; retain app/request uniqueness and add required requested-run identity and management revision, unique app/run/revision. Preserve the resolved identity digest and closed outcome. Requested-run identity has no run foreign key, so `NotFound` needs no invented run. |
+| Creator `management_scopes` | Opaque typed `id`, unique app/requested-run identity and the last applied management revision. It survives run and history retention. |
+
+Creator application advances its management revision for both applied commands
+and durable lifecycle refusals. Gaps, substituted identities and unknown older
+commands cannot advance it. Completed job replay must find matching management
+history, while allowing the scope to have advanced since that receipt. Missing
+history is corruption, never permission to reapply a lifecycle change.
+
 Pause/cancel/restart can provisionally block conflicting execution jobs. Management
 and required reconciliation remain deliverable so the barrier cannot prevent
 its own resolution. Barrier ownership includes command identity and lifecycle
@@ -1284,6 +1306,17 @@ After settlement, remove the matching provisional barrier and let creator contro
 state govern later execution. A blanket persistent barrier would also suppress
 the Advance work needed to finish cancellation, compensation or interrupted-task
 recovery. Filter provisional barriers before applying the queue candidate limit.
+
+An unsettled blocking command is its own barrier. Candidate selection admits a
+management command only at the successor of its run's settled revision, and
+excludes Advance jobs with a pending blocking command for that run. Activation,
+cron acceptance and required reconciliation remain eligible. Claim must also
+validate the relevant authoritative command/job linkage under the app lock:
+damaged native run or blocking projections must not hide a barrier from an
+otherwise valid Advance. Scan bounded pages of pending app commands without
+filtering on the projections being verified; a failed or exhausted validation
+cannot grant a delivery. Settlement records the exact command outcome and advances
+the settled revision with the queue receipt, resolving only that command's barrier.
 
 Resume requires current authorized admission. Restart requires source-generation
 quiescence before creating another; generation changes fence timers, children
@@ -1379,9 +1412,13 @@ claim, renewal, settlement and successor insertion enforce retention only for
 operations that actually require code.
 
 The representation is implemented across core, queue, creator readers and metadata
-transport. Management and collection delivery remain explicitly unsupported in the
-creator consumer. Carry the closed management outcome through the exact creator
-receipt and queue settlement. Queue ordering and
+transport. Settlement preflight checks the outcome family, and creator receipts
+also enforce the operation's supported result. Management and collection delivery
+remain explicitly unsupported in the creator consumer. Fresh management settlement
+is refused until it can atomically update the authoritative command, order and
+barrier; a typed lifecycle result alone does not establish that linkage. Carry the
+closed management outcome through the exact creator receipt and that transaction.
+Queue ordering and
 barrier filters need native scalar linkage fields before limiting candidates.
 The existing separate inbox has no production consumer and should disappear with this handler
 cohort; it does not implement the delivered protocol. The manager must never query

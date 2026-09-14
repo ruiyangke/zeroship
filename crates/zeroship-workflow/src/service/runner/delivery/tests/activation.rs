@@ -42,9 +42,9 @@ async fn activation_lost_ack_and_redelivery_never_start_the_executor() {
         panic!("activation must settle its readiness receipt")
     };
     assert_eq!(creator.job, job);
-    assert_eq!(creator.outcome, JobOutcome::Completed);
+    assert_eq!(creator.outcome, JobOutcome::Completed {});
     assert_eq!(manager.job_id, job.id);
-    assert_eq!(manager.outcome, JobOutcome::Completed);
+    assert_eq!(manager.outcome, JobOutcome::Completed {});
     {
         let requests = fixture.metadata.requests.borrow();
         assert_eq!(requests.len(), 2);

@@ -154,7 +154,7 @@ fn job(app: &AppId) -> JobSpec {
 fn settlement(delivery: &Delivery, successors: Vec<JobSpec>) -> Settlement {
     Settlement {
         delivery: delivery.clone(),
-        outcome: JobOutcome::Completed,
+        outcome: JobOutcome::Completed {},
         successors,
     }
 }
@@ -1046,7 +1046,7 @@ async fn atomic_successors_and_replayed_receipts(fixture: &Fixture) {
     );
     assert_replay_authentication(&reopened, &authority, &command, &receipt).await;
     let mut changed = command.clone();
-    changed.outcome = JobOutcome::Waiting;
+    changed.outcome = JobOutcome::Waiting {};
     assert_eq!(
         reopened.settle(&authority, &changed).await,
         Err(Error::Conflict)
@@ -1309,7 +1309,7 @@ async fn cancellation_rolls_back_settlement(
     }
     assert_eq!(
         queue.settle(authority, command).await.unwrap().outcome,
-        JobOutcome::Completed
+        JobOutcome::Completed {}
     );
 }
 

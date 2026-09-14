@@ -405,12 +405,12 @@ async fn activations(fixture: &Fixture) {
 
     let next_delivery = claim(&queue, &owner).await;
     assert_eq!(next_delivery.job, next_activation);
-    settle(&queue, &owner, &next_delivery, JobOutcome::Completed).await;
+    settle(&queue, &owner, &next_delivery, JobOutcome::Completed {}).await;
     let new_delivery = claim(&queue, &owner).await;
     assert_eq!(new_delivery.job, new_job);
-    settle(&queue, &owner, &new_delivery, JobOutcome::Completed).await;
+    settle(&queue, &owner, &new_delivery, JobOutcome::Completed {}).await;
     assert!(queue.claim(&owner).await.unwrap().is_none());
-    settle(&queue, &owner, &old_delivery, JobOutcome::Completed).await;
+    settle(&queue, &owner, &old_delivery, JobOutcome::Completed {}).await;
     let mut remaining = vec![old_kept, old_removed];
     for _ in 0..remaining.len() {
         let delivery = claim(&queue, &owner).await;
@@ -420,7 +420,7 @@ async fn activations(fixture: &Fixture) {
             .unwrap();
         remaining.remove(index);
         assert_eq!(delivery.job.deployment_id(), Some(&first.deployment_id));
-        settle(&queue, &owner, &delivery, JobOutcome::Completed).await;
+        settle(&queue, &owner, &delivery, JobOutcome::Completed {}).await;
     }
     assert!(remaining.is_empty());
     assert!(queue.claim(&owner).await.unwrap().is_none());
@@ -428,7 +428,7 @@ async fn activations(fixture: &Fixture) {
 
 async fn activation_gate(fixture: &Fixture) {
     let (scheduler, queue) = host(fixture).await;
-    for outcome in [JobOutcome::Rejected, JobOutcome::Waiting] {
+    for outcome in [JobOutcome::Rejected {}, JobOutcome::Waiting {}] {
         let app = AppId::mint();
         let metadata = registration(
             &app,
@@ -445,7 +445,7 @@ async fn activation_gate(fixture: &Fixture) {
         settle(&queue, &owner, &delivery, outcome).await;
         let delivery = claim(&queue, &owner).await;
         assert_eq!(delivery.job, recovery_job);
-        settle(&queue, &owner, &delivery, JobOutcome::Completed).await;
+        settle(&queue, &owner, &delivery, JobOutcome::Completed {}).await;
         assert!(queue.claim(&owner).await.unwrap().is_none());
         assert_eq!(
             scoped_rows(fixture, "schedule_occurrences", &app)
@@ -480,10 +480,10 @@ async fn disabled_schedules(fixture: &Fixture) {
     let owner = assignment(&app);
     let delivery = claim(&queue, &owner).await;
     assert_eq!(delivery.job, original_activation);
-    settle(&queue, &owner, &delivery, JobOutcome::Completed).await;
+    settle(&queue, &owner, &delivery, JobOutcome::Completed {}).await;
     let delivery = claim(&queue, &owner).await;
     assert_eq!(delivery.job, pending);
-    settle(&queue, &owner, &delivery, JobOutcome::Completed).await;
+    settle(&queue, &owner, &delivery, JobOutcome::Completed {}).await;
     assert_eq!(claim(&queue, &owner).await.job, disabled_activation);
 }
 
@@ -533,12 +533,12 @@ async fn replicas(fixture: &Fixture) {
     let owner = assignment(&app);
     let delivery = claim(&queue, &owner).await;
     assert_eq!(delivery.job, activation_job);
-    settle(&queue, &owner, &delivery, JobOutcome::Completed).await;
+    settle(&queue, &owner, &delivery, JobOutcome::Completed {}).await;
     jobs.sort_by_key(|job| job.available_at.get());
     for expected in jobs {
         let delivery = claim(&queue, &owner).await;
         assert_eq!(delivery.job, expected);
-        settle(&queue, &owner, &delivery, JobOutcome::Completed).await;
+        settle(&queue, &owner, &delivery, JobOutcome::Completed {}).await;
     }
     assert!(queue.claim(&owner).await.unwrap().is_none());
 }
@@ -995,6 +995,12 @@ async fn orphan_cron(fixture: &Fixture) {
         claim(&queue, &owner).await
     };
     assert_eq!(activation_delivery.job, activation_job);
-    settle(&queue, &owner, &activation_delivery, JobOutcome::Completed).await;
+    settle(
+        &queue,
+        &owner,
+        &activation_delivery,
+        JobOutcome::Completed {},
+    )
+    .await;
     assert_eq!(claim(&queue, &owner).await.job, cron);
 }

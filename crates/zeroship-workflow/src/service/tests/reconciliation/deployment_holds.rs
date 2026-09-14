@@ -211,13 +211,13 @@ async fn completed_replay(store: Rc<OrmStore>) {
     let scope = service.fixture_app(app.clone());
     let seed = start(&scope, 1).await.remove(0);
     let publisher = Publisher::new(&app).await;
-    page(&scope, &seed, &publisher, 1, JobOutcome::Waiting).await;
+    page(&scope, &seed, &publisher, 1, JobOutcome::Waiting {}).await;
     let grant = Grant::new(&seed);
     let receipt = scope
         .reconcile_job(&grant, &publisher, options(1))
         .await
         .unwrap();
-    assert_eq!(receipt.outcome, JobOutcome::Completed);
+    assert_eq!(receipt.outcome, JobOutcome::Completed {});
     let held = intent(&service, &app, &deployment.id).await.0;
     let count = holds_count(&service, &app).await;
     let scan = scans(&service, &app).await.remove(0).0;
@@ -303,8 +303,8 @@ async fn malformed_intent(store: Rc<OrmStore>) {
     let scope = service.fixture_app(app.clone());
     let seed = start(&scope, 1).await.remove(0);
     let publisher = Publisher::new(&app).await;
-    page(&scope, &seed, &publisher, 2, JobOutcome::Waiting).await;
-    page(&scope, &seed, &publisher, 2, JobOutcome::Completed).await;
+    page(&scope, &seed, &publisher, 2, JobOutcome::Waiting {}).await;
+    page(&scope, &seed, &publisher, 2, JobOutcome::Completed {}).await;
     assert_eq!(
         intent(&service, &app, &deployments[0].id).await.0,
         malformed
@@ -330,8 +330,8 @@ async fn malformed_intent(store: Rc<OrmStore>) {
     )
     .await;
     tx.commit().await.unwrap();
-    page(&scope, &seed, &publisher, 2, JobOutcome::Waiting).await;
-    page(&scope, &seed, &publisher, 2, JobOutcome::Completed).await;
+    page(&scope, &seed, &publisher, 2, JobOutcome::Waiting {}).await;
+    page(&scope, &seed, &publisher, 2, JobOutcome::Completed {}).await;
     assert_eq!(
         client.calls.borrow().as_slice(),
         &[
@@ -367,14 +367,14 @@ async fn lost_replies(store: Rc<OrmStore>) {
     let scope = service.fixture_app(app.clone());
     let seed = start(&scope, 1).await.remove(0);
     let publisher = Publisher::new(&app).await;
-    page(&scope, &seed, &publisher, 1, JobOutcome::Waiting).await;
+    page(&scope, &seed, &publisher, 1, JobOutcome::Waiting {}).await;
     assert!(client.calls.borrow().is_empty());
     let grant = Grant::new(&seed);
     let receipt = scope
         .reconcile_job(&grant, &publisher, options(1))
         .await
         .unwrap();
-    assert_eq!(receipt.outcome, JobOutcome::Completed);
+    assert_eq!(receipt.outcome, JobOutcome::Completed {});
     assert_eq!(
         intent(&service, &app, &acquiring.id)
             .await
@@ -444,8 +444,8 @@ async fn recover_lost_release(
         "releasing"
     );
     client.calls.borrow_mut().clear();
-    page(scope, seed, publisher, 1, JobOutcome::Waiting).await;
-    page(scope, seed, publisher, 1, JobOutcome::Completed).await;
+    page(scope, seed, publisher, 1, JobOutcome::Waiting {}).await;
+    page(scope, seed, publisher, 1, JobOutcome::Completed {}).await;
     let released = intent(service, app, deployment).await;
     assert_eq!(released.text("state").unwrap(), "released");
     assert_eq!(released.integer("generation").unwrap(), 1);
@@ -478,9 +478,9 @@ async fn fairness(store: Rc<OrmStore>) {
     let scope = service.fixture_app(app.clone());
     let jobs = start(&scope, 2).await;
     let publisher = Publisher::new(&app).await;
-    page(&scope, &jobs[0], &publisher, 1, JobOutcome::Waiting).await;
+    page(&scope, &jobs[0], &publisher, 1, JobOutcome::Waiting {}).await;
     start(&scope, 1).await;
-    page(&scope, &jobs[0], &publisher, 1, JobOutcome::Waiting).await;
+    page(&scope, &jobs[0], &publisher, 1, JobOutcome::Waiting {}).await;
     assert_eq!(scope.pending_jobs(None, 10).await.unwrap().len(), 1);
     assert_eq!(
         scope
@@ -488,7 +488,7 @@ async fn fairness(store: Rc<OrmStore>) {
             .await
             .unwrap()
             .outcome,
-        JobOutcome::Completed
+        JobOutcome::Completed {}
     );
     assert_eq!(
         intent(&service, &app, &deployments[0].id)
@@ -526,8 +526,8 @@ async fn fairness(store: Rc<OrmStore>) {
         "new publication must wait while holds receive their turn"
     );
     client.hang.borrow_mut().take();
-    page(&scope, &jobs[0], &publisher, 2, JobOutcome::Waiting).await;
-    page(&scope, &jobs[0], &publisher, 2, JobOutcome::Completed).await;
+    page(&scope, &jobs[0], &publisher, 2, JobOutcome::Waiting {}).await;
+    page(&scope, &jobs[0], &publisher, 2, JobOutcome::Completed {}).await;
     assert!(service
         .pending_deployment_holds(&app, None, 10)
         .await
@@ -546,7 +546,7 @@ async fn authority_loss(store: Rc<OrmStore>) {
         let scope = service.fixture_app(app.clone());
         let seed = start(&scope, 1).await.remove(0);
         let publisher = Publisher::new(&app).await;
-        page(&scope, &seed, &publisher, 1, JobOutcome::Waiting).await;
+        page(&scope, &seed, &publisher, 1, JobOutcome::Waiting {}).await;
         let (observed, release) = client.gate();
         let mut grant = Grant::new(&seed);
         if expire_delivery {
@@ -599,15 +599,15 @@ async fn authority_loss(store: Rc<OrmStore>) {
                 .await
                 .unwrap()
                 .outcome,
-            JobOutcome::Completed
+            JobOutcome::Completed {}
         );
         assert_eq!(
             client.calls.borrow().len(),
             1,
             "an interrupted reserved item is retried in a later sweep"
         );
-        page(&scope, &seed, &publisher, 1, JobOutcome::Waiting).await;
-        page(&scope, &seed, &publisher, 1, JobOutcome::Completed).await;
+        page(&scope, &seed, &publisher, 1, JobOutcome::Waiting {}).await;
+        page(&scope, &seed, &publisher, 1, JobOutcome::Completed {}).await;
         assert_eq!(
             intent(&service, &app, &deployment.id)
                 .await
@@ -634,7 +634,7 @@ async fn generation_race(store: Rc<OrmStore>) {
     let scope = service.fixture_app(app.clone());
     let seed = start(&scope, 1).await.remove(0);
     let publisher = Publisher::new(&app).await;
-    page(&scope, &seed, &publisher, 1, JobOutcome::Waiting).await;
+    page(&scope, &seed, &publisher, 1, JobOutcome::Waiting {}).await;
     let (observed, release) = client.gate();
     let grant = Grant::new(&seed);
     let mut recovering = Box::pin(scope.reconcile_job(&grant, &publisher, options(1)));
@@ -663,12 +663,12 @@ async fn generation_race(store: Rc<OrmStore>) {
         2
     );
     release.send(()).unwrap();
-    assert_eq!(recovering.await.unwrap().outcome, JobOutcome::Completed);
+    assert_eq!(recovering.await.unwrap().outcome, JobOutcome::Completed {});
     let pending = intent(&service, &app, &deployment.id).await;
     assert_eq!(pending.text("state").unwrap(), "acquiring");
     assert_eq!(pending.integer("generation").unwrap(), 2);
-    page(&scope, &seed, &publisher, 1, JobOutcome::Waiting).await;
-    page(&scope, &seed, &publisher, 1, JobOutcome::Completed).await;
+    page(&scope, &seed, &publisher, 1, JobOutcome::Waiting {}).await;
+    page(&scope, &seed, &publisher, 1, JobOutcome::Completed {}).await;
     let held = intent(&service, &app, &deployment.id).await;
     assert_eq!(held.text("state").unwrap(), "held");
     assert_eq!(held.integer("generation").unwrap(), 2);
@@ -696,7 +696,7 @@ async fn phase_substitution(store: Rc<OrmStore>) {
     let scope = service.fixture_app(app.clone());
     let seed = start(&scope, 1).await.remove(0);
     let publisher = Publisher::new(&app).await;
-    page(&scope, &seed, &publisher, 1, JobOutcome::Waiting).await;
+    page(&scope, &seed, &publisher, 1, JobOutcome::Waiting {}).await;
     let (observed, release) = client.gate();
     let grant = Grant::new(&seed);
     let mut recovering = Box::pin(scope.reconcile_job(&grant, &publisher, options(2)));
@@ -747,7 +747,7 @@ async fn phase_substitution(store: Rc<OrmStore>) {
             .await
             .unwrap()
             .outcome,
-        JobOutcome::Completed
+        JobOutcome::Completed {}
     );
     assert_eq!(
         client

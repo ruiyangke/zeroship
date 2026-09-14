@@ -70,6 +70,9 @@ impl JobReceipt {
         if lease.delivery().job != self.job {
             return Err(conflict());
         }
+        if !valid_outcome(&self.job.operation, self.outcome) {
+            return Err(invalid());
+        }
         Ok(Settlement {
             delivery: lease.delivery().clone(),
             outcome: self.outcome,
@@ -218,16 +221,7 @@ impl Record {
         match (&self.outcome, self.completed_at) {
             (Some(outcome), Some(_)) => {
                 let outcome = decode(outcome)?;
-                if let JobOperation::Cron { run_id, .. } = &job.operation {
-                    let valid = match outcome {
-                        JobOutcome::Completed => self.run_id.as_deref() == Some(run_id.as_str()),
-                        JobOutcome::Rejected => self.run_id.is_none(),
-                        JobOutcome::Waiting => false,
-                    };
-                    if !valid {
-                        return Err(invalid());
-                    }
-                }
+                self.check_outcome(job, outcome)?;
                 Ok(Some(JobReceipt {
                     job: job.clone(),
                     outcome,
@@ -236,6 +230,44 @@ impl Record {
             (None, None) => Ok(None),
             _ => Err(invalid()),
         }
+    }
+
+    fn check_outcome(
+        &self,
+        job: &JobSpec,
+        outcome: JobOutcome,
+    ) -> Result<(), WorkflowServiceError> {
+        if !valid_outcome(&job.operation, outcome) {
+            return Err(invalid());
+        }
+        if let JobOperation::Cron { run_id, .. } = &job.operation {
+            let valid = match outcome {
+                JobOutcome::Completed {} => self.run_id.as_deref() == Some(run_id.as_str()),
+                JobOutcome::Rejected {} => self.run_id.is_none(),
+                JobOutcome::Waiting {} | JobOutcome::Management { .. } => false,
+            };
+            if !valid {
+                return Err(invalid());
+            }
+        }
+        Ok(())
+    }
+}
+
+const fn valid_outcome(operation: &JobOperation, outcome: JobOutcome) -> bool {
+    if !outcome.valid_for(operation) {
+        return false;
+    }
+    match operation {
+        JobOperation::Activate { .. } => matches!(outcome, JobOutcome::Completed {}),
+        JobOperation::Advance { .. } => true,
+        JobOperation::Cron { .. } => {
+            matches!(outcome, JobOutcome::Completed {} | JobOutcome::Rejected {})
+        }
+        JobOperation::Reconcile {} => {
+            matches!(outcome, JobOutcome::Completed {} | JobOutcome::Waiting {})
+        }
+        JobOperation::Management { .. } | JobOperation::Collect {} => false,
     }
 }
 
@@ -311,7 +343,7 @@ impl AppWorkflows {
             }
         };
         if stale {
-            let receipt = finish(&tx, job, JobOutcome::Rejected, now).await?;
+            let receipt = finish(&tx, job, JobOutcome::Rejected {}, now).await?;
             lease.check(self)?;
             tx.commit().await?;
             return Ok(JobAcceptance::Settled(receipt));
@@ -330,9 +362,9 @@ impl AppWorkflows {
             publication::advance(&tx, &self.app, run_id.as_str(), now).await?;
             let current = lock_run(&mut tx, &self.app, run_id.as_str()).await?;
             let outcome = if parse_state(&current.text("state")?)?.is_terminal() {
-                JobOutcome::Completed
+                JobOutcome::Completed {}
             } else {
-                JobOutcome::Waiting
+                JobOutcome::Waiting {}
             };
             let receipt = finish(&tx, job, outcome, now).await?;
             lease.check(self)?;
@@ -482,9 +514,9 @@ impl AppWorkflows {
                 let claim = claim.authorize(&mut tx)?;
                 let completion = tasks::complete_in(&mut tx, &claim, execution, &digest).await?;
                 let outcome = if completion.state.is_terminal() {
-                    JobOutcome::Completed
+                    JobOutcome::Completed {}
                 } else {
-                    JobOutcome::Waiting
+                    JobOutcome::Waiting {}
                 };
                 let receipt = finish(&tx, &delivery.job, outcome, claim.now).await?;
                 claim.validate_at(tx.now().await?)?;
@@ -729,6 +761,7 @@ pub(super) async fn finish(
     if record.receipt(job)?.is_some() {
         return Err(conflict());
     }
+    record.check_outcome(job, outcome)?;
     let changed = tx.database().collection(job_receipts::Entity::COLLECTION)?.execute(Operation::Update {
         filter:value!({"app_id":job.app_id.as_str(), "id":job.id.as_str(), "outcome":null, "completed_at":null}),
         patch:value!({"outcome":encode(&outcome)?, "completed_at":now}), many:true,

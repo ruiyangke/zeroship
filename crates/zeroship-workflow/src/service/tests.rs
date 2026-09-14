@@ -99,6 +99,7 @@ mod ingress_models;
 mod journal_models;
 mod management;
 mod orm;
+mod outcomes;
 mod output_reads;
 mod output_writes;
 mod payload_models;

@@ -1,7 +1,7 @@
 use super::*;
 use std::future::ready;
 use zeroship_core::{
-    workflow_coordination::{RequestId, RestartTarget, RunOperation},
+    workflow_coordination::{ManagementOutcome, RequestId, RestartTarget, RunOperation, RunState},
     workflow_jobs::ManagementCommand,
 };
 use zeroship_workflow_manager::retention::HoldFuture;
@@ -85,58 +85,7 @@ async fn journal_jobs(fixture: &Fixture) {
         operations.push(management(ManagementCommand::RestartStarted { from }));
     }
     for operation in operations {
-        let app = AppId::mint();
-        queue.register_scope(&app).await.unwrap();
-        let authority = assignment(&app);
-        let spec = JobSpec {
-            id: JobId::mint(),
-            app_id: app.clone(),
-            operation,
-            available_at: 0.try_into().unwrap(),
-        };
-        assert_eq!(spec.deployment_id(), None);
-        assert_eq!(queue.submit(&spec).await.unwrap(), spec);
-        assert_eq!(queue.submit(&spec).await.unwrap(), spec);
-        assert_eq!(
-            queue
-                .submit_authorized(&(&authority).into(), &spec, |_| ready(
-                    Ok(authority.clone())
-                ))
-                .await
-                .unwrap(),
-            spec
-        );
-        let granted = queue.claim(&authority).await.unwrap().unwrap();
-        assert_eq!(granted.delivery().job, spec);
-        let renewed = queue
-            .heartbeat(&authority, granted.delivery())
-            .await
-            .unwrap();
-        let successor = JobSpec {
-            id: JobId::mint(),
-            ..spec.clone()
-        };
-        let settlement = Settlement {
-            delivery: renewed.delivery().clone(),
-            outcome: JobOutcome::Completed,
-            successors: vec![successor.clone()],
-        };
-        let receipt = queue.settle(&authority, &settlement).await.unwrap();
-        assert_eq!(
-            queue.settle(&authority, &settlement).await.unwrap(),
-            receipt
-        );
-        finish(&queue, &authority, &successor).await;
-        assert_eq!(queue.submit(&spec).await.unwrap(), spec);
-        assert!(queue.claim(&authority).await.unwrap().is_none());
-        assert!(
-            rows(fixture, "deployment_holds", value!({"app_id":app.as_str()}))
-                .await
-                .is_empty()
-        );
-        let stored = rows(fixture, "jobs", value!({"app_id":app.as_str()})).await;
-        assert!(!stored.is_empty());
-        assert!(stored.iter().all(|row| row["deployment_id"] == Value::Null));
+        exercise_journal_job(fixture, &queue, operation).await;
     }
 
     let app = AppId::mint();
@@ -156,6 +105,100 @@ async fn journal_jobs(fixture: &Fixture) {
     assert!(rows(fixture, "deployment_holds", value!({}))
         .await
         .is_empty());
+}
+
+async fn exercise_journal_job(fixture: &Fixture, queue: &Queue, operation: JobOperation) {
+    let app = AppId::mint();
+    queue.register_scope(&app).await.unwrap();
+    let authority = assignment(&app);
+    let spec = JobSpec {
+        id: JobId::mint(),
+        app_id: app.clone(),
+        operation,
+        available_at: 0.try_into().unwrap(),
+    };
+    assert_eq!(spec.deployment_id(), None);
+    assert_eq!(queue.submit(&spec).await.unwrap(), spec);
+    assert_eq!(queue.submit(&spec).await.unwrap(), spec);
+    assert_eq!(
+        queue
+            .submit_authorized(&(&authority).into(), &spec, |_| ready(
+                Ok(authority.clone())
+            ))
+            .await
+            .unwrap(),
+        spec
+    );
+    let granted = queue.claim(&authority).await.unwrap().unwrap();
+    assert_eq!(granted.delivery().job, spec);
+    let renewed = queue
+        .heartbeat(&authority, granted.delivery())
+        .await
+        .unwrap();
+    if matches!(spec.operation, JobOperation::Management { .. }) {
+        unsupported_management(fixture, queue, &authority, renewed.delivery()).await;
+        return;
+    }
+    let successor = JobSpec {
+        id: JobId::mint(),
+        ..spec.clone()
+    };
+    let settlement = Settlement {
+        delivery: renewed.delivery().clone(),
+        outcome: JobOutcome::Completed {},
+        successors: vec![successor.clone()],
+    };
+    let receipt = queue.settle(&authority, &settlement).await.unwrap();
+    assert_eq!(
+        queue.settle(&authority, &settlement).await.unwrap(),
+        receipt
+    );
+    finish(queue, &authority, &successor).await;
+    assert_eq!(queue.submit(&spec).await.unwrap(), spec);
+    assert!(queue.claim(&authority).await.unwrap().is_none());
+    assert!(
+        rows(fixture, "deployment_holds", value!({"app_id":app.as_str()}))
+            .await
+            .is_empty()
+    );
+    let stored = rows(fixture, "jobs", value!({"app_id":app.as_str()})).await;
+    assert!(!stored.is_empty());
+    assert!(stored.iter().all(|row| row["deployment_id"] == Value::Null));
+}
+
+async fn unsupported_management(
+    fixture: &Fixture,
+    queue: &Queue,
+    authority: &Assignment,
+    delivery: &zeroship_core::workflow_jobs::Delivery,
+) {
+    for outcome in [
+        ManagementOutcome::Applied {
+            state: RunState::Queued,
+        },
+        ManagementOutcome::NotFound {},
+        ManagementOutcome::Conflict {},
+        ManagementOutcome::Denied {},
+    ] {
+        let settlement = Settlement {
+            delivery: delivery.clone(),
+            outcome: JobOutcome::Management { outcome },
+            successors: vec![job(&delivery.job.app_id, &DeploymentId::mint())],
+        };
+        super::outcomes::refused(fixture, queue, authority, &settlement, Error::Unavailable).await;
+    }
+    for outcome in [
+        JobOutcome::Completed {},
+        JobOutcome::Waiting {},
+        JobOutcome::Rejected {},
+    ] {
+        let settlement = Settlement {
+            delivery: delivery.clone(),
+            outcome,
+            successors: vec![],
+        };
+        super::outcomes::refused(fixture, queue, authority, &settlement, Error::Invalid).await;
+    }
 }
 
 async fn set_projection(fixture: &Fixture, spec: &JobSpec, projection: Value) {
@@ -315,7 +358,7 @@ async fn projection_mismatch(fixture: &Fixture) {
         let grant = queue.claim(&authority).await.unwrap().unwrap();
         let settlement = Settlement {
             delivery: grant.delivery().clone(),
-            outcome: JobOutcome::Completed,
+            outcome: JobOutcome::Completed {},
             successors: vec![],
         };
         for projection in wrong {
@@ -498,7 +541,7 @@ async fn provenance_reclamation(fixture: &Fixture) {
             &authority,
             &Settlement {
                 delivery: renewed.delivery().clone(),
-                outcome: JobOutcome::Waiting,
+                outcome: JobOutcome::Waiting {},
                 successors: vec![],
             },
         )

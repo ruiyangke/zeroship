@@ -227,7 +227,7 @@ async fn enroll(platform: &platform::Platform, http: &Client, url: &str, worker:
 fn settlement(delivery: &Delivery, successors: Vec<JobSpec>) -> Settlement {
     Settlement {
         delivery: delivery.clone(),
-        outcome: JobOutcome::Completed,
+        outcome: JobOutcome::Completed {},
         successors,
     }
 }
@@ -259,10 +259,11 @@ async fn delivery_and_receipts_remain_scoped_across_process_restart_and_placemen
     let (status, body) = fixture.post(endpoints::WORKFLOW_JOB_SETTLE, &command).await;
     assert_eq!(status, StatusCode::OK, "{body}");
     let receipt: SettlementReceipt = serde_json::from_value(body.clone()).unwrap();
+    assert_eq!(body["outcome"], json!({"kind":"completed"}));
     assert_eq!(receipt.job_id, job.id);
     assert_eq!(receipt.app_id, job.app_id);
     assert_eq!(receipt.attempt, original.attempt);
-    assert_eq!(receipt.outcome, JobOutcome::Completed);
+    assert_eq!(receipt.outcome, JobOutcome::Completed {});
     assert_foreign_worker_denied(&fixture, &command).await;
     assert_receipt_replay(&mut fixture, &command, &successor, body).await;
 }
@@ -304,7 +305,7 @@ async fn assert_receipt_replay(
     assert_eq!(fixture.job_snapshot(job).await, before_job);
     assert_eq!(fixture.job_snapshot(successor).await, before_successor);
     let changed = Settlement {
-        outcome: JobOutcome::Rejected,
+        outcome: JobOutcome::Rejected {},
         ..command.clone()
     };
     assert_eq!(
@@ -516,6 +517,45 @@ async fn rejects_incomplete_job_envelopes(fixture: &Fixture) {
     assert!(fixture.job_snapshot(&candidate).await.is_empty());
 }
 
+async fn rejects_invalid_settlement_outcomes(fixture: &Fixture, delivery: &Delivery) {
+    let command = settlement(delivery, Vec::new());
+    let before = fixture.job_snapshot(&delivery.job).await;
+    assert_eq!(before.len(), 1);
+    for outcome in [
+        json!("completed"),
+        json!("waiting"),
+        json!("rejected"),
+        json!({"kind":"completed","result":"private"}),
+        json!({"kind":"waiting","history":[]}),
+        json!({"kind":"rejected","error":"private"}),
+        json!({"kind":"completed","outcome":{"kind":"denied"}}),
+        json!({"kind":"management"}),
+        json!({"kind":"management","outcome":null}),
+        json!({"kind":"management","outcome":{"kind":"applied"}}),
+        json!({"kind":"management","outcome":{"kind":"applied","state":"invented"}}),
+        json!({"kind":"management","outcome":{"kind":"denied","input":"private"}}),
+        // A closed management result still cannot settle an execution job.
+        json!({"kind":"management","outcome":{"kind":"denied"}}),
+    ] {
+        let mut body = json!(command);
+        body["outcome"] = outcome;
+        assert_eq!(
+            fixture.post(endpoints::WORKFLOW_JOB_SETTLE, &body).await,
+            (StatusCode::BAD_REQUEST, json!({"code":"invalid"})),
+        );
+        assert_eq!(fixture.job_snapshot(&delivery.job).await, before);
+    }
+    let mut secondary = json!(command);
+    secondary["managementOutcome"] = json!({"kind":"denied"});
+    assert_eq!(
+        fixture
+            .post(endpoints::WORKFLOW_JOB_SETTLE, &secondary)
+            .await,
+        (StatusCode::BAD_REQUEST, json!({"code":"invalid"})),
+    );
+    assert_eq!(fixture.job_snapshot(&delivery.job).await, before);
+}
+
 #[ntex::test]
 async fn queue_routes_authenticate_before_body_and_reject_open_metadata() {
     let fixture = Fixture::new().await;
@@ -523,6 +563,7 @@ async fn queue_routes_authenticate_before_body_and_reject_open_metadata() {
     fixture.submit(&job).await;
     let delivery = fixture.claim(&job).await;
     rejects_incomplete_job_envelopes(&fixture).await;
+    rejects_invalid_settlement_outcomes(&fixture, &delivery).await;
     for (endpoint, mut body) in [
         (
             endpoints::WORKFLOW_JOB_SUBMIT,
@@ -611,6 +652,13 @@ async fn queue_routes_authenticate_before_body_and_reject_open_metadata() {
         .0,
         StatusCode::UNAUTHORIZED
     );
+    let command = settlement(&delivery, Vec::new());
+    let (status, body) = fixture.post(endpoints::WORKFLOW_JOB_SETTLE, &command).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let receipt: SettlementReceipt = serde_json::from_value(body.clone()).unwrap();
+    assert_eq!(receipt.job_id, job.id);
+    assert_eq!(receipt.outcome, JobOutcome::Completed {});
+    assert_eq!(body["outcome"], json!({"kind":"completed"}));
 }
 
 async fn rejects_before_body(address: std::net::SocketAddr, endpoint: ServiceEndpoint) {

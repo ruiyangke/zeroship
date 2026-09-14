@@ -405,7 +405,7 @@ async fn stable_rotation(fixture: &Fixture) {
     assert_eq!(rotation(&database, &app).await, claimed);
     let command = Settlement {
         delivery: renewed,
-        outcome: JobOutcome::Completed,
+        outcome: JobOutcome::Completed {},
         successors: Vec::new(),
     };
     let receipt = queue.settle(&authority, &command).await.unwrap();
