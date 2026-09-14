@@ -7,9 +7,7 @@
 //   e:{...}                — structured error envelope (zeroship extension)
 //   d:{}                   — done
 //
-// These tests drive the synthetic-entry shim's SSE encoder over the
-// `/__zeroship/v1/<id>` wire (HTTP POST). Async generators returned by
-// procedures are piped through the shim's `_zsRpcAndRespond` helper.
+// These tests drive the native iterator encoder over the RPC HTTP wire.
 
 use crate::common;
 use common::*;
@@ -113,7 +111,7 @@ fn stream_object_output_emits_two_lines() {
 }
 
 #[test]
-fn stream_mid_error_emits_envelope_then_done() {
+fn stream_internal_error_is_redacted_before_terminal_frame() {
     // Mid-stream throw emits an `e:` envelope with structured metadata
     // followed by a final `d:{}`. message/name are mandatory; code,
     // details, retryable are optional pass-throughs.
@@ -139,10 +137,11 @@ fn stream_mid_error_emits_envelope_then_done() {
     let env_json = &r[e_idx + 2..e_idx + e_line_end];
     let parsed: serde_json::Value = serde_json::from_str(env_json)
         .unwrap_or_else(|_| panic!("e: envelope not JSON: {}", env_json));
-    assert_eq!(parsed["message"], "kaboom");
-    assert_eq!(parsed["code"], "INTERNAL");
-    assert_eq!(parsed["details"]["hint"], "demo");
-    assert_eq!(parsed["retryable"], false);
+    assert_eq!(parsed["message"], "internal error");
+    assert!(parsed["request_id"].is_string());
+    assert!(parsed.get("details").is_none());
+    assert!(parsed.get("retryable").is_none());
+    assert!(!r.contains("kaboom") && !r.contains("demo"));
     let after_err = &r[e_idx + e_line_end..];
     assert!(after_err.contains("d:{}\n"), "expected d:{{}} after error: {}", r);
 }

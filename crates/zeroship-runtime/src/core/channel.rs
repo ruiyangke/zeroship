@@ -146,6 +146,14 @@ struct StreamInner {
     error: Option<String>,
     done: bool,
     waker: Option<Waker>,
+    consumer_callback: Option<Rc<dyn Fn(StreamConsumerEvent)>>,
+}
+
+/// Consumer activity that can release producer backpressure or close its source.
+#[derive(Clone, Copy)]
+pub(crate) enum StreamConsumerEvent {
+    Drained,
+    Closed,
 }
 
 impl Drop for StreamInner {
@@ -183,6 +191,10 @@ pub struct StreamWriter {
 }
 
 impl StreamWriter {
+    pub(crate) fn set_consumer_callback(&self, callback: Rc<dyn Fn(StreamConsumerEvent)>) {
+        self.inner.borrow_mut().consumer_callback = Some(callback);
+    }
+
     /// Push a chunk into the buffer and wake the reader. Returns an explicit
     /// status so the producer knows whether the chunk was accepted — a
     /// previously-unbounded queue could silently accumulate gigabytes if the
@@ -318,6 +330,11 @@ impl StreamReader {
         let n = chunk.len();
         inner.buffered_bytes = inner.buffered_bytes.saturating_sub(n);
         STREAM_GLOBAL_BUFFERED.fetch_sub(n, Ordering::Relaxed);
+        let callback = inner.consumer_callback.clone();
+        drop(inner);
+        if let Some(callback) = callback {
+            callback(StreamConsumerEvent::Drained);
+        }
         Some(chunk)
     }
 
@@ -376,6 +393,27 @@ impl StreamReader {
     }
 }
 
+impl Drop for StreamReader {
+    fn drop(&mut self) {
+        use std::sync::atomic::Ordering;
+        let mut inner = self.inner.borrow_mut();
+        let callback = if inner.done || inner.overflow {
+            None
+        } else {
+            inner.consumer_callback.take()
+        };
+        inner.done = true;
+        let released = inner.buffered_bytes;
+        inner.chunks.clear();
+        inner.buffered_bytes = 0;
+        STREAM_GLOBAL_BUFFERED.fetch_sub(released, Ordering::Relaxed);
+        drop(inner);
+        if let Some(callback) = callback {
+            callback(StreamConsumerEvent::Closed);
+        }
+    }
+}
+
 /// Future that resolves when the StreamReader has data or is done.
 pub struct WaitForData<'a> {
     reader: &'a StreamReader,
@@ -413,6 +451,7 @@ pub fn stream_buffer_with_cap(max_bytes: usize) -> (StreamWriter, StreamReader) 
         error: None,
         done: false,
         waker: None,
+        consumer_callback: None,
     }));
     (
         StreamWriter { inner: inner.clone() },
@@ -491,6 +530,36 @@ mod tests {
         GLOBAL_COUNTER_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    #[test]
+    fn consumer_notifications_release_the_channel_borrow_before_calling_producer() {
+        let _guard = lock_global_counter();
+        let (writer, reader) = stream_buffer_with_cap(100);
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let observed = events.clone();
+        let weak = Rc::downgrade(&writer.inner);
+        writer.set_consumer_callback(Rc::new(move |event| {
+            let inner = weak.upgrade().unwrap();
+            let state = inner.borrow();
+            observed.borrow_mut().push((matches!(event, StreamConsumerEvent::Closed), state.buffered_bytes));
+        }));
+        assert_eq!(writer.push(vec![1; 30]), StreamPushResult::Ok);
+        assert_eq!(reader.pop(), Some(vec![1; 30]));
+        assert_eq!(writer.push(vec![2; 40]), StreamPushResult::Ok);
+        drop(reader);
+        assert_eq!(*events.borrow(), [(false, 0), (true, 0)]);
+        assert_eq!(writer.buffered_bytes(), 0);
+        assert_eq!(writer.push(vec![3]), StreamPushResult::Closed);
+    }
+
+    #[test]
+    fn completed_reader_does_not_cancel_its_source_on_drop() {
+        let _guard = lock_global_counter();
+        let (writer, reader) = stream_buffer_with_cap(100);
+        writer.set_consumer_callback(Rc::new(|_| panic!("completed stream was cancelled")));
+        writer.close();
+        drop(reader);
     }
 
     #[test]

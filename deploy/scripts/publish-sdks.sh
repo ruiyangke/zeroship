@@ -15,7 +15,6 @@ publish_packages=(
   "sdks/mcp"
   "sdks/db"
   "packages/zero-migrate"
-  "sdks/bootstrap"
   "sdks/auth"
   "sdks/kv"
   "sdks/storage"

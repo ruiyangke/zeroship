@@ -1,43 +1,20 @@
-//! Rust-side response-body forwarder.
+//! Response readers forwarded through native body channels.
 //!
-//! Replaces the JS pump in `embed/fetch.js`'s `__zsBeginStreamForward`.
-//! When the kernel decides a Response with a ReadableStream body should
-//! ship to the wire, it calls `begin_forward(scope, response_obj)`. We:
+//! The runtime retains a reader, converts its results to bytes and delivers
+//! them through the attached writer. Uploads and RPC iterators pause while
+//! the consumer's buffer is full. Reader methods use the public stream API
+//! so creator-supplied stream implementations can participate.
 //!
-//!   1. Allocate a stream_id (used by the kernel to match this forward
-//!      to the eventual `direct_writer` attachment).
-//!   2. Lock the body via `getReader()` (the public spec API, so any
-//!      class that implements the WHATWG Streams surface — native or
-//!      user-defined — works).
-//!   3. Drive `reader.read()` in a Rust-side promise-reaction loop:
-//!      each `read()` returns a Promise; we attach `.then(on_chunk,
-//!      on_error)` callbacks. on_chunk normalises the chunk to bytes
-//!      and pushes through the forwarder; on_error errors it; the
-//!      `done` flag closes it.
-//!   4. The forwarder either buffers chunks (until the kernel attaches
-//!      a `direct_writer`) or pushes them straight to that writer's
-//!      channel.
-//!
-//! No JS-visible namespace, no `__streams.{create,enqueue,close,error}`,
-//! no `OpResult::StreamChunk` round-trip. Everything stays in V8 memory
-//! + a Rust-owned channel.
-//!
-//! ## Why getReader (not native-internal API)
-//!
-//! `crate::streams::readable_default_reader::acquire_readable_stream_default_reader`
-//! is a faster path that bypasses the JS-visible reader class — but it
-//! only works on NATIVE ReadableStreams. Custom stream classes that
-//! satisfy the spec surface but aren't backed by `RSState` would
-//! fail the brand check. The kernel must accept any spec-compliant
-//! Response body, so we go through the public surface.
-//!
-//! The cost is one extra V8 frame per chunk: getReader + each read()
-//! is a method call. For a 1MB streamed response in 64KB chunks that's
-//! 16 extra V8 frames; negligible compared to the actual pump work.
+//! Promise callbacks identify the live forwarder without retaining its reader.
+//! RPC cancellation and deadlines follow the response body after headers,
+//! and source cancellation runs in the captured request context.
 
 use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::rc::Rc;
+use std::time::Instant;
+
+use crate::rpc::lifetime::{Cancellation, RequestLifetime};
 
 use crate::channel::{StreamPushResult, StreamWriter};
 use crate::state::SharedState;
@@ -65,8 +42,7 @@ pub struct ResponseForwarderInner {
     pub direct_writer: Option<StreamWriter>,
     /// The locked `reader` (from `getReader()`). Persisted so a paused
     /// read loop can be re-armed by `resume_read` after the consumer drains
-    /// the downstream buffer. `None` for a wire-path (response-body)
-    /// forwarder that never pauses.
+    /// the downstream buffer, or cancelled when the response consumer leaves.
     pub reader: Option<v8::Global<v8::Object>>,
     /// True while the read loop is suspended for backpressure: the writer
     /// buffer crossed the high-water mark, so we stopped re-arming
@@ -75,14 +51,14 @@ pub struct ResponseForwarderInner {
     pub paused: bool,
     /// Continuation context captured when the app supplied the stream.
     pub continuation_context: Option<v8::Global<v8::Value>>,
-    /// Whether this forwarder applies upload backpressure (pause/resume on
-    /// the buffer high/low-water marks). ONLY the `env.storage.putStream`
-    /// path (`begin_forward_stream`) enables it, because its consumer
-    /// (`StreamReaderSource`) calls `request_resume`. The wire response-body
-    /// path (`begin_forward`) leaves this `false`: its TCP consumer does not
-    /// re-arm, so it must keep the original eager read loop (overflow-capped),
-    /// never pausing.
+    /// Pause the producer until its consumer drains the channel. Enabled for
+    /// uploads and native RPC iterators. Ordinary Response bodies retain their
+    /// existing read scheduling.
     pub backpressure: bool,
+    cancel_requested: Option<Cancellation>,
+    request: Option<RequestLifetime>,
+    rpc_framing: bool,
+    error: Option<String>,
 }
 
 /// Resume the read loop on a forwarder that paused for backpressure. Called
@@ -91,6 +67,10 @@ pub struct ResponseForwarderInner {
 /// is gone, closed, not paused, or has no persisted reader.
 pub fn resume_read(scope: &mut v8::PinScope, state: &SharedState, stream_id: u32) {
     let Some(fwd) = get(state, stream_id) else { return };
+    if fwd.borrow().cancel_requested.is_some() {
+        cancel_reader(scope, state, stream_id, &fwd);
+        return;
+    }
     let (reader, continuation_context) = {
         let mut inner = fwd.borrow_mut();
         if inner.closed || !inner.paused {
@@ -125,6 +105,61 @@ fn register(state: &SharedState, stream_id: u32, fwd: ResponseForwarder) {
 /// Look up a forwarder by stream_id.
 pub fn get(state: &SharedState, stream_id: u32) -> Option<ResponseForwarder> {
     state.borrow().response_forwarders.get(&stream_id).cloned()
+}
+
+/// Transfer cancellation ownership from RPC invocation to its response body.
+pub(crate) fn retain_request(
+    scope: &mut v8::PinScope,
+    state: &SharedState,
+    stream_id: u32,
+    request: RequestLifetime,
+) {
+    let Some(fwd) = get(state, stream_id) else { return; };
+    if fwd.borrow().closed { return; }
+    let signal = request.signal.local(scope);
+    fwd.borrow_mut().request = Some(request);
+    let weak_state = Rc::downgrade(state);
+    crate::dom::abort_signal::add_abort_algorithm(scope, signal, Box::new(move || {
+        if let Some(state) = weak_state.upgrade() {
+            request_cancel(&state, stream_id, Cancellation::Cancelled);
+        }
+    }));
+    if crate::dom::abort_signal::is_aborted(scope, signal) {
+        request_cancel(state, stream_id, Cancellation::Cancelled);
+    }
+    state.borrow().notify_pump();
+}
+
+pub(crate) fn owns_request(state: &SharedState, stream_id: u32) -> bool {
+    get(state, stream_id).is_some_and(|fwd| fwd.borrow().request.is_some())
+}
+
+pub(crate) fn next_deadline(state: &SharedState) -> Option<Instant> {
+    state.borrow().response_forwarders.values().filter_map(|fwd| {
+        let inner = fwd.borrow();
+        if inner.closed || inner.cancel_requested.is_some() { return None; }
+        inner.request.as_ref().and_then(|request| request.deadline)
+    }).min()
+}
+
+pub(crate) fn poll_cancellation(state: &SharedState, cx: &mut std::task::Context<'_>) -> bool {
+    state.borrow().response_forwarders.values().any(|fwd| {
+        let inner = fwd.borrow();
+        if inner.closed || inner.cancel_requested.is_some() { return false; }
+        inner.request.as_ref().is_some_and(|request| {
+            request.cancel.register_waker(cx.waker());
+            request.cancel.is_cancelled()
+        })
+    })
+}
+
+pub(crate) fn queue_cancellations(state: &SharedState, now: Instant) {
+    let cancelled: Vec<_> = state.borrow().response_forwarders.iter().filter_map(|(&id, fwd)| {
+        let inner = fwd.borrow();
+        if inner.closed || inner.cancel_requested.is_some() { return None; }
+        inner.request.as_ref()?.cancellation(now).map(|reason| (id, reason))
+    }).collect();
+    for (id, reason) in cancelled { request_cancel(state, id, reason); }
 }
 
 /// Remove a forwarder from the registry. Called by the kernel after
@@ -237,6 +272,20 @@ fn forward_from_readable(
         v8::Global::new(tc, reader_obj)
     };
 
+    let reader = v8::Local::new(scope, reader_global);
+    begin_forward_reader(scope, reader, if backpressure { ForwardMode::Upload } else { ForwardMode::Body })
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ForwardMode { Body, Upload, Rpc }
+
+/// Forward a host-supplied reader through the same body channel as a Response.
+pub(crate) fn begin_forward_reader(
+    scope: &mut v8::PinScope,
+    reader: v8::Local<v8::Object>,
+    mode: ForwardMode,
+) -> Result<u32, String> {
+    let reader_global = v8::Global::new(scope, reader);
     // Allocate stream_id.
     let state: SharedState = scope
         .get_slot::<SharedState>()
@@ -252,7 +301,8 @@ fn forward_from_readable(
         let mut inner = fwd.borrow_mut();
         inner.reader = Some(reader_global.clone());
         inner.continuation_context = Some(continuation_context);
-        inner.backpressure = backpressure;
+        inner.backpressure = mode != ForwardMode::Body;
+        inner.rpc_framing = mode == ForwardMode::Rpc;
     }
     register(&state, stream_id, fwd.clone());
 
@@ -318,12 +368,10 @@ fn schedule_next_read(
         v8::Global::new(tc, promise)
     };
 
-    // Build on_chunk + on_error closures. We stash all the captures
-    // we'll need in External-backed v8::Functions so the promise's
-    // reaction list keeps them alive without us holding Rc<>s on the
-    // Rust side.
-    let on_chunk = make_on_chunk_callback(scope, reader_global.clone(), fwd.clone(), stream_id, state.clone());
-    let on_error = make_on_error_callback(scope, fwd, stream_id, state);
+    // Promise reactions carry the stream identifier. The registry owns
+    // the reader only while the forwarder is live.
+    let on_chunk = make_on_chunk_callback(scope, stream_id);
+    let on_error = make_on_error_callback(scope, stream_id);
 
     let promise = v8::Local::new(scope, &promise_global);
     promise.then2(scope, on_chunk, on_error);
@@ -333,77 +381,16 @@ fn schedule_next_read(
 // on_chunk / on_error — promise-reaction callbacks
 // ---------------------------------------------------------------------------
 
-/// Captures for the on_chunk callback. Stored in an External tied to
-/// the v8::Function's data slot.
-struct OnChunkCaptures {
-    reader: v8::Global<v8::Object>,
-    fwd: ResponseForwarder,
-    stream_id: u32,
-    state: SharedState,
+// Callback data contains only a stream identifier. Looking up the live
+// forwarder avoids rooting its reader through the promise reaction itself.
+fn make_on_chunk_callback<'s>(scope: &mut v8::PinScope<'s, '_>, stream_id: u32) -> v8::Local<'s, v8::Function> {
+    let id = v8::Integer::new_from_unsigned(scope, stream_id);
+    v8::FunctionTemplate::builder(on_chunk_callback).data(id.into()).build(scope).get_function(scope).unwrap()
 }
 
-/// Captures for the on_error callback.
-struct OnErrorCaptures {
-    fwd: ResponseForwarder,
-    stream_id: u32,
-    state: SharedState,
-}
-
-fn make_on_chunk_callback<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
-    reader: v8::Global<v8::Object>,
-    fwd: ResponseForwarder,
-    stream_id: u32,
-    state: SharedState,
-) -> v8::Local<'s, v8::Function> {
-    let captures = Box::new(OnChunkCaptures { reader, fwd, stream_id, state });
-    let raw = Box::into_raw(captures);
-    let raw_addr = raw as usize;
-    let ext = v8::External::new(scope, raw as *mut std::ffi::c_void);
-
-    let tmpl = v8::FunctionTemplate::builder(on_chunk_callback)
-        .data(ext.into())
-        .build(scope);
-    let f = tmpl.get_function(scope).unwrap();
-
-    // Tie cleanup to the function's lifetime: when V8 GCs the wrapper
-    // (which it will once the promise's reaction is consumed), we
-    // drop the Box.
-    let weak = v8::Weak::with_guaranteed_finalizer(
-        scope,
-        f,
-        Box::new(move || unsafe {
-            drop(Box::from_raw(raw_addr as *mut OnChunkCaptures));
-        }),
-    );
-    std::mem::forget(weak);
-    f
-}
-
-fn make_on_error_callback<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
-    fwd: ResponseForwarder,
-    stream_id: u32,
-    state: SharedState,
-) -> v8::Local<'s, v8::Function> {
-    let captures = Box::new(OnErrorCaptures { fwd, stream_id, state });
-    let raw = Box::into_raw(captures);
-    let raw_addr = raw as usize;
-    let ext = v8::External::new(scope, raw as *mut std::ffi::c_void);
-
-    let tmpl = v8::FunctionTemplate::builder(on_error_callback)
-        .data(ext.into())
-        .build(scope);
-    let f = tmpl.get_function(scope).unwrap();
-    let weak = v8::Weak::with_guaranteed_finalizer(
-        scope,
-        f,
-        Box::new(move || unsafe {
-            drop(Box::from_raw(raw_addr as *mut OnErrorCaptures));
-        }),
-    );
-    std::mem::forget(weak);
-    f
+fn make_on_error_callback<'s>(scope: &mut v8::PinScope<'s, '_>, stream_id: u32) -> v8::Local<'s, v8::Function> {
+    let id = v8::Integer::new_from_unsigned(scope, stream_id);
+    v8::FunctionTemplate::builder(on_error_callback).data(id.into()).build(scope).get_function(scope).unwrap()
 }
 
 fn on_chunk_callback(
@@ -411,13 +398,10 @@ fn on_chunk_callback(
     args: v8::FunctionCallbackArguments,
     _rv: v8::ReturnValue,
 ) {
-    // Recover captures from the data slot.
-    let data = args.data();
-    let ext = match v8::Local::<v8::External>::try_from(data) {
-        Ok(e) => e,
-        Err(_) => return,
-    };
-    let captures: &OnChunkCaptures = unsafe { &*(ext.value() as *const OnChunkCaptures) };
+    let Some(stream_id) = args.data().uint32_value(scope) else { return; };
+    let Some(state) = scope.get_slot::<SharedState>().cloned() else { return; };
+    let Some(fwd) = get(&state, stream_id) else { return; };
+    if fwd.borrow().closed || fwd.borrow().cancel_requested.is_some() { return; }
 
     // The argument is `{ value, done }` (the Promise resolution of
     // `reader.read()`).
@@ -426,9 +410,9 @@ fn on_chunk_callback(
         Ok(o) => o,
         Err(_) => {
             error_forwarder(
-                &captures.fwd,
-                &captures.state,
-                captures.stream_id,
+                &fwd,
+                &state,
+                stream_id,
                 "read() resolved with non-object",
             );
             return;
@@ -442,7 +426,7 @@ fn on_chunk_callback(
         .unwrap_or(false);
 
     if done {
-        close_forwarder(&captures.fwd, &captures.state, captures.stream_id);
+        close_forwarder(&fwd, &state, stream_id);
         return;
     }
 
@@ -451,9 +435,9 @@ fn on_chunk_callback(
         Some(v) => v,
         None => {
             error_forwarder(
-                &captures.fwd,
-                &captures.state,
-                captures.stream_id,
+                &fwd,
+                &state,
+                stream_id,
                 "read() result has no `value`",
             );
             return;
@@ -486,7 +470,7 @@ fn on_chunk_callback(
         value.to_rust_string_lossy(scope).into_bytes()
     };
 
-    if !push_chunk(&captures.fwd, &captures.state, captures.stream_id, bytes) {
+    if !push_chunk(&fwd, &state, stream_id, bytes) {
         return;
     }
 
@@ -498,37 +482,31 @@ fn on_chunk_callback(
     // overflow it. A wire-path forwarder (no high-water hit, or already
     // direct-draining to the TCP channel faster than V8 produces) simply
     // never pauses.
-    if should_pause(&captures.fwd) {
-        captures.fwd.borrow_mut().paused = true;
+    if should_pause(&fwd) {
+        fwd.borrow_mut().paused = true;
         return;
     }
 
-    // Re-arm: schedule the next read. We clone the captures' fields
-    // because schedule_next_read consumes them; the captures struct
-    // itself stays alive for as long as the original Function does.
+    // Re-arm using the reader still owned by the live forwarder.
+    let Some(reader) = fwd.borrow().reader.clone() else { return; };
     schedule_next_read(
         scope,
-        captures.reader.clone(),
-        captures.fwd.clone(),
-        captures.stream_id,
-        captures.state.clone(),
+        reader,
+        fwd.clone(),
+        stream_id,
+        state.clone(),
     );
 }
 
-/// True if the forwarder should pause its read loop for backpressure: it has a
-/// `direct_writer` (the consumer side is live) whose buffer is at/over the
-/// high-water mark. The mark is **per-stream** — half the writer's own cap — so
-/// a large-cap upload stream (`env.storage.putStream`, 2× the S3 part size)
-/// lets the producer run a full next part ahead while the current part PUTs,
-/// while a default-cap stream keeps the small mark. Pre-attach buffering (no
-/// `direct_writer`) never pauses — `attach_writer` drains those synchronously.
+/// Pause before writer attachment or when its buffer reaches the producer
+/// watermark. Attachment and consumer draining enqueue the next pull.
 fn should_pause(fwd: &ResponseForwarder) -> bool {
     let inner = fwd.borrow();
     inner.backpressure
         && inner
             .direct_writer
             .as_ref()
-            .is_some_and(|w| w.buffered_bytes() >= w.cap() / 2)
+            .is_none_or(|w| w.buffered_bytes() >= w.cap() / 2)
 }
 
 fn on_error_callback(
@@ -536,12 +514,10 @@ fn on_error_callback(
     args: v8::FunctionCallbackArguments,
     _rv: v8::ReturnValue,
 ) {
-    let data = args.data();
-    let ext = match v8::Local::<v8::External>::try_from(data) {
-        Ok(e) => e,
-        Err(_) => return,
-    };
-    let captures: &OnErrorCaptures = unsafe { &*(ext.value() as *const OnErrorCaptures) };
+    let Some(stream_id) = args.data().uint32_value(scope) else { return; };
+    let Some(state) = scope.get_slot::<SharedState>().cloned() else { return; };
+    let Some(fwd) = get(&state, stream_id) else { return; };
+    if fwd.borrow().closed || fwd.borrow().cancel_requested.is_some() { return; }
 
     let err = args.get(0);
     let msg = if err.is_object() {
@@ -556,7 +532,7 @@ fn on_error_callback(
         err.to_rust_string_lossy(scope)
     };
 
-    error_forwarder(&captures.fwd, &captures.state, captures.stream_id, &msg);
+    error_forwarder(&fwd, &state, stream_id, &msg);
 }
 
 // ---------------------------------------------------------------------------
@@ -570,15 +546,16 @@ fn push_chunk(
     data: Vec<u8>,
 ) -> bool {
     let mut inner = fwd.borrow_mut();
-    if inner.closed {
+    if inner.closed || inner.cancel_requested.is_some() {
         return false;
     }
     if let Some(writer) = inner.direct_writer.as_ref() {
         match writer.push(data) {
             StreamPushResult::Ok => true,
-            StreamPushResult::Closed | StreamPushResult::Full => {
+            result @ (StreamPushResult::Closed | StreamPushResult::Full) => {
                 drop(inner);
-                close_forwarder(fwd, state, stream_id);
+                let reason = if matches!(result, StreamPushResult::Full) { Cancellation::Overflow } else { Cancellation::Cancelled };
+                request_cancel(state, stream_id, reason);
                 false
             }
         }
@@ -591,6 +568,9 @@ fn push_chunk(
 fn close_forwarder(fwd: &ResponseForwarder, state: &SharedState, stream_id: u32) {
     let mut inner = fwd.borrow_mut();
     inner.closed = true;
+    let request = inner.request.take();
+    inner.reader.take();
+    inner.continuation_context.take();
     // If a direct writer is attached, signal EOF.
     if let Some(writer) = inner.direct_writer.as_ref() {
         writer.close();
@@ -600,6 +580,7 @@ fn close_forwarder(fwd: &ResponseForwarder, state: &SharedState, stream_id: u32)
     if remove_now {
         remove(state, stream_id);
     }
+    if let Some(request) = request { request.release(state); }
 }
 
 fn error_forwarder(fwd: &ResponseForwarder, state: &SharedState, stream_id: u32, msg: &str) {
@@ -614,6 +595,10 @@ fn error_forwarder(fwd: &ResponseForwarder, state: &SharedState, stream_id: u32,
     // the wire path; nothing reads the reason there yet.
     let mut inner = fwd.borrow_mut();
     inner.closed = true;
+    inner.error.get_or_insert_with(|| msg.to_string());
+    let request = inner.request.take();
+    inner.reader.take();
+    inner.continuation_context.take();
     if let Some(writer) = inner.direct_writer.as_ref() {
         writer.abort(msg);
     }
@@ -622,6 +607,7 @@ fn error_forwarder(fwd: &ResponseForwarder, state: &SharedState, stream_id: u32,
     if remove_now {
         remove(state, stream_id);
     }
+    if let Some(request) = request { request.release(state); }
 }
 
 // ---------------------------------------------------------------------------
@@ -642,23 +628,119 @@ pub fn attach_writer(state: &SharedState, stream_id: u32, writer: StreamWriter) 
         writer.close();
         return;
     };
-    let drained_or_closed = {
-        let mut inner = fwd.borrow_mut();
-        for chunk in inner.buffer.drain(..) {
-            let _ = writer.push(chunk);
+    let weak_state = Rc::downgrade(state);
+    writer.set_consumer_callback(Rc::new(move |event| {
+        let Some(state) = weak_state.upgrade() else { return; };
+        match event {
+            crate::channel::StreamConsumerEvent::Drained => {
+                let below_watermark = get(&state, stream_id).is_some_and(|fwd| {
+                    fwd.borrow().direct_writer.as_ref()
+                        .is_some_and(|writer| writer.buffered_bytes() <= writer.cap() / 4)
+                });
+                if below_watermark { request_resume(&state, stream_id); }
+            }
+            crate::channel::StreamConsumerEvent::Closed => request_cancel(&state, stream_id, Cancellation::Cancelled),
         }
-        if inner.closed {
-            writer.close();
-            true
-        } else {
-            inner.direct_writer = Some(writer);
-            false
+    }));
+    let (buffered, closed) = {
+        let mut inner = fwd.borrow_mut();
+        inner.direct_writer = Some(writer);
+        (std::mem::take(&mut inner.buffer), inner.closed)
+    };
+    for chunk in buffered {
+        if closed {
+            let result = fwd.borrow().direct_writer.as_ref().unwrap().push(chunk);
+            if !matches!(result, StreamPushResult::Ok) { break; }
+        } else if !push_chunk(&fwd, state, stream_id, chunk) { return; }
+    }
+    if closed {
+        let inner = fwd.borrow();
+        let writer = inner.direct_writer.as_ref().unwrap();
+        if let Some(error) = &inner.error { writer.abort(error); }
+        else { writer.close(); }
+        drop(inner);
+        remove(state, stream_id);
+    } else if !should_pause(&fwd) {
+        request_resume(state, stream_id);
+    }
+}
+
+fn request_cancel(state: &SharedState, stream_id: u32, reason: Cancellation) {
+    let Some(fwd) = get(state, stream_id) else { return; };
+    {
+        let mut inner = fwd.borrow_mut();
+        if inner.closed || inner.cancel_requested.is_some() { return; }
+        inner.cancel_requested = Some(reason);
+        if inner.reader.is_none() && inner.request.is_none() {
+            drop(inner);
+            close_forwarder(&fwd, state, stream_id);
+            return;
+        }
+    }
+    let mut state = state.borrow_mut();
+    if !state.forwarder_resumes.contains(&stream_id) {
+        state.forwarder_resumes.push_back(stream_id);
+    }
+    state.notify_pump();
+}
+
+fn cancel_reader(
+    scope: &mut v8::PinScope,
+    state: &SharedState,
+    stream_id: u32,
+    fwd: &ResponseForwarder,
+) {
+    let (reader, frame, request, reason, rpc_framing) = {
+        let mut inner = fwd.borrow_mut();
+        (inner.reader.take(), inner.continuation_context.take(), inner.request.take(),
+         inner.cancel_requested.take().unwrap_or(Cancellation::Cancelled), inner.rpc_framing)
+    };
+    // Mark closed before abort listeners run. Late reads and reentrant
+    // cancellation cannot append chunks or invoke source cleanup again.
+    fwd.borrow_mut().closed = true;
+    let request_id = request.as_ref().map_or(0, |request| request.request_id);
+    if rpc_framing {
+        let bytes = crate::rpc::dispatch::stream::terminal_error(reason.response(), request_id);
+        let mut inner = fwd.borrow_mut();
+        match bytes {
+            Ok(bytes) => {
+                if let Some(writer) = &inner.direct_writer { let _ = writer.push(bytes); }
+                else { inner.buffer.push_back(bytes); }
+            }
+            Err(message) => {
+                if let Some(writer) = &inner.direct_writer { writer.abort(&message); }
+            }
+        }
+    } else if let Some(writer) = &fwd.borrow().direct_writer {
+        writer.abort(reason.message());
+    }
+    let cancel = |scope: &mut v8::PinScope| {
+        let reason_value = reason.exception(scope);
+        if let Some(request) = &request {
+            request.cancel.cancel();
+            v8::tc_scope!(let tc, scope);
+            request.signal.abort(tc, reason_value);
+        }
+        if let Some(reader) = reader {
+            v8::tc_scope!(let tc, scope);
+            let reader = v8::Local::new(tc, reader);
+            let key = v8::String::new(tc, "cancel").unwrap();
+            if let Some(method) = reader.get(tc, key.into())
+                && let Ok(method) = v8::Local::<v8::Function>::try_from(method)
+                && let Some(result) = method.call(tc, reader.into(), &[reason_value])
+                && let Some(resolver) = v8::PromiseResolver::new(tc)
+            {
+                resolver.get_promise(tc).mark_as_handled();
+                resolver.resolve(tc, result);
+            }
         }
     };
-    if drained_or_closed {
-        // Forwarder is done — no more chunks coming. Drop from registry.
-        remove(state, stream_id);
+    match frame {
+        Some(frame) => crate::core::invocation::with_captured_context(scope, &frame, cancel),
+        None => cancel(scope),
     }
+    close_forwarder(fwd, state, stream_id);
+    if let Some(request) = request { request.release(state); }
 }
 
 /// Ask the pump to resume a paused upload forwarder. Called by the consumer of
@@ -753,5 +835,19 @@ mod tests {
             get(&state, stream_id).is_none(),
             "overflowed forwarder should be removed from the registry"
         );
+    }
+
+    #[test]
+    fn failure_before_writer_attachment_remains_a_transport_error() {
+        let state = test_state();
+        let stream_id = 43;
+        let fwd = Rc::new(RefCell::new(ResponseForwarderInner::default()));
+        register(&state, stream_id, fwd.clone());
+        error_forwarder(&fwd, &state, stream_id, "reader failed");
+        let (writer, reader) = crate::channel::stream_buffer();
+        attach_writer(&state, stream_id, writer);
+        assert!(reader.is_done());
+        assert_eq!(reader.error().as_deref(), Some("reader failed"));
+        assert!(get(&state, stream_id).is_none());
     }
 }

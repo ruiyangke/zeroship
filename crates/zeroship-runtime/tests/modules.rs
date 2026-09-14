@@ -1,5 +1,5 @@
 //! ESM integration tests — ride on `call_fetch_handler` via the common
-//! `dispatch` bootstrap helper. Proves import graphs resolve correctly
+//! `dispatch` helper. Proves import graphs resolve correctly
 //! in the actual kernel, complementing the lib-side `modules::tests`
 //! unit suite.
 

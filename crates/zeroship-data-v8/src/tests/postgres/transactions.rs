@@ -1,7 +1,7 @@
 //! Creator transaction callbacks through the V8 runtime and PostgreSQL.
 //!
 //! Fixtures install tables before boot and supply runtime descriptors, so calls use
-//! the bootstrap transaction wrapper. It returns a `Result` envelope: failures are
+//! the DB facade transaction wrapper. It returns a `Result` envelope: failures are
 //! asserted through `result.error`, or deliberately rethrown for HTTP-boundary tests.
 //! PostgreSQL comes from an owned testcontainer; fixture startup is required.
 
@@ -277,43 +277,7 @@ fn user_email_versions(url: &str, app: &str) -> Vec<(String, i32)> {
 /// Self-contained dispatcher shim: a function-shape `default.rpc` that
 /// looks up `_procedures[name]` and runs it. These tests open
 /// transactions explicitly via `env.db.transaction`.
-const SHIM: &str = r#"
-async function _shimRpc(name, input, ctx) {
-    const fn = _procedures[name];
-    if (typeof fn !== "function") {
-        throw Object.assign(new Error("Method not found: " + name), { status: 404 });
-    }
-    let out = fn(input, ctx);
-    if (out && typeof out.then === "function") out = await out;
-    return out;
-}
-async function _zsRpcAndRespond(name, input) {
-    try {
-        const result = await _shimRpc(name, input);
-        return new Response(JSON.stringify({ json: result === undefined ? null : result }),
-            { status: 200, headers: { "content-type": "application/json" } });
-    } catch (err) {
-        const status = (err && Number.isInteger(err.status) && err.status >= 400 && err.status < 600) ? err.status : 500;
-        const body = { message: err?.message ?? String(err), name: err?.name ?? "Error" };
-        if (err && typeof err.code === "string") body.code = err.code;
-        return new Response(JSON.stringify(body), {
-            status, headers: { "content-type": "application/json" },
-        });
-    }
-}
-async function _zsFetch(request) {
-    const url = new URL(request.url);
-    const id = decodeURIComponent(url.pathname.slice("/__zeroship/v1/".length));
-    const text = await request.text();
-    let input;
-    if (text) {
-        const env = JSON.parse(text);
-        input = env && typeof env === "object" && "json" in env ? env.json : env;
-    }
-    return await _zsRpcAndRespond(id, input);
-}
-export default { fetch: _zsFetch, rpc: _shimRpc };
-"#;
+const SHIM: &str = r#"export default { rpc: _procedures };"#;
 
 fn notes_runtime_descriptor() -> String {
     let mut descriptor = serde_json::json!({
@@ -637,7 +601,7 @@ const _procedures = { autocommitBeforeMigrate };
 /// The unmigrated-app classification must reach the creator, and it must reach
 /// them with the terminal HTTP remedy when nothing catches it.
 ///
-/// `env.db.transaction` is the bootstrap wrapper (module header), so it folds
+/// `env.db.transaction` is the DB facade wrapper (module header), so it folds
 /// the classified denial into `result.error` and the handler answers 200 with
 /// `{data:null,error:{...}}`. THAT IS THE PUBLISHED CONTRACT, not a defect -
 /// but it means the handler has to rethrow to make the response terminal, and
@@ -870,27 +834,15 @@ const _procedures = {
 fn unmigrated_app_streaming_response_names_migrate() {
     let (_postgres, url) = require_pg();
     let app_id = uuid::Uuid::new_v4().simple().to_string();
-    let src = [
-        r#"import { env } from "zeroship";"#,
-        include_str!("../../../../../sdks/bootstrap/dist/fetch-handler.js"),
-        r#"
-globalThis.__zsDispatch = async (rpc, name, input, ctx) => rpc[name](input, ctx);
-
+    let src = r#"
+import { env } from "zeroship";
 async function* streamBeforeMigrate(_input, _ctx) {
     await env.db.collection("notes").find({}, {});
     yield "unreachable";
 }
 streamBeforeMigrate.config = { kind: "stream" };
-const _procedures = { streamBeforeMigrate };
-const _fetch = createFetchHandler(async () => ({
-    userDefault: {},
-    fetch: undefined,
-    rpc: _procedures,
-}));
-export default { fetch: _fetch, rpc: _procedures };
-"#,
-    ]
-    .join("\n");
+export default { rpc: { streamBeforeMigrate } };
+"#;
 
     let (status, body) = dispatch_zs_for_app(&url, &src, "streamBeforeMigrate", Some(&app_id));
     assert_eq!(
@@ -1735,7 +1687,7 @@ const _procedures = { nestedBothCommit };
 ///
 /// NAMED `..._is_refused`, not `..._throws`: the refusal arrives as
 /// `result.error` on the level that could not open its savepoint, because
-/// `env.db.transaction` here is the bootstrap wrapper (module header). It
+/// `env.db.transaction` here is the DB facade wrapper (module header). It
 /// asserted a throw until 2026-09-04 and had never once observed the cap - it
 /// panicked on `tripped: false` while the very same body reported
 /// `reachedLevel: 10`, which is the cap doing exactly its job.

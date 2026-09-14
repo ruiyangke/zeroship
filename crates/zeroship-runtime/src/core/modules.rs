@@ -23,6 +23,8 @@ pub struct ModuleEntry {
 pub struct ModuleRegistry {
     /// Compiled V8 modules — populated by the lazy compilation loop.
     compiled: HashMap<String, v8::Global<v8::Module>>,
+    sources: HashMap<String, String>,
+    host_names: HashSet<String>,
 }
 
 pub type SharedRegistry = Rc<RefCell<ModuleRegistry>>;
@@ -37,6 +39,8 @@ impl ModuleRegistry {
     pub fn new() -> Self {
         Self {
             compiled: HashMap::new(),
+            sources: HashMap::new(),
+            host_names: HashSet::new(),
         }
     }
 
@@ -136,109 +140,74 @@ pub(crate) fn compile_modules(
             return Err(format!("Module shadows plugin source: {}", module.specifier));
         }
     }
-    let host_names: HashSet<&str> = plugin_modules.0.iter()
-        .map(|module| module.specifier)
-        .collect();
+    let registry = Rc::new(RefCell::new(ModuleRegistry {
+        compiled: HashMap::new(),
+        sources,
+        host_names: plugin_modules.0.iter().map(|module| module.specifier.to_owned()).collect(),
+    }));
+    scope.set_slot(registry.clone());
+    let entry = compile_registered_graph(scope, &registry, &entries[0].specifier)?;
+    for module in &plugin_modules.0 {
+        compile_registered_graph(scope, &registry, module.specifier)?;
+    }
+    Ok(entry)
+}
 
-    let registry: SharedRegistry = Rc::new(RefCell::new(ModuleRegistry::new()));
+/// Compile an artifact-resident dynamic import without evaluating its graph.
+/// Missing source remains distinct from a compilation failure.
+pub(crate) fn compile_dynamic_module(
+    scope: &mut v8::PinScope,
+    specifier: &str,
+) -> Result<Option<v8::Global<v8::Module>>, String> {
+    let Some(registry) = scope.get_slot::<SharedRegistry>().cloned() else { return Ok(None); };
+    let resolved = resolve_specifier(specifier, &registry.borrow().sources);
+    resolved.map(|resolved| compile_registered_graph(scope, &registry, &resolved)).transpose()
+}
 
-    // Compile the entry module.
-    let entrypoint = &entries[0].specifier;
-    let entry_source = sources.get(entrypoint)
-        .ok_or_else(|| format!("Entrypoint not found: {entrypoint}"))?;
-    let entry_module = compile_module(scope, entrypoint, entry_source)?;
-
-    // Discover and compile all transitive imports (BFS).
-    //
-    // V8's resolve_callback can't compile modules — it must return
-    // an already-compiled module. So we walk the import graph here,
-    // compiling each discovered module BEFORE calling instantiate_module.
-    {
-        let mut queue: VecDeque<(String, v8::Global<v8::Module>)> = VecDeque::new();
-        queue.push_back((entrypoint.clone(), entry_module));
-        let mut scheduled = HashSet::from([entrypoint.clone()]);
-        // Compile adapter roots and discover their imports before evaluation.
-        // Dynamic imports then use the same cached graph as static ones.
-        for module in &plugin_modules.0 {
-            let compiled = compile_module(scope, module.specifier, module.source)?;
-            queue.push_back((module.specifier.to_string(), compiled));
-            scheduled.insert(module.specifier.to_string());
-        }
-
-        while let Some((spec, module_global)) = queue.pop_front() {
-            // Store compiled module in registry
-            let already_registered = registry.borrow().compiled.contains_key(&spec);
-            if already_registered {
+fn compile_registered_graph(
+    scope: &mut v8::PinScope,
+    registry: &SharedRegistry,
+    root: &str,
+) -> Result<v8::Global<v8::Module>, String> {
+    if let Some(module) = registry.borrow().get(root).cloned() { return Ok(module); }
+    let source = registry.borrow().sources.get(root).cloned()
+        .ok_or_else(|| format!("Module source not found: {root}"))?;
+    let entry = compile_module(scope, root, &source)?;
+    let mut queue = VecDeque::from([(root.to_owned(), entry.clone())]);
+    let mut scheduled = HashSet::from([root.to_owned()]);
+    let mut compiled = HashMap::new();
+    while let Some((specifier, module)) = queue.pop_front() {
+        compiled.insert(specifier.clone(), module.clone());
+        let module = v8::Local::new(scope, &module);
+        let requests = module.get_module_requests();
+        for index in 0..requests.length() {
+            let request = v8::Local::<v8::ModuleRequest>::try_from(requests.get(scope, index).unwrap()).unwrap();
+            let import = request.get_specifier().to_rust_string_lossy(scope);
+            if super::native_modules::is_native(scope, &import) {
+                if registry.borrow().get(&import).is_none() && !compiled.contains_key(&import) {
+                    let module = super::native_modules::resolve_native(scope, &import)
+                        .expect("registered native module");
+                    compiled.insert(import, v8::Global::new(scope, module));
+                }
                 continue;
             }
-            registry.borrow_mut().compiled.insert(spec.clone(), module_global.clone());
-
-            // Discover this module's imports via V8
-            let module_local = v8::Local::new(scope, &module_global);
-            let requests = module_local.get_module_requests();
-            let num_requests = requests.length();
-
-            for i in 0..num_requests {
-                let request = v8::Local::<v8::ModuleRequest>::try_from(
-                    requests.get(scope, i).unwrap()
-                ).unwrap();
-                let import_specifier = request.get_specifier().to_rust_string_lossy(scope);
-
-                // Native synthetic module (e.g. `node:async_hooks`) — minted
-                // here so the resolve callback finds it pre-instantiation.
-                // Synthetic modules have no imports, so we don't queue
-                // them for further discovery.
-                if super::native_modules::is_native(scope, &import_specifier) {
-                    if !registry.borrow().compiled.contains_key(&import_specifier) {
-                        let m = super::native_modules::resolve_native(scope, &import_specifier)
-                            .expect("is_native true but resolve_native returned None");
-                        registry
-                            .borrow_mut()
-                            .compiled
-                            .insert(import_specifier.clone(), v8::Global::new(scope, m));
-                    }
-                    continue;
+            let (resolved, source) = {
+                let registry = registry.borrow();
+                let resolved = resolve_specifier(&import, &registry.sources)
+                    .ok_or_else(|| format!("Cannot resolve import '{import}' from '{specifier}'"))?;
+                if registry.host_names.contains(&specifier) && !registry.host_names.contains(&resolved) {
+                    return Err(format!("Plugin module {specifier:?} cannot import creator module {resolved:?}"));
                 }
-
-                // Resolve to actual source specifier
-                let resolved = match resolve_specifier(&import_specifier, &sources) {
-                    Some(s) => s,
-                    None => return Err(format!(
-                        "Cannot resolve import '{import_specifier}' from '{spec}'"
-                    )),
-                };
-
-                if host_names.contains(spec.as_str())
-                    && !host_names.contains(resolved.as_str())
-                {
-                    return Err(format!(
-                        "Plugin module {spec:?} cannot import creator module {resolved:?}"
-                    ));
-                }
-
-                // Skip sources already compiled or queued for discovery.
-                if !scheduled.insert(resolved.clone()) {
-                    continue;
-                }
-
-                // Compile the imported module
-                let source = sources.get(&resolved)
-                    .ok_or_else(|| format!(
-                        "Source not found for '{resolved}' (imported from '{spec}')"
-                    ))?;
-                let compiled = compile_module(scope, &resolved, source)?;
-
-                // Queue for import discovery (its own imports)
-                queue.push_back((resolved, compiled));
-            }
+                if registry.get(&resolved).is_some() || !scheduled.insert(resolved.clone()) { continue; }
+                let source = registry.sources.get(&resolved).expect("resolved module source").clone();
+                (resolved, source)
+            };
+            let module = compile_module(scope, &resolved, &source)?;
+            queue.push_back((resolved, module));
         }
     }
-
-    // Store registry in isolate slot for the resolve callback
-    scope.set_slot(registry.clone());
-
-    let entry = registry.borrow().compiled.get(entrypoint).cloned()
-        .ok_or_else(|| format!("Entrypoint not compiled: {entrypoint}"))?;
+    // Publish the graph together so a failed import cannot leave a partial root.
+    registry.borrow_mut().compiled.extend(compiled);
     Ok(entry)
 }
 

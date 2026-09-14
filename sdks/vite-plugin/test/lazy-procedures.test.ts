@@ -1,26 +1,9 @@
-/**
- * Wave #188 — opt-in lazy procedures.
- *
- * `fn.config.lazy = true` (or the `mutation(handler, { lazy: true })`
- * wrapper option) flips a procedure to dynamic-import emission. The
- * synthetic SSR entry stops emitting the static `import * as
- * _user_TARGET_<n>_ from "./<file>"` line and replaces the dispatch
- * entry with `async (input, ctx) => (await import("./<file>"))
- * .<exportName>(input, ctx)`.
- *
- * Cold-start parses ONLY non-lazy procedures' modules; the lazy
- * module's body runs on first call. V8's dynamic-import host callback
- * (Wave #187) caches the namespace, so the second call to a lazy
- * procedure is a Map lookup, not a re-import.
- */
-
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import { parse as acornParse } from "acorn";
 
 import { transformPlugin, type TransformState } from "../src/transform.js";
-import { buildServerEntrySource } from "../src/rpc-registry.js";
-import type { ServerBinding } from "../src/rpc-registry.js";
+import { bindingMap, buildEntryFixture } from "./helpers/server-entry-fixture.js";
 
 // ── Test harness ──────────────────────────────────────────────────────────
 
@@ -49,22 +32,6 @@ function getHandler(plugin: ReturnType<typeof transformPlugin>): any {
   return typeof (plugin.transform as any) === "function"
     ? (plugin.transform as any)
     : (plugin.transform as any).handler;
-}
-
-function bindingMap(rows: Array<Partial<ServerBinding>>): Map<string, ServerBinding> {
-  const out = new Map<string, ServerBinding>();
-  for (const r of rows) {
-    const sf = r.sourceFile!;
-    const en = r.exportName!;
-    out.set(`${sf}::${en}`, {
-      wireId: r.wireId ?? en,
-      sourceFile: sf,
-      exportName: en,
-      kind: r.kind ?? "mutation",
-      ...(r.lazy ? { lazy: true } : {}),
-    });
-  }
-  return out;
 }
 
 // ── Detection — fn.config.lazy = true ────────────────────────────────────
@@ -184,206 +151,131 @@ op.config = { id: "op", lazy: false };
   });
 });
 
-// ── Emission — buildServerEntrySource ────────────────────────────────────
 
-describe("lazy emission — buildServerEntrySource", () => {
-  test("eager binding: standard static import + namespace lookup", () => {
-    const code = buildServerEntrySource({
-      userEntryRel: "/proj/src/server.ts",
-      bindings: bindingMap([
-        {
-          sourceFile: "/proj/src/actions/eager.ts",
-          exportName: "fast",
-          wireId: "fast",
-        },
-      ]),
+describe("lazy entries return procedures to native dispatch", () => {
+  test("module loading preserves frozen metadata without invoking the handler", async (t) => {
+    const fixture = await buildEntryFixture(t, {
+      bindings: bindingMap([{ sourceFile: "./actions/heavy.mjs", exportName: "heavy", wireId: "__proto__", lazy: true }]),
+      files: {
+        "state.mjs": "export const state = { loaded: 0, invoked: 0, parsed: 0 };",
+        "user.mjs": "import { state } from './state.mjs'; export default { rpc: { inspect: () => ({ ...state }) } };",
+        "actions/heavy.mjs": `
+          import { state } from '../state.mjs';
+          state.loaded++;
+          const input = Object.freeze({
+            parse(value) {
+              if (value == null || typeof value.amount !== 'number') throw Error('amount required');
+              state.parsed++;
+              return value.amount * 2;
+            },
+          });
+          const config = Object.freeze({ kind: 'mutation', input, outputIsString: false });
+          export const heavy = Object.assign((input, ctx) => {
+            state.invoked++;
+            return { input, requestId: ctx.requestId };
+          }, { config });
+          heavy.identity = heavy;
+          Object.freeze(heavy);
+        `,
+      },
     });
-    assert.match(
-      code,
-      /import \* as _user_TARGET_0_ from "\/proj\/src\/actions\/eager\.ts"/,
-    );
-    assert.match(code, /"fast":\s*_user_TARGET_0_\.fast/);
-    // No dynamic-import wrapper around USER procedures in the eager-only
-    // emission. The schema-registration block (Stage 2) dynamically
-    // imports `@zeroship/db`; that's orthogonal to procedure
-    // dispatch and must not affect cold-start procedure parsing.
-    assert.equal(/await import\("\/proj\//.test(code), false);
-    assert.equal(/await import\("\.\//.test(code), false);
-  });
-
-  test("lazy binding: no static import; emits dynamic-import wrapper", () => {
-    const code = buildServerEntrySource({
-      userEntryRel: "/proj/src/server.ts",
-      bindings: bindingMap([
-        {
-          sourceFile: "/proj/src/actions/wizard.ts",
-          exportName: "wizard",
-          wireId: "wizard",
-          lazy: true,
-        },
-      ]),
-    });
-    // No static import line for the lazy file.
-    assert.equal(
-      /import \* as _user_TARGET_\d+_ from "\/proj\/src\/actions\/wizard\.ts"/.test(
-        code,
-      ),
-      false,
-      "lazy-only file gets no static import",
-    );
-    // The dispatch entry is the dynamic-import wrapper.
-    assert.match(
-      code,
-      /"wizard":\s*async \(input, ctx\) =>\s*\(await import\("\/proj\/src\/actions\/wizard\.ts"\)\)\.wizard\(input, ctx\)/,
-    );
-  });
-
-  test("mixed file: eager + lazy exports share the source file", () => {
-    // Same file holds both `eager()` and `heavy({ lazy: true })`. The
-    // static import emits for the eager path; the lazy path uses
-    // `await import()`. V8's module cache de-dupes — the dynamic
-    // import resolves to the same namespace the static import already
-    // evaluated.
-    const code = buildServerEntrySource({
-      userEntryRel: "/proj/src/server.ts",
-      bindings: bindingMap([
-        {
-          sourceFile: "/proj/src/actions/mixed.ts",
-          exportName: "eager",
-          wireId: "eager",
-        },
-        {
-          sourceFile: "/proj/src/actions/mixed.ts",
-          exportName: "heavy",
-          wireId: "heavy",
-          lazy: true,
-        },
-      ]),
-    });
-    // Static import IS emitted — driven by the eager binding.
-    assert.match(
-      code,
-      /import \* as _user_TARGET_0_ from "\/proj\/src\/actions\/mixed\.ts"/,
-    );
-    // Eager dispatch entry uses the namespace alias.
-    assert.match(code, /"eager":\s*_user_TARGET_0_\.eager/);
-    // Lazy dispatch entry uses dynamic import on the SAME file.
-    assert.match(
-      code,
-      /"heavy":\s*async \(input, ctx\) =>\s*\(await import\("\/proj\/src\/actions\/mixed\.ts"\)\)\.heavy\(input, ctx\)/,
+    const { rpc } = (await fixture.load()).default;
+    assert.deepEqual(rpc.inspect(), { loaded: 0, invoked: 0, parsed: 0 });
+    assert.ok(Object.hasOwn(rpc, "__proto__"));
+    assert.equal(typeof rpc.__proto__, "object");
+    assert.deepEqual(Object.keys(rpc.__proto__), ["load"]);
+    const [procedure, same] = await Promise.all([rpc.__proto__.load(), rpc.__proto__.load()]);
+    assert.equal(procedure, same);
+    assert.equal(procedure, procedure.identity);
+    assert.ok(Object.isFrozen(procedure));
+    assert.ok(Object.isFrozen(procedure.config));
+    assert.equal(procedure.config.kind, "mutation");
+    assert.equal(procedure.config.outputIsString, false);
+    assert.deepEqual(rpc.inspect(), { loaded: 1, invoked: 0, parsed: 0 });
+    assert.throws(() => procedure.config.input.parse({ amount: "invalid" }), /amount required/);
+    const input = procedure.config.input.parse({ amount: 3 });
+    assert.deepEqual(procedure(input, { requestId: "request" }), { input: 6, requestId: "request" });
+    assert.deepEqual(rpc.inspect(), { loaded: 1, invoked: 1, parsed: 1 });
+    assert.equal(await rpc.__proto__.load(), procedure);
+    assert.deepEqual(
+      fixture.artifact.inputs["entry.mjs"].imports
+        .filter(entry => entry.path === "actions/heavy.mjs")
+        .map(entry => entry.kind),
+      ["dynamic-import"],
     );
   });
 
-  test("synthetic-entry shape: dynamic-import arrow matches the spec", () => {
-    const code = buildServerEntrySource({
-      userEntryRel: "/proj/src/server.ts",
+  test("eager and lazy exports share their module instance", async (t) => {
+    const fixture = await buildEntryFixture(t, {
       bindings: bindingMap([
-        {
-          sourceFile: "/proj/src/heavy.ts",
-          exportName: "heavy",
-          wireId: "heavy",
-          lazy: true,
-        },
+        { sourceFile: "./mixed.mjs", exportName: "fast" },
+        { sourceFile: "./mixed.mjs", exportName: "heavy", lazy: true },
       ]),
+      files: {
+        "user.mjs": "export default {};",
+        "mixed.mjs": `
+          const identity = {};
+          let calls = 0;
+          export const fast = () => ({ identity, calls, heavy });
+          export const heavy = Object.assign(() => { calls++; return identity; }, { config: { kind: 'query' } });
+        `,
+      },
     });
-    // The full arrow: `async (input, ctx) => (await import("./heavy.js")).heavy(input, ctx)`.
-    assert.match(
-      code,
-      /async \(input, ctx\) => \(await import\("\/proj\/src\/heavy\.ts"\)\)\.heavy\(input, ctx\)/,
+    const { rpc } = (await fixture.load()).default;
+    const before = rpc.fast();
+    const procedure = await rpc.heavy.load();
+    assert.equal(procedure, before.heavy);
+    assert.equal(rpc.fast().calls, 0);
+    assert.equal(procedure(), before.identity);
+    assert.equal(rpc.fast().calls, 1);
+    assert.deepEqual(
+      fixture.artifact.inputs["entry.mjs"].imports
+        .filter(entry => entry.path === "mixed.mjs")
+        .map(entry => entry.kind).sort(),
+      ["dynamic-import", "import-statement"],
     );
   });
 
-  test("strict-mode interaction: lazy is orthogonal to wireId pinning", () => {
-    // A lazy procedure with bare exportName as its wireId still passes
-    // through the same emission shape — strict-mode gating happens
-    // upstream in build.ts (not in buildServerEntrySource). The
-    // emission itself doesn't care whether wireId is a default or a
-    // pin: the output is byte-identical for the two cases.
-    const codeBare = buildServerEntrySource({
-      userEntryRel: "/proj/src/server.ts",
+  test("lazy bindings use declaring modules and arbitrary export and RPC names", async (t) => {
+    const fixture = await buildEntryFixture(t, {
       bindings: bindingMap([
-        {
-          sourceFile: "/proj/src/h.ts",
-          exportName: "heavy",
-          wireId: "heavy", // bare default
-          lazy: true,
-        },
+        { sourceFile: "./actions/b.mjs", exportName: 'quoted "export"', wireId: "constructor", lazy: true },
+        { sourceFile: "./actions/a.mjs", exportName: "actual", wireId: "rpc with spaces", lazy: true },
       ]),
+      files: {
+        "user.mjs": "export default {};",
+        "actions/index.mjs": "throw Error('a re-exporting module must not be evaluated');",
+        "actions/a.mjs": "export const actual = Object.assign(() => 'A', { config: { kind: 'query' } });",
+        "actions/b.mjs": 'const actual = () => "B"; export { actual as "quoted \\"export\\"" };',
+      },
     });
-    const codePinned = buildServerEntrySource({
-      userEntryRel: "/proj/src/server.ts",
-      bindings: bindingMap([
-        {
-          sourceFile: "/proj/src/h.ts",
-          exportName: "heavy",
-          wireId: "myWizard", // pinned
-          lazy: true,
-        },
-      ]),
-    });
-    assert.match(
-      codeBare,
-      /"heavy":\s*async \(input, ctx\) => \(await import\("\/proj\/src\/h\.ts"\)\)\.heavy\(input, ctx\)/,
+    const { rpc } = (await fixture.load()).default;
+    assert.equal((await rpc.constructor.load())(), "B");
+    assert.equal((await rpc["rpc with spaces"].load())(), "A");
+    assert.deepEqual(
+      fixture.artifact.inputs["entry.mjs"].imports
+        .filter(entry => entry.kind === "dynamic-import")
+        .map(entry => entry.path),
+      ["actions/a.mjs", "actions/b.mjs"],
     );
-    assert.match(
-      codePinned,
-      /"myWizard":\s*async \(input, ctx\) => \(await import\("\/proj\/src\/h\.ts"\)\)\.heavy\(input, ctx\)/,
-    );
+    assert.equal(Object.hasOwn(fixture.artifact.inputs, "actions/index.mjs"), false);
   });
 
-  test("re-export chain + lazy: dynamic import targets the actual source file", () => {
-    // A binding's `sourceFile` is the ULTIMATE declaring location, not
-    // whatever intermediate module re-exported it. Our emission consumes
-    // that field verbatim — so a lazy binding always imports from the
-    // source-of-truth, never from an intermediate re-exporting
-    // `index.ts`.
-    const code = buildServerEntrySource({
-      userEntryRel: "/proj/src/server.ts",
+  test("module evaluation failure rejects loading without affecting an eager procedure", async (t) => {
+    const fixture = await buildEntryFixture(t, {
       bindings: bindingMap([
-        {
-          // Caller already resolved `index.ts`'s
-          // `export { heavy } from "./heavy.ts"` to the declaring file.
-          sourceFile: "/proj/src/actions/heavy.ts",
-          exportName: "heavy",
-          wireId: "heavy",
-          lazy: true,
-        },
+        { sourceFile: "./ready.mjs", exportName: "ready" },
+        { sourceFile: "./failure.mjs", exportName: "failure", lazy: true },
       ]),
+      files: {
+        "user.mjs": "export default {};",
+        "ready.mjs": "export const ready = () => 'ready';",
+        "failure.mjs": "throw Error('cannot initialize'); export const failure = () => 'unreachable';",
+      },
     });
-    // Imports the source file, NOT `index.ts`.
-    assert.match(code, /await import\("\/proj\/src\/actions\/heavy\.ts"\)/);
-    assert.equal(
-      /await import\("\/proj\/src\/actions\/index\.ts"\)/.test(code),
-      false,
-      "re-exporting file is not the dynamic import target",
-    );
-  });
-
-  test("multiple lazy procedures across files: deterministic emission", () => {
-    // Lex-ordered file iteration — emission stability matters for
-    // build cache hits. Two lazy bindings in two different files
-    // each get their own dynamic-import wrapper line.
-    const code = buildServerEntrySource({
-      userEntryRel: "/proj/src/server.ts",
-      bindings: bindingMap([
-        {
-          sourceFile: "/proj/src/b.ts",
-          exportName: "bigB",
-          wireId: "bigB",
-          lazy: true,
-        },
-        {
-          sourceFile: "/proj/src/a.ts",
-          exportName: "bigA",
-          wireId: "bigA",
-          lazy: true,
-        },
-      ]),
-    });
-    // Both lazy lines present.
-    assert.match(code, /"bigA":[\s\S]*await import\("\/proj\/src\/a\.ts"\)/);
-    assert.match(code, /"bigB":[\s\S]*await import\("\/proj\/src\/b\.ts"\)/);
-    // No static imports — both files are lazy-only.
-    assert.equal(/import \* as _user_TARGET_/.test(code), false);
+    const { rpc } = (await fixture.load()).default;
+    assert.equal(rpc.ready(), "ready");
+    await assert.rejects(rpc.failure.load(), /cannot initialize/);
+    assert.equal(rpc.ready(), "ready");
   });
 });

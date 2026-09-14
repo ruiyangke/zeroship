@@ -11,7 +11,6 @@ use zeroship_data_orm::error::DbError;
 use crate::op_error::ToOpError;
 use crate::v8_bridge::{runtime_state, setup_js_promise};
 use zeroship_data_orm::orm::{Operation, Output, PreparedOperation};
-use zeroship_data_orm::protection::mask_policy::install_mask_policy;
 use zeroship_data_orm::protection::unmask::{
     dispatch_bulk_unmask, dispatch_unmask, parse_args, parse_bulk_args,
 };
@@ -47,7 +46,16 @@ pub(super) fn dispatch_operation<'s>(
     mode: OutputMode,
 ) -> v8::Local<'s, v8::Promise> {
     let state = runtime_state(scope);
-    let route = crate::tx_scope::capture_route(scope, &binding);
+    let policy_ready = match &operation {
+        Operation::Find { options, .. }
+            if options.get("unmask").and_then(Value::as_array)
+                .is_some_and(|columns| !columns.is_empty()) =>
+        {
+            crate::startup_policy::require_finalized(scope)
+        }
+        _ => Ok(()),
+    };
+    let route = policy_ready.and_then(|()| crate::tx_scope::capture_route(scope, &binding));
     let prepared = crate::read_capture::current(scope).map(|capture| {
         let prepared = capture.with(|| {
             route.and_then(|route| {
@@ -440,12 +448,11 @@ pub(crate) fn reject_op(
 }
 
 // ---------------------------------------------------------------------------
-// Protection dispatch: unmask and deployment policy installation
+// Protection dispatch: audited unmask operations
 // ---------------------------------------------------------------------------
 //
-// Collection exposes audited unmask operations. DbPlatform carries policy
-// installation through the runtime's private capability handle. These helpers
-// capture arguments and return V8 promises; authorization stays in the ORM.
+// These helpers capture startup readiness and arguments before returning V8
+// promises. Authorization stays in the ORM.
 //
 // Their engine halves stay in `protection::unmask` and `protection::mask_policy`, which is
 // where the DB-3 fence lives - `sanitize_app_actor` runs inside `parse_args` /
@@ -467,7 +474,7 @@ pub(crate) fn dispatch_unmask_field<'s>(
 
     // Parse the args eagerly, off the V8 stack, so a malformed shape is decided
     // before anything is spawned and cannot race the spawn.
-    let parsed = parse_args(&args_v);
+    let parsed = crate::startup_policy::require_finalized(scope).and_then(|()| parse_args(&args_v));
     let binding = binding.clone();
     // The route is captured HERE, on the adapter side, while the V8 frame is
     // live, and handed to the engine. `protection::unmask` used to open a backend
@@ -529,7 +536,7 @@ pub(crate) fn dispatch_bulk_unmask_field<'s>(
     let state = crate::v8_bridge::runtime_state(scope);
     let (resolver, request_id, promise) = crate::v8_bridge::setup_js_promise(scope, &state);
 
-    let parsed = parse_bulk_args(&args_v);
+    let parsed = crate::startup_policy::require_finalized(scope).and_then(|()| parse_bulk_args(&args_v));
     let binding = binding.clone();
     // Captured adapter-side, as in [`dispatch_unmask_field`].
     let route = crate::tx_scope::capture_route(scope, &binding);
@@ -572,23 +579,5 @@ pub(crate) fn dispatch_bulk_unmask_field<'s>(
             },
         )));
 
-    promise
-}
-/// Install the startup policy captured from the framework-private handle.
-/// No database connection or file I/O is needed.
-pub(crate) fn dispatch_set_mask_policy_field<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
-    binding: &DbBinding,
-    policy_v: Value,
-) -> v8::Local<'s, v8::Promise> {
-    let state = crate::v8_bridge::runtime_state(scope);
-    let (resolver, request_id, promise) = crate::v8_bridge::setup_js_promise(scope, &state);
-    let result = install_mask_policy(binding, policy_v);
-    state.borrow_mut().spawned_ops.push(Box::pin(settle(
-        resolver,
-        request_id,
-        async move { result },
-        |()| crate::v8_values::resolve(Value::Object(Default::default()), false),
-    )));
     promise
 }

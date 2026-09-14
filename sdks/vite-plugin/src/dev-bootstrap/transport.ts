@@ -20,20 +20,10 @@ export async function createRunner(): Promise<ModuleRunner> {
     throw new Error(`[zeroship] ${ENV_VITE_ORIGIN} not set`);
   }
 
-  // HTTP-based transport: uses fetch for module requests.
-  //
-  // These fetches are dev-kernel infrastructure (Vite SSR module
-  // transport) — NOT user code. When a request lazily triggers a
-  // module load mid-handler, the active capability frame
-  // (`CURRENT_KIND=Query`/`Mutation`) would otherwise refuse the
-  // outbound fetch. We use `__zsClearKind()` to push the active kind
-  // and run the fetch under a `None` frame; `__zsExitKind(tok)`
-  // restores the user-visible kind on the way out.
+  // HTTP-based transport. The native dev loader calls ModuleRunner under its
+  // anonymous host context, outside creator procedure capability frames.
   const transport = {
     async invoke(data: any): Promise<{ result: any } | { error: any }> {
-      const ck = (globalThis as any).__zsClearKind;
-      const xk = (globalThis as any).__zsExitKind;
-      const tok = (typeof ck === "function") ? ck() : -1;
       try {
         const resp = await fetch(`${viteOrigin}${MODULE_FETCH_PATH}`, {
           method: "POST",
@@ -44,8 +34,6 @@ export async function createRunner(): Promise<ModuleRunner> {
         return json;
       } catch (e: any) {
         return { error: { message: e.message ?? String(e) } };
-      } finally {
-        if (tok >= 0 && typeof xk === "function") xk(tok);
       }
     },
   };

@@ -2,3 +2,5 @@
 pub(crate) mod fixtures;
 mod postgres;
 mod sqlite;
+
+mod startup_policy;

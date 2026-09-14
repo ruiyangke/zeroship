@@ -55,6 +55,7 @@ void contracts;
 
 const collisionSchema = {
   collection: {id:t.string().required().primaryKey()},
+  declareMaskPolicy: {id:t.string().required().primaryKey()},
   transaction: {id:t.string().required().primaryKey()},
   from: {id:t.string().required().primaryKey()},
   live: {id:t.string().required().primaryKey()},
@@ -74,6 +75,7 @@ function collisionContracts(db: Db<typeof collisionSchema>) {
   });
   void db.collection("transaction").find({id:"row"});
   void db.collection("collection").find({id:"row"});
+  void db.collection("declareMaskPolicy").find({id:"row"});
   void db.collection("from").find({id:"row"});
   void db.collection("live").find({id:"row"});
   void db.collection("constructor").find({id:"row"});

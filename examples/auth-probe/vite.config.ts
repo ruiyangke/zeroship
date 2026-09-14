@@ -13,7 +13,7 @@ import { zeroship } from "@zeroship/vite-plugin";
 // matching claim in that script (it re-asserts the pair on every run).
 //
 // The dev sign-in password is NOT declared here - it is derived from each id by
-// `devPasswordFor` (sdks/bootstrap/src/dev-auth.ts): "dev-" + the first 8
+// `devPasswordFor` (sdks/vite-plugin/src/dev-auth.ts): "dev-" + the first 8
 // characters after "pws_". So alpha signs in with "dev-probealp" and beta with
 // "dev-probebet". The e2e harnesses derive it the same way from the ids below.
 //

@@ -1,60 +1,11 @@
 /**
- * Dev-tier auth provider — the self-contained `pnpm dev` implementation of the
- * platform auth contract (BFF model), the auth peer of `env.db` → SQLite and
- * `env.kv` → redb. NO gateway, NO external auth service, NO control plane.
- *
- * ## Contract parity (dev mirrors prod exactly)
- *
- * In production the **gateway** serves the same-origin `/__zeroship/auth/*` endpoints
- * the `@zeroship/auth` browser client drives (`crates/zeroship-gateway/src/browser_auth.rs`,
- * `crates/zeroship-gateway/src/auth_token.rs`), owns the `__Host-zeroship_app_session` cookie,
- * and HMAC-signs the resolved identity into the request-bound `ZeroShip-User`
- * header the worker decodes into server-side `env.auth.getUser()` /
- * `currentUser()`.
- *
- * This module is the DEV-TIER implementation of that exact contract:
- *
- *   - `GET  /__zeroship/auth/authorize`     → frictionless dev login. Instead of a
- *       cross-site hop to the native auth service, it 302-redirects straight back to the app's
- *       own `/__zeroship/auth/popup-callback?code=…&state=…` with a dev auth code.
- *       An optional dev user-picker (multi-user config) renders an HTML form.
- *   - `GET  /__zeroship/auth/popup-callback`→ the SAME same-origin relay page the
- *       gateway serves (byte-for-byte): parses code/state from the query and
- *       postMessages `zs:authorization_response` over three channels.
- *   - `POST /__zeroship/auth/session`       → exchange the dev code for a session;
- *       mints the local `__zeroship_dev_session` cookie and returns `{user, expires_at}`.
- *   - `GET  /__zeroship/auth/session[?mint=1]` → read / re-mint; returns `{user,
- *       expires_at}` or a `401 {error:"login_required"}` envelope.
- *   - `POST /__zeroship/auth/signout`       → clears the cookie; `204`.
- *
- * Every wire shape — request params, the `{user, expires_at}` body with
- * snake_case `email_verified`, the `pws_`-style id, the granted `scopes`, the
- * `{error, error_description?}` envelope — is identical to prod, so the
- * `@zeroship/auth` client and the app's `currentUser()`/`env.auth` code are
- * byte-identical dev↔prod. Only the BACKEND differs (this provider vs gateway).
- *
- * ## Server-side identity injection
- *
- * The `__zeroship_dev_session` cookie value is `base64url(user_json) "." hex-hmac`,
- * signed with the per-dev-server secret `ZEROSHIP_DEV_AUTH_SECRET` (the Vite
- * plugin generates it and passes it to the spawned `zeroship serve` child). The
- * runtime's dev serve path (`crates/zeroship-runtime/src/core/dev_auth.rs`) reads that
- * cookie BEFORE dispatch, verifies the HMAC, and threads the decoded
- * `user_json` through the SAME `call_fetch_handler_with_user` path the worker
- * uses for the gateway header — so `env.auth.getUser()` and `currentUser()`
- * resolve the dev user server-side, identical native plumbing to prod. The
- * JS↔Rust token format is byte-compatible (see `sign`/`signDevSession`).
- *
- * ## Dev-only by construction
- *
- * This module is imported ONLY by `dev-entry.ts` (`@zeroship/bootstrap/dev`),
- * which the Vite plugin's dev-bootstrap consumes. The production
- * `runtime-entry.ts` never imports it, and `vite build`'s `.zship` bundles the
- * user module + the prod runtime-entry — never `@zeroship/bootstrap/dev`. So
- * the dev-auth provider is structurally absent from any shipped worker module
- * (grep-provable). There is no runtime flag in shipped code; the dev tier lives
- * exclusively in the dev path.
+ * Vite-owned development implementation of the same-origin browser auth
+ * contract. It mints a local signed session cookie; `zeroship serve` verifies
+ * that cookie before dispatch and supplies the resulting request identity to
+ * `env.auth` and RPC context. Production builds never import this module.
  */
+
+import type { IncomingMessage, ServerResponse } from "node:http";
 
 /** Public user projection (camelCase) — mirrors `@zeroship/auth` `User`. */
 export interface DevUser {
@@ -125,44 +76,23 @@ const DEV_SESSION_COOKIE = "__zeroship_dev_session";
  */
 const DEV_CSRF_COOKIE = "__zeroship_dev_csrf";
 /**
- * The dev password for a given dev user id: `"dev-"` + the first 8 characters
- * of the id with any leading `"pws_"` stripped (fewer if the remainder is
- * shorter). Deterministic, pure, and distinct for distinct id prefixes:
- *
- *   pws_alice000000000000000  ->  dev-alice000
- *   pws_probealpha0000000000  ->  dev-probealp
- *
- * It is *not* a secret -- the dev login form prefills it in plain sight. It
- * exists only so the credential-validation path (and its `invalid_credentials`
- * failure arm) is real in dev, and it is derived rather than configured so no
- * creator can accidentally write a dev credential that would also work on the
- * platform.
- *
- * ## Why the result MUST stay under 15 characters
- *
- * `crates/zeroship-auth/src/ui/signup.rs` REFUSES any password shorter than 15
- * characters, so a dev password below that bound is a credential that works
- * locally and CANNOT EXIST in production. `tests/e2e_dev_vs_deployed_login.sh`
- * measures exactly that: its `policy.short_password` assertion submits the dev
- * password to the deployed platform OP's `POST /signup` and requires that NO
- * account is created. A derived password of >= 15 characters would silently
- * invert that measurement into a vacuous pass (the signup would succeed, and
- * the row would stop meaning anything). `assertPairwiseSubject` pins every id
- * to `pws_` + exactly 20 characters, so every real derivation here is exactly
- * 12 characters; the bound is asserted directly in `tests/dev-auth.test.ts`.
+ * Derive the visible development password from the pairwise subject. It only
+ * exercises the local credential failure path and remains shorter than the
+ * production signup policy in `identity::password::MIN_PASSWORD_CHARS`. The
+ * provider tests gate both derivation and that separation from production.
  */
 export function devPasswordFor(id: string): string {
   const body = id.startsWith("pws_") ? id.slice(4) : id;
   return `dev-${body.slice(0, 8)}`;
 }
-/** Dev session lifetime (seconds). One day is plenty for a dev loop. */
+/** Dev session lifetime supplied to the cookie and session response. */
 const DEV_SESSION_TTL_SECS = 24 * 60 * 60;
 /** RFC 4648 §5 base64url alphabet (no padding) — matches the Rust URL_SAFE_NO_PAD. */
 const B64URL = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
 
 const DEFAULT_DEV_USER: WireUser = {
   // A `pws_`-style opaque per-app pairwise subject, matching the prod shape
-  // (gateway §6.2 — app code only ever sees the `pws_…`, never the `usr_…`).
+  // App code only ever sees the `pws_…`, never the account's `usr_…` id.
   id: "pws_dev00000000000000000",
   email: "dev@localhost",
   name: "Dev User",
@@ -394,24 +324,7 @@ interface DevCode {
   userId: string;
   expiresAt: number;
 }
-const devCodes = new Map<string, DevCode>();
 const DEV_CODE_TTL_MS = 5 * 60 * 1000;
-
-function mintCode(userId: string): string {
-  const bytes = new Uint8Array(18);
-  crypto.getRandomValues(bytes);
-  const code = `devc_${base64UrlEncode(bytes)}`;
-  devCodes.set(code, { userId, expiresAt: Date.now() + DEV_CODE_TTL_MS });
-  return code;
-}
-
-function spendCode(code: string): string | null {
-  const entry = devCodes.get(code);
-  if (!entry) return null;
-  devCodes.delete(code);
-  if (entry.expiresAt < Date.now()) return null;
-  return entry.userId;
-}
 
 // ── HTTP helpers ─────────────────────────────────────────────────────────────
 
@@ -626,20 +539,36 @@ export interface DevAuthProvider {
 }
 
 /**
- * Build the dev-auth provider from the spawn env. `getEnv` reads
- * `ZEROSHIP_DEV_AUTH` (user config) and `ZEROSHIP_DEV_AUTH_SECRET` (cookie
- * HMAC). Returns `null` when dev-auth is disabled or no secret is present
- * (e.g. someone ran `zeroship serve` by hand without the Vite plugin).
+ * Build the provider from the configuration and secret owned by this Vite
+ * server. Returns `null` when development auth is disabled.
  */
-export function createDevAuthProvider(
-  getEnv: (name: string) => string | undefined,
-): DevAuthProvider | null {
-  const secret = getEnv("ZEROSHIP_DEV_AUTH_SECRET");
+export function createDevAuthProvider(options: {
+  config: string | undefined;
+  secret: string | undefined;
+}): DevAuthProvider | null {
+  const { secret } = options;
   if (!secret) return null;
-  const config = parseDevAuthConfig(getEnv("ZEROSHIP_DEV_AUTH"));
+  const config = parseDevAuthConfig(options.config);
   if (!config) return null;
 
   const userById = new Map(config.users.map((u) => [u.id, u] as const));
+  const devCodes = new Map<string, DevCode>();
+
+  function mintCode(userId: string): string {
+    const bytes = new Uint8Array(18);
+    crypto.getRandomValues(bytes);
+    const code = `devc_${base64UrlEncode(bytes)}`;
+    devCodes.set(code, { userId, expiresAt: Date.now() + DEV_CODE_TTL_MS });
+    return code;
+  }
+
+  function spendCode(code: string): string | null {
+    const entry = devCodes.get(code);
+    if (!entry) return null;
+    devCodes.delete(code);
+    if (entry.expiresAt < Date.now()) return null;
+    return entry.userId;
+  }
 
   async function handle(request: Request): Promise<Response> {
     const url = new URL(request.url);
@@ -796,3 +725,71 @@ export function createDevAuthProvider(
 
 /** Expose the public-user projection for tests / diagnostics. */
 export { wireToPublic };
+
+const DEV_AUTH_BODY_LIMIT = 64 * 1024;
+
+class DevAuthHttpError extends Error {
+  constructor(readonly status: number, message: string) {
+    super(message);
+  }
+}
+
+async function requestFromNode(req: IncomingMessage): Promise<Request> {
+  const encrypted = (req.socket as { encrypted?: boolean }).encrypted === true;
+  const origin = `${encrypted ? "https" : "http"}://${req.headers.host ?? "localhost"}`;
+  const url = new URL(req.url ?? "/", origin);
+  const headers = new Headers();
+  for (const [name, value] of Object.entries(req.headers)) {
+    if (Array.isArray(value)) {
+      for (const item of value) headers.append(name, item);
+    } else if (value !== undefined) {
+      headers.set(name, value);
+    }
+  }
+
+  const method = req.method ?? "GET";
+  let body: string | undefined;
+  if (method !== "GET" && method !== "HEAD") {
+    const chunks: Buffer[] = [];
+    let size = 0;
+    for await (const chunk of req) {
+      const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      size += buffer.length;
+      if (size > DEV_AUTH_BODY_LIMIT) {
+        throw new DevAuthHttpError(413, "development auth request body is too large");
+      }
+      chunks.push(buffer);
+    }
+    body = Buffer.concat(chunks).toString("utf8");
+  }
+
+  return new Request(url, { method, headers, body });
+}
+
+async function writeNodeResponse(res: ServerResponse, response: Response): Promise<void> {
+  const headers: Record<string, string> = {};
+  response.headers.forEach((value, name) => {
+    headers[name] = value;
+  });
+  res.writeHead(response.status, headers);
+  if (response.body === null) {
+    res.end();
+    return;
+  }
+  res.end(Buffer.from(await response.arrayBuffer()));
+}
+
+/** Serve one Vite middleware request without evaluating creator modules. */
+export async function serveDevAuthHttp(
+  provider: DevAuthProvider,
+  req: IncomingMessage,
+  res: ServerResponse,
+): Promise<void> {
+  try {
+    await writeNodeResponse(res, await provider.handle(await requestFromNode(req)));
+  } catch (error) {
+    const status = error instanceof DevAuthHttpError ? error.status : 500;
+    const message = error instanceof Error ? error.message : String(error);
+    await writeNodeResponse(res, errorEnvelope(status, "dev_auth_error", message));
+  }
+}

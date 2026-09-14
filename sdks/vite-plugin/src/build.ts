@@ -15,7 +15,7 @@ import {
   type DiscoveredSchedule,
 } from "./manifest.js";
 import {
-  zeroshipBootstrapResolverPlugin,
+  zeroshipFrameworkResolverPlugin,
   zeroshipModulePlugin,
 } from "./zeroship-module.js";
 import { genTypesFromMigrations } from "./gen-types/index.js";
@@ -415,8 +415,8 @@ export function buildPlugin(
   let serverBuilt = false;
   let zshipEmitted = false;
   // Whether the user's SSR entry source contains `export default`.
-  // Probed before Rollup runs so it isn't confused by the bootstrap's
-  // own appended default. Conservative default = true (emit Worker(SSR)
+  // Probed before Rollup runs so it isn't confused by the generated server
+  // entry's default export. Conservative default = true (emit Worker(SSR)
   // catch-all when in doubt; better to 404 than serve stale shell).
   let userHasDefaultFetch = true;
   // Vite's resolved mode — drives the manifest emitter's
@@ -502,9 +502,9 @@ export function buildPlugin(
         // etc. as bare specifiers.
         nodeCompatPlugin(),
         // Intercept the bare `zeroship` specifier so user code's
-        // `import { env } from "zeroship"` resolves to the runtime
-        // virtual module (`Object.freeze(__zs_env())`) instead of the
-        // file-linked `zeroship-stub` package (`export const env = {}`).
+        // `import { env } from "zeroship"` resolves to the runtime-owned
+        // virtual module instead of the file-linked `zeroship-stub` package
+        // (`export const env = {}`).
         // Without this, `noExternal: true` inlines the stub and
         // `env.db` is `undefined` at runtime — every env.db (and
         // env.auth/kv/storage) RPC procedure throws `Cannot read
@@ -520,13 +520,9 @@ export function buildPlugin(
         // more — the synthetic SSR entry discovers procedures at
         // module-init time from the user namespace's exports.
         transformPlugin(state),
-        // The synthetic server entry side-effect-imports
-        // @zeroship/bootstrap so the runtime can resolve its dynamic
-        // imports from the bundled worker. That package is
-        // framework-internal, so the nested SSR build must resolve it
-        // through the Vite plugin's dependency tree rather than the
-        // user's app root.
-        zeroshipBootstrapResolverPlugin(),
+        // Framework-private SDK imports resolve through the Vite plugin's
+        // dependency tree rather than the creator's app root.
+        zeroshipFrameworkResolverPlugin(),
         // Synthetic SSR entry virtual module owner. The entry's body
         // is build-time-static and order-independent.
         rpcRegistryPlugin({

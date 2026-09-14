@@ -1,18 +1,8 @@
 // sdks/vite-plugin/src/dev-auth-config.ts
 //
-// Resolve the plugin's `devAuth` option into the env-var pair the spawned
-// `zeroship serve` child reads:
-//
-//   ZEROSHIP_DEV_AUTH        — JSON dev-user config (`@zeroship/bootstrap`'s
-//                              `parseDevAuthConfig` consumes it).
-//   ZEROSHIP_DEV_AUTH_SECRET — per-dev-server HMAC secret. Both the JS dev-auth
-//                              provider (cookie signing) and the runtime's
-//                              `dev_auth.rs` (cookie verification → server-side
-//                              identity) read it. Generated fresh per dev server.
-//
-// Dev-only by construction: these env vars are set only on the dev `serve`
-// child; the production `.zship` build never sees them, and the dev-auth
-// provider lives in `@zeroship/bootstrap/dev` (absent from the shipped worker).
+// Resolve the plugin's `devAuth` option into Vite-owned provider config and a
+// cookie HMAC secret shared with the spawned `zeroship serve` process. The
+// production build never imports this module.
 
 import type { DevAuthUser } from "./index.js";
 
@@ -24,7 +14,7 @@ export type DevAuthOption =
   | { users: DevAuthUser[]; defaultUserId?: string };
 
 /** Resolved env-var pair to merge into the child `spawn` env. */
-export interface ResolvedDevAuthEnv {
+export interface ResolvedDevAuth {
   /** `null` when dev-auth is disabled — caller omits both env vars. */
   config: string | null;
   /** `null` when disabled. */
@@ -32,8 +22,8 @@ export interface ResolvedDevAuthEnv {
 }
 
 /**
- * Serialize the `devAuth` option into the `ZEROSHIP_DEV_AUTH` JSON the
- * bootstrap dev-auth provider parses, and mint a fresh HMAC secret.
+ * Serialize the `devAuth` option for the Vite auth provider and mint its HMAC
+ * secret. The secret is also passed to the runtime for cookie verification.
  *
  * - `undefined` / `true` → ON with the built-in default user (`config = "1"`).
  * - `false` → OFF (`config = null`, no secret) — `/__zeroship/auth/*` falls through
@@ -44,16 +34,16 @@ export interface ResolvedDevAuthEnv {
  * `generateSecret` is injectable for deterministic tests; defaults to a
  * 32-byte hex random.
  */
-export function resolveDevAuthEnv(
+export function resolveDevAuth(
   option: DevAuthOption | undefined,
   generateSecret: () => string,
-): ResolvedDevAuthEnv {
+): ResolvedDevAuth {
   if (option === false) return { config: null, secret: null };
 
   const secret = generateSecret();
 
   if (option === undefined || option === true) {
-    // Default ON: the built-in dev user. `"1"` is the bootstrap sentinel.
+    // Default ON: the provider expands `"1"` to its built-in user.
     return { config: "1", secret };
   }
 

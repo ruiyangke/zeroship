@@ -25,7 +25,7 @@ the full stance.
 - `sdks/` - the `@zeroship/*` npm packages (a pnpm workspace): `db`, `kv`, `storage`,
   `auth`, `rpc`, `ui`, `vite-plugin`, `control`, `payments`, `react`, `migrate`,
   `workflows`, `server`, `types`, `mcp`, `eslint-config`, `eslint-plugin-workflow`,
-  `create-zeroship-app`, `zeroship-stub`, and the framework-internal `bootstrap`.
+  `create-zeroship-app`, and `zeroship-stub`.
   Same caveat as `crates/`: `ls sdks/` is the source of truth.
 - `db/` - the platform's own database schema, authored as `@zeroship/migrate`
   migrations in `db/migrations-ts/` (the sole platform migration source - no SQL/Flyway).
@@ -38,13 +38,8 @@ the full stance.
 ## Development
 
 Prerequisites: a stable Rust toolchain, plus Node.js and pnpm at the versions
-`package.json` declares in `engines` and `packageManager` (currently Node >= 20 and
-pnpm 9). The live database tests expect the PostgreSQL that
-`deploy/compose/docker-compose.yml` pins, exposed on `127.0.0.1:5440`. Some e2e
-suites need Docker.
-
-Those files are the authority; the versions named here are a convenience copy and
-can drift from them.
+declared by `package.json`. Live database and end-to-end suites use the services
+and ports declared by `deploy/compose/docker-compose.yml`; Docker is required.
 
 **First, initialize the submodule** - the workspace won't resolve without it:
 
@@ -52,13 +47,12 @@ can drift from them.
 git submodule update --init third_party/zero-migrate
 ```
 
-**Build the SDKs before the Rust workspace.** The runtime crate `include_str!`s
-`sdks/bootstrap/dist/*` and `sdks/db/dist/internal.js`, so `pnpm build` must run before
-`cargo build`:
+**Build the SDKs before the Rust workspace.** The DB adapter crate embeds
+`sdks/db/dist/internal.js`, so `pnpm build` must run before `cargo build`:
 
 ```
 pnpm install
-pnpm build            # db -> bootstrap -> the rest of sdks/*, in dependency order
+pnpm build            # builds DB before the Rust-embedded adapter and then the SDK workspace
 cargo build --workspace
 ```
 
@@ -205,7 +199,7 @@ scope before inventing one - grep `git log` for the current vocabulary. Common s
   `plugin-db`, `kv-v8`, `storage-v8`, `metering`, `stream`, `bundle`, `core`,
   `cli`, `mailer`
 - Drivers (`libs/`): `compio-postgres`, `compio-redis`, `compio-s3`
-- SDKs: `db`, `kv`, `storage`, `rpc`, `ui`, `vite-plugin`, `bootstrap`, `payments`
+- SDKs: `db`, `kv`, `storage`, `rpc`, `ui`, `vite-plugin`, `payments`
 - Migrations: `migrate`, `migrated`, `migrate-adapter`, `schema`, `db` (platform schema)
 - Domains: `billing`, `websocket`, `node-compat`, `workflows`, `deploy`
 - Umbrella: `workspace`, `docs`, `tests`, `ci`, `deps`

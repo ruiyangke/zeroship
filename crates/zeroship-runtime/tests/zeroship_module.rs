@@ -182,6 +182,7 @@ async fn native_exports_keep_request_context_when_globals_are_replaced() {
         import * as zs from 'zeroship';
         async function test() {
             const ctx = zs.getRequestContext();
+            const legacyGlobalAbsent = typeof globalThis.__zeroshipGetRpcCtx === 'undefined';
             globalThis.__zeroshipGetRpcCtx = () => ({ user: 'forged' });
             globalThis.__zsEnterKind = () => { throw new Error('forged enter'); };
             globalThis.__zsExitKind = () => { throw new Error('forged exit'); };
@@ -192,6 +193,7 @@ async fn native_exports_keep_request_context_when_globals_are_replaced() {
             });
             const dynamic = await import('zeroship');
             return { same: dynamic === zs, nested, context: zs.getRequestContext() === ctx,
+                legacyGlobalAbsent,
                 fields: [zs.currentUser() === ctx.user, zs.currentRequestId() === ctx.requestId,
                     zs.currentTraceId() === ctx.traceId, zs.currentSignal() === ctx.signal,
                     zs.currentHeaders() === ctx.headers,
@@ -202,7 +204,7 @@ async fn native_exports_keep_request_context_when_globals_are_replaced() {
     assert_eq!(
         value,
         json!({
-            "same": true, "nested": true, "context": true,
+            "same": true, "nested": true, "context": true, "legacyGlobalAbsent": true,
             "fields": [true, true, true, true, true, true],
         })
     );

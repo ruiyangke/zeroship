@@ -282,7 +282,7 @@ There is no binding level between `env.db` and a collection. That is a deliberat
 one-database-per-app, and it is load-bearing in two ways:
 
 - `installSchema` plants collections directly on the target with `Object.defineProperty`
-  (`sdks/bootstrap/src/install-schema.ts:952`). With several bindings, a binding named `analytics`
+  (`sdks/db/src/install-schema.ts`). With several bindings, a binding named `analytics`
   and a collection named `analytics` would be the same key.
 - Database resolution stays `f(app_id)` rather than becoming `f(app_id, binding_name)` with the
   binding coming from creator code. A whole class of mismatched-pair bug - right role, wrong schema

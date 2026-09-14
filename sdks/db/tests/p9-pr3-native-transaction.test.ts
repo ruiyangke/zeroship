@@ -3,12 +3,12 @@
  *
  * Transaction begin/commit/rollback/nested-savepoint moved into Rust
  * (`crates/zeroship-data-orm/src/transaction/mod.rs`). The
- * `@zeroship/bootstrap` `transactionImpl` is now a thin `Result`-wrapping
- * shim over the native `env.db.transaction(callback, opts)` v8_method,
+ * The private database facade is a thin `Result`-wrapping shim over the native
+ * `env.db.transaction(callback, opts)` v8_method,
  * keeping the JS loader drain, callback-local guards, and Result mapping.
  *
  * These tests mock the native method (no DB) to pin the observable
- * creator-facing contract through the bootstrap wrapper:
+ * creator-facing contract through the database facade:
  *   - commit on resolve → `result.data` is the body value;
  *   - rollback on throw → `result.error` is the thrown error;
  *   - nested transaction isolates an inner failure (savepoint) while the

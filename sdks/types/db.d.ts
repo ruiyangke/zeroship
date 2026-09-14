@@ -295,13 +295,13 @@ interface ZeroshipSubscription {
 
 /**
  * The `zeroship.db` namespace surfaced as `env.db` on every isolate.
- * The creator-facing operations live on the Db v8_class instance —
- * collection mint and transaction open. The platform-internal entry
- * policy installation live on the `__platform`
- * capability handle and are
- * not on this surface.
+ * Native operations live on the Db instance. The host finalizes startup
+ * configuration after creator evaluation.
  */
 interface ZeroshipDb {
+  /** Startup declaration used by @zeroship/db; native finalization seals it. */
+  declareMaskPolicy(policy: Readonly<Record<string, readonly string[]>>): void;
+
   /**
    * Mint (or return the cached) Collection wrapper for `name`. Identity
    * is cached on the Db wrapper so repeated calls with the same name
