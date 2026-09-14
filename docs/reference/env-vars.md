@@ -4,15 +4,15 @@ This file has TWO HALVES and they carry different guarantees.
 
 **The generated half** is the table between the
 `BEGIN/END GENERATED CONFIGURATION CONTRACT` markers below. It is rendered from
-the COMPILED `ConfigSpec` registries of the six declaring binaries by
+the COMPILED `ConfigSpec` registries of the declaring binaries by
 
 ```bash
 cargo run -p zeroship-config-contract -- env-vars-doc
 ```
 
 Every name in it is the name the binary parses, because both are the same
-compiled value. It cannot be stale: `tests/config_name_alignment_gate.sh` fails
-CI when the committed region differs from a fresh render.
+compiled value. Pass `--check` to compare the committed region with a fresh
+render without rewriting the file.
 
 **The hand-maintained half** is everything else. It documents what zeroship does
 NOT declare - Stripe, Supabase, AWS and other third-party names, the Compose
@@ -199,9 +199,8 @@ a command control has no environment name, so no ambient variable can trigger it
 <!-- BEGIN GENERATED CONFIGURATION CONTRACT -->
 <!--
 DO NOT EDIT THIS REGION BY HAND. It is rendered from the COMPILED
-ConfigSpec registries of the seven declaring binaries by
-`cargo run -p zeroship-config-contract -- env-vars-doc`, and
-tests/config_name_alignment_gate.sh fails when it drifts. Everything
+ConfigSpec registries of the declaring binaries by
+`cargo run -p zeroship-config-contract -- env-vars-doc`. Everything
 OUTSIDE these two markers is hand-maintained and is never rewritten
 by the generator.
 -->
@@ -492,9 +491,9 @@ each one into the container variable OF THE SAME NAME, so
 contract table has a working default or belongs to a service the stack does not
 run.
 
-The `.env` name and the container name are now always identical; that equality
-is enforced by check 6b of `tests/config_name_alignment_gate.sh`. It used to be
-that eight values were spelled one way in `.env` and another in the container.
+The checked-in Compose file passes each direct `.env` interpolation through to
+the container under the same name. Earlier versions used different host and
+container spellings for some values.
 
 Before the first local compose run, provision the file and its sibling secret
 directory from the repository root:
@@ -573,8 +572,7 @@ mounted file the platform-migration one-shot reads. Setting the variable to a
 literal DSN still works and is what a `.env` override does; the point is that
 the checked-in file no longer carries superuser material, and that repointing
 `secrets/migrate-dsn` at a real database now moves BOTH privileged readers
-instead of only the one-shot. `check 6d` of `tests/config_name_alignment_gate.sh`
-refuses a superuser DSN reappearing in any `environment:` value.
+instead of only the one-shot.
 
 Optional: `OPENAI_API_KEY` (defaults empty).
 
@@ -590,8 +588,7 @@ passes that path along; it is not read by any container.
 
 Section 4.3 of `docs/proposals/2026-08-11-config-name-alignment.md` requires
 `LEFT == RIGHT` for any container value whose whole scalar is one interpolation.
-As of 2026-08-13 the deployment satisfies it and check 6b of
-`tests/config_name_alignment_gate.sh` enforces it.
+The checked-in deployment uses that form.
 
 ### Operational literals not supplied by the generator
 
@@ -625,12 +622,7 @@ is in `docs/runbooks/deploy-server.md`.
 Not every environment read is a server SETTING. The creator CLI, the
 single-tenant runtime, the data plugins and the test suites all read names that
 no `ConfigSpec` declares, and they are not invented: each goes through a typed
-declared key whose class the raw-environment gate checks. Re-derive the current
-census with
-
-```bash
-cargo run -p zeroship-config-contract -- raw-env 2>&1 >/dev/null | grep class
-```
+declared key that records its class and consumer.
 
 **creator CLI** (`CliEnv`): `ZEROSHIP_TOKEN` `ZEROSHIP_CONTROL_URL`
 `ZEROSHIP_CONFIG` `ZEROSHIP_CONFIG_HOME` `ZEROSHIP_KV_PATH` `ZEROSHIP_KV_CONFIG_FILE`
@@ -674,8 +666,7 @@ worker - whose TOML overlay source was removed as a credential boundary - ended
 up with no interface at all for the billing stream. They are now four canonical
 `metering.*` identities in the generated table above, so the worker and the
 gateway each take `--metering-brokers`, `ZEROSHIP_METERING_BROKERS` and
-`[metering] brokers` (and the three siblings). `REDPANDA_BROKERS` survives only
-as a TEST-ONLY name, listed below, that gates the real-broker integration tests.
+`[metering] brokers` (and the three siblings).
 
 ---
 
@@ -740,11 +731,8 @@ read through the platform's own `FileConfig` parser
 shell). `deny_unknown_fields` applies, so a misspelled key in it is an error
 rather than a value that silently configures nothing.
 
-It is generated and gitignored rather than committed because every
-`*.database_url` and `worker.kv_config` leaf is `secret`-classed, and check 8 of
-`tests/config_name_alignment_gate.sh` fails any TRACKED `*.toml` holding a
-literal at a secret-classed leaf - with no exception list, by design. That same
-gate exempts untracked overlays deliberately, which is exactly what this is.
+It is generated and gitignored rather than committed because its database and
+KV values contain credentials for the local backend instances.
 
 `PG_TEST_URL` is the PostgreSQL test override, including the workflow engine
 fixtures. Otherwise tests read the generated overlay. Suite runners export this
@@ -762,22 +750,14 @@ required now, like Postgres, for the same reason
 `PG_TEST_URL`
 
 `ZEROSHIP_SESSION_SECRET`, `ZEROSHIP_SESSION_SECRET_PREV` and
-`ZEROSHIP_SESSION_NONCE_CAPACITY` were on that list until 2026-09-04 and
-nothing read any of them. They configured the SQLite session minter, which went
-with the HMAC session anchor the operator deleted on 2026-08-27; the names
-outlived it here and in `tests/test_only_env_gate.sh`'s inventory, where arm 2
-had been red for a week because that gate was not wired into CI.
+`ZEROSHIP_SESSION_NONCE_CAPACITY` previously configured the deleted SQLite
+session minter. They were removed when their readers disappeared.
 
-`ZEROSHIP_NET_TEST_DNS_HANG_HOST` and `ZEROSHIP_NET_TEST_DNS_HANG_MS` were on
-that list until 2026-08-20 and NOTHING READ EITHER ONE. They appeared in this
-file and in one comment in `crates/zeroship-runtime/src/transport/egress.rs` that cites
-the pair as an analogy; no reader, no setter, in any language. A list of live
-names that has stopped being live reads exactly like a correct one, which is
-why `tests/test_only_env_gate.sh` arm 2 now checks this section's claim against
-the tree rather than leaving it to a reader.
+`ZEROSHIP_NET_TEST_DNS_HANG_HOST` and `ZEROSHIP_NET_TEST_DNS_HANG_MS` were
+removed after their readers disappeared.
 
 CI also sets `PG_CONTAINER` `PG_HOST` `PG_PORT` `PG_USER` `PG_PASS`
-`POSTGRES_USER` `POSTGRES_PASSWORD` `REDPANDA_BROKERS` `ZS_FRESHNESS_STRICT`.
+`POSTGRES_USER` `POSTGRES_PASSWORD` `ZS_FRESHNESS_STRICT`.
 `PG_HOST`/`PG_PORT`/`PG_USER`/`PG_PASS` are INPUTS to
 `tests/provision_test_backends.sh`, which writes what they resolve to into the
 overlay. Mailer tests own their PostgreSQL and Mailpit containers through
@@ -799,17 +779,8 @@ in every run it would have helped; it is deleted, not renamed.
 # Rewrite the generated region above from the COMPILED contract.
 cargo run -p zeroship-config-contract -- env-vars-doc
 
-# Verify it, exactly as CI does.
+# Compare the generated region without rewriting it.
 cargo run -p zeroship-config-contract -- env-vars-doc --check
-
-# THE AUDIT. Re-derive every projection a SECOND time by parsing the source
-# text with syn, and require the two sets to be equal in both directions. The
-# extraction is no longer the source of truth for this document; its job is to
-# disagree with the compiled contract if either one is wrong.
-cargo run -p zeroship-config-contract -- audit
-
-# The declared non-contract census behind the hand-maintained sections.
-cargo run -p zeroship-config-contract -- raw-env 2>&1 >/dev/null | grep class
 
 # The compose knobs an operator can set.
 grep -ohE '\$\{[A-Z_0-9]+(:-[^}]*)?\}' deploy/compose/docker-compose.yml | sort -u

@@ -46,8 +46,9 @@
 //!    receipt that the suite's `CREATE TEMP TABLE`s executed on THIS backend - the
 //!    scratch tables themselves are dropped by the suite and leave nothing to look at.
 //!
-//! This target runs in ordinary cargo test and requires a configured PostgreSQL
-//! server. Missing configuration or a failed connection fails the run.
+//! This target runs in ordinary cargo test and owns its `PostgreSQL` server.
+
+mod fixture;
 
 use zeroship_migrate::driver::conformance::{self, SeamFixture};
 use zeroship_migrate::driver::SqlSession;
@@ -95,20 +96,6 @@ fn scratch_ident(tag: &str) -> String {
     let n = N.fetch_add(1, Ordering::SeqCst);
     let pid = std::process::id();
     format!("zm_conf_{tag}_{pid}_{n}")
-}
-
-/// The DSN, or a loud refusal. There is no skip arm on purpose: this target exists
-/// because a driver went unexercised for a whole release cycle while every run
-/// reported green, and a skip would rebuild exactly that.
-fn require_live_pg() -> String {
-    zeroship_core::config::test_database_url_opt().unwrap_or_else(|| {
-        panic!(
-            "compio_pg_conformance REQUIRES a live PostgreSQL: no test DSN configured. \
-             Set PG_TEST_URL to a DSN on :5440, or run tests/provision_test_backends.sh. \
-             This test does not skip - a skipped live suite reports exactly like a \
-             passing one, which is how CompioPgSession went unconformed."
-        )
-    })
 }
 
 /// The config for the session under test, carrying a distinctive
@@ -161,9 +148,10 @@ async fn seam_temp_schema_oid(session: &CompioPgSession) -> i64 {
 
 #[compio::test]
 async fn compio_pg_session_passes_seam_conformance() {
-    let url = require_live_pg();
+    let postgres = fixture::Postgres::start();
+    let url = postgres.url();
     let app_name = format!("zs-seam-conformance-{}", std::process::id());
-    let session = CompioPgSession::connect_with_config(&tagged_config(&url, &app_name))
+    let session = CompioPgSession::connect_with_config(&tagged_config(url, &app_name))
         .await
         .expect("connect CompioPgSession to the test PG");
 
@@ -177,7 +165,7 @@ async fn compio_pg_session_passes_seam_conformance() {
     );
 
     // --- Evidence 2: an INDEPENDENT connection identifies that backend. ---
-    let observer = CompioPgSession::connect(&url)
+    let observer = CompioPgSession::connect(url)
         .await
         .expect("connect the independent observer session");
     let observer_pid = seam_backend_pid(&observer).await;

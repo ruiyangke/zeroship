@@ -25,13 +25,9 @@
 //! THE FIRST LINE IS NOT A RUST TEST, and for a while this module could not have
 //! helped it: the host suite had no claim at all, so the Rust binaries serialized
 //! against each other while the CLI suite installed `citext` whenever it liked. Its
-//! half now lives in `packages/zero-migrate-cli/tests/host/extension-claim.ts` and
-//! hashes the string [`claim_key`] builds. Re-measured from that state: six of six
-//! runs of `rollback-live.test.ts`'s extension arm failed against a loop of
-//! `pg_scenarios::guard_detects_representation_changes_under_case_insensitive_cursor_semantics`,
-//! in three distinct shapes - the `already installed` assertion above, `migration ...
-//! failed to apply: extension "citext" already exists`, and the same error from the
-//! rollback. Zero of six failed once both halves took this claim.
+//! half now lives in `packages/zero-migrate-cli/tests/host/extension-claim.ts`. Both
+//! implementations load the same fixture prefix before handing the key to
+//! PostgreSQL's `hashtext`, so neither language carries a private copy.
 //!
 //! KEYED BY THE RESOURCE, NOT BY THE SUITE. [`claim_key`] hashes
 //! `zero-migrate:pg-extension:<name>` and NOTHING ELSE - no suite name, no binary
@@ -60,6 +56,8 @@ use zeroship_migrate::driver::{Bind, SqlSession};
 
 use super::PgDevSession;
 
+const CLAIM_PREFIX: &str = include_str!("../fixtures/extension-claim-prefix.txt");
+
 /// How long a run waits for a claim before it REPORTS rather than hangs.
 ///
 /// Spelled as a `lock_timeout`, which PostgreSQL applies to a `pg_advisory_lock`
@@ -76,7 +74,7 @@ pub const CLAIM_WAIT: &str = "180s";
 /// siblings.
 #[must_use]
 pub fn claim_key(extension: &str) -> String {
-    format!("zero-migrate:pg-extension:{extension}")
+    format!("{}{extension}", CLAIM_PREFIX.trim_end())
 }
 
 fn quoted(extension: &str) -> String {

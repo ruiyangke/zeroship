@@ -33,12 +33,10 @@
 //! the question, in its own crate, in its own diff, instead of acquiring an answer by
 //! omitting something.
 //!
-//! # Why this test is not redundant with the census
+//! # Why this test matters
 //!
-//! `core_names_no_vendor_crate.rs` proves the engine does not NAME
-//! `zeroship_migrate_postgres`. It cannot prove the dispatch is real. A refactor that
-//! routed all three vendors to PostgreSQL's renderer would satisfy the census
-//! completely and be exactly the defect the crate split exists to prevent — the same
+//! A refactor that routed every vendor to one renderer could compile cleanly and be
+//! exactly the defect the crate split exists to prevent — the same
 //! shape as the SQLite-identifiers-quoted-by-PostgreSQL bug this repo already had,
 //! which compiled clean and passed every emitted-SQL assertion because the two vendors
 //! agreed on the bytes. Here they do not agree: two of them have no answer at all, and

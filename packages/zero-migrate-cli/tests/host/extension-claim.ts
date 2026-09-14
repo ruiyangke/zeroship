@@ -18,11 +18,9 @@
 // while looking exactly like protection". A claim only one of two contenders takes is
 // the degenerate case of that - one key and no key.
 //
-// SO THE KEY IS COPIED, NOT RE-DESIGNED. [`claimKey`] must produce byte-for-byte what
-// `extension_claim::claim_key` produces, and `extension-claim-is-exclusive.test.ts`
-// reads the Rust source and asserts exactly that rather than trusting this comment.
-// The hashing is the SERVER's (`hashtext`), so once the two strings agree the two
-// languages are provably in one lock space: neither side hashes anything itself.
+// Both implementations load the prefix from the same data fixture. The hashing is
+// the server's (`hashtext`), so the two languages share one lock space without
+// parsing or copying each other's source.
 //
 // RELEASE ON EVERY PATH. The claim is a SESSION-level advisory lock on the caller's
 // ONE `pg.Client` connection, so the server releases it when that connection closes -
@@ -35,7 +33,14 @@
 // claim into a quiet pass would have a test that reports green without asking its
 // question, which this project treats as a defect in itself.
 
+import { readFileSync } from "node:fs";
+
 import type { Client } from "pg";
+
+const CLAIM_PREFIX = readFileSync(
+  new URL("../../../../crates/zeroship-migrate/tests/fixtures/extension-claim-prefix.txt", import.meta.url),
+  "utf8",
+).trimEnd();
 
 /**
  * How long a run waits for a claim before it REPORTS rather than hangs.
@@ -57,7 +62,7 @@ export const CLAIM_WAIT = "180s";
  * its siblings.
  */
 export function claimKey(extension: string): string {
-  return `zero-migrate:pg-extension:${extension}`;
+  return `${CLAIM_PREFIX}${extension}`;
 }
 
 function quoted(extension: string): string {

@@ -6,10 +6,14 @@
 
 import assert from "node:assert/strict";
 import { existsSync } from "node:fs";
-import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { test } from "node:test";
 import { pathToFileURL } from "node:url";
+
+import {
+  recordMigration,
+  type MigrationModule,
+} from "@zeroship/migrate/internal/recorder";
 
 import {
   ids,
@@ -70,27 +74,17 @@ function record(up: () => void): any[] {
   return __drain();
 }
 
-async function importPlatformCorpusMigration(relativePath: string): Promise<{ schema(): void }> {
+async function importPlatformCorpusMigration(relativePath: string): Promise<MigrationModule> {
   const sourcePath = resolve(process.cwd(), "../..", relativePath);
-  const indexUrl = pathToFileURL(resolve(process.cwd(), "src/index.js")).href;
-  const source = (await readFile(sourcePath, "utf8")).replaceAll(
-    `from "@zeroship/migrate"`,
-    `from "${indexUrl}"`,
-  );
-  // THE SWEEP LANDED. This used to resolve `up()` and assert it existed, with a
-  // comment predicting it would "fail once that sweep lands" - d92efa740 swept the
-  // corpus to `schema()` and it did, silently, because the specifier rewrite above
-  // also stopped matching (the corpus said `@zeroship/migrate` then) so the import
-  // failed before the assertion was ever reached. Both halves are repaired here:
-  // the corpus now spells `@zeroship/migrate`, and this resolves the member it exports.
-  const dataUrl = `data:text/javascript;base64,${Buffer.from(source).toString("base64")}#${Date.now()}`;
-  const mod = (await import(dataUrl)) as {
+  const sourceUrl = pathToFileURL(sourcePath);
+  sourceUrl.searchParams.set("test", String(Date.now()));
+  const mod = (await import(sourceUrl.href)) as {
     schema?: () => void;
     default?: { schema?: () => void };
   };
   const phase = typeof mod.schema === "function" ? mod.schema : mod.default?.schema;
   assert.ok(phase, `${relativePath} must export a schema() phase`);
-  return { schema: phase };
+  return mod;
 }
 
 function recordEngine(up: (api: {
@@ -2804,10 +2798,8 @@ test("platform corpus domain checks record byte-identical VALUE colRef ops", asy
     return;
   }
   const migration = await importPlatformCorpusMigration(corpusRel);
-  const ops = record(() => migration.schema());
+  const ops = recordMigration(migration, { irVersion: 0 }).envelope.ops as any[];
   const domainOps = ops.filter((op) => op.op === "createDomain");
-  // `zeroship`, which is what the corpus spells. It read `zero_migrate` while the
-  // import above was failing, so nothing ever compared it to the file.
   const inDomain = (name: string, elems: string[]) => ({
     op: "createDomain",
     name,

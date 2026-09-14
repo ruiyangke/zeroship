@@ -153,26 +153,15 @@ zeroship dev init      # generate a strong secrets dir + dev overlay, gitignored
 The server binary is then identical in dev and production: it always requires
 real secrets, always verifies, and **has no bypass flag to pass**.
 
-This is not speculative. The deployed stack already works this way. Seven
-generated secret files sit in `/opt/zeroship-deploy/secrets`
-(`auth-signing.pem`, `gateway-signing.pem`, `control-signing.pem`,
-`broker-secret`, `pairwise-salt`, `refresh-hash-key`, `refresh-idem-key`) and
-the services read them without complaint. Local dev is the odd one out, using
-hardcoded literals. Unify by making the file-provisioned path universal and
-automatic.
+The deployed stack already uses generated secret files under
+`/opt/zeroship-deploy/secrets`. Local development uses the same provisioning
+model through `zeroship dev init`.
 
-AMENDED 2026-08-20. The file list above is a MEASUREMENT of the host on
-2026-08-12 and is left as it was taken, but two of its seven names have since
-changed and the list should not be read as current. `control-signing.pem` was
-control's PAT signing key; 8e365f478 (2026-08-17) deleted the key, its compose
-mount and its entry in `secret_specs()`, and `zeroship dev init` has not
-written it since. Nothing removed the orphan from the production host, so it is
-still on disk there, still 119 bytes, and no service reads it. The set the
-shipped compose now names is those six minus `control-signing.pem`, plus
-`migrate-dsn`. Both halves are derived rather than listed as of 2026-08-20
-(`secret_files()` in `deploy/scripts/deploy-remote.sh`, `_dev_secrets_missing`
-in `tests/lib/dev_secrets.sh`), so the next such change does not need a doc
-edit to stay true.
+AMENDED 2026-08-20. `control-signing.pem` was control's PAT signing key; the
+key, its Compose mount and its entry in `secret_specs()` were deleted together.
+The deployment now includes `migrate-dsn`. The deploy script derives the host
+file inventory from Compose, while test harnesses invoke `zeroship dev init`
+directly instead of maintaining another shell inventory.
 
 Generation must be coordinated, because several secrets are SHARED: gateway and
 auth read one `broker-secret` file, and auth's `pairwise-salt` file content must

@@ -596,6 +596,28 @@ describe("emitZship", () => {
     }
   });
 
+  test("keeps project config outside the archive while packing dist files", async () => {
+    const projectMarker = "project-config-must-not-ship";
+    const distMarker = "dist-content-must-ship";
+    const fix = await makeFixture({
+      "zeroship.jsonc": `{ "control": "https://${projectMarker}.example" }\n`,
+      "dist/index.html": "<!doctype html><title>scope</title>\n",
+      "dist/marker.txt": `${distMarker}\n`,
+    });
+    try {
+      const result = await emitZship({ root: fix.root, silent: true });
+      const tarBytes = zstdDecompressSync(await fs.readFile(result.outputPath));
+      assert.ok(tarBytes.includes(Buffer.from(distMarker)), "dist marker reaches the archive");
+      assert.equal(
+        tarBytes.includes(Buffer.from(projectMarker)),
+        false,
+        "project config stays outside the archive",
+      );
+    } finally {
+      await fix.cleanup();
+    }
+  });
+
   test("rejects a dist symlink that resolves to the project root", async () => {
     const fix = await makeFixture({
       "zeroship.jsonc": "{\"name\":\"creator-project\"}\n",

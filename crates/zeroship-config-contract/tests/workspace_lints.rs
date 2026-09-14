@@ -1,7 +1,7 @@
 //! Every first-party workspace member must inherit the shared lint table.
 //!
 //! Section 4.5 of `docs/proposals/2026-08-11-config-name-alignment.md`: the
-//! compiler half of the raw-environment gate is
+//! compiler-enforced environment-access policy is
 //! `[workspace.lints.clippy] disallowed_methods = "deny"`, and a member that
 //! omits `[lints] workspace = true` simply does not get it. That omission is
 //! invisible - the crate compiles, Clippy runs, and the deny is silently absent

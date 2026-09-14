@@ -50,7 +50,11 @@ impl Provider {
                     .await
                     .expect("publish this database's signing key");
                 let pool = zeroship_auth::oidc::refresh::RefreshSessionPool::new(url.as_str(), 1);
+                let orm = zeroship_auth::store::native::connect(url.as_str())
+                    .await
+                    .expect("open the auth service ORM");
                 let app = web::App::new()
+                    .state(orm)
                     .state(config)
                     .state(Arc::new(client))
                     .state(driver)

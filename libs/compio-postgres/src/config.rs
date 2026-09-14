@@ -717,10 +717,8 @@ pub enum Host {
 /// environment would silently redirect every connection the process makes. Everything that decides
 /// where this driver connects, and as whom, comes from the `Config` or the connection string.
 ///
-/// That is not only a preference here, it is a workspace rule with a gate behind it: a published
-/// library takes resolved options from its caller, and `crates/zeroship-core/tests/config_env_access_gate.rs`
-/// rejects a raw environment read anywhere in this crate's sources, against an exemption list that
-/// is deliberately empty.
+/// The workspace Clippy policy rejects direct environment reads in library code, so a published
+/// library takes resolved options from its caller.
 ///
 /// The consequence is that the file-valued parameters need their paths GIVEN, since there is
 /// nothing else to find them with: `passfile` names the password file, and `servicefile` names the

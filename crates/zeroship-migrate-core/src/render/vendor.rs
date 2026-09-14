@@ -44,16 +44,13 @@
 //! it again is an E0603 privacy error at the use site. That is a compiler-enforced
 //! boundary, not a convention.
 //!
-//! It is worth being precise about why that was available here when it was NOT
-//! available for the spelling primitives (see
-//! `crates/zeroship-migrate/tests/dialect_matrix/core_does_not_spell_a_vendors_bytes.rs`, which exists
-//! because a privacy invariant did NOT survive a crate boundary). The difference is
-//! direction. `ansi_double_quote_ident` has to be reachable BY the vendor crates, and
+//! It is worth being precise about why that was available here when it was not
+//! available for the spelling primitives. The difference is direction.
+//! `ansi_double_quote_ident` has to be reachable by the vendor crates, and
 //! `pub(in ...)` cannot say "these three crates and no other", so it had to become
-//! `pub`. `render_vendor_op` only ever needs to be reachable by PostgreSQL ITSELF -
+//! `pub`. `render_vendor_op` only ever needs to be reachable by PostgreSQL itself -
 //! it is one crate's own item, and one crate's own privacy still works. A rule that
-//! can be a privacy should be one; the textual census in
-//! `crates/zeroship-migrate/tests/dialect_matrix/core_names_no_vendor_crate.rs` is the backstop for the rest.
+//! can be expressed through privacy should use privacy.
 //!
 //! # The behaviour test the census cannot be
 //!

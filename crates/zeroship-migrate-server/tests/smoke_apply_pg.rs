@@ -13,9 +13,10 @@
 //!   4. assert the table, the added column, AND the journal row all exist via an
 //!      INDEPENDENT query over the same seam.
 //!
-//! Requires PostgreSQL through the test overlay or `PG_TEST_URL`; missing
-//! configuration or connectivity fails the test. Each run owns token-suffixed
+//! The test owns `PostgreSQL` through Testcontainers. Each run also owns its
 //! metadata and project schemas.
+
+mod fixture;
 
 use zeroship_migrate::driver::SqlSession;
 use zeroship_migrate::{
@@ -111,18 +112,6 @@ fn cfg_for(tok: &str) -> (ExecutorConfig, EffectivePolicy) {
     (c, effective)
 }
 
-/// The env var gating the live-PG smoke test. Mirrors the standalone's suite gate.
-/// The live `PostgreSQL` this target applies its migrations to.
-///
-/// # Panics
-///
-/// When neither `PG_TEST_URL` nor the test overlay names one, with the
-/// provisioning command. It used to announce a skip, so a run against no
-/// database reported the same green as one that had applied real DDL.
-fn pg_url() -> String {
-    zeroship_core::config::test_database_url()
-}
-
 async fn ensure_project_schema(session: &CompioPgSession, cfg: &ExecutorConfig) {
     session
         .batch(&format!(
@@ -181,10 +170,11 @@ async fn column_exists(session: &CompioPgSession, schema: &str, table: &str, col
 
 #[compio::test]
 async fn ir_envelope_lowers_and_applies_over_native_compio_seam() {
-    let url = pg_url();
+    let postgres = fixture::Postgres::start();
+    let url = postgres.url();
 
     // (a) live compio client, (b) wrapped in this crate's SqlSession adapter.
-    let session = CompioPgSession::connect(&url)
+    let session = CompioPgSession::connect(url)
         .await
         .expect("connect compio session to test PG");
     let tok = token();

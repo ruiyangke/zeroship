@@ -36,7 +36,7 @@ import { dirname, join, resolve } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
-// The host suite's addon is resolved and freshness-checked in one place.
+// The host suite builds and resolves its addon in one place.
 import "./addon.js";
 import { PG_URL_ENV, requireLiveDb } from "./live-db.js";
 

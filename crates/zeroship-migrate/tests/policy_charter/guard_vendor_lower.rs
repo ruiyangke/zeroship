@@ -10,11 +10,8 @@
 //! An in-`src` `#[cfg(test)] mod` is how a suite reaches engine internals, and this one
 //! must not live that way: the
 //! assertions below name PostgreSQL's deny-list rule ids
-//! (`zeroship_migrate_postgres::guard::denylist::rule`), and
-//! `dialect_matrix/core_names_no_vendor_crate.rs` forbids ANY file under
-//! `crates/zeroship-migrate-core/src` from naming a vendor crate — a test asserting one
-//! vendor's rule ids is exactly the coupling that census exists to catch, whether or
-//! not it is `#[cfg(test)]`.
+//! (`zeroship_migrate_postgres::guard::denylist::rule`). Keeping them in the host
+//! integration suite avoids making core's unit tests depend on one vendor's rules.
 //!
 //! Nothing is weakened by living here. Everything it needs from the engine
 //! (`render::lower`, `conn::ExecutorConfig`, `model::*`) is already `pub`; the only
