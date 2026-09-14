@@ -68,7 +68,7 @@ Self-managed up/down: tears down control and deletes the test-mode connected
 accounts it minted on exit.
 
 Nothing in `.github/workflows/` runs this script and neither does
-`tests/run_billing_suite.sh`, so a refusal reaches the person who ran it by hand
+`cargo xtask test billing`, so a refusal reaches the person who ran it by hand
 and cannot leave a CI job permanently red.
 
 ## Secrets handling

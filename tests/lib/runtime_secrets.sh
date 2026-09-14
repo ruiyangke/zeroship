@@ -208,10 +208,9 @@ e2e_platform_op_up() {
   mkdir -p "$dir"
   _e2e_write_platform_op_js "$E2E_PLATFORM_OP_JS" || return 1
 
-  # The pinned-issuer path needs neither node nor jose, and tests/health_endpoints.sh
-  # takes it precisely so the health contract stays testable on a checkout that
-  # has never run `pnpm install`. So these two are checked HERE, on the path that
-  # actually runs a node server, not at the top of the function.
+  # The pinned-issuer path needs neither node nor jose. These dependencies are
+  # checked here, on the path that actually runs a node server, rather than at
+  # the top of the function.
   if [ -n "$pinned_issuer" ]; then
     E2E_PLATFORM_OP_ISSUER="$pinned_issuer"
     # Empty, not unset: a caller doing `PIDS+=($E2E_PLATFORM_OP_PID)` must add
@@ -571,8 +570,7 @@ _e2e_write_service_assertion_js() {
 //   node service-assertion.mjs <key.pem> <jose-url> <issuer> <audience>
 //
 // EVERY INPUT IS AN ARGUMENT. Nothing here reads process.env, so what this
-// mints is a function of the invocation and not of how the run was launched -
-// the rule tests/test_only_env_gate.sh states in full.
+// mints is a function of the invocation and not of how the run was launched.
 //
 // The profile is crates/zeroship-core/src/service_assertion.rs, not bare
 // RFC 7523: `typ` is exactly `svc-assertion+jwt`, `kid` is the RFC 7638

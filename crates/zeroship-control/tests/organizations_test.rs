@@ -1589,11 +1589,12 @@ async fn a_project_owning_an_app_is_not_deleted() {
     // foreign key onto `zeroship.plans`, whose ids are typed (`pln_...`), and a
     // literal "free" is a fixture that refuses at the constraint.
     let plan = zeroship_control::plan_catalog::free_plan_id();
+    let app_id = AppId::mint();
     fx.pg
         .execute(
-            "INSERT INTO zeroship.apps (name, plan_id, project_id, organization_id) \
-             VALUES ($1, $2, $3, $4)",
-            &[&app_name, &plan, &project, &org.id],
+            "INSERT INTO zeroship.apps (id, name, plan_id, project_id, organization_id) \
+             VALUES ($1, $2, $3, $4, $5)",
+            &[&app_id.as_str(), &app_name, &plan, &project, &org.id],
         )
         .await
         .expect("seed an app in the project");

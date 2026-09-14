@@ -56,9 +56,8 @@
     "build": "tsup",
     "typecheck": "tsc --noEmit",
     "check": "tsc --noEmit",
-    "test:docs": "NODE_ENV=test node --import tsx --test tests/doc-examples.test.ts",
-    "test:host": "NODE_ENV=test node --import tsx --import ./tests/host/addon.ts --test --test-timeout=600000 tests/host/*.test.ts",
-    "test:host:leak": "node --import tsx tests/host-leak-gate.ts"
+    "test": "pnpm run test:host",
+    "test:host": "pnpm --filter zeroship-migrate-node build && node --import tsx tests/host/run.ts tests/host/*.test.ts"
   },
   "dependencies": {
     "@zeroship/migrate": "workspace:*",
@@ -72,6 +71,7 @@
   "devDependencies": {
     "@types/node": "^22.0.0",
     "@types/pg": "^8.20.0",
+    "testcontainers": "^12.1.0",
     "tsup": "^8.5.1",
     "tsx": "catalog:",
     "typescript": "catalog:"

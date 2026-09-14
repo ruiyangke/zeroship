@@ -1051,8 +1051,8 @@ mod tests {
 
         // Does NOT cover the environment tier: a secret's canonical env name is
         // read by the generated resolver, not by clap, so it is deliberately
-        // absent from this metadata. `--check-config` against a set variable is
-        // what shows it works, in tests/config_check_e2e.sh.
+        // absent from this metadata. The config_env_tier integration target
+        // runs `--check-config` against a set variable.
     }
 
     #[test]

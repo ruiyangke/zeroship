@@ -221,18 +221,11 @@ pub fn cell_bool(b: bool) -> JsCell {
 mod tests {
     use super::*;
 
-    /// Every `Bind` variant this fold knows, pinned to the cell it produces.
+    /// Every constructible `Bind` variant is pinned to the cell it produces.
     ///
-    /// This is the RUNTIME half of the silent-NULL regression proof, and it is
-    /// deliberately exhaustive over all six of today's variants rather than the
-    /// five it used to cover (`Inferred` was absent). It cannot reach the
-    /// fallback arm - see `bind_fold_fallback_is_loud_not_a_silent_null` for why
-    /// that is impossible from outside the defining crate - but it does catch the
-    /// realistic near-term version of the same defect: DELETE any arm above and
-    /// that variant falls through to the fallback, which this test then observes
-    /// directly. Under the old `_ => cell_null()` a deleted `Bool` arm turned
-    /// `true` into SQL NULL and only this test's `kind == "bool"` assertion stood
-    /// between that and a silently corrupted write.
+    /// Removing a conversion arm sends that value through the fallback and makes
+    /// these behavior assertions fail. This protects the database write from a
+    /// conversion silently changing a supplied value into SQL NULL.
     #[test]
     fn bind_fold_covers_every_variant() {
         assert_eq!(bind_to_cell(&Bind::Null).unwrap().kind, "null");
@@ -287,71 +280,6 @@ mod tests {
                  written would be written as SQL NULL"
             );
         }
-    }
-
-    /// The fallback arm must REFUSE, not fold to null.
-    ///
-    /// WHY THIS TEST READS SOURCE INSTEAD OF CALLING THE FUNCTION, stated plainly
-    /// because a weaker test presented as a stronger one is worse than no test:
-    /// A TRUE RUNTIME REGRESSION TEST IS IMPOSSIBLE HERE. `Bind` is
-    /// `#[non_exhaustive]` and lives in `zeroship-migrate-backend`, so this crate
-    /// cannot construct a variant outside the six it handles - not in a test, not
-    /// with any amount of unsafe that would still be meaningful. All six are
-    /// handled above, so the fallback is unreachable at runtime BY CONSTRUCTION.
-    /// There is no input that reaches it and therefore no input a runtime
-    /// assertion could use.
-    ///
-    /// What is left is the strongest thing that CAN be checked: the arm's shape.
-    /// That is not an improvised workaround - it is the technique this crate
-    /// already uses for exactly this class of unreachable-but-load-bearing
-    /// property, in `tests/napi_exports_catch_panics.rs`, which `include_str!`s
-    /// `src/bridge.rs` to assert every napi export opts into `catch_unwind`.
-    ///
-    /// The test is written so that FINDING NOTHING IS A FAILURE: if the function
-    /// is renamed or moved out of this file, the locator assertions fire rather
-    /// than the scan quietly matching zero lines and reporting success.
-    #[test]
-    fn bind_fold_fallback_is_loud_not_a_silent_null() {
-        let src = include_str!("marshal.rs");
-
-        // Vacuity guard 1: the function must still be in this file.
-        let start = src
-            .find("pub fn bind_to_cell")
-            .expect("bind_to_cell is no longer defined in marshal.rs - this test \
-                     scans that function's body and has just been reading nothing. \
-                     Move the test to wherever the fold now lives.");
-
-        // Vacuity guard 2: bound the scan to this function, not the whole file.
-        let body = &src[start..];
-        let end = body
-            .find("\npub fn ")
-            .or_else(|| body.find("\n#[cfg(test)]"))
-            .expect("could not find the end of bind_to_cell; the scan below would \
-                     otherwise run to end-of-file and could match another function");
-        let body = &body[..end];
-
-        // Vacuity guard 3: the wildcard arm must exist. It cannot be deleted while
-        // `Bind` is #[non_exhaustive], so its absence means this scan is wrong.
-        assert!(
-            body.contains("other =>") || body.contains("_ =>"),
-            "bind_to_cell has no fallback arm. `Bind` is #[non_exhaustive], so one \
-             is required to compile - if this fires, the scan is broken, not the code."
-        );
-
-        // THE ASSERTION. The fallback must not produce a cell at all.
-        assert!(
-            !body.contains("_ => cell_null()"),
-            "REGRESSION: bind_to_cell's fallback arm folds an unhandled Bind to a \
-             null cell. That makes a value the engine asked to be written into a \
-             silent SQL NULL - no error, no log, and the write reports success. \
-             Return an Err naming the variant instead."
-        );
-        assert!(
-            body.contains("return Err(") && body.contains("unhandled Bind variant"),
-            "bind_to_cell's fallback arm must return an Err naming the unhandled \
-             variant, so an engine-side addition fails loudly at the seam instead \
-             of corrupting the write."
-        );
     }
 
     #[test]

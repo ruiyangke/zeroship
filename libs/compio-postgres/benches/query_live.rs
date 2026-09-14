@@ -58,11 +58,8 @@ const DEFAULT_URL: &str = "postgres://postgres:zeroship@127.0.0.1:5455/zeroship"
 /// The sealed key enum this crate reads the environment through, shared with
 /// the test suites rather than copied.
 ///
-/// It was copied here, and the copy was the problem: the workspace gate
-/// recognises the sanctioned accessor BY PATH
-/// (`libs/<crate>/tests/common/env.rs`), so a local re-implementation of the
-/// same shape is an unsanctioned raw read plus an illicit `allow`, and
-/// `crates/zeroship-core/tests/config_env_access_gate.rs` failed on exactly that.
+/// Keeping this in the test support module gives the benchmark and suites one
+/// typed implementation of their process input.
 #[path = "../tests/common/env.rs"]
 mod env;
 

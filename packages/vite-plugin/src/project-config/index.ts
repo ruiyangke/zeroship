@@ -5,8 +5,8 @@
  * read by the `zeroship` CLI and by the build toolchain. It is NEVER read by
  * the runtime and NEVER packed into a `.zship`. The packer walks `distDir` and
  * `zeroship.jsonc` lives one level above it, so the invariant holds by
- * construction today - which is exactly why `tests/project_config_gate.sh`
- * asserts it on the ARCHIVE BYTES rather than trusting the construction.
+ * construction. The package's archive tests assert that boundary against the
+ * emitted archive bytes.
  *
  * THIS IS THE SIDE THAT HAS DEFAULTS. The plugin must work with
  * `zeroship()` and no file at all - that is what the scaffold ships - so every
@@ -515,9 +515,9 @@ export function applyProjectConfigOverride(
 // ---------------------------------------------------------------------------
 
 /**
- * Object keys sorted, compact. Byte-compared against the Rust reader's dump by
- * `tests/project_config_gate.sh` - one comparison that catches divergent
- * defaults, silently ignored keys and type-coercion differences at once.
+ * Object keys sorted and compact. The package tests pin this reader's output;
+ * the CLI tests pin the Rust reader against the same generated schema and
+ * committed fixture.
  */
 export function canonicalJson(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;

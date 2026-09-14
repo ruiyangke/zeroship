@@ -33,7 +33,7 @@ import { table, t } from "@zeroship/migrate";
 import { plan, validate } from "zero-migrate-cli";
 import type { MigrationModule } from "@zeroship/migrate/internal/recorder";
 
-// The host suite's addon is resolved and freshness-checked in one place.
+// The host suite builds and resolves its addon in one place.
 import "./addon.js";
 
 const CHARTER = `policy_version = 1

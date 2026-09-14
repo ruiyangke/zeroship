@@ -72,10 +72,6 @@ pub(crate) fn placeholder(n: usize) -> String {
 // rather than an edit. It worked: the move renamed one identifier and touched
 // nothing else, and the name those thirteen sites read now is this crate's
 // `DIALECT`.
-//
-// Pinned by `crates/zeroship-migrate/tests/dialect_matrix/sqlite_trigger_quoting_reaches_postgres.rs`, whose
-// count went 6 -> 0 when the fix landed and whose subject-anchor followed the three
-// functions here.
 use crate::DIALECT;
 
 #[derive(Debug)]
@@ -929,9 +925,7 @@ impl DmlRenderer for SqliteDmlRenderer {
     /// `render::vendor`, and that one was not the same shape: `render::vendor` was
     /// PostgreSQL by CONSTRUCTION rather than by gate (it carried no dialect literal
     /// at all), so every dialect-match census scored it zero. RESOLVED as well now -
-    /// see [`Self::render_vendor_op`] below and `zeroship_migrate::render::vendor`. The
-    /// census that DOES see it is `core_names_no_vendor_crate.rs`, which counts crate
-    /// idents rather than dialect literals.
+    /// see [`Self::render_vendor_op`] below and `zeroship_migrate::render::vendor`.
     fn render_trigger_op(
         &self,
         op: &Op,

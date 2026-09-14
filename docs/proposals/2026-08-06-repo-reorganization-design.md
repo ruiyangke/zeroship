@@ -338,6 +338,6 @@ from mechanical file moves so a billing regression never rides in on a reorg dif
 
 **Sequencing.** Land the reorg (Phases 1–7) first; branch `refactor/control-billing`
 off the new `main`; factor `BillingState` + `mount()`; then `git mv` behind a green
-per-crate + billing e2e suite (`tests/e2e_stripe_*.sh`, `tests/run_billing_suite.sh`).
+per-crate + billing e2e suite (`tests/e2e_stripe_*.sh`, `cargo xtask test billing`).
 </content>
 </invoke>

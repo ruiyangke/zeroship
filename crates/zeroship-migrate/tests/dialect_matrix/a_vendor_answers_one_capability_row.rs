@@ -33,10 +33,6 @@
 //! Pointer identity, not equality. `BackendDescriptor` could grow `PartialEq` and two
 //! structurally-equal rows would then pass while still being two objects that can drift
 //! apart on the next edit. The claim worth making is that there is ONE row.
-//!
-//! Sibling in spirit to `the_registry_travels_as_a_value::the_two_compositions_list_the_same_vendors`,
-//! which guards the other duplication the workspace grew: two lists of vendors rather
-//! than two rows per vendor.
 
 use std::ptr;
 

@@ -23,6 +23,7 @@ pub mod csrf;
 pub mod entity_ids;
 pub mod error;
 pub mod headers;
+pub mod health;
 pub mod identity;
 pub mod oidc;
 pub mod return_to;

@@ -39,7 +39,7 @@ import { claim, release } from "./extension-claim.js";
 import { connectLivePg, pgUrl } from "./live-db.js";
 import { noInjectPolicy } from "./policy.js";
 
-// The host suite's addon is resolved and freshness-checked in one place.
+// The host suite builds and resolves its addon in one place.
 import "./addon.js";
 
 const OWNER_APP = "app_citext_prereq";

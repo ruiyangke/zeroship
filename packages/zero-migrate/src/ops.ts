@@ -24,7 +24,7 @@
 //
 // It emits the dialect-neutral op objects the closed Rust `Op` enum /
 // `ir-envelope.schema.json` deserialize — the IR envelope wire shape is frozen, and the
-// golden corpus (`tests/op_fixtures`) + the `Checksum::of_ir` round-trip are the
+// golden corpus (`tests/fixtures/op-corpus`) + the `Checksum::of_ir` round-trip are the
 // contract.
 //
 // `table()` is the reusable table DDL/DML entry. The flat op-functions are GONE

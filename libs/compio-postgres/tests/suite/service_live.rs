@@ -1,11 +1,9 @@
 //! `pg_service.conf`, end to end against a live server.
 //!
 //! The service file's PATH comes from the caller here, never from the
-//! environment: this crate is a standalone, publishable driver and the
-//! workspace forbids a published library reading process configuration
-//! (`crates/zeroship-core/tests/config_env_access_gate.rs`, exemption list empty). So
-//! these tests write a file and name it with `Config::service_file`, which is
-//! exactly what an application does.
+//! environment: this crate is a standalone, publishable driver. These tests
+//! write a file and name it with `Config::service_file`, which is exactly what
+//! an application does.
 
 #[allow(unused_imports)]
 use crate::common;

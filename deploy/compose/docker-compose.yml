@@ -445,8 +445,8 @@ services:
       # and worker; crates/control/src/ contains no reader for it, so setting it
       # on the control container configured nothing. It was set here for "the
       # deployed console's control-client", which runs in the WORKER, and the
-      # worker gets the value from its own --control-url. Found by
-      # tests/config_name_alignment_gate.sh the first time it ran.
+      # worker gets the value from its own --control-url. The retired
+      # configuration alignment gate found this when it first ran.
     # No host port. Caddy reaches control over the compose network through the
     # authenticated control.<domain> route.
     volumes:
@@ -516,12 +516,8 @@ services:
       # DSN authenticating as the POSTGRES_USER superuser against the postgres
       # service, which put the cluster SUPERUSER credential in a tracked file
       # that people copy and in this container's /proc/<pid>/environ. The
-      # example is deliberately NOT written out: this file is scanned for that
-      # grammar, and a comment holding it would be a credential too. Check 6c of
-      # tests/config_name_alignment_gate.sh had banned exactly that grammar in
-      # argv since 2026-08-16 and could not see an `environment:` default;
-      # check 6d now does, and it derives the superuser's name from the
-      # postgres service in this same file rather than from a list.
+      # example is deliberately NOT written out because a comment holding it
+      # would still publish a credential.
       #
       # ONE SOURCE, not two. `migrate` and `migrate-server` need the SAME privileged
       # credential against the SAME cluster, and until this change they took it

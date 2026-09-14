@@ -26,8 +26,7 @@
 //! MySQL delimits identifiers with backticks, so emitting `"x"` from here would be
 //! wrong in a way no comparison test can see. `zeroship-migrate-mysql`'s DDL half
 //! re-spells the body it gets from here (`mysql_requote_sql`) precisely because the
-//! two are different jobs. `constraint_definition_is_comparison_text` is the census
-//! that keeps that rule after `pub(crate)` stopped being able to state it.
+//! two are different jobs.
 //!
 //! # What resolves a vendor, and what does not
 //!

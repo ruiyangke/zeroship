@@ -3,9 +3,9 @@
  *
  * WHAT THESE DO NOT CATCH, so their greenness is not overread:
  *
- * - They never compare this reader against the Rust one. Byte-equality of the
- *   two resolved dumps is checked by `tests/project_config_gate.sh` and needs
- *   both binaries; a divergent Rust default is invisible here.
+ * - They do not run the Rust reader in process. Both readers consume generated
+ *   contracts from the shared schema, and each owning suite exercises the
+ *   committed cross-tool fixture.
  * - They do not run a real `vite build`, so nothing here proves the plugin
  *   actually threads the resolved config into the packer. That is the
  *   end-to-end harness's job (`tests/e2e_project_config.sh`).
