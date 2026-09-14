@@ -20,6 +20,23 @@ import { and as removedPkgAnd, or as removedPkgOr, not as removedPkgNot } from "
 import { createPolicy as removedPkgCreatePolicy, dropPolicy as removedPkgDropPolicy } from "@zeroship/migrate";
 // @ts-expect-error — flat named-object lifecycle helpers were deleted; use schema/extension/role handles.
 import { dropSchema as removedPkgDropSchema, dropExtension as removedPkgDropExtension, alterRole as removedPkgAlterRole, dropRole as removedPkgDropRole } from "@zeroship/migrate";
+// @ts-expect-error — removed root types must not reappear in published declarations.
+import type { IdOptions, CreateRawViewArgs } from "@zeroship/migrate";
+// @ts-expect-error — raw view construction is represented by the structured view API.
+import { createRaw as removedPublishedCreateRaw } from "@zeroship/migrate";
+import type {
+  BackfillSetValue as PublishedBackfillSetValue,
+  ColumnDef as PublishedColumnDef,
+  IdFormats as PublishedIdFormats,
+  PerRowGenerator as PublishedPerRowGenerator,
+  PerRowGeneratorValue as PublishedPerRowGeneratorValue,
+  PerRowGenerators as PublishedPerRowGenerators,
+  PrimaryKeyOperations as PublishedPrimaryKeyOperations,
+  TableHandle as PublishedTableHandle,
+  TypeIdOptions as PublishedTypeIdOptions,
+  TypeLexicon as PublishedTypeLexicon,
+  ValueFormat as PublishedValueFormat,
+} from "@zeroship/migrate";
 
 import * as migrate from "../../src/index.js";
 import {
@@ -1097,4 +1114,30 @@ export function handwrittenIrTypeShapes(): void {
   expectExactType<BackfillOp["set"][string], IrBackfillSetValue>(true);
   expectExactType<UpdateOp["set"][string], IrValue>(true);
   expectExactType<ColumnCollation, "bytewise">(true);
+}
+
+type PublishedTypeHasId = "id" extends keyof PublishedTypeLexicon ? true : false;
+type PublishedTypeHasRef = "ref" extends keyof PublishedTypeLexicon ? true : false;
+type PublishedTableHasPrimaryKey = "primaryKey" extends keyof PublishedTableHandle ? true : false;
+type PublishedTableHasChangeIdType = "changeIdType" extends keyof PublishedTableHandle ? true : false;
+type PublishedColumnHasReferences = "references" extends keyof PublishedColumnDef ? true : false;
+
+export function publishedDeclarationSurface(): void {
+  expectExactType<PublishedTypeHasId, false>(true);
+  expectExactType<PublishedTypeHasRef, false>(true);
+  expectExactType<PublishedTableHasPrimaryKey, true>(true);
+  expectExactType<PublishedTableHasChangeIdType, false>(true);
+  expectExactType<PublishedColumnHasReferences, true>(true);
+  expectExactType<keyof PublishedPrimaryKeyOperations, "add" | "drop" | "replace">(true);
+
+  const exportedTypes = null as unknown as readonly [
+    PublishedBackfillSetValue,
+    PublishedIdFormats,
+    PublishedPerRowGenerator,
+    PublishedPerRowGeneratorValue,
+    PublishedPerRowGenerators,
+    PublishedTypeIdOptions,
+    PublishedValueFormat,
+  ];
+  void exportedTypes;
 }
