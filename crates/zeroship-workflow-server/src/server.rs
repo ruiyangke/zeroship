@@ -31,6 +31,7 @@ use zeroship_workflow_manager::{
     driver::{Driver, Options as DriverOptions, TickReport},
     lifecycle::{self, ControlLifecycle},
     policy::control::{self, ControlPolicies, ControlPolicyStore},
+    recovery::Options as RecoveryOptions,
     retention::HoldClient,
     Error as ManagerError,
 };
@@ -96,6 +97,13 @@ impl ServerOptions {
         let driver = DriverOptions {
             page_limit: coordinator.batch_limit.try_into()?,
             lane_timeout: Duration::from_millis(*settings.driver_lane_timeout_ms.get()),
+            recovery: RecoveryOptions {
+                idle_after: Duration::from_millis(*settings.closing_idle_ms.get()),
+                closing_timeout: Duration::from_millis(*settings.closing_timeout_ms.get()),
+                closing_backoff: Duration::from_millis(*settings.closing_backoff_ms.get()),
+                closing_backoff_max: Duration::from_millis(*settings.closing_backoff_max_ms.get()),
+                ..RecoveryOptions::default()
+            },
             ..DriverOptions::default()
         };
         driver.validate()?;
