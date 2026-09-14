@@ -4,7 +4,7 @@ mod activation;
 mod app;
 mod backend;
 mod bundle;
-pub use backend::AppBackend;
+pub use backend::{AppBackend, CommitHint};
 pub use bundle::{BundleDeclarations, BundleExecutable};
 pub mod capability;
 pub mod collection;
