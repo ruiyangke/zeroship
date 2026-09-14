@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { generateKeyPairSync, randomBytes, randomUUID } from "node:crypto";
+import { generateKeyPairSync, randomBytes } from "node:crypto";
 import { cp, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import { connect, createServer } from "node:net";
 import { tmpdir } from "node:os";
@@ -13,6 +13,7 @@ import { generate } from "selfsigned";
 import { stringify } from "smol-toml";
 import { Parser } from "tar";
 import { GenericContainer, Wait, type StartedTestContainer } from "testcontainers";
+import { parseTypedId, typedIdFromStableSeed } from "@zeroship/server/typed-id";
 import type { Target } from "../targets";
 import { issuer } from "./issuer";
 import { Processes } from "./processes";
@@ -160,7 +161,7 @@ export class Platform {
     const identity = issuer();
     const jwks = await this.container(identity.container);
     const issuerUrl = `http://${jwks.getHost()}:${jwks.getMappedPort(80)}`;
-    const owner = randomUUID();
+    const owner = typedIdFromStableSeed("usr", "workflow-probe-fixture-owner");
     const seeded = await postgres.exec(["psql", "-U", "postgres", "-d", "workflow_fixture", "-v", "ON_ERROR_STOP=1", "-c",
       `INSERT INTO zeroship.users (id, email, name, email_verified_at) VALUES ('${owner}', 'probe-${owner}@zeroship.test', 'Workflow fixture owner', NOW())`]);
     assert.equal(seeded.exitCode, 0, `Seed authenticated fixture owner: ${seeded.output}`);
@@ -243,12 +244,12 @@ export class Platform {
     assert(created.ok, `Create app: HTTP ${created.status}: ${created.ok ? "" : await created.text()}`);
     const { id } = await created.json();
     assert.equal(typeof id, "string", "Created app must have an id");
-    assert.match(id, /^[0-9a-f-]{36}$/);
+    parseTypedId(id, "app");
     const provisionUrl = migrationServer.url + "/v1/apps/" + id + "/workflows/provision";
     const anonymous = await fetch(provisionUrl, { method: "POST" });
     assert.equal(anonymous.status, 401, "Provisioning requires creator authorization");
     await anonymous.arrayBuffer();
-    const outsiderId = randomUUID();
+    const outsiderId = typedIdFromStableSeed("usr", "workflow-probe-fixture-outsider");
     const outsiderSeed = await postgres.exec(["psql", "-U", "postgres", "-d", "workflow_fixture", "-v", "ON_ERROR_STOP=1", "-c",
       "INSERT INTO zeroship.users (id, email, name, email_verified_at) VALUES ('" + outsiderId + "', 'outsider-" + outsiderId + "@zeroship.test', 'Other creator', NOW())"]);
     assert.equal(outsiderSeed.exitCode, 0, outsiderSeed.output);
