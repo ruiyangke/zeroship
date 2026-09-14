@@ -245,8 +245,65 @@ the enroller row lock, and a lost-reply retry returns the same instance.
 
 **Implementation boundary:** the worker still loads the shared role key, and
 Control has no startup import of enroller keys yet. Production startup
-registration, consumer wiring, zone eligibility and capacity activation remain
-cutover work.
+registration and consumer wiring remain cutover work.
+
+### Placement eligibility and capacity provider
+
+Each app belongs to exactly one execution zone, recorded by Control in
+`zeroship.apps.execution_zone_id` when the app is created and frozen by trigger.
+An execution zone is an operator-declared set of deployment units that share
+creator-side connectivity. A worker's zone is the zone of the enroller Control
+verified when it enrolled, also frozen. Registration carries no zone; the
+manager copies it from Control's rows and nothing a worker sends can change it.
+
+The manager selects workers itself. It takes the app lock, then the worker
+lock, and admits a placement only when all of these hold: the app is not
+deleted, the zones match, the enrollment is active, the registration is ready
+and unexpired, and the worker has capacity. It reads these facts from
+Control-owned rows through column grants and an injected eligibility
+capability, after the lock waits and again before commit. A revocation that
+commits after the second read is caught by the next registration, renewal,
+ownership or delivery check, the same eventual admission fence enrollment has.
+Archived apps remain placeable for maintenance jobs; policy still refuses their
+admission, dispatch and ingress. Deleted apps are abandoned.
+
+A worker that cannot serve an assigned app releases it as refused, and the
+manager does not offer that app to that instance again. Release carries a
+closed reason and no wake hint, needs no responsible peer, and never discharges
+recovery responsibility.
+
+The driver's placement lanes key on claimable jobs; the recovery lanes turn due
+duties into jobs first, and a closing scope's Close job is a job. An app with
+claimable work and no ready eligible owner is placed on free eligible capacity
+first. Otherwise its demand is recorded durably in its zone. Each zone has one
+declarative capacity target in placement slots, its live placements plus its
+unplaced demand, so placing an app leaves the target unchanged. The target's
+revision advances only when that number changes, under the zone row's lock, and
+one request per revision is claimed in the same transaction. An injected
+provider applies the target outside every lock and replies with progress or a
+closed, durable, retryable refusal (`pool_exhausted`, `no_enroller`,
+`unavailable`). Replies apply only to the revision and attempt they answered. A
+lower target applies only after the idle hold-down. Provider failure keeps jobs,
+demand and targets pending.
+
+A provider holds only scale authority over worker units in one zone. It never
+receives creator credentials, secret-mount authority or queue messages. The
+local host injects an always-satisfied provider for its trusted in-process
+worker. Single-host deployments use a static pool that never starts processes
+and reports exhaustion durably.
+
+A native proof of concept on branch `poc/workflow-placement` passes this
+contract on PostgreSQL and SQLite, and against Control's migrated rows and
+grants. It compares the declarative target with per-app provisioning intents:
+racing replicas converge on one revision and one request under either
+contract, but a retried intent starts another worker unless the provider
+deduplicates it, and intents do not coalesce apps onto shared workers.
+
+**Implementation boundary:** providers that start processes wait for the
+production orchestrator. Control's assign, worker listing and recovery routes
+still exist and are held to the same predicate. The worker does not yet release
+refused apps, request placement on ingress, or narrow Control's host app reads
+to its zone.
 
 ## Policy bindings and authenticated leases
 
@@ -539,9 +596,12 @@ with this queue namespace; it is not a second authoritative placement store.
 | --- | --- |
 | `workflow_manager.schema_version` | Generated schema fingerprint. Runtime roles read it; provisioning owns changes. |
 | `workflow_manager.queue_scopes` | Registered apps and the shared app lock for queue and coordinator operations. |
-| `workflow_manager.workers` | Instance liveness, capacity, ready/draining state and serialization of worker-wide admission. |
-| `workflow_manager.assignments` | App/worker placement revision, expiry and release tombstone. Existing wake-hint fields belong to the coordinator protocol being replaced. |
-| `workflow_manager.placement_receipts` | Immutable assignment/release request identity and recorded result. |
+| `workflow_manager.workers` | Instance liveness, capacity, ready/draining state, the enroller zone registration copied from Control, and serialization of worker-wide admission. |
+| `workflow_manager.assignments` | App/worker placement revision, expiry, release tombstone and refusal tombstone. A refused pair is never offered again during that instance's life. |
+| `workflow_manager.placement_receipts` | Immutable assignment/release request identity, release reason and recorded result. |
+| `workflow_manager.capacity_demands` | Apps with claimable work that free eligible capacity did not absorb, keyed by app and recorded with its zone. The committed input of every replica's target. |
+| `workflow_manager.capacity_targets` | One declarative target per execution zone in placement slots, with its revision, provider state, closed refusal, claimed attempt and pacing. |
+| `workflow_manager.capacity_intents` | The rejected per-app provisioning contract, kept only as the proof of concept's comparison. |
 | `workflow_manager.management` | Job-linked authorized command, original request provenance, per-run revision, provisional execution barrier and reported closed outcome. |
 | `workflow_manager.management_scopes` | Accepted and settled management revisions per app/run; independent of the creator's run existence. |
 | `workflow_manager.jobs` | Immutable job specification, checked operation/run/request projections, availability, current attempt, delivery fence and settlement digest/outcome. It also supplies submission and settlement deduplication. |
@@ -553,18 +613,17 @@ with this queue namespace; it is not a second authoritative placement store.
 | `workflow_manager.schedule_scopes` | App lifecycle revision, calendar-enabled state and optional selected activation; historical receipts remain independently replayable. |
 | `workflow_manager.schedules` | Logical schedule identity across deployments, active descriptor and persisted due/catch-up frontier. |
 | `workflow_manager.schedule_occurrences` | Stable occurrence request, run and job identities bound to a schedule revision, instant and activation prerequisite. |
-| `zeroship.worker_instances` | Control-owned enrollment, public key and revocation state; distinct from workflow registration. |
+| `zeroship.worker_instances` | Control-owned enrollment, public key and revocation state; distinct from workflow registration. The manager also reads each instance's enroller. |
+| `zeroship.execution_zones`, `zeroship.worker_enrollers` | Control-owned zones and deployment-unit enrollers. The manager reads an enroller's frozen zone and its status. |
 | `zeroship.app_deploys` | Control-owned immutable deployment metadata and reclamation state. |
 | `zeroship.app_deploy_holds` | Control-owned app/deployment/holder generation and retention state. |
-| `zeroship.apps`, `zeroship.plans` | Control-owned lifecycle, entitlement and complete workflow policy inputs. The manager receives column-scoped read access. |
+| `zeroship.apps`, `zeroship.plans` | Control-owned lifecycle, entitlement and complete workflow policy inputs, and each app's frozen execution zone. The manager receives column-scoped read access. |
 | `zeroship.workflow_rollout_config` | Operator dispatch/ingress switches and the finite source-validity bound. |
 | `zeroship.workflow_policy_ledger` | Durable per-app ordered policy publication. The manager locks and updates this row, without writing its app or plan inputs. An unpublished row grants nothing. |
 
-The scheduling target also requires scope ingress epochs and
-capacity demand. Their physical model is not
-implemented by the current table list. Prefer extending the owning manager
-models over adding another store. Final table names and the shared protocol
-fields must be selected together; an in-memory map is not a substitute.
+Capacity demand lives in `capacity_demands` and `capacity_targets`, beside the
+queue it describes. Prefer extending the owning manager models over adding
+another store; an in-memory map is not a substitute.
 
 A delayed job's `available_at` is sufficient for a simple timer. Separate timer
 rows are warranted only where calendar cursors, cancellation or coalescing need
@@ -1777,10 +1836,11 @@ substituting another app's job.
 healthy owners. The scheduler resumes after the last returned app, then begins
 another sweep after an empty page; newly due work behind the cursor joins that sweep.
 Job publication failure leaves the prior deadline and pending identity intact.
-The server drives these duties through independently bounded lanes. These native
-operations do not yet establish the authenticated activation-to-ingress handshake
-or provision missing worker capacity.
-The ingress epoch and drain evidence remain required before enabling that path.
+The server drives these duties through independently bounded lanes, and its
+placement lanes give every app with a claimable duty job an eligible owner or
+record its capacity demand. These native operations do not yet establish the
+authenticated activation-to-ingress handshake. The ingress epoch and drain
+evidence remain required before enabling that path.
 
 A reconciliation job processes an app-scoped page without loading app code.
 The persisted scan alternates between publication intents and deployment-hold
@@ -1824,13 +1884,14 @@ heartbeat is not that proof. Future ingress must establish responsibility again
 before writing customer data. The drain handshake and its closed evidence fields
 remain a required protocol definition.
 
-The capacity adapter takes trusted app/zone/deployment demand and returns durable
-provisioning progress or a retryable refusal. Requests are idempotent across
-manager replicas; provider failure keeps jobs and demand pending. The adapter
-starts the ordinary worker and supplies authorized creator connectivity through
-the normal deployment host, not through a queue message. The provider integration
-and zone-eligibility source are unresolved; no new workflow infrastructure service
-is assumed.
+The capacity provider takes a zone's declarative target and returns progress or
+a durable, retryable refusal, as
+[placement eligibility and capacity](#placement-eligibility-and-capacity-provider)
+describes. Repeated requests from manager replicas converge on the same target;
+provider failure keeps jobs, demand and the target pending. A provider that
+starts processes starts the ordinary worker and supplies authorized creator
+connectivity through the normal deployment host, not through a queue message.
+No new workflow infrastructure service is assumed.
 
 Manager maintenance schedules journal reconciliation, payload collection and
 customer retention checks as explicit jobs. Such a job examines customer records
@@ -2946,7 +3007,7 @@ archive and retains the last valid deployment when current sources fail to build
 
 | Decision | Fixed requirement and remaining choice |
 | --- | --- |
-| Placement eligibility and capacity provider | Only platform-authorized app/zone combinations may be assigned. Select the trusted eligibility source and host adapter's durable request/progress contract. |
+| Placement eligibility and capacity provider | Decided: Control's frozen app and enroller zones, read under the placement locks, and a declarative per-zone target applied by an injected provider. Providers that start processes remain, pending the production orchestrator. |
 | Archive acknowledgement | The direct Control source provides bounded convergence under original observation validity. Define any stronger execution-quiescence evidence separately from calendar acknowledgement or lease expiry. |
 | Complete job envelopes | Operation-specific deployment prerequisites, frozen manager restart targets and linked management outcomes are implemented. Collection, topic fanout and dependency propagation have durable pages, receipts and delivered consumers. |
 | Normal deployment publication | Bind activation revision issuance to a stable deploy command and immutable body. Artifact identity alone cannot distinguish a delayed retry from an intentional rollback. Compose mutable deployment side effects with command acceptance, connect archive/stage/restore to the durable handoff, and keep the calendar's activation origin explicit across delayed delivery. |
