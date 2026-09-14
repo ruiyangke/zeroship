@@ -271,7 +271,9 @@ pub async fn accept(
 ) -> Result<Acceptance, CatalogError> {
     let binding = &command.binding;
     let app = &binding.app;
-    let state = lock_live_app(tx, app).await?.ok_or(CatalogError::AppAbsent)?;
+    let state = lock_live_app(tx, app)
+        .await?
+        .ok_or(CatalogError::AppAbsent)?;
     if let Some(receipt) = find_receipt(tx, &binding.id).await? {
         return receipt.answer(binding).map(Acceptance::Replayed);
     }
@@ -397,9 +399,7 @@ pub async fn archive(
     changed(
         tx.entity::<apps::Entity>()?
             .update_many(
-                apps::id
-                    .eq(app.as_str())?
-                    .and(apps::archived_at.is_null()),
+                apps::id.eq(app.as_str())?.and(apps::archived_at.is_null()),
                 apps::archived_at
                     .set(Some(now))?
                     .and(apps::updated_at.set(now)?)?,
@@ -453,7 +453,9 @@ pub async fn restore(
     admit_schema(
         tx,
         app,
-        staged.as_ref().and_then(VerifiedDeployment::descriptor_sha256),
+        staged
+            .as_ref()
+            .and_then(VerifiedDeployment::descriptor_sha256),
     )
     .await?;
     changed(
@@ -471,9 +473,12 @@ pub async fn restore(
     let Some(staged) = staged else {
         return Ok(Some(Transition::Restored));
     };
-    let deployment = existing_deployment(tx, app, staged.hash())
-        .await?
-        .ok_or(CatalogError::Storage("staged deployment is not in the catalog"))?;
+    let deployment =
+        existing_deployment(tx, app, staged.hash())
+            .await?
+            .ok_or(CatalogError::Storage(
+                "staged deployment is not in the catalog",
+            ))?;
     let revision = allocate_revision(tx, app, state.lifecycle_revision).await?;
     let registration = serde_json::to_string(&staged.registration(app, &deployment))
         .map_err(|_| CatalogError::Storage("schedule registration"))?;
@@ -709,6 +714,8 @@ const fn changed(count: i64) -> Result<(), CatalogError> {
     if count == 1 {
         Ok(())
     } else {
-        Err(CatalogError::Storage("guarded catalog update did not apply"))
+        Err(CatalogError::Storage(
+            "guarded catalog update did not apply",
+        ))
     }
 }

@@ -134,7 +134,11 @@ impl<M: ScheduleManager> Publisher<M> {
     ///
     /// # Errors
     /// Refuses invalid bounds and missing catalog models.
-    pub fn new(database: Database, manager: M, config: PublisherConfig) -> Result<Self, CatalogError> {
+    pub fn new(
+        database: Database,
+        manager: M,
+        config: PublisherConfig,
+    ) -> Result<Self, CatalogError> {
         if config.batch_size <= 0
             || config.batch_size > zeroship_data_orm::sql::MAX_ROW_LIMIT
             || config.attempt_timeout.is_zero()
@@ -208,8 +212,8 @@ impl<M: ScheduleManager> Publisher<M> {
 
     async fn publish(&self, intent: &PendingIntent) -> Result<(), PublishError> {
         let app = AppId::parse(&intent.app_id).map_err(|_| PublishError::InvalidIntent("app"))?;
-        let revision =
-            Revision::try_from(intent.revision).map_err(|_| PublishError::InvalidIntent("revision"))?;
+        let revision = Revision::try_from(intent.revision)
+            .map_err(|_| PublishError::InvalidIntent("revision"))?;
         let receipt = match (
             intent.action.as_str(),
             intent.deploy_id.as_deref(),
@@ -319,7 +323,9 @@ async fn confirm(
         .receipt
         .as_deref()
         .ok_or(CatalogError::Storage("acknowledged intent has no receipt"))?;
-    if updated > 1 || stored.state != ACKNOWLEDGED || !same_receipt(&intent.action, recorded, receipt)
+    if updated > 1
+        || stored.state != ACKNOWLEDGED
+        || !same_receipt(&intent.action, recorded, receipt)
     {
         return Err(CatalogError::Storage(
             "a different manager receipt is recorded for this intent",

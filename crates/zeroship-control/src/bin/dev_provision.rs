@@ -20,9 +20,9 @@ use std::process::ExitCode;
 
 use clap::Parser;
 use compio_postgres::{Client, NoTls};
+use sha2::{Digest, Sha256};
 use zeroship_bundle::{build_blob_store, StoreUrl};
 use zeroship_control::plan_catalog::{free_plan_id, seed_plans};
-use sha2::{Digest, Sha256};
 use zeroship_control::publication::{
     CatalogError, CommandBinding, DeployCommand, VerifiedDeployment, ZSHIP_CONTENT_TYPE,
 };
