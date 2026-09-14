@@ -424,7 +424,10 @@ async fn policy_route_establishes_an_epoch_above_the_named_one() {
     )
     .await
     .unwrap();
-    zeroship_workflow_manager::recovery::Recovery::new(queue, Default::default())
+    zeroship_workflow_manager::recovery::Recovery::new(
+        queue,
+        zeroship_workflow_manager::recovery::Options::default(),
+    )
         .unwrap()
         .ensure(
             &fixture.scope.app_id,
@@ -451,7 +454,9 @@ async fn policy_route_establishes_an_epoch_above_the_named_one() {
         let body = test::read_body(response).await;
         if status == StatusCode::OK {
             let lease: PolicyLease = serde_json::from_slice(&body).unwrap();
-            Ok(lease.ingress_epoch.map(|epoch| epoch.get()))
+            Ok(lease
+                .ingress_epoch
+                .map(zeroship_core::workflow_coordination::Revision::get))
         } else {
             let failure: Failure = serde_json::from_slice(&body).unwrap();
             Err((status, failure.code))
