@@ -56,9 +56,8 @@ pub fn configure(
             web::resource("/.well-known/openid-configuration/oauth2")
                 .route(web::get().to(oidc::metadata::openid_configuration_handler)),
         );
-        cfg.service(healthz)
-            .service(readyz)
-            .service(style)
+        crate::health::configure(cfg);
+        cfg.service(style)
             .service(
                 web::resource("/login")
                     .route(web::get().to(ui::login::get))
@@ -273,42 +272,6 @@ pub fn configure(
                     .route(web::get().to(ui::oauth_github::callback)),
             );
         }
-    }
-}
-
-/// Liveness. Constant 200 by design: it must not touch Postgres, or a database
-/// blip would get this container killed on top of the outage.
-#[web::get("/healthz")]
-async fn healthz() -> web::HttpResponse {
-    web::HttpResponse::Ok().json(&serde_json::json!({ "ok": true }))
-}
-
-/// Readiness. There is no login, token, or consent route that does not read
-/// Postgres, so an unreachable database means this OP cannot serve.
-///
-/// Probes the SHARED long-lived client with a protocol-level sync - no new
-/// connection, no query. Bounded, cached and single-flighted by
-/// `ReadinessGate`; the body carries no DSN and no driver error text.
-#[web::get("/readyz")]
-async fn readyz(
-    db: web::types::State<Arc<compio_postgres::Client>>,
-    gate: web::types::State<Arc<ReadinessGate>>,
-) -> web::HttpResponse {
-    let ready = gate
-        .ready(|| async {
-            match db.check_connection().await {
-                Ok(()) => true,
-                Err(error) => {
-                    tracing::warn!(error = %error, "auth readiness: postgres unreachable");
-                    false
-                }
-            }
-        })
-        .await;
-    if ready {
-        web::HttpResponse::Ok().json(&serde_json::json!({ "ready": true }))
-    } else {
-        web::HttpResponse::ServiceUnavailable().json(&serde_json::json!({ "ready": false }))
     }
 }
 
