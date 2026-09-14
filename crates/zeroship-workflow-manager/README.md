@@ -150,8 +150,8 @@ the kind, run, request and nullable deployment projections against its immutable
 specification digest. The queue persists
 acquire/release intents and generations; network requests run outside its database
 transactions. Release closes publication and checks pending jobs and the
-frontiers of an enabled calendar under the app lock. It validates bounded pages of unsettled job
-specifications before ruling out executable dependencies. Recovery provenance
+frontiers of an enabled calendar under the app lock. It validates bounded pages
+of unsettled job specifications before ruling out executable dependencies. Recovery provenance
 does not retain code. Completed receipts may
 replay after code reclamation. A host must reconcile unfinished intents, and
 Control reclamation must consult the shared ledger before deleting manifests.
