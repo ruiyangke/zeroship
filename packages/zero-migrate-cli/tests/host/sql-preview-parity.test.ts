@@ -66,7 +66,7 @@ import { currentIrVersion, previewSql } from "zero-migrate-cli";
 const HERE = dirname(fileURLToPath(import.meta.url));
 const CRATE = resolve(HERE, "../../../../crates/zeroship-migrate");
 
-// The host suite's addon is resolved and freshness-checked in one place.
+// The host suite builds and resolves its addon in one place.
 import "./addon.js";
 
 // The label `render_ir_envelope_sql` prints for an op it refuses to render offline

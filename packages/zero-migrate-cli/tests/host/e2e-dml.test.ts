@@ -13,7 +13,7 @@ import { noInjectPolicy } from "./policy.js";
 import { MYSQL_URL_ENV, connectLivePg, pgUrl, requireLiveDb } from "./live-db.js";
 
 
-// The host suite's addon is resolved and freshness-checked in one place.
+// The host suite builds and resolves its addon in one place.
 import "./addon.js";
 
 const PG_URL = pgUrl();

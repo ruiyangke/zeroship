@@ -38,7 +38,7 @@ import { noInjectPolicy } from "./policy.js";
 import { connectLivePg, pgUrl } from "./live-db.js";
 
 
-// The host suite's addon is resolved and freshness-checked in one place.
+// The host suite builds and resolves its addon in one place.
 import "./addon.js";
 
 test("programmatic executor verbs require explicit policy bytes", async () => {
