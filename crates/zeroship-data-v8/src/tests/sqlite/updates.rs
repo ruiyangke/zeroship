@@ -594,7 +594,7 @@ const _procedures = { seed, failBulk, failBulkInsideTransaction };
         // code - so this assertion could never have passed, and could never
         // have told you why.
         //
-        // CASE: `canonicalErrorCode` (`sdks/db/src/errors.ts:27`) deliberately
+        // CASE: `canonicalErrorCode` (`packages/db/src/errors.ts:27`) deliberately
         // upper-snakes every code not already in that form, so `unique_violation`
         // reaches app code as `UNIQUE_VIOLATION`. The lowercase driver spelling
         // survives only inside the nested `message` payload.

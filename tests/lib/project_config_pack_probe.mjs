@@ -35,7 +35,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { zstdDecompressSync } from "node:zlib";
 
-import { emitZship } from "../../sdks/vite-plugin/src/zship.ts";
+import { emitZship } from "../../packages/vite-plugin/src/zship.ts";
 
 function arg(name, fallback) {
   const hit = process.argv.find((a) => a.startsWith(`--${name}=`));

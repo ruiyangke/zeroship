@@ -2410,7 +2410,7 @@ fn setup_globals_with_descriptor(
 
     // (`__cryptoHashSync` / `__cryptoHmacSync` were the v1 sync hash/HMAC
     // ad-hoc V8 callbacks consumed by the JS shim at
-    // `sdks/vite-plugin/src/node-compat.ts`. Stage B of
+    // `packages/vite-plugin/src/node-compat.ts`. Stage B of
     // `docs/archive/node-crypto-native.md` replaced them with a
     // boundary object; the post-Stage-B migration moved the surface
     // into a V8 SyntheticModule registered as `node:crypto` (see

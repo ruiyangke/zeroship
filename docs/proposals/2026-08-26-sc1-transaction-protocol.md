@@ -582,7 +582,7 @@ deliverable of this contract. The only candidate that could force one is a
 workflow step, and the workflow layer already owns that failure mode: durable
 workflows keep a journal (`StepCheckpoint` / `StepOutcome` / `StepResult` in
 `crates/zeroship-control/src/cron/workflow_engine.rs`, `JournalStepRecord` in
-`sdks/workflows/src/journal.ts`) and refuse I/O outside a journaled step by
+`packages/workflows/src/journal.ts`) and refuse I/O outside a journaled step by
 construction. A creator transaction inside a workflow therefore runs inside a
 journaled step, and process death is handled by replay against that journal.
 The accepted cost is that such a transaction is **at-least-once**: if the step

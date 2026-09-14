@@ -30,13 +30,13 @@
 #       table-shape ceiling" and must therefore be the shipped one.
 #
 # THE TWO TYPESCRIPT CONSUMERS take it through a generated module, because
-# TypeScript has no include_str! and sdks/vite-plugin is a PUBLISHED package that
+# TypeScript has no include_str! and packages/vite-plugin is a PUBLISHED package that
 # runs where this repo does not exist, so it can neither include nor read the
 # file. policies/codegen.mjs emits these bytes as a const into
-# sdks/vite-plugin/src/gen-types/confined-system-shape.generated.ts, which
+# packages/vite-plugin/src/gen-types/confined-system-shape.generated.ts, which
 #
-#   sdks/vite-plugin/src/gen-types/confined-ceiling.ts   (build-time emit)
-#   sdks/vite-plugin/src/gen-types/dev-apply.ts          (dev apply)
+#   packages/vite-plugin/src/gen-types/confined-ceiling.ts   (build-time emit)
+#   packages/vite-plugin/src/gen-types/dev-apply.ts          (dev apply)
 #
 # import and concatenate onto their own grants. That generated file is COMMITTED,
 # not built, so tsc and the editor need no build-order knowledge; the price is

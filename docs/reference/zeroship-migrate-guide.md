@@ -17,7 +17,7 @@ and the current creator build path is documented in
 **How to read the citations.** An unqualified `file:line` citation names a path
 inside the former `crates/zeroship-migrate/` crate and records what was read
 there when this guide was written; it is a historical reference, not a live
-pointer. A citation that begins with `sdks/` or `crates/` resolves against the
+pointer. A citation that begins with `packages/` or `crates/` resolves against the
 tree as it stands today, and names the file that carries the claim now.
 (Citations once began with `third_party/zero-migrate/`, from the period when the
 engine was vendored. Those have been repointed at the in-sourced crates; a
@@ -860,7 +860,7 @@ the committed migration modules into IR envelopes, and `zeroship-migrate-node`'s
 `.zship` packer does **not** carry migration documents — it reads only the
 generated `schema.runtime.json` and stages it as the manifest's
 content-addressed `runtime_descriptor` blob
-(`stageRuntimeDescriptor` in `sdks/vite-plugin/src/zship.ts`); deploy-time application runs through
+(`stageRuntimeDescriptor` in `packages/vite-plugin/src/zship.ts`); deploy-time application runs through
 the standalone migration service. At runtime boot, Rust validates the
 descriptor and plugin-db publishes its collection field maps natively before
 creator modules evaluate. The DB plugin then runs its crate-owned
@@ -1614,7 +1614,7 @@ SQL/Flyway/Liquibase, no committed `.ir.json`):
 | `20260702000800_policies_rls.ts` | `policies_rls` | `setRls` + tenant-isolation `policy()` on 9 tables |
 | `20260702000900_grants.ts` | `grants` | per-role `grant`/`revoke` |
 
-**Naming/timestamp grammar.** The 14-digit prefix `YYYYMMDDHHMMSS` is the corpus order key (`^(\d{14})_([A-Za-z0-9_]+)\.ts$`, enforced by `sdks/vite-plugin/src/gen-types/recorder.ts:37` and the Rust loader) — no master/changelog file. **Never edit an already-applied migration** — the engine validates per-migration checksums and aborts on drift; add a new timestamped file. The nine files share the date and increment the time component, split by *concern* (schema/roles → tables-per-domain → constraints → functions → RLS → grants) because objects have creation-order dependencies.
+**Naming/timestamp grammar.** The 14-digit prefix `YYYYMMDDHHMMSS` is the corpus order key (`^(\d{14})_([A-Za-z0-9_]+)\.ts$`, enforced by `packages/vite-plugin/src/gen-types/recorder.ts:37` and the Rust loader) — no master/changelog file. **Never edit an already-applied migration** — the engine validates per-migration checksums and aborts on drift; add a new timestamped file. The nine files share the date and increment the time component, split by *concern* (schema/roles → tables-per-domain → constraints → functions → RLS → grants) because objects have creation-order dependencies.
 
 ### 11.2 The "explicit `{schema}`" convention — the key confined-vs-platform difference
 

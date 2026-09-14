@@ -12,9 +12,11 @@ pub struct MintFixture {
 }
 
 impl MintFixture {
+    #[allow(clippy::future_not_send, reason = "the ORM belongs to its compio runtime")]
     pub async fn seed(database: &Database) -> Self {
         let setup = database.connect().await;
-        let user = users::create(&setup, "recipient@example.test", "Mint subject", None)
+        let orm = database.orm().await;
+        let user = Box::pin(users::create(&orm, "recipient@example.test", "Mint subject", None))
             .await
             .unwrap();
         let client_id = zeroship_core::typed_id::generate("oac");

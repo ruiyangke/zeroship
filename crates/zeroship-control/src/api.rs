@@ -220,7 +220,7 @@ fn schema_precondition_response(
 ///
 /// ## Why `trace_id` and not `request_id`
 ///
-/// The wire contract already chose. `sdks/rpc/src/error.ts` documents the
+/// The wire contract already chose. `packages/rpc/src/error.ts` documents the
 /// envelope as `{ code, message, details?, retryable, trace_id? }` and lifts
 /// `trace_id`/`traceId`; `RpcCtx` (`crates/zeroship-runtime/src/rpc/ctx_holder.rs`)
 /// carries a `trace_id` field. This tree already has more request-id
@@ -2307,7 +2307,7 @@ mod stream_tmp_tests {
             "helper test documentation must scope its body claim to the helper"
         );
 
-        let sdk = compact(include_str!("../../../sdks/control/src/index.ts"));
+        let sdk = compact(include_str!("../../../packages/control/src/index.ts"));
         for required in [
             "Only responses produced by `infrastructure_error_response` carry this id.",
             "Failures such as `control.env.listVars` can remain id-less.",

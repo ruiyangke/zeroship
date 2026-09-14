@@ -94,7 +94,7 @@ server-authoritative: `crates/zeroship-control/src/fee_policy.rs` holds the per-
 `FeePolicy { Fixed | Percent + cap + floor }` (default 15%) in `zeroship.creator_fee_policy`,
 with an operator-only write, and `crates/zeroship-control/src/stripe_handlers.rs` stamps
 `application_fee_amount` on the Connect PaymentIntent. The SDK was rewritten as a thin client
-over those endpoints (`sdks/payments/src/connect.ts`): no method takes a fee parameter, and the
+over those endpoints (`packages/payments/src/connect.ts`): no method takes a fee parameter, and the
 stamped value comes back read-only as `applicationFeeCents`.
 
 ### ISS-30 · Stripe Connect onboarding is a placeholder
@@ -603,7 +603,7 @@ secret/expose split — the dev tier has no secret store), so everything is impl
 
 **Genuine (minor) gaps worth closing — DX/docs, not correctness:**
 - The `expose` opt-in is reachable via the control API (`GET/PUT /api/apps/{id}/env/expose`, `main.rs:1022`;
-  `env_store.{list,set}_expose`) and the `@zeroship/control` SDK (`sdks/control/src/index.ts:216`), but there
+  `env_store.{list,set}_expose`) and the `@zeroship/control` SDK (`packages/control/src/index.ts:216`), but there
   is **no CLI surface** (`crates/cli` has no `zeroship env`/`expose` command) — a creator on the CLI can't
   opt a secret in without hand-calling the API.
 - No dedicated `docs/reference/` page for **env vars vs. secrets vs. expose** (mentions are scattered across
@@ -742,7 +742,7 @@ stream dispatch is now redundant (harmless) — it was the prior caller-side wor
 ~~Original investigation below.~~ Browser-side streaming of a `stream()` RPC stalled after
 the first frame. Two issues, isolated with raw-`fetch` reader probes in a real Chromium:
 
-**(a) Stale local SDK build — FIXED, not a committed bug.** The local `sdks/rpc/dist`
+**(a) Stale local SDK build — FIXED, not a committed bug.** The local `packages/rpc/dist`
 (gitignored, rebuilt by `pnpm build`) was stale and shipped a stream consumer that
 stalled after the first frame even on the *first* stream. Rebuilding the SDK
 (`pnpm --filter @zeroship/rpc build`) fixed it — the committed source (`transport.ts`

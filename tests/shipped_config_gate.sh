@@ -40,17 +40,17 @@ command -v jq >/dev/null 2>&1 || {
 # usable red and a confusing one.
 #
 # The list is DERIVED (every `include_str!` literal in a crate's `src/` that
-# resolves under `sdks/`), not written out, so a fourth one is covered the day
+# resolves under `packages/`), not written out, so a fourth one is covered the day
 # it lands. A derived list that matched nothing would refuse silently, so the
 # empty case is itself a refusal.
 # ---------------------------------------------------------------------------
-grep -rhoE '"\.\.[^"]*/sdks/[^"]+"' "$ROOT"/crates/*/src "$ROOT"/libs/*/src \
+grep -rhoE '"\.\.[^"]*/packages/[^"]+"' "$ROOT"/crates/*/src "$ROOT"/libs/*/src \
   --include='*.rs' 2>/dev/null \
-  | tr -d '"' | sed 's#^.*/sdks/#sdks/#' | LC_ALL=C sort -u > "$TMP/generated.txt"
+  | tr -d '"' | sed 's#^.*/packages/#packages/#' | LC_ALL=C sort -u > "$TMP/generated.txt"
 
 n_generated="$(grep -c . "$TMP/generated.txt" || true)"
 if [ "${n_generated:-0}" -lt 1 ]; then
-  echo "  x REFUSED: found no include_str! literal resolving under sdks/." >&2
+  echo "  x REFUSED: found no include_str! literal resolving under packages/." >&2
   echo "             The scan matched nothing, so it proves nothing. Either" >&2
   echo "             the embeds moved or this grep stopped matching them." >&2
   exit 1

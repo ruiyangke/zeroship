@@ -233,7 +233,7 @@ export const deleteTodo = mutation(
 // An earlier version of this comment said "Auto-tx is NOT applied here",
 // implying mutation() gets an implicit transaction and action() does not.
 // It does not, and neither does mutation(). Verified 2026-08-10:
-// `mutation()` is `attach(handler, "mutation", config)` (sdks/rpc/src/
+// `mutation()` is `attach(handler, "mutation", config)` (packages/rpc/src/
 // server.ts:225) -- a capability TAG, nothing more; the dispatcher's only
 // per-call frame is `__zsEnterKind` in native runtime dispatch,
 // which sets a thread-local ProcedureKind; and plugin-db reads that kind in

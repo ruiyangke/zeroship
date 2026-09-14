@@ -1,12 +1,12 @@
 import { promises as fs } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { buildDevBundle } from "../../../../sdks/vite-plugin/src/dev-bundle.js";
-import { defaultProjectConfig } from "../../../../sdks/vite-plugin/src/project-config/index.js";
+import { buildDevBundle } from "../../../../packages/vite-plugin/src/dev-bundle.js";
+import { defaultProjectConfig } from "../../../../packages/vite-plugin/src/project-config/index.js";
 
 const [root, version] = process.argv.slice(2);
 if (!root || !version) throw new Error("expected a fixture project and version");
-const dependencies = fileURLToPath(new URL("../../../../sdks/vite-plugin/node_modules", import.meta.url));
+const dependencies = fileURLToPath(new URL("../../../../packages/vite-plugin/node_modules", import.meta.url));
 await fs.mkdir(join(root, "src"), { recursive: true });
 try { await fs.symlink(dependencies, join(root, "node_modules"), "dir"); }
 catch (error) { if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error; }

@@ -10,7 +10,7 @@
 
   // The local stack `zeroship dev init` plus docker compose bring up. A real
   // creator app points at the hosted control plane, which is what the scaffold
-  // template (sdks/create-zeroship-app/template/zeroship.jsonc) ships.
+  // template (packages/create-zeroship-app/template/zeroship.jsonc) ships.
   //
   // `app` is absent: the first `zeroship deploy` auto-creates the app and
   // appends its id to this root object.

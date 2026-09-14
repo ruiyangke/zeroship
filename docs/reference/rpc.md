@@ -7,7 +7,7 @@ clients. It has three stable subpaths:
 - `@zeroship/rpc/client` — manual clients and the runtime used by generated stubs.
 - `@zeroship/rpc/types` — type-only contract helpers.
 
-The package is implemented in `sdks/rpc/`. The Vite plugin discovers server
+The package is implemented in `packages/rpc/`. The Vite plugin discovers server
 procedures, generates client stubs, and emits manifest resources, but the
 transport, retry, timeout, auth, transformer, and error behavior live in this
 package so non-Vite TypeScript projects can use the same client manually.

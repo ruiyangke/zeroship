@@ -1,0 +1,1132 @@
+// packages/vite-plugin/src/manifest.ts
+//
+// Compute the manifest's resource tree:
+//
+//   - resources    flat map of `<key> -> resource` per
+//                  `docs/proposals/rpc.md` §7
+//   - transformer  always "json" by default
+//
+// Validation is wired into the runtime dispatch — the synthetic SSR
+// entry calls `proc.config.input.parse(args)` before invoking the
+// user handler. The manifest never carries JSONSchemas.
+//
+// Wire identity (from `docs/proposals/rpc.md` §2): a pure function
+// of current source.
+//
+//   1. fn.config.id (explicit) wins.
+//   2. Default = <exportName>.
+//   3. Collision check across all assigned wireIds — duplicates fail
+//      the build with both file paths.
+//   4. Production-mode gate: any procedure that landed at step 2 (no
+//      explicit id) is a build error in production.
+//
+// No previous-build alias state. No persistence. The wireId is always
+// what the current source says. (The earlier alias system is gone — see
+// the §2 update in `docs/proposals/rpc.md`.)
+//
+// Wireshape: see `docs/proposals/rpc.md` §7.
+
+import { promises as fs } from "node:fs";
+import { resolve } from "node:path";
+
+// ── Public types ───────────────────────────────────────────────────────────
+
+/**
+ * One discovered procedure handed off from the transform plugin.
+ *
+ * The default wireId is the bare `exportName`; identity is a pure
+ * function of current source. `moduleSlug` is carried for diagnostic
+ * messages only — it does NOT influence the wireId.
+ */
+export interface DiscoveredProcedure {
+  /** Absolute path to the source file. */
+  filePath: string;
+  /** Bare export name as it appears in source. */
+  exportName: string;
+  /**
+   * Slug derived from the file path (e.g. `src/server/todos.ts` →
+   * `src-server-todos`). Diagnostic-only; not used in wireId
+   * derivation since the default wireId stopped including the file path.
+   */
+  moduleSlug: string;
+  /**
+   * Discriminator. Every value reaches the wire, `action` included:
+   * `ProcedureKind` carries an `Action` variant, so an omitted kind reads
+   * as "unknown" to the gateway rather than as "action", and the two are
+   * not gated alike.
+   */
+  kind: "query" | "mutation" | "action" | "stream" | "subscription";
+  /** True if the export is an async generator. */
+  isStream: boolean;
+  /**
+   * Per-procedure metadata pulled out of the AST: contents of
+   * `<fnName>.config = { ... }`. Loose typing here — the manifest
+   * shape validates at write time.
+   */
+  config?: Record<string, unknown>;
+  /**
+   * Module-level `$config` values (auth, rate_limit defaults). Same
+   * shape as `config`; merged with lower precedence.
+   */
+  moduleConfig?: Record<string, unknown>;
+}
+
+export interface ManifestExtrasInput {
+  root: string;
+  procedures: DiscoveredProcedure[];
+  schedules?: DiscoveredSchedule[];
+  /**
+   * Export names of the durable workflow classes the server graph declares.
+   * Emitted verbatim as `manifest.workflows`; the control plane matches a
+   * `start` request's workflow name against this list before creating a run.
+   */
+  workflowNames?: string[];
+  /** Production: throw on validation errors. Development: warn. */
+  mode: "production" | "development";
+  /**
+   * Override the canonical config path (`src/server/config.ts`). Tests
+   * use this; production builds always read the canonical path.
+   */
+  configPath?: string;
+  /** Hook for logging non-fatal warnings. */
+  onWarn?: (msg: string) => void;
+}
+
+/** Resource entry on the wire — snake_case fields, mirrors §7. */
+export type WireResource = Record<string, unknown>;
+
+export interface ManifestExtras {
+  resources: Record<string, WireResource>;
+  transformer: "superjson" | "json";
+  net?: NetConfig;
+  schedules?: WireScheduleRegistration[];
+  workflows?: unknown;
+  /** Hint for the manifest schema version (1 — the initial published shape). */
+  versionHint: 1;
+}
+
+export interface NetRequest {
+  host: string;
+  port: number;
+  reason: string;
+}
+
+export interface NetConfig {
+  requests?: NetRequest[];
+}
+
+interface DefineAppConfig {
+  resources?: Record<string, Record<string, unknown>>;
+  net?: NetConfig;
+}
+
+export interface DiscoveredSchedule {
+  filePath: string;
+  name: string;
+  workflowName: string;
+  schedule: Record<string, unknown>;
+  input?: unknown;
+  overlap?: "allow" | "skipIfRunning";
+  catchUp?: { mode: "skip" | "backfill"; max?: number };
+}
+
+export interface WireScheduleRegistration {
+  name: string;
+  workflowName: string;
+  schedule: Record<string, unknown>;
+  input: unknown;
+  overlap: "allow" | "skipIfRunning";
+  catchUp: { mode: "skip" } | { mode: "backfill"; max: number };
+}
+
+// ── camelCase → snake_case rename map ──────────────────────────────────────
+//
+// The authoring surface uses camelCase; the wire shape uses snake_case
+// (matches Rust serde defaults). Resources flow from one to the other
+// via this map, applied per top-level field.
+
+const CAMEL_TO_SNAKE: Record<string, string> = {
+  rateLimit: "rate_limit",
+  maxInputBytes: "max_input_bytes",
+  publiclyAccessible: "publicly_accessible",
+  csrfOrigins: "csrf_origins",
+  // cache.swr / cache.maxAge handled inside the cache subobject below
+};
+
+/** Per-field mapper for fields whose VALUES contain nested camelCase keys. */
+function renameCacheControlKeys(
+  cache: Record<string, unknown>,
+): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(cache)) {
+    if (k === "maxAge") out.max_age = v;
+    else if (k === "swr") out.swr_window = v;
+    else if (k === "staleOnError") out.stale_on_error = v;
+    else out[k] = v;
+  }
+  return out;
+}
+
+function renameCorsKeys(cors: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(cors)) {
+    if (k === "allowOrigins") out.allow_origins = v;
+    else if (k === "allowMethods") out.allow_methods = v;
+    else if (k === "allowHeaders") out.allow_headers = v;
+    else if (k === "exposeHeaders") out.expose_headers = v;
+    else if (k === "allowCredentials") out.allow_credentials = v;
+    else if (k === "maxAge") out.max_age = v;
+    else out[k] = v;
+  }
+  return out;
+}
+
+function renameRedirectKeys(
+  red: string | Record<string, unknown>,
+): Record<string, unknown> {
+  if (typeof red === "string") return { to: red, status: 302 };
+  const out: Record<string, unknown> = { ...red };
+  if (out.status === undefined) out.status = 302;
+  return out;
+}
+
+/**
+ * Spec §8: `fn.config.idempotencyTtl: { hours: 168 }` → wire field
+ * `idempotency_ttl_hours: 168`. The authoring surface uses an object
+ * so future TTL units (`days`, `minutes`) can land without breaking
+ * the existing shape; the wire stores hours since that's what the
+ * gateway honours.
+ *
+ * Returns `undefined` when the input is not a plain `{ hours }`
+ * object; callers drop the field (gateway falls back to the 24h
+ * default). Out-of-band values (≤0, ≥168) are clamped here so the
+ * wire never carries a value the gateway would reject.
+ *
+ * Min 1, max 168 (7 days). Mirrors the Rust-side `clamp_ttl_hours`.
+ */
+function extractIdempotencyTtlHours(value: unknown): number | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const rec = value as Record<string, unknown>;
+  const h = rec.hours;
+  if (typeof h !== "number" || !Number.isFinite(h)) return undefined;
+  const rounded = Math.round(h);
+  if (rounded < 1) return 1;
+  if (rounded > 168) return 168;
+  return rounded;
+}
+
+/**
+ * Convert a single authored resource node to the wire shape. Drops
+ * `children:` (handled separately) and renames camelCase keys.
+ */
+function authorToWire(node: Record<string, unknown>): WireResource {
+  const out: WireResource = {};
+  for (const [k, v] of Object.entries(node)) {
+    if (k === "children") continue;
+    if (k === "cache" && v && typeof v === "object") {
+      out.cache = renameCacheControlKeys(v as Record<string, unknown>);
+      continue;
+    }
+    if (k === "cors" && v && typeof v === "object") {
+      out.cors = renameCorsKeys(v as Record<string, unknown>);
+      continue;
+    }
+    if (k === "redirect" && v != null) {
+      out.redirect = renameRedirectKeys(v as string | Record<string, unknown>);
+      continue;
+    }
+    if (k === "idempotencyTtl") {
+      const hours = extractIdempotencyTtlHours(v);
+      if (hours !== undefined) {
+        out.idempotency_ttl_hours = hours;
+      }
+      continue;
+    }
+    const renamed = CAMEL_TO_SNAKE[k] ?? k;
+    out[renamed] = v;
+  }
+  return out;
+}
+
+// ── Tree flattening ────────────────────────────────────────────────────────
+
+/**
+ * Flatten an authored resource tree (potentially nested via `children:`)
+ * into the wire's flat key map.
+ *
+ * Rules per §7 Authoring:
+ *   - `rpc:` namespace uses `.` as the child separator.
+ *   - URL namespace (key starts with `/`) uses `/`.
+ *   - Bare `*` is the root sentinel; never has children.
+ */
+function flattenAuthorTree(
+  tree: Record<string, Record<string, unknown>>,
+): Record<string, WireResource> {
+  const out: Record<string, WireResource> = {};
+  for (const [key, node] of Object.entries(tree)) {
+    flattenInto(out, key, node);
+  }
+  return out;
+}
+
+function flattenInto(
+  out: Record<string, WireResource>,
+  key: string,
+  node: Record<string, unknown>,
+): void {
+  out[key] = authorToWire(node);
+  const children = node.children as Record<string, Record<string, unknown>> | undefined;
+  if (!children) return;
+  const sep = childSeparator(key);
+  for (const [childKey, childNode] of Object.entries(children)) {
+    const fullKey = key + sep + childKey;
+    flattenInto(out, fullKey, childNode);
+  }
+}
+
+function childSeparator(parentKey: string): string {
+  if (parentKey === "*") {
+    throw new Error(`children: not allowed on the root "*" resource`);
+  }
+  if (parentKey.startsWith("rpc:")) return ".";
+  if (parentKey.startsWith("/")) return "/";
+  throw new Error(
+    `unrecognized resource-key namespace: ${JSON.stringify(parentKey)}`,
+  );
+}
+
+// ── Canonical JSON (used by override-marker shadow detection) ─────────────
+
+function canonicalJson(value: unknown): string {
+  return JSON.stringify(sortKeys(value));
+}
+
+function sortKeys(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(sortKeys);
+  if (value !== null && typeof value === "object") {
+    const sorted: Record<string, unknown> = {};
+    for (const k of Object.keys(value as Record<string, unknown>).sort()) {
+      sorted[k] = sortKeys((value as Record<string, unknown>)[k]);
+    }
+    return sorted;
+  }
+  return value;
+}
+
+// ── WireId resolution ──────────────────────────────────────────────────────
+
+/**
+ * Result of `pickWireId`: the wireId itself plus a tag describing
+ * which resolution step produced it. The tag drives the
+ * production-mode gate (only `default` is rejected) and is harmless
+ * to throw away after assignment.
+ */
+type WireIdResolution = {
+  wireId: string;
+  source: "explicit" | "default";
+};
+
+/**
+ * Pick the wireId for a procedure. Resolution order (highest priority
+ * first; see `docs/proposals/rpc.md` §2):
+ *
+ *   1. `proc.config.id` (explicit, set on the procedure or on the
+ *      module).
+ *   2. Default: bare `<exportName>` — no path-derived slug.
+ *
+ * The returned wireId never has the `rpc:` prefix; the prefix is
+ * applied when keying the resource map. The collision check and
+ * production-mode gate run on the assigned wireIds — see
+ * `computeManifestExtras()`.
+ */
+function pickWireId(proc: DiscoveredProcedure): WireIdResolution {
+  // 1. Explicit id pinned on the procedure's `config.id`.
+  const explicit = proc.config?.id;
+  if (typeof explicit === "string" && explicit.length > 0) {
+    return { wireId: explicit, source: "explicit" };
+  }
+
+  // 2. Default — bare export name. Path-derived slugs are NOT used
+  //    here (they leak file structure to the wire). This is the only
+  //    resolution that the production-mode gate rejects.
+  return { wireId: proc.exportName, source: "default" };
+}
+
+// ── Validation ─────────────────────────────────────────────────────────────
+
+const KEY_FORMAT_RE = /^(?:\*|rpc:[a-zA-Z0-9._*-]+|\/[\w\-/.\[\]:*]*)$/;
+
+/**
+ * Validate the authored, flattened resource map against the rules in
+ * `docs/proposals/rpc.md` §7 ("Validation"). Throws (production) or
+ * warns (dev) on failure.
+ */
+function validateResources(
+  flat: Record<string, WireResource>,
+  mode: "production" | "development",
+  warn: (msg: string) => void,
+): void {
+  const errors: string[] = [];
+  const warnings: string[] = [];
+
+  // Resource-key format.
+  for (const key of Object.keys(flat)) {
+    if (!KEY_FORMAT_RE.test(key)) {
+      errors.push(
+        `resource key ${JSON.stringify(key)} does not match the allowed shape ` +
+          `(bare "*", "rpc:<id>", or "/<path>")`,
+      );
+    }
+  }
+
+  // At-most-one routing action per resource.
+  for (const [key, node] of Object.entries(flat)) {
+    const actions = ["redirect", "rewrite", "static"].filter((a) => a in node);
+    if (actions.length > 1) {
+      errors.push(
+        `resource ${JSON.stringify(key)} has multiple routing actions: ` +
+          actions.join(", ") +
+          ` — only one of redirect/rewrite/static is allowed`,
+      );
+    }
+  }
+
+  // `rewrite` is accepted by the manifest shape but the gateway forwards the
+  // request under its original path, so a rewrite would build and deploy while
+  // silently ignoring the target. The control plane rejects it too; failing
+  // here means the creator sees it at build time instead of on deploy.
+  for (const [key, node] of Object.entries(flat)) {
+    if ("rewrite" in node) {
+      errors.push(
+        `resource ${JSON.stringify(key)} uses \`rewrite\`, which is not implemented — ` +
+          `the gateway would serve the original path and ignore the rewrite target. ` +
+          `Use \`redirect\` for an outward hop, or \`static\` to serve a different asset.`,
+      );
+    }
+  }
+
+  // Credentialed CORS requests require an exact allowed origin.
+  for (const [key, node] of Object.entries(flat)) {
+    const cors = node.cors;
+    if (!cors || typeof cors !== "object" || Array.isArray(cors)) continue;
+    const config = cors as Record<string, unknown>;
+    if (
+      config.allow_credentials === true &&
+      Array.isArray(config.allow_origins) &&
+      config.allow_origins.includes("*")
+    ) {
+      errors.push(
+        `resource ${JSON.stringify(key)}: \`cors.allow_credentials: true\` is incompatible ` +
+          `with the \`"*"\` wildcard origin; list the exact origins instead`,
+      );
+    }
+  }
+
+  // The `auth` value must name a principal the platform has. Two exist:
+  // "anonymous" (no identity required) and "user" (an authenticated end
+  // user). This is an ERROR IN EVERY MODE, dev included — an unknown value
+  // is not a posture the runtime can honour, so a dev build that accepted
+  // it would emit a manifest the gateway cannot compile.
+  //
+  // `"admin"` is called out by name because the platform used to accept it
+  // and the build itself used to recommend it. It was never enforced: the
+  // gateway matched it in the same arm as `user`, so a route locked down
+  // with `admin` was reachable by every signed-in end user. There is no
+  // platform-admin principal (`docs/architecture/control-plane.md`), so the
+  // level was deleted rather than implemented.
+  for (const [key, node] of Object.entries(flat)) {
+    if (!("auth" in node) || node.auth === undefined) continue;
+    if (node.auth === "anonymous" || node.auth === "user") continue;
+    const wrote = JSON.stringify(node.auth);
+    let msg =
+      `resource ${JSON.stringify(key)} sets auth: ${wrote}, which is not a principal ` +
+      `this platform has. Use auth: "user" to require an authenticated end user, or ` +
+      `auth: "anonymous" with publiclyAccessible: true to make it deliberately public.`;
+    if (node.auth === "admin") {
+      msg +=
+        ` The "admin" level was deleted on 2026-09-05: no platform-admin principal ` +
+        `exists, and the gateway enforced it identically to "user", so a route gated ` +
+        `with it was reachable by every signed-in end user.`;
+    }
+    errors.push(msg);
+  }
+
+  // Secure-by-default.
+  for (const [key, node] of Object.entries(flat)) {
+    if (node.auth === "anonymous" && node.publicly_accessible !== true) {
+      const msg =
+        `resource ${JSON.stringify(key)} sets auth: "anonymous" without publicly_accessible: true. ` +
+        `Add publicly_accessible: true to confirm this is an intentionally public endpoint, ` +
+        `or set auth: "user".`;
+      if (mode === "production") errors.push(msg);
+      else warnings.push(msg);
+    }
+  }
+
+  // Override marker — child weakening or shadowing inherited fields.
+  // Fields we track for shadow-detection. `auth` is the prime case; other
+  // fields are detected the same way but the build only emits a warning
+  // for them — the spec doesn't explicitly forbid e.g. weakening rate_limit
+  // (the merge rule is "min" anyway) but it does require declarative
+  // intent for `auth`.
+  const shadowableFields = [
+    "auth",
+    "rate_limit",
+    "max_input_bytes",
+    "cache",
+    "cors",
+    "csrf_origins",
+    "publicly_accessible",
+    "idempotent",
+    "idempotency_ttl_hours",
+    "middleware",
+  ];
+  for (const [key, node] of Object.entries(flat)) {
+    const parentKey = parentResourceKey(key);
+    if (!parentKey || !flat[parentKey]) continue;
+    const parent = flat[parentKey];
+    const declaredOverrides = new Set(
+      Array.isArray(node.override) ? (node.override as string[]) : [],
+    );
+    for (const field of shadowableFields) {
+      if (!(field in node)) continue;
+      if (!(field in parent)) continue;
+      // Same value? Not a shadow.
+      if (canonicalJson(node[field]) === canonicalJson(parent[field])) continue;
+      // For auth, the spec only requires `override` when the child weakens.
+      // With two principals there is no ladder to consult: the values differ
+      // (checked just above), so the child either ADDS the user requirement —
+      // strengthening, allowed bare — or DROPS it, which is the weakening the
+      // marker exists to make explicit.
+      if (field === "auth" && node.auth === "user") continue;
+      if (!declaredOverrides.has(field)) {
+        errors.push(
+          `resource ${JSON.stringify(key)} shadows inherited field ` +
+            `${JSON.stringify(field)} from ${JSON.stringify(parentKey)} ` +
+            `but does not list it in override: [...]. ` +
+            `Add override: ${JSON.stringify([...declaredOverrides, field])} to confirm.`,
+        );
+      }
+    }
+  }
+
+  for (const w of warnings) warn(w);
+  if (errors.length > 0) {
+    throw new Error(
+      `[zeroship:manifest] validation failed:\n  - ` + errors.join("\n  - "),
+    );
+  }
+}
+
+type ScheduleCompilerModule = {
+  compileSchedule(input: unknown, options?: unknown): unknown;
+};
+
+let scheduleCompiler: Promise<ScheduleCompilerModule> | undefined;
+
+async function loadScheduleCompiler(): Promise<ScheduleCompilerModule> {
+  if (!scheduleCompiler) {
+    scheduleCompiler = (async () => {
+      const dynamicImport = new Function("specifier", "return import(specifier)") as (
+        specifier: string,
+      ) => Promise<ScheduleCompilerModule>;
+      try {
+        return await dynamicImport("@zeroship/workflows/schedule");
+      } catch (packageError) {
+        try {
+          return await dynamicImport(new URL("../../workflows/dist/schedule.js", import.meta.url).href);
+        } catch {
+          const message = packageError instanceof Error ? packageError.message : String(packageError);
+          throw new Error(
+            `[zeroship:manifest] cannot load @zeroship/workflows/schedule to compile schedules: ${message}`,
+          );
+        }
+      }
+    })();
+  }
+  return scheduleCompiler;
+}
+
+async function compileSchedules(
+  schedules: DiscoveredSchedule[] | undefined,
+): Promise<WireScheduleRegistration[] | undefined> {
+  if (!schedules || schedules.length === 0) return undefined;
+
+  const byName = new Map<string, DiscoveredSchedule[]>();
+  for (const schedule of schedules) {
+    const group = byName.get(schedule.name);
+    if (group) group.push(schedule);
+    else byName.set(schedule.name, [schedule]);
+  }
+  const duplicates: string[] = [];
+  for (const [name, group] of byName) {
+    if (group.length < 2) continue;
+    const files = [...new Set(group.map((s) => s.filePath))].join(", ");
+    duplicates.push(`${JSON.stringify(name)} in ${files}`);
+  }
+  if (duplicates.length > 0) {
+    throw new Error(
+      `[zeroship:manifest] duplicate workflow schedule name(s): ${duplicates.join("; ")}`,
+    );
+  }
+
+  const compiler = await loadScheduleCompiler();
+  return schedules.map((registration) => {
+    let compiled: unknown;
+    try {
+      compiled = compiler.compileSchedule(registration.schedule, {
+        overlap: registration.overlap,
+        catchUp: registration.catchUp,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      throw new Error(
+        `[zeroship:manifest] invalid workflow schedule ${JSON.stringify(registration.name)} ` +
+          `in ${registration.filePath}: ${message}`,
+      );
+    }
+    const { overlap, catchUp, ...schedule } = JSON.parse(JSON.stringify(compiled)) as Record<string, unknown>;
+    if (overlap !== "allow" && overlap !== "skipIfRunning") {
+      throw new Error(
+        `[zeroship:manifest] invalid workflow schedule ${JSON.stringify(registration.name)}: ` +
+          `compiled overlap policy is invalid`,
+      );
+    }
+    if (!isCompiledCatchUp(catchUp)) {
+      throw new Error(
+        `[zeroship:manifest] invalid workflow schedule ${JSON.stringify(registration.name)}: ` +
+          `compiled catchUp policy is invalid`,
+      );
+    }
+    return {
+      name: registration.name,
+      workflowName: registration.workflowName,
+      schedule,
+      input: registration.input ?? {},
+      overlap,
+      catchUp,
+    };
+  });
+}
+
+function isCompiledCatchUp(
+  value: unknown,
+): value is { mode: "skip" } | { mode: "backfill"; max: number } {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const record = value as Record<string, unknown>;
+  if (record.mode === "skip") return record.max === undefined;
+  return record.mode === "backfill" && Number.isInteger(record.max) && Number(record.max) > 0;
+}
+
+/**
+ * Walk up to the parent resource key. For URL paths we drop the last
+ * segment (`/api/admin/users` → `/api/admin`). For RPC ids we drop the
+ * last dot segment (`rpc:todos.delete` → `rpc:todos`). The bare `*`
+ * is everyone's ultimate parent — but we don't infer it as a parent
+ * for this check; `docs/proposals/rpc.md` §7 talks about explicit
+ * parent declarations.
+ */
+function parentResourceKey(key: string): string | null {
+  if (key === "*") return null;
+  if (key.startsWith("rpc:")) {
+    const id = key.slice("rpc:".length);
+    const i = id.lastIndexOf(".");
+    if (i < 0) return null;
+    return "rpc:" + id.slice(0, i);
+  }
+  if (key.startsWith("/")) {
+    const i = key.lastIndexOf("/");
+    if (i <= 0) return null;
+    return key.slice(0, i);
+  }
+  return null;
+}
+
+// ── defineApp config extraction ────────────────────────────────────────────
+//
+// Current limitation: we extract the `defineApp({ resources: { ... } })`
+// argument via a coarse JS-evaluation approach. The user file is read,
+// the import lines stripped, and the `defineApp(...)` call evaluated as
+// a literal. Computed expressions (e.g. `auth: env.PROD ? ... : ...`)
+// fail with a clear message asking the user to flatten the literal.
+//
+// This is the simplest possible extraction that handles the documented
+// happy path. A full ts-morph based parse is future work.
+
+async function loadDefineAppConfig(
+  root: string,
+  configPath?: string,
+): Promise<DefineAppConfig | null> {
+  // Exactly one canonical path: `src/server/config.ts`. The vite-plugin
+  // never reads `zeroship.config.ts` at the project root, never reads
+  // per-directory `$config.ts` — there is one place app-level defaults
+  // and the resource tree live, and that is `src/server/config.ts`.
+  // (Tests / advanced callers may override via `configPath`.)
+  const path = configPath
+    ? resolve(root, configPath)
+    : resolve(root, "src/server/config.ts");
+
+  let src: string;
+  try {
+    src = await fs.readFile(path, "utf8");
+  } catch {
+    return null;
+  }
+  return extractDefineAppLiteral(src, path);
+}
+
+/**
+ * Extract the literal object passed to `defineApp({ ... })`.
+ *
+ * Approach: locate the `defineApp(` call, parse the matched-paren
+ * region, then `Function`-eval the slice as a JS expression in a
+ * scope where references to non-literal identifiers throw a useful
+ * error. This intentionally supports only literal trees today.
+ * Regex literals, template interpolation, and other computed
+ * expressions are outside the contract and should be flattened
+ * before they reach `defineApp({ resources })`.
+ */
+export function extractDefineAppLiteral(
+  src: string,
+  filePath: string,
+): DefineAppConfig | null {
+  // Strip TS-only syntax that's harmless to evaluate-time JS:
+  //   - TS type annotations on var/let/const (limited support)
+  //   - import statements (we don't need them for the literal)
+  //   - `as Foo` casts (rare in defineApp args, but possible)
+  const stripped = src
+    // Drop import lines.
+    .replace(/^\s*import[\s\S]+?;[\r\n]+/gm, "")
+    // Drop export keyword on default-export lines so we can pull the
+    // expression on its own.
+    .replace(/^\s*export\s+default\s+/m, "var __zsApp = ")
+    // Strip `as Foo` type assertions.
+    .replace(/\s+as\s+[A-Za-z_$][\w$<>,\s|&\[\]]*/g, "");
+
+  // Find the defineApp(...) call.
+  const m = stripped.match(/defineApp\s*\(/);
+  if (!m || m.index === undefined) return null;
+  const open = m.index + m[0].length;
+  const close = matchParen(stripped, open - 1);
+  if (close < 0) {
+    throw new Error(
+      `[zeroship:manifest] failed to parse defineApp(...) in ${filePath}: ` +
+        `unbalanced parentheses`,
+    );
+  }
+  const argSrc = stripped.slice(open, close).trim();
+  // Empty arg list?
+  if (argSrc === "") return null;
+
+  // Best-effort eval: build a function that returns the expression,
+  // catching ReferenceErrors with a spec-friendly message.
+  let arg: unknown;
+  try {
+    // eslint-disable-next-line no-new-func
+    arg = new Function(`return (${argSrc});`)();
+  } catch (e) {
+    throw new Error(
+      `[zeroship:manifest] cannot evaluate defineApp argument in ${filePath} as a literal. ` +
+        `This build only supports literal resource trees (no computed expressions). ` +
+        `Hint: replace dynamic values like \`env.PROD ? "anonymous" : "user"\` with a constant. ` +
+        `Underlying error: ${(e as Error).message}`,
+    );
+  }
+  if (!arg || typeof arg !== "object") return null;
+  const config = arg as { resources?: unknown; net?: unknown };
+  const out: DefineAppConfig = {};
+  if (config.resources && typeof config.resources === "object") {
+    out.resources = config.resources as Record<string, Record<string, unknown>>;
+  }
+  if (config.net && typeof config.net === "object" && !Array.isArray(config.net)) {
+    out.net = config.net as NetConfig;
+  }
+  return Object.keys(out).length > 0 ? out : null;
+}
+
+function matchParen(src: string, openIdx: number): number {
+  if (src[openIdx] !== "(") return -1;
+  let depth = 0;
+  let i = openIdx;
+  let inString: string | null = null;
+  let inLineComment = false;
+  let inBlockComment = false;
+  while (i < src.length) {
+    const c = src[i];
+    const next = src[i + 1];
+    if (inLineComment) {
+      if (c === "\n") inLineComment = false;
+      i++;
+      continue;
+    }
+    if (inBlockComment) {
+      if (c === "*" && next === "/") {
+        inBlockComment = false;
+        i += 2;
+        continue;
+      }
+      i++;
+      continue;
+    }
+    if (inString) {
+      if (c === "\\") {
+        i += 2;
+        continue;
+      }
+      if (c === inString) inString = null;
+      i++;
+      continue;
+    }
+    if (c === "/" && next === "/") {
+      inLineComment = true;
+      i += 2;
+      continue;
+    }
+    if (c === "/" && next === "*") {
+      inBlockComment = true;
+      i += 2;
+      continue;
+    }
+    if (c === '"' || c === "'" || c === "`") {
+      inString = c;
+      i++;
+      continue;
+    }
+    if (c === "(") depth++;
+    else if (c === ")") {
+      depth--;
+      if (depth === 0) return i;
+    }
+    i++;
+  }
+  return -1;
+}
+
+// ── Auto-derived RPC entries ───────────────────────────────────────────────
+
+/**
+ * Build the wire shape for an auto-derived RPC procedure entry. Pulls
+ * kind/idempotent/auth/rate_limit/etc. from `proc.config` and
+ * `proc.moduleConfig`.
+ *
+ * Schemas (Zod) are NOT serialized into the manifest — they're typed
+ * objects the synthetic SSR entry calls `.parse()` on at runtime. The
+ * `input` / `output` keys on `proc.config` (when present) are skipped
+ * here so the wire stays clean.
+ */
+function autoDeriveRpcEntry(proc: DiscoveredProcedure): WireResource {
+  const out: WireResource = {};
+  // Every capability, `action` included, goes on the wire. `ProcedureKind`
+  // carries an `Action` variant, so omitting it does not mean "action" to the
+  // gateway — it means "unknown", and the two are not gated alike. The CSRF
+  // origin guard fires on `Some(Mutation) | Some(Action)` or an unsafe method,
+  // so an omitted kind left an action reachable over GET without an origin
+  // check, even though an action is the most permissive capability there is.
+  out.kind = proc.kind;
+
+  // Module-level $config has lowest priority among user-supplied metadata.
+  // Per-procedure config wins.
+  const merged: Record<string, unknown> = {
+    ...(proc.moduleConfig ?? {}),
+    ...(proc.config ?? {}),
+  };
+  delete merged.id; // wireId is keyed separately, never written into the resource.
+  // Zod schemas live in fn.config.input / fn.config.output but never
+  // touch the wire — runtime validation owns them.
+  delete merged.input;
+  delete merged.output;
+
+  // Apply via authorToWire so camelCase → snake_case conversion is
+  // identical to the user-tree path.
+  const wired = authorToWire(merged);
+  Object.assign(out, wired);
+
+  return out;
+}
+
+// ── Fail-closed auth visibility ────────────────────────────────────────────
+
+/**
+ * The resource keys the gateway consults when resolving a `rpc:` key's
+ * effective policy, in chain order.
+ *
+ * Mirrors `build_inheritance_chain` in `crates/zeroship-bundle/src/compiled.rs`:
+ * the root `*` sentinel, then each dot-segment ancestor (`rpc:a`,
+ * `rpc:a.b`, ... but NOT the key itself), then the key. The Rust side
+ * skips ancestors absent from the resource map; here the caller does the
+ * same implicitly by looking each key up and finding nothing.
+ */
+function rpcInheritanceChain(key: string): string[] {
+  const chain: string[] = ["*"];
+  const segs = key.slice("rpc:".length).split(".");
+  for (let end = 1; end < segs.length; end++) {
+    chain.push(`rpc:${segs.slice(0, end).join(".")}`);
+  }
+  chain.push(key);
+  return chain;
+}
+
+/**
+ * Surface, AT BUILD TIME, every procedure that will deploy fail-closed.
+ *
+ * A `rpc:` procedure whose whole inheritance chain declares no `auth`
+ * resolves to `RequiredPrincipal::User` in the gateway (`resolve_effective_policy`,
+ * the `if !auth_declared && key.starts_with("rpc:")` arm). That default is
+ * deliberate and stays as it is: forgetting a policy must be a loud 401,
+ * never a silent public endpoint.
+ *
+ * The gap this closes is visibility, not policy. Enforcement lives ONLY in
+ * the gateway -- `RequiredPrincipal` has no reader in `crates/cli` or
+ * `crates/runtime` -- so `pnpm dev` cannot reproduce the 401 and the
+ * creator learns about it only after deploying. The build, by contrast,
+ * already holds both halves of the answer (the discovered procedure list
+ * and the resolved resource tree), so it can name the affected procedures
+ * for free.
+ *
+ * WARNING, never a build failure: making this fatal is a policy call, and
+ * it would break every example that currently relies on the default.
+ * Silence is mandatory when every procedure is covered -- a warning that
+ * fires on correct apps is one people learn to scroll past.
+ */
+function warnFailClosedProcedures(
+  assignments: readonly {
+    resourceKey: string;
+    proc: Pick<DiscoveredProcedure, "exportName" | "filePath">;
+  }[],
+  merged: Record<string, WireResource>,
+  onWarn: (msg: string) => void,
+): void {
+  // Dedupe by resource key: the same procedure can be recorded twice when
+  // the transform fires in more than one environment (see the collision
+  // check above, which dedupes for the same reason).
+  const seen = new Set<string>();
+  const offenders: { resourceKey: string; exportName: string; filePath: string }[] = [];
+  for (const a of assignments) {
+    if (seen.has(a.resourceKey)) continue;
+    seen.add(a.resourceKey);
+    const declared = rpcInheritanceChain(a.resourceKey).some(
+      (k) => merged[k]?.auth !== undefined,
+    );
+    if (!declared) {
+      offenders.push({
+        resourceKey: a.resourceKey,
+        exportName: a.proc.exportName,
+        filePath: a.proc.filePath,
+      });
+    }
+  }
+  if (offenders.length === 0) return;
+
+  offenders.sort((x, y) => x.resourceKey.localeCompare(y.resourceKey));
+  const n = offenders.length;
+  const lines = offenders.map(
+    (a) => `  - ${JSON.stringify(a.resourceKey)} (export ${a.exportName} in ${a.filePath})`,
+  );
+  const sample = offenders[0].resourceKey;
+
+  onWarn(
+    `${n} ${n === 1 ? "procedure declares" : "procedures declare"} no \`auth\` policy ` +
+      `and will deploy fail-closed:\n` +
+      lines.join("\n") +
+      `\n  Each resolves to \`auth: "user"\` at the gateway, so every call returns 401 ` +
+      `until an authenticated end user is present. \`pnpm dev\` runs no gateway and does ` +
+      `NOT enforce this, so these procedures work locally and fail only once deployed.\n` +
+      `  Declare the policy in src/server/config.ts:\n` +
+      `      export default defineApp({\n` +
+      `        resources: {\n` +
+      `          ${JSON.stringify(sample)}: { auth: "anonymous", publiclyAccessible: true },\n` +
+      `        },\n` +
+      `      });\n` +
+      `  Use \`auth: "anonymous", publiclyAccessible: true\` to make a procedure publicly ` +
+      `reachable, or \`auth: "user"\` to keep it gated and make that ` +
+      `intent explicit.`,
+  );
+}
+
+// ── Public entry point ─────────────────────────────────────────────────────
+
+export async function computeManifestExtras(
+  input: ManifestExtrasInput,
+): Promise<ManifestExtras> {
+  const { root, procedures, schedules, workflowNames, mode, configPath } = input;
+  const onWarn = input.onWarn ?? ((msg) => console.warn(`[zeroship:manifest] ${msg}`));
+
+  // 1. Resolve every procedure's wireId, building both the auto-derived
+  //    resources block and a parallel array of (resolution, proc) pairs
+  //    for the collision-detection and production-mode-gate passes
+  //    below.
+  type Assigned = {
+    proc: DiscoveredProcedure;
+    resolution: WireIdResolution;
+    resourceKey: string;
+  };
+  const assignments: Assigned[] = [];
+  const autoResources: Record<string, WireResource> = {};
+
+  for (const proc of procedures) {
+    const resolution = pickWireId(proc);
+    const resourceKey = `rpc:${resolution.wireId}`;
+    assignments.push({ proc, resolution, resourceKey });
+  }
+
+  // 2. Collision check — two distinct procedures that resolved to the
+  //    same wireId. This is unrecoverable: the wire path
+  //    `/__zeroship/v1/<wireId>` would be ambiguous. Cite both file paths and
+  //    instruct the user to pin an explicit id.
+  const byKey = new Map<string, Assigned[]>();
+  for (const a of assignments) {
+    const arr = byKey.get(a.resourceKey);
+    if (arr) arr.push(a);
+    else byKey.set(a.resourceKey, [a]);
+  }
+  const collisions: string[] = [];
+  for (const [key, group] of byKey) {
+    if (group.length < 2) continue;
+    // Same (filePath, exportName) being recorded twice (e.g. the
+    // transform fires on multiple environments) is not a real
+    // collision — dedup before flagging.
+    const distinct = new Map<string, Assigned>();
+    for (const a of group) {
+      distinct.set(`${a.proc.filePath}::${a.proc.exportName}`, a);
+    }
+    if (distinct.size < 2) continue;
+    const lines = [...distinct.values()].map(
+      (a) => `    ${a.proc.filePath} (export ${JSON.stringify(a.proc.exportName)})`,
+    );
+    collisions.push(
+      `wireId collision: ${JSON.stringify(key)} is the default for multiple procedures:\n${lines.join("\n")}\n` +
+        `    Pin an explicit id on at least one of them, e.g.:\n` +
+        `        export function ${[...distinct.values()][0].proc.exportName}(...) { ... }\n` +
+        `        ${[...distinct.values()][0].proc.exportName}.config = { id: "<unique>" };`,
+    );
+  }
+  if (collisions.length > 0) {
+    throw new Error(
+      `[zeroship:manifest] ` + collisions.join("\n"),
+    );
+  }
+
+  // 3. Production-mode gate — any procedure whose wireId came from the
+  //    bare-name default (resolution.source === "default") is rejected
+  //    in production. The wire identity for a deployed app must be
+  //    explicit, not implicit.
+  if (mode === "production") {
+    const offenders = assignments.filter((a) => a.resolution.source === "default");
+    if (offenders.length > 0) {
+      const lines = offenders.map((a) => {
+        const name = a.proc.exportName;
+        return (
+          `  - procedure ${JSON.stringify(name)} (in ${a.proc.filePath}) has no explicit \`id\`. ` +
+          `Add \`${name}.config = { id: "..." }\` before deploying.`
+        );
+      });
+      throw new Error(
+        `[zeroship:manifest] production build refused: ` +
+          `every procedure must have an explicit \`id\`.\n` +
+          lines.join("\n"),
+      );
+    }
+  }
+
+  for (const a of assignments) {
+    autoResources[a.resourceKey] = autoDeriveRpcEntry(a.proc);
+  }
+
+  // 4. defineApp({ resources }) tree from src/server/config.ts.
+  const appConfig = await loadDefineAppConfig(root, configPath);
+  const userFlat = appConfig?.resources ? flattenAuthorTree(appConfig.resources) : {};
+
+  // 4b. Reconcile the two independent inputs. `autoResources` comes from
+  //     the transform's discovery pass, which only fires on a module
+  //     carrying the `"use server"` directive; `userFlat` comes from
+  //     `defineApp({ resources })`, which is a plain literal and asks
+  //     nothing of the module it names. Drop the directive from a
+  //     procedure module and only the first set empties: the build then
+  //     ships `rpc:` policies for procedures that are not in the worker
+  //     bundle, while the client bundle inlines and calls the handler
+  //     locally instead of over the wire. MEASURED before this gate
+  //     existed: `vite build` printed "0 modules, 0 server functions",
+  //     still emitted `rpc:getMessages` + `rpc:addMessage`, and exited 0
+  //     with no warning at all.
+  //
+  //     A declared `rpc:` key is legitimate in exactly two shapes: it
+  //     names a discovered procedure, or it is a dot-segment FAMILY
+  //     ancestor whose policy is inherited by one (`rpc:todos` above
+  //     `rpc:todos.list`). Anything else is stale or unreachable.
+  const discoveredRpcKeys = new Set(assignments.map((a) => a.resourceKey));
+  const orphanRpcKeys = Object.keys(userFlat).filter((key) => {
+    if (!key.startsWith("rpc:")) return false;
+    if (discoveredRpcKeys.has(key)) return false;
+    const familyPrefix = `${key}.`;
+    for (const discovered of discoveredRpcKeys) {
+      if (discovered.startsWith(familyPrefix)) return false;
+    }
+    return true;
+  });
+  if (orphanRpcKeys.length > 0) {
+    const lines = orphanRpcKeys
+      .sort()
+      .map(
+        (key) =>
+          `  - ${JSON.stringify(key)} is declared in \`defineApp({ resources })\` but no ` +
+          `procedure with that id was discovered.`,
+      );
+    throw new Error(
+      `[zeroship:manifest] build refused: the resource tree declares ${orphanRpcKeys.length} ` +
+        `\`rpc:\` ${orphanRpcKeys.length === 1 ? "policy" : "policies"} with no matching procedure.\n` +
+        lines.join("\n") +
+        `\n  The usual cause is a missing \`"use server"\` directive: a procedure module ` +
+        `only enters RPC discovery when its first statement is \`"use server";\`. Without it ` +
+        `the procedure is bundled into the CLIENT and never published, while this policy ` +
+        `still ships. Add the directive to the declaring module, or drop the stale entry ` +
+        `from \`src/server/config.ts\`.`,
+    );
+  }
+
+  // 5. Merge: auto-derived first, user entries on top (user wins).
+  const merged: Record<string, WireResource> = { ...autoResources };
+  for (const [key, node] of Object.entries(userFlat)) {
+    if (key in merged) {
+      merged[key] = { ...merged[key], ...node };
+    } else {
+      merged[key] = node;
+    }
+  }
+
+  // 5b. Name every procedure that will deploy fail-closed. Runs on the
+  //     MERGED tree (auto-derived + user-declared), because a policy can
+  //     legitimately arrive from either side, so neither input alone can
+  //     answer the question.
+  warnFailClosedProcedures(assignments, merged, onWarn);
+
+  // 6. Validate.
+  validateResources(merged, mode, onWarn);
+
+  const extras: ManifestExtras = {
+    resources: merged,
+    transformer: "json",
+    versionHint: 1,
+  };
+  const net = normalizeNetConfig(appConfig?.net);
+  if (net) extras.net = net;
+  const compiledSchedules = await compileSchedules(schedules);
+  if (compiledSchedules && compiledSchedules.length > 0) {
+    extras.schedules = compiledSchedules;
+  }
+  if (workflowNames && workflowNames.length > 0) {
+    extras.workflows = [...new Set(workflowNames)].sort();
+  }
+  return extras;
+}
+
+function normalizeNetConfig(net: NetConfig | undefined): NetConfig | undefined {
+  const requests = net?.requests;
+  if (!Array.isArray(requests) || requests.length === 0) return undefined;
+  return {
+    requests: requests.map((r) => ({
+      host: String(r.host),
+      port: Number(r.port),
+      reason: String(r.reason),
+    })),
+  };
+}

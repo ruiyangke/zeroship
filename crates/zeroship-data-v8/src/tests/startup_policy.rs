@@ -48,7 +48,7 @@ fn runtime(source: &str, binding: &DbBinding, url: &str) -> Runtime {
             },
             ModuleEntry {
                 specifier: "@zeroship/db".into(),
-                source: include_str!("../../../../sdks/db/dist/index.js").into(),
+                source: include_str!("../../../../packages/db/dist/index.js").into(),
             },
             ModuleEntry {
                 specifier: "late-policy.js".into(),

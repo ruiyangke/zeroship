@@ -45,19 +45,19 @@ honor a schema property on it.
 
 ## RPC authoring
 
-`@zeroship/rpc/server` (in `sdks/rpc/src/server.ts`) provides the wrapper
+`@zeroship/rpc/server` (in `packages/rpc/src/server.ts`) provides the wrapper
 helpers (`procedure`, `query`, `mutation`, `action`, `stream`,
 `subscription`) — see [docs/reference/rpc.md](./rpc.md) for the canonical
 list and signatures.
 
 Named exports are normalized into the runtime RPC object by the Vite plugin's
-[synthetic server entry](../../sdks/vite-plugin/src/rpc-registry.ts). It preserves
+[synthetic server entry](../../packages/vite-plugin/src/rpc-registry.ts). It preserves
 the original callable and metadata. The generated fetch export retains the
 user's receiver without wrapping RPC dispatch. The runtime-owned dispatch path
 is `/__zeroship/v1/<wireId>`; user code does not route that path manually.
 
 The Vite development host builds live entry snapshots through
-`sdks/vite-plugin/src/dev-bootstrap/entry.ts`. It returns the same dictionary
+`packages/vite-plugin/src/dev-bootstrap/entry.ts`. It returns the same dictionary
 shape to the runtime; native code invokes the captured procedures.
 
 Production RPC resources require explicit wire IDs:

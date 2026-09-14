@@ -415,7 +415,7 @@ mod tests {
     /// So a creator value of `Infinity` is not rejected here and does not error -
     /// it becomes NULL, and on a nullable column the row stores NULL for a number
     /// the app supplied. What prevents that on the ordinary path is the SDK guard
-    /// in `sdks/db/src/validate.ts` (`Number.isFinite`), which runs before the op.
+    /// in `packages/db/src/validate.ts` (`Number.isFinite`), which runs before the op.
     /// A raw native op call does not go through it and still nulls silently.
     ///
     /// The coercion is worth pinning because it is invisible: no error, no log,

@@ -130,7 +130,7 @@ capability enforcement). All JS polyfills are replaced with native Rust v8_class
 
 A narrow Node.js compat layer in two tiers: (1) seven runtime-native synthetic ESM modules
 registered directly in V8 (`crates/zeroship-runtime/src/core/native_modules.rs`), and (2) a
-Vite-plugin build-time layer (`sdks/vite-plugin/src/node-compat.ts`) combining custom
+Vite-plugin build-time layer (`packages/vite-plugin/src/node-compat.ts`) combining custom
 polyfills with unenv@2 aliases. A partial mismatch: `node:zlib`/`node:os` are runtime-native
 but absent from the plugin's `RUNTIME_NATIVE_MODULES`, so in dev they fall through to unenv.
 
@@ -154,7 +154,7 @@ but absent from the plugin's `RUNTIME_NATIVE_MODULES`, so in dev they fall throu
 | node:zlib — async callback codecs | 🟡 | `import { gzip, brotliCompress }` | `crates/zeroship-runtime/src/node/zlib/mod.rs` | — | `crates/zeroship-runtime/tests/node_zlib.rs` | Runs sync on V8 thread; large input blocks loop. |
 | node:zlib — stream constructors | 🟠 | `import { createGzip } from "node:zlib"` | `crates/zeroship-runtime/src/node/zlib/mod.rs` | — | — | Throw ERR_METHOD_NOT_IMPLEMENTED. |
 | node:zlib — constants | 🟡 | `import { constants } from "node:zlib"` | `crates/zeroship-runtime/src/node/zlib/mod.rs` | — | — | ~30 of ~80 constants. |
-| node:zlib — build↔runtime mismatch | 🟡 | internal | `sdks/vite-plugin/src/node-compat.ts` | — | — | Absent from RUNTIME_NATIVE_MODULES → unenv in dev. |
+| node:zlib — build↔runtime mismatch | 🟡 | internal | `packages/vite-plugin/src/node-compat.ts` | — | — | Absent from RUNTIME_NATIVE_MODULES → unenv in dev. |
 | node:os | 🟡 | `import { platform, arch, cpus } from "node:os"` | `crates/zeroship-runtime/src/node/os/mod.rs` | `docs/reference/node-compat.md` | `crates/zeroship-runtime/tests/node_os.rs` | Sandbox constants; networkInterfaces empty; build mismatch. |
 | node:path (POSIX) | 🟢 | `import { join, resolve, dirname }` | `crates/zeroship-runtime/src/node/path/mod.rs` | `docs/reference/node-compat.md` | `crates/zeroship-runtime/tests/node_path.rs` | win32 is throwing Proxy; posix aliases module. |
 | node:util — format/inspect | 🟡 | `import { format, inspect } from "node:util"` | `crates/zeroship-runtime/src/node/util/mod.rs` | `docs/reference/node-compat.md` | `crates/zeroship-runtime/tests/node_util.rs` | inspect.custom, styleText, MIMEType deferred. |
@@ -164,12 +164,12 @@ but absent from the plugin's `RUNTIME_NATIVE_MODULES`, so in dev they fall throu
 | node:util — parseArgs | 🟡 | `import { parseArgs }` | `crates/zeroship-runtime/src/node/util/mod.rs` | — | — | Long-form only; short flags/strict deferred. |
 | node:util — TextEncoder/Decoder re-export | 🟢 | `import { TextEncoder, TextDecoder }` | `crates/zeroship-runtime/src/node/util/mod.rs` | — | — | Identity with globals. |
 | globalThis.process polyfill | 🟡 | bare `process` / `import process from "node:process"` | `crates/zeroship-runtime/src/core/init.rs` | — | — | Runtime sets global; Vite wraps it; not a real EventEmitter. |
-| node:timers/promises — Vite polyfill | 🟡 | `import { setTimeout, setInterval } from "node:timers/promises"` | `sdks/vite-plugin/src/node-compat.ts` | — | — | Custom (unenv setInterval isn't async gen); build-only. |
-| node:module — Vite polyfill | 🟠 | `import { createRequire } from "node:module"` | `sdks/vite-plugin/src/node-compat.ts` | — | — | noop-Proxy; documented as "not a feature". |
-| unenv@2 fallback for other node: modules | 🟡 | any unhandled `node:*` (build only) | `sdks/vite-plugin/src/node-compat.ts` | `docs/reference/node-compat.md` | — | events/stream/http/fs/etc.; quality varies. |
-| Bare global injection (Buffer/process/...) | 🟢 | internal (build transform) | `sdks/vite-plugin/src/node-compat.ts` | — | — | @rollup/plugin-inject; SSR env only. |
+| node:timers/promises — Vite polyfill | 🟡 | `import { setTimeout, setInterval } from "node:timers/promises"` | `packages/vite-plugin/src/node-compat.ts` | — | — | Custom (unenv setInterval isn't async gen); build-only. |
+| node:module — Vite polyfill | 🟠 | `import { createRequire } from "node:module"` | `packages/vite-plugin/src/node-compat.ts` | — | — | noop-Proxy; documented as "not a feature". |
+| unenv@2 fallback for other node: modules | 🟡 | any unhandled `node:*` (build only) | `packages/vite-plugin/src/node-compat.ts` | `docs/reference/node-compat.md` | — | events/stream/http/fs/etc.; quality varies. |
+| Bare global injection (Buffer/process/...) | 🟢 | internal (build transform) | `packages/vite-plugin/src/node-compat.ts` | — | — | @rollup/plugin-inject; SSR env only. |
 | __zeroshipNodeBuiltin dev bridge | 🟢 | internal | `crates/zeroship-runtime/src/core/native_modules.rs` | — | — | Lets Vite ModuleRunner source native node: exports. |
-| Bare-without-prefix specifiers ('crypto') | 🟡 | `import { createHash } from 'crypto'` | `sdks/vite-plugin/src/node-compat.ts` | — | — | Works in Vite; bare 'crypto' fails at runtime (prod). |
+| Bare-without-prefix specifiers ('crypto') | 🟡 | `import { createHash } from 'crypto'` | `packages/vite-plugin/src/node-compat.ts` | — | — | Works in Vite; bare 'crypto' fails at runtime (prod). |
 
 ---
 
@@ -184,42 +184,42 @@ provides the native V8 surface; the TS SDK (`@zeroship/db`) wraps it. Both Postg
 
 | Feature | Status | Surface | Code | Docs | Example | Notes |
 | --- | --- | --- | --- | --- | --- | --- |
-| Schema DSL — t.* type builders | 🟢 | `import { t } from '@zeroship/db'` | `sdks/db/src/types.ts` | `docs/reference/db.md` | `sdks/db/tests/types.test.ts` | t.encrypted/vector/geoPoint/id; no t.date(). |
-| Schema refinements (.required/.unique/.index/...) | &#x1F7E2; | chained on t.*() | `sdks/db/src/types.ts` | `docs/reference/db.md` | `sdks/db/tests/types.test.ts` | |
-| Per-collection options (schema() builder) | 🟢 | `import { schema } from '@zeroship/db'` | `sdks/db/src/types.ts` | `docs/reference/db.md` | `sdks/db/tests/named-indexes.test.ts` | softDelete/withVersioning are hints; cols always created. |
+| Schema DSL — t.* type builders | 🟢 | `import { t } from '@zeroship/db'` | `packages/db/src/types.ts` | `docs/reference/db.md` | `packages/db/tests/types.test.ts` | t.encrypted/vector/geoPoint/id; no t.date(). |
+| Schema refinements (.required/.unique/.index/...) | &#x1F7E2; | chained on t.*() | `packages/db/src/types.ts` | `docs/reference/db.md` | `packages/db/tests/types.test.ts` | |
+| Per-collection options (schema() builder) | 🟢 | `import { schema } from '@zeroship/db'` | `packages/db/src/types.ts` | `docs/reference/db.md` | `packages/db/tests/named-indexes.test.ts` | softDelete/withVersioning are hints; cols always created. |
 | Native runtime-descriptor binding | &#x1F7E2; | internal (runtime plugin boot hook) | `crates/zeroship-runtime/src/core/plugin.rs`, `crates/zeroship-data-v8/src/lib.rs` | `docs/reference/db.md` | `crates/zeroship-data-v8/src/lib.rs` | Runtime validates the descriptor, then data-v8 installs the app-at-deploy collection set before creator modules evaluate. |
 | Per-app Postgres schema isolation | &#x1F7E2; | internal | `crates/zeroship-migrate-server/src/apply.rs` | `docs/reference/db.md` | &mdash; | The migration service derives the schema from app_id; SQLite uses one file per app. |
-| Descriptor assignments | 🟢 | declared generators on Row<S> fields | `crates/zeroship-data-orm/src/crud/assignment_pass.rs`, `crates/zeroship-data-orm/src/sql/statement.rs` | `docs/reference/db.md` | `sdks/db/tests/p7-pr1-system-field-builders.test.ts` | Generators and lifecycle roles come from the migration-generated descriptor. |
-| Typed-id prefix system | 🟢 | `t.id('prefix')` / Id<S> | `crates/zeroship-data-orm/src/crud/assignment_pass.rs`, `sdks/db/src/types.ts` | `docs/reference/db.md` | `sdks/db/tests/p7-id-prefix.test.ts` | UUIDv7 base36, sortable. |
-| Collection.insert / insertMany | 🟢 | `Collection.insert(doc)` / `insertMany(docs)` | `crates/zeroship-data-orm/src/crud/mod.rs` | `docs/reference/db.md` | `sdks/db/tests/query.test.ts` | Result outside tx; bare Row inside tx. |
-| Collection.find / get | 🟢 | `Collection.find(filter, opts?)` / `get(...)` | `crates/zeroship-data-orm/src/crud/mod.rs` | `docs/reference/db.md` | `sdks/db/tests/query.test.ts` | Auto-filters the declared soft-delete field; masked → MaskedValue. |
-| Query builder (lazy thenable) | 🟢 | `@zeroship/db` Query class | `sdks/db/src/query.ts` | `docs/reference/db.md` | `sdks/db/tests/query.test.ts` | sort/limit/skip/select/after/paginate/with/first/unique. |
-| Collection.exists | 🟢 | `Collection.exists(filter?)` | `sdks/db/src/collection/crud.ts` | `docs/reference/db.md` | — | find(...).limit(1) SDK-side. |
+| Descriptor assignments | 🟢 | declared generators on Row<S> fields | `crates/zeroship-data-orm/src/crud/assignment_pass.rs`, `crates/zeroship-data-orm/src/sql/statement.rs` | `docs/reference/db.md` | `packages/db/tests/p7-pr1-system-field-builders.test.ts` | Generators and lifecycle roles come from the migration-generated descriptor. |
+| Typed-id prefix system | 🟢 | `t.id('prefix')` / Id<S> | `crates/zeroship-data-orm/src/crud/assignment_pass.rs`, `packages/db/src/types.ts` | `docs/reference/db.md` | `packages/db/tests/p7-id-prefix.test.ts` | UUIDv7 base36, sortable. |
+| Collection.insert / insertMany | 🟢 | `Collection.insert(doc)` / `insertMany(docs)` | `crates/zeroship-data-orm/src/crud/mod.rs` | `docs/reference/db.md` | `packages/db/tests/query.test.ts` | Result outside tx; bare Row inside tx. |
+| Collection.find / get | 🟢 | `Collection.find(filter, opts?)` / `get(...)` | `crates/zeroship-data-orm/src/crud/mod.rs` | `docs/reference/db.md` | `packages/db/tests/query.test.ts` | Auto-filters the declared soft-delete field; masked → MaskedValue. |
+| Query builder (lazy thenable) | 🟢 | `@zeroship/db` Query class | `packages/db/src/query.ts` | `docs/reference/db.md` | `packages/db/tests/query.test.ts` | sort/limit/skip/select/after/paginate/with/first/unique. |
+| Collection.exists | 🟢 | `Collection.exists(filter?)` | `packages/db/src/collection/crud.ts` | `docs/reference/db.md` | — | find(...).limit(1) SDK-side. |
 | Collection.count | 🟢 | `Collection.count(filter, opts?)` | `crates/zeroship-data-orm/src/crud/mod.rs`, `query.rs` | `docs/reference/db.md` | — | Auto-filters soft-deleted. |
 | Collection.distinct | 🟢 | `Collection.distinct(field, filter?, opts?)` | `crates/zeroship-data-orm/src/crud/mod.rs`, `query.rs` | `docs/reference/db.md` | — | opts.field required. |
-| Collection.update / updateMany | 🟢 | `Collection.update(filter, patch)` / `updateMany(...)` | `crates/zeroship-data-orm/src/crud/mod.rs` | `docs/reference/db.md` | `sdks/db/tests/p7-pr4-update-version.test.ts` | CAS version; $inc/$push/$set operators. |
-| Collection.delete / deleteMany (soft) | 🟢 | `Collection.delete(idOrFilter)` / `deleteMany(...)` | `crates/zeroship-data-orm/src/crud/mod.rs` | `docs/reference/db.md` | `sdks/db/tests/p7-pr5-soft-delete.test.ts` | Sets the declared soft-delete field; emits Update CDC. |
-| Collection.purge / purgeMany (hard) | 🟢 | `Collection.purge(idOrFilter)` / `purgeMany(...)` | `crates/zeroship-data-orm/src/crud/mod.rs` | `docs/reference/db.md` | `sdks/db/tests/p7-pr5-soft-delete.test.ts` | GDPR erase; bypasses soft-delete filter. |
-| Collection.restore / restoreMany | 🟢 | `Collection.restore(idOrFilter)` / `restoreMany(...)` | `crates/zeroship-data-orm/src/crud/mod.rs` | `docs/reference/db.md` | `sdks/db/tests/p7-pr5-soft-delete.test.ts` | Clears the declared soft-delete field and applies declared write generators. |
+| Collection.update / updateMany | 🟢 | `Collection.update(filter, patch)` / `updateMany(...)` | `crates/zeroship-data-orm/src/crud/mod.rs` | `docs/reference/db.md` | `packages/db/tests/p7-pr4-update-version.test.ts` | CAS version; $inc/$push/$set operators. |
+| Collection.delete / deleteMany (soft) | 🟢 | `Collection.delete(idOrFilter)` / `deleteMany(...)` | `crates/zeroship-data-orm/src/crud/mod.rs` | `docs/reference/db.md` | `packages/db/tests/p7-pr5-soft-delete.test.ts` | Sets the declared soft-delete field; emits Update CDC. |
+| Collection.purge / purgeMany (hard) | 🟢 | `Collection.purge(idOrFilter)` / `purgeMany(...)` | `crates/zeroship-data-orm/src/crud/mod.rs` | `docs/reference/db.md` | `packages/db/tests/p7-pr5-soft-delete.test.ts` | GDPR erase; bypasses soft-delete filter. |
+| Collection.restore / restoreMany | 🟢 | `Collection.restore(idOrFilter)` / `restoreMany(...)` | `crates/zeroship-data-orm/src/crud/mod.rs` | `docs/reference/db.md` | `packages/db/tests/p7-pr5-soft-delete.test.ts` | Clears the declared soft-delete field and applies declared write generators. |
 | Collection.upsert | 🟢 | `Collection.upsert(doc, { conflictFields })` | `crates/zeroship-data-orm/src/crud/mod.rs` | `docs/reference/db.md` | — | conflictFields required. |
 | Collection.aggregate | 🟢 | `Collection.aggregate(pipeline, opts?)` | `crates/zeroship-data-orm/src/crud/aggregate.rs`, `crates/zeroship-data-orm/src/sql/compiler/shared.rs` | `docs/reference/db.md` | — | $match/$group/$having/$sort/$limit; $first sort-order future. |
-| Filter operators | &#x1F7E2; | Filter<S> on read/write | `crates/zeroship-data-orm/src/crud/predicate.rs`, `crates/zeroship-data-orm/src/sql/predicate.rs` | `docs/reference/db.md` | `sdks/db/tests/query-and-or-semantics.test.ts` | All values parameterized. |
-| Optimistic concurrency (version + withRetry) | 🟢 | `Collection.update({id,version},...)` / `withRetry` | `crates/zeroship-data-orm/src/crud/assignment_pass.rs`, `sdks/db/src/with-retry.ts` | `docs/reference/db.md` | `sdks/db/tests/optimistic-lock-in-tx.test.ts` | withRetry max:3, no backoff default. |
-| Relations — with: { fk: true } | 🟢 | `find(filter, { with })` / `Query.with(spec)` | `sdks/db/src/collection/relations.ts` | `docs/reference/db.md` | `sdks/db/tests/relations.test.ts` | v1 single-level; no nested with. |
-| Foreign keys (t.ref) | &#x1F7E2; | `t.ref('collection', opts?)` | `sdks/db/src/types.ts`, `crates/zeroship-migrate-core/src/render/declarative.rs` | `docs/reference/db.md` | `sdks/db/tests/b2-ref-validation.test.ts` | Default restrict/deferrable. An FK cannot leave the app, but the enforcement is the migration engine's (`reject_cross_app_ref` plus server-derived schema), not `crates/zeroship-data-v8/src/cross_app_fk.rs (DELETED)`, which has no production call site as of 2026-08-20. See db.md. |
-| Named multi-column indexes | &#x1F7E2; | `schema({...}).index('name', [...])` | `sdks/db/src/types.ts`, `crates/zeroship-migrate-core/src/render/declarative.rs` | `docs/reference/db.md` | `sdks/db/tests/named-indexes.test.ts` | Declared indexes are emitted by the migration engine. |
-| Native transactions + nested savepoints | 🟢 | `env.db.transaction(async tx => {...})` | `crates/zeroship-data-orm/src/transaction/mod.rs`, `v8_classes/db.rs` | `docs/reference/db.md` | `sdks/db/tests/p9-pr3-native-transaction.test.ts` | PG isolation; SQLite ignores level. |
+| Filter operators | &#x1F7E2; | Filter<S> on read/write | `crates/zeroship-data-orm/src/crud/predicate.rs`, `crates/zeroship-data-orm/src/sql/predicate.rs` | `docs/reference/db.md` | `packages/db/tests/query-and-or-semantics.test.ts` | All values parameterized. |
+| Optimistic concurrency (version + withRetry) | 🟢 | `Collection.update({id,version},...)` / `withRetry` | `crates/zeroship-data-orm/src/crud/assignment_pass.rs`, `packages/db/src/with-retry.ts` | `docs/reference/db.md` | `packages/db/tests/optimistic-lock-in-tx.test.ts` | withRetry max:3, no backoff default. |
+| Relations — with: { fk: true } | 🟢 | `find(filter, { with })` / `Query.with(spec)` | `packages/db/src/collection/relations.ts` | `docs/reference/db.md` | `packages/db/tests/relations.test.ts` | v1 single-level; no nested with. |
+| Foreign keys (t.ref) | &#x1F7E2; | `t.ref('collection', opts?)` | `packages/db/src/types.ts`, `crates/zeroship-migrate-core/src/render/declarative.rs` | `docs/reference/db.md` | `packages/db/tests/b2-ref-validation.test.ts` | Default restrict/deferrable. An FK cannot leave the app, but the enforcement is the migration engine's (`reject_cross_app_ref` plus server-derived schema), not `crates/zeroship-data-v8/src/cross_app_fk.rs (DELETED)`, which has no production call site as of 2026-08-20. See db.md. |
+| Named multi-column indexes | &#x1F7E2; | `schema({...}).index('name', [...])` | `packages/db/src/types.ts`, `crates/zeroship-migrate-core/src/render/declarative.rs` | `docs/reference/db.md` | `packages/db/tests/named-indexes.test.ts` | Declared indexes are emitted by the migration engine. |
+| Native transactions + nested savepoints | 🟢 | `env.db.transaction(async tx => {...})` | `crates/zeroship-data-orm/src/transaction/mod.rs`, `v8_classes/db.rs` | `docs/reference/db.md` | `packages/db/tests/p9-pr3-native-transaction.test.ts` | PG isolation; SQLite ignores level. |
 | Vector search (t.vector + search({vector})) | 🟢 | `Collection.search({ vector, k, ... })` | `crates/zeroship-data-orm/src/crud/search.rs`, `crates/zeroship-data-orm/src/backend/sqlite/search.rs`, `crates/zeroship-data-orm/src/backend/postgres/search.rs` | `docs/reference/db.md` | — | pgvector / sqlite-vec; innerProduct PG-only. |
 | Geo / spatial search (t.geoPoint + near()) | 🟢 | `Collection.near({ field, point, radius, ... })` | `crates/zeroship-data-orm/src/crud/search.rs`, `crates/zeroship-data-orm/src/backend/sqlite/search.rs`, `crates/zeroship-data-orm/src/backend/postgres/search.rs` | `docs/reference/db.md` | — | PostGIS; SQLite haversine flat scan. |
-| Column-level encryption (t.encrypted) | 🟢 | `t.encrypted({ of })` | `crates/zeroship-data-orm/src/encryption/`, `crates/zeroship-data-orm/src/protection/encryption_pass.rs` | `docs/reference/db.md` | `sdks/db/tests/p5-encrypted-builder-and-filter-fence.test.ts` | Randomised AES-GCM; fenced from filters. |
-| Field masking (.mask() + MaskedValue) | 🟢 | `.mask({ kind, classification })` | `crates/zeroship-data-orm/src/protection/mask_pass.rs`, `v8_classes/masked_value.rs` | `docs/reference/db.md` | `sdks/db/tests/p55-pr1-mask-builder-and-masked-value.test.ts` | 8 kinds × 6 classifications; __zsmask__ sentinel. |
-| MaskedValue.unmask() / bulkUnmask() | 🟢 | `MaskedValue.unmask(opts)` / `Collection.bulkUnmask(...)` | `crates/zeroship-data-orm/src/protection/unmask.rs`, `sdks/db/src/collection/masking.ts` | `docs/reference/db.md` | `sdks/db/tests/p55-pr7-per-query-unmask.test.ts` | Atomic; every call audited. |
-| defineMaskPolicy() | 🟢 | `import { defineMaskPolicy } from '@zeroship/db'` | `sdks/db/src/policy.ts`, `crates/zeroship-data-orm/src/protection/mask_policy.rs` | `docs/reference/db.md` | `sdks/db/tests/p55-pr5-define-mask-policy.test.ts` | Keyed by app_id; replace not merge. |
+| Column-level encryption (t.encrypted) | 🟢 | `t.encrypted({ of })` | `crates/zeroship-data-orm/src/encryption/`, `crates/zeroship-data-orm/src/protection/encryption_pass.rs` | `docs/reference/db.md` | `packages/db/tests/p5-encrypted-builder-and-filter-fence.test.ts` | Randomised AES-GCM; fenced from filters. |
+| Field masking (.mask() + MaskedValue) | 🟢 | `.mask({ kind, classification })` | `crates/zeroship-data-orm/src/protection/mask_pass.rs`, `v8_classes/masked_value.rs` | `docs/reference/db.md` | `packages/db/tests/p55-pr1-mask-builder-and-masked-value.test.ts` | 8 kinds × 6 classifications; __zsmask__ sentinel. |
+| MaskedValue.unmask() / bulkUnmask() | 🟢 | `MaskedValue.unmask(opts)` / `Collection.bulkUnmask(...)` | `crates/zeroship-data-orm/src/protection/unmask.rs`, `packages/db/src/collection/masking.ts` | `docs/reference/db.md` | `packages/db/tests/p55-pr7-per-query-unmask.test.ts` | Atomic; every call audited. |
+| defineMaskPolicy() | 🟢 | `import { defineMaskPolicy } from '@zeroship/db'` | `packages/db/src/policy.ts`, `crates/zeroship-data-orm/src/protection/mask_policy.rs` | `docs/reference/db.md` | `packages/db/tests/p55-pr5-define-mask-policy.test.ts` | Keyed by app_id; replace not merge. |
 | Mask/encryption backfill pipeline | 🟡 | internal (DDL apply) | the migration engine (`crates/zeroship-migrate-core/src/schema/diff.rs`, `MaskBackfill`) | — | — | PG only; SQLite returns backend_unsupported. |
 | Data backfill migrations | ⚫ | none (superseded) | — | `docs/reference/migrate-op-dsl.md` | — | Runtime backfill orchestration was removed; `@zeroship/migrate` owns the resumable `.backfill()` operation. |
 | Migration sweeper (orphan reaper) | ⚫ | none | — | — | — | No runtime-owned migration state remains to reap. |
-| Process-wide CDC broker (openSubscription) | green | `collection.openSubscription()` / `subscribe(name)` | `crates/zeroship-data-orm/src/cdc/broker.rs`, `v8_classes/subscription.rs`, `sdks/db/src/subscribe.ts` | - | `sdks/db/tests/subscribe-close.test.ts` | Cross-isolate within one worker process; coarse-grained; 1024-event queue. |
-| Live queries — db.live(queryFn) | 🟢 | `db.live(queryFn, opts?)` | `sdks/db/src/live.ts` | `docs/reference/db.md` | `sdks/db/tests/live.test.ts` | v1 coarse-grained; LIVE_IN_TRANSACTION error. |
+| Process-wide CDC broker (openSubscription) | green | `collection.openSubscription()` / `subscribe(name)` | `crates/zeroship-data-orm/src/cdc/broker.rs`, `v8_classes/subscription.rs`, `packages/db/src/subscribe.ts` | - | `packages/db/tests/subscribe-close.test.ts` | Cross-isolate within one worker process; coarse-grained; 1024-event queue. |
+| Live queries — db.live(queryFn) | 🟢 | `db.live(queryFn, opts?)` | `packages/db/src/live.ts` | `docs/reference/db.md` | `packages/db/tests/live.test.ts` | v1 coarse-grained; LIVE_IN_TRANSACTION error. |
 | PostgreSQL CDC relay | green | `Subscription.ready()` starts the ORM relay client | `crates/zeroship-data-orm/src/cdc/relay.rs`, `crates/zeroship-data-cdc-server/src/source.rs` | `docs/runbooks/cdc-relay.md` | `crates/zeroship-data-v8/tests/distributed_live.rs` | Workers use authenticated TLS; the separate relay owns logical decoding. |
 | Replication slot/publication lifecycle | green | relay-managed capture | `crates/zeroship-data-cdc-server/src/source.rs`, `crates/zeroship-data-orm/src/cdc/lifecycle.rs` | `docs/runbooks/cdc-relay.md` | `crates/zeroship-data-v8/tests/distributed_live.rs` | The relay shares capture by app and cleans up slots. Workers subscribe to migration-provisioned publications through the relay. |
 | Migration event journal (__zeroship_schema_migrations) | &#x1F7E2; | descriptor-declared ORM collection | `crates/zeroship-migrate-postgres/src/backend/journal_sql.rs` | &mdash; | &mdash; | Engine-managed relation; its prefix does not alter ORM or CDC behavior. |
@@ -227,14 +227,14 @@ provides the native V8 surface; the TS SDK (`@zeroship/db`) wraps it. Both Postg
 | Worker database teardown | removed | none | `crates/zeroship-data-v8/src/service.rs` | `docs/architecture/data-system.md` | `xtask/tests/data_architecture.rs` | The adapter releases local subscriptions. Privileged schema teardown belongs to a separate service. |
 | Pluggable ORM backends | green | host `ConnectionFactory` | `crates/zeroship-data-orm/src/connection/factory.rs`, `crates/zeroship-data-v8/src/service.rs` | `docs/architecture/data-orm.md` | `crates/zeroship-data-v8/src/v8_classes/cold_open.rs` | Built-in PostgreSQL and file-backed SQLite, or a host-defined factory; V8 uses the same adapter. |
 | Per-app auth schema (PG roles, sessions) | 🟢 | internal (schema initialization) | `crates/zeroship-data-orm/src/auth/` | — | — | PG-only; SQLite has shim. |
-| DataLoader (batched get by id) | 🟢 | internal (Collection.get) | `sdks/db/src/loader.ts` | — | `sdks/db/tests/loader.test.ts` | Per-collection, per-tx-depth. |
-| Input validation | 🟢 | automatic on insert/update | `sdks/db/src/validate.ts` | `docs/reference/db.md` | `sdks/db/tests/validate.test.ts` | Runs in JS before native call. |
-| env.db generated type augmentation | 🟢 | `generated/zeroship/env.db.ts` in tsconfig include | `sdks/vite-plugin/src/gen-types/` | `docs/reference/db.md` | `sdks/vite-plugin/test/gen-types/` | Folded migration set is canonical; `@zeroship/db/env` is retired. |
+| DataLoader (batched get by id) | 🟢 | internal (Collection.get) | `packages/db/src/loader.ts` | — | `packages/db/tests/loader.test.ts` | Per-collection, per-tx-depth. |
+| Input validation | 🟢 | automatic on insert/update | `packages/db/src/validate.ts` | `docs/reference/db.md` | `packages/db/tests/validate.test.ts` | Runs in JS before native call. |
+| env.db generated type augmentation | 🟢 | `generated/zeroship/env.db.ts` in tsconfig include | `packages/vite-plugin/src/gen-types/` | `docs/reference/db.md` | `packages/vite-plugin/test/gen-types/` | Folded migration set is canonical; `@zeroship/db/env` is retired. |
 | Schema strictness (strict/lenient/off) | &#x1F7E1; | `schema({...}).strictness(...)` | `crates/zeroship-migrate-ir/src/ir.rs`, `crates/zeroship-migrate-core/src/render/fold.rs` | `docs/reference/db.md` | &mdash; | Defaults to strict and survives in folded runtime metadata; no deploy-time refusal consumer is wired. |
-| Per-query unmask hint (find opts.unmask) | 🟢 | `Collection.find(filter, { unmask, actor, ... })` | `crates/zeroship-data-orm/src/crud/mod.rs` | `docs/reference/db.md` | `sdks/db/tests/p55-pr7-per-query-unmask.test.ts` | id must be in select if projecting. |
+| Per-query unmask hint (find opts.unmask) | 🟢 | `Collection.find(filter, { unmask, actor, ... })` | `crates/zeroship-data-orm/src/crud/mod.rs` | `docs/reference/db.md` | `packages/db/tests/p55-pr7-per-query-unmask.test.ts` | id must be in select if projecting. |
 | Collection.unmaskField / bulkUnmask | 🟢 | `collection.unmaskField(rowPk, column, opts?)` | `crates/zeroship-data-v8/src/v8_classes/collection.rs`, `crud/unmask.rs` | `docs/reference/db.md` | — | Collection name un-spoofable; audited. |
-| Unindexed query runtime warnings | 🟢 | automatic (dev) | `sdks/db/src/collection/index-warnings.ts` | `docs/reference/db.md` | `sdks/db/tests/named-indexes.test.ts` | Suppressed in production. |
-| Encrypted field filter fence | 🟢 | automatic when schema has t.encrypted | `sdks/db/src/collection/encryption-fence.ts` | — | `sdks/db/tests/filter-encryption-types.test.ts` | Deterministic mode allows equality. |
+| Unindexed query runtime warnings | 🟢 | automatic (dev) | `packages/db/src/collection/index-warnings.ts` | `docs/reference/db.md` | `packages/db/tests/named-indexes.test.ts` | Suppressed in production. |
+| Encrypted field filter fence | 🟢 | automatic when schema has t.encrypted | `packages/db/src/collection/encryption-fence.ts` | — | `packages/db/tests/filter-encryption-types.test.ts` | Deterministic mode allows equality. |
 
 ---
 
@@ -263,20 +263,20 @@ typed TS SDK (`@zeroship/kv`) adding JSON serialization, Result wrapping, and co
 | Input validation and limits | 🟢 | internal | `crates/zeroship-kv/src/limits.rs`, `crates/zeroship-kv-v8/src/limits.rs` | — | `crates/zeroship-kv-v8/tests/e2e_runtime.rs` | Shared key/value limits; binding converts JS numeric options. |
 | Typed error classification | 🟢 | error.code on rejected Promises | `crates/zeroship-kv-v8/src/error.rs` | `docs/reference/kv.md` | `crates/zeroship-kv-v8/tests/e2e_runtime.rs` | Validation → TypeError; runtime → coded. |
 | KvBinding / NativePlugin registration | 🟢 | internal | `crates/zeroship-kv-v8/src/lib.rs`, `v8_class.rs` | — | `crates/zeroship-kv-v8/tests/e2e_runtime.rs` | One Kv instance/isolate. |
-| @zeroship/kv kv.get<T> | 🟢 | `kv.get<T>(key)` | `sdks/kv/src/index.ts` | `docs/reference/kv.md` | `sdks/kv/tests/kv.test.ts` | ok(null) on miss. |
-| @zeroship/kv kv.getString | 🟢 | `kv.getString(key)` | `sdks/kv/src/index.ts` | `docs/reference/kv.md` | `sdks/kv/tests/kv.test.ts` | get<string> convenience. |
-| @zeroship/kv kv.set<T> | 🟢 | `kv.set<T>(key, value, {ttlMs?})` | `sdks/kv/src/index.ts` | `docs/reference/kv.md` | `sdks/kv/tests/kv.test.ts` | JSON-encodes. |
-| @zeroship/kv kv.delete | 🟢 | `kv.delete(key)` | `sdks/kv/src/index.ts` | `docs/reference/kv.md` | `sdks/kv/tests/kv.test.ts` | Result<{deleted}>. |
-| @zeroship/kv kv.incr | 🟢 | `kv.incr(key, {by?, ttlMs?})` | `sdks/kv/src/index.ts` | `docs/reference/kv.md` | `sdks/kv/tests/kv.test.ts` | bigint→Number normalize (precision loss>2^53). |
-| @zeroship/kv kv.setIfAbsent<T> | 🟢 | `kv.setIfAbsent<T>(key, value, {ttlMs?})` | `sdks/kv/src/index.ts` | `docs/reference/kv.md` | `sdks/kv/tests/kv.test.ts` | Result<{stored}>. |
-| @zeroship/kv kv.expire | 🟢 | `kv.expire(key, ttlMs)` | `sdks/kv/src/index.ts` | `docs/reference/kv.md` | `sdks/kv/tests/kv.test.ts` | Result<{updated}>. |
-| @zeroship/kv kv.ttl | 🟢 | `kv.ttl(key)` | `sdks/kv/src/index.ts` | `docs/reference/kv.md` | `sdks/kv/tests/kv.test.ts` | 3-state. |
-| @zeroship/kv kv.persist | 🟢 | `kv.persist(key)` | `sdks/kv/src/index.ts` | `docs/reference/kv.md` | `sdks/kv/tests/kv.test.ts` | Result<{updated}>. |
-| @zeroship/kv kv.list | 🟢 | `kv.list(prefix?, {cursor?, limit?})` | `sdks/kv/src/index.ts` | `docs/reference/kv.md` | `sdks/kv/tests/kv.test.ts` | Pagination loop pattern. |
-| @zeroship/kv kv.has | 🟢 | `kv.has(key)` | `sdks/kv/src/index.ts` | `docs/reference/kv.md` | `sdks/kv/tests/kv.test.ts` | Pure JS over get(). |
-| @zeroship/kv kv.getOrSet | 🟢 | `kv.getOrSet<T>(key, {ttlMs?}, factory)` | `sdks/kv/src/index.ts` | `docs/reference/kv.md` | `sdks/kv/tests/kv.test.ts` | NOT atomic (stampede possible). |
-| @zeroship/kv kv.namespace | 🟢 | `kv.namespace(prefix)` | `sdks/kv/src/index.ts` | `docs/reference/kv.md` | `sdks/kv/tests/kv.test.ts` | String-concat sugar; composes. |
-| createKv factory / NativeKv injection | 🟢 | `import { createKv } from "@zeroship/kv"` | `sdks/kv/src/index.ts` | — | `sdks/kv/tests/kv.test.ts` | Mock injection for tests. |
+| @zeroship/kv kv.get<T> | 🟢 | `kv.get<T>(key)` | `packages/kv/src/index.ts` | `docs/reference/kv.md` | `packages/kv/tests/kv.test.ts` | ok(null) on miss. |
+| @zeroship/kv kv.getString | 🟢 | `kv.getString(key)` | `packages/kv/src/index.ts` | `docs/reference/kv.md` | `packages/kv/tests/kv.test.ts` | get<string> convenience. |
+| @zeroship/kv kv.set<T> | 🟢 | `kv.set<T>(key, value, {ttlMs?})` | `packages/kv/src/index.ts` | `docs/reference/kv.md` | `packages/kv/tests/kv.test.ts` | JSON-encodes. |
+| @zeroship/kv kv.delete | 🟢 | `kv.delete(key)` | `packages/kv/src/index.ts` | `docs/reference/kv.md` | `packages/kv/tests/kv.test.ts` | Result<{deleted}>. |
+| @zeroship/kv kv.incr | 🟢 | `kv.incr(key, {by?, ttlMs?})` | `packages/kv/src/index.ts` | `docs/reference/kv.md` | `packages/kv/tests/kv.test.ts` | bigint→Number normalize (precision loss>2^53). |
+| @zeroship/kv kv.setIfAbsent<T> | 🟢 | `kv.setIfAbsent<T>(key, value, {ttlMs?})` | `packages/kv/src/index.ts` | `docs/reference/kv.md` | `packages/kv/tests/kv.test.ts` | Result<{stored}>. |
+| @zeroship/kv kv.expire | 🟢 | `kv.expire(key, ttlMs)` | `packages/kv/src/index.ts` | `docs/reference/kv.md` | `packages/kv/tests/kv.test.ts` | Result<{updated}>. |
+| @zeroship/kv kv.ttl | 🟢 | `kv.ttl(key)` | `packages/kv/src/index.ts` | `docs/reference/kv.md` | `packages/kv/tests/kv.test.ts` | 3-state. |
+| @zeroship/kv kv.persist | 🟢 | `kv.persist(key)` | `packages/kv/src/index.ts` | `docs/reference/kv.md` | `packages/kv/tests/kv.test.ts` | Result<{updated}>. |
+| @zeroship/kv kv.list | 🟢 | `kv.list(prefix?, {cursor?, limit?})` | `packages/kv/src/index.ts` | `docs/reference/kv.md` | `packages/kv/tests/kv.test.ts` | Pagination loop pattern. |
+| @zeroship/kv kv.has | 🟢 | `kv.has(key)` | `packages/kv/src/index.ts` | `docs/reference/kv.md` | `packages/kv/tests/kv.test.ts` | Pure JS over get(). |
+| @zeroship/kv kv.getOrSet | 🟢 | `kv.getOrSet<T>(key, {ttlMs?}, factory)` | `packages/kv/src/index.ts` | `docs/reference/kv.md` | `packages/kv/tests/kv.test.ts` | NOT atomic (stampede possible). |
+| @zeroship/kv kv.namespace | 🟢 | `kv.namespace(prefix)` | `packages/kv/src/index.ts` | `docs/reference/kv.md` | `packages/kv/tests/kv.test.ts` | String-concat sugar; composes. |
+| createKv factory / NativeKv injection | 🟢 | `import { createKv } from "@zeroship/kv"` | `packages/kv/src/index.ts` | — | `packages/kv/tests/kv.test.ts` | Mock injection for tests. |
 | Backend unavailability / graceful rejection | 🟢 | error.code === 'kv_connection' | `crates/zeroship-kv/src/backend/redis.rs`, `error.rs` | — | `crates/zeroship-kv-v8/tests/e2e_runtime.rs` | Rejects rather than hangs; retry hint. |
 | Redis cluster hash-tag slot targeting | 🟢 | internal | `crates/zeroship-kv/src/backend/mod.rs`, `backend/redis.rs` | — | `crates/zeroship-kv/tests/redis_backend.rs` | Single-shard ceiling per whale app. |
 | Redis list SCAN glob escaping | 🟢 | internal | `crates/zeroship-kv/src/limits.rs` | — | `crates/zeroship-kv/src/limits.rs` | Escapes glob metachars. |
@@ -298,7 +298,7 @@ apps can use LocalFs or S3-compatible backends. See [Object storage](reference/s
 | S3-compatible backend | 🟢 | `s3` feature and storage URL | `crates/zeroship-storage/src/backend/s3.rs` | `docs/reference/storage.md` | `crates/zeroship-storage/tests/backend_parity.rs` | Compio client; multipart uploads; Testcontainers MinIO verification. |
 | Buffered and streaming native operations | 🟢 | `env.storage` | `crates/zeroship-storage-v8/src/callbacks.rs` | `docs/reference/storage.md` | `crates/zeroship-storage-v8/tests/e2e_streaming.rs` | Size limits, backpressure and metering. |
 | Download ownership | 🟢 | Isolate-owned handles | `crates/zeroship-storage-v8/src/live_streams.rs` | `docs/reference/storage.md` | `crates/zeroship-storage-v8/tests/cross_tenant_streams.rs` | Isolates cannot access each other's downloads; teardown releases sources. |
-| TypeScript bucket API | 🟢 | `Bucket`, `bucket()` | `sdks/storage/src/index.ts` | `docs/reference/storage.md` | `sdks/storage/tests` | Result envelopes, byte/text helpers, streaming and paginated listing. |
+| TypeScript bucket API | 🟢 | `Bucket`, `bucket()` | `packages/storage/src/index.ts` | `docs/reference/storage.md` | `packages/storage/tests` | Result envelopes, byte/text helpers, streaming and paginated listing. |
 | Aggregate stored-byte quotas | 🔵 | Per-app quota | — | — | — | Operation limits ship; total retained-byte enforcement does not. |
 | Presigned URLs and image transforms | 🔵 | Planned | — | `docs/proposals/feature-roadmap.md` | — | No implementation. |
 
@@ -314,8 +314,8 @@ audit, and a dev-tier parity implementation.
 
 | Feature | Status | Surface | Code | Docs | Example | Notes |
 | --- | --- | --- | --- | --- | --- | --- |
-| Password signup | 🟢 | GET/POST /signup | `crates/zeroship-auth/src/ui/signup.rs`, `identity/password.rs` | `docs/reference/auth.md` | `sdks/auth/tests/identity.test.ts` | Argon2id OWASP 2026; per-IP rate-limit. |
-| Password login | 🟢 | GET/POST /login | `crates/zeroship-auth/src/ui/login.rs`, `identity/password.rs` | `docs/reference/auth.md` | `sdks/auth/tests/identity.test.ts` | Enumeration-resistant; leaky token buckets. |
+| Password signup | 🟢 | GET/POST /signup | `crates/zeroship-auth/src/ui/signup.rs`, `identity/password.rs` | `docs/reference/auth.md` | `packages/auth/tests/identity.test.ts` | Argon2id OWASP 2026; per-IP rate-limit. |
+| Password login | 🟢 | GET/POST /login | `crates/zeroship-auth/src/ui/login.rs`, `identity/password.rs` | `docs/reference/auth.md` | `packages/auth/tests/identity.test.ts` | Enumeration-resistant; leaky token buckets. |
 | Password hashing (Argon2id) | 🟢 | internal | `crates/zeroship-auth/src/identity/password.rs` | — | — | spawn_blocking for CPU-bound ops. |
 | Google OIDC federation | 🟢 | GET /oauth/google/start, /callback | `crates/zeroship-auth/src/identity/oauth/google.rs`, `ui/oauth_google.rs` | `docs/reference/auth.md` | — | S256 PKCE + nonce + at_hash; hd claim. |
 | GitHub OAuth federation | 🟢 | GET /oauth/github/start, /callback | `crates/zeroship-auth/src/identity/oauth/github.rs`, `ui/oauth_github.rs` | `docs/reference/auth.md` | — | OAuth 2.0 (no ID token); rejects noreply. |
@@ -345,12 +345,12 @@ audit, and a dev-tier parity implementation.
 | Relay alias minting at consent | 🟢 | internal | `crates/zeroship-auth/src/store/relay.rs` | — | `crates/zeroship-auth/src/store/relay.rs` | 62-bit base36; re-grant reuses alias. |
 | env.auth.getUser() | 🟢 | `env.auth.getUser()` | `crates/zeroship-runtime/src/auth.rs` | `docs/reference/auth.md` | `crates/zeroship-runtime/tests/auth_plugin.rs` | Per-request keyed; WS fallback. |
 | env.auth.requireUser() | 🟢 | `env.auth.requireUser()` | `crates/zeroship-runtime/src/auth.rs` | `docs/reference/auth.md` | `crates/zeroship-runtime/tests/auth_plugin.rs` | Throws → 401; RPC fail-closed (SEC-5). |
-| @zeroship/auth server helper | 🟢 | `@zeroship/auth` (server) | `sdks/auth/src/server.ts` | `docs/reference/auth.md` | `sdks/auth/tests/server.test.ts` | getUser/requireUser/isLoggedIn; no signOut. |
-| @zeroship/auth headless browser client | 🟢 | `@zeroship/auth/client` | `sdks/auth/src/client.ts`, `internal/` | `docs/reference/auth-dev-tier.md` | `sdks/auth/tests/client.test.ts` | BFF; PKCE S256; no token in browser. |
-| @zeroship/auth React adapter | 🟢 | `@zeroship/auth/react` | `sdks/auth/src/react.tsx` | — | `sdks/auth/tests/react.test.tsx` | AuthProvider/useAuth/AuthModal (cross-origin iframe). |
-| Session scope step-up / requestScopes | 🟢 | `client.requestScopes(scopes)` | `sdks/auth/src/client.ts` | — | — | prompt:'consent'; no browser token. |
-| Auth state change events | 🟢 | `client.onAuthStateChange(cb)` | `sdks/auth/src/client.ts` | — | `sdks/auth/tests/client.test.ts` | RECOVERING event during 503 backoff. |
-| Dev-tier auth provider | 🟢 | internal (ZEROSHIP_DEV=1) | `crates/zeroship-runtime/src/core/dev_auth.rs` | `docs/reference/auth-dev-tier.md` | `sdks/auth/tests/dev-tier.test.ts` | Distinct cookie; contract parity. |
+| @zeroship/auth server helper | 🟢 | `@zeroship/auth` (server) | `packages/auth/src/server.ts` | `docs/reference/auth.md` | `packages/auth/tests/server.test.ts` | getUser/requireUser/isLoggedIn; no signOut. |
+| @zeroship/auth headless browser client | 🟢 | `@zeroship/auth/client` | `packages/auth/src/client.ts`, `internal/` | `docs/reference/auth-dev-tier.md` | `packages/auth/tests/client.test.ts` | BFF; PKCE S256; no token in browser. |
+| @zeroship/auth React adapter | 🟢 | `@zeroship/auth/react` | `packages/auth/src/react.tsx` | — | `packages/auth/tests/react.test.tsx` | AuthProvider/useAuth/AuthModal (cross-origin iframe). |
+| Session scope step-up / requestScopes | 🟢 | `client.requestScopes(scopes)` | `packages/auth/src/client.ts` | — | — | prompt:'consent'; no browser token. |
+| Auth state change events | 🟢 | `client.onAuthStateChange(cb)` | `packages/auth/src/client.ts` | — | `packages/auth/tests/client.test.ts` | RECOVERING event during 503 backoff. |
+| Dev-tier auth provider | 🟢 | internal (ZEROSHIP_DEV=1) | `crates/zeroship-runtime/src/core/dev_auth.rs` | `docs/reference/auth-dev-tier.md` | `packages/auth/tests/dev-tier.test.ts` | Distinct cookie; contract parity. |
 | Pairwise subject identifier (pws_) | 🟢 | internal (User.id) | `crates/zeroship-gateway/src/identities.rs`, `auth_token.rs` | `docs/reference/auth.md` | — | Per-app opaque; global usr_ never exposed. |
 | CSRF protection (double-submit) | 🟢 | internal | `crates/zeroship-auth/src/csrf.rs` | — | — | Constant-time; __Host- prefix in prod. |
 | Native OP issuer/signing | 🟢 | internal | `crates/zeroship-auth/src/oidc/issuer.rs`, `oidc/signing.rs` | `docs/reference/auth.md` | — | EdDSA signing; public JWK metadata. |
@@ -360,7 +360,7 @@ audit, and a dev-tier parity implementation.
 | Account eligibility check | 🟢 | internal | `crates/zeroship-auth/src/identity/eligibility.rs` | — | — | Guards login/device for disabled/pending. |
 | Link-from-/me (add identity) | 🟠 | GET /me (placeholder) | `crates/zeroship-auth/src/ui/me.rs` | — | — | Only "coming soon" template text. |
 | Email address change | 🔵 | none | `crates/zeroship-auth/src/` | — | — | No handler/store/doc found. |
-| Refresh token management | 🟢 | internal (gateway) | `crates/zeroship-gateway/src/session_token.rs` | `docs/reference/auth.md` | `sdks/auth/tests/refresh.test.ts` | reuse-detected never swept; BFF holds token. |
+| Refresh token management | 🟢 | internal (gateway) | `crates/zeroship-gateway/src/session_token.rs` | `docs/reference/auth.md` | `packages/auth/tests/refresh.test.ts` | reuse-detected never swept; BFF holds token. |
 
 ---
 
@@ -374,57 +374,57 @@ subscriptions. The gateway enforces fail-closed auth (default `user` for all `rp
 
 | Feature | Status | Surface | Code | Docs | Example | Notes |
 | --- | --- | --- | --- | --- | --- | --- |
-| query procedure wrapper | 🟢 | `query(handler, config?)` | `sdks/rpc/src/server.ts` | `docs/reference/rpc.md` | `sdks/rpc/test/server.test.ts` | GET stub; query() can't fetch. |
-| mutation procedure wrapper | 🟢 | `mutation(handler, config?)` | `sdks/rpc/src/server.ts` | `docs/reference/rpc.md` | `sdks/rpc/test/server.test.ts` | Generic procedure defaults to mutation. |
-| action procedure wrapper | 🟢 | `action(handler, config?)` | `sdks/rpc/src/server.ts` | `docs/reference/rpc.md` | `sdks/rpc/test/server.test.ts` | Manifest folds action → omitted kind. |
-| stream procedure wrapper | 🟢 | `stream(handler, config?)` | `sdks/rpc/src/server.ts` | `docs/reference/rpc.md` | `sdks/rpc/test/stream.test.ts` | AI-SDK Data Stream Protocol. |
-| subscription procedure wrapper | 🟡 | `subscription(handler, config?)` | `sdks/rpc/src/server.ts` | `docs/reference/rpc.md` | `sdks/rpc/test/subscription.test.ts` | Transport works; public client proxy UNIMPLEMENTED; use stream(). |
-| generic procedure wrapper | 🟢 | `procedure(handler, config)` | `sdks/rpc/src/server.ts` | `docs/reference/rpc.md` | `sdks/rpc/test/server.test.ts` | Needs config.kind. |
-| streamResponse procedure wrapper | 🟢 | `streamResponse(handler, config?)` | `sdks/rpc/src/server.ts` | — | — | Returns raw Response. |
-| 'use server' file-level discovery | 🟢 | internal (Vite transform) | `sdks/vite-plugin/src/transform.ts` | `docs/reference/rpc.md` | `sdks/vite-plugin/test/` | Directive is the only opt-in now. |
-| 'use server' function-level discovery | 🟢 | internal (Vite transform) | `sdks/vite-plugin/src/transform.ts` | `docs/reference/rpc.md` | `sdks/vite-plugin/test/` | Per-binding server reference. |
-| Vite-generated client stubs | 🟢 | internal (client env) | `sdks/vite-plugin/src/transform.ts` | `docs/reference/rpc.md` | `sdks/vite-plugin/test/` | __zsRpc.query/mutation/stream; subscription fails. |
-| synthetic server entry (virtual) | 🟢 | `virtual:zeroship/_server-entry` | `sdks/vite-plugin/src/rpc-registry.ts` | `docs/reference/zeroship-standard.md` | `sdks/vite-plugin/test/` | namespace-walk default; Phase-2 dict optional. |
-| lazy procedure loading | 🟢 | `query(handler, { lazy: true })` | `sdks/vite-plugin/src/transform.ts`, `rpc-registry.ts` | — | — | Literal boolean only. |
-| procedure wire ID (id config) | 🟢 | `query(handler, { id: 'todos.list' })` | `sdks/vite-plugin/src/manifest.ts`, `sdks/rpc/src/server.ts` | `docs/reference/rpc.md` | — | Prod rejects bare-name; collision check. |
+| query procedure wrapper | 🟢 | `query(handler, config?)` | `packages/rpc/src/server.ts` | `docs/reference/rpc.md` | `packages/rpc/test/server.test.ts` | GET stub; query() can't fetch. |
+| mutation procedure wrapper | 🟢 | `mutation(handler, config?)` | `packages/rpc/src/server.ts` | `docs/reference/rpc.md` | `packages/rpc/test/server.test.ts` | Generic procedure defaults to mutation. |
+| action procedure wrapper | 🟢 | `action(handler, config?)` | `packages/rpc/src/server.ts` | `docs/reference/rpc.md` | `packages/rpc/test/server.test.ts` | Manifest folds action → omitted kind. |
+| stream procedure wrapper | 🟢 | `stream(handler, config?)` | `packages/rpc/src/server.ts` | `docs/reference/rpc.md` | `packages/rpc/test/stream.test.ts` | AI-SDK Data Stream Protocol. |
+| subscription procedure wrapper | 🟡 | `subscription(handler, config?)` | `packages/rpc/src/server.ts` | `docs/reference/rpc.md` | `packages/rpc/test/subscription.test.ts` | Transport works; public client proxy UNIMPLEMENTED; use stream(). |
+| generic procedure wrapper | 🟢 | `procedure(handler, config)` | `packages/rpc/src/server.ts` | `docs/reference/rpc.md` | `packages/rpc/test/server.test.ts` | Needs config.kind. |
+| streamResponse procedure wrapper | 🟢 | `streamResponse(handler, config?)` | `packages/rpc/src/server.ts` | — | — | Returns raw Response. |
+| 'use server' file-level discovery | 🟢 | internal (Vite transform) | `packages/vite-plugin/src/transform.ts` | `docs/reference/rpc.md` | `packages/vite-plugin/test/` | Directive is the only opt-in now. |
+| 'use server' function-level discovery | 🟢 | internal (Vite transform) | `packages/vite-plugin/src/transform.ts` | `docs/reference/rpc.md` | `packages/vite-plugin/test/` | Per-binding server reference. |
+| Vite-generated client stubs | 🟢 | internal (client env) | `packages/vite-plugin/src/transform.ts` | `docs/reference/rpc.md` | `packages/vite-plugin/test/` | __zsRpc.query/mutation/stream; subscription fails. |
+| synthetic server entry (virtual) | 🟢 | `virtual:zeroship/_server-entry` | `packages/vite-plugin/src/rpc-registry.ts` | `docs/reference/zeroship-standard.md` | `packages/vite-plugin/test/` | namespace-walk default; Phase-2 dict optional. |
+| lazy procedure loading | 🟢 | `query(handler, { lazy: true })` | `packages/vite-plugin/src/transform.ts`, `rpc-registry.ts` | — | — | Literal boolean only. |
+| procedure wire ID (id config) | 🟢 | `query(handler, { id: 'todos.list' })` | `packages/vite-plugin/src/manifest.ts`, `packages/rpc/src/server.ts` | `docs/reference/rpc.md` | — | Prod rejects bare-name; collision check. |
 | native RPC dispatcher | 🟢 | internal | `crates/zeroship-runtime/src/rpc/dispatch/` | `docs/reference/zeroship-standard.md` | `crates/zeroship-runtime/tests/rpc_dispatch.rs` | Resolves string-keyed dictionaries in built and dev entries. |
 | native RPC HTTP routing | 🟢 | internal | `crates/zeroship-runtime/src/core/runtime.rs` | `docs/reference/rpc.md` | `crates/zeroship-runtime/tests/call_fetch_handler.rs` | Decodes query and body input, then serializes the response envelope. |
-| application input validation | 🟢 | `query(handler, { input })` | `crates/zeroship-runtime/src/rpc/dispatch/call.rs` | `docs/reference/rpc.md` | `sdks/rpc/test/make-procedure.test.ts` | Rust calls the procedure's JavaScript validator with its original receiver. |
+| application input validation | 🟢 | `query(handler, { input })` | `crates/zeroship-runtime/src/rpc/dispatch/call.rs` | `docs/reference/rpc.md` | `packages/rpc/test/make-procedure.test.ts` | Rust calls the procedure's JavaScript validator with its original receiver. |
 | application output validation | 🟢 | `query(handler, { output })` | `crates/zeroship-runtime/src/rpc/dispatch/call.rs` | `docs/reference/rpc.md` | `crates/zeroship-runtime/tests/rpc_dispatch.rs` | Controlled by host runtime configuration. |
 | capability frame enforcement | 🟢 | internal | `crates/zeroship-runtime/src/rpc/capability.rs` | — | `crates/zeroship-runtime/tests/capability.rs` | Continuation-scoped state survives asynchronous procedure work. |
 | runQuery / runMutation composition | 🟢 | `runQuery(fn, args)` / `runMutation(...)` | `crates/zeroship-runtime/src/core/zeroship_module.rs` | — | `crates/zeroship-runtime/tests/zeroship_module.rs` | Only in action/stream/subscription. |
 | per-request context getters | 🟢 | `currentUser()` / `currentRequestId()` / ... | `crates/zeroship-runtime/src/core/zeroship_module.rs` | — | `crates/zeroship-runtime/tests/rpc_ctx.rs` | Native module reads continuation state directly. |
-| transport — query (GET/POST fallback) | 🟢 | `rpc.query(id)` | `sdks/rpc/src/transport.ts` | `docs/reference/rpc.md` | `sdks/rpc/test/transport.test.ts` | 6 KB URL threshold. |
-| transport — mutation/action (POST) | 🟢 | `rpc.mutation(id)` / `rpc.action(id)` | `sdks/rpc/src/transport.ts` | `docs/reference/rpc.md` | `sdks/rpc/test/transport.test.ts` | Idempotency-Key UUIDv7. |
-| transport — stream (SSE/AI-SDK) | 🟢 | `rpc.stream(id)` | `sdks/rpc/src/transport.ts` | `docs/reference/rpc.md` | `sdks/rpc/test/stream.test.ts` | Demand-driven iteration. |
-| transport — WebSocket subscription | 🟢 | `client(opts).proc.subscribe(input, opts)` | `sdks/rpc/src/transport.ts` | — | `sdks/rpc/test/subscription.test.ts` | zs.v1 subprotocol; auto-reconnect. |
-| streamUrl helper | 🟢 | `rpc.stream('id').streamUrl(input)` | `sdks/rpc/src/transport.ts`, `runtime.ts` | `docs/reference/rpc.md` | — | For ai-sdk useChat. |
-| retry policy (unary) | 🟢 | `createRpcClient({ retry })` | `sdks/rpc/src/transport.ts` | `docs/reference/rpc.md` | `sdks/rpc/test/transport.test.ts` | Writes retry only with idempotency key. |
-| call timeout | 🟢 | `createRpcClient({ timeout })` | `sdks/rpc/src/transport.ts` | `docs/reference/rpc.md` | `sdks/rpc/test/transport.test.ts` | Composes with caller signal. |
-| idempotency-key support | 🟢 | `mutation(handler, { idempotent: true })` | `sdks/rpc/src/idempotency.ts`, `transport.ts`, `crates/zeroship-gateway/src/router/dispatch.rs` | `docs/reference/rpc.md` | `sdks/rpc/test/idempotency.test.ts` | TTL 24h default, 7d max; fails closed. |
-| auth resolver (client-side) | 🟢 | `createRpcClient({ auth })` | `sdks/rpc/src/client.ts`, `runtime.ts` | `docs/reference/rpc.md` | `sdks/rpc/test/auth.test.ts` | Null result → anonymous call. |
+| transport — query (GET/POST fallback) | 🟢 | `rpc.query(id)` | `packages/rpc/src/transport.ts` | `docs/reference/rpc.md` | `packages/rpc/test/transport.test.ts` | 6 KB URL threshold. |
+| transport — mutation/action (POST) | 🟢 | `rpc.mutation(id)` / `rpc.action(id)` | `packages/rpc/src/transport.ts` | `docs/reference/rpc.md` | `packages/rpc/test/transport.test.ts` | Idempotency-Key UUIDv7. |
+| transport — stream (SSE/AI-SDK) | 🟢 | `rpc.stream(id)` | `packages/rpc/src/transport.ts` | `docs/reference/rpc.md` | `packages/rpc/test/stream.test.ts` | Demand-driven iteration. |
+| transport — WebSocket subscription | 🟢 | `client(opts).proc.subscribe(input, opts)` | `packages/rpc/src/transport.ts` | — | `packages/rpc/test/subscription.test.ts` | zs.v1 subprotocol; auto-reconnect. |
+| streamUrl helper | 🟢 | `rpc.stream('id').streamUrl(input)` | `packages/rpc/src/transport.ts`, `runtime.ts` | `docs/reference/rpc.md` | — | For ai-sdk useChat. |
+| retry policy (unary) | 🟢 | `createRpcClient({ retry })` | `packages/rpc/src/transport.ts` | `docs/reference/rpc.md` | `packages/rpc/test/transport.test.ts` | Writes retry only with idempotency key. |
+| call timeout | 🟢 | `createRpcClient({ timeout })` | `packages/rpc/src/transport.ts` | `docs/reference/rpc.md` | `packages/rpc/test/transport.test.ts` | Composes with caller signal. |
+| idempotency-key support | 🟢 | `mutation(handler, { idempotent: true })` | `packages/rpc/src/idempotency.ts`, `transport.ts`, `crates/zeroship-gateway/src/router/dispatch.rs` | `docs/reference/rpc.md` | `packages/rpc/test/idempotency.test.ts` | TTL 24h default, 7d max; fails closed. |
+| auth resolver (client-side) | 🟢 | `createRpcClient({ auth })` | `packages/rpc/src/client.ts`, `runtime.ts` | `docs/reference/rpc.md` | `packages/rpc/test/auth.test.ts` | Null result → anonymous call. |
 | gateway auth fail-closed default (SEC-5) | 🟢 | internal | `crates/zeroship-bundle/src/compiled.rs` | `docs/reference/rpc.md` | `crates/zeroship-bundle/src/compiled.rs` | rpc: defaults to user; anonymous needs publiclyAccessible. |
-| RpcError typed error class | 🟢 | `import { RpcError, ErrorCode }` | `sdks/rpc/src/error.ts` | `docs/reference/rpc.md` | `sdks/rpc/test/error.test.ts` | 14 gRPC-style codes. |
-| JSON transformer (default) | 🟢 | `createRpcClient({ transformer: 'json' })` | `sdks/rpc/src/encoding.ts` | `docs/reference/rpc.md` | `sdks/rpc/test/transport.test.ts` | Unwraps {json, meta}. |
-| superjson transformer | 🟢 | `createRpcClient({ transformer: 'superjson' })` | `sdks/rpc/src/encoding.ts` | `docs/reference/rpc.md` | — | Optional peer dep; must match server. |
-| query auto-batching | 🟢 | `client({ batch: true })` | `sdks/rpc/src/batch.ts` | — | `sdks/rpc/test/batch.test.ts` | Mutations/streams never batched. |
-| proxy-style typed client | 🟢 | `client<App>(opts).proc.query(input)` | `sdks/rpc/src/client.ts` | `docs/reference/rpc.md` | `sdks/rpc/test/client.test.ts` | Dotted ids expand to nested objects. |
-| factory-style typed client | 🟢 | `createRpcClient<Contract>(opts).query('id')` | `sdks/rpc/src/runtime.ts` | `docs/reference/rpc.md` | `sdks/rpc/test/runtime.test.ts` | configureRpcClient installs defaults. |
-| InferRpcContract type helper | 🟢 | `InferRpcContract<typeof server>` | `sdks/rpc/src/types.ts` | `docs/reference/rpc.md` | `sdks/rpc/test/typecheck.ts` | Type-check time only. |
-| server-reference brand | 🟢 | internal | `sdks/rpc/src/make-procedure.ts` | — | — | Symbol.for('zeroship/server-reference'). |
-| module-level $config | 🟢 | `export const $config = {...}` | `sdks/vite-plugin/src/transform.ts`, `manifest.ts` | — | — | Lower precedence than fn.config. |
-| defineApp resource tree + RPC defaults | 🟢 | `defineApp({ resources, rpc })` | `sdks/server/src/define-app.ts`, `types.ts`, `sdks/vite-plugin/src/manifest.ts` | `docs/reference/rpc.md` | — | override array required to shadow. |
-| per-procedure rate limiting | 🟢 | `query(handler, { rateLimit })` | `sdks/server/src/types.ts`, `crates/zeroship-gateway/src/router/dispatch.rs` | `docs/reference/rpc.md` | — | ip/user/session/app; min-wins. |
-| per-procedure timeout | 🟡 | `query(handler, { timeout })` | `sdks/server/src/types.ts`, `crates/zeroship-bundle/src/compiled.rs` | `docs/reference/rpc.md` | — | timeout_ms hardcoded None; not enforced. |
-| per-procedure max input bytes | 🟢 | `mutation(handler, { maxInputBytes })` | `sdks/server/src/types.ts`, `crates/zeroship-gateway/src/router/dispatch.rs` | `docs/reference/rpc.md` | — | Gateway enforces. |
-| per-procedure middleware list | 🟠 | `query(handler, { middleware })` | `sdks/server/src/types.ts`, `sdks/vite-plugin/src/manifest.ts` | `docs/reference/rpc.md` | — | Carried in manifest; runtime chain not wired. |
-| dev entry snapshot loader | 🟢 | internal | `sdks/vite-plugin/src/dev-bootstrap/{entry,index}.ts` | `docs/reference/vite-environment-api.md` | `sdks/vite-plugin/test/dev-entry-snapshot.test.ts` | Returns callable targets to native dispatch and invalidates by module graph. |
-| configureRpcClient global defaults | 🟢 | `configureRpcClient(opts)` | `sdks/rpc/src/runtime.ts` | `docs/reference/rpc.md` | — | Returns restore fn. |
-| onError / onAuthExpired global hooks | 🟢 | `createRpcClient({ onError, onAuthExpired })` | `sdks/rpc/src/transport.ts`, `client.ts` | `docs/reference/rpc.md` | — | onAuthExpired once per expiry. |
-| @zeroship/rpc-react adapter | 🟡 | `ZeroshipProvider` / `useStream` / `rpcInvalidate` | `sdks/rpc-react/dist/` | — | — | Dist-only; TanStack hook integration not done. |
-| @zeroship/rpc-client proxy package | 🟡 | `@zeroship/rpc-client` | `sdks/rpc-client/dist/` | — | — | Dist-only; HookRegistry slots unfilled. |
-| defineRpcProcedures type helper | 🟢 | `defineRpcProcedures<Contract>()(procedures)` | `sdks/rpc/src/runtime.ts` | — | — | Registry-backed clients. |
-| newUuidV7 (public utility) | 🟢 | `import { newUuidV7 } from '@zeroship/rpc/client'` | `sdks/rpc/src/idempotency.ts` | — | — | RFC 9562. |
+| RpcError typed error class | 🟢 | `import { RpcError, ErrorCode }` | `packages/rpc/src/error.ts` | `docs/reference/rpc.md` | `packages/rpc/test/error.test.ts` | 14 gRPC-style codes. |
+| JSON transformer (default) | 🟢 | `createRpcClient({ transformer: 'json' })` | `packages/rpc/src/encoding.ts` | `docs/reference/rpc.md` | `packages/rpc/test/transport.test.ts` | Unwraps {json, meta}. |
+| superjson transformer | 🟢 | `createRpcClient({ transformer: 'superjson' })` | `packages/rpc/src/encoding.ts` | `docs/reference/rpc.md` | — | Optional peer dep; must match server. |
+| query auto-batching | 🟢 | `client({ batch: true })` | `packages/rpc/src/batch.ts` | — | `packages/rpc/test/batch.test.ts` | Mutations/streams never batched. |
+| proxy-style typed client | 🟢 | `client<App>(opts).proc.query(input)` | `packages/rpc/src/client.ts` | `docs/reference/rpc.md` | `packages/rpc/test/client.test.ts` | Dotted ids expand to nested objects. |
+| factory-style typed client | 🟢 | `createRpcClient<Contract>(opts).query('id')` | `packages/rpc/src/runtime.ts` | `docs/reference/rpc.md` | `packages/rpc/test/runtime.test.ts` | configureRpcClient installs defaults. |
+| InferRpcContract type helper | 🟢 | `InferRpcContract<typeof server>` | `packages/rpc/src/types.ts` | `docs/reference/rpc.md` | `packages/rpc/test/typecheck.ts` | Type-check time only. |
+| server-reference brand | 🟢 | internal | `packages/rpc/src/make-procedure.ts` | — | — | Symbol.for('zeroship/server-reference'). |
+| module-level $config | 🟢 | `export const $config = {...}` | `packages/vite-plugin/src/transform.ts`, `manifest.ts` | — | — | Lower precedence than fn.config. |
+| defineApp resource tree + RPC defaults | 🟢 | `defineApp({ resources, rpc })` | `packages/server/src/define-app.ts`, `types.ts`, `packages/vite-plugin/src/manifest.ts` | `docs/reference/rpc.md` | — | override array required to shadow. |
+| per-procedure rate limiting | 🟢 | `query(handler, { rateLimit })` | `packages/server/src/types.ts`, `crates/zeroship-gateway/src/router/dispatch.rs` | `docs/reference/rpc.md` | — | ip/user/session/app; min-wins. |
+| per-procedure timeout | 🟡 | `query(handler, { timeout })` | `packages/server/src/types.ts`, `crates/zeroship-bundle/src/compiled.rs` | `docs/reference/rpc.md` | — | timeout_ms hardcoded None; not enforced. |
+| per-procedure max input bytes | 🟢 | `mutation(handler, { maxInputBytes })` | `packages/server/src/types.ts`, `crates/zeroship-gateway/src/router/dispatch.rs` | `docs/reference/rpc.md` | — | Gateway enforces. |
+| per-procedure middleware list | 🟠 | `query(handler, { middleware })` | `packages/server/src/types.ts`, `packages/vite-plugin/src/manifest.ts` | `docs/reference/rpc.md` | — | Carried in manifest; runtime chain not wired. |
+| dev entry snapshot loader | 🟢 | internal | `packages/vite-plugin/src/dev-bootstrap/{entry,index}.ts` | `docs/reference/vite-environment-api.md` | `packages/vite-plugin/test/dev-entry-snapshot.test.ts` | Returns callable targets to native dispatch and invalidates by module graph. |
+| configureRpcClient global defaults | 🟢 | `configureRpcClient(opts)` | `packages/rpc/src/runtime.ts` | `docs/reference/rpc.md` | — | Returns restore fn. |
+| onError / onAuthExpired global hooks | 🟢 | `createRpcClient({ onError, onAuthExpired })` | `packages/rpc/src/transport.ts`, `client.ts` | `docs/reference/rpc.md` | — | onAuthExpired once per expiry. |
+| @zeroship/rpc-react adapter | 🟡 | `ZeroshipProvider` / `useStream` / `rpcInvalidate` | `packages/rpc-react/dist/` | — | — | Dist-only; TanStack hook integration not done. |
+| @zeroship/rpc-client proxy package | 🟡 | `@zeroship/rpc-client` | `packages/rpc-client/dist/` | — | — | Dist-only; HookRegistry slots unfilled. |
+| defineRpcProcedures type helper | 🟢 | `defineRpcProcedures<Contract>()(procedures)` | `packages/rpc/src/runtime.ts` | — | — | Registry-backed clients. |
+| newUuidV7 (public utility) | 🟢 | `import { newUuidV7 } from '@zeroship/rpc/client'` | `packages/rpc/src/idempotency.ts` | — | — | RFC 9562. |
 
 ---
 
@@ -438,15 +438,15 @@ ModuleRunner snapshots containing callable references.
 | Feature | Status | Surface | Code | Docs | Example | Notes |
 | --- | --- | --- | --- | --- | --- | --- |
 | default-export contract | 🟢 | internal (user module namespace) | `crates/zeroship-runtime/src/core/application_entry.rs` | `docs/reference/zeroship-standard.md` | `examples/raw-rpc.js` | Fetch and string-keyed RPC dictionaries are independent entry points. |
-| entry normalization | 🟢 | internal | `sdks/vite-plugin/src/rpc-registry.ts`, `crates/zeroship-runtime/src/core/init.rs` | `docs/reference/vite-plugin.md` | `sdks/vite-plugin/test/rpc-registry.test.ts` | Preserves callable references and the fetch receiver; contains no dispatcher. |
-| installSchema facade projection | 🟢 | host DB adapter | `crates/zeroship-data-v8/js/install-schema.ts` | `docs/reference/db.md` | `sdks/db/tests/install-schema.test.ts` | Plants SDK collections from the host-validated descriptor over native handles. |
-| normalizeSchema + expandUnionToFlatColumns | 🟢 | host DB adapter | `crates/zeroship-data-v8/js/install-schema.ts` | `docs/reference/db.md` | `sdks/db/tests/install-schema.test.ts` | Keeps native method names; colliding collections use `collection(name)`. |
-| validateRefTargets | 🟢 | host DB adapter | `crates/zeroship-data-v8/js/install-schema.ts` | `docs/reference/db.md` | `sdks/db/tests/b2-ref-validation.test.ts` | Every reference target must resolve within the descriptor. |
+| entry normalization | 🟢 | internal | `packages/vite-plugin/src/rpc-registry.ts`, `crates/zeroship-runtime/src/core/init.rs` | `docs/reference/vite-plugin.md` | `packages/vite-plugin/test/rpc-registry.test.ts` | Preserves callable references and the fetch receiver; contains no dispatcher. |
+| installSchema facade projection | 🟢 | host DB adapter | `crates/zeroship-data-v8/js/install-schema.ts` | `docs/reference/db.md` | `packages/db/tests/install-schema.test.ts` | Plants SDK collections from the host-validated descriptor over native handles. |
+| normalizeSchema + expandUnionToFlatColumns | 🟢 | host DB adapter | `crates/zeroship-data-v8/js/install-schema.ts` | `docs/reference/db.md` | `packages/db/tests/install-schema.test.ts` | Keeps native method names; colliding collections use `collection(name)`. |
+| validateRefTargets | 🟢 | host DB adapter | `crates/zeroship-data-v8/js/install-schema.ts` | `docs/reference/db.md` | `packages/db/tests/b2-ref-validation.test.ts` | Every reference target must resolve within the descriptor. |
 | native RPC dispatcher | 🟢 | internal | `crates/zeroship-runtime/src/rpc/dispatch/` | `docs/reference/zeroship-standard.md` | `crates/zeroship-runtime/tests/rpc_dispatch.rs` | One invocation path handles built and development dictionaries. |
 | Native startup lifecycle | 🟢 | internal | `crates/zeroship-runtime/src/core/runtime_startup.rs` | `docs/reference/plugin-system.md` | `crates/zeroship-runtime/tests/startup.rs` | Prepares adapters, evaluates the app, validates entries and finalizes declarations before dispatch. |
-| development entry loader | 🟢 | internal | `sdks/vite-plugin/src/dev-bootstrap/{entry,index}.ts`, `crates/zeroship-runtime/src/core/dev_entry.rs` | `docs/reference/vite-environment-api.md` | `sdks/vite-plugin/test/dev-entry-snapshot.test.ts` | Returns generation-pinned targets without invoking them. |
+| development entry loader | 🟢 | internal | `packages/vite-plugin/src/dev-bootstrap/{entry,index}.ts`, `crates/zeroship-runtime/src/core/dev_entry.rs` | `docs/reference/vite-environment-api.md` | `packages/vite-plugin/test/dev-entry-snapshot.test.ts` | Returns generation-pinned targets without invoking them. |
 | native fetch routing | 🟢 | internal | `crates/zeroship-runtime/src/core/runtime.rs` | `docs/reference/zeroship-standard.md` | `crates/zeroship-runtime/tests/call_fetch_handler.rs` | Preserves the WinterCG handler receiver and request context. |
-| dev-tier auth provider | 🟢 | internal | `sdks/vite-plugin/src/dev-auth.ts` | `docs/reference/auth-dev-tier.md` | `sdks/vite-plugin/test/dev-auth.test.ts` | Vite middleware owns browser routes; Rust verifies the cookie before dispatch. |
+| dev-tier auth provider | 🟢 | internal | `packages/vite-plugin/src/dev-auth.ts` | `docs/reference/auth-dev-tier.md` | `packages/vite-plugin/test/dev-auth.test.ts` | Vite middleware owns browser routes; Rust verifies the cookie before dispatch. |
 | WS subscription dispatch | 🟢 | native RPC transport | `crates/zeroship-runtime/src/rpc/subscription.rs` | `docs/reference/rpc.md` | `crates/zeroship-runtime/tests/subscription.rs` | Retains and pulls the procedure iterator under native invocation context. |
 | fetchFast extension | 🟢 | internal (user namespace) | `crates/zeroship-runtime/src/core/init.rs` | — | — | Signature undocumented; no example. |
 | zeroship facade module | 🟢 | `import { env } from 'zeroship'` | `crates/zeroship-runtime/src/core/zeroship_module.rs` | `docs/reference/zeroship-standard.md` | `examples/http-handler.js` | env/waitUntil/getRequest/current*/runQuery. |
@@ -564,7 +564,7 @@ no second issuance authority.
 | Rate limiting (per-IP token bucket) | 🟢 | internal | `crates/zeroship-authn/src/rate_limit.rs`, `crates/zeroship-control/src/http_util.rs` | — | — | In-memory per-process; DB-backed for multi-node, so replicas share a bucket. `crates/zeroship-migrate-server/src/rate_limit.rs` binds it to the migration service. |
 | Metering aggregation / period snapshots | 🟢 | internal | `crates/zeroship-control/src/metering/mod.rs`, `metering/provider/` | `docs/reference/billing-metering.md` | `crates/zeroship-control/tests/billing_pipeline_redpanda_e2e.rs` | No longer a stub: `UsageEvent`s arrive on the durable stream and the spend-recompute cron overwrites `zeroship.usage_aggregates` as an idempotent period snapshot; `record_direct` for trusted control-plane work; dev fallback does an immediate `+=`. |
 | Control health + readiness | 🟢 | GET /healthz, GET /readyz | `crates/zeroship-control/src/internal.rs` | — | `tests/health_endpoints.sh` | /healthz is a constant 200 (liveness); /readyz probes the shared Postgres client, cached 2s. |
-| TypeScript control client (@zeroship/control) | 🟢 | `@zeroship/control` npm | `sdks/control/src/index.ts` | `docs/reference/control.md` | `sdks/control/test/control.test.ts` | Auth namespace removed (R5). `organizations` and `projects` mirror the two path roots; a test reconciles the routing table against the client's own key set, so a method added and left untested fails rather than being covered by nothing. |
+| TypeScript control client (@zeroship/control) | 🟢 | `@zeroship/control` npm | `packages/control/src/index.ts` | `docs/reference/control.md` | `packages/control/test/control.test.ts` | Auth namespace removed (R5). `organizations` and `projects` mirror the two path roots; a test reconciles the routing table against the client's own key set, so a method added and left untested fails rather than being covered by nothing. |
 | Config validation (--check-config) | 🟢 | --check-config [--format] | `crates/zeroship-control/src/main.rs` | — | — | Text/JSON; prod startup guards. |
 
 ---
@@ -637,8 +637,8 @@ The Stripe-Connect rows below were not part of that flag.
 | Webhook signature verification (Rust) | 🟢 | internal | `crates/zeroship-control/src/stripe_handlers.rs` | `docs/reference/billing-metering.md` | `crates/zeroship-control/src/stripe_handlers.rs` | Constant-time; cross-validated with TS. |
 | Payout ledger (write) | 🟢 | internal (StripeStore::record_payout) | `crates/zeroship-control/src/stripe_store.rs` | — | `crates/zeroship-control/tests/stripe_store.rs` | DB CHECK net = gross - fee; cents. |
 | Earnings dashboard (read) | 🟢 | GET /api/creators/{id}/earnings | `crates/zeroship-control/src/stripe_handlers.rs` | `docs/reference/billing-metering.md` | — | Totals + 50 recent; no pagination. |
-| @zeroship/payments — checkout / startOnboarding | 🟢 | `createPaymentsClient({ baseUrl, creatorId, auth }).checkout/startOnboarding` | `sdks/payments/src/connect.ts` | `docs/reference/billing-metering.md` | `sdks/payments/tests/connect.test.ts` | Thin client over control (`POST …/connect/checkout`, `…/stripe/onboard`); NO fee param — fee is server-authoritative (ISS-29). |
-| @zeroship/payments — verifyWebhook | 🟢 | `verifyWebhook(rawBody, sig, secret, opts)` | `sdks/payments/src/webhook.ts` | `docs/reference/billing-metering.md` | `sdks/payments/tests/webhook.test.ts` | WebCrypto HMAC; runs in V8/browser/Node. |
+| @zeroship/payments — checkout / startOnboarding | 🟢 | `createPaymentsClient({ baseUrl, creatorId, auth }).checkout/startOnboarding` | `packages/payments/src/connect.ts` | `docs/reference/billing-metering.md` | `packages/payments/tests/connect.test.ts` | Thin client over control (`POST …/connect/checkout`, `…/stripe/onboard`); NO fee param — fee is server-authoritative (ISS-29). |
+| @zeroship/payments — verifyWebhook | 🟢 | `verifyWebhook(rawBody, sig, secret, opts)` | `packages/payments/src/webhook.ts` | `docs/reference/billing-metering.md` | `packages/payments/tests/webhook.test.ts` | WebCrypto HMAC; runs in V8/browser/Node. |
 | App plan management | 🟡 | PUT /api/apps/{id}/plan | `crates/zeroship-control/src/api.rs` | — | — | plan_id is a label; no billing logic acts on it. |
 | Usage counter ingest (worker → control) | 🟡 | POST /internal/usage | `crates/zeroship-control/src/internal.rs` | `docs/reference/billing-metering.md` | — | No worker ever calls it; ingest-only. |
 | Usage counter read (dashboard) | 🟡 | GET /api/apps/{id}/usage | `crates/zeroship-control/src/api.rs` | `docs/reference/billing-metering.md` | — | Returns empty maps in real deploys. |
@@ -710,39 +710,39 @@ plugins. The `build.mode` field in `zeroship.jsonc` selects the build posture.
 
 | Feature | Status | Surface | Code | Docs | Example | Notes |
 | --- | --- | --- | --- | --- | --- | --- |
-| Plugin entry / factory (zeroship()) | 🟢 | `import { zeroship } from '@zeroship/vite-plugin'` | `sdks/vite-plugin/src/index.ts` | `docs/reference/vite-plugin.md` | `examples/csr-todo/vite.config.ts` | Returns 7 composed plugins. |
-| 'use server' file-level detection | 🟢 | internal (transform) | `sdks/vite-plugin/src/transform.ts` | `docs/reference/vite-plugin.md` | `examples/csr-todo/src/server.ts` | Acorn + Oxc directive shapes. |
-| 'use server' function-level detection | 🟢 | internal (transform/graph) | `sdks/vite-plugin/src/transform.ts` | `docs/reference/vite-plugin.md` | — | Fn/Expr/Arrow; only that fn becomes RPC. |
-| RPC wrapper-call recognition | 🟢 | internal (transform) | `sdks/vite-plugin/src/transform.ts` | `docs/reference/vite-plugin.md` | — | `export const x = query(...)`; subscription stubs → UNIMPLEMENTED. |
-| Client stub emission | 🟢 | internal (client env) | `sdks/vite-plugin/src/transform.ts` | `docs/reference/vite-plugin.md` | `examples/csr-todo/src/api.ts` | __zsRpc factories; file overwritten. |
-| SSR/server-env transform (proc metadata) | 🟢 | internal (server env) | `sdks/vite-plugin/src/transform.ts` | — | — | __zsAttachProcedureMeta + __registerModule. |
-| WireId resolution | 🟢 | internal | `sdks/vite-plugin/src/transform.ts` | `docs/reference/vite-plugin.md` | — | Prod rejects bare name; collision fails build. |
-| Lazy procedure loading | 🟢 | internal | `sdks/vite-plugin/src/transform.ts` | `docs/reference/vite-plugin.md` | — | Literal boolean; warns+eager fallback. |
-| Synthetic server entry | 🟢 | `virtual:zeroship/_server-entry` | `sdks/vite-plugin/src/rpc-registry.ts` | `docs/reference/vite-plugin.md` | — | namespace-walk always active in prod. |
-| Phase-2 static-binding entry | 🟠 | internal (getBindings param) | `sdks/vite-plugin/src/rpc-registry.ts` | — | `sdks/vite-plugin/test/synthetic-entry-bindings.test.ts` | Implemented/tested; never passed from build.ts. |
-| Manifest extras computation | 🟢 | internal (closeBundle) | `sdks/vite-plugin/src/manifest.ts` | `docs/reference/vite-plugin.md` | `sdks/vite-plugin/test/manifest-resources.test.ts` | snake_case rename; secure-by-default. |
-| defineApp resources from config.ts | 🟢 | internal | `sdks/vite-plugin/src/manifest.ts` | — | `sdks/vite-plugin/test/manifest-resources.test.ts` | new Function() eval; computed exprs error. |
-| Production build pipeline (client + SSR) | 🟢 | internal (buildPlugin) | `sdks/vite-plugin/src/build.ts` | `docs/reference/vite-plugin.md` | `examples/csr-todo/vite.config.ts` | SSR target webworker; strips 'use server'. |
-| Static / SSG build mode | 🟢 | `"build": { "mode": "static" }` in `zeroship.jsonc` | `sdks/vite-plugin/src/build.ts` | `docs/reference/project-config.md` | `examples/ssg-docs/zeroship.jsonc` | Stub input injected then deleted. |
-| .zship archive emitter | 🟢 | internal (emitZship) | `sdks/vite-plugin/src/zship.ts` | `docs/reference/zship.md` | `sdks/vite-plugin/test/zship.test.ts` | brotli default; validates hash refs. |
-| SSR vs SPA catch-all detection | 🟢 | internal (probeUserDefaultExport) | `sdks/vite-plugin/src/build.ts` | — | — | Conservative default true (SSR). |
-| virtual:zeroship/client-manifest | 🟢 | `import manifest from 'virtual:zeroship/client-manifest'` | `sdks/vite-plugin/src/build.ts` | — | `examples/ssr-blog/vite.config.ts` | Reads dist/.vite/manifest.json. |
-| Node.js compat shims | 🟢 | internal (SSR/zeroship env) | `sdks/vite-plugin/src/node-compat.ts` | `docs/reference/node-compat.md` | — | Native modules external; custom polyfills. |
-| Virtual zeroship module resolution | 🟢 | `import { env } from 'zeroship'` | `sdks/vite-plugin/src/zeroship-module.ts` | — | — | Imports the runtime-owned native module. |
-| Reserved host module resolution | 🟢 | internal (resolveId) | `sdks/vite-plugin/src/zeroship-module.ts` | `docs/reference/zeroship-standard.md` | `sdks/vite-plugin/test/zeroship-env-resolution.test.ts` | Preserves runtime-owned `zeroship` imports for native evaluation. |
-| Vite Environment API integration | 🟢 | internal (environments.zeroship) | `sdks/vite-plugin/src/environment.ts` | `docs/reference/vite-environment-api.md` | — | Intercepts node:* fetchModule. |
-| Dev server bridge (spawn + proxy) | 🟢 | internal (configureServer) | `sdks/vite-plugin/src/dev-server.ts` | `docs/reference/vite-environment-api.md` | — | Crash-restart; ZEROSHIP_BIN override. |
-| HTTP module-fetch endpoint | 🟢 | POST /__zeroship_fetch | `sdks/vite-plugin/src/dev-server.ts` | `docs/reference/vite-environment-api.md` | — | fetchModule/getBuiltins only; 64 KB cap. |
-| Poll-based HMR | 🟢 | GET /__zeroship_hmr_check | `sdks/vite-plugin/src/dev-server.ts` | `docs/reference/vite-environment-api.md` | — | V8 polls every 500ms. |
-| Development ModuleRunner host | 🟢 | internal (V8 entry) | `sdks/vite-plugin/src/dev-bootstrap/index.ts` | `docs/reference/vite-environment-api.md` | `sdks/vite-plugin/test/dev-entry-snapshot.test.ts` | Loads generation-pinned entry snapshots for the native dispatcher. |
-| Dev-tier auth provider config | 🟢 | `zeroship({ devAuth: ... })` | `sdks/vite-plugin/src/dev-auth-config.ts` | `docs/reference/auth-dev-tier.md` | — | Fresh secret per start; dev-only by construction. |
-| Dev SQLite database fallback | 🟢 | internal | `sdks/vite-plugin/src/dev-db.ts` | `docs/reference/vite-environment-api.md` | — | shell > .env > sqlite:.zeroship/dev.sqlite. |
-| Server-entry auto-detection | 🟢 | internal (findServerEntry) | `sdks/vite-plugin/src/build.ts` | — | — | Fixed candidate list; `build.serverEntry` in `zeroship.jsonc` overrides. |
-| client-manifest TypeScript type shim | 🟢 | `@zeroship/vite-plugin/types` | `sdks/vite-plugin/src/client-manifest.d.ts` | — | `examples/ssr-blog/vite.config.ts` | Mirrors Vite Manifest shape. |
-| CSR build support | 🟢 | `zeroship()` (default full) | `sdks/vite-plugin/src/build.ts` | `docs/reference/vite-plugin.md` | `examples/csr-todo/vite.config.ts` | SPA fallback catch-all when no default.fetch. |
-| SSR build support | 🟢 | `zeroship()` + build.manifest:true | `sdks/vite-plugin/src/build.ts` | — | `examples/ssr-blog/vite.config.ts` | User must set manifest:true. |
-| SSG build support | 🟢 | `"build": { "mode": "static" }` in `zeroship.jsonc` | `sdks/vite-plugin/src/build.ts` | `docs/reference/project-config.md` | `examples/ssg-docs/zeroship.jsonc` | HTML pre-render is user's responsibility. |
-| zeroship.jsonc reader (build side) | 🟢 | `zeroship({ configPath, env, config })` | `sdks/vite-plugin/src/project-config/` | `docs/reference/project-config.md` | `examples/starter/zeroship.jsonc` | Generated from `schema/project-v1.json`; holds every schema default. `config` may not change a CLI-read field. |
+| Plugin entry / factory (zeroship()) | 🟢 | `import { zeroship } from '@zeroship/vite-plugin'` | `packages/vite-plugin/src/index.ts` | `docs/reference/vite-plugin.md` | `examples/csr-todo/vite.config.ts` | Returns 7 composed plugins. |
+| 'use server' file-level detection | 🟢 | internal (transform) | `packages/vite-plugin/src/transform.ts` | `docs/reference/vite-plugin.md` | `examples/csr-todo/src/server.ts` | Acorn + Oxc directive shapes. |
+| 'use server' function-level detection | 🟢 | internal (transform/graph) | `packages/vite-plugin/src/transform.ts` | `docs/reference/vite-plugin.md` | — | Fn/Expr/Arrow; only that fn becomes RPC. |
+| RPC wrapper-call recognition | 🟢 | internal (transform) | `packages/vite-plugin/src/transform.ts` | `docs/reference/vite-plugin.md` | — | `export const x = query(...)`; subscription stubs → UNIMPLEMENTED. |
+| Client stub emission | 🟢 | internal (client env) | `packages/vite-plugin/src/transform.ts` | `docs/reference/vite-plugin.md` | `examples/csr-todo/src/api.ts` | __zsRpc factories; file overwritten. |
+| SSR/server-env transform (proc metadata) | 🟢 | internal (server env) | `packages/vite-plugin/src/transform.ts` | — | — | __zsAttachProcedureMeta + __registerModule. |
+| WireId resolution | 🟢 | internal | `packages/vite-plugin/src/transform.ts` | `docs/reference/vite-plugin.md` | — | Prod rejects bare name; collision fails build. |
+| Lazy procedure loading | 🟢 | internal | `packages/vite-plugin/src/transform.ts` | `docs/reference/vite-plugin.md` | — | Literal boolean; warns+eager fallback. |
+| Synthetic server entry | 🟢 | `virtual:zeroship/_server-entry` | `packages/vite-plugin/src/rpc-registry.ts` | `docs/reference/vite-plugin.md` | — | namespace-walk always active in prod. |
+| Phase-2 static-binding entry | 🟠 | internal (getBindings param) | `packages/vite-plugin/src/rpc-registry.ts` | — | `packages/vite-plugin/test/synthetic-entry-bindings.test.ts` | Implemented/tested; never passed from build.ts. |
+| Manifest extras computation | 🟢 | internal (closeBundle) | `packages/vite-plugin/src/manifest.ts` | `docs/reference/vite-plugin.md` | `packages/vite-plugin/test/manifest-resources.test.ts` | snake_case rename; secure-by-default. |
+| defineApp resources from config.ts | 🟢 | internal | `packages/vite-plugin/src/manifest.ts` | — | `packages/vite-plugin/test/manifest-resources.test.ts` | new Function() eval; computed exprs error. |
+| Production build pipeline (client + SSR) | 🟢 | internal (buildPlugin) | `packages/vite-plugin/src/build.ts` | `docs/reference/vite-plugin.md` | `examples/csr-todo/vite.config.ts` | SSR target webworker; strips 'use server'. |
+| Static / SSG build mode | 🟢 | `"build": { "mode": "static" }` in `zeroship.jsonc` | `packages/vite-plugin/src/build.ts` | `docs/reference/project-config.md` | `examples/ssg-docs/zeroship.jsonc` | Stub input injected then deleted. |
+| .zship archive emitter | 🟢 | internal (emitZship) | `packages/vite-plugin/src/zship.ts` | `docs/reference/zship.md` | `packages/vite-plugin/test/zship.test.ts` | brotli default; validates hash refs. |
+| SSR vs SPA catch-all detection | 🟢 | internal (probeUserDefaultExport) | `packages/vite-plugin/src/build.ts` | — | — | Conservative default true (SSR). |
+| virtual:zeroship/client-manifest | 🟢 | `import manifest from 'virtual:zeroship/client-manifest'` | `packages/vite-plugin/src/build.ts` | — | `examples/ssr-blog/vite.config.ts` | Reads dist/.vite/manifest.json. |
+| Node.js compat shims | 🟢 | internal (SSR/zeroship env) | `packages/vite-plugin/src/node-compat.ts` | `docs/reference/node-compat.md` | — | Native modules external; custom polyfills. |
+| Virtual zeroship module resolution | 🟢 | `import { env } from 'zeroship'` | `packages/vite-plugin/src/zeroship-module.ts` | — | — | Imports the runtime-owned native module. |
+| Reserved host module resolution | 🟢 | internal (resolveId) | `packages/vite-plugin/src/zeroship-module.ts` | `docs/reference/zeroship-standard.md` | `packages/vite-plugin/test/zeroship-env-resolution.test.ts` | Preserves runtime-owned `zeroship` imports for native evaluation. |
+| Vite Environment API integration | 🟢 | internal (environments.zeroship) | `packages/vite-plugin/src/environment.ts` | `docs/reference/vite-environment-api.md` | — | Intercepts node:* fetchModule. |
+| Dev server bridge (spawn + proxy) | 🟢 | internal (configureServer) | `packages/vite-plugin/src/dev-server.ts` | `docs/reference/vite-environment-api.md` | — | Crash-restart; ZEROSHIP_BIN override. |
+| HTTP module-fetch endpoint | 🟢 | POST /__zeroship_fetch | `packages/vite-plugin/src/dev-server.ts` | `docs/reference/vite-environment-api.md` | — | fetchModule/getBuiltins only; 64 KB cap. |
+| Poll-based HMR | 🟢 | GET /__zeroship_hmr_check | `packages/vite-plugin/src/dev-server.ts` | `docs/reference/vite-environment-api.md` | — | V8 polls every 500ms. |
+| Development ModuleRunner host | 🟢 | internal (V8 entry) | `packages/vite-plugin/src/dev-bootstrap/index.ts` | `docs/reference/vite-environment-api.md` | `packages/vite-plugin/test/dev-entry-snapshot.test.ts` | Loads generation-pinned entry snapshots for the native dispatcher. |
+| Dev-tier auth provider config | 🟢 | `zeroship({ devAuth: ... })` | `packages/vite-plugin/src/dev-auth-config.ts` | `docs/reference/auth-dev-tier.md` | — | Fresh secret per start; dev-only by construction. |
+| Dev SQLite database fallback | 🟢 | internal | `packages/vite-plugin/src/dev-db.ts` | `docs/reference/vite-environment-api.md` | — | shell > .env > sqlite:.zeroship/dev.sqlite. |
+| Server-entry auto-detection | 🟢 | internal (findServerEntry) | `packages/vite-plugin/src/build.ts` | — | — | Fixed candidate list; `build.serverEntry` in `zeroship.jsonc` overrides. |
+| client-manifest TypeScript type shim | 🟢 | `@zeroship/vite-plugin/types` | `packages/vite-plugin/src/client-manifest.d.ts` | — | `examples/ssr-blog/vite.config.ts` | Mirrors Vite Manifest shape. |
+| CSR build support | 🟢 | `zeroship()` (default full) | `packages/vite-plugin/src/build.ts` | `docs/reference/vite-plugin.md` | `examples/csr-todo/vite.config.ts` | SPA fallback catch-all when no default.fetch. |
+| SSR build support | 🟢 | `zeroship()` + build.manifest:true | `packages/vite-plugin/src/build.ts` | — | `examples/ssr-blog/vite.config.ts` | User must set manifest:true. |
+| SSG build support | 🟢 | `"build": { "mode": "static" }` in `zeroship.jsonc` | `packages/vite-plugin/src/build.ts` | `docs/reference/project-config.md` | `examples/ssg-docs/zeroship.jsonc` | HTML pre-render is user's responsibility. |
+| zeroship.jsonc reader (build side) | 🟢 | `zeroship({ configPath, env, config })` | `packages/vite-plugin/src/project-config/` | `docs/reference/project-config.md` | `examples/starter/zeroship.jsonc` | Generated from `schema/project-v1.json`; holds every schema default. `config` may not change a CLI-read field. |
 
 ---
 
@@ -950,26 +950,26 @@ replaces the external auth/gateway stack. Production builds produce a `.zship` a
 | zeroship secret set/list/rm | 🟢 | `zeroship secret set KEY=value \| list \| rm KEY` | `crates/zeroship-cli/src/secrets.rs` | — | — | ls/del aliases; splits on first '='. |
 | zeroship var set/list/rm | 🟢 | `zeroship var set KEY=value \| list \| rm KEY` | `crates/zeroship-cli/src/secrets.rs` | — | — | /vars endpoint. |
 | Bearer token resolution | 🟢 | internal | `crates/zeroship-cli/src/main.rs` | `docs/runbooks/local-dev.md` | `crates/zeroship-cli/src/main.rs` | flag > env > saved creds. |
-| create-zeroship-app scaffolder | 🟢 | `npm create zeroship-app <name>` | `sdks/create-zeroship-app/bin/create.js` | — | `sdks/create-zeroship-app/template/` | _gitignore → .gitignore; private registry. |
-| create-zeroship-app template | 🟢 | @zeroship/vite-plugin + rpc/server | `sdks/create-zeroship-app/template/src/index.ts` | — | `sdks/create-zeroship-app/template/` | Notes CRUD + storage + kv + React. |
-| Vite plugin — zeroship() factory | 🟢 | `import { zeroship } from '@zeroship/vite-plugin'` | `sdks/vite-plugin/src/index.ts` | `docs/reference/vite-plugin.md` | `sdks/create-zeroship-app/template/vite.config.ts` | Five options: devServerPort, devAuth, configPath, env, config. Build shape lives in `zeroship.jsonc`. |
-| Vite plugin — dev server spawn + proxy | 🟢 | internal | `sdks/vite-plugin/src/dev-server.ts` | `docs/reference/vite-plugin.md` | `examples/db-todos` | Spawns zeroship serve; crash-restart. |
-| Vite plugin — Vite Environment API | 🟢 | internal | `sdks/vite-plugin/src/environment.ts` | `docs/reference/vite-environment-api.md` | — | /__zeroship_fetch + /__zeroship_hmr_check. |
-| Vite plugin — dev HMR poll | 🟢 | internal (V8 polls) | `sdks/vite-plugin/src/dev-bootstrap/hmr.ts` | — | — | Transitive importer invalidation. |
-| Vite plugin — dev-auth provider | 🟢 | `ZeroshipOptions.devAuth` | `sdks/vite-plugin/src/dev-auth-config.ts` | `docs/reference/auth-dev-tier.md` | — | Fresh secret per lifetime; dev-only. |
-| Vite plugin — dev-db (SQLite zero-config) | 🟢 | internal | `sdks/vite-plugin/src/dev-db.ts` | `docs/reference/auth-dev-tier.md` | — | shell > .env > sqlite default. |
-| Vite plugin — .dotenv parsing | 🟢 | internal | `sdks/vite-plugin/src/dev-server.ts` | — | — | Bespoke; shell wins over .env. |
-| Vite plugin — server-entry auto-detection | 🟢 | internal | `sdks/vite-plugin/src/build.ts` | `docs/reference/vite-plugin.md` | — | Fixed candidate list. |
-| Vite plugin — 'use server' (file-level) | 🟢 | @zeroship/vite-plugin transform | `sdks/vite-plugin/src/transform.ts` | `docs/reference/vite-plugin.md` | `sdks/create-zeroship-app/template/src/index.ts` | Directive is the only opt-in. |
-| Vite plugin — 'use server' (function-level) | 🟢 | @zeroship/vite-plugin transform | `sdks/vite-plugin/src/transform.ts` | — | — | Only graph consumes today. |
-| Vite plugin — wire-id + collision detection | 🟢 | internal | `sdks/vite-plugin/src/manifest.ts` | `docs/reference/rpc.md` | `sdks/vite-plugin/test/wireid-collision.test.ts` | Prod rejects bare name. |
-| Vite plugin — lazy procedure support | 🟢 | @zeroship/vite-plugin | `sdks/vite-plugin/src/transform.ts` | `docs/reference/vite-plugin.md` | — | Literal boolean only. |
-| Vite plugin — node compat shims | 🟢 | internal | `sdks/vite-plugin/src/node-compat.ts` | `docs/reference/node-compat.md` | — | unenv@2 + custom; @rollup/plugin-inject. |
-| Vite plugin — production build (.zship) | 🟢 | internal (closeBundle) | `sdks/vite-plugin/src/build.ts` | `docs/reference/zship.md` | `examples/db-todos` | rolldown SSR; strips 'use server'. |
-| Vite plugin — .zship packing + precompress | 🟢 | internal (emitZship) | `sdks/vite-plugin/src/zship.ts` | `docs/reference/zship.md` | — | brotli default; canonical JSON. |
-| Vite plugin — static mode | 🟢 | `"build": { "mode": "static" }` in `zeroship.jsonc` | `sdks/vite-plugin/src/build.ts` | `docs/reference/project-config.md` | `examples/ssg-docs/zeroship.jsonc` | Stub input then deleted. |
-| Vite plugin — client-manifest virtual module | 🟢 | `virtual:zeroship/client-manifest` | `sdks/vite-plugin/src/build.ts` | — | — | Graceful {} fallback. |
-| Vite plugin — development host | 🟢 | internal | `sdks/vite-plugin/src/dev-bootstrap/index.ts` | — | — | ModuleRunner entry snapshots; dependency refresh rebuild. |
+| create-zeroship-app scaffolder | 🟢 | `npm create zeroship-app <name>` | `packages/create-zeroship-app/bin/create.js` | — | `packages/create-zeroship-app/template/` | _gitignore → .gitignore; private registry. |
+| create-zeroship-app template | 🟢 | @zeroship/vite-plugin + rpc/server | `packages/create-zeroship-app/template/src/index.ts` | — | `packages/create-zeroship-app/template/` | Notes CRUD + storage + kv + React. |
+| Vite plugin — zeroship() factory | 🟢 | `import { zeroship } from '@zeroship/vite-plugin'` | `packages/vite-plugin/src/index.ts` | `docs/reference/vite-plugin.md` | `packages/create-zeroship-app/template/vite.config.ts` | Five options: devServerPort, devAuth, configPath, env, config. Build shape lives in `zeroship.jsonc`. |
+| Vite plugin — dev server spawn + proxy | 🟢 | internal | `packages/vite-plugin/src/dev-server.ts` | `docs/reference/vite-plugin.md` | `examples/db-todos` | Spawns zeroship serve; crash-restart. |
+| Vite plugin — Vite Environment API | 🟢 | internal | `packages/vite-plugin/src/environment.ts` | `docs/reference/vite-environment-api.md` | — | /__zeroship_fetch + /__zeroship_hmr_check. |
+| Vite plugin — dev HMR poll | 🟢 | internal (V8 polls) | `packages/vite-plugin/src/dev-bootstrap/hmr.ts` | — | — | Transitive importer invalidation. |
+| Vite plugin — dev-auth provider | 🟢 | `ZeroshipOptions.devAuth` | `packages/vite-plugin/src/dev-auth-config.ts` | `docs/reference/auth-dev-tier.md` | — | Fresh secret per lifetime; dev-only. |
+| Vite plugin — dev-db (SQLite zero-config) | 🟢 | internal | `packages/vite-plugin/src/dev-db.ts` | `docs/reference/auth-dev-tier.md` | — | shell > .env > sqlite default. |
+| Vite plugin — .dotenv parsing | 🟢 | internal | `packages/vite-plugin/src/dev-server.ts` | — | — | Bespoke; shell wins over .env. |
+| Vite plugin — server-entry auto-detection | 🟢 | internal | `packages/vite-plugin/src/build.ts` | `docs/reference/vite-plugin.md` | — | Fixed candidate list. |
+| Vite plugin — 'use server' (file-level) | 🟢 | @zeroship/vite-plugin transform | `packages/vite-plugin/src/transform.ts` | `docs/reference/vite-plugin.md` | `packages/create-zeroship-app/template/src/index.ts` | Directive is the only opt-in. |
+| Vite plugin — 'use server' (function-level) | 🟢 | @zeroship/vite-plugin transform | `packages/vite-plugin/src/transform.ts` | — | — | Only graph consumes today. |
+| Vite plugin — wire-id + collision detection | 🟢 | internal | `packages/vite-plugin/src/manifest.ts` | `docs/reference/rpc.md` | `packages/vite-plugin/test/wireid-collision.test.ts` | Prod rejects bare name. |
+| Vite plugin — lazy procedure support | 🟢 | @zeroship/vite-plugin | `packages/vite-plugin/src/transform.ts` | `docs/reference/vite-plugin.md` | — | Literal boolean only. |
+| Vite plugin — node compat shims | 🟢 | internal | `packages/vite-plugin/src/node-compat.ts` | `docs/reference/node-compat.md` | — | unenv@2 + custom; @rollup/plugin-inject. |
+| Vite plugin — production build (.zship) | 🟢 | internal (closeBundle) | `packages/vite-plugin/src/build.ts` | `docs/reference/zship.md` | `examples/db-todos` | rolldown SSR; strips 'use server'. |
+| Vite plugin — .zship packing + precompress | 🟢 | internal (emitZship) | `packages/vite-plugin/src/zship.ts` | `docs/reference/zship.md` | — | brotli default; canonical JSON. |
+| Vite plugin — static mode | 🟢 | `"build": { "mode": "static" }` in `zeroship.jsonc` | `packages/vite-plugin/src/build.ts` | `docs/reference/project-config.md` | `examples/ssg-docs/zeroship.jsonc` | Stub input then deleted. |
+| Vite plugin — client-manifest virtual module | 🟢 | `virtual:zeroship/client-manifest` | `packages/vite-plugin/src/build.ts` | — | — | Graceful {} fallback. |
+| Vite plugin — development host | 🟢 | internal | `packages/vite-plugin/src/dev-bootstrap/index.ts` | — | — | ModuleRunner entry snapshots; dependency refresh rebuild. |
 | CLI serve — dev KV backend (redb/Redis) | 🟢 | ZEROSHIP_KV_URL / ZEROSHIP_KV_PATH | `crates/zeroship-cli/src/main.rs` | — | — | URL→Redis, else redb. |
 | CLI serve — dev storage (LocalFs) | 🟢 | ZEROSHIP_STORAGE_ROOT | `crates/zeroship-cli/src/main.rs` | — | — | Default .zeroship/storage. |
 | CLI serve — heap limit configuration | 🟢 | --heap-limit-mb / ZEROSHIP_HEAP_LIMIT_MB | `crates/zeroship-cli/src/main.rs` | `docs/reference/runtime-limits.md` | — | Dev default 512MB vs prod 128MB. |
@@ -977,7 +977,7 @@ replaces the external auth/gateway stack. Production builds produce a `.zship` a
 | zeroship inspect | ⚫ | (removed) | `crates/zeroship-cli/src/main.rs` | — | — | Removed in artifact-layout redesign. |
 | zeroship config show / path | 🟢 | `zeroship config show [--env] [--config]` | `crates/zeroship-cli/src/project_config/mod.rs` | `docs/reference/project-config.md` | `tests/project_config_gate.sh` | Canonical JSON of the resolved file; byte-compared against the TS reader's dump. |
 | zeroship.jsonc reader (CLI side) | 🟢 | `--config=<path>` / `ZEROSHIP_CONFIG` / auto-discovery | `crates/zeroship-cli/src/project_config/` | `docs/reference/project-config.md` | `crates/zeroship-cli/src/project_config/tests.rs` | No defaults on this side: a key the file omits is an error naming it. Writeback splices the root `app` only; `login` reads `control` softly. |
-| subscription procedures | 🟡 | `subscription(handler, config)` | `sdks/vite-plugin/src/transform.ts` | `docs/reference/vite-plugin.md` | — | Server discovered; client UNIMPLEMENTED. |
+| subscription procedures | 🟡 | `subscription(handler, config)` | `packages/vite-plugin/src/transform.ts` | `docs/reference/vite-plugin.md` | — | Server discovered; client UNIMPLEMENTED. |
 
 ---
 
@@ -992,83 +992,83 @@ palette. **Storybook is the sole reference doc surface** — there is no prose d
 
 | Feature | Status | Surface | Code | Docs | Example | Notes |
 | --- | --- | --- | --- | --- | --- | --- |
-| ThemeProvider + useTheme | 🟡 | `ThemeProvider, useTheme, themes` | `sdks/ui/src/theme.tsx` | — | `sdks/ui/src/stories/story.css` | ADR specified 3 themes; only crystal built. |
-| Design token foundation (styles.css) | 🟢 | `import '@zeroship/ui/styles.css'` | `sdks/ui/src/styles.css` | — | — | Theme-invariant; Tailwind contract file missing. |
-| Crystal theme palette | 🟢 | internal CSS ([data-theme='crystal']) | `sdks/ui/src/styles.css` | — | — | Only registered theme. |
-| Button | 🟢 | `Button` | `sdks/ui/src/components/Button/Button.tsx` | — | `sdks/ui/src/stories/Button.stories.tsx` | 4 variants, loading, asChild, a11y guard. |
-| Input | 🟢 | `Input` | `sdks/ui/src/components/Input/Input.tsx` | — | `sdks/ui/src/stories/Input.stories.tsx` | outline/filled/plain; Field context. |
-| Field | 🟢 | `Field, useFieldVisualSize` | `sdks/ui/src/components/Field/Field.tsx` | — | `sdks/ui/src/stories/Field.stories.tsx` | Cascades required/disabled/size. |
-| Fieldset | 🟢 | `Fieldset, useFieldsetDisabledContext` | `sdks/ui/src/components/Fieldset/Fieldset.tsx` | — | `sdks/ui/src/stories/Fieldset.stories.tsx` | Propagates disabled to descendants. |
-| Form | 🟢 | `Form, FormActions` | `sdks/ui/src/components/Form/Form.tsx` | — | `sdks/ui/src/stories/Form.stories.tsx` | Server-error routing; no initialValues. |
-| Checkbox | 🟢 | `Checkbox` | `sdks/ui/src/components/Checkbox/Checkbox.tsx` | — | `sdks/ui/src/stories/Checkbox.stories.tsx` | Indeterminate-capable. |
-| CheckboxGroup | 🟢 | `CheckboxGroup` | `sdks/ui/src/components/CheckboxGroup/CheckboxGroup.tsx` | — | `sdks/ui/src/stories/CheckboxGroup.stories.tsx` | Controlled/uncontrolled multi-value. |
-| Switch | 🟢 | `Switch` | `sdks/ui/src/components/Switch/Switch.tsx` | — | `sdks/ui/src/stories/Switch.stories.tsx` | Field context. |
-| Radio / RadioGroup | 🟢 | `Radio, RadioGroup` | `sdks/ui/src/components/Radio/Radio.tsx` | — | `sdks/ui/src/stories/Radio.stories.tsx` | Horizontal/vertical. |
-| Toggle / ToggleGroup | 🟢 | `Toggle, ToggleGroup` | `sdks/ui/src/components/Toggle/Toggle.tsx` | — | `sdks/ui/src/stories/Toggle.stories.tsx` | Single/multiple exclusive. |
-| Select | 🟢 | `Select` | `sdks/ui/src/components/Select/Select.tsx` | — | `sdks/ui/src/stories/Select.stories.tsx` | Single/multiple; hidden input. |
-| Combobox | 🟢 | `Combobox` | `sdks/ui/src/components/Combobox/Combobox.tsx` | — | `sdks/ui/src/stories/Combobox.stories.tsx` | Typeahead; chips in multiple. |
-| Autocomplete | 🟢 | `Autocomplete` | `sdks/ui/src/components/Autocomplete/Autocomplete.tsx` | — | `sdks/ui/src/stories/Autocomplete.stories.tsx` | Free-text value kept as-is. |
-| NumberField | 🟢 | `NumberField` | `sdks/ui/src/components/NumberField/NumberField.tsx` | — | `sdks/ui/src/stories/NumberField.stories.tsx` | Stepper; min/max/step. |
-| Slider | 🟢 | `Slider` | `sdks/ui/src/components/Slider/Slider.tsx` | — | `sdks/ui/src/stories/Slider.stories.tsx` | Auto single/range; value badge. |
-| OtpField | 🟢 | `OtpField` | `sdks/ui/src/components/OtpField/OtpField.tsx` | — | `sdks/ui/src/stories/OtpField.stories.tsx` | Paste-split; keyboard nav. |
-| Card | 🟢 | `Card` | `sdks/ui/src/components/Card/Card.tsx` | — | `sdks/ui/src/stories/Card.stories.tsx` | header/media/footer anatomy. |
-| Dialog | 🟢 | `Dialog, createDialogHandle` | `sdks/ui/src/components/Dialog/Dialog.tsx` | — | `sdks/ui/src/stories/Dialog.stories.tsx` | Glass backdrop; imperative handle. |
-| AlertDialog | 🟢 | `AlertDialog` | `sdks/ui/src/components/AlertDialog/AlertDialog.tsx` | — | `sdks/ui/src/stories/AlertDialog.stories.tsx` | Destructive-confirm variant. |
-| Drawer | 🟢 | `Drawer` | `sdks/ui/src/components/Drawer/Drawer.tsx` | — | `sdks/ui/src/stories/Drawer.stories.tsx` | Slide-in from 4 edges. |
-| Popover | 🟢 | `Popover, createPopoverHandle` | `sdks/ui/src/components/Popover/Popover.tsx` | — | `sdks/ui/src/stories/Popover.stories.tsx` | Anchored floating panel. |
-| Tooltip | 🟢 | `Tooltip, createTooltipHandle` | `sdks/ui/src/components/Tooltip/Tooltip.tsx` | — | `sdks/ui/src/stories/Tooltip.stories.tsx` | Hover/focus; decorative-safe. |
-| PreviewCard | 🟢 | `PreviewCard, createPreviewCardHandle` | `sdks/ui/src/components/PreviewCard/PreviewCard.tsx` | — | `sdks/ui/src/stories/PreviewCard.stories.tsx` | Hover rich preview. |
-| Menu | 🟢 | `Menu, createMenuHandle` | `sdks/ui/src/components/Menu/Menu.tsx` | — | `sdks/ui/src/stories/Menu.stories.tsx` | Items/groups/submenus/radio. |
-| ContextMenu | 🟢 | `ContextMenu` | `sdks/ui/src/components/ContextMenu/ContextMenu.tsx` | — | `sdks/ui/src/stories/ContextMenu.stories.tsx` | Right-click; cursor position. |
-| Menubar | 🟢 | `Menubar` | `sdks/ui/src/components/Menubar/Menubar.tsx` | — | `sdks/ui/src/stories/Menubar.stories.tsx` | App-style menu bar. |
-| Toolbar | 🟢 | `Toolbar, ToolbarComponent` | `sdks/ui/src/components/Toolbar/Toolbar.tsx` | — | `sdks/ui/src/stories/Toolbar.stories.tsx` | Roving tabindex. |
-| NavigationMenu | 🟢 | `NavigationMenu` | `sdks/ui/src/components/NavigationMenu/NavigationMenu.tsx` | — | `sdks/ui/src/stories/NavigationMenu.stories.tsx` | Mega-menu popouts. |
-| Tabs | 🟢 | `Tabs` | `sdks/ui/src/components/Tabs/Tabs.tsx` | — | `sdks/ui/src/stories/Tabs.stories.tsx` | underline/chip/pill; indicator. |
-| Accordion | 🟢 | `Accordion` | `sdks/ui/src/components/Accordion/Accordion.tsx` | — | `sdks/ui/src/stories/Accordion.stories.tsx` | single/multiple; animated. |
-| Collapsible | 🟢 | `Collapsible` | `sdks/ui/src/components/Collapsible/Collapsible.tsx` | — | `sdks/ui/src/stories/Collapsible.stories.tsx` | Single-section disclosure. |
-| Toast + useToast | 🟢 | `Toast, useToast` | `sdks/ui/src/components/Toast/Toast.tsx` | — | `sdks/ui/src/stories/Toast.stories.tsx` | Imperative; success/error/warn/info. |
-| ScrollArea | 🟢 | `ScrollArea` | `sdks/ui/src/components/ScrollArea/ScrollArea.tsx` | — | `sdks/ui/src/stories/ScrollArea.stories.tsx` | Auto-hide scrollbars. |
-| Avatar | 🟢 | `Avatar` | `sdks/ui/src/components/Avatar/Avatar.tsx` | — | `sdks/ui/src/stories/Avatar.stories.tsx` | Image/initials/icon fallback. |
-| Badge | 🟢 | `Badge` | `sdks/ui/src/components/Badge/Badge.tsx` | — | `sdks/ui/src/stories/Badge.stories.tsx` | 5 intents; static. |
-| Tag | 🟢 | `Tag` | `sdks/ui/src/components/Tag/Tag.tsx` | — | `sdks/ui/src/stories/Tag.stories.tsx` | Removable chip. |
-| Icon | 🟢 | `Icon` | `sdks/ui/src/components/Icon/Icon.tsx` | — | `sdks/ui/src/stories/Icon.stories.tsx` | Governed lucide wrapper. |
-| Separator | 🟢 | `Separator` | `sdks/ui/src/components/Separator/Separator.tsx` | — | `sdks/ui/src/stories/Separator.stories.tsx` | solid/dashed/dotted. |
-| Breadcrumbs | 🟢 | `Breadcrumbs` | `sdks/ui/src/components/Breadcrumbs/Breadcrumbs.tsx` | — | `sdks/ui/src/stories/Breadcrumbs.stories.tsx` | aria-current on last. |
-| Meter | 🟢 | `Meter, meterStatus` | `sdks/ui/src/components/Meter/Meter.tsx` | — | `sdks/ui/src/stories/Meter.stories.tsx` | Semantic <meter>. |
-| Progress | 🟢 | `Progress` | `sdks/ui/src/components/Progress/Progress.tsx` | — | `sdks/ui/src/stories/Progress.stories.tsx` | Indeterminate/determinate. |
-| Skeleton | 🟢 | `Skeleton` | `sdks/ui/src/components/Skeleton/Skeleton.tsx` | — | `sdks/ui/src/stories/Skeleton.stories.tsx` | text/rounded/circular shimmer. |
-| Spinner | 🟢 | `Spinner` | `sdks/ui/src/components/Spinner/Spinner.tsx` | — | `sdks/ui/src/stories/Spinner.stories.tsx` | sr-only label; reduced-motion. |
-| Stack layout primitive | 🟢 | `Stack` | `sdks/ui/src/layouts/Stack/Stack.tsx` | — | `sdks/ui/src/stories/Stack.stories.tsx` | 1D flex; governed gap. |
-| Grid layout primitive | 🟢 | `Grid` | `sdks/ui/src/layouts/Grid/Grid.tsx` | — | `sdks/ui/src/stories/Grid.stories.tsx` | minColWidth or columns. |
-| Cluster layout primitive | 🟢 | `Cluster` | `sdks/ui/src/layouts/Cluster/Cluster.tsx` | — | `sdks/ui/src/stories/Cluster.stories.tsx` | Wrapping inline row. |
-| Container layout primitive | 🟢 | `Container` | `sdks/ui/src/layouts/Container/Container.tsx` | — | `sdks/ui/src/stories/Container.stories.tsx` | The single width authority. |
-| Split layout primitive | 🟢 | `Split` | `sdks/ui/src/layouts/Split/Split.tsx` | — | `sdks/ui/src/stories/Split.stories.tsx` | Fixed Side + fluid Main. |
-| Center layout primitive | 🟢 | `Center` | `sdks/ui/src/layouts/Center/Center.tsx` | — | `sdks/ui/src/stories/Center.stories.tsx` | Intrinsic centering. |
-| AppShell layout composition | 🟢 | `AppShell, useAppShellSidebar` | `sdks/ui/src/layouts/AppShell/AppShell.tsx` | — | `sdks/ui/src/stories/AppShell.stories.tsx` | Header/body/footer; skip-link. |
-| PageHeader layout composition | 🟢 | `PageHeader` | `sdks/ui/src/layouts/PageHeader/PageHeader.tsx` | — | `sdks/ui/src/stories/PageHeader.stories.tsx` | breadcrumbs/title/actions. |
-| EmptyState block | 🟢 | `EmptyState` | `sdks/ui/src/blocks/EmptyState/EmptyState.tsx` | — | `sdks/ui/src/stories/EmptyState.stories.tsx` | Centered empty-collection. |
-| ErrorState block | 🟢 | `ErrorState` | `sdks/ui/src/blocks/ErrorState/ErrorState.tsx` | — | `sdks/ui/src/stories/ErrorState.stories.tsx` | Intent colors; retry actions. |
-| StatCard block | 🟢 | `StatCard` | `sdks/ui/src/blocks/StatCard/StatCard.tsx` | — | `sdks/ui/src/stories/StatCard.stories.tsx` | value + delta arrow. |
-| Banner block | 🟢 | `Banner` | `sdks/ui/src/blocks/Banner/Banner.tsx` | — | `sdks/ui/src/stories/Banner.stories.tsx` | 5 intents; live-region option. |
-| DescriptionList block | 🟢 | `DescriptionList` | `sdks/ui/src/blocks/DescriptionList/DescriptionList.tsx` | — | `sdks/ui/src/stories/DescriptionList.stories.tsx` | DL/DT/DD semantics. |
-| DataTable block | 🟢 | `DataTable` | `sdks/ui/src/blocks/DataTable/DataTable.tsx` | — | `sdks/ui/src/stories/DataTable.stories.tsx` | @tanstack/react-table; sort/filter/paginate/select. |
-| Pagination block | 🟢 | `Pagination, buildPageItems` | `sdks/ui/src/blocks/Pagination/Pagination.tsx` | — | `sdks/ui/src/stories/Pagination.stories.tsx` | prev/next + numbered. |
-| FilterBar block | 🟢 | `FilterBar` | `sdks/ui/src/blocks/FilterBar/FilterBar.tsx` | — | `sdks/ui/src/stories/FilterBar.stories.tsx` | Search + active-filter chips. |
-| ListView block | 🟢 | `ListView` | `sdks/ui/src/blocks/ListView/ListView.tsx` | — | `sdks/ui/src/stories/ListView.stories.tsx` | Stacked rows; href/onClick a11y. |
-| FormSection block | 🟢 | `FormSection` | `sdks/ui/src/blocks/FormSection/FormSection.tsx` | — | `sdks/ui/src/stories/FormSection.stories.tsx` | stacked/aside; footer actions. |
-| AuthForm block | 🟢 | `AuthForm` | `sdks/ui/src/blocks/AuthForm/AuthForm.tsx` | — | `sdks/ui/src/stories/AuthForm.stories.tsx` | signIn/signUp; no bundled auth. |
-| Stepper block | 🟢 | `Stepper` | `sdks/ui/src/blocks/Stepper/Stepper.tsx` | — | `sdks/ui/src/stories/Stepper.stories.tsx` | WCAG 1.4.1 (not color-only). |
-| Hero section | 🟢 | `Hero, SectionTone` | `sdks/ui/src/sections/Hero/Hero.tsx` | — | `sdks/ui/src/stories/Hero.stories.tsx` | eyebrow/title/media; Container-wrapped. |
-| PricingTable section | 🟢 | `PricingTable` | `sdks/ui/src/sections/PricingTable/PricingTable.tsx` | — | `sdks/ui/src/stories/PricingTable.stories.tsx` | Featured tier ring + badge. |
-| FeatureGrid section | 🟢 | `FeatureGrid` | `sdks/ui/src/sections/FeatureGrid/FeatureGrid.tsx` | — | `sdks/ui/src/stories/FeatureGrid.stories.tsx` | 2/3/4 cols. |
-| Cta section | 🟢 | `Cta` | `sdks/ui/src/sections/Cta/Cta.tsx` | — | `sdks/ui/src/stories/Cta.stories.tsx` | inline/stacked; accent tone. |
-| StatsBand section | 🟢 | `StatsBand` | `sdks/ui/src/sections/StatsBand/StatsBand.tsx` | — | `sdks/ui/src/stories/StatsBand.stories.tsx` | Billboard stats. |
-| Faq section | 🟢 | `Faq` | `sdks/ui/src/sections/Faq/Faq.tsx` | — | `sdks/ui/src/stories/Faq.stories.tsx` | Built on Accordion. |
-| Footer section | 🟢 | `Footer` | `sdks/ui/src/sections/Footer/Footer.tsx` | — | `sdks/ui/src/stories/Footer.stories.tsx` | Multi-column link groups. |
-| SectionTone system | 🟢 | `SectionTone` (type) | `sdks/ui/src/sections/_tone.ts` | — | — | data-section-band + data-tone. |
-| Storybook documentation + a11y gate | 🟢 | http://127.0.0.1:6006 | `sdks/ui/.storybook/` | `sdks/ui/README.md` | `sdks/ui/src/stories/` | Sole API reference; MCP server. |
-| Tailwind v4 contract file | 🔵 | `@zeroship/ui/tailwind.css` (declared) | `sdks/ui/package.json` | `docs/decisions/2026-05-26-design-system.md` | — | Export declared; file does not exist. |
-| Atelier / Studio / Dusk themes | 🔵 | (would be themes/ThemeName) | `sdks/ui/src/styles.css` | `docs/decisions/2026-05-26-design-system.md` | — | ADR-specified; never implemented. |
+| ThemeProvider + useTheme | 🟡 | `ThemeProvider, useTheme, themes` | `packages/ui/src/theme.tsx` | — | `packages/ui/src/stories/story.css` | ADR specified 3 themes; only crystal built. |
+| Design token foundation (styles.css) | 🟢 | `import '@zeroship/ui/styles.css'` | `packages/ui/src/styles.css` | — | — | Theme-invariant; Tailwind contract file missing. |
+| Crystal theme palette | 🟢 | internal CSS ([data-theme='crystal']) | `packages/ui/src/styles.css` | — | — | Only registered theme. |
+| Button | 🟢 | `Button` | `packages/ui/src/components/Button/Button.tsx` | — | `packages/ui/src/stories/Button.stories.tsx` | 4 variants, loading, asChild, a11y guard. |
+| Input | 🟢 | `Input` | `packages/ui/src/components/Input/Input.tsx` | — | `packages/ui/src/stories/Input.stories.tsx` | outline/filled/plain; Field context. |
+| Field | 🟢 | `Field, useFieldVisualSize` | `packages/ui/src/components/Field/Field.tsx` | — | `packages/ui/src/stories/Field.stories.tsx` | Cascades required/disabled/size. |
+| Fieldset | 🟢 | `Fieldset, useFieldsetDisabledContext` | `packages/ui/src/components/Fieldset/Fieldset.tsx` | — | `packages/ui/src/stories/Fieldset.stories.tsx` | Propagates disabled to descendants. |
+| Form | 🟢 | `Form, FormActions` | `packages/ui/src/components/Form/Form.tsx` | — | `packages/ui/src/stories/Form.stories.tsx` | Server-error routing; no initialValues. |
+| Checkbox | 🟢 | `Checkbox` | `packages/ui/src/components/Checkbox/Checkbox.tsx` | — | `packages/ui/src/stories/Checkbox.stories.tsx` | Indeterminate-capable. |
+| CheckboxGroup | 🟢 | `CheckboxGroup` | `packages/ui/src/components/CheckboxGroup/CheckboxGroup.tsx` | — | `packages/ui/src/stories/CheckboxGroup.stories.tsx` | Controlled/uncontrolled multi-value. |
+| Switch | 🟢 | `Switch` | `packages/ui/src/components/Switch/Switch.tsx` | — | `packages/ui/src/stories/Switch.stories.tsx` | Field context. |
+| Radio / RadioGroup | 🟢 | `Radio, RadioGroup` | `packages/ui/src/components/Radio/Radio.tsx` | — | `packages/ui/src/stories/Radio.stories.tsx` | Horizontal/vertical. |
+| Toggle / ToggleGroup | 🟢 | `Toggle, ToggleGroup` | `packages/ui/src/components/Toggle/Toggle.tsx` | — | `packages/ui/src/stories/Toggle.stories.tsx` | Single/multiple exclusive. |
+| Select | 🟢 | `Select` | `packages/ui/src/components/Select/Select.tsx` | — | `packages/ui/src/stories/Select.stories.tsx` | Single/multiple; hidden input. |
+| Combobox | 🟢 | `Combobox` | `packages/ui/src/components/Combobox/Combobox.tsx` | — | `packages/ui/src/stories/Combobox.stories.tsx` | Typeahead; chips in multiple. |
+| Autocomplete | 🟢 | `Autocomplete` | `packages/ui/src/components/Autocomplete/Autocomplete.tsx` | — | `packages/ui/src/stories/Autocomplete.stories.tsx` | Free-text value kept as-is. |
+| NumberField | 🟢 | `NumberField` | `packages/ui/src/components/NumberField/NumberField.tsx` | — | `packages/ui/src/stories/NumberField.stories.tsx` | Stepper; min/max/step. |
+| Slider | 🟢 | `Slider` | `packages/ui/src/components/Slider/Slider.tsx` | — | `packages/ui/src/stories/Slider.stories.tsx` | Auto single/range; value badge. |
+| OtpField | 🟢 | `OtpField` | `packages/ui/src/components/OtpField/OtpField.tsx` | — | `packages/ui/src/stories/OtpField.stories.tsx` | Paste-split; keyboard nav. |
+| Card | 🟢 | `Card` | `packages/ui/src/components/Card/Card.tsx` | — | `packages/ui/src/stories/Card.stories.tsx` | header/media/footer anatomy. |
+| Dialog | 🟢 | `Dialog, createDialogHandle` | `packages/ui/src/components/Dialog/Dialog.tsx` | — | `packages/ui/src/stories/Dialog.stories.tsx` | Glass backdrop; imperative handle. |
+| AlertDialog | 🟢 | `AlertDialog` | `packages/ui/src/components/AlertDialog/AlertDialog.tsx` | — | `packages/ui/src/stories/AlertDialog.stories.tsx` | Destructive-confirm variant. |
+| Drawer | 🟢 | `Drawer` | `packages/ui/src/components/Drawer/Drawer.tsx` | — | `packages/ui/src/stories/Drawer.stories.tsx` | Slide-in from 4 edges. |
+| Popover | 🟢 | `Popover, createPopoverHandle` | `packages/ui/src/components/Popover/Popover.tsx` | — | `packages/ui/src/stories/Popover.stories.tsx` | Anchored floating panel. |
+| Tooltip | 🟢 | `Tooltip, createTooltipHandle` | `packages/ui/src/components/Tooltip/Tooltip.tsx` | — | `packages/ui/src/stories/Tooltip.stories.tsx` | Hover/focus; decorative-safe. |
+| PreviewCard | 🟢 | `PreviewCard, createPreviewCardHandle` | `packages/ui/src/components/PreviewCard/PreviewCard.tsx` | — | `packages/ui/src/stories/PreviewCard.stories.tsx` | Hover rich preview. |
+| Menu | 🟢 | `Menu, createMenuHandle` | `packages/ui/src/components/Menu/Menu.tsx` | — | `packages/ui/src/stories/Menu.stories.tsx` | Items/groups/submenus/radio. |
+| ContextMenu | 🟢 | `ContextMenu` | `packages/ui/src/components/ContextMenu/ContextMenu.tsx` | — | `packages/ui/src/stories/ContextMenu.stories.tsx` | Right-click; cursor position. |
+| Menubar | 🟢 | `Menubar` | `packages/ui/src/components/Menubar/Menubar.tsx` | — | `packages/ui/src/stories/Menubar.stories.tsx` | App-style menu bar. |
+| Toolbar | 🟢 | `Toolbar, ToolbarComponent` | `packages/ui/src/components/Toolbar/Toolbar.tsx` | — | `packages/ui/src/stories/Toolbar.stories.tsx` | Roving tabindex. |
+| NavigationMenu | 🟢 | `NavigationMenu` | `packages/ui/src/components/NavigationMenu/NavigationMenu.tsx` | — | `packages/ui/src/stories/NavigationMenu.stories.tsx` | Mega-menu popouts. |
+| Tabs | 🟢 | `Tabs` | `packages/ui/src/components/Tabs/Tabs.tsx` | — | `packages/ui/src/stories/Tabs.stories.tsx` | underline/chip/pill; indicator. |
+| Accordion | 🟢 | `Accordion` | `packages/ui/src/components/Accordion/Accordion.tsx` | — | `packages/ui/src/stories/Accordion.stories.tsx` | single/multiple; animated. |
+| Collapsible | 🟢 | `Collapsible` | `packages/ui/src/components/Collapsible/Collapsible.tsx` | — | `packages/ui/src/stories/Collapsible.stories.tsx` | Single-section disclosure. |
+| Toast + useToast | 🟢 | `Toast, useToast` | `packages/ui/src/components/Toast/Toast.tsx` | — | `packages/ui/src/stories/Toast.stories.tsx` | Imperative; success/error/warn/info. |
+| ScrollArea | 🟢 | `ScrollArea` | `packages/ui/src/components/ScrollArea/ScrollArea.tsx` | — | `packages/ui/src/stories/ScrollArea.stories.tsx` | Auto-hide scrollbars. |
+| Avatar | 🟢 | `Avatar` | `packages/ui/src/components/Avatar/Avatar.tsx` | — | `packages/ui/src/stories/Avatar.stories.tsx` | Image/initials/icon fallback. |
+| Badge | 🟢 | `Badge` | `packages/ui/src/components/Badge/Badge.tsx` | — | `packages/ui/src/stories/Badge.stories.tsx` | 5 intents; static. |
+| Tag | 🟢 | `Tag` | `packages/ui/src/components/Tag/Tag.tsx` | — | `packages/ui/src/stories/Tag.stories.tsx` | Removable chip. |
+| Icon | 🟢 | `Icon` | `packages/ui/src/components/Icon/Icon.tsx` | — | `packages/ui/src/stories/Icon.stories.tsx` | Governed lucide wrapper. |
+| Separator | 🟢 | `Separator` | `packages/ui/src/components/Separator/Separator.tsx` | — | `packages/ui/src/stories/Separator.stories.tsx` | solid/dashed/dotted. |
+| Breadcrumbs | 🟢 | `Breadcrumbs` | `packages/ui/src/components/Breadcrumbs/Breadcrumbs.tsx` | — | `packages/ui/src/stories/Breadcrumbs.stories.tsx` | aria-current on last. |
+| Meter | 🟢 | `Meter, meterStatus` | `packages/ui/src/components/Meter/Meter.tsx` | — | `packages/ui/src/stories/Meter.stories.tsx` | Semantic <meter>. |
+| Progress | 🟢 | `Progress` | `packages/ui/src/components/Progress/Progress.tsx` | — | `packages/ui/src/stories/Progress.stories.tsx` | Indeterminate/determinate. |
+| Skeleton | 🟢 | `Skeleton` | `packages/ui/src/components/Skeleton/Skeleton.tsx` | — | `packages/ui/src/stories/Skeleton.stories.tsx` | text/rounded/circular shimmer. |
+| Spinner | 🟢 | `Spinner` | `packages/ui/src/components/Spinner/Spinner.tsx` | — | `packages/ui/src/stories/Spinner.stories.tsx` | sr-only label; reduced-motion. |
+| Stack layout primitive | 🟢 | `Stack` | `packages/ui/src/layouts/Stack/Stack.tsx` | — | `packages/ui/src/stories/Stack.stories.tsx` | 1D flex; governed gap. |
+| Grid layout primitive | 🟢 | `Grid` | `packages/ui/src/layouts/Grid/Grid.tsx` | — | `packages/ui/src/stories/Grid.stories.tsx` | minColWidth or columns. |
+| Cluster layout primitive | 🟢 | `Cluster` | `packages/ui/src/layouts/Cluster/Cluster.tsx` | — | `packages/ui/src/stories/Cluster.stories.tsx` | Wrapping inline row. |
+| Container layout primitive | 🟢 | `Container` | `packages/ui/src/layouts/Container/Container.tsx` | — | `packages/ui/src/stories/Container.stories.tsx` | The single width authority. |
+| Split layout primitive | 🟢 | `Split` | `packages/ui/src/layouts/Split/Split.tsx` | — | `packages/ui/src/stories/Split.stories.tsx` | Fixed Side + fluid Main. |
+| Center layout primitive | 🟢 | `Center` | `packages/ui/src/layouts/Center/Center.tsx` | — | `packages/ui/src/stories/Center.stories.tsx` | Intrinsic centering. |
+| AppShell layout composition | 🟢 | `AppShell, useAppShellSidebar` | `packages/ui/src/layouts/AppShell/AppShell.tsx` | — | `packages/ui/src/stories/AppShell.stories.tsx` | Header/body/footer; skip-link. |
+| PageHeader layout composition | 🟢 | `PageHeader` | `packages/ui/src/layouts/PageHeader/PageHeader.tsx` | — | `packages/ui/src/stories/PageHeader.stories.tsx` | breadcrumbs/title/actions. |
+| EmptyState block | 🟢 | `EmptyState` | `packages/ui/src/blocks/EmptyState/EmptyState.tsx` | — | `packages/ui/src/stories/EmptyState.stories.tsx` | Centered empty-collection. |
+| ErrorState block | 🟢 | `ErrorState` | `packages/ui/src/blocks/ErrorState/ErrorState.tsx` | — | `packages/ui/src/stories/ErrorState.stories.tsx` | Intent colors; retry actions. |
+| StatCard block | 🟢 | `StatCard` | `packages/ui/src/blocks/StatCard/StatCard.tsx` | — | `packages/ui/src/stories/StatCard.stories.tsx` | value + delta arrow. |
+| Banner block | 🟢 | `Banner` | `packages/ui/src/blocks/Banner/Banner.tsx` | — | `packages/ui/src/stories/Banner.stories.tsx` | 5 intents; live-region option. |
+| DescriptionList block | 🟢 | `DescriptionList` | `packages/ui/src/blocks/DescriptionList/DescriptionList.tsx` | — | `packages/ui/src/stories/DescriptionList.stories.tsx` | DL/DT/DD semantics. |
+| DataTable block | 🟢 | `DataTable` | `packages/ui/src/blocks/DataTable/DataTable.tsx` | — | `packages/ui/src/stories/DataTable.stories.tsx` | @tanstack/react-table; sort/filter/paginate/select. |
+| Pagination block | 🟢 | `Pagination, buildPageItems` | `packages/ui/src/blocks/Pagination/Pagination.tsx` | — | `packages/ui/src/stories/Pagination.stories.tsx` | prev/next + numbered. |
+| FilterBar block | 🟢 | `FilterBar` | `packages/ui/src/blocks/FilterBar/FilterBar.tsx` | — | `packages/ui/src/stories/FilterBar.stories.tsx` | Search + active-filter chips. |
+| ListView block | 🟢 | `ListView` | `packages/ui/src/blocks/ListView/ListView.tsx` | — | `packages/ui/src/stories/ListView.stories.tsx` | Stacked rows; href/onClick a11y. |
+| FormSection block | 🟢 | `FormSection` | `packages/ui/src/blocks/FormSection/FormSection.tsx` | — | `packages/ui/src/stories/FormSection.stories.tsx` | stacked/aside; footer actions. |
+| AuthForm block | 🟢 | `AuthForm` | `packages/ui/src/blocks/AuthForm/AuthForm.tsx` | — | `packages/ui/src/stories/AuthForm.stories.tsx` | signIn/signUp; no bundled auth. |
+| Stepper block | 🟢 | `Stepper` | `packages/ui/src/blocks/Stepper/Stepper.tsx` | — | `packages/ui/src/stories/Stepper.stories.tsx` | WCAG 1.4.1 (not color-only). |
+| Hero section | 🟢 | `Hero, SectionTone` | `packages/ui/src/sections/Hero/Hero.tsx` | — | `packages/ui/src/stories/Hero.stories.tsx` | eyebrow/title/media; Container-wrapped. |
+| PricingTable section | 🟢 | `PricingTable` | `packages/ui/src/sections/PricingTable/PricingTable.tsx` | — | `packages/ui/src/stories/PricingTable.stories.tsx` | Featured tier ring + badge. |
+| FeatureGrid section | 🟢 | `FeatureGrid` | `packages/ui/src/sections/FeatureGrid/FeatureGrid.tsx` | — | `packages/ui/src/stories/FeatureGrid.stories.tsx` | 2/3/4 cols. |
+| Cta section | 🟢 | `Cta` | `packages/ui/src/sections/Cta/Cta.tsx` | — | `packages/ui/src/stories/Cta.stories.tsx` | inline/stacked; accent tone. |
+| StatsBand section | 🟢 | `StatsBand` | `packages/ui/src/sections/StatsBand/StatsBand.tsx` | — | `packages/ui/src/stories/StatsBand.stories.tsx` | Billboard stats. |
+| Faq section | 🟢 | `Faq` | `packages/ui/src/sections/Faq/Faq.tsx` | — | `packages/ui/src/stories/Faq.stories.tsx` | Built on Accordion. |
+| Footer section | 🟢 | `Footer` | `packages/ui/src/sections/Footer/Footer.tsx` | — | `packages/ui/src/stories/Footer.stories.tsx` | Multi-column link groups. |
+| SectionTone system | 🟢 | `SectionTone` (type) | `packages/ui/src/sections/_tone.ts` | — | — | data-section-band + data-tone. |
+| Storybook documentation + a11y gate | 🟢 | http://127.0.0.1:6006 | `packages/ui/.storybook/` | `packages/ui/README.md` | `packages/ui/src/stories/` | Sole API reference; MCP server. |
+| Tailwind v4 contract file | 🔵 | `@zeroship/ui/tailwind.css` (declared) | `packages/ui/package.json` | `docs/decisions/2026-05-26-design-system.md` | — | Export declared; file does not exist. |
+| Atelier / Studio / Dusk themes | 🔵 | (would be themes/ThemeName) | `packages/ui/src/styles.css` | `docs/decisions/2026-05-26-design-system.md` | — | ADR-specified; never implemented. |
 
 ---
 
@@ -1079,10 +1079,10 @@ completeness critic).
 
 | Feature | Status | Surface | Code | Docs | Example | Notes |
 | --- | --- | --- | --- | --- | --- | --- |
-| `@zeroship/react` — React bindings for db reactivity | 🟢 | `useQuery` / `useSuspenseQuery` / `QueryClientProvider` / `createDefaultClient` | `sdks/react/src/` | none | `sdks/react/test/{useQuery,useSuspenseQuery}.test.tsx` | Bridges `@zeroship/db` reactive-broker queries onto the React render cycle (P8b stage 4). Distinct from `@zeroship/rpc-react`. 9 unit tests. |
-| `@zeroship/eslint-config` — flat ESLint config + custom rule | 🟢 | `recommended` preset + the `no-unindexed-query` rule (D1) | `sdks/eslint-config/src/{index,rules/no-unindexed-query}.ts` | none | `sdks/eslint-config/tests/no-unindexed-query.test.ts` | Lints unindexed `env.db` queries at author time (the build-time peer of the runtime warning in §3). |
-| `@zeroship/types` — ambient TS declarations | 🟢 | published `.d.ts` (auth/db/globals/shared/zeroship) | `sdks/types/*.d.ts` | none | — | Ambient types for the `zeroship` module + SDK globals. |
-| `zeroship` — published stub package | ⚫ | the bare `zeroship` import (placeholder) | `sdks/zeroship-stub/` (name `zeroship`, `0.0.0-stub`) | none | — | Placeholder reserving the `zeroship` npm name; the real module is runtime-injected. |
+| `@zeroship/react` — React bindings for db reactivity | 🟢 | `useQuery` / `useSuspenseQuery` / `QueryClientProvider` / `createDefaultClient` | `packages/react/src/` | none | `packages/react/test/{useQuery,useSuspenseQuery}.test.tsx` | Bridges `@zeroship/db` reactive-broker queries onto the React render cycle (P8b stage 4). Distinct from `@zeroship/rpc-react`. 9 unit tests. |
+| `@zeroship/eslint-config` — flat ESLint config + custom rule | 🟢 | `recommended` preset + the `no-unindexed-query` rule (D1) | `packages/eslint-config/src/{index,rules/no-unindexed-query}.ts` | none | `packages/eslint-config/tests/no-unindexed-query.test.ts` | Lints unindexed `env.db` queries at author time (the build-time peer of the runtime warning in §3). |
+| `@zeroship/types` — ambient TS declarations | 🟢 | published `.d.ts` (auth/db/globals/shared/zeroship) | `packages/types/*.d.ts` | none | — | Ambient types for the `zeroship` module + SDK globals. |
+| `zeroship` — published stub package | ⚫ | the bare `zeroship` import (placeholder) | `packages/zeroship-stub/` (name `zeroship`, `0.0.0-stub`) | none | — | Placeholder reserving the `zeroship` npm name; the real module is runtime-injected. |
 
 ---
 

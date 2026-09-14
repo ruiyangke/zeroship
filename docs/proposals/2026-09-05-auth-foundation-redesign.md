@@ -1466,7 +1466,7 @@ real caller set was somewhere else.
   `db/migrations-ts/20260905000100_drop_app_api_key_hash.ts`, following the
   corpus convention of a new drop migration rather than an edit to an applied
   file), the create-response injection in `crates/zeroship-control/src/api.rs`,
-  and the field from the published `AppRecord` in `sdks/control/src/index.ts`.
+  and the field from the published `AppRecord` in `packages/control/src/index.ts`.
 
   **KEPT, and this is the correction.** `hash_api_key` and `validate_api_key` in
   `crates/zeroship-core/src/auth/mod.rs` are NOT api-key-only: they are the
@@ -1623,8 +1623,8 @@ derived shared secret.
   TRUE rather than being removed: the session row carries them and the assertion
   projects them.
 - `crates/zeroship-core/src/pkce.rs`, `crates/zeroship-core/src/oidc_verify.rs`,
-  `sdks/auth/src/internal/pkce.ts` and the verifier storage in
-  `sdks/auth/src/internal/transaction.ts`.
+  `packages/auth/src/internal/pkce.ts` and the verifier storage in
+  `packages/auth/src/internal/transaction.ts`.
 - `crates/zeroship-control/src/app_oauth_client.rs`,
   `crates/zeroship-control/src/oauth_grants_handlers.rs` and
   `crates/zeroship-control/src/device_handlers.rs`.
@@ -1766,7 +1766,7 @@ own.
   `scopes`. They are already in the signed cookie and in the identity header, so
   projecting them leaks no capability, and it makes `AuthClient.hasScope` capable
   of returning true - today it is constant-false, because
-  `sdks/auth/src/internal/transport.ts` reads a key the projection does not emit.
+  `packages/auth/src/internal/transport.ts` reads a key the projection does not emit.
   The bearer arm and the cookie arm become one projection function, so they
   cannot return different user objects for the same human.
 

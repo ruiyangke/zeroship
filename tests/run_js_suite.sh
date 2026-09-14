@@ -76,7 +76,7 @@ packages="$(printf '%s\n' "$clean" | grep -oP '^\S+(?= test\$)' | sort -u | wc -
 
 # TAP assertions. NOTE this covers 16 of the 21 running packages: the other five
 # (the zeroship-migrate-node addon, tests/e2e-browser, examples/db-todos,
-# examples/ssr-blog, and sdks/payments) do not emit a TAP summary line. The
+# examples/ssr-blog, and packages/payments) do not emit a TAP summary line. The
 # package count above covers all 21; this one bounds mass deletion inside the
 # 16 that report.
 tests_passed="$(printf '%s\n' "$clean" | grep -oP '# pass \K[0-9]+' | awk '{s+=$1} END {print s+0}')"

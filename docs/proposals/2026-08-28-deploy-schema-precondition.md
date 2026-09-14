@@ -50,7 +50,7 @@ writers and gave no hint that one was dead.*
 has exactly one schema-related field, `runtime_descriptor:
 Option<RuntimeDescriptorEntry>` (`crates/zeroship-bundle/src/manifest.rs:172`),
 whose `hash` is the sha256 of the `schema.runtime.json` blob
-(`sdks/vite-plugin/src/zship.ts:526-527`). Ingest validates hex format and blob
+(`packages/vite-plugin/src/zship.ts:526-527`). Ingest validates hex format and blob
 presence only (`crates/zeroship-bundle/src/unpack.rs:428-435`) and never parses
 the body.
 
@@ -61,7 +61,7 @@ own preconditions, which is the shape that cannot be checked.
 
 `manifest.runtime_descriptor.hash` is the identity because the descriptor is a
 deterministic DB-free fold of the migration set: `genTypesFromMigrations`
-(`sdks/vite-plugin/src/gen-types/index.ts`) calls `genArtifacts` **once** and
+(`packages/vite-plugin/src/gen-types/index.ts`) calls `genArtifacts` **once** and
 writes `schema.runtime.json` and `migrations.ir.json` from that single reply;
 the CLI posts the latter verbatim as the apply body
 (`crates/zeroship-cli/src/migrate.rs:139-150`). One emit, two artifacts.
@@ -317,7 +317,7 @@ satisfy.
 
 ## One invariant that exists only as prose
 
-`sdks/vite-plugin/src/gen-types/confined-ceiling.ts:20-22` states: *"the emitted
+`packages/vite-plugin/src/gen-types/confined-ceiling.ts:20-22` states: *"the emitted
 `schema.runtime.json` cannot describe a different table from the one the
 migration apply produces."* It rests on `confined-system-shape.inject.toml`
 being shared between the migration service
