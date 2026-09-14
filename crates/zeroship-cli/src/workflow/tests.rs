@@ -60,9 +60,23 @@ fn local_configuration_rejects_unknown_and_invalid_limits() {
             },
             ..LocalConfig::default()
         },
+        // A grace inside the manager transaction budget could release a hold
+        // before the dependency confirmed with it commits.
+        LocalConfig {
+            manager: ManagerConfig {
+                hold_grace_ms: 5_000,
+                ..ManagerConfig::default()
+            },
+            ..LocalConfig::default()
+        },
     ] {
         assert!(invalid.validate().is_err());
     }
+    let valid: LocalConfig = toml::from_str("[manager]\nhold_grace_ms = 5001").unwrap();
+    assert_eq!(
+        valid.validate().unwrap().manager_options().hold_grace,
+        Duration::from_millis(5_001)
+    );
 }
 
 fn publish(root: &Path, version: &str, cooldown: &str) -> PathBuf {
