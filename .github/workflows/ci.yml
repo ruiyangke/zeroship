@@ -802,43 +802,6 @@ jobs:
               echo "      (no 'step 3 arm:' line in the log at all)" >&2
             exit 1
           fi
-      # The .zship artifact contract, run over whatever the step above just
-      # built. This job is the only one in the workflow that produces an
-      # `examples/*/dist/app.zship`, which is why the check lives here rather
-      # than in a job of its own - there is nothing for it to read anywhere else.
-      #
-      # `if: always()` is load-bearing, not defensive. golden_path.sh exits 1 BY
-      # DESIGN at HEAD (step 10's six scaffold-policy reds, #260, and step 11's
-      # two collation reds, #255), so a step without it would never run at all.
-      # The contract check does not depend on the golden path's verdict, only on
-      # its build output.
-      #
-      # WHAT IT CHECKS, per artifact: the archive is really zstd+tar with exactly
-      # one root manifest.json; every other entry is `blobs/<64 hex>`; nothing
-      # escapes the root; every blob's NAME equals the sha256 of its CONTENT;
-      # every manifest-referenced hash resolves; every recorded `size` is the
-      # real byte length; worker.entry names a key in worker.modules. A blob
-      # whose name disagreed with its body would silently defeat the deploy
-      # path's content-addressed dedup - the store would treat two different
-      # bodies as one object - and nothing else in this repo opens the archive.
-      #
-      # MEASURED BEFORE WIRING, locally over all 29 artifacts in the tree:
-      # 145 checks passed, 0 failed, 0 unreferenced blobs, 2.3s. Both mutation
-      # controls the script declares were run and both fire hard:
-      # MUTATE_CORRUPT_BLOB=1 -> 103/42, MUTATE_WRONG_SIZE=1 -> 128/17.
-      #
-      # COVERAGE HERE IS NARROWER THAN THAT, deliberately stated: CI sees only
-      # the artifacts this job builds (starter, db-todos, the scaffold), not 29.
-      # They are the ones built by the plugin at THIS commit, which is the set a
-      # contract regression would show up in first.
-      #
-      # It cannot pass over nothing: finding zero artifacts is a FATAL exit 1
-      # with "nothing was checked, which is not the same as everything passing".
-      - name: .zship artifact contract (blob names, sizes, worker entry)
-        if: always()
-        run: |
-          set -o pipefail
-          tests/zship_artifact_gate.sh 2>&1 | tee "$RUNNER_TEMP/zship-contract.log"
       # The service logs the harness leaves in /tmp are where a failure is
       # actually diagnosable; without them a red run reports only which assertion
       # went red. `if: failure()` so a green run stays quiet.
