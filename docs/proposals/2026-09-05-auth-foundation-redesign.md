@@ -1353,17 +1353,16 @@ crates, each pinned by a test asserting a substring of itself.
 
 **F15. Every forced-RLS policy in the corpus binds something.**
 
-*Mechanism:* a gate arm over `db/migrations-ts/`: for every table with forced
-RLS, require at least one role that lacks BYPASSRLS at its final state across the
-whole corpus AND holds a grant on that table.
+*Mechanism:* apply the platform migrations to owned PostgreSQL, connect through
+the same non-exempt role used by the request path, set one tenant identity, and
+verify that rows belonging to another tenant cannot be read or written. Query
+the catalog to prove the role lacks BYPASSRLS and holds the intended table
+privileges before making the behavior assertion.
 
-*Red:* the new `rls_binding_gate.sh` under `tests/`. It goes red today on the
-spend and secrets family, and it would have gone red the day
-`db/migrations-ts/20260818000200_worker_database_authority.ts` gave the worker
-BYPASSRLS - a one-line attribute change whose blast radius nothing currently
-reports. **This is the highest-leverage new instrument in the design**, because it
-mechanises the whole defect class for a family at once and counts nothing, so it
-cannot go stale.
+*Red:* a native integration test that changes only the session tenant identity
+and observes the allowed and denied paths through the real role. A hand-written
+model of migration operations or SQL privilege syntax is not evidence that
+PostgreSQL enforces the policy.
 
 **F16. The one auth path taking an attacker-supplied tenant key is
 database-fenced.**
@@ -1821,12 +1820,12 @@ Each step is independently landable and ordered by value delivered per unit of
 disruption. Each names the RED TEST that fails before and passes after. A
 **premise** is a test that must be green BEFORE the step begins.
 
-**Step 0 (premise for everything after step 3).** Land `rls_binding_gate.sh`
-under `tests/` and run it as a measurement. It goes red today. Do not delete a
-single RLS policy before this gate exists and its verdict per table is recorded.
-*Red test:* the gate itself, red on the spend and secrets family and green on the
-session, anchor and identity tables - which is the evidence that those are live
-fences and the others are not.
+**Step 0 (premise for everything after step 3).** Add the native role-scoped
+PostgreSQL test described by F15 with the identity split that makes the policy a
+real boundary. Do not retain or add a policy whose production role cannot make
+the allowed and denied cases pass.
+*Red test:* the request role can read or write a row belonging to a different
+tenant after its transaction-local tenant identity is set.
 
 **Step 1. Delete what binds nothing.** `check_api_key` and the api-key columns,
 `identity_bridge`, the gateway's `sessions::validate`, `jwk_key_state`, the

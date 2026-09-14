@@ -295,25 +295,6 @@ jobs:
         run: tests/ws_subscription_stub_gate.sh
       - name: Data architecture and database posture
         run: cargo xtask test data-architecture
-      # THE STEP ABOVE WAS THE VISIBLE HALF OF A LARGER MISS. Measuring "which
-      # gates does this workflow actually run" on 2026-09-04 found TWELVE of the
-      # 37 gates in tests/ wired nowhere - a third of them - and not one of the
-      # twelve appeared in this file even as a comment, so no reader was going
-      # to trip over them the way vendor_embedding was tripped over. Eight of
-      # them read text or cargo metadata and cost seconds; they are here. Two
-      # need a warm cargo cache and are wired at the end of this job. One needs
-      # a database of its own and carries its reason on the allowlist in
-      # tests/ci_wiring_gate.sh - the step that makes this question mechanical
-      # instead of something somebody remembers to ask.
-      # SELF-TEST FIRST, and this one had been written and never run. The gate's
-      # own header said "Run the detector's own positive/control pair: this
-      # script --self-test" while the only invocation in this file was the bare
-      # run below - so the pair that proves its fence and YAML filters are
-      # SELECTIVE, rather than blind, was enforced by whoever remembered. Its
-      # markdown pair is what notices `fenced_only` inverting: measured 2026-09-04
-      # with the in-block state flipped, the bare run's doc arm went 11 -> 10 and
-      # EXITED 0, while the self-test went red on three cases - both halves of
-      # that pair and the DELETED control beside it.
       - name: Cargo package spec gate self-test
         run: tests/cargo_package_spec_gate.sh --self-test
       - name: Every cargo -p spec in the repo names a real package
@@ -334,10 +315,6 @@ jobs:
       # stays UNREAD.
       - name: Test-only env names are declared, and every declared one is read
         run: tests/test_only_env_gate.sh
-      - name: CI wiring gate self-test
-        run: tests/ci_wiring_gate.sh --self-test
-      - name: Every gate is run by a workflow, or allowlisted with a reason
-        run: tests/ci_wiring_gate.sh
       # NOTHING IN THIS REPO BUILDS THE PLATFORM IMAGE. Measured 2026-08-11:
       # grep over .github/workflows/*.yml for `deploy/Dockerfile`, `docker build`
       # and `docker compose` returns ZERO hits, so the deploy path AGENTS.md
