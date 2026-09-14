@@ -13,6 +13,7 @@
     "@zeroship/workflows": "workspace:*"
   },
   "devDependencies": {
+    "@zeroship/server": "workspace:*",
     "@zeroship/types": "workspace:*",
     "typescript": "catalog:",
     "vite": "catalog:",
