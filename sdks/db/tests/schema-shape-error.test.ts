@@ -15,7 +15,7 @@
  */
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { t, schema, TypeBuilder } from "@zeroship/db";
+import { t, schema, TypeBuilder } from "../src/index.js";
 import { installSchemaForTest } from "./_install-helper.js";
 import type { NativeDb } from "../src/native.js";
 

@@ -16,7 +16,7 @@ function isDrainableIdLoader(value: unknown): value is Pick<IdLoader<LoaderRow>,
 
 function requireTransactionStateCarrier(value: unknown): TransactionStateCarrier {
   if (value === null || typeof value !== "object") {
-    throw new Error("@zeroship/db/internal: expected a Collection transaction-state carrier.");
+    throw new Error("@zeroship/db: expected a Collection transaction-state carrier.");
   }
   const carrier = value as {
     _idLoader?: unknown;
@@ -26,7 +26,7 @@ function requireTransactionStateCarrier(value: unknown): TransactionStateCarrier
     carrier._idLoader !== undefined &&
     !isDrainableIdLoader(carrier._idLoader)
   ) {
-    throw new Error("@zeroship/db/internal: transaction-state carrier has a non-drainable _idLoader.");
+    throw new Error("@zeroship/db: transaction-state carrier has a non-drainable _idLoader.");
   }
   return carrier as TransactionStateCarrier;
 }

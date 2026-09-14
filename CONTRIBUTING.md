@@ -47,12 +47,13 @@ and ports declared by `deploy/compose/docker-compose.yml`; Docker is required.
 git submodule update --init third_party/zero-migrate
 ```
 
-**Build the SDKs before the Rust workspace.** The DB adapter crate embeds
-`sdks/db/dist/internal.js`, so `pnpm build` must run before `cargo build`:
+**Build the JavaScript packages before the Rust workspace.** The data V8 crate
+embeds `crates/zeroship-data-v8/dist/adapter.js`, so `pnpm build` must run before
+`cargo build`:
 
 ```
 pnpm install
-pnpm build            # builds DB before the Rust-embedded adapter and then the SDK workspace
+pnpm build            # builds the public DB SDK, host adapter, and remaining packages
 cargo build --workspace
 ```
 

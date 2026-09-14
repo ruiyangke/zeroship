@@ -18,14 +18,16 @@ export type { WithRetryOptions } from "./with-retry";
 
 export { defineMaskPolicy } from "./policy";
 export type { MaskPolicy } from "./policy";
+export { subscribe } from "./subscribe";
+export type { Subscription, SubscriptionEvent } from "./subscribe";
 
 // Reactive queries.
 export type { LiveQuery, LiveOptions } from "./live";
 export type { NativeCollection } from "./native";
 
 // Types — `Db`, `TxCollection`, `TxQuery`, `Collections`, `DbExtensions`,
-// `TransactionOptions`, `SchemaInput` are user-facing. Framework-internal
-// installation helpers remain private to this package.
+// `TransactionOptions`, `SchemaInput` are user-facing. Host installation
+// belongs to zeroship-data-v8 and is absent from this package surface.
 export type { Db, Collections, TransactionDb, DbExtensions, TxCollection, TxQuery, TransactionOptions, SchemaInput, SchemaShape, RowOf, RowInputOf } from "./db-types";
 export type { PaginationResult } from "./query";
 export type { Decimal, FieldDef, FieldStorage, FieldDefaultValue, PlainObject, Result, Row, RowInput, UpsertOptions, ColumnAssignment, UpdateExpression, Filter, SortableField, DistinctField, VectorField, GeoField, SortSpec, SortInput, SelectableField, SelectSpec, SelectInput, NamingStrategy, SchemaOptions, InferSchema, InferUnion, InferFieldDef, IsolationLevel, Id, IdValue, RowId, FkAction, RefOptions, InferRow, InferRowInput, InferId, MaskKind, Classification, MaskOpts, MaskedValueRepr, MaskedValue, Actor, NamedIndexSpec, RelationField, RelationName, ExactWithSpec, WithRelations, WithSpec } from "./types";

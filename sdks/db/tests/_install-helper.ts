@@ -1,7 +1,7 @@
 /**
  * Test-only adapter that stands in for the descriptor build step.
  *
- * `installSchema` is supplied by the DB internal entry and takes its
+ * `installSchema` is supplied by the crate-owned test adapter and takes its
  * collections exclusively from the runtime schema descriptor.
  * In production the toolchain folds committed migrations into that
  * descriptor before boot.
@@ -18,22 +18,12 @@ import {
   normalizeSchema,
   type InstallSchemaOptions,
   type RuntimeSchemaDescriptor,
-} from "@zeroship/db/internal";
-// `SchemaBuilder`/`Db`/`SchemaInput` come from the PUBLISHED `@zeroship/db`
-// specifier, not raw `../src/...`, because callers build their schemas via
-// `schema(...)` imported the same way (`import { schema, t } from
-// "@zeroship/db"`). `SchemaBuilder` carries a module-private `unique
-// symbol` brand (see src/types.ts) — importing it from a second,
-// independently-compiled declaration site (raw src vs. the package's
-// bundled dist) makes it a nominally DIFFERENT type even though the
-// runtime class is identical, so `declared instanceof SchemaBuilder`
-// below would silently mismatch the class `schema(...)` actually
-// constructs, and `Db<T>`'s `SchemaInput` bound would reject those same
-// schema() values at the type layer. Importing all three from the
-// published entry keeps this helper on the same module instance as
-// every test file that calls `schema(...)`.
-import { SchemaBuilder, t } from "@zeroship/db";
-import type { Db, SchemaInput } from "@zeroship/db";
+} from "../../../crates/zeroship-data-v8/js/testing.js";
+// Use the source entry throughout SDK unit tests so branded builders and the
+// crate-owned adapter resolve one implementation instance. The separate
+// package-surface test exercises the compiled public artifact.
+import { SchemaBuilder, t } from "../src/index.js";
+import type { Db, SchemaInput } from "../src/index.js";
 import type { NativeDb } from "../src/native.js";
 
 export const generatedSchema = {

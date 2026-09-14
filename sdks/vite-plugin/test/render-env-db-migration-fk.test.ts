@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { resolve } from "node:path";
 import ts from "typescript";
 import * as sdk from "@zeroship/db";
-import { normalizeSchema } from "@zeroship/db/internal";
+import { normalizeSchema } from "../../../crates/zeroship-data-v8/js/testing.js";
 import { renderGeneratedEnvDb, type RuntimeDescriptor } from "../src/gen-types/render-env-db.js";
 import { fieldDefToDto } from "../src/gen-types/manual.js";
 
