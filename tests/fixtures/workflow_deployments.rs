@@ -66,6 +66,9 @@ pub struct Deployments {
     pub source: Arc<dyn BlobStore>,
     pub database: Database,
     pub ledger: DeploymentHolds,
+    /// The local platform file holding this catalog, for queues that hold
+    /// deployments through it.
+    pub platform: zeroship_workflow_manager::local::LocalPlatform,
 }
 impl Deployments {
     pub async fn new() -> Self {
@@ -78,11 +81,10 @@ impl Deployments {
         source: Arc<dyn BlobStore>,
     ) -> Self {
         let path = directory.path().join("platform.sqlite");
-        let ledger = zeroship_workflow_manager::local::LocalPlatform::open(&path)
+        let platform = zeroship_workflow_manager::local::LocalPlatform::open(&path)
             .await
-            .unwrap()
-            .deployments()
-            .clone();
+            .unwrap();
+        let ledger = platform.deployments().clone();
         let database = Database::connect(
             DbBinding::new(
                 "platform",
@@ -103,6 +105,7 @@ impl Deployments {
             source,
             database,
             ledger,
+            platform,
         }
     }
     pub fn client(&self, app: &AppId) -> OwnedClient {
