@@ -736,19 +736,11 @@ required now, like Postgres, for the same reason
 `PG_TEST_URL`
 
 `ZEROSHIP_SESSION_SECRET`, `ZEROSHIP_SESSION_SECRET_PREV` and
-`ZEROSHIP_SESSION_NONCE_CAPACITY` were on that list until 2026-09-04 and
-nothing read any of them. They configured the SQLite session minter, which went
-with the HMAC session anchor the operator deleted on 2026-08-27; the names
-outlived it here and in `tests/test_only_env_gate.sh`'s inventory, where arm 2
-had been red for a week because that gate was not wired into CI.
+`ZEROSHIP_SESSION_NONCE_CAPACITY` previously configured the deleted SQLite
+session minter. They were removed when their readers disappeared.
 
-`ZEROSHIP_NET_TEST_DNS_HANG_HOST` and `ZEROSHIP_NET_TEST_DNS_HANG_MS` were on
-that list until 2026-08-20 and NOTHING READ EITHER ONE. They appeared in this
-file and in one comment in `crates/zeroship-runtime/src/transport/egress.rs` that cites
-the pair as an analogy; no reader, no setter, in any language. A list of live
-names that has stopped being live reads exactly like a correct one, which is
-why `tests/test_only_env_gate.sh` arm 2 now checks this section's claim against
-the tree rather than leaving it to a reader.
+`ZEROSHIP_NET_TEST_DNS_HANG_HOST` and `ZEROSHIP_NET_TEST_DNS_HANG_MS` were
+removed after their readers disappeared.
 
 CI also sets `PG_CONTAINER` `PG_HOST` `PG_PORT` `PG_USER` `PG_PASS`
 `POSTGRES_USER` `POSTGRES_PASSWORD` `ZS_FRESHNESS_STRICT`.
