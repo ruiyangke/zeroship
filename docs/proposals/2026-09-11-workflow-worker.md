@@ -222,8 +222,9 @@ that serializes with enrollments in flight, so a revoked unit cannot restore
 authority by enrolling a fresh identity; a replacement unit needs a newly
 provisioned enroller. Retiring a single instance is attribution and hygiene,
 not a boundary against a process that still holds its unit's key, so
-revocation for cause targets the enroller. Observed liveness never writes
-enrollment status.
+revocation for cause targets the enroller. A worker that exits gracefully
+retires its own instance after its server drains; observed liveness never
+writes enrollment status.
 
 Every enrollment reader reads the authoritative row: Control on each internal
 request, the manager at ingress and again after lock waits and before commit,
@@ -243,10 +244,26 @@ enroller cascades to Control, the manager and the CDC relay while a sibling
 unit stays active, the revocation serializes with a concurrent enrollment on
 the enroller row lock, and a lost-reply retry returns the same instance.
 
-**Implementation boundary:** the worker still loads the shared role key, and
-Control has no startup import of enroller keys yet. Production startup
-registration, consumer wiring, zone eligibility and capacity activation remain
-cutover work.
+**Implementation boundary:** a worker loads only its deployment unit's enroller
+credential (`worker.enroller_file`, the enroller id and key in one document)
+and spends it on enrolment; no process holds a `svc/worker` role key, the peer
+document publishes none, and Control refuses a `svc/worker` or
+`svc/worker-enroller` assertion minted at role arity. Control imports
+enrollers at startup from `control.worker_enrollers_file`: it inserts unknown
+enrollers, never reactivates a revoked one, and refuses a file that conflicts
+with a recorded enroller without writing. `zeroship dev init` provisions the
+host's enroller and the import file, `zeroship dev enroller` adds a
+deployment unit, compose mounts both, and `docs/runbooks/worker-enrollers.md`
+holds the operator procedure, revocation included. A gracefully stopped worker
+retires its own instance through `CONTROL_WORKER_RETIRE`. The worker's
+version poll and the `env.workflows` HTTP backend still authenticate with the
+shared control key rather than a worker credential, so revoking a unit does
+not take that credential from a process that already holds it; the poll moves
+to the instance-authenticated `CONTROL_VERSIONS` grant and the backend goes
+with the workflow-server cutover. Production startup registration, consumer
+wiring, zone eligibility (including the foreign key from
+`worker_enrollers.execution_zone_id`) and capacity activation remain cutover
+work.
 
 ## Policy bindings and authenticated leases
 
