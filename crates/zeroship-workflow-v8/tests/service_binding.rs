@@ -12,8 +12,8 @@ use zeroship_runtime::{
 use zeroship_workflow::{
     operations::{RunState, StartOptions},
     service::{
-        AppPolicy, AppWorkflows, DeployRegistration, HostPolicies, PolicySnapshot, RequestId,
-        WorkerIdentity, WorkflowService,
+        runner::ready::ReadyApps, AppPolicy, AppWorkflows, DeployRegistration, HostPolicies,
+        PolicyBinding, PolicySnapshot, RequestId, WorkerIdentity, WorkflowService,
     },
     WorkflowExecution,
 };
@@ -24,6 +24,7 @@ struct Fixture {
     service: WorkflowService,
     app: AppWorkflows,
     other: AppWorkflows,
+    bindings: [PolicyBinding; 2],
 }
 impl Fixture {
     async fn new() -> Self {
@@ -72,7 +73,23 @@ impl Fixture {
             app,
             other,
             service,
+            bindings,
         }
+    }
+
+    /// A request isolate whose `env.workflows` resolves published backends.
+    fn ready_runtime(&self, apps: &ReadyApps, identity: &AppId, source: &str) -> Runtime {
+        zeroship_runtime::init_v8();
+        Runtime::builder()
+            .modules(vec![ModuleEntry {
+                specifier: "index.js".into(),
+                source: source.into(),
+            }])
+            .plugins(vec![Arc::new(WorkflowBinding::ready(apps.clone()))])
+            // Mutable input naming the other app must not select its backend.
+            .env_vars([("APP_ID".into(), self.other.app_id().as_str().to_owned())].into())
+            .app_id(identity.clone())
+            .build()
     }
 
     fn runtime(&self, app: &AppWorkflows, identity: Option<AppId>, source: &str) -> Runtime {
@@ -234,6 +251,50 @@ async fn mismatched_or_missing_host_identity_rejects_before_creator_evaluation()
         runtime.exit_isolate();
         runtime.shutdown().await;
     }
+}
+
+#[compio::test]
+async fn ready_binding_reaches_only_the_published_backend_of_its_runtime_identity() {
+    let fixture = Fixture::new().await;
+    let apps = ReadyApps::default();
+    let identity = fixture.app.app_id().clone();
+    let source = r"
+        export default { async fetch(_request, env) {
+            try {
+                const run = await env.workflows.Example.start({input:{secret:'app-a'}});
+                return Response.json({id:run.id});
+            } catch (error) { return Response.json({code:error.code}); }
+        }};
+    ";
+    let refused = json!({"code":"workflow_unavailable"});
+    // Nothing published: a retryable refusal rather than any fallback.
+    assert_eq!(
+        fetch(fixture.ready_runtime(&apps, &identity, source)).await,
+        refused
+    );
+    // Another app's published backend never serves this identity, whatever
+    // the mutable environment names.
+    apps.install(fixture.other.clone().into_backend(1024).unwrap());
+    assert_eq!(
+        fetch(fixture.ready_runtime(&apps, &identity, source)).await,
+        refused
+    );
+    apps.install(fixture.app.clone().into_backend(1024).unwrap());
+    let started = fetch(fixture.ready_runtime(&apps, &identity, source)).await;
+    let run = started["id"].as_str().expect("a published backend starts runs");
+    assert_eq!(
+        fixture.app.status(run).await.unwrap().state,
+        RunState::Queued
+    );
+    assert!(fixture.other.status(run).await.is_err());
+    // Retiring the other app's generation leaves this one published.
+    apps.retire(&fixture.bindings[1]);
+    assert!(fetch(fixture.ready_runtime(&apps, &identity, source)).await["id"].is_string());
+    apps.retire(&fixture.bindings[0]);
+    assert_eq!(
+        fetch(fixture.ready_runtime(&apps, &identity, source)).await,
+        refused
+    );
 }
 
 #[path = "support/orm.rs"]

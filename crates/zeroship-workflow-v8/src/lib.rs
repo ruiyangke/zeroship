@@ -3,7 +3,8 @@
 //! `WorkflowBinding::build_instance` mints a native `env.workflows` namespace
 //! per isolate. Each namespace owns an app-scoped Rust backend; credentials
 //! remain in the host. Service bindings validate the immutable runtime identity
-//! before evaluating app code.
+//! before evaluating app code. Ready bindings resolve the backend a workflow
+//! host published for the isolate's own app, on every call.
 
 mod error;
 mod executor;
@@ -16,9 +17,8 @@ pub use loader::AppRuntimeLoader;
 use std::sync::Arc;
 
 use zeroship_runtime::plugin::{NativePlugin, NativeRegistrar};
-use zeroship_workflow::backend::{HttpWorkflowBackend, SharedWorkflowBackend};
-
-use zeroship_workflow::WorkflowClientConfig;
+use zeroship_workflow::backend::SharedWorkflowBackend;
+use zeroship_workflow::service::runner::ready::ReadyApps;
 
 pub use v8_class::{is_excluded_workflow_property, mint_workflows};
 
@@ -27,9 +27,8 @@ enum WorkflowBackendFactory {
     Service {
         backend: Arc<zeroship_workflow::service::AppBackend>,
     },
-    Http {
-        control_url: String,
-        control_key: String,
+    Ready {
+        apps: ReadyApps,
     },
 }
 
@@ -49,30 +48,13 @@ impl WorkflowBinding {
         }
     }
 
+    /// Bind each isolate to the backend a workflow host published for the
+    /// runtime's own app. An isolate of an app that is unknown or not ready
+    /// on this process receives a retryable refusal from every call.
     #[must_use]
-    pub fn new(control_url: impl Into<String>, control_key: impl Into<String>) -> Self {
+    pub fn ready(apps: ReadyApps) -> Self {
         Self {
-            backend: WorkflowBackendFactory::Http {
-                control_url: control_url.into(),
-                control_key: control_key.into(),
-            },
-        }
-    }
-
-    fn build_backend(&self, app_id: &str) -> SharedWorkflowBackend {
-        match &self.backend {
-            WorkflowBackendFactory::Service { backend } => backend.clone(),
-            WorkflowBackendFactory::Http {
-                control_url,
-                control_key,
-            } => {
-                let token = zeroship_workflow::app_scoped_token(control_key, app_id);
-                Arc::new(HttpWorkflowBackend::new(WorkflowClientConfig::new(
-                    control_url.clone(),
-                    app_id.to_string(),
-                    token,
-                )))
-            }
+            backend: WorkflowBackendFactory::Ready { apps },
         }
     }
 }
@@ -108,8 +90,19 @@ impl NativePlugin for WorkflowBinding {
     fn build_instance<'s>(
         &self,
         scope: &mut v8::PinScope<'s, '_>,
-        app_id: &str,
+        _app_id: &str,
     ) -> Option<v8::Local<'s, v8::Object>> {
-        mint_workflows(scope, self.build_backend(app_id))
+        let backend: SharedWorkflowBackend = match &self.backend {
+            WorkflowBackendFactory::Service { backend } => backend.clone(),
+            // The immutable identity the runtime was built with selects the
+            // app; creator-visible environment values cannot.
+            WorkflowBackendFactory::Ready { apps } => {
+                let Some(app) = zeroship_runtime::plugin::runtime_app_identity(scope) else {
+                    return None;
+                };
+                apps.backend(app)
+            }
+        };
+        mint_workflows(scope, backend)
     }
 }

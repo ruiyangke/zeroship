@@ -13,6 +13,7 @@ use zeroship_runtime::plugin::NativePlugin;
 use zeroship_runtime::runtime::{Runtime, RuntimeLimits};
 use zeroship_runtime::{EnvSnapshot, ModuleEntry, NetPolicy};
 use zeroship_storage::StorageBackendConfig;
+use zeroship_workflow::service::runner::ready::ReadyApps;
 
 #[cfg(test)]
 pub(crate) mod fixture;
@@ -95,11 +96,10 @@ thread_local! {
     /// or `S3` (S3/R2/MinIO — inherently shared). When `None`, the `storage`
     /// namespace is absent.
     static STORAGE_BACKEND: RefCell<Option<StorageBackendConfig>> = const { RefCell::new(None) };
-    /// Control-plane endpoint and raw control key used only to derive
-    /// app-scoped workflow tokens in `WorkflowBinding::build_instance`.
-    /// The raw key stays in Rust process memory and is never exposed to V8.
-    static CONTROL_URL: RefCell<Option<String>> = const { RefCell::new(None) };
-    static CONTROL_KEY: RefCell<Option<String>> = const { RefCell::new(None) };
+    /// The app backends the process's workflow host has made ready. Every
+    /// isolate's `env.workflows` resolves its own app here on each call, so an
+    /// unknown or unready app is refused and nothing reaches Control.
+    static WORKFLOWS: RefCell<Option<ReadyApps>> = const { RefCell::new(None) };
     /// The PROCESS-WIDE usage meter, cloned into every ntex worker thread's
     /// thread-local on `init_cache`. Metering is INFRASTRUCTURE: there is no
     /// creator-facing `env.meter` namespace. Instead `create_plugins` binds
@@ -120,8 +120,9 @@ thread_local! {
 /// The real multi-node stack SHOULD set all of them so deployed apps get
 /// the complete `env.{db,kv,storage,auth}` kernel.
 pub struct KernelConfig {
-    pub control_url: String,
-    pub control_key: String,
+    /// Ready app backends published by the process's workflow host. With no
+    /// host the registry stays empty and every `env.workflows` call is refused.
+    pub workflows: ReadyApps,
     /// The ONE process-wide `env.db` service, built in `main` before any
     /// worker thread exists. `None` when no database is configured, in which
     /// case the `db` namespace is simply absent.
@@ -138,7 +139,6 @@ pub struct KernelConfig {
 impl std::fmt::Debug for KernelConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("KernelConfig")
-            .field("control_key", &"[REDACTED]")
             .field("db_configured", &self.db_service.is_some())
             .field("kv_configured", &self.kv_store.is_some())
             .field("storage_configured", &self.storage_backend.is_some())
@@ -165,8 +165,7 @@ pub fn init_cache(max_size: usize, max_pinned_isolates_per_app: usize, kernel: K
     if let Some(backend) = kernel.storage_backend {
         STORAGE_BACKEND.with(|s| *s.borrow_mut() = Some(backend));
     }
-    CONTROL_URL.with(|u| *u.borrow_mut() = Some(kernel.control_url));
-    CONTROL_KEY.with(|k| *k.borrow_mut() = Some(kernel.control_key));
+    WORKFLOWS.with(|w| *w.borrow_mut() = Some(kernel.workflows));
     METER.with(|m| *m.borrow_mut() = Some(kernel.meter));
     // Every input `plugin_set` builds from was just replaced, so any cached
     // prototype set is now stale. Clearing here rather than trusting
@@ -286,12 +285,8 @@ fn create_plugins() -> Vec<Arc<dyn NativePlugin>> {
             }
         }
     }
-    if let Some(control_url) = CONTROL_URL.with(|u| u.borrow().clone()) {
-        let control_key = CONTROL_KEY.with(|k| k.borrow().clone()).unwrap_or_default();
-        plugins.push(Arc::new(zeroship_workflow_v8::WorkflowBinding::new(
-            control_url,
-            control_key,
-        )));
+    if let Some(apps) = WORKFLOWS.with(|w| w.borrow().clone()) {
+        plugins.push(Arc::new(zeroship_workflow_v8::WorkflowBinding::ready(apps)));
     }
     plugins.push(Arc::new(zeroship_runtime::auth::AuthPlugin));
     plugins
@@ -1093,8 +1088,7 @@ mod tests {
                 4,
                 4,
                 KernelConfig {
-                    control_url: "http://127.0.0.1:1".to_string(),
-                    control_key: "test-control-key".to_string(),
+                    workflows: ReadyApps::default(),
                     db_service: Some(service),
                     kv_store: None,
                     storage_backend: None,
@@ -1198,8 +1192,7 @@ mod tests {
         }
         let service = fixture::database_service("postgres://localhost/zs_unused_shared");
         let kernel = |service: Arc<zeroship_data_v8::service::DbService>| KernelConfig {
-            control_url: "http://127.0.0.1:1".to_string(),
-            control_key: "test-control-key".to_string(),
+            workflows: ReadyApps::default(),
             db_service: Some(service),
             kv_store: None,
             storage_backend: None,
@@ -1255,8 +1248,7 @@ mod tests {
     fn plugin_set_is_shared_per_thread_and_invalidated_by_init_cache() {
         std::thread::spawn(|| {
             let kernel = || KernelConfig {
-                control_url: "http://127.0.0.1:1".to_string(),
-                control_key: "test-control-key".to_string(),
+                workflows: ReadyApps::default(),
                 db_service: Some(fixture::database_service("postgres://localhost/zs_unused")),
                 kv_store: None,
                 storage_backend: None,
@@ -1307,8 +1299,7 @@ mod tests {
     fn re_installing_the_kernel_without_a_database_clears_the_db_namespace() {
         std::thread::spawn(|| {
             let with_db = || KernelConfig {
-                control_url: "http://127.0.0.1:1".to_string(),
-                control_key: "test-control-key".to_string(),
+                workflows: ReadyApps::default(),
                 db_service: Some(fixture::database_service("postgres://localhost/zs_unused_sticky")),
                 kv_store: None,
                 storage_backend: None,
@@ -1367,8 +1358,7 @@ mod tests {
                 4,
                 4,
                 KernelConfig {
-                    control_url: "http://127.0.0.1:1".to_string(),
-                    control_key: "test-control-key".to_string(),
+                    workflows: ReadyApps::default(),
                     db_service: Some(fixture::database_service("postgres://localhost/zs_unused")),
                     kv_store: Some(
                         zeroship_kv::KvStore::open(&zeroship_kv::KvConfig::Redis {
@@ -1407,8 +1397,7 @@ mod tests {
     fn replacing_kernel_without_kv_removes_its_cached_binding() {
         std::thread::spawn(|| {
             let kernel = |kv_store| KernelConfig {
-                control_url: "http://127.0.0.1:1".to_string(),
-                control_key: String::new(),
+                workflows: ReadyApps::default(),
                 db_service: None,
                 kv_store,
                 storage_backend: None,
@@ -1440,8 +1429,7 @@ mod tests {
                 4,
                 4,
                 KernelConfig {
-                    control_url: "http://127.0.0.1:1".to_string(),
-                    control_key: String::new(),
+                    workflows: ReadyApps::default(),
                     db_service: None,
                     kv_store: None,
                     storage_backend: None,
@@ -1708,8 +1696,7 @@ mod tests {
                     4,
                     4,
                     KernelConfig {
-                        control_url: "http://127.0.0.1:1".to_string(),
-                        control_key: String::new(),
+                        workflows: ReadyApps::default(),
                         db_service: None,
                         kv_store: None,
                         storage_backend: None,
@@ -1772,8 +1759,7 @@ mod tests {
                 zeroship_runtime::init::init_v8();
                 let app_id = AppId::mint();
                 init_cache(4, 4, KernelConfig {
-                    control_url: "http://127.0.0.1:1".into(),
-                    control_key: String::new(),
+                    workflows: ReadyApps::default(),
                     db_service: None,
                     kv_store: None,
                     storage_backend: None,
@@ -1833,8 +1819,7 @@ mod tests {
                     4,
                     4,
                     KernelConfig {
-                        control_url: "http://127.0.0.1:1".to_string(),
-                        control_key: String::new(),
+                        workflows: ReadyApps::default(),
                         db_service: None,
                         kv_store: None,
                         storage_backend: None,
@@ -1899,8 +1884,7 @@ mod tests {
             use futures::FutureExt;
             compio::runtime::Runtime::new().unwrap().block_on(async {
                 init_cache(4, 4, KernelConfig {
-                    control_url: "http://127.0.0.1:1".into(),
-                    control_key: String::new(),
+                    workflows: ReadyApps::default(),
                     db_service: None,
                     kv_store: None,
                     storage_backend: None,
@@ -1949,8 +1933,7 @@ mod tests {
                     4,
                     4,
                     KernelConfig {
-                        control_url: "http://127.0.0.1:1".to_string(),
-                        control_key: String::new(),
+                        workflows: ReadyApps::default(),
                         db_service: None,
                         kv_store: None,
                         storage_backend: None,
@@ -2001,8 +1984,7 @@ mod tests {
                     4,
                     4,
                     KernelConfig {
-                        control_url: "http://127.0.0.1:1".to_string(),
-                        control_key: String::new(),
+                        workflows: ReadyApps::default(),
                         db_service: None,
                         kv_store: None,
                         storage_backend: None,

@@ -10,8 +10,7 @@ impl Kernel {
             10,
             max_pinned,
             KernelConfig {
-                control_url: "http://127.0.0.1:1".into(),
-                control_key: String::new(),
+                workflows: Default::default(),
                 db_service: Some(database_service(url)),
                 kv_store: None,
                 storage_backend: None,
@@ -62,8 +61,7 @@ impl Drop for Kernel {
         DB_SERVICE.with(|slot| slot.borrow_mut().take());
         KV_STORE.with(|slot| slot.borrow_mut().take());
         STORAGE_BACKEND.with(|slot| slot.borrow_mut().take());
-        CONTROL_URL.with(|slot| slot.borrow_mut().take());
-        CONTROL_KEY.with(|slot| slot.borrow_mut().take());
+        WORKFLOWS.with(|slot| slot.borrow_mut().take());
         METER.with(|slot| slot.borrow_mut().take());
         LOADED_META.with(|slot| slot.borrow_mut().clear());
     }
