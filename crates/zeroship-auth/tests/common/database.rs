@@ -88,6 +88,13 @@ impl Database {
         self.connect_to(self.auth_url().as_str()).await
     }
 
+    #[allow(clippy::future_not_send, reason = "the ORM belongs to its compio runtime")]
+    pub async fn orm(&self) -> zeroship_data_orm::Database {
+        zeroship_auth::store::native::connect(self.auth_url().as_str())
+            .await
+            .expect("connect the native auth repository")
+    }
+
     /// Observe all requested backends waiting on locks before releasing a fixture transaction.
     #[allow(
         clippy::future_not_send,

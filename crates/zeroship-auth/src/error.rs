@@ -4,6 +4,9 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum AuthError {
+    #[error(transparent)]
+    Orm(Box<zeroship_data_orm::orm::DbError>),
+
     #[error("database: {0}")]
     Db(String),
 
@@ -20,13 +23,9 @@ pub enum AuthError {
     Internal(String),
 }
 
-impl AuthError {
-    #[must_use]
-    pub fn db_code(&self) -> Option<&str> {
-        match self {
-            Self::DbCode { code, .. } => Some(code.as_str()),
-            _ => None,
-        }
+impl From<zeroship_data_orm::orm::DbError> for AuthError {
+    fn from(error: zeroship_data_orm::orm::DbError) -> Self {
+        Self::Orm(Box::new(error))
     }
 }
 

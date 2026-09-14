@@ -18,9 +18,10 @@ use zeroship_auth::store::sessions;
 #[ntex::test]
 async fn reset_revokes_the_users_sessions_and_audits_the_effects() {
     Database::run(async |database| {
+        let orm = database.orm().await;
         let pg = Arc::new(database.connect_as_auth().await);
-        let user = fixtures::user(&pg, "reset@example.test").await;
-        let other = fixtures::user(&pg, "other@example.test").await;
+        let user = fixtures::user(&orm, "reset@example.test").await;
+        let other = fixtures::user(&orm, "other@example.test").await;
         let app = fixtures::app(database).await;
         fixtures::idp_session(&pg, &user).await;
         fixtures::gateway_session(database, &user, &app).await;
@@ -87,9 +88,10 @@ async fn reset_revokes_the_users_sessions_and_audits_the_effects() {
 #[ntex::test]
 async fn reset_consumes_only_the_users_pending_magic_login_state() {
     Database::run(async |database| {
+        let orm = database.orm().await;
         let pg = Arc::new(database.connect_as_auth().await);
-        let user = fixtures::user(&pg, "reset@example.test").await;
-        let other = fixtures::user(&pg, "other@example.test").await;
+        let user = fixtures::user(&orm, "reset@example.test").await;
+        let other = fixtures::user(&orm, "other@example.test").await;
         let magic = magic_link::issue(&pg, &user.email, "login").await.unwrap();
         let other_magic = magic_link::issue(&pg, &other.email, "login").await.unwrap();
         let admin = database.connect().await;
@@ -127,9 +129,10 @@ async fn reset_consumes_only_the_users_pending_magic_login_state() {
 #[ntex::test]
 async fn reset_revokes_app_anchors_and_marks_each_pairwise_family() {
     Database::run(async |database| {
+        let orm = database.orm().await;
         let pg = Arc::new(database.connect_as_auth().await);
-        let user = fixtures::user(&pg, "reset@example.test").await;
-        let other = fixtures::user(&pg, "other@example.test").await;
+        let user = fixtures::user(&orm, "reset@example.test").await;
+        let other = fixtures::user(&orm, "other@example.test").await;
         let app = fixtures::app(database).await;
         let second_app = fixtures::app(database).await;
         let subject = fixtures::identity(database, &user, &app).await;
@@ -201,9 +204,10 @@ async fn reset_revokes_app_anchors_and_marks_each_pairwise_family() {
 #[ntex::test]
 async fn reset_completes_with_an_identity_and_refresh_grant_for_the_same_family() {
     Database::run(async |database| {
+        let orm = database.orm().await;
         let pg = Arc::new(database.connect_as_auth().await);
-        let user = fixtures::user(&pg, "reset@example.test").await;
-        let other = fixtures::user(&pg, "other@example.test").await;
+        let user = fixtures::user(&orm, "reset@example.test").await;
+        let other = fixtures::user(&orm, "other@example.test").await;
         let app = fixtures::app(database).await;
         let subject = fixtures::identity(database, &user, &app).await;
         let other_subject = fixtures::identity(database, &other, &app).await;
@@ -216,6 +220,7 @@ async fn reset_completes_with_an_identity_and_refresh_grant_for_the_same_family(
             .to_http_request();
         let before = credentials::verify_password_credentials(
             &pg,
+            &orm,
             &req,
             &app.client_id,
             ip,
@@ -231,6 +236,7 @@ async fn reset_completes_with_an_identity_and_refresh_grant_for_the_same_family(
 
         let old = credentials::verify_password_credentials(
             &pg,
+            &orm,
             &req,
             &app.client_id,
             ip,
@@ -244,6 +250,7 @@ async fn reset_completes_with_an_identity_and_refresh_grant_for_the_same_family(
         );
         let new = credentials::verify_password_credentials(
             &pg,
+            &orm,
             &req,
             &app.client_id,
             ip,
