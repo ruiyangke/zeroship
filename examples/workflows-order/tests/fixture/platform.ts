@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { createHash, generateKeyPairSync, randomBytes } from "node:crypto";
+import { generateKeyPairSync, randomBytes } from "node:crypto";
 import { cp, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import { connect, createServer } from "node:net";
 import { tmpdir } from "node:os";
@@ -8,10 +8,10 @@ import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { setTimeout as sleep } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
-import { zstdCompressSync, zstdDecompressSync } from "node:zlib";
+import { zstdDecompressSync } from "node:zlib";
 import { generate } from "selfsigned";
 import { stringify } from "smol-toml";
-import { create as tarCreate, Parser } from "tar";
+import { Parser } from "tar";
 import { GenericContainer, Wait, type StartedTestContainer } from "testcontainers";
 import { parseTypedId, typedIdFromStableSeed } from "@zeroship/server/typed-id";
 import type { Target } from "../targets";
@@ -135,20 +135,7 @@ export class Platform {
     await symlink(join(example, "node_modules"), join(app, "node_modules"), "dir");
     const vite = join(app, "node_modules/vite/bin/vite.js");
     await processes.run("app-build", process.execPath, [vite, "build"], app);
-    const directory = join(app, "dist");
-    const source = await readFile(join(directory, "index.js"));
-    const hash = createHash("sha256").update(source).digest("hex");
-    await mkdir(join(directory, "blobs"));
-    await writeFile(join(directory, "blobs", hash), source);
-    await writeFile(join(directory, "manifest.json"), JSON.stringify({
-      version: 1, resources: { "/[...rest]": { auth: "anonymous", publicly_accessible: true } }, assets: {}, runtime_assets: {},
-      worker: { entry: "index.js", modules: { "index.js": hash } }, workflows: ["OrderWorkflow", "RiskReviewWorkflow"],
-      metadata: { compiler: "workflows-order-fixture", built_at: new Date().toISOString() },
-    }));
-    const archive: Buffer[] = [];
-    for await (const chunk of tarCreate({ cwd: directory, portable: true }, ["manifest.json", "blobs/" + hash])) archive.push(Buffer.from(chunk));
-    const bundle = join(directory, "app.zship");
-    await writeFile(bundle, zstdCompressSync(Buffer.concat(archive)));
+    const bundle = join(app, "dist/app.zship");
     await checkManifest(bundle);
 
     console.info("Workflow fixture: start backing containers and apply platform migrations");
@@ -274,14 +261,14 @@ export class Platform {
     assert.equal(plan.exitCode, 0, plan.output);
     assert.equal(plan.output.trim(), id, "Operator must enable the workflow test plan");
     const rollout = await postgres.exec(["psql", "-U", "postgres", "-d", "workflow_fixture", "-v", "ON_ERROR_STOP=1", "-c",
-      "UPDATE zeroship.plans SET workflows_allowed = true; INSERT INTO zeroship.workflow_rollout_config (id, dispatch_paused, ingress_disabled, updated_by) VALUES ('global', false, false, 'workflow-fixture') ON CONFLICT (id) DO UPDATE SET dispatch_paused = false, ingress_disabled = false"]);
+      "UPDATE zeroship.plans SET workflows_allowed = true; INSERT INTO zeroship.workflow_rollout_config (id, dispatch_paused, ingress_disabled, source_validity_ms, updated_by) VALUES ('global', false, false, 30000, 'workflow-fixture') ON CONFLICT (id) DO UPDATE SET dispatch_paused = false, ingress_disabled = false, source_validity_ms = EXCLUDED.source_validity_ms"]);
     assert.equal(rollout.exitCode, 0, rollout.output);
     await processes.run("deploy", binary("zeroship"), ["deploy", bundle, `--app=${id}`, `--control=${control.url}`, `--token=${bearer}`], work, { HOME: work });
 
-    console.info("Workflow fixture: start the raw JavaScript app locally");
+    console.info("Workflow fixture: serve the app bundle locally");
     const dev = await this.port();
     await dev.release();
-    processes.start("dev", binary("zeroship"), ["serve", join(app, "dist/index.js"), "--port", String(dev.number)], app, {});
+    processes.start("dev", binary("zeroship"), ["serve", bundle, "--port", String(dev.number)], app, {});
     const targets = [
       { name: "local", apiUrl: dev.url, uiUrl: dev.url },
       { name: "deployed", apiUrl: gateway.url + "/apps/orders", uiUrl: "http://orders.localhost:" + gateway.number },

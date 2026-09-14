@@ -22,14 +22,9 @@ The tests assert results independently on each tier, observe sleeps and signal
 waits before resuming them, and check compensation through its KV trail. The
 browser test loads the built assets and calls the app over its own origin.
 
-Local development currently has explicit limitations:
-
-- Child workflows fail with `WorkflowUnsupportedError`.
-- Compensators do not run. The error preserves the creator's failure and reports
-  `compensation.supported: false` with `outcome: "not-attempted"`.
-
-The tests check those limits and deployed child/compensation behavior. Changes
-to local support require updating the assertions along with the implementation.
+Local and deployed runs both execute child workflows and compensators. The
+tests require child output to reach its parent and compensation to reverse the
+recorded effect while preserving the creator's original failure.
 
 The RPC procedures are `wf.ping`, `wf.start`, `wf.status`, `wf.signal`,
 `wf.trail`, and `wf.resetTrail`. The supported cases are `basic`, `sleep`,

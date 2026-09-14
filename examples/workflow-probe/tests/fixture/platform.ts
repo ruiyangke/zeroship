@@ -267,7 +267,7 @@ export class Platform {
     assert.equal(plan.exitCode, 0, plan.output);
     assert.equal(plan.output.trim(), id, "Operator must enable the workflow test plan");
     const rollout = await postgres.exec(["psql", "-U", "postgres", "-d", "workflow_fixture", "-v", "ON_ERROR_STOP=1", "-c",
-      "UPDATE zeroship.plans SET workflows_allowed = true; INSERT INTO zeroship.workflow_rollout_config (id, dispatch_paused, ingress_disabled, updated_by) VALUES ('global', false, false, 'workflow-fixture') ON CONFLICT (id) DO UPDATE SET dispatch_paused = false, ingress_disabled = false"]);
+      "UPDATE zeroship.plans SET workflows_allowed = true; INSERT INTO zeroship.workflow_rollout_config (id, dispatch_paused, ingress_disabled, source_validity_ms, updated_by) VALUES ('global', false, false, 30000, 'workflow-fixture') ON CONFLICT (id) DO UPDATE SET dispatch_paused = false, ingress_disabled = false, source_validity_ms = EXCLUDED.source_validity_ms"]);
     assert.equal(rollout.exitCode, 0, rollout.output);
     await processes.run("deploy", binary("zeroship"), ["deploy", bundle, `--app=${id}`, `--control=${control.url}`, `--token=${bearer}`], work, { HOME: work });
 
