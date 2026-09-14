@@ -195,8 +195,7 @@ pub fn render(settings: &[Setting]) -> String {
         "<!--\n\
          DO NOT EDIT THIS REGION BY HAND. It is rendered from the COMPILED\n\
          ConfigSpec registries of the declaring binaries by\n\
-         `cargo run -p zeroship-config-contract -- env-vars-doc`, and\n\
-         tests/config_name_alignment_gate.sh fails when it drifts. Everything\n\
+         `cargo run -p zeroship-config-contract -- env-vars-doc`. Everything\n\
          OUTSIDE these two markers is hand-maintained and is never rewritten\n\
          by the generator.\n\
          -->\n\n",

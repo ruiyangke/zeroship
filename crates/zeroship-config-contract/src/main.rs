@@ -1,15 +1,11 @@
-use std::collections::BTreeSet;
 use std::path::PathBuf;
 
-use zeroship_core::config::SupplyClass;
-
-use zeroship_config_contract::contract::validate_contract;
 use zeroship_config_contract::docs;
 use zeroship_config_contract::metadata::check_workspace;
-use zeroship_config_contract::registry::{platform_read_sites, platform_specs};
+use zeroship_config_contract::registry::platform_specs;
 
 const USAGE: &str = "usage: zeroship-config-contract \
-[check-metadata [path/to/Cargo.toml] | contract | env-vars-doc [--root DIR] [--check]]";
+[check-metadata [path/to/Cargo.toml] | env-vars-doc [--root DIR] [--check]]";
 
 /// The generated half of the environment reference.
 const ENV_VARS_DOC: &str = "docs/reference/env-vars.md";
@@ -18,7 +14,6 @@ fn main() {
     let args = std::env::args().skip(1).collect::<Vec<_>>();
     match args.first().map(String::as_str) {
         None | Some("check-metadata") => check_metadata(args.get(1).map(PathBuf::from)),
-        Some("contract") => contract(&args[1..]),
         Some("env-vars-doc") => env_vars_doc(&args[1..]),
         Some(other) => {
             eprintln!("{USAGE}; got {other:?}");
@@ -53,53 +48,6 @@ fn parse_root_and_check(args: &[String], allow_check: bool) -> (PathBuf, bool) {
         }
     }
     (root, check)
-}
-
-/// Emit the compiled contract as TSV, for the text gates to join against.
-///
-/// Exists so the Compose and ops-TOML checks can stay text-only shell scripts
-/// beside their siblings in `tests/` while still deriving their expected set
-/// from the COMPILED registry rather than from a list in the script. A shell
-/// gate that carries its own copy of the names is satisfiable by editing the
-/// copy, which is the shape this repository has been burned by before.
-fn contract(args: &[String]) {
-    let (_, _) = parse_root_and_check(args, false);
-    let specs = platform_specs();
-    let sites = platform_read_sites();
-    if let Err(errors) = validate_contract(&specs, &sites) {
-        for error in errors {
-            eprintln!("config contract: {error}");
-        }
-        std::process::exit(1);
-    }
-
-    let rows = specs
-        .iter()
-        .flat_map(|spec| {
-            spec.consumers().iter().map(move |consumer| {
-                let class = match spec.class() {
-                    SupplyClass::Operational => "operational",
-                    SupplyClass::Secret => "secret",
-                    SupplyClass::Bootstrap => "bootstrap",
-                    SupplyClass::Command => "command",
-                };
-                (
-                    consumer.target().to_owned(),
-                    spec.canonical().as_str().to_owned(),
-                    class,
-                    spec.flag_name(*consumer)
-                        .map_or_else(|| "-".to_owned(), |flag| format!("--{flag}")),
-                    spec.env_name().unwrap_or_else(|| "-".to_owned()),
-                    spec.toml_path().unwrap_or("-").to_owned(),
-                )
-            })
-        })
-        .collect::<BTreeSet<_>>();
-    println!("consumer\tcanonical\tclass\tflag\tenv\ttoml");
-    for (consumer, canonical, class, flag, env, toml) in &rows {
-        println!("{consumer}\t{canonical}\t{class}\t{flag}\t{env}\t{toml}");
-    }
-    eprintln!("config contract: {} projections", rows.len());
 }
 
 /// Render, or verify, the generated region of `docs/reference/env-vars.md`.

@@ -15,26 +15,11 @@
 //! through the same parser, so the test topology is one document with one
 //! schema and a typo in it is an error rather than a silence.
 //!
-//! WHY THE FILE IS GENERATED AND GITIGNORED, which is the one place this
-//! diverges from the obvious shape. Every DSN leaf in the schema is
-//! `secret`-classed - `auth.database_url`, `control.database_url`,
-//! `gateway.database_url`, `migrate_server.database_url`,
-//! `migrate_server.provision_database_url`, `worker.database_url`, `worker.kv_config`,
-//! `workflow_scheduler.database_url`, verified against the compiled contract
-//! dump. Check 8 of `tests/config_name_alignment_gate.sh` fails any TRACKED
-//! `*.toml` holding a literal at a secret-classed leaf, and it says in terms
-//! that it will never carry an exception list. A committed
-//! `control.database_url = "postgres://postgres:zeroship@..."` is therefore
-//! rejected, and was: planting exactly that line produced
-//!
-//!   deploy/ops/zeroship.test.toml:2 control.database_url is secret-classed
-//!       and holds a plaintext literal
-//!
-//! The same gate exempts UNTRACKED overlays deliberately, because in a real
-//! deployment the overlay may itself be a mounted secret. The test overlay is
-//! the same thing: `tests/provision_test_backends.sh` writes it next to the
-//! backends it stands up, so the coordinates have one definition, the file has
-//! the real schema, and no credential enters git.
+//! WHY THE FILE IS GENERATED AND GITIGNORED. It contains the live credentials
+//! for the backend instance `tests/provision_test_backends.sh` owns. The
+//! provisioner writes it next to the backends it starts, so their coordinates
+//! have one definition, the file has the real schema, and no credential enters
+//! git.
 //!
 //! PRECEDENCE is the services' own, and the surviving environment names are the
 //! overlay tier rather than a parallel system: an explicit `PG_TEST_URL` wins, else the generated file, and there is no third tier -
@@ -160,11 +145,9 @@ fn load_opt() -> Option<FileConfig> {
 /// ONCE PER PROCESS, not per call. This is called from test setup paths that
 /// run per test; a per-call print would bury the signal it exists to give.
 ///
-/// THE DSN IS NEVER PRINTED. Every DSN leaf in the schema is `secret`-classed
-/// (see this module's header) because it carries a password, and
-/// `tests/config_name_alignment_gate.sh` refuses literals at those leaves. The
-/// announcement therefore carries the SOURCE and a redacted authority - enough
-/// to see which server answered, never the credential.
+/// THE DSN IS NEVER PRINTED. It carries a password, so the announcement has the
+/// SOURCE and a redacted authority: enough to see which server answered, never
+/// the credential.
 #[must_use]
 pub fn database_url_opt() -> Option<String> {
     let from_env = crate::test_env!("PG_TEST_URL").filter(|url| !url.is_empty());

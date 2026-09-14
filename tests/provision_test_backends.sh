@@ -241,18 +241,9 @@ fi
 # `deny_unknown_fields`, so this writes that same schema and test code loads it
 # through that same parser. A misspelled key is then an error, not a silence.
 #
-# WHY IT IS GENERATED AND GITIGNORED RATHER THAN COMMITTED. Every DSN leaf in
-# the schema is `secret`-classed - checked against the compiled contract dump,
-# all eight of auth/control/gateway/migrate-server(x2)/worker(x2)/workflow_scheduler.
-# Check 8 of tests/config_name_alignment_gate.sh fails ANY tracked *.toml
-# holding a literal at a secret-classed leaf and states it will never carry an
-# exception list. Committing this file with a real DSN was tried and rejected:
-#
-#   deploy/ops/zeroship.test.toml:2 control.database_url is secret-classed
-#       and holds a plaintext literal
-#
-# The same gate exempts untracked overlays deliberately, because a real
-# deployment's overlay may itself be a mounted secret. This is that, for tests.
+# WHY IT IS GENERATED AND GITIGNORED RATHER THAN COMMITTED. The overlay contains
+# live test credentials and belongs to the backend instance this provisioner
+# owns. Keeping it local also lets concurrent suites use their own coordinates.
 #
 # It is rewritten on every run rather than created-if-absent, so a stale file
 # from a run with different coordinates cannot outlive them.
