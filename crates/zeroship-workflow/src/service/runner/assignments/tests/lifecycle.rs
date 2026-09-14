@@ -43,6 +43,7 @@ async fn cancelled_host_retires_in_progress_creator_authority_before_explicit_dr
             client,
             fixture.policies.clone(),
             fixture.factory.clone(),
+            fixture.ready.clone(),
             options(),
         )
         .unwrap();
@@ -91,6 +92,7 @@ async fn fatal_registration_retires_ready_creator_before_drain_network_wait() {
             client,
             fixture.policies.clone(),
             fixture.factory.clone(),
+            fixture.ready.clone(),
             options,
         )
         .unwrap();

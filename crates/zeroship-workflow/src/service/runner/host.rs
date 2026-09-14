@@ -8,6 +8,8 @@
 use super::{
     assignments::{AssignmentBindings, AssignmentOptions, CreatorFactory},
     consumer::{ConsumerOptions, JobConsumer},
+    publication::{self, HostTransport},
+    ready::ReadyApps,
 };
 use crate::{service::HostPolicies, WorkflowServiceError};
 use futures::{future::Either, FutureExt};
@@ -38,13 +40,16 @@ pub struct HostOptions {
 /// Owns one enrolled process identity and its joined execution capacity.
 ///
 /// The injected factory supplies independently authorized creator resources.
-/// This host registers liveness, refreshes authorized placements and consumes
-/// delivered jobs; it does not decide placement, scan journals for work or open
-/// the Control database. Registration is not an enrollment bootstrap.
+/// This host registers liveness, refreshes authorized placements, publishes
+/// each prepared app's backend to request threads through [`ReadyApps`],
+/// promptly submits intents those backends and settled deliveries commit, and
+/// consumes delivered jobs. It does not decide placement, scan journals for
+/// work or open the Control database. Registration is not an enrollment
+/// bootstrap.
 pub struct WorkerHost<F> {
     client: WorkerCoordinator,
     assignments: AssignmentBindings<F>,
-    consumer: JobConsumer<WorkerCoordinator>,
+    consumer: JobConsumer<HostTransport>,
     options: HostOptions,
     capacity: NonZeroU32,
     started: bool,
@@ -62,7 +67,9 @@ impl<F> std::fmt::Debug for WorkerHost<F> {
 
 impl<F> WorkerHost<F> {
     /// The manager's advertised capacity counts app placements, while the
-    /// consumer's slots independently bound concurrent execution.
+    /// consumer's slots independently bound concurrent execution. `ready` is
+    /// the registry request threads resolve app backends from; this host is
+    /// its only writer.
     ///
     /// # Errors
     /// Rejects invalid capacity, operation bounds and refresh intervals.
@@ -70,6 +77,7 @@ impl<F> WorkerHost<F> {
         client: WorkerCoordinator,
         policies: Arc<HostPolicies>,
         factory: F,
+        ready: ReadyApps,
         options: HostOptions,
     ) -> Result<Self, WorkflowServiceError> {
         let capacity = u32::try_from(options.assignments.max_scopes)
@@ -86,17 +94,23 @@ impl<F> WorkerHost<F> {
         {
             return Err(invalid_options());
         }
+        let (wake, marked) = publication::channel();
         let consumer = JobConsumer::new(
-            Rc::new(client.clone()),
+            Rc::new(HostTransport {
+                client: client.clone(),
+                settled: wake.clone(),
+            }),
             client.worker_id().clone(),
             options.consumer,
         )?;
-        let assignments = AssignmentBindings::new(
+        let assignments = AssignmentBindings::with_publication(
             client.clone(),
             policies,
             consumer.bindings(),
             factory,
+            ready,
             options.assignments,
+            (wake, marked),
         )?;
         Ok(Self {
             client,
@@ -196,7 +210,7 @@ impl<F> Drop for RetireOnDrop<'_, F> {
 async fn drive<F: CreatorFactory>(
     client: &WorkerCoordinator,
     assignments: &AssignmentBindings<F>,
-    consumer: &mut JobConsumer<WorkerCoordinator>,
+    consumer: &mut JobConsumer<HostTransport>,
     capacity: NonZeroU32,
     options: HostOptions,
 ) -> Result<(), WorkflowServiceError> {
@@ -207,6 +221,12 @@ async fn drive<F: CreatorFactory>(
             ready(client, capacity, options.registration_interval).await?;
         }
     };
+    let publication = async {
+        loop {
+            let apps = assignments.marked().await;
+            assignments.publish_marked(apps).await;
+        }
+    };
     let work = async {
         futures::join!(
             periodic(options.assignment_interval, async || assignments
@@ -215,6 +235,7 @@ async fn drive<F: CreatorFactory>(
             periodic(options.policy_interval, async || assignments
                 .refresh()
                 .await),
+            publication,
             consumer.run_until(std::future::pending()),
         );
     };
@@ -277,7 +298,7 @@ async fn ready(
 async fn drain<F>(
     client: &WorkerCoordinator,
     assignments: &AssignmentBindings<F>,
-    consumer: &mut JobConsumer<WorkerCoordinator>,
+    consumer: &mut JobConsumer<HostTransport>,
     capacity: NonZeroU32,
 ) -> Result<(), WorkflowServiceError> {
     let closed = assignments.close();

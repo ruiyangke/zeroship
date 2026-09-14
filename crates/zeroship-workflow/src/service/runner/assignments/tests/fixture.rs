@@ -1,4 +1,8 @@
 use super::*;
+use crate::{
+    operations::StartOptions,
+    service::{tests::deployment_fixture::Deployments, DeployRegistration, RequestId},
+};
 use compio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use std::{collections::VecDeque, path::Path};
 use zeroship_core::{
@@ -21,10 +25,35 @@ pub(super) struct Fixture {
     pub policies: Arc<HostPolicies>,
     pub worker: WorkerId,
     pub factory: Factory,
+    pub ready: ReadyApps,
+    /// Every job submission the manager fixture accepted, as sent.
+    pub submitted: RefCell<Vec<Value>>,
     auth: Arc<ServiceAuth>,
 }
 
 impl Fixture {
+    /// Accept one settlement exactly as sent and acknowledge it.
+    pub fn settlement(&self, settlement: &Settlement) -> Exchange {
+        Exchange::new(
+            endpoints::WORKFLOW_JOB_SETTLE,
+            json!(settlement),
+            json!(SettlementReceipt {
+                job_id: settlement.delivery.job.id.clone(),
+                app_id: settlement.delivery.job.app_id.clone(),
+                attempt: settlement.delivery.attempt,
+                outcome: settlement.outcome,
+            }),
+        )
+    }
+
+    /// Accept one job submission and acknowledge exactly the submitted job.
+    pub fn submission(&self) -> Exchange {
+        Exchange {
+            echo: Some("job"),
+            ..Exchange::new(endpoints::WORKFLOW_JOB_SUBMIT, Value::Null, Value::Null)
+        }
+    }
+
     pub fn registration(
         &self,
         state: zeroship_core::workflow_coordination::WorkerState,
@@ -71,9 +100,14 @@ impl Fixture {
                 gates: RefCell::new(BTreeMap::new()),
                 finished: RefCell::new(BTreeMap::new()),
                 alternative: RefCell::new(None),
+                foreign_backend: Cell::new(false),
+                deployments: RefCell::new(None),
+                leftover: Cell::new(false),
             })),
             policies,
             worker,
+            ready: ReadyApps::default(),
+            submitted: RefCell::new(Vec::new()),
             auth,
         }
     }
@@ -178,6 +212,7 @@ impl Fixture {
             self.policies.clone(),
             consumer.bindings(),
             self.factory.clone(),
+            self.ready.clone(),
             AssignmentOptions {
                 max_scopes: limit,
                 operation_timeout: Duration::from_secs(5),
@@ -218,6 +253,8 @@ pub(super) struct Exchange {
     response: Value,
     status: u16,
     gate: Option<Gate>,
+    /// Match any request to the endpoint and reply with this request field.
+    echo: Option<&'static str>,
 }
 
 impl Exchange {
@@ -234,6 +271,7 @@ impl Exchange {
             response,
             status: 200,
             gate: None,
+            echo: None,
         }
     }
 
@@ -290,7 +328,7 @@ pub(super) fn peer<'a>(
                     .iter()
                     .position(|exchange| {
                         exchange.endpoint.path_template() == observed.path
-                            && exchange.request == observed.body
+                            && (exchange.echo.is_some() || exchange.request == observed.body)
                     })
                     .unwrap_or_else(|| {
                         panic!(
@@ -298,7 +336,11 @@ pub(super) fn peer<'a>(
                             observed.path, observed.body
                         )
                     });
-                let exchange = exchanges.remove(index).unwrap();
+                let mut exchange = exchanges.remove(index).unwrap();
+                if let Some(field) = exchange.echo {
+                    exchange.response = observed.body[field].clone();
+                    fixture.submitted.borrow_mut().push(observed.body.clone());
+                }
                 verify_service_call(
                     &verifier,
                     Some(&observed.authorization),
@@ -404,6 +446,9 @@ struct FactoryState {
     gates: RefCell<BTreeMap<AppId, Gate>>,
     finished: RefCell<BTreeMap<AppId, oneshot::Sender<()>>>,
     alternative: RefCell<Option<AppId>>,
+    foreign_backend: Cell<bool>,
+    deployments: RefCell<Option<Rc<Deployments>>>,
+    leftover: Cell<bool>,
 }
 
 pub(super) struct Opening {
@@ -438,6 +483,19 @@ impl Factory {
 
     pub fn wrong_binding(&self, app: AppId) {
         *self.0.alternative.borrow_mut() = Some(app);
+    }
+
+    /// Return the exact app, but a request backend from another generation.
+    pub fn foreign_backend(&self) {
+        self.0.foreign_backend.set(true);
+    }
+
+    /// Open creators with an activated deployment of an `Example` workflow.
+    /// With `leftover`, each opening also commits a start whose intent a
+    /// previous process would have left unpublished.
+    pub async fn deployed(&self, leftover: bool) {
+        *self.0.deployments.borrow_mut() = Some(Rc::new(Deployments::new().await));
+        self.0.leftover.set(leftover);
     }
 
     pub fn completed(&self, app: &AppId) -> oneshot::Receiver<()> {
@@ -484,10 +542,51 @@ impl CreatorFactory for Factory {
         } else {
             (self.0.policies.clone(), policy.clone())
         };
-        let service = creator(self.0.directory.path(), &scope.app_id, policies).await;
+        let mut service = creator(self.0.directory.path(), &scope.app_id, policies).await;
+        let deployments = self.0.deployments.borrow().clone();
+        if let Some(deployments) = &deployments {
+            service = service.with_deployments(deployments.binding(&[&scope.app_id]));
+        }
+        let app = service.register_app(&policy).await?;
+        if let Some(deployments) = &deployments {
+            deployments
+                .activate(
+                    &service,
+                    &scope.app_id,
+                    &DeployRegistration {
+                        id: zeroship_core::typed_id::generate("dep"),
+                        hash: String::new(),
+                        workflows: ["Example".into()].into(),
+                        schedules: Vec::new(),
+                    },
+                )
+                .await?;
+            if self.0.leftover.get() {
+                app.start(&RequestId::mint(), "Example", StartOptions::default())
+                    .await?;
+            }
+        }
+        let backend = if self.0.foreign_backend.get() {
+            let policies = Arc::new(HostPolicies::default());
+            let binding = policies.bind(scope.app_id.clone())?;
+            binding
+                .begin_refresh()?
+                .install(PolicySnapshot::configuration(
+                    1.try_into().unwrap(),
+                    AppPolicy::default(),
+                )?)?;
+            creator(self.0.directory.path(), &scope.app_id, policies)
+                .await
+                .register_app(&binding)
+                .await?
+                .into_backend(1024)?
+        } else {
+            app.clone().into_backend(1024)?
+        };
         let runtime = CreatorRuntime {
-            app: service.register_app(&policy).await?,
+            app,
             executor: Rc::new(NoExecution),
+            backend,
         };
         *opening.runtime.borrow_mut() = Some(runtime.clone());
         if let Some(finished) = self.0.finished.borrow_mut().remove(&scope.app_id) {
