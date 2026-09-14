@@ -778,8 +778,9 @@ and instance credentials grant neither operation. Registration returns the
 accepted typed declaration, which the client compares in full; native storage
 canonicalizes its ordering independently. Activation returns the stable job,
 whose app, deployment, operation and revision must match the original request.
-These routes require no enrolled or assigned worker. Normal deployment callers
-still need the durable publication handoff described below.
+These routes require no enrolled or assigned worker. Control's lifecycle
+publisher is their production caller, delivering the durable intents described
+under [normal deployment publication](#normal-deployment-publication).
 
 ### Delivery, execution and settlement
 
@@ -2282,8 +2283,9 @@ Authenticated job submission, claim, heartbeat and settlement routes are in
 [`workflow-server/src/api/jobs.rs`](../../crates/zeroship-workflow-server/src/api/jobs.rs).
 Control schedule preparation, activation and disable routes are in
 [`workflow-server/src/api/schedules.rs`](../../crates/zeroship-workflow-server/src/api/schedules.rs).
-Normal deployment publication and ingress-scope host composition remain cutover
-work; endpoint availability alone does not provide their durable handoff.
+Control's lifecycle publisher is the durable handoff for normal deployment
+publication. Ingress-scope host composition remains cutover work; endpoint
+availability alone does not provide its durable handoff.
 The inventory includes required semantics beyond the currently available routes.
 
 | Operation | Authorized caller and receiving owner | Successful result |
@@ -2875,8 +2877,8 @@ preserving calendar progress; replacing it selects the replacement's calendar.
 Historical command replay cannot undo a newer selection. Disabled scopes are
 excluded before due-page limits. Exact-Control authenticated register, activate
 and disable routes expose these native operations independently of workers.
-Normal deployment and lifecycle commands still need their durable Control
-publication handoff.
+Control's deploy, archive and restore commands reach them through committed
+lifecycle intents that its publisher delivers in revision order.
 
 Creator activation now resolves the immutable deployment hash through the
 authenticated journal hold receipt and verifies the normal app artifact. Its
@@ -2983,13 +2985,18 @@ deliverable behind blocking management commands, and leave maintenance duties
 unchanged; the consumer contract settles a page through separate manager and
 creator databases.
 The server injects an authenticated Control hold client into its native queue.
-Production deployment registration and activation publication still require
-host integration. The normal Control deployment transaction needs a durable
-publication intent and stable activation identity; an HTTP attempt after commit
-cannot be its only handoff. Pending activation consumers must retain their code
-until the manager's exact acceptance receipt discharges that intent. The manager
-acquires its queue hold through Control outside Control's deployment transaction
-to avoid a callback waiting on the transaction that initiated it.
+Control's deployment transaction records a lifecycle intent at a stable app
+revision, and its publisher delivers registration, activation and disable
+afterwards, so no HTTP attempt after commit is the only handoff. The collector
+keeps a pending activation's code until the manager's exact receipt discharges
+the intent. The manager acquires its queue hold through Control outside
+Control's deployment transaction, so the callback never waits on the
+transaction that initiated it. Control contracts drive the signed manager routes
+over the canonical platform schema: revision order across deploy, archive,
+staged deploy, restore and rollback; empty schedule removal; a publisher killed
+after commit, a reply lost after remote activation and a failed confirmation;
+a manager conflict; a blocked app beside others; retention until the queue hold
+takes over; and rollback of every staged catalog write.
 Publication intents and advance-job receipts exist in the journal; their
 delivered reconciliation and queue settlement are integrated natively. Creator
 reconciliation tests exercise persisted progress, failed publication, lost hold
@@ -3081,13 +3088,16 @@ is the merge order.
    next slice. The native contracts are implemented; see
    [delivered dependency propagation](#delivered-dependency-propagation). The
    local host delivers these pages once slice one's consumer runs there.
-3. **Normal deployment publication.** Control's deploy transaction records an
-   idempotent command receipt and a lifecycle intent together. A Control
-   publisher delivers register, activate and disable to the manager and confirms
-   only exact receipts. Pending activations keep their bundle until confirmed.
-   Archive and restore use the same intents, and the CLI and
-   `@zeroship/control` carry the command identity. The legacy schedule
-   reconciler is deleted.
+3. **Normal deployment publication (implemented).** Control's deploy
+   transaction records an idempotent command receipt and a lifecycle intent
+   together. A Control publisher delivers register, activate and disable to the
+   manager and confirms only exact receipts. Pending activations keep their
+   bundle until confirmed. Archive and restore use the same intents, and the
+   CLI and `@zeroship/control` carry the command identity. The legacy schedule
+   reconciler is deleted. Proof: Control's deploy HTTP contracts for replay,
+   conflict, concurrent duplicates, rollback and refusal; its publication
+   contracts against the signed manager routes; and the CLI and SDK command
+   contracts.
 4. **Worker executable.** The production worker runs `WorkerHost` on a
    dedicated thread with a trusted creator-resource provider, the enrolled
    instance signer and joined shutdown. `WorkerHost` publishes an app's backend
