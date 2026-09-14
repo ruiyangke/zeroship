@@ -64,11 +64,14 @@ Auth today is cookie/JWT-based at the gateway. When a session is valid, the gate
 ## Deploy path
 
 ```text
-1. CLI uploads `application/x-zship` to `POST /api/apps/{id}/deploy`.
+1. CLI uploads `application/x-zship` to `POST /api/apps/{id}/deploy`, naming
+   the deploy command in its `Idempotency-Key`.
 2. Control streams the body to temp storage, then calls `zeroship_bundle::ingest`.
 3. Ingest validates `manifest.json`, streams `blobs/<hash>` into `BlobStore`,
    and returns `deploy_hash` + canonical `manifest_json`.
-4. Control updates the `apps` row.
+4. Control commits the `apps` row, the deployment, the command receipt and a
+   lifecycle intent in one transaction; its publisher later delivers the
+   intent to the workflow manager.
 5. Gateway picks up the new route state from `/internal/routes`.
 6. Worker picks up the new version state from `/internal/versions` and fetches
    the worker-entry blob from `BlobStore`.
