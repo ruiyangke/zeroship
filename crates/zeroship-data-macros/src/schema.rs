@@ -123,7 +123,7 @@ fn generate(input: Input, orm: &syn::Path) -> syn::Result<TokenStream> {
                     const COLLECTION: &'static str = #collection_name;
                     fn schema() -> &'static #schema::CollectionSchema {
                         static SCHEMA: ::std::sync::OnceLock<#schema::CollectionSchema> = ::std::sync::OnceLock::new();
-                        SCHEMA.get_or_init(|| #schema::CollectionSchema::new([#(#definitions),*]))
+                        SCHEMA.get_or_init(|| #schema::CollectionSchema::new(::std::vec![#(#definitions),*]))
                     }
                 }
                 pub mod columns { #(#columns)* }
@@ -139,7 +139,7 @@ fn generate(input: Input, orm: &syn::Path) -> syn::Result<TokenStream> {
         #visibility mod #name {
             #(#modules)*
             pub fn schema() -> #schema::Schema {
-                #schema::Schema::new([#(#schema_entries),*])
+                #schema::Schema::new(::std::vec![#(#schema_entries),*])
             }
         }
     })
@@ -259,5 +259,5 @@ fn field_map(columns: &[Column], orm: &syn::Path) -> TokenStream {
         let metadata = column_schema(column, orm);
         quote!((::std::string::String::from(#name), #metadata))
     });
-    quote!(::core::iter::IntoIterator::into_iter([#(#fields),*]).collect())
+    quote!(::core::iter::IntoIterator::into_iter(::std::vec![#(#fields),*]).collect())
 }
