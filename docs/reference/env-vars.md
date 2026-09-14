@@ -328,6 +328,7 @@ Every environment name below is `ZEROSHIP_<CANONICAL>` and every overlay path is
 | `control.supabase_jwks_url` | operational | `ZEROSHIP_CONTROL_SUPABASE_JWKS_URL` | `control.supabase_jwks_url` | zeroship-control `--supabase-jwks-url` | empty |
 | `control.supabase_jwt_issuer` | operational | `ZEROSHIP_CONTROL_SUPABASE_JWT_ISSUER` | `control.supabase_jwt_issuer` | zeroship-control `--supabase-jwt-issuer` | empty |
 | `control.tax_provider` | operational | `ZEROSHIP_CONTROL_TAX_PROVIDER` | `control.tax_provider` | zeroship-control `--tax-provider` | `native` |
+| `control.worker_enrollers_file` | operational | `ZEROSHIP_CONTROL_WORKER_ENROLLERS_FILE` | `control.worker_enrollers_file` | zeroship-control `--worker-enrollers-file` | empty |
 | `control.worker_enrolment_networks` | operational | `ZEROSHIP_CONTROL_WORKER_ENROLMENT_NETWORKS` | `control.worker_enrolment_networks` | zeroship-control `--worker-enrolment-networks` | empty |
 | `control.worker_enrolment_ports` | operational | `ZEROSHIP_CONTROL_WORKER_ENROLMENT_PORTS` | `control.worker_enrolment_ports` | zeroship-control `--worker-enrolment-ports` | empty |
 | `control.workflow_coordinator_url` | operational | `ZEROSHIP_CONTROL_WORKFLOW_COORDINATOR_URL` | `control.workflow_coordinator_url` | zeroship-control `--workflow-coordinator-url` | `http://127.0.0.1:9093` |
@@ -406,12 +407,12 @@ Every environment name below is `ZEROSHIP_<CANONICAL>` and every overlay path is
 | `worker.cdc_relay_ca_file` | operational | `ZEROSHIP_WORKER_CDC_RELAY_CA_FILE` | `worker.cdc_relay_ca_file` | zeroship-worker `--cdc-relay-ca-file` | empty |
 | `worker.cdc_relay_url` | operational | `ZEROSHIP_WORKER_CDC_RELAY_URL` | `worker.cdc_relay_url` | zeroship-worker `--cdc-relay-url` | empty |
 | `worker.database_url` | secret | `ZEROSHIP_WORKER_DATABASE_URL` | `worker.database_url` | zeroship-worker `--database-url-file` | - |
+| `worker.enroller_file` | operational | `ZEROSHIP_WORKER_ENROLLER_FILE` | `worker.enroller_file` | zeroship-worker `--enroller-file` | empty |
 | `worker.kv_config` | secret | `ZEROSHIP_WORKER_KV_CONFIG` | `worker.kv_config` | zeroship-worker `--kv-config-file` | - |
 | `worker.max_isolates` | operational | `ZEROSHIP_WORKER_MAX_ISOLATES` | `worker.max_isolates` | zeroship-worker `--max-isolates` | `200` |
 | `worker.max_pinned_isolates_per_app` | operational | `ZEROSHIP_WORKER_MAX_PINNED_ISOLATES_PER_APP` | `worker.max_pinned_isolates_per_app` | zeroship-worker `--max-pinned-isolates-per-app` | `4` |
 | `worker.max_step_blob_bytes` | operational | `ZEROSHIP_WORKER_MAX_STEP_BLOB_BYTES` | `worker.max_step_blob_bytes` | zeroship-worker `--max-step-blob-bytes` | `67_108_864` |
 | `worker.port` | operational | `ZEROSHIP_WORKER_PORT` | `worker.port` | zeroship-worker `--port` | `8080` |
-| `worker.service_key_file` | operational | `ZEROSHIP_WORKER_SERVICE_KEY_FILE` | `worker.service_key_file` | zeroship-worker `--service-key-file` | empty |
 | `worker.service_peers_file` | operational | `ZEROSHIP_WORKER_SERVICE_PEERS_FILE` | `worker.service_peers_file` | zeroship-worker `--service-peers-file` | empty |
 | `worker.shutdown_timeout` | operational | `ZEROSHIP_WORKER_SHUTDOWN_TIMEOUT` | `worker.shutdown_timeout` | zeroship-worker `--shutdown-timeout` | `30` |
 | `worker.socket` | operational | `ZEROSHIP_WORKER_SOCKET` | `worker.socket` | zeroship-worker `--socket` | empty |
