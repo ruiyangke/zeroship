@@ -347,7 +347,8 @@ impl<P> ReadBuilder<P> {
         if let Err(error) = self.register_origins(predicate.origins, &self.sources()) {
             self.error.get_or_insert(error);
         }
-        self.query.filter = Predicate::And(vec![self.query.filter, predicate.expression]);
+        self.query.filter =
+            composition::combine_predicates(self.query.filter, predicate.expression, true);
         self
     }
     pub fn group_by<C: ReadableColumn>(mut self, column: SourceColumn<C>) -> Self {
@@ -367,7 +368,8 @@ impl<P> ReadBuilder<P> {
         if let Err(error) = self.register_origins(predicate.origins, &self.sources()) {
             self.error.get_or_insert(error);
         }
-        self.query.having = Predicate::And(vec![self.query.having, predicate.expression]);
+        self.query.having =
+            composition::combine_predicates(self.query.having, predicate.expression, true);
         self
     }
     pub fn order_by(mut self, key: ReadOrder) -> Self {
