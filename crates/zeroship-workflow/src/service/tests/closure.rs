@@ -741,3 +741,109 @@ async fn postgres_closed_epoch_fences_every_ingress_path() {
     }
     assert_eq!(closed(&fixture.service, &fixture.app).await, 5);
 }
+
+/// The host's establishment as a test double: it records each refused epoch
+/// and, unless told otherwise, installs the manager's next one.
+struct Epochs {
+    service: WorkflowService,
+    app: AppId,
+    requested: std::cell::RefCell<Vec<Option<Revision>>>,
+    accepted: std::cell::Cell<usize>,
+    installs: std::cell::Cell<bool>,
+    fails: std::cell::Cell<bool>,
+}
+
+impl super::super::IngressEpochs for Epochs {
+    fn establish(
+        &self,
+        after: Option<Revision>,
+    ) -> futures::future::LocalBoxFuture<'_, Result<(), WorkflowServiceError>> {
+        self.requested.borrow_mut().push(after);
+        Box::pin(async move {
+            if self.fails.get() {
+                return Err(WorkflowServiceError::Unavailable(
+                    "workflow manager unavailable".into(),
+                ));
+            }
+            if self.installs.get() {
+                let next = after.map_or(1, |after| after.get() + 1);
+                install(&self.service, &self.app, 1, AppPolicy::default(), Some(next));
+            }
+            Ok(())
+        })
+    }
+
+    fn accepted(&self) {
+        self.accepted.set(self.accepted.get() + 1);
+    }
+}
+
+#[compio::test]
+async fn sqlite_fenced_acceptance_establishes_a_newer_epoch_and_retries_once() {
+    let (_dir, fixture) = sqlite_fenced_app().await;
+    let epochs = Rc::new(Epochs {
+        service: fixture.service.clone(),
+        app: fixture.app.clone(),
+        requested: std::cell::RefCell::new(Vec::new()),
+        accepted: std::cell::Cell::new(0),
+        installs: std::cell::Cell::new(true),
+        fails: std::cell::Cell::new(false),
+    });
+    let scope = fixture.scope.clone().with_ingress(epochs.clone());
+    let request = RequestId::mint();
+    let started = scope
+        .start(&request, "Example", StartOptions::default())
+        .await
+        .unwrap();
+    assert_eq!(*epochs.requested.borrow(), vec![Some(epoch(1))]);
+    assert_eq!(epochs.accepted.get(), 1);
+    // The retry used the original request identity: its receipt replays.
+    assert_eq!(
+        scope
+            .start(&request, "Example", StartOptions::default())
+            .await
+            .unwrap(),
+        started
+    );
+    assert_eq!(epochs.requested.borrow().len(), 1);
+
+    // An establishment that installs no newer epoch is not retried again.
+    assert!(!drained(&scope, 2).await);
+    epochs.installs.set(false);
+    fenced(
+        scope.signal(&RequestId::mint(), &started.id, approved()).await,
+        Some(2),
+    );
+    assert_eq!(
+        *epochs.requested.borrow(),
+        vec![Some(epoch(1)), Some(epoch(2))],
+        "one establishment per acceptance"
+    );
+    // A failed establishment reports its own error without a retry.
+    epochs.fails.set(true);
+    assert!(matches!(
+        scope
+            .transition(
+                &RequestId::mint(),
+                &started.id,
+                crate::operations::RunOperation::Pause
+            )
+            .await,
+        Err(WorkflowServiceError::Unavailable(_))
+    ));
+    assert_eq!(epochs.requested.borrow().len(), 3);
+    assert_eq!(epochs.accepted.get(), 2);
+
+    // The request isolates' backend retains authority captured before the
+    // call; its retry captures the binding's newly installed epoch instead.
+    epochs.fails.set(false);
+    epochs.installs.set(true);
+    let backend = scope.clone().into_backend(1024).unwrap();
+    use crate::backend::WorkflowBackend;
+    backend
+        .signal(started.id.clone(), approved())
+        .await
+        .unwrap();
+    assert_eq!(epochs.requested.borrow().last(), Some(&Some(epoch(2))));
+    assert_eq!(epochs.accepted.get(), 3);
+}
