@@ -95,8 +95,8 @@ async fn native_worker_client_uses_the_authenticated_coordinator_api() {
         client.register(&registration).await.unwrap_err(),
         Error::Refused(FailureCode::Unauthenticated)
     );
-    fixture.admin.execute("INSERT INTO zeroship.worker_instances(id,ring_key,public_key,advertise_host,advertise_port,status) VALUES($1,$2,$3,'127.0.0.1',8080,'active')",
-        &[&worker.as_str(), &vec![7u8], &public]).await.unwrap();
+    fixture.admin.execute("INSERT INTO zeroship.worker_instances(id,ring_key,public_key,advertise_host,advertise_port,status,enroller_id) VALUES($1,$2,$3,'127.0.0.1',8080,'active',$4)",
+        &[&worker.as_str(), &vec![7u8], &public, &fixture.default_enroller_id]).await.unwrap();
     client.register(&registration).await.unwrap();
     // Independent requests must mint fresh assertions despite sharing a signer.
     client.register(&registration).await.unwrap();
@@ -268,8 +268,8 @@ async fn native_worker_client_uses_the_authenticated_coordinator_api() {
     );
     let backup = WorkerId::mint();
     let key = ServiceSigningKey::generate();
-    fixture.admin.execute("INSERT INTO zeroship.worker_instances(id,ring_key,public_key,advertise_host,advertise_port,status) VALUES($1,$2,$3,'127.0.0.1',8080,'active')",
-        &[&backup.as_str(), &vec![8u8], &key.verifying_key_bytes().to_vec()]).await.unwrap();
+    fixture.admin.execute("INSERT INTO zeroship.worker_instances(id,ring_key,public_key,advertise_host,advertise_port,status,enroller_id) VALUES($1,$2,$3,'127.0.0.1',8080,'active',$4)",
+        &[&backup.as_str(), &vec![8u8], &key.verifying_key_bytes().to_vec(), &fixture.default_enroller_id]).await.unwrap();
     let issuer = ServiceIssuer::parse(&format!(
         "spiffe://zeroship.ai/svc/worker/{}",
         backup.as_str()
@@ -571,8 +571,8 @@ async fn replicas_authenticate_metadata_and_keep_customer_execution_off_the_prot
         .0,
         StatusCode::UNAUTHORIZED
     );
-    fixture.admin.execute("INSERT INTO zeroship.worker_instances(id,ring_key,public_key,advertise_host,advertise_port,status) VALUES($1,$2,$3,'127.0.0.1',8080,'active')",
-        &[&worker.as_str(),&vec![1u8],&worker_key.verifying_key_bytes().to_vec()]).await.unwrap();
+    fixture.admin.execute("INSERT INTO zeroship.worker_instances(id,ring_key,public_key,advertise_host,advertise_port,status,enroller_id) VALUES($1,$2,$3,'127.0.0.1',8080,'active',$4)",
+        &[&worker.as_str(),&vec![1u8],&worker_key.verifying_key_bytes().to_vec(),&fixture.default_enroller_id]).await.unwrap();
     assert_eq!(
         post(
             &client,

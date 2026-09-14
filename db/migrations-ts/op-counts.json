@@ -263,5 +263,20 @@
     "file": "20260911000100_project_data_keys.ts",
     "name": "project_data_keys",
     "opCount": 5
+  },
+  {
+    "file": "20260914000000_execution_zones_and_worker_enrollers.ts",
+    "name": "execution_zones_and_worker_enrollers",
+    "opCount": 13
+  },
+  {
+    "file": "20260914000050_execution_zones_default_zone.ts",
+    "name": "execution_zones_default_zone",
+    "opCount": 1
+  },
+  {
+    "file": "20260914000100_worker_instances_enroller_binding.ts",
+    "name": "worker_instances_enroller_binding",
+    "opCount": 10
   }
 ]

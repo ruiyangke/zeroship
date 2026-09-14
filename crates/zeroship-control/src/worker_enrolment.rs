@@ -598,9 +598,14 @@ fn classify_enrolment_error(error: compio_postgres::Error) -> EnrolmentFailure {
 /// the filter and marking a row `gone` changes nothing at all, while looking
 /// exactly like a revocation mechanism that ran and approved.
 ///
-/// It admits exactly the status [`enrol`] writes, read from the same constant,
-/// so the accepted set cannot drift from the written one. The other two members
-/// of the column's closed set authenticate nothing.
+/// It admits exactly `ENROLLED_STATUS`. The write side moved into
+/// `zeroship.enrol_worker_instance` (a literal `'active'` in its own migration
+/// file) when enrolment became a single server-side statement, so this is now
+/// a SECOND spelling of that string rather than a shared Rust constant - the
+/// two must be kept in agreement by convention, and `worker_instances_status_check`
+/// / `worker_enrollers_status_check` are what would catch either one drifting
+/// to a value the other does not recognise. The other two members of the
+/// column's closed set authenticate nothing.
 ///
 /// # Errors
 ///

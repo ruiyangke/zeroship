@@ -15,6 +15,13 @@ pub struct Platform {
     pub admin: compio_postgres::Client,
     pub runtime_url: String,
     pub work: tempfile::TempDir,
+    /// An `active` `zeroship.worker_enrollers` row this fixture seeds once, so
+    /// every test that enrols a worker instance directly (option 1A froze
+    /// `worker_instances.enroller_id` NOT NULL with a restrict FK to this
+    /// table) has a satisfying value to reference without minting its own
+    /// enroller per call site. Tests exercising enroller-level behaviour
+    /// itself (revocation, a second enroller) seed their own rows instead.
+    pub default_enroller_id: String,
 }
 impl Platform {
     pub async fn new() -> Self {
@@ -60,11 +67,21 @@ impl Platform {
             String::from_utf8_lossy(&result.stderr)
         );
         let admin = connect(&url).await;
+        let default_enroller_id = "wen_testfixturedefault0000000".to_string();
+        admin
+            .execute(
+                "INSERT INTO zeroship.worker_enrollers (id, public_key, execution_zone_id, status) \
+                 VALUES ($1, $2, 'ezn_default000000000000000000', 'active')",
+                &[&default_enroller_id, &vec![7_u8; 32]],
+            )
+            .await
+            .unwrap();
         Self {
             _postgres: postgres,
             admin,
             runtime_url: format!("postgres://zeroship_workflow@{address}/postgres"),
             work,
+            default_enroller_id,
         }
     }
 }

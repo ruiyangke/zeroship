@@ -212,9 +212,9 @@ async fn post<T: Serialize>(
 
 async fn enroll(platform: &platform::Platform, http: &Client, url: &str, worker: &Worker) {
     platform.admin.execute(
-        "INSERT INTO zeroship.worker_instances(id,ring_key,public_key,advertise_host,advertise_port,status) \
-         VALUES($1,$2,$3,'127.0.0.1',8080,'active')",
-        &[&worker.id.as_str(), &vec![1_u8], &worker.key.verifying_key_bytes().to_vec()],
+        "INSERT INTO zeroship.worker_instances(id,ring_key,public_key,advertise_host,advertise_port,status,enroller_id) \
+         VALUES($1,$2,$3,'127.0.0.1',8080,'active',$4)",
+        &[&worker.id.as_str(), &vec![1_u8], &worker.key.verifying_key_bytes().to_vec(), &platform.default_enroller_id],
     ).await.unwrap();
     let (status, body) = post(
         http,
@@ -699,6 +699,190 @@ async fn enrollment_revocation_and_key_replacement_fence_blocked_queue_operation
     }
 }
 
+/// Success criterion 3 (the manager half) of the option-1A worker-enrollment
+/// PoC: revoking enroller E's row - `SELECT zeroship.revoke_worker_enroller(E)`,
+/// the same explicit operator database operation
+/// `db/migrations-ts/20260914000100_worker_instances_enroller_binding.ts`
+/// defines - cascades to `WorkflowAuth::worker`
+/// (crates/zeroship-workflow-server/src/auth.rs) refusing E's instance, while
+/// a DIFFERENT enroller F's instance is unaffected.
+///
+/// `WorkflowAuth::worker` and `PostgresWorkerRegistry::active_key` are
+/// UNCHANGED by option 1A: they already read
+/// `zeroship.worker_instances.status = 'active'`, and revocation writes
+/// exactly that column for every instance the enroller admitted - see the
+/// module header of `crates/zeroship-control/src/worker_enrolment.rs`. This
+/// test is what binds that claim for the manager reader specifically, the way
+/// [`enrollment_revocation_and_key_replacement_fence_blocked_queue_operations`]
+/// already binds it for a direct instance-status transition.
+#[ntex::test]
+async fn revoking_an_enroller_denies_its_worker_while_a_sibling_enroller_stays_active() {
+    let fixture = Fixture::new().await;
+
+    // A second enroller F, and a second worker enrolled under it, assigned to
+    // its own app - independent of the fixture's default enroller and worker.
+    // Reuse WorkerId's own base36 body under the enroller prefix - this crate
+    // has no direct dependency on a UUID generator, and the typed-id shape
+    // constraints only care about the body's alphabet and width, not which
+    // entity minted it.
+    let enroller_f = format!("wen_{}", &WorkerId::mint().as_str()[4..]);
+    fixture
+        .platform
+        .admin
+        .execute(
+            "INSERT INTO zeroship.worker_enrollers (id, public_key, execution_zone_id, status) \
+             VALUES ($1, $2, 'ezn_default000000000000000000', 'active')",
+            &[&enroller_f, &vec![5_u8; 32]],
+        )
+        .await
+        .unwrap();
+    let worker_g = Worker::new();
+    fixture
+        .platform
+        .admin
+        .execute(
+            "INSERT INTO zeroship.worker_instances(id,ring_key,public_key,advertise_host,advertise_port,status,enroller_id) \
+             VALUES($1,$2,$3,'127.0.0.1',8081,'active',$4)",
+            &[
+                &worker_g.id.as_str(),
+                &vec![2_u8],
+                &worker_g.key.verifying_key_bytes().to_vec(),
+                &enroller_f,
+            ],
+        )
+        .await
+        .unwrap();
+    // Registration, like `enroll()` does for the fixture's own worker: the
+    // coordinator must know G is a live, ready worker before it is assignable.
+    let (register_status, body) = post(
+        &fixture.http,
+        &fixture.server.url,
+        endpoints::WORKFLOW_REGISTER,
+        &worker_g.assertion(),
+        &json!({"capacity":1,"state":"ready"}),
+    )
+    .await;
+    assert_eq!(register_status, StatusCode::OK, "{body}");
+    let (status, body) = post(
+        &fixture.http,
+        &fixture.server.url,
+        endpoints::WORKFLOW_ASSIGN,
+        &assertion(&fixture.control, &fixture.control_key, AUDIENCE),
+        &json!({"requestId":RequestId::mint(),"appId":AppId::mint(),
+            "workerId":worker_g.id,"expectedRevision":null}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let assignment_g: Assignment = serde_json::from_value(body).unwrap();
+    let scope_g = AssignedScope {
+        app_id: assignment_g.app_id.clone(),
+        assignment_revision: assignment_g.revision,
+    };
+    let job_g = JobSpec {
+        id: JobId::mint(),
+        app_id: assignment_g.app_id.clone(),
+        operation: JobOperation::Advance {
+            deployment_id: DeploymentId::mint(),
+            run_id: RunId::mint(),
+            generation: 0,
+            revision: 1.try_into().unwrap(),
+        },
+        available_at: 1.try_into().unwrap(),
+    };
+
+    // BEFORE: both workers can submit and claim from their own scope.
+    let job_e = fixture.job();
+    fixture.submit(&job_e).await;
+    let claimed_e_before = fixture.claim(&job_e).await;
+    let settle_e_before = fixture
+        .post(
+            endpoints::WORKFLOW_JOB_SETTLE,
+            &settlement(&claimed_e_before, vec![]),
+        )
+        .await;
+    assert_eq!(settle_e_before.0, StatusCode::OK, "{:?}", settle_e_before.1);
+
+    let (submit_g_status, body) = post(
+        &fixture.http,
+        &fixture.server.url,
+        endpoints::WORKFLOW_JOB_SUBMIT,
+        &worker_g.assertion(),
+        &SubmitJob {
+            scope: scope_g.clone(),
+            job: job_g.clone(),
+        },
+    )
+    .await;
+    assert_eq!(submit_g_status, StatusCode::OK, "{body}");
+    let (claim_g_before_status, _) = post(
+        &fixture.http,
+        &fixture.server.url,
+        endpoints::WORKFLOW_JOB_CLAIM,
+        &worker_g.assertion(),
+        &scope_g,
+    )
+    .await;
+    assert_eq!(claim_g_before_status, StatusCode::OK);
+
+    // Revoke ONLY the fixture's default enroller.
+    fixture
+        .platform
+        .admin
+        .execute(
+            "SELECT zeroship.revoke_worker_enroller($1)",
+            &[&fixture.platform.default_enroller_id],
+        )
+        .await
+        .unwrap();
+
+    // AFTER: E's worker is refused at the manager; F's worker is unaffected.
+    let job_e_after = fixture.job();
+    let (submit_e_after_status, _) = post(
+        &fixture.http,
+        &fixture.server.url,
+        endpoints::WORKFLOW_JOB_SUBMIT,
+        &fixture.worker.assertion(),
+        &SubmitJob {
+            scope: fixture.scope(),
+            job: job_e_after,
+        },
+    )
+    .await;
+    assert_eq!(
+        submit_e_after_status,
+        StatusCode::UNAUTHORIZED,
+        "a revoked enroller's worker must lose manager access"
+    );
+
+    let job_g_2 = JobSpec {
+        id: JobId::mint(),
+        app_id: assignment_g.app_id.clone(),
+        operation: JobOperation::Advance {
+            deployment_id: DeploymentId::mint(),
+            run_id: RunId::mint(),
+            generation: 0,
+            revision: 1.try_into().unwrap(),
+        },
+        available_at: 1.try_into().unwrap(),
+    };
+    let (submit_g_after_status, body) = post(
+        &fixture.http,
+        &fixture.server.url,
+        endpoints::WORKFLOW_JOB_SUBMIT,
+        &worker_g.assertion(),
+        &SubmitJob {
+            scope: scope_g.clone(),
+            job: job_g_2,
+        },
+    )
+    .await;
+    assert_eq!(
+        submit_g_after_status,
+        StatusCode::OK,
+        "an untouched enroller's worker must be unaffected by a sibling's revocation: {body}"
+    );
+}
+
 #[ntex::test]
 async fn management_receipt_replay_rechecks_enrollment_after_linkage_reads() {
     use zeroship_core::workflow_coordination::{ManageRun, ManagementOperation, ManagementOutcome};
@@ -961,9 +1145,9 @@ async fn replace_enrollment(fixture: &Fixture, public_key: [u8; 32]) {
     assert_eq!(
         fixture.platform.admin.execute(
             "WITH previous AS (DELETE FROM zeroship.worker_instances WHERE id=$1 \
-             RETURNING id,ring_key,advertise_host,advertise_port,registered_at) \
-             INSERT INTO zeroship.worker_instances(id,ring_key,public_key,advertise_host,advertise_port,registered_at,status) \
-             SELECT id,ring_key,$2,advertise_host,advertise_port,registered_at,'active' FROM previous",
+             RETURNING id,ring_key,advertise_host,advertise_port,registered_at,enroller_id) \
+             INSERT INTO zeroship.worker_instances(id,ring_key,public_key,advertise_host,advertise_port,registered_at,status,enroller_id) \
+             SELECT id,ring_key,$2,advertise_host,advertise_port,registered_at,'active',enroller_id FROM previous",
             &[&fixture.worker.id.as_str(), &public_key.to_vec()],
         ).await.unwrap(),
         1
