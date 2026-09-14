@@ -638,13 +638,18 @@ impl PlatformOp {
                     let pg_state = pg.clone();
                     let issuer_state = issuer.clone();
                     let refresh_pool_state = refresh_pool.clone();
+                    let orm_url = database_url.clone();
                     let server = web::test::server(move || {
                         let cfg_state = cfg_state.clone();
                         let pg_state = pg_state.clone();
                         let issuer_state = issuer_state.clone();
                         let refresh_pool_state = refresh_pool_state.clone();
+                        let orm_url = orm_url.clone();
                         async move {
                             web::App::new()
+                                .state_factory(async move || {
+                                    zeroship_auth::store::native::connect(&orm_url).await
+                                })
                                 .state(cfg_state)
                                 .state(pg_state)
                                 .state(issuer_state)
