@@ -23,8 +23,8 @@
 #
 # It is recorded rather than quietly deleted so the belief is closed instead of
 # deferred. The isolation is not restored and is not wanted: the package builds and
-# tests as a default member, which is what `tests/test_target_packages.txt` and
-# `tests/shipped_config_gate.sh` both now rule on.
+# tests as a default member. CI also compiles the shipped library and binary
+# targets without test targets in the unit graph.
 [package]
 name = "zeroship-migrate-node"
 version.workspace = true
@@ -82,15 +82,11 @@ napi = ["dep:napi", "dep:napi-derive"]
 zeroship-migrate = { path = "../zeroship-migrate" }
 # The PostgreSQL backend, named DIRECTLY rather than through a `zeroship-migrate`
 # re-export. The apply and status/journal hosts below build `PostgresBackend` over
-# the napi `pg` seam; the engine stopped re-exporting it when
-# the execution half moved into this crate, and re-adding the re-export would be core
-# naming a vendor crate outside its registry, which `core_names_no_vendor_crate`
-# forbids. All three vendors are named the same way now.
+# the napi `pg` seam; the engine stopped re-exporting it when the execution half
+# moved into this crate. Hosts name the vendor implementations they compose.
 zeroship-migrate-postgres = { path = "../zeroship-migrate-postgres" }
-# The MySQL backend, named DIRECTLY rather than through a `zeroship-migrate` re-export.
-# The apply host below builds `MysqlBackend` over the `mysql2` seam, and the
-# engine no longer re-exports it: core naming a vendor crate outside its registry is
-# what `core_names_no_vendor_crate` forbids, so the host names the vendor it wants.
+# The MySQL backend, named directly rather than through a `zeroship-migrate`
+# re-export. The apply host builds `MysqlBackend` over the `mysql2` seam.
 zeroship-migrate-mysql = { path = "../zeroship-migrate-mysql" }
 # The SQLite backend, named the same way and for the same reason. `apply_ir_sqlite` and
 # its siblings below build `SqliteBackend` on the in-process rusqlite actor; the
@@ -158,9 +154,9 @@ tempfile = { workspace = true }
 # DECLARED ON THE DEV-DEPENDENCY, never routed through `[features]`, per
 # xtask/tests/repository_architecture.rs. Under resolver v3 a dev-dependency's
 # features unify into the normal edge WHENEVER A TEST TARGET IS IN THE UNIT GRAPH,
-# so `cargo test` gets it and a `--lib`/`--bins` build does not. Measured: the
-# shipped cdylib keeps 52 undefined `napi_*` symbols and a defined
-# `napi_register_module_v1`; tests/napi_symbol_shape_gate.sh holds both halves.
+# so `cargo test` gets it and a `--lib`/`--bins` build does not. The shipped
+# cdylib keeps its Node API imports undefined and exports
+# `napi_register_module_v1`; `tests/shipped_symbol_shape.rs` holds both halves.
 #
 # No Rust test process may call an N-API function. With no host loaded the napi-sys stub
 # prints `Node-API symbol ... has not been loaded` to stderr and returns 1 for a

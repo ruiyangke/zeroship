@@ -168,18 +168,8 @@ mod tests {
     }
 }
 
-// The rate-limit gate is enforced by a `zeroship.rate_limits` row, so these
-// three cases need a reachable, migrated PostgreSQL and cannot run under a bare
-// `cargo test --workspace`. They live in their own module because the sibling
-// `tests` module above is pure and must keep running there; `required-features`
-// in Cargo.toml gates whole targets and cannot reach inside a lib, so the split
-// is what keeps the database-free half visible to the default build.
-//
-// They previously resolved their DSN from the environment and RETURNED EARLY
-// when it was unset, which cargo reports as a pass - a missing database
-// masquerading as coverage. Behind the gate that fallback is not needed and not
-// wanted: the DSN now defaults to the same dev Postgres the rest of the control
-// suite uses, and an unreachable server fails.
+// The rate-limit gate is enforced by a `zeroship.rate_limits` row. These cases
+// use the PostgreSQL instance owned and migrated by this library test binary.
 #[cfg(test)]
 mod live_db_tests {
     use std::net::{IpAddr, Ipv4Addr};
@@ -191,7 +181,7 @@ mod live_db_tests {
     use super::*;
 
     async fn pg() -> compio_postgres::Client {
-        let db_url = crate::test_live_db::require();
+        let db_url = crate::test_database::url();
         let (client, conn) = compio_postgres::connect(&db_url, compio_postgres::NoTls)
             .await
             .expect("pg connect");

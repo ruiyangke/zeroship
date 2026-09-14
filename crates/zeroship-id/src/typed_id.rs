@@ -402,7 +402,8 @@ pub fn app_oauth_client_id(app_id: &crate::app_id::AppId) -> String {
     format!("{APP_OAUTH_CLIENT_PREFIX}_{body}")
 }
 
-/// Decode a per-app OAuth `client_id` (`oac_<body>`) back to its [`AppId`].
+/// Decode a per-app OAuth `client_id` (`oac_<body>`) back to its
+/// [`AppId`](crate::app_id::AppId).
 ///
 /// Returns `None` for any client id that is not a per-app end-user client - a
 /// missing `oac_` prefix, or a body that is not a legal app-id body - e.g. the

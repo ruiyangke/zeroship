@@ -59,7 +59,7 @@ not an `sk_test_` key. Self-managed up/down: tears down `stripe listen` + contro
 on exit.
 
 Nothing in `.github/workflows/` runs this script and neither does
-`tests/run_billing_suite.sh`, so a refusal reaches the person who ran it by hand
+`cargo xtask test billing`, so a refusal reaches the person who ran it by hand
 and cannot leave a CI job permanently red.
 
 ## Secrets handling

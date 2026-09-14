@@ -24,7 +24,7 @@
 // home to begin with. That refusal is asserted too, since it is what stops
 // `collapse` from being a blanket "ignore my partitioning" switch.
 //
-// GATES: `ZERO_MIGRATE_TEST_PG_URL`, `ZERO_MIGRATE_MYSQL_URL`. SQLite always runs.
+// The package runner owns the PostgreSQL and MySQL servers; SQLite runs in process.
 
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
@@ -36,7 +36,7 @@ import { fileURLToPath } from "node:url";
 
 import { MYSQL_URL_ENV, PG_URL_ENV, pgUrl, requireLiveDb } from "./live-db.js";
 
-// The host suite's addon is resolved and freshness-checked in one place.
+// The host suite builds and resolves its addon in one place.
 import "./addon.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -214,7 +214,11 @@ test("collapse produces a single table on SQLite", async () => {
     const tables = (
       db
         .prepare(
-          `SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY 1`,
+          `SELECT name FROM sqlite_master
+            WHERE type='table'
+              AND name NOT LIKE 'sqlite_%'
+              AND name NOT LIKE '__zeroship_%'
+            ORDER BY 1`,
         )
         .all() as Array<{ name: string }>
     ).map((row) => row.name);

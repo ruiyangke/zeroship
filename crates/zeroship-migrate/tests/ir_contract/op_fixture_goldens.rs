@@ -3,13 +3,13 @@
 //!
 //! This is one half of a two-part check. The other half
 //! (`packages/zero-migrate/tests/recorded-corpus.test.ts`) executes each
-//! `op_fixtures/<stem>.mig.js` through the production recorder and asserts the
-//! drained envelope equals `op_fixtures/recorded.json`. This half reads that same
-//! file, rebuilds an envelope from the recorded `{ name, ops }`, runs
+//! local `<stem>.mig.js` input through the production recorder and asserts the
+//! drained envelope equals its local `recorded.json`. This half reads that recorded
+//! contract, rebuilds an envelope from `{ name, ops }`, runs
 //! [`resolve_create_table_policy`] under the shared confined charter, and asserts
-//! the resolved ops equal the golden. Composed, the halves check `.mig.js` ->
-//! golden for all 27 stems, with each half in the job that already has its
-//! toolchain: no new public API and no new CI step.
+//! the resolved ops equal the Rust crate's `<stem>.golden.json`. Composed, the halves
+//! check `.mig.js` -> golden for every named stem, with each half in the job that
+//! already has its toolchain.
 //!
 //! The resolver used here is the SAME function the addon's production lowering
 //! calls (`zeroship-migrate-node/src/lower.rs`), not a reimplementation. A JS
@@ -30,7 +30,6 @@ use std::path::PathBuf;
 use zeroship_migrate::model::ir::Op;
 use zeroship_migrate::{resolve_create_table_policy, MigrationIr, CURRENT_IR_VERSION};
 
-const MIG_SUFFIX: &str = ".mig.js";
 const GOLDEN_SUFFIX: &str = ".golden.json";
 const RECORDED_FILE: &str = "recorded.json";
 
@@ -41,7 +40,7 @@ const DEFAULT_SCHEMA: &str = "public";
 /// The corpus, committed rather than globbed. A directory listing cannot notice a
 /// fixture that went missing, so this list is the authority and the directory is
 /// checked against it in both directions below.
-const EXPECTED_STEMS: [&str; 27] = [
+const EXPECTED_STEMS: &[&str] = &[
     "alter_primary_key",
     "comments_indexes",
     "constraint_not_valid",
@@ -71,12 +70,18 @@ const EXPECTED_STEMS: [&str; 27] = [
     "views",
 ];
 
-fn fixtures_dir() -> PathBuf {
+fn goldens_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/op_fixtures")
 }
 
+fn recorded_path() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../packages/zero-migrate/tests/fixtures/op-corpus")
+        .join(RECORDED_FILE)
+}
+
 fn read_recorded() -> serde_json::Map<String, serde_json::Value> {
-    let path = fixtures_dir().join(RECORDED_FILE);
+    let path = recorded_path();
     let text =
         std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
     serde_json::from_str::<serde_json::Value>(&text)
@@ -87,7 +92,7 @@ fn read_recorded() -> serde_json::Map<String, serde_json::Value> {
 }
 
 fn read_golden(stem: &str) -> MigrationIr {
-    let path = fixtures_dir().join(format!("{stem}{GOLDEN_SUFFIX}"));
+    let path = goldens_dir().join(format!("{stem}{GOLDEN_SUFFIX}"));
     let text =
         std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
     serde_json::from_str(&text).unwrap_or_else(|e| panic!("parse {}: {e}", path.display()))
@@ -122,34 +127,27 @@ fn op_fixture_corpus_is_exactly_the_committed_stem_list() {
         "the stem list has no duplicates"
     );
 
-    let mut mig_stems: BTreeSet<String> = BTreeSet::new();
     let mut golden_stems: BTreeSet<String> = BTreeSet::new();
     let mut unrecognized: Vec<String> = Vec::new();
-    for entry in std::fs::read_dir(fixtures_dir()).expect("read op_fixtures") {
+    for entry in std::fs::read_dir(goldens_dir()).expect("read op_fixtures") {
         let name = entry.expect("dir entry").file_name();
         let name = name.to_str().expect("fixture names are UTF-8").to_string();
         // No skip branch: an entry matching nothing is a failure, not a pass. A loop
         // that quietly continues past unmatched entries lets the corpus shrink
         // without any test noticing.
-        if let Some(stem) = name.strip_suffix(MIG_SUFFIX) {
-            mig_stems.insert(stem.to_string());
-        } else if let Some(stem) = name.strip_suffix(GOLDEN_SUFFIX) {
+        if let Some(stem) = name.strip_suffix(GOLDEN_SUFFIX) {
             golden_stems.insert(stem.to_string());
-        } else if name != RECORDED_FILE {
+        } else {
             unrecognized.push(name);
         }
     }
     assert!(
         unrecognized.is_empty(),
-        "every op_fixtures entry is a {MIG_SUFFIX}, a {GOLDEN_SUFFIX}, or {RECORDED_FILE}; \
+        "every op_fixtures entry is a {GOLDEN_SUFFIX}; \
          found {unrecognized:?}"
     );
 
     let expected: BTreeSet<String> = EXPECTED_STEMS.iter().map(|s| (*s).to_string()).collect();
-    assert_eq!(
-        mig_stems, expected,
-        "the {MIG_SUFFIX} set equals the committed stem list"
-    );
     assert_eq!(
         golden_stems, expected,
         "the {GOLDEN_SUFFIX} set equals the committed stem list"
@@ -169,7 +167,7 @@ fn recorded_fixtures_resolve_to_their_committed_goldens() {
     // Enumerated from the AUTHORING INPUTS by way of the committed stem list. Keying
     // this loop on `*.golden.json` is the defect being closed: it lets an input drift
     // away from the artifact it is supposed to produce with no assertion ever running.
-    for stem in EXPECTED_STEMS {
+    for &stem in EXPECTED_STEMS {
         let raw = recorded
             .get(stem)
             .unwrap_or_else(|| panic!("{RECORDED_FILE} carries an entry for {stem}"));

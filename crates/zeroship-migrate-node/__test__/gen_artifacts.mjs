@@ -214,7 +214,11 @@ const refEnvelope = {
       name: 'posts',
       // The recorder's image of a reference column: the FK target rides on the
       // `ref` ColType brand, which already derives `posts_authorId_fkey`.
-      columns: [{ name: 'authorId', type: { ref: { references: 'users' } } }],
+      columns: [{
+        name: 'authorId',
+        type: { ref: { references: 'users' } },
+        references: { table: 'users', column: 'id' },
+      }],
       primaryKey: null,
       constraints: [],
       indexes: [],
@@ -233,7 +237,7 @@ const refDescriptors = [
   {
     name: 'posts',
     ownerApp: 'app_js',
-    fields: [{ name: 'authorId', type: 'ref', references: 'users' }],
+    fields: [{ name: 'authorId', type: 'ref', references: 'users', referenceColumn: 'id' }],
     runtimeOptions: { softDelete: false, versioning: false, strictness: 'strict' },
   },
 ];

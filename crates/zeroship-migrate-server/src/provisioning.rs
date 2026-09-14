@@ -418,7 +418,6 @@ pub async fn provision_audit_unmask_table(
 #[cfg(test)]
 mod audit_unmask_tests {
     use super::*;
-    use compio_postgres::NoTls;
     use uuid::Uuid;
 
     /// The identifier goes through `quote_ident`, which doubles embedded quotes.
@@ -462,14 +461,7 @@ mod audit_unmask_tests {
 
     #[compio::test]
     async fn a_preexisting_audit_table_without_its_identity_sequence_is_refused() {
-        let (client, connection) =
-            compio_postgres::connect(&zeroship_core::config::test_database_url(), NoTls)
-                .await
-                .expect("connect to the migrate-server test database");
-        compio::runtime::spawn(async move {
-            let _ = connection.run().await;
-        })
-        .detach();
+        let client = crate::test_database::connect().await;
 
         let schema = Uuid::new_v4().to_string();
         let schema_q = quote_ident(&schema);

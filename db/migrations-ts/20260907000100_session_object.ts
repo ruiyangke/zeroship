@@ -47,9 +47,8 @@ const userIdColumnsByTable: Readonly<Record<string, readonly string[]>> = {
 // on `app_user_identities`, `gateway_sessions` and `app_session_anchors` and
 // sets the matching GUCs. These two tables are granted to `zeroship_auth` and
 // to nothing else, so there is no second tenant to isolate from and a policy
-// here would bind nothing. `tests/rls_binding_gate.sh` is the instrument that
-// tells those two cases apart; it rules on what the corpus creates, so adding
-// a grant to a second role here without a policy is what it exists to catch.
+// here would bind nothing. Role-scoped PostgreSQL behavior tests must prove any
+// future policy and second role form an actual tenant boundary.
 //
 // THE SECRET IS NEVER STORED. `secret_hash` is a keyed HMAC under a versioned
 // keyring the auth service holds, so a database copy yields no presentable

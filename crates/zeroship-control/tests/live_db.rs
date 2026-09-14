@@ -1,7 +1,7 @@
 //! Mandatory PostgreSQL integration tests, included in ordinary cargo test.
 //!
-//! Run tests/run_billing_suite.sh to prepare a migrated database and run the
-//! suite. Fleet sweeps share state, so libtest defaults to serial execution
+//! This test binary owns and migrates its PostgreSQL instance. Fleet sweeps
+//! share state within that instance, so libtest defaults to serial execution
 //! through .cargo/config.toml.
 //!
 //! With autotests disabled, register new database test modules below. Filter a

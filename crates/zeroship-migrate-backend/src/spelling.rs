@@ -12,15 +12,8 @@
 //! about emitted SQL can see the missing routing.
 //!
 //! Across a crate boundary `pub(in ...)` cannot express "these three crates and no
-//! other". The vendor crates must reach these, so they are `pub`, and the engine can
-//! now name them too. THE COMPILER NO LONGER ENFORCES THE RULE.
-//!
-//! It is replaced, not dropped, by a textual census -
-//! `crates/zeroship-migrate/tests/dialect_matrix/core_does_not_spell_a_vendors_bytes.rs` - which walks every
-//! crate `src` root and asserts that `zero-migrate` names neither function. That is
-//! strictly weaker than a visibility error (it can be deleted; a privacy violation
-//! cannot) and it is recorded here as a DOWNGRADE rather than presented as an equal
-//! substitute.
+//! other". The vendor crates must reach these, so they are `pub`. Callers keep the
+//! target explicit by passing the backend renderer that owns the spelling.
 
 /// The ANSI double-quote identifier spelling: double every embedded `"`, wrap the
 /// result in `"`. THE single physical home of that byte-logic.

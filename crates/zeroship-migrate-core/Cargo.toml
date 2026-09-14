@@ -39,9 +39,8 @@ description = "The zeroship-migrate ENGINE: authoring, validation, the single ca
 # NAMES in prose and diagnostics, and the raw spelling primitives — are still there
 # and are still the only thing measuring those.
 #
-# THE ONE HOLE CARGO LEAVES is the `[dev-dependencies]` edge below. It is deliberate,
-# it is bounded to one file, and `crates/zeroship-migrate/tests/dialect_matrix/core_names_no_vendor_crate.rs`
-# is what keeps it bounded.
+# The `[dev-dependencies]` edge below is deliberate: core unit tests compose the
+# shipping vendor implementations without adding them to the production graph.
 
 [dependencies]
 sha2 = { workspace = true }
@@ -120,12 +119,7 @@ toml = { workspace = true }
 # backends that ship. There is no cycle: no vendor crate depends on this one, which is
 # the property that let them be extracted at all, so Cargo accepts these edges.
 #
-# THEY ARE REACHABLE FROM `#[cfg(test)]` CODE ANYWHERE UNDER `src`, which is exactly
-# what Cargo cannot narrow. `src/test_fixtures.rs` is the single file allowed to name
-# them, it composes the set once, and
-# `crates/zeroship-migrate/tests/dialect_matrix/core_names_no_vendor_crate.rs` is the ratchet that keeps that
-# number at one file — the census that Cargo did NOT subsume, kept and re-aimed rather
-# than retired.
+# `src/test_fixtures.rs` composes the vendor set used by core unit tests.
 #
 # Resolver 3 keeps dev-dependency features and edges out of the normal build, so
 # `cargo build -p zeroship-migrate-core` links none of this.

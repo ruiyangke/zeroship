@@ -753,10 +753,6 @@ NOSENT="$(edge_claimed_labels "$FIX/no-sentinel.json")"; NOSENT_RC=$?
 #       Cannot find module 'zeroship-migrate-node'
 #   [ERR_PNPM_RECURSIVE_RUN_FIRST_FAIL] @zeroship/vite-plugin build
 #
-# tests/dockerfile_copy_paths_gate.sh does NOT cover this and cannot: it asks
-# `[ -e ]` of every COPY source, and `third_party/` exists - it is empty.
-# MEASURED in a worktree with the submodule unpopulated, it reports 15 passed,
-# 0 failed. Green on the exact tree whose build fails.
 echo ""
 echo "-- submodule_paths / submodule_manifests (fixtures)"
 

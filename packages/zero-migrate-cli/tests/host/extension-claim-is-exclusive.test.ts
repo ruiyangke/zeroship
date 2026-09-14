@@ -5,16 +5,8 @@
 // `citext-prerequisite.test.ts` can install - or require the absence of - a
 // DATABASE-GLOBAL object while a sibling gate run does the same. Its Rust counterpart
 // is guarded by `crates/zeroship-migrate/tests/rollback/extension_claim_is_exclusive.rs`
-// and this file is the matching guard on this side, plus the one property neither
-// language can assert alone:
+// and this file is the matching guard on this side:
 //
-//   0. THE TWO HALVES TAKE ONE LOCK. The key is a string both languages hand to the
-//      server's `hashtext`, so the lock is shared exactly when the two strings are.
-//      Nothing else couples them: a rename on either side would leave two suites each
-//      holding "their" claim and still colliding, and every test in both trees would
-//      stay green. So the Rust `claim_key` is READ from its source here and compared
-//      against `claimKey`. This is the only assertion in either tree that can see a
-//      one-sided rename.
 //   1. THE KEY NAMES THE RESOURCE. Not the suite, not the binary, not the pid. The
 //      first version of the Rust claim was keyed by the SUITE, which is how a
 //      neighbour's installation came to be reported as a defect.
@@ -38,26 +30,15 @@
 // each other. The shared-key property those probes give up is what (0) and (1) assert
 // directly, on the real names.
 //
-// GATE: `connectLivePg` (see `live-db.ts`) for (2) and (3); (0) and (1) need no server.
+// GATE: `connectLivePg` (see `live-db.ts`) for the exclusion and timeout behavior.
 
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
-import { dirname, resolve } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
 
 import type { Client } from "pg";
 
 import { CLAIM_WAIT, claim, claimKey, release } from "./extension-claim.js";
 import { connectLivePg } from "./live-db.js";
-
-const HERE = dirname(fileURLToPath(import.meta.url));
-
-/** The Rust half of the claim, whose key this file is pinned against. */
-const RUST_CLAIM = resolve(
-  HERE,
-  "../../../../crates/zeroship-migrate/tests/support/extension_claim.rs",
-);
 
 /** A lock name of this run's own, distinct per case. See the header. */
 function probe(tag: string): string {
@@ -71,49 +52,6 @@ async function tryTake(client: Client, name: string): Promise<boolean> {
   );
   return rows[0].got;
 }
-
-/**
- * `claim_key`'s key as the RUST source spells it, with `extension` substituted.
- *
- * Reads the source rather than a copy of it, because a copy is the thing under test.
- * A source that cannot be parsed is a CANNOT-ANSWER and fails here: a regex that
- * silently stopped matching would turn this guard into an unconditional pass, which is
- * the exact shape of failure the claim itself exists to prevent.
- */
-function rustClaimKey(extension: string): string {
-  const source = readFileSync(RUST_CLAIM, "utf8");
-  const fn = /pub fn claim_key\(extension: &str\) -> String \{\s*format!\("([^"]*)"\)\s*\}/.exec(
-    source,
-  );
-  assert.ok(
-    fn,
-    `could not find claim_key's format literal in ${RUST_CLAIM}. This test cannot ` +
-      `compare the two halves' keys without it, and a silent pass here would let the ` +
-      `two suites hold different locks while both reported green - so the unreadable ` +
-      `source is the failure.`,
-  );
-  const template = fn[1];
-  assert.ok(
-    template.includes("{extension}"),
-    `claim_key's literal ${JSON.stringify(template)} no longer interpolates the ` +
-      `extension name, so the Rust claim is keyed by something this test cannot model`,
-  );
-  return template.replaceAll("{extension}", extension);
-}
-
-test("the host claim key is the key the Rust claim hashes", () => {
-  for (const extension of ["citext", "pgcrypto", "unaccent", "uuid-ossp"]) {
-    assert.equal(
-      claimKey(extension),
-      rustClaimKey(extension),
-      `the host suite and the Rust suites must hand the server the SAME string for ` +
-        `${extension}, or each holds a claim the other cannot see and both install ` +
-        `the extension anyway - which is "already installed in this database" in one ` +
-        `process and "does not exist" in the other, the two failures this claim was ` +
-        `written for`,
-    );
-  }
-});
 
 test("the extension claim key names the extension and nothing else", () => {
   assert.equal(

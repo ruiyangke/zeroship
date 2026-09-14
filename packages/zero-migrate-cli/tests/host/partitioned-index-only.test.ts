@@ -31,7 +31,7 @@ import type { MigrationModule } from "@zeroship/migrate/internal/recorder";
 import { connectLivePg, pgUrl } from "./live-db.js";
 import { partitionPolicy } from "./policy.js";
 
-// The host suite's addon is resolved and freshness-checked in one place.
+// The host suite builds and resolves its addon in one place.
 import "./addon.js";
 
 const OWNER_APP = "app_partition_index_only";

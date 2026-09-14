@@ -21,9 +21,8 @@
 //!
 //! # Why this needs a FOURTH backend and cannot be shown on the three that ship
 //!
-//! It is the defect class `core_does_not_spell_a_vendors_bytes.rs` describes in its
-//! header: **when the vendors agree, absent routing emits the right bytes and no
-//! assertion about emitted SQL can see it.** The three shipping backends do not
+//! When vendors agree, absent routing emits the right bytes and an assertion about
+//! emitted SQL cannot see the missing dispatch. The shipping backends do not
 //! disagree here in any way an assertion can catch —
 //!
 //! * PostgreSQL wants exactly what the engine wrote, so its leg is silently correct.
@@ -87,8 +86,7 @@ const OWNER: &str = "app_fourth";
 const TABLE: &str = "widgets";
 const COLUMN: &str = "qty";
 
-/// The fourth backend's identity. Declared here because a test binary is a HOST and
-/// is entitled to compose — see `the_registry_travels_as_a_value.rs`.
+/// The fourth backend's identity. A test binary is a host and may compose a backend.
 const FOURTH_ID: DialectId = DialectId::new("fourthdb");
 
 /// The fourth backend's own capability row.

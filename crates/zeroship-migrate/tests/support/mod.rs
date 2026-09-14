@@ -60,10 +60,8 @@ pub mod field_defs_corpus;
 /// protection.
 ///
 /// The claimants are not all Rust. `packages/zero-migrate-cli/tests/host/
-/// extension-claim.ts` is the host suite's half, and it hashes this same key by
-/// copying the string this module builds - `extension-claim-is-exclusive.test.ts`
-/// reads `extension_claim.rs` and asserts the two spellings agree, which is the only
-/// check in either tree that can see a one-sided rename.
+/// extension-claim.ts` is the host suite's half, and both sides load the key prefix
+/// from `tests/fixtures/extension-claim-prefix.txt`.
 pub mod extension_claim;
 
 use std::cell::{Cell, RefCell};
@@ -75,48 +73,7 @@ use postgres::{Client, NoTls, Row as PgRow};
 use zeroship_migrate::driver::{Bind, DbError, Row, SqlSession, Value};
 use zeroship_migrate::{effective_policy_from_charter_toml, EffectivePolicy};
 
-pub const CONFINED_CHARTER_TOML: &str = r#"policy_version = 1
-
-[[grant]]
-key = "schema.cross_schema"
-value = true
-scope = { include = ["app"] }
-
-[[grant]]
-key = "schema.create_table"
-value = true
-scope = { include = ["app"] }
-
-[[grant]]
-key = "schema.rename"
-value = true
-scope = { include = ["app"] }
-
-[[grant]]
-key = "safety.destructive_ops"
-value = "allow"
-scope = "all"
-
-[[inject]]
-scope = "all"
-mandatory = true
-primary_key = ["id"]
-author_primary_key = "forbid"
-columns = [
-  { name = "id",         type = "text",        nullable = false, assign = { by = "typedId", on = "insert" } },
-  { name = "created_at", type = "timestamptz", nullable = false, assign = { by = "now", on = "insert" } },
-  { name = "updated_at", type = "timestamptz", nullable = false, assign = { by = "now", on = "write" } },
-  { name = "created_by", type = "text",        nullable = true, assign = { by = "actor", on = "insert" } },
-  { name = "updated_by", type = "text",        nullable = true, assign = { by = "actor", on = "write" } },
-  { name = "version",    type = "integer",     nullable = false, assign = { by = "increment(1)", on = "write" } },
-  { name = "deleted_at", type = "timestamptz", nullable = true, assign = { by = "now", on = "delete" } },
-]
-indexes = [
-  { name = "ix_deleted_at", columns = ["deleted_at"] },
-  { name = "ix_updated_at", columns = ["updated_at"] },
-  { name = "ix_created_by", columns = ["created_by"] },
-]
-"#;
+pub const CONFINED_CHARTER_TOML: &str = include_str!("../fixtures/confined-charter.toml");
 
 #[must_use]
 pub fn confined_charter() -> EffectivePolicy {

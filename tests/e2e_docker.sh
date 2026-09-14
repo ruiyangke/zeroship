@@ -76,8 +76,10 @@ echo ""
 
 # The stack now REQUIRES generated secrets; without them compose refuses to
 # render. Idempotent, never rotates.
-. "$(dirname "$0")/lib/dev_secrets.sh"
-ensure_dev_secrets || exit 1
+cargo run --manifest-path "$ROOT/Cargo.toml" -q \
+  -p zeroship-cli --bin zeroship -- dev init \
+  --secrets-dir="$ROOT/deploy/compose/secrets" \
+  --env-file="$ROOT/deploy/compose/.env"
 
 # --- Start cluster ---
 echo "=== Starting cluster ==="

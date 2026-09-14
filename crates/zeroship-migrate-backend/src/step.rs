@@ -199,7 +199,6 @@ impl DialectScope {
 /// policy, and `lower_ir_rename` all declare MySQL column rename unsupported, and the
 /// declarative differ is the lone dissenter. The strategy names are honest about
 /// what each arm IS without re-encoding a dialect claim the type cannot keep.
-/// `dialect_matrix::plan_vocabulary_names_strategies_not_vendors` holds the line.
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone)]
 pub enum RenameStep {

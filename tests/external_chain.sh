@@ -228,8 +228,10 @@ NODE
 require_local_registry
 
 # compose now requires generated secrets to interpolate; idempotent.
-. "$(dirname "$0")/lib/dev_secrets.sh"
-ensure_dev_secrets || exit 1
+cargo run --manifest-path "$ROOT/Cargo.toml" -q \
+  -p zeroship-cli --bin zeroship -- dev init \
+  --secrets-dir="$ROOT/deploy/compose/secrets" \
+  --env-file="$ROOT/deploy/compose/.env"
 
 log "1. Verdaccio up"
 docker compose up -d verdaccio

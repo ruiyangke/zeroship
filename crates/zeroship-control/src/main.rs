@@ -27,7 +27,7 @@ use zeroship_bundle::{
 };
 use zeroship_control::config::{ControlSettings, ControlSettingsSources};
 use zeroship_control::{
-    api, device_handlers, env_handlers, erasure,
+    api, device_handlers, env_handlers, erasure, health,
     internal, oauth_grants_handlers, plan_catalog, stripe_handlers,
     workflow_instance_api,
     AppState, EnvStore, Quota, RateLimiter, Registry, StripeStore,
@@ -1183,6 +1183,7 @@ fn main() -> std::io::Result<()> {
         let coordinator_url = workflow_coordinator_url.clone();
         web::App::new()
             .state(state.clone())
+            .state(state.control_pg.clone())
             .state(readiness.clone())
             .state_factory(async move || {
                 zeroship_control::deployment_hold_api::DeploymentHoldApi::connect(
@@ -1390,15 +1391,7 @@ fn main() -> std::io::Result<()> {
                     .state(stripe_handlers::webhook_payload_config())
                     .route(web::post().to(stripe_handlers::webhook)),
             )
-            // --- Health ---
-            .service(
-                web::resource("/healthz")
-                    .route(web::get().to(internal::healthz)),
-            )
-            .service(
-                web::resource("/readyz")
-                    .route(web::get().to(internal::readyz)),
-            )
+            .configure(health::configure)
     })
     .bind(&bind_addr)?
     .run()
@@ -1918,8 +1911,7 @@ mod tests {
         }
 
         // Does NOT cover whether the environment is actually READ at that name;
-        // that is the generated resolver's `read_config_env!` and is exercised
-        // end to end by tests/config_check_e2e.sh.
+        // the config_env_tier integration target drives the generated resolver.
     }
 
     // A resolved secret publishes presence and nothing else. The sentinel is

@@ -579,7 +579,7 @@ mod tests {
 /// snapshot, so it needs a reachable, migrated PostgreSQL and panics on connect
 /// without one.
 ///
-/// Included in ordinary cargo test; tests/run_billing_suite.sh prepares the DB.
+/// Included in ordinary cargo test with a crate-owned PostgreSQL fixture.
 #[cfg(test)]
 mod live_db_tests {
     use std::collections::BTreeMap;
@@ -637,7 +637,7 @@ mod live_db_tests {
     }
 
     fn db_url() -> String {
-        crate::test_live_db::require()
+        crate::test_database::url()
     }
 
     async fn pg(db_url: &str) -> compio_postgres::Client {
@@ -654,6 +654,7 @@ mod live_db_tests {
         plan_id: &str,
         label: &str,
     ) -> AppId {
+        let app_id = AppId::mint();
         let name = format!("{label}-{}", Uuid::new_v4());
         // A LIVE app needs a project and a project needs an organization:
         // `apps_live_app_has_project` (`project_id IS NOT NULL OR deleted_at IS
@@ -681,20 +682,16 @@ mod live_db_tests {
             )
             .await
             .expect("seed fixture project");
-        let row = client
-            .query(
-                "INSERT INTO zeroship.apps (name, plan_id, project_id, organization_id) \
-                 SELECT $1, $2, p.id, p.organization_id FROM zeroship.projects p \
-                  WHERE p.id = $3 RETURNING id",
-                &[&name, &plan_id, &project_id],
+        client
+            .execute(
+                "INSERT INTO zeroship.apps (id, name, plan_id, project_id, organization_id) \
+                 SELECT $1, $2, $3, p.id, p.organization_id FROM zeroship.projects p \
+                  WHERE p.id = $4",
+                &[&app_id.as_str(), &name, &plan_id, &project_id],
             )
             .await
-            .expect("insert app")
-            .into_iter()
-            .next()
-            .expect("insert app returns one row");
-        let id_raw: String = row.get("id");
-        AppId::parse(&id_raw).expect("inserted app id is canonical")
+            .expect("insert app");
+        app_id
     }
 
     async fn seed_pricing(client: &compio_postgres::Client) -> String {
