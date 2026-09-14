@@ -97,6 +97,13 @@ It records normal app deployments and generation-fenced retention holds. Manager
 queue ownership and customer journal ownership require separate host authority;
 the journal hold API does not grant manager access.
 
+`deployments::latest::LatestDeploymentSource` observes the ordinary app deployment
+pointer through a native ORM join to the same app's catalog row. It selects only
+identity, hash and retention state; missing or unavailable targets refuse without
+falling back to activation history. The returned value is an observation, with no
+admission authority or deployment hold. Platform grants, host readiness and
+ordered management acceptance still need composition with this reader.
+
 `retention::HoldClient` supplies the queue's Control capability. Activation,
 execution, cron and resolved Latest restart jobs require a confirmed deployment hold.
 Reconciliation, collection, lifecycle transitions and Started restart jobs do not
