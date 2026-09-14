@@ -223,7 +223,9 @@ impl Record {
                     && self.reconciliation.is_none()
                     && self.reconciliation_next.is_none()
             }
-            JobOperation::Collect {} | JobOperation::Fanout { .. } | JobOperation::Propagate { .. } => {
+            JobOperation::Collect {}
+            | JobOperation::Fanout { .. }
+            | JobOperation::Propagate { .. } => {
                 self.run_id.is_none()
                     && self.reconciliation.is_none()
                     && self.reconciliation_next.is_none()

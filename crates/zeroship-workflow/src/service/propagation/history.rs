@@ -146,6 +146,20 @@ pub(super) async fn receipt(
     if receipt.outcome != expected {
         return Err(invalid());
     }
+    successors(tx, job, &result).await?;
+    Ok(Some(receipt))
+}
+
+/// Retained successors are the page's exact publications: Advance intents for
+/// affected runs and, unless finished, the obligation's next page.
+async fn successors(
+    tx: &Transaction,
+    job: &JobSpec,
+    result: &PageResult,
+) -> Result<(), WorkflowServiceError> {
+    let JobOperation::Propagate { propagation_id, .. } = &job.operation else {
+        return Err(invalid());
+    };
     let mut next_pages = 0;
     let mut advances = 0_i64;
     let mut identities = BTreeSet::new();
@@ -168,5 +182,5 @@ pub(super) async fn receipt(
     if next_pages != usize::from(!result.finished) || advances > result.affected {
         return Err(invalid());
     }
-    Ok(Some(receipt))
+    Ok(())
 }

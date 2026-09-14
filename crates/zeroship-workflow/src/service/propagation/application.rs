@@ -46,7 +46,15 @@ pub(super) async fn apply(
     };
     match kind {
         Kind::Cascade => {
-            Box::pin(cascade(tx, &job.app_id, &current, options, now, &mut result)).await?;
+            Box::pin(cascade(
+                tx,
+                &job.app_id,
+                &current,
+                options,
+                now,
+                &mut result,
+            ))
+            .await?;
         }
         Kind::Notify => {
             Box::pin(notify(tx, &job.app_id, &current, options, now, &mut result)).await?;
@@ -71,7 +79,10 @@ async fn cascade(
     let mut filter = run
         .column(runs::app_id)
         .eq(app.as_str())?
-        .and(run.column(runs::parent_id).eq(Some(source.run_id.as_str()))?)
+        .and(
+            run.column(runs::parent_id)
+                .eq(Some(source.run_id.as_str()))?,
+        )
         .and(
             run.column(runs::parent_generation)
                 .eq(Some(source.generation))?,
@@ -119,7 +130,7 @@ async fn cascade(
                 )
                 .await?,
         )?;
-        if let Some(advance) = publication::advance_job(tx, app, &child.id, now).await? {
+        if let Some(advance) = Box::pin(publication::advance_job(tx, app, &child.id, now)).await? {
             result.successors.push(advance);
         }
     }
@@ -184,7 +195,9 @@ async fn notify(
         }
         changed(woken)?;
         result.affected += 1;
-        if let Some(advance) = publication::advance_job(tx, app, &parent.run_id, now).await? {
+        if let Some(advance) =
+            Box::pin(publication::advance_job(tx, app, &parent.run_id, now)).await?
+        {
             result.successors.push(advance);
         }
     }
