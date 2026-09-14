@@ -80,6 +80,40 @@ fn check_config_reports_json_without_contacting_control_or_creating_blob_state()
 }
 
 #[test]
+fn check_config_reports_whether_an_enroller_credential_is_configured() {
+    // Presence only: a dry run never opens the credential, so a path that
+    // does not exist still reports as configured.
+    const KEY: &str = "enroller_file_configured";
+    let configured = |output: &Output| {
+        assert_success(output);
+        report(&output.stdout).get(KEY).cloned()
+    };
+
+    // The control: nothing supplies the credential, so a report that always
+    // said `true` fails here.
+    let unset = run(&["--check-config", "--check-config-format", "json"]);
+    assert_eq!(configured(&unset), Some(serde_json::Value::Bool(false)));
+
+    let flagged = run(&[
+        "--check-config",
+        "--check-config-format",
+        "json",
+        "--enroller-file",
+        "/flag/worker-enroller.json",
+    ]);
+    assert_eq!(configured(&flagged), Some(serde_json::Value::Bool(true)));
+
+    let from_env = Command::new(env!("CARGO_BIN_EXE_zeroship-worker"))
+        .env_clear()
+        .env("ZEROSHIP_CONTROL_KEY", STRONG_HEX)
+        .env("ZEROSHIP_WORKER_ENROLLER_FILE", "/env/worker-enroller.json")
+        .args(["--check-config", "--check-config-format", "json"])
+        .output()
+        .expect("spawn zeroship-worker");
+    assert_eq!(configured(&from_env), Some(serde_json::Value::Bool(true)));
+}
+
+#[test]
 fn worker_rejects_shared_overlay_selectors() {
     for args in [
         ["--check-config", "--config", "ignored.toml"].as_slice(),
