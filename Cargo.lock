@@ -8081,6 +8081,7 @@ dependencies = [
  "aes-gcm",
  "async-trait",
  "base64",
+ "cidr",
  "compio",
  "compio-postgres",
  "compio-tls",
