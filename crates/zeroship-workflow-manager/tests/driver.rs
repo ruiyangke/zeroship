@@ -121,6 +121,14 @@ fn options_reject_invalid_bounds_without_io() {
             ..Options::default()
         },
         Options {
+            hold_grace: Duration::ZERO,
+            ..Options::default()
+        },
+        Options {
+            hold_grace: Duration::MAX,
+            ..Options::default()
+        },
+        Options {
             scheduling: zeroship_workflow_manager::scheduling::Options {
                 max_backfill: 0,
                 ..Default::default()
@@ -641,7 +649,7 @@ async fn retention_replies(fixture: &Fixture) {
         "pending second",
     )
     .await;
-    let held = catalog.publish(&app, "explicit release policy", &[]).await;
+    let held = catalog.publish(&app, "released after its grace", &[]).await;
     queue.ensure_deployment(&app, &held.id).await.unwrap();
     let released = catalog.publish(&app, "lost release", &[]).await;
     queue.ensure_deployment(&app, &released.id).await.unwrap();
@@ -660,11 +668,23 @@ async fn retention_replies(fixture: &Fixture) {
         .is_empty());
     catalog.assert_retained(&app, &first).await;
     catalog.assert_retained(&other_app, &second).await;
+    // Within its grace an unselected, unused hold stays held.
     catalog.assert_retained(&app, &held).await;
     catalog.reclaim(&app, &released).await;
     let before = client.calls.get();
     success(&driver.tick().await.retention, 0);
     assert_eq!(client.calls.get(), before);
+    patch(
+        fixture,
+        "deployment_holds",
+        value!({"app_id":app.as_str(),"deployment_id":held.id.as_str()}),
+        value!({"held_at":0}),
+    )
+    .await;
+    success(&driver.tick().await.retention, 1);
+    assert_eq!(client.calls.get(), before + 1);
+    catalog.reclaim(&app, &held).await;
+    catalog.assert_retained(&app, &first).await;
 }
 
 #[expect(
