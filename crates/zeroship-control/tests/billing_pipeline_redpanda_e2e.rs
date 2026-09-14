@@ -1,33 +1,31 @@
-//! End-to-end billing/enforcement pipeline over a REAL Redpanda broker.
+//! End-to-end billing/enforcement pipeline over a real Redpanda broker.
 //!
 //! This is the faithful wired path — no shims for the components under test:
 //!
 //!   real Meter (worker producer) ──drain──► real UsageOutbox ──publish──►
-//!     REAL Redpanda ──recompute (rewind+poll)──► usage_aggregates (live PG)
+//!     real Redpanda ──recompute (rewind+poll)──► usage_aggregates (live PG)
 //!       ──► real SpendEngine.evaluate_all ──► app_spend_state (Block)
 //!
 //! It proves the producer, the durable stream, the enforcement recompute (which
 //! `rewind()`s a fresh consumer every cycle — the cold-start seek path), and the
-//! spend evaluator work together against a real broker + real Postgres, rather
+//! spend evaluator work together against a real broker and real Postgres, rather
 //! than each in isolation with a fake stream.
-//!
-//! `REDPANDA_BROKERS` names the broker. With it unset this REFUSES and names
-//! the compose service that provides one; it used to skip, which cargo counts
-//! as a pass, so the only end-to-end proof that the producer, the durable
-//! stream and the spend evaluator agree reported green on every machine
-//! without a broker.
 
-use std::sync::Arc;
+use std::net::{Ipv4Addr, TcpListener};
+use std::sync::{Arc, OnceLock};
+use std::time::Duration;
 
 use compio_postgres::{connect, NoTls};
+use testcontainers::core::{IntoContainerPort, WaitFor};
+use testcontainers::{runners::SyncRunner, Container, GenericImage, ImageExt};
 use uuid::Uuid;
 
-use zeroship_core::app_id::AppId;
 use zeroship_control::cron::billing_reconcile::DEFAULT_SETTLE_WINDOW_SECS;
 use zeroship_control::cron::spend_recompute::{recompute_usage_aggregates, SpendRecomputeConfig};
 use zeroship_control::metering::current_period_start_unix;
 use zeroship_control::spend::SpendEngine;
 use zeroship_control::Registry;
+use zeroship_core::app_id::AppId;
 use zeroship_metering::{Meter, UsageOutbox};
 use zeroship_stream::{adapters, StreamConfig, StreamRegistry};
 
@@ -35,6 +33,62 @@ use crate::common;
 
 fn db_url() -> String {
     crate::common::require_control_db()
+}
+
+struct Redpanda {
+    _container: Container<GenericImage>,
+    brokers: String,
+}
+
+impl Redpanda {
+    fn start() -> Self {
+        let port = available_port();
+        let advertised = format!("external://127.0.0.1:{port}");
+        let container = GenericImage::new("docker.redpanda.com/redpandadata/redpanda", "v26.2.2")
+            .with_wait_for(WaitFor::message_on_stderr("Successfully started Redpanda!"))
+            .with_mapped_port(port, 19092.tcp())
+            .with_cmd([
+                "redpanda".to_owned(),
+                "start".to_owned(),
+                "--overprovisioned".to_owned(),
+                "--smp".to_owned(),
+                "1".to_owned(),
+                "--memory".to_owned(),
+                "512M".to_owned(),
+                "--reserve-memory".to_owned(),
+                "0M".to_owned(),
+                "--node-id".to_owned(),
+                "0".to_owned(),
+                "--check=false".to_owned(),
+                "--kafka-addr".to_owned(),
+                "external://0.0.0.0:19092".to_owned(),
+                "--advertise-kafka-addr".to_owned(),
+                advertised,
+                "--set".to_owned(),
+                "redpanda.auto_create_topics_enabled=true".to_owned(),
+            ])
+            .with_startup_timeout(Duration::from_secs(120))
+            .start()
+            .expect("control tests require Docker and Redpanda");
+        Self {
+            _container: container,
+            brokers: format!("127.0.0.1:{port}"),
+        }
+    }
+}
+
+fn available_port() -> u16 {
+    TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+        .expect("bind an available Redpanda port")
+        .local_addr()
+        .expect("Redpanda listener address")
+        .port()
+}
+
+static REDPANDA: OnceLock<Redpanda> = OnceLock::new();
+
+fn brokers() -> String {
+    REDPANDA.get_or_init(Redpanda::start).brokers.to_owned()
 }
 
 async fn pg(url: &str) -> compio_postgres::Client {
@@ -146,17 +200,7 @@ fn redpanda_config(brokers: &str, topic: &str, group: &str) -> StreamConfig {
 
 #[compio::test]
 async fn producer_to_redpanda_to_recompute_to_spend_block_end_to_end() {
-    let Some(brokers) = zeroship_core::test_env_os!("REDPANDA_BROKERS") else {
-        common::refuse_missing_backend(
-            "a Redpanda broker",
-            "REDPANDA_BROKERS is unset, so there is no broker to publish to",
-            "Bring the broker up and point the test at it:\n\
-             \x20     docker compose -f deploy/compose/docker-compose.yml up -d redpanda\n\
-             \x20     REDPANDA_BROKERS=127.0.0.1:19092 cargo test -p zeroship-control \\\n\
-             \x20       --test main billing_pipeline_redpanda_e2e::",
-        );
-    };
-    let brokers = brokers.to_string_lossy().to_string();
+    let brokers = brokers();
 
     let url = db_url();
     let client = pg(&url).await;
