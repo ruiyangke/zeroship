@@ -105,6 +105,7 @@ impl CredentialError {
 #[allow(clippy::future_not_send, clippy::too_many_lines)]
 pub async fn verify_password_credentials(
     db: &compio_postgres::Client,
+    orm: &zeroship_data_orm::Database,
     req: &ntex::web::HttpRequest,
     client_id: &str,
     ip: &str,
@@ -144,7 +145,7 @@ pub async fn verify_password_credentials(
     }
 
     // 2. Look up user.
-    let user = match users::find_by_email(db, &email_norm).await {
+    let user = match users::find_by_email(orm, &email_norm).await {
         Ok(u) => u,
         Err(e) => {
             tracing::error!(error = %e, "users::find_by_email failed");

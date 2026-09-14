@@ -15,10 +15,11 @@ use zeroship_auth::store::users;
 #[allow(clippy::future_not_send)]
 async fn request_marks_deletion_schedules_and_mints_one_undo_token() {
     Database::run(async |database| {
+        let orm = database.orm().await;
         let mut db = database.connect().await;
         let tag = Uuid::new_v4().simple().to_string();
         let email = format!("acctdel-req-{tag}@zeroship.test");
-        let user = users::create(&db, &email, "Req User", Some("phc"))
+        let user = users::create(&orm, &email, "Req User", Some("phc"))
             .await
             .unwrap();
 
@@ -85,10 +86,11 @@ async fn request_marks_deletion_schedules_and_mints_one_undo_token() {
 #[allow(clippy::future_not_send)]
 async fn the_emailed_token_cancels_within_grace_and_only_once() {
     Database::run(async |database| {
+        let orm = database.orm().await;
         let mut db = database.connect().await;
         let tag = Uuid::new_v4().simple().to_string();
         let email = format!("acctdel-cancel-{tag}@zeroship.test");
-        let user = users::create(&db, &email, "Cancel User", Some("phc"))
+        let user = users::create(&orm, &email, "Cancel User", Some("phc"))
             .await
             .unwrap();
 
@@ -156,10 +158,11 @@ async fn the_emailed_token_cancels_within_grace_and_only_once() {
 #[allow(clippy::future_not_send)]
 async fn reissuing_a_request_supersedes_the_previous_undo_token() {
     Database::run(async |database| {
+        let orm = database.orm().await;
         let mut db = database.connect().await;
         let tag = Uuid::new_v4().simple().to_string();
         let user = users::create(
-            &db,
+            &orm,
             &format!("acctdel-reissue-{tag}@zeroship.test"),
             "Reissue User",
             Some("phc"),
@@ -200,10 +203,11 @@ async fn reissuing_a_request_supersedes_the_previous_undo_token() {
 #[allow(clippy::future_not_send)]
 async fn a_token_past_the_grace_window_is_refused() {
     Database::run(async |database| {
+        let orm = database.orm().await;
         let mut db = database.connect().await;
         let tag = Uuid::new_v4().simple().to_string();
         let user = users::create(
-            &db,
+            &orm,
             &format!("acctdel-expired-{tag}@zeroship.test"),
             "Expired Token",
             Some("phc"),
@@ -246,10 +250,11 @@ async fn a_token_past_the_grace_window_is_refused() {
 #[allow(clippy::future_not_send)]
 async fn cancellation_preserves_an_independent_administrative_disable() {
     Database::run(async |database| {
+        let orm = database.orm().await;
         let mut db = database.connect().await;
         let tag = Uuid::new_v4().simple().to_string();
         let user = users::create(
-            &db,
+            &orm,
             &format!("acctdel-disabled-{tag}@zeroship.test"),
             "Disabled User",
             Some("phc"),
@@ -292,10 +297,11 @@ async fn cancellation_preserves_an_independent_administrative_disable() {
 #[allow(clippy::future_not_send)]
 async fn cancellation_does_not_restore_pre_deletion_app_credentials() {
     Database::run(async |database| {
+        let orm = database.orm().await;
         let mut db = database.connect().await;
         let tag = Uuid::new_v4().simple().to_string();
         let user = users::create(
-            &db,
+            &orm,
             &format!("acctdel-recall-{tag}@zeroship.test"),
             "Recall User",
             Some("phc"),

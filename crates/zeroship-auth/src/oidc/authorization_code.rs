@@ -16,7 +16,7 @@ use zeroship_core::{AppId, UserId};
 use crate::config::AuthConfig;
 use crate::oidc::auth_request::{AuthRequest, AuthRequestError};
 use crate::oidc::backchannel_logout;
-use crate::oidc::claims::scope_gated_identity_claims;
+use crate::oidc::claims::{IdentityProfile, ScopeGatedIdentityClaims};
 use crate::oidc::device_token;
 use crate::oidc::refresh::{self, ClientAuth, ClientAuthMethod, RefreshSessionPool};
 use crate::oidc::{
@@ -26,7 +26,6 @@ use crate::return_to;
 use crate::session_store::{SessionKind, ValidatedSession};
 use crate::sessions::login as login_session;
 use crate::store::sessions as idp_sessions;
-use crate::store::users;
 
 const AUTH_CODE_TTL_SECS: i64 = 60;
 const PKCE_METHOD_S256: &str = "S256";
@@ -800,31 +799,9 @@ async fn exchange_authorization_code(
             .granted_scopes
             .iter()
             .any(|scope| scope == "email" || scope == "profile");
-        // Only pay the user SELECT when a granted scope actually carries identity
-        // claims. A bare-`openid` (authentication-only) exchange derives `sub`
-        // from the already-in-hand `user_id`, so it needs no row.
+        // Read identity fields only for scopes that expose them.
         let identity_claims = if wants_identity_claims {
-            let user = users::find_by_id(db, &consumed.user_id)
-                .await
-                .map_err(|err| {
-                    tracing::error!(
-                        error = %err,
-                        user_id = consumed.user_id.as_str(),
-                        "token: id-token user lookup failed"
-                    );
-                    OAuthError::server_error("id token user lookup failed")
-                })?
-                .ok_or_else(|| {
-                    tracing::error!(
-                        user_id = consumed.user_id.as_str(),
-                        "token: consumed code user is missing"
-                    );
-                    OAuthError::server_error("id token user missing")
-                })?;
-            Some(scope_gated_identity_claims(
-                &user,
-                consumed.granted_scopes.iter().map(String::as_str),
-            ))
+            Some(transaction_identity_claims(db, proof, &consumed.granted_scopes).await?)
         } else {
             None
         };
@@ -937,6 +914,44 @@ async fn exchange_authorization_code(
         expires_in: ACCESS_TOKEN_TTL_SECS as u64,
         scope: consumed.granted_scopes.join(" "),
     }))
+}
+
+#[allow(clippy::future_not_send)]
+async fn transaction_identity_claims(
+    db: &Transaction<'_>,
+    proof: &ValidatedSession,
+    granted_scopes: &[String],
+) -> Result<ScopeGatedIdentityClaims, OAuthError> {
+    let lookup_error = |error: compio_postgres::Error| {
+        tracing::error!(
+            error = %error,
+            user_id = proof.person_id().as_str(),
+            "token: id-token identity lookup failed"
+        );
+        OAuthError::server_error("id token user lookup failed")
+    };
+    let rows = db
+        .query(
+            "SELECT email::text AS email, email_verified_at IS NOT NULL AS email_verified, \
+             name, avatar_url FROM zeroship.users WHERE id = $1",
+            &[&proof.person_id().as_str()],
+        )
+        .await
+        .map_err(lookup_error)?;
+    let row = rows.first().ok_or_else(|| {
+        tracing::error!(
+            user_id = proof.person_id().as_str(),
+            "token: consumed code user is missing"
+        );
+        OAuthError::server_error("id token user missing")
+    })?;
+    Ok(IdentityProfile {
+        email: row.try_get("email").map_err(lookup_error)?,
+        email_verified: row.try_get("email_verified").map_err(lookup_error)?,
+        name: row.try_get("name").map_err(lookup_error)?,
+        picture: row.try_get("avatar_url").map_err(lookup_error)?,
+    }
+    .for_scopes(granted_scopes.iter().map(String::as_str)))
 }
 
 async fn revoke_replayed_authorization_code_lineage(

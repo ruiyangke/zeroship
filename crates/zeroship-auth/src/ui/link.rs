@@ -31,6 +31,7 @@ use ntex::http::header::{COOKIE, SET_COOKIE};
 use ntex::web::{HttpRequest, HttpResponse};
 use serde::Deserialize;
 use serde_json::json;
+use zeroship_data_orm::Database;
 
 use crate::audit::{self, AuditEvent};
 use crate::config::AuthConfig;
@@ -145,6 +146,7 @@ pub async fn post(
     form: ntex::web::types::Form<LinkForm>,
     cfg: ntex::web::types::State<Arc<AuthConfig>>,
     db: ntex::web::types::State<Arc<compio_postgres::Client>>,
+    orm: ntex::web::types::State<Database>,
 ) -> HttpResponse {
     // 1. CSRF — cheapest check first.
     let cookie_header = req
@@ -211,7 +213,7 @@ pub async fn post(
     // `user_id` came from us — but the row might have been deleted between
     // token issuance and confirmation. Run dummy-hash on the missing arm so
     // the wall-clock matches.
-    let user = match users::find_by_email(db.as_ref(), &pending.email).await {
+    let user = match users::find_by_email(&orm, &pending.email).await {
         Ok(u) => u,
         Err(e) => {
             tracing::error!(error = %e, "users::find_by_email failed");

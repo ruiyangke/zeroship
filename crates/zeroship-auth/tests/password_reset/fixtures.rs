@@ -19,9 +19,12 @@ pub(super) struct App {
     pub client_id: String,
 }
 
-pub(super) async fn user(pg: &Client, email: &str) -> users::UserRow {
+pub(super) async fn user(
+    orm: &zeroship_data_orm::Database,
+    email: &str,
+) -> users::UserRow {
     let hash = password::hash(OLD_PASSWORD).unwrap();
-    users::create(pg, email, "Reset", Some(&hash))
+    users::create(orm, email, "Reset", Some(&hash))
         .await
         .unwrap()
 }

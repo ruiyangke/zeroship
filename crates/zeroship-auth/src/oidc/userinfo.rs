@@ -9,6 +9,7 @@ use ntex::web::{self, HttpRequest, HttpResponse};
 use serde::Serialize;
 use serde_json::json;
 use zeroship_core::UserId;
+use zeroship_data_orm::Database;
 
 use crate::oidc::claims::{scope_gated_identity_claims, ScopeGatedIdentityClaims};
 use crate::oidc::Issuer;
@@ -48,9 +49,10 @@ enum UserInfoError {
 async fn userinfo(
     req: HttpRequest,
     db: web::types::State<Arc<Client>>,
+    orm: web::types::State<Database>,
     issuer: web::types::State<Arc<Issuer>>,
 ) -> HttpResponse {
-    match userinfo_inner(&req, db.as_ref(), issuer.as_ref()).await {
+    match userinfo_inner(&req, db.as_ref(), &orm, issuer.as_ref()).await {
         Ok(body) => HttpResponse::Ok()
             .content_type("application/json")
             .header("cache-control", "no-store")
@@ -74,6 +76,7 @@ async fn userinfo(
 async fn userinfo_inner(
     req: &HttpRequest,
     db: &Client,
+    orm: &Database,
     issuer: &Issuer,
 ) -> Result<UserInfoResponse, UserInfoError> {
     // Distinguish "no credential" (bare challenge) from "bad credential".
@@ -117,7 +120,7 @@ async fn userinfo_inner(
     else {
         return Err(UserInfoError::InvalidToken);
     };
-    let Some(user) = users::find_by_id(db, &global_user_id)
+    let Some(user) = users::find_by_id(orm, &global_user_id)
         .await
         .map_err(|err| {
             tracing::error!(error = %err, "userinfo: user lookup failed");

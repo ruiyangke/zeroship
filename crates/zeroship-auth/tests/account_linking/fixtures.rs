@@ -25,7 +25,7 @@ pub(super) struct Confirmation {
 impl Confirmation {
     pub async fn new(server: &AuthServer, email: &str, subject: &str) -> Self {
         let hash = password::hash(PASSWORD).unwrap();
-        let user = users::create(&server.pg, email, "Account linking", Some(&hash))
+        let user = Box::pin(users::create(&server.orm, email, "Account linking", Some(&hash)))
             .await
             .unwrap();
         let return_to =
@@ -90,8 +90,9 @@ async fn issue(
     subject: &str,
     return_to: &str,
 ) -> String {
-    let outcome = linker::resolve_or_link(
+    let outcome = Box::pin(linker::resolve_or_link(
         &server.pg,
+        &server.orm,
         &ResolvedProfile {
             provider: "github",
             subject,
@@ -108,7 +109,7 @@ async fn issue(
             .stash_signing_key
             .expose_str()
             .as_bytes(),
-    )
+    ))
     .await
     .unwrap();
     let LinkOutcome::NeedsConfirmation {
