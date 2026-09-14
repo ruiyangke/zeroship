@@ -190,11 +190,13 @@ fn has_return_to(return_to: Option<&str>) -> bool {
 ///
 /// # Errors
 ///
-/// [`AuthError::Db`] on PG failure;
+/// Returns database errors from the user and identity repositories;
 /// [`AuthError::Internal`] when the provider is not trusted for the email
 /// and we refuse to auto-create.
+#[allow(clippy::future_not_send, reason = "the ORM belongs to its compio runtime")]
 pub async fn resolve_or_link(
     db: &Client,
+    orm: &zeroship_data_orm::Database,
     profile: &ResolvedProfile<'_>,
     resume: LinkResume<'_>,
     pending_signing_key: &[u8],
@@ -212,7 +214,7 @@ pub async fn resolve_or_link(
     }
 
     // 2. Email collision with an existing local user.
-    if let Some(user) = users::find_by_email(db, profile.email).await? {
+    if let Some(user) = users::find_by_email(orm, profile.email).await? {
         // 2a. Local credential present, or provider not trusted for this
         // email → require explicit confirmation before creating the link.
         if user.password_hash.is_some() || !profile.provider_trusted_for_email {
@@ -253,7 +255,7 @@ pub async fn resolve_or_link(
         fallback
     });
 
-    let user = users::create(db, profile.email, name, None).await?;
+    let user = users::create(orm, profile.email, name, None).await?;
 
     // Mark email_verified_at only when this provider is trusted for this
     // email. Raw provider `email_verified` is not enough.
