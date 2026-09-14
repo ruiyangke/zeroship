@@ -23,6 +23,9 @@ pub mod sql_types {
     );
     #[derive(Debug)]
     pub struct Nullable<S>(std::marker::PhantomData<S>);
+    /// An array whose elements use the `S` codec, in JSON or native storage.
+    #[derive(Debug)]
+    pub struct Array<S>(std::marker::PhantomData<S>);
 }
 use sql_types::*;
 
@@ -246,6 +249,35 @@ impl<S, T: DecodeValue<S>> DecodeValue<Nullable<S>> for Option<T> {
         } else {
             T::decode_value(value).map(Some)
         }
+    }
+}
+
+impl<S, T: EncodeValue<S>> EncodeValue<Array<S>> for Vec<T> {
+    fn encode_value(self) -> Result<Value, DbError> {
+        self.into_iter()
+            .map(<T as EncodeValue<S>>::encode_value)
+            .collect::<Result<_, _>>()
+            .map(Value::Array)
+    }
+}
+impl<S, T: Clone + EncodeValue<S>> EncodeValue<Array<S>> for &[T] {
+    fn encode_value(self) -> Result<Value, DbError> {
+        self.iter()
+            .cloned()
+            .map(<T as EncodeValue<S>>::encode_value)
+            .collect::<Result<_, _>>()
+            .map(Value::Array)
+    }
+}
+impl<S, T: DecodeValue<S>> DecodeValue<Array<S>> for Vec<T> {
+    fn decode_value(value: Value) -> Result<Self, DbError> {
+        let Value::Array(values) = value else {
+            return Err(invalid("array"));
+        };
+        values
+            .into_iter()
+            .map(<T as DecodeValue<S>>::decode_value)
+            .collect()
     }
 }
 
