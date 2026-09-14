@@ -42,25 +42,33 @@ impl ReadPredicate {
     }
 
     fn combine(mut self, other: Self, conjunction: bool) -> Self {
-        let mut children = match self.expression {
-            Predicate::And(children) if conjunction => children,
-            Predicate::Or(children) if !conjunction => children,
-            child => vec![child],
-        };
-        match other.expression {
-            Predicate::And(nested) if conjunction => children.extend(nested),
-            Predicate::Or(nested) if !conjunction => children.extend(nested),
-            child => children.push(child),
-        }
         self.origins.extend(other.origins);
         Self::new(
-            if conjunction {
-                Predicate::And(children)
-            } else {
-                Predicate::Or(children)
-            },
+            combine_predicates(self.expression, other.expression, conjunction),
             self.origins,
         )
+    }
+}
+
+pub(super) fn combine_predicates(
+    left: Predicate,
+    right: Predicate,
+    conjunction: bool,
+) -> Predicate {
+    let mut children = match left {
+        Predicate::And(children) if conjunction => children,
+        Predicate::Or(children) if !conjunction => children,
+        child => vec![child],
+    };
+    match right {
+        Predicate::And(nested) if conjunction => children.extend(nested),
+        Predicate::Or(nested) if !conjunction => children.extend(nested),
+        child => children.push(child),
+    }
+    if conjunction {
+        Predicate::And(children)
+    } else {
+        Predicate::Or(children)
     }
 }
 
