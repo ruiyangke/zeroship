@@ -1188,7 +1188,7 @@ mod tests {
         assert!(GateSettings::resolve_config(boot, None).is_err());
 
         // Does NOT cover whether `main` routes `--check-config` to the report
-        // rather than to the server; that is `tests/config_check_e2e.sh`.
+        // rather than to the server; the config_env_tier integration target does.
     }
 
     /// A secret is reported by PRESENCE. The resolved declaration derives

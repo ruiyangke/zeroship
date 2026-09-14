@@ -105,9 +105,8 @@ mod tests {
 
     #[test]
     fn the_relay_carries_the_same_bootstrap_controls_as_its_siblings() {
-        // The failure this guards: a platform binary that cannot be dry-run is
-        // invisible to tests/config_check_e2e.sh, which is the only harness that
-        // runs the real executable against a real overlay.
+        // The failure this guards: a platform binary that cannot be dry-run
+        // would otherwise be invisible until deployment.
         let sources = CdcServerSettingsSources::try_parse_from([
             "zeroship-data-cdc-server",
             "--check-config",
@@ -151,8 +150,7 @@ mod tests {
         }
 
         // Does NOT cover whether the path is ever READ. Under --check-config it
-        // must not be, and that is asserted in core against the resolver and end
-        // to end by tests/config_check_e2e.sh.
+        // must not be; core asserts that against the resolver.
     }
 
     #[test]

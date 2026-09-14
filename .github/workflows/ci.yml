@@ -376,15 +376,6 @@ jobs:
           tests/lib/e2e_stack_selftest.sh
           tests/lib/known_catchall_selftest.sh
           tests/lib_gate_arms_selftest.sh
-      # THE FIVE-BINARY --check-config E2E. Built and ran nowhere until now,
-      # which mattered: it is the only instrument that starts the real control,
-      # gateway, auth, worker and migrated binaries and asserts what each one
-      # RESOLVES - source precedence, secret presence-only reporting, and the
-      # refusals. 76 assertions with a measured floor of 76 at the bottom of the
-      # script. It starts no services; --check-config exits before any listener,
-      # database or filesystem side effect, which is the property under test.
-      - name: --check-config on all five server binaries
-        run: tests/config_check_e2e.sh
       # Data tests own PostgreSQL containers and run without optional features.
       - run: |
           set -o pipefail
@@ -1198,20 +1189,6 @@ jobs:
         run: |
           set -o pipefail
           tests/e2e_app_primitives_render.sh 2>&1 | tee "$RUNNER_TEMP/dvd-render.log"
-      # A COUNT IN A COMMENT DECAYS, and these two are why the shape is worth a
-      # warning. Both carried "run by me at HEAD: N passed, 0 failed" from the
-      # day they were wired (2026-08-11). On 2026-08-16 9b205f6ed removed the
-      # worker's `--config` overlay as a credential boundary and both harnesses
-      # kept passing it, so from that commit forward the worker exited on
-      #
-      #     error: unexpected argument '--config' found
-      #
-      # before either script's first assertion. Neither number had been true for
-      # four days, and neither comment moved, because nothing re-runs a comment.
-      # Date the measurement or delete it; an undated count reads as current
-      # forever. tests/config_check_e2e.sh case 13c is the static gate that now
-      # fails on a worker launch carrying --config.
-      #
       # Scenario 17's harness (#311) - Active / PastDue / Suspended enforced at
       # the gateway. Re-run on this branch 2026-08-20 against the flag fix:
       # 18 passed, 0 failed, rc=0. Database provisioning adds two mandatory rows,

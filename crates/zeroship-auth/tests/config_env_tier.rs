@@ -103,3 +103,26 @@ fn auth_starts_a_dry_run_once_the_keys_are_supplied() {
         combined(&output)
     );
 }
+
+#[test]
+fn the_shared_auth_provider_variable_reaches_auth() {
+    let output = run(&[
+        ("ZEROSHIP_AUTH_STASH_SIGNING_KEY", STRONG_HEX),
+        ("ZEROSHIP_AUTH_TOTP_ENC_KEY", STRONG_HEX),
+        ("ZEROSHIP_AUTH_PROVIDER", "supabase"),
+        ("ZEROSHIP_AUTH_SUPABASE_URL", "https://project.supabase.co"),
+        ("ZEROSHIP_AUTH_SUPABASE_ANON_KEY", "anon"),
+    ]);
+
+    assert!(
+        output.status.success(),
+        "auth --check-config exited {:?}: {}",
+        output.status.code(),
+        combined(&output)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("auth_provider = supabase"),
+        "auth did not report the provider supplied through the shared variable: {}",
+        combined(&output)
+    );
+}
