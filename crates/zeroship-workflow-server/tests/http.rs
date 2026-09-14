@@ -427,7 +427,7 @@ async fn verify_native_policy_source(
     };
     use zeroship_workflow_manager::policy::control::{self, ControlPolicyStore, RolloutPolicy};
     assert!(matches!(
-        client.policy_lease(scope).await,
+        client.policy_lease(&plain_request(scope)).await,
         Err(zeroship_workflow_client::Error::Refused(
             zeroship_core::workflow_coordination::FailureCode::Unavailable
         ))
@@ -461,7 +461,7 @@ async fn verify_native_policy_source(
         })
         .await
         .unwrap();
-    let leased = client.policy_lease(scope).await.unwrap();
+    let leased = client.policy_lease(&plain_request(scope)).await.unwrap();
     assert_eq!(leased.policy(), &policy);
     assert_eq!(leased.app_id(), &scope.app_id);
     assert_eq!(leased.worker_id(), client.worker_id());
@@ -989,4 +989,14 @@ async fn replicas_authenticate_metadata_and_keep_customer_execution_off_the_prot
         .0,
         StatusCode::OK
     );
+}
+
+fn plain_request(
+    scope: &zeroship_core::workflow_coordination::AssignedScope,
+) -> zeroship_core::workflow_policy::PolicyLeaseRequest {
+    zeroship_core::workflow_policy::PolicyLeaseRequest {
+        scope: scope.clone(),
+        establish_after: None,
+        ingress_used: false,
+    }
 }

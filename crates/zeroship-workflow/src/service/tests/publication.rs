@@ -214,7 +214,7 @@ impl HoldClient for PublicationHolds {
 
 pub(in crate::service) struct Manager {
     _directory: tempfile::TempDir,
-    path: std::path::PathBuf,
+    pub(in crate::service) path: std::path::PathBuf,
     pub(in crate::service) queue: Queue,
 }
 impl Manager {

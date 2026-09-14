@@ -258,6 +258,7 @@ impl AppWorkflows {
         let policy = &captured.authority()?.policy;
         admit(policy)?;
         captured.check()?;
+        require_open_epoch(&tx, &self.app, captured).await?;
         if encode(&options.input)?.len() > policy.max_input_bytes {
             return Err(WorkflowServiceError::PayloadTooLarge);
         }
@@ -368,6 +369,7 @@ impl AppWorkflows {
                     return Ok(receipt);
                 }
                 captured.check()?;
+                require_open_epoch(&tx, &self.app, &captured).await?;
                 let policy = &captured.authority()?.policy;
                 if encode(&options.payload)?.len() > policy.max_input_bytes {
                     return Err(WorkflowServiceError::PayloadTooLarge);
@@ -510,6 +512,63 @@ pub(super) async fn lock_app_state(
         return Err(not_found("workflow app"));
     }
     Ok(())
+}
+
+/// The journal's highest fenced ingress epoch. Read it under the app state lock.
+#[expect(
+    clippy::future_not_send,
+    reason = "journal reads use the creator transaction thread"
+)]
+pub(super) async fn closed_epoch(
+    tx: &Transaction,
+    app: &AppId,
+) -> Result<i64, WorkflowServiceError> {
+    let row = tx
+        .database()
+        .entity::<models::app_state::Entity>()?
+        .find::<models::ClosedEpoch>(
+            models::app_state::app_id.eq(app.as_str())?,
+            FindOptions {
+                limit: Some(1),
+                ..Default::default()
+            },
+        )
+        .await?
+        .into_iter()
+        .next()
+        .ok_or_else(|| not_found("workflow app"))?;
+    if row.closed_epoch < 0 {
+        return Err(WorkflowServiceError::Internal(
+            "invalid workflow closed epoch".into(),
+        ));
+    }
+    Ok(row.closed_epoch)
+}
+
+/// Ingress acceptance fence. The caller holds [`lock_app_state`], which a
+/// delivered Close also takes before raising the closed epoch, so acceptance and
+/// closure serialize in both orders. Acceptance needs the epoch captured with
+/// its policy and that epoch must still be open in this journal.
+#[expect(
+    clippy::future_not_send,
+    reason = "the fence reads the creator transaction on its owning thread"
+)]
+pub(super) async fn require_open_epoch(
+    tx: &Transaction,
+    app: &AppId,
+    captured: &CapturedPolicy,
+) -> Result<(), WorkflowServiceError> {
+    let closed = closed_epoch(tx, app).await?;
+    let held = captured.authority()?.ingress_epoch;
+    if held.is_some_and(|epoch| epoch.get() > closed) {
+        return Ok(());
+    }
+    // Name the epoch the host must exceed: the one it holds, or the journal's
+    // closed epoch when that is newer or when it holds none.
+    let refused = held.map_or(closed, |epoch| epoch.get().max(closed));
+    Err(WorkflowServiceError::IngressFenced(
+        zeroship_core::workflow_coordination::Revision::try_from(refused).ok(),
+    ))
 }
 
 pub(crate) async fn lock_run(
