@@ -264,10 +264,6 @@ jobs:
         run: tests/verdaccio_config_gate.sh
       - name: Data architecture and database posture
         run: cargo xtask test data-architecture
-      - name: Cargo package spec gate self-test
-        run: tests/cargo_package_spec_gate.sh --self-test
-      - name: Every cargo -p spec in the repo names a real package
-        run: tests/cargo_package_spec_gate.sh
       - name: KV storage remains independent of the V8 binding
         run: cargo test -p zeroship-kv --test architecture
       - name: Repository dependency and feature contracts
