@@ -1,6 +1,8 @@
 //! SQL compiler contracts and native execution output.
 
 #[cfg(test)]
+mod array_tests;
+#[cfg(test)]
 mod comparison_tests;
 mod postgres;
 mod query;

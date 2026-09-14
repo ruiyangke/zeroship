@@ -26,6 +26,7 @@ mod internal_tables;
 mod joins;
 mod json;
 mod lifecycle;
+mod native_arrays;
 mod nested_temporal;
 mod nested_values;
 mod protected_projections;

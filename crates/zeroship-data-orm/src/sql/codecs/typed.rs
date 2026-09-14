@@ -136,6 +136,31 @@ fn validate_encoded_array(field: &str, item: LogicalType, json: &str) -> Result<
     Ok(())
 }
 
+/// Native text arrays hold strings only: SQL NULL elements have no ORM text
+/// value, and PostgreSQL text cannot contain NUL. Both backends refuse the same
+/// inputs.
+fn native_text_element(field: &str, value: &Value) -> Result<(), CodecError> {
+    match value {
+        Value::String(text) if !text.contains('\0') => Ok(()),
+        Value::String(_) => Err(CodecError::validation(
+            "invalid_array_element",
+            format!("column '{field}' requires string array elements without NUL characters"),
+        )),
+        _ => Err(invalid_element(field, LogicalType::Text)),
+    }
+}
+
+fn native_text_array(field: &str, value: &mut Value) -> Result<(), CodecError> {
+    if let Value::Json(json) = value {
+        *value = serde_json::from_str(json).map_err(|_| invalid(field, "valid typed JSON"))?;
+    }
+    let values = value.as_array().ok_or_else(|| invalid(field, "an array"))?;
+    for value in values {
+        native_text_element(field, value)?;
+    }
+    Ok(())
+}
+
 fn prepare_array_element(
     field: &str,
     item: LogicalType,
@@ -203,6 +228,9 @@ fn prepare_value_at(
     }
     if value.is_null() {
         return Ok(());
+    }
+    if definition.has_native_array_storage() {
+        return native_text_array(field, value);
     }
     let kind = definition.logical_type;
     if crate::sql::descriptors::is_exact_decimal(definition) {
@@ -338,6 +366,9 @@ pub fn prepare_array_operand(
 ) -> Result<(), CodecError> {
     if definition.logical_type != LogicalType::Array {
         return Ok(());
+    }
+    if definition.has_native_array_storage() {
+        return native_text_element(field, value);
     }
     prepare_array_element(field, array_item(field, definition)?, value)
 }
