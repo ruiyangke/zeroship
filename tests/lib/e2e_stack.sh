@@ -391,7 +391,20 @@ mint_creator_bearer() {
   local scope="${1:-organization:create apps:read apps:write apps:deploy apps:archive deployments:read env:read env:write secrets:read secrets:write}"
   local owner pg_database
   pg_database="${E2E_PG_DATABASE:-zeroship}"
-  owner="$(node -e 'console.log(require("crypto").randomUUID())')"
+  owner="$(node <<'NODE'
+const { randomBytes } = require("node:crypto");
+const bytes = randomBytes(16);
+let milliseconds = BigInt(Date.now());
+for (let index = 5; index >= 0; index -= 1) {
+  bytes[index] = Number(milliseconds & 0xffn);
+  milliseconds >>= 8n;
+}
+bytes[6] = (bytes[6] & 0x0f) | 0x70;
+bytes[8] = (bytes[8] & 0x3f) | 0x80;
+const body = BigInt(`0x${bytes.toString("hex")}`).toString(36).padStart(25, "0");
+process.stdout.write(`usr_${body}`);
+NODE
+)"
   docker exec -i "$PG_CONTAINER" psql -U postgres -d "$pg_database" -v ON_ERROR_STOP=1 >/dev/null 2>&1 <<SQL
 INSERT INTO zeroship.users (id, email, name, email_verified_at)
 VALUES ('$owner', 'e2e-$owner@zeroship.test'::citext, 'E2E Stack Creator', NOW());
