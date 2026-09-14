@@ -25,6 +25,7 @@ mod management;
 mod models;
 mod payloads;
 mod policy;
+pub mod propagation;
 pub mod publication;
 pub mod reconciliation;
 pub use payloads::{PayloadRead, PayloadSlot, StagedPayload};

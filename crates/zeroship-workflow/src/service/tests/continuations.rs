@@ -211,6 +211,8 @@ async fn pending_targets(store: Rc<OrmStore>) {
     assert_eq!(run.integer("depth").unwrap(), 1);
     tx.commit().await.unwrap();
     finish_run(&service, &worker, &head, "terminal head").await;
+    // The paused owner is not woken; it resolves the child when resumed.
+    assert_eq!(deliver_propagations(&scope).await.len(), 1);
     let resumed = service.poll(&worker).await.unwrap().unwrap();
     assert_eq!(resumed.invocation.run_id, joiner);
     assert_eq!(
@@ -285,6 +287,14 @@ async fn cancellation(store: Rc<OrmStore>) {
         {"kind":"Wait", "ordinal":1, "name":"wait", "signalType":"release"}
     ]))).await.unwrap();
     transition(&scope, &owner, RunOperation::Cancel).await;
+    // Settling the owner records its cascade without touching the idle head,
+    // which inherited the owner's linkage when its source continued.
+    assert!(service.poll(&worker).await.unwrap().is_none());
+    assert_eq!(
+        scope.status(&owner).await.unwrap().state,
+        RunState::Cancelled
+    );
+    assert_eq!(deliver_propagations(&scope).await.len(), 1);
     let compensation = service.poll(&worker).await.unwrap().unwrap();
     assert_eq!(compensation.invocation.run_id, head);
     assert_eq!(compensation.invocation.phase, "compensating");
@@ -327,6 +337,7 @@ async fn all_state(
         "steps",
         "waits",
         "tasks",
+        "propagations",
     ] {
         let mut rows = journal_rows(&tx, table, json!({"app_id":app.as_str()})).await;
         rows.sort_by_key(|row| row.text("id").unwrap());

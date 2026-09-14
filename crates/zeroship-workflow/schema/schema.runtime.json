@@ -1187,6 +1187,26 @@
             "valueColumn": "broadcast_revision"
           }
         },
+        "propagation_id": {
+          "type": "string",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "propagation_id"
+          }
+        },
+        "propagation_revision": {
+          "type": "bigInt",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "propagation_revision"
+          }
+        },
         "available_at": {
           "type": "bigInt",
           "required": true,
@@ -1262,6 +1282,15 @@
             "app_id",
             "broadcast_id",
             "broadcast_revision"
+          ],
+          "unique": true
+        },
+        {
+          "name": "__zeroship_workflow_job_publication_propagation",
+          "fields": [
+            "app_id",
+            "propagation_id",
+            "propagation_revision"
           ],
           "unique": true
         },
@@ -2050,6 +2079,218 @@
         }
       ]
     },
+    "__zeroship_workflow_propagation_pages": {
+      "fields": {
+        "id": {
+          "type": "string",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "id"
+          },
+          "primaryKey": true
+        },
+        "app_id": {
+          "type": "string",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "app_id"
+          }
+        },
+        "propagation_id": {
+          "type": "string",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "propagation_id"
+          }
+        },
+        "revision": {
+          "type": "bigInt",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "revision"
+          }
+        },
+        "result": {
+          "type": "string",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "result"
+          }
+        }
+      },
+      "options": {
+        "softDelete": false,
+        "versioning": false,
+        "strictness": "strict"
+      },
+      "indexes": [
+        {
+          "name": "__zeroship_workflow_propagation_pages_scope_key",
+          "fields": [
+            "app_id",
+            "id"
+          ],
+          "unique": true
+        },
+        {
+          "name": "__zeroship_workflow_propagation_page_revision",
+          "fields": [
+            "app_id",
+            "propagation_id",
+            "revision"
+          ],
+          "unique": true
+        }
+      ]
+    },
+    "__zeroship_workflow_propagations": {
+      "fields": {
+        "id": {
+          "type": "string",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "id"
+          },
+          "primaryKey": true
+        },
+        "app_id": {
+          "type": "string",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "app_id"
+          }
+        },
+        "run_id": {
+          "type": "string",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "run_id"
+          }
+        },
+        "generation": {
+          "type": "bigInt",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "generation"
+          }
+        },
+        "kind": {
+          "type": "string",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "kind"
+          }
+        },
+        "cursor": {
+          "type": "string",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "cursor"
+          }
+        },
+        "revision": {
+          "type": "bigInt",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "revision"
+          }
+        },
+        "finished": {
+          "type": "bigInt",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "finished"
+          }
+        },
+        "created_at": {
+          "type": "bigInt",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "created_at"
+          }
+        }
+      },
+      "options": {
+        "softDelete": false,
+        "versioning": false,
+        "strictness": "strict"
+      },
+      "indexes": [
+        {
+          "name": "__zeroship_workflow_propagations_scope_key",
+          "fields": [
+            "app_id",
+            "run_id",
+            "generation",
+            "kind"
+          ],
+          "unique": true
+        },
+        {
+          "name": "__zeroship_workflow_propagation_identity",
+          "fields": [
+            "app_id",
+            "id"
+          ],
+          "unique": true
+        }
+      ]
+    },
     "__zeroship_workflow_reconciliation_scans": {
       "fields": {
         "id": {
@@ -2485,7 +2726,9 @@
           "fields": [
             "app_id",
             "parent_id",
-            "parent_generation"
+            "parent_generation",
+            "cascade",
+            "id"
           ]
         }
       ]

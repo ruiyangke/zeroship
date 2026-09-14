@@ -159,6 +159,7 @@ impl Fixture {
                     reconciliation: ReconciliationOptions::default(),
                     collection: crate::service::collection::CollectionOptions::default(),
                     fanout: crate::service::fanout::FanoutOptions::default(),
+                    propagation: crate::service::propagation::PropagationOptions::default(),
                 },
             },
         )

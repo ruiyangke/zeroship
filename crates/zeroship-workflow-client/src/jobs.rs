@@ -176,6 +176,7 @@ const fn worker_publication(job: &JobSpec) -> Result<(), Error> {
         | JobOperation::Management { .. } => Err(denied()),
         JobOperation::Advance { .. }
         | JobOperation::Fanout { .. }
+        | JobOperation::Propagate { .. }
         | JobOperation::Reconcile {}
         | JobOperation::Collect {} => Ok(()),
     }
