@@ -101,9 +101,9 @@ fn eviction_fires_single_inflight_controller() {
     let rt = build_runtime_with_app(
         &app_id,
         r#"
+        import { currentSignal } from "zeroship";
         export async function pending() {
-            const ctx = __zeroshipGetRpcCtx();
-            ctx.signal.addEventListener("abort", () => {
+            currentSignal().addEventListener("abort", () => {
                 globalThis.__zsAbortFired = true;
             });
             await new Promise(r => setTimeout(r, 60_000));
@@ -181,15 +181,16 @@ fn eviction_fires_all_inflight_controllers() {
     let rt = build_runtime_with_app(
         &app_id,
         r#"
+        import { currentSignal } from "zeroship";
         globalThis.__zsAbortCount = 0;
         export async function p1() {
-            __zeroshipGetRpcCtx().signal.addEventListener("abort", () => {
+            currentSignal().addEventListener("abort", () => {
                 globalThis.__zsAbortCount += 1;
             });
             await new Promise(r => setTimeout(r, 60_000));
         }
         export async function p2() {
-            __zeroshipGetRpcCtx().signal.addEventListener("abort", () => {
+            currentSignal().addEventListener("abort", () => {
                 globalThis.__zsAbortCount += 1;
             });
             await new Promise(r => setTimeout(r, 60_000));
@@ -280,8 +281,9 @@ fn sync_procedure_unregisters_on_return() {
     let rt = build_runtime_with_app(
         &app_id,
         r#"
+        import { currentSignal } from "zeroship";
         export function check() {
-            return { aborted: __zeroshipGetRpcCtx().signal.aborted };
+            return { aborted: currentSignal().aborted };
         }
         "#,
         "{ check }",
@@ -325,9 +327,10 @@ fn integration_two_isolates_eviction_walks_correct_registry() {
     let rt_a = build_runtime_with_app(
         &app_a,
         r#"
+        import { currentSignal } from "zeroship";
         globalThis.__zsAbortFired = false;
         export async function pending() {
-            __zeroshipGetRpcCtx().signal.addEventListener("abort", () => {
+            currentSignal().addEventListener("abort", () => {
                 globalThis.__zsAbortFired = true;
             });
             await new Promise(r => setTimeout(r, 60_000));

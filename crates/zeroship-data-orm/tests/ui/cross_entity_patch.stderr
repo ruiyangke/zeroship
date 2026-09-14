@@ -1,0 +1,28 @@
+warning: unused import: `zeroship_data_orm::orm::*`
+ --> tests/ui/cross_entity_patch.rs:1:5
+  |
+1 | use zeroship_data_orm::orm::*;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+error[E0277]: the trait bound `Patch<other::counters::Entity>: Changeset<schema::counters::Entity>` is not satisfied
+ --> tests/ui/cross_entity_patch.rs:5:78
+  |
+5 | fn main() { let _ = schema::counters::quantity.increment(1_i64).unwrap().and(other::counters::quantity.set(1_i64).unwrap()); }
+  |                                                                          --- ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `Changeset<schema::counters::Entity>` is not implemented for `Patch<other::counters::Entity>`
+  |                                                                          |
+  |                                                                          required by a bound introduced by this call
+  |
+help: the trait `Changeset<schema::counters::Entity>` is not implemented for `Patch<other::counters::Entity>`
+      but trait `Changeset<other::counters::Entity>` is implemented for it
+ --> src/orm/model/patch.rs
+  |
+  | impl<E: Entity> Changeset<E> for Patch<E> {
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  = help: for that trait implementation, expected `other::counters::Entity`, found `schema::counters::Entity`
+note: required by a bound in `Patch::<E>::and`
+ --> src/orm/model/patch.rs
+  |
+  |     pub fn and<C: Changeset<E>>(mut self, other: C) -> Result<Self, DbError> {
+  |                   ^^^^^^^^^^^^ required by this bound in `Patch::<E>::and`

@@ -1,6 +1,6 @@
 /**
  * Faithful dev-tier auth test — the REAL `@zeroship/auth` browser client driving
- * the REAL `@zeroship/bootstrap` dev-auth provider end-to-end, with NO gateway /
+ * the REAL Vite development auth provider end-to-end, with NO gateway /
  * external auth service. This is the contract-parity proof: the same client code that talks to
  * the gateway in prod resolves a session against the dev provider's
  * `/__zeroship/auth/*` endpoints, byte-identical wire, only the backend differs.
@@ -15,7 +15,10 @@
 import { test, describe, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 
-import { createDevAuthProvider, type DevAuthProvider } from "@zeroship/bootstrap/dev-auth";
+import {
+  createDevAuthProvider,
+  type DevAuthProvider,
+} from "../../vite-plugin/src/dev-auth.js";
 import { createAuthClient } from "../src/client.js";
 import {
   makeHarness,
@@ -32,9 +35,10 @@ const SECRET = "dev-tier-secret-0123456789abcdef";
  * jar, mirroring the gateway relationship.
  */
 function wireProviderToHarness(h: Harness, devAuthConfig?: string): DevAuthProvider {
-  const env: Record<string, string> = { ZEROSHIP_DEV_AUTH_SECRET: SECRET };
-  if (devAuthConfig !== undefined) env.ZEROSHIP_DEV_AUTH = devAuthConfig;
-  const provider = createDevAuthProvider((name) => env[name]);
+  const provider = createDevAuthProvider({
+    config: devAuthConfig,
+    secret: SECRET,
+  });
   assert.ok(provider, "provider must be created");
 
   // Cookie bridge — the provider sets `__zeroship_dev_session` via set-cookie; we

@@ -115,7 +115,7 @@ check that required fields without database defaults are supplied. Generator-ass
 are generated as read-only columns. The runtime still validates every operation,
 including operations from handwritten trait implementations.
 
-Changeset records contain literal field assignments. `Change::Set(value)` and
+Derived changesets contain literal field assignments and convert to `Patch<Entity>`. `Change::Set(value)` and
 `Field::set(value)` preserve JSON objects as data, including objects with keys
 that look like update operators. `Field::eq(value)` compares the complete JSON
 value without interpreting its object keys as filter operators.
@@ -123,6 +123,10 @@ value without interpreting its object keys as filter operators.
 Native update operators are checked against the installed field descriptor
 before row lookup: arithmetic requires a numeric field, and array operations
 require an array field. An invalid operation is refused even when no row matches.
+Typed fields expose `increment`, `decrement`, `multiply`, `push`, `pull`, and
+`add_to_set` through the same update planner. Patches compose with `.and(...)`,
+including derived changesets, and reject duplicate assignments.
+
 Encrypted and masked fields accept literal assignments only; their stored
 representation cannot be mutated with arithmetic or array operators.
 

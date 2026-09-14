@@ -293,8 +293,8 @@ pub fn transaction_dispatch<'s>(
     // is a copy that can disagree with it.
 
     state.borrow_mut().spawned_ops.push(Box::pin(async move {
-        // Drain note: the JS-side DataLoader queues are flushed by the
-        // bootstrap wrapper *before* it calls this native method (those
+        // Drain note: the JS-side DataLoader queues are flushed by the DB
+        // facade *before* it calls this native method (those
         // microtask queues are pure-JS state with no Rust counterpart).
         // The Rust-side broker `pending_emits` queue is cleared on every
         // top-level BEGIN inside `exec_begin` so a prior tx's residue

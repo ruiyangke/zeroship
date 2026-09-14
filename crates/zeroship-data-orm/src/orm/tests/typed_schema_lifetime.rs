@@ -17,6 +17,12 @@ fn pending_operations(db: &Database) -> Vec<(&'static str, Pending)> {
             "find",
             discard(entity.find::<Post>(Filter::all(), FindOptions::default())),
         ),
+        ("joined summary", discard(db.from(&alias).count())),
+        ("joined existence", discard(db.from(&alias).exists())),
+        (
+            "joined first",
+            discard(db.from(&alias).select(alias.row::<Post>()).unwrap().first()),
+        ),
         ("count", discard(entity.count(Filter::all()))),
         ("exists", discard(entity.exists(Filter::all()))),
         (
@@ -56,6 +62,10 @@ fn pending_operations(db: &Database) -> Vec<(&'static str, Pending)> {
         (
             "update_many",
             discard(entity.update_many(Filter::all(), posts::counter.set(99_i64).unwrap())),
+        ),
+        (
+            "arithmetic",
+            discard(entity.update_many(Filter::all(), posts::counter.increment(1_i64).unwrap())),
         ),
         ("delete", discard(entity.delete::<Post>(Filter::all()))),
         ("delete_many", discard(entity.delete_many(Filter::all()))),

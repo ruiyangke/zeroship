@@ -37,7 +37,6 @@ export function installSchema(env, descriptor, options) {
     });
     return { collections: {} };
 }
-export function _flushPendingMaskPolicy() { return null; }
 "#,
         }]
     }
@@ -58,7 +57,7 @@ export function _flushPendingMaskPolicy() { return null; }
 
     fn register(&self, r: &mut NativeRegistrar) {
         // Register one trivial op so the runtime materializes a non-null
-        // `env.db` object. runtime-entry's schema-install sentinel keys on
+        // `env.db` object. native plugin preparation keys on
         // `env.db != null` (the real DbPlugin always populates env.db); an
         // empty register() leaves env.db absent and the sentinel skips
         // install, which is unfaithful to "DB plugin present".
@@ -171,67 +170,10 @@ fn native_descriptor_hook_receives_none_before_schema_less_module_evaluation() {
     assert_eq!(descriptor_hook_observed(None), "none");
 }
 
-/// Build a Runtime around the given user-entry source + procedure
-/// table, dispatch a probe procedure, and return its result body.
-///
-/// `user_src` is the user-entry JS string. The shim wraps it with a
-/// hand-rolled function-shape `default.rpc` dispatcher (the documented
-/// advanced / back-compat path — see `docs/reference/zeroship-standard.md`).
-/// Using function-shape here keeps the test surface narrow: the
-/// runtime's `__zsDispatch` is exercised by `rpc_dispatch.rs`; here we
-/// just need a working dispatch path that surfaces the probe result.
+/// Dispatch the startup probe through the native procedure dictionary.
 fn dispatch_probe(user_src: &str, procs_block: &str, method: &str) -> Result<String, String> {
     init_v8();
-
-    // Synthetic entry shim — function-shape dispatcher (the advanced /
-    // back-compat path). The Vite plugin emits dict-shape; this shim
-    // intentionally exercises the function-shape branch so a regression
-    // dropping that path would surface here.
-    let src = format!(
-        r#"
-{user_src}
-
-const _procedures = {procs_block};
-function _zsRpc(name, input) {{
-    const fn = _procedures[name];
-    if (typeof fn !== "function") {{
-        throw Object.assign(new Error("Method not found: " + name), {{ status: 404, code: "NOT_FOUND" }});
-    }}
-    return fn(input);
-}}
-async function _zsRpcAndRespond(name, input) {{
-    try {{
-        const result = await _zsRpc(name, input);
-        if (result instanceof Response) return result;
-        return new Response(JSON.stringify({{ json: result === undefined ? null : result }}), {{
-            status: 200, headers: {{ "content-type": "application/json" }},
-        }});
-    }} catch (err) {{
-        const status = (err && Number.isInteger(err.status) && err.status >= 400 && err.status < 600) ? err.status : 500;
-        return new Response(JSON.stringify({{ message: err?.message ?? String(err), name: err?.name ?? "Error" }}), {{
-            status, headers: {{ "content-type": "application/json" }},
-        }});
-    }}
-}}
-async function _zsFetch(request) {{
-    const url = new URL(request.url);
-    if (!url.pathname.startsWith("/__zeroship/v1/")) {{
-        return new Response("Not Found", {{ status: 404 }});
-    }}
-    const id = decodeURIComponent(url.pathname.slice("/__zeroship/v1/".length));
-    let input = undefined;
-    if (request.method === "POST") {{
-        const text = await request.text();
-        if (text) {{
-            const env = JSON.parse(text);
-            input = env && typeof env === "object" && "json" in env ? env.json : env;
-        }}
-    }}
-    return await _zsRpcAndRespond(id, input);
-}}
-export default {{ fetch: _zsFetch, rpc: _zsRpc }};
-"#
-    );
+    let src = format!("{user_src}\nexport default {{ rpc: {procs_block} }};");
     let modules = vec![ModuleEntry {
         specifier: "index.js".into(),
         source: src,
@@ -264,11 +206,8 @@ export default {{ fetch: _zsFetch, rpc: _zsRpc }};
 
 #[test]
 fn init_script_no_ops_without_db_plugin() {
-    // The init script guards on `__zs_env()?.db`. When the plugin isn't
-    // loaded — the configuration this test runs under — the script must
-    // NOT attempt to dynamically import `@zeroship/db` (which isn't in
-    // the test bundle) and the bootstrap must finish module evaluation
-    // cleanly.
+    // When the DB plugin isn't loaded, native startup must not request its SDK
+    // adapter module and host entry evaluation must finish cleanly.
     //
     // We assert the boot path made it through end-to-end: the worker
     // resolved `default.fetch`, served a request, and returned the
@@ -291,7 +230,7 @@ fn init_script_no_ops_when_runtime_descriptor_missing() {
     // Even with an `env.db` namespace present, absence of a runtime
     // descriptor short-circuits the init script before the dynamic import.
     // The test's synthetic-entry shim emits its own `default = { fetch, rpc }`,
-    // so bootstrap finishes evaluation cleanly without trying to import
+    // so host entry evaluation finishes cleanly without trying to import
     // `@zeroship/db`.
     init_v8();
     let user_src = r#"
@@ -308,7 +247,7 @@ async function _zsFetch(request) {
 }
 export default {
     fetch: _zsFetch,
-    rpc: (name, input) => _procedures[name](input),
+    rpc: _procedures,
     // No schema key — discovery should short-circuit.
 };
 "#;
@@ -381,7 +320,7 @@ async function _zsFetch(request) {
 }
 export default {
     fetch: _zsFetch,
-    rpc: (name, input) => _procedures[name](input),
+    rpc: _procedures,
 };
 "#;
 
@@ -425,9 +364,8 @@ export default {
 fn init_script_sources_schema_from_runtime_descriptor_when_present() {
     // **Migration-first cutover (P4b).** When the deploy carries a bundled
     // `RuntimeSchemaDescriptor` (v2 `{ fields, options, indexes }` per collection), the
-    // worker stamps it onto the runtime via `RuntimeBuilder::runtime_descriptor`
-    // and `setup_globals` exposes it as `globalThis.__zsRuntimeDescriptor`. The
-    // bootstrap's `runtime-entry` must then install the schema FROM the
+    // worker stamps it onto the runtime via `RuntimeBuilder::runtime_descriptor`.
+    // Native plugin preparation must then install the schema FROM the
     // descriptor — IGNORING `user.default.schema`.
     //
     // We give the user a throwing `default.schema` getter and inject a descriptor
@@ -461,7 +399,7 @@ async function _zsFetch(request) {
 }
 const defaultExport = {
     fetch: _zsFetch,
-    rpc: (name, input) => _procedures[name](input),
+    rpc: _procedures,
 };
 Object.defineProperty(defaultExport, "schema", {
     get() { throw new Error("default.schema must not be read when a descriptor is present"); },
@@ -508,7 +446,7 @@ export default defaultExport;
     );
     assert!(
         body.contains(r#"\"optionKeys\":[]"#),
-        "expected runtime-entry to pass no extra options, got: {body}"
+        "expected native preparation to pass no extra options, got: {body}"
     );
     assert!(
         body.contains(r#"\"hasDeclaredSchemas\":false"#),
@@ -520,7 +458,7 @@ export default defaultExport;
 fn init_script_does_not_fallback_to_default_schema_without_descriptor() {
     // **Migration-first cutover (P5 S3).** An app that ships no descriptor is
     // treated as schema-less by the runtime entry. Even if a stale
-    // `default.schema` exists, the bootstrap must not read it or import
+    // `default.schema` exists, the runtime host must not read it or import
     // `zeroship:db/internal`.
     init_v8();
 
@@ -547,7 +485,7 @@ async function _zsFetch(request) {
 }
 export default {
     fetch: _zsFetch,
-    rpc: (name, input) => _procedures[name](input),
+    rpc: _procedures,
     schema: { todos: { id: { type: "id" } } },
 };
 "#;
@@ -586,7 +524,7 @@ export default {
     };
     assert!(
         body.contains(r#""json":null"#),
-        "without a descriptor, runtime-entry must install nothing and ignore default.schema: {body}"
+        "without a descriptor, native preparation must install nothing and ignore default.schema: {body}"
     );
 }
 
@@ -641,12 +579,12 @@ fn non_v2_runtime_descriptor_fails_isolate_init() {
 }
 
 #[test]
-fn bootstrap_module_lacks_legacy_schema_init_symbols() {
+fn host_entry_lacks_legacy_schema_init_symbols() {
     // Stage 4 cleanup: the synthetic SSR entry no longer publishes
-    // `__zsSchemaInit`. The runtime bootstrap does not either: native plugins
+    // `__zsSchemaInit`. The runtime host does not either: native plugins
     // receive the descriptor before module evaluation and the JavaScript
     // installer plants wrappers directly. Verify the legacy global stays
-    // undefined throughout bootstrap evaluation.
+    // undefined throughout host entry evaluation.
     let body = dispatch_probe(
         r#"
         export function readInit() {

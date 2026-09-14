@@ -68,4 +68,22 @@ describe("@zeroship/rpc/server wrappers", () => {
     assert.equal((wrapped as unknown as { __zsKind?: string }).__zsKind, "query");
     assert.equal(Object.keys(wrapped).includes("__zsKind"), false);
   });
+
+  test("string output schemas carry framing metadata without changing the iterator", async () => {
+    for (const shape of [{ _def: { typeName: "ZodString" } }, { def: { type: "string" } }]) {
+      const output = { ...shape, parse: (value: unknown) => String(value) };
+      const config = Object.freeze({ output });
+      const iterator = Object.freeze((async function* () { yield "text"; })());
+      const wrapped = stream(() => iterator, config);
+      assert.equal(wrapped.config?.outputIsString, true);
+      assert.equal(wrapped(), iterator);
+      assert.equal("outputIsString" in config, false);
+      assert.equal("__zsOutputIsString" in iterator, false);
+      assert.deepEqual(await iterator.next(), { value: "text", done: false });
+    }
+    const wrapped = stream(async function* () { yield 5; }, {
+      output: { parse: (value: unknown) => value },
+    });
+    assert.equal(wrapped.config?.outputIsString, undefined);
+  });
 });

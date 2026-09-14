@@ -77,8 +77,8 @@ fn dispatch_zs_for_capability(
     (status, json)
 }
 
-/// Export the procedure dictionary directly so the runtime-owned bootstrap
-/// dispatcher reads `fn.config.kind` and installs the capability frame.
+/// Export the procedure dictionary directly so native dispatch reads
+/// `fn.config.kind` and installs the capability frame.
 const DICT_RPC_EXPORT: &str = r#"
 export default { rpc: _procedures };
 "#;
@@ -308,9 +308,8 @@ const _procedures = { doAct };
     );
 }
 
-/// The native kind callbacks must not be creator-callable. The bootstrap's
-/// internal bridge captures them and deletes their string-named globals before
-/// `__user__.js` evaluates.
+/// Procedure capability state must not be exposed through creator-callable
+/// globals.
 #[test]
 fn b3_runtime_kind_globals_hidden_from_creator_scope() {
     let user_code = r#"

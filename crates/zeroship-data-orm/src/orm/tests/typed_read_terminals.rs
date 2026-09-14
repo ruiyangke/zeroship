@@ -1,6 +1,12 @@
+#![expect(
+    clippy::future_not_send,
+    reason = "ORM fixtures use thread-local compio sessions"
+)]
+
 use super::fixtures::CollectionFixture;
 use super::*;
 
+#[expect(clippy::too_many_lines, reason = "shared backend conformance scenario")]
 async fn exercise(owner: CollectionFixture) {
     let db = &owner.database;
     let table = db.entity::<posts::Entity>().unwrap();
@@ -181,25 +187,81 @@ async fn exercise(owner: CollectionFixture) {
 }
 #[compio::test]
 async fn typed_read_terminals_sqlite() {
-    exercise(
+    Box::pin(exercise(
         CollectionFixture::sqlite_native(
             "posts",
             posts::Entity::schema().clone(),
             fixtures::post_migration_fields(),
         )
         .await,
-    )
+    ))
     .await;
 }
 #[compio::test]
 async fn typed_read_terminals_postgres() {
-    exercise(
+    Box::pin(exercise(
         CollectionFixture::postgres_native(
             "posts",
             posts::Entity::schema().clone(),
             fixtures::post_migration_fields(),
         )
         .await,
-    )
+    ))
+    .await;
+}
+
+async fn exercise_chained_predicates(owner: CollectionFixture) {
+    let db = &owner.database;
+    let table = db.entity::<posts::Entity>().unwrap();
+    table
+        .insert::<_, Post>(NewPost {
+            title: "present".into(),
+        })
+        .await
+        .unwrap();
+    let p = table.alias("p").unwrap();
+    let mut filtered = db.from(&p);
+    let mut grouped = db.from(&p).group_by(p.column(posts::title));
+    for _ in 0..=crate::sql::MAX_PREDICATE_DEPTH {
+        filtered = filtered.filter(p.column(posts::title).eq("present").unwrap());
+        grouped = grouped.having(count_rows().eq(1_i64).unwrap());
+    }
+    let results = [filtered.count().await, grouped.count().await];
+    assert!(
+        results.iter().all(|result| matches!(result, Ok(1))),
+        "{results:?}"
+    );
+
+    let mut nested = p.column(posts::title).eq("present").unwrap();
+    for _ in 0..=crate::sql::MAX_PREDICATE_DEPTH {
+        nested = nested.negate();
+    }
+    assert!(db.from(&p).filter(nested).count().await.is_err());
+    owner.close().await;
+}
+
+#[compio::test]
+async fn typed_chained_predicates_sqlite() {
+    Box::pin(exercise_chained_predicates(
+        CollectionFixture::sqlite_native(
+            "posts",
+            posts::Entity::schema().clone(),
+            fixtures::post_migration_fields(),
+        )
+        .await,
+    ))
+    .await;
+}
+
+#[compio::test]
+async fn typed_chained_predicates_postgres() {
+    Box::pin(exercise_chained_predicates(
+        CollectionFixture::postgres_native(
+            "posts",
+            posts::Entity::schema().clone(),
+            fixtures::post_migration_fields(),
+        )
+        .await,
+    ))
     .await;
 }

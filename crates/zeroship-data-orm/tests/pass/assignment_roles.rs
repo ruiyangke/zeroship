@@ -34,7 +34,6 @@ fn main() {
     }
     .into_changes()
     .unwrap();
-    assert_eq!(patch["version"].as_i64(), Some(10));
-    assert!(!patch.contains_key("id"));
+    assert!(patch.and(entries::version.set(10_i64).unwrap()).is_err());
     entries::version.set(10_i64).unwrap();
 }

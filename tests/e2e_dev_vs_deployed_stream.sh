@@ -1,75 +1,9 @@
 #!/usr/bin/env bash
-# ---------------------------------------------------------------------------
-# Streaming, dev vs deployed: do SSE chunk BOUNDARIES survive the gateway?
-#
-# The failure this guards is a proxy that buffers the response body. Such a
-# proxy still delivers every chunk, in order, with identical bytes -- so a test
-# that compared only the assembled result would pass while streaming was
-# completely broken. Nothing else in this repo would notice.
-#
-# So the fixture (examples/stream-probe) paces its emission: 5 chunks 200ms
-# apart. That makes TIME-TO-FIRST-CHUNK the discriminator. Streaming delivers
-# chunk 1 at ~200ms and chunk 5 at ~1000ms; buffering delivers all five at
-# ~1000ms. The assertion is ttfc < total/2, which the streaming case clears by
-# 2.5x and the buffering case fails outright -- not a tight timing margin.
-#
-# Proven load-bearing by dropping curl's -N (unbuffered) flag, which makes the
-# client aggregate exactly as a buffering proxy would: both sides then report
-# ttfc == total and the run fails. See the MUTATION note at the bottom.
-#
-# WHAT THE TIMING CHECK CANNOT SEE (added 2026-08-09). Unlike its siblings this
-# script never diffs the two tiers -- `judge` is already an absolute verdict,
-# applied to each side on its own, so a defect shared by both makes BOTH fail.
-# But it only ever looked at the TICK lines and the clock. The wire format
-# around them was unmeasured, and every part of it can break while five ticks
-# still arrive 200ms apart:
-#
-#   - the TERMINATOR. The stream is AI-SDK data-stream framing
-#     (sdks/bootstrap/src/fetch-handler.ts): `2:[<json>]` per chunk and a final
-#     `d:{}`. `d:` is what tells the client the stream ENDED
-#     (sdks/rpc/src/transport.ts consumeLine), so an omitted terminator leaves
-#     a correct-looking stream that a real client waits on until the socket
-#     closes. Every tick assertion here stays green through that.
-#   - the FRAME PREFIX. `grep '"mark":"TICK"'` matches the payload wherever it
-#     sits, so a change from `2:[...]` to anything else is invisible.
-#   - the RESPONSE HEADERS. A `content-length` on a streaming response is
-#     positive proof of buffering -- stronger evidence than any clock -- and
-#     `x-accel-buffering: no` is what stops an intermediary from doing it. The
-#     gateway could strip either and the timing check would still pass in this
-#     single-hop test rig.
-#
-# Those are asserted below, on the RAW frames and the RAW headers, per side.
-#
-# MUTATIONS for that half edit `sdks/bootstrap/src/fetch-handler.ts`, rebuild
-# the package and the app, and must move only the verdict named:
-#   MUTATE=no-terminator   the `d:{}` frame is never enqueued
-#   MUTATE=no-sse-ctype    the response declares application/json
-# Both restore the source and rebuild on exit.
-#
-# THEY REACH THE DEPLOYED TIER ONLY, and that is a finding rather than a
-# limitation. MEASURED 2026-08-09: with `no-terminator` applied and
-# @zeroship/bootstrap rebuilt, the DEPLOYED stream lost its `d:` frame while
-# the DEV stream still had one. The deployed side runs the fetch handler Vite
-# bundled into the `.zship` (the server blob carries both the `d:{}` emitter
-# and the `x-accel-buffering` header -- checked in the built artifact). The dev
-# side does NOT: `sdks/vite-plugin/src/dev-server.ts` boots
-# `sdks/vite-plugin/dist/dev-bootstrap.js`, a PREBUILT bundle that inlines its
-# own copy of the same handler and is only refreshed when the vite plugin is
-# rebuilt.
-#
-# So the two tiers can be running different VINTAGES of the same framework
-# code, and nothing here or in tests/lib/binary_freshness.sh (which watches
-# Rust binaries) would say so. For these mutations that is convenient -- the
-# dev row becomes a one-variable control -- but for a real change to the
-# framework it means a stale `dev-bootstrap.js` shows up as a
-# "dev-vs-deployed divergence" that is neither backend's fault.
-#
-# Prereqs (docs/runbooks/local-dev.md):
-#   cargo build --release -p zeroship-control -p zeroship-worker -p zeroship-gateway -p zeroship-cli --bins
-#   pnpm install && pnpm build
-#   docker (Postgres on :5440 as compose-postgres-1)
-#   pnpm install in examples/stream-probe
-# ---------------------------------------------------------------------------
+# Verify native RPC streams preserve incremental delivery, framing, and
+# response headers through Vite development and the deployed gateway path.
+# MUTATE_BUFFERED removes curl's unbuffered mode to prove the timing verdict
+# rejects an aggregated response.
+
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -132,8 +66,6 @@ export E2E_STALE_WORKER_BEARER="${E2E_STALE_WORKER_BEARER:-stream-worker-key-012
 APP_NAME="streamp"
 # Set to 1 to run the buffering mutation described in the header.
 MUTATE_BUFFERED="${MUTATE_BUFFERED:-0}"
-MUTATE="${MUTATE:-none}"
-BOOTSTRAP_SRC="$ROOT/sdks/bootstrap/src/fetch-handler.ts"
 
 PASS=0; FAIL=0; PIDS=()
 ok() { PASS=$((PASS+1)); echo "  ok   $1"; }
@@ -146,14 +78,6 @@ cleanup() {
   for _p in "$DEV_PORT" "$VITE_PORT"; do
     lsof -ti :"$_p" 2>/dev/null | xargs -r kill 2>/dev/null || true
   done
-  # A mutation edited a TRACKED SDK source and rebuilt its dist. Put both back
-  # before anything else can read them -- a half-restored bootstrap would make
-  # every later run in this tree report on the mutation instead of the product.
-  if [ -f "${MUTATE_BAK:-}" ]; then
-    cp "$MUTATE_BAK" "$BOOTSTRAP_SRC"
-    ( cd "$ROOT" && pnpm --filter @zeroship/bootstrap build ) >/dev/null 2>&1 \
-      || echo "  WARNING: bootstrap restore build FAILED -- run 'pnpm --filter @zeroship/bootstrap build' by hand"
-  fi
   # Drops the per-run database. A no-op when the caller named it.
   zs_scratch_db_cleanup
   rm -rf "$WORK"
@@ -268,35 +192,8 @@ judge() {
 }
 
 echo "=== streaming: dev vs deployed ==="
-echo "  mutation: $MUTATE   MUTATE_BUFFERED=$MUTATE_BUFFERED"
+echo "  MUTATE_BUFFERED=$MUTATE_BUFFERED"
 [ "$MUTATE_BUFFERED" = "1" ] && echo "  (MUTATION ACTIVE: curl -N dropped, expect both sides to fail)"
-
-# Wire-format mutations. They edit the fetch handler BOTH tiers run, so the
-# defect is genuinely present on the deployed side rather than simulated at the
-# client, and the rebuild order matters: the package first, then the app that
-# bundles it.
-if [ "$MUTATE" != "none" ]; then
-  MUTATE_BAK="$WORK/fetch-handler.ts.bak"
-  cp "$BOOTSTRAP_SRC" "$MUTATE_BAK"
-  case "$MUTATE" in
-    no-terminator)
-      # The terminator frame becomes an empty chunk: the stream still ends and
-      # every tick still arrives, but nothing tells the client it is over.
-      sed -i 's|encoder.encode("d:{}\\n")|encoder.encode("")|g' "$BOOTSTRAP_SRC"
-      grep -q 'encoder.encode("")' "$BOOTSTRAP_SRC" \
-        || { no "mutation did not apply to $BOOTSTRAP_SRC"; exit 1; } ;;
-    no-sse-ctype)
-      sed -i 's|"content-type": "text/event-stream",|"content-type": "application/json",|' \
-        "$BOOTSTRAP_SRC"
-      grep -q '"content-type": "application/json",$' "$BOOTSTRAP_SRC" \
-        || { no "mutation did not apply to $BOOTSTRAP_SRC"; exit 1; } ;;
-    *) no "unknown MUTATE=$MUTATE"; exit 2 ;;
-  esac
-  ( cd "$ROOT" && pnpm --filter @zeroship/bootstrap build ) > "$WORK/bootstrap-build.log" 2>&1 \
-    || { no "bootstrap rebuild failed"; tail -20 "$WORK/bootstrap-build.log"; exit 1; }
-  echo "  MUTATED ($MUTATE): @zeroship/bootstrap rebuilt -- the DEPLOYED bundle picks"
-  echo "    it up; dev keeps the vite plugin's prebuilt dev-bootstrap.js (see header)"
-fi
 
 ( cd "$APP_DIR" && pnpm build ) > "$WORK/build.log" 2>&1
 [ -f "$ZSHIP" ] && ok "built stream-probe .zship" || { no "build produced no .zship"; tail -20 "$WORK/build.log"; exit 1; }
@@ -377,66 +274,16 @@ sed 's/^/  /' "$WORK/deployed.txt"
 echo "  --- deployed response headers ---"
 tr -d '\r' < "$WORK/deployed.txt.hdr" | sed 's/^/  /'
 
-# --- The floor: a MEASURED minimum, and the guard against a green run over ---
-#     nothing. This script exits on $FAIL alone, and $FAIL is 0 both when every
-#     assertion passed and when NO assertion ran -- a stack that never came up,
-#     a `drive` that wrote an empty file, a rename that stopped `judge` being
-#     called. This repo has shipped three gates that passed over zero tests
-#     (#102/#103/#112); a job that cannot fail is worse than no job.
-#
-# THE FLOOR IS A MEASUREMENT. Taken 2026-08-10 on this tree, running this script
-# unmodified against the compose Postgres on :5440:
-#
-#     streaming: 24 passed, 0 failed        (exit 0)
-#
-# CROSS-CHECKED against a second, independent instrument, because a count read
-# out of the run it is meant to guard proves only that the run was self-
-# consistent. Counting `ok "` CALL SITES in this file and multiplying by the
-# number of times each function is invoked: judge() 3, frames() 3, headers() 3,
-# each called once per tier = (3+3+3) x 2 = 18, plus 6 top-level setup sites
-# (built .zship, 2 server functions, dev reachable, stack healthy, deployed
-# stream-probe, deployed reachable) = 24. The dynamic 24 and the static 24
-# agree, and they disagree for different reasons if either is wrong: the
-# dynamic one moves when a tier stops answering, the static one when an
-# assertion is deleted from the source.
-#
-# NO HEADROOM, deliberately. This total is not DISCOVERED (unlike a cargo run,
-# where feature resolution and host capabilities move the count); it is the
-# number of ok()/no() sites this file reaches, fixed by the source. Adding an
-# assertion passes untouched (25 >= 24); removing one costs a deliberate edit
-# here. That asymmetry is the whole point.
-#
-# WHAT THE FLOOR DOES NOT CATCH: substitution. Deleting one assertion and adding
-# an easier one keeps the total at 24. Nothing here can see that; review can.
+# Keep a floor beside the gate so a path that silently skips its assertions
+# cannot pass through an empty result.
 STREAM_MIN_PASSED=24
 
 echo ""
-# MUTATE_BUFFERED is named in this line too. It is a SEPARATE variable from
-# MUTATE, so a buffered run used to close with `(mutation: none)` beside two
-# failures -- the one line a reader skips to, telling them an unmutated run had
-# regressed. The banner above says it, but the banner is 50 lines up.
-echo "  streaming: $PASS passed, $FAIL failed  (mutation: $MUTATE, MUTATE_BUFFERED=$MUTATE_BUFFERED)  (floor $STREAM_MIN_PASSED)"
+echo "  streaming: $PASS passed, $FAIL failed  (MUTATE_BUFFERED=$MUTATE_BUFFERED)  (floor $STREAM_MIN_PASSED)"
 echo "  MUTATION: re-run with MUTATE_BUFFERED=1 to drop curl -N; both sides must then FAIL"
-echo "  MUTATIONS (wire format): MUTATE=no-terminator | no-sse-ctype -- each edits"
-echo "    sdks/bootstrap/src/fetch-handler.ts; the DEPLOYED side carries the defect"
-echo "    and exactly the named verdict must go RED while the tick/timing rows stay"
-echo "    green (dev keeps its prebuilt dev-bootstrap.js -- see the header note)"
 
-# A MUTATION run is EXPECTED to fail assertions, so the floor is the only thing
-# that still has to hold there: the point of MUTATE_BUFFERED=1 is that the
-# timing rows go red, not that fewer rows run. The floor must therefore count
-# assertions that RAN. A failing assertion is already caught by `FAIL -eq 0`
-# below; the floor exists for the other failure, where an assertion stops
-# running at all and its absence reads as a pass. A mutation moves an outcome
-# between columns and leaves the sum alone.
-#
-# MEASURED 2026-08-11, both runs mine, same HEAD:
-#   unmutated          24 passed, 0 failed  -> 24 ran
-#   MUTATE_BUFFERED=1  22 passed, 2 failed  -> 24 ran
-# The two are the incremental-arrival rows, one per tier, exactly the pair the
-# mutation names. Counting PASS alone reported `only 22 assertions passed,
-# fewer than the 24` on that run -- a third failure that is not one, on the one
-# run this harness is designed to be told apart by.
+# A buffered mutation still runs the assertions it makes fail, so the floor
+# counts both outcomes. FAIL remains the behavioral verdict.
 RAN=$((PASS + FAIL))
 rc=0
 [ "$FAIL" -eq 0 ] || rc=1

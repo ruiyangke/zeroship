@@ -45,13 +45,28 @@ type MaybePromise<T> = T | Promise<T>;
 type StreamItem<Output> =
   Awaited<Output> extends AsyncIterable<infer Item> ? Item : never;
 
+function withOutputHint(config?: ProcedureConfig): ProcedureConfig | undefined {
+  if (!config || config.outputIsString !== undefined) return config;
+  const schema = config.output;
+  if (!schema || typeof schema !== "object") return config;
+  const candidate = schema as {
+    _def?: { typeName?: string; type?: string };
+    def?: { typeName?: string; type?: string };
+  };
+  const definition = candidate._def || candidate.def;
+  if (definition?.typeName === "ZodString" || definition?.type === "string") {
+    return { ...config, outputIsString: true };
+  }
+  return config;
+}
+
 function attach<H extends Handler>(
   handler: H,
   marker: WrapperMarker,
   config?: ProcedureConfig,
 ): H {
   try {
-    const baseConfig: ProcedureConfig | undefined = config;
+    const baseConfig = withOutputHint(config);
     if (marker !== "procedure") {
       const merged: ProcedureConfig =
         baseConfig === undefined

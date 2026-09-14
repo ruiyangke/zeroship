@@ -1,0 +1,21 @@
+warning: unused import: `zeroship_data_orm::orm::*`
+ --> tests/ui/increment_text.rs:1:5
+  |
+1 | use zeroship_data_orm::orm::*;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+error[E0599]: the method `increment` exists for struct `zeroship_data_orm::orm::Field<title>`, but its trait bounds were not satisfied
+ --> tests/ui/increment_text.rs:4:42
+  |
+4 | fn main() { let _ = schema::posts::title.increment(1_i64); }
+  |                                          ^^^^^^^^^
+  |
+ ::: src/orm/codecs.rs
+  |
+  |         ($($name:ident),* $(,)?) => { $(#[derive(Debug)] pub enum $name {})* };
+  |                                                          ----------------- doesn't satisfy `_: NumericSqlType`
+  |
+  = note: the following trait bounds were not satisfied:
+          `zeroship_data_orm::orm::sql_types::Text: NumericSqlType`

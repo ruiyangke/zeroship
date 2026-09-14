@@ -56,8 +56,11 @@ The worker awaits it before caching an isolate. Hosts that manage multiple
 isolates keep them exited between asynchronous turns; initialization enters
 and exits the isolate around its synchronous V8 work.
 
-DB facade preparation uses this lifecycle. The remaining bootstrap mask-policy
-handoff has not yet moved into native finalization.
+DB facade preparation uses this lifecycle. The SDK records mask-policy
+declarations through the native DB binding while creator startup evaluates.
+The DB plugin installs and seals the captured declaration during finalization.
+Unmasking refuses with `database_startup_pending` until finalization; ordinary
+descriptor-bound operations remain available during startup.
 
 ## Current plugin styles
 
@@ -103,4 +106,7 @@ Implementations: [procedure frames](../../crates/zeroship-runtime/src/rpc/capabi
 
 Creator-facing APIs should stay small. If a feature can be expressed in JS on top of `fetch` or the existing native primitives, it belongs in an SDK package rather than a new runtime plugin.
 
-Platform-only DB internals are not part of the public plugin contract. The bootstrap layer resolves those privately when installing schema; creator code should treat `env.db` as the typed document API described in [docs/reference/db.md](../reference/db.md).
+Platform-only DB internals are not part of the public plugin contract. `DbPlugin`
+registers its private adapter module and native startup invokes it with the
+validated descriptor and DB handle. Creator code should treat `env.db` as the
+typed document API described in [db.md](db.md).

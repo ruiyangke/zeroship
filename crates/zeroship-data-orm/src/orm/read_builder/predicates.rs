@@ -141,7 +141,7 @@ where
     }
 }
 
-fn literal<C: Column>(mut value: Value) -> Result<Option<crate::sql::Literal>, DbError> {
+pub(super) fn literal<C: Column>(mut value: Value) -> Result<Option<crate::sql::Literal>, DbError> {
     if !value.is_null()
         && !matches!(value, Value::Json(_))
         && C::Entity::schema()[C::NAME].logical_type.is_json()

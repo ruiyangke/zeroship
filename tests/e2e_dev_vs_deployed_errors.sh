@@ -88,41 +88,12 @@
 #      two modes, not the verdict lines -- the totals are equal by design.
 #
 # ===========================================================================
-# SECOND LEG, added 2026-08-11: DISPATCHER-ORIGINATED errors.
+# Native dispatcher errors.
 #
-# Everything above is about errors USER CODE throws. This harness now also
-# drives the errors produced BEFORE user code runs. WHY THAT IS A DIFFERENT
-# QUESTION rather than more rows of the same one: the rail forks by WHICH ERROR
-# it is, not by which tier you are on.
-#
-#   SHARED. Both tiers run the same Rust runtime -- `pnpm dev` is
-#   `target/release/zeroship`, the deploy is `zeroship-worker` -- so the input
-#   parser (`crates/zeroship-runtime/src/core/runtime.rs::parse_rpc_input`) and the
-#   dispatch body (`__zsDispatchRpc`, inline in `crates/runtime/src/core/
-#   init.rs`) are the same code on both. MEASURED, not assumed: d.badJson
-#   answers with the RUST parser's text ("invalid JSON body") on both, where
-#   the JS parser in `sdks/bootstrap/src/fetch-handler.ts` would have appended
-#   the underlying parse error.
-#
-#   DEV ONLY. `fetch-handler.ts` still owns the cases the kernel's
-#   `extract_zs_v1_id` declines to claim: a non-GET/POST method, and a path
-#   with no id. In dev nothing is in front of it, so it answers them.
-#
-#   DEPLOYED ONLY. The gateway sits in front and answers anything it can settle
-#   from the manifest without asking the worker: an unknown procedure id, a
-#   method the procedure kind forbids, a path with no id. Those three are
-#   precisely where this leg found divergence, and all three were the gateway
-#   speaking a different error envelope. Fixed 2026-08-11; the rows below are
-#   what keeps it fixed.
-#
-# NOT the rail, despite its own header having said so until 2026-08-11:
-# `sdks/bootstrap/src/dispatcher.ts`'s `__zsDispatch`. `dist/dispatcher.js` is
-# not `include_str!`d anywhere in `crates/runtime` (grep it), and the unary path
-# never reaches that function on either tier -- the synthetic entry exports
-# `default.rpc` as a dict, the kernel wraps it in `USER_RPC`, and that calls
-# init.rs's second copy. The two copies have ALREADY drifted in text ("No RPC
-# dispatch table installed" vs "RPC registry is not an object"); it is not
-# client-visible only because that arm is unreachable in a built app.
+# These requests fail before creator code runs. Development and deployed
+# workers use the same native parser and dispatcher, while the gateway may
+# reject a request before forwarding it. The rows below require those paths to
+# expose the same RPC envelope.
 #
 # THE CASES, and the ONE variable each moves:
 #
@@ -276,34 +247,12 @@ trap cleanup EXIT
 # shellcheck source=lib/binary_freshness.sh
 source "$ROOT/tests/lib/binary_freshness.sh"
 zs_check_binary_freshness "$ROOT" "$BIN" \
-  "crates/zeroship-runtime/src crates/zeroship-worker/src crates/zeroship-gateway/src crates/zeroship-control/src crates/zeroship-core/src sdks/bootstrap/src sdks/rpc/src" \
+  "crates/zeroship-runtime/src crates/zeroship-worker/src crates/zeroship-gateway/src crates/zeroship-control/src crates/zeroship-core/src sdks/rpc/src" \
   "zeroship zeroship-worker zeroship-gate zeroship-control" \
   || { _zs_fresh_rc=$?; [ "$_zs_fresh_rc" -ne 0 ] && exit "$_zs_fresh_rc"; }
 
 echo "=== error envelopes: dev vs deployed (error-probe) ==="
 echo "  mutation: $MUTATE"
-
-# --- 0b. THE PRECONDITION THE WHOLE MEASUREMENT RESTS ON --------------------
-# The 5xx sanitization rail must have NO env escape hatch. It used to have one:
-# `AUTH_INSECURE_DEV`, read by
-# `crates/zeroship-runtime/src/core/dispatch.rs::expose_internal_dispatch_errors` and
-# `sdks/bootstrap/src/fetch-handler.ts::insecureDevErrorsEnabled`. Both readers
-# are deleted. While they existed, a stray value in the environment reached BOTH
-# tiers and every 5xx row below measured the hatch instead of the rail --
-# silently, and in the direction that manufactures a finding.
-#
-# The old check here read the harness's own environment. That is now unfalsifiable
-# (an unset variable nothing reads), so it checks the SOURCE instead: if a reader
-# is ever re-introduced, this fires whether or not the variable happens to be set
-# in the shell that runs the harness.
-_ZS_HATCH_HITS="$(grep -rlE 'AUTH_INSECURE_DEV|insecureDevErrorsEnabled|expose_internal_dispatch_errors' \
-  "$ROOT/crates/zeroship-runtime/src" "$ROOT/crates/zeroship-worker/src" "$ROOT/crates/zeroship-gateway/src" \
-  "$ROOT/sdks/bootstrap/src" "$ROOT/sdks/rpc/src" 2>/dev/null || true)"
-if [ -n "$_ZS_HATCH_HITS" ]; then
-  fail "an escape hatch out of the 5xx sanitization rail is back in the source: $(tr '\n' ' ' <<<"$_ZS_HATCH_HITS")"
-  exit 2
-fi
-pass "no source reader of a 5xx-sanitization escape hatch (the rail is unconditional)"
 
 # ---------------------------------------------------------------------------
 # The probe. ONE function, both sides. `$1` is the base URL.

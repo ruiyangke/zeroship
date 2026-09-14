@@ -7,7 +7,7 @@
     "esModuleInterop": true,
     "skipLibCheck": true,
     "outDir": "dist",
-    "rootDir": "src/dev-bootstrap",
+    "rootDir": "src",
     "noEmit": true
   },
   "include": ["src/dev-bootstrap"]

@@ -160,12 +160,12 @@ touched by the dev tier. Its integration tests + live E2E stay authoritative.
 
 ## The dev tier
 
-Two pieces, mirroring the two contract surfaces:
+The browser surface and native identity path mirror the production contract.
 
-### 1. Browser endpoints — `@zeroship/bootstrap` `dev-auth.ts`
+### Browser endpoints — Vite development middleware
 
-`createDevAuthProvider(getEnv)` serves the same-origin `/__zeroship/auth/*` routes
-from inside the dev runtime — no gateway, no external auth service:
+`createDevAuthProvider(options)` serves the same-origin `/__zeroship/auth/*` routes
+from Vite's development middleware — no gateway or external auth service:
 
 - `authorize` (GET) → render a **real dev login form** in-frame (the same
   same-origin iframe the SDK drives in prod). It is **prefilled** with the
@@ -194,17 +194,18 @@ from inside the dev runtime — no gateway, no external auth service:
 - `signout` → clears the cookie; `204` (idempotent).
 
 Every wire shape is identical to prod, so the `@zeroship/auth` client is
-unchanged dev↔prod. The provider is wired into the dev fetch handler in
-`dev-entry.ts` (`@zeroship/bootstrap/dev`), ahead of the user module's fetch.
+unchanged dev↔prod. `sdks/vite-plugin/src/dev-server.ts` mounts the provider
+before the proxy to the creator runtime. It remains available when creator
+module compilation or startup fails.
 
 ### Framed same-origin dev-login parity
 
 There is **no separate `auth.zeroship.ai` origin in dev** — the dev-auth
 provider IS the auth service, served **same-origin** through the
-`@zeroship/vite-plugin` dev-server proxy (which forwards the whole
-`/__zeroship/auth/*` prefix to the spawned `zeroship serve` child runtime). The
-immersive iframe's `src` is the same `/__zeroship/auth/authorize?…`, which in dev
-is same-origin (localhost), so the iframe loads with no header relax needed:
+`@zeroship/vite-plugin` development middleware before its creator-runtime
+proxy. The immersive iframe's `src` is the same
+`/__zeroship/auth/authorize?…`, which in dev is same-origin (localhost), so the
+iframe loads with no header relax needed:
 
 - The login-form/authorize/callback responses set only `content-type` +
   `cache-control` (no `X-Frame-Options` / `frame-ancestors`), so they are already
@@ -218,7 +219,7 @@ is same-origin (localhost), so the iframe loads with no header relax needed:
   POST 302s to the in-frame callback, the callback postMessages `{code,state}`
   to `window.parent`, and the SDK drives `POST /session`.
 
-### 2. Server-side identity — `__zeroship_dev_session` cookie → `user_json`
+### Server-side identity — `__zeroship_dev_session` cookie → `user_json`
 
 The `__zeroship_dev_session` cookie value is
 `base64url(user_json) "." hex-HMAC-SHA256(secret, base64url-payload)`, signed
@@ -261,45 +262,36 @@ zeroship({
 ```
 
 There is **no `password` field**. The login form **prefills + validates** a
-password *derived* from each user's `id` -- `"dev-"` plus the first 8 characters
-of the id after `pws_`, so `pws_alice000000000000000` signs in with
-`dev-alice000`. Sign-in is one click, but it is not auto-login and the
+password derived from each user's `id` by `devPasswordFor`. Sign-in is one
+click, but it is not auto-login and the
 `invalid_credentials` failure arm is real. The password is *not* a secret: it is
 prefilled in the page and never enters the `{user}` identity projection /
 session cookie.
 
-Deriving it rather than configuring it keeps a property the dev-vs-deployed
-harnesses measure: the derived password is always under 15 characters, and the
-deployed platform refuses any password shorter than that
-(`crates/zeroship-auth/src/ui/signup.rs`). So a dev credential works locally and
-**cannot exist in production** -- `tests/e2e_dev_vs_deployed_login.sh` asserts
-exactly that in its `policy.short_password` row. The authority is
-`devPasswordFor` in `sdks/bootstrap/src/dev-auth.ts`.
+Deriving it rather than configuring it keeps a property the
+dev-vs-deployed harness measures: the deployed signup policy refuses every
+credential the dev derivation emits. The implementation authorities are
+`devPasswordFor` in `sdks/vite-plugin/src/dev-auth.ts` and the production
+password policy in `crates/zeroship-auth/src/ui/signup.rs`.
 
-The plugin serializes the resolved config into `ZEROSHIP_DEV_AUTH` and mints a
-fresh `ZEROSHIP_DEV_AUTH_SECRET`, both passed to the spawned `zeroship serve`
-child (`sdks/vite-plugin/src/{dev-auth-config,dev-server,constants}.ts`).
+The plugin retains the resolved user config in Vite middleware and passes a
+fresh `ZEROSHIP_DEV_AUTH_SECRET` to the spawned `zeroship serve` child
+(`sdks/vite-plugin/src/{dev-auth-config,dev-server,constants}.ts`).
 
 ## Dev-only by construction
 
 The dev-auth provider must never reach a production `.zship`:
 
-- It lives in `@zeroship/bootstrap`'s `dev-auth.ts`, imported ONLY by
-  `dev-entry.ts` (`@zeroship/bootstrap/dev`). The production
-  `runtime-entry.ts` never imports it.
-- It is **deliberately NOT re-exported from the `@zeroship/bootstrap` barrel**
-  (`index.js`) — the prod synthetic SSR entry does `import "@zeroship/bootstrap"`
-  for side effects, so a barrel re-export would risk pulling the provider into
-  the shipped worker. Consumers reach it via the `./dev-auth` subpath or
-  transitively via `./dev`, neither of which the prod entry imports.
-- The runtime hook `dev_auth::resolve_dev_user_json` is a no-op unless
-  `ZEROSHIP_DEV=1` (set only on the dev `serve` child).
+- It lives in `sdks/vite-plugin/src/dev-auth.ts` and is mounted only by the
+  Vite development server.
+- The generated server entry contains creator references only; it does not
+  import the provider.
+- The child runtime receives only the cookie verification secret. Native
+  verification is enabled by the explicit development settings passed to
+  `zeroship serve`.
 
-This is **grep-provable** and guarded by a test
-(`sdks/bootstrap/tests/dev-auth.test.ts`): the prod artifacts
-(`dist/runtime-entry.js`, `dist/index.js`, `dist/dispatcher.js`) carry no
-`createDevAuthProvider` / `__zeroship_dev_session` / `signDevSession` /
-`/__zeroship/auth/authorize` symbols.
+`sdks/vite-plugin/test/dev-auth.test.ts` exercises the provider and the
+production artifact boundary.
 
 ## Tests (the faithful path)
 
@@ -308,7 +300,7 @@ This is **grep-provable** and guarded by a test
   `env.auth.getUser()` and `currentUser()` resolve the dev user from the cookie,
   plus forgery rejection (wrong-secret cookie → anonymous). No gateway or
   external auth service.
-- `sdks/bootstrap/tests/dev-auth.test.ts` — exercises the real provider through
+- `sdks/vite-plugin/test/dev-auth.test.ts` — exercises the real provider through
   the full `/__zeroship/auth/*` flow + the WebCrypto HMAC cookie roundtrip, and the
   production-build absence guard.
 - `sdks/auth/tests/dev-tier.test.ts` — the real `@zeroship/auth` client driving
@@ -318,10 +310,9 @@ This is **grep-provable** and guarded by a test
 ## Files
 
 ```
-crates/zeroship-runtime/src/core/dev_auth.rs        cookie verify → user_json (dev-gated)
-crates/zeroship-runtime/src/core/serve.rs           handle_request calls resolve_dev_user_json
-sdks/bootstrap/src/dev-auth.ts             the /__zeroship/auth/* provider + cookie signing
-sdks/bootstrap/src/dev-entry.ts            wires the provider into the dev fetch handler
-sdks/vite-plugin/src/dev-auth-config.ts    devAuth option → env pair + secret
-sdks/vite-plugin/src/dev-server.ts         passes the env pair to the serve child
+crates/zeroship-runtime/src/core/dev_auth.rs     cookie verify → user_json (dev-gated)
+crates/zeroship-runtime/src/core/serve.rs        handle_request calls resolve_dev_user_json
+sdks/vite-plugin/src/dev-auth.ts                 browser provider + cookie signing
+sdks/vite-plugin/src/dev-auth-config.ts          devAuth option → provider config + secret
+sdks/vite-plugin/src/dev-server.ts               routes browser auth and passes the secret to the child
 ```
