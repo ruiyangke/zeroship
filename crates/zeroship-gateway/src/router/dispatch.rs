@@ -1302,8 +1302,8 @@ async fn execute_resource_tree(
             ProcedureKind::Subscription => method == ntex::http::Method::GET,
         };
         if !allow {
-            // Same envelope decision as the 404 arm above. Dev answers this
-            // case from `sdks/bootstrap/src/fetch-handler.ts` with
+            // Same envelope decision as the 404 arm above. Native development
+            // dispatch answers this case with
             // `{"message":"method PUT not allowed on /__zeroship/v1/<id>",
             // "name":"Error","code":"FAILED_PRECONDITION"}`; the gateway used to
             // answer `{"error":"method not allowed for this procedure kind"}`.
@@ -1739,9 +1739,8 @@ fn dispatch_path_wire_id(dispatch_path: &str) -> Option<&str> {
 /// This is deliberately NOT [`build_zs_error_response`]'s
 /// `application/zs-error+json` `{code,message,details,retryable}` shape. That one
 /// is the idempotency subsystem's; the shape here is what
-/// `crates/zeroship-runtime/src/core/init.rs`'s `mkErr` and
-/// `sdks/bootstrap/src/fetch-handler.ts`'s `errResponse` produce, and therefore
-/// what a client sees for every RPC error the gateway does NOT intercept. A
+/// `crates/zeroship-runtime/src/core/init.rs`'s `mkErr` produces, and therefore
+/// what a client sees for every RPC error the gateway does not intercept. A
 /// gateway pre-dispatch rejection is the same event to a client as a worker
 /// rejection, so it gets the same envelope.
 fn zs_rpc_predispatch_error(

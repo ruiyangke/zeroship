@@ -571,8 +571,8 @@ impl Manifest {
             request.validate()?;
         }
         // The `schema.runtime.json` blob is content-addressed like every other
-        // bundle blob. The descriptor's JSON shape is checked by the runtime
-        // when it injects `__zsRuntimeDescriptor`.
+        // bundle blob. The runtime validates the descriptor and passes the
+        // resulting snapshot directly to native plugins.
         if let Some(desc) = &self.runtime_descriptor {
             if !is_sha256_hex(&desc.hash) {
                 return Err(format!(

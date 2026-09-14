@@ -72,7 +72,7 @@
 //
 //   what does NOT reach the unary path on either tier, despite its own header
 //   having claimed otherwise until 2026-08-11: `__zsDispatch` from
-//   sdks/bootstrap/src/dispatcher.ts. The synthetic entry exports `default.rpc`
+//   native runtime dispatch. The synthetic entry exports `default.rpc`
 //   as a plain dict, and the kernel wraps that dict in `USER_RPC`
 //   (crates/zeroship-runtime/src/core/init.rs), which calls a SECOND copy of the
 //   dispatch body written inline in that same file as `__zsDispatchRpc`.

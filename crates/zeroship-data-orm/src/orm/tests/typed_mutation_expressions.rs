@@ -184,3 +184,87 @@ async fn typed_mutation_expressions_sqlite() {
 async fn typed_mutation_expressions_postgres() {
     Box::pin(exercise(true)).await;
 }
+
+async fn count_comparisons(postgres: bool) {
+    let owner = fixture(postgres).await;
+    let db = &owner.database;
+    let table = db.entity::<counters::Entity>().unwrap();
+    for id in ["a", "b"] {
+        table
+            .insert::<_, Counter>(NewCounter {
+                id: id.into(),
+                quantity: 10,
+                ratio: 2.0,
+                optional: None,
+                tags: value!(["same"]),
+                moments: value!([0]),
+                dates: value!(["2026-09-14"]),
+                document: value!({}),
+            })
+            .await
+            .unwrap();
+    }
+    let c = table.alias("c").unwrap();
+    for expression in [
+        c.column(counters::tags).count(),
+        c.column(counters::moments).count(),
+        c.column(counters::dates).count(),
+    ] {
+        let rows = db
+            .from(&c)
+            .having(expression.eq(2_i64).unwrap())
+            .select(expression)
+            .unwrap()
+            .all()
+            .await
+            .unwrap();
+        assert_eq!(rows, vec![2]);
+    }
+    let distinct = c.column(counters::tags).count_distinct();
+    assert!(matches!(
+        db.from(&c)
+            .having(distinct.eq(1_i64).unwrap())
+            .select(distinct)
+            .unwrap()
+            .all()
+            .await,
+        Err(DbError::ValidationFailed {
+            code: "invalid_read",
+            ..
+        })
+    ));
+    let distinct = c.column(counters::quantity).count_distinct();
+    assert_eq!(
+        db.from(&c)
+            .having(distinct.eq(1_i64).unwrap())
+            .select(distinct)
+            .unwrap()
+            .all()
+            .await
+            .unwrap(),
+        vec![1]
+    );
+    let absent = c.column(counters::dates).count();
+    assert_eq!(
+        db.from(&c)
+            .filter(c.column(counters::id).eq("absent").unwrap())
+            .having(absent.eq(0_i64).unwrap())
+            .select(absent)
+            .unwrap()
+            .all()
+            .await
+            .unwrap(),
+        vec![0]
+    );
+    owner.close().await;
+}
+
+#[compio::test]
+async fn count_comparisons_sqlite() {
+    Box::pin(count_comparisons(false)).await;
+}
+
+#[compio::test]
+async fn count_comparisons_postgres() {
+    Box::pin(count_comparisons(true)).await;
+}

@@ -71,7 +71,8 @@ export const auth = {
    * invisible (the gateway's 401 answers before the worker runs), so the
    * damage lands only in dev, where this throw is the 401 source: an app that
    * re-authenticates from `onAuthExpired` would silently stop doing so.
-   * Seam coverage: `tests/auth-expired-seam.test.ts`.
+   * The native runtime auth-plugin tests cover the thrown wire shape, and the
+   * RPC client tests cover `onAuthExpired` classification.
    */
   requireUser(): User {
     const ea = envAuth();

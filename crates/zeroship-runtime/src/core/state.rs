@@ -492,6 +492,11 @@ pub struct RuntimeState {
     /// re-arming the read loop. This is what keeps a large streaming upload
     /// bounded by the buffer cap instead of overflowing it.
     pub forwarder_resumes: VecDeque<u32>,
+    /// Host-controlled development output checking.
+    pub(crate) validate_rpc_output: bool,
+    /// Native plugins may accept startup declarations only while the creator
+    /// entry is evaluating. Finalization and failure close this authority.
+    pub(crate) startup_declarations_open: bool,
 
     /// Futures for in-flight async ops (fetch, kv, ...).
     pub spawned_ops: Vec<Pin<Box<dyn Future<Output = OpResult>>>>,
@@ -567,28 +572,13 @@ pub struct RuntimeState {
     /// Per-request Request JS object, keyed by request_id. Stored by the
     /// kernel when `call_fetch_handler` builds the Request; read by the
     /// native `zeroship` module export so user code can do
-    /// `import { getRequest } from 'zeroship'; getRequest()` without the
-    /// bootstrap having to call `__bindRequest(ctx, request)` on every
-    /// request.
+    /// `import { getRequest } from 'zeroship'; getRequest()`.
     ///
     /// Empty when the request is served through the RPC fast-path (no
     /// Request is constructed). Callers of `getRequest()` inside a
     /// "use server" function receive null/throw in that case — use the
     /// `default.fetch` contract if header/URL access is needed.
     pub request_by_id: HashMap<u64, v8::Global<v8::Object>>,
-
-    /// Per-request JS-exposed `ctx` object, keyed by request_id.
-    /// Populated via `__zs_bind_request_ctx(ctxObj)` from bootstrap JS;
-    /// read via `__zs_get_request_ctx()` from any nested module that
-    /// needs waitUntil/passThroughOnException without threading ctx
-    /// through every function call. Lightweight replacement for
-    /// AsyncLocalStorage — single-threaded isolate, request_id tracked
-    /// by the pump across await boundaries.
-    ///
-    /// TODO(PR 2): clear entries in drain_request_logs /
-    /// discard_request_state / cancellation sweep alongside
-    /// per_request_user and wait_until_by_request.
-    pub request_ctx_by_id: std::collections::HashMap<u64, v8::Global<v8::Object>>,
 
     /// In-memory KV store.
     pub kv_store: HashMap<String, String>,
@@ -603,10 +593,9 @@ pub struct RuntimeState {
     /// `manifest.runtime_descriptor`. The worker
     /// resolves the descriptor blob via `BlobStore` at bundle-load and stamps
     /// it here through `RuntimeBuilder::runtime_descriptor`. `setup_globals`
-    /// parses it and exposes it to JS as `globalThis.__zsRuntimeDescriptor` so
-    /// `@zeroship/bootstrap`'s entry sources the schema from the migration fold
-    /// when present. `None` for apps that ship no migrations/descriptor; those
-    /// apps install no schema.
+    /// passes it to the database plugin's embedded facade so schema installation
+    /// uses the migration fold when present. `None` for apps that ship no
+    /// migrations/descriptor; those apps install no schema.
     pub runtime_descriptor: Option<String>,
 
     /// User-controlled `vars` half of the EnvSnapshot. Plaintext. Always
@@ -776,6 +765,8 @@ impl RuntimeState {
             next_stream_id: 1,
             response_forwarders: HashMap::new(),
             forwarder_resumes: VecDeque::new(),
+            validate_rpc_output: false,
+            startup_declarations_open: false,
 
             spawned_ops: Vec::new(),
             tasks: crate::core::tasks::RuntimeTasks::default(),
@@ -794,8 +785,6 @@ impl RuntimeState {
             executing_ws_user: None,
             wait_until_by_request: HashMap::new(),
             request_by_id: HashMap::new(),
-            request_ctx_by_id: HashMap::new(),
-
             kv_store: HashMap::new(),
             app_id,
             env_vars,
@@ -1172,6 +1161,12 @@ pub enum OpResult {
     /// to be no-ops). See `websocket_native::network::drain_events`.
     #[cfg(feature = "runtime_native_websocket")]
     WebSocketEvent { ws_id: u32 },
+    /// A retained native subscription call or iterator is ready to advance.
+    #[cfg(feature = "runtime_native_websocket")]
+    SubscriptionAdvance { ws_id: u32 },
+    /// A native subscription handshake or keepalive deadline elapsed.
+    #[cfg(feature = "runtime_native_websocket")]
+    SubscriptionTimer(crate::rpc::subscription::Timer),
     /// A native `node:net.Socket` event is ready for EventEmitter
     /// dispatch on the V8 thread. Payload is queued under
     /// `RuntimeState::native_sockets[socket_id].events`.

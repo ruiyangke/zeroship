@@ -325,6 +325,19 @@ For AI SDK integrations that want a URL instead of an iterator, stream
 procedures expose `streamUrl(input)` on the manual factory result and generated
 procedure reference.
 
+The runtime retains the server's iterator and bounds how far it reads ahead
+of the response consumer. Disconnects, cancellation and the host wall deadline
+abort the handler's `ctx.signal` before invoking iterator cleanup. Calls to
+`next()` and `return()` run in the original request context, including after
+asynchronous suspension. A shared lazy module load belongs to its registry
+generation; cancelling a waiting request leaves that load available to other
+requests.
+
+Host timeouts produce the `TIMEOUT` error code. Iterator streams use the
+existing `e:` error frame followed by `d:{}` when the body channel can accept
+the terminal frames. Buffer overflow stops the producer and triggers cancellation. Creator-thrown
+server errors retain their usual redaction rules.
+
 ## Current boundaries
 
 - There is no public `@zeroship/rpc/react` package. Use TanStack Query or your

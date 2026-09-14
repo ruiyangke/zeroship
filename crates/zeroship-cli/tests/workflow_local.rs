@@ -16,7 +16,7 @@ struct Host {
     log: tempfile::NamedTempFile,
 }
 impl Host {
-    fn start(root: &Path, app: Option<&AppId>) -> Self {
+    fn start(root: &Path, app: Option<&AppId>, native_dev: bool) -> Self {
         let port = TcpListener::bind("127.0.0.1:0")
             .unwrap()
             .local_addr()
@@ -46,6 +46,14 @@ impl Host {
             "ZEROSHIP_RUNTIME_DESCRIPTOR",
         ] {
             command.env_remove(key);
+        }
+        if native_dev {
+            command
+                .args([
+                    "--dev-bootstrap=dev-entry.mjs",
+                    "--dev-entry-loader=createDevEntryLoader",
+                ])
+                .env("ZEROSHIP_DEV", "1");
         }
         let mut host = Self {
             child: command.spawn().unwrap(),
@@ -142,15 +150,48 @@ impl Drop for Host {
 
 #[test]
 fn cli_resumes_a_workflow_from_retained_code_after_process_death() {
-    resume_after_process_death(None);
+    resume_after_process_death(None, false);
 }
 
 #[test]
 fn cli_resumes_a_workflow_with_a_configured_app_identity() {
-    resume_after_process_death(Some(&AppId::mint()));
+    resume_after_process_death(Some(&AppId::mint()), false);
 }
 
-fn resume_after_process_death(configured_app: Option<&AppId>) {
+#[test]
+fn native_dev_entry_keeps_workflow_replay_on_the_retained_archive() {
+    resume_after_process_death(None, true);
+}
+
+fn write_dev_entry(root: &Path, version: &str) {
+    std::fs::write(
+        root.join("dev-entry.mjs"),
+        format!(
+            r#"
+export function createDevEntryLoader() {{
+  return async () => ({{
+    async fetch(request, env) {{
+      const url = new URL(request.url);
+      if (url.pathname === "/ping") return Response.json({{ ready: true }});
+      if (url.pathname === "/version") return Response.json({{ version: {version} }});
+      if (url.pathname === "/start") {{
+        const run = await env.workflows.Example.start();
+        return Response.json({{ id: run.id }});
+      }}
+      const run = env.workflows.Example.get(url.searchParams.get("id"));
+      if (url.pathname === "/signal") return Response.json(await run.signal({{ type: "resume" }}));
+      return Response.json(await run.status());
+    }}
+  }});
+}}
+"#,
+            version = serde_json::to_string(version).unwrap(),
+        ),
+    )
+    .unwrap();
+}
+
+fn resume_after_process_death(configured_app: Option<&AppId>, native_dev: bool) {
     let expected_app = configured_app.cloned().unwrap_or_else(local_dev_app_id);
     let root = tempfile::tempdir().unwrap();
     let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -168,10 +209,13 @@ fn resume_after_process_death(configured_app: Option<&AppId>) {
         "{}",
         String::from_utf8_lossy(&compiled.stderr)
     );
-    let mut host = Host::start(root.path(), configured_app);
+    if native_dev {
+        write_dev_entry(root.path(), "live-original");
+    }
+    let mut host = Host::start(root.path(), configured_app, native_dev);
     assert_eq!(
         host.request("/version").unwrap(),
-        json!({"version":"original:lazy"})
+        json!({"version": if native_dev { "live-original" } else { "original:lazy" }})
     );
     assert!(!root.path().join("unused.sqlite").exists());
     let database = root
@@ -188,10 +232,13 @@ fn resume_after_process_death(configured_app: Option<&AppId>) {
     assert!(!root.path().join(".zeroship/app-id").exists());
     drop(host);
     std::fs::remove_dir_all(root.path().join("src")).unwrap();
-    let mut host = Host::start(root.path(), configured_app);
+    if native_dev {
+        write_dev_entry(root.path(), "live-replacement");
+    }
+    let mut host = Host::start(root.path(), configured_app, native_dev);
     assert_eq!(
         host.request("/version").unwrap(),
-        json!({"version":"original:lazy"})
+        json!({"version": if native_dev { "live-replacement" } else { "original:lazy" }})
     );
     assert!(database.exists());
     assert!(!root.path().join(".zeroship/app-id").exists());

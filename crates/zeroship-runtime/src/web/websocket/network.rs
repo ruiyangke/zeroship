@@ -88,8 +88,8 @@ use std::task::Waker;
 
 use compio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use compio::net::TcpStream;
-use futures::channel::mpsc;
 use futures::StreamExt;
+use futures::channel::mpsc;
 
 use super::frame_reader::{DecodedFrame, FrameReader, StepResult};
 use super::frame_writer::{
@@ -128,6 +128,31 @@ pub enum WsEvent {
     Error { reason: String },
 }
 
+/// Event handed from an in-isolate WebSocket endpoint to the kernel writer.
+/// A flow-controlled producer may attach work that becomes runnable only after
+/// the event has been written to the network.
+pub struct KernelOutboundEvent {
+    event: WsEvent,
+    completion: Option<OpResult>,
+}
+
+impl KernelOutboundEvent {
+    pub fn split(self) -> (WsEvent, KernelWriteCompletion) {
+        (self.event, KernelWriteCompletion(self.completion))
+    }
+}
+
+/// Deferred runtime work released by a completed kernel WebSocket write.
+pub struct KernelWriteCompletion(Option<OpResult>);
+
+impl KernelWriteCompletion {
+    pub fn complete(self, state: &SharedState) {
+        if let Some(completion) = self.0 {
+            byte_pump::schedule_event_op(state, completion);
+        }
+    }
+}
+
 /// Per-WS native state — shared between the connect task, both pumps,
 /// and the V8-thread dispatch arm.
 pub struct NativeWsState {
@@ -154,7 +179,7 @@ pub struct NativeWsState {
     /// forward server-side `socket.send()` frames out to the TCP
     /// client. The dispatch arm checks this BEFORE attempting V8
     /// dispatch.
-    pub kernel_outbound: Option<mpsc::UnboundedSender<WsEvent>>,
+    pub kernel_outbound: Option<mpsc::UnboundedSender<KernelOutboundEvent>>,
 }
 
 impl NativeWsState {
@@ -259,6 +284,18 @@ fn push_event(state: &SharedState, ws_id: u32, event: WsEvent) {
 /// kernel channel BYPASSING V8 dispatch, since the kernel-side
 /// wrapper has no JS listeners attached.
 pub fn push_event_pub(state: &SharedState, ws_id: u32, event: WsEvent) {
+    push_event_with_completion(state, ws_id, event, None);
+}
+
+/// Queue an event and release `completion` after the kernel has written it.
+/// In-process pairs have no kernel writer, so delivery itself completes the
+/// handoff and releases the work immediately.
+pub(crate) fn push_event_with_completion(
+    state: &SharedState,
+    ws_id: u32,
+    event: WsEvent,
+    completion: Option<OpResult>,
+) {
     let ws = match lookup_native_ws_state(state, ws_id) {
         Some(w) => w,
         None => return,
@@ -272,7 +309,7 @@ pub fn push_event_pub(state: &SharedState, ws_id: u32, event: WsEvent) {
         if let Some(log) = ws.borrow_mut().event_log.as_mut() {
             log.push(event.clone());
         }
-        let _ = tx.unbounded_send(event);
+        let _ = tx.unbounded_send(KernelOutboundEvent { event, completion });
         return;
     }
 
@@ -281,6 +318,9 @@ pub fn push_event_pub(state: &SharedState, ws_id: u32, event: WsEvent) {
     }
     byte_pump::enqueue_event(&ws, event);
     byte_pump::schedule_event_op(state, OpResult::WebSocketEvent { ws_id });
+    if let Some(completion) = completion {
+        byte_pump::schedule_event_op(state, completion);
+    }
 }
 
 async fn await_recv_drain(ws_state: &Rc<RefCell<NativeWsState>>) {

@@ -115,9 +115,8 @@ APPJS="$WORK/app.js"
 cat > "$APPJS" <<'JS'
 export default {
   // `rpc` is the platform-standard surface (docs/reference/zeroship-standard.md
-  // `default = { fetch?, rpc? }`). The runtime's OWN fetch handler
-  // (sdks/bootstrap/src/fetch-handler.ts) routes `/__zeroship/v1/<id>` to the
-  // embedded dispatcher off `new URL(request.url).pathname` -- so T7 exercises
+  // `default = { fetch?, rpc? }`). Native runtime dispatch routes
+  // `/__zeroship/v1/<id>` from `new URL(request.url).pathname`, so T7 exercises
   // the platform's routing, not this fixture's.
   rpc: {
     secret() {

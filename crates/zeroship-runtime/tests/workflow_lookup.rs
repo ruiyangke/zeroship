@@ -1,4 +1,4 @@
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 
 use super::{build_runtime, dispatch_workflow};
 
@@ -144,24 +144,25 @@ fn an_unexported_constructor_cannot_select_a_child_by_name() {
 }
 
 #[test]
-fn repeating_a_declaration_cannot_clear_constructor_alias_ambiguity() {
-    let result = invoke(
-        r"
-        class x { run() {} }
-        export { x as First, x as Second };
-        export default { workflows: { First: x } };
-        export class Parent {
-            run(_trigger, step) { return step.call(x, null); }
-        }
-        ",
-        "Parent",
-        &json!([]),
-    );
-    assert_eq!(result["kind"], "RunFailed", "{result}");
-    assert_eq!(
-        result["error"]["message"], "workflow export bindings must be unambiguous",
-        "{result}"
-    );
+fn conflicting_names_for_a_constructor_are_rejected() {
+    for declaration in ["", "export default { workflows: { First: x } };"] {
+        let source = format!(
+            r"
+            class x {{ run() {{}} }}
+            export {{ x as First, x as Second }};
+            {declaration}
+            export class Parent {{
+                run(_trigger, step) {{ return step.call(x, null); }}
+            }}
+            "
+        );
+        let result = invoke(&source, "Parent", &json!([]));
+        assert_eq!(result["kind"], "RunFailed", "{result}");
+        assert_eq!(
+            result["error"]["message"], "workflow export bindings must be unambiguous",
+            "{result}"
+        );
+    }
 }
 
 #[test]

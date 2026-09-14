@@ -55,7 +55,6 @@
   },
   "dependencies": {
     "@rollup/plugin-inject": "^5.0.5",
-    "@zeroship/bootstrap": "workspace:*",
     "@zeroship/db": "workspace:*",
     "esbuild": "^0.28.0",
     "jsonc-parser": "3.3.1",

@@ -104,7 +104,7 @@ pub struct ErrorExtras<'a> {
 /// `stack`, `code`, `details`, `retryable`.
 ///
 /// The FIELD SET matches the JS-side `errorResponse()` in
-/// `init.rs::bootstrap_js`. The BEHAVIOUR does not, and this comment used to
+/// `init.rs::host_entry_js`. The BEHAVIOUR does not, and this comment used to
 /// say it did — "so a procedure throw produces the same body whether the
 /// kernel's RPC fast path caught the exception or the slow path's JS handler
 /// did". That is false at 5xx and the difference is the whole point of this
@@ -204,8 +204,8 @@ pub fn build_error_body(
     //
     //   - 4xx, which skips the sanitization rail entirely and is the status
     //     class an ANONYMOUS caller reaches most easily — `requireUser()`'s
-    //     401 and `__zsDispatchRpc`'s own 404 `NOT_FOUND` / 400
-    //     `INVALID_ARGUMENT` are all platform-minted 4xx, so "the creator
+    //     401 and native procedure resolution's `NOT_FOUND` /
+    //     `INVALID_ARGUMENT` failures are all platform-minted 4xx, so "the creator
     //     chose to throw it" is not true of the common cases;
     //   - the 5xx whitelist exemption, which was written to keep a
     //     developer-facing `code` on the wire and, being implemented as
@@ -226,6 +226,17 @@ pub fn build_error_body(
     };
 
     build_verbose_error_body(message, name, extras)
+}
+
+/// Serialize a fixed host failure without granting creator errors an exemption
+/// from redaction. Host messages are static and have no application details.
+pub(crate) fn build_host_error_body(message: &'static str, code: crate::rpc::ZsErrorCode) -> String {
+    build_verbose_error_body(message, "Error", ErrorExtras {
+        stack: None,
+        code: Some(code.as_wire_str()),
+        details_json: None,
+        retryable: Some(code.default_retryable()),
+    })
 }
 
 /// Platform-authored error codes whose fixed messages may cross the server-error rail.
@@ -278,11 +289,8 @@ fn is_public_error_code(code: &str) -> bool {
 /// `scrub_constraint_detail`, so this is a contract-stability rule, not a
 /// containment one.
 ///
-/// Deliberately NOT "any string code". The TS rail in
-/// `sdks/bootstrap/src/fetch-handler.ts` does preserve any string `.code` at
-/// 5xx, which is a live divergence between the two rails; widening this one to
-/// match is a contract decision, not a bug fix, and is left open rather than
-/// taken here.
+/// Deliberately not "any string code". Widening this allowlist changes which
+/// backend details become public and must be treated as a contract decision.
 /// Both spellings of each code are listed, and the pairing is NOT mechanical:
 /// `fk_violation` canonicalises to `FOREIGN_KEY_VIOLATION`, not
 /// `FK_VIOLATION`. See [`is_public_error_code`] for why the canonical form is
@@ -904,8 +912,8 @@ mod tests {
     /// A 4xx skips the 5xx sanitization rail entirely, so before the fix the
     /// thrown `Error.stack` went verbatim to whoever made the request — and
     /// 4xx is the status class an ANONYMOUS caller can reach most easily
-    /// (`requireUser()`'s 401, `__zsDispatchRpc`'s own 404 `NOT_FOUND` and
-    /// 400 `INVALID_ARGUMENT`). The measured deployed body carried the
+    /// (`requireUser()`'s 401 and native procedure resolution's `NOT_FOUND`
+    /// and `INVALID_ARGUMENT`). The measured deployed body carried the
     /// internal module layout, the dispatcher frame names, and the
     /// `__zs_kind_bridge_<hash>` build fingerprint.
     ///

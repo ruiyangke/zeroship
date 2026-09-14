@@ -483,6 +483,18 @@ impl Runtime {
         self.inner.borrow().notify_pump();
     }
 
+    /// Whether development startup has failed after touching the isolate.
+    ///
+    /// Creator evaluation and plugin finalization can run arbitrary callbacks
+    /// before they fail, so the dev host must replace this runtime rather than
+    /// retrying startup in the same isolate. A failed later entry generation
+    /// does not set this state: the last published snapshot remains valid and
+    /// another invalidation can retry through its existing loader.
+    pub(crate) fn dev_runtime_requires_fresh_start(&self) -> bool {
+        let inner = self.inner.borrow();
+        inner.dev_entry_factory.is_some() && matches!(inner.startup, StartupState::Failed(_))
+    }
+
     // ---- Methods that enter V8 — borrow internally -----------------------
 
     /// Kernel's sole dispatch primitive. Invokes the user's
@@ -533,8 +545,8 @@ impl Runtime {
         )
     }
 
-    /// Durable-workflow replay dispatch. Invokes the bootstrap's
-    /// `default.workflow(envelope, ctx)` entry and returns the JSON
+    /// Durable-workflow replay dispatch. Invokes the embedded workflow
+    /// bridge's `default.workflow(envelope, ctx)` entry and returns the JSON
     /// StepResult object it produced.
     pub fn call_workflow_dispatch(
         &self,
@@ -707,13 +719,10 @@ pub struct RuntimeBuilder {
     /// Lives on the builder (not `RuntimeLimits`) because it's a runtime
     /// scheduling knob, not a per-request cap.
     idle_gc_after_ms: Option<u64>,
-    /// **Migration-first cutover (P4b/P5 S2)** — the bundled
-    /// `RuntimeSchemaDescriptor` JSON the worker resolves from
-    /// `manifest.runtime_descriptor`'s blob.
-    /// Exposed to JS as `globalThis.__zsRuntimeDescriptor` so the bootstrap
-    /// entry sources the schema from the migration fold. `None` means the app
-    /// is schema-less.
+    /// Host-supplied schema descriptor, validated and bound before creator evaluation.
     runtime_descriptor: Option<String>,
+    validate_rpc_output: bool,
+    dev_entry_loader: Option<String>,
 }
 
 impl RuntimeBuilder {
@@ -836,12 +845,22 @@ impl RuntimeBuilder {
         self
     }
 
-    /// **Migration-first cutover (P4b/P5 S2)** — set the bundled
-    /// `RuntimeSchemaDescriptor` JSON (`schema.runtime.json`). Exposed to JS
-    /// as `globalThis.__zsRuntimeDescriptor`; the bootstrap entry installs
-    /// the schema from it when present.
+    /// Set the host-supplied runtime schema descriptor.
     pub fn runtime_descriptor(mut self, descriptor: Option<String>) -> Self {
         self.runtime_descriptor = descriptor;
+        self
+    }
+
+    /// Select a trusted dev-host export that constructs an entry loader.
+    /// Production hosts leave this unset; creator exports cannot enable it.
+    pub fn dev_entry_loader(mut self, factory_export: impl Into<String>) -> Self {
+        self.dev_entry_loader = Some(factory_export.into());
+        self
+    }
+
+    /// Enable output validator checks independently of creator globals.
+    pub fn validate_rpc_output(mut self, enabled: bool) -> Self {
+        self.validate_rpc_output = enabled;
         self
     }
 
@@ -855,7 +874,7 @@ impl RuntimeBuilder {
             .idle_gc_after_ms
             .map(Duration::from_millis)
             .unwrap_or(DEFAULT_IDLE_GC_AFTER);
-        let inner = RuntimeInner::new_with_plugins(
+        let mut inner = RuntimeInner::new_with_plugins(
             self.env_vars,
             limits.cpu_limit,
             limits.wall_timeout,
@@ -869,6 +888,8 @@ impl RuntimeBuilder {
             idle_gc_after,
             self.runtime_descriptor,
         );
+        inner.state.borrow_mut().validate_rpc_output = self.validate_rpc_output;
+        inner.dev_entry_factory = self.dev_entry_loader;
         Runtime {
             inner: Rc::new(RefCell::new(inner)),
             limits,
@@ -889,12 +910,10 @@ enum PendingOrigin {
     /// Promise came from `default.fetch` — resolved value is a Response,
     /// inspected via `http::inspect_response`.
     Fetch,
-    /// Promise came from `default.rpc` — resolved value is the user's
-    /// return, classified via `classify_rpc_return` (envelope-wrapped,
-    /// inspected if Response, fall-through if AsyncIterator).
+    /// A native procedure call is waiting for its loader or handler promise.
     Rpc,
     /// Promise came from `default.workflow` — resolved value is the
-    /// StepResult object the workflow replay bootstrap returns.
+    /// StepResult object the embedded workflow bridge returns.
     Workflow,
 }
 
@@ -915,13 +934,10 @@ struct PendingRequest {
     wall_start: Instant,
     cancel: CancelFlag,
     origin: PendingOrigin,
-    /// Keeps the per-request `AbortController` registered with
-    /// `crate::rpc::abort` until the promise settles. Drop unregisters
-    /// (covers normal settle, cancellation sweep, and pump-side
-    /// timeout / CPU termination removals). `None` for non-RPC paths
-    /// and for runtimes built without an `app_id`.
-    #[allow(dead_code)]
-    abort_guard: Option<crate::rpc::abort::AbortGuard>,
+    rpc_call: Option<crate::rpc::dispatch::RpcCall>,
+    /// Host cancellation and eviction ownership until settlement or transfer
+    /// to the response forwarder.
+    rpc_lifetime: Option<crate::rpc::lifetime::RequestLifetime>,
 }
 
 fn send_pending_error(req: PendingRequest, error: impl Into<DispatchError>) {
@@ -960,34 +976,18 @@ macro_rules! enter_v8 {
 pub(crate) struct RuntimeInner {
     pub(crate) isolate: v8::OwnedIsolate,
     pub(crate) context: v8::Global<v8::Context>,
-    /// Cached reference to `module.default.fetch`, resolved once at module
-    /// init. None if the module doesn't export a default.fetch handler.
-    /// Slow path — runs when the request isn't claimed by `rpc_fn` (the
-    /// RPC fast path) or `fetch_fast_fn` (the non-WinterCG HTTP fast
-    /// path), or when those return a fall-through marker (null /
-    /// AsyncIterator / Response).
-    pub(crate) fetch_handler_fn: Option<v8::Global<v8::Function>>,
-    /// Cached reference to `module.default.fetchFast` — the zeroship
-    /// extension for bypassing the WinterCG Request/Response contract.
-    /// Signature: `fetchFast(method, url, bodyBytes, env) → object | string | null`.
-    /// When non-null result: `{ status, headers, body }` plain object OR
-    /// a string body (200 OK). When null: kernel falls through to the
-    /// full `default.fetch(request, env, ctx)` path.
-    pub(crate) fetch_fast_fn: Option<v8::Global<v8::Function>>,
-    /// Cached reference to `module.default.rpc` — the RPC dispatcher.
-    /// Signature: `rpc(name, input, ctx) → any | Promise<any> | AsyncIterator<any>`.
-    /// When set AND the incoming URL matches `/__zeroship/v1/<id>` (POST or GET),
-    /// the kernel slices the id, parses the body's superjson `{ json }`
-    /// envelope in V8, and calls `rpc(id, input, ctx)` directly —
-    /// bypassing Request construction, URL parsing, async body read,
-    /// and Response wrap. Sync/async return values are envelope-wrapped
-    /// (`{"json":<result>}`); AsyncIterator returns and Response objects
-    /// fall through to the slow path which encodes them.
-    pub(crate) rpc_fn: Option<v8::Global<v8::Function>>,
-    /// Cached reference to `module.default.workflow` — the durable workflow
-    /// replay entry the worker invokes with a StepRequest envelope.
+    /// Published HTTP and RPC targets, captured together after validation.
+    /// A dispatch holds this snapshot while later loading can replace it.
+    pub(crate) application: Option<Rc<super::application_entry::ApplicationEntry>>,
+
     pub(crate) workflow_fn: Option<v8::Global<v8::Function>>,
     startup: StartupState,
+    dev_entry_factory: Option<String>,
+    dev_entry_loader: Option<super::dev_entry::DevEntryLoader>,
+    dev_entry_cpu: Duration,
+    dev_entry_cpu_started: Option<Duration>,
+    dev_entry_cpu_generation: Option<u64>,
+    dev_entry_cpu_running: bool,
     startup_cpu: Duration,
     startup_cpu_started: Option<Duration>,
     startup_waiters: Vec<std::task::Waker>,
@@ -997,6 +997,8 @@ pub(crate) struct RuntimeInner {
     plugins: Vec<Arc<dyn NativePlugin>>,
 
     pending_requests: HashMap<u64, PendingRequest>,
+    #[cfg(feature = "runtime_native_websocket")]
+    subscriptions: crate::rpc::subscription::Subscriptions,
     next_direct_request_id: u64,
 
     /// Notification channel to wake the pump task when new work is added.
@@ -1291,8 +1293,8 @@ impl RuntimeInner {
         if let Some(dsn_json) = js_driver_dsn_json {
             state.borrow_mut().js_driver = Some(crate::state::JsDriverState::new(dsn_json));
         }
-        // **Migration-first cutover (P4b)** — stash the bundled descriptor so
-        // `setup_globals` can expose it as `globalThis.__zsRuntimeDescriptor`.
+        // Stash the bundled descriptor for validation and direct plugin binding
+        // during native startup.
         state.borrow_mut().runtime_descriptor = runtime_descriptor;
         isolate.set_slot(state.clone());
         isolate.set_slot(crate::plugin::RuntimeAppIdentity(app_id.clone()));
@@ -1306,11 +1308,15 @@ impl RuntimeInner {
         Self {
             isolate,
             context,
-            fetch_handler_fn: None,
-            fetch_fast_fn: None,
-            rpc_fn: None,
+            application: None,
             workflow_fn: None,
             startup: StartupState::Uninitialized,
+            dev_entry_factory: None,
+            dev_entry_loader: None,
+            dev_entry_cpu: Duration::ZERO,
+            dev_entry_cpu_started: None,
+            dev_entry_cpu_generation: None,
+            dev_entry_cpu_running: false,
             startup_cpu: Duration::ZERO,
             startup_cpu_started: None,
             startup_waiters: vec![],
@@ -1318,6 +1324,8 @@ impl RuntimeInner {
             state,
             plugins,
             pending_requests: HashMap::new(),
+            #[cfg(feature = "runtime_native_websocket")]
+            subscriptions: crate::rpc::subscription::Subscriptions::default(),
             next_direct_request_id: 1,
             pump_notify_tx: None,
             cpu_limit,
@@ -1497,7 +1505,7 @@ impl RuntimeInner {
             // them, so this iteration must not park waiting for an event —
             // nothing would ever wake it (`setTimeout` does not `notify_pump`).
             let mut ready_timers_pending = false;
-            let startup_deadline;
+            let request_deadline;
 
             // Upgrade the Weak back-reference for this iteration's synchronous
             // V8 work. If it returns `None`, the `Runtime` handle has been
@@ -1511,13 +1519,33 @@ impl RuntimeInner {
                 let Some(runtime) = runtime.upgrade() else { return; };
                 {
                     let mut rt = runtime.borrow_mut();
-                    if rt.startup.is_pending() || matches!(rt.startup, StartupState::Failed(_)) {
+                    if rt.startup.is_pending()
+                        || rt
+                            .dev_entry_loader
+                            .as_ref()
+                            .is_some_and(|loader| loader.is_pending())
+                        || matches!(rt.startup, StartupState::Failed(_))
+                    {
                         rt.enter_isolate();
                         rt.advance_startup();
                         rt.exit_isolate();
                     }
                     if matches!(rt.startup, StartupState::Failed(_)) { return; }
-                    startup_deadline = rt.startup_deadline();
+                    let cancellation_cpu_start = crate::core::init::thread_cpu_time();
+                    rt.cleanup_cancelled_requests();
+                    rt.bill_pump_cpu(crate::core::init::thread_cpu_time().saturating_sub(cancellation_cpu_start));
+                    crate::streams::response_forwarder::queue_cancellations(&rt.state, Instant::now());
+                    request_deadline = rt.startup_deadline().into_iter()
+                        .chain(rt.dev_entry_deadline())
+                        .chain(rt.waiting_startup_requests.iter().filter_map(|request| {
+                            rt.wall_timeout
+                                .and_then(|limit| request.started.checked_add(limit))
+                        }))
+                        .chain(rt.pending_requests.values().filter_map(|request| {
+                            request.rpc_lifetime.as_ref().and_then(|request| request.deadline)
+                        }))
+                        .chain(crate::streams::response_forwarder::next_deadline(&rt.state))
+                        .min();
                 }
 
                 if runtime.borrow().host_interrupt.load(Ordering::Acquire) {
@@ -1567,7 +1595,7 @@ impl RuntimeInner {
                     let mut rt = runtime.borrow_mut();
                     rt.enter_isolate();
                     rt.drain_new_tasks_into(&mut work);
-                    rt.service_forwarder_resumes();
+                    rt.service_forwarder_resumes(&mut work);
                     rt.service_js_driver_commands(&mut work);
                     rt.advance_startup();
                     rt.exit_isolate();
@@ -1580,13 +1608,13 @@ impl RuntimeInner {
                 // event await below.
             }
 
-            let wake_deadline = match (ready_timers_pending, startup_deadline) {
+            let wake_deadline = match (ready_timers_pending, request_deadline) {
                 (true, Some(deadline)) => Some(deadline.min(Instant::now() + READY_TIMER_PASS_TICK)),
                 (true, None) => Some(Instant::now() + READY_TIMER_PASS_TICK),
                 (false, deadline) => deadline,
             };
             let cancel_runtime = runtime.clone();
-            let mut startup_cancel = futures::future::poll_fn(move |cx| {
+            let mut request_cancel = futures::future::poll_fn(move |cx| {
                 let Some(runtime) = cancel_runtime.upgrade() else {
                     return std::task::Poll::Ready(());
                 };
@@ -1596,6 +1624,13 @@ impl RuntimeInner {
                     if request.ctx.cancel.is_cancelled() {
                         return std::task::Poll::Ready(());
                     }
+                }
+                for request in rt.pending_requests.values() {
+                    request.cancel.register_waker(cx.waker());
+                    if request.cancel.is_cancelled() { return std::task::Poll::Ready(()); }
+                }
+                if crate::streams::response_forwarder::poll_cancellation(&rt.state, cx) {
+                    return std::task::Poll::Ready(());
                 }
                 std::task::Poll::Pending
             }).fuse();
@@ -1630,7 +1665,7 @@ impl RuntimeInner {
                             r = work.pending_ops.select_next_some() => Some(AsyncEvent::Op(r)),
                             r = work.pending_timers.select_next_some() => Some(AsyncEvent::Timer(r)),
                             _ = notify_rx.next() => None,
-                            _ = startup_cancel => None,
+                            _ = request_cancel => None,
                             _ = tick => None,
                         }
                     }
@@ -1638,7 +1673,7 @@ impl RuntimeInner {
                         futures::select! {
                             r = work.pending_ops.select_next_some() => Some(AsyncEvent::Op(r)),
                             _ = notify_rx.next() => None,
-                            _ = startup_cancel => None,
+                            _ = request_cancel => None,
                             _ = tick => None,
                         }
                     }
@@ -1646,14 +1681,14 @@ impl RuntimeInner {
                         futures::select! {
                             r = work.pending_timers.select_next_some() => Some(AsyncEvent::Timer(r)),
                             _ = notify_rx.next() => None,
-                            _ = startup_cancel => None,
+                            _ = request_cancel => None,
                             _ = tick => None,
                         }
                     }
                     (false, false) => {
                         futures::select! {
                             _ = notify_rx.next() => None,
-                            _ = startup_cancel => None,
+                            _ = request_cancel => None,
                             _ = tick => None,
                         }
                     }
@@ -1668,27 +1703,27 @@ impl RuntimeInner {
                             r = work.pending_ops.select_next_some() => Some(AsyncEvent::Op(r)),
                             r = work.pending_timers.select_next_some() => Some(AsyncEvent::Timer(r)),
                             _ = notify_rx.next() => None,
-                            _ = startup_cancel => None,
+                            _ = request_cancel => None,
                         }
                     }
                     (true, false) => {
                         futures::select! {
                             r = work.pending_ops.select_next_some() => Some(AsyncEvent::Op(r)),
                             _ = notify_rx.next() => None,
-                            _ = startup_cancel => None,
+                            _ = request_cancel => None,
                         }
                     }
                     (false, true) => {
                         futures::select! {
                             r = work.pending_timers.select_next_some() => Some(AsyncEvent::Timer(r)),
                             _ = notify_rx.next() => None,
-                            _ = startup_cancel => None,
+                            _ = request_cancel => None,
                         }
                     }
                     (false, false) => {
                         futures::select! {
                             _ = notify_rx.next() => None,
-                            _ = startup_cancel => None,
+                            _ = request_cancel => None,
                         }
                     }
                 }
@@ -1829,7 +1864,10 @@ impl RuntimeInner {
                 // which re-runs PHASE 1. No yield is needed here — reaching this
                 // point means the wait above already awaited a real deadline.
                 let Some(runtime) = runtime.upgrade() else { return; };
-                runtime.borrow_mut().cleanup_cancelled_requests();
+                let mut rt = runtime.borrow_mut();
+                let cancellation_cpu_start = crate::core::init::thread_cpu_time();
+                rt.cleanup_cancelled_requests();
+                rt.bill_pump_cpu(crate::core::init::thread_cpu_time().saturating_sub(cancellation_cpu_start));
             }
         }
     }
@@ -1840,6 +1878,15 @@ impl RuntimeInner {
 
     fn arm_cpu_timer(&mut self) {
         let startup = self.startup.is_pending();
+        let dev_loading = !startup && self.dev_entry_cpu_running;
+        if dev_loading && self.cpu_limit.is_some() && self.dev_entry_cpu_started.is_none() {
+            let generation = self.dev_entry_loader.as_ref().unwrap().work_generation();
+            if self.dev_entry_cpu_generation != Some(generation) {
+                self.dev_entry_cpu_generation = Some(generation);
+                self.dev_entry_cpu = Duration::ZERO;
+            }
+            self.dev_entry_cpu_started = Some(crate::core::init::thread_cpu_time());
+        }
         if startup && self.cpu_limit.is_some() && self.startup_cpu_started.is_none() {
             self.startup_cpu_started = Some(crate::core::init::thread_cpu_time());
         }
@@ -1847,7 +1894,13 @@ impl RuntimeInner {
         if !self.cpu_timer_active
             && let (Some(timer), Some(limit)) = (&self.cpu_timer, self.cpu_limit)
         {
-            let remaining = if startup { limit.saturating_sub(self.startup_cpu) } else { limit };
+            let remaining = if startup {
+                limit.saturating_sub(self.startup_cpu)
+            } else if dev_loading {
+                limit.saturating_sub(self.dev_entry_cpu)
+            } else {
+                limit
+            };
             // A zero POSIX timer duration disarms it, so an exhausted startup
             // budget must retain an active interrupt deadline.
             timer.arm(remaining.max(Duration::from_nanos(1)));
@@ -1867,6 +1920,17 @@ impl RuntimeInner {
             self.startup_cpu += crate::core::init::thread_cpu_time().saturating_sub(started);
             if self.cpu_limit.is_some_and(|limit| self.startup_cpu >= limit) {
                 self.cpu_note.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
+        if let Some(started) = self.dev_entry_cpu_started.take() {
+            self.dev_entry_cpu +=
+                crate::core::init::thread_cpu_time().saturating_sub(started);
+            if self
+                .cpu_limit
+                .is_some_and(|limit| self.dev_entry_cpu >= limit)
+            {
+                self.cpu_note
+                    .store(true, std::sync::atomic::Ordering::Relaxed);
             }
         }
     }
@@ -2017,16 +2081,8 @@ impl RuntimeInner {
         }
     }
 
-    /// Kernel's sole HTTP dispatch primitive. Three tiers, in order:
-    ///   1. `default.rpc(name, input, ctx)` when set + URL matches
-    ///      `/__zeroship/v1/<id>` and the request isn't a WS upgrade.
-    ///   2. `default.fetchFast(method, url, bodyBytes, env)` when set.
-    ///   3. `default.fetch(request, env, ctx)` (WinterCG slow path).
-    ///
-    /// Tiers 1 and 2 can fall through to (3) by returning a sentinel
-    /// (AsyncIterator from rpc, `null` from fetchFast). Pending Promises
-    /// from any tier hand off to the pump. The result is classified as
-    /// a `FetchOutcome`.
+    /// Invoke native RPC for matching procedure URLs, then fetchFast and fetch.
+    /// A fetchFast null result falls through to the ordinary HTTP handler.
     // Mirrors the outer Runtime::call_fetch_handler_with_user wrapper's
     // params one-for-one; same rationale as that allow.
     #[allow(clippy::too_many_arguments)]
@@ -2041,6 +2097,32 @@ impl RuntimeInner {
         ctx: crate::RequestCtx,
         user_json: Option<String>,
     ) -> crate::FetchOutcome {
+        self.call_fetch_handler_started(
+            modules,
+            method,
+            url,
+            headers,
+            body,
+            env,
+            ctx,
+            user_json,
+            Instant::now(),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn call_fetch_handler_started(
+        &mut self,
+        modules: &[crate::ModuleEntry],
+        method: &str,
+        url: &str,
+        headers: &[(String, String)],
+        body: &[u8],
+        env: &crate::EnvSnapshot,
+        ctx: crate::RequestCtx,
+        user_json: Option<String>,
+        request_started: Instant,
+    ) -> crate::FetchOutcome {
         // Reset the idle-GC clock — every request entry is "activity".
         self.last_request_ts.set(Instant::now());
         crate::node::net::state::reset_dispatch_egress(&self.state);
@@ -2051,6 +2133,7 @@ impl RuntimeInner {
                 let (reply, rx) = channel::result_slot();
                 let cancel = ctx.cancel.clone();
                 self.waiting_startup_requests.push(WaitingRequest {
+                    started: request_started,
                     method: method.into(), url: url.into(), headers: headers.to_vec(),
                     body: body.to_vec(), env: env.clone(), ctx, user_json, reply,
                 });
@@ -2059,15 +2142,14 @@ impl RuntimeInner {
             }
             Ok(true) => {}
         }
-        if self.fetch_handler_fn.is_none() {
-            return crate::FetchOutcome::Response {
-                status: 404,
-                headers: vec![("content-type".into(), "application/json".into())],
-                body: br#"{"message":"No default.fetch handler exported","name":"Error"}"#.to_vec(),
-                logs: vec![],
-            };
+        if self
+            .wall_timeout
+            .is_some_and(|limit| request_started.elapsed() >= limit)
+        {
+            return super::startup::failure_response("Request wall timeout while loading entry");
         }
-
+        let application = self.application.as_ref().expect("ready application entry").clone();
+        let dispatch_started = Instant::now();
         let request_id = self.next_direct_request_id;
         self.next_direct_request_id += 1;
         let invocation_context = crate::core::invocation::InvocationContext::request(
@@ -2079,8 +2161,6 @@ impl RuntimeInner {
             crate::auth::set_request_user(&self.state, request_id, user_json);
         }
 
-        let wall_start = Instant::now();
-
         // Mark the request as executing, and wire the cancel flag through so
         // native ops spawned inside the handler can observe cancellation.
         {
@@ -2089,28 +2169,22 @@ impl RuntimeInner {
             s.executing_request_cancel = Some(ctx.cancel.clone());
         }
 
-        // Kernel dispatch — three tiers, in order of preference:
-        //   1. RPC fast path: URL matches /__zeroship/v1/<id> AND `default.rpc`
-        //      is exported. Slice id in Rust, parse body envelope in V8,
-        //      call rpc(id, input, ctx). No Request construction. Sync
-        //      and Promise returns are envelope-wrapped; AsyncIterator
-        //      and Response returns fall through to (3).
-        //   2. fetchFast: when user code opts in via default.fetchFast
-        //      (raw HTTP fast path, e.g., the bench fixture's /ping).
-        //      Existing zeroship extension. Independent of RPC.
-        //   3. Slow path: full default.fetch(request, env, ctx). WinterCG.
-        //
-        // Compute the wireId only when the cache says rpc is wired up
-        // AND the request isn't a WebSocket upgrade (those route through
-        // default.fetch → fallbackFetch → dispatchSubscription, which
-        // owns the WS handshake). Stored as `Option<&str>` so the borrow
-        // on `self.rpc_fn` is released before the mutable
-        // `self.arm_cpu_timer()` below; the dispatch block re-borrows
-        // inside `enter_v8!`.
+        // Native RPC resolves a retained procedure and owns its eventual result.
+        // Other requests try fetchFast before the ordinary fetch handler.
+        // Subscription upgrades still use the existing WebSocket transport.
         let is_ws_upgrade = headers.iter().any(|(k, v)| {
             k.eq_ignore_ascii_case("upgrade") && v.eq_ignore_ascii_case("websocket")
         });
-        let rpc_id_str: Option<&str> = if self.rpc_fn.is_some() && !is_ws_upgrade {
+        let rpc_id_str: Option<&str> = if application.rpc.is_some() && !is_ws_upgrade {
+            extract_zs_v1_id(method, url)
+        } else {
+            None
+        };
+        #[cfg(feature = "runtime_native_websocket")]
+        let subscription_id_str: Option<&str> = if application.rpc.is_some()
+            && is_ws_upgrade
+            && method.eq_ignore_ascii_case("GET")
+        {
             extract_zs_v1_id(method, url)
         } else {
             None
@@ -2129,56 +2203,67 @@ impl RuntimeInner {
         // inspect_response for Fetch). Default Fetch — only flipped
         // inside the RPC fast-path block.
         let mut pending_origin = PendingOrigin::Fetch;
-        // When the RPC fast path returns a pending Promise, this
-        // carries the per-request `AbortGuard` from inside the
-        // V8 scope out to `store_fetch_pending`. Otherwise the guard
-        // would drop at the end of the `enter_v8!` block, leaving
-        // the registry empty for async procedures.
-        let mut pending_abort_guard: Option<crate::rpc::abort::AbortGuard> = None;
+        let mut pending_rpc_call = None;
+        // A pending call or response body takes ownership of cancellation.
+        let mut pending_rpc_lifetime: Option<crate::rpc::lifetime::RequestLifetime> = None;
+        #[cfg(feature = "runtime_native_websocket")]
+        let mut subscriptions = std::mem::take(&mut self.subscriptions);
         let dispatch_result: Result<DispatchResult, v8::Global<v8::Promise>> =
             enter_v8!(self, |scope| {
                 crate::core::invocation::with_context(scope, &invocation_context, |scope| 'dispatch: {
-                let undefined = v8::undefined(scope).into();
+
+                #[cfg(feature = "runtime_native_websocket")]
+                if let Some(rpc_id) = subscription_id_str {
+                    let registry = application.rpc.as_ref().unwrap().clone();
+                    let user_json = self.state.borrow().per_request_user.get(&request_id).cloned();
+                    let inputs = build_rpc_ctx_inputs(request_id, headers);
+                    let headers = std::sync::Arc::new(headers.to_vec());
+                    let (rpc_ctx, signal) = match crate::rpc::mint_rpc_ctx(
+                        scope,
+                        inputs.request_id,
+                        inputs.trace_id,
+                        method.to_string(),
+                        url.to_string(),
+                        headers,
+                        user_json,
+                        inputs.idempotency_key,
+                    ) {
+                        Ok(result) => result,
+                        Err(error) => break 'dispatch Ok(DispatchResult::Error(error.to_string())),
+                    };
+                    let abort_guard = self.app_id.as_ref().map(|app_id| {
+                        crate::rpc::abort::register_in_flight(app_id, request_id, signal.clone())
+                    });
+                    let lifetime = crate::rpc::lifetime::RequestLifetime {
+                        request_id,
+                        cancel: CancelFlag::new(),
+                        deadline: None,
+                        signal,
+                        _abort_guard: abort_guard,
+                    };
+                    let info = subscriptions.open(
+                        scope,
+                        &self.state,
+                        rpc_id.to_string(),
+                        registry,
+                        rpc_ctx,
+                        lifetime,
+                    );
+                    break 'dispatch Ok(DispatchResult::HttpResponse(info));
+                }
 
                 // ---- Tier 1: RPC fast path ----
-                // `rpc_id_str.is_some()` implies `self.rpc_fn.is_some()`
-                // by construction above, so we can unwrap the Global.
+                // `rpc_id_str.is_some()` implies `application.rpc.is_some()`
+                // by construction above, so the published registry is available.
                 if let Some(rpc_id) = rpc_id_str {
-                    let rpc_fn = v8::Local::new(scope, self.rpc_fn.as_ref().unwrap());
-                    let id_arg: v8::Local<v8::Value> = v8::String::new(scope, rpc_id).unwrap().into();
+                    let registry = application.rpc.as_ref().unwrap().clone();
                     let input_arg: v8::Local<v8::Value> = match parse_rpc_input(scope, method, url, body) {
                         InputParse::Ok(v) => v,
                         InputParse::Reject400(msg) => {
                             break 'dispatch Ok(rpc_invalid_argument_response(msg));
                         }
                     };
-                    let ctx_arg: v8::Local<v8::Value> = {
-                        let maybe = self.state.borrow().ctx_obj.clone();
-                        match maybe {
-                            Some(g) => v8::Local::new(scope, g).into(),
-                            None => v8::Object::new(scope).into(),
-                        }
-                    };
-
-                    // Build the per-request RpcCtx holder (Rust state +
-                    // V8 wrapper), and let `call_rpc_inner` install it in
-                    // the ALS slot. On any build failure we drop ALS
-                    // support and fall through to a no-ALS call (degrades
-                    // to undefined for `__zeroshipGetRpcCtx`, never breaks
-                    // the dispatch).
-                    //
-                    // The AbortController is minted EAGERLY inside
-                    // `mint_rpc_ctx` so the abort registry can register it
-                    // before user code runs. Headers / URL / signal V8
-                    // wrappers are deferred to first accessor read.
-                    //
-                    // When `app_id` is configured (multi-tenant worker),
-                    // register the controller with `crate::rpc::abort` so
-                    // the LRU eviction sweep can fire `ctx.signal` for
-                    // every in-flight procedure before the isolate is
-                    // disposed. The guard drops on sync return / throw;
-                    // on a pending promise we hand it off to
-                    // `store_fetch_pending` via `pending_abort_guard`.
+                    // The native RpcCtx is the handler argument and its ambient context.
                     let user_json = {
                         let s = self.state.borrow();
                         if s.per_request_user.is_empty() {
@@ -2208,49 +2293,38 @@ impl RuntimeInner {
                         headers_arc,
                         user_json,
                         inputs.idempotency_key,
-                        self.app_id.is_some(),
                     );
-                    let (rpc_ctx_object, mut local_abort_guard) = match mint_result {
-                        Ok((ctx_obj, controller)) => {
-                            let guard = match (self.app_id.as_ref(), controller) {
-                                (Some(aid), Some(c)) => Some(crate::rpc::abort::register_in_flight(
-                                    scope,
-                                    aid,
-                                    request_id,
-                                    c,
-                                )),
-                                _ => None,
+                    let (rpc_ctx_object, mut local_rpc_lifetime) = match mint_result {
+                        Ok((ctx_obj, signal)) => {
+                            let abort_guard = self.app_id.as_ref().map(|app_id| {
+                                crate::rpc::abort::register_in_flight(app_id, request_id, signal.clone())
+                            });
+                            let request = crate::rpc::lifetime::RequestLifetime {
+                                request_id, cancel: ctx.cancel.clone(),
+                                deadline: self
+                                    .wall_timeout
+                                    .and_then(|timeout| request_started.checked_add(timeout)),
+                                signal, _abort_guard: abort_guard,
                             };
-                            (Some(ctx_obj), guard)
+                            (ctx_obj, Some(request))
                         }
-                        Err(_) => (None, None),
+                        Err(error) => break 'dispatch Ok(DispatchResult::Error(error.to_string())),
                     };
-                    match call_rpc_inner(scope, rpc_fn, id_arg, input_arg, ctx_arg, rpc_ctx_object) {
-                        RpcCallResult::Handled(res) => {
-                            // If the call returned a pending promise,
-                            // the pump must settle it as RPC (envelope-
-                            // wrap the value, not inspect as Response).
-                            // Hand the AbortGuard off to the pump so the
-                            // registry entry survives across `await`s.
-                            if res.is_err() {
-                                pending_origin = PendingOrigin::Rpc;
-                                pending_abort_guard = local_abort_guard.take();
-                            }
-                            break 'dispatch res;
-                        }
-                        // AsyncIterator return → falls through to the
-                        // slow path (default.fetch / synthetic entry),
-                        // which wraps it in an SSE Response.
-                        RpcCallResult::FallThrough => {}
+                    let (result, call) = call_rpc_inner(scope, registry, rpc_id, input_arg, rpc_ctx_object);
+                    if result.is_err() {
+                        pending_origin = PendingOrigin::Rpc;
+                        pending_rpc_call = call;
+                        pending_rpc_lifetime = local_rpc_lifetime.take();
+                    } else if let Ok(DispatchResult::HttpResponse(ResponseInfo::Stream {stream_id, ..})) = &result {
+                        crate::streams::response_forwarder::retain_request(
+                            scope, &self.state, *stream_id, local_rpc_lifetime.take().expect("RPC request lifetime"),
+                        );
                     }
-                    // Sync return / FallThrough: drop the guard at the
-                    // end of the V8 turn (the unused `_` binding here is
-                    // explicit — we want the Drop to run).
-                    drop(local_abort_guard);
+                    break 'dispatch result;
                 }
 
-                let fetch_fast_result = if let Some(ff_fn_global) = self.fetch_fast_fn.as_ref() {
-                    let ff_fn = v8::Local::new(scope, ff_fn_global);
+                let fetch_fast_result = if let Some(handler) = application.fetch_fast.as_ref() {
+                    let (ff_fn, receiver) = handler.locals(scope);
                     let method_arg = v8::String::new(scope, method).unwrap().into();
                     let url_arg = v8::String::new(scope, url).unwrap().into();
                     let body_arg = uint8_array_from_bytes(scope, body)
@@ -2262,7 +2336,7 @@ impl RuntimeInner {
                             None => v8::Object::new(scope).into(),
                         }
                     };
-                    call_fetch_fast_inner(scope, ff_fn, method_arg, url_arg, body_arg, env_arg)
+                    call_fetch_fast_inner(scope, ff_fn, receiver, method_arg, url_arg, body_arg, env_arg)
                 } else {
                     FetchFastResult::FallThrough
                 };
@@ -2273,6 +2347,13 @@ impl RuntimeInner {
                     // Request/Response object construction needed.
                     res
                 } else {
+                    if application.fetch.is_none() {
+                        break 'dispatch Ok(DispatchResult::HttpResponse(ResponseInfo::Complete {
+                            status: 404,
+                            headers: vec![("content-type".into(), "application/json".into())],
+                            body: br#"{"message":"No default.fetch handler exported","name":"Error"}"#.to_vec(),
+                        }));
+                    }
                     // ---- Slow path: full default.fetch(request, env, ctx) ----
                     //
                     // Build the Request from the parsed HTTP data using the
@@ -2282,8 +2363,8 @@ impl RuntimeInner {
                     );
                     if let Some(request) = request_opt {
                         // Stash the Request so `getRequest()` can find it
-                        // without the bootstrap having to push `ctx.__zs_request`
-                        // through JS on every call. Cleared in drain_request_logs /
+                        // without forwarding it through a mutable JavaScript global.
+                        // Cleared in drain_request_logs /
                         // discard_request_state together with the other per-request
                         // state (user, ctx, logs).
                         let global = v8::Global::new(scope, request);
@@ -2315,14 +2396,18 @@ impl RuntimeInner {
                             }
                         };
 
-                        let handler = v8::Local::new(scope, self.fetch_handler_fn.as_ref().unwrap());
-                        call_fetch_inner(scope, handler, undefined, request.into(), env_val, ctx_val)
+                        let (handler, receiver) = application.fetch.as_ref().unwrap().locals(scope);
+                        call_fetch_inner(scope, handler, receiver, request.into(), env_val, ctx_val)
                     } else {
                         Ok(DispatchResult::Error("Failed to construct Request object".to_string()))
                     }
                 }
                 })
             });
+        #[cfg(feature = "runtime_native_websocket")]
+        {
+            self.subscriptions = subscriptions;
+        }
         self.disarm_cpu_timer();
 
         if self.check_v8_terminated() {
@@ -2343,7 +2428,7 @@ impl RuntimeInner {
             };
         }
 
-        let cpu_elapsed = wall_start.elapsed();
+        let cpu_elapsed = dispatch_started.elapsed();
 
         match dispatch_result {
             Ok(DispatchResult::HttpResponse(info)) => {
@@ -2425,14 +2510,10 @@ impl RuntimeInner {
                 // when the promise settles. DO NOT call
                 // `discard_request_state` here — only after settle.
                 //
-                // `pending_abort_guard` is `Some` only on the RPC fast
-                // path with `app_id` configured; the guard rides
-                // alongside the PendingRequest entry and unregisters
-                // when the request settles or is cancelled.
                 self.clear_executing_request();
                 self.store_fetch_pending(
-                    request_id, promise, ctx, cpu_elapsed, wall_start, pending_origin,
-                    pending_abort_guard,
+                    request_id, promise, ctx, cpu_elapsed, request_started, pending_origin,
+                    pending_rpc_call, pending_rpc_lifetime,
                 )
             }
         }
@@ -2452,7 +2533,8 @@ impl RuntimeInner {
         cpu_accumulated: Duration,
         wall_start: Instant,
         origin: PendingOrigin,
-        abort_guard: Option<crate::rpc::abort::AbortGuard>,
+        rpc_call: Option<crate::rpc::dispatch::RpcCall>,
+        rpc_lifetime: Option<crate::rpc::lifetime::RequestLifetime>,
     ) -> crate::FetchOutcome {
         let (tx, rx) = channel::result_slot();
 
@@ -2464,7 +2546,8 @@ impl RuntimeInner {
             wall_start,
             cancel: ctx.cancel.clone(),
             origin,
-            abort_guard,
+            rpc_call,
+            rpc_lifetime,
         });
         self.notify_pump();
 
@@ -2492,7 +2575,8 @@ impl RuntimeInner {
             wall_start,
             cancel: ctx.cancel.clone(),
             origin: PendingOrigin::Workflow,
-            abort_guard: None,
+            rpc_call: None,
+            rpc_lifetime: None,
         });
         self.notify_pump();
 
@@ -2512,7 +2596,13 @@ impl RuntimeInner {
         info: ResponseInfo,
         _cpu_time: Duration,
     ) -> crate::FetchOutcome {
-        let logs = self.drain_request_logs(request_id);
+        let logs = if matches!(&info, ResponseInfo::Stream { stream_id, .. }
+            if crate::streams::response_forwarder::owns_request(&self.state, *stream_id))
+        {
+            self.state.borrow_mut().per_request_logs.remove(&request_id).unwrap_or_default()
+        } else {
+            self.drain_request_logs(request_id)
+        };
         match info {
             ResponseInfo::Complete { status, headers, body } => {
                 crate::FetchOutcome::Response { status, headers, body, logs }
@@ -2582,28 +2672,32 @@ impl RuntimeInner {
         self.fire_ready_timers_pump(work);
     }
 
-    /// Re-arm any upload forwarders that paused for backpressure and whose
-    /// consumer has since drained the buffer (it enqueued the stream-id in
-    /// `RuntimeState::forwarder_resumes`). Runs inside the pump's V8 scope —
-    /// `resume_read` needs a scope to call `reader.read()`. Called from the
-    /// pump's PHASE 1 with the isolate already entered.
-    fn service_forwarder_resumes(&mut self) {
+    /// Drive resumed readers and cancellation through the guarded native-turn
+    /// path. It settles promises resolved by callbacks and drains cleanup work
+    /// before the pump can park again.
+    fn service_forwarder_resumes(&mut self, work: &mut AsyncWork) {
         if self.host_interrupt.load(Ordering::Acquire) {
             return;
         }
         let pending: Vec<u32> = {
-            let mut s = self.state.borrow_mut();
-            if s.forwarder_resumes.is_empty() {
-                return;
-            }
-            s.forwarder_resumes.drain(..).collect()
+            let mut state = self.state.borrow_mut();
+            if state.forwarder_resumes.is_empty() { return; }
+            state.forwarder_resumes.drain(..).collect()
         };
-        let state = self.state.clone();
-        enter_v8!(self, |scope| {
-            for stream_id in pending {
-                crate::streams::response_forwarder::resume_read(scope, &state, stream_id);
-            }
-        });
+        self.dispatch_native_turn(
+            work,
+            crate::core::invocation::InvocationContext::default(),
+            |state| {
+                let mut state = state.borrow_mut();
+                state.executing_request_id = None;
+                state.executing_request_cancel = None;
+            },
+            move |scope, state| {
+                for stream_id in pending {
+                    crate::streams::response_forwarder::resume_read(scope, state, stream_id);
+                }
+            },
+        );
     }
 
     /// Resolve parked Trusted JS-driver command promises from the Rust mailbox.
@@ -2965,6 +3059,17 @@ impl RuntimeInner {
                     crate::core::invocation::InvocationContext::connection(
                         self.state.borrow().ws_user.get(&ws_id).cloned(),
                     );
+                if self.subscriptions.owns(ws_id) {
+                    self.dispatch_subscription_turn(
+                        work,
+                        invocation_context,
+                        ws_id,
+                        |subscriptions, scope, state| {
+                            subscriptions.on_websocket_event(scope, state, ws_id);
+                        },
+                    );
+                    return;
+                }
                 // Native WebSocket events: drain the per-WS event
                 // queue and dispatch each event in FIFO order. Multiple
                 // events may have been coalesced under one OpResult
@@ -2998,6 +3103,33 @@ impl RuntimeInner {
                             scope, state, ws_id,
                         );
                     },
+                );
+            }
+            #[cfg(feature = "runtime_native_websocket")]
+            OpResult::SubscriptionAdvance { ws_id } => {
+                let invocation_context =
+                    crate::core::invocation::InvocationContext::connection(
+                        self.state.borrow().ws_user.get(&ws_id).cloned(),
+                    );
+                self.dispatch_subscription_turn(
+                    work,
+                    invocation_context,
+                    ws_id,
+                    |subscriptions, scope, state| subscriptions.advance(scope, state, ws_id),
+                );
+            }
+            #[cfg(feature = "runtime_native_websocket")]
+            OpResult::SubscriptionTimer(timer) => {
+                let ws_id = timer.ws_id();
+                let invocation_context =
+                    crate::core::invocation::InvocationContext::connection(
+                        self.state.borrow().ws_user.get(&ws_id).cloned(),
+                    );
+                self.dispatch_subscription_turn(
+                    work,
+                    invocation_context,
+                    ws_id,
+                    |subscriptions, scope, state| subscriptions.on_timer(scope, state, timer),
                 );
             }
             OpResult::SocketEvent { socket_id } => {
@@ -3066,6 +3198,35 @@ impl RuntimeInner {
         self.cleanup_cancelled_requests();
         self.clear_executing_request();
         self.drain_new_tasks_into(work);
+    }
+
+    #[cfg(feature = "runtime_native_websocket")]
+    fn dispatch_subscription_turn<Dispatch>(
+        &mut self,
+        work: &mut AsyncWork,
+        invocation_context: crate::core::invocation::InvocationContext,
+        ws_id: u32,
+        dispatch: Dispatch,
+    ) where
+        Dispatch: FnOnce(
+            &mut crate::rpc::subscription::Subscriptions,
+            &mut v8::PinScope,
+            &SharedState,
+        ),
+    {
+        let mut subscriptions = std::mem::take(&mut self.subscriptions);
+        self.dispatch_native_turn(
+            work,
+            invocation_context,
+            |state| {
+                let mut state = state.borrow_mut();
+                state.executing_request_id = None;
+                state.executing_request_cancel = None;
+                state.executing_ws_user = state.ws_user.get(&ws_id).cloned();
+            },
+            |scope, state| dispatch(&mut subscriptions, scope, state),
+        );
+        self.subscriptions = subscriptions;
     }
 
     /// Handle a timer firing (pump path). Enters V8 to fire the callback,
@@ -3289,7 +3450,13 @@ impl RuntimeInner {
     /// Returns true if there are pending async requests.
     #[allow(dead_code)]
     pub fn has_pending_requests(&self) -> bool {
-        self.startup.is_pending() || !self.waiting_startup_requests.is_empty() || !self.pending_requests.is_empty()
+        self.startup.is_pending()
+            || self
+                .dev_entry_loader
+                .as_ref()
+                .is_some_and(|loader| loader.is_pending())
+            || !self.waiting_startup_requests.is_empty()
+            || !self.pending_requests.is_empty()
     }
 
     // -----------------------------------------------------------------------
@@ -3312,9 +3479,6 @@ impl RuntimeInner {
         // procedures).
         if !s.per_request_user.is_empty() {
             s.per_request_user.remove(&request_id);
-        }
-        if !s.request_ctx_by_id.is_empty() {
-            s.request_ctx_by_id.remove(&request_id);
         }
         if !s.request_by_id.is_empty() {
             s.request_by_id.remove(&request_id);
@@ -3341,7 +3505,6 @@ impl RuntimeInner {
     fn discard_request_state(&self, request_id: u64) {
         let mut s = self.state.borrow_mut();
         s.per_request_user.remove(&request_id);
-        s.request_ctx_by_id.remove(&request_id);
         s.request_by_id.remove(&request_id);
         s.per_request_logs.remove(&request_id);
     }
@@ -3528,46 +3691,43 @@ impl RuntimeInner {
     }
 
     fn cleanup_cancelled_requests(&mut self) {
-        let cancelled: Vec<u64> = self
-            .pending_requests
-            .iter()
-            .filter(|(_, req)| req.cancel.is_cancelled())
-            .map(|(&id, _)| id)
-            .collect();
+        use crate::rpc::lifetime::Cancellation;
+        let now = Instant::now();
+        let cancelled: Vec<_> = self.pending_requests.iter().filter_map(|(&id, request)| {
+            request.rpc_lifetime.as_ref().and_then(|request| request.cancellation(now))
+                .or_else(|| request.cancel.is_cancelled().then_some(Cancellation::Cancelled))
+                .map(|reason| (id, reason))
+        }).collect();
 
-        if cancelled.is_empty() {
-            return;
-        }
-
-        for id in cancelled {
-            let Some(req) = self.pending_requests.remove(&id) else {
-                continue;
-            };
-
-            // Notify the caller. If the handler already timed out, the
-            // receiver is dropped and this send is a no-op — that's fine,
-            // it just means we don't double-error.
-            send_pending_error(req, "Request timed out");
-
-            // Drop every piece of per-request state that was still live
-            // when cancellation fired. Before this fix, only `logs` got
-            // drained; the rest leaked until the isolate was torn down.
-            //
-            //   - `per_request_user` / `per_request_logs`: owned by the
-            //     HashMap keyed on request_id. Covered by drain_request_logs.
-            //   - Timers owned by the request: `timer_owner` maps timer_id
-            //     → request_id. We walk that map, pull out the matching
-            //     timer callbacks, and drop them. The compio `sleep` future
-            //     the pump is holding will still fire, but when
-            //     `fire_timer_callback` runs there's no callback to
-            //     invoke, so no user JS executes.
-            //   - Orphan promise resolvers: `pending_resolvers` keyed by
-            //     op_id. We don't maintain a request_id → op_id index,
-            //     but `executing_request_cancel` short-circuits any op
-            //     that checks it (fetch does). For ops that don't check,
-            //     the resolver just holds a handle — freed when the
-            //     isolate next GCs, bounded memory.
-            let _logs = self.drain_request_logs(id);
+        for (id, reason) in cancelled {
+            let Some(req) = self.pending_requests.remove(&id) else { continue; };
+            if let Some(request) = &req.rpc_lifetime {
+                request.cancel.cancel();
+                self.enter_isolate();
+                self.arm_cpu_timer();
+                let settled = enter_v8!(self, |scope| {
+                    let abort = |scope: &mut v8::PinScope| {
+                        v8::tc_scope!(let tc, scope);
+                        let reason = reason.exception(tc);
+                        request.signal.abort(tc, reason);
+                    };
+                    if let Some(call) = &req.rpc_call { call.with_frame(scope, abort); }
+                    else { abort(scope); }
+                    crate::core::init::perform_microtask_checkpoint(scope);
+                    collect_settled_promises(scope, &mut self.pending_requests, &self.state)
+                });
+                self.disarm_cpu_timer();
+                self.check_v8_terminated();
+                self.exit_isolate();
+                for (id, req, result) in settled {
+                    self.send_settled_reply_any(id, req, result, Duration::ZERO);
+                }
+                let response = crate::rpc::dispatch::response::into_http(reason.response(), id);
+                self.send_settled_reply_any(id, req, SettledResult::Http(response), Duration::ZERO);
+            } else {
+                send_pending_error(req, "Request timed out");
+                let _logs = self.drain_request_logs(id);
+            }
             self.drop_timers_owned_by(id);
         }
     }
@@ -3607,6 +3767,9 @@ fn collect_settled_promises(
     let settled_ids: Vec<u64> = pending_requests
         .iter()
         .filter_map(|(&id, req)| {
+            if req.cancel.is_cancelled() || req.rpc_lifetime.as_ref()
+                .is_some_and(|request| request.cancellation(Instant::now()).is_some())
+            { return None; }
             let p = v8::Local::new(scope, &req.promise);
             if p.state() != v8::PromiseState::Pending {
                 Some(id)
@@ -3619,7 +3782,7 @@ fn collect_settled_promises(
     settled_ids
         .into_iter()
         .filter_map(|id| {
-            let req = pending_requests.remove(&id)?;
+            let mut req = pending_requests.remove(&id)?;
             let invocation_context =
                 crate::core::invocation::InvocationContext::from_request_id(state, Some(id));
             let result = crate::core::invocation::with_context(
@@ -3627,104 +3790,31 @@ fn collect_settled_promises(
                 &invocation_context,
                 |scope| match req.origin {
                     PendingOrigin::Fetch => {
-                        http::extract_settled_result(scope, &req.promise, id)
+                        Ok(http::extract_settled_result(scope, &req.promise, id))
                     }
-                    PendingOrigin::Rpc => settle_rpc_promise(scope, &req.promise, id),
-                    PendingOrigin::Workflow => settle_workflow_promise(scope, &req.promise),
+                    PendingOrigin::Rpc => advance_rpc_call(scope, req.rpc_call.as_mut().expect("pending RPC owns a call"))
+                        .map(|result| {
+                            let response = crate::rpc::dispatch::response::into_http(result, id);
+                            if let Ok(ResponseInfo::Stream {stream_id, ..}) = &response {
+                                crate::streams::response_forwarder::retain_request(
+                                    scope, state, *stream_id, req.rpc_lifetime.take().expect("RPC request lifetime"),
+                                );
+                            }
+                            SettledResult::Http(response)
+                        }),
+                    PendingOrigin::Workflow => Ok(settle_workflow_promise(scope, &req.promise)),
                 },
             );
-            Some((id, req, result))
+            match result {
+                Ok(result) => Some((id, req, result)),
+                Err(promise) => {
+                    req.promise = promise;
+                    pending_requests.insert(id, req);
+                    None
+                }
+            }
         })
         .collect()
-}
-
-/// Settle a pending RPC promise into a `SettledResult`. The resolved
-/// value goes through `classify_rpc_return` so we get the same wire
-/// shape (envelope-wrapped value, inspected Response, fall-through for
-/// AsyncIterator) as the synchronous fast path.
-fn settle_rpc_promise(
-    scope: &mut v8::PinScope,
-    promise: &v8::Global<v8::Promise>,
-    request_id: u64,
-) -> SettledResult {
-    let local = v8::Local::new(scope, promise);
-    match local.state() {
-        v8::PromiseState::Fulfilled => {
-            let val = local.result(scope);
-            match classify_rpc_return(scope, val) {
-                RpcCallResult::Handled(Ok(DispatchResult::HttpResponse(info))) => {
-                    SettledResult::Http(Ok(info))
-                }
-                RpcCallResult::Handled(Ok(DispatchResult::ErrorValue {
-                    message, name: _, stack: _, status: _, code: _, details_json: _, retryable: _
-                })) => {
-                    // Promote to Http(Err) — caller renders a 500 with this
-                    // message. Structured-error fields are dropped here; the
-                    // settle path's wire only carries a string. (Procedures
-                    // returning a thrown Error object as a value rather than
-                    // throwing is an unusual shape — most error paths land
-                    // via Promise rejection below.)
-                    SettledResult::Http(Err(message))
-                }
-                RpcCallResult::Handled(Ok(DispatchResult::Error(msg))) => {
-                    SettledResult::Http(Err(msg))
-                }
-                RpcCallResult::Handled(Err(_)) => {
-                    // Re-pending after settle is a no-op shape — unreachable
-                    // from `classify_rpc_return` which only inspects sync
-                    // values.
-                    SettledResult::Http(Err("rpc re-pending after settle".to_string()))
-                }
-                RpcCallResult::FallThrough => {
-                    // AsyncIterator returned from a Promise: the procedure
-                    // already ran and we hold the iterator, but we have no
-                    // native SSE encoder here. Surface an explicit error so
-                    // the failure mode is visible rather than silent garbage.
-                    // (Procedures that stream should use sync `async function*`
-                    // returns, which the kernel's sync-tier fall-through
-                    // routes through the JS encoder.)
-                    SettledResult::Http(Err(
-                        "rpc returned AsyncIterator from a Promise — unsupported; use `async function*` for streams".to_string()
-                    ))
-                }
-            }
-        }
-        v8::PromiseState::Rejected => {
-            let exc = local.result(scope);
-            match crate::dispatch::v8_exception_to_error_value(scope, exc) {
-                DispatchResult::ErrorValue {
-                    message,
-                    name,
-                    stack,
-                    status,
-                    code,
-                    details_json,
-                    retryable,
-                } => {
-                    let extras = crate::dispatch::ErrorExtras {
-                        stack: stack.as_deref(),
-                        code: code.as_deref(),
-                        details_json: details_json.as_deref(),
-                        retryable,
-                    };
-                    SettledResult::Http(Ok(http::ResponseInfo::Complete {
-                        status,
-                        headers: vec![("content-type".into(), "application/json".into())],
-                        body: crate::dispatch::build_error_body(
-                            status, request_id, &message, &name, extras,
-                        )
-                        .into_bytes(),
-                    }))
-                }
-                _ => SettledResult::Http(Err("rpc rejected".to_string())),
-            }
-        }
-        v8::PromiseState::Pending => {
-            // collect_settled_promises only invokes us for non-pending
-            // promises, so this branch is unreachable in practice.
-            SettledResult::Http(Err("rpc settle on pending promise".to_string()))
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -3853,15 +3943,15 @@ enum FetchFastResult {
 fn call_fetch_fast_inner(
     scope: &mut v8::PinScope,
     ff_fn: v8::Local<v8::Function>,
+    receiver: v8::Local<v8::Value>,
     method_arg: v8::Local<v8::Value>,
     url_arg: v8::Local<v8::Value>,
     body_arg: v8::Local<v8::Value>,
     env_arg: v8::Local<v8::Value>,
 ) -> FetchFastResult {
-    let undefined = v8::undefined(scope).into();
     let (result_val, caught_exception) = {
         v8::tc_scope!(let tc, scope);
-        let r = ff_fn.call(tc, undefined, &[method_arg, url_arg, body_arg, env_arg]);
+        let r = ff_fn.call(tc, receiver, &[method_arg, url_arg, body_arg, env_arg]);
         if tc.has_caught() {
             let exc = tc.exception();
             let exc_global = exc.map(|e| v8::Global::new(tc, e));
@@ -3980,45 +4070,6 @@ fn classify_fetch_fast_return(
             body,
         },
     )))
-}
-
-// ─── RPC fast path ─────────────────────────────────────────────────────────
-//
-// Standalone kernel entry point for `default.rpc(name, input, ctx)`.
-// Activates when:
-//   - `default.rpc` is exported by the user module (cached as `rpc_fn`)
-//   - The incoming URL contains `/__zeroship/v1/<id>` (POST or GET)
-//
-// The kernel slices the id in Rust (no URL-object construction), parses
-// the body's superjson `{ json, meta? }` envelope in V8, and calls
-// `rpc(id, input, ctx)`. Resolved values are encoded inline:
-//   - Plain / superjson-serializable → `{ "json": ..., "meta"? }`, 200 OK
-//   - Response object → inspect_response (status, headers, body)
-//   - AsyncIterator → fall through to default.fetch (whose synthetic
-//     entry wraps it in an SSE Response)
-//
-// Synchronous handlers complete entirely in this block; async handlers
-// (Promise) hand off to the existing pump path on pending; the resolved
-// fast path applies to fulfilled-on-checkpoint promises too.
-
-/// Outcome of the RPC fast-path attempt.
-enum RpcCallResult {
-    /// rpc(...) returned a serializable value, a Response, or threw
-    /// — we have a concrete DispatchResult (or pending Promise) to
-    /// return.
-    Handled(Result<DispatchResult, v8::Global<v8::Promise>>),
-    /// rpc(...) returned an AsyncIterator — the kernel can't encode
-    /// it inline (no native SSE encoder; the synthetic SSR entry's
-    /// JS-side encoder owns that), so we fall through to the slow
-    /// `default.fetch` path, which re-invokes the procedure to wrap
-    /// it in a Response.
-    ///
-    /// Re-invocation is benign for `async function*` (the body only
-    /// runs when iterated, and the discarded generator is GC'd). For
-    /// hand-rolled AsyncIterators that do work in the synchronous
-    /// constructor, the work runs twice. Procedures should use
-    /// `async function*` (the kind=stream convention) for this lane.
-    FallThrough,
 }
 
 /// Byte offset of the path component of `url` — the index of the `/` that
@@ -4329,125 +4380,48 @@ fn format_trace_id_hex(id: u64) -> String {
     s
 }
 
-/// Invoke `default.rpc(id, input, ctx)` and classify the return value.
-///
-/// `als_ctx_object`, when `Some`, is installed into V8's
-/// `ContinuationPreservedEmbedderData` slot under the platform's
-/// RPC-ctx Symbol for the duration of the call. The slot is
-/// restored on every exit path (sync return, JS throw, panic). When
-/// `None`, the call runs without an ALS frame — used by paths that
-/// don't have a populated `RpcContext` yet (synthetic-entry tests
-/// using the older wire shape).
+/// Invoke the retained procedure target under the native request context.
 fn call_rpc_inner<'s>(
     scope: &mut v8::PinScope<'s, '_>,
-    rpc_fn: v8::Local<'s, v8::Function>,
-    id_arg: v8::Local<'s, v8::Value>,
-    input_arg: v8::Local<'s, v8::Value>,
-    ctx_arg: v8::Local<'s, v8::Value>,
-    als_ctx_object: Option<v8::Local<'s, v8::Object>>,
-) -> RpcCallResult {
-    let undefined: v8::Local<v8::Value> = v8::undefined(scope).into();
-    let invoke = |scope: &mut v8::PinScope<'s, '_>| {
-        v8::tc_scope!(let tc, scope);
-        let r = rpc_fn.call(tc, undefined, &[id_arg, input_arg, ctx_arg]);
-        if tc.has_caught() {
-            let exc = tc.exception();
-            let exc_global = exc.map(|e| v8::Global::new(tc, e));
-            (None, exc_global)
-        } else {
-            (r.map(|v| v8::Global::new(tc, v)), None)
-        }
-    };
-    let (result_val, caught_exception) = match als_ctx_object {
-        Some(ctx_object) => crate::rpc::with_rpc_context(scope, ctx_object, invoke),
-        None => invoke(scope),
-    };
-
-    crate::core::init::perform_microtask_checkpoint(scope);
-
-    if let Some(exc_global) = caught_exception {
-        let exc_local = v8::Local::new(scope, &exc_global);
-        return RpcCallResult::Handled(Ok(
-            crate::dispatch::v8_exception_to_error_value(scope, exc_local),
-        ));
-    }
-
-    let Some(result_global) = result_val else {
-        return RpcCallResult::Handled(Ok(DispatchResult::Error(
-            "rpc returned no value".to_string(),
-        )));
-    };
-    let result: v8::Local<v8::Value> = v8::Local::new(scope, &result_global);
-
-    if result.is_promise() {
-        let promise = v8::Local::<v8::Promise>::try_from(result).unwrap();
-        return match promise.state() {
-            v8::PromiseState::Fulfilled => {
-                let resolved = promise.result(scope);
-                classify_rpc_return(scope, resolved)
-            }
-            v8::PromiseState::Rejected => {
-                let exc = promise.result(scope);
-                RpcCallResult::Handled(Ok(
-                    crate::dispatch::v8_exception_to_error_value(scope, exc),
-                ))
-            }
-            v8::PromiseState::Pending => {
-                RpcCallResult::Handled(Err(v8::Global::new(scope, promise)))
-            }
-        };
-    }
-
-    classify_rpc_return(scope, result)
+    registry: crate::rpc::dispatch::ProcedureRegistry,
+    name: &str,
+    input: v8::Local<'s, v8::Value>,
+    context: v8::Local<'s, v8::Object>,
+) -> (Result<DispatchResult, v8::Global<v8::Promise>>, Option<crate::rpc::dispatch::RpcCall>) {
+    let mut call = crate::rpc::with_rpc_context(scope, context, |scope| {
+        crate::rpc::dispatch::RpcCall::new(scope, registry, name.into(), input, context.into())
+    });
+    let result = advance_rpc_call(scope, &mut call);
+    let retained = if result.is_err() { Some(call) } else { None };
+    (result, retained)
 }
 
-/// Materialize a resolved RPC return value into a DispatchResult.
-///
-/// Object-shape probes (skipped for primitives):
-///   - Response (branded via `__zsResponse` on Response.prototype) →
-///     inspect inline and return its ResponseInfo. No fall-through —
-///     the user procedure is NOT re-invoked.
-///   - AsyncIterator → fall through. The kernel has no native SSE
-///     encoder; the synthetic SSR entry's JS encoder takes over via
-///     re-invocation (see RpcCallResult::FallThrough).
-///
-/// Everything else: superjson encode and wrap in `{ json, meta? }`.
-fn classify_rpc_return<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
-    val: v8::Local<'s, v8::Value>,
-) -> RpcCallResult {
-    if val.is_object() {
-        // Response: branded via `__zsResponse = 1` on the prototype by
-        // the fetch polyfill. One property get (cached IC after
-        // warmup) — much cheaper than constructor.name probing.
-        if http::looks_like_response(scope, val) {
-            return match http::inspect_response(scope, val) {
-                Ok(info) => RpcCallResult::Handled(Ok(DispatchResult::HttpResponse(info))),
-                Err(e) => RpcCallResult::Handled(Ok(DispatchResult::Error(e))),
-            };
-        }
-        // AsyncIterator detection: cheap, single-symbol probe.
-        let obj: v8::Local<v8::Object> = val.try_into().unwrap();
-        let async_iter_sym = v8::Symbol::get_async_iterator(scope);
-        if obj.has(scope, async_iter_sym.into()).unwrap_or(false) {
-            return RpcCallResult::FallThrough;
+/// Loading and handler promises use the same pump-owned call. A checkpoint
+/// can finish either phase without needing another external wakeup.
+fn advance_rpc_call(
+    scope: &mut v8::PinScope,
+    call: &mut crate::rpc::dispatch::RpcCall,
+) -> Result<DispatchResult, v8::Global<v8::Promise>> {
+    use crate::rpc::dispatch::{CallProgress, response};
+    loop {
+        match call.poll(scope) {
+            Ok(CallProgress::Pending(promise)) => {
+                crate::core::init::perform_microtask_checkpoint(scope);
+                if v8::Local::new(scope, &promise).state() == v8::PromiseState::Pending {
+                    return Err(promise);
+                }
+            }
+            Ok(CallProgress::Complete { invocation, value }) => {
+                let validate_output = scope.get_slot::<SharedState>()
+                    .is_some_and(|state| state.borrow().validate_rpc_output);
+                return Ok(response::classify(scope, invocation, &value, validate_output));
+            }
+            Ok(CallProgress::Missing(name)) => return Ok(response::error_value(
+                format!("Method not found: {name}"), 404, "NOT_FOUND",
+            )),
+            Err(error) => return Ok(response::failure(scope, error)),
         }
     }
-
-    // Plain value → superjson encode and wrap in `{ json, meta? }`.
-    let body = match crate::rpc::encode_to_bytes(scope, val) {
-        Ok(bytes) => bytes,
-        Err(e) => {
-            return RpcCallResult::Handled(Ok(DispatchResult::Error(e.message)));
-        }
-    };
-    RpcCallResult::Handled(Ok(DispatchResult::HttpResponse(
-        http::ResponseInfo::Complete {
-            status: 200,
-            headers: vec![("content-type".into(), "application/json".into())],
-            body,
-        },
-    )))
 }
 
 /// Extract headers from a plain `{ k: v }` object. For the fetchFast
@@ -4484,7 +4458,7 @@ fn extract_plain_headers(
 fn call_fetch_inner(
     scope: &mut v8::PinScope,
     handler: v8::Local<v8::Function>,
-    undefined: v8::Local<v8::Value>,
+    receiver: v8::Local<v8::Value>,
     request: v8::Local<v8::Value>,
     env: v8::Local<v8::Value>,
     ctx: v8::Local<v8::Value>,
@@ -4494,7 +4468,7 @@ fn call_fetch_inner(
     // `None` return that drops all of it.
     let (result_val, caught_exception) = {
         v8::tc_scope!(let tc, scope);
-        let r = handler.call(tc, undefined, &[request, env, ctx]);
+        let r = handler.call(tc, receiver, &[request, env, ctx]);
         if tc.has_caught() {
             let exc = tc.exception();
             let exc_global = exc.map(|e| v8::Global::new(tc, e));

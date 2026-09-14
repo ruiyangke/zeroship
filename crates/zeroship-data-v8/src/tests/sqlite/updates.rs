@@ -587,11 +587,12 @@ const _procedures = { seed, failBulk, failBulkInsideTransaction };
         // second.
         //
         // PATH: `transaction()` returns `Promise<Result<R>>` and wraps the
-        // callback's value with `ok(...)` (`sdks/bootstrap/src/install-schema.ts`
-        // :1145, :1193), so the payload is `{data: {...}, error: null}` and the
-        // failure sits at `["data"]["failure"]`. Reading `["failure"]` yielded
-        // `Null`, which compares unequal to ANY expected code - so this assertion
-        // could never have passed, and could never have told you why.
+        // callback's value with `ok(...)` (`sdks/db/src/install-schema.ts`, in
+        // the transaction facade), so the payload is `{data: {...}, error:
+        // null}` and the failure sits at `["data"]["failure"]`. Reading
+        // `["failure"]` yielded `Null`, which compares unequal to ANY expected
+        // code - so this assertion could never have passed, and could never
+        // have told you why.
         //
         // CASE: `canonicalErrorCode` (`sdks/db/src/errors.ts:27`) deliberately
         // upper-snakes every code not already in that form, so `unique_violation`

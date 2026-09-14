@@ -1,8 +1,9 @@
 # zeroship standard
 
 The deploy contract is centered on the app entry module's default export. The
-runtime bootstrap code is in `sdks/bootstrap/src/runtime-entry.ts`, and the
-runtime-side loader lives in `crates/zeroship-runtime/src/core/init.rs`.
+[runtime loader](../../crates/zeroship-runtime/src/core/init.rs) prepares the
+module graph and the [native RPC dispatcher](../../crates/zeroship-runtime/src/rpc/dispatch/mod.rs)
+invokes retained procedures.
 
 Module specifiers `zeroship`, `zeroship.js` and the `zeroship:` prefix are
 reserved for host-provided modules, including plugin adapters. Creator artifacts
@@ -33,8 +34,11 @@ export default {
 ```
 
 - `fetch` is the WinterCG-style request handler.
-- `rpc` is the procedure object dispatched by
-  `sdks/bootstrap/src/dispatcher.ts`.
+- `rpc` is a dictionary whose own string keys name procedures. Values are
+  callable procedures or `{ load: () => Promise<Procedure> }` records.
+  The native HTTP dispatcher loads and retains the actual procedure and its
+  metadata before invoking it. A shared lazy load and its failure are cached
+  for that registry generation.
 
 The default export is not a schema contract. The runtime does not read or
 honor a schema property on it.
@@ -47,9 +51,14 @@ helpers (`procedure`, `query`, `mutation`, `action`, `stream`,
 list and signatures.
 
 Named exports are normalized into the runtime RPC object by the Vite plugin's
-synthetic server entry and `sdks/bootstrap/src/normalize.ts`. The runtime-owned
-dispatch path is `/__zeroship/v1/<wireId>`; user code does not route that path
-manually.
+[synthetic server entry](../../sdks/vite-plugin/src/rpc-registry.ts). It preserves
+the original callable and metadata. The generated fetch export retains the
+user's receiver without wrapping RPC dispatch. The runtime-owned dispatch path
+is `/__zeroship/v1/<wireId>`; user code does not route that path manually.
+
+The Vite development host builds live entry snapshots through
+`sdks/vite-plugin/src/dev-bootstrap/entry.ts`. It returns the same dictionary
+shape to the runtime; native code invokes the captured procedures.
 
 Production RPC resources require explicit wire IDs:
 

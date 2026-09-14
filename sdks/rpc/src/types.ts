@@ -41,6 +41,8 @@ export interface ProcedureConfig<TIn = unknown, TOut = unknown> {
   lazy?: boolean;
   input?: ProcedureSchema<TIn>;
   output?: ProcedureSchema<TOut>;
+  /** Stream encoding hint. The SDK derives it for recognized string schemas. */
+  outputIsString?: boolean;
 }
 
 declare const rpcKind: unique symbol;

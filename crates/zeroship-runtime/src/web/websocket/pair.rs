@@ -15,17 +15,35 @@
 
 use crate::state::SharedState;
 
-use super::network::{self, WsEvent};
 use super::WsFrame;
+use super::network::{self, WsEvent};
 
 /// Move queued frames from sender (`from_id`) to peer (`to_id`).
 /// Each frame becomes a Message/Close event on the peer's queue.
 /// Decrement the sender's bufferedAmount by the bytes written.
-pub fn deliver_to_peer(
+pub fn deliver_to_peer(state: &SharedState, from_id: u32, to_id: u32, frames: Vec<WsFrame>) {
+    deliver_to_peer_inner(state, from_id, to_id, frames, None);
+}
+
+/// Deliver frames and release `completion` after the last frame reaches the
+/// kernel writer. Subscription transport uses this to couple iterator pulls to
+/// socket progress.
+pub(crate) fn deliver_to_peer_with_completion(
     state: &SharedState,
     from_id: u32,
     to_id: u32,
     frames: Vec<WsFrame>,
+    completion: crate::state::OpResult,
+) {
+    deliver_to_peer_inner(state, from_id, to_id, frames, Some(completion));
+}
+
+fn deliver_to_peer_inner(
+    state: &SharedState,
+    from_id: u32,
+    to_id: u32,
+    frames: Vec<WsFrame>,
+    mut completion: Option<crate::state::OpResult>,
 ) {
     if frames.is_empty() {
         return;
@@ -43,15 +61,17 @@ pub fn deliver_to_peer(
     };
 
     let mut total_drained: u64 = 0;
-    for frame in frames {
+    let last = frames.len() - 1;
+    for (index, frame) in frames.into_iter().enumerate() {
+        let frame_completion = (index == last).then(|| completion.take()).flatten();
         match frame {
             WsFrame::Text(s) => {
                 total_drained = total_drained.saturating_add(s.len() as u64);
-                push_peer_event(state, to_id, WsEvent::MessageText(s));
+                push_peer_event(state, to_id, WsEvent::MessageText(s), frame_completion);
             }
             WsFrame::Binary(b) => {
                 total_drained = total_drained.saturating_add(b.len() as u64);
-                push_peer_event(state, to_id, WsEvent::MessageBinary(b));
+                push_peer_event(state, to_id, WsEvent::MessageBinary(b), frame_completion);
             }
             WsFrame::Blob { handle: _, size } => {
                 // Blob byte extraction needs a V8 scope — pair sockets
@@ -59,6 +79,9 @@ pub fn deliver_to_peer(
                 // bufferedAmount budget is released and the frame is
                 // dropped. Same caveat as the network path's Blob arm.
                 total_drained = total_drained.saturating_add(size);
+                if let Some(completion) = frame_completion {
+                    crate::transport::byte_pump::schedule_event_op(state, completion);
+                }
             }
             WsFrame::Close { code, reason } => {
                 let was_clean = code.is_some_and(|c| c == 1000) || code.is_none();
@@ -71,6 +94,7 @@ pub fn deliver_to_peer(
                         reason: reason.clone(),
                         was_clean,
                     },
+                    frame_completion,
                 );
                 // Mirror Close on the local side so the sender's
                 // close handler fires too. We treat sender-initiated
@@ -85,6 +109,7 @@ pub fn deliver_to_peer(
                             reason,
                             was_clean: true,
                         },
+                        None,
                     );
                 }
             }
@@ -94,6 +119,9 @@ pub fn deliver_to_peer(
                 // don't generate Pings; if user code somehow queues a
                 // Pong we drop it silently — it has no observable
                 // effect.
+                if let Some(completion) = frame_completion {
+                    crate::transport::byte_pump::schedule_event_op(state, completion);
+                }
             }
         }
     }
@@ -117,8 +145,13 @@ pub fn deliver_to_peer(
 /// Mirrors `network::push_event` but for pair sockets. Delegates to
 /// the public `network::push_event_pub` so the test event-log
 /// instrumentation captures pair traffic too.
-fn push_peer_event(state: &SharedState, ws_id: u32, event: WsEvent) {
-    network::push_event_pub(state, ws_id, event);
+fn push_peer_event(
+    state: &SharedState,
+    ws_id: u32,
+    event: WsEvent,
+    completion: Option<crate::state::OpResult>,
+) {
+    network::push_event_with_completion(state, ws_id, event, completion);
 }
 
 /// Mint two paired native sockets — `WebSocketPair[0]` and `[1]`.

@@ -2264,12 +2264,12 @@ complete while those paths remain. There are no production users requiring
 compatibility aliases or parallel legacy modes.
 
 The V8 executor still calls `Runtime::call_workflow_dispatch`, and runtime startup
-still supplies its workflow replay entry. Bootstrap retirement must preserve that
-live contract until a workflow-owned cutover removes the duplicated interpreter
-and bootstrap wiring. Coordinate changes to `zeroship-runtime/src/core/init.rs`,
-`core/runtime.rs` and `sdks/bootstrap/src/dispatcher.ts` with their startup owner;
-verify outcome batches, task-bound payload reads, interruption and joined shutdown
-through the replacement before deleting the old source.
+still supplies its workflow replay entry. The bootstrap package has been removed;
+the live interpreter remains in the runtime's private workflow bridge. Coordinate
+changes to `crates/zeroship-runtime/src/core/init.rs` and
+`crates/zeroship-runtime/src/core/runtime.rs` with their startup owner. Verify
+outcome batches, task-bound payload reads, interruption and joined shutdown through
+the replacement before deleting that interpreter.
 
 Retained-entry workflow lookup now captures the constructor-to-export binding
 before invoking a workflow. Parent lookup and child frontiers use the same
@@ -2277,10 +2277,11 @@ binding; neither minification nor mutation of `Function.name` changes a target.
 Named exports and explicit `default.workflows` entries must agree, and ambiguous
 aliases or unexported child constructors fail dispatch. The native module-graph
 contract verifies generic named-export forwarding without a Vite collector.
-Vite/bootstrap removal remains coordinated with its owner; these native tests
-do not establish that its pending producer cutover has shipped. Local workflow
-tasks use ordinary retained bundles, independently of the live development
-HTTP/RPC entry snapshots, and require no asynchronous `loadWorkflow` bridge.
+Vite now forwards creator named exports through the ordinary app bundle and
+provides native development HTTP/RPC entry snapshots without a workflow lookup
+callback. Local workflow tasks use ordinary retained bundles independently of
+those replaceable snapshots. The development host continues publishing its app
+archive and retains the last valid deployment when current sources fail to build.
 
 ### Decisions still requiring an explicit contract
 

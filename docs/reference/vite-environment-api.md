@@ -35,7 +35,7 @@ Browser
                                                   zeroship child runtime
                                                          │
                                                          ▼
-                                                dev-bootstrap ModuleRunner
+                                             Vite-owned ModuleRunner host
                                                          │
                        POST /__zeroship_fetch ◄──────────┤
                        GET  /__zeroship_hmr_check ◄──────┘
@@ -60,7 +60,8 @@ Browser
 
 ### Module fetch
 
-The dev bootstrap bundles `vite/module-runner` and gives it an HTTP transport.
+The development host bundle includes `vite/module-runner` and gives it an HTTP
+transport.
 When ModuleRunner needs a module, it sends JSON to Vite:
 
 ```http
@@ -85,7 +86,7 @@ GET /__zeroship_hmr_check
 ```
 
 Vite returns the list of changed server files since the last poll and clears the
-pending set atomically. The dev bootstrap invalidates those module ids in
+pending set atomically. The ModuleRunner host invalidates those module ids in
 ModuleRunner's evaluated-module cache so the next import re-fetches them.
 
 ## Dev Database
@@ -175,8 +176,9 @@ the `ZEROSHIP_VITE_ORIGIN` origin.
 
 ### `src/dev-bootstrap/index.ts`
 
-Starts the ModuleRunner, installs the framework-internal `devEntry(...)`
-wrapper from `@zeroship/bootstrap/dev`, and runs the HMR polling loop.
+Starts the ModuleRunner, exposes a loader that returns normalized entry
+snapshots, and runs the HMR polling loop. It does not invoke procedures or
+encode RPC transport.
 
 ## Request Flow
 
@@ -185,11 +187,12 @@ For a server route like `POST /__zeroship/v1/todos.add`:
 1. The browser sends the request to Vite.
 2. Vite's pre-middleware sees that the path is a server route and proxies it
    to the zeroship child runtime.
-3. The zeroship runtime dispatches the request into V8.
-4. The dev bootstrap imports the server entry through ModuleRunner.
+3. The zeroship runtime asks the development loader for the current entry
+   snapshot.
+4. The ModuleRunner host imports the server entry and returns callable targets.
 5. If a module is missing or invalidated, ModuleRunner POSTs to
    `/__zeroship_fetch` and Vite returns transformed code.
-6. The module executes inside the real zeroship runtime.
+6. Native runtime dispatch invokes the captured target inside V8.
 7. The request resolves back through the child runtime and Vite proxy.
 
 ## HMR Flow
@@ -200,7 +203,7 @@ For a server-file edit:
 2. The plugin records that file path in a pending set.
 3. The zeroship runtime polls `GET /__zeroship_hmr_check`.
 4. Vite returns the changed paths and clears the set.
-5. The dev bootstrap invalidates those ids in ModuleRunner's evaluated-module
+5. The ModuleRunner host invalidates those ids in its evaluated-module
    cache.
 6. The next request re-imports the changed module graph through Vite.
 

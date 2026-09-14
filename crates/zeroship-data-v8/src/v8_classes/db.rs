@@ -16,26 +16,8 @@
 //! `#[v8_method]` on `Collection` that calls into the
 //! `super::dispatch` helpers.
 //!
-//! ## Platform-internal surface (behind `__platform`)
-//!
-//! `setMaskPolicy` lives off `env.db` on the
-//! [`super::db_platform::DbPlatform`] capability handle. That handle is
-//! set on this `Db` object under the `ZS_PLATFORM` private symbol in
-//! [`mint_db`] and reached only via `@zeroship/bootstrap`'s
-//! runtime-entry (§8). The string `env.db.__platform` is actively
-//! refused by the `Db::platform_trap` getter
-//! (`platform_internal_only`).
-//!
-//! ## Why a v8_class
-//!
-//! The instance carries per-isolate state (its immutable [`DbBinding`] + the collection
-//! cache); the brand check that ships with `#[v8_class]` gives a
-//! free `instanceof`-style guard for any receiver-shape checks the
-//! runtime needs.
-
 #![allow(unsafe_code)]
 
-use crate::op_error::ToOpError;
 use std::cell::RefCell;
 use std::collections::HashMap;
 
@@ -46,7 +28,6 @@ use zeroship_runtime_macros::{v8_constructor, v8_getter, v8_method};
 
 use crate::v8_bridge::decode_native;
 use crate::v8_classes::collection::mint_collection;
-use crate::v8_classes::db_platform::mint_db_platform;
 use crate::v8_classes::transaction::transaction_dispatch;
 use zeroship_data_orm::binding::{DbBinding, COLD_START_DEPLOY_TOKEN};
 use zeroship_data_orm::error::IsolationLevel;
@@ -73,7 +54,6 @@ pub struct Db {
     /// calls return the same Global so identity holds:
     /// `env.db.collection("users") === env.db.collection("users")`.
     pub(crate) collection_cache: RefCell<HashMap<String, v8::Global<v8::Object>>>,
-    // The private DbPlatform policy handle is finalized independently.
 }
 
 impl std::fmt::Debug for Db {
@@ -185,34 +165,19 @@ impl Db {
         Ok(transaction_dispatch(scope, user_fn, isolation, self.binding.clone()).into())
     }
 
-    /// `env.db.__platform` (string access) — **actively refused**. The
-    /// real `DbPlatform` capability handle lives under the
-    /// `ZS_PLATFORM` private symbol, not under any string-named
-    /// property, so a creator reading `env.db.__platform` hits this trap
-    /// and gets a typed `platform_internal_only` error rather than the
-    /// handle (or a silent `undefined`). Defense-in-depth: even if a
-    /// future code path accidentally planted a string `__platform`
-    /// property, this getter shadows it. The legitimate reader
-    /// (`@zeroship/bootstrap`'s `runtime-entry`) never uses the string
-    /// name — it resolves the handle through `globalThis.__zsDbPlatform`,
-    /// which reads the private slot in Rust.
-    #[v8_getter]
-    #[v8_name = "__platform"]
-    fn platform_trap<'s>(
+    /// Record creator configuration while the host evaluates the startup entry.
+    /// Only the native plugin lifecycle can install and seal this declaration.
+    #[v8_method]
+    #[v8_name = "declareMaskPolicy"]
+    fn declare_mask_policy(
         &self,
-        _scope: &mut v8::PinScope<'s, '_>,
-    ) -> Result<v8::Local<'s, v8::Value>, OpError> {
-        tracing::error!(
-            target: "zeroship_db",
-            app_id = %self.binding.app_id(),
-            "env.db.__platform string access denied (platform_internal_only) — \
-             the platform capability handle is private-symbol-only"
-        );
-        Err(zeroship_data_orm::error::DbError::AccessDenied {
-            code: "platform_internal_only",
-        }
-        .to_op_error())
+        scope: &mut v8::PinScope,
+        policy: v8::Local<v8::Value>,
+    ) -> Result<(), OpError> {
+        crate::startup_policy::declare(scope, &self.binding, policy)
     }
+
+
 }
 
 pub(crate) fn cached_collection<'s>(
@@ -339,13 +304,6 @@ fn normalize_isolation_level(raw: &str) -> Result<IsolationLevel, OpError> {
 /// `app_id` is not a legal physical schema name, which
 /// `binding_for_isolate` refuses.
 ///
-/// Before returning, this also mints a [`crate::v8_classes::db_platform::DbPlatform`]
-/// capability handle scoped to the same `app_id` and stashes it on the
-/// `Db` object under the `ZS_PLATFORM` private symbol. The handle
-/// holds the platform-internal `setMaskPolicy` callable; it is unreachable from creator JS (a `v8::Private`
-/// slot is invisible to every JS reflection path and cannot be keyed
-/// from JS) and is read only by Rust and the bootstrap runtime-entry
-/// resolver (`globalThis.__zsDbPlatform`).
 pub fn mint_db<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     app_id: &str,
@@ -389,20 +347,6 @@ pub fn mint_db<'s>(
         }),
     );
     std::mem::forget(weak);
-
-    // Mint the platform capability handle and stash it on
-    // the Db object under the `ZS_PLATFORM` private symbol. A failure to
-    // mint the handle is non-fatal: the Db is still usable for the public
-    // `collection` / `transaction` surface; `__platform` resolution simply
-    // yields `undefined`, so optional platform-only boot work is skipped.
-    if let Some(plat) = mint_db_platform(scope, binding) {
-        let priv_sym = zeroship_runtime::core::init::zs_platform_private(scope);
-        // `set_private` returns `Option<bool>` (None only on context
-        // teardown — impossible here, we just minted the object). The
-        // private slot is the sole capability carrier; if it somehow
-        // failed, `__zsDbPlatform` returns undefined.
-        let _ = obj.set_private(scope, priv_sym, plat.into());
-    }
 
     Some(obj)
 }
