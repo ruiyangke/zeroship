@@ -159,7 +159,7 @@ async fn exercise_journal_job(fixture: &Fixture, queue: &Queue, operation: JobOp
 
 async fn journal_commands(fixture: &Fixture, queue: &Queue) {
     let source = latest_support::Source::new(fixture).await;
-    let coordinator = support::coordinator(&queue, CoordinatorOptions::default());
+    let coordinator = support::coordinator(queue, CoordinatorOptions::default());
     let actor = service_issuer(CONTROL_SERVICE_NAME).unwrap();
     let mut commands: Vec<_> = [
         RunOperation::Pause,

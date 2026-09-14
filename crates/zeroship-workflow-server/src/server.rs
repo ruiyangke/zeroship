@@ -151,25 +151,7 @@ pub async fn run(settings: WorkflowSettings, options: ServerOptions) -> Result<(
     let outbound = Arc::new(ServiceAuth::new(keyring, verifier.clone()));
     let control_url = settings.control_url.get().clone();
     let holds = ControlHolds::new(&control_url, outbound.clone(), options.coordinator)?;
-    // Verify migration readiness before accepting connections. Each HTTP thread
-    // constructs its own bounded pool and retention transport in the state factory.
-    let startup = Coordinator::connect(
-        &url,
-        options.coordinator,
-        Rc::new(holds),
-        Rc::new(connect_eligibility(&url, options.coordinator).await?),
-    )
-    .await?;
-    connect_policies(&url, options.coordinator, options.policy_cache_entries).await?;
-    // A deployment that starts workers itself (compose replicas, a single
-    // host) is a static pool: the manager never starts processes and reports
-    // exhaustion durably. Adapters that start processes need an orchestrator.
-    let driver = Driver::new(
-        startup.manager.clone(),
-        options.driver,
-        Contract::declarative(Rc::new(StaticPool)),
-    )?;
-    drop(startup);
+    let driver = driver(&url, &options, holds).await?;
     compio::time::timeout(options.coordinator.command_timeout, replay.purge_expired()).await??;
     let auth = Arc::new(WorkflowAuth::new(
         verifier,
@@ -234,6 +216,28 @@ pub async fn run(settings: WorkflowSettings, options: ServerOptions) -> Result<(
     };
     let _ = maintenance.cancel().await;
     result
+}
+
+/// Verify migration readiness before accepting connections, then compose the
+/// maintenance driver. Each HTTP thread constructs its own bounded pool and
+/// retention transport in the state factory.
+async fn driver(url: &str, options: &ServerOptions, holds: ControlHolds) -> Result<Driver, Error> {
+    let startup = Coordinator::connect(
+        url,
+        options.coordinator,
+        Rc::new(holds),
+        Rc::new(connect_eligibility(url, options.coordinator).await?),
+    )
+    .await?;
+    connect_policies(url, options.coordinator, options.policy_cache_entries).await?;
+    // A deployment that starts workers itself (compose replicas, a single
+    // host) is a static pool: the manager never starts processes and reports
+    // exhaustion durably. Adapters that start processes need an orchestrator.
+    Ok(Driver::new(
+        startup.manager.clone(),
+        options.driver,
+        Contract::declarative(Rc::new(StaticPool)),
+    )?)
 }
 
 async fn connect_policies(

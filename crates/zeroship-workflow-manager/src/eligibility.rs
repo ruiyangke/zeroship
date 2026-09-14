@@ -250,9 +250,11 @@ impl EligibilitySource for ControlEligibility {
     }
 }
 
-/// A trusted composition with exactly one zone: every app and every worker of
-/// this host is in `zone` and active. The local host uses it for its
-/// in-process worker; it performs no enrollment and reads no Control rows.
+/// Trusted facts for a host with exactly one zone.
+///
+/// Every app and every worker of this host is in `zone` and active. The local
+/// host uses it for its in-process worker; it performs no enrollment and reads
+/// no Control rows.
 #[derive(Debug, Clone)]
 pub struct LocalEligibility {
     zone: ZoneId,

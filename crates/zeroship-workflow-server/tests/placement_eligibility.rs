@@ -8,6 +8,10 @@
 
 #[path = "support/holds.rs"]
 mod holds;
+#[allow(
+    dead_code,
+    reason = "the shared platform fixture also supports process tests"
+)]
 #[path = "support/platform.rs"]
 mod platform;
 
@@ -92,7 +96,7 @@ async fn enrolled(platform: &platform::Platform, service: &Coordinator, enroller
     worker
 }
 
-fn ready() -> RegisterWorker {
+const fn ready() -> RegisterWorker {
     RegisterWorker {
         capacity: NonZeroU32::new(4).unwrap(),
         state: WorkerState::Ready,

@@ -622,9 +622,9 @@ struct Cost {
 /// start one worker per app, and without provider-side deduplication the
 /// retried intent starts another: more starts than unabsorbable placements.
 async fn head_to_head(fixture: &Fixture) {
-    let declarative = race_target(fixture).await;
-    let deduplicated = race_intents(fixture, true).await;
-    let blind = race_intents(fixture, false).await;
+    let declarative = Box::pin(race_target(fixture)).await;
+    let deduplicated = Box::pin(race_intents(fixture, true)).await;
+    let blind = Box::pin(race_intents(fixture, false)).await;
     eprintln!(
         "capacity head to head: {OWNERLESS} owner-less apps, {SLOTS} slots per worker; \
          target {declarative:?}; intents with dedupe {deduplicated:?}; \

@@ -145,10 +145,12 @@ pub enum CapacityReply {
 
 pub type CapacityFuture<'a> = Pin<Box<dyn Future<Output = Result<CapacityReply, Error>> + 'a>>;
 
-/// Applies a zone's declarative capacity target. A provider holds only scale
-/// authority over worker units in one zone: it never receives creator
-/// credentials, secret-mount authority or queue messages. Repeating a request
-/// for the same revision must converge on the same capacity.
+/// Applies a zone's declarative capacity target.
+///
+/// A provider holds only scale authority over worker units in one zone: it
+/// never receives creator credentials, secret-mount authority or queue
+/// messages. Repeating a request for the same revision must converge on the
+/// same capacity.
 pub trait CapacityProvider: Debug {
     fn ensure<'a>(&'a self, request: &'a CapacityRequest) -> CapacityFuture<'a>;
 }
@@ -168,10 +170,12 @@ impl CapacityProvider for LocalCapacity {
     }
 }
 
-/// A fixed pool of workers started by the deployment, such as compose
-/// replicas on one host. It never starts processes. It reports progress while
-/// registered ready capacity covers the target, and otherwise a durable
-/// `pool_exhausted` refusal that an operator resolves by scaling the pool.
+/// A fixed pool of workers the deployment starts itself.
+///
+/// Compose replicas on one host are such a pool. It never starts processes.
+/// It reports progress while registered ready capacity covers the target, and
+/// otherwise a durable `pool_exhausted` refusal that an operator resolves by
+/// scaling the pool.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct StaticPool;
 
@@ -334,6 +338,14 @@ pub enum Visit {
     Unplaced(ZoneId),
 }
 
+/// A request claimed for one revision and attempt of a zone's target.
+struct Claim {
+    revision: i64,
+    attempt: i64,
+    desired: i64,
+    ready: i64,
+}
+
 /// What one provider exchange did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Exchange {
@@ -396,7 +408,7 @@ impl TargetRow {
     fn advance(&mut self, desired: i64) -> Result<(), Error> {
         self.revision = self.revision.checked_add(1).ok_or(Error::Capacity)?;
         self.desired = desired;
-        self.state = TargetState::Requesting.as_str().to_owned();
+        TargetState::Requesting.as_str().clone_into(&mut self.state);
         self.refusal = None;
         self.attempt_deadline = None;
         self.retry_at = None;
@@ -536,8 +548,8 @@ impl Capacity {
         queue
             .transact(|tx| async move {
                 lock_scope(&tx, app).await?;
-                if self.coordinator.has_owner(&tx, app, true).await? {
-                    self.clear_in(&tx, app).await?;
+                if Box::pin(self.coordinator.has_owner(&tx, app, true)).await? {
+                    Box::pin(self.clear_in(&tx, app)).await?;
                     return Ok(Visit::Owned);
                 }
                 let now = queue.clock.now().await?;
@@ -611,7 +623,7 @@ impl Capacity {
                 // Demand and intents reference the app's queue scope, so an
                 // app without one has nothing to clear.
                 match lock_scope(&tx, app).await {
-                    Ok(()) => self.clear_in(&tx, app).await,
+                    Ok(()) => Box::pin(self.clear_in(&tx, app)).await,
                     Err(Error::Denied) => Ok(()),
                     Err(error) => Err(error),
                 }
@@ -655,10 +667,36 @@ impl Capacity {
         let Contract::Declarative(provider) = &self.contract else {
             return Err(Error::Invalid);
         };
+        let Some(claim) = Box::pin(self.claim_target(zone)).await? else {
+            return Ok(Exchange::Idle);
+        };
+        let request = CapacityRequest {
+            zone: zone.clone(),
+            revision: Revision::try_from(claim.revision).map_err(|_| Error::Storage)?,
+            desired_slots: u64::try_from(claim.desired).map_err(|_| Error::Storage)?,
+            ready_slots: u64::try_from(claim.ready).map_err(|_| Error::Storage)?,
+        };
+        // A failed or unanswered provider leaves a durable, retryable refusal.
+        let reply = match compio::time::timeout(
+            self.options.request_timeout,
+            provider.ensure(&request),
+        )
+        .await
+        {
+            Ok(Ok(reply)) => reply,
+            Ok(Err(_)) | Err(_) => CapacityReply::Refused(Refusal::Unavailable),
+        };
+        Box::pin(self.apply_target(zone, &claim, reply)).await
+    }
+
+    /// Under the zone lock: compute the target from committed placements and
+    /// demand, advance its revision if it changed, and claim a request if one
+    /// is due and none is in flight.
+    async fn claim_target(&self, zone: &ZoneId) -> Result<Option<Claim>, Error> {
         let queue = self.coordinator.queue();
         let hold_down = millis(self.options.idle_hold_down)?;
         let timeout = millis(self.options.request_timeout)?;
-        let claim = queue
+        queue
             .transact(|tx| async move {
                 if !lock_zone(&tx, zone).await? {
                     return Ok(None);
@@ -701,13 +739,14 @@ impl Capacity {
                     };
                 let claim = if due {
                     next.attempt = next.attempt.checked_add(1).ok_or(Error::Capacity)?;
-                    next.attempt_deadline = Some(now.checked_add(timeout).ok_or(Error::Capacity)?);
-                    Some((
-                        next.revision,
-                        next.attempt,
-                        next.desired,
-                        ready_slots(&tx, zone, now).await?,
-                    ))
+                    next.attempt_deadline =
+                        Some(now.checked_add(timeout).ok_or(Error::Capacity)?);
+                    Some(Claim {
+                        revision: next.revision,
+                        attempt: next.attempt,
+                        desired: next.desired,
+                        ready: ready_slots(&tx, zone, now).await?,
+                    })
                 } else {
                     None
                 };
@@ -716,20 +755,18 @@ impl Capacity {
                 }
                 Ok(claim)
             })
-            .await?;
-        let Some((revision, attempt, desired, ready)) = claim else {
-            return Ok(Exchange::Idle);
-        };
-        let request = CapacityRequest {
-            zone: zone.clone(),
-            revision: Revision::try_from(revision).map_err(|_| Error::Storage)?,
-            desired_slots: u64::try_from(desired).map_err(|_| Error::Storage)?,
-            ready_slots: u64::try_from(ready).map_err(|_| Error::Storage)?,
-        };
-        let reply = match compio::time::timeout(self.options.request_timeout, provider.ensure(&request)).await {
-            Ok(Ok(reply)) => reply,
-            Ok(Err(_)) | Err(_) => CapacityReply::Refused(Refusal::Unavailable),
-        };
+            .await
+    }
+
+    /// Under the zone lock: record a reply only for the revision and attempt
+    /// it answered.
+    async fn apply_target(
+        &self,
+        zone: &ZoneId,
+        claim: &Claim,
+        reply: CapacityReply,
+    ) -> Result<Exchange, Error> {
+        let queue = self.coordinator.queue();
         let retry = millis(self.options.retry_interval)?;
         queue
             .transact(|tx| async move {
@@ -737,7 +774,7 @@ impl Capacity {
                     return Err(Error::Storage);
                 }
                 let stored = target(&tx, zone).await?.ok_or(Error::Storage)?;
-                if stored.revision != revision || stored.attempt != attempt {
+                if stored.revision != claim.revision || stored.attempt != claim.attempt {
                     return Ok(Exchange::Stale);
                 }
                 let now = queue.clock.now().await?;
@@ -746,12 +783,13 @@ impl Capacity {
                 next.retry_at = Some(now.checked_add(retry).ok_or(Error::Capacity)?);
                 match reply {
                     CapacityReply::Progress { ready_slots } => {
-                        next.state = TargetState::Steady.as_str().to_owned();
+                        TargetState::Steady.as_str().clone_into(&mut next.state);
                         next.refusal = None;
-                        next.observed = Some(i64::try_from(ready_slots).map_err(|_| Error::Invalid)?);
+                        next.observed =
+                            Some(i64::try_from(ready_slots).map_err(|_| Error::Invalid)?);
                     }
                     CapacityReply::Refused(refusal) => {
-                        next.state = TargetState::Refused.as_str().to_owned();
+                        TargetState::Refused.as_str().clone_into(&mut next.state);
                         next.refusal = Some(refusal.as_str().to_owned());
                     }
                 }

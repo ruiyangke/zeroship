@@ -20,6 +20,28 @@ use zeroship_workflow_manager::{
 };
 
 pub const SCHEMA_SQL: &str = include_str!("../../zeroship-workflow-manager/schema/postgres.sql");
+/// Manager tables the runtime role must read and write, and nothing more.
+const MANAGER_TABLES: &[&str] = &[
+    "workers",
+    "queue_scopes",
+    "deployment_holds",
+    "jobs",
+    "assignments",
+    "placement_receipts",
+    "management",
+    "management_scopes",
+    "schedule_deployments",
+    "schedule_activations",
+    "schedule_disables",
+    "schedule_scopes",
+    "schedules",
+    "schedule_occurrences",
+    "recovery_scopes",
+    "recovery_duties",
+    "capacity_demands",
+    "capacity_targets",
+    "capacity_intents",
+];
 const FINGERPRINT: &str = include_str!("../../zeroship-workflow-manager/schema/fingerprint.txt");
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -217,27 +239,7 @@ impl Coordinator {
         if get::<bool>(&permissions[0], "privileged")? {
             return Err(Error::Unavailable);
         }
-        for table in [
-            "workers",
-            "queue_scopes",
-            "deployment_holds",
-            "jobs",
-            "assignments",
-            "placement_receipts",
-            "management",
-            "management_scopes",
-            "schedule_deployments",
-            "schedule_activations",
-            "schedule_disables",
-            "schedule_scopes",
-            "schedules",
-            "schedule_occurrences",
-            "recovery_scopes",
-            "recovery_duties",
-            "capacity_demands",
-            "capacity_targets",
-            "capacity_intents",
-        ] {
+        for table in MANAGER_TABLES {
             let name = format!("workflow_manager.{table}");
             let rows = self
                 .pool
