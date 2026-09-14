@@ -41,7 +41,7 @@ use zeroship_core::{
         AssignScope, AssignedScope, Failure, FailureCode, RegisterWorker, RequestId, WorkerId,
         WorkerState, AUDIENCE,
     },
-    workflow_policy::{AppPolicy, PolicyLease},
+    workflow_policy::{AppPolicy, PolicyLease, PolicyLeaseRequest},
 };
 use zeroship_workflow_manager::{
     policy::{PolicyObservation, PolicySource},
@@ -234,7 +234,7 @@ impl Fixture {
         test::TestRequest::post()
             .uri(endpoints::WORKFLOW_POLICY_LEASE.path_template())
             .header("authorization", self.signer.authorization())
-            .set_json(&self.scope)
+            .set_json(&plain(&self.scope))
     }
     async fn replace_key(&self, public: [u8; 32]) {
         // Enrollment freezes keys; model an administrator replacing the enrolled
@@ -310,7 +310,7 @@ async fn policy_route_returns_complete_disabled_policy_and_exact_authority_tuple
         },
     ] {
         let response =
-            test::call_service(&app, fixture.request().set_json(&scope).to_request()).await;
+            test::call_service(&app, fixture.request().set_json(&plain(&scope)).to_request()).await;
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
         let failure: Failure = serde_json::from_slice(&test::read_body(response).await).unwrap();
         assert_eq!(failure.code, FailureCode::Denied);
@@ -393,4 +393,76 @@ async fn enrollment_changes_while_policy_source_waits_refuse_the_old_signer() {
         let lease: PolicyLease = serde_json::from_slice(&test::read_body(response).await).unwrap();
         assert_eq!(lease.signing_key_id, fixture.signer.key.key_id());
     }
+}
+
+/// A plain policy refresh, which never establishes responsibility.
+fn plain(scope: &AssignedScope) -> PolicyLeaseRequest {
+    PolicyLeaseRequest {
+        scope: scope.clone(),
+        establish_after: None,
+        ingress_used: false,
+    }
+}
+
+/// Establishment through the authenticated route commits responsibility before
+/// the lease is returned: a plain refresh reports the open epoch, establishing
+/// after it opens the next one, a retry returns that same epoch, and an epoch
+/// the manager never issued is refused.
+#[ntex::test]
+async fn policy_route_establishes_an_epoch_above_the_named_one() {
+    use zeroship_core::{schema_name::SchemaName, workflow_jobs::DeploymentId};
+    let fixture = Box::pin(Fixture::new(AppPolicy::default(), true)).await;
+    let queue = zeroship_workflow_manager::Queue::connect(
+        zeroship_data_orm::binding::DbBinding::new(
+            "workflow_manager",
+            "workflow_manager",
+            SchemaName::new("workflow_manager").unwrap(),
+        ),
+        &fixture.platform.runtime_url,
+        zeroship_workflow_manager::Options::default(),
+        holds::client(),
+    )
+    .await
+    .unwrap();
+    zeroship_workflow_manager::recovery::Recovery::new(queue, Default::default())
+        .unwrap()
+        .ensure(
+            &fixture.scope.app_id,
+            &DeploymentId::mint(),
+            1.try_into().unwrap(),
+        )
+        .await
+        .unwrap();
+    let app = test::init_service(
+        web::App::new()
+            .state(fixture.state.clone())
+            .configure(zeroship_workflow_server::configure),
+    )
+    .await;
+    let exchange = async |after: Option<i64>| {
+        let body = PolicyLeaseRequest {
+            establish_after: after.map(|epoch| epoch.try_into().unwrap()),
+            ingress_used: after.is_some(),
+            ..plain(&fixture.scope)
+        };
+        let response =
+            test::call_service(&app, fixture.request().set_json(&body).to_request()).await;
+        let status = response.status();
+        let body = test::read_body(response).await;
+        if status == StatusCode::OK {
+            let lease: PolicyLease = serde_json::from_slice(&body).unwrap();
+            Ok(lease.ingress_epoch.map(|epoch| epoch.get()))
+        } else {
+            let failure: Failure = serde_json::from_slice(&body).unwrap();
+            Err((status, failure.code))
+        }
+    };
+    assert_eq!(exchange(None).await, Ok(Some(1)));
+    assert_eq!(exchange(Some(1)).await, Ok(Some(2)));
+    assert_eq!(exchange(Some(1)).await, Ok(Some(2)));
+    assert_eq!(exchange(None).await, Ok(Some(2)));
+    assert_eq!(
+        exchange(Some(5)).await,
+        Err((StatusCode::CONFLICT, FailureCode::Conflict))
+    );
 }
