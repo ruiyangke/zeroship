@@ -27,7 +27,12 @@ pub(super) async fn pages(store: Rc<OrmStore>) {
     for parent in parents.iter().chain([&paused, &leased, &cancelling]) {
         waits.push(wait(identities.next().unwrap(), parent, 0, &child));
     }
-    waits.push(wait(identities.next().unwrap(), &unrelated, 0, &other_child));
+    waits.push(wait(
+        identities.next().unwrap(),
+        &unrelated,
+        0,
+        &other_child,
+    ));
     for chunk in waits.chunks(100) {
         let tx = service.begin().await.unwrap();
         graph::seed_waits(&tx, &app, chunk).await;
@@ -42,12 +47,47 @@ pub(super) async fn pages(store: Rc<OrmStore>) {
     .await;
     tx.commit().await.unwrap();
     let mut waiting: Vec<_> = parents.clone();
-    waiting.extend([twice.clone(), leased.clone(), cancelling.clone(), unrelated.clone()]);
-    update_runs(&service, &app, &waiting, json!({"state":"waiting", "due_at":null})).await;
-    update_runs(&service, &app, std::slice::from_ref(&paused), json!({"state":"paused", "control":"pause", "due_at":null})).await;
-    update_runs(&service, &app, std::slice::from_ref(&leased), json!({"state":"running", "task_id":storage_id(), "due_at":i64::MAX})).await;
-    update_runs(&service, &app, std::slice::from_ref(&cancelling), json!({"control":"cancel"})).await;
-    update_runs(&service, &foreign, std::slice::from_ref(&foreign_parent), json!({"state":"waiting", "due_at":null})).await;
+    waiting.extend([
+        twice.clone(),
+        leased.clone(),
+        cancelling.clone(),
+        unrelated.clone(),
+    ]);
+    update_runs(
+        &service,
+        &app,
+        &waiting,
+        json!({"state":"waiting", "due_at":null}),
+    )
+    .await;
+    update_runs(
+        &service,
+        &app,
+        std::slice::from_ref(&paused),
+        json!({"state":"paused", "control":"pause", "due_at":null}),
+    )
+    .await;
+    update_runs(
+        &service,
+        &app,
+        std::slice::from_ref(&leased),
+        json!({"state":"running", "task_id":storage_id(), "due_at":i64::MAX}),
+    )
+    .await;
+    update_runs(
+        &service,
+        &app,
+        std::slice::from_ref(&cancelling),
+        json!({"control":"cancel"}),
+    )
+    .await;
+    update_runs(
+        &service,
+        &foreign,
+        std::slice::from_ref(&foreign_parent),
+        json!({"state":"waiting", "due_at":null}),
+    )
+    .await;
 
     let mut tx = service.begin().await.unwrap();
     app::lock_app(&mut tx, &app).await.unwrap();
@@ -62,7 +102,10 @@ pub(super) async fn pages(store: Rc<OrmStore>) {
     assert_eq!(obligations.len(), 1);
     assert_eq!(obligations[0].text("kind").unwrap(), "notify");
     assert_eq!(obligations[0].text("run_id").unwrap(), child);
-    for parent in parents.iter().chain([&twice, &paused, &cancelling, &unrelated]) {
+    for parent in parents
+        .iter()
+        .chain([&twice, &paused, &cancelling, &unrelated])
+    {
         let row = run_row(&service, &app, parent).await;
         assert_eq!(row.optional_integer("due_at").unwrap(), None);
     }
@@ -93,9 +136,11 @@ pub(super) async fn pages(store: Rc<OrmStore>) {
     }
     let foreign_row = run_row(&service, &foreign, &foreign_parent).await;
     assert_eq!(foreign_row.optional_integer("due_at").unwrap(), None);
-    assert!(rows(&service, "propagations", json!({"app_id":foreign.as_str()}))
-        .await
-        .is_empty());
+    assert!(
+        rows(&service, "propagations", json!({"app_id":foreign.as_str()}))
+            .await
+            .is_empty()
+    );
     for (job, receipt, _) in [chain.first().unwrap(), chain.last().unwrap()] {
         assert_exact_replay(&service, &scope, job, receipt).await;
     }
