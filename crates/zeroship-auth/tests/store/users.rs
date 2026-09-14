@@ -1,6 +1,9 @@
 //! User identity constraints retain their structured database errors.
 
-use crate::common::database::Database;
+use crate::common::database::{eventually, Database};
+use futures::channel::oneshot;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use zeroship_auth::store::users;
 use zeroship_core::UserId;
 use zeroship_data_orm::orm::{Entity, Insertable};
@@ -448,11 +451,106 @@ async fn take_user_updates(admin: &compio_postgres::Client) -> Vec<i64> {
         .collect()
 }
 
+/// Session names that the fixture's trigger and activity probes use to tell
+/// concurrent login failures apart.
+const FIRST_CALLER: &str = "lockout-first";
+const LATER_CALLER: &str = "lockout-later";
+/// Advisory lock the fixture holds to pause the first caller's deadline write.
+const DEADLINE_GATE: i64 = 41_001;
+
+/// One login failure on its own thread, compio runtime and connection pool,
+/// connected before it is started.
+struct Caller {
+    start: Option<oneshot::Sender<()>>,
+    finished: Arc<AtomicBool>,
+    count: oneshot::Receiver<i32>,
+}
+
+impl Caller {
+    #[allow(
+        clippy::future_not_send,
+        reason = "fixture channels are awaited on this compio runtime"
+    )]
+    async fn connect(database: &Database, name: &str, id: &UserId) -> Self {
+        let url = database.auth_url_named(name).to_string();
+        let id = id.clone();
+        let (connected, ready) = oneshot::channel();
+        let (start, started) = oneshot::channel::<()>();
+        let (recorded, count) = oneshot::channel();
+        let finished = Arc::new(AtomicBool::new(false));
+        let done = finished.clone();
+        std::thread::spawn(move || {
+            let runtime = compio::runtime::Runtime::new().unwrap();
+            let outcome = runtime.block_on(async move {
+                let orm = zeroship_auth::store::native::connect(&url).await.unwrap();
+                connected.send(()).unwrap();
+                started.await.ok()?;
+                let count = users::record_login_failure(&orm, &id).await.unwrap();
+                done.store(true, Ordering::SeqCst);
+                Some(count)
+            });
+            drop(runtime);
+            if let Some(count) = outcome {
+                let _ = recorded.send(count);
+            }
+        });
+        ready.await.expect("the caller connects its repository");
+        Self {
+            start: Some(start),
+            finished,
+            count,
+        }
+    }
+
+    fn start(&mut self) {
+        self.start
+            .take()
+            .expect("each caller starts once")
+            .send(())
+            .unwrap();
+    }
+
+    fn finished(&self) -> bool {
+        self.finished.load(Ordering::SeqCst)
+    }
+}
+
+/// Backends of callers under `name` that wait on a lock.
+async fn lock_waiters(observer: &compio_postgres::Client, name: &str) -> i64 {
+    observer
+        .query_one(
+            "SELECT count(*) FROM pg_stat_activity \
+             WHERE datname = current_database() AND application_name = $1 \
+               AND wait_event_type = 'Lock'",
+            &[&name],
+        )
+        .await
+        .unwrap()
+        .get(0)
+}
+
+/// Whether the first caller waits at the deadline gate, and how many later
+/// callers' backends the lock manager reports as blocked.
+async fn deadline_pause(observer: &compio_postgres::Client) -> (bool, usize) {
+    let row = observer
+        .query_one(
+            "SELECT count(*) FILTER (WHERE application_name = $1 \
+                      AND wait_event_type = 'Lock' AND wait_event = 'advisory') = 1, \
+                    count(*) FILTER (WHERE application_name = $2 \
+                      AND cardinality(pg_blocking_pids(pid)) > 0) \
+             FROM pg_stat_activity WHERE datname = current_database()",
+            &[&FIRST_CALLER, &LATER_CALLER],
+        )
+        .await
+        .unwrap();
+    (row.get(0), usize::try_from(row.get::<_, i64>(1)).unwrap())
+}
+
 #[compio::test]
 async fn concurrent_native_login_failures_preserve_increments_and_the_longest_lock() {
     Database::run(async |database| {
         let orm = database.orm().await;
-        let pg = database.connect_as_auth().await;
+        let admin = database.connect().await;
         let user = users::create(
             &orm,
             "concurrent-lock@example.test",
@@ -462,51 +560,130 @@ async fn concurrent_native_login_failures_preserve_increments_and_the_longest_lo
         .await
         .unwrap();
         let initial = users::lockout::THRESHOLD - 1;
-        pg.execute(
-            "UPDATE zeroship.users SET failed_login_count = $2 WHERE id = $1",
-            &[&user.id.as_str(), &initial],
+        let callers = 4;
+        let final_count = initial + callers;
+        let longest = users::lockout::backoff_secs(final_count).unwrap();
+        let previous = users::lockout::backoff_secs(final_count - 1).unwrap();
+        assert!(
+            longest > previous && longest < users::lockout::MAX_BACKOFF_SECS,
+            "the final count must lock below the cap and longer than the count before it"
+        );
+        admin
+            .execute(
+                "UPDATE zeroship.users SET failed_login_count = $2 WHERE id = $1",
+                &[&user.id.as_str(), &initial],
+            )
+            .await
+            .unwrap();
+        // Pause the deadline write of the caller that records the first
+        // failure. It is a statement trigger, so it runs before that write
+        // touches the row.
+        admin
+            .batch_execute(&format!(
+                "CREATE SCHEMA fixture; \
+                 CREATE FUNCTION fixture.pause_first_deadline() RETURNS trigger \
+                 LANGUAGE plpgsql AS $$ \
+                 BEGIN \
+                   IF current_setting('application_name') = '{FIRST_CALLER}' THEN \
+                     PERFORM pg_advisory_xact_lock({DEADLINE_GATE}); \
+                   END IF; \
+                   RETURN NULL; \
+                 END $$; \
+                 CREATE TRIGGER pause_first_deadline \
+                 BEFORE UPDATE OF locked_until ON zeroship.users \
+                 FOR EACH STATEMENT EXECUTE FUNCTION fixture.pause_first_deadline()"
+            ))
+            .await
+            .unwrap();
+        let gate = database.connect().await;
+        gate.query_one("SELECT pg_advisory_lock($1)", &[&DEADLINE_GATE])
+            .await
+            .unwrap();
+        let mut holder = database.connect().await;
+        let hold = holder.transaction().await.unwrap();
+        hold.query_one(
+            "SELECT id FROM zeroship.users WHERE id = $1 FOR UPDATE",
+            &[&user.id.as_str()],
         )
         .await
         .unwrap();
-        let before = database_now(&pg).await;
-        let url = database.auth_url().to_string();
-        let id = user.id.clone();
-        let workers = 4;
-        let attempts = 3;
-        let mut counts = compio::runtime::spawn_blocking(move || {
-            let start = std::sync::Arc::new(std::sync::Barrier::new(workers));
-            let threads: Vec<_> = (0..workers)
-                .map(|_| {
-                    let start = start.clone();
-                    let url = url.clone();
-                    let id = id.clone();
-                    std::thread::spawn(move || {
-                        start.wait();
-                        compio::runtime::Runtime::new().unwrap().block_on(async {
-                            let orm = zeroship_auth::store::native::connect(&url).await.unwrap();
-                            let mut counts = Vec::new();
-                            for _ in 0..attempts {
-                                counts.push(users::record_login_failure(&orm, &id).await.unwrap());
-                            }
-                            counts
-                        })
-                    })
-                })
-                .collect();
-            threads
-                .into_iter()
-                .flat_map(|thread| thread.join().unwrap())
-                .collect::<Vec<_>>()
+
+        let mut first = Caller::connect(database, FIRST_CALLER, &user.id).await;
+        let mut later = Vec::new();
+        for _ in 1..callers {
+            later.push(Caller::connect(database, LATER_CALLER, &user.id).await);
+        }
+        // The caller that queues first on the held row is the first to update
+        // it once the hold commits.
+        first.start();
+        let first_queued = eventually(async || lock_waiters(&admin, FIRST_CALLER).await == 1).await;
+        for caller in &mut later {
+            caller.start();
+        }
+        let all_queued = eventually(async || {
+            lock_waiters(&admin, FIRST_CALLER).await + lock_waiters(&admin, LATER_CALLER).await
+                == i64::from(callers)
         })
-        .await
-        .unwrap();
+        .await;
+        let before = database_now(&admin).await;
+        hold.commit().await.unwrap();
+        // While the first deadline write waits, a failure written in one
+        // transaction still holds the row, so later callers stay queued. A
+        // deadline written outside that transaction lets them finish first.
+        let settled = eventually(async || {
+            let (paused, blocked) = deadline_pause(&admin).await;
+            paused && (blocked == later.len() || later.iter().all(Caller::finished))
+        })
+        .await;
+        gate.query_one("SELECT pg_advisory_unlock($1)", &[&DEADLINE_GATE])
+            .await
+            .unwrap();
+        let first_count = first
+            .count
+            .await
+            .expect("the first caller records its failure");
+        let mut counts = vec![first_count];
+        for caller in later {
+            counts.push(
+                caller
+                    .count
+                    .await
+                    .expect("a later caller records its failure"),
+            );
+        }
+        let after = database_now(&admin).await;
+
+        assert!(first_queued, "the first caller must queue on the held row");
+        assert!(all_queued, "every caller must queue on the held row");
+        assert!(
+            settled,
+            "the first deadline write must pause until the later callers settle"
+        );
+        assert_eq!(first_count, initial + 1);
         counts.sort_unstable();
-        let final_count = initial + i32::try_from(workers * attempts).unwrap();
         assert_eq!(counts, ((initial + 1)..=final_count).collect::<Vec<_>>());
-        let state = login_state(&pg, &user.id).await;
+        let state = login_state(&admin, &user.id).await;
         assert_eq!(state.failures, final_count);
-        let longest = users::lockout::backoff_secs(final_count).unwrap();
-        assert!(state.locked_until.unwrap() >= before + chrono::Duration::seconds(longest));
+        let locked_until = state
+            .locked_until
+            .expect("the final failure locks the account");
+        // Inside this window an earlier count's deadline ends before the
+        // lower bound, so the bounds identify the count that wrote it.
+        assert!(
+            after - before < chrono::Duration::seconds(longest - previous),
+            "the run must be shorter than the gap between the last two backoffs"
+        );
+        let backoff = chrono::Duration::seconds(longest);
+        assert!(
+            locked_until >= before + backoff,
+            "the deadline must belong to the final count: {locked_until} < {}",
+            before + backoff
+        );
+        assert!(
+            locked_until <= after + backoff,
+            "the deadline must belong to the final count: {locked_until} > {}",
+            after + backoff
+        );
     })
     .await;
 }
