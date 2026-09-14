@@ -65,6 +65,8 @@ pub fn expand(input: DeriveInput, kind: Kind) -> syn::Result<TokenStream> {
         let ty = &field.ty;
         let mut column_name: Option<LitStr> = None;
         let mut default = false;
+        let mut decode_conversion: Option<Path> = None;
+        let mut encode_conversion: Option<Path> = None;
         for attr in field
             .attrs
             .iter()
@@ -82,6 +84,17 @@ pub fn expand(input: DeriveInput, kind: Kind) -> syn::Result<TokenStream> {
                         return Err(meta.error("duplicate default attribute"));
                     }
                     default = true;
+                    Ok(())
+                } else if meta.path.is_ident("decode_with") || meta.path.is_ident("encode_with") {
+                    let conversion = if meta.path.is_ident("decode_with") {
+                        &mut decode_conversion
+                    } else {
+                        &mut encode_conversion
+                    };
+                    if conversion.is_some() {
+                        return Err(meta.error("duplicate conversion attribute"));
+                    }
+                    *conversion = Some(meta.value()?.parse()?);
                     Ok(())
                 } else {
                     Err(meta.error("unsupported ORM field attribute for this derive"))
@@ -105,28 +118,44 @@ pub fn expand(input: DeriveInput, kind: Kind) -> syn::Result<TokenStream> {
         match kind {
             Kind::Read => {
                 predicates.push(syn::parse_quote!(#column: #orm::ReadableColumn));
-                predicates.push(syn::parse_quote!(#ty: #orm::DecodeValue<#sql>));
-                statements.push(quote!(#ident: row.take::<#column, #ty>()?));
+                if let Some(convert) = &decode_conversion {
+                    statements.push(quote!(#ident: row.take_with::<#column, _, #ty>(#convert)?));
+                } else {
+                    predicates.push(syn::parse_quote!(#ty: #orm::DecodeValue<#sql>));
+                    statements.push(quote!(#ident: row.take::<#column, #ty>()?));
+                }
                 columns.push(quote!(<#column as #orm::Column>::NAME));
             }
             Kind::Insert => {
                 if default {
                     predicates.push(syn::parse_quote!(#column: #orm::DefaultableColumn));
-                    predicates.push(syn::parse_quote!(#ty: #orm::DefaultInput<#column>));
-                    statements.push(quote!(<#ty as #orm::DefaultInput<#column>>::encode_default(self.#ident, &mut record)?;));
+                    if let Some(convert) = &encode_conversion {
+                        statements.push(quote!(#orm::encode_default_with::<#column, _, _>(&mut record, self.#ident, #convert)?;));
+                    } else {
+                        predicates.push(syn::parse_quote!(#ty: #orm::DefaultInput<#column>));
+                        statements.push(quote!(<#ty as #orm::DefaultInput<#column>>::encode_default(self.#ident, &mut record)?;));
+                    }
                 } else {
                     predicates.push(syn::parse_quote!(#column: #orm::WritableColumn));
-                    predicates.push(syn::parse_quote!(#ty: #orm::EncodeValue<#sql>));
-                    statements.push(
-                        quote!(#orm::encode_field::<#column, #ty>(&mut record, self.#ident)?;),
-                    );
+                    if let Some(convert) = &encode_conversion {
+                        statements.push(quote!(#orm::encode_field_with::<#column, _, _>(&mut record, self.#ident, #convert)?;));
+                    } else {
+                        predicates.push(syn::parse_quote!(#ty: #orm::EncodeValue<#sql>));
+                        statements.push(
+                            quote!(#orm::encode_field::<#column, #ty>(&mut record, self.#ident)?;),
+                        );
+                    }
                 }
                 presence.push(column);
             }
             Kind::Update => {
                 predicates.push(syn::parse_quote!(#column: #orm::UpdatableColumn));
-                predicates.push(syn::parse_quote!(#ty: #orm::ChangeInput<#column>));
-                statements.push(quote!(<#ty as #orm::ChangeInput<#column>>::encode_change(self.#ident, &mut record)?;));
+                if let Some(convert) = &encode_conversion {
+                    statements.push(quote!(#orm::encode_change_with::<#column, _, _>(&mut record, self.#ident, #convert)?;));
+                } else {
+                    predicates.push(syn::parse_quote!(#ty: #orm::ChangeInput<#column>));
+                    statements.push(quote!(<#ty as #orm::ChangeInput<#column>>::encode_change(self.#ident, &mut record)?;));
+                }
             }
         }
     }
