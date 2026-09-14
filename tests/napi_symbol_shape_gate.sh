@@ -64,8 +64,7 @@
 #
 # 2. `shipped_features_no_dyn` - THE MECHANISM, shipped side. Asserts no
 #    napi-family unit in the default `--lib` build resolved `dyn-symbols`. Arm 1
-#    reads a consequence; this reads the cause, and names it. Same shape and
-#    same purpose as tests/shipped_config_gate.sh arm 3.
+#    reads a consequence; this reads the cause, and names it.
 #
 # 3. `test_features_have_dyn` - THE MECHANISM, test side. Asserts every
 #    napi-family unit in the `cargo test --no-run` graph DOES resolve it. This
