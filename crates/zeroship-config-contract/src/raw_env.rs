@@ -108,17 +108,8 @@ const BUILD_INPUTS: &[&str] = &[
 
 /// The exact path of the one module allowed to touch `std::env`.
 ///
-/// This said `crates/core/src/config/env.rs` until 2026-08-28. A path constant that no
-/// longer names a file does not fail loudly: `FileRole::for_path` simply stopped
-/// matching, the central accessor was reclassified `Ordinary`, and the gate began
-/// reporting the ONE file whose whole purpose is raw access as a violation - along with
-/// its sanctioned `#[allow]`.
-///
-/// The rename landed in `105a75131` (2026-08-26, "every crate directory is named for the
-/// package it holds"), which moved the directory and left this constant behind. That
-/// commit is still the last one to touch this file, the accessor it names, and
-/// `crates/zeroship-core/tests/config_env_access_gate.rs` - so the source half of the
-/// raw-environment rule failed from there to here. Keep this in step with the directory.
+/// The raw-environment command classifies this path as the typed boundary.
+/// Keep it in step with the owning module.
 pub const CENTRAL_ACCESSOR: &str = "crates/zeroship-core/src/config/env.rs";
 
 /// The exact tail every sealed library test-key module must have.

@@ -480,11 +480,8 @@ fn raw_env(args: &[String]) {
 /// directory to `crates/zeroship-config-contract`) until 2026-09-04, and it named
 /// nothing for that whole period: `gate_verdict` classifies by
 /// `to_string().contains(...)`, so a prefix matching nothing put all four planted
-/// violations in the UNEXPECTED column and `--gate` exited 1 on every tree. That
-/// is the third site of one defect. `raw_env::CENTRAL_ACCESSOR` and
-/// `crates/zeroship-core/tests/config_env_access_gate.rs`'s `FIXTURE_PREFIXES` were
-/// the first two, both repaired on 2026-08-28; this one was missed because it is
-/// in a `[[bin]]` that no `#[test]` linked. `env!("CARGO_PKG_NAME")` makes the
+/// violations in the UNEXPECTED column and `--gate` exited 1 on every tree.
+/// `env!("CARGO_PKG_NAME")` makes the
 /// rename impossible to survive: cargo supplies the name, so a package rename
 /// moves this string in the same build.
 ///
@@ -516,9 +513,6 @@ const PLANTED_VIOLATIONS: usize = 4;
 /// whether the prefix resolves separates those two states before the verdict is
 /// computed.
 ///
-/// This is the same guard `crates/zeroship-core/tests/config_env_access_gate.rs`
-/// added for `FIXTURE_PREFIXES` on 2026-08-28, at the sibling site that was
-/// repaired then and this one was not.
 fn planted_fixtures_are_tracked(sources: &[(String, String)]) -> bool {
     sources
         .iter()
@@ -691,11 +685,7 @@ mod tests {
     /// tree for that whole period, blaming the two fixture files that exist to
     /// prove the scanner works.
     ///
-    /// This test lives in the `[[bin]]` because the constant does. That is why the
-    /// 2026-08-28 sweep repaired `raw_env::CENTRAL_ACCESSOR` and
-    /// `config_env_access_gate.rs`'s `FIXTURE_PREFIXES` and missed this one: both
-    /// of those are reachable from a `#[test]` in a library or integration target,
-    /// and nothing linked this one.
+    /// This test lives in the `[[bin]]` because the constant does.
     #[test]
     fn planted_violation_dir_names_tracked_fixtures() {
         let sources = collect_tracked_rust_sources(&workspace_root())
