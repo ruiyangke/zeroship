@@ -5,6 +5,7 @@
 pub mod audit;
 pub mod identities;
 pub mod magic_completions;
+pub mod native;
 pub mod relay;
 pub mod sessions;
 pub mod totp;
