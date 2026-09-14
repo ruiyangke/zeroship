@@ -8,7 +8,9 @@
 pub use zeroship_id::workflow::{RequestId, RunId, WorkerId};
 
 mod lifecycle;
-pub use lifecycle::{RestartDeploy, RestartOptions, RestartTarget, RunOperation, RunState};
+pub use lifecycle::{
+    InvalidRestart, RestartDeploy, RestartOptions, RestartTarget, RunOperation, RunState,
+};
 
 use crate::app_id::AppId;
 use serde::{Deserialize, Serialize};

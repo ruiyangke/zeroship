@@ -3,10 +3,13 @@ use serde_json::{json, Value};
 use std::fmt::Debug;
 use zeroship_core::{
     app_id::AppId,
-    workflow_coordination::{AssignedScope, RequestId, RunId, WorkerId},
+    workflow_coordination::{
+        AssignedScope, InvalidRestart, RequestId, RestartDeploy, RestartOptions, RestartTarget,
+        RunId, RunOperation, WorkerId,
+    },
     workflow_jobs::{
         Delivery, DeliveryLease, DeploymentId, JobId, JobOperation, JobOutcome, JobSpec,
-        Settlement, SettlementReceipt, SubmitJob,
+        ManagementCommand, Settlement, SettlementReceipt, SubmitJob,
     },
     workflow_schedules::ScheduleId,
 };
@@ -28,23 +31,27 @@ fn operations() -> Vec<(JobOperation, Value)> {
     let run = RunId::mint();
     let request = RequestId::mint();
     let schedule = ScheduleId::mint();
-    vec![
+    let deployment = DeploymentId::mint();
+    let mut operations = vec![
         (
             JobOperation::Activate {
+                deployment_id: deployment.clone(),
                 revision: 1.try_into().unwrap(),
             },
-            json!({"kind":"activate","revision":1}),
+            json!({"kind":"activate","deploymentId":deployment,"revision":1}),
         ),
         (
             JobOperation::Advance {
+                deployment_id: deployment.clone(),
                 run_id: run.clone(),
                 generation: 0,
                 revision: 1.try_into().unwrap(),
             },
-            json!({"kind":"advance","runId":run,"generation":0,"revision":1}),
+            json!({"kind":"advance","deploymentId":deployment,"runId":run,"generation":0,"revision":1}),
         ),
         (
             JobOperation::Cron {
+                deployment_id: deployment.clone(),
                 schedule_id: schedule.clone(),
                 schedule_name: "daily-report".into(),
                 request_id: request.clone(),
@@ -52,25 +59,53 @@ fn operations() -> Vec<(JobOperation, Value)> {
                 revision: 2.try_into().unwrap(),
                 scheduled_at: 123.try_into().unwrap(),
             },
-            json!({"kind":"cron","scheduleId":schedule,"scheduleName":"daily-report","requestId":request,"runId":run,"revision":2,"scheduledAt":123}),
-        ),
-        (
-            JobOperation::Management {
-                request_id: request.clone(),
-                run_id: run.clone(),
-            },
-            json!({"kind":"management","requestId":request,"runId":run}),
+            json!({"kind":"cron","deploymentId":deployment,"scheduleId":schedule,"scheduleName":"daily-report","requestId":request,"runId":run,"revision":2,"scheduledAt":123}),
         ),
         (JobOperation::Reconcile {}, json!({"kind":"reconcile"})),
         (JobOperation::Collect {}, json!({"kind":"collect"})),
-    ]
+    ];
+    for (command, expected) in [
+        (
+            ManagementCommand::Transition {
+                operation: RunOperation::Pause,
+            },
+            json!({"kind":"transition","operation":"pause"}),
+        ),
+        (
+            ManagementCommand::RestartStarted { from: None },
+            json!({"kind":"restart_started"}),
+        ),
+        (
+            ManagementCommand::RestartStarted {
+                from: Some(RestartTarget {
+                    name: "charge".into(),
+                    occurrence: Some(0),
+                }),
+            },
+            json!({"kind":"restart_started","from":{"name":"charge","occurrence":0}}),
+        ),
+        (
+            ManagementCommand::RestartLatest {
+                deployment_id: deployment.clone(),
+            },
+            json!({"kind":"restart_latest","deploymentId":deployment}),
+        ),
+    ] {
+        operations.push((
+            JobOperation::Management {
+                request_id: request.clone(), run_id: run.clone(),
+                revision: 1.try_into().unwrap(), command,
+            },
+            json!({"kind":"management","requestId":request,"runId":run,"revision":1,"command":expected}),
+        ));
+    }
+    operations
 }
 
 fn settlement(operation: JobOperation) -> Settlement {
     let job = JobSpec {
         id: JobId::mint(),
         app_id: AppId::mint(),
-        deployment_id: DeploymentId::mint(),
         operation,
         available_at: 0.try_into().unwrap(),
     };
@@ -109,12 +144,148 @@ fn operation_wire_shapes_are_explicit_and_round_trip() {
 }
 
 #[test]
+fn executable_prerequisites_belong_only_to_operations_that_require_code() {
+    let mut executable = false;
+    let mut journal_only = false;
+    for (operation, expected) in operations() {
+        let job = settlement(operation).delivery.job;
+        let wire = round_trip(&job);
+        assert!(wire.get("deploymentId").is_none());
+        let expected_deployment = expected
+            .get("deploymentId")
+            .or_else(|| expected.pointer("/command/deploymentId"));
+        assert_eq!(
+            job.deployment_id().map(|id| json!(id)),
+            expected_deployment.cloned(),
+        );
+        let mut obsolete = wire.clone();
+        obsolete["deploymentId"] = json!(DeploymentId::mint());
+        refuses::<JobSpec>(obsolete);
+        let prerequisite_path = if matches!(job.operation, JobOperation::Management { .. }) {
+            "/operation/command"
+        } else {
+            "/operation"
+        };
+        if job.deployment_id().is_some() {
+            executable = true;
+            let mut missing = wire.clone();
+            missing
+                .pointer_mut(prerequisite_path)
+                .unwrap()
+                .as_object_mut()
+                .unwrap()
+                .remove("deploymentId");
+            refuses::<JobSpec>(missing);
+            let mut null = wire;
+            null.pointer_mut(prerequisite_path).unwrap()["deploymentId"] = Value::Null;
+            refuses::<JobSpec>(null);
+        } else {
+            journal_only = true;
+            let mut injected = wire;
+            injected.pointer_mut(prerequisite_path).unwrap()["deploymentId"] =
+                json!(DeploymentId::mint());
+            refuses::<JobSpec>(injected);
+        }
+    }
+    assert!(executable && journal_only);
+}
+
+#[test]
+fn management_commands_reject_ambiguous_targets_and_extra_authority() {
+    let mut saw_management = false;
+    for (operation, _) in operations() {
+        let JobOperation::Management { command, .. } = operation else {
+            continue;
+        };
+        saw_management = true;
+        let wire = round_trip(&command);
+        for field in ["input", "history", "payloadUrl", "credentials", "deploy"] {
+            let mut injected = wire.clone();
+            injected[field] = json!({"untrusted":true});
+            refuses::<ManagementCommand>(injected);
+        }
+        if let ManagementCommand::RestartLatest { .. } = command {
+            for from in [Value::Null, json!({"name":"charge"})] {
+                let mut partial = wire.clone();
+                partial["from"] = from;
+                refuses::<ManagementCommand>(partial);
+            }
+        }
+        if let ManagementCommand::RestartStarted { from: Some(_) } = command {
+            let mut injected = wire;
+            injected["from"]["input"] = json!({"private":true});
+            refuses::<ManagementCommand>(injected);
+        }
+    }
+    assert!(saw_management);
+    for command in [
+        json!({"kind":"restart"}),
+        json!({"kind":"transition"}),
+        json!({"kind":"restart_latest"}),
+        json!({"kind":"restart_latest","deploymentId":RunId::mint()}),
+        json!({"kind":"restart_started","from":{"name":"charge","occurrence":-1}}),
+    ] {
+        refuses::<ManagementCommand>(command);
+    }
+}
+
+#[test]
+fn restart_policy_is_normalized_before_resolving_the_executable_prerequisite() {
+    for deploy in [
+        None,
+        Some(RestartDeploy::Started),
+        Some(RestartDeploy::Latest),
+    ] {
+        let full = RestartOptions { from: None, deploy };
+        assert_eq!(
+            full.effective_deploy(),
+            Ok(deploy.unwrap_or(RestartDeploy::Latest))
+        );
+        let partial = RestartOptions {
+            from: Some(RestartTarget {
+                name: "charge".into(),
+                occurrence: None,
+            }),
+            deploy,
+        };
+        assert_eq!(
+            partial.effective_deploy(),
+            if deploy == Some(RestartDeploy::Latest) {
+                Err(InvalidRestart::PartialLatest)
+            } else {
+                Ok(RestartDeploy::Started)
+            }
+        );
+    }
+    let mut options = RestartOptions {
+        from: Some(RestartTarget {
+            name: String::new(),
+            occurrence: None,
+        }),
+        deploy: None,
+    };
+    assert_eq!(
+        options.effective_deploy(),
+        Err(InvalidRestart::EmptyTargetName)
+    );
+    let target = options.from.as_mut().unwrap();
+    target.name = "charge".into();
+    target.occurrence = Some(i32::MAX as u32 + 1);
+    assert_eq!(
+        options.effective_deploy(),
+        Err(InvalidRestart::TargetOccurrenceOutOfRange)
+    );
+    options.from.as_mut().unwrap().occurrence = Some(i32::MAX as u32);
+    assert_eq!(options.effective_deploy(), Ok(RestartDeploy::Started));
+}
+
+#[test]
 fn delivery_and_settlement_preserve_logical_and_attempt_identities() {
     let settlement = settlement(JobOperation::Collect {});
     let delivery = &settlement.delivery;
     let job = &delivery.job;
     let expected_job = json!({
-        "id":job.id,"appId":job.app_id,"deploymentId":job.deployment_id,
+        "id":job.id,"appId":job.app_id,
         "operation":{"kind":"collect"},"availableAt":0,
     });
     assert_eq!(round_trip(job), expected_job);
@@ -130,7 +301,7 @@ fn delivery_and_settlement_preserve_logical_and_attempt_identities() {
         json!({
             "delivery":expected_delivery,"outcome":"waiting",
             "successors":[{
-                "id":successor.id,"appId":job.app_id,"deploymentId":job.deployment_id,
+                "id":successor.id,"appId":job.app_id,
                 "operation":{"kind":"collect"},"availableAt":321,
             }],
         })
@@ -304,7 +475,11 @@ fn nested_identifiers_cannot_be_replaced_with_other_entity_types() {
         let wire = round_trip(&settlement(operation));
         for (path, foreign) in [
             ("/delivery/job/id", json!(DeploymentId::mint())),
-            ("/delivery/job/deploymentId", json!(JobId::mint())),
+            ("/delivery/job/operation/deploymentId", json!(JobId::mint())),
+            (
+                "/delivery/job/operation/command/deploymentId",
+                json!(JobId::mint()),
+            ),
             ("/delivery/job/appId", json!(WorkerId::mint())),
             ("/delivery/workerId", json!(AppId::mint())),
             ("/delivery/job/operation/runId", json!(RequestId::mint())),
@@ -325,6 +500,7 @@ fn nested_identifiers_cannot_be_replaced_with_other_entity_types() {
 #[test]
 fn counters_and_deadlines_enforce_native_ranges_on_the_wire() {
     let operation = JobOperation::Advance {
+        deployment_id: DeploymentId::mint(),
         run_id: RunId::mint(),
         generation: 0,
         revision: 1.try_into().unwrap(),
@@ -391,13 +567,15 @@ fn counters_and_deadlines_enforce_native_ranges_on_the_wire() {
 }
 
 #[test]
-fn activation_and_cron_require_typed_schedule_identity_and_native_counters() {
+fn workflow_operations_require_native_revisions_and_cron_identity() {
     let cases: Vec<_> = operations()
         .into_iter()
         .filter(|(operation, _)| {
             matches!(
                 operation,
-                JobOperation::Activate { .. } | JobOperation::Cron { .. }
+                JobOperation::Activate { .. }
+                    | JobOperation::Cron { .. }
+                    | JobOperation::Management { .. }
             )
         })
         .collect();

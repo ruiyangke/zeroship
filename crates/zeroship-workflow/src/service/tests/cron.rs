@@ -21,13 +21,12 @@ struct Grant {
     expires: Instant,
 }
 impl Grant {
-    fn new(app: &AppId, deploy: &DeployRegistration, operation: JobOperation) -> Self {
+    fn new(app: &AppId, operation: JobOperation) -> Self {
         Self {
             delivery: Delivery {
                 job: JobSpec {
                     id: JobId::mint(),
                     app_id: app.clone(),
-                    deployment_id: DeploymentId::parse(&deploy.id).unwrap(),
                     operation,
                     available_at: 0.try_into().unwrap(),
                 },
@@ -48,8 +47,8 @@ impl Grant {
     ) -> Self {
         Self::new(
             app,
-            deploy,
             JobOperation::Cron {
+                deployment_id: DeploymentId::parse(&deploy.id).unwrap(),
                 schedule_id: schedule.clone(),
                 schedule_name: "periodic".into(),
                 request_id: RequestId::mint(),
@@ -186,8 +185,8 @@ async fn publish(
 async fn activate(scope: &AppWorkflows, deploy: &DeployRegistration, revision: i64) {
     let grant = Grant::new(
         scope.app_id(),
-        deploy,
         JobOperation::Activate {
+            deployment_id: DeploymentId::parse(&deploy.id).unwrap(),
             revision: revision.try_into().unwrap(),
         },
     );
@@ -277,7 +276,7 @@ async fn replay(store: Rc<OrmStore>) {
     tx.commit().await.unwrap();
     let jobs = scope.pending_jobs(None, 10).await.unwrap();
     assert_eq!(jobs.len(), 1);
-    assert_eq!(jobs[0].deployment_id.as_str(), deployment.id);
+    assert_eq!(jobs[0].deployment_id().unwrap().as_str(), deployment.id);
     assert!(
         matches!(&jobs[0].operation, JobOperation::Advance { run_id, generation: 0, .. } if run_id.as_str() == grant.run_id())
     );
@@ -379,6 +378,7 @@ async fn identities(store: Rc<OrmStore>) {
     ] {
         let mut bad = grant.retry();
         let JobOperation::Cron {
+            deployment_id,
             schedule_id,
             schedule_name,
             request_id,
@@ -397,7 +397,7 @@ async fn identities(store: Rc<OrmStore>) {
             "revision" => *revision = 2.try_into().unwrap(),
             "instant" => *scheduled_at = 2000.try_into().unwrap(),
             "job" => bad.delivery.job.id = JobId::mint(),
-            "deploy" => bad.delivery.job.deployment_id = DeploymentId::mint(),
+            "deploy" => *deployment_id = DeploymentId::mint(),
             _ => unreachable!(),
         }
         assert!(
@@ -965,10 +965,10 @@ case!(
 );
 
 async fn policy_hold(store: Rc<OrmStore>) {
-    held_authority(store, false).await;
+    Box::pin(held_authority(store, false)).await;
 }
 async fn expired_hold(store: Rc<OrmStore>) {
-    held_authority(store, true).await;
+    Box::pin(held_authority(store, true)).await;
 }
 
 async fn held_authority(store: Rc<OrmStore>, expire: bool) {

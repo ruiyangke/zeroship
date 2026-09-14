@@ -23,10 +23,12 @@ use zeroship_core::{
     service_assertion::{ServiceAssertionMinter, ServiceIssuer, ServiceSigningKey},
     service_identity::{endpoints, ServiceEndpoint},
     service_peers::{service_issuer, CONTROL_SERVICE_NAME},
-    workflow_coordination::{AssignedScope, Assignment, RequestId, RunId, WorkerId, AUDIENCE},
+    workflow_coordination::{
+        AssignedScope, Assignment, RequestId, RunId, RunOperation, WorkerId, AUDIENCE,
+    },
     workflow_jobs::{
         Delivery, DeliveryLease, DeploymentId, JobId, JobOperation, JobOutcome, JobSpec,
-        Settlement, SettlementReceipt, SubmitJob,
+        ManagementCommand, Settlement, SettlementReceipt, SubmitJob,
     },
     workflow_schedules::ScheduleId,
 };
@@ -117,8 +119,8 @@ impl Fixture {
         JobSpec {
             id: JobId::mint(),
             app_id: self.assignment.app_id.clone(),
-            deployment_id: DeploymentId::mint(),
             operation: JobOperation::Advance {
+                deployment_id: DeploymentId::mint(),
                 run_id: RunId::mint(),
                 generation: 0,
                 revision: 1.try_into().unwrap(),
@@ -391,15 +393,28 @@ async fn queue_refuses_foreign_scope_and_platform_job_origins() {
         app_id: AppId::mint(),
         ..fixture.job()
     };
-    let management = JobSpec {
+    let management = [
+        ManagementCommand::Transition {
+            operation: RunOperation::Pause,
+        },
+        ManagementCommand::RestartStarted { from: None },
+        ManagementCommand::RestartLatest {
+            deployment_id: DeploymentId::mint(),
+        },
+    ]
+    .into_iter()
+    .map(|command| JobSpec {
         operation: JobOperation::Management {
             request_id: RequestId::mint(),
             run_id: RunId::mint(),
+            revision: 1.try_into().unwrap(),
+            command,
         },
         ..fixture.job()
-    };
+    });
     let cron = JobSpec {
         operation: JobOperation::Cron {
+            deployment_id: DeploymentId::mint(),
             schedule_id: ScheduleId::mint(),
             schedule_name: "daily-report".into(),
             request_id: RequestId::mint(),
@@ -411,11 +426,12 @@ async fn queue_refuses_foreign_scope_and_platform_job_origins() {
     };
     let activation = JobSpec {
         operation: JobOperation::Activate {
+            deployment_id: DeploymentId::mint(),
             revision: 1.try_into().unwrap(),
         },
         ..fixture.job()
     };
-    for denied in [foreign, management, cron, activation] {
+    for denied in [foreign, cron, activation].into_iter().chain(management) {
         let submission = SubmitJob {
             scope: fixture.scope(),
             job: denied.clone(),
@@ -452,12 +468,61 @@ async fn queue_refuses_foreign_scope_and_platform_job_origins() {
     );
 }
 
+async fn rejects_incomplete_job_envelopes(fixture: &Fixture) {
+    let candidate = fixture.job();
+    let submitted = serde_json::to_value(SubmitJob {
+        scope: fixture.scope(),
+        job: candidate.clone(),
+    })
+    .unwrap();
+    let mut bodies = Vec::new();
+    let mut missing = submitted.clone();
+    missing["job"]["operation"]
+        .as_object_mut()
+        .unwrap()
+        .remove("deploymentId");
+    bodies.push(missing);
+    let mut misplaced = submitted.clone();
+    misplaced["job"]["deploymentId"] = json!(candidate.deployment_id().unwrap());
+    bodies.push(misplaced);
+    for operation in [
+        json!({"kind":"activate", "revision":1}),
+        json!({"kind":"reconcile", "deploymentId":DeploymentId::mint()}),
+        json!({"kind":"collect", "deploymentId":DeploymentId::mint()}),
+        json!({"kind":"cron", "scheduleId":ScheduleId::mint(), "scheduleName":"daily-report",
+            "requestId":RequestId::mint(), "runId":RunId::mint(), "revision":1, "scheduledAt":0}),
+        json!({"kind":"management", "requestId":RequestId::mint(), "runId":RunId::mint(), "revision":1}),
+        json!({"kind":"management", "requestId":RequestId::mint(), "runId":RunId::mint(),
+            "command":{"kind":"transition","operation":"pause"}}),
+        json!({"kind":"management", "requestId":RequestId::mint(), "runId":RunId::mint(), "revision":1,
+            "command":{"kind":"restart_latest"}}),
+        json!({"kind":"management", "requestId":RequestId::mint(), "runId":RunId::mint(), "revision":1,
+            "command":{"kind":"transition","operation":"pause","input":"private"}}),
+        json!({"kind":"management", "requestId":RequestId::mint(), "runId":RunId::mint(), "revision":1,
+            "command":{"kind":"restart_started","deploymentId":DeploymentId::mint()}}),
+        json!({"kind":"management", "requestId":RequestId::mint(), "runId":RunId::mint(), "revision":1,
+            "command":{"kind":"restart_started","from":{"name":"step","input":"private"}}}),
+    ] {
+        let mut malformed = submitted.clone();
+        malformed["job"]["operation"] = operation;
+        bodies.push(malformed);
+    }
+    assert!(!bodies.is_empty());
+    for body in bodies {
+        let (status, failure) = fixture.post(endpoints::WORKFLOW_JOB_SUBMIT, &body).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{failure}");
+        assert_eq!(failure, json!({"code":"invalid"}));
+    }
+    assert!(fixture.job_snapshot(&candidate).await.is_empty());
+}
+
 #[ntex::test]
 async fn queue_routes_authenticate_before_body_and_reject_open_metadata() {
     let fixture = Fixture::new().await;
     let job = fixture.job();
     fixture.submit(&job).await;
     let delivery = fixture.claim(&job).await;
+    rejects_incomplete_job_envelopes(&fixture).await;
     for (endpoint, mut body) in [
         (
             endpoints::WORKFLOW_JOB_SUBMIT,

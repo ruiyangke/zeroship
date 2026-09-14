@@ -51,6 +51,9 @@ macro_rules! case {
     };
 }
 
+#[path = "retention/operation_prerequisites.rs"]
+mod operation_prerequisites;
+
 case!(
     sqlite_queue_holds_reconcile_lost_replies,
     postgres_queue_holds_reconcile_lost_replies,
@@ -177,8 +180,8 @@ fn job(app: &AppId, deployment: &DeploymentId) -> JobSpec {
     JobSpec {
         id: JobId::mint(),
         app_id: app.clone(),
-        deployment_id: deployment.clone(),
         operation: JobOperation::Advance {
+            deployment_id: deployment.clone(),
             run_id: RunId::mint(),
             generation: 0,
             revision: 1.try_into().unwrap(),
@@ -464,7 +467,7 @@ async fn scheduling_retention(fixture: &Fixture) {
         .ensure(&app, &replacement.id, 2.try_into().unwrap())
         .await
         .unwrap();
-    // Moving recovery responsibility leaves the old future schedule as a pin.
+    // Recovery provenance changes leave the old future schedule as a pin.
     assert_eq!(
         queue.release_deployment(&app, &old.id).await,
         Err(Error::Conflict)

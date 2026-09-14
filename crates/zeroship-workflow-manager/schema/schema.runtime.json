@@ -252,7 +252,6 @@
         },
         "deployment_id": {
           "type": "string",
-          "required": true,
           "readable": true,
           "filterable": true,
           "sortable": true,

@@ -374,6 +374,64 @@ async fn unrepresentable_retry_delay_is_rejected_before_execution() {
 }
 
 #[compio::test]
+async fn unsupported_management_and_collection_never_execute_or_settle() {
+    use zeroship_core::{
+        workflow_coordination::RunOperation,
+        workflow_jobs::{JobId, ManagementCommand},
+    };
+
+    let fixture = Fixture::new(AppPolicy::default()).await;
+    let JobOperation::Advance {
+        deployment_id,
+        run_id,
+        ..
+    } = &fixture.job.operation
+    else {
+        panic!("fixture must publish an executable frontier")
+    };
+    let commands = [
+        ManagementCommand::Transition {
+            operation: RunOperation::Cancel,
+        },
+        ManagementCommand::RestartStarted { from: None },
+        ManagementCommand::RestartLatest {
+            deployment_id: deployment_id.clone(),
+        },
+    ];
+    let operations = commands
+        .into_iter()
+        .map(|command| JobOperation::Management {
+            request_id: RequestId::mint(),
+            run_id: run_id.clone(),
+            revision: 1.try_into().unwrap(),
+            command,
+        })
+        .chain([JobOperation::Collect {}]);
+    let mut slot = fixture.slot(Duration::from_secs(5));
+    for operation in operations {
+        let mut lease = fixture.lease.clone();
+        lease.delivery.job.id = JobId::mint();
+        lease.delivery.job.operation = operation;
+        let job = lease.delivery.job.clone();
+        assert!(matches!(
+            Box::pin(slot.run(&fixture.app, lease)).await,
+            Err(WorkflowServiceError::InvalidRequest(_))
+        ));
+        assert!(fixture.app.job_receipt(&job).await.unwrap().is_none());
+    }
+    assert_eq!(fixture.probe.starts.get(), 0);
+    assert_eq!(fixture.metadata.renewals.get(), 0);
+    assert!(fixture.metadata.requests.borrow().is_empty());
+    assert!(matches!(
+        Box::pin(slot.run(&fixture.app, fixture.lease.clone()))
+            .await
+            .unwrap(),
+        DeliveryOutcome::Settled { .. }
+    ));
+    assert_eq!(fixture.probe.starts.get(), 1);
+}
+
+#[compio::test]
 async fn lost_ack_and_new_attempt_replay_without_executing_again() {
     let fixture = Fixture::new(AppPolicy::default()).await;
     fixture.metadata.lose_ack.set(true);

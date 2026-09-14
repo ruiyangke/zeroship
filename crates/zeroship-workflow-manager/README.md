@@ -85,7 +85,7 @@ requires the host's explicit release operation and its dependency checks.
 
 `recovery::Recovery` stores persistent scope responsibility and publishes due
 reconciliation into this queue. Repeated activation registration preserves its
-deadline; newer activation affects future jobs while a pending job keeps its pin.
+deadline; newer activation updates provenance while a pending job keeps its identity.
 Publication and the next deadline commit together. An unsettled job is reused
 across replicas and restarts, so absent workers cannot erase responsibility or
 accumulate replacement jobs. Bounded due pages include healthy scopes and must
@@ -97,11 +97,18 @@ It records normal app deployments and generation-fenced retention holds. Manager
 queue ownership and customer journal ownership require separate host authority;
 the journal hold API does not grant manager access.
 
-`retention::HoldClient` supplies the queue's Control capability. Queue publication,
-activation and recovery require a confirmed deployment hold. The queue persists
+`retention::HoldClient` supplies the queue's Control capability. Activation,
+execution, cron and resolved Latest restart jobs require a confirmed deployment hold.
+Reconciliation, collection, lifecycle transitions and Started restart jobs do not
+depend on a queue deployment. Started restart prerequisites belong to creator
+storage; delivered management and collection handlers remain pending. The
+operation carries executable identity; decoding stored jobs verifies the nullable
+queue projection and immutable specification digest. The queue persists
 acquire/release intents and generations; network requests run outside its database
-transactions. Release closes publication and checks pending jobs, schedule
-frontiers and recovery responsibility under the app lock. Completed receipts may
+transactions. Release closes publication and checks pending jobs and schedule
+frontiers under the app lock. It validates bounded pages of unsettled job
+specifications before ruling out executable dependencies. Recovery provenance
+does not retain code. Completed receipts may
 replay after code reclamation. A host must reconcile unfinished intents, and
 Control reclamation must consult the shared ledger before deleting manifests.
 

@@ -141,8 +141,8 @@ fn job(app: &AppId) -> JobSpec {
     JobSpec {
         id: JobId::mint(),
         app_id: app.clone(),
-        deployment_id: DeploymentId::mint(),
         operation: JobOperation::Advance {
+            deployment_id: DeploymentId::mint(),
             run_id: RunId::mint(),
             generation: 0,
             revision: 1.try_into().unwrap(),
@@ -236,7 +236,7 @@ async fn authorized_submission_scope_replay_and_rollback(fixture: &Fixture) {
     // Prepare retention independently so the following callbacks observe the
     // transaction that inserts the job and its final authorization check.
     queue
-        .ensure_deployment(&app, &spec.deployment_id)
+        .ensure_deployment(&app, spec.deployment_id().unwrap())
         .await
         .unwrap();
     for reject_at in [1, 2] {
@@ -400,7 +400,7 @@ async fn authorized_submission_bounds_pending_authorization(fixture: &Fixture) {
         queue.register_scope(&app).await.unwrap();
         let spec = job(&app);
         queue
-            .ensure_deployment(&app, &spec.deployment_id)
+            .ensure_deployment(&app, spec.deployment_id().unwrap())
             .await
             .unwrap();
         let authority = assignment(fixture, &app).await;
@@ -557,7 +557,7 @@ async fn postgres_shortened_authority_bounds_commit_wait_and_receipt_replays() {
         .clone();
     let successor = job(&app);
     queue
-        .ensure_deployment(&app, &successor.deployment_id)
+        .ensure_deployment(&app, successor.deployment_id().unwrap())
         .await
         .unwrap();
     let command = settlement(&delivery, vec![successor.clone()]);
@@ -1167,7 +1167,7 @@ async fn revocation_rolls_back_mutations(fixture: &Fixture) {
     assert_authorization_rolled_back(fixture, &app).await;
     let successor = job(&app);
     queue
-        .ensure_deployment(&app, &successor.deployment_id)
+        .ensure_deployment(&app, successor.deployment_id().unwrap())
         .await
         .unwrap();
     let command = settlement(&delivery, vec![successor.clone()]);

@@ -39,7 +39,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS "management_scope_key" ON "workflow_manager"."
 
 CREATE INDEX IF NOT EXISTS "management_pending_idx" ON "workflow_manager"."management" ("app_id", "outcome", "created_at", "request_id");
 
-CREATE TABLE "workflow_manager"."jobs" ("id" text PRIMARY KEY NOT NULL, "app_id" text NOT NULL, "deployment_id" text NOT NULL, "operation" text NOT NULL, "spec_digest" text NOT NULL, "available_at" bigint NOT NULL, "dispatch_order" bigint NOT NULL, "state" text NOT NULL, "attempt" bigint NOT NULL DEFAULT 0, "worker_id" text, "assignment_revision" bigint, "lease_deadline" bigint, "outcome" text, "settlement_digest" text, "created_at" bigint NOT NULL, CONSTRAINT "jobs_app_id_fkey" FOREIGN KEY ("app_id") REFERENCES "workflow_manager"."queue_scopes" (id) ON DELETE RESTRICT);
+CREATE TABLE "workflow_manager"."jobs" ("id" text PRIMARY KEY NOT NULL, "app_id" text NOT NULL, "deployment_id" text, "operation" text NOT NULL, "spec_digest" text NOT NULL, "available_at" bigint NOT NULL, "dispatch_order" bigint NOT NULL, "state" text NOT NULL, "attempt" bigint NOT NULL DEFAULT 0, "worker_id" text, "assignment_revision" bigint, "lease_deadline" bigint, "outcome" text, "settlement_digest" text, "created_at" bigint NOT NULL, CONSTRAINT "jobs_app_id_fkey" FOREIGN KEY ("app_id") REFERENCES "workflow_manager"."queue_scopes" (id) ON DELETE RESTRICT);
 
 CREATE INDEX IF NOT EXISTS "jobs_app_id_fkey_idx" ON "workflow_manager"."jobs" ("app_id");
 
@@ -142,4 +142,4 @@ ALTER TABLE "workflow_manager"."schedule_scopes" ALTER COLUMN "id" TYPE text COL
 ALTER TABLE "workflow_manager"."schedules" ALTER COLUMN "id" TYPE text COLLATE "C", ALTER COLUMN "app_id" TYPE text COLLATE "C", ALTER COLUMN "name" TYPE text COLLATE "C", ALTER COLUMN "activation_id" TYPE text COLLATE "C";
 
 ALTER TABLE "workflow_manager"."schedule_occurrences" ALTER COLUMN "id" TYPE text COLLATE "C", ALTER COLUMN "app_id" TYPE text COLLATE "C", ALTER COLUMN "schedule_id" TYPE text COLLATE "C", ALTER COLUMN "run_id" TYPE text COLLATE "C", ALTER COLUMN "job_id" TYPE text COLLATE "C", ALTER COLUMN "activation_id" TYPE text COLLATE "C";
-INSERT INTO workflow_manager.schema_version (id, fingerprint) VALUES ('manager', '0895c557b5d3ef9c718a55bb0677e83d06df62a80b727fe2a745f685c0d3438a');
+INSERT INTO workflow_manager.schema_version (id, fingerprint) VALUES ('manager', '41e6b950e4da28b26b5c3b52492e75a164d058490434e89f43347876457592d9');

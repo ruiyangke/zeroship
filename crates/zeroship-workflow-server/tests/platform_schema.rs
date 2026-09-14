@@ -157,8 +157,8 @@ async fn manager_recovery_authority(fixture: &platform::Platform) {
     };
     use zeroship_data_orm::binding::DbBinding;
     use zeroship_workflow_manager::{
-        recovery::{Options as RecoveryOptions, Recovery},
         Options as QueueOptions, Queue,
+        recovery::{Options as RecoveryOptions, Recovery},
     };
 
     let queue = Queue::connect(
@@ -186,9 +186,19 @@ async fn manager_recovery_authority(fixture: &platform::Platform) {
     );
     let job = recovery.dispatch(&app).await.unwrap().unwrap();
     assert_eq!(job.app_id, app);
-    assert_eq!(job.deployment_id, deployment);
+    assert_eq!(job.deployment_id(), None);
     assert_eq!(job.operation, JobOperation::Reconcile {});
     assert_eq!(recovery.dispatch(&app).await.unwrap(), Some(job));
+    let retained = fixture
+        .admin
+        .query_one(
+            "SELECT count(*) FROM workflow_manager.deployment_holds WHERE app_id=$1",
+            &[&app.as_str()],
+        )
+        .await
+        .unwrap()
+        .get::<_, i64>(0);
+    assert_eq!(retained, 0);
 }
 
 #[expect(
@@ -207,8 +217,8 @@ async fn manager_scheduling_authority(fixture: &platform::Platform) {
     };
     use zeroship_data_orm::binding::DbBinding;
     use zeroship_workflow_manager::{
-        scheduling::{Options as SchedulingOptions, Scheduler},
         Options as QueueOptions, Queue,
+        scheduling::{Options as SchedulingOptions, Scheduler},
     };
 
     let queue = Queue::connect(
@@ -269,7 +279,7 @@ async fn manager_scheduling_authority(fixture: &platform::Platform) {
     assert_eq!(due[0].app_id, app);
     let page = scheduler.dispatch(&app, &due[0].schedule_id).await.unwrap();
     assert_eq!(page.jobs.len(), 1);
-    assert_eq!(page.jobs[0].deployment_id, deployment);
+    assert_eq!(page.jobs[0].deployment_id(), Some(&deployment));
     assert!(matches!(page.jobs[0].operation, JobOperation::Cron { .. }));
     assert!(!page.more);
     assert!(scheduler.due(None).await.unwrap().is_empty());
@@ -338,7 +348,11 @@ async fn manager_queue_authority(fixture: &platform::Platform, runtime: &compio_
     let app = AppId::mint();
     let job = JobId::mint();
     let deployment = DeploymentId::mint();
-    let operation = serde_json::to_string(&JobOperation::Reconcile {}).unwrap();
+    let operation = serde_json::to_string(&JobOperation::Activate {
+        deployment_id: deployment.clone(),
+        revision: 1.try_into().unwrap(),
+    })
+    .unwrap();
     let digest = "a".repeat(64);
     assert_eq!(
         runtime

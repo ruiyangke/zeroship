@@ -423,10 +423,11 @@ async fn activation_lifecycle(fixture: &Fixture, registration: &RegisterSchedule
     let command = activation(registration, 1);
     let original = fixture.client.activate_schedules(&command).await.unwrap();
     assert_eq!(original.app_id, command.app_id);
-    assert_eq!(original.deployment_id, command.deployment_id);
+    assert_eq!(original.deployment_id(), Some(&command.deployment_id));
     assert_eq!(
         original.operation,
         JobOperation::Activate {
+            deployment_id: command.deployment_id.clone(),
             revision: command.revision
         }
     );

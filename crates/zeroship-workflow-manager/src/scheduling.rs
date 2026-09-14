@@ -413,8 +413,8 @@ impl Scheduler {
                     let job = JobSpec {
                         id: JobId::mint(),
                         app_id: request.app_id.clone(),
-                        deployment_id: request.deployment_id.clone(),
                         operation: JobOperation::Activate {
+                            deployment_id: request.deployment_id.clone(),
                             revision: request.revision,
                         },
                         available_at: now.try_into().map_err(|_| Error::Storage)?,
@@ -740,9 +740,17 @@ impl Scheduler {
                     && remaining > 0
                     && jobs.len() < self.options.page_size as usize
                 {
-                    let job = self
-                        .occurrence(&tx, app, id, &record, &definition, &deployment, at, now)
-                        .await?;
+                    let job = Box::pin(self.occurrence(
+                        &tx,
+                        app,
+                        id,
+                        &record,
+                        &definition,
+                        &deployment,
+                        at,
+                        now,
+                    ))
+                    .await?;
                     jobs.push(job);
                     at = definition
                         .schedule
@@ -826,8 +834,8 @@ impl Scheduler {
         let job = JobSpec {
             id: JobId::mint(),
             app_id: app.clone(),
-            deployment_id: deployment.clone(),
             operation: JobOperation::Cron {
+                deployment_id: deployment.clone(),
                 schedule_id: id.clone(),
                 schedule_name: definition.name.clone(),
                 request_id: request.clone(),
@@ -907,9 +915,9 @@ async fn activation_job(
     let expected = JobSpec {
         id: JobId::parse(&activation.id).map_err(|_| Error::Storage)?,
         app_id: app.clone(),
-        deployment_id: DeploymentId::parse(&activation.deployment_id)
-            .map_err(|_| Error::Storage)?,
         operation: JobOperation::Activate {
+            deployment_id: DeploymentId::parse(&activation.deployment_id)
+                .map_err(|_| Error::Storage)?,
             revision: activation.revision.try_into().map_err(|_| Error::Storage)?,
         },
         available_at: activation
@@ -922,7 +930,8 @@ async fn activation_job(
     }
     match job.state.as_str() {
         "ready" | "leased" => {
-            retention::require_held(tx, app, &expected.deployment_id).await?;
+            retention::require_held(tx, app, expected.deployment_id().ok_or(Error::Storage)?)
+                .await?;
         }
         "settled" => {}
         _ => return Err(Error::Storage),
@@ -937,6 +946,7 @@ fn check_occurrence(
     job: &JobSpec,
 ) -> Result<(), Error> {
     let operation = JobOperation::Cron {
+        deployment_id: deployment.clone(),
         schedule_id: ScheduleId::parse(&occurrence.schedule_id).map_err(|_| Error::Storage)?,
         schedule_name: name.to_owned(),
         request_id: RequestId::parse(&occurrence.id).map_err(|_| Error::Storage)?,
@@ -949,7 +959,6 @@ fn check_occurrence(
     };
     if occurrence.job_id != job.id.as_str()
         || job.operation != operation
-        || &job.deployment_id != deployment
         || job.available_at.get() != occurrence.scheduled_at
     {
         return Err(Error::Storage);

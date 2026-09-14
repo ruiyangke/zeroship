@@ -4,12 +4,7 @@
     reason = "recovery shares the manager's owning compio runtime"
 )]
 
-use crate::{
-    models::recovery_scopes,
-    queue::{self, Budget},
-    retention::{self, Retention},
-    Error, Queue,
-};
+use crate::{models::recovery_scopes, queue, Error, Queue};
 use std::time::Duration;
 use zeroship_core::{
     app_id::AppId,
@@ -91,7 +86,7 @@ impl Recovery {
 
     /// Persist responsibility using a platform-authorized deployment activation.
     /// Repeated registration preserves the deadline. A newer activation changes
-    /// only the deployment for future jobs; a pending job keeps its original pin.
+    /// only activation provenance; pending reconciliation keeps its identity.
     ///
     /// # Errors
     /// Rejects stale or conflicting activations and unavailable platform storage.
@@ -101,42 +96,20 @@ impl Recovery {
         deployment: &DeploymentId,
         activation_revision: Revision,
     ) -> Result<(), Error> {
-        let budget = Budget::new(self.queue.options.transaction_timeout);
-        loop {
-            let result = self
-                .queue
-                .transact_for(budget.clone(), |tx| async move {
-                    queue::register_scope_in(&tx, app).await?;
-                    queue::lock_scope(&tx, app).await?;
-                    if let Some(stored) = load(&tx, app).await? {
-                        validate_revision(&stored, deployment, activation_revision)?;
-                        let existing = DeploymentId::parse(&stored.deployment_id)
-                            .map_err(|_| Error::Storage)?;
-                        retention::require_held(&tx, app, &existing).await?;
-                    }
-                    if !retention::prepared(&tx, app, deployment).await? {
-                        return Ok(Retention::Acquire(deployment.clone()));
-                    }
-                    ensure_in(
-                        &tx,
-                        app,
-                        deployment,
-                        activation_revision,
-                        self.queue.clock.now().await?,
-                    )
-                    .await?;
-                    Ok(Retention::Ready(()))
-                })
-                .await?;
-            match result {
-                Retention::Ready(()) => return Ok(()),
-                Retention::Acquire(deployment) => {
-                    self.queue
-                        .ensure_deployment_for(app, &deployment, budget.clone())
-                        .await?;
-                }
-            }
-        }
+        self.queue
+            .transact(|tx| async move {
+                queue::register_scope_in(&tx, app).await?;
+                queue::lock_scope(&tx, app).await?;
+                ensure_in(
+                    &tx,
+                    app,
+                    deployment,
+                    activation_revision,
+                    self.queue.clock.now().await?,
+                )
+                .await
+            })
+            .await
     }
 
     /// Page due obligations by app identity, including apps with healthy owners.
@@ -181,10 +154,12 @@ impl Recovery {
                     let job = queue::load(&tx, app, pending)
                         .await?
                         .ok_or(Error::Storage)?;
+                    let spec = job.spec()?;
+                    if !matches!(spec.operation, JobOperation::Reconcile {}) {
+                        return Err(Error::Storage);
+                    }
                     match job.state.as_str() {
                         "ready" | "leased" => {
-                            let spec = job.spec()?;
-                            retention::require_held(&tx, app, &spec.deployment_id).await?;
                             return Ok(Some(spec));
                         }
                         "settled" => {}
@@ -199,8 +174,6 @@ impl Recovery {
                 let spec = JobSpec {
                     id: JobId::mint(),
                     app_id: app.clone(),
-                    deployment_id: DeploymentId::parse(&stored.deployment_id)
-                        .map_err(|_| Error::Storage)?,
                     operation: JobOperation::Reconcile {},
                     available_at: now.try_into().map_err(|_| Error::Storage)?,
                 };
@@ -231,12 +204,9 @@ pub(crate) async fn ensure_in(
     activation_revision: Revision,
     now: i64,
 ) -> Result<(), Error> {
-    retention::require_held(tx, app, deployment).await?;
     let scopes = tx.entity::<recovery_scopes::Entity>()?;
     if let Some(stored) = load(tx, app).await? {
         let revision = validate_revision(&stored, deployment, activation_revision)?;
-        let existing = DeploymentId::parse(&stored.deployment_id).map_err(|_| Error::Storage)?;
-        retention::require_held(tx, app, &existing).await?;
         if activation_revision > revision {
             let changed = scopes
                 .update_many(
@@ -273,6 +243,7 @@ fn validate_revision(
     deployment: &DeploymentId,
     activation_revision: Revision,
 ) -> Result<Revision, Error> {
+    DeploymentId::parse(&stored.deployment_id).map_err(|_| Error::Storage)?;
     let revision = Revision::try_from(stored.activation_revision).map_err(|_| Error::Storage)?;
     if activation_revision < revision
         || (activation_revision == revision && stored.deployment_id != deployment.as_str())

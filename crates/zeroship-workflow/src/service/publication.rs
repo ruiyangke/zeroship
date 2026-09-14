@@ -96,6 +96,7 @@ impl Intent {
     fn job(&self, app: &AppId) -> Result<JobSpec, WorkflowServiceError> {
         let job: JobSpec = decode(&self.specification)?;
         let JobOperation::Advance {
+            deployment_id,
             run_id,
             generation,
             revision,
@@ -106,7 +107,7 @@ impl Intent {
         if job.app_id != *app
             || self.app_id != app.as_str()
             || job.id.as_str() != self.id
-            || job.deployment_id.as_str() != self.deploy_id
+            || deployment_id.as_str() != self.deploy_id
             || run_id.as_str() != self.run_id
             || i64::from(*generation) != self.generation
             || revision.get() != self.frontier_revision
@@ -310,6 +311,7 @@ pub(super) async fn record(
         return Ok(());
     }
     let operation = JobOperation::Advance {
+        deployment_id: DeploymentId::parse(&frontier.deploy_id).map_err(|_| invalid())?,
         run_id: RunId::parse(run).map_err(|_| invalid())?,
         generation: frontier.generation.try_into().map_err(|_| invalid())?,
         revision: Revision::try_from(frontier.frontier_revision).map_err(|_| invalid())?,
@@ -334,7 +336,6 @@ pub(super) async fn record(
             .transpose()?
             .unwrap_or_else(JobId::mint),
         app_id: app.clone(),
-        deployment_id: DeploymentId::parse(&frontier.deploy_id).map_err(|_| invalid())?,
         operation,
         available_at: due.try_into().map_err(|_| invalid())?,
     };

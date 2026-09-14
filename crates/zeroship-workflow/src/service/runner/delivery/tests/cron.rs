@@ -36,8 +36,8 @@ async fn cron_lost_ack_and_redelivery_publish_once_without_starting_executor() {
         .unwrap();
     let mut lease = fixture.lease.clone();
     lease.delivery.job.id = JobId::mint();
-    lease.delivery.job.deployment_id = DeploymentId::parse(&deploy.id).unwrap();
     lease.delivery.job.operation = JobOperation::Activate {
+        deployment_id: DeploymentId::parse(&deploy.id).unwrap(),
         revision: 1.try_into().unwrap(),
     };
     fixture.app.activate_job(&lease).await.unwrap();
@@ -45,6 +45,7 @@ async fn cron_lost_ack_and_redelivery_publish_once_without_starting_executor() {
     let run_id = RunId::mint();
     lease.delivery.job.id = JobId::mint();
     lease.delivery.job.operation = JobOperation::Cron {
+        deployment_id: DeploymentId::parse(&deploy.id).unwrap(),
         schedule_id: ScheduleId::mint(),
         schedule_name: "periodic".into(),
         request_id: RequestId::mint(),

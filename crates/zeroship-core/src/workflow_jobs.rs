@@ -7,7 +7,10 @@ pub use zeroship_id::workflow::{DeploymentId, JobId};
 
 use crate::{
     app_id::AppId,
-    workflow_coordination::{AssignedScope, RequestId, Revision, RunId, UnixMillis, WorkerId},
+    workflow_coordination::{
+        AssignedScope, RequestId, RestartTarget, Revision, RunId, RunOperation, UnixMillis,
+        WorkerId,
+    },
     workflow_schedules::ScheduleId,
 };
 use serde::{Deserialize, Serialize};
@@ -23,14 +26,17 @@ use std::time::Duration;
 )]
 pub enum JobOperation {
     Activate {
+        deployment_id: DeploymentId,
         revision: Revision,
     },
     Advance {
+        deployment_id: DeploymentId,
         run_id: RunId,
         generation: u32,
         revision: Revision,
     },
     Cron {
+        deployment_id: DeploymentId,
         schedule_id: ScheduleId,
         schedule_name: String,
         request_id: RequestId,
@@ -41,10 +47,36 @@ pub enum JobOperation {
     Management {
         request_id: RequestId,
         run_id: RunId,
+        revision: Revision,
+        command: ManagementCommand,
     },
     // Empty struct variants reject extra fields on internally tagged messages.
     Reconcile {},
     Collect {},
+}
+
+/// The effective lifecycle command frozen by trusted manager acceptance.
+///
+/// A latest restart cannot carry a retained task boundary. A started restart
+/// resolves its current source generation inside the creator transaction.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(
+    tag = "kind",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase",
+    deny_unknown_fields
+)]
+pub enum ManagementCommand {
+    Transition {
+        operation: RunOperation,
+    },
+    RestartStarted {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        from: Option<RestartTarget>,
+    },
+    RestartLatest {
+        deployment_id: DeploymentId,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -52,9 +84,32 @@ pub enum JobOperation {
 pub struct JobSpec {
     pub id: JobId,
     pub app_id: AppId,
-    pub deployment_id: DeploymentId,
     pub operation: JobOperation,
     pub available_at: UnixMillis,
+}
+
+impl JobSpec {
+    /// The operation's executable prerequisite, if it has one. Journal-only
+    /// operations must remain deliverable without acquiring a deployment hold.
+    #[must_use]
+    pub const fn deployment_id(&self) -> Option<&DeploymentId> {
+        match &self.operation {
+            JobOperation::Activate { deployment_id, .. }
+            | JobOperation::Advance { deployment_id, .. }
+            | JobOperation::Cron { deployment_id, .. }
+            | JobOperation::Management {
+                command: ManagementCommand::RestartLatest { deployment_id },
+                ..
+            } => Some(deployment_id),
+            JobOperation::Management {
+                command:
+                    ManagementCommand::Transition { .. } | ManagementCommand::RestartStarted { .. },
+                ..
+            }
+            | JobOperation::Reconcile {}
+            | JobOperation::Collect {} => None,
+        }
+    }
 }
 
 /// Worker publication carries placement identity, never a caller-chosen expiry.
@@ -98,6 +153,7 @@ pub trait JobLease {
 }
 
 /// Scheduling classification without customer results or free-form failures.
+///
 /// For reconciliation, `Waiting` requests another page or intent phase and
 /// `Completed` closes the scan cycle. Neither result proves that intents drained.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

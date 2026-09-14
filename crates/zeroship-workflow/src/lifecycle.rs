@@ -1,7 +1,7 @@
 //! Lifecycle rules shared by the embedded and deployed journal adapters.
 
 use crate::errors::WorkflowServiceError;
-use crate::operations::{RestartDeploy, RestartOptions};
+use zeroship_core::workflow_coordination::InvalidRestart;
 
 /// Observed under the journal transaction's locks, before any history is removed.
 #[derive(Debug, Clone, Copy, Default)]
@@ -36,34 +36,13 @@ impl RestartSafety {
     }
 }
 
-/// Resolve the deploy policy without changing the immutable retained prefix.
-///
-/// # Errors
-/// Rejects an invalid target or a partial restart onto another deploy.
-pub fn restart_deploy_policy(
-    options: &RestartOptions,
-) -> Result<RestartDeploy, WorkflowServiceError> {
-    if let Some(target) = &options.from {
-        if target.name.is_empty() {
-            return Err(WorkflowServiceError::InvalidRequest(
-                "restart target name must not be empty".into(),
-            ));
+impl From<InvalidRestart> for WorkflowServiceError {
+    fn from(error: InvalidRestart) -> Self {
+        match error {
+            InvalidRestart::PartialLatest => Self::Conflict(error.to_string()),
+            InvalidRestart::EmptyTargetName | InvalidRestart::TargetOccurrenceOutOfRange => {
+                Self::InvalidRequest(error.to_string())
+            }
         }
-        if target
-            .occurrence
-            .is_some_and(|value| value > i32::MAX as u32)
-        {
-            return Err(WorkflowServiceError::InvalidRequest(
-                "restart target occurrence exceeds the journal ordinal range".into(),
-            ));
-        }
-        if options.deploy == Some(RestartDeploy::Latest) {
-            return Err(WorkflowServiceError::Conflict(
-                "partial restart cannot change deploy pin".into(),
-            ));
-        }
-        Ok(RestartDeploy::Started)
-    } else {
-        Ok(options.deploy.unwrap_or(RestartDeploy::Latest))
     }
 }

@@ -51,7 +51,10 @@ pub(in crate::service) async fn prepare(
     if admit(policy).is_err() {
         return Ok(Preparation::Rejected(Rejection::Denied));
     }
-    let deploy_policy = match crate::lifecycle::restart_deploy_policy(options) {
+    let deploy_policy = match options
+        .effective_deploy()
+        .map_err(WorkflowServiceError::from)
+    {
         Ok(policy) => policy,
         Err(WorkflowServiceError::InvalidRequest(message)) => {
             return Ok(Preparation::Rejected(Rejection::Invalid(message)))

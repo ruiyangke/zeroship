@@ -45,6 +45,42 @@ pub struct RestartOptions {
     pub deploy: Option<RestartDeploy>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum InvalidRestart {
+    #[error("restart target name must not be empty")]
+    EmptyTargetName,
+    #[error("restart target occurrence exceeds the journal ordinal range")]
+    TargetOccurrenceOutOfRange,
+    #[error("partial restart cannot change deploy pin")]
+    PartialLatest,
+}
+
+impl RestartOptions {
+    /// Resolve the effective deployment policy before selecting its prerequisite.
+    ///
+    /// # Errors
+    /// Rejects invalid task boundaries and partial restarts onto latest code.
+    pub fn effective_deploy(&self) -> Result<RestartDeploy, InvalidRestart> {
+        if let Some(target) = &self.from {
+            if target.name.is_empty() {
+                return Err(InvalidRestart::EmptyTargetName);
+            }
+            if target
+                .occurrence
+                .is_some_and(|value| value > i32::MAX as u32)
+            {
+                return Err(InvalidRestart::TargetOccurrenceOutOfRange);
+            }
+            if self.deploy == Some(RestartDeploy::Latest) {
+                return Err(InvalidRestart::PartialLatest);
+            }
+            Ok(RestartDeploy::Started)
+        } else {
+            Ok(self.deploy.unwrap_or(RestartDeploy::Latest))
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum RunState {

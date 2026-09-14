@@ -102,6 +102,65 @@ case!(
     postgres_publication_survives_history_removal_and_checks_identity,
     retention
 );
+case!(
+    sqlite_publication_rejects_changed_executable_prerequisite,
+    postgres_publication_rejects_changed_executable_prerequisite,
+    executable_identity
+);
+
+async fn executable_identity(store: Rc<OrmStore>, _: &FaultDb) {
+    let (service, app, _, _platform) = registered_service(store).await;
+    let scope = service.fixture_app(app.clone());
+    scope
+        .start(&RequestId::mint(), "Example", StartOptions::default())
+        .await
+        .unwrap();
+    let original = scope.pending_jobs(None, 1).await.unwrap().remove(0);
+    let manager = Manager::new(&app).await;
+    let publisher = Publisher::new(&app, manager.queue.clone());
+    let mut substituted = original.clone();
+    let JobOperation::Advance { deployment_id, .. } = &mut substituted.operation else {
+        panic!("publication must require executable code")
+    };
+    *deployment_id = DeploymentId::mint();
+    let mut erased = original.clone();
+    erased.operation = JobOperation::Reconcile {};
+    for changed in [substituted, erased] {
+        let tx = service.begin().await.unwrap();
+        journal_update(
+            &tx,
+            "job_publications",
+            json!({"id":original.id.as_str()}),
+            json!({"specification":serde_json::to_string(&changed).unwrap()}),
+        )
+        .await;
+        tx.commit().await.unwrap();
+        assert!(matches!(
+            scope.pending_jobs(None, 1).await,
+            Err(WorkflowServiceError::Internal(_))
+        ));
+        assert!(matches!(
+            scope.publish_job(&original.id, &publisher).await,
+            Err(WorkflowServiceError::Internal(_))
+        ));
+        assert_eq!(publisher.calls.get(), 0);
+        assert_eq!(manager.count(), 0);
+    }
+    let tx = service.begin().await.unwrap();
+    journal_update(
+        &tx,
+        "job_publications",
+        json!({"id":original.id.as_str()}),
+        json!({"specification":serde_json::to_string(&original).unwrap()}),
+    )
+    .await;
+    tx.commit().await.unwrap();
+    assert_eq!(
+        scope.publish_job(&original.id, &publisher).await.unwrap(),
+        original
+    );
+    assert_eq!(manager.count(), 1);
+}
 
 /// Publication tests isolate the journal outbox from artifact retention. The
 /// manager's retention suite supplies a real catalog for deployment safety.
@@ -281,7 +340,7 @@ async fn recovery(store: Rc<OrmStore>, faults: &FaultDb) {
     assert_eq!(jobs.len(), 1);
     let job = jobs[0].clone();
     assert!(
-        matches!(&job.operation, JobOperation::Advance { run_id, generation:0, revision } if run_id.as_str() == run.id && revision.get() == 1)
+        matches!(&job.operation, JobOperation::Advance { run_id, generation:0, revision, .. } if run_id.as_str() == run.id && revision.get() == 1)
     );
     assert!(!serde_json::to_string(&job)
         .unwrap()
@@ -586,7 +645,7 @@ async fn retention(store: Rc<OrmStore>, _faults: &FaultDb) {
     let client = platform.client(&app);
     assert_eq!(
         service
-            .release_deployment_hold(&app, job.deployment_id.as_str(), &client)
+            .release_deployment_hold(&app, job.deployment_id().unwrap().as_str(), &client)
             .await,
         Err(WorkflowServiceError::Conflict(
             "deployment retains unpublished workflow jobs".into()
@@ -620,7 +679,7 @@ async fn retention(store: Rc<OrmStore>, _faults: &FaultDb) {
     tx.commit().await.unwrap();
     scope.publish_job(&job.id, &publisher).await.unwrap();
     service
-        .release_deployment_hold(&app, job.deployment_id.as_str(), &client)
+        .release_deployment_hold(&app, job.deployment_id().unwrap().as_str(), &client)
         .await
         .unwrap();
     assert!(scope.pending_jobs(None, 10).await.unwrap().is_empty());

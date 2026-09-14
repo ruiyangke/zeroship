@@ -535,8 +535,8 @@ async fn claim_authority(fixture: &Fixture) {
     let spec = JobSpec {
         id: JobId::mint(),
         app_id: app.clone(),
-        deployment_id: DeploymentId::mint(),
         operation: JobOperation::Advance {
+            deployment_id: DeploymentId::mint(),
             run_id: RunId::mint(),
             generation: 0,
             revision: 1.try_into().unwrap(),
@@ -702,8 +702,8 @@ fn job(app: &AppId) -> JobSpec {
     JobSpec {
         id: JobId::mint(),
         app_id: app.clone(),
-        deployment_id: DeploymentId::mint(),
         operation: JobOperation::Advance {
+            deployment_id: DeploymentId::mint(),
             run_id: RunId::mint(),
             generation: 0,
             revision: 1.try_into().unwrap(),
@@ -722,9 +722,11 @@ fn publication(assignment: &Assignment, job: JobSpec) -> SubmitJob {
 fn manager_operations() -> [JobOperation; 3] {
     [
         JobOperation::Activate {
+            deployment_id: DeploymentId::mint(),
             revision: 1.try_into().unwrap(),
         },
         JobOperation::Cron {
+            deployment_id: DeploymentId::mint(),
             schedule_id: ScheduleId::mint(),
             schedule_name: "daily-report".into(),
             request_id: RequestId::mint(),
@@ -735,6 +737,10 @@ fn manager_operations() -> [JobOperation; 3] {
         JobOperation::Management {
             request_id: RequestId::mint(),
             run_id: RunId::mint(),
+            revision: 1.try_into().unwrap(),
+            command: zeroship_core::workflow_jobs::ManagementCommand::Transition {
+                operation: RunOperation::Pause,
+            },
         },
     ]
 }

@@ -230,8 +230,8 @@ impl Fixture {
         let lease = self.grant(JobSpec {
             id: JobId::mint(),
             app_id: self.scope.app_id.clone(),
-            deployment_id: deployment.clone(),
             operation: JobOperation::Activate {
+                deployment_id: deployment.clone(),
                 revision: 1.try_into().unwrap(),
             },
             available_at: 0.try_into().unwrap(),

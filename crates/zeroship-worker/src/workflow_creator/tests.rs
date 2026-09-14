@@ -175,7 +175,7 @@ async fn factory_executes_delivered_v8_frontiers_with_its_creator_artifact_and_p
     let mut finished = false;
     for _ in 0..8 {
         let lease = fixture.next(&runtime.app, &started.id).await;
-        assert_eq!(lease.delivery.job.deployment_id, deployment);
+        assert_eq!(lease.delivery.job.deployment_id(), Some(&deployment));
         let JobAcceptance::Execute(task) = runtime.app.accept_job(&lease).await.unwrap() else {
             panic!("exact published Advance must be executable");
         };
