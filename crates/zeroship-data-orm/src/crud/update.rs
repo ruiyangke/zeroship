@@ -183,10 +183,7 @@ pub(crate) fn validate_results(
                 .and_then(crate::sql::temporal::timestamp_millis)
                 .is_none()
             {
-                return Err(crate::error::DbError::validation(
-                    "invalid_timestamp_expression",
-                    "database timestamp expression is outside the portable calendar",
-                ));
+                return Err(crate::error::DbError::timestamp_expression_outside_calendar());
             }
             if check.hidden {
                 row.as_object_mut()

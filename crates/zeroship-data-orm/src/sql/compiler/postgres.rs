@@ -43,11 +43,23 @@ const SYNTAX: super::shared::Syntax = super::shared::Syntax {
     array_mutation: write_array_mutation,
 };
 
+// The last instant before the portable calendar, one millisecond before
+// `MIN_TIMESTAMP_MILLIS`, independent of the session time zone.
+const BEFORE_PORTABLE_CALENDAR: &str = "'0001-12-31 23:59:59.999+00 BC'::timestamptz";
+
+// The database clock shifted by an exact millisecond interval.
+//
+// PostgreSQL raises for an instant before its own calendar begins, and the
+// largest negative offset reaches past it. A negative offset therefore first
+// raises the clock to at least `BEFORE_PORTABLE_CALENDAR` minus the offset. A
+// sum inside the portable calendar is unchanged; any other sum stays inside
+// PostgreSQL's range but outside the portable calendar, so the update's result
+// check refuses it. A positive offset from a clock inside the portable calendar
+// stays far inside PostgreSQL's range.
 fn write_database_timestamp(
     writer: &mut SqlWriter,
     offset_millis: i64,
 ) -> Result<(), CompileError> {
-    writer.sql.push_str("(clock_timestamp() + ");
     let seconds = offset_millis / 1000;
     let fraction = (offset_millis % 1000).unsigned_abs();
     let sign = if offset_millis < 0 && seconds == 0 {
@@ -55,9 +67,19 @@ fn write_database_timestamp(
     } else {
         ""
     };
-    writer.write_param(Value::from(format!(
+    let offset = writer.bind(Value::from(format!(
         "{sign}{seconds}.{fraction:03} seconds"
     )))?;
+    if offset_millis < 0 {
+        writer.sql.push_str("(GREATEST(clock_timestamp(), ");
+        writer.sql.push_str(BEFORE_PORTABLE_CALENDAR);
+        writer.sql.push_str(" - ");
+        writer.write_bound(offset);
+        writer.sql.push_str("::interval) + ");
+    } else {
+        writer.sql.push_str("(clock_timestamp() + ");
+    }
+    writer.write_bound(offset);
     writer.sql.push_str("::interval)");
     Ok(())
 }
