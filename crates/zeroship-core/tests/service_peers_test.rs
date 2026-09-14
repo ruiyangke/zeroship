@@ -508,9 +508,10 @@ fn worker_instance_issuer() -> ServiceIssuer {
 /// required its own minting name would refuse every caller.
 ///
 /// This is a DISTINGUISHER and not a boundary. Enrolment authenticates with the
-/// shared `svc/worker` role key, so a holder of that key can enrol as many
+/// deployment unit's enroller key, so a holder of that key can enrol as many
 /// instances as it likes; what an instance name buys is attribution,
-/// per-instance revocation and a countable event.
+/// per-instance retirement and a countable event. The boundary is revoking the
+/// enroller.
 #[compio::test]
 async fn a_service_requires_the_audience_it_is_addressed_by_not_the_one_it_mints_under() {
     let dir = tempfile::tempdir().expect("a scratch directory");
