@@ -911,6 +911,120 @@ fn native_rpc_method_not_found_returns_404() {
 }
 
 #[test]
+fn native_rpc_rejects_a_method_for_the_resolved_procedure_kind() {
+    let modules = synthetic_entry(r#"
+        function greet() { return "ran"; }
+        greet.config = { kind: "query" };
+        function _makeProcedures() { return { greet }; }
+    "#);
+    init_v8();
+    let runtime = Runtime::builder().modules(modules).build();
+    let env = EnvSnapshot::empty();
+    let ctx = RequestCtx::new(CancelFlag::new());
+    let outcome = runtime.call_fetch_handler(
+        "PUT",
+        "http://localhost/__zeroship/v1/greet",
+        &[("content-type".into(), "application/json".into())],
+        r#"{"json":null}"#,
+        &env,
+        ctx,
+    );
+    let FetchOutcome::Response { status, body, .. } = outcome else {
+        panic!("expected Response");
+    };
+    let body = body_to_string(&body);
+    assert_eq!(status, 405, "body: {}", body);
+    assert!(body.contains("FAILED_PRECONDITION"), "body: {}", body);
+    assert!(
+        body.contains("method PUT not allowed on /__zeroship/v1/greet"),
+        "body: {}",
+        body
+    );
+}
+
+#[test]
+fn native_rpc_keeps_action_methods_permissive() {
+    let modules = synthetic_entry(r#"
+        function run() { return "ran"; }
+        run.config = { kind: "action" };
+        function _makeProcedures() { return { run }; }
+    "#);
+    init_v8();
+    let runtime = Runtime::builder().modules(modules).build();
+    let env = EnvSnapshot::empty();
+    let ctx = RequestCtx::new(CancelFlag::new());
+    let outcome = runtime.call_fetch_handler(
+        "PUT",
+        "http://localhost/__zeroship/v1/run",
+        &[("content-type".into(), "application/json".into())],
+        r#"{"json":null}"#,
+        &env,
+        ctx,
+    );
+    let FetchOutcome::Response { status, body, .. } = outcome else {
+        panic!("expected Response");
+    };
+    let body = body_to_string(&body);
+    assert_eq!(status, 200, "body: {}", body);
+    assert!(body.contains(r#""ran""#), "body: {}", body);
+}
+
+#[test]
+fn native_rpc_claims_an_idless_reserved_path() {
+    let modules = synthetic_entry(r#"
+        function greet() { return "ran"; }
+        function _makeProcedures() { return { greet }; }
+    "#);
+    init_v8();
+    let runtime = Runtime::builder().modules(modules).build();
+    let env = EnvSnapshot::empty();
+    let ctx = RequestCtx::new(CancelFlag::new());
+    let outcome = runtime.call_fetch_handler(
+        "POST",
+        "http://localhost/__zeroship/v1/",
+        &[("content-type".into(), "application/json".into())],
+        r#"{"json":null}"#,
+        &env,
+        ctx,
+    );
+    let FetchOutcome::Response { status, body, .. } = outcome else {
+        panic!("expected Response");
+    };
+    let body = body_to_string(&body);
+    assert_eq!(status, 400, "body: {}", body);
+    assert!(body.contains("INVALID_ARGUMENT"), "body: {}", body);
+    assert!(body.contains("missing wireId"), "body: {}", body);
+}
+
+#[test]
+fn native_rpc_claims_the_reserved_path_without_a_registry() {
+    let modules = m(
+        r#"export default {
+            fetch() { return new Response("creator fetch"); }
+        };"#,
+    );
+    init_v8();
+    let runtime = Runtime::builder().modules(modules).build();
+    let env = EnvSnapshot::empty();
+    let ctx = RequestCtx::new(CancelFlag::new());
+    let outcome = runtime.call_fetch_handler(
+        "POST",
+        "http://localhost/__zeroship/v1/missing",
+        &[("content-type".into(), "application/json".into())],
+        r#"{"json":null}"#,
+        &env,
+        ctx,
+    );
+    let FetchOutcome::Response { status, body, .. } = outcome else {
+        panic!("expected Response");
+    };
+    let body = body_to_string(&body);
+    assert_eq!(status, 404, "body: {}", body);
+    assert!(body.contains("Method not found: missing"), "body: {}", body);
+    assert!(!body.contains("creator fetch"), "body: {}", body);
+}
+
+#[test]
 fn native_rpc_malformed_json_returns_400() {
     let modules = synthetic_entry(r#"
         function greet(x) { return x; }
