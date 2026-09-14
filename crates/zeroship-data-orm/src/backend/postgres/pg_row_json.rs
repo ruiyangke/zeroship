@@ -10,6 +10,9 @@ use compio_postgres::{
 };
 use crate::value::{Map, Value};
 
+#[cfg(test)]
+mod network_tests;
+
 pub fn rows_to_values(rows: &[Row]) -> Result<Vec<Value>, DbError> {
     rows.iter().map(row_to_value).collect()
 }
@@ -63,6 +66,7 @@ fn decode_value(ty: &Type, bytes: &[u8]) -> Result<Value, String> {
         Type::FLOAT4 => finite_number(f64::from(from_sql::<f32>(ty, bytes)?)),
         Type::FLOAT8 => finite_number(from_sql::<f64>(ty, bytes)?),
         Type::UUID => from_sql::<uuid::Uuid>(ty, bytes).map(|value| Value::from(value.to_string())),
+        Type::INET | Type::CIDR => decode_network(ty, bytes),
         Type::TIMESTAMP | Type::TIMESTAMPTZ => {
             let micros = i64::from_be_bytes(
                 bytes
@@ -100,6 +104,18 @@ fn decode_value(ty: &Type, bytes: &[u8]) -> Result<Value, String> {
         _ if ty.name() == "geography" => decode_geography(bytes),
         _ if <String as FromSql>::accepts(ty) => from_sql::<String>(ty, bytes).map(Value::from),
         _ => Err(format!("unsupported PostgreSQL type '{}'", ty.name())),
+    }
+}
+
+fn decode_network(ty: &Type, bytes: &[u8]) -> Result<Value, String> {
+    let is_cidr = *ty == Type::CIDR;
+    if bytes.get(2).copied() != Some(u8::from(is_cidr)) {
+        return Err(format!("invalid {} binary value", ty.name()));
+    }
+    if is_cidr {
+        from_sql::<cidr::IpCidr>(ty, bytes).map(|value| Value::String(format!("{value:#}")))
+    } else {
+        from_sql::<cidr::IpInet>(ty, bytes).map(|value| Value::String(value.to_string()))
     }
 }
 
