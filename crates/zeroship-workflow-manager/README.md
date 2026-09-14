@@ -25,6 +25,14 @@ Claim and heartbeat return `DeliveryGrant`; converting it to a wire lease after
 commit charges elapsed time against the originally observed assignment authority.
 Worker publication cannot mint manager-owned activation, cron or management commands.
 
+The app's persistent dispatch cursor assigns tickets to new jobs and successful
+claims in their existing transactions. Due and dependency filters run before ticket
+ordering, so an expired delivery retries behind work already waiting; new arrivals
+cannot continually displace that retry. Due times and job identity remain unchanged.
+Exact publication replay, heartbeat and settled acknowledgement replay do not
+rotate work. Failed claim transactions roll back both the cursor and job ticket.
+Failures before a successful claim still require a host retry or parking policy.
+
 `coordinator::Coordinator::policy_lease` verifies placement and the original
 enrolled key before consulting a trusted `policy::PolicySource`. Source I/O runs
 outside manager locks. Final admission locks the app before the worker and

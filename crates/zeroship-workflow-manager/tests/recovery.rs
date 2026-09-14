@@ -453,13 +453,16 @@ async fn unrelated_page(fixture: &Fixture) {
     let pending = recovery.dispatch(&app).await.unwrap().unwrap();
     set_deadline(fixture, &app, i64::MAX).await;
     let obligation = snapshot(fixture, &app).await;
+    let owner = assignment(&app);
+    let in_flight = queue.claim(&owner).await.unwrap().unwrap();
+    assert_eq!(in_flight.delivery().job, pending);
+    let pending_state = stored_job(fixture, &pending).await.unwrap();
     let unrelated = JobSpec {
         id: JobId::mint(),
         available_at: 0.try_into().unwrap(),
         ..pending.clone()
     };
     queue.submit(&unrelated).await.unwrap();
-    let owner = assignment(&app);
     let delivery = queue.claim(&owner).await.unwrap().unwrap();
     assert_eq!(delivery.delivery().job, unrelated);
     queue
@@ -475,6 +478,7 @@ async fn unrelated_page(fixture: &Fixture) {
         .unwrap();
     assert_eq!(snapshot(fixture, &app).await, obligation);
     assert!(recovery.due(None).await.unwrap().is_empty());
+    assert_eq!(stored_job(fixture, &pending).await.unwrap(), pending_state);
     assert_eq!(recovery.dispatch(&app).await.unwrap(), Some(pending));
     assert_eq!(
         stored_job(fixture, &unrelated).await.unwrap()["state"],

@@ -44,6 +44,7 @@ export function workflowManagerSchema(namespace) {
     columns: {
       id: text(),
       lock_version: integer().default(0),
+      dispatch_cursor: integer().default(0),
     },
     primaryKey: ["id"],
   });
@@ -91,6 +92,7 @@ export function workflowManagerSchema(namespace) {
       operation: text(),
       spec_digest: text(),
       available_at: integer(),
+      dispatch_order: integer(),
       state: text(),
       attempt: integer().default(0),
       worker_id: t.text(),
@@ -112,6 +114,8 @@ export function workflowManagerSchema(namespace) {
   jobs.index("jobs_lease_idx").add({ on: ["app_id", "state", "lease_deadline", "id"] });
   jobs.index("jobs_scope_key").add({ on: ["app_id", "id"], unique: true });
   jobs.index("jobs_deployment_idx").add({ on: ["app_id", "deployment_id", "state"] });
+  jobs.index("jobs_dispatch_key").add({ on: ["app_id", "dispatch_order"], unique: true });
+  jobs.index("jobs_dispatch_idx").add({ on: ["app_id", "state", "dispatch_order"] });
 
   create("schedule_deployments", {
     app_id: text(), definition: text(), interpretation: text(), created_at: integer(),

@@ -33,6 +33,7 @@ zeroship_data_orm::orm::schema! {
             operation: Text,
             spec_digest: Text,
             available_at: BigInt,
+            dispatch_order: BigInt,
             state: Text,
             #[orm(default = 0)]
             attempt: BigInt,
@@ -80,6 +81,8 @@ zeroship_data_orm::orm::schema! {
             id: Text,
             #[orm(default = 0)]
             lock_version: BigInt,
+            #[orm(default = 0)]
+            dispatch_cursor: BigInt,
         }
 
         recovery_scopes {

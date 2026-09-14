@@ -17,12 +17,21 @@ test("compiles both manager backends with matching typed collection metadata", (
   assert.equal(collections.jobs.fields.deployment_id.required, true);
   assert.equal(collections.jobs.fields.worker_id.required ?? false, false);
   assert.equal(collections.jobs.fields.attempt.type, "bigInt");
+  assert.equal(collections.queue_scopes.fields.dispatch_cursor.type, "bigInt");
+  assert.equal(collections.queue_scopes.fields.dispatch_cursor.required, true);
+  assert.equal(collections.queue_scopes.fields.dispatch_cursor.default, 0);
+  assert.equal(collections.jobs.fields.dispatch_order.type, "bigInt");
+  assert.equal(collections.jobs.fields.dispatch_order.required, true);
+  assert.equal(collections.jobs.fields.dispatch_order.default, undefined);
   assert.deepEqual(collections.jobs.indexes.map(index => index.fields), [
     ["app_id", "state", "available_at", "id"],
     ["app_id", "state", "lease_deadline", "id"],
     ["app_id", "id"],
     ["app_id", "deployment_id", "state"],
+    ["app_id", "dispatch_order"],
+    ["app_id", "state", "dispatch_order"],
   ]);
+  assert(collections.jobs.indexes.some(index => index.unique && index.fields.join() === "app_id,dispatch_order"));
   for (const [name, duplicateIdentity] of [["queue_scopes", "app_id"], ["workers", "worker_id"]]) {
     assert.equal(collections[name].fields[duplicateIdentity], undefined);
     assert.equal(collections[name].indexes?.some(index => index.unique) ?? false, false);

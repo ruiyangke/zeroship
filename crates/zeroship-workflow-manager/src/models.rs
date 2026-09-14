@@ -30,6 +30,7 @@ pub struct Job {
     pub operation: String,
     pub spec_digest: String,
     pub available_at: i64,
+    pub dispatch_order: i64,
     pub state: String,
     pub attempt: i64,
     pub worker_id: Option<String>,
@@ -64,6 +65,7 @@ pub struct Worker {
 #[orm(entity = queue_scopes)]
 pub struct Scope {
     pub id: String,
+    pub dispatch_cursor: i64,
 }
 
 #[derive(FromRow)]

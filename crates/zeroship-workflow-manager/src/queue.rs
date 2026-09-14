@@ -6,7 +6,7 @@
 use crate::{
     clock::{Clock, Sample, RESOLUTION_MILLIS},
     error::Error,
-    models::{self, jobs, queue_scopes, Job},
+    models::{self, jobs, queue_scopes, Job, Scope},
     retention::{self, Retention},
 };
 use serde::Serialize;
@@ -342,10 +342,12 @@ impl Queue {
                 deadline: deadline.try_into().map_err(|_| Error::Storage)?,
             };
             let mut grant = DeliveryGrant::new(delivery, sample, assignment_expires)?;
+            let dispatch_order = next_dispatch_order(&tx, &assignment.app_id, Some(job.dispatch_order)).await?;
             update(&tx,
                 value!({"id":id,"app_id":assignment.app_id.as_str(),"state":job.state,"attempt":job.attempt}),
                 value!({"state":"leased","attempt":attempt,"worker_id":assignment.worker_id.as_str(),
-                    "assignment_revision":assignment.assignment_revision.get(),"lease_deadline":deadline})
+                    "assignment_revision":assignment.assignment_revision.get(),"lease_deadline":deadline,
+                    "dispatch_order":dispatch_order})
             ).await?;
             let observed = authorize(tx.clone()).await?;
             let sample = self.clock.sample().await?;
@@ -644,11 +646,12 @@ impl Queue {
         }
         retention::require_held(tx, &spec.app_id, &spec.deployment_id).await?;
         let digest = digest(&self.encode(spec)?);
+        let dispatch_order = next_dispatch_order(tx, &spec.app_id, None).await?;
         tx.collection(jobs::Entity::COLLECTION)?.insert(value!({
             "id":spec.id.as_str(),"app_id":spec.app_id.as_str(),"deployment_id":spec.deployment_id.as_str(),
             "operation":serde_json::to_string(&spec.operation).map_err(|_| Error::Invalid)?,
             "spec_digest":digest,"available_at":spec.available_at.get(),"state":"ready", "attempt":0,
-            "created_at":now
+            "dispatch_order":dispatch_order,"created_at":now
         })).await?;
         Ok(())
     }
@@ -739,6 +742,50 @@ pub async fn lock_scope(tx: &Database, app: &AppId) -> Result<(), Error> {
         Output::Count(0) => Err(Error::Denied),
         _ => Err(Error::Storage),
     }
+}
+
+/// Allocate under the app lock in the transaction that publishes or claims a job.
+/// A claim moves to the tail without changing its immutable specification.
+async fn next_dispatch_order(
+    tx: &Database,
+    app: &AppId,
+    previous: Option<i64>,
+) -> Result<i64, Error> {
+    let scopes = tx.entity::<queue_scopes::Entity>()?;
+    let scope = scopes
+        .find::<Scope>(
+            queue_scopes::id.eq(app.as_str())?,
+            FindOptions {
+                limit: Some(1),
+                ..Default::default()
+            },
+        )
+        .await?
+        .into_iter()
+        .next()
+        .ok_or(Error::Storage)?;
+    if scope.dispatch_cursor < 0
+        || previous.is_some_and(|order| order <= 0 || order > scope.dispatch_cursor)
+    {
+        return Err(Error::Storage);
+    }
+    let next = scope
+        .dispatch_cursor
+        .checked_add(1)
+        .ok_or(Error::Capacity)?;
+    if scopes
+        .update_many(
+            queue_scopes::id
+                .eq(app.as_str())?
+                .and(queue_scopes::dispatch_cursor.eq(scope.dispatch_cursor)?),
+            queue_scopes::dispatch_cursor.set(next)?,
+        )
+        .await?
+        != 1
+    {
+        return Err(Error::Storage);
+    }
+    Ok(next)
 }
 
 pub async fn load(tx: &Database, app: &AppId, id: &str) -> Result<Option<Job>, Error> {
