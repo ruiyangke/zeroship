@@ -26,6 +26,23 @@ pub(super) const fn admit(policy: &AppPolicy) -> Result<(), WorkflowServiceError
     Ok(())
 }
 
+/// Establishes the manager's ingress epoch for one app's policy binding.
+///
+/// The creator journal refuses an acceptance whose captured epoch it closed.
+/// The host then obtains an open epoch above the refused one from the manager,
+/// which commits recovery responsibility before replying, and installs it into
+/// the app's binding before returning, so a retried acceptance captures it.
+pub trait IngressEpochs {
+    /// Obtain and install an epoch above `after`, or any open epoch when it
+    /// names none. Concurrent calls serialize, and a call that finds a newer
+    /// epoch already installed returns without another exchange.
+    fn establish(&self, after: Option<Revision>)
+        -> LocalBoxFuture<'_, Result<(), WorkflowServiceError>>;
+
+    /// Record an accepted ingress for the manager's idle closure trigger.
+    fn accepted(&self);
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Validity {
     Configuration,
@@ -378,6 +395,14 @@ impl PolicyBinding {
             .as_ref()
             .map(PolicySnapshot::effective)
             .ok_or_else(unavailable)
+    }
+
+    /// The ingress epoch of this generation's installed snapshot. Retired,
+    /// uninitialized and epoch-less bindings have none.
+    #[must_use]
+    pub fn ingress_epoch(&self) -> Option<Revision> {
+        let state = self.registry.state.read().ok()?;
+        self.current(&state).ok()?.snapshot.as_ref()?.ingress_epoch
     }
 
     pub(crate) fn authority(&self) -> Result<PolicyAuthority, WorkflowServiceError> {

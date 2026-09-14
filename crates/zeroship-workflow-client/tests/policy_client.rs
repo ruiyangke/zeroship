@@ -20,7 +20,7 @@ use zeroship_core::{
     service_identity::{endpoints, verify_service_call},
     service_peers::{ServiceAuth, ServiceKeyring},
     workflow_coordination::{AssignedScope, FailureCode, Revision, WorkerId, AUDIENCE},
-    workflow_policy::{AppPolicy, PolicyLease, PolicyLeaseRequest},
+    workflow_policy::{AppPolicy, EstablishIngress, PolicyLease, PolicyLeaseRequest},
 };
 use zeroship_workflow_client::{Error, Options, WorkerCoordinator};
 
@@ -58,7 +58,7 @@ impl Fixture {
             auth,
             request: PolicyLeaseRequest {
                 scope: scope.clone(),
-                establish_after: None,
+                establish: None,
                 ingress_used: false,
             },
             scope,
@@ -465,7 +465,9 @@ async fn missing_source_authority_stays_unavailable_without_default_policy() {
 #[compio::test]
 async fn establishment_replies_must_carry_an_epoch_above_the_named_one() {
     let mut fixture = Fixture::new();
-    fixture.request.establish_after = Some(4.try_into().unwrap());
+    fixture.request.establish = Some(EstablishIngress {
+        after: Some(4.try_into().unwrap()),
+    });
     fixture.request.ingress_used = true;
     let mut unchanged = fixture.reply(60_000);
     unchanged["ingressEpoch"] = json!(4);
@@ -489,6 +491,30 @@ async fn establishment_replies_must_carry_an_epoch_above_the_named_one() {
         let lease = client.policy_lease(&fixture.request).await.unwrap();
         assert_eq!(lease.ingress_epoch(), Some(5.try_into().unwrap()));
     })
+    .await;
+}
+
+/// Startup names no refused epoch: any open epoch satisfies it, none does not.
+#[compio::test]
+async fn startup_establishment_replies_must_carry_an_epoch() {
+    let mut fixture = Fixture::new();
+    fixture.request.establish = Some(EstablishIngress { after: None });
+    let mut retired = fixture.reply(60_000);
+    retired["ingressEpoch"] = Value::Null;
+    let mut first = fixture.reply(60_000);
+    first["ingressEpoch"] = json!(1);
+    peer(
+        &fixture,
+        vec![Exchange::new(retired), Exchange::new(first)],
+        async |client| {
+            assert_eq!(
+                client.policy_lease(&fixture.request).await.unwrap_err(),
+                Error::InvalidResponse
+            );
+            let lease = client.policy_lease(&fixture.request).await.unwrap();
+            assert_eq!(lease.ingress_epoch(), Some(1.try_into().unwrap()));
+        },
+    )
     .await;
 }
 

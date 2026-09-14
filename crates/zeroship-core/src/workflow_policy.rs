@@ -6,7 +6,7 @@
 use serde::{Deserialize, Serialize};
 
 mod lease;
-pub use lease::{PolicyLease, PolicyLeaseRequest};
+pub use lease::{EstablishIngress, PolicyLease, PolicyLeaseRequest};
 
 /// Hard ceiling shared by policy validation and signal capability verification.
 pub const SIGNAL_CAPABILITY_MAX_LIFETIME_SECONDS: i64 = 604_800;

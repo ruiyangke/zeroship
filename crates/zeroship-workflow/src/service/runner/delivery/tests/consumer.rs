@@ -1075,7 +1075,9 @@ impl NativeManager {
     async fn establish(&self, source: &Policies, after: Option<i64>) -> Option<Revision> {
         let request = zeroship_core::workflow_policy::PolicyLeaseRequest {
             scope: self.scope.clone(),
-            establish_after: after.map(|epoch| Revision::try_from(epoch).unwrap()),
+            establish: after.map(|epoch| zeroship_core::workflow_policy::EstablishIngress {
+                after: Some(Revision::try_from(epoch).unwrap()),
+            }),
             ingress_used: true,
         };
         self.coordinator
@@ -1363,7 +1365,9 @@ async fn consumer_delivers_close_under_archived_policy_and_the_scope_retires() {
             "enrolled-key",
             &zeroship_core::workflow_policy::PolicyLeaseRequest {
                 scope: manager.scope.clone(),
-                establish_after: Some(Revision::try_from(1).unwrap()),
+                establish: Some(zeroship_core::workflow_policy::EstablishIngress {
+                    after: Some(Revision::try_from(1).unwrap()),
+                }),
                 ingress_used: false,
             },
             &source,

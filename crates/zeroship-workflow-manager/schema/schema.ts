@@ -172,13 +172,16 @@ export function workflowManagerSchema(namespace) {
   ]);
   table("schedule_occurrences", { schema: namespace }).index("schedule_occurrences_job_key").add({ on: ["app_id", "job_id"], unique: true });
 
-  // The scope row is the ingress epoch's tombstone: it survives retirement so an
-  // epoch is never reused. A closing attempt records the app's dispatch cursor
-  // as its watermark and names its Close job through a scoped reference.
+  // The scope row is the ingress epoch's tombstone: it survives retirement and
+  // abandonment so an epoch is never reused. A closing attempt records the
+  // app's dispatch cursor as its watermark and names its Close job through a
+  // scoped reference. active_at is the latest activity of the current epoch;
+  // close_after and close_attempts pace closing attempts.
   create("recovery_scopes", {
     deployment_id: text(), activation_revision: integer(),
     ingress_epoch: integer(), state: text(),
-    closing_watermark: t.bigInt(), close_job_id: t.text(), last_ingress_at: t.bigInt(),
+    closing_watermark: t.bigInt(), close_job_id: t.text(), active_at: integer(),
+    close_after: t.bigInt(), close_attempts: integer().default(0),
   }, ["id"], [
     fk("recovery_scope", ["id"], "queue_scopes", ["id"]),
     fk("recovery_close_job", ["id", "close_job_id"], "jobs", ["app_id", "id"]),

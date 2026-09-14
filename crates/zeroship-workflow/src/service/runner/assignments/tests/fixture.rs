@@ -123,7 +123,7 @@ impl Fixture {
             endpoints::WORKFLOW_POLICY_LEASE,
             json!(PolicyLeaseRequest {
                 scope: scope.clone(),
-                establish_after: None,
+                establish: None,
                 ingress_used: false,
             }),
             json!(PolicyLease {

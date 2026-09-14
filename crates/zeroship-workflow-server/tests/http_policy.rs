@@ -41,7 +41,7 @@ use zeroship_core::{
         AssignScope, AssignedScope, Failure, FailureCode, RegisterWorker, RequestId, WorkerId,
         WorkerState, AUDIENCE,
     },
-    workflow_policy::{AppPolicy, PolicyLease, PolicyLeaseRequest},
+    workflow_policy::{AppPolicy, EstablishIngress, PolicyLease, PolicyLeaseRequest},
 };
 use zeroship_workflow_manager::{
     policy::{PolicyObservation, PolicySource},
@@ -399,7 +399,7 @@ async fn enrollment_changes_while_policy_source_waits_refuse_the_old_signer() {
 fn plain(scope: &AssignedScope) -> PolicyLeaseRequest {
     PolicyLeaseRequest {
         scope: scope.clone(),
-        establish_after: None,
+        establish: None,
         ingress_used: false,
     }
 }
@@ -442,9 +442,12 @@ async fn policy_route_establishes_an_epoch_above_the_named_one() {
             .configure(zeroship_workflow_server::configure),
     )
     .await;
+    // `None` is a plain refresh; `Some(0)` names no refused epoch, as at startup.
     let exchange = async |after: Option<i64>| {
         let body = PolicyLeaseRequest {
-            establish_after: after.map(|epoch| epoch.try_into().unwrap()),
+            establish: after.map(|epoch| EstablishIngress {
+                after: (epoch > 0).then(|| epoch.try_into().unwrap()),
+            }),
             ingress_used: after.is_some(),
             ..plain(&fixture.scope)
         };
@@ -463,6 +466,7 @@ async fn policy_route_establishes_an_epoch_above_the_named_one() {
         }
     };
     assert_eq!(exchange(None).await, Ok(Some(1)));
+    assert_eq!(exchange(Some(0)).await, Ok(Some(1)), "startup keeps the open epoch");
     assert_eq!(exchange(Some(1)).await, Ok(Some(2)));
     assert_eq!(exchange(Some(1)).await, Ok(Some(2)));
     assert_eq!(exchange(None).await, Ok(Some(2)));

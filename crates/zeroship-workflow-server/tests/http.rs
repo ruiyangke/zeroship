@@ -996,7 +996,7 @@ fn plain_request(
 ) -> zeroship_core::workflow_policy::PolicyLeaseRequest {
     zeroship_core::workflow_policy::PolicyLeaseRequest {
         scope: scope.clone(),
-        establish_after: None,
+        establish: None,
         ingress_used: false,
     }
 }

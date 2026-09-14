@@ -105,7 +105,7 @@ impl Coordinator {
                         let ingress_epoch = Box::pin(crate::recovery::lease_epoch_in(
                             &tx,
                             &scope.app_id,
-                            request.establish_after,
+                            request.establish,
                             request.ingress_used,
                             observation.policy().admission,
                             sample.millis,

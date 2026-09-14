@@ -868,7 +868,7 @@ fn observations_reject_invalid_or_expired_raw_authority() {
 fn plain(scope: &AssignedScope) -> PolicyLeaseRequest {
     PolicyLeaseRequest {
         scope: scope.clone(),
-        establish_after: None,
+        establish: None,
         ingress_used: false,
     }
 }

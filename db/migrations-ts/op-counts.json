@@ -278,5 +278,10 @@
     "file": "20260914000200_deploy_publication_references.ts",
     "name": "deploy_publication_references",
     "opCount": 2
+  },
+  {
+    "file": "20260914000300_workflow_app_deletion.ts",
+    "name": "workflow_app_deletion",
+    "opCount": 1
   }
 ]

@@ -153,7 +153,9 @@ fn fixed_integer_fields_reject_wire_overflow_and_coercion() {
 #[test]
 fn lease_requests_are_closed_and_name_an_optional_prior_epoch() {
     use zeroship_core::{
-        app_id::AppId, workflow_coordination::AssignedScope, workflow_policy::PolicyLeaseRequest,
+        app_id::AppId,
+        workflow_coordination::AssignedScope,
+        workflow_policy::{EstablishIngress, PolicyLeaseRequest},
     };
     let scope = AssignedScope {
         app_id: AppId::mint(),
@@ -161,33 +163,51 @@ fn lease_requests_are_closed_and_name_an_optional_prior_epoch() {
     };
     let plain = PolicyLeaseRequest {
         scope: scope.clone(),
-        establish_after: None,
+        establish: None,
         ingress_used: false,
     };
     let wire = serde_json::to_value(&plain).unwrap();
     assert_eq!(
         wire,
         json!({"scope":{"appId":scope.app_id,"assignmentRevision":2},
-            "establishAfter":null,"ingressUsed":false})
+            "establish":null,"ingressUsed":false})
     );
     assert_eq!(
         serde_json::from_value::<PolicyLeaseRequest>(wire).unwrap(),
         plain
     );
+    // Startup names no refused epoch; the manager returns or opens one.
+    let startup = PolicyLeaseRequest {
+        establish: Some(EstablishIngress { after: None }),
+        ..plain.clone()
+    };
+    let started = serde_json::to_value(&startup).unwrap();
+    assert_eq!(started["establish"], json!({"after":null}));
+    assert_eq!(
+        serde_json::from_value::<PolicyLeaseRequest>(started).unwrap(),
+        startup
+    );
     let establish = PolicyLeaseRequest {
-        establish_after: Some(5.try_into().unwrap()),
+        establish: Some(EstablishIngress {
+            after: Some(5.try_into().unwrap()),
+        }),
         ingress_used: true,
         ..plain
     };
     let established = serde_json::to_value(&establish).unwrap();
-    assert_eq!(established["establishAfter"], json!(5));
+    assert_eq!(established["establish"], json!({"after":5}));
     assert_eq!(
         serde_json::from_value::<PolicyLeaseRequest>(established.clone()).unwrap(),
         establish
     );
     for bad in [json!(0), json!(-1), json!(1.5), json!("1")] {
         let mut invalid = established.clone();
-        invalid["establishAfter"] = bad;
+        invalid["establish"]["after"] = bad;
+        assert!(serde_json::from_value::<PolicyLeaseRequest>(invalid).is_err());
+    }
+    for bad in [json!(5), json!(true), json!({"after":5,"epoch":6})] {
+        let mut invalid = established.clone();
+        invalid["establish"] = bad;
         assert!(serde_json::from_value::<PolicyLeaseRequest>(invalid).is_err());
     }
     for bad in [Value::Null, json!(0), json!("true")] {

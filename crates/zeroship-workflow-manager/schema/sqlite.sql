@@ -123,7 +123,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS "schedule_occurrences_scope_key" ON "schedule_
 
 CREATE UNIQUE INDEX IF NOT EXISTS "schedule_occurrences_job_key" ON "schedule_occurrences" ("app_id", "job_id");
 
-CREATE TABLE "recovery_scopes" ("id" TEXT PRIMARY KEY NOT NULL, "deployment_id" TEXT NOT NULL, "activation_revision" INTEGER NOT NULL, "ingress_epoch" INTEGER NOT NULL, "state" TEXT NOT NULL, "closing_watermark" INTEGER, "close_job_id" TEXT, "last_ingress_at" INTEGER, CONSTRAINT "recovery_close_job" FOREIGN KEY (id, close_job_id) REFERENCES jobs(app_id, id) ON DELETE RESTRICT, CONSTRAINT "recovery_scope" FOREIGN KEY (id) REFERENCES queue_scopes(id) ON DELETE RESTRICT);
+CREATE TABLE "recovery_scopes" ("id" TEXT PRIMARY KEY NOT NULL, "deployment_id" TEXT NOT NULL, "activation_revision" INTEGER NOT NULL, "ingress_epoch" INTEGER NOT NULL, "state" TEXT NOT NULL, "closing_watermark" INTEGER, "close_job_id" TEXT, "active_at" INTEGER NOT NULL, "close_after" INTEGER, "close_attempts" INTEGER NOT NULL DEFAULT 0, CONSTRAINT "recovery_close_job" FOREIGN KEY (id, close_job_id) REFERENCES jobs(app_id, id) ON DELETE RESTRICT, CONSTRAINT "recovery_scope" FOREIGN KEY (id) REFERENCES queue_scopes(id) ON DELETE RESTRICT);
 
 CREATE INDEX IF NOT EXISTS "recovery_close_job_idx" ON "recovery_scopes" ("id", "close_job_id");
 
@@ -138,4 +138,4 @@ CREATE UNIQUE INDEX IF NOT EXISTS "recovery_duties_scope_key" ON "recovery_dutie
 CREATE INDEX IF NOT EXISTS "recovery_duties_due_idx" ON "recovery_duties" ("kind", "next_due_at", "app_id");
 
 SELECT 1;
-INSERT INTO main.schema_version (id, fingerprint) VALUES ('manager', '92b9bf2a59887fbc17bf77c853145cac83db7256e9a8947c8547728bd91b3e7a');
+INSERT INTO main.schema_version (id, fingerprint) VALUES ('manager', '5bf17bd3a131495b50b784d5b0255decced1c30b707c5d2a390d3588589df64e');
