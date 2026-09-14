@@ -101,9 +101,10 @@
 #     verifies a service assertion, so neither holds a peer bundle and neither
 #     has anything to refuse.
 #   - how the `forged` document gets WRITTEN. This gate rules on the reader.
-#     The writer is `zeroship dev init`, whose `SERVICE_KEY_FILES` rustdoc has
-#     always said four keys and not one shared file; it now refuses a secrets
-#     directory in which two of the four paths hold the same key, and
+#     The writer is `zeroship dev init`, whose `SERVICE_KEY_FILES` rustdoc says
+#     one key per service and not one shared file; it refuses a secrets
+#     directory in which two service key paths, or a service key path and the
+#     worker enroller credential, hold the same key, and
 #     `dev_init_refuses_when_two_service_key_paths_hold_the_same_key` in
 #     crates/zeroship-cli/tests/dev_init_test.rs is the one-variable control for
 #     that. The two halves are deliberately separate: an operator can hand a
