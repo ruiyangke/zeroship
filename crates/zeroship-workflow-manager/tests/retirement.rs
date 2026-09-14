@@ -595,10 +595,11 @@ async fn claim_rearm(fixture: &Fixture) {
     host.settle(&grant, JobOutcome::Completed {}).await.unwrap();
 
     // Later intent-producing claims find the scope open and only record activity.
+    compio::time::sleep(Duration::from_millis(5)).await;
     let grant = host.claim().await.unwrap();
     assert_eq!(grant.delivery().job, second);
     let later = host.state().await;
-    assert!(later.active_at >= reopened.active_at);
+    assert!(later.active_at > reopened.active_at, "a claim is activity");
     assert_eq!(Responsibility { active_at: reopened.active_at, ..later }, reopened);
     assert_eq!(duties(fixture, &host.app).await.len(), 2);
 }
@@ -638,9 +639,10 @@ async fn publication_rearm(fixture: &Fixture) {
     assert_eq!(reopened.ingress_epoch, revision(2));
     assert_eq!(duties(fixture, &host.app).await.len(), 2);
     assert_eq!(host.publish(&job).await.unwrap(), job);
+    compio::time::sleep(Duration::from_millis(5)).await;
     host.publish(&fanout(&host.app, FUTURE)).await.unwrap();
     let later = host.state().await;
-    assert!(later.active_at >= reopened.active_at, "publication is activity");
+    assert!(later.active_at > reopened.active_at, "publication is activity");
     assert_eq!(Responsibility { active_at: reopened.active_at, ..later }, reopened);
     assert_eq!(duties(fixture, &host.app).await.len(), 2);
 }

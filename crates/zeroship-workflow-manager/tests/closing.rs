@@ -315,6 +315,24 @@ async fn postpone_duties(fixture: &Fixture, app: &AppId) {
     assert!(matches!(updated, Output::Count(2)), "{updated:?}");
 }
 
+/// Rewind scope columns the manager stamps from its clock, standing in for
+/// elapsed time a test would otherwise have to wait out.
+async fn rewind(fixture: &Fixture, app: &AppId, patch: Value) {
+    let updated = fixture
+        .database()
+        .await
+        .collection("recovery_scopes")
+        .unwrap()
+        .execute(Operation::Update {
+            filter: value!({"id":app.as_str()}),
+            patch,
+            many: true,
+        })
+        .await
+        .unwrap();
+    assert!(matches!(updated, Output::Count(1)), "{updated:?}");
+}
+
 async fn duties(fixture: &Fixture, app: &AppId) -> usize {
     rows(fixture, "recovery_duties", value!({"app_id":app.as_str()}))
         .await
@@ -344,12 +362,28 @@ async fn idleness(fixture: &Fixture) {
         Closing::Kept
     );
     assert_eq!(host.state().await.state, ScopeState::Open);
-    compio::time::sleep(TICK * 5).await;
-    let eager = host.recovery(options(TICK, HOUR, HOUR, HOUR));
-    let close = started(eager.closing_turn(&host.app).await.unwrap());
+    // Reported ingress and a worker publication each restart the idle window.
+    let watchful = host.recovery(options(TICK * 5000, HOUR, HOUR, HOUR));
+    rewind(fixture, &host.app, value!({"active_at":0})).await;
+    watchful.note_ingress(&host.app).await.unwrap();
+    assert_eq!(
+        watchful.closing_turn(&host.app).await.unwrap(),
+        Closing::Kept,
+        "reported ingress restarts the idle window"
+    );
+    rewind(fixture, &host.app, value!({"active_at":0})).await;
+    host.publish(&fanout(&host.app, FUTURE)).await.unwrap();
+    assert_eq!(
+        watchful.closing_turn(&host.app).await.unwrap(),
+        Closing::Kept,
+        "a worker publication restarts the idle window"
+    );
+    // The same turn over the same aged row, with no activity, begins closing.
+    rewind(fixture, &host.app, value!({"active_at":0})).await;
+    let close = started(watchful.closing_turn(&host.app).await.unwrap());
     assert_eq!(close.operation, JobOperation::Close { epoch: revision(1) });
     assert_eq!(
-        eager.closing_turn(&host.app).await.unwrap(),
+        watchful.closing_turn(&host.app).await.unwrap(),
         Closing::Pending(close.clone()),
         "replicas and later turns converge on one attempt"
     );
@@ -357,7 +391,7 @@ async fn idleness(fixture: &Fixture) {
     host.settle_close(&close, true).await;
     assert_eq!(host.state().await.state, ScopeState::Retired);
     assert_eq!(
-        eager.closing_turn(&host.app).await.unwrap(),
+        watchful.closing_turn(&host.app).await.unwrap(),
         Closing::Inactive
     );
     let retired = host.state().await;
@@ -450,8 +484,8 @@ async fn deferred(fixture: &Fixture) {
     let host = host(fixture).await;
     host.publish(&fanout(&host.app, 0)).await.unwrap();
     let leased = host.claim().await.unwrap();
-    compio::time::sleep(TICK * 5).await;
-    let quick = host.recovery(options(TICK, HOUR, TICK * 50, TICK * 50));
+    let quick = host.recovery(options(TICK, HOUR, HOUR, HOUR));
+    rewind(fixture, &host.app, value!({"active_at":0})).await;
     assert_eq!(
         quick.closing_turn(&host.app).await.unwrap(),
         Closing::Deferred
@@ -472,8 +506,13 @@ async fn deferred(fixture: &Fixture) {
         Closing::Deferred,
         "the backoff defers the next turn"
     );
+    assert_eq!(
+        host.state().await.close_attempts,
+        1,
+        "a turn the backoff defers makes no attempt"
+    );
     host.settle(&leased, JobOutcome::Completed {}).await;
-    compio::time::sleep(TICK * 60).await;
+    rewind(fixture, &host.app, value!({"active_at":0,"close_after":0})).await;
     let close = started(quick.closing_turn(&host.app).await.unwrap());
     assert_eq!(host.state().await.close_attempts, 2);
     host.settle_close(&close, true).await;
@@ -584,6 +623,19 @@ async fn driver_lane(fixture: &Fixture) {
         assert_eq!(host.state().await.state, ScopeState::Open);
     }
     *deletions.unavailable.borrow_mut() = false;
+    // Under a longer idle window no scope is a candidate, deleted or not.
+    let mut patient = Driver::new(
+        idle.queue.clone(),
+        driver::Options {
+            recovery: options(HOUR, HOUR, HOUR, HOUR),
+            ..driver::Options::default()
+        },
+        deletions.clone(),
+    )
+    .unwrap();
+    let report = patient.tick().await.closing;
+    assert_eq!((report.visited, report.scan_error), (0, None), "{report:?}");
+    assert_eq!(deleted.state().await.state, ScopeState::Open);
 
     let mut driver = Driver::new(idle.queue.clone(), driver_options, deletions).unwrap();
     let report = driver.tick().await.closing;
