@@ -584,7 +584,7 @@ impl ServiceAuthorization {
 /// Return the measured service-to-service machine-identity table.
 #[must_use]
 pub fn service_allowlist() -> &'static [ServiceAuthorization] {
-    static ALLOWLIST: OnceLock<[ServiceAuthorization; 6]> = OnceLock::new();
+    static ALLOWLIST: OnceLock<[ServiceAuthorization; 7]> = OnceLock::new();
 
     ALLOWLIST.get_or_init(|| {
         let principal = |name| {
@@ -664,13 +664,36 @@ pub fn service_allowlist() -> &'static [ServiceAuthorization] {
                     endpoints::CONTROL_APP,
                     endpoints::CONTROL_APP_ENV,
                     endpoints::CONTROL_APP_DATA_KEY,
-                    // Enrolment authenticates with THIS SHARED ROLE KEY, so a
-                    // holder of it can enrol many instances. That is a
-                    // DISTINGUISHER, not a boundary: what it buys is
-                    // attribution, per-instance revocation and a countable
-                    // event, and it is what makes the narrowing above writable
-                    // at all. Do not read this grant as a fence against a
-                    // role-key holder.
+                    // CONTROL_WORKER_ENROL IS NOT HERE. Option 1A of the
+                    // worker-enrollment-bootstrap design moved it to
+                    // `svc/worker-enroller` below: no process holds a bare
+                    // `svc/worker` role signing key any more, so an active
+                    // INSTANCE assertion cannot reach this endpoint at all,
+                    // however it is presented. Enrolling instances keep
+                    // every other grant in this list.
+                ],
+            ),
+            ServiceAuthorization::new(
+                principal("svc/worker-enroller"),
+                &[
+                    // The sole grant this principal holds. An enroller is a
+                    // deployment unit's bootstrap credential (one Ed25519
+                    // keypair per host or pool, mounted where `svc-worker.pem`
+                    // used to be), and every caller mints under an INSTANCE
+                    // identifier of this role naming the enroller row Control
+                    // resolves and locks
+                    // (`crates/zeroship-control/src/worker_enrolment.rs`).
+                    //
+                    // Enrolling still authenticates with a KEY SHARED BY THE
+                    // UNIT, so a holder of it can enrol many instances in that
+                    // unit and zone. That is a DISTINGUISHER against the unit,
+                    // not a boundary within it -- see the design's own
+                    // "honest weaknesses": revocation for cause targets the
+                    // whole enroller, and the unit's healthy peers need a new
+                    // key. What the split from `svc/worker` buys is that
+                    // revoking the unit's enroller now revokes every
+                    // instance it ever enrolled, in one operator transaction,
+                    // with no fresh identity able to restore it.
                     endpoints::CONTROL_WORKER_ENROL,
                 ],
             ),

@@ -140,6 +140,21 @@ pub const SERVICE_TRUST_DOMAIN: &str = "zeroship.ai";
 pub const GATEWAY_SERVICE_NAME: &str = "svc/gateway";
 /// The hierarchical name of the worker's service identity.
 pub const WORKER_SERVICE_NAME: &str = "svc/worker";
+/// The hierarchical name of a deployment unit's enrolment identity (option 1A
+/// of the worker-enrollment-bootstrap design).
+///
+/// An enroller is a HOST OR POOL's bootstrap credential, one Ed25519 keypair
+/// per deployment unit, provisioned by the operator and mounted into that
+/// unit's worker containers in place of a shared `svc/worker` role key. Only
+/// this principal holds `CONTROL_WORKER_ENROL`
+/// (`crates/zeroship-core/src/service_identity.rs`); an enrolled worker
+/// INSTANCE cannot enrol another instance, and no process holds a bare
+/// `svc/worker` role signing key at all. Every enroller mints under an
+/// INSTANCE identifier of this role (`svc/worker-enroller/<wen_id>`), never
+/// under the bare role name, exactly as a worker instance does today under
+/// `svc/worker/<wkr_id>` -- see `crates/zeroship-control/src/worker_enrolment.rs`
+/// for how Control resolves and locks the enroller row that identifier names.
+pub const WORKER_ENROLLER_SERVICE_NAME: &str = "svc/worker-enroller";
 /// The hierarchical name of the control plane's service identity.
 pub const CONTROL_SERVICE_NAME: &str = "svc/control";
 /// The hierarchical name of the workflow manager's service identity.
@@ -1020,13 +1035,14 @@ mod tests {
         let names = [
             GATEWAY_SERVICE_NAME,
             WORKER_SERVICE_NAME,
+            WORKER_ENROLLER_SERVICE_NAME,
             CONTROL_SERVICE_NAME,
             WORKFLOW_SERVICE_NAME,
             AUTH_SERVICE_NAME,
         ];
         // The floor is the whole constant list, not a sample: a name added
         // without an issuer that parses would be an edge nobody can address.
-        assert_eq!(names.len(), 5);
+        assert_eq!(names.len(), 6);
         for name in names {
             let issuer = service_issuer(name).expect("named service issuer parses");
             assert_eq!(issuer.as_str(), format!("spiffe://zeroship.ai/{name}"));
