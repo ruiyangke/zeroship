@@ -114,10 +114,20 @@ zeroship_data_orm::orm::schema! {
             #[orm(primary_key)]
             id: Text,
             app_id: Text,
+            run_id: Text,
             request_id: Text,
+            revision: BigInt,
             digest: Text,
             outcome: Text,
             created_at: BigInt,
+        }
+
+        __zeroship_workflow_management_scopes {
+            #[orm(primary_key)]
+            id: Text,
+            app_id: Text,
+            run_id: Text,
+            revision: BigInt,
         }
 
         __zeroship_workflow_occurrences {

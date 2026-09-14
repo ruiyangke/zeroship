@@ -1005,6 +1005,17 @@
             "valueColumn": "app_id"
           }
         },
+        "run_id": {
+          "type": "string",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "run_id"
+          }
+        },
         "request_id": {
           "type": "string",
           "required": true,
@@ -1014,6 +1025,17 @@
           "projectable": true,
           "storage": {
             "valueColumn": "request_id"
+          }
+        },
+        "revision": {
+          "type": "bigInt",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "revision"
           }
         },
         "digest": {
@@ -1061,6 +1083,79 @@
           "fields": [
             "app_id",
             "request_id"
+          ],
+          "unique": true
+        },
+        {
+          "name": "__zeroship_workflow_management_revision_identity",
+          "fields": [
+            "app_id",
+            "run_id",
+            "revision"
+          ],
+          "unique": true
+        }
+      ]
+    },
+    "__zeroship_workflow_management_scopes": {
+      "fields": {
+        "id": {
+          "type": "string",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "id"
+          },
+          "primaryKey": true
+        },
+        "app_id": {
+          "type": "string",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "app_id"
+          }
+        },
+        "run_id": {
+          "type": "string",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "run_id"
+          }
+        },
+        "revision": {
+          "type": "bigInt",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "revision"
+          }
+        }
+      },
+      "options": {
+        "softDelete": false,
+        "versioning": false,
+        "strictness": "strict"
+      },
+      "indexes": [
+        {
+          "name": "__zeroship_workflow_management_scopes_scope_key",
+          "fields": [
+            "app_id",
+            "run_id"
           ],
           "unique": true
         }

@@ -3,16 +3,14 @@
     reason = "restart integrity tests own compio-local journal transactions"
 )]
 
+use super::super::management::fixture::{latest, started};
 use super::super::*;
 use crate::{
     deployment_holds::HoldScope,
     service::{app, store::Row},
 };
 use std::collections::BTreeMap;
-use zeroship_core::workflow_coordination::{
-    ManageRun, ManagementOperation, ManagementOutcome, RestartDeploy, RestartOptions, RunId,
-    RunState,
-};
+use zeroship_core::workflow_coordination::{ManagementOutcome, RunState};
 use zeroship_data_orm::{orm::Operation, value, Value};
 
 macro_rules! case {
@@ -55,20 +53,6 @@ async fn start(service: &WorkflowService, app: &AppId) -> String {
         .await
         .unwrap()
         .id
-}
-
-fn restart(app: &AppId, run: &str, deploy: RestartDeploy) -> ManageRun {
-    ManageRun {
-        request_id: RequestId::mint(),
-        app_id: app.clone(),
-        run_id: RunId::parse(run).unwrap(),
-        command: ManagementOperation::Restart {
-            options: RestartOptions {
-                deploy: Some(deploy),
-                ..Default::default()
-            },
-        },
-    }
 }
 
 fn applied() -> ManagementOutcome {
@@ -127,6 +111,8 @@ async fn snapshot(service: &WorkflowService) -> Snapshot {
         "generations",
         "job_publications",
         "management_receipts",
+        "management_scopes",
+        "job_receipts",
         "requests",
         "outbox",
         "deploys",
@@ -277,6 +263,7 @@ async fn damaged_identity(store: Rc<OrmStore>) {
     let damage = damage_cases(&owner, &foreign, &run, &original, &alternative);
 
     let mut generation = 0;
+    let mut revision = 1;
     for mut damaged in damage {
         // Each successful repair becomes the source generation of the next attempt.
         if damaged.table == "generations" {
@@ -291,8 +278,8 @@ async fn damaged_identity(store: Rc<OrmStore>) {
         )
         .await;
         let before = snapshot(&journal).await;
-        let request = restart(&owner, &run, RestartDeploy::Started);
-        let result = scope.apply_management(&request).await;
+        let request = started(&owner, &run, revision);
+        let result = scope.management_outcome(&request).await;
         assert!(
             result.is_err(),
             "{} must be retryable: {result:?}",
@@ -306,12 +293,13 @@ async fn damaged_identity(store: Rc<OrmStore>) {
         );
         restore(&service, damaged.table, stored.0).await;
         assert_eq!(
-            scope.apply_management(&request).await.unwrap(),
+            scope.management_outcome(&request).await.unwrap(),
             applied(),
             "{}",
             damaged.name
         );
         generation += 1;
+        revision += 1;
         assert_generation(&journal, &owner, &run, generation, &original.id).await;
     }
 
@@ -331,15 +319,15 @@ async fn damaged_identity(store: Rc<OrmStore>) {
     .await;
     patch(&journal, "runs", &run, value!({"generation":-1})).await;
     let before = snapshot(&journal).await;
-    let request = restart(&owner, &run, RestartDeploy::Started);
+    let request = started(&owner, &run, revision);
     assert!(matches!(
-        scope.apply_management(&request).await,
+        scope.management_outcome(&request).await,
         Err(WorkflowServiceError::Unavailable(_))
     ));
     assert_eq!(snapshot(&journal).await, before);
     restore(&journal, "generations", source.0).await;
     restore(&journal, "runs", head.0).await;
-    assert_eq!(scope.apply_management(&request).await.unwrap(), applied());
+    assert_eq!(scope.management_outcome(&request).await.unwrap(), applied());
     assert_generation(&journal, &owner, &run, generation + 1, &original.id).await;
 }
 
@@ -352,7 +340,7 @@ async fn current_source(store: Rc<OrmStore>) {
     let scope = service.fixture_app(owner.clone());
     assert_eq!(
         scope
-            .apply_management(&restart(&owner, &run, RestartDeploy::Latest))
+            .management_outcome(&latest(&owner, &run, 1, &replacement))
             .await
             .unwrap(),
         applied()
@@ -367,7 +355,7 @@ async fn current_source(store: Rc<OrmStore>) {
     assert_eq!(
         journal
             .fixture_app(owner.clone())
-            .apply_management(&restart(&owner, &run, RestartDeploy::Started))
+            .management_outcome(&started(&owner, &run, 2))
             .await
             .unwrap(),
         applied()
@@ -393,8 +381,11 @@ async fn receipt_replay(store: Rc<OrmStore>) {
         .await
         .unwrap();
     let scope = journal.fixture_app(owner.clone());
-    let completed = restart(&owner, &run, RestartDeploy::Started);
-    assert_eq!(scope.apply_management(&completed).await.unwrap(), applied());
+    let completed = started(&owner, &run, 1);
+    assert_eq!(
+        scope.management_outcome(&completed).await.unwrap(),
+        applied()
+    );
     let hold = one(
         &journal,
         "deployment_holds",
@@ -409,13 +400,16 @@ async fn receipt_replay(store: Rc<OrmStore>) {
     )
     .await;
     let before = snapshot(&journal).await;
-    assert_eq!(scope.apply_management(&completed).await.unwrap(), applied());
+    assert_eq!(
+        scope.management_outcome(&completed).await.unwrap(),
+        applied()
+    );
     assert_eq!(snapshot(&journal).await, before);
 
-    let pending = restart(&owner, &run, RestartDeploy::Started);
-    assert!(scope.apply_management(&pending).await.is_err());
+    let pending = started(&owner, &run, 2);
+    assert!(scope.management_outcome(&pending).await.is_err());
     assert_eq!(snapshot(&journal).await, before);
     restore(&journal, "deployment_holds", hold.0).await;
-    assert_eq!(scope.apply_management(&pending).await.unwrap(), applied());
+    assert_eq!(scope.management_outcome(&pending).await.unwrap(), applied());
     assert_generation(&journal, &owner, &run, 2, &deployment.id).await;
 }

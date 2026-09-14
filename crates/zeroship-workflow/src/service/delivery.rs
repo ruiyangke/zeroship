@@ -121,6 +121,11 @@ pub(super) struct CapturedLease {
     policy: PolicyAuthority,
 }
 impl CapturedLease {
+    pub(super) fn bind(&self, scope: &AppWorkflows) -> Result<AppWorkflows, WorkflowServiceError> {
+        self.check(scope)?;
+        scope.clone().with_authority(self.policy.clone())
+    }
+
     pub(super) fn capture(
         scope: &AppWorkflows,
         lease: &impl JobLease,
@@ -144,11 +149,11 @@ impl CapturedLease {
         })
     }
     pub(super) fn check(&self, scope: &AppWorkflows) -> Result<(), WorkflowServiceError> {
-        remaining(self)?;
         if !self.policy.belongs_to(&scope.binding) {
             return Err(WorkflowServiceError::PermissionDenied);
         }
-        self.policy.check()
+        self.policy.check()?;
+        remaining(self).map(|_| ())
     }
 }
 impl CapturedLease {
@@ -213,7 +218,12 @@ impl Record {
                     && self.reconciliation.is_some()
                     && self.reconciliation_next.is_some()
             }
-            JobOperation::Management { .. } | JobOperation::Collect {} => false,
+            JobOperation::Management { .. } => {
+                self.run_id.is_none()
+                    && self.reconciliation.is_none()
+                    && self.reconciliation_next.is_none()
+            }
+            JobOperation::Collect {} => false,
         };
         if !valid {
             return Err(invalid());
@@ -267,7 +277,8 @@ const fn valid_outcome(operation: &JobOperation, outcome: JobOutcome) -> bool {
         JobOperation::Reconcile {} => {
             matches!(outcome, JobOutcome::Completed {} | JobOutcome::Waiting {})
         }
-        JobOperation::Management { .. } | JobOperation::Collect {} => false,
+        JobOperation::Management { .. } => matches!(outcome, JobOutcome::Management { .. }),
+        JobOperation::Collect {} => false,
     }
 }
 
@@ -605,7 +616,13 @@ impl AppWorkflows {
         job: &JobSpec,
     ) -> Result<Option<JobReceipt>, WorkflowServiceError> {
         check_scope(&self.app, job)?;
-        let tx = self.service.begin_history().await?;
+        let mut tx = self.service.begin_history().await?;
+        if matches!(job.operation, JobOperation::Management { .. }) {
+            lock_app_state(&mut tx, &self.app).await?;
+            let receipt = super::management::receipt(&tx, job).await?;
+            tx.commit().await?;
+            return Ok(receipt);
+        }
         if matches!(job.operation, JobOperation::Cron { .. }) {
             let receipt = super::cron::receipt(&tx, job).await?;
             tx.commit().await?;

@@ -2,6 +2,7 @@ use super::*;
 mod activation;
 mod consumer;
 mod cron;
+mod management;
 use crate::{
     operations::{RunState, StartOptions},
     service::{
@@ -374,39 +375,10 @@ async fn unrepresentable_retry_delay_is_rejected_before_execution() {
 }
 
 #[compio::test]
-async fn unsupported_management_and_collection_never_execute_or_settle() {
-    use zeroship_core::{
-        workflow_coordination::RunOperation,
-        workflow_jobs::{JobId, ManagementCommand},
-    };
-
+async fn unsupported_collection_never_executes_or_settles() {
+    use zeroship_core::workflow_jobs::JobId;
     let fixture = Fixture::new(AppPolicy::default()).await;
-    let JobOperation::Advance {
-        deployment_id,
-        run_id,
-        ..
-    } = &fixture.job.operation
-    else {
-        panic!("fixture must publish an executable frontier")
-    };
-    let commands = [
-        ManagementCommand::Transition {
-            operation: RunOperation::Cancel,
-        },
-        ManagementCommand::RestartStarted { from: None },
-        ManagementCommand::RestartLatest {
-            deployment_id: deployment_id.clone(),
-        },
-    ];
-    let operations = commands
-        .into_iter()
-        .map(|command| JobOperation::Management {
-            request_id: RequestId::mint(),
-            run_id: run_id.clone(),
-            revision: 1.try_into().unwrap(),
-            command,
-        })
-        .chain([JobOperation::Collect {}]);
+    let operations = [JobOperation::Collect {}];
     let mut slot = fixture.slot(Duration::from_secs(5));
     for operation in operations {
         let mut lease = fixture.lease.clone();

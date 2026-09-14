@@ -177,8 +177,17 @@ export function workflowSchema(namespace) {
     ...identity(), request_id: text(), operation: text(), digest: text(), result: text(), created_at: integer(),
   }, ["app_id", "request_id"], [appFk("requests")]);
   create("management_receipts", {
-    ...identity(), request_id: text(), digest: text(), outcome: text(), created_at: integer(),
-  }, ["app_id", "request_id"], [appFk("management_receipts")]);
+    ...runIdentity(), request_id: text(), revision: integer(), digest: text(), outcome: text(), created_at: integer(),
+  }, ["app_id", "request_id"], [
+    appFk("management_receipts"),
+    fk("management_job_receipt", ["app_id", "id"], "job_receipts", ["app_id", "id"]),
+  ], [{ name: "management_revision_identity", columns: ["app_id", "run_id", "revision"] }]);
+  create("management_scopes", {
+    ...runIdentity(), revision: integer(),
+  }, ["app_id", "run_id"], [
+    appFk("management_scopes"),
+    fk("management_scope_head", ["app_id", "run_id", "revision"], "management_receipts", ["app_id", "run_id", "revision"]),
+  ]);
   create("occurrences", {
     ...identity(), schedule_id: text(), revision: integer(), at: integer(), job_id: text(), run_id: t.text(),
   }, ["app_id", "schedule_id", "revision", "at"], [
@@ -227,6 +236,8 @@ export function workflowSchema(namespace) {
         job_receipts: ["id", "app_id", "run_id"],
         activations: ["id", "app_id", "deploy_id"],
         activation_scopes: ["id", "activation_id"],
+        management_receipts: ["id", "app_id", "run_id", "request_id"],
+        management_scopes: ["id", "app_id", "run_id"],
         schedules: ["id", "app_id", "name"],
         occurrences: ["id", "app_id", "schedule_id", "job_id", "run_id"],
         reconciliation_scans: ["id", "after_id", "upper_id"],
