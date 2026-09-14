@@ -70,13 +70,10 @@
 //   divergences the leg found, and all three were the gateway speaking a
 //   different error envelope from the worker. Fixed in the same change.
 //
-//   what does NOT reach the unary path on either tier, despite its own header
-//   having claimed otherwise until 2026-08-11: `__zsDispatch` from
-//   native runtime dispatch. The synthetic entry exports `default.rpc`
-//   as a plain dict, and the kernel wraps that dict in `USER_RPC`
-//   (crates/zeroship-runtime/src/core/init.rs), which calls a SECOND copy of the
-//   dispatch body written inline in that same file as `__zsDispatchRpc`.
-//   dispatcher.ts serves the SLOW path only (streams, subscriptions).
+//   the synthetic entry exports `default.rpc` as a plain dictionary. The
+//   runtime resolves the request's string procedure name in that dictionary,
+//   applies validation and capability state, then invokes the handler. Streams
+//   and subscriptions follow the matching native dispatch paths.
 //
 // `err.needsInput` below is the only procedure in this app that declares an
 // input schema, which is what makes the schema-rejection arm reachable at all.
