@@ -109,8 +109,12 @@ test("local workflow bundles retain dependencies and rebuild declarations indepe
     try {
       const oldModule = await import(pathToFileURL(join(oldPath, manifest.worker.entry)).href);
       const newModule = await import(pathToFileURL(join(newPath, updated.worker.entry)).href);
-      assert.equal(await new oldModule.default.workflows.Example().run(), "original:lazy");
-      assert.equal(await new newModule.default.workflows.Example().run(), "replacement:lazy");
+      assert.equal(typeof oldModule.Example, "function");
+      assert.equal(typeof newModule.Example, "function");
+      assert.equal(Object.hasOwn(oldModule.default, "workflows"), false);
+      assert.equal(Object.hasOwn(newModule.default, "workflows"), false);
+      assert.equal(await new oldModule.Example().run(), "original:lazy");
+      assert.equal(await new newModule.Example().run(), "replacement:lazy");
     } finally {
       Reflect.deleteProperty(globalThis, "__zs_env");
     }

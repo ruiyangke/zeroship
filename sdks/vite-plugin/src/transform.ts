@@ -1225,6 +1225,14 @@ export function transformPlugin(state: TransformState): Plugin {
         const envName = this.environment?.name;
         const isServerEnv = envName === "zeroship" || envName === "ssr";
 
+        // Each transform replaces this module's whole procedure contribution.
+        // This also clears a previous contribution when HMR removes the
+        // directive or the last wrapped export.
+        state.discoveredProcedures = state.discoveredProcedures.filter(
+          (procedure) => procedure.filePath !== id,
+        );
+        serverFunctionMap.delete(relative(root, id));
+
         // 1. Cheap textual pre-filter — skip files that obviously can't
         //    be a server module without parsing. The directive must be
         //    the first non-trivial token after the BOM / whitespace /
@@ -1431,14 +1439,12 @@ export function transformPlugin(state: TransformState): Plugin {
         // 6. Track for build report + export signature tracking
         serverFunctionMap.set(relative(root, id), new Set(names));
 
-        // 6b. Collect per-procedure metadata for the manifest emitter.
-        //     We do this once per server-env transform
-        //     pass; idempotent on (filePath, exportName). The synthetic
-        //     SSR entry's dispatch table is populated at module-init
-        //     time from the user namespace's exports — it does NOT read
-        //     this state — so we only record in the server env (where
-        //     the manifest emitter runs).
-        if (isServerEnv) {
+        // 6b. Collect per-procedure metadata for entry generation and the
+        //     manifest emitter. The client build runs before the nested server
+        //     build, so it supplies the binding map used to generate explicit
+        //     procedure imports. A later server transform replaces the same
+        //     module contribution with equivalent records.
+        {
           const { perFn, moduleConfig, perFnNode } = collectConfig(ast.body);
           const slug = moduleSlug(root, id);
           for (const fn of serverFns) {
@@ -1493,11 +1499,6 @@ export function transformPlugin(state: TransformState): Plugin {
               | "query" | "mutation" | "action" | "stream" | "subscription" | undefined =
               fn.markerKind === "procedure" ? undefined : fn.markerKind;
             const kind = explicitKind ?? wrapperKind ?? defaultKind(fn.isStream);
-            // Avoid duplicates if the transform fires twice (e.g., dev
-            // server hot-reload). Replace existing record by key.
-            const existingIdx = state.discoveredProcedures.findIndex(
-              (p) => p.filePath === id && p.exportName === fn.name,
-            );
             const record: DiscoveredProcedureRecord = {
               filePath: id,
               exportName: fn.name,
@@ -1508,8 +1509,7 @@ export function transformPlugin(state: TransformState): Plugin {
               moduleConfig,
               ...(lazy ? { lazy: true } : {}),
             };
-            if (existingIdx >= 0) state.discoveredProcedures[existingIdx] = record;
-            else state.discoveredProcedures.push(record);
+            state.discoveredProcedures.push(record);
           }
         }
 
@@ -1597,24 +1597,9 @@ export function transformPlugin(state: TransformState): Plugin {
             `  } catch (_) { /* @zeroship/server not installed — RPC dispatch still works. */ }\n` +
             `}\n`
           );
-          // Emit one module-scoped registration call so the dev-bootstrap
-          // can replace this module's whole wire-id set atomically. That
-          // lets HMR drop stale ids when a handler is renamed or deleted.
-          const registerEntries = serverFns
-            .map((fn) => {
-              const wid = wireIdFor(fn);
-              return `${JSON.stringify(wid)}: ${fn.name}`;
-            })
-            .join(", ");
-          const registerCall =
-            `if (typeof globalThis.__registerModule === "function") ` +
-            `globalThis.__registerModule(${JSON.stringify(id)}, { ${registerEntries} });`;
-
           s.append(
             `\n\n// zeroship: SSR hooks\n` +
-            `${ssrPatches}\n` +
-            `\n// zeroship: dev-bootstrap registry (harmless no-op outside dev)\n` +
-            `${registerCall}\n`
+            `${ssrPatches}\n`
           );
           return {
             code: s.toString(),

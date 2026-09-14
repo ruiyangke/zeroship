@@ -860,12 +860,12 @@ the committed migration modules into IR envelopes, and `zeroship-migrate-node`'s
 `.zship` packer does **not** carry migration documents — it reads only the
 generated `schema.runtime.json` and stages it as the manifest's
 content-addressed `runtime_descriptor` blob
-(`sdks/vite-plugin/src/zship.ts:203-216`); deploy-time application runs through
+(`stageRuntimeDescriptor` in `sdks/vite-plugin/src/zship.ts`); deploy-time application runs through
 the standalone migration service. At runtime boot, Rust validates the
 descriptor and plugin-db publishes its collection field maps natively before
-creator modules evaluate. `@zeroship/bootstrap`'s
-`installSchema(env.db, descriptor)` walks the same descriptor to
-plant typed `Collection` wrappers on the native `env.db`. So both directions
+creator modules evaluate. The DB plugin then runs
+`@zeroship/db/internal`'s `installSchema(env.db, descriptor)` to plant typed
+`Collection` wrappers on the native `env.db`. So both directions
 meet at one wire type - the v2
 `RuntimeSchemaDescriptor`: gen-types *emits* it, the `.zship` packer *carries*
 it, native boot *binds* it, and `installSchema` projects its typed JavaScript

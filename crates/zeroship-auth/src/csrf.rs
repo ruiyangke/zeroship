@@ -13,9 +13,8 @@
 //! carry an inline script (`reset`, `token_redeem_interstitial`,
 //! `device_supabase`) scrub history and submit a form, and none touches
 //! `document.cookie`. The claim read as a justified trade-off, so it stopped
-//! anyone asking, and the DEV tier ended up strictly harder than production:
-//! `sdks/bootstrap/src/dev-auth.ts` keeps its dev CSRF cookie `HttpOnly` and
-//! cites this very sentence as the reason prod cannot.
+//! anyone asking. The Vite development provider uses the same server-rendered
+//! double-submit shape.
 //!
 //! The cookie always uses the `__Host-` prefix and `Secure`. The local browser
 //! topology uses `.localhost`, which browsers treat as potentially trustworthy;

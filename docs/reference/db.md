@@ -1185,28 +1185,28 @@ Rust DbPlugin. App code rarely needs it; SDK packages use it directly.
   (begin/commit/rollback/nested-savepoint owned in Rust; throw to abort,
   resolve to commit — see [Transactions](#transactions))
 
-**Platform-internal — NOT on `env.db` (P9 §8 `__platform` capability gate):**
+**Startup policy and schema ownership:**
 
-`setMaskPolicy` lives on a `DbPlatform` capability handle the runtime sets
-on `env.db` under a **V8 private symbol** and hands only to
-`@zeroship/bootstrap`'s runtime-entry. The handle is unreachable from app
-code. Replication operations exist only in the relay service:
+The SDK's `defineMaskPolicy` submits a declaration through
+`env.db.declareMaskPolicy`. The native binding accepts it only while the host
+is evaluating the app's startup entry and captures an owned copy. The DB plugin
+installs and seals that declaration during native finalization. Creator code
+cannot reset or finalize the policy, or choose its deployment binding. Late
+calls fail with `MASK_POLICY_IMMUTABLE`; unmask operations issued before
+finalization fail with `database_startup_pending`.
 
-- `env.db.__platform` (string access) throws `PLATFORM_INTERNAL_ONLY`.
-- The handle is invisible to `Object.keys` / `getOwnPropertyNames` /
-  `getOwnPropertySymbols` / `Reflect.ownKeys` / `for..in` / JSON — a
-  `v8::Private` slot is not a JS property and cannot be keyed from JS.
-- Runtime boot validates the generated descriptor and asks the data adapter to publish
-  its complete collection field-map set natively before creator modules run.
-  The DB SDK internal entry supplies `installSchema`, which reads the same
-  descriptor to plant JavaScript collection and transaction wrappers. Vite
-  does not inject an installer import or call into the creator entry.
+Runtime boot validates the generated descriptor and asks the data adapter to
+publish its complete collection field maps before creator modules run. The DB
+SDK internal entry supplies `installSchema`, which reads that descriptor to
+install JavaScript collection and transaction wrappers. Vite does not inject
+an installer import or call into the creator entry. Ordinary database operations
+may run during startup once the descriptor and SDK facade are prepared.
 
-Public type contracts live in `sdks/types/db.d.ts` (which no longer
-declares the platform-internal classes — those moved to
-`@zeroship/bootstrap`'s framework-internal `internal.d.ts`). The runtime
-implementation lives in `crates/zeroship-data-v8/` (`v8_classes/db.rs`,
-`v8_classes/db_platform.rs`).
+Native policy installation has no JavaScript capability handle or readiness
+global. Replication operations belong to the relay service. Public type
+contracts live in `sdks/types/db.d.ts`; the native DB binding lives in
+`crates/zeroship-data-v8/src/v8_classes/db.rs`.
+
 
 ## Per-app isolation
 
@@ -1468,7 +1468,7 @@ isolate sees the same policy on boot.
 ```ts
 import { defineMaskPolicy } from "@zeroship/db";
 
-await defineMaskPolicy(env.db, {
+defineMaskPolicy({
   admin: ["public", "pii", "spi", "phi", "pci", "internal"],
   support: ["public", "pii"],
   end_user: ["public"],
@@ -1476,8 +1476,9 @@ await defineMaskPolicy(env.db, {
 });
 ```
 
-Policy is keyed by app id — app A's policy never leaks to app B's
-isolate. Two policies under the same app id replace, never merge.
+Policies are keyed by app and deployment. Declarations replace the pending
+policy during startup; native finalization fixes it for that deployment. A new
+deployment can declare a different policy without changing an older isolate.
 
 ### Audit tables
 
@@ -1539,7 +1540,7 @@ Default reads surface `MaskedValue<T>`, not plaintext. The Rust read path wraps 
 
 Plaintext reveal is always explicit. `await row.ssn.unmask({ actor?, reason? })` reveals one field on one row, and `await row.ssn.unmask(["ssn", "dob"], { actor, reason })` fans out across multiple columns on the same row (`crates/zeroship-data-v8/src/v8_classes/masked_value.rs`, `sdks/db/src/types.ts`). `Collection.bulkUnmask()` is the shipped multi-row path; it maps `(id, columns)` pairs to the native collection op and is atomic, so one unauthorized `(row, column)` pair rejects the whole call (`sdks/db/src/collection/masking.ts`, `crates/zeroship-data-orm/src/protection/unmask.rs`). The per-query hint `find(..., { unmask: [...], actor, reason })` promotes only the listed columns to plaintext while leaving other masked columns wrapped, and it writes audit only after a successful query (`crates/zeroship-data-orm/src/protection/unmask.rs`, `sdks/db/src/types.ts`).
 
-`defineMaskPolicy()` is the app-scoped authorization declaration for unmasking. It validates the classifications (`public`, `pii`, `spi`, `phi`, `pci`, `internal`) and snapshots a pending role-to-classification map for bootstrap to install. Declarations may be replaced during startup; after the startup flush, further calls fail with `MASK_POLICY_IMMUTABLE`. The policy is held in memory for the app and deployment. No database backend persists it, and changes require redeployment (`sdks/db/src/policy.ts`). If an app never calls `defineMaskPolicy()`, the fallback is strict: only the `auto` actor can unmask. If the app does declare a policy, `auto` still keeps full access unless the policy explicitly lists `auto` with a narrower set (`sdks/db/src/policy.ts`).
+`defineMaskPolicy()` is the app-scoped authorization declaration for unmasking. It validates the classifications (`public`, `pii`, `spi`, `phi`, `pci`, `internal`) and asks the native DB binding to capture the pending role-to-classification map. Declarations may be replaced during startup; after native finalization, further calls fail with `MASK_POLICY_IMMUTABLE`. The policy is held in memory for the app and deployment. No database backend persists it, and changes require redeployment (`sdks/db/src/policy.ts`). If an app never calls `defineMaskPolicy()`, the fallback is strict: only the `auto` actor can unmask. If the app does declare a policy, `auto` still keeps full access unless the policy explicitly lists `auto` with a narrower set (`sdks/db/src/policy.ts`).
 
 `__zsmask__` is the read-side wire sentinel for a masked value payload (`sdks/db/src/types.ts`, `crates/zeroship-data-orm/src/protection/mask_pass.rs`, `crates/zeroship-data-v8/src/v8_classes/masked_value.rs`). Catalog sentinels record stored protection. The mask marker carries its kind and classification; the encryption marker records only that protection is present from the ORM's perspective. Runtime type and storage behavior always come from the installed descriptor (`crates/zeroship-data-orm/src/sql/mask_codec.rs`).
 

@@ -1,7 +1,7 @@
 //! ALS-backed RPC ctx tests.
 //!
-//! Covers the per-request `ctx` object exposed via
-//! `globalThis.__zeroshipGetRpcCtx()`: scalar fields, native
+//! Covers the per-request `ctx` object exposed by the native `zeroship`
+//! module: scalar fields, native
 //! Headers/URL wrapping (request-scoped, mutable per the 2026-05-07
 //! amendment), AbortSignal binding, and ALS-backed survival across
 //! `await` / `.then` boundaries.
@@ -18,8 +18,9 @@ use common::{dispatch, m};
 #[test]
 fn ctx_is_observable_inside_procedure() {
     let r = dispatch(
-        m(r#"export function test() {
-            const ctx = __zeroshipGetRpcCtx();
+        m(r#"import { getRequestContext } from "zeroship";
+        export function test() {
+            const ctx = getRequestContext();
             return {
                 hasCtx: !!ctx,
                 hasRequestId: typeof ctx.requestId === "string" && ctx.requestId.length > 0,
@@ -56,8 +57,9 @@ fn headers_set_succeeds_request_scoped() {
     // Per the 2026-05-07 amendment, ctx.headers is mutable; mutations
     // succeed and vanish at request end.
     let r = dispatch(
-        m(r#"export function test() {
-            const h = __zeroshipGetRpcCtx().headers;
+        m(r#"import { getRequestContext } from "zeroship";
+        export function test() {
+            const h = getRequestContext().headers;
             h.set("x-zs-test", "1");
             return { x: h.get("x-zs-test") };
         }"#),
@@ -77,8 +79,9 @@ fn frozen_headers_get_works() {
     // Header is populated by the kernel from the request — content-type
     // is always supplied by the test harness.
     let r = dispatch(
-        m(r#"export function test() {
-            const h = __zeroshipGetRpcCtx().headers;
+        m(r#"import { getRequestContext } from "zeroship";
+        export function test() {
+            const h = getRequestContext().headers;
             return { ct: h.get("content-type") };
         }"#),
         "test",
@@ -97,8 +100,9 @@ fn url_searchparams_set_succeeds_request_scoped() {
     // Per the 2026-05-07 amendment, ctx.url is mutable; mutations
     // succeed and vanish at request end.
     let r = dispatch(
-        m(r#"export function test() {
-            const url = __zeroshipGetRpcCtx().url;
+        m(r#"import { getRequestContext } from "zeroship";
+        export function test() {
+            const url = getRequestContext().url;
             url.searchParams.set("a", "b");
             return { a: url.searchParams.get("a") };
         }"#),
@@ -121,8 +125,9 @@ fn frozen_url_searchparams_get_works() {
     // searchParams.get returns null on missing key (canonical WHATWG
     // URL behavior).
     let r = dispatch(
-        m(r#"export function test() {
-            const url = __zeroshipGetRpcCtx().url;
+        m(r#"import { getRequestContext } from "zeroship";
+        export function test() {
+            const url = getRequestContext().url;
             return {
                 pathname: url.pathname,
                 missing: url.searchParams.get("missing"),
@@ -143,10 +148,11 @@ fn frozen_url_searchparams_get_works() {
 #[test]
 fn ctx_survives_await() {
     let r = dispatch(
-        m(r#"export async function test() {
-            const before = __zeroshipGetRpcCtx();
+        m(r#"import { getRequestContext } from "zeroship";
+        export async function test() {
+            const before = getRequestContext();
             await new Promise(r => setTimeout(r, 10));
-            const after = __zeroshipGetRpcCtx();
+            const after = getRequestContext();
             return { sameRef: before === after, sameId: before.requestId === after.requestId };
         }"#),
         "test",
@@ -164,10 +170,11 @@ fn ctx_survives_await() {
 #[test]
 fn ctx_survives_promise_then() {
     let r = dispatch(
-        m(r#"export function test() {
-            const before = __zeroshipGetRpcCtx();
+        m(r#"import { getRequestContext } from "zeroship";
+        export function test() {
+            const before = getRequestContext();
             return Promise.resolve().then(() => {
-                const after = __zeroshipGetRpcCtx();
+                const after = getRequestContext();
                 return { sameRef: before === after };
             });
         }"#),
@@ -189,11 +196,12 @@ fn ctx_undefined_at_module_init() {
     // proving the ALS slot is empty outside the dispatch path.
     let r = dispatch(
         m(r#"
-        const initCtx = __zeroshipGetRpcCtx();
+        import { getRequestContext } from "zeroship";
+        const initCtx = getRequestContext();
         export function test() {
             return {
                 initCtxIsUndefined: initCtx === undefined,
-                callTimeCtxDefined: __zeroshipGetRpcCtx() !== undefined,
+                callTimeCtxDefined: getRequestContext() !== undefined,
             };
         }
         "#),
@@ -212,8 +220,9 @@ fn ctx_undefined_at_module_init() {
 #[test]
 fn ctx_scalars_match_request() {
     let r = dispatch(
-        m(r#"export function test() {
-            const ctx = __zeroshipGetRpcCtx();
+        m(r#"import { getRequestContext } from "zeroship";
+        export function test() {
+            const ctx = getRequestContext();
             return {
                 method: ctx.method,
                 href: ctx.url.href,
@@ -240,8 +249,9 @@ fn ctx_scalars_match_request() {
 #[test]
 fn ctx_signal_is_abort_signal() {
     let r = dispatch(
-        m(r#"export function test() {
-            const sig = __zeroshipGetRpcCtx().signal;
+        m(r#"import { getRequestContext } from "zeroship";
+        export function test() {
+            const sig = getRequestContext().signal;
             return {
                 isAbortSignal: sig instanceof AbortSignal,
                 aborted: sig.aborted,
@@ -265,18 +275,19 @@ fn ctx_signal_is_abort_signal() {
 fn user_async_local_storage_does_not_collide() {
     // The user mints their own ALS, runs a callback inside als.run(),
     // and inside that callback both `als.getStore()` (their store) and
-    // `__zeroshipGetRpcCtx()` (platform ctx) must return what each
+    // `getRequestContext()` (platform ctx) must return what each
     // owner expects — no leakage in either direction.
     let r = dispatch(
         m(r#"
         import { AsyncLocalStorage } from "node:async_hooks";
+        import { getRequestContext } from "zeroship";
         export function test() {
-            const platformCtx = __zeroshipGetRpcCtx();
+            const platformCtx = getRequestContext();
             const userAls = new AsyncLocalStorage();
             return userAls.run({ user: "store" }, () => {
                 return {
                     userStore: userAls.getStore(),
-                    platformSeenInside: __zeroshipGetRpcCtx() === platformCtx,
+                    platformSeenInside: getRequestContext() === platformCtx,
                     userStoreSeenInPlatformShape: platformCtx.user === null,
                 };
             });

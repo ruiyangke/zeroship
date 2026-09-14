@@ -137,7 +137,7 @@ BETA_ID="pws_probebeta00000000000"
 BETA_EMAIL="beta@probe.zeroship.test"
 BETA_NAME="Probe Beta"
 # The dev password is DERIVED from the id, not declared in the vite config:
-# `devPasswordFor` (sdks/bootstrap/src/dev-auth.ts -- the authority) returns
+# `devPasswordFor` (`sdks/vite-plugin/src/dev-auth.ts`) returns
 # "dev-" + the first 8 characters of the id after "pws_". Derived here the same
 # way from the ids above, so it tracks an id change automatically and the two
 # users get DIFFERENT passwords (they used to share one literal).
@@ -181,7 +181,7 @@ trap cleanup EXIT
 # shellcheck source=lib/binary_freshness.sh
 source "$ROOT/tests/lib/binary_freshness.sh"
 zs_check_binary_freshness "$ROOT" "$BIN" \
-  "crates/zeroship-runtime/src crates/zeroship-worker/src crates/zeroship-gateway/src crates/zeroship-control/src crates/zeroship-core/src sdks/auth/src sdks/bootstrap/src" \
+  "crates/zeroship-runtime/src crates/zeroship-worker/src crates/zeroship-gateway/src crates/zeroship-control/src crates/zeroship-core/src sdks/auth/src sdks/vite-plugin/src" \
   "zeroship zeroship-worker zeroship-gate zeroship-control" \
   || { _zs_fresh_rc=$?; [ "$_zs_fresh_rc" -ne 0 ] && exit "$_zs_fresh_rc"; }
 
@@ -351,15 +351,14 @@ assert_identity_pair
 # longer reads -- the derivation below would then disagree with what dev
 # actually accepts and every authenticated row would fail as "login broken".
 if grep -qE '^[[:space:]]*password:' "$APP/vite.config.ts"; then
-  fail "credential drift: $APP/vite.config.ts declares a 'password:' field, which the dev tier ignores (it derives the password from the id -- sdks/bootstrap/src/dev-auth.ts devPasswordFor)"
+  fail "credential drift: $APP/vite.config.ts declares a 'password:' field, which the dev tier ignores (see sdks/vite-plugin/src/dev-auth.ts devPasswordFor)"
 else
   pass "dev passwords are derived from the ids (alpha=$ALPHA_PASSWORD beta=$BETA_PASSWORD), not declared in vite.config.ts"
 fi
 
 # ---------------------------------------------------------------------------
-# 2. Dev side. `pnpm dev` spawns `zeroship serve`; the dev-auth provider lives in
-#    that child (sdks/bootstrap/src/dev-auth.ts, reached via dev-entry.ts), so
-#    DEV_PORT is the AUTH_PROBE_API_PORT the vite plugin gave the child.
+# 2. Dev side. Vite serves the development auth endpoints and proxies app
+#    dispatch to `zeroship serve` on DEV_PORT.
 # ---------------------------------------------------------------------------
 for _p in "$DEV_PORT" "$VITE_PORT"; do
   lsof -ti :"$_p" 2>/dev/null | xargs -r kill -9 2>/dev/null || true

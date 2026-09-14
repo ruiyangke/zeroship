@@ -1,35 +1,5 @@
-//! What `process.nextTick` orders against promise microtasks, in the two
-//! arrangements that behave differently.
-//!
-//! `node_pg_e2e.rs` asserted `["tick","promise"]` from inside an async
-//! handler's prefix and was RED on HEAD. Separating the arrangements shows
-//! why, and the reference values below were MEASURED against node v22.22.2
-//! rather than reasoned from the docs - reasoning got it wrong twice.
-//!
-//! Node, measured:
-//!
-//!   CommonJS, synchronous top level      ["tick","promise"]
-//!   ESM, top level                       ["promise","tick"]
-//!   inside a microtask (either module)   ["promise","tick"]
-//!
-//! ESM top level is NOT a synchronous context: module evaluation is itself
-//! driven from a job, so a tick queued there lands after the pending
-//! promise queue. Only CommonJS gives the textbook "nextTick runs first".
-//!
-//! This runtime, measured by the two tests below:
-//!
-//!   ESM top level                        ["tick","promise"]   <- diverges
-//!   inside a microtask                   ["promise","tick"]   <- matches
-//!
-//! So the in-microtask case, the one the pg e2e actually constructs, does
-//! NOT diverge from Node. The real divergence is at ESM top level, where
-//! this runtime behaves like Node's CommonJS.
-//!
-//! These tests assert the MEASURED behaviour, not the wished-for one, so a
-//! change to the drain order fails here with the arrangement named instead
-//! of as one ambiguous assertion buried in a 200-line database e2e.
-//!
-//! See `core/init.rs` (`perform_microtask_checkpoint`) for the drain shape.
+//! Next-tick ordering at module evaluation and inside an explicit promise job.
+//! See `perform_microtask_checkpoint` for the native drain order.
 
 use std::time::Duration;
 
@@ -96,20 +66,14 @@ export default {
     );
 }
 
-/// Arrangement B: both queued from inside a microtask.
-///
-/// The handler's synchronous prefix is itself a promise job, so the
-/// pre-drain has already passed when `nextTick` is called; the rest of the
-/// microtask queue runs before the tick queue is revisited. Node behaves
-/// the same way here - MEASURED on v22.22.2, both ESM and CommonJS. This
-/// is NOT a divergence, and the pg e2e asserting `["tick","promise"]` for
-/// this arrangement demanded something Node does not do either.
+/// Queue both callbacks from an explicit promise continuation.
 #[compio::test]
 async fn tick_queued_from_inside_a_microtask_runs_after_the_pending_promise_queue() {
     let body = run_js(
         r#"
 export default {
     async fetch() {
+        await Promise.resolve();
         const ordering = [];
         Promise.resolve().then(() => ordering.push("promise"));
         process.nextTick(() => ordering.push("tick"));

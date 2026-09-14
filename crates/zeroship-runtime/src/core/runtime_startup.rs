@@ -44,7 +44,12 @@ impl RuntimeInner {
                 self.state.borrow_mut().ctx_obj = Some(v8::Global::new(scope, ctx));
 
                 with_context_preserving_ambient(scope, &InvocationContext::default(), |scope| {
-                    crate::init::prepare_application(scope, modules, &self.plugins)
+                    crate::init::prepare_application(
+                        scope,
+                        modules,
+                        &self.plugins,
+                        self.dev_entry_factory.is_some(),
+                    )
                 })
             };
             if self.check_v8_terminated() {
@@ -69,7 +74,10 @@ impl RuntimeInner {
 
     pub(super) fn startup_result(&self) -> Result<bool, String> {
         match &self.startup {
-            StartupState::Ready => Ok(true),
+            StartupState::Ready => self
+                .dev_entry_loader
+                .as_ref()
+                .map_or(Ok(true), crate::core::dev_entry::DevEntryLoader::result),
             StartupState::Failed(error) => Err(format!("module init failed: {error}")),
             _ => Ok(false),
         }
@@ -77,6 +85,13 @@ impl RuntimeInner {
 
     pub(super) fn startup_deadline(&self) -> Option<Instant> {
         Some(self.startup.started()? + self.wall_timeout?)
+    }
+
+    pub(super) fn dev_entry_deadline(&self) -> Option<Instant> {
+        self.dev_entry_loader
+            .as_ref()?
+            .started()?
+            .checked_add(self.wall_timeout?)
     }
 
     pub(super) fn advance_startup(&mut self) {
@@ -88,6 +103,14 @@ impl RuntimeInner {
                 request
                     .reply
                     .send(Err("Request cancelled during startup".into()));
+            } else if matches!(self.startup, StartupState::Ready)
+                && self
+                    .wall_timeout
+                    .is_some_and(|limit| request.started.elapsed() >= limit)
+            {
+                request
+                    .reply
+                    .send(Err("Request wall timeout while loading entry".into()));
             } else {
                 self.waiting_startup_requests.push(request);
             }
@@ -99,7 +122,10 @@ impl RuntimeInner {
             self.fail_startup("startup wall timeout".into());
         }
         self.poll_startup_evaluation();
-        if matches!(self.startup, StartupState::Ready | StartupState::Failed(_)) {
+        if matches!(self.startup, StartupState::Ready) {
+            self.advance_dev_entry();
+        }
+        if !matches!(self.startup_result(), Ok(false)) {
             for waker in self.startup_waiters.drain(..) {
                 waker.wake();
             }
@@ -113,6 +139,7 @@ impl RuntimeInner {
         };
         let started = *started;
         let phase = std::mem::replace(phase, EvaluationPhase::Running);
+        let dev_entry_factory = self.dev_entry_factory.clone();
         self.arm_cpu_timer();
         let advanced = {
             v8::scope!(let handle_scope, &mut self.isolate);
@@ -129,16 +156,50 @@ impl RuntimeInner {
                         if !ready {
                             return Ok((EvaluationPhase::Adapters { entry, promises }, false));
                         }
+                        self.state.borrow_mut().startup_declarations_open = true;
                         let evaluation = evaluate_module(scope, &entry)?;
                         crate::core::init::perform_microtask_checkpoint(scope);
                         evaluation
                     }
                     EvaluationPhase::Creator(evaluation) => evaluation,
+                    EvaluationPhase::Dev {
+                        mut loader,
+                        application,
+                    } => {
+                        debug_assert!(application.is_none());
+                        let application = loader.poll_initial(scope)?;
+                        let ready = application.is_some();
+                        return Ok((
+                            EvaluationPhase::Dev {
+                                loader,
+                                application,
+                            },
+                            ready,
+                        ));
+                    }
                     EvaluationPhase::Running => {
                         return Err("startup evaluation is already running".into());
                     }
                 };
                 let ready = evaluation.is_ready(scope)?;
+                if ready
+                    && let Some(export) = dev_entry_factory.as_deref()
+                {
+                    let mut loader = crate::core::dev_entry::DevEntryLoader::create(
+                        scope,
+                        &evaluation.namespace,
+                        export,
+                    )?;
+                    let application = loader.poll_initial(scope)?;
+                    let ready = application.is_some();
+                    return Ok((
+                        EvaluationPhase::Dev {
+                            loader,
+                            application,
+                        },
+                        ready,
+                    ));
+                }
                 Ok((EvaluationPhase::Creator(evaluation), ready))
             })
         };
@@ -156,14 +217,27 @@ impl RuntimeInner {
         }
         match advanced {
             Err(error) => self.fail_startup(error),
-            Ok((EvaluationPhase::Creator(evaluation), true)) => {
+            Ok((phase, true)) => {
+                self.state.borrow_mut().startup_declarations_open = false;
                 let StartupState::Evaluating { descriptor, .. } =
                     std::mem::replace(&mut self.startup, StartupState::Finalizing)
                 else {
                     unreachable!("only an evaluating startup can finalize");
                 };
                 self.arm_cpu_timer();
-                let result = self.publish_application(&evaluation.namespace, descriptor.as_ref());
+                let mut dev_publication = None;
+                let result = match phase {
+                    EvaluationPhase::Creator(evaluation) => {
+                        self.publish_application(&evaluation.namespace, descriptor.as_ref())
+                    }
+                    EvaluationPhase::Dev {
+                        loader,
+                        application: Some(application),
+                    } => self.finalize_plugins(descriptor.as_ref()).map(|()| {
+                        dev_publication = Some((loader, application));
+                    }),
+                    _ => unreachable!("only a ready entry can finalize"),
+                };
                 self.disarm_cpu_timer();
                 if self.check_v8_terminated() {
                     self.fail_startup(self.termination_message().into());
@@ -173,10 +247,16 @@ impl RuntimeInner {
                 {
                     self.fail_startup("startup wall timeout".into());
                 } else {
-                    self.startup = match result {
-                        Ok(()) => StartupState::Ready,
-                        Err(error) => StartupState::Failed(error),
-                    };
+                    match result {
+                        Ok(()) => {
+                            if let Some((loader, application)) = dev_publication {
+                                self.dev_entry_loader = Some(loader);
+                                self.application = Some(application);
+                            }
+                            self.startup = StartupState::Ready;
+                        }
+                        Err(error) => self.fail_startup(error),
+                    }
                 }
             }
             Ok((phase, _)) => {
@@ -188,11 +268,71 @@ impl RuntimeInner {
     }
 
     pub(super) fn fail_startup(&mut self, error: String) {
+        self.state.borrow_mut().startup_declarations_open = false;
         self.startup = StartupState::Failed(error);
-        self.fetch_handler_fn = None;
-        self.fetch_fast_fn = None;
-        self.rpc_fn = None;
+        self.application = None;
+        self.dev_entry_loader = None;
         self.workflow_fn = None;
+    }
+
+    fn advance_dev_entry(&mut self) {
+        if self
+            .dev_entry_loader
+            .as_ref()
+            .is_none_or(|loader| !loader.is_pending())
+        {
+            return;
+        }
+        if self
+            .dev_entry_deadline()
+            .is_some_and(|deadline| Instant::now() >= deadline)
+        {
+            self.dev_entry_loader.as_mut().unwrap().fail_current(
+                "dev entry loading wall timeout; a fresh runtime is required".into(),
+            );
+            return;
+        }
+
+        self.dev_entry_cpu_running = true;
+        self.arm_cpu_timer();
+        let result = {
+            v8::scope!(let handle_scope, &mut self.isolate);
+            let context = v8::Local::new(handle_scope, &self.context);
+            let scope = &mut v8::ContextScope::new(handle_scope, context);
+            with_context_preserving_ambient(scope, &InvocationContext::default(), |scope| {
+                self.dev_entry_loader.as_mut().unwrap().poll(scope)
+            })
+        };
+        self.disarm_cpu_timer();
+        self.dev_entry_cpu_running = false;
+        if self.check_v8_terminated() {
+            let error = self.termination_message().to_owned();
+            self.dev_entry_loader
+                .as_mut()
+                .unwrap()
+                .fail_current(error);
+        } else if let Ok(Some(application)) = result {
+            self.application = Some(application);
+        }
+        // A compile or validation failure remains cached on the loader for
+        // this generation. Existing requests retain their captured callables.
+    }
+
+    fn finalize_plugins(
+        &mut self,
+        descriptor: Option<&serde_json::Value>,
+    ) -> Result<(), String> {
+        v8::scope!(let handle_scope, &mut self.isolate);
+        let context = v8::Local::new(handle_scope, &self.context);
+        let scope = &mut v8::ContextScope::new(handle_scope, context);
+        with_context_preserving_ambient(scope, &InvocationContext::default(), |scope| {
+            for plugin in &self.plugins {
+                let namespace =
+                    crate::plugin::runtime_plugin_namespace(scope, plugin.namespace())?;
+                plugin.finalize_runtime(scope, namespace, descriptor)?;
+            }
+            Ok(())
+        })
     }
 
     fn publish_application(
@@ -203,53 +343,33 @@ impl RuntimeInner {
         v8::scope!(let handle_scope, &mut self.isolate);
         let context = v8::Local::new(handle_scope, &self.context);
         let scope = &mut v8::ContextScope::new(handle_scope, context);
-        let entries =
+        let (application, workflow) =
             with_context_preserving_ambient(scope, &InvocationContext::default(), |scope| {
+                let ns = v8::Local::new(scope, namespace).to_object(scope)
+                    .ok_or("invalid module namespace")?;
+                let default = crate::core::application_entry::read_field(scope, ns, "default")?;
+                let application = crate::core::application_entry::ApplicationEntry::capture(scope, default, None)?;
+                let workflow = if default.is_null_or_undefined() { None } else {
+                    let object = default.to_object(scope).ok_or("invalid module default export")?;
+                    let value = crate::core::application_entry::read_field(scope, object, "workflow")?;
+                    v8::Local::<v8::Function>::try_from(value).ok()
+                        .map(|function| v8::Global::new(scope, function))
+                };
                 for plugin in &self.plugins {
-                    let namespace =
-                        crate::plugin::runtime_plugin_namespace(scope, plugin.namespace())?;
+                    let namespace = crate::plugin::runtime_plugin_namespace(scope, plugin.namespace())?;
                     plugin.finalize_runtime(scope, namespace, descriptor)?;
                 }
-                v8::tc_scope!(let tc, scope);
-                let ns = v8::Local::new(tc, namespace)
-                    .to_object(tc)
-                    .ok_or("invalid module namespace")?;
-                let key = v8::String::new(tc, "default").unwrap();
-                let default = ns
-                    .get(tc, key.into())
-                    .ok_or("could not read module default export")?;
-                let mut entries = Vec::new();
-                for name in ["fetch", "fetchFast", "rpc", "workflow"] {
-                    let entry = if default.is_null_or_undefined() {
-                        None
-                    } else {
-                        let object = default
-                            .to_object(tc)
-                            .ok_or("invalid module default export")?;
-                        let key = v8::String::new(tc, name).unwrap();
-                        let value = object.get(tc, key.into()).ok_or_else(|| {
-                            tc.exception().map_or_else(
-                                || format!("could not read default.{name}"),
-                                |error| crate::core::modules::error_detail(tc, error),
-                            )
-                        })?;
-                        v8::Local::<v8::Function>::try_from(value)
-                            .ok()
-                            .map(|function| v8::Global::new(tc, function))
-                    };
-                    entries.push(entry);
-                }
-                Ok::<_, String>(entries)
+                Ok::<_, String>((application, workflow))
             })?;
-        let mut entries = entries.into_iter();
-        self.fetch_handler_fn = entries.next().unwrap();
-        self.fetch_fast_fn = entries.next().unwrap();
-        self.rpc_fn = entries.next().unwrap();
-        self.workflow_fn = entries.next().unwrap();
+        self.application = Some(std::rc::Rc::new(application));
+        self.workflow_fn = workflow;
         Ok(())
     }
 
     fn release_startup_requests(&mut self) {
+        if matches!(self.startup_result(), Ok(false)) {
+            return;
+        }
         for request in std::mem::take(&mut self.waiting_startup_requests) {
             if request.ctx.cancel.is_cancelled() {
                 request
@@ -258,7 +378,7 @@ impl RuntimeInner {
                 continue;
             }
             let request_id = self.next_direct_request_id;
-            let outcome = self.call_fetch_handler(
+            let outcome = self.call_fetch_handler_started(
                 &[],
                 &request.method,
                 &request.url,
@@ -267,6 +387,7 @@ impl RuntimeInner {
                 &request.env,
                 request.ctx,
                 request.user_json,
+                request.started,
             );
             let settled = match outcome {
                 crate::FetchOutcome::Response {

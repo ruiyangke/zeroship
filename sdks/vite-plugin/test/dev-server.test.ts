@@ -11,6 +11,11 @@ import {
   ENV_RUNTIME_DESCRIPTOR,
   HMR_POLL_PATH,
   MODULE_FETCH_PATH,
+  PROCEDURE_BINDINGS_PATH,
+  RUNTIME_MODULE_SPECIFIER,
+  VITE_RUNTIME_MODULE_ID,
+  DEV_RUNTIME_STATE_HEADER,
+  DEV_RUNTIME_FRESH_REQUIRED,
 } from "../src/constants.js";
 import { devServerPlugin } from "../src/dev-server.js";
 import { createProjectConfigHolder } from "../src/project-config/index.js";
@@ -111,6 +116,31 @@ describe("devServerPlugin", () => {
       assert.equal(typeof payload.result?.code, "string");
       assert.match(payload.result?.code ?? "", /__vite_ssr_|new Response/);
       assert.equal(payload.result?.id, harness.serverEntry);
+    } finally {
+      await harness.close();
+    }
+  });
+
+  test("advertises the runtime-owned module to the module runner", async () => {
+    const harness = await startHarness();
+    try {
+      const resp = await fetch(`${harness.origin}${MODULE_FETCH_PATH}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          type: "custom",
+          event: "vite:invoke",
+          data: {
+            id: "builtins-1",
+            name: "getBuiltins",
+            data: [],
+          },
+        }),
+      });
+      assert.equal(resp.status, 200);
+      assert.deepEqual(await resp.json(), {
+        result: [RUNTIME_MODULE_SPECIFIER, VITE_RUNTIME_MODULE_ID],
+      });
     } finally {
       await harness.close();
     }
@@ -217,14 +247,102 @@ describe("devServerPlugin", () => {
 
       const first = await fetch(`${harness.origin}${HMR_POLL_PATH}`);
       assert.equal(first.status, 200);
-      assert.deepEqual(await first.json(), {
-        changed: [harness.serverEntry],
-      });
+      const firstPayload = await first.json() as {
+        changed?: unknown;
+        bindingsVersion?: unknown;
+      };
+      assert.deepEqual(firstPayload.changed, [harness.serverEntry]);
+      assert.equal(typeof firstPayload.bindingsVersion, "string");
 
       const second = await fetch(`${harness.origin}${HMR_POLL_PATH}`);
       assert.equal(second.status, 200);
-      assert.deepEqual(await second.json(), { changed: [] });
+      const secondPayload = await second.json() as {
+        changed?: unknown;
+        bindingsVersion?: unknown;
+      };
+      assert.deepEqual(secondPayload.changed, []);
+      assert.equal(secondPayload.bindingsVersion, firstPayload.bindingsVersion);
       assert.equal(await harness.runtimeSpawnCount(), 1, "ordinary HMR keeps the runtime alive");
+    } finally {
+      await harness.close();
+    }
+  });
+
+  test("source edits replace a runtime whose initial entry failed", async () => {
+    const harness = await startHarness({
+      devServerPort: 3908,
+      serveRuntime: true,
+      freshRuntimeRequired: true,
+    });
+    try {
+      const firstRuntime = await harness.runtimeLog();
+      const failed = await waitForStatus(`${harness.origin}/api/probe`, 500);
+      assert.equal(failed.headers.has(DEV_RUNTIME_STATE_HEADER), false);
+      assert.equal(await failed.text(), "module init failed");
+
+      await harness.queueHmrChange();
+      await waitFor(async () => {
+        assert.equal(await harness.runtimeSpawnCount(), 2);
+        assert.notEqual((await harness.runtimeLog()).pid, firstRuntime.pid);
+      });
+    } finally {
+      await harness.close();
+    }
+  });
+
+  test("serves the dev-auth flow while creator runtime startup is broken", async () => {
+    const harness = await startHarness({
+      devServerPort: 3909,
+      serveRuntime: true,
+      freshRuntimeRequired: true,
+    });
+    try {
+      await waitForStatus(`${harness.origin}/api/probe`, 500);
+
+      const callback = `${harness.origin}/__zeroship/auth/popup-callback`;
+      const authorize = await fetch(
+        `${harness.origin}/__zeroship/auth/authorize?state=dev-state&redirect_uri=${encodeURIComponent(callback)}`,
+      );
+      assert.equal(authorize.status, 200);
+      const csrfCookie = authorize.headers.get("set-cookie") ?? "";
+      const csrf = /__zeroship_dev_csrf=([^;]+)/.exec(csrfCookie)?.[1];
+      assert.ok(csrf, "authorize must set the dev CSRF cookie");
+
+      const login = await fetch(`${harness.origin}/__zeroship/auth/authorize`, {
+        method: "POST",
+        redirect: "manual",
+        headers: {
+          "content-type": "application/x-www-form-urlencoded",
+          cookie: `__zeroship_dev_csrf=${csrf}`,
+        },
+        body: new URLSearchParams({
+          csrf,
+          state: "dev-state",
+          redirect_uri: callback,
+          email: "dev@localhost",
+          password: "dev-dev00000",
+        }),
+      });
+      assert.equal(login.status, 302);
+      const location = new URL(login.headers.get("location") ?? "", harness.origin);
+      const code = location.searchParams.get("code");
+      assert.ok(code, "login must mint an authorization code");
+
+      const exchange = await fetch(`${harness.origin}/__zeroship/auth/session`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ code }),
+      });
+      assert.equal(exchange.status, 200);
+      const sessionCookie = exchange.headers.get("set-cookie") ?? "";
+      const session = /__zeroship_dev_session=([^;]+)/.exec(sessionCookie)?.[1];
+      assert.ok(session, "exchange must set the dev session cookie");
+
+      const probe = await fetch(`${harness.origin}/__zeroship/auth/session`, {
+        headers: { cookie: `__zeroship_dev_session=${session}` },
+      });
+      assert.equal(probe.status, 200);
+      assert.equal((await probe.json() as { user?: { email?: string } }).user?.email, "dev@localhost");
     } finally {
       await harness.close();
     }
@@ -256,14 +374,15 @@ describe("devServerPlugin", () => {
       // half is crates/zeroship-cli/tests/parent_death_test.rs; the two of them meeting
       // on a real dev server is step 7d of tests/golden_path.sh.
       assert.equal(runtime.env.ZEROSHIP_DIE_WITH_PARENT, String(process.pid));
-      assert.deepEqual(runtime.argv.slice(0, 4), [
+      assert.deepEqual(runtime.argv, [
         "serve",
         resolve(harness.root, ".zeroship/app.zship"),
         "--port=3901",
         "--workers=1",
+        `--dev-bootstrap=${BOOTSTRAP_SHIM_PATH}`,
+        "--dev-entry-loader=createDevEntryLoader",
       ]);
       const archive = resolve(harness.root, ".zeroship/app.zship");
-      assert.equal(runtime.argv[4], `--dev-bootstrap=${BOOTSTRAP_SHIM_PATH}`);
       assert.ok((await fs.stat(archive)).size > 0);
     } finally {
       await harness.close();
@@ -306,6 +425,22 @@ describe("devServerPlugin", () => {
         assert.ok((await harness.runtimeLog()).spawnCount > before.spawnCount);
       });
       assert.deepEqual(await fs.readFile(path), retained);
+    } finally {
+      await harness.close();
+    }
+  });
+
+  test("serves versioned procedure bindings to the runtime loader", async () => {
+    const harness = await startHarness();
+    try {
+      const response = await fetch(`${harness.origin}${PROCEDURE_BINDINGS_PATH}`);
+      assert.equal(response.status, 200);
+      const payload = await response.json() as {
+        version?: unknown;
+        bindings?: unknown;
+      };
+      assert.equal(typeof payload.version, "string");
+      assert.deepEqual(payload.bindings, []);
     } finally {
       await harness.close();
     }
@@ -478,6 +613,7 @@ async function startHarness(options: {
   };
   rapidExitSpawns?: number;
   serveRuntime?: boolean;
+  freshRuntimeRequired?: boolean;
 } = {}): Promise<Harness> {
   const root = await fs.mkdtemp(join(tmpdir(), "zs-vite-dev-server-"));
   const serverEntry = resolve(root, "src/server.ts");
@@ -548,6 +684,9 @@ async function startHarness(options: {
       "}, null, 2));",
       `const rapidExitSpawns = ${options.rapidExitSpawns ?? 0};`,
       `const serveRuntime = ${options.serveRuntime === true};`,
+      `const freshRuntimeRequired = ${options.freshRuntimeRequired === true};`,
+      `const runtimeStateHeader = ${JSON.stringify(DEV_RUNTIME_STATE_HEADER)};`,
+      `const freshRequired = ${JSON.stringify(DEV_RUNTIME_FRESH_REQUIRED)};`,
       "const stop = () => {",
       "  writeFileSync(stopPath, 'stopped');",
       "  process.exit(0);",
@@ -561,7 +700,15 @@ async function startHarness(options: {
       "  const { createServer } = require('node:http');",
       "  const portArg = process.argv.find((arg) => arg.startsWith('--port='));",
       "  const port = Number(portArg.slice('--port='.length));",
-      "  createServer((_req, res) => { res.end('runtime-ok'); }).listen(port);",
+      "  createServer((_req, res) => {",
+      "    if (freshRuntimeRequired) {",
+      "      res.statusCode = 500;",
+      "      res.setHeader(runtimeStateHeader, freshRequired);",
+      "      res.end('module init failed');",
+      "    } else {",
+      "      res.end('runtime-ok');",
+      "    }",
+      "  }).listen(port);",
       "} else {",
       "  setInterval(() => {}, 1000);",
       "}",
@@ -706,6 +853,15 @@ async function waitFor(fn: () => Promise<void>, timeoutMs = 10_000): Promise<voi
       await new Promise((resolve) => setTimeout(resolve, 50));
     }
   }
+}
+
+async function waitForStatus(url: string, status: number): Promise<Response> {
+  let response: Response | undefined;
+  await waitFor(async () => {
+    response = await fetch(url);
+    assert.equal(response.status, status);
+  });
+  return response!;
 }
 
 async function waitForProcessExit(pid: number, timeoutMs = 10_000): Promise<void> {

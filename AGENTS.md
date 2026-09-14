@@ -59,12 +59,12 @@ None of this is licence to measure less - measure more, and put the result in a 
 | **The PLATFORM's own schema** (`db/migrations-ts/`) | `deploy/ops/db-migrate.sh` (the sanctioned applier) · `cargo xtask test migrations` (native corpus test in `crates/zeroship-migrate-node/tests/platform_corpus.rs`) · `policies/platform.policy.toml`. Platform and creator migrations both import the single **`@zeroship/migrate`** package in `packages/zero-migrate/`; the engine CLI and Vite plugin drain that package's one ambient recorder. This identity is load-bearing: importing a second implementation would record into another singleton and let the host drain empty. The 2026-08-28 outage was exactly that split; `docs/reviews/2026-08-28-migrate-dsl-fork-divergence.md` preserves the history. There is no alias and no second SDK package. |
 | **Object storage and SDK** (`@zeroship/storage`) | `docs/reference/storage.md` · `crates/zeroship-storage/` (Rust operations) · `crates/zeroship-storage-v8/` (V8 binding) · `sdks/storage/` |
 | **KV storage and SDK** (`@zeroship/kv`) | `docs/reference/kv.md` · `crates/zeroship-kv/` (storage) · `crates/zeroship-kv-v8/` (V8 binding) · `sdks/kv/` |
-| **The RPC SDK / server functions** (`@zeroship/rpc`) | `docs/reference/rpc.md` · `sdks/rpc/` · `sdks/vite-plugin/src/{transform,rpc-registry,manifest}.ts` · `sdks/bootstrap/src/dispatcher.ts` |
-| **Durable workflows** (`@zeroship/workflows`, `env.workflows`) | `docs/reference/workflows.md` · `sdks/workflows/` · `crates/zeroship-workflow/` (customer engine) · `crates/zeroship-workflow-client/` (authenticated metadata transport) · `crates/zeroship-workflow-manager/` (platform queue) · `crates/zeroship-workflow-v8/` (binding/executor) · `docs/proposals/2026-09-11-workflow-worker.md` (manager cutover) |
+| **The RPC SDK / server functions** (`@zeroship/rpc`) | `docs/reference/rpc.md` · `sdks/rpc/` · `sdks/vite-plugin/src/{transform,rpc-registry,manifest}.ts` · `crates/zeroship-runtime/src/rpc/` |
+| **Durable workflows** (`@zeroship/workflows`, `env.workflows`) | `docs/reference/workflows.md` · `sdks/workflows/` · `crates/zeroship-workflow/` (Rust engine/client) · `crates/zeroship-workflow-v8/` (binding/executor) · `crates/zeroship-control/src/{workflow_instance_api.rs,cron/workflow_engine.rs}` · `crates/zeroship-worker/src/handler.rs` |
 | **Build a creator app + deploy** (the primary creator flow) | `docs/build-and-deploy-golden-path.md` · `examples/starter/` (scaffold + `CLAUDE.md`) · `tests/golden_path.sh` · `crates/zeroship-cli/` (`zeroship deploy`) |
 | **Creator project config** (`zeroship.jsonc`: app, control, build shape, migration paths, environments) | `docs/reference/project-config.md`, `schema/project-v1.json`, `crates/zeroship-cli/src/project_config/`, `sdks/vite-plugin/src/project-config/` |
-| **zeroship deploy contract** (`default = { fetch?, rpc? }`, dispatcher, raw-JS deploys) | `docs/reference/zeroship-standard.md` · `sdks/bootstrap/src/{dispatcher,runtime-entry}.ts` · `crates/zeroship-runtime/src/core/init.rs` |
-| **Framework-internal coordination** (`installSchema`, `__zsDispatch`, dev-entry) | `sdks/db/src/install-schema.ts` · `crates/zeroship-data-v8/src/lib.rs` · `sdks/bootstrap/README.md` |
+| **zeroship deploy contract** (`default = { fetch?, rpc? }`, dispatcher, raw-JS deploys) | `docs/reference/zeroship-standard.md` · `crates/zeroship-runtime/src/core/runtime_startup.rs` · `crates/zeroship-runtime/src/rpc/dispatch.rs` |
+| **Framework-internal coordination** (startup, DB facade, dev entry loading) | `crates/zeroship-runtime/src/core/{runtime_startup,plugin_modules,dev_entry}.rs` · `sdks/db/src/install-schema.ts` · `sdks/vite-plugin/src/dev-bootstrap/` |
 | **Billing / metering / Stripe Connect** | `docs/reference/billing-metering.md` · `crates/zeroship-control/src/metering/provider/` · `crates/zeroship-stream/` · `crates/zeroship-control/src/cron/{event_forwarder,spend_recompute,billing_reconcile}.rs` |
 | **WebSocket** (RFC 6455 implementation) | `docs/reference/websocket-design.md` · `crates/zeroship-runtime/src/` (search `WebSocket`) |
 | **Vite plugin / build pipeline** (synthetic entry is a thin normaliser; runtime owns dispatch) | `docs/reference/vite-plugin.md` · `docs/reference/vite-environment-api.md` · `sdks/vite-plugin/src/rpc-registry.ts` |
@@ -166,16 +166,11 @@ crates/
 ├── zeroship-kv-v8/      env.kv binding: V8 conversion, isolate state, dispatch, metering
 ├── zeroship-storage/    Scoped Rust object storage, LocalFs and S3 backends; no V8
 ├── zeroship-storage-v8/ env.storage binding, isolate-owned streams and metering
-├── zeroship-workflow/   Customer ORM journal, replay, scoped Rust operations and bounded execution
-├── zeroship-workflow-client/ Authenticated workflow metadata transport; no ORM or V8
-├── zeroship-workflow-manager/ Platform ORM queue and deployment retention ledger; no customer journal or V8
-├── zeroship-workflow-v8/ env.workflows binding and exclusive workflow execution
 ├── zeroship-metering/ Meter (atomic per-(app,metric) counters) + compio usage-event outbox task; NO V8. The data plugins emit usage metrics into it; there is no env.meter.
 ├── zeroship-stream/  Kafka-family durable event stream (StreamTransport trait + registry + Redpanda adapter)
 │
 │ System 1 — Creator Platform
 ├── zeroship-control/ Control plane (app CRUD, deploy, billing, env, route registry)
-├── zeroship-workflow-server/ Authenticated workflow registry and placement host; manager queue cutover is tracked in the workflow proposal
 │
 │ System 2 — App Runtime
 ├── zeroship-gateway/ Manifest dispatch, JWT, rate-limit, CHWBL routing, asset proxy
@@ -261,10 +256,8 @@ These don't change. If you're about to violate one, stop and ask.
   Update the sets and this invariant together when that accepted boundary
   changes, including when Tokio is removed. Rejection tests cover dependency
   aliases, target-specific kinds, TOML spellings, missing input, and optional
-  feature activation. Authenticated workflow metadata transport belongs to
-  `zeroship-workflow-client`; its accepted cyper dependency follows that client.
-  `zeroship-workflow` also retains a cyper dependency for its existing app API
-  client until the manager cutover removes that transport.
+  feature activation. The workflow HTTP client belongs to `zeroship-workflow`;
+  its accepted cyper dependency follows the Rust client.
 
 - **V8 per thread, one isolate per (app, live deploy) plus a bounded budget of pinned workflow isolates per app (`max_pinned_isolates_per_app`) for deploy-pinned workflow replay.** Worker uses LRU eviction; isolates `enter`/`exit` to allow many apps per thread (`crates/zeroship-worker/src/cache.rs`).
 - **typed_id everywhere.** UUIDv7 + base36 + entity prefix (`usr_…`, `app_…`, `ses_…`). Defined in `crates/zeroship-id/src/typed_id.rs`.
@@ -357,23 +350,20 @@ import { query, mutation } from "@zeroship/rpc/server";
 
 SDK packages call the `env.*` native primitives internally. Validation, query building, error mapping, TypeScript types all live in JS. They evolve independently of the Rust runtime.
 
-### Framework-internal: `@zeroship/bootstrap`
+### Framework-internal coordination
 
-`@zeroship/bootstrap` is the coordination package the runtime crate and Vite plugin both consume. It owns:
+`@zeroship/bootstrap` has been retired. The runtime owns startup readiness, entry validation,
+procedure lookup and invocation, stream framing and subscription transport. The
+Vite plugin emits procedure references for production and supplies ModuleRunner
+entry snapshots in development; it does not invoke handlers.
 
-- `__zsDispatch` — the embedded RPC dispatcher (input parse / capability / stream framing)
-- `normalizeUserModule` — namespace → `{ fetch, rpc, userDefault }` shape
-- `createFetchHandler` — WinterCG fetch wrapper routing `/__zeroship/v1/<id>` through the dispatcher
-- `runtime-entry.ts` — TLA orchestrator the runtime crate `include_str!`s
-- `dev-entry.ts` — dev-mode equivalent the Vite plugin's dev-bootstrap delegates to
-
-The DB SDK internal entry owns `installSchema` and its collection, transaction,
-relation and live-query helpers. `DbPlugin` supplies that compiled adapter as
-`zeroship:db/internal` through `NativePlugin::javascript_modules`. Runtime
-initialization supplies the native DB handle and generated descriptor; Vite
-emits no installer import or call.
-
-**User code MUST NOT import `@zeroship/bootstrap`.** It carries no back-compat guarantee; the runtime crate and Vite plugin are the only stable consumers. See `sdks/bootstrap/README.md`.
+The DB SDK internal entry owns `installSchema` and its collection, transaction, relation
+and live-query helpers. `DbPlugin` supplies that compiled adapter as
+`zeroship:db/internal` through `NativePlugin::javascript_modules`. Native
+preparation supplies the DB handle and validated descriptor before creator
+modules evaluate. The SDK's `defineMaskPolicy` records a declaration through
+`env.db.declareMaskPolicy`; the DB plugin installs and seals it during native
+finalization. Vite emits no installer import or call.
 
 ### When to add a native primitive vs. an npm package
 
@@ -462,11 +452,8 @@ range yourself with `tests/commit_msg_gate.sh --range origin/main..HEAD`.
 ## Development
 
 ```bash
-# Build (workspace) — build the SDKs FIRST. The runtime crate
-# includes `sdks/bootstrap/dist/runtime-entry.js` and `sdks/db/dist/internal.js`,
-# so `pnpm build` must run before `cargo build -p zeroship-runtime`.
-# Root `pnpm build` respects the dependency graph (bootstrap → db);
-# cargo then sees the freshly emitted dist files.
+# Build the SDKs before Cargo. The DB adapter embeds
+# `sdks/db/dist/internal.js`; root `pnpm build` supplies that compiled source.
 #
 # `sdks/vite-plugin` imports `zeroship-migrate-node`, a Rust N-API addon in
 # `crates/zeroship-migrate-node` whose outputs are untracked and which `pnpm install`

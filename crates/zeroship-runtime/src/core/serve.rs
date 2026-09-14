@@ -57,6 +57,8 @@ pub struct ServerOptions {
     /// Dev callers typically raise this to 256-512 MB for app bundles that
     /// pull in heavy dependencies (LangChain, SDKs, etc).
     pub heap_limit_bytes: Option<usize>,
+    /// Trusted host export used to load replaceable development entries.
+    pub dev_entry_loader: Option<String>,
     /// Env vars exposed to JS as `process.env.*`. Cloned into each worker.
     ///
     /// In serve mode this map also seeds the app-facing `env` object (the
@@ -78,6 +80,7 @@ impl std::fmt::Debug for ServerOptions {
             .field("workers", &self.workers)
             .field("cpu_limit", &self.cpu_limit)
             .field("wall_timeout", &self.wall_timeout)
+            .field("dev_entry_loader", &self.dev_entry_loader)
             .field("plugins", &self.plugins.len())
             .finish()
     }
@@ -92,6 +95,7 @@ impl Default for ServerOptions {
             cpu_limit: None,
             wall_timeout: None,
             heap_limit_bytes: None,
+            dev_entry_loader: None,
             env_vars: HashMap::new(),
             plugins: Vec::new(),
         }
@@ -218,6 +222,7 @@ pub fn start_server(modules: Vec<ModuleEntry>, options: ServerOptions) -> ! {
             options.cpu_limit,
             options.wall_timeout,
             options.heap_limit_bytes,
+            options.dev_entry_loader,
             modules,
             options.env_vars,
             options.plugins,
@@ -238,6 +243,7 @@ pub fn start_server(modules: Vec<ModuleEntry>, options: ServerOptions) -> ! {
             let cpu_limit = options.cpu_limit;
             let wall_timeout = options.wall_timeout;
             let heap_limit_bytes = options.heap_limit_bytes;
+            let dev_entry_loader = options.dev_entry_loader.clone();
             let port = options.port;
             let app_id = options.app_id.clone();
             let worker_env = options.env_vars.clone();
@@ -253,6 +259,7 @@ pub fn start_server(modules: Vec<ModuleEntry>, options: ServerOptions) -> ! {
                         cpu_limit,
                         wall_timeout,
                         heap_limit_bytes,
+                        dev_entry_loader,
                         worker_modules,
                         worker_env,
                         worker_plugins,
@@ -975,8 +982,8 @@ async fn handle_request(
     let ctx = RequestCtx::new(cancel.clone());
 
     // Dev-tier auth: in self-contained dev there is no gateway to HMAC-sign a
-    // `ZeroShip-User` header, so the JS dev-auth provider
-    // (`@zeroship/bootstrap/dev`) mints a local `__zeroship_dev_session`
+    // `ZeroShip-User` header, so Vite dev-auth middleware mints a local
+    // `__zeroship_dev_session`
     // cookie instead. Resolve the dev identity from that cookie and thread it
     // through the SAME `call_fetch_handler_with_user` path the worker uses for
     // the gateway header — identical `user_json` shape, identical native
@@ -999,10 +1006,11 @@ async fn handle_request(
     match outcome {
         FetchOutcome::Response {
             status,
-            headers,
+            mut headers,
             body,
             logs: _,
         } => {
+            append_dev_runtime_state(runtime, &mut headers);
             let resp = build_http_response(status, &headers, &body);
             let BufResult(r, _) = stream.write_all(resp).await;
             r.is_ok()
@@ -1039,10 +1047,11 @@ async fn handle_request(
             match recv_with_timeout(&rx, runtime.wall_timeout(), &cf, runtime).await {
                 Some(Ok(SettledFetch::Response {
                     status,
-                    headers,
+                    mut headers,
                     body,
                     ..
                 })) => {
+                    append_dev_runtime_state(runtime, &mut headers);
                     let resp = build_http_response(status, &headers, &body);
                     let BufResult(r, _) = stream.write_all(resp).await;
                     r.is_ok()
@@ -1076,14 +1085,18 @@ async fn handle_request(
                         r#"{{"message":"{}","name":"Error"}}"#,
                         e.message.replace('"', "\\\"")
                     );
-                    let resp = build_http_response(e.status, &[], body.as_bytes());
+                    let mut headers = Vec::new();
+                    append_dev_runtime_state(runtime, &mut headers);
+                    let resp = build_http_response(e.status, &headers, body.as_bytes());
                     let BufResult(r, _) = stream.write_all(resp).await;
                     r.is_ok()
                 }
                 None => {
+                    let mut headers = Vec::new();
+                    append_dev_runtime_state(runtime, &mut headers);
                     let resp = build_http_response(
                         504,
-                        &[],
+                        &headers,
                         br#"{"message":"request timed out","name":"Error"}"#,
                     );
                     let BufResult(r, _) = stream.write_all(resp).await;
@@ -1091,6 +1104,18 @@ async fn handle_request(
                 }
             }
         }
+    }
+}
+
+const DEV_RUNTIME_STATE_HEADER: &str = "x-zeroship-dev-runtime";
+const DEV_RUNTIME_FRESH_REQUIRED: &str = "fresh-required";
+
+fn append_dev_runtime_state(runtime: &Runtime, headers: &mut Vec<(String, String)>) {
+    if runtime.dev_runtime_requires_fresh_start() {
+        headers.push((
+            DEV_RUNTIME_STATE_HEADER.into(),
+            DEV_RUNTIME_FRESH_REQUIRED.into(),
+        ));
     }
 }
 
@@ -1356,7 +1381,7 @@ async fn handle_websocket_upgrade(
     let kernel_rx = {
         use crate::websocket_native::network as nw;
         use futures::channel::mpsc;
-        let (tx, rx) = mpsc::unbounded::<nw::WsEvent>();
+        let (tx, rx) = mpsc::unbounded::<nw::KernelOutboundEvent>();
         let state = runtime.state();
         if let Some(ws) = nw::lookup_native_ws_state(&state, ws_id) {
             ws.borrow_mut().kernel_outbound = Some(tx);
@@ -1532,7 +1557,7 @@ async fn native_ws_pump(
     stream: &mut TcpStream,
     server_ws_id: u32,
     mut kernel_rx: futures::channel::mpsc::UnboundedReceiver<
-        crate::websocket_native::network::WsEvent,
+        crate::websocket_native::network::KernelOutboundEvent,
     >,
     runtime: &Runtime,
     ws_pending: Vec<u8>,
@@ -1598,8 +1623,8 @@ async fn native_ws_pump(
         let mut s = stream_shared;
         loop {
             futures::select! {
-                ev = kernel_rx.next().fuse() => {
-                    let Some(ev) = ev else {
+                outbound = kernel_rx.next().fuse() => {
+                    let Some(outbound) = outbound else {
                         // kernel_outbound dropped — the WS state
                         // was destroyed. Wait only on close_rx
                         // from now on.
@@ -1611,10 +1636,12 @@ async fn native_ws_pump(
                         }
                         return;
                     };
+                    let (ev, completion) = outbound.split();
                     let mut got_close = false;
                     if !write_kernel_event(&mut s, ev, &mut got_close).await {
                         return;
                     }
+                    completion.complete(&runtime.state());
                     if got_close {
                         return;
                     }
@@ -1840,6 +1867,7 @@ fn run_single_worker(
     cpu_limit: Option<Duration>,
     wall_timeout: Option<Duration>,
     heap_limit_bytes: Option<usize>,
+    dev_entry_loader: Option<String>,
     modules: Vec<ModuleEntry>,
     env_vars: HashMap<String, String>,
     plugins: Vec<Arc<dyn NativePlugin>>,
@@ -1893,7 +1921,11 @@ fn run_single_worker(
             if let Some(app_id) = app_id {
                 builder = builder.app_id(app_id);
             }
-            let runtime = builder.build();
+            let runtime = match dev_entry_loader {
+                Some(export) => builder.dev_entry_loader(export),
+                None => builder,
+            }
+            .build();
 
             // Start the async event loop pump (timers, fetch, streams).
             // (Warmup removed — `call_fetch_handler` initializes lazily via

@@ -1,8 +1,15 @@
 // sdks/vite-plugin/src/constants.ts
 
-/** HTTP endpoints used by the dev bootstrap for module fetch + HMR polling. */
+/** HTTP endpoints used by the dev host and its runtime module loader. */
 export const MODULE_FETCH_PATH = "/__zeroship_fetch";
 export const HMR_POLL_PATH = "/__zeroship_hmr_check";
+export const PROCEDURE_BINDINGS_PATH = "/__zeroship_bindings";
+export const RUNTIME_MODULE_SPECIFIER = "zeroship";
+export const VITE_RUNTIME_MODULE_ID = "/@id/zeroship";
+
+/** Standalone runtime signal consumed and removed by the Vite supervisor. */
+export const DEV_RUNTIME_STATE_HEADER = "x-zeroship-dev-runtime";
+export const DEV_RUNTIME_FRESH_REQUIRED = "fresh-required";
 
 /** Environment variable names passed to the zeroship child process. */
 export const ENV_DEV = "ZEROSHIP_DEV";
@@ -10,18 +17,7 @@ export const ENV_VITE_ORIGIN = "ZEROSHIP_VITE_ORIGIN";
 export const ENV_ENTRY = "ZEROSHIP_ENTRY";
 export const ENV_RUNTIME_DESCRIPTOR = "ZEROSHIP_RUNTIME_DESCRIPTOR";
 
-/**
- * Dev-tier auth env vars passed to the spawned `zeroship serve` child.
- *
- * - `ENV_DEV_AUTH`        — JSON dev-user config the bootstrap dev-auth provider
- *   parses (`@zeroship/bootstrap` `parseDevAuthConfig`). `"0"`/`"false"`
- *   disables; absent/`"1"` is the built-in default user.
- * - `ENV_DEV_AUTH_SECRET` — per-dev-server HMAC secret. Both the JS dev-auth
- *   provider (cookie signing) and the runtime's `dev_auth.rs` (cookie
- *   verification → server-side identity) read it. Generated fresh per dev
- *   server; never persisted.
- */
-export const ENV_DEV_AUTH = "ZEROSHIP_DEV_AUTH";
+/** Cookie secret shared with the spawned runtime's native verifier. */
 export const ENV_DEV_AUTH_SECRET = "ZEROSHIP_DEV_AUTH_SECRET";
 
 /**
@@ -90,4 +86,3 @@ export const RUNTIME_RESTART_MAX_MS = 8_000;
 
 /** Lines of the child runtime's own output retained to explain a failure. */
 export const RUNTIME_LOG_TAIL_LINES = 20;
-

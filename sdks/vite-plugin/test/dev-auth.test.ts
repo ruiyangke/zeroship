@@ -6,17 +6,10 @@
  * real HMAC cookie signing (WebCrypto), real CSRF double-submit, real code
  * ledger, and real wire shapes are exercised.
  *
- * Plus a production-build absence guard: the dev-auth provider must be
- * structurally absent from the prod artifacts the runtime crate `include_str!`s
- * and the prod synthetic SSR entry imports (`runtime-entry.js`, the barrel
- * `index.js`).
  */
 
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
-import { dirname, resolve } from "node:path";
 
 import {
   createDevAuthProvider,
@@ -30,13 +23,13 @@ const SECRET = "test-dev-secret-0123456789abcdef";
 /** The built-in default user's id, and the password derived from it. */
 const DEFAULT_DEV_USER_ID = "pws_dev00000000000000000";
 const DEV_USER_PASSWORD = devPasswordFor(DEFAULT_DEV_USER_ID);
-const DIST = resolve(dirname(fileURLToPath(import.meta.url)), "..", "dist");
 
-/** Build a provider whose env returns our fixed secret + config. */
+/** Build a provider with a fixed secret and optional user config. */
 function makeProvider(devAuthConfig?: string) {
-  const env: Record<string, string> = { ZEROSHIP_DEV_AUTH_SECRET: SECRET };
-  if (devAuthConfig !== undefined) env.ZEROSHIP_DEV_AUTH = devAuthConfig;
-  const provider = createDevAuthProvider((name) => env[name]);
+  const provider = createDevAuthProvider({
+    config: devAuthConfig,
+    secret: SECRET,
+  });
   assert.ok(provider, "provider should be created when a secret is present");
   return provider!;
 }
@@ -119,7 +112,7 @@ async function devSessionCookie(
 describe("devPasswordFor -- the derived dev credential", () => {
   /** Every dev user id that actually exists in this tree. */
   const TREE_IDS = [
-    DEFAULT_DEV_USER_ID, // sdks/bootstrap/src/dev-auth.ts DEFAULT_DEV_USER
+    DEFAULT_DEV_USER_ID, // sdks/vite-plugin/src/dev-auth.ts DEFAULT_DEV_USER
     "pws_alice000000000000000", // examples/auth-notes-db + auth-uploads-kv
     "pws_bob00000000000000000", // examples/auth-notes-db + auth-uploads-kv
     "pws_probealpha0000000000", // examples/auth-probe
@@ -131,35 +124,23 @@ describe("devPasswordFor -- the derived dev credential", () => {
     assert.equal(devPasswordFor("pws_probealpha0000000000"), "dev-probealp");
     // Pure: same input, same output, no hidden state.
     assert.equal(devPasswordFor("pws_alice000000000000000"), devPasswordFor("pws_alice000000000000000"));
-    // The longest input assertPairwiseSubject admits (pws_ + exactly 20 chars)
-    // is still truncated to 8.
+    // The canonical subject shape still derives the expected fixed prefix.
     assert.equal(devPasswordFor(`pws_${"z".repeat(20)}`), "dev-zzzzzzzz");
   });
 
-  test("the ids in this tree get FIVE distinct passwords", () => {
+  test("different configured ids get distinct passwords", () => {
     const derived = TREE_IDS.map(devPasswordFor);
     assert.equal(new Set(derived).size, TREE_IDS.length, `not distinct: ${derived.join(",")}`);
   });
 
-  test("every derived password stays UNDER 15 characters", () => {
-    // Load-bearing, not cosmetic. crates/zeroship-auth/src/ui/signup.rs refuses any
-    // password under 15 characters, and tests/e2e_dev_vs_deployed_login.sh's
-    // `policy.short_password` row asserts the DEV password is REFUSED by the
-    // platform OP -- i.e. that a dev credential works locally and cannot exist
-    // in production. A derivation of >= 15 chars would let the signup succeed
-    // and silently invert that measurement into a vacuous pass.
-    //
-    // This test asserts LENGTH ONLY, on purpose. Distinctness and the exact
-    // derived values are asserted by the two tests above, so a mutation that
-    // widens the result fails HERE and a mutation that collapses every id to
-    // one constant does NOT -- which is what makes this row a measurement of
-    // the bound rather than of the function in general.
+  test("every derived password remains below the production signup minimum", () => {
+    // This assertion gates the separation from the production password policy;
+    // the preceding assertions gate the derivation itself.
     for (const id of TREE_IDS) {
       const pw = devPasswordFor(id);
       assert.ok(pw.length < 15, `devPasswordFor(${id}) = ${pw} is ${pw.length} chars, must be < 15`);
     }
-    // The bound holds for ANY id assertPairwiseSubject admits (pws_ + exactly
-    // 20 chars), not just the five above: the body is truncated to 8.
+    // The bound also holds at the edge of the accepted subject shape.
     const longest = devPasswordFor(`pws_${"z".repeat(20)}`);
     assert.ok(longest.length < 15, `the longest admissible id derives ${longest.length} chars, must be < 15`);
   });
@@ -592,54 +573,21 @@ describe("dev-auth provider — full /__zeroship/auth/* flow", () => {
   });
 
   test("disabled when no secret is present", () => {
-    assert.equal(createDevAuthProvider(() => undefined), null);
+    assert.equal(createDevAuthProvider({ config: undefined, secret: undefined }), null);
   });
-});
-
-describe("dev-auth provider — DEV-ONLY by construction (build artifact guard)", () => {
-  // The dev provider must never reach a production .zship. The runtime crate
-  // include_str!s `runtime-entry.js`; the prod synthetic SSR entry imports the
-  // barrel `index.js` for its side effects. Neither may carry the dev provider.
-  for (const artifact of ["runtime-entry.js", "index.js", "dispatcher.js"]) {
-    test(`dist/${artifact} contains no dev-auth provider symbols`, () => {
-      const src = readFileSync(resolve(DIST, artifact), "utf8");
-      // Strip line comments so the deliberate explanatory comment in index.js
-      // (which mentions "dev-auth" by name) is not a false positive.
-      const code = src
-        .split("\n")
-        .filter((line) => !line.trim().startsWith("//"))
-        .join("\n");
-      assert.doesNotMatch(code, /createDevAuthProvider/, `${artifact} must not reference createDevAuthProvider`);
-      assert.doesNotMatch(code, /__zeroship_dev_session/, `${artifact} must not reference the dev session cookie`);
-      assert.doesNotMatch(code, /signDevSession/, `${artifact} must not reference signDevSession`);
-      assert.doesNotMatch(code, /\/__zeroship\/auth\/authorize/, `${artifact} must not embed the dev authorize route`);
-    });
-  }
 });
 
 /**
  * A configured dev-user `id` must be a subject the DEPLOYED gateway will accept.
  *
- * The gateway's `is_pairwise_subject` (crates/zeroship-core/src/auth/mod.rs:225) requires
- * `pws_` plus EXACTLY `PAIRWISE_SUB_BODY_LEN` = 20 ascii-alphanumeric chars, and
- * `router/auth.rs:972` HARD-REJECTS a session cookie whose `sub` fails it -
- * `return CookieOutcome::None`, so the caller is anonymous and every
- * `auth: "user"` procedure answers 401.
- *
- * Dev validated nothing, so a malformed id worked locally and failed only on
- * deploy, with a 401 that names no cause. Measured 2026-08-12: two shipped
- * examples declared `pws_alice0000000000000000` (body 21) alongside a correct
- * `pws_bob00000000000000000` (body 20) - asymmetric inside one config block and
- * copy-pasted to a second example (fixed in 57cc19b93).
- *
- * Refusing at config-parse time cannot break a config that currently works: a
- * subject this rejects is one the gateway would have rejected anyway. The only
- * behaviour that changes is WHERE the creator finds out.
+ * `parseDevAuthConfig` must enforce the same pairwise-subject predicate as
+ * `zeroship_core::auth::is_pairwise_subject`. Otherwise a development identity
+ * can work locally and become anonymous at the deployed gateway.
  */
 describe("dev user ids must satisfy the gateway's pairwise-subject shape", () => {
   const cfg = (users: unknown) => JSON.stringify({ users });
 
-  test("a 21-char body is refused, naming the id and the rule", () => {
+  test("a malformed body is refused, naming the id and the rule", () => {
     assert.throws(
       () => parseDevAuthConfig(cfg([{ id: "pws_alice0000000000000000" }])),
       (err: Error) => {
@@ -650,7 +598,7 @@ describe("dev user ids must satisfy the gateway's pairwise-subject shape", () =>
     );
   });
 
-  test("the 20-char sibling in the same block is accepted", () => {
+  test("a canonical sibling in the same block is accepted", () => {
     const parsed = parseDevAuthConfig(cfg([{ id: "pws_bob00000000000000000" }]));
     assert.equal(parsed?.users[0].id, "pws_bob00000000000000000");
   });

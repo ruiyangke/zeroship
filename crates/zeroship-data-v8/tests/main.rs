@@ -14,5 +14,4 @@
 mod audit_table_parity;
 mod capability;
 mod db_v8_class;
-mod platform_fence;
 mod subscription_finalizer;

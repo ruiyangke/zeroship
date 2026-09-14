@@ -21,12 +21,10 @@ pub struct ModuleEntry {
 
 /// Module registry stored in V8 isolate slot.
 pub struct ModuleRegistry {
-    /// Uncompiled bundle modules remain available to dynamic imports.
-    sources: HashMap<String, String>,
-    /// Adapter ownership applies to dependencies discovered by either import path.
-    plugin_modules: HashSet<String>,
     /// Compiled V8 modules — populated by the lazy compilation loop.
     compiled: HashMap<String, v8::Global<v8::Module>>,
+    sources: HashMap<String, String>,
+    host_names: HashSet<String>,
 }
 
 pub type SharedRegistry = Rc<RefCell<ModuleRegistry>>;
@@ -40,9 +38,9 @@ impl Default for ModuleRegistry {
 impl ModuleRegistry {
     pub fn new() -> Self {
         Self {
-            sources: HashMap::new(),
-            plugin_modules: HashSet::new(),
             compiled: HashMap::new(),
+            sources: HashMap::new(),
+            host_names: HashSet::new(),
         }
     }
 
@@ -66,8 +64,7 @@ impl ModuleRegistry {
     }
 
     fn check_source_import(&self, referrer: &str, resolved: &str) -> Result<(), String> {
-        if self.plugin_modules.contains(referrer) && !self.plugin_modules.contains(resolved)
-        {
+        if self.host_names.contains(referrer) && !self.host_names.contains(resolved) {
             return Err(format!(
                 "Plugin module {referrer:?} cannot import creator module {resolved:?}"
             ));
@@ -131,103 +128,6 @@ pub(crate) fn compile_module(
     Ok(v8::Global::new(scope, module))
 }
 
-/// Compile a module and its static dependency closure without evaluating it.
-/// Register each module before visiting imports so cycles share module records.
-fn compile_graph(
-    scope: &mut v8::PinScope,
-    registry: &SharedRegistry,
-    root: &str,
-) -> Result<v8::Global<v8::Module>, String> {
-    let mut queue = VecDeque::from([root.to_owned()]);
-    let mut visited = HashSet::new();
-    while let Some(spec) = queue.pop_front() {
-        if !visited.insert(spec.clone()) {
-            continue;
-        }
-        let existing = registry.borrow().get(&spec).cloned();
-        let module = if let Some(module) = existing {
-            module
-        } else {
-            let source = registry
-                .borrow()
-                .sources
-                .get(&spec)
-                .cloned()
-                .ok_or_else(|| format!("Source not found for '{spec}'"))?;
-            let module = compile_module(scope, &spec, &source)?;
-            registry.borrow_mut().insert(spec.clone(), module.clone());
-            module
-        };
-        let module = v8::Local::new(scope, &module);
-        if !module.is_source_text_module() {
-            continue;
-        }
-        let requests = module.get_module_requests();
-        for index in 0..requests.length() {
-            let request =
-                v8::Local::<v8::ModuleRequest>::try_from(requests.get(scope, index).unwrap())
-                    .unwrap();
-            let imported = request.get_specifier().to_rust_string_lossy(scope);
-            if super::native_modules::is_native(scope, &imported) {
-                if registry.borrow().get(&imported).is_none() {
-                    let module = super::native_modules::resolve_native(scope, &imported)
-                        .ok_or_else(|| format!("Cannot resolve native module '{imported}'"))?;
-                    registry
-                        .borrow_mut()
-                        .insert(imported, v8::Global::new(scope, module));
-                }
-                continue;
-            }
-            let resolved = {
-                let reg = registry.borrow();
-                resolve_specifier(&imported, &spec, |name| {
-                    reg.sources.contains_key(name) || reg.compiled.contains_key(name)
-                })
-            }
-            .ok_or_else(|| format!("Cannot resolve import '{imported}' from '{spec}'"))?;
-            registry.borrow().check_source_import(&spec, &resolved)?;
-            queue.push_back(resolved);
-        }
-    }
-    registry
-        .borrow()
-        .get(root)
-        .cloned()
-        .ok_or_else(|| format!("Module not compiled: {root}"))
-}
-
-/// Prepare a dynamic dependency and return its canonical registry name.
-/// Evaluation is deferred until the importing module leaves its sync frame.
-pub(crate) fn dynamic_module(
-    scope: &mut v8::PinScope,
-    specifier: &str,
-    referrer: &str,
-) -> Result<Option<String>, String> {
-    let Some(registry) = scope.get_slot::<SharedRegistry>().cloned() else {
-        return Ok(None);
-    };
-    let resolved = {
-        let reg = registry.borrow();
-        resolve_specifier(specifier, referrer, |name| {
-            reg.sources.contains_key(name) || reg.compiled.contains_key(name)
-        })
-    };
-    let Some(root) = resolved else {
-        return Ok(None);
-    };
-    if !super::native_modules::is_native(scope, &root) {
-        registry.borrow().check_source_import(referrer, &root)?;
-    }
-    if let Some(module) = registry.borrow().get(&root).cloned() {
-        // Linking has already prepared this module's complete static closure.
-        if v8::Local::new(scope, &module).get_status() != v8::ModuleStatus::Uninstantiated {
-            return Ok(Some(root));
-        }
-    }
-    compile_graph(scope, &registry, &root)?;
-    Ok(Some(root))
-}
-
 /// Load modules with lazy compilation.
 ///
 /// `entries[0]` is the entrypoint. All entries are stored as source strings,
@@ -261,31 +161,89 @@ pub(crate) fn compile_modules(
             return Err(format!("Module shadows plugin source: {}", module.specifier));
         }
     }
-    let host_names: HashSet<String> = plugin_modules
-        .0
-        .iter()
-        .map(|module| module.specifier.to_owned())
-        .collect();
-
-    let registry: SharedRegistry = Rc::new(RefCell::new(ModuleRegistry::new()));
-
-    {
-        let mut reg = registry.borrow_mut();
-        reg.sources = sources;
-        reg.plugin_modules = host_names;
-    }
-
-    // Store registry in isolate slot for the resolve callback
+    let registry = Rc::new(RefCell::new(ModuleRegistry {
+        compiled: HashMap::new(),
+        sources,
+        host_names: plugin_modules.0.iter().map(|module| module.specifier.to_owned()).collect(),
+    }));
     scope.set_slot(registry.clone());
-    let entrypoint = &entries[0].specifier;
-    compile_graph(scope, &registry, entrypoint)?;
-    // Validate adapter roots even when creator code only imports them lazily.
+    let entry = compile_registered_graph(scope, &registry, &entries[0].specifier)?;
     for module in &plugin_modules.0 {
-        compile_graph(scope, &registry, module.specifier)?;
+        compile_registered_graph(scope, &registry, module.specifier)?;
     }
+    Ok(entry)
+}
 
-    let entry = registry.borrow().compiled.get(entrypoint).cloned()
-        .ok_or_else(|| format!("Entrypoint not compiled: {entrypoint}"))?;
+/// Prepare a dynamic dependency and return its canonical registry name.
+/// Evaluation is deferred until the importing module leaves its sync frame.
+pub(crate) fn dynamic_module(
+    scope: &mut v8::PinScope,
+    specifier: &str,
+    referrer: &str,
+) -> Result<Option<String>, String> {
+    let Some(registry) = scope.get_slot::<SharedRegistry>().cloned() else {
+        return Ok(None);
+    };
+    let resolved = {
+        let registry = registry.borrow();
+        resolve_specifier(specifier, referrer, |name| {
+            registry.sources.contains_key(name) || registry.compiled.contains_key(name)
+        })
+    };
+    let Some(root) = resolved else {
+        return Ok(None);
+    };
+    if !super::native_modules::is_native(scope, &root) {
+        registry.borrow().check_source_import(referrer, &root)?;
+    }
+    compile_registered_graph(scope, &registry, &root)?;
+    Ok(Some(root))
+}
+
+fn compile_registered_graph(
+    scope: &mut v8::PinScope,
+    registry: &SharedRegistry,
+    root: &str,
+) -> Result<v8::Global<v8::Module>, String> {
+    if let Some(module) = registry.borrow().get(root).cloned() { return Ok(module); }
+    let source = registry.borrow().sources.get(root).cloned()
+        .ok_or_else(|| format!("Module source not found: {root}"))?;
+    let entry = compile_module(scope, root, &source)?;
+    let mut queue = VecDeque::from([(root.to_owned(), entry.clone())]);
+    let mut scheduled = HashSet::from([root.to_owned()]);
+    let mut compiled = HashMap::new();
+    while let Some((specifier, module)) = queue.pop_front() {
+        compiled.insert(specifier.clone(), module.clone());
+        let module = v8::Local::new(scope, &module);
+        let requests = module.get_module_requests();
+        for index in 0..requests.length() {
+            let request = v8::Local::<v8::ModuleRequest>::try_from(requests.get(scope, index).unwrap()).unwrap();
+            let import = request.get_specifier().to_rust_string_lossy(scope);
+            if super::native_modules::is_native(scope, &import) {
+                if registry.borrow().get(&import).is_none() && !compiled.contains_key(&import) {
+                    let module = super::native_modules::resolve_native(scope, &import)
+                        .expect("registered native module");
+                    compiled.insert(import, v8::Global::new(scope, module));
+                }
+                continue;
+            }
+            let (resolved, source) = {
+                let registry = registry.borrow();
+                let resolved = resolve_specifier(&import, &specifier, |name| {
+                    registry.sources.contains_key(name)
+                })
+                .ok_or_else(|| format!("Cannot resolve import '{import}' from '{specifier}'"))?;
+                registry.check_source_import(&specifier, &resolved)?;
+                if registry.get(&resolved).is_some() || !scheduled.insert(resolved.clone()) { continue; }
+                let source = registry.sources.get(&resolved).expect("resolved module source").clone();
+                (resolved, source)
+            };
+            let module = compile_module(scope, &resolved, &source)?;
+            queue.push_back((resolved, module));
+        }
+    }
+    // Publish the graph together so a failed import cannot leave a partial root.
+    registry.borrow_mut().compiled.extend(compiled);
     Ok(entry)
 }
 

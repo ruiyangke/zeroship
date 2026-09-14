@@ -177,126 +177,18 @@ pub struct HttpResult {
 // requires a rollback, restore from `git log --diff-filter=D --
 // crates/runtime/src/embed/websocket.js`.
 
-/// Runtime-injected bootstrap module. Becomes the host entry,
-/// wrapping the user's original entry while preserving its module specifier.
+/// Runtime-owned host entry imports the creator entry under its original name.
 ///
-/// The kernel invokes one of three entry points per request:
-///   - `user.default.rpc(name, input, ctx)`  for `/__zeroship/v1/<id>` (when set)
-///   - `user.default.fetchFast(method, url, bodyBytes, env)`  for non-RPC paths (when set)
-///   - `user.default.fetch(request, env, ctx)`  WinterCG slow path (always)
+/// It preserves creator fetch receivers, exposes the procedure dictionary for
+/// the Rust runtime to snapshot, supplies the optional index fallback, and
+/// currently retains the workflow entry owned by the workflow refactor.
+/// Unary, streaming and subscription RPC dispatch do not execute here.
 ///
-/// The synthetic SSR entry (emitted by `@zeroship/vite-plugin`) provides
-/// `default.{fetch, rpc}` and owns the `/__zeroship/v1/<id>` wire dispatch. Raw
-/// user code (no plugin) can export any subset; the bootstrap forwards
-/// whichever are present.
+/// Internal workflow bridge module source.
 ///
-/// This module exists to:
-///   1. **WS-subscription dispatch**: WebSocket upgrades on `/__zeroship/v1/<id>`
-///      reach `_zsAcceptSubscription` → `dispatchSubscription` →
-///      `user.default.rpc(name, input, ctx)`. The kernel itself doesn't
-///      know about subscriptions — they ride entirely on user-space JS
-///      over the existing WebSocketPair primitive.
-///   2. **Bare-app fallback**: when the user's module doesn't export
-///      `default.fetch`, return a 404 (or the legacy `user.index()`
-///      convention for hand-written test apps).
-///   3. **Request-context binding**: before invoking user code, the
-///      kernel stashes the ctx + Request so nested modules can call
-///      `getRequest()` without threading the request everywhere.
-///
-/// The `default` export shape is `{ fetch, rpc, fetchFast, subscribe }`
-/// — `rpc` is the standalone RPC entry (kernel calls it directly when
-/// the URL matches /__zeroship/v1/<id>; symmetric to `default.fetch`),
-/// `fetchFast` is the optional zeroship-extension HTTP fast path for
-/// non-RPC traffic, and `subscribe` is the WS-subscription dispatcher.
-/// Name of the process-lifetime `v8::Private` symbol under which the
-/// `DbPlatform` capability handle is stashed on the `env.db` object
-/// (P9 §8 — the `__platform` capability gate).
-///
-/// A `v8::Private` minted via [`v8::Private::for_api`] is interned by
-/// name across the isolate and never collected, so any site that needs
-/// the symbol — `plugin-db`'s `mint_db` (which calls `set_private`) and
-/// the [`zs_db_platform_callback`] resolver (which calls `get_private`)
-/// — derives the SAME symbol from this single name string. The name is
-/// the shared source of truth; there is no shared static handle to
-/// thread across crates.
-///
-/// `plugin-db` references this via
-/// `zeroship_runtime::core::init::ZS_PLATFORM_PRIVATE_NAME`
-/// (plugin-db depends on the runtime crate; not vice-versa). The
-/// qualified `#capability` suffix follows the V8 guidance to namespace
-/// `for_api` keys to avoid clashes in the global private name space.
-pub const ZS_PLATFORM_PRIVATE_NAME: &str = "zeroship::db::__platform#capability";
-
-/// Resolve the process-lifetime `ZS_PLATFORM` private symbol.
-///
-/// Both the `set_private` site (`plugin-db::v8_classes::db::mint_db`)
-/// and the `get_private` reader ([`zs_db_platform_callback`]) call this
-/// so they operate on byte-identical symbol identity. Cheap after the
-/// first call — `for_api` returns the interned symbol on repeat reads.
-pub fn zs_platform_private<'s>(scope: &mut v8::PinScope<'s, '_>) -> v8::Local<'s, v8::Private> {
-    let name = v8::String::new(scope, ZS_PLATFORM_PRIVATE_NAME).unwrap();
-    v8::Private::for_api(scope, Some(name))
-}
-
-/// `globalThis.__zsDbPlatform(db)` — the capability-handle resolver
-/// handed to `@zeroship/bootstrap`'s `runtime-entry` (P9 §8).
-///
-/// Reads the `DbPlatform` instance stashed on the passed `db` object
-/// under the `ZS_PLATFORM` private symbol and returns it. Returns
-/// `undefined` when the argument is not an object or carries no platform
-/// slot (e.g. a stub `env.db` in a dev run without `DATABASE_URL`).
-///
-/// ## Security (P9 §8)
-///
-/// The `DbPlatform` handle lives in a `v8::Private` slot and is unreadable from
-/// creator JavaScript. The internal bridge captures this resolver and deletes
-/// the global before the creator module evaluates. It exposes only the mask
-/// policy installation operation to the bootstrap module. Dev uses the same
-/// ordering before its module runner loads creator code.
-fn zs_db_platform_callback(
-    scope: &mut v8::PinScope,
-    args: v8::FunctionCallbackArguments,
-    mut rv: v8::ReturnValue,
-) {
-    let arg = args.get(0);
-    let Ok(db_obj) = v8::Local::<v8::Object>::try_from(arg) else {
-        rv.set(v8::undefined(scope).into());
-        return;
-    };
-    let priv_sym = zs_platform_private(scope);
-    match db_obj.get_private(scope, priv_sym) {
-        Some(handle) if !handle.is_undefined() => rv.set(handle),
-        _ => rv.set(v8::undefined(scope).into()),
-    }
-}
-
-/// Schema auto-discovery init script. Spliced into [`bootstrap_js`]
-/// immediately after importing the creator entry module so
-/// the top-level `await import("zeroship:db/internal")`
-/// runs inside the bootstrap module's evaluation — before the runtime
-/// resolves `default.fetch` / `default.rpc` off the namespace.
-///
-/// Source of truth: `sdks/bootstrap/src/runtime-entry.ts` — compiled by
-/// the bootstrap package's `pnpm build` (which strips the `export {};`
-/// module marker so the file is splice-safe). Stage 7 of the refactor
-/// moved this out of a runtime-owned JS file (since deleted) so dev and
-/// prod share a single implementation.
-///
-/// Build ordering: `pnpm -F @zeroship/bootstrap build` MUST run before
-/// `cargo build -p zeroship-runtime`. The workspace's root `pnpm build`
-/// runs the bootstrap package in topological order via the
-/// @zeroship/db → @zeroship/bootstrap dependency edge.
-pub(crate) const DB_INIT_JS: &str =
-    include_str!("../../../../sdks/bootstrap/dist/runtime-entry.js");
-
-/// Internal capability bridge module source.
-///
-/// This module is imported before the creator entry, so it captures the native
-/// kind callbacks and deletes their string-named globals before creator code
-/// can observe or retain them. The import specifier is generated once per
-/// process (see [`BOOTSTRAP_KIND_BRIDGE_SPEC`]) and is not part of the creator
-/// module graph contract.
-const KIND_BRIDGE_JS: &str = r##"
+/// This module captures native capabilities before the creator entry evaluates.
+/// Creator code does not receive these captured callbacks.
+const WORKFLOW_BRIDGE_JS: &str = r##"
 import { AsyncLocalStorage } from "node:async_hooks";
 
 const zsWorkflowDispatchAls = new AsyncLocalStorage();
@@ -304,31 +196,7 @@ const ZS_WORKFLOW_BODY_FETCH_ERROR =
     "workflow bodies may not perform I/O directly — move fetch(...) inside step.run(...) or use step.sideEffect(...)";
 const ZS_WORKFLOW_BODY_TIMER_ERROR =
     "workflow bodies may not use timers directly — use step.sleep(...) instead";
-const enterKind = globalThis.__zsEnterKind;
-const exitKind = globalThis.__zsExitKind;
 const zsWorkflowRealFetch = globalThis.fetch;
-const zsDbPlatformResolver = globalThis.__zsDbPlatform;
-const zsEnvDb = typeof globalThis.__zs_env === "function"
-    ? globalThis.__zs_env()?.db
-    : undefined;
-const zsDbPlatform = typeof zsDbPlatformResolver === "function" && zsEnvDb != null
-    ? zsDbPlatformResolver(zsEnvDb)
-    : undefined;
-
-try { delete globalThis.__zsEnterKind; } catch (_e) {}
-try { delete globalThis.__zsExitKind; } catch (_e) {}
-try { delete globalThis.__zsClearKind; } catch (_e) {}
-if (__zsHideDbPlatform) {
-    try { delete globalThis.__zsDbPlatform; } catch (_e) {}
-}
-
-export async function __zsInstallDbMaskPolicy(policy) {
-    const setter = zsDbPlatform?.setMaskPolicy;
-    if (typeof setter === "function") {
-        await setter.call(zsDbPlatform, policy);
-    }
-}
-
 class ZsNondeterministicError extends Error {
     constructor(message = "workflow replay is nondeterministic") {
         super(message);
@@ -375,94 +243,6 @@ function zsInstallWorkflowIoGuards() {
 }
 
 zsInstallWorkflowIoGuards();
-
-function isAsyncIterator(x) {
-    return x != null && typeof x === "object"
-        && typeof x[Symbol.asyncIterator] === "function"
-        && typeof x.next === "function";
-}
-
-function isParseable(s) {
-    return s != null && typeof s === "object" && typeof s.parse === "function";
-}
-
-function zodIssues(err) {
-    if (err && Array.isArray(err.issues)) return err.issues;
-    if (err && Array.isArray(err.errors)) return err.errors;
-    return [];
-}
-
-function isZodStringSchema(s) {
-    if (!s || typeof s !== "object") return false;
-    const def = s._def ?? s.def;
-    if (!def) return false;
-    if (def.typeName === "ZodString") return true;
-    if (def.type === "string") return true;
-    return false;
-}
-
-function mkErr(message, status, code, details) {
-    const e = new Error(message);
-    e.status = status;
-    e.code = code;
-    if (details !== undefined) e.details = details;
-    return e;
-}
-
-function enter(kind) {
-    return kind && typeof enterKind === "function" ? enterKind(kind) : -1;
-}
-
-function exit(token) {
-    if (token >= 0 && typeof exitKind === "function") exitKind(token);
-}
-
-export async function __zsDispatchRpc(rpc, name, input, ctx) {
-    if (rpc == null || typeof rpc !== "object") {
-        throw mkErr("RPC registry is not an object", 500, "INTERNAL");
-    }
-    const fn = rpc[name];
-    if (typeof fn !== "function") {
-        throw mkErr("Method not found: " + name, 404, "NOT_FOUND");
-    }
-
-    const schemaReady = globalThis.__zsSchemaReady;
-    if (schemaReady && typeof schemaReady.then === "function") {
-        await schemaReady;
-    }
-
-    const cfg = fn.config;
-    let validated = input;
-    if (cfg && isParseable(cfg.input)) {
-        try {
-            validated = cfg.input.parse(input);
-        } catch (e) {
-            throw mkErr("Invalid input", 400, "INVALID_ARGUMENT", { issues: zodIssues(e) });
-        }
-    }
-
-    const kind = cfg && typeof cfg.kind === "string" ? cfg.kind : undefined;
-    const token = enter(kind);
-    try {
-        const result = await fn(validated, ctx);
-        if (isAsyncIterator(result)) {
-            if (cfg && isZodStringSchema(cfg.output)) {
-                try { result.__zsOutputIsString = true; } catch (_e) {}
-            }
-            return result;
-        }
-        if (cfg && isParseable(cfg.output) && globalThis.__zsValidateOutput) {
-            try {
-                cfg.output.parse(result);
-            } catch (e) {
-                throw mkErr("Invalid handler output", 500, "INTERNAL", { issues: zodIssues(e) });
-            }
-        }
-        return result;
-    } finally {
-        exit(token);
-    }
-}
 
 class ZsWorkflowSuspendSignal extends Error {
     constructor(outcome) {
@@ -679,8 +459,8 @@ async function wfReadStepOutputBytes(outputRead, name, occurrence) {
     return outputRead(name, occurrence);
 }
 
-// Runtime dispatcher copy: keep behavior in lock-step with
-// sdks/bootstrap/src/dispatcher.ts and sdks/workflows/src/journal.ts.
+// Runtime workflow drain barrier. The workflow SDK owns the related journal
+// behavior.
 class ZsDispatchMicrotaskQuiescenceBarrier {
     #version = 0;
     #stopped = false;
@@ -1535,96 +1315,24 @@ export async function __zsWorkflowDispatch(userNamespace, envelope, _ctx) {
 }
 "##;
 
-pub(crate) static BOOTSTRAP_KIND_BRIDGE_SPEC: LazyLock<String> =
+pub(crate) static WORKFLOW_BRIDGE_SPEC: LazyLock<String> =
     LazyLock::new(|| format!("__zs_kind_bridge_{}.js", uuid::Uuid::new_v4().simple()));
 
-/// Import the private kind bridge before creator code, then install the schema
-/// and bind dispatch from the creator's original module namespace.
-fn bootstrap_js(entry: &str) -> Result<String, String> {
+/// Bind dispatch from the creator's original module namespace.
+fn host_entry_js(entry: &str) -> Result<String, String> {
     let entry = serde_json::to_string(entry)
         .map_err(|error| format!("Invalid entry specifier: {error}"))?;
     let prefix = format!(
-        "import {{ __zsDispatchRpc, __zsInstallDbMaskPolicy, __zsWorkflowDispatch }} from \"./{}\";\nimport * as user from {entry};\n",
-        &*BOOTSTRAP_KIND_BRIDGE_SPEC,
+        "import {{ __zsWorkflowDispatch }} from \"./{}\";\nimport * as user from {entry};\n",
+        &*WORKFLOW_BRIDGE_SPEC,
     );
-    let mut source =
-        String::with_capacity(prefix.len() + DB_INIT_JS.len() + BOOTSTRAP_MAIN_JS.len());
+    let mut source = String::with_capacity(prefix.len() + HOST_ENTRY_MAIN_JS.len());
     source.push_str(&prefix);
-    source.push_str(DB_INIT_JS);
-    source.push_str(BOOTSTRAP_MAIN_JS);
+    source.push_str(HOST_ENTRY_MAIN_JS);
     Ok(source)
 }
 
-const BOOTSTRAP_MAIN_JS: &str = r##"
-// Vercel AI-SDK Data Stream Protocol encoder.
-//
-// Each line is `<typeId>:<json>\n`. TypeIds we emit:
-//   0:"text"           — text part (string yield)
-//   2:[<json>]         — typed object yield (the array shape matches
-//                        the AI-SDK convention: a yield is one
-//                        element of a streaming array)
-//   e:{...}            — structured error envelope (zeroship extension;
-//                        the AI-SDK parser tolerates unknown ids)
-//   d:{}               — done
-//
-// `outputIsString`, when truthy, forces every yield to the `0:` lane —
-// even non-string values get coerced via String(). Set by callers that
-// know the procedure's declared output schema is a string. When
-// undefined, we per-value-typeof: strings go to `0:`, anything else
-// goes to `2:`.
-//
-// The async generator's `return` value (vs yields) is intentionally
-// dropped on the floor — the AI-SDK protocol has no equivalent. If the
-// creator wants a final value distinguished from yields, they emit it
-// as the last `yield` and `return undefined`.
-function sseFromAsyncGen(gen, outputIsString) {
-    const encoder = new TextEncoder();
-    const body = new ReadableStream({
-        async start(controller) {
-            try {
-                while (true) {
-                    const step = await gen.next();
-                    if (step.done) {
-                        controller.enqueue(encoder.encode("d:{}\n"));
-                        break;
-                    }
-                    const v = step.value;
-                    if (outputIsString || typeof v === "string") {
-                        controller.enqueue(encoder.encode("0:" + JSON.stringify(String(v)) + "\n"));
-                    } else {
-                        controller.enqueue(encoder.encode("2:[" + JSON.stringify(v) + "]\n"));
-                    }
-                }
-            } catch (e) {
-                // `e:` carries the structured error envelope — keeps
-                // the SSE error frame field-compatible with the unary
-                // error body so clients can share a single parser.
-                // `code` and `retryable` are type-checked; `details`
-                // is forwarded as-is when present.
-                const env = {
-                    message: (e && e.message) || String(e),
-                    name:    (e && e.name)    || "Error",
-                };
-                if (e && typeof e.code === "string") env.code = e.code;
-                if (e && e.details !== undefined)    env.details = e.details;
-                if (e && typeof e.retryable === "boolean") env.retryable = e.retryable;
-                controller.enqueue(encoder.encode("e:" + JSON.stringify(env) + "\n"));
-                controller.enqueue(encoder.encode("d:{}\n"));
-            } finally {
-                controller.close();
-            }
-        },
-    });
-    return new Response(body, {
-        status: 200,
-        headers: {
-            "Content-Type": "text/event-stream",
-            "Cache-Control": "no-cache, no-transform",
-            "X-Accel-Buffering": "no",
-        },
-    });
-}
-
+const HOST_ENTRY_MAIN_JS: &str = r##"
 function errorResponse(err) {
     const status = Number.isInteger(err && err.status) && err.status >= 400 && err.status < 600
         ? err.status : 500;
@@ -1648,299 +1356,10 @@ function errorResponse(err) {
     });
 }
 
-// ── Subscription wire dispatch ────────────────────────────────────────────
-//
-// Subscription procedures are async generators wired over WebSocket per
-// `docs/proposals/rpc.md` §6 (Subscription wire). Frame protocol:
-//
-//   Client → server (first frame after upgrade):
-//     {"t":"hello","input":<json>}
-//
-//   Server → client:
-//     {"t":"data","value":<json>}    each yield
-//     {"t":"error","error":<env>}    on handler throw (envelope is
-//                                    field-compatible with errorResponse)
-//     {"t":"end"}                    normal completion
-//     {"t":"ping"} / {"t":"pong"}    keepalive (either direction)
-//
-// Pings: server sends every 30s; if a pong doesn't come back within 60s
-// we close 4408. Hello timeout: 5s after upgrade or close 4400.
-//
-// Implementation note: this runs entirely in user-space JS over the
-// existing WebSocketPair primitive — the kernel itself doesn't know
-// about subscriptions. The synthetic SSR entry detects WS-upgrade
-// requests on `/__zeroship/v1/<id>` and calls into `dispatchSubscription` to
-// hand off the server side of the pair. For the bootstrap fallback
-// (apps without the synthetic entry) we expose the same handler so
-// runtime tests + bare-bone apps can wire WS subscriptions directly.
-function _zsSubError(err) {
-    const env = {
-        message: (err && err.message) || String(err),
-        name:    (err && err.name)    || "Error",
-    };
-    if (err && typeof err.code === "string") env.code = err.code;
-    if (err && err.details !== undefined)    env.details = err.details;
-    if (err && typeof err.retryable === "boolean") env.retryable = err.retryable;
-    return env;
-}
-
-// Run an async iterator over `ws`. Emits `{"t":"data",value}` per yield,
-// `{"t":"end"}` on normal completion, `{"t":"error",error}` on throw.
-// Closes the socket cleanly afterward. Stops emitting when the socket
-// is no longer open (client closed). Calls `gen.return()` on early exit
-// so handler-side cleanup runs (clear timers, close DB watch, etc.).
-async function _zsRunSubscriptionGen(gen, ws) {
-    try {
-        while (true) {
-            // Cheap closed-check before pulling the next value — saves
-            // the (potentially expensive) async-gen step when the
-            // client is already gone.
-            if (ws.readyState !== 1 /* OPEN */) {
-                try { await gen.return(undefined); } catch (_e) {}
-                return;
-            }
-            let step;
-            try {
-                step = await gen.next();
-            } catch (err) {
-                if (ws.readyState === 1) {
-                    try { ws.send(JSON.stringify({ t: "error", error: _zsSubError(err) })); } catch (_) {}
-                    try { (typeof __wsServerClose === "function" ? __wsServerClose(ws, 1011, "") : ws.close(1011, "")); } catch (_) {}
-                }
-                return;
-            }
-            if (step.done) {
-                if (ws.readyState === 1) {
-                    try { ws.send(JSON.stringify({ t: "end" })); } catch (_) {}
-                    try { ws.close(1000, ""); } catch (_) {}
-                }
-                return;
-            }
-            if (ws.readyState !== 1) {
-                try { await gen.return(undefined); } catch (_e) {}
-                return;
-            }
-            try {
-                ws.send(JSON.stringify({ t: "data", value: step.value }));
-            } catch (_) {
-                try { await gen.return(undefined); } catch (_e) {}
-                return;
-            }
-        }
-    } catch (err) {
-        // Defensive: any unexpected throw above bubbles here.
-        if (ws && ws.readyState === 1) {
-            try { ws.send(JSON.stringify({ t: "error", error: _zsSubError(err) })); } catch (_) {}
-            try { (typeof __wsServerClose === "function" ? __wsServerClose(ws, 1011, "") : ws.close(1011, "")); } catch (_) {}
-        }
-    }
-}
-
-// dispatchSubscription — entry point for WS-subscription procedures.
-//
-// `methodName` is the wireId. `input` is the parsed input value
-// (already pulled out of the `{"t":"hello"}` frame by the caller).
-// `ws` is the *server-side* WebSocket of the pair created by the
-// caller; it's already been .accept()ed before we're invoked.
-//
-// Routes through `user.default.rpc(name, input, ctx)` — the symmetric
-// shape the synthetic SSR entry exposes. Subscription procedures are
-// async generators; the handler returns the iterator directly.
-async function dispatchSubscription(methodName, input, ws) {
-    try {
-        if (!user.default) {
-            throw Object.assign(
-                new Error("default.rpc not exported — subscription requires the synthetic SSR entry"),
-                { code: "INTERNAL" },
-            );
-        }
-        // Stage 5a: accept function-shape (legacy) OR dict-shape
-        // `default.rpc`. Dict-shape rides through the internal dispatcher, which
-        // returns the handler's value unchanged — so an AsyncIterator
-        // handler still surfaces as an iterator for `_zsRunSubscriptionGen`.
-        let rpcInvoker;
-        if (typeof user.default.rpc === "function") {
-            rpcInvoker = user.default.rpc;
-        } else if (user.default.rpc != null && typeof user.default.rpc === "object") {
-            const rpcDict = user.default.rpc;
-            rpcInvoker = (name, input) => __zsDispatchRpc(rpcDict, name, input);
-        } else {
-            throw Object.assign(
-                new Error("default.rpc not exported — subscription requires the synthetic SSR entry"),
-                { code: "INTERNAL" },
-            );
-        }
-        const gen = await rpcInvoker(methodName, input);
-        if (gen == null || typeof gen !== "object"
-            || typeof gen[Symbol.asyncIterator] !== "function"
-            || typeof gen.next !== "function") {
-            throw Object.assign(new Error("Subscription handler must return an async iterator"), {
-                code: "INTERNAL",
-            });
-        }
-        await _zsRunSubscriptionGen(gen, ws);
-    } catch (err) {
-        if (ws && ws.readyState === 1 /* OPEN */) {
-            try { ws.send(JSON.stringify({ t: "error", error: _zsSubError(err) })); } catch (_) {}
-            try { (typeof __wsServerClose === "function" ? __wsServerClose(ws, 1011, "") : ws.close(1011, "")); } catch (_) {}
-        }
-    }
-}
-
-// Build a Response that completes the WS-subscription upgrade. Spawns
-// the subscription pump as a side effect — the pump reads the `hello`
-// frame, runs the generator, and writes data frames; the kernel
-// handles the WS handshake from the returned Response.
-//
-// `urlStr` is the request URL (used to extract the wireId after the
-// `/__zeroship/v1/` prefix). On structural failure (bad URL, missing method)
-// we return an HTTP error response — the kernel will write that
-// instead of upgrading.
-function _zsAcceptSubscription(urlStr) {
-    let methodName = null;
-    try {
-        const u = new URL(urlStr);
-        const m = u.pathname.match(/^\/__zeroship\/v1\/(.+)$/);
-        if (m) methodName = decodeURIComponent(m[1]);
-    } catch (_e) {}
-    if (!methodName) {
-        return new Response('{"message":"missing wireId","name":"Error"}', {
-            status: 400, headers: { "Content-Type": "application/json" },
-        });
-    }
-
-    const pair = new WebSocketPair();
-    const client = pair[0];
-    const server = pair[1];
-    server.accept();
-
-    // Hello timeout — close 4400 if the client doesn't send `hello`
-    // within 5s. The first message handler clears this.
-    let helloTimer = setTimeout(() => {
-        if (server.readyState === 1) {
-            try { server.close(4400, "missing hello"); } catch (_) {}
-        }
-    }, 5000);
-
-    let pingTimer = null;
-    let pongDeadline = null;
-    function startPings() {
-        // Server sends ping every 30s. If client doesn't pong within
-        // 60s we close 4408.
-        pingTimer = setInterval(() => {
-            if (server.readyState !== 1) { clearInterval(pingTimer); return; }
-            try { server.send(JSON.stringify({ t: "ping" })); } catch (_) {}
-            if (pongDeadline === null) {
-                pongDeadline = setTimeout(() => {
-                    if (server.readyState === 1) {
-                        try { server.close(4408, "pong timeout"); } catch (_) {}
-                    }
-                }, 60000);
-            }
-        }, 30000);
-    }
-
-    // Wire the message router. The first message must be `hello`; any
-    // other shape closes the connection 4400.
-    let started = false;
-    server.addEventListener("message", function(ev) {
-        let msg;
-        try { msg = JSON.parse(typeof ev.data === "string" ? ev.data : String(ev.data)); }
-        catch (_e) {
-            try { server.close(4400, "invalid JSON"); } catch (_) {}
-            return;
-        }
-        if (!msg || typeof msg.t !== "string") {
-            try { server.close(4400, "missing frame tag"); } catch (_) {}
-            return;
-        }
-        if (msg.t === "ping") {
-            try { server.send(JSON.stringify({ t: "pong" })); } catch (_) {}
-            return;
-        }
-        if (msg.t === "pong") {
-            if (pongDeadline !== null) { clearTimeout(pongDeadline); pongDeadline = null; }
-            return;
-        }
-        if (!started && msg.t === "hello") {
-            started = true;
-            clearTimeout(helloTimer); helloTimer = null;
-            startPings();
-            // Kick off the dispatcher — fire-and-forget; errors are
-            // funnelled into ws frames inside dispatchSubscription.
-            dispatchSubscription(methodName, msg.input, server);
-            return;
-        }
-        // Frames after hello (other than ping/pong) are not part of
-        // the protocol — drop silently for forward-compat.
-    });
-
-    // On close, stop timers + ensure the generator gets a chance to
-    // tear down. (The generator's own `ws.readyState !== 1` check
-    // catches this on the next iteration.)
-    server.addEventListener("close", function() {
-        if (helloTimer !== null) { clearTimeout(helloTimer); helloTimer = null; }
-        if (pingTimer !== null) { clearInterval(pingTimer); pingTimer = null; }
-        if (pongDeadline !== null) { clearTimeout(pongDeadline); pongDeadline = null; }
-    });
-
-    // Return the WS-upgrade response — kernel writes the 101 + handshake
-    // headers from this and pumps frames between TCP and the pair.
-    return new Response(null, {
-        status: 101,
-        webSocket: client,
-        headers: { "Sec-WebSocket-Protocol": "zs.v1" },
-    });
-}
-
-// Detect a WS-upgrade request. The kernel/gateway already gates on
-// these — we re-check on the JS side so the bootstrap's fallback
-// router doesn't need to trust the path alone.
-function _zsIsWsUpgrade(request) {
-    if (request.method !== "GET") return false;
-    const upgrade = request.headers.get("upgrade");
-    if (!upgrade || upgrade.toLowerCase() !== "websocket") return false;
-    return true;
-}
-
-// DB boot-policy readiness gate. `runtime-entry` stashes the asynchronous
-// mask-policy installation on `globalThis.__zsSchemaReady` but does NOT await
-// it (top-level await would leave module eval pending and
-// 404 every dispatch). The RPC dispatcher already awaits it before the
-// first procedure; the WinterCG fetch / fetchFast entries did NOT — so a
-// `default.fetch` handler could otherwise race that security setup.
-//
-// Gate fetch + fetchFast at REQUEST time (not module-eval time): await
-// the same promise the dispatcher awaits before invoking the user slot.
-// The await is near-free on the warm path once the promise is settled. A
-// rejected policy chain surfaces as a thrown error from the gate, so the fetch
-// fails loud rather than running without its declared policy.
-async function __zsAwaitSchemaReady() {
-    const ready = globalThis.__zsSchemaReady;
-    if (ready && typeof ready.then === "function") {
-        // A rejection here throws out of this await — the caller (the
-        // gated fetch/fetchFast shim) propagates it to the kernel, which
-        // maps it to an HTTP error envelope. Do NOT swallow it: a fetch
-        // after a failed schema-apply must surface a clear error.
-        await ready;
-    }
-}
-
-// Resolve the user's default.fetch once at module init. When present we
-// wrap it in a thin async shim that AWAITS `__zsSchemaReady` first, so
-// the user handler never runs before DB boot policy is ready.
-// The kernel already awaits a returned Promise and turns thrown
-// exceptions into `DispatchResult::ErrorValue` (honoring `err.status`),
-// so the shim adds one settled-promise await on the warm path and
-// correctly propagates a rejected schema chain on the cold path.
-const __USER_FETCH_RAW = (user && user.default && typeof user.default.fetch === "function")
-    ? user.default.fetch
-    : null;
-const USER_FETCH = __USER_FETCH_RAW
-    ? async function gatedFetch(request, env, ctx) {
-          await __zsAwaitSchemaReady();
-          return __USER_FETCH_RAW.call(user.default, request, env, ctx);
-      }
+// The host finalizes startup before dispatch. Preserve the creator fetch receiver.
+const __USER_FETCH_RAW = user?.default?.fetch;
+const USER_FETCH = typeof __USER_FETCH_RAW === "function"
+    ? Function.prototype.bind.call(__USER_FETCH_RAW, user.default)
     : null;
 
 // Optional zeroship extension: `user.default.fetchFast(method, url, bodyBytes, env)`.
@@ -1955,17 +1374,8 @@ const USER_FETCH = __USER_FETCH_RAW
 const __USER_FETCH_FAST_RAW = (user && user.default && typeof user.default.fetchFast === "function")
     ? user.default.fetchFast
     : null;
-// Same schema-readiness gate as `fetch` (C1). The shim is async, so it
-// returns a Promise; the kernel's fetchFast path already awaits a
-// promise return and re-classifies the resolved value (null → fall
-// through to the slow `default.fetch`, which is itself gated). A
-// rejected `__zsSchemaReady` throws out of the shim → kernel maps it to
-// an error envelope. Near-free on the warm path (settled promise).
 const USER_FETCH_FAST = __USER_FETCH_FAST_RAW
-    ? async function gatedFetchFast(method, url, bodyBytes, env) {
-          await __zsAwaitSchemaReady();
-          return __USER_FETCH_FAST_RAW(method, url, bodyBytes, env);
-      }
+    ? Function.prototype.bind.call(__USER_FETCH_FAST_RAW, user.default)
     : null;
 
 // Standalone RPC entry — the kernel calls this directly when the URL
@@ -1974,48 +1384,8 @@ const USER_FETCH_FAST = __USER_FETCH_FAST_RAW
 // envelope-wrapped on the wire by the kernel; promises get awaited;
 // async iterators fall through to the slow path's stream encoder.
 //
-// Two shapes accepted (see `docs/reference/zeroship-standard.md`):
-//   - plain object (dict-shape, `{ [wireId]: handler }`): the canonical
-//     contract. Wrapped in the internal dispatcher so the runtime
-//     owns input validation, capability frame, stream framing, and
-//     dev-only output validation. The Vite plugin's
-//     synthetic entry and `examples/raw-rpc.js`-style raw deploys both
-//     emit this.
-//   - function (`(name, input, ctx) => ...`): documented advanced /
-//     back-compat path. Used directly without the runtime dispatcher
-//     — the function owns its own validation. The dev-bootstrap consumes
-//     this because HMR re-resolves the user namespace per request; raw
-//     deploys may use it for dynamic routing.
-let USER_RPC = null;
-if (user && user.default && user.default.rpc != null) {
-    const _rpc = user.default.rpc;
-    if (typeof _rpc === "function") {
-        USER_RPC = _rpc;
-    } else if (typeof _rpc === "object") {
-        USER_RPC = function dispatchRpc(name, input, ctx) {
-            // Stream/subscription handlers are `async function*` — calling
-            // them returns an AsyncIterator synchronously (not a Promise).
-            // Returning it here lets the kernel's sync FallThrough path
-            // kick in, which routes the request to `default.fetch` where
-            // the SSE encoder (`sseFromAsyncGen` / `createFetchHandler`)
-            // wraps the iterator into a streaming Response.
-            //
-            // If we let the async internal dispatcher handle these,
-            // it wraps the iterator in a Promise; the kernel's promise-
-            // settle path then sees `Promise<AsyncIterator>` and surfaces
-            // the "AsyncIterator from a Promise — unsupported" error.
-            const _fn = _rpc[name];
-            const _cfg = _fn && _fn.config;
-            const _kind = _cfg && typeof _cfg.kind === "string" ? _cfg.kind : undefined;
-            if (_kind === "stream" || _kind === "subscription") {
-                return _fn(input, ctx);
-            }
-            return __zsDispatchRpc(_rpc, name, input, ctx);
-        };
-    }
-}
-
-const FALLBACK_ZS_V1_TAG = "/__zeroship/v1/";
+// Rust snapshots the procedure dictionary before publishing the application.
+const USER_RPC = user?.default?.rpc ?? null;
 
 // Coerce a user-supplied page handler return value into a Response.
 // Strings/null are wrapped as text/html. Response is passed through.
@@ -2029,29 +1399,16 @@ function coerceToHtmlResponse(result, status) {
 }
 
 // Fallback fetch — used only when the user's module doesn't export a
-// default.fetch handler. Handles:
-//   - /__zeroship/v1/<id>    + WS upgrade  → dispatchSubscription
-//   - GET /           → user.index() if exported, returns HTML
-//   - else            → 404
+// default.fetch handler. It serves the optional index export and otherwise 404s.
 //
 // Unary /__zeroship/v1/<id> requests fall through here when there's no
 // `default.fetch`; we 404. Real apps ship via the synthetic SSR
 // entry which exports `default.{fetch, rpc}` and handles them.
 async function fallbackFetch(request) {
-    const urlStr = request.url;
-
-    const zsIdx = urlStr.indexOf(FALLBACK_ZS_V1_TAG);
-    if (zsIdx >= 0 && _zsIsWsUpgrade(request)) {
-        return _zsAcceptSubscription(urlStr);
-    }
-
     // GET / (or any path) → user.index() convention. The export
     // returns HTML (string or Response). Lets RPC-only apps still
     // render a UI without forcing creators to handle URL routing.
-    // Gate on schema readiness (C1) — `user.index()` may read `env.db`,
-    // so it must not run before the cold-boot migration resolves.
     if (request.method === "GET" && typeof user.index === "function") {
-        await __zsAwaitSchemaReady();
         try {
             const url = new URL(request.url);
             if (url.pathname === "/" || url.pathname === "") {
@@ -2072,17 +1429,12 @@ async function fallbackFetch(request) {
 
 export default {
     // Durable workflow replay entry. The worker calls this with a
-    // control-plane StepRequest envelope; the bootstrap replays the
+    // control-plane StepRequest envelope; the workflow bridge replays the
     // deploy-pinned Workflow class against the supplied journal prefix
     // and returns a StepResult-shaped JSON object.
     workflow(envelope, ctx) {
         return __zsWorkflowDispatch(user, envelope, ctx);
     },
-    // Subscription dispatch. Caller hands in (name, input,
-    // server-side WebSocket already accepted). Used by the kernel's
-    // WS-upgrade path; tests can drive this directly via the
-    // runtime's WebSocketPair primitive.
-    subscribe: dispatchSubscription,
     // Standalone RPC entry. When set, the kernel calls this directly
     // for /__zeroship/v1/<id> requests and never builds a Request object.
     // Symmetric to fetch — independent kernel entry, not layered.
@@ -2093,7 +1445,7 @@ export default {
     // fetch(). Skips Request/Response construction — hot-path-only win.
     fetchFast: USER_FETCH_FAST,
     // Standard WinterCG fetch handler — the user's default.fetch
-    // directly (no bootstrap wrapper). Catches everything not handled
+    // directly. Catches everything not handled
     // by `rpc` or `fetchFast`.
     fetch: USER_FETCH || fallbackFetch,
 };
@@ -2114,6 +1466,7 @@ pub(crate) fn prepare_application(
     scope: &mut v8::PinScope,
     modules: &[crate::modules::ModuleEntry],
     plugins: &[std::sync::Arc<dyn crate::plugin::NativePlugin>],
+    dev_host_entry: bool,
 ) -> Result<PreparedApplication, String> {
     crate::core::plugin_modules::register(scope, plugins, modules)?;
     let runtime_descriptor = setup_globals_with_descriptor(scope)?;
@@ -2270,13 +1623,13 @@ pub(crate) fn prepare_application(
     // class above is the sole provider; building with
     // `--no-default-features` (polyfill mode) is no longer supported.
 
-    // P5 S3: schema install is descriptor-only. Apps that ship migrations get
-    // `manifest.runtime_descriptor`; schema-less apps get no descriptor and the
-    // bootstrap installs no env.db collections.
-
-    // The host bootstrap imports the creator entry under its declared name.
-    // Its namespace supplies dispatch while the creator graph keeps its paths.
-    let wrapped = wrap_with_bootstrap(modules)?;
+    // The host entry normalizes dispatch without renaming creator sources.
+    // Trusted dev loaders already provide the native application entry contract.
+    let wrapped = if dev_host_entry {
+        modules.to_vec()
+    } else {
+        wrap_with_host_entry(modules)?
+    };
 
     // Compile the graph and retain adapter preparation before creator evaluation.
     let entry = crate::modules::compile_modules(scope, &wrapped)?;
@@ -2290,39 +1643,29 @@ pub(crate) fn prepare_application(
     Ok(PreparedApplication { entry, descriptor: runtime_descriptor, promises })
 }
 
-/// Prepend the host bootstrap without changing creator module identities.
+/// Prepend the host entry without changing creator module identities.
 /// Relative imports and imports back to the entry retain their original base.
-fn wrap_with_bootstrap(
+fn wrap_with_host_entry(
     modules: &[crate::modules::ModuleEntry],
 ) -> Result<Vec<crate::modules::ModuleEntry>, String> {
     use crate::modules::ModuleEntry;
     let Some(user_entry) = modules.first() else {
         return Ok(Vec::new());
     };
-    let bootstrap_spec = format!("__zs_bootstrap_{}.js", uuid::Uuid::new_v4().simple());
+    let host_spec = format!("__zs_host_entry_{}.js", uuid::Uuid::new_v4().simple());
     if modules.iter().any(|entry| {
-        entry.specifier == bootstrap_spec || entry.specifier == *BOOTSTRAP_KIND_BRIDGE_SPEC
+        entry.specifier == host_spec || entry.specifier == *WORKFLOW_BRIDGE_SPEC
     }) {
-        return Err("App module collides with the runtime bootstrap".into());
+        return Err("App module collides with the runtime host entry".into());
     }
-    let bootstrap = bootstrap_js(&user_entry.specifier)?;
     let mut out = vec![
         ModuleEntry {
-            specifier: bootstrap_spec,
-            // Creator globals cannot disable the host's schema policy sealing.
-            source: format!(
-                "const __zsAllowDeferredSchemaInstall = {};\n{}",
-                crate::transport::ssrf::dev_mode_enabled(),
-                bootstrap
-            ),
+            specifier: host_spec,
+            source: host_entry_js(&user_entry.specifier)?,
         },
         ModuleEntry {
-            specifier: BOOTSTRAP_KIND_BRIDGE_SPEC.clone(),
-            source: format!(
-                "const __zsHideDbPlatform = {};\n{}",
-                !crate::transport::ssrf::dev_mode_enabled(),
-                KIND_BRIDGE_JS
-            ),
+            specifier: WORKFLOW_BRIDGE_SPEC.clone(),
+            source: WORKFLOW_BRIDGE_JS.into(),
         },
     ];
     out.extend_from_slice(modules);
@@ -2761,78 +2104,6 @@ fn zs_env_callback(
 }
 
 // ===========================================================================
-// __zs_bind_request_ctx / __zs_get_request_ctx — per-request ctx stash
-// ===========================================================================
-
-/// `__zs_bind_request_ctx(ctxObj)` — stash the JS `ctx` object on the
-/// currently-executing request so nested modules can look it up without
-/// threading it through every call. Called by the bootstrap (PR 2)
-/// immediately on entry to `fetch(req, env, ctx)`. Passing `null` clears
-/// the stash; passing a non-object is a silent no-op.
-fn zs_bind_request_ctx_callback(
-    scope: &mut v8::PinScope,
-    args: v8::FunctionCallbackArguments,
-    _rv: v8::ReturnValue,
-) {
-    let state: SharedState = scope
-        .get_slot::<SharedState>()
-        .expect("RuntimeState not in isolate slot")
-        .clone();
-    let rid_opt = crate::core::invocation::current_request_id(scope, &state);
-    let Some(rid) = rid_opt else {
-        // No active request — silently ignore. Bootstrap should never
-        // call this outside a request, but defensive no-op is safer
-        // than a throw.
-        return;
-    };
-
-    let arg = args.get(0);
-    if arg.is_null() || arg.is_undefined() {
-        // __zs_bind_request_ctx(null) clears the stashed ctx.
-        state.borrow_mut().request_ctx_by_id.remove(&rid);
-        return;
-    }
-    if !arg.is_object() {
-        // Non-null, non-object — ignore (type error from JS side
-        // would be appropriate but silent for now).
-        return;
-    }
-    let obj: v8::Local<v8::Object> = arg.try_into().unwrap();
-    let global_obj = v8::Global::new(scope, obj);
-    state.borrow_mut().request_ctx_by_id.insert(rid, global_obj);
-}
-
-/// `__zs_get_request_ctx()` — return the stashed `ctx` object for the
-/// currently-executing request, or `null` if none was bound (no active
-/// request, or bootstrap hasn't run). Returns the exact same object
-/// reference passed to `__zs_bind_request_ctx` — not a clone.
-fn zs_get_request_ctx_callback(
-    scope: &mut v8::PinScope,
-    _args: v8::FunctionCallbackArguments,
-    mut rv: v8::ReturnValue,
-) {
-    let state: SharedState = scope
-        .get_slot::<SharedState>()
-        .expect("RuntimeState not in isolate slot")
-        .clone();
-    let rid_opt = crate::core::invocation::current_request_id(scope, &state);
-    let Some(rid) = rid_opt else {
-        rv.set(v8::null(scope).into());
-        return;
-    };
-    let ctx_opt = state.borrow().request_ctx_by_id.get(&rid).cloned();
-    match ctx_opt {
-        Some(ctx_global) => {
-            let ctx_local = v8::Local::new(scope, ctx_global);
-            rv.set(ctx_local.into());
-        }
-        None => {
-            rv.set(v8::null(scope).into());
-        }
-    }
-}
-
-// ===========================================================================
 // Timer callbacks (take v8::Function args — stays manual)
 // ===========================================================================
 
@@ -3151,23 +2422,6 @@ fn setup_globals_with_descriptor(
     // forwarder owns the wire pump now — see
     // `crate::streams::response_forwarder`.)
 
-    // WebSocket native callbacks. Cutover landing 3: the 5
-    // polyfill-driving globals (`__wsCreatePair` / `__wsLinkPair` /
-    // `__wsAccept` / `__wsSend` / `__wsClose`) are gone — all
-    // WebSocket traffic flows through the native class above.
-    //
-    // `__wsServerClose` is the privileged server-side close that
-    // bypasses the WHATWG user-API code restriction (1000 OR
-    // 3000-4999). Used by the bootstrap to issue protocol-level
-    // codes like 1011 (server error). Only the bootstrap reaches
-    // this; user app code keeps using `socket.close(code, reason)`.
-    {
-        let f =
-            v8::Function::new(scope, crate::websocket_native::ws_server_close_callback).unwrap();
-        let key = v8::String::new(scope, "__wsServerClose").unwrap();
-        global.set(scope, key.into(), f.into());
-    }
-
     // env namespace
     {
         let env = v8::Object::new(scope);
@@ -3181,7 +2435,7 @@ fn setup_globals_with_descriptor(
     }
 
     // __zs_env — returns the frozen env snapshot (same as fetch's 2nd arg).
-    // The bootstrap capability bridge still captures this callback.
+    // The embedded workflow bridge still captures this callback.
     {
         let f = v8::Function::new(scope, zs_env_callback).unwrap();
         let key = v8::String::new(scope, "__zs_env").unwrap();
@@ -3212,25 +2466,6 @@ fn setup_globals_with_descriptor(
         }
     }
 
-    // __zsDbPlatform - the P9 section 8 capability-handle resolver. Reads the
-    // `DbPlatform` instance stashed on `env.db` under the `ZS_PLATFORM`
-    // private symbol and returns it. `@zeroship/bootstrap` resolves it once for
-    // the mask-policy flush, then deletes the global so no creator handler can
-    // reach it. See `zs_db_platform_callback`.
-    {
-        let f = v8::Function::new(scope, zs_db_platform_callback).unwrap();
-        let key = v8::String::new(scope, "__zsDbPlatform").unwrap();
-        global.set(scope, key.into(), f.into());
-    }
-
-    // __zsRuntimeDescriptor — the migration-first cutover (P5 S3). When the
-    // deployed `.zship` carries a `manifest.runtime_descriptor`, the worker
-    // resolves its blob and stamps the JSON onto `RuntimeState`. We parse it
-    // here and expose the resulting v2 `{ version, collections }` descriptor as
-    // a global so `@zeroship/bootstrap`'s entry sources the schema from the
-    // migration fold. Absent (`None`) means schema-less app. A present but
-    // corrupt/non-v2 descriptor is a hard boot error, never a schema-less
-    // fallback.
     let runtime_descriptor = {
         let descriptor_json = {
             let state: crate::state::SharedState = scope
@@ -3241,35 +2476,11 @@ fn setup_globals_with_descriptor(
         };
         if let Some(json) = descriptor_json {
             let descriptor = validate_runtime_descriptor_json(&json)?;
-            let parsed = v8::String::new(scope, &json)
-                .and_then(|s| v8::json::parse(scope, s))
-                .ok_or_else(|| {
-                    "runtime: failed to inject manifest.runtime_descriptor after JSON validation"
-                        .to_string()
-                })?;
-            let key = v8::String::new(scope, "__zsRuntimeDescriptor").unwrap();
-            global.set(scope, key.into(), parsed);
             Some(descriptor)
         } else {
             None
         }
     };
-
-    // __zs_bind_request_ctx / __zs_get_request_ctx — per-request ctx stash
-    // for the PR 2 bootstrap. `__zs_bind_request_ctx(ctx)` stashes the
-    // object under the current request_id; `__zs_get_request_ctx()` returns
-    // the same reference from any nested module. Lightweight replacement
-    // for AsyncLocalStorage — single-threaded isolate, request_id tracked
-    // by the pump across await boundaries.
-    {
-        let bind_key = v8::String::new(scope, "__zs_bind_request_ctx").unwrap();
-        let bind_fn = v8::Function::new(scope, zs_bind_request_ctx_callback).unwrap();
-        global.set(scope, bind_key.into(), bind_fn.into());
-
-        let get_key = v8::String::new(scope, "__zs_get_request_ctx").unwrap();
-        let get_fn = v8::Function::new(scope, zs_get_request_ctx_callback).unwrap();
-        global.set(scope, get_key.into(), get_fn.into());
-    }
 
     // process.env polyfill — many npm packages (e.g. LangChain) read
     // `process.env.OPENAI_API_KEY`. SECURITY: this object only carries
@@ -3692,16 +2903,6 @@ pub fn install_dom(scope: &mut v8::PinScope) {
     // already exists on the global is fine because V8 wires the Error
     // intrinsic before user-visible install hooks fire.
     crate::rpc::install_global(scope, global);
-    // Install `__zeroshipGetRpcCtx` so the `getRequestContext` export
-    // in the `zeroship` JS module can read the per-request platform
-    // ctx out of V8's embedder-data slot.
-    crate::rpc::install_dispatch_globals(scope, global);
-    // B3 capability enforcement: install `__zsEnterKind` /
-    // `__zsExitKind` so the synthetic SSR entry can mark the active
-    // procedure kind around each user handler invocation. DB write
-    // callbacks + the native fetch callback consult `current_kind()`
-    // to refuse capability-violating ops.
-    crate::rpc::install_capability_globals(scope, global);
     // Native Request + Response: install AFTER dom (which gives us
     // FormData / AbortSignal that the constructors need to resolve via
     // globalThis).

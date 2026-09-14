@@ -135,13 +135,14 @@ pub(crate) fn host_import_module_dynamically_callback<'s>(
     let referrer = resource_name.to_rust_string_lossy(scope);
     v8::tc_scope!(let scope, scope);
     match modules::dynamic_module(scope, &spec, &referrer) {
-        Ok(Some(resolved)) => {
-            let resolved = v8::String::new(scope, &resolved)?;
-            return import_registered(scope, resolver, resolved);
+        Ok(Some(canonical_name)) => {
+            let canonical_name = v8::String::new(scope, &canonical_name)?;
+            return import_registered(scope, resolver, canonical_name);
         }
         Ok(None) => {}
         Err(error) => {
             if let Some(exception) = scope.exception() {
+                scope.reset();
                 resolver.reject(scope, exception);
                 return Some(resolver.get_promise(scope));
             }

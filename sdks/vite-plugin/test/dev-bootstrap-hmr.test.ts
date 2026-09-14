@@ -64,7 +64,7 @@ describe("dev-bootstrap HMR", () => {
     );
   });
 
-  test("poll invalidates the current runner after a deps reoptimize swap", async () => {
+  test("poll reports changes before the serialized loader invalidates modules", async () => {
     const firstRunner = createRunner({
       "/app/src/value.ts": [{ id: "/app/src/value.ts?v=1", importers: new Set<string>() }],
     });
@@ -73,23 +73,29 @@ describe("dev-bootstrap HMR", () => {
       "/app/src/server.ts": [{ id: "/app/src/server.ts", importers: new Set<string>() }],
     });
 
-    let currentRunner: typeof firstRunner | typeof secondRunner | null = firstRunner;
     const logs: string[] = [];
+    const updates: unknown[] = [];
 
-    const invalidated = await pollHmrChanges({
+    const update = await pollHmrChanges({
       pollUrl: "http://vite.test/__zeroship_hmr_check",
-      getCurrentRunner: () => currentRunner,
-      fetchImpl: async () => ({
-        async json() {
-          currentRunner = secondRunner;
-          return { changed: ["/app/src/value.ts"] };
-        },
-      } as Response),
+      fetchImpl: async () => new Response(JSON.stringify({
+        changed: ["/app/src/value.ts"],
+        bindingsVersion: "next",
+      })),
       log: (message) => logs.push(message),
+      onChange: (value) => updates.push(value),
     });
 
-    assert.equal(invalidated, 2);
+    assert.deepEqual(update, {
+      changed: ["/app/src/value.ts"],
+      bindingsVersion: "next",
+    });
+    assert.deepEqual(updates, [update]);
     assert.deepEqual(firstRunner.invalidated, []);
+    assert.deepEqual(secondRunner.invalidated, []);
+
+    const invalidated = invalidateChangedFiles(secondRunner, update.changed);
+    assert.equal(invalidated, 2);
     assert.deepEqual(
       new Set(secondRunner.invalidated),
       new Set([
@@ -100,25 +106,20 @@ describe("dev-bootstrap HMR", () => {
     assert.deepEqual(logs, ["[zeroship:hmr] 1 module(s) updated"]);
   });
 
-  test("poll prunes changed-module registrations before invalidation", async () => {
-    const runner = createRunner({
-      "/app/src/server.ts": [{ id: "/app/src/server.ts", importers: new Set<string>() }],
-    });
-    const pruned: string[][] = [];
-
-    const invalidated = await pollHmrChanges({
+  test("poll filters malformed changes and survives a failed host response", async () => {
+    const update = await pollHmrChanges({
       pollUrl: "http://vite.test/__zeroship_hmr_check",
-      getCurrentRunner: () => runner,
-      fetchImpl: async () => ({
-        async json() {
-          return { changed: ["/app/src/server.ts"] };
-        },
-      } as Response),
-      onBeforeInvalidate: (changed) => pruned.push(changed),
+      fetchImpl: async () => new Response(JSON.stringify({
+        changed: [null, "/app/src/server.ts", 42],
+        bindingsVersion: 42,
+      })),
     });
+    assert.deepEqual(update, { changed: ["/app/src/server.ts"] });
 
-    assert.equal(invalidated, 1);
-    assert.deepEqual(pruned, [["/app/src/server.ts"]]);
-    assert.deepEqual(runner.invalidated, ["/app/src/server.ts"]);
+    const failed = await pollHmrChanges({
+      pollUrl: "http://vite.test/__zeroship_hmr_check",
+      fetchImpl: async () => new Response("unavailable", { status: 503 }),
+    });
+    assert.deepEqual(failed, { changed: [] });
   });
 });
