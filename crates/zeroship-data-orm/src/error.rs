@@ -582,6 +582,15 @@ impl DbError {
         }
     }
 
+    /// A database timestamp expression produced an instant outside the portable
+    /// calendar. Every backend reports that outcome with this error.
+    pub(crate) fn timestamp_expression_outside_calendar() -> Self {
+        Self::validation(
+            "invalid_timestamp_expression",
+            "database timestamp expression is outside the portable calendar",
+        )
+    }
+
     /// Convenience: catch-all internal error.
     pub fn internal(message: impl Into<String>) -> Self {
         DbError::Internal {

@@ -63,6 +63,22 @@ async fn fixture(postgres: bool) -> CollectionFixture {
     owner
 }
 
+/// Both backends refuse an instant outside the portable calendar with the same
+/// validation code, whichever side of the calendar it falls on.
+fn assert_outside_calendar<T: std::fmt::Debug>(result: Result<T, DbError>) {
+    let error = result.unwrap_err();
+    assert!(
+        matches!(
+            error,
+            DbError::ValidationFailed {
+                code: "invalid_timestamp_expression",
+                ..
+            }
+        ),
+        "{error:?}"
+    );
+}
+
 async fn exercise(postgres: bool) {
     let owner = fixture(postgres).await;
     let table = owner.database.entity::<moments::Entity>().unwrap();
@@ -145,23 +161,21 @@ async fn exercise(postgres: bool) {
         TimestampExpr::database_now().plus(span).unwrap(),
         TimestampExpr::database_now().minus(span).unwrap(),
     ] {
-        assert!(
+        assert_outside_calendar(
             table
                 .update::<_, Moment>(
                     moments::id.eq("row").unwrap(),
                     moments::deadline.set_expression(expression).unwrap(),
                 )
-                .await
-                .is_err()
+                .await,
         );
-        assert!(
+        assert_outside_calendar(
             table
                 .update_many(
                     Filter::all(),
                     moments::deadline.set_expression(expression).unwrap(),
                 )
-                .await
-                .is_err()
+                .await,
         );
         let persisted = table.query().first::<Moment>().await.unwrap().unwrap();
         assert_eq!(persisted.deadline, committed.deadline);
@@ -174,16 +188,19 @@ async fn exercise(postgres: bool) {
         .database
         .transaction(|tx| async move {
             let table = tx.entity::<moments::Entity>()?;
-            assert!(
-                table
-                    .update::<_, Moment>(
-                        moments::id.eq("row")?,
-                        moments::deadline
-                            .set_expression(TimestampExpr::database_now().plus(span)?)?,
-                    )
-                    .await
-                    .is_err()
-            );
+            for expression in [
+                TimestampExpr::database_now().plus(span)?,
+                TimestampExpr::database_now().minus(span)?,
+            ] {
+                assert_outside_calendar(
+                    table
+                        .update::<_, Moment>(
+                            moments::id.eq("row")?,
+                            moments::deadline.set_expression(expression)?,
+                        )
+                        .await,
+                );
+            }
             table
                 .update::<_, Moment>(moments::id.eq("row")?, moments::happened.set(7_i64)?)
                 .await?;
