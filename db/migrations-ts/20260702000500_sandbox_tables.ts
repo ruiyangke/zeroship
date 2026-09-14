@@ -12,15 +12,18 @@ export default {
   schema() {
     table("deleted_sandboxes", { schema: "zeroship" }).create({
       columns: {
+        id: t.bigInt().notNull().identity(),
         sandbox_id: t.text().notNull(),
         user_id: t.text().notNull(),
         deleted_at: t.timestamp().notNull().default(now()),
       },
-      primaryKey: ["sandbox_id"],
+      primaryKey: ["id"],
     });
+    table("deleted_sandboxes", { schema: "zeroship" }).unique("deleted_sandboxes_natural_key").add({ columns: ["sandbox_id"] });
     table("deleted_sandboxes", { schema: "zeroship" }).check("deleted_sandboxes_sandbox_id_check").add({ expr: (col) => col("sandbox_id").regex("^sbx_[0-9A-Za-z]{20,40}$") });
     table("hosts", { schema: "zeroship" }).create({
       columns: {
+        id: t.bigInt().notNull().identity(),
         host_id: t.text().notNull(),
         boot_id: t.text().notNull(),
         hostname: t.text().notNull(),
@@ -33,8 +36,9 @@ export default {
         version: t.text().notNull().default(""),
         metadata: t.json().notNull().default({}),
       },
-      primaryKey: ["host_id"],
+      primaryKey: ["id"],
     });
+    table("hosts", { schema: "zeroship" }).unique("hosts_natural_key").add({ columns: ["host_id"] });
     table("hosts", { schema: "zeroship" }).check("hosts_backend_check").add({ expr: (col) => col("backend").in(["docker", "k8s", "nomad-ch"]) });
     table("hosts", { schema: "zeroship" }).check("hosts_boot_id_check").add({ expr: (col) => col("boot_id").regex("^[0-9A-Za-z]{20,40}$") });
     table("hosts", { schema: "zeroship" }).check("hosts_host_id_check").add({ expr: (col) => col("host_id").regex("^hst_[0-9A-Za-z]{20,40}$") });
@@ -42,6 +46,7 @@ export default {
     table("hosts", { schema: "zeroship" }).check("hosts_status_check").add({ expr: (col) => col("status").in(["alive", "draining", "dead"]) });
     table("sandbox_events", { schema: "zeroship" }).create({
       columns: {
+        id: t.bigInt().notNull().identity(),
         event_id: t.text().notNull(),
         sandbox_id: t.text(),
         user_id: t.text().notNull(),
@@ -49,21 +54,15 @@ export default {
         ts: t.timestamp().notNull().default(now()),
         data: t.json().notNull().default({}),
       },
-      primaryKey: ["ts", "event_id"],
-      partitionBy: { range: ["ts"] },
+      primaryKey: ["id"],
     });
+    table("sandbox_events", { schema: "zeroship" }).unique("sandbox_events_natural_key").add({ columns: ["ts", "event_id"] });
     table("sandbox_events", { schema: "zeroship" }).check("sandbox_events_data_check").add({ expr: (col) => col("data").columnSize().le(8192) });
     table("sandbox_events", { schema: "zeroship" }).check("sandbox_events_event_id_check").add({ expr: (col) => col("event_id").regex("^evt_[0-9A-Za-z]{20,40}$") });
     table("sandbox_events", { schema: "zeroship" }).check("sandbox_events_sandbox_id_check").add({ expr: (col) => col("sandbox_id").regex("^sbx_[0-9A-Za-z]{20,40}$") });
-    table("sandbox_events", { schema: "zeroship" }).partition("sandbox_events_2026_05").create({ from: ["2026-05-01 00:00:00+00"], to: ["2026-06-01 00:00:00+00"] });
-    table("sandbox_events", { schema: "zeroship" }).partition("sandbox_events_2026_06").create({ from: ["2026-06-01 00:00:00+00"], to: ["2026-07-01 00:00:00+00"] });
-    table("sandbox_events", { schema: "zeroship" }).partition("sandbox_events_2026_07").create({ from: ["2026-07-01 00:00:00+00"], to: ["2026-08-01 00:00:00+00"] });
-    table("sandbox_events", { schema: "zeroship" }).partition("sandbox_events_2026_08").create({ from: ["2026-08-01 00:00:00+00"], to: ["2026-09-01 00:00:00+00"] });
-    table("sandbox_events", { schema: "zeroship" }).partition("sandbox_events_2026_09").create({ from: ["2026-09-01 00:00:00+00"], to: ["2026-10-01 00:00:00+00"] });
-    table("sandbox_events", { schema: "zeroship" }).partition("sandbox_events_2026_10").create({ from: ["2026-10-01 00:00:00+00"], to: ["2026-11-01 00:00:00+00"] });
-    table("sandbox_events", { schema: "zeroship" }).partition("sandbox_events_default").create({ default: true });
     table("sandboxes", { schema: "zeroship" }).create({
       columns: {
+        id: t.bigInt().notNull().identity(),
         sandbox_id: t.text().notNull(),
         user_id: t.text().notNull(),
         project_id: t.text().notNull(),
@@ -94,8 +93,9 @@ export default {
         last_drain_failure_at: t.timestamp(),
         drain_failure_count: t.int().notNull().default(0),
       },
-      primaryKey: ["sandbox_id"],
+      primaryKey: ["id"],
     });
+    table("sandboxes", { schema: "zeroship" }).unique("sandboxes_natural_key").add({ columns: ["sandbox_id"] });
     table("sandboxes", { schema: "zeroship" }).check("sandboxes_backend_check").add({ expr: (col) => col("backend").in(["docker", "k8s", "nomad-ch"]) });
     table("sandboxes", { schema: "zeroship" }).check("sandboxes_generation_check").add({ expr: (col) => col("generation").ge(0) });
     table("sandboxes", { schema: "zeroship" }).check("sandboxes_key_fp_check").add({ expr: (col) => col("key_fp").regex("^[0-9a-f]{32}$") });
@@ -111,6 +111,7 @@ export default {
     table("sandboxes", { schema: "zeroship" }).check("sandboxes_status_check").add({ expr: (col) => col("status").in(["starting", "running", "stopping", "stopped", "lost", "recreating", "orphan", "unreachable", "snapshotting", "snapshotted", "snapshotting_aborted", "snapshotted_suspect", "restoring", "restoring_cold"]) });
     table("shares", { schema: "zeroship" }).create({
       columns: {
+        id: t.bigInt().notNull().identity(),
         token_id: t.text().notNull(),
         sandbox_id: t.text().notNull(),
         port: t.int().notNull(),
@@ -124,8 +125,9 @@ export default {
         iss: t.text(),
         deleted_at: t.timestamp(),
       },
-      primaryKey: ["token_id"],
+      primaryKey: ["id"],
     });
+    table("shares", { schema: "zeroship" }).unique("shares_natural_key").add({ columns: ["token_id"] });
     table("shares", { schema: "zeroship" }).check("shares_check").add({ expr: (col) => col("expires_at").gt(col("issued_at")) });
     table("shares", { schema: "zeroship" }).check("shares_check1").add({ expr: (col) => col("revoked_at").isNull().or(col("revoked_at").ge(col("issued_at"))) });
     table("shares", { schema: "zeroship" }).check("shares_port_check").add({ expr: (col) => col("port").ge(1).and(col("port").le(65535)) });
@@ -134,6 +136,7 @@ export default {
     table("shares", { schema: "zeroship" }).check("shares_token_id_check").add({ expr: (col) => col("token_id").regex("^tok_[A-Za-z0-9_-]{20,40}$") });
     table("wake_jobs", { schema: "zeroship" }).create({
       columns: {
+        id: t.bigInt().notNull().identity(),
         wake_id: t.text().notNull(),
         sandbox_id: t.text().notNull(),
         state: t.text().notNull(),
@@ -146,8 +149,9 @@ export default {
         lessee: t.text().notNull(),
         lessee_updated_at: t.timestamp().notNull().default(now()),
       },
-      primaryKey: ["wake_id"],
+      primaryKey: ["id"],
     });
+    table("wake_jobs", { schema: "zeroship" }).unique("wake_jobs_natural_key").add({ columns: ["wake_id"] });
     table("wake_jobs", { schema: "zeroship" }).check("wake_jobs_agent_url_chk").add({ expr: (col) => col("agent_url").isNull().or(col("agent_url").regex("^https?://[a-zA-Z0-9._:/-]+$")) });
     table("wake_jobs", { schema: "zeroship" }).check("wake_jobs_error_code_check").add({ expr: (col) => col("error_code").isNull().or(col("error_code").in(["slot_unavailable", "source_teardown_timeout", "restore_failed", "livez_timeout", "clock_resync_failed", "register_failed", "internal", "wake_worker_aborted", "staging_path_missing", "agent_version_mismatch"])) });
     table("wake_jobs", { schema: "zeroship" }).check("wake_jobs_sandbox_id_check").add({ expr: (col) => col("sandbox_id").regex("^sbx_[0-9A-Za-z]{20,40}$") });

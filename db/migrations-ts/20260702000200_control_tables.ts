@@ -34,25 +34,30 @@ export default {
     });
     table("app_env_expose", { schema: "zeroship" }).create({
       columns: {
+        id: t.bigInt().notNull().identity(),
         app_id: t.text().notNull(),
         key_name: t.text().notNull(),
         updated_at: t.timestamp().notNull().default(now()),
       },
-      primaryKey: ["app_id", "key_name"],
+      primaryKey: ["id"],
     });
+    table("app_env_expose", { schema: "zeroship" }).unique("app_env_expose_natural_key").add({ columns: ["app_id", "key_name"] });
     table("app_members", { schema: "zeroship" }).create({
       columns: {
+        id: t.bigInt().notNull().identity(),
         app_id: t.text().notNull(),
         user_id: t.text().notNull(),
         role: t.text().notNull(),
         added_at: t.timestamp().notNull().default(now()),
         added_by: t.text(),
       },
-      primaryKey: ["app_id", "user_id"],
+      primaryKey: ["id"],
     });
+    table("app_members", { schema: "zeroship" }).unique("app_members_natural_key").add({ columns: ["app_id", "user_id"] });
     table("app_members", { schema: "zeroship" }).check("app_members_role_check").add({ expr: (col) => col("role").in(["owner", "editor", "viewer"]) });
     table("app_net_grants", { schema: "zeroship" }).create({
       columns: {
+        id: t.bigInt().notNull().identity(),
         app_id: t.text().notNull(),
         host: t.text().notNull(),
         port: t.int().notNull(),
@@ -60,19 +65,22 @@ export default {
         granted_at: t.timestamp().notNull().default(now()),
         note: t.text(),
       },
-      primaryKey: ["app_id", "host", "port"],
+      primaryKey: ["id"],
     });
+    table("app_net_grants", { schema: "zeroship" }).unique("app_net_grants_natural_key").add({ columns: ["app_id", "host", "port"] });
     table("app_net_grants", { schema: "zeroship" }).check("app_net_grants_port_check").add({ expr: (col) => col("port").ge(1).and(col("port").le(65535)) });
     table("app_oauth_clients", { schema: "zeroship" }).create({
       columns: {
+        id: t.bigInt().notNull().identity(),
         app_id: t.text().notNull(),
         client_id: t.text().notNull(),
         sector_identifier: t.text().notNull(),
         created_at: t.timestamp().notNull().default(now()),
         updated_at: t.timestamp().notNull().default(now()),
       },
-      primaryKey: ["app_id"],
+      primaryKey: ["id"],
     });
+    table("app_oauth_clients", { schema: "zeroship" }).unique("app_oauth_clients_natural_key").add({ columns: ["app_id"] });
     // ONE ROW PER SCHEMA-APPLY REQUEST the migration service accepted. It is the
     // platform's own record of what an app's schema corresponds to, and it exists
     // BECAUSE the engine journal is not usable as one: that journal now lives in
@@ -95,6 +103,7 @@ export default {
     // that advanced the schema.
     table("app_schema_applies", { schema: "zeroship" }).create({
       columns: {
+        id: t.bigInt().notNull().identity(),
         app_id: t.text().notNull(),
         migration_id: t.uuid().notNull(),
         status: t.text().notNull(),
@@ -113,54 +122,64 @@ export default {
         applied_at: t.timestamp(),
         last_error: t.text(),
       },
-      primaryKey: ["app_id", "migration_id"],
+      primaryKey: ["id"],
     });
+    table("app_schema_applies", { schema: "zeroship" }).unique("app_schema_applies_natural_key").add({ columns: ["app_id", "migration_id"] });
     table("app_schema_applies", { schema: "zeroship" }).check("app_schema_applies_ceiling_version_check").add({ expr: (col) => col("ceiling_version").gt(0) });
     table("app_schema_applies", { schema: "zeroship" }).check("app_schema_applies_status_check").add({ expr: (col) => col("status").in(["submitted", "applied", "failed"]) });
     table("app_scope_defs", { schema: "zeroship" }).create({
       columns: {
+        id: t.bigInt().notNull().identity(),
         app_id: t.text().notNull(),
         scope_id: t.text().notNull(),
         label: t.text().notNull(),
         description: t.text(),
       },
-      primaryKey: ["app_id", "scope_id"],
+      primaryKey: ["id"],
     });
+    table("app_scope_defs", { schema: "zeroship" }).unique("app_scope_defs_natural_key").add({ columns: ["app_id", "scope_id"] });
     table("app_secrets", { schema: "zeroship" }).create({
       columns: {
+        id: t.bigInt().notNull().identity(),
         app_id: t.text().notNull(),
         key_name: t.text().notNull(),
         ciphertext: t.bytes().notNull(),
         updated_at: t.timestamp().notNull().default(now()),
       },
-      primaryKey: ["app_id", "key_name"],
+      primaryKey: ["id"],
     });
+    table("app_secrets", { schema: "zeroship" }).unique("app_secrets_natural_key").add({ columns: ["app_id", "key_name"] });
     table("app_usage", { schema: "zeroship" }).create({
       columns: {
+        id: t.bigInt().notNull().identity(),
         app_id: t.text().notNull(),
         resource: t.text().notNull(),
         value: t.bigInt().notNull().default(0),
       },
-      primaryKey: ["app_id", "resource"],
+      primaryKey: ["id"],
     });
+    table("app_usage", { schema: "zeroship" }).unique("app_usage_natural_key").add({ columns: ["app_id", "resource"] });
     table("app_usage_history", { schema: "zeroship" }).create({
       columns: {
+        id: t.bigInt().notNull().identity(),
         app_id: t.text().notNull(),
         period: t.text().notNull(),
         counters: t.json().notNull(),
         created_at: t.timestamp().notNull().default(now()),
       },
-      primaryKey: null,
+      primaryKey: ["id"],
     });
     table("app_vars", { schema: "zeroship" }).create({
       columns: {
+        id: t.bigInt().notNull().identity(),
         app_id: t.text().notNull(),
         key_name: t.text().notNull(),
         value: t.text().notNull(),
         updated_at: t.timestamp().notNull().default(now()),
       },
-      primaryKey: ["app_id", "key_name"],
+      primaryKey: ["id"],
     });
+    table("app_vars", { schema: "zeroship" }).unique("app_vars_natural_key").add({ columns: ["app_id", "key_name"] });
     table("apps", { schema: "zeroship" }).create({
       columns: {
         // A typed id, and deliberately WITHOUT a database default: a SQL-side
@@ -207,6 +226,7 @@ export default {
     });
     table("creator_accounts", { schema: "zeroship" }).create({
       columns: {
+        id: t.bigInt().notNull().identity(),
         creator_id: t.text().notNull(),
         stripe_account_id: t.text().notNull(),
         onboarded_at: t.timestamp().notNull().default(now()),
@@ -215,17 +235,20 @@ export default {
         payouts_enabled: t.boolean().notNull().default(false),
         details_submitted: t.boolean().notNull().default(false),
       },
-      primaryKey: ["creator_id"],
+      primaryKey: ["id"],
     });
+    table("creator_accounts", { schema: "zeroship" }).unique("creator_accounts_natural_key").add({ columns: ["creator_id"] });
     table("net_policy_catalog", { schema: "zeroship" }).create({
       columns: {
+        id: t.bigInt().notNull().identity(),
         key: t.text().notNull(),
         value_json: t.json().notNull(),
         updated_by: t.text(),
         updated_at: t.timestamp().notNull().default(now()),
       },
-      primaryKey: ["key"],
+      primaryKey: ["id"],
     });
+    table("net_policy_catalog", { schema: "zeroship" }).unique("net_policy_catalog_natural_key").add({ columns: ["key"] });
     table("payouts", { schema: "zeroship" }).create({
       columns: {
         id: t.uuid().notNull().default(uuidV4()),
@@ -267,13 +290,15 @@ export default {
     table("permission_tokens", { schema: "zeroship" }).check("permission_tokens_kind_check").add({ expr: (col) => col("kind").in(["pat", "oauth_grant"]) });
     table("platform_admin_roles", { schema: "zeroship" }).create({
       columns: {
+        id: t.bigInt().notNull().identity(),
         user_id: t.text().notNull(),
         role: t.text().notNull(),
         granted_at: t.timestamp().notNull().default(now()),
         granted_by: t.text(),
       },
-      primaryKey: ["user_id"],
+      primaryKey: ["id"],
     });
+    table("platform_admin_roles", { schema: "zeroship" }).unique("platform_admin_roles_natural_key").add({ columns: ["user_id"] });
     table("platform_admin_roles", { schema: "zeroship" }).check("platform_admin_roles_role_check").add({ expr: (col) => col("role").in(["admin", "support", "billing", "readonly"]) });
     table("platform_policies", { schema: "zeroship" }).create({
       columns: {

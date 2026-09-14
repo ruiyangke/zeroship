@@ -4,6 +4,8 @@
 mod fixture;
 #[path = "platform_corpus/organization_authority.rs"]
 mod organization_authority;
+#[path = "platform_corpus/table_identity.rs"]
+mod table_identity;
 #[path = "platform_corpus/user_erasure.rs"]
 mod user_erasure;
 #[path = "platform_corpus/user_identity.rs"]
