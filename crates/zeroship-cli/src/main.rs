@@ -9,6 +9,7 @@
 //!   zeroship config path [--config=PATH]
 //!   zeroship login [--control=URL] [--config=PATH] [--env=NAME]
 //!   zeroship dev init [--secrets-dir=PATH] [--env-file=PATH]
+//!   zeroship dev enroller --credential=PATH --import-file=PATH [--zone=NAME]
 //!
 //! `build` and `inspect` were removed in the artifact-layout redesign —
 //! the canonical build path is now `@zeroship/vite-plugin`, which emits
@@ -1169,6 +1170,8 @@ fn print_usage() {
     );
     eprintln!("  zeroship dev init [--secrets-dir=PATH] [--env-file=PATH]");
     eprintln!("                   Provision stable, strong local platform secrets.");
+    eprintln!("  zeroship dev enroller --credential=PATH --import-file=PATH [--zone=NAME]");
+    eprintln!("                   Provision one more worker deployment unit's enroller.");
     eprintln!("  zeroship organization create|list|show|use|members|invite|revoke|join|role|remove|transfer|projects");
     eprintln!("                   The organization owns your projects and is the billed party.");
     eprintln!("                   `use <org_...>` records which one, so the other subcommands");
