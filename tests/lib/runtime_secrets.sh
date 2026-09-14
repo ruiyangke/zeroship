@@ -571,8 +571,7 @@ _e2e_write_service_assertion_js() {
 //   node service-assertion.mjs <key.pem> <jose-url> <issuer> <audience>
 //
 // EVERY INPUT IS AN ARGUMENT. Nothing here reads process.env, so what this
-// mints is a function of the invocation and not of how the run was launched -
-// the rule tests/test_only_env_gate.sh states in full.
+// mints is a function of the invocation and not of how the run was launched.
 //
 // The profile is crates/zeroship-core/src/service_assertion.rs, not bare
 // RFC 7523: `typ` is exactly `svc-assertion+jwt`, `kid` is the RFC 7638

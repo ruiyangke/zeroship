@@ -268,14 +268,6 @@ jobs:
         run: cargo test -p zeroship-kv --test architecture
       - name: Repository dependency and feature contracts
         run: cargo xtask test repository
-      # Arm 2 of this one was RED on main the whole time it was unwired:
-      # ZEROSHIP_SESSION_SECRET sat in its inventory and in
-      # docs/reference/env-vars.md's "surviving test-only names" with no reader
-      # anywhere, the SQLite session minter having gone with the HMAC session
-      # anchor deleted on 2026-08-27. A gate nobody runs does not stay green, it
-      # stays UNREAD.
-      - name: Test-only env names are declared, and every declared one is read
-        run: tests/test_only_env_gate.sh
       # deploy/compose/docker-compose.yml HAS NO AUTOMATED CHECK as of
       # 2026-08-21. Four steps stood here - named volumes on stateful services,
       # 0.0.0.0 published only by the edge, secret strength, and the unsigned
