@@ -670,13 +670,15 @@ pub fn new_provider_dead_letter_id() -> String {
 /// MINTED BY CONTROL AT ENROLMENT, never by the registrant. The worker presents
 /// its boot-generated Ed25519 public key and its listening port; control assigns
 /// the id, the ring key and the address. An instance is a CHILD of the
-/// `svc/worker` role it enrols under: it mints under `svc/worker/<wkr_id>` and
-/// is addressed as `svc/worker`.
+/// `svc/worker` role: it mints under `svc/worker/<wkr_id>` and is addressed as
+/// `svc/worker`.
 ///
-/// Because enrolment authenticates with the SHARED role key, a holder of that
-/// key can enrol many instances. The id is therefore a DISTINGUISHER against a
-/// role-key holder, not a boundary: what it buys is attribution, per-instance
-/// revocation, and a countable event.
+/// Enrolment authenticates with the key of the instance's deployment unit (a
+/// [`WORKER_ENROLLER_PREFIX`] row), which every worker of that unit holds, so a
+/// holder of it can enrol many instances in that unit. The id is therefore a
+/// DISTINGUISHER within a unit, not a boundary: what it buys is attribution,
+/// per-instance retirement, and a countable event. The boundary is the
+/// enroller, whose revocation retires every instance it enrolled.
 pub const WORKER_INSTANCE_PREFIX: &str = "wkr";
 
 /// Generate a new worker-instance ID: `wkr_{base36(uuidv7)}`. Minted by the
@@ -685,6 +687,24 @@ pub const WORKER_INSTANCE_PREFIX: &str = "wkr";
 /// CHECK, with no SQL `DEFAULT` because there is no in-database base36 generator.
 pub fn new_worker_instance_id() -> String {
     generate(WORKER_INSTANCE_PREFIX)
+}
+
+/// Worker-enroller typed-id prefix: one row in `zeroship.worker_enrollers` per
+/// deployment unit, a host or pool of workers in exactly one execution zone.
+///
+/// MINTED BY THE OPERATOR'S PROVISIONING STEP, never by Control or a worker.
+/// `zeroship dev init` mints one for its single host; an operator provisioning
+/// a unit by hand mints one beside the unit's keypair. Control learns the id,
+/// the public key and the zone from its import file at startup. An enroller
+/// mints under `svc/worker-enroller/<wen_id>`, and only that principal may
+/// enrol worker instances.
+pub const WORKER_ENROLLER_PREFIX: &str = "wen";
+
+/// Generate a new worker-enroller ID: `wen_{base36(uuidv7)}`. The
+/// `zeroship.worker_enrollers.id` column stores the full typed-id string under a
+/// `worker_enrollers_id_shape` CHECK.
+pub fn new_worker_enroller_id() -> String {
+    generate(WORKER_ENROLLER_PREFIX)
 }
 
 #[cfg(test)]
@@ -1035,27 +1055,35 @@ mod tests {
         assert_ne!(prefix, ORGANIZATION_BILLING_HISTORY_PREFIX);
     }
 
-    /// `wkr` must collide with nothing, and the sweep is over the WHOLE
-    /// registry rather than a family, because a worker instance is not a member
-    /// of one: it is addressed by the control plane and by nothing else.
+    /// `wkr` and `wen` must collide with nothing, and the sweep is over the
+    /// WHOLE registry rather than a family, because neither a worker instance
+    /// nor its enroller is a member of one: both are addressed by the control
+    /// plane and by nothing else. Each is also swept against the other.
     ///
     /// WHAT THIS DOES NOT CATCH: a prefix added to the module after this list
     /// was written is not in the list, so this test cannot see it. Adding a
     /// prefix means adding it here; the failure of that is silent.
     #[test]
-    fn worker_instance_prefix_is_three_chars_and_disjoint() {
-        assert_eq!(
-            WORKER_INSTANCE_PREFIX.len(),
-            3,
-            "worker-instance prefix must be 3 chars (R16-API2)"
-        );
-        let w = new_worker_instance_id();
-        assert!(w.starts_with("wkr_"), "got {w}");
-        assert_eq!(w.len(), 29, "wkr_ + 25 base36 = 29 chars");
-        let (prefix, _) = parse(&w).expect("new_worker_instance_id must roundtrip");
-        assert_eq!(prefix, "wkr");
+    fn worker_instance_and_enroller_prefixes_are_three_chars_and_disjoint() {
+        for (prefix, minted) in [
+            (WORKER_INSTANCE_PREFIX, new_worker_instance_id()),
+            (WORKER_ENROLLER_PREFIX, new_worker_enroller_id()),
+        ] {
+            assert_eq!(prefix.len(), 3, "{prefix} must be 3 chars (R16-API2)");
+            assert!(minted.starts_with(&format!("{prefix}_")), "got {minted}");
+            assert_eq!(minted.len(), 29, "{prefix}_ + 25 base36 = 29 chars");
+            let (parsed, _) = parse(&minted).expect("a minted id must roundtrip");
+            assert_eq!(parsed, prefix);
+        }
+        // The control: the two are not one prefix spelled twice.
+        assert_ne!(WORKER_INSTANCE_PREFIX, WORKER_ENROLLER_PREFIX);
 
         let registry = [
+            ("deployments", DEPLOYMENT_PREFIX),
+            ("workflow_jobs", WORKFLOW_JOB_PREFIX),
+            ("workflow_requests", WORKFLOW_REQUEST_PREFIX),
+            ("workflow_capabilities", WORKFLOW_CAPABILITY_PREFIX),
+            ("workflow_payloads", WORKFLOW_PAYLOAD_PREFIX),
             ("users", USER_PREFIX),
             ("apps", APP_PREFIX),
             ("sessions", SESSION_PREFIX),
@@ -1090,10 +1118,12 @@ mod tests {
             ("provider_dead_letter", PROVIDER_DEAD_LETTER_PREFIX),
         ];
         for (owner, other) in registry {
-            assert_ne!(
-                WORKER_INSTANCE_PREFIX, other,
-                "wkr must be disjoint from every registered prefix; {owner} already uses it"
-            );
+            for prefix in [WORKER_INSTANCE_PREFIX, WORKER_ENROLLER_PREFIX] {
+                assert_ne!(
+                    prefix, other,
+                    "{prefix} must be disjoint from every registered prefix; {owner} already uses it"
+                );
+            }
         }
     }
 
