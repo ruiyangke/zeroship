@@ -40,6 +40,12 @@ run_psql() { docker exec "$PG_CONTAINER" psql -U "$PG_USER" "$@"; }
 ZEROSHIP_CONTROL_PORT="${ZEROSHIP_CONTROL_PORT:-9394}"
 ZEROSHIP_WORKER_PORT="${ZEROSHIP_WORKER_PORT:-8394}"
 ZEROSHIP_GATEWAY_PORT="${ZEROSHIP_GATEWAY_PORT:-8304}"
+# This harness starts control and worker directly instead of using
+# stack_workspace. Declare the loopback worker-enrolment envelope here so the
+# worker can obtain its instance identity before the gateway sends it traffic.
+ZEROSHIP_CONTROL_WORKER_ENROLMENT_NETWORKS="${ZEROSHIP_CONTROL_WORKER_ENROLMENT_NETWORKS:-127.0.0.0/8}"
+ZEROSHIP_CONTROL_WORKER_ENROLMENT_PORTS="${ZEROSHIP_CONTROL_WORKER_ENROLMENT_PORTS:-$ZEROSHIP_WORKER_PORT}"
+export ZEROSHIP_CONTROL_WORKER_ENROLMENT_NETWORKS ZEROSHIP_CONTROL_WORKER_ENROLMENT_PORTS
 DEV_PORT="${DEV_PORT:-3061}"
 # VITE's own port. DEV_PORT above is the RUNTIME port -- what `zeroship serve`
 # binds, and the only one the app's vite.config names. Left undeclared until
