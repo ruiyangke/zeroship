@@ -41,6 +41,7 @@ export default {
   schema() {
     table("app_egress_rules", { schema: "zeroship" }).create({
       columns: {
+        id: t.bigInt().notNull().identity(),
         app_id: t.text().notNull(),
         verdict: t.text().notNull(),
         kind: t.text().notNull(),
@@ -50,8 +51,9 @@ export default {
         created_at: t.timestamp().notNull().default(now()),
         note: t.text(),
       },
-      primaryKey: ["app_id", "kind", "destination", "port"],
+      primaryKey: ["id"],
     });
+    table("app_egress_rules", { schema: "zeroship" }).unique("app_egress_rules_natural_key").add({ columns: ["app_id", "kind", "destination", "port"] });
     table("app_egress_rules", { schema: "zeroship" }).check("app_egress_rules_verdict_check").add({ expr: (col) => col("verdict").in(["accept", "reject"]) });
     table("app_egress_rules", { schema: "zeroship" }).check("app_egress_rules_kind_check").add({ expr: (col) => col("kind").in(["name", "cidr"]) });
     table("app_egress_rules", { schema: "zeroship" }).check("app_egress_rules_port_check").add({ expr: (col) => col("port").ge(1).and(col("port").le(65535)) });

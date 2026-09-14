@@ -51,6 +51,7 @@ export default {
     });
     table("app_user_identities", { schema: "zeroship" }).create({
       columns: {
+        id: t.bigInt().notNull().identity(),
         app_client_id: t.text().notNull(),
         global_user_id: t.text().notNull(),
         pairwise_sub: t.text().notNull(),
@@ -58,8 +59,9 @@ export default {
         created_at: t.timestamp().notNull().default(now()),
         revoked_at: t.timestamp(),
       },
-      primaryKey: ["app_client_id", "global_user_id"],
+      primaryKey: ["id"],
     });
+    table("app_user_identities", { schema: "zeroship" }).unique("app_user_identities_natural_key").add({ columns: ["app_client_id", "global_user_id"] });
     table("audit_events", { schema: "zeroship" }).create({
       columns: {
         id: t.bigInt().notNull().default(nextval("audit_events_id_seq", { schema: "zeroship" })),
@@ -96,14 +98,17 @@ export default {
     table("authz_decisions", { schema: "zeroship" }).check("authz_decisions_decision_check").add({ expr: (col) => col("decision").in(["allow", "deny"]) });
     table("cron_state", { schema: "zeroship" }).create({
       columns: {
+        id: t.bigInt().notNull().identity(),
         key: t.text().notNull(),
         last_rotated_at: t.timestamp().notNull().default(now()),
         notes: t.text(),
       },
-      primaryKey: ["key"],
+      primaryKey: ["id"],
     });
+    table("cron_state", { schema: "zeroship" }).unique("cron_state_natural_key").add({ columns: ["key"] });
     table("device_grants", { schema: "zeroship" }).create({
       columns: {
+        id: t.bigInt().notNull().identity(),
         device_code_hash: t.text().notNull(),
         user_code: t.text().notNull(),
         status: t.text().notNull().default("pending"),
@@ -119,28 +124,34 @@ export default {
         sid: t.text(),
         poll_interval_secs: t.int().notNull().default(5),
       },
-      primaryKey: ["device_code_hash"],
+      primaryKey: ["id"],
     });
+    table("device_grants", { schema: "zeroship" }).unique("device_grants_natural_key").add({ columns: ["device_code_hash"] });
     table("device_grants", { schema: "zeroship" }).check("device_grants_poll_interval_secs_check").add({ expr: (col) => col("poll_interval_secs").gt(0) });
     table("device_grants", { schema: "zeroship" }).check("device_grants_status_check").add({ expr: (col) => col("status").in(["pending", "approved", "denied"]) });
     table("dpop_jti", { schema: "zeroship" }).create({
       columns: {
+        id: t.bigInt().notNull().identity(),
         jti: t.text().notNull(),
         inserted_at: t.timestamp().notNull().default(now()),
       },
-      primaryKey: ["jti"],
+      primaryKey: ["id"],
     });
+    table("dpop_jti", { schema: "zeroship" }).unique("dpop_jti_natural_key").add({ columns: ["jti"] });
     table("email_suppressions", { schema: "zeroship" }).create({
       columns: {
+        id: t.bigInt().notNull().identity(),
         email: t.text({ caseSensitive: false }).notNull(),
         reason: t.text().notNull(),
         suppressed_at: t.timestamp().notNull().default(now()),
         provider_msg: t.text(),
       },
-      primaryKey: ["email"],
+      primaryKey: ["id"],
     });
+    table("email_suppressions", { schema: "zeroship" }).unique("email_suppressions_natural_key").add({ columns: ["email"] });
     table("email_verifications", { schema: "zeroship" }).create({
       columns: {
+        id: t.bigInt().notNull().identity(),
         token_hash: t.bytes().notNull(),
         user_id: t.text().notNull(),
         email: t.text({ caseSensitive: false }).notNull(),
@@ -148,8 +159,9 @@ export default {
         expires_at: t.timestamp().notNull(),
         consumed_at: t.timestamp(),
       },
-      primaryKey: ["token_hash"],
+      primaryKey: ["id"],
     });
+    table("email_verifications", { schema: "zeroship" }).unique("email_verifications_natural_key").add({ columns: ["token_hash"] });
     table("federated_identities", { schema: "zeroship" }).create({
       columns: {
         id: t.uuid().notNull().default(uuidV4()),
@@ -184,14 +196,16 @@ export default {
     });
     table("identity_links", { schema: "zeroship" }).create({
       columns: {
+        id: t.bigInt().notNull().identity(),
         principal_id: t.text().notNull(),
         provider: t.text().notNull(),
         provider_subject: t.text().notNull(),
         email: t.text(),
         created_at: t.timestamp().notNull().default(now()),
       },
-      primaryKey: ["provider", "provider_subject"],
+      primaryKey: ["id"],
     });
+    table("identity_links", { schema: "zeroship" }).unique("identity_links_natural_key").add({ columns: ["provider", "provider_subject"] });
     table("idp_sessions", { schema: "zeroship" }).create({
       columns: {
         id: t.uuid().notNull().default(uuidV4()),
@@ -209,14 +223,17 @@ export default {
     });
     table("jwk_key_state", { schema: "zeroship" }).create({
       columns: {
+        id: t.bigInt().notNull().identity(),
         set_name: t.text().notNull(),
         kid: t.text().notNull(),
         created_at: t.timestamp().notNull().default(now()),
       },
-      primaryKey: ["set_name", "kid"],
+      primaryKey: ["id"],
     });
+    table("jwk_key_state", { schema: "zeroship" }).unique("jwk_key_state_natural_key").add({ columns: ["set_name", "kid"] });
     table("magic_completions", { schema: "zeroship" }).create({
       columns: {
+        id: t.bigInt().notNull().identity(),
         csrf_nonce: t.text().notNull(),
         code: t.text().notNull(),
         email: t.text({ caseSensitive: false }).notNull(),
@@ -226,10 +243,12 @@ export default {
         consumed_pending_at: t.timestamp(),
         consumed_at: t.timestamp(),
       },
-      primaryKey: ["csrf_nonce"],
+      primaryKey: ["id"],
     });
+    table("magic_completions", { schema: "zeroship" }).unique("magic_completions_natural_key").add({ columns: ["csrf_nonce"] });
     table("magic_links", { schema: "zeroship" }).create({
       columns: {
+        id: t.bigInt().notNull().identity(),
         token_hash: t.bytes().notNull(),
         email: t.text({ caseSensitive: false }).notNull(),
         csrf_nonce: t.text().notNull(),
@@ -242,10 +261,12 @@ export default {
         consumed_at: t.timestamp(),
         user_id: t.text(),
       },
-      primaryKey: ["token_hash"],
+      primaryKey: ["id"],
     });
+    table("magic_links", { schema: "zeroship" }).unique("magic_links_natural_key").add({ columns: ["token_hash"] });
     table("oauth_authorization_codes", { schema: "zeroship" }).create({
       columns: {
+        id: t.bigInt().notNull().identity(),
         code_hash: t.bytes().notNull(),
         client_id: t.text().notNull(),
         redirect_uri: t.text().notNull(),
@@ -261,12 +282,14 @@ export default {
         auth_credential_version: t.bigInt().notNull().default(0),
         sid: t.text().notNull(),
       },
-      primaryKey: ["code_hash"],
+      primaryKey: ["id"],
     });
+    table("oauth_authorization_codes", { schema: "zeroship" }).unique("oauth_authorization_codes_natural_key").add({ columns: ["code_hash"] });
     table("oauth_authorization_codes", { schema: "zeroship" }).check("oauth_authorization_codes_max_ttl").add({ expr: (col) => col("expires_at").le(col("created_at").add(interval({ minutes: 1 }))) });
     table("oauth_authorization_codes", { schema: "zeroship" }).check("oauth_authorization_codes_pkce_method_check").add({ expr: (col) => col("pkce_method").eq("S256") });
     table("oauth_clients", { schema: "zeroship" }).create({
       columns: {
+        id: t.bigInt().notNull().identity(),
         client_id: t.text().notNull(),
         client_name: t.text().notNull(),
         client_uri: t.text(),
@@ -282,12 +305,14 @@ export default {
         brokered: t.boolean().notNull().default(false),
         backchannel_logout_uri: t.text(),
       },
-      primaryKey: ["client_id"],
+      primaryKey: ["id"],
     });
+    table("oauth_clients", { schema: "zeroship" }).unique("oauth_clients_natural_key").add({ columns: ["client_id"] });
     table("oauth_clients", { schema: "zeroship" }).check("oauth_clients_brokered_requires_secret_basic").add({ expr: (col) => col("brokered").eq(false).or(col("token_endpoint_auth_method").eq("client_secret_basic")) });
     table("oauth_clients", { schema: "zeroship" }).check("oauth_clients_token_endpoint_auth_method_check").add({ expr: (col) => col("token_endpoint_auth_method").in(["none", "client_secret_basic", "client_secret_post"]) });
     table("oauth_grants", { schema: "zeroship" }).create({
       columns: {
+        id: t.bigInt().notNull().identity(),
         user_id: t.text().notNull(),
         client_id: t.text().notNull(),
         granted_scopes: t.textArray().notNull(),
@@ -295,10 +320,12 @@ export default {
         updated_at: t.timestamp().notNull().default(now()),
         last_used_at: t.timestamp(),
       },
-      primaryKey: ["user_id", "client_id"],
+      primaryKey: ["id"],
     });
+    table("oauth_grants", { schema: "zeroship" }).unique("oauth_grants_natural_key").add({ columns: ["user_id", "client_id"] });
     table("oauth_refresh_tokens", { schema: "zeroship" }).create({
       columns: {
+        id: t.bigInt().notNull().identity(),
         token_hash: t.bytes().notNull(),
         hash_key_version: t.smallInt().notNull(),
         refresh_family_id: t.text().notNull(),
@@ -318,11 +345,13 @@ export default {
         idem_response_enc: t.bytes(),
         idem_expires_at: t.timestamp(),
       },
-      primaryKey: ["token_hash"],
+      primaryKey: ["id"],
     });
+    table("oauth_refresh_tokens", { schema: "zeroship" }).unique("oauth_refresh_tokens_natural_key").add({ columns: ["token_hash"] });
     table("oauth_refresh_tokens", { schema: "zeroship" }).check("oauth_refresh_tokens_idle_le_ceiling").add({ expr: (col) => col("expires_at").le(col("family_absolute_expires_at")) });
     table("oidc_session_clients", { schema: "zeroship" }).create({
       columns: {
+        id: t.bigInt().notNull().identity(),
         idp_session_id: t.uuid().notNull(),
         user_id: t.text().notNull(),
         client_id: t.text().notNull(),
@@ -331,25 +360,31 @@ export default {
         first_seen_at: t.timestamp().notNull().default(now()),
         last_seen_at: t.timestamp().notNull().default(now()),
       },
-      primaryKey: ["idp_session_id", "client_id"],
+      primaryKey: ["id"],
     });
+    table("oidc_session_clients", { schema: "zeroship" }).unique("oidc_session_clients_natural_key").add({ columns: ["idp_session_id", "client_id"] });
     table("principal_grants", { schema: "zeroship" }).create({
       columns: {
+        id: t.bigInt().notNull().identity(),
         principal_id: t.text().notNull(),
         grant_name: t.text().notNull(),
       },
-      primaryKey: ["principal_id", "grant_name"],
+      primaryKey: ["id"],
     });
+    table("principal_grants", { schema: "zeroship" }).unique("principal_grants_natural_key").add({ columns: ["principal_id", "grant_name"] });
     table("rate_limits", { schema: "zeroship" }).create({
       columns: {
+        id: t.bigInt().notNull().identity(),
         bucket_key: t.text().notNull(),
         tokens: t.real().notNull(),
         updated_at: t.timestamp().notNull(),
       },
-      primaryKey: ["bucket_key"],
+      primaryKey: ["id"],
     });
+    table("rate_limits", { schema: "zeroship" }).unique("rate_limits_natural_key").add({ columns: ["bucket_key"] });
     table("signing_keys", { schema: "zeroship" }).create({
       columns: {
+        id: t.bigInt().notNull().identity(),
         kid: t.text().notNull(),
         alg: t.text().notNull(),
         public_jwk: t.json().notNull(),
@@ -359,18 +394,21 @@ export default {
         retiring_at: t.timestamp(),
         retired_at: t.timestamp(),
       },
-      primaryKey: ["kid"],
+      primaryKey: ["id"],
     });
+    table("signing_keys", { schema: "zeroship" }).unique("signing_keys_natural_key").add({ columns: ["kid"] });
     table("signing_keys", { schema: "zeroship" }).check("signing_keys_alg_check").add({ expr: (col) => col("alg").eq("EdDSA") });
     table("signing_keys", { schema: "zeroship" }).check("signing_keys_status_check").add({ expr: (col) => col("status").in(["active", "next", "retiring"]) });
     table("token_revocations", { schema: "zeroship" }).create({
       columns: {
+        id: t.bigInt().notNull().identity(),
         client_id: t.text().notNull(),
         sub: t.text().notNull(),
         revoked_after: t.timestamp().notNull().default(now()),
       },
-      primaryKey: ["client_id", "sub"],
+      primaryKey: ["id"],
     });
+    table("token_revocations", { schema: "zeroship" }).unique("token_revocations_natural_key").add({ columns: ["client_id", "sub"] });
     table("totp_backup_codes", { schema: "zeroship" }).create({
       columns: {
         id: t.bigInt().notNull().identity({ always: true }),
@@ -383,13 +421,15 @@ export default {
     });
     table("totp_credentials", { schema: "zeroship" }).create({
       columns: {
+        id: t.bigInt().notNull().identity(),
         user_id: t.text().notNull(),
         encrypted_secret: t.bytes().notNull(),
         confirmed_at: t.timestamp(),
         created_at: t.timestamp().notNull().default(now()),
       },
-      primaryKey: ["user_id"],
+      primaryKey: ["id"],
     });
+    table("totp_credentials", { schema: "zeroship" }).unique("totp_credentials_natural_key").add({ columns: ["user_id"] });
     table("users", { schema: "zeroship" }).create({
       columns: {
         id: t.text().notNull(),

@@ -31,7 +31,7 @@ import { table, t, now, grant } from "@zeroship/migrate";
 // no reason to sit outside the platform schema. The names carry the prefix the
 // schema used to provide, matching the workflow_* tables already in `zeroship`.
 //
-// The columns mirror provision_sql() exactly; store.rs reads them by name.
+// The store addresses scheduling state by run_id; id is the row identity.
 const SCHEMA = "zeroship";
 
 function zs(name) {
@@ -43,26 +43,30 @@ export default {
   schema() {
     zs("workflow_scheduler_timers").create({
       columns: {
+        id: t.bigInt().notNull().identity(),
         run_id: t.text().notNull(),
         app_id: t.text().notNull(),
         wake_at: t.timestamp().notNull(),
         generation: t.bigInt().notNull().default(0),
         registered_at: t.timestamp().notNull().default(now()),
       },
-      primaryKey: ["run_id"],
+      primaryKey: ["id"],
     });
+    zs("workflow_scheduler_timers").unique("workflow_scheduler_timers_natural_key").add({ columns: ["run_id"] });
     zs("workflow_scheduler_timers").index("workflow_scheduler_timers_due_idx").add({ on: ["wake_at"] });
 
     zs("workflow_scheduler_inflight").create({
       columns: {
+        id: t.bigInt().notNull().identity(),
         run_id: t.text().notNull(),
         app_id: t.text().notNull(),
         deadline: t.timestamp().notNull(),
         dispatch_generation: t.bigInt().notNull(),
         dispatched_at: t.timestamp().notNull().default(now()),
       },
-      primaryKey: ["run_id"],
+      primaryKey: ["id"],
     });
+    zs("workflow_scheduler_inflight").unique("workflow_scheduler_inflight_natural_key").add({ columns: ["run_id"] });
     zs("workflow_scheduler_inflight").index("workflow_scheduler_inflight_deadline_idx").add({ on: ["deadline"] });
 
     // Exactly the store's working set, measured by sweeping store.rs for the verbs
