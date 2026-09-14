@@ -45,11 +45,12 @@ use zeroship_migrate_postgres::role::migrator_role_name;
 
 use crate::policy::confined_guard_policy_for_schema;
 
-/// The narrow, precreated role that owns every app's workflow journal schema.
+/// The precreated role granted workflow provisioning access to creator schemas.
 ///
 /// The platform migration creates it
-/// (`db/migrations-ts/20260702000100_schema_roles_extensions.ts`); nothing in
-/// this service, and nothing in the worker, may create it or a schema for it.
+/// (`db/migrations-ts/20260818000200_worker_database_authority.ts`); nothing in
+/// this service, and nothing in the worker, may create the role. Provisioning
+/// preserves the creator migrator's ownership of an existing schema.
 pub const WORKFLOW_OWNER_ROLE: &str = "zeroship_workflow_owner";
 
 /// Error provisioning a migrator role.
@@ -105,7 +106,7 @@ pub(crate) fn migrator_executor_config(
 /// Idempotently create one database's data schema and migrator role.
 ///
 /// This is the complete create verb. Runtime roles, audit tables, workflow
-/// schemas, publications, and apply-ledger rows remain apply-time concerns.
+/// grants, publications, and apply-ledger rows remain apply-time concerns.
 pub async fn provision_database(
     admin: &Client,
     schema: &str,
@@ -268,21 +269,19 @@ pub async fn provision_migrator(
 
 /// The schema an app's durable-workflow journal tables live in.
 ///
-/// Distinct from the app's DATA schema, which is the bare `<uuid>`. Kept in
-/// sync with `zeroship_workflow::store::pg::app_schema_for`, which
-/// derives the same name on the read/write side; this crate does not depend on
-/// that one, so the derivation is duplicated rather than shared.
+/// Workflow journals share the creator's data schema. The canonical app
+/// derivation keeps migration provisioning and runtime storage aligned.
 #[must_use]
 pub fn workflow_journal_schema_name(app_id: &AppId) -> String {
     app_derivation::schema_name(app_id)
 }
 
-/// The DDL that gives an app its workflow journal schema, owned by the narrow
-/// [`WORKFLOW_OWNER_ROLE`].
+/// Grant workflow provisioning access within an app's shared creator schema.
 ///
 /// Guarded on the role existing rather than creating it: the migration identity
 /// creates no platform role, it only delegates to roles the platform migration
-/// precreated.
+/// precreated. An existing schema keeps its owner so creator migrations retain
+/// their authority after runtime provisioning.
 pub(crate) fn workflow_journal_schema_sql(app_schema: &str) -> String {
     let schema_q = quote_ident(app_schema);
     let owner_q = quote_ident(WORKFLOW_OWNER_ROLE);
@@ -290,7 +289,6 @@ pub(crate) fn workflow_journal_schema_sql(app_schema: &str) -> String {
         "DO $workflow_journal$ BEGIN
             IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '{owner_lit}') THEN
                 CREATE SCHEMA IF NOT EXISTS {schema_q} AUTHORIZATION {owner_q};
-                ALTER SCHEMA {schema_q} OWNER TO {owner_q};
                 GRANT CREATE, USAGE ON SCHEMA {schema_q} TO {owner_q};
             END IF;
          END $workflow_journal$",
@@ -298,24 +296,18 @@ pub(crate) fn workflow_journal_schema_sql(app_schema: &str) -> String {
     )
 }
 
-/// Idempotently provision an app's workflow journal schema, as an admin
-/// principal.
+/// Idempotently provision workflow access to an app's shared creator schema.
 ///
 /// Runs [`workflow_journal_schema_sql`], the one generator for this DDL; the
-/// apply path embeds the same text (`apply::runtime_dependents_sql`). Nothing
-/// else in the platform creates it: the worker and the control plane
-/// provision the journal TABLES into it (`PgStore::provision`) holding no
-/// CREATE on the database and no authority to make a schema of their own - a
-/// process running creator code must not be able to author schemas
-/// (2a44ea8ef). So the schema has to exist first, and in production it exists
-/// because a migration apply or the authenticated workflow provisioning route
-/// created it.
+/// apply path embeds the same text through its runtime role provisioning plan.
+/// Creator database provisioning owns the schema lifecycle. This helper can
+/// create a missing schema for privileged provisioning callers, but never
+/// transfers ownership of an existing creator schema to the workflow role.
 ///
 /// Exported because callers outside the apply path need a deployed app's
-/// journal schema to exist and must get it from the production statement rather
-/// than a CREATE SCHEMA of their own: control's workflow tests seed an app by
-/// INSERTing into `zeroship.apps`, which skips the apply that would have called
-/// this.
+/// schema and grants to exist without running a creator migration. Callers must
+/// hold the provisioning principal. Runtime app roles retain data privileges
+/// without schema creation authority.
 ///
 /// # Errors
 /// Any database error from the DDL - including a permission failure, when the
