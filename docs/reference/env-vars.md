@@ -199,7 +199,7 @@ a command control has no environment name, so no ambient variable can trigger it
 <!-- BEGIN GENERATED CONFIGURATION CONTRACT -->
 <!--
 DO NOT EDIT THIS REGION BY HAND. It is rendered from the COMPILED
-ConfigSpec registries of the seven declaring binaries by
+ConfigSpec registries of the declaring binaries by
 `cargo run -p zeroship-config-contract -- env-vars-doc`, and
 tests/config_name_alignment_gate.sh fails when it drifts. Everything
 OUTSIDE these two markers is hand-maintained and is never rewritten
@@ -762,12 +762,6 @@ cargo run -p zeroship-config-contract -- env-vars-doc
 
 # Verify it, exactly as CI does.
 cargo run -p zeroship-config-contract -- env-vars-doc --check
-
-# THE AUDIT. Re-derive every projection a SECOND time by parsing the source
-# text with syn, and require the two sets to be equal in both directions. The
-# extraction is no longer the source of truth for this document; its job is to
-# disagree with the compiled contract if either one is wrong.
-cargo run -p zeroship-config-contract -- audit
 
 # The compose knobs an operator can set.
 grep -ohE '\$\{[A-Z_0-9]+(:-[^}]*)?\}' deploy/compose/docker-compose.yml | sort -u
