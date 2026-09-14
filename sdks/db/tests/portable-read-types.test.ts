@@ -1,5 +1,5 @@
-import { t } from "@zeroship/db";
-import type { Collection, SortableField, SortInput } from "@zeroship/db";
+import { t } from "../src/index.js";
+import type { Collection, SortableField, SortInput } from "../src/index.js";
 
 const fields = {
   title: t.string(),

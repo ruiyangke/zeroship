@@ -35,7 +35,7 @@ async function makeFixture(
   return { root, cleanup: () => fs.rm(root, { recursive: true, force: true }) };
 }
 
-/** v2 RuntimeSchemaDescriptor contract (mirrors install-schema.ts:155-233). */
+/** RuntimeSchemaDescriptor contract consumed by the host DB adapter. */
 function assertRuntimeDescriptorV2(descriptor: unknown): void {
   assert.ok(descriptor && typeof descriptor === "object", "descriptor is an object");
   const d = descriptor as Record<string, unknown>;

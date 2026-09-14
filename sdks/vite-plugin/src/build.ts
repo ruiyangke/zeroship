@@ -14,10 +14,7 @@ import {
   type DiscoveredProcedure,
   type DiscoveredSchedule,
 } from "./manifest.js";
-import {
-  zeroshipFrameworkResolverPlugin,
-  zeroshipModulePlugin,
-} from "./zeroship-module.js";
+import { zeroshipModulePlugin } from "./zeroship-module.js";
 import { genTypesFromMigrations } from "./gen-types/index.js";
 import {
   defaultProjectConfig,
@@ -214,7 +211,11 @@ export async function buildServerBundle(opts: {
       for (const output of Object.values(bundle)) {
         if (output.type !== "chunk") continue;
         for (const imported of [...output.imports, ...output.dynamicImports]) {
-          if (bundle[imported]?.type !== "chunk" && !isRuntimeNative(imported)) {
+          if (
+            bundle[imported]?.type !== "chunk" &&
+            imported !== "zeroship" &&
+            !isRuntimeNative(imported)
+          ) {
             this.error(`server executable contains an unbundled import: ${imported}`);
           }
         }
@@ -233,7 +234,6 @@ export async function buildServerBundle(opts: {
       nodeCompatPlugin(),
       zeroshipModulePlugin(),
       transformPlugin(opts.state),
-      zeroshipFrameworkResolverPlugin(),
       clientManifestPlugin({ root: opts.root, distDir: opts.clientDistDir }),
     ],
   });
@@ -247,7 +247,6 @@ export async function buildServerBundle(opts: {
       nodeCompatPlugin(),
       zeroshipModulePlugin(),
       transformPlugin(opts.state),
-      zeroshipFrameworkResolverPlugin(),
       rpcRegistryPlugin({
         root: opts.root,
         userEntryRel,

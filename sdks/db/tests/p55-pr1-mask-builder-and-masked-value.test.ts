@@ -32,14 +32,14 @@ import { generatedSchema } from "./_install-helper.js";
 
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { t } from "@zeroship/db";
+import { t } from "../src/index.js";
 // **P9 PR 2** — `MaskedValue` is now a native v8_class; the SDK export
 // is a type-only `declare class`. It can only be imported as a type
 // (no runtime constructor). Its runtime behaviour (coercion, unmask,
 // brand check) is covered by the Rust unit tests in
 // `crates/zeroship-data-v8/src/v8_classes/masked_value.rs` and the
 // `p9-pr2-masked-value-v8-class` suite.
-import type { Row, MaskedValueRepr, MaskedValue } from "@zeroship/db";
+import type { Row, MaskedValueRepr, MaskedValue } from "../src/index.js";
 
 describe("P5.5 PR 1 — t.encrypted() default-mask rule", () => {
   test("bare t.encrypted() auto-populates mask = { kind: 'full', classification: 'pii' }", () => {

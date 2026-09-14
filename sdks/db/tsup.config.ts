@@ -1,8 +1,7 @@
 import { defineConfig } from "tsup";
 
-// Build public and internal declarations together so branded SDK types share
-// their declaration site. JavaScript entries remain independently bundled;
-// installer tests exercise public builders against the internal facade.
+// The package emits only its documented creator-facing entry. Runtime facade
+// assembly belongs to the zeroship-data-v8 crate and is built separately.
 export default defineConfig({
   format: ["esm"],
   dts: true,
@@ -12,6 +11,6 @@ export default defineConfig({
   treeshake: true,
   splitting: false,
   external: ["@zeroship/types", "zeroship"],
-  entry: ["src/index.ts", "src/internal.ts"],
+  entry: ["src/index.ts"],
   clean: true,
 });

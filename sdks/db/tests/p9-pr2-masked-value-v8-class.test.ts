@@ -31,9 +31,9 @@ import { generatedSchema } from "./_install-helper.js";
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import { installSchemaForTest } from "./_install-helper.js";
-import { t, schema as schemaWrap } from "@zeroship/db";
+import { t, schema as schemaWrap } from "../src/index.js";
 import { mapResultDoc } from "../src/utils.js";
-import type { Row, MaskedValue } from "@zeroship/db";
+import type { Row, MaskedValue } from "../src/index.js";
 import type { NativeDb } from "../src/native.js";
 
 type AnyRec = Record<string, unknown>;

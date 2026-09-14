@@ -12,13 +12,13 @@
   // because the base config sets `rootDir: "src"` for the package build
   // (tsup emits dist/ from src/ only); adding "tests" to that `include`
   // puts test files outside `rootDir` and tsc rejects every one with
-  // TS6059 ("not under 'rootDir'"). `rootDir: "."` here widens the root to
-  // cover both `src` and `tests` for this noEmit-only check, which never
-  // writes to `outDir` and so cannot collide with the real build.
+  // TS6059 ("not under 'rootDir'"). The wider root here also covers the
+  // crate-owned adapter test support imported by these tests. This noEmit-only
+  // check never writes to `outDir` and cannot collide with the real build.
   "extends": "./tsconfig.json",
   "compilerOptions": {
     "noEmit": true,
-    "rootDir": ".",
+    "rootDir": "../..",
     // The base tsconfig restricts ambient globals to `@zeroship/types`
     // only (deliberately - `src/` runs in the WinterCG/V8 runtime, not
     // Node, and must not see Node's ambient globals). Tests run under

@@ -4,9 +4,11 @@
 It captures V8 arguments and request context, prepares ORM operations, and turns
 native results into V8 values and promises. `DbPlugin` registers the primitive
 with the runtime and installs deployment metadata before app code evaluates.
-It also supplies the compiled DB SDK adapter through `javascript_modules()`.
-Build `@zeroship/db` before compiling this crate; the runtime loads that adapter
-as `zeroship:db/internal` independently of the creator artifact.
+It also owns and supplies the compiled host adapter through
+`host_javascript_modules()`. Run the root JavaScript build before compiling this
+crate; the runtime loads `crates/zeroship-data-v8/dist/adapter.js` as
+`zeroship:db/adapter` independently of the creator artifact. The published
+`@zeroship/db` package has no host-only entry.
 
 CRUD, protection, SQL compilation, database drivers, and transaction policy
 belong to `zeroship-data-orm`. This adapter owns V8

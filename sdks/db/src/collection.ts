@@ -127,15 +127,12 @@ function toResultError(e: unknown): Error {
  * types are derived. `N` carries the table name as a string-literal so the
  * `Id` accessor below produces `Id<N>` rather than `Id<string>`.
  *
- * `AllSchemas` is the parent db's full schema map — threaded in by
- * `installSchema` so a `find({...}, { with: { user: true } })` can
+ * `AllSchemas` is the parent db's full schema map — threaded in by the host
+ * facade so a `find({...}, { with: { user: true } })` can
  * resolve the relation's type to the target collection's `Row<...>`
- * instead of `PlainObject`. Standalone `model()`
- * callers inherit the safe default and degrade to `PlainObject` per
- * relation.
+ * instead of `PlainObject`.
  *
- * Use `model()` in tests/shared packages, or access app collections through the
- * generated `env.db.<name>` surface — do not construct directly.
+ * Access app collections through the generated `env.db.<name>` surface.
  */
 export class Collection<
   S = PlainObject,
