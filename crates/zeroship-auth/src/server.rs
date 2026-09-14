@@ -341,6 +341,7 @@ async fn style() -> web::HttpResponse {
 /// - `RefreshSessionPool` - bounded dedicated-session pool config for auth
 ///   transactions that need an exclusive connection. The concrete pool is cached
 ///   per ntex worker thread because it is `!Send`.
+/// - `Database` - the native ORM, initialized on each worker thread.
 ///
 /// # Errors
 ///
@@ -373,7 +374,9 @@ pub async fn run(
     let readiness = Arc::new(ReadinessGate::with_defaults());
 
     web::server(async move || {
+        let database_url = cfg.settings.database_url.expose_str().to_owned();
         let mut app = web::App::new()
+            .state_factory(async move || crate::store::native::connect(&database_url).await)
             .state(cfg.clone())
             .state(db.clone())
             .state(readiness.clone())
