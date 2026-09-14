@@ -49,6 +49,7 @@ pub mod plan_catalog;
 pub mod pricing;
 pub mod pricing_store;
 pub mod proration;
+pub mod publication;
 pub mod refund;
 pub mod registry;
 pub mod reserved_names;

@@ -28,7 +28,6 @@ pub mod workflow_blob_gc;
 pub mod workflow_engine;
 pub mod workflow_retention;
 pub mod workflow_signal_fanout;
-pub mod workflow_schedules;
 
 use std::sync::Arc;
 
@@ -148,12 +147,6 @@ pub fn spawn_all_with_options(
     // Durable-workflow control sweeps remain in control. They create or wake
     // runs, then register scheduler timers instead of scanning workflow_runs.
     if options.workflow_sweeps {
-        let schedule_state = Arc::clone(&state);
-        compio::runtime::spawn(async move {
-            workflow_schedules::run(schedule_state, workflow_schedules::DEFAULT_TICK_SECS).await;
-        })
-        .detach();
-
         let signal_fanout_state = Arc::clone(&state);
         compio::runtime::spawn(async move {
             workflow_signal_fanout::run(
@@ -388,7 +381,7 @@ mod tests {
         );
         assert!(
             options.workflow_sweeps,
-            "workflow schedules/signals still need sweeps"
+            "workflow signals and journal collection still need sweeps"
         );
         assert!(
             !options.scheduler_authoritative,

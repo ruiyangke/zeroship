@@ -311,15 +311,17 @@ async fn archived_app_can_stage_a_deploy_without_becoming_routable() {
         )
         .await
         .expect("create app");
-    let old_hash = "1".repeat(64);
-    let staged_hash = "2".repeat(64);
-    let old_manifest = manifest_json(&old_hash, "before-archive");
-    let staged_manifest = manifest_json(&staged_hash, "staged-while-archived");
-
-    assert!(registry
-        .set_deploy_with_manifest(&app.id, &old_hash, &old_manifest, None)
-        .await
-        .expect("set initial deploy"));
+    let old_hash = common::deployments::deploy(
+        &registry,
+        &app.id,
+        &owner,
+        common::deployments::labelled("before-archive"),
+    )
+    .await
+    .expect("set initial deploy")
+    .result()
+    .deploy_hash
+    .clone();
     let initial_route = registry
         .get_routes()
         .await
@@ -345,10 +347,20 @@ async fn archived_app_can_stage_a_deploy_without_becoming_routable() {
         "archive must remove the app from the gateway projection"
     );
 
-    assert!(registry
-        .set_deploy_with_manifest(&app.id, &staged_hash, &staged_manifest, None)
-        .await
-        .expect("stage deploy while archived"));
+    let staged = common::deployments::deploy(
+        &registry,
+        &app.id,
+        &owner,
+        common::deployments::labelled("staged-while-archived"),
+    )
+    .await
+    .expect("stage deploy while archived");
+    assert_eq!(
+        staged.result().lifecycle_revision,
+        None,
+        "a deploy while archived stages code without publishing an activation"
+    );
+    let staged_hash = staged.result().deploy_hash.clone();
     assert!(
         !registry
             .get_routes()
@@ -399,11 +411,14 @@ async fn restore_requires_a_staged_deploy_matching_the_latest_applied_schema() {
         )
         .await
         .expect("create app");
-    let old_hash = "4".repeat(64);
-    assert!(registry
-        .set_deploy_with_manifest(&app.id, &old_hash, &manifest_json(&old_hash, "old"), None)
-        .await
-        .expect("set schema-less deploy"));
+    common::deployments::deploy(
+        &registry,
+        &app.id,
+        &owner,
+        common::deployments::labelled("old"),
+    )
+    .await
+    .expect("set schema-less deploy");
     registry
         .archive_app(&app.id)
         .await
@@ -445,22 +460,16 @@ async fn restore_requires_a_staged_deploy_matching_the_latest_applied_schema() {
         "a schema mismatch must leave the app archived"
     );
 
-    let staged_hash = "6".repeat(64);
     let mut staged_manifest = Manifest::passthrough();
-    staged_manifest.deploy_hash = Some(staged_hash.clone());
     staged_manifest.runtime_descriptor = Some(zeroship_bundle::RuntimeDescriptorEntry {
         hash: descriptor_hash.clone(),
     });
-    let staged_manifest = serde_json::to_string(&staged_manifest).expect("serialize manifest");
-    assert!(registry
-        .set_deploy_with_manifest(
-            &app.id,
-            &staged_hash,
-            &staged_manifest,
-            Some(&descriptor_hash),
-        )
+    let staged_hash = common::deployments::deploy(&registry, &app.id, &owner, staged_manifest)
         .await
-        .expect("stage schema-compatible deploy"));
+        .expect("stage schema-compatible deploy")
+        .result()
+        .deploy_hash
+        .clone();
     assert!(!registry
         .get_routes()
         .await
@@ -491,13 +500,6 @@ async fn restore_requires_a_staged_deploy_matching_the_latest_applied_schema() {
     drop(client);
     drop(registry);
     common::drain_pg().await;
-}
-
-fn manifest_json(deploy_hash: &str, compiler: &str) -> String {
-    let mut manifest = Manifest::passthrough();
-    manifest.deploy_hash = Some(deploy_hash.to_string());
-    manifest.metadata.compiler = Some(compiler.to_string());
-    serde_json::to_string(&manifest).expect("serialize manifest")
 }
 
 async fn count(client: &Client, table: &str, column: &str, app_id: &zeroship_core::AppId) -> i64 {

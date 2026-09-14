@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 
 pub mod authz_fixture;
+pub mod deployments;
 pub mod stripe_mock;
 
 use std::sync::mpsc;

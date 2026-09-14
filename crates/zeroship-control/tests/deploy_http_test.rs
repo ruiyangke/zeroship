@@ -31,7 +31,7 @@ use ntex::http::StatusCode;
 use ntex::web::{self, test};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
-use zeroship_core::{AppId, UserId};
+use zeroship_core::{AppId, DeployCommandId, UserId};
 
 use zeroship_bundle::{
     AssetEntry, AuthConfig, BlobStore, LocalDiskBlobStore, Manifest, ManifestMetadata, ScopeDef,
@@ -403,6 +403,7 @@ async fn deploy_happy_path_returns_200_with_deploy_hash() {
         .uri(&format!("/api/apps/{}/deploy", app_id.as_str()))
         .header("authorization", pat.bearer())
         .header("content-type", "application/x-zship")
+        .header("idempotency-key", DeployCommandId::mint().as_str())
         .set_payload(body)
         .to_request();
     let resp = test::call_service(&app, req).await;
@@ -542,6 +543,7 @@ async fn deploy_missing_auth_returns_401_without_consuming_body() {
     let req = test::TestRequest::post()
         .uri(&format!("/api/apps/{}/deploy", app_id.as_str()))
         .header("content-type", "application/x-zship")
+        .header("idempotency-key", DeployCommandId::mint().as_str())
         .set_payload(body.clone())
         .to_request();
     // Status only: a retained `WebResponse` keeps the app state - and its
@@ -558,6 +560,7 @@ async fn deploy_missing_auth_returns_401_without_consuming_body() {
         .uri(&format!("/api/apps/{}/deploy", app_id.as_str()))
         .header("authorization", "Bearer not-a-valid-pat")
         .header("content-type", "application/x-zship")
+        .header("idempotency-key", DeployCommandId::mint().as_str())
         .set_payload(body)
         .to_request();
     let status = test::call_service(&app, req).await.status();
@@ -620,6 +623,7 @@ async fn deploy_manifest_not_first_returns_400() {
         .uri(&format!("/api/apps/{}/deploy", app_id.as_str()))
         .header("authorization", pat.bearer())
         .header("content-type", "application/x-zship")
+        .header("idempotency-key", DeployCommandId::mint().as_str())
         .set_payload(body)
         .to_request();
     let resp = test::call_service(&app, req).await;
@@ -701,6 +705,7 @@ async fn deploy_colliding_scope_returns_400_invalid_scope() {
         .uri(&format!("/api/apps/{}/deploy", app_id.as_str()))
         .header("authorization", pat.bearer())
         .header("content-type", "application/x-zship")
+        .header("idempotency-key", DeployCommandId::mint().as_str())
         .set_payload(body)
         .to_request();
     let resp = test::call_service(&app, req).await;
@@ -796,6 +801,7 @@ async fn deploy_noncolliding_scope_returns_200() {
         .uri(&format!("/api/apps/{}/deploy", app_id.as_str()))
         .header("authorization", pat.bearer())
         .header("content-type", "application/x-zship")
+        .header("idempotency-key", DeployCommandId::mint().as_str())
         .set_payload(body)
         .to_request();
     let resp = test::call_service(&app, req).await;
@@ -927,6 +933,7 @@ async fn deploy_rejects_legacy_migration_approval_query() {
         ))
         .header("authorization", pat.bearer())
         .header("content-type", "application/x-zship")
+        .header("idempotency-key", DeployCommandId::mint().as_str())
         .set_payload(bundle)
         .to_request();
     let resp = test::call_service(&app, req).await;
@@ -974,6 +981,7 @@ async fn deploy_rejects_legacy_manifest_migrations_and_runs_no_migration() {
         .uri(&format!("/api/apps/{}/deploy", app_id.as_str()))
         .header("authorization", pat.bearer())
         .header("content-type", "application/x-zship")
+        .header("idempotency-key", DeployCommandId::mint().as_str())
         .set_payload(bundle)
         .to_request();
     let resp = test::call_service(&app, req).await;
@@ -1058,6 +1066,7 @@ async fn deploy_to_nonexistent_app_does_not_write_blobs() {
         .uri(&format!("/api/apps/{}/deploy", ghost_id.as_str()))
         .header("authorization", pat.bearer())
         .header("content-type", "application/x-zship")
+        .header("idempotency-key", DeployCommandId::mint().as_str())
         .set_payload(body)
         .to_request();
     // Status only: a retained `WebResponse` keeps the app state - and its
@@ -1132,6 +1141,7 @@ async fn deploy_is_rate_limited() {
             .header("authorization", pat.bearer())
             .header("x-forwarded-for", caller_ip.as_str())
             .header("content-type", "application/x-zship")
+            .header("idempotency-key", DeployCommandId::mint().as_str())
             .set_payload(b"never read".to_vec())
             .to_request();
         statuses.push(test::call_service(&app, req).await.status());
@@ -1161,8 +1171,8 @@ async fn deploy_is_rate_limited() {
 // database still holds plaintext there, and the runtime serves the plain value
 // believing it is masked. Nothing downstream detects it.
 //
-// The guard is a predicate on the UPDATE in `Registry::set_deploy_with_manifest`,
-// which is what "this deploy is live" means. These cases drive the full HTTP
+// The guard runs under the app row lock in `publication::catalog::accept`, the
+// transaction that makes a deploy live. These cases drive the full HTTP
 // handler, so they measure the shipped path rather than the registry call.
 //
 // ON THE FIXTURE, AND WHY IT IS NOT `manifest_for`. Every other deploy case in
@@ -1277,6 +1287,7 @@ async fn post_zship(
         .uri(&format!("/api/apps/{}/deploy", app_id.as_str()))
         .header("authorization", bearer)
         .header("content-type", "application/x-zship")
+        .header("idempotency-key", DeployCommandId::mint().as_str())
         .set_payload(body)
         .to_request();
     let resp = test::call_service(app, req).await;
@@ -1305,8 +1316,8 @@ async fn create_labelled_app(state: &AppState, label: &str, owner_id: &UserId) -
 /// refused, and nothing goes live.
 ///
 /// MUTATIONS THIS MUST SURVIVE, both run:
-///  - CODE: delete the `AND CASE ... END` clause from the UPDATE in
-///    `Registry::set_deploy_with_manifest`. This case must go RED.
+///  - CODE: skip the schema admission in `publication::catalog::accept`.
+///    This case must go RED.
 ///  - FIXTURE: build the bundle with `zship_with_descriptor(None)`. This case
 ///    must ALSO go red - with no descriptor and no applied schema the guard
 ///    correctly answers 200, so a case that cannot tell those two apart is not
@@ -1515,6 +1526,526 @@ async fn deploy_rolling_back_to_a_previously_applied_descriptor_is_refused() {
     assert!(live_deploy_hash(&fx.state, &app_id).await.is_some());
 
     let _ = fx.state.registry.archive_app(&app_id).await;
+    pat.cleanup(&fx.state).await;
+    drop(app);
+    drop(fx);
+    common::drain_pg().await;
+}
+
+// ---------------------------------------------------------------------------
+// Deploy command identity
+//
+// A deploy names its command in one `Idempotency-Key` header. The receipt binds
+// the app, the actor, the content type and the digest of the bytes the handler
+// consumed; an exact retry answers from it, and anything else under the same id
+// is a conflict that says nothing about what the id was first used for.
+// ---------------------------------------------------------------------------
+
+/// POST a `.zship` with the given `Idempotency-Key` values, verbatim.
+async fn post_command(
+    app: &ntex::Pipeline<
+        impl ntex::Service<
+            ntex::http::Request,
+            Response = ntex::web::WebResponse,
+            Error = ntex::web::Error,
+        >,
+    >,
+    app_id: &AppId,
+    bearer: &str,
+    keys: &[&str],
+    body: Vec<u8>,
+) -> (StatusCode, bool, serde_json::Value) {
+    let mut req = test::TestRequest::post()
+        .uri(&format!("/api/apps/{}/deploy", app_id.as_str()))
+        .header("authorization", bearer)
+        .header("content-type", "application/x-zship");
+    for key in keys {
+        req = req.header("idempotency-key", *key);
+    }
+    let resp = test::call_service(app, req.set_payload(body).to_request()).await;
+    let status = resp.status();
+    let replayed = resp
+        .headers()
+        .get("idempotent-replayed")
+        .is_some_and(|value| value == "true");
+    let bytes = test::read_body(resp).await;
+    let json = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+    (status, replayed, json)
+}
+
+/// The app's lifecycle revision, its intents in revision order as
+/// `(revision, action, deploy_id)`, and its command receipt count.
+async fn publication_rows(
+    state: &AppState,
+    app_id: &AppId,
+) -> (i64, Vec<(i64, String, Option<String>)>, i64) {
+    let revision: i64 = state
+        .control_pg
+        .query_one(
+            "SELECT lifecycle_revision FROM zeroship.apps WHERE id = $1",
+            &[&app_id.as_str()],
+        )
+        .await
+        .expect("lifecycle revision")
+        .get(0);
+    let intents = state
+        .control_pg
+        .query(
+            "SELECT revision, action, deploy_id FROM zeroship.app_lifecycle_intents \
+              WHERE app_id = $1 ORDER BY revision",
+            &[&app_id.as_str()],
+        )
+        .await
+        .expect("lifecycle intents")
+        .iter()
+        .map(|row| (row.get(0), row.get(1), row.get(2)))
+        .collect();
+    let receipts: i64 = state
+        .control_pg
+        .query_one(
+            "SELECT COUNT(*)::bigint FROM zeroship.app_deploy_commands WHERE app_id = $1",
+            &[&app_id.as_str()],
+        )
+        .await
+        .expect("receipts")
+        .get(0);
+    (revision, intents, receipts)
+}
+
+/// A worker-only artifact whose single module is told apart by `marker`.
+fn marked_zship(marker: &str) -> (Vec<u8>, String) {
+    let server = format!("export default {{ fetch() {{ return new Response('{marker}'); }} }}");
+    let server_hash = sha256_hex(server.as_bytes());
+    let manifest = manifest_for(Some(&server_hash), &[]);
+    let manifest_bytes = serde_json::to_vec(&manifest).unwrap();
+    (
+        build_zship(
+            &manifest_bytes,
+            &[(server_hash.clone(), server.into_bytes())],
+            true,
+        ),
+        server_hash,
+    )
+}
+
+/// Every malformed command identity is refused before a body byte is read,
+/// and the canonical id one variable away is accepted.
+#[compio::test]
+async fn deploy_requires_one_canonical_command_id_before_reading_the_body() {
+    let fx = build_test_state(&db_url(), "command-header").await;
+    let app = deploy_service(fx.state.clone()).await;
+    let pat = seed_owner(&fx.state, "command-header").await;
+    let app_id = create_labelled_app(&fx.state, "commandheader", &pat.user_id).await;
+    let (body, _) = marked_zship("command-header");
+    let first = DeployCommandId::mint();
+    let second = DeployCommandId::mint();
+    let foreign = AppId::mint();
+    let upper = first.as_str().to_ascii_uppercase();
+
+    for keys in [
+        vec![],
+        vec![first.as_str(), second.as_str()],
+        vec![first.as_str(), first.as_str()],
+        vec!["dcm_bad"],
+        vec![foreign.as_str()],
+        vec![upper.as_str()],
+        vec![""],
+    ] {
+        let (status, _, json) =
+            post_command(&app, &app_id, &pat.bearer(), &keys, body.clone()).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{keys:?}: {json}");
+        assert_eq!(json["error"], "invalid_idempotency_key", "{keys:?}");
+        assert!(
+            dir_is_empty(&fx.deploy_tmp_dir),
+            "{keys:?}: the body streamed before the command id was checked"
+        );
+    }
+    assert_eq!(publication_rows(&fx.state, &app_id).await, (0, vec![], 0));
+
+    let (status, replayed, json) =
+        post_command(&app, &app_id, &pat.bearer(), &[first.as_str()], body).await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    assert!(!replayed);
+    assert_eq!(json["command_id"], first.as_str());
+    assert_eq!(json["lifecycle_revision"], 1);
+
+    let _ = fx.state.registry.archive_app(&app_id).await;
+    pat.cleanup(&fx.state).await;
+    drop(app);
+    drop(fx);
+    common::drain_pg().await;
+}
+
+/// A lost reply is recovered by resending the same bytes under the same id:
+/// the original result comes back even after a later deploy moved the app and
+/// the app's schema changed, and nothing is ingested, admitted, retargeted or
+/// published again.
+#[compio::test]
+async fn an_exact_retry_returns_the_first_acceptance_without_republishing() {
+    let fx = build_test_state(&db_url(), "command-replay").await;
+    let app = deploy_service(fx.state.clone()).await;
+    let pat = seed_owner(&fx.state, "command-replay").await;
+    let app_id = create_labelled_app(&fx.state, "commandreplay", &pat.user_id).await;
+    let (first_body, first_module) = marked_zship("first");
+    let (second_body, _) = marked_zship("second");
+    let first = DeployCommandId::mint();
+
+    let (status, replayed, accepted) = post_command(
+        &app,
+        &app_id,
+        &pat.bearer(),
+        &[first.as_str()],
+        first_body.clone(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{accepted}");
+    assert!(!replayed);
+    assert_eq!(accepted["lifecycle_revision"], 1);
+    assert_eq!(accepted["blobs_uploaded"], 1);
+
+    let (status, _, later) = post_command(
+        &app,
+        &app_id,
+        &pat.bearer(),
+        &[DeployCommandId::mint().as_str()],
+        second_body,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{later}");
+    // The retry must not ingest: remove the first artifact's module and check
+    // that the replay does not put it back.
+    std::fs::remove_file(fx.blob_store.local_path(&first_module).expect("local blob"))
+        .expect("remove the first module blob");
+    // Admission would now refuse the first artifact, which declares no schema.
+    insert_applied_migration(
+        &fx.state.control_pg,
+        &app_id,
+        &pat.user_id,
+        &sha256_hex(b"a schema applied after the first deploy"),
+        "2026-09-14T00:00:00Z",
+    )
+    .await;
+    let before = publication_rows(&fx.state, &app_id).await;
+    assert_eq!(before.0, 2);
+
+    let (status, replayed, replay) =
+        post_command(&app, &app_id, &pat.bearer(), &[first.as_str()], first_body).await;
+    assert_eq!(status, StatusCode::OK, "{replay}");
+    assert!(replayed, "an exact retry is marked as a replay");
+    assert_eq!(replay, accepted, "the retry returns the first acceptance unchanged");
+    assert_eq!(publication_rows(&fx.state, &app_id).await, before);
+    assert_eq!(
+        live_deploy_hash(&fx.state, &app_id).await.as_deref(),
+        later["deploy_hash"].as_str(),
+        "a replay never retargets the app"
+    );
+    assert!(
+        !fx.blob_store.has_blob(&first_module).await.unwrap(),
+        "a replay answered from the receipt must not ingest the artifact again"
+    );
+    assert!(dir_is_empty(&fx.deploy_tmp_dir));
+
+    let _ = fx.state.registry.archive_app(&app_id).await;
+    pat.cleanup(&fx.state).await;
+    drop(app);
+    drop(fx);
+    common::drain_pg().await;
+}
+
+/// The same command id with other bytes, from another actor, or on another app
+/// is refused without revealing anything about the first deploy, and without
+/// ingesting the refused artifact.
+#[compio::test]
+async fn a_reused_command_id_conflicts_without_disclosing_its_receipt() {
+    let fx = build_test_state(&db_url(), "command-conflict").await;
+    let app = deploy_service(fx.state.clone()).await;
+    let pat = seed_owner(&fx.state, "command-conflict").await;
+    let app_id = create_labelled_app(&fx.state, "commandconflict", &pat.user_id).await;
+    let other_app = create_labelled_app(&fx.state, "commandother", &pat.user_id).await;
+    let (body, _) = marked_zship("original");
+    let (changed, changed_module) = marked_zship("changed");
+    let command = DeployCommandId::mint();
+
+    let (status, _, accepted) =
+        post_command(&app, &app_id, &pat.bearer(), &[command.as_str()], body.clone()).await;
+    assert_eq!(status, StatusCode::OK, "{accepted}");
+
+    // A second member who may deploy the same app. An admin reaches every
+    // project in the organization without a project seat.
+    let teammate = seed_owner(&fx.state, "command-conflict-teammate").await;
+    let organization: String = fx
+        .state
+        .control_pg
+        .query_one(
+            "SELECT organization_id FROM zeroship.apps WHERE id = $1",
+            &[&app_id.as_str()],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    zeroship_control::organizations::add_member(
+        &fx.state.registry,
+        &pat.user_id,
+        &organization,
+        &zeroship_control::organizations::AddMemberBody {
+            user_id: teammate.user_id.clone(),
+            role: "admin".to_string(),
+        },
+        None,
+    )
+    .await
+    .expect("seat an admin");
+    // The control: the teammate can deploy this app under a fresh command.
+    let (status, _, own) = post_command(
+        &app,
+        &app_id,
+        &teammate.bearer(),
+        &[DeployCommandId::mint().as_str()],
+        body.clone(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{own}");
+    let before = publication_rows(&fx.state, &app_id).await;
+
+    for (target, bearer, bytes, case) in [
+        (&app_id, pat.bearer(), changed.clone(), "changed body"),
+        (&app_id, teammate.bearer(), body.clone(), "another actor"),
+        (&other_app, pat.bearer(), body.clone(), "another app"),
+    ] {
+        let (status, replayed, json) =
+            post_command(&app, target, &bearer, &[command.as_str()], bytes).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{case}: {json}");
+        assert!(!replayed, "{case}");
+        assert_eq!(json["error"], "idempotency_key_conflict", "{case}");
+        for field in ["deploy_hash", "deploy_id", "command_id", "lifecycle_revision"] {
+            assert!(json.get(field).is_none(), "{case} disclosed {field}: {json}");
+        }
+    }
+    assert_eq!(publication_rows(&fx.state, &app_id).await, before);
+    assert_eq!(publication_rows(&fx.state, &other_app).await, (0, vec![], 0));
+    assert!(
+        !fx.blob_store.has_blob(&changed_module).await.unwrap(),
+        "a conflicting artifact must not be ingested"
+    );
+
+    for target in [&app_id, &other_app] {
+        let _ = fx.state.registry.archive_app(target).await;
+    }
+    teammate.cleanup(&fx.state).await;
+    pat.cleanup(&fx.state).await;
+    drop(app);
+    drop(fx);
+    common::drain_pg().await;
+}
+
+/// Two copies of one deploy racing each other accept once: one receipt, one
+/// revision, one intent, and both callers see the same result.
+#[compio::test]
+async fn concurrent_duplicate_deploys_accept_once() {
+    let fx = build_test_state(&db_url(), "command-race").await;
+    let app = deploy_service(fx.state.clone()).await;
+    let pat = seed_owner(&fx.state, "command-race").await;
+    let app_id = create_labelled_app(&fx.state, "commandrace", &pat.user_id).await;
+    let (body, _) = marked_zship("race");
+    let command = DeployCommandId::mint();
+
+    let bearer = pat.bearer();
+    let keys = [command.as_str()];
+    let ((first, first_replayed, first_body), (second, second_replayed, second_body)) =
+        futures::join!(
+            post_command(&app, &app_id, &bearer, &keys, body.clone()),
+            post_command(&app, &app_id, &bearer, &keys, body.clone()),
+        );
+    assert_eq!(first, StatusCode::OK, "{first_body}");
+    assert_eq!(second, StatusCode::OK, "{second_body}");
+    assert_eq!(first_body, second_body, "both callers see the one acceptance");
+    assert!(
+        !(first_replayed && second_replayed),
+        "one of the two requests performed the acceptance"
+    );
+    let (revision, intents, receipts) = publication_rows(&fx.state, &app_id).await;
+    assert_eq!((revision, intents.len(), receipts), (1, 1, 1));
+
+    let _ = fx.state.registry.archive_app(&app_id).await;
+    pat.cleanup(&fx.state).await;
+    drop(app);
+    drop(fx);
+    common::drain_pg().await;
+}
+
+/// Redeploying an earlier artifact is an intentional rollback: a new command,
+/// a new revision and a new activation of the original deployment row. The
+/// artifact hash never stands in for the command.
+#[compio::test]
+async fn a_rollback_to_an_earlier_artifact_is_a_new_activation() {
+    let fx = build_test_state(&db_url(), "command-rollback").await;
+    let app = deploy_service(fx.state.clone()).await;
+    let pat = seed_owner(&fx.state, "command-rollback").await;
+    let app_id = create_labelled_app(&fx.state, "commandrollback", &pat.user_id).await;
+    let (first, _) = marked_zship("rollback-first");
+    let (second, _) = marked_zship("rollback-second");
+
+    let mut results = Vec::new();
+    for body in [first.clone(), second, first] {
+        let (status, replayed, json) = post_command(
+            &app,
+            &app_id,
+            &pat.bearer(),
+            &[DeployCommandId::mint().as_str()],
+            body,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{json}");
+        assert!(!replayed);
+        results.push(json);
+    }
+    assert_eq!(results[2]["deploy_hash"], results[0]["deploy_hash"]);
+    assert_eq!(
+        results[2]["deploy_id"], results[0]["deploy_id"],
+        "the rollback selects the original deployment row"
+    );
+    assert_ne!(results[2]["command_id"], results[0]["command_id"]);
+    assert_eq!(results[2]["lifecycle_revision"], 3);
+    let (revision, intents, receipts) = publication_rows(&fx.state, &app_id).await;
+    assert_eq!((revision, receipts), (3, 3));
+    let expected: Vec<_> = results
+        .iter()
+        .enumerate()
+        .map(|(index, json)| {
+            (
+                i64::try_from(index + 1).unwrap(),
+                "activate".to_string(),
+                json["deploy_id"].as_str().map(str::to_owned),
+            )
+        })
+        .collect();
+    assert_eq!(intents, expected);
+    assert_eq!(
+        live_deploy_hash(&fx.state, &app_id).await.as_deref(),
+        results[0]["deploy_hash"].as_str()
+    );
+
+    let _ = fx.state.registry.archive_app(&app_id).await;
+    pat.cleanup(&fx.state).await;
+    drop(app);
+    drop(fx);
+    common::drain_pg().await;
+}
+
+/// A refused deploy leaves no receipt, revision, intent or pointer behind, so
+/// the same command is evaluated afresh once the creator fixes the cause.
+#[compio::test]
+async fn a_refused_deploy_commits_nothing_and_the_same_command_can_succeed_later() {
+    let fx = build_test_state(&db_url(), "command-refused").await;
+    let app = deploy_service(fx.state.clone()).await;
+    let pat = seed_owner(&fx.state, "command-refused").await;
+    let app_id = create_labelled_app(&fx.state, "commandrefused", &pat.user_id).await;
+    let blob = descriptor_blob("refused");
+    let body = zship_with_descriptor(Some(&blob));
+    let command = DeployCommandId::mint();
+
+    let (status, _, json) =
+        post_command(&app, &app_id, &pat.bearer(), &[command.as_str()], body.clone()).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{json}");
+    assert_eq!(json["error"], "schema_not_applied");
+    assert_eq!(publication_rows(&fx.state, &app_id).await, (0, vec![], 0));
+    assert_eq!(live_deploy_hash(&fx.state, &app_id).await, None);
+
+    // A schedule the manager would refuse is refused before acceptance too.
+    let server = b"export default { fetch() { return new Response('ok'); } }";
+    let server_hash = sha256_hex(server);
+    let mut manifest = manifest_for(Some(&server_hash), &[]);
+    manifest.workflows = Some(serde_json::json!(["Nightly"]));
+    manifest.schedules = vec![serde_json::json!({
+        "name": "too-often",
+        "workflowName": "Nightly",
+        "schedule": {"kind": "interval", "interval_ms": 1, "anchor": "epoch"},
+    })];
+    let invalid = build_zship(
+        &serde_json::to_vec(&manifest).unwrap(),
+        &[(server_hash, server.to_vec())],
+        true,
+    );
+    let (status, _, json) = post_command(
+        &app,
+        &app_id,
+        &pat.bearer(),
+        &[DeployCommandId::mint().as_str()],
+        invalid,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{json}");
+    assert_eq!(json["error"], "invalid_workflow_schedules");
+    assert_eq!(publication_rows(&fx.state, &app_id).await, (0, vec![], 0));
+
+    insert_applied_migration(
+        &fx.state.control_pg,
+        &app_id,
+        &pat.user_id,
+        &sha256_hex(&blob),
+        "2026-09-14T00:00:00Z",
+    )
+    .await;
+    let (status, replayed, json) =
+        post_command(&app, &app_id, &pat.bearer(), &[command.as_str()], body).await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    assert!(!replayed, "a refusal is not a receipt");
+    assert_eq!(json["lifecycle_revision"], 1);
+    assert_eq!(publication_rows(&fx.state, &app_id).await.2, 1);
+
+    let _ = fx.state.registry.archive_app(&app_id).await;
+    pat.cleanup(&fx.state).await;
+    drop(app);
+    drop(fx);
+    common::drain_pg().await;
+}
+
+/// A deleted app is refused before any receipt lookup: an exact retry of a
+/// command it once accepted cannot report success or stage code again.
+#[compio::test]
+async fn a_deleted_app_refuses_command_replay() {
+    let fx = build_test_state(&db_url(), "command-deleted").await;
+    let app = deploy_service(fx.state.clone()).await;
+    let pat = seed_owner(&fx.state, "command-deleted").await;
+    let app_id = create_labelled_app(&fx.state, "commanddeleted", &pat.user_id).await;
+    let (body, _) = marked_zship("deleted");
+    let command = DeployCommandId::mint();
+
+    let (status, _, json) =
+        post_command(&app, &app_id, &pat.bearer(), &[command.as_str()], body.clone()).await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    fx.state
+        .registry
+        .archive_app(&app_id)
+        .await
+        .expect("archive")
+        .expect("the app exists");
+    zeroship_control::organizations::delete_app(&fx.state.registry, &pat.user_id, &app_id, None)
+        .await
+        .expect("delete");
+    let before = publication_rows(&fx.state, &app_id).await;
+
+    let (status, replayed, json) =
+        post_command(&app, &app_id, &pat.bearer(), &[command.as_str()], body).await;
+    assert!(
+        status == StatusCode::FORBIDDEN || status == StatusCode::NOT_FOUND,
+        "a deleted app must be refused, got {status}: {json}"
+    );
+    assert!(!replayed);
+    assert!(json.get("deploy_hash").is_none(), "{json}");
+    assert_eq!(publication_rows(&fx.state, &app_id).await, before);
+    let deleted: (Option<String>, bool) = fx
+        .state
+        .control_pg
+        .query_one(
+            "SELECT deploy_hash, deleted_at IS NOT NULL FROM zeroship.apps WHERE id = $1",
+            &[&app_id.as_str()],
+        )
+        .await
+        .map(|row| (row.get(0), row.get(1)))
+        .unwrap();
+    assert_eq!(deleted, (None, true), "the deleted app stays deleted and empty");
+
     pat.cleanup(&fx.state).await;
     drop(app);
     drop(fx);

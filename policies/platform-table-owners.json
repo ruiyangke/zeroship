@@ -87,6 +87,8 @@
   "wake_jobs": "zeroship_platform",
   "app_deploys": "zeroship_platform",
   "app_deploy_holds": "zeroship_platform",
+  "app_deploy_commands": "zeroship_platform",
+  "app_lifecycle_intents": "zeroship_platform",
   "workflow_runs": "zeroship_platform",
   "workflow_blobs": "zeroship_platform",
   "workflow_signal_keys": "zeroship_platform",
