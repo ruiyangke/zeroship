@@ -369,7 +369,7 @@ async fn finite_sweeps(fixture: &Fixture) {
         .unwrap()
         .insert(value!({
             "id":"!malformed", "deployment_id":DeploymentId::mint().as_str(),
-            "activation_revision":1, "ingress_epoch":1, "state":"open",
+            "activation_revision":1, "ingress_epoch":1, "state":"open", "active_at":0,
         }))
         .await
         .unwrap();
