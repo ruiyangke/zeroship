@@ -3,6 +3,8 @@ use super::super::{
     deployment_retention::admission_generation,
     deployments::unavailable,
     deploys, journal,
+    store::Row,
+    DeployRegistration,
 };
 use super::{
     lock_run, models, parse_state, replay, value, AppId, AppPolicy, Entity, Preparation, Rejection,
@@ -30,7 +32,27 @@ struct SourceGeneration {
     input_ref: Option<String>,
 }
 
-pub(in crate::service) struct RestartPlan {
+struct RestartContext<'tx> {
+    tx: &'tx mut Transaction,
+    app: AppId,
+    run_id: String,
+    now: i64,
+}
+
+/// Lifecycle preparation remains inside the caller's app-locked transaction.
+pub(in crate::service) struct RestartDraft<'tx> {
+    context: RestartContext<'tx>,
+    run: Row,
+    current: i64,
+    steps: Vec<StepCheckpoint>,
+    from: Option<i32>,
+    previous: SourceGeneration,
+    workflow: String,
+    deploy_policy: RestartDeploy,
+}
+
+pub(in crate::service) struct RestartPlan<'tx> {
+    context: RestartContext<'tx>,
     current: i64,
     generation: i64,
     signal_epoch: i64,
@@ -40,14 +62,30 @@ pub(in crate::service) struct RestartPlan {
     previous: SourceGeneration,
 }
 
-pub(in crate::service) async fn prepare(
-    tx: &mut Transaction,
+pub(in crate::service) async fn prepare<'tx>(
+    tx: &'tx mut Transaction,
     app: &AppId,
     run_id: &str,
     options: &RestartOptions,
     policy: &AppPolicy,
     now: i64,
-) -> Result<Preparation<RestartPlan>, WorkflowServiceError> {
+) -> Result<Preparation<RestartPlan<'tx>>, WorkflowServiceError> {
+    match prepare_draft(tx, app, run_id, options, policy, now).await? {
+        Preparation::Ready(draft) => draft.bind_configured().await,
+        Preparation::Rejected(reason) => Ok(Preparation::Rejected(reason)),
+    }
+}
+
+/// The caller holds the app lock and keeps its original authority through commit.
+pub(in crate::service) async fn prepare_draft<'tx>(
+    tx: &'tx mut Transaction,
+    app: &AppId,
+    run_id: &str,
+    options: &RestartOptions,
+    policy: &AppPolicy,
+    now: i64,
+) -> Result<Preparation<RestartDraft<'tx>>, WorkflowServiceError> {
+    tx.check_app(app)?;
     if admit(policy).is_err() {
         return Ok(Preparation::Rejected(Rejection::Denied));
     }
@@ -199,34 +237,130 @@ pub(in crate::service) async fn prepare(
         return Err(unavailable());
     }
     let workflow = run.text("workflow_name")?;
-    let deploy = if deploy_policy == RestartDeploy::Latest {
-        let deploy = active_deploy(tx, app).await?;
-        if !deploy.workflows.contains(&workflow) {
-            return Ok(Preparation::Rejected(Rejection::Conflict(
-                "workflow is absent from the active deployment".into(),
-            )));
-        }
-        deploy.id
-    } else {
-        retained_source(tx, app, &source_deployment, &workflow).await?;
-        source_deployment
-    };
-    let generation = current.checked_add(1).ok_or_else(|| {
-        WorkflowServiceError::ResourceExhausted("workflow generation exhausted".into())
-    })?;
-    let signal_epoch = run.integer("signal_epoch")?.checked_add(1).ok_or_else(|| {
-        WorkflowServiceError::ResourceExhausted("workflow signal epoch exhausted".into())
-    })?;
-
-    Ok(Preparation::Ready(RestartPlan {
+    Ok(Preparation::Ready(RestartDraft {
+        context: RestartContext {
+            tx,
+            app: app.clone(),
+            run_id: run_id.to_owned(),
+            now,
+        },
+        run,
         current,
-        generation,
-        signal_epoch,
         steps,
         from,
-        deploy,
         previous,
+        workflow,
+        deploy_policy,
     }))
+}
+
+impl<'tx> RestartDraft<'tx> {
+    async fn bind_configured(self) -> Result<Preparation<RestartPlan<'tx>>, WorkflowServiceError> {
+        if self.deploy_policy == RestartDeploy::Latest {
+            let deploy = active_deploy(self.context.tx, &self.context.app).await?;
+            // Preserve ordinary lifecycle refusal before additional integrity checks.
+            if !deploy.workflows.contains(&self.workflow) {
+                return Ok(Preparation::Rejected(Rejection::Conflict(
+                    "workflow is absent from the active deployment".into(),
+                )));
+            }
+            if !self
+                .context
+                .tx
+                .database()
+                .entity::<models::deploys::Entity>()?
+                .exists(
+                    models::deploys::app_id
+                        .eq(self.context.app.as_str())?
+                        .and(models::deploys::id.eq(deploy.id.as_str())?)
+                        .and(models::deploys::active.eq(1_i64)?)
+                        .and(models::deploys::state.eq("available")?),
+                )
+                .await?
+            {
+                return Err(unavailable());
+            }
+            self.bind_exact(&deploy).await
+        } else {
+            retained_source(
+                self.context.tx,
+                &self.context.app,
+                &self.previous.deploy_id,
+                &self.workflow,
+            )
+            .await?;
+            let deploy = self.previous.deploy_id.clone();
+            self.finish(deploy).map(Preparation::Ready)
+        }
+    }
+
+    /// Bind verified local metadata without selecting the current deployment.
+    /// The app lock protects source, availability and retention until application.
+    pub(in crate::service) async fn bind_exact(
+        self,
+        expected: &DeployRegistration,
+    ) -> Result<Preparation<RestartPlan<'tx>>, WorkflowServiceError> {
+        if self.deploy_policy != RestartDeploy::Latest {
+            return Ok(Preparation::Rejected(Rejection::Conflict(
+                "an explicit deployment requires a latest restart".into(),
+            )));
+        }
+        exact_target(self.context.tx, &self.context.app, expected).await?;
+        if !expected.workflows.contains(&self.workflow) {
+            return Ok(Preparation::Rejected(Rejection::Conflict(
+                "workflow is absent from the target deployment".into(),
+            )));
+        }
+        self.finish(expected.id.clone()).map(Preparation::Ready)
+    }
+
+    fn finish(self, deploy: String) -> Result<RestartPlan<'tx>, WorkflowServiceError> {
+        let generation = self.current.checked_add(1).ok_or_else(|| {
+            WorkflowServiceError::ResourceExhausted("workflow generation exhausted".into())
+        })?;
+        let signal_epoch = self
+            .run
+            .integer("signal_epoch")?
+            .checked_add(1)
+            .ok_or_else(|| {
+                WorkflowServiceError::ResourceExhausted("workflow signal epoch exhausted".into())
+            })?;
+        Ok(RestartPlan {
+            context: self.context,
+            current: self.current,
+            generation,
+            signal_epoch,
+            steps: self.steps,
+            from: self.from,
+            deploy,
+            previous: self.previous,
+        })
+    }
+}
+
+async fn exact_target(
+    tx: &Transaction,
+    app: &AppId,
+    expected: &DeployRegistration,
+) -> Result<(), WorkflowServiceError> {
+    let record = deploys::read(tx, app, &expected.id)
+        .await?
+        .ok_or_else(unavailable)?;
+    record.available()?;
+    let registration = record.registration()?;
+    if registration != *expected
+        || record.hash != expected.hash
+        || zeroship_core::typed_id::parse_with_prefix(&expected.id, "dep").is_err()
+        || !zeroship_bundle::validate_hash_format(&record.hash)
+        || record.availability_epoch < 0
+        || registration
+            .workflows
+            .iter()
+            .any(|name| crate::validation::workflow_name(name).is_err())
+    {
+        return Err(unavailable());
+    }
+    require_journal_hold(tx, app, &expected.id, &record.hash).await
 }
 
 /// The app lock protects this source through the new generation's commit.
@@ -255,30 +389,28 @@ async fn retained_source(
     {
         return Err(unavailable());
     }
-    admission_generation(
-        tx,
-        app,
-        deployment,
-        &record.hash,
-        &HoldScope::for_app(app.clone()),
-    )
-    .await
-    .map_err(|error| match error {
-        WorkflowServiceError::Conflict(_) => unavailable(),
-        other => other,
-    })?;
+    require_journal_hold(tx, app, deployment, &record.hash).await
+}
+
+async fn require_journal_hold(
+    tx: &Transaction,
+    app: &AppId,
+    deployment: &str,
+    hash: &str,
+) -> Result<(), WorkflowServiceError> {
+    admission_generation(tx, app, deployment, hash, &HoldScope::for_app(app.clone()))
+        .await
+        .map_err(|error| match error {
+            WorkflowServiceError::Conflict(_) => unavailable(),
+            other => other,
+        })?;
     Ok(())
 }
 
-impl RestartPlan {
-    pub(in crate::service) async fn apply(
-        self,
-        tx: &mut Transaction,
-        app: &AppId,
-        run_id: &str,
-        now: i64,
-    ) -> Result<RestartedRun, WorkflowServiceError> {
+impl RestartPlan<'_> {
+    pub(in crate::service) async fn apply(self) -> Result<RestartedRun, WorkflowServiceError> {
         let Self {
+            context,
             current,
             generation,
             signal_epoch,
@@ -287,6 +419,10 @@ impl RestartPlan {
             deploy,
             previous,
         } = self;
+        let tx = context.tx;
+        let app = &context.app;
+        let run_id = context.run_id.as_str();
+        let now = context.now;
         let prefix = from.unwrap_or(0);
         let restarted_from_ordinal = from
             .map(|ordinal| {

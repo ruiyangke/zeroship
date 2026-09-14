@@ -11,6 +11,7 @@ use zeroship_data_orm::{
     value, Value,
 };
 
+mod exact_binding;
 mod retained_deployment;
 
 #[compio::test]

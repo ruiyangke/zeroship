@@ -126,7 +126,7 @@ impl AppWorkflows {
                     Preparation::Ready(plan) => {
                         authority.check()?;
                         ManagementOutcome::Applied {
-                            state: plan.apply(tx, &self.app, run_id, now).await?.state,
+                            state: plan.apply().await?.state,
                         }
                     }
                     Preparation::Rejected(reason) => reason.outcome(),

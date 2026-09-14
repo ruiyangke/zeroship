@@ -2058,8 +2058,18 @@ Started restart validates the locked run against its current generation's
 deployment, then checks that deployment's registration and existing held journal
 retention. An inactive available deployment remains usable; source inconsistency
 is a retryable infrastructure failure. This path uses only the creator journal
-and requires no artifact client. The manager-frozen latest target and ordered
-management delivery remain to be wired.
+and requires no artifact client.
+
+Restart preparation now borrows the caller's app-locked transaction through its
+lifecycle draft and bound plan. The plan captures app, run and observation time;
+applying it cannot substitute another transaction or target. Ordinary latest
+restart uses the same exact-target binding needed by delivered commands. That
+binding validates the complete locally verified registration, availability and
+journal hold without reselecting the current deployment. Existing lifecycle
+refusal precedence remains before deployment binding and counter exhaustion.
+The delivered handler must still obtain and verify its frozen target outside
+the journal transaction, then prepare again under the final creator app lock with the
+original captured authority. Ordered management delivery remains to be wired.
 
 The crate split includes the metadata client, closed job/delivery contracts,
 manager ORM queue and platform deployment ledger. Native coordinator placement
