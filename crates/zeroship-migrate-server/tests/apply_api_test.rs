@@ -1,48 +1,44 @@
+mod fixture;
+
 use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex, OnceLock, RwLock, mpsc};
+use std::sync::{mpsc, Arc, Mutex, OnceLock, RwLock};
 use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
-use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use compio_postgres::{Client, NoTls};
-use ed25519_dalek::SigningKey;
 use ed25519_dalek::pkcs8::EncodePrivateKey;
-use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
+use ed25519_dalek::SigningKey;
+use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
 use ntex::http::StatusCode;
-use ntex::web::{self, HttpResponse, test};
-use serde_json::{Value, json};
+use ntex::web::{self, test, HttpResponse};
+use serde_json::{json, Value};
 use uuid::Uuid;
 use zeroship_authz::{Action, Scope};
-use zeroship_id::{AppId, OrganizationId, ProjectId, UserId};
 use zeroship_core::app_derivation;
 use zeroship_core::device_grant::{PLATFORM_CLI_CLIENT_ID, PLATFORM_CLI_ISSUABLE_SCOPES};
+use zeroship_id::{AppId, OrganizationId, ProjectId, UserId};
 use zeroship_migrate::{
-    ExecutorConfig, MigrationBackend, ProjectLockAcquisition, effective_policy_from_charter_toml,
+    effective_policy_from_charter_toml, ExecutorConfig, MigrationBackend, ProjectLockAcquisition,
 };
 use zeroship_migrate_postgres::PostgresBackend;
-use zeroship_migrate_server::MigrationServiceState;
-use zeroship_migrate_server::apply::{ApplyMigrationsRequest, apply_ir_documents};
+use zeroship_migrate_server::apply::{apply_ir_documents, ApplyMigrationsRequest};
 use zeroship_migrate_server::auth::{
     AuthError, Authenticator, ControlPlaneAuthenticator, VerifiedCaller,
 };
-use zeroship_migrate_server::policy::{MIGRATE_POLICY_FILENAME, ManagedPolicyConfig};
+use zeroship_migrate_server::policy::{ManagedPolicyConfig, MIGRATE_POLICY_FILENAME};
 use zeroship_migrate_server::rate_limit::{MutationRateLimiter, PostgresMutationRateLimiter};
 use zeroship_migrate_server::schema_apply_store::SchemaApplyStore;
 use zeroship_migrate_server::session::CompioPgSession;
+use zeroship_migrate_server::MigrationServiceState;
 
 const TEST_POLICY_SEAL_KEY: &[u8] = b"migrated integration policy seal key";
 
-/// The database this target dials, or a panic naming the provisioner.
-///
-/// It used to fall back to `dbname=zeroship_control_test` on :5440, a database
-/// no other part of the workspace creates. On a box that happened to have one
-/// the run went green against it; on a box that did not, the connect failed
-/// with an address nothing in the tree had chosen.
 fn dsn() -> String {
-    zeroship_core::config::test_database_url()
+    fixture::migrated_url()
 }
 
 fn tmpdir(label: &str) -> PathBuf {
@@ -1477,15 +1473,46 @@ async fn a_created_then_migrated_database_is_usable_by_the_runtime_role_pg() {
     .await;
     create_database(&svc, &app_id, "good-token").await;
 
+    let schema = app_derivation::schema_name(&app_id);
+    let migrator = zeroship_migrate_postgres::role::migrator_role_name(&schema).unwrap();
+    let posture = conn
+        .query_one(
+            "SELECT pg_get_userbyid(n.nspowner) AS owner, \
+                    has_schema_privilege($1, $2, 'USAGE') AS can_use, \
+                    has_schema_privilege($1, $2, 'CREATE') AS can_create, \
+                    pg_has_role(current_user, $1, 'SET') AS can_set \
+               FROM pg_namespace n WHERE n.nspname = $2",
+            &[&migrator, &schema],
+        )
+        .await
+        .expect("inspect explicit database ownership");
+    assert_eq!(posture.get::<_, String>("owner"), migrator);
+    assert!(posture.get::<_, bool>("can_use"));
+    assert!(posture.get::<_, bool>("can_create"));
+    assert!(posture.get::<_, bool>("can_set"));
+    conn.batch_execute(&format!(
+        "BEGIN; SET LOCAL ROLE {}; CREATE TABLE {}.__fixture_role_probe(id bigint); ROLLBACK",
+        quote_ident(&migrator),
+        quote_ident(&schema),
+    ))
+    .await
+    .expect("the provisioned migrator must create objects in its schema");
+
     let req = test::TestRequest::post()
         .uri(&format!("/v1/apps/{}/migrations/apply", app_id.as_str()))
         .header("authorization", "Bearer good-token")
         .set_json(&create_notes_request())
         .to_request();
     let resp = test::call_service(&svc, req).await;
-    assert_eq!(resp.status(), StatusCode::OK);
+    let status = resp.status();
+    let body = test::read_body(resp).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "migration apply failed: {}",
+        String::from_utf8_lossy(&body)
+    );
 
-    let schema = app_derivation::schema_name(&app_id);
     let table = format!("{}.{}", quote_ident(&schema), quote_ident("notes"));
     let runtime_role =
         zeroship_core::database_role::per_app_role_name(&schema).expect("test app role name");
@@ -3200,9 +3227,9 @@ async fn rollback_route_passes_through_the_mutation_rate_limiter() {
     let _ = std::fs::remove_dir_all(tmp);
 }
 
-/// The CLI posts the generated IR envelope verbatim. Pin the former 8 MiB
-/// ingress contract so ntex's 32 KiB extractor default cannot reject a real
-/// migration bundle before authentication and throttling run.
+/// The CLI posts the generated IR envelope verbatim. Pin the configured ingress
+/// contract so Ntex's extractor default cannot reject a real migration bundle
+/// before authentication and throttling run.
 #[ntex::test]
 async fn apply_route_accepts_a_body_larger_than_ntexs_default_limit() {
     let app_id = AppId::mint();
@@ -3244,7 +3271,7 @@ async fn apply_route_accepts_a_body_larger_than_ntexs_default_limit() {
     assert_eq!(
         response.status(),
         StatusCode::TOO_MANY_REQUESTS,
-        "a body below the documented 8 MiB ceiling must reach the handler"
+        "a body below APPLY_REQUEST_BODY_BYTES must reach the handler"
     );
 
     let _ = std::fs::remove_dir_all(tmp);
