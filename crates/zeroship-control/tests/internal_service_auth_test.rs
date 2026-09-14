@@ -1,4 +1,5 @@
-//! What may open `/internal/apps/{id}/env` and `/internal/apps/{id}`.
+//! What may open `/internal/apps/{id}/env` and `/internal/apps/{id}`, and the
+//! option-1A enroller cascade that reaches them.
 //!
 //! These are the privileged internal reads: the first returns an app's
 //! DECRYPTED environment. Before this suite they were opened by a bearer equal
@@ -34,11 +35,12 @@ use zeroship_control::{
     internal, AppState, EnvStore, Quota, RateLimiter, Registry, SecretString, StripeStore,
 };
 use zeroship_core::service_assertion::{
-    ServiceAssertionVerifier, ServiceIssuer, ServiceSigningKey,
+    ServiceAssertionVerifier, ServiceIssuer, ServiceSigningKey, ServiceTrustBundle,
 };
 use zeroship_core::service_peers::{
     load_peer_bundle, service_issuer, InstanceSigningKey, ServiceAuth, ServiceKeyring,
-    CONTROL_SERVICE_NAME, GATEWAY_SERVICE_NAME, SERVICE_TRUST_DOMAIN, WORKER_SERVICE_NAME,
+    CONTROL_SERVICE_NAME, GATEWAY_SERVICE_NAME, SERVICE_TRUST_DOMAIN, WORKER_ENROLLER_SERVICE_NAME,
+    WORKER_SERVICE_NAME,
 };
 use zeroship_core::typed_id::new_worker_instance_id;
 
@@ -56,6 +58,10 @@ const ENROLMENT_NETWORKS: &str = "10.7.0.0/16";
 const ENROLMENT_PORTS: &str = "8080-8090";
 const ENROLMENT_PEER: &str = "10.7.3.9:51314";
 const ADVERTISED_PORT: u16 = 8080;
+
+/// The deployment's single execution zone, seeded by
+/// `db/migrations-ts/20260914000000_execution_zones_and_worker_enrollers.ts`.
+const DEFAULT_ZONE_ID: &str = "ezn_default000000000000000000";
 
 /// An instance identifier the OPERATOR'S peer document publishes a key for, and
 /// that nothing ever enrols.
@@ -120,6 +126,47 @@ fn instance_issuer(instance_id: &str) -> ServiceIssuer {
         "spiffe://{SERVICE_TRUST_DOMAIN}/{WORKER_SERVICE_NAME}/{instance_id}"
     ))
     .expect("an instance issuer parses")
+}
+
+/// The identifier one enroller of `svc/worker-enroller` mints under.
+fn enroller_issuer(enroller_id: &str) -> ServiceIssuer {
+    ServiceIssuer::parse(&format!(
+        "spiffe://{SERVICE_TRUST_DOMAIN}/{WORKER_ENROLLER_SERVICE_NAME}/{enroller_id}"
+    ))
+    .expect("an instance issuer parses")
+}
+
+fn new_enroller_id() -> String {
+    format!("wen_{}", &Uuid::new_v4().simple().to_string()[..25])
+}
+
+/// Insert one `zeroship.worker_enrollers` row directly (there is no import
+/// mechanism built in this PoC) and return a keyring that mints under its
+/// instance identifier.
+async fn seed_enroller_keyring(pg: &compio_postgres::Client) -> (String, ServiceKeyring) {
+    let id = new_enroller_id();
+    let key = InstanceSigningKey::generate();
+    let public = *key.public_key();
+    pg.execute(
+        "INSERT INTO zeroship.worker_enrollers (id, public_key, execution_zone_id, status) \
+         VALUES ($1, $2, $3, 'active')",
+        &[&id, &public.as_slice(), &DEFAULT_ZONE_ID],
+    )
+    .await
+    .expect("insert enroller row");
+    let keyring = key
+        .into_keyring(enroller_issuer(&id), ServiceTrustBundle::new())
+        .expect("a boot-drawn key an empty bundle does not publish builds a keyring");
+    (id, keyring)
+}
+
+async fn forget_enroller(pg: &compio_postgres::Client, enroller_id: &str) {
+    pg.execute(
+        "DELETE FROM zeroship.worker_enrollers WHERE id = $1",
+        &[&enroller_id],
+    )
+    .await
+    .expect("probe enroller row removed");
 }
 
 fn keyring_for(name: &str, dir: &Path, peers: &Path) -> ServiceKeyring {
@@ -302,6 +349,10 @@ macro_rules! internal_app {
                 .service(
                     web::resource("/internal/apps/{app_id}")
                         .route(web::get().to(internal::get_app_version)),
+                )
+                .service(
+                    web::resource("/internal/workers/enrol")
+                        .route(web::post().to(internal::enrol_worker_instance)),
                 ),
         )
         .await
@@ -499,15 +550,17 @@ async fn body_json(mut response: web::HttpResponse) -> serde_json::Value {
     serde_json::from_slice(&buf).expect("body is JSON")
 }
 
-/// Enrol one instance through the PRODUCTION writer and return its id.
+/// Enrol one instance through the PRODUCTION writer, under `enroller_id`, and
+/// return its id.
 ///
 /// Not an INSERT of this suite's own: the id, the ring key and the row shape
 /// are control's, and a hand-written row would let these arms pass against a
 /// registry the enrolment path never produces.
-async fn enrol_instance(state: &Arc<AppState>, public_key: &[u8; 32]) -> String {
+async fn enrol_instance(state: &Arc<AppState>, enroller_id: &str, public_key: &[u8; 32]) -> String {
     let response = enrol(
         state,
         Some(ENROLMENT_PEER.parse().expect("peer socket parses")),
+        enroller_id,
         WorkerEnrolmentRequest {
             port: ADVERTISED_PORT,
             public_key: URL_SAFE_NO_PAD.encode(public_key),
@@ -558,10 +611,11 @@ async fn forget(pg: &compio_postgres::Client, instance_id: &str) {
 async fn marking_an_instance_draining_or_gone_stops_its_assertions_verifying() {
     let fixture = build_fixture().await;
     let app = internal_app!(Arc::clone(&fixture.state));
+    let (enroller_id, _enroller_keyring) = seed_enroller_keyring(&fixture.state.control_pg).await;
 
     let key = InstanceSigningKey::generate();
     let public = *key.public_key();
-    let instance_id = enrol_instance(&fixture.state, &public).await;
+    let instance_id = enrol_instance(&fixture.state, &enroller_id, &public).await;
     let keyring = key
         .into_keyring(
             instance_issuer(&instance_id),
@@ -602,6 +656,7 @@ async fn marking_an_instance_draining_or_gone_stops_its_assertions_verifying() {
     // anything after it, which is how a probe row survives exactly the runs
     // that matter.
     forget(pg, &instance_id).await;
+    forget_enroller(pg, &enroller_id).await;
 
     assert_eq!(
         active,
@@ -680,4 +735,116 @@ async fn an_instance_with_no_active_row_is_refused_and_never_resolved_from_the_p
         StatusCode::BAD_REQUEST,
         "svc/worker itself must still authenticate from the operator file"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Option 1A: the enroller cascade (success criteria 1 and 3)
+// ---------------------------------------------------------------------------
+
+/// Success criterion 1 (the red control's target) and the "Control internal
+/// routes" half of criterion 3.
+///
+/// Revoking enroller E must, in one operator transaction:
+///   - refuse E's already-enrolled instance at `CONTROL_APP_ENV`;
+///   - refuse a FRESH enrolment attempt presenting E's instance's SAME public
+///     key (the red control this arm is named for: on the pre-1A tree, a
+///     revoked INSTANCE's process could re-enrol with the shared `svc/worker`
+///     role key and read `CONTROL_APP_ENV` again under a fresh identity - see
+///     this crate's own module header history and the design's "Verified
+///     starting point" for the mechanism this closes);
+///
+/// while enroller F's instance is completely unaffected, which is the paired
+/// control proving the refusal is about E and not a fault that would refuse
+/// everyone.
+#[ntex::test]
+async fn revoking_an_enroller_refuses_its_instances_env_reads_and_its_new_enrolments() {
+    let fixture = build_fixture().await;
+    let app = internal_app!(Arc::clone(&fixture.state));
+    let pg = &fixture.state.control_pg;
+
+    let (enroller_e, _e_keyring) = seed_enroller_keyring(pg).await;
+    let (enroller_f, _f_keyring) = seed_enroller_keyring(pg).await;
+
+    let key_e = InstanceSigningKey::generate();
+    let public_e = *key_e.public_key();
+    let instance_e = enrol_instance(&fixture.state, &enroller_e, &public_e).await;
+    let keyring_e = key_e
+        .into_keyring(
+            instance_issuer(&instance_e),
+            load_peer_bundle(&fixture.peers).expect("peer bundle loads"),
+        )
+        .expect("instance keyring for E");
+
+    let key_f = InstanceSigningKey::generate();
+    let public_f = *key_f.public_key();
+    let instance_f = enrol_instance(&fixture.state, &enroller_f, &public_f).await;
+    let keyring_f = key_f
+        .into_keyring(
+            instance_issuer(&instance_f),
+            load_peer_bundle(&fixture.peers).expect("peer bundle loads"),
+        )
+        .expect("instance keyring for F");
+
+    let control = service_issuer(CONTROL_SERVICE_NAME).expect("control issuer");
+    let read_env = |keyring: &ServiceKeyring| {
+        let app = &app;
+        let header = format!("Bearer {}", keyring.mint_for(&control).expect("mint"));
+        async move {
+            test::call_service(
+                app,
+                test::TestRequest::get()
+                    .uri(&format!("/internal/apps/{BAD_APP_ID}/env"))
+                    .header("authorization", header)
+                    .to_request(),
+            )
+            .await
+            .status()
+        }
+    };
+
+    // BEFORE revocation: both instances reach the handler (400 on the
+    // malformed id, which is the point - the guard admitted them).
+    assert_eq!(read_env(&keyring_e).await, StatusCode::BAD_REQUEST);
+    assert_eq!(read_env(&keyring_f).await, StatusCode::BAD_REQUEST);
+
+    pg.execute("SELECT zeroship.revoke_worker_enroller($1)", &[&enroller_e])
+        .await
+        .expect("revoke_worker_enroller runs");
+
+    // AFTER: E's instance is refused; F's is exactly as before. One variable
+    // moved (which enroller was revoked), and only the rows under it changed.
+    assert_eq!(
+        read_env(&keyring_e).await,
+        StatusCode::UNAUTHORIZED,
+        "a revoked enroller's instance must lose CONTROL_APP_ENV access"
+    );
+    assert_eq!(
+        read_env(&keyring_f).await,
+        StatusCode::BAD_REQUEST,
+        "an untouched enroller's instance must be unaffected by a sibling's revocation"
+    );
+
+    // THE RED CONTROL'S TARGET: E's SAME public key, presented in a fresh
+    // enrolment request under the now-revoked E, must not mint a fresh active
+    // identity that could read the environment again.
+    let retry = enrol(
+        &fixture.state,
+        Some(ENROLMENT_PEER.parse().expect("peer socket parses")),
+        &enroller_e,
+        WorkerEnrolmentRequest {
+            port: ADVERTISED_PORT,
+            public_key: URL_SAFE_NO_PAD.encode(public_e),
+        },
+    )
+    .await;
+    assert_eq!(
+        retry.status(),
+        StatusCode::FORBIDDEN,
+        "a revoked enroller must not be able to mint a fresh active instance"
+    );
+
+    forget(pg, &instance_e).await;
+    forget(pg, &instance_f).await;
+    forget_enroller(pg, &enroller_e).await;
+    forget_enroller(pg, &enroller_f).await;
 }
