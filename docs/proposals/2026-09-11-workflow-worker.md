@@ -205,13 +205,48 @@ liveness and delivery authority while durable work and scope responsibility
 remain. Healthy registration does not discharge an obligation to recover an
 unpublished creator intent.
 
-**Implementation boundary:** Control enrollment already runs at worker startup.
-The workflow registration endpoint and authenticated client exist. Production
-startup registration, consumer wiring, zone eligibility and capacity activation
-remain cutover work. Bootstrap credentials must not allow a revoked deployment
-to restore authority by enrolling a fresh identity. The approved bootstrap trust
-source, replacement authorization and revocation freshness contract must be
-finalized with the authentication owner; registration alone does not solve them.
+### Enrollment bootstrap and revocation
+
+A worker enrolls with the credential of its deployment unit, called an
+enroller: an operator-provisioned key that Control records with exactly one
+execution zone. Only the enroller principal may call enrollment; an enrolled
+instance key cannot enroll, and no process holds a shared worker role signing
+key. Enrollment locks the active enroller row, inserts an instance bound to that
+enroller, and is idempotent on the instance public key. A changed key is always
+a new instance identity, and registration, leases and receipts keep comparing
+the exact key that verified each request.
+
+Revocation is an explicit operator database operation. Revoking an enroller
+marks it revoked and marks every instance it enrolled `gone` in one transaction
+that serializes with enrollments in flight, so a revoked unit cannot restore
+authority by enrolling a fresh identity; a replacement unit needs a newly
+provisioned enroller. Retiring a single instance is attribution and hygiene,
+not a boundary against a process that still holds its unit's key, so
+revocation for cause targets the enroller. Observed liveness never writes
+enrollment status.
+
+Every enrollment reader reads the authoritative row: Control on each internal
+request, the manager at ingress and again after lock waits and before commit,
+and the CDC relay on its session recheck. Revocation therefore stops new
+admissions at the next check; leases already issued keep their original
+deadlines while creator fences stay authoritative. An unavailable registry is a
+retryable infrastructure failure. Local development composes a trusted
+in-process worker and performs no enrollment.
+
+This contract suits long-lived worker replicas that mount their unit key. If
+production replicas churn under an orchestrator, the key moves into a
+creator-zone host agent that issues single-use enrollment grants; the Control
+records and revocation cascade stay the same. A native proof of concept on
+branch `poc/workflow-enrollment` passes the contract against a migrated
+PostgreSQL database: instance keys are refused at enrollment, revoking an
+enroller cascades to Control, the manager and the CDC relay while a sibling
+unit stays active, the revocation serializes with a concurrent enrollment on
+the enroller row lock, and a lost-reply retry returns the same instance.
+
+**Implementation boundary:** the worker still loads the shared role key, and
+Control has no startup import of enroller keys yet. Production startup
+registration, consumer wiring, zone eligibility and capacity activation remain
+cutover work.
 
 ## Policy bindings and authenticated leases
 
@@ -1907,12 +1942,62 @@ intents behind the cursor or above the captured upper boundary join a subsequent
 and writes remain bounded by the original manager grant and host policy; this
 native metadata turn does not renew itself or run an independent timer.
 
-Retiring a responsibility requires closing ingress for its scope epoch, fencing
-new acceptance and proving the creator drain/publication state. Failed closure
-keeps the obligation. A last worker's release, an empty local queue or a successful
-heartbeat is not that proof. Future ingress must establish responsibility again
-before writing customer data. The drain handshake and its closed evidence fields
-remain a required protocol definition.
+### Ingress epochs and scope retirement
+
+A scope's recovery responsibility carries a monotonic ingress epoch and a state:
+open, closing or retired. Activation opens it. A worker obtains the epoch with
+its policy lease, bound to its exact key and placement; a plain refresh never
+reopens responsibility. Asking for an epoch greater than one the worker holds
+reopens a retired scope or advances a closing one, recreating reconciliation
+and collection duties under the app lock after enrollment, placement and
+admission checks and before the lease is issued. Establishment follows the
+admission policy; archive masks admission, so an archived app cannot be
+reopened by ingress. An epoch the manager never issued is a conflict.
+
+Every creator ingress acceptance captures the epoch with its policy and, under
+the app state lock before commit, requires it to exceed the journal's closed
+epoch. The fence runs after the authority and admission checks, so an expired
+lease or disabled admission reports its own refusal; a missing or closed epoch
+is a retryable refusal that leads the host to establish a newer epoch.
+
+The manager closes an archived or idle scope only when no job for the app is
+leased, no maintenance job is pending and no earlier Close is unsettled. It
+records the app's dispatch cursor as the closing watermark, suspends the
+scope's periodic duties for the attempt, and delivers a manager-origin Close job
+for the current epoch; an attempt that does not settle in time returns the
+scope to open. Under the same app state lock the worker raises the closed epoch
+and evaluates the drain predicates in one transaction: no unconfirmed
+publication intent, no hold in transition, no payload in preparation or
+deletion, no live task claim, and no deletion tombstone still inside its sweep
+window. Settlement retires the scope only when it is still closing at that
+epoch, the result is drained and no job was published or claimed above the
+watermark. Claims during closing do not cancel the attempt; the watermark
+refuses its retirement at settlement.
+
+Claiming an intent-producing job or a worker publication reopens a retired scope
+before execution. Workers cannot publish Reconcile, Collect or Close, and Close
+is never a settlement successor. Registration expiry, release, empty polling,
+healthy heartbeats, completed scans and calendar or policy acknowledgements
+never retire responsibility. Deletion retires responsibility by abandonment,
+keyed on Control's terminal deletion. A creator snapshot restore must reopen
+responsibility for the restored apps.
+
+A native proof of concept on branch `poc/workflow-retirement` passes this
+protocol on PostgreSQL and SQLite: a still-valid lease is fenced after Close,
+both orders of a racing acceptance and Close refuse retirement, a job claimed
+or published after closing began keeps the scope open (removing the watermark
+check lets these cases retire with an unconfirmed intent), each re-arm path
+reopens exactly once across retries and racing replicas, lost acknowledgements
+and redelivery converge to one retirement, archived apps drain, and duties that
+fall due during closing wait for the attempt.
+
+**Remaining before production:** the local host and worker establish an epoch
+at startup and after a fenced refusal; the fence covers broadcast, signal
+ingestion, transitions and restart; the manager driver gains the closing lane
+with its timeout and backoff; deletion abandons responsibility; and payload
+tombstones become final after one sweep window, because collection currently
+re-sweeps them indefinitely and an app that ever deleted a payload could not
+retire.
 
 The capacity adapter takes trusted app/zone/deployment demand and returns durable
 provisioning progress or a retryable refusal. Requests are idempotent across
@@ -3042,11 +3127,9 @@ archive and retains the last valid deployment when current sources fail to build
 
 | Decision | Fixed requirement and remaining choice |
 | --- | --- |
-| Enrollment bootstrap and revocation | A revoked worker cannot regain equivalent authority by automatic enrollment. Finalize bootstrap trust, replacement authorization and registry freshness with auth ownership. |
 | Placement eligibility and capacity provider | Only platform-authorized app/zone combinations may be assigned. Select the trusted eligibility source and host adapter's durable request/progress contract. |
 | Archive acknowledgement | The direct Control source provides bounded convergence under original observation validity. Define any stronger execution-quiescence evidence separately from calendar acknowledgement or lease expiry. |
 | Complete job envelopes | Operation-specific deployment prerequisites, frozen manager restart targets and linked management outcomes are implemented. Collection, topic fanout and dependency propagation have durable pages, receipts and delivered consumers. |
-| Scope retirement | Define ingress epoch closure and durable drain evidence. Registration expiry and empty polling cannot retire unpublished-work responsibility. |
 | Receipt retirement | Define admissibility fences and publication/settlement watermarks before deleting job deduplication state. Retain it until that proof exists. |
 | Dispatch fairness and persistent failure | Per-app dispatch tickets rotate successfully claimed jobs behind waiting work without changing due times. Define cross-app host fairness, management priority and observable parking/retry policy for failures before claim without deleting accepted work. |
 | Snapshot restore | Define restore epochs, fenced admission and cross-owner reconciliation with the storage owners; process-restart recovery alone cannot protect lost receipts or resurrected authority. |
