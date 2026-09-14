@@ -3,7 +3,7 @@
 //! Customer inputs, history and outputs stay in creator storage. The manager
 //! validates app scope, execution authority and successor bounds separately.
 
-pub use zeroship_id::workflow::{BroadcastId, DeploymentId, JobId};
+pub use zeroship_id::workflow::{BroadcastId, DeploymentId, JobId, PropagationId};
 
 use crate::{
     app_id::AppId,
@@ -52,6 +52,12 @@ pub enum JobOperation {
     },
     Fanout {
         broadcast_id: BroadcastId,
+        revision: Revision,
+    },
+    /// One bounded page of a creator dependency propagation obligation. Its
+    /// kind, source run and cursor stay in the creator journal.
+    Propagate {
+        propagation_id: PropagationId,
         revision: Revision,
     },
     // Empty struct variants reject extra fields on internally tagged messages.
@@ -111,6 +117,7 @@ impl JobSpec {
                 ..
             }
             | JobOperation::Fanout { .. }
+            | JobOperation::Propagate { .. }
             | JobOperation::Reconcile {}
             | JobOperation::Collect {} => None,
         }
@@ -160,7 +167,9 @@ pub trait JobLease {
 /// Scheduling classification without customer results or free-form failures.
 ///
 /// For Fanout, `Waiting` confirms a committed successor page and `Completed`
-/// finishes the broadcast expansion. For reconciliation and collection, `Waiting`
+/// finishes the broadcast expansion. For Propagate, `Waiting` confirms a
+/// committed successor page and `Completed` discharges the obligation; neither
+/// asserts that affected runs stopped. For reconciliation and collection, `Waiting`
 /// requests another scan page or phase and `Completed` closes that scan cycle.
 /// Neither classification asserts that the manager queue or app intents drained.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

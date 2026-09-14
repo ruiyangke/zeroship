@@ -139,6 +139,8 @@ zeroship_data_orm::orm::schema! {
             frontier_revision: Nullable<BigInt>,
             broadcast_id: Nullable<Text>,
             broadcast_revision: Nullable<BigInt>,
+            propagation_id: Nullable<Text>,
+            propagation_revision: Nullable<BigInt>,
             available_at: BigInt,
             specification: Text,
             created_at: BigInt,
@@ -224,6 +226,28 @@ zeroship_data_orm::orm::schema! {
             state: Text,
             created_at: BigInt,
             expires_at: BigInt,
+        }
+
+        __zeroship_workflow_propagation_pages {
+            #[orm(primary_key)]
+            id: Text,
+            app_id: Text,
+            propagation_id: Text,
+            revision: BigInt,
+            result: Text,
+        }
+
+        __zeroship_workflow_propagations {
+            #[orm(primary_key)]
+            id: Text,
+            app_id: Text,
+            run_id: Text,
+            generation: BigInt,
+            kind: Text,
+            cursor: Nullable<Text>,
+            revision: BigInt,
+            finished: BigInt,
+            created_at: BigInt,
         }
 
         __zeroship_workflow_reconciliation_scans {

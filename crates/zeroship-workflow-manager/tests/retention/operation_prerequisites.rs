@@ -6,7 +6,7 @@ use zeroship_core::{
         ManageRun, ManagementOperation, ManagementOutcome, RequestId, RestartDeploy,
         RestartOptions, RestartTarget, RunOperation, RunState,
     },
-    workflow_jobs::BroadcastId,
+    workflow_jobs::{BroadcastId, PropagationId},
 };
 use zeroship_workflow_manager::{
     coordinator::{Coordinator, Options as CoordinatorOptions},
@@ -70,6 +70,10 @@ async fn journal_jobs(fixture: &Fixture) {
         JobOperation::Collect {},
         JobOperation::Fanout {
             broadcast_id: BroadcastId::mint(),
+            revision: 1.try_into().unwrap(),
+        },
+        JobOperation::Propagate {
+            propagation_id: PropagationId::mint(),
             revision: 1.try_into().unwrap(),
         },
     ] {
@@ -363,6 +367,10 @@ async fn projection_mismatch(fixture: &Fixture) {
         JobOperation::Reconcile {},
         JobOperation::Fanout {
             broadcast_id: BroadcastId::mint(),
+            revision: 1.try_into().unwrap(),
+        },
+        JobOperation::Propagate {
+            propagation_id: PropagationId::mint(),
             revision: 1.try_into().unwrap(),
         },
     ] {

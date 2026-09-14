@@ -13,7 +13,7 @@ mod read;
 mod records;
 mod sources;
 pub use mutation::{advance, create, restart};
-pub use read::{by_id, historical, member, resolve, waiting};
+pub use read::{by_id, has_waiting, historical, member, resolve, waiting};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HistoricalMember {
