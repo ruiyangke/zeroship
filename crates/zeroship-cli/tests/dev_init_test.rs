@@ -40,11 +40,13 @@ const SECRET_FILES: [&str; 11] = [
     "refresh-idem-key",
     // One per-service assertion key, never one shared file: a peer must be able
     // to VERIFY a service without being able to IMPERSONATE it, and a key held
-    // by four processes is a shared secret wearing a signature.
+    // by several processes is a shared secret wearing a signature.
     "svc-auth.pem",
     "svc-control.pem",
     "svc-gateway.pem",
-    "svc-worker.pem",
+    // The worker holds no service key of its own: it enrols with this host's
+    // ENROLLER credential and mints under an instance key it draws at boot.
+    "worker-enroller.json",
 ];
 
 /// The one generated file that is NOT private, and must not become private.
@@ -53,7 +55,7 @@ const SECRET_FILES: [&str; 11] = [
 /// would read as "another secret", and the first operator who had to serve it
 /// to a peer would loosen the whole directory instead of this one file. It is
 /// named separately here so the distinction is asserted rather than assumed.
-const PUBLIC_FILES: [&str; 1] = ["service-peers.json"];
+const PUBLIC_FILES: [&str; 2] = ["service-peers.json", "worker-enrollers.json"];
 
 // ZEROSHIP_CONTROL_STRIPE_WEBHOOK_SECRET is NOT here: only Stripe can issue a value that
 // verifies, so `dev init` no longer manufactures one. See
@@ -211,6 +213,201 @@ fn dev_init_generates_the_complete_private_deployment_secret_set() {
         !pairwise.ends_with(b"\n"),
         "pairwise-salt must have no newline"
     );
+
+    // The peer document publishes the three services that hold a key of their
+    // own and NO worker key: no process holds a `svc/worker` role key.
+    let peers: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(secrets_dir.join("service-peers.json")).expect("read the peer document"),
+    )
+    .expect("the peer document is JSON");
+    let issuers = peers["keys"]
+        .as_array()
+        .expect("keys")
+        .iter()
+        .map(|key| key["iss"].as_str().expect("iss").to_owned())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        issuers,
+        [
+            "spiffe://zeroship.ai/svc/auth",
+            "spiffe://zeroship.ai/svc/control",
+            "spiffe://zeroship.ai/svc/gateway",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect::<BTreeSet<_>>()
+    );
+
+    // The worker's enroller credential is read by THE reader the worker boots
+    // with, against the peer document this run wrote - not by a parser of this
+    // test's own.
+    let (enroller_id, enroller_public) = worker_enroller(&secrets_dir);
+    let keyring = zeroship_core::service_peers::ServiceKeyring::load_worker_enroller(
+        &secrets_dir.join("worker-enroller.json"),
+        &secrets_dir.join("service-peers.json"),
+    )
+    .expect("the worker loads the generated enroller credential");
+    assert_eq!(
+        keyring.issuer().as_str(),
+        format!("spiffe://zeroship.ai/svc/worker-enroller/{enroller_id}")
+    );
+
+    // Control's import file names exactly this host's enroller, in the
+    // default zone, parsed by the one parser Control imports it with.
+    let records = zeroship_core::worker_enrollers::parse_enroller_import(
+        &std::fs::read(secrets_dir.join("worker-enrollers.json")).expect("read the import file"),
+    )
+    .expect("Control's parser accepts the generated import file");
+    assert_eq!(
+        records,
+        vec![zeroship_core::worker_enrollers::EnrollerRecord {
+            id: enroller_id,
+            zone: "default".to_owned(),
+            public_key: enroller_public,
+        }]
+    );
+}
+
+/// The enroller id and PUBLIC key in a generated `worker-enroller.json`.
+fn worker_enroller(secrets_dir: &Path) -> (String, [u8; 32]) {
+    let credential: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(secrets_dir.join("worker-enroller.json")).expect("read the credential"),
+    )
+    .expect("the credential is JSON");
+    let key = SigningKey::from_pkcs8_pem(credential["private_key"].as_str().expect("private_key"))
+        .expect("an Ed25519 PKCS#8 PEM key");
+    (
+        credential["enroller_id"]
+            .as_str()
+            .expect("enroller_id")
+            .to_owned(),
+        key.verifying_key().to_bytes(),
+    )
+}
+
+/// An operator who provisioned more deployment units keeps them: dev init adds
+/// THIS host's enroller to an existing import file and touches no other entry,
+/// and a re-run leaves the file byte-for-byte alone.
+#[test]
+fn dev_init_adds_its_enroller_to_an_operators_import_file_and_keeps_the_rest() {
+    let temp = tempfile::tempdir().expect("create temp directory");
+    let secrets_dir = temp.path().join("secrets");
+    let env_file = temp.path().join("dev.env");
+    std::fs::create_dir(&secrets_dir).expect("create secrets directory");
+    let other = zeroship_core::worker_enrollers::EnrollerRecord {
+        id: zeroship_core::typed_id::new_worker_enroller_id(),
+        zone: "edge".to_owned(),
+        public_key: SigningKey::from_bytes(&[11_u8; 32]).verifying_key().to_bytes(),
+    };
+    std::fs::write(
+        secrets_dir.join("worker-enrollers.json"),
+        zeroship_core::worker_enrollers::render_enroller_import(std::slice::from_ref(&other)),
+    )
+    .expect("write the operator's import file");
+
+    assert_success(&run_dev_init(&secrets_dir, &env_file), "zeroship dev init");
+    let import = std::fs::read(secrets_dir.join("worker-enrollers.json")).expect("read import");
+    let (enroller_id, enroller_public) = worker_enroller(&secrets_dir);
+    assert_eq!(
+        zeroship_core::worker_enrollers::parse_enroller_import(&import).expect("parses"),
+        vec![
+            other,
+            zeroship_core::worker_enrollers::EnrollerRecord {
+                id: enroller_id,
+                zone: "default".to_owned(),
+                public_key: enroller_public,
+            },
+        ]
+    );
+
+    assert_success(&run_dev_init(&secrets_dir, &env_file), "re-run");
+    assert_eq!(
+        std::fs::read(secrets_dir.join("worker-enrollers.json")).expect("reread import"),
+        import,
+        "a re-run must not rewrite an import file that already names this host"
+    );
+}
+
+/// An import file naming this host's enroller under a DIFFERENT key is
+/// refused, and nothing is changed: Control would refuse it at its next boot,
+/// and guessing which of the two files is right is the operator's call.
+/// The control half is the untouched directory, which re-runs cleanly.
+#[test]
+fn dev_init_refuses_an_import_file_that_rekeys_its_enroller() {
+    let temp = tempfile::tempdir().expect("create temp directory");
+    let secrets_dir = temp.path().join("secrets");
+    let env_file = temp.path().join("dev.env");
+    assert_success(&run_dev_init(&secrets_dir, &env_file), "zeroship dev init");
+    assert_success(
+        &run_dev_init(&secrets_dir, &env_file),
+        "the control: an untouched directory re-runs",
+    );
+
+    let (enroller_id, _) = worker_enroller(&secrets_dir);
+    std::fs::write(
+        secrets_dir.join("worker-enrollers.json"),
+        zeroship_core::worker_enrollers::render_enroller_import(&[
+            zeroship_core::worker_enrollers::EnrollerRecord {
+                id: enroller_id.clone(),
+                zone: "default".to_owned(),
+                public_key: SigningKey::from_bytes(&[12_u8; 32]).verifying_key().to_bytes(),
+            },
+        ]),
+    )
+    .expect("re-key the host's entry");
+    let import_before = std::fs::read(secrets_dir.join("worker-enrollers.json")).expect("read");
+    let before = snapshot(&secrets_dir, &env_file);
+
+    let output = run_dev_init(&secrets_dir, &env_file);
+    assert!(
+        !output.status.success(),
+        "a re-keyed enroller entry was accepted\nstderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains(&enroller_id), "stderr={stderr}");
+    assert_eq!(snapshot(&secrets_dir, &env_file), before);
+    assert_eq!(
+        std::fs::read(secrets_dir.join("worker-enrollers.json")).expect("reread"),
+        import_before
+    );
+}
+
+/// The enroller key is judged in the same no-shared-keys set as the service
+/// keys: a worker credential holding a service's key would let whoever holds
+/// the worker's file present as that service.
+#[test]
+fn dev_init_refuses_an_enroller_key_equal_to_a_service_key() {
+    let temp = tempfile::tempdir().expect("create temp directory");
+    let secrets_dir = temp.path().join("secrets");
+    let env_file = temp.path().join("dev.env");
+    assert_success(&run_dev_init(&secrets_dir, &env_file), "zeroship dev init");
+
+    let (enroller_id, _) = worker_enroller(&secrets_dir);
+    let gateway_pem =
+        std::fs::read_to_string(secrets_dir.join("svc-gateway.pem")).expect("read gateway key");
+    std::fs::write(
+        secrets_dir.join("worker-enroller.json"),
+        serde_json::to_vec(&serde_json::json!({
+            "enroller_id": enroller_id,
+            "private_key": gateway_pem,
+        }))
+        .expect("json"),
+    )
+    .expect("put the gateway's key in the enroller credential");
+    let before = snapshot(&secrets_dir, &env_file);
+
+    let output = run_dev_init(&secrets_dir, &env_file);
+    assert!(
+        !output.status.success(),
+        "an enroller key shared with svc-gateway was accepted"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("worker-enroller.json") && stderr.contains("svc-gateway.pem"),
+        "stderr={stderr}"
+    );
+    assert_eq!(snapshot(&secrets_dir, &env_file), before);
 }
 
 #[test]
@@ -343,17 +540,17 @@ fn dev_init_rejects_an_empty_pairwise_file_before_creating_siblings() {
 
 /// ONE KEY AT TWO SERVICE PATHS MUST REFUSE, and this is a one-variable
 /// control: the only difference between the two halves is whether one of the
-/// four files was overwritten with a copy of another.
+/// service key files was overwritten with a copy of another.
 ///
-/// WHAT WENT WRONG. `SERVICE_KEY_FILES`'s own rustdoc has always said four
-/// keys and not one shared file, "because a peer must be able to VERIFY a
-/// service without being able to IMPERSONATE it" - and nothing enforced it.
+/// WHAT WENT WRONG. `SERVICE_KEY_FILES`'s own rustdoc has always said one key
+/// per service and not one shared file, "because a peer must be able to VERIFY
+/// a service without being able to IMPERSONATE it" - and nothing enforced it.
 /// `ensure_secret_file` keeps whatever exists, `validate_signing_key` asks
 /// only whether it parses, and `write_service_peers` published each path under
-/// its own issuer. So one key copied to all four paths - what a secret manager
-/// or a compose override produces when it maps one secret onto the four
-/// `ZEROSHIP_*_SERVICE_KEY_FILE` mounts - exited 0, printed "kept" four times
-/// and emitted a peer document with ONE key under FOUR issuers.
+/// its own issuer. So one key copied to every path - what a secret manager or a
+/// compose override produces when it maps one secret onto every
+/// `ZEROSHIP_*_SERVICE_KEY_FILE` mount - exited 0, printed "kept" for each and
+/// emitted a peer document with ONE key under EVERY issuer.
 ///
 /// WHY THAT DOCUMENT IS THE WHOLE ATTACK. The envelope and assertion wire
 /// formats carry a key id derived from the public bytes and no issuer, and the
@@ -374,14 +571,9 @@ fn dev_init_rejects_an_empty_pairwise_file_before_creating_siblings() {
 /// `tests/service_peer_boot_gate.sh`'s `forged` arm, against the real binaries.
 #[test]
 fn dev_init_refuses_when_two_service_key_paths_hold_the_same_key() {
-    const SERVICE_KEYS: [&str; 4] = [
-        "svc-auth.pem",
-        "svc-control.pem",
-        "svc-gateway.pem",
-        "svc-worker.pem",
-    ];
+    const SERVICE_KEYS: [&str; 3] = ["svc-auth.pem", "svc-control.pem", "svc-gateway.pem"];
 
-    // The control half. Four distinct keys, which is what a run generates.
+    // The control half. Distinct keys, which is what a run generates.
     let temp = tempfile::tempdir().expect("create temp directory");
     let secrets_dir = temp.path().join("secrets");
     let env_file = temp.path().join("dev.env");
@@ -391,7 +583,7 @@ fn dev_init_refuses_when_two_service_key_paths_hold_the_same_key() {
     );
     assert_success(
         &run_dev_init(&secrets_dir, &env_file),
-        "re-run over four DISTINCT service keys",
+        "re-run over DISTINCT service keys",
     );
     let public_keys = SERVICE_KEYS
         .iter()
@@ -400,20 +592,20 @@ fn dev_init_refuses_when_two_service_key_paths_hold_the_same_key() {
     assert_eq!(
         public_keys.len(),
         SERVICE_KEYS.len(),
-        "the control half must start from four DISTINCT keys, or the refusal \
+        "the control half must start from DISTINCT keys, or the refusal \
          below proves nothing"
     );
 
-    // The case half, one variable changed: svc-worker's key copied over
-    // svc-gateway. Every other byte in the directory is the one the control
-    // just accepted.
-    for victim in ["svc-gateway.pem", "svc-control.pem", "svc-auth.pem"] {
+    // The case half, one variable changed: svc-auth's key copied over another
+    // service's. Every other byte in the directory is the one the control just
+    // accepted.
+    for victim in ["svc-gateway.pem", "svc-control.pem"] {
         let temp = tempfile::tempdir().expect("create temp directory");
         let secrets_dir = temp.path().join("secrets");
         let env_file = temp.path().join("dev.env");
         assert_success(&run_dev_init(&secrets_dir, &env_file), "seed the directory");
 
-        let source = secrets_dir.join("svc-worker.pem");
+        let source = secrets_dir.join("svc-auth.pem");
         let target = secrets_dir.join(victim);
         std::fs::copy(&source, &target).expect("copy one service key over another");
         let before = snapshot(&secrets_dir, &env_file);
@@ -421,7 +613,7 @@ fn dev_init_refuses_when_two_service_key_paths_hold_the_same_key() {
         let output = run_dev_init(&secrets_dir, &env_file);
         assert!(
             !output.status.success(),
-            "zeroship dev init ACCEPTED one key at both svc-worker.pem and \
+            "zeroship dev init ACCEPTED one key at both svc-auth.pem and \
              {victim}, so it can still emit a document that collapses two \
              issuers onto one key\nstdout={}\nstderr={}",
             String::from_utf8_lossy(&output.stdout),
@@ -653,4 +845,93 @@ fn assert_private_mode(_path: &Path, _expected: u32) {}
 
 fn workspace_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
+}
+
+fn run_dev_enroller(args: &[&str]) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_zeroship"))
+        .args(["dev", "enroller"])
+        .args(args)
+        .output()
+        .expect("run zeroship dev enroller")
+}
+
+/// Adding a second deployment unit: `dev enroller` mints a new enroller whose
+/// credential the worker's own loader accepts, and EXTENDS the import file
+/// dev init wrote - the host's entry is kept byte-for-byte in meaning, and the
+/// new unit lands in the zone it was given.
+#[test]
+fn dev_enroller_adds_a_unit_to_the_import_file_and_keeps_the_hosts_entry() {
+    let temp = tempfile::tempdir().expect("create temp directory");
+    let secrets_dir = temp.path().join("secrets");
+    let env_file = temp.path().join("dev.env");
+    assert_success(&run_dev_init(&secrets_dir, &env_file), "zeroship dev init");
+    let import = secrets_dir.join("worker-enrollers.json");
+    let before = zeroship_core::worker_enrollers::parse_enroller_import(
+        &std::fs::read(&import).expect("read import"),
+    )
+    .expect("parses");
+
+    let unit = temp.path().join("unit-b-enroller.json");
+    let output = run_dev_enroller(&[
+        &format!("--credential={}", unit.display()),
+        &format!("--import-file={}", import.display()),
+        "--zone=default",
+    ]);
+    assert_success(&output, "zeroship dev enroller");
+    assert_private_mode(&unit, 0o600);
+
+    let keyring = zeroship_core::service_peers::ServiceKeyring::load_worker_enroller(
+        &unit,
+        &secrets_dir.join("service-peers.json"),
+    )
+    .expect("the worker loads the new unit's credential");
+    let after = zeroship_core::worker_enrollers::parse_enroller_import(
+        &std::fs::read(&import).expect("reread import"),
+    )
+    .expect("Control's parser accepts the extended file");
+    assert_eq!(after.len(), before.len() + 1);
+    assert_eq!(after[..before.len()], before[..], "existing entries are kept");
+    let added = after.last().expect("the new entry");
+    assert_eq!(
+        keyring.issuer().as_str(),
+        format!("spiffe://zeroship.ai/svc/worker-enroller/{}", added.id)
+    );
+    assert_eq!(added.zone, "default");
+
+    // A unit's key is never rotated in place: the same credential path is
+    // refused, and neither file changes.
+    let unit_bytes = std::fs::read(&unit).expect("read the credential");
+    let import_bytes = std::fs::read(&import).expect("read the import file");
+    let again = run_dev_enroller(&[
+        &format!("--credential={}", unit.display()),
+        &format!("--import-file={}", import.display()),
+    ]);
+    assert!(!again.status.success(), "an existing credential was replaced");
+    assert_eq!(std::fs::read(&unit).expect("reread"), unit_bytes);
+    assert_eq!(std::fs::read(&import).expect("reread"), import_bytes);
+}
+
+/// A zone name Control would refuse is refused before any file exists.
+#[test]
+fn dev_enroller_refuses_a_zone_control_would_refuse_and_writes_nothing() {
+    let temp = tempfile::tempdir().expect("create temp directory");
+    let unit = temp.path().join("enroller.json");
+    let import = temp.path().join("worker-enrollers.json");
+    let output = run_dev_enroller(&[
+        &format!("--credential={}", unit.display()),
+        &format!("--import-file={}", import.display()),
+        "--zone= padded",
+    ]);
+    assert!(!output.status.success(), "a padded zone name was accepted");
+    assert!(!unit.exists() && !import.exists(), "a refused run wrote a file");
+    // The control: the same command with a clean zone name succeeds.
+    assert_success(
+        &run_dev_enroller(&[
+            &format!("--credential={}", unit.display()),
+            &format!("--import-file={}", import.display()),
+            "--zone=edge",
+        ]),
+        "zeroship dev enroller with a clean zone",
+    );
+    assert!(unit.exists() && import.exists());
 }
