@@ -205,13 +205,48 @@ liveness and delivery authority while durable work and scope responsibility
 remain. Healthy registration does not discharge an obligation to recover an
 unpublished creator intent.
 
-**Implementation boundary:** Control enrollment already runs at worker startup.
-The workflow registration endpoint and authenticated client exist. Production
-startup registration, consumer wiring, zone eligibility and capacity activation
-remain cutover work. Bootstrap credentials must not allow a revoked deployment
-to restore authority by enrolling a fresh identity. The approved bootstrap trust
-source, replacement authorization and revocation freshness contract must be
-finalized with the authentication owner; registration alone does not solve them.
+### Enrollment bootstrap and revocation
+
+A worker enrolls with the credential of its deployment unit, called an
+enroller: an operator-provisioned key that Control records with exactly one
+execution zone. Only the enroller principal may call enrollment; an enrolled
+instance key cannot enroll, and no process holds a shared worker role signing
+key. Enrollment locks the active enroller row, inserts an instance bound to that
+enroller, and is idempotent on the instance public key. A changed key is always
+a new instance identity, and registration, leases and receipts keep comparing
+the exact key that verified each request.
+
+Revocation is an explicit operator database operation. Revoking an enroller
+marks it revoked and marks every instance it enrolled `gone` in one transaction
+that serializes with enrollments in flight, so a revoked unit cannot restore
+authority by enrolling a fresh identity; a replacement unit needs a newly
+provisioned enroller. Retiring a single instance is attribution and hygiene,
+not a boundary against a process that still holds its unit's key, so
+revocation for cause targets the enroller. Observed liveness never writes
+enrollment status.
+
+Every enrollment reader reads the authoritative row: Control on each internal
+request, the manager at ingress and again after lock waits and before commit,
+and the CDC relay on its session recheck. Revocation therefore stops new
+admissions at the next check; leases already issued keep their original
+deadlines while creator fences stay authoritative. An unavailable registry is a
+retryable infrastructure failure. Local development composes a trusted
+in-process worker and performs no enrollment.
+
+This contract suits long-lived worker replicas that mount their unit key. If
+production replicas churn under an orchestrator, the key moves into a
+creator-zone host agent that issues single-use enrollment grants; the Control
+records and revocation cascade stay the same. A native proof of concept on
+branch `poc/workflow-enrollment` passes the contract against a migrated
+PostgreSQL database: instance keys are refused at enrollment, revoking an
+enroller cascades to Control, the manager and the CDC relay while a sibling
+unit stays active, the revocation serializes with a concurrent enrollment on
+the enroller row lock, and a lost-reply retry returns the same instance.
+
+**Implementation boundary:** the worker still loads the shared role key, and
+Control has no startup import of enroller keys yet. Production startup
+registration, consumer wiring, zone eligibility and capacity activation remain
+cutover work.
 
 ## Policy bindings and authenticated leases
 
@@ -2911,7 +2946,6 @@ archive and retains the last valid deployment when current sources fail to build
 
 | Decision | Fixed requirement and remaining choice |
 | --- | --- |
-| Enrollment bootstrap and revocation | A revoked worker cannot regain equivalent authority by automatic enrollment. Finalize bootstrap trust, replacement authorization and registry freshness with auth ownership. |
 | Placement eligibility and capacity provider | Only platform-authorized app/zone combinations may be assigned. Select the trusted eligibility source and host adapter's durable request/progress contract. |
 | Archive acknowledgement | The direct Control source provides bounded convergence under original observation validity. Define any stronger execution-quiescence evidence separately from calendar acknowledgement or lease expiry. |
 | Complete job envelopes | Operation-specific deployment prerequisites, frozen manager restart targets and linked management outcomes are implemented. Collection, topic fanout and dependency propagation have durable pages, receipts and delivered consumers. |
