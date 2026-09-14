@@ -5,6 +5,10 @@ use zeroship_runtime::{EnvSnapshot, FetchOutcome, ModuleEntry, RequestCtx};
 
 struct AdapterPlugin(&'static [JavaScriptModule]);
 
+struct HostAdapterPlugin(&'static [JavaScriptModule]);
+
+struct MixedAdapterPlugin;
+
 fn value_callback(
     _scope: &mut v8::PinScope,
     _args: v8::FunctionCallbackArguments,
@@ -22,6 +26,43 @@ impl NativePlugin for AdapterPlugin {
     }
     fn javascript_modules(&self) -> &'static [JavaScriptModule] {
         self.0
+    }
+}
+
+impl NativePlugin for HostAdapterPlugin {
+    fn namespace(&self) -> &str {
+        "fixture"
+    }
+    fn register(&self, registrar: &mut NativeRegistrar) {
+        registrar.add("value", value_callback);
+    }
+    fn host_javascript_modules(&self) -> &'static [JavaScriptModule] {
+        self.0
+    }
+}
+
+impl NativePlugin for MixedAdapterPlugin {
+    fn namespace(&self) -> &str {
+        "fixture"
+    }
+    fn register(&self, registrar: &mut NativeRegistrar) {
+        registrar.add("value", value_callback);
+    }
+    fn javascript_modules(&self) -> &'static [JavaScriptModule] {
+        &[JavaScriptModule {
+            specifier: "zeroship:fixture/public",
+            source: r#"
+                export async function readPrivate() {
+                    return (await import("zeroship:fixture/private")).secret;
+                }
+            "#,
+        }]
+    }
+    fn host_javascript_modules(&self) -> &'static [JavaScriptModule] {
+        &[JavaScriptModule {
+            specifier: "zeroship:fixture/private",
+            source: "export const secret = 'private';",
+        }]
     }
 }
 
@@ -73,6 +114,76 @@ fn runtime(source: &str, modules: &'static [JavaScriptModule], extra: Vec<Module
         .modules(entries)
         .plugin(AdapterPlugin(modules))
         .build()
+}
+
+fn host_runtime(source: &str, modules: &'static [JavaScriptModule]) -> Runtime {
+    zeroship_runtime::init_v8();
+    Runtime::builder()
+        .modules(vec![ModuleEntry {
+            specifier: "index.js".into(),
+            source: source.into(),
+        }])
+        .plugin(HostAdapterPlugin(modules))
+        .build()
+}
+
+fn mixed_runtime(source: &str) -> Runtime {
+    zeroship_runtime::init_v8();
+    Runtime::builder()
+        .modules(vec![ModuleEntry {
+            specifier: "index.js".into(),
+            source: source.into(),
+        }])
+        .plugin(MixedAdapterPlugin)
+        .build()
+}
+
+#[test]
+fn creator_static_import_cannot_resolve_host_only_adapter() {
+    let runtime = host_runtime(
+        r#"
+        import "zeroship:fixture/adapter";
+        export default { fetch() { return new Response("unexpected import"); } };
+    "#,
+        ADAPTERS,
+    );
+    let (status, body) = call(&runtime);
+    assert_eq!(status, 500, "{body}");
+    assert!(body.contains("cannot import host-only module"), "{body}");
+}
+
+#[test]
+fn creator_dynamic_import_cannot_resolve_host_only_adapter() {
+    let runtime = host_runtime(
+        r#"
+        export default { async fetch() {
+            try { await import("zeroship:fixture/adapter"); }
+            catch (error) { return new Response(error.message); }
+            return new Response("unexpected import");
+        } };
+    "#,
+        ADAPTERS,
+    );
+    let (status, body) = call(&runtime);
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body, "Cannot find module 'zeroship:fixture/adapter'");
+}
+
+#[test]
+fn creator_importable_adapter_cannot_reexport_host_only_module() {
+    let runtime = mixed_runtime(
+        r#"
+        import { readPrivate } from "zeroship:fixture/public";
+        export default { async fetch() {
+            try { await readPrivate(); }
+            catch (error) { return new Response(error.message); }
+            return new Response("unexpected import");
+        } };
+    "#,
+    );
+    let (status, body) = call(&runtime);
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body, "Cannot find module 'zeroship:fixture/private'");
 }
 
 #[test]
@@ -139,11 +250,11 @@ fn dynamic_core_facade_import_resolves_without_plugin_adapters() {
 }
 
 #[test]
-fn runtime_without_db_plugin_does_not_supply_the_db_sdk() {
+fn runtime_without_db_plugin_does_not_supply_the_db_adapter() {
     let runtime = runtime(
         r#"
         export default { async fetch() {
-            try { await import("zeroship:db/internal"); }
+            try { await import("zeroship:db/adapter"); }
             catch (error) { return new Response(error.message); }
             return new Response('unexpected DB adapter');
         } };
@@ -153,7 +264,7 @@ fn runtime_without_db_plugin_does_not_supply_the_db_sdk() {
     );
     let (status, body) = call(&runtime);
     assert_eq!(status, 200, "{body}");
-    assert_eq!(body, "Cannot find module 'zeroship:db/internal'");
+    assert_eq!(body, "Cannot find module 'zeroship:db/adapter'");
 }
 
 #[test]

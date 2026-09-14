@@ -74,9 +74,7 @@ import type {
 } from "./types";
 
 // ---------------------------------------------------------------------------
-// Schema-shape input (used by bootstrap's installSchema, also exposed
-// here so user code can reference it when typing the entry's default
-// export)
+// Schema-shape input used by the public collection and generated env types.
 // ---------------------------------------------------------------------------
 
 /**
@@ -101,8 +99,8 @@ export type SchemaInput =
  * throws on error instead of returning Result. Generic over schema
  * shape S.
  *
- * `AllSchemas` mirrors `Collection<S, N, AllSchemas>` — `installSchema`
- * passes the full schema map so `tx.x.find({...}, { with: { author: true } })`
+ * `AllSchemas` mirrors `Collection<S, N, AllSchemas>` — the host facade passes
+ * the full schema map so `tx.x.find({...}, { with: { author: true } })`
  * resolves the joined field to the target collection's `Row<...>` at the
  * type layer. Default `Record<string, unknown>` keeps direct `TxCollection`
  * consumers compiling (joined fields degrade to `PlainObject`).
@@ -260,7 +258,7 @@ export type RowOf<T> = Row<SchemaShape<T>>;
 export type RowInputOf<T> = RowInput<SchemaShape<T>>;
 
 /**
- * The typed Collection map produced by `installSchema`. Indexed by
+ * The typed Collection map produced by the host facade. Indexed by
  * collection name; values are fully typed `Collection<...>` instances
  * carrying both the per-row shape (`UnwrapSchema<T[K]>`) and the full
  * schema map (`T`) so brand types and joined-relation types resolve
@@ -292,7 +290,7 @@ export type TransactionDb<T extends Record<string, SchemaInput>> = {
 };
 
 /**
- * The shape `installSchema` plants on `env.db` (the native handle) on
+ * The shape the host facade plants on `env.db` (the native handle) on
  * top of the per-collection wrappers. `transaction` is a thin
  * `Result`-wrapping shim over the native transaction orchestrator;
  * `live` wraps the subscription primitives.

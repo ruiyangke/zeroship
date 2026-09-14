@@ -20,7 +20,7 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import { installSchemaForTest } from "./_install-helper.js";
-import { t } from "@zeroship/db";
+import { t } from "../src/index.js";
 
 type AnyRec = Record<string, unknown>;
 
@@ -162,7 +162,7 @@ describe("P9 PR 3 — native env.db.transaction(fn)", () => {
     // internal `Collection.update` throws from, so the `instanceof` check
     // compares one class identity (a dual import would yield two distinct
     // classes and a spurious mismatch).
-    const { OptimisticLockError, schema: schemaWrap } = await import("@zeroship/db");
+    const { OptimisticLockError, schema: schemaWrap } = await import("../src/index.js");
     const native = makeNativeTxMock();
     const db = installSchemaForTest(
       {

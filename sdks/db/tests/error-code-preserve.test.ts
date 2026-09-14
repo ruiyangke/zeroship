@@ -11,8 +11,8 @@ import { generatedSchema } from "./_install-helper.js";
  */
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { model } from "@zeroship/db/internal";
-import { t } from "@zeroship/db";
+import { model } from "../../../crates/zeroship-data-v8/js/testing.js";
+import { t } from "../src/index.js";
 import { mapNativeError } from "../src/errors.js";
 import type { NativeDb } from "../src/native.js";
 

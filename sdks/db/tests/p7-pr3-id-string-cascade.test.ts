@@ -16,8 +16,8 @@ import { generatedSchema } from "./_install-helper.js";
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import { IdLoader } from "../src/loader.js";
-import { model } from "@zeroship/db/internal";
-import { t, type Row, type TypeBuilder } from "@zeroship/db";
+import { model } from "../../../crates/zeroship-data-v8/js/testing.js";
+import { t, type Row, type TypeBuilder } from "../src/index.js";
 import type { NativeDb } from "../src/native.js";
 
 type AnyRec = Record<string, unknown>;

@@ -1,6 +1,6 @@
 /**
- * `installSchema` — the framework-internal helper the synthetic SSR entry
- * and dev-bootstrap call to install a schema onto the native handle. This
+ * `installSchema` — the host adapter helper that installs a descriptor onto
+ * the native handle. This
  * test pins the install *mechanics*, independently of the surrounding
  * wiring:
  *
@@ -19,8 +19,8 @@
  */
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { installSchema } from "@zeroship/db/internal";
-import { t } from "@zeroship/db";
+import { installSchema } from "../../../crates/zeroship-data-v8/js/testing.js";
+import { t } from "../src/index.js";
 import { descriptorFor } from "./_install-helper.js";
 import type { NativeDb } from "../src/native.js";
 
@@ -106,7 +106,7 @@ describe("installSchema", () => {
 
     install({ todos: { title: t.string().required() } }, native);
     const first = (native as unknown as { todos: unknown }).todos;
-    assert.notEqual(first, nativeAlias, "bootstrap must install the typed SDK facade");
+    assert.notEqual(first, nativeAlias, "host preparation must install the typed SDK facade");
 
     install({ todos: { title: t.string().required() } }, native);
     const second = (native as unknown as { todos: unknown }).todos;
@@ -195,7 +195,7 @@ describe("installSchema", () => {
     // The install path is synchronous, so the guard only fires on true
     // re-entry within one stack frame — e.g. a getter on the descriptor's
     // collection map that recursively calls back into `installSchema`.
-    // HMR storms in practice are serialised by the dev-bootstrap's
+    // Repeated host preparation is serialized by the runtime's
     // `schemaRegistered` latch; this guard exists for the case where that
     // latch is bypassed.
     //

@@ -82,10 +82,10 @@ impl NativePlugin for DbPlugin {
         "database"
     }
 
-    fn javascript_modules(&self) -> &'static [JavaScriptModule] {
+    fn host_javascript_modules(&self) -> &'static [JavaScriptModule] {
         &[JavaScriptModule {
-            specifier: "zeroship:db/internal",
-            source: include_str!("../../../sdks/db/dist/internal.js"),
+            specifier: "zeroship:db/adapter",
+            source: include_str!("../dist/adapter.js"),
         }]
     }
 
@@ -95,13 +95,19 @@ impl NativePlugin for DbPlugin {
         namespace: v8::Local<'s, v8::Object>,
         descriptor: Option<&serde_json::Value>,
     ) -> Result<Option<v8::Global<v8::Promise>>, String> {
-        let Some(descriptor) = descriptor else { return Ok(None); };
+        let Some(descriptor) = descriptor else {
+            return Ok(None);
+        };
         let json = serde_json::to_string(descriptor).map_err(|error| error.to_string())?;
         let json = v8::String::new(scope, &json).ok_or("could not allocate DB descriptor")?;
         let descriptor = v8::json::parse(scope, json).ok_or("could not parse DB descriptor")?;
         zeroship_runtime::modules::invoke_module_export(
-            scope, "zeroship:db/internal", "installSchema", &[namespace.into(), descriptor],
-        ).map(Some)
+            scope,
+            "zeroship:db/adapter",
+            "installSchema",
+            &[namespace.into(), descriptor],
+        )
+        .map(Some)
     }
 
     /// Mint a `Db` v8_class instance as the namespace value for
@@ -284,13 +290,13 @@ mod runtime_descriptor_binding_tests {
             specifier: "index.js".into(),
             source: r#"
 import { env } from "zeroship";
-import { Collection } from "zeroship:db/internal";
 const direct = env.db.__zeroship_workflow_app_state;
 const property = Object.getOwnPropertyDescriptor(env.db, "__zeroship_workflow_app_state");
+const query = direct?.find({});
 globalThis.__nativeCollectionAtEvaluation = JSON.stringify({
     visible: direct != null,
     hasFind: typeof direct?.find === "function",
-    isSdkCollection: direct instanceof Collection,
+    hasSdkQueryBuilder: typeof query?.sort === "function",
     nativeLookupAvailable: typeof env.db.collection("__zeroship_workflow_app_state").find === "function",
     enumerable: property?.enumerable === true,
     readOnly: property?.writable === false,
@@ -323,7 +329,7 @@ export default { fetch() { return new Response("ok"); } };
             serde_json::json!({
                 "visible": true,
                 "hasFind": true,
-                "isSdkCollection": true,
+                "hasSdkQueryBuilder": true,
                 "nativeLookupAvailable": true,
                 "enumerable": true,
                 "readOnly": true,

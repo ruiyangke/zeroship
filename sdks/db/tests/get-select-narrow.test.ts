@@ -7,8 +7,8 @@ import { generatedSchema } from "./_install-helper.js";
  */
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { model } from "@zeroship/db/internal";
-import { t, type Row } from "@zeroship/db";
+import { model } from "../../../crates/zeroship-data-v8/js/testing.js";
+import { t, type Row } from "../src/index.js";
 import type { NativeDb } from "../src/native.js";
 
 type AnyRec = Record<string, unknown>;

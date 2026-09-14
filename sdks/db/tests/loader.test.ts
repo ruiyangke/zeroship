@@ -10,8 +10,8 @@ import { generatedSchema } from "./_install-helper.js";
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import { installSchemaForTest } from "./_install-helper.js";
-import { model } from "@zeroship/db/internal";
-import { t } from "@zeroship/db";
+import { model } from "../../../crates/zeroship-data-v8/js/testing.js";
+import { t } from "../src/index.js";
 import type { NativeDb } from "../src/native.js";
 
 type AnyRec = Record<string, unknown>;
@@ -54,7 +54,7 @@ function makeMockNative(rows: Record<string, AnyRec>, opts?: { findThrows?: Erro
   for (const [k, v] of Object.entries(rows)) stringIndex[k] = v;
   const native = {
     // P9 PR 3: native `transaction(callback)` orchestrator stub. The
-    // begin tick happens after the bootstrap wrapper drains pending loaders.
+    // begin tick happens after the host facade drains pending loaders.
     // Transaction collection reads bypass batching explicitly.
     transaction: async (
       cb: (raw: unknown) => unknown,
@@ -313,7 +313,7 @@ describe("IdLoader — DataLoader batching for get(id)", () => {
     // TX_CONN before the batch flushes, the supposedly-non-tx batched read
     // leaks onto the transaction's connection. We assert the observable
     // ordering: every batched `find` settled before the begin tick. The
-    // drain-before-begin lives in the bootstrap `transactionImpl` wrapper
+    // drain-before-begin lives in the host `transactionImpl` wrapper
     // (the JS-side DataLoader queues have no Rust counterpart, so the
     // drain stays in JS even though the begin moved into Rust).
     const events: string[] = [];
@@ -325,7 +325,7 @@ describe("IdLoader — DataLoader batching for get(id)", () => {
     };
     const native = {
       // P9 PR 3: native `transaction(callback)` orchestrator. The "begin"
-      // tick fires when the orchestrator is invoked — AFTER the bootstrap
+      // tick fires when the orchestrator is invoked — AFTER the host facade
       // wrapper drained the loaders. The callback resolving pushes
       // "commit"; throwing would push "rollback".
       async transaction(cb: (raw: unknown) => unknown, _o?: { isolationLevel?: string }) {
@@ -382,7 +382,7 @@ describe("IdLoader — DataLoader batching for get(id)", () => {
     // get() that has already called load(), so it's in the loader queue
     // at the moment tx starts. The original
     // bug: this queued dispatch fires AFTER the tx begin, and the find
-    // lands on TX_CONN. The fix: the bootstrap wrapper awaits the loader
+    // lands on TX_CONN. The fix: the host facade awaits the loader
     // drain before invoking the native transaction(fn) (whose begin runs
     // in Rust).
     const usersCol = (db as unknown as Record<string, unknown>).users as {

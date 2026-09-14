@@ -641,7 +641,7 @@ impl zeroship_runtime::NativePlugin for PreparationPlugin {
 
     fn register(&self, _registrar: &mut zeroship_runtime::NativeRegistrar) {}
 
-    fn javascript_modules(&self) -> &'static [zeroship_runtime::plugin::JavaScriptModule] {
+    fn host_javascript_modules(&self) -> &'static [zeroship_runtime::plugin::JavaScriptModule] {
         &[zeroship_runtime::plugin::JavaScriptModule {
             specifier: "zeroship:startup/adapter",
             source: r#"

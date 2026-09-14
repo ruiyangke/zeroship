@@ -26,7 +26,7 @@
  *     into the AsyncIterable's queue. v1 yields every rerun; deep-equal
  *     diffing to suppress no-op events is future work.
  *
- * Transaction callbacks are rejected by the bootstrap wrapper before this
+ * Transaction callbacks are rejected by the host facade before this
  * factory runs.
  *
  * Limitations (future work, not v1):
@@ -135,7 +135,7 @@ function isResultEnvelope(v: unknown): v is { data: unknown; error: unknown } {
 
 /**
  * Build a `LiveQuery<R>` from a `queryFn`.
- * Exported via `env.db.live` (planted by `installSchema` — see
+ * Exported via `env.db.live` (planted by the host facade — see
  * `db-types.ts`).
  */
 export function createLive<R>(
