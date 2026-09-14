@@ -2,6 +2,8 @@
 
 #[path = "platform_corpus/fixture.rs"]
 mod fixture;
+#[path = "platform_corpus/app_identity.rs"]
+mod app_identity;
 #[path = "platform_corpus/organization_authority.rs"]
 mod organization_authority;
 #[path = "platform_corpus/user_erasure.rs"]
