@@ -256,6 +256,30 @@ export const shouldNotBeDiscovered = procedure(async () => 1);
     assert.equal(result, null, "transform passes through (returns null)");
   });
 
+  test("client discovery supplies current entry bindings and drops removed exports", () => {
+    const state = makeState();
+    const plugin = transformPlugin(state);
+    (plugin.configResolved as (c: unknown) => void).call(plugin, { root: "/r" });
+
+    const ctx = makeCtx("client");
+    const file = "/r/src/actions.ts";
+    getHandler(plugin).call(ctx, `"use server";
+import { query } from "@zeroship/rpc/server";
+export const before = query(async () => "before", { id: "current" });
+`, file);
+
+    assert.deepEqual(
+      state.discoveredProcedures.map((procedure) => procedure.exportName),
+      ["before"],
+    );
+
+    getHandler(plugin).call(ctx, `"use server";
+export const helper = () => "private";
+`, file);
+    assert.deepEqual(state.discoveredProcedures, []);
+    assert.equal(state.serverFunctionMap.has("src/actions.ts"), false);
+  });
+
   test("directive: legacy path without directive emits a migration warning", () => {
     const state = makeState();
     const plugin = transformPlugin(state);

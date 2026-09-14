@@ -275,6 +275,22 @@ let saved: Post = posts.upsert(
 ).await?;
 ```
 
+Typed patches support `increment`, `decrement`, `multiply`, `push`, `pull`,
+and `add_to_set`. They compose with literal assignments and derived changesets:
+
+```rust,ignore
+let changes = posts::counter.increment(1_i64)?
+    .and(posts::title.set("published")?)?;
+let updated: Option<Post> = posts.update(posts::id.eq(post_id)?, changes).await?;
+```
+
+`Changeset::into_changes` returns `Patch<Entity>`. Derives and `set` keep
+operator-shaped JSON literal; expression methods feed the shared atomic update
+planner. Arithmetic uses the column's numeric codec, and array methods use the
+schema-declared element codec. Duplicate assignments are refused. Field
+capabilities, protection, generators and transaction routing remain enforced by
+the ORM.
+
 The conflict target must belong to the entity and match database uniqueness.
 Composite unique targets use `ConflictTarget::new(field).and(other_field)`.
 These methods share the normal generators, protection passes and transaction
@@ -421,8 +437,8 @@ A driver author implements connection mechanics. A host integrating that driver
 with the multi-tenant ORM supplies the corresponding authority and metadata
 services. Neither task changes Rust models or worker TypeScript.
 
-Mask policy comes from the app's `defineMaskPolicy()` declaration. Bootstrap
-installs it in memory for the app-at-deploy binding, including the empty default.
+Mask policy comes from the app's `defineMaskPolicy()` declaration. Native plugin
+finalization installs it in memory for the app-at-deploy binding, including the empty default.
 The declaration is fixed after startup; changing it requires a new deployment.
 Neither PostgreSQL nor SQLite persists policy, and unmask authorization never
 loads policy from a database or sidecar. Policy installation opens no connection.

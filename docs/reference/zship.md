@@ -92,7 +92,8 @@ rules an app may hold, how many sockets it may open, and how much it may send.
 `exports` is still part of the wire struct, but the runtime no longer uses it
 for schema discovery. New code relies on committed migrations plus the generated
 `runtime_descriptor` blob (`schema.runtime.json`) instead. See
-`sdks/bootstrap/src/runtime-entry.ts` and `crates/zeroship-bundle/src/manifest.rs`.
+`crates/zeroship-runtime/src/core/init.rs` and
+`crates/zeroship-bundle/src/manifest.rs`.
 
 ## RPC resources
 

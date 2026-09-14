@@ -122,7 +122,7 @@ wait_for_quota() {
 
 echo "[0] sign in as two distinct dev users"
 # The dev password is DERIVED from the user id, not declared in vite.config.ts:
-# `devPasswordFor` (sdks/bootstrap/src/dev-auth.ts, the authority) returns
+# `devPasswordFor` (sdks/vite-plugin/src/dev-auth.ts, the authority) returns
 # "dev-" + the first 8 characters of the id after "pws_". The ids in
 # vite.config.ts are pws_alice000000000000000 and pws_bob00000000000000000.
 login alice alice@localhost dev-alice000

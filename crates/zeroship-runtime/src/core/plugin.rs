@@ -23,6 +23,13 @@ pub struct JavaScriptModule {
     pub source: &'static str,
 }
 
+/// Whether a native plugin may accept creator configuration for this startup.
+/// This authority closes before finalization and remains closed after failure.
+pub fn startup_declarations_open(scope: &mut v8::PinScope) -> bool {
+    scope.get_slot::<crate::state::SharedState>()
+        .is_some_and(|state| state.borrow().startup_declarations_open)
+}
+
 /// A native extension that registers functions on `env.{namespace}.*`.
 ///
 /// Plugins are the extension mechanism for the runtime. Each plugin:
@@ -34,7 +41,7 @@ pub struct JavaScriptModule {
 /// - `app_id` → from `scope.get_slot::<SharedState>()` → `state.app_id`
 /// - `meter`  → from `scope.get_slot::<SharedState>()` → `state.meter`
 /// - resources → from `thread_local!` (pools, caches — initialized lazily
-///   on first callback via async bootstrap; see `plugin-db` for the pattern)
+///   during native startup; see the DB plugin for the pattern)
 ///
 /// `Send + Sync + 'static` are needed so plugins can live inside an
 /// `Arc<dyn NativePlugin>` that crosses worker-thread boundaries in the

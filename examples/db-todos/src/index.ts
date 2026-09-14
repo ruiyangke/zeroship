@@ -235,7 +235,7 @@ export const deleteTodo = mutation(
 // It does not, and neither does mutation(). Verified 2026-08-10:
 // `mutation()` is `attach(handler, "mutation", config)` (sdks/rpc/src/
 // server.ts:225) -- a capability TAG, nothing more; the dispatcher's only
-// per-call frame is `__zsEnterKind` (sdks/bootstrap/src/dispatcher.ts:140-146),
+// per-call frame is `__zsEnterKind` in native runtime dispatch,
 // which sets a thread-local ProcedureKind; and plugin-db reads that kind in
 // exactly one place, `refuse_if_query_capability` (v8_bridge.rs:82), which
 // matches ONLY `ProcedureKind::Query` in order to refuse writes from a

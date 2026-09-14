@@ -1,4 +1,7 @@
-use super::*;
+use super::{
+    read, CompareOp, DbError, EncodeValue, NullOrder, Operand, OrderKey, Predicate, ReadOrigin,
+    Value, ValueOperand,
+};
 
 /// A relational predicate retaining the origin of every referenced expression.
 #[derive(Debug, Clone)]
@@ -15,7 +18,7 @@ impl Default for ReadPredicate {
 }
 
 impl ReadPredicate {
-    pub fn all() -> Self {
+    pub const fn all() -> Self {
         Self::new(Predicate::Const(true), Vec::new())
     }
 
@@ -31,7 +34,7 @@ impl ReadPredicate {
         Self::new(Predicate::Not(Box::new(self.expression)), self.origins)
     }
 
-    pub(super) fn new(expression: Predicate, origins: Vec<ReadOrigin>) -> Self {
+    pub(super) const fn new(expression: Predicate, origins: Vec<ReadOrigin>) -> Self {
         Self {
             expression,
             origins,
@@ -39,25 +42,33 @@ impl ReadPredicate {
     }
 
     fn combine(mut self, other: Self, conjunction: bool) -> Self {
-        let mut children = match self.expression {
-            Predicate::And(children) if conjunction => children,
-            Predicate::Or(children) if !conjunction => children,
-            child => vec![child],
-        };
-        match other.expression {
-            Predicate::And(nested) if conjunction => children.extend(nested),
-            Predicate::Or(nested) if !conjunction => children.extend(nested),
-            child => children.push(child),
-        }
         self.origins.extend(other.origins);
         Self::new(
-            if conjunction {
-                Predicate::And(children)
-            } else {
-                Predicate::Or(children)
-            },
+            combine_predicates(self.expression, other.expression, conjunction),
             self.origins,
         )
+    }
+}
+
+pub(super) fn combine_predicates(
+    left: Predicate,
+    right: Predicate,
+    conjunction: bool,
+) -> Predicate {
+    let mut children = match left {
+        Predicate::And(children) if conjunction => children,
+        Predicate::Or(children) if !conjunction => children,
+        child => vec![child],
+    };
+    match right {
+        Predicate::And(nested) if conjunction => children.extend(nested),
+        Predicate::Or(nested) if !conjunction => children.extend(nested),
+        child => children.push(child),
+    }
+    if conjunction {
+        Predicate::And(children)
+    } else {
+        Predicate::Or(children)
     }
 }
 
@@ -109,7 +120,7 @@ impl<S, T: EncodeValue<S>> IntoReadOperand<S, ValueOperand> for T {
     }
 }
 impl ReadOperand {
-    pub(super) fn expression(expression: Operand, origins: Vec<ReadOrigin>) -> Self {
+    pub(super) const fn expression(expression: Operand, origins: Vec<ReadOrigin>) -> Self {
         Self(ReadOperandValue::Expression(expression, origins))
     }
     pub(super) fn compare(

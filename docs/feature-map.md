@@ -43,7 +43,7 @@ catalogs.
 | 5 | [env.storage / @zeroship/storage](#5-envstorage--zeroshipstorage) | 24 | Object-store CRUD over LocalFs; S3 backend declared but unimplemented. |
 | 6 | [Auth (env.auth + IdP + SDK)](#6-auth-envauth--idp--sdk) | 47 | Full OIDC/OAuth identity platform: login UI, federation, 2FA, sessions, GDPR, relay, SDK. |
 | 7 | [RPC / server functions](#7-rpc--server-functions) | 47 | Typed server-function stack: discovery, transport, transformers, retries, fail-closed auth. |
-| 8 | [Deploy contract / bootstrap](#8-deploy-contract--bootstrap) | 19 | The `default = { fetch?, rpc? }` contract and the framework-internal bootstrap. |
+| 8 | [Deploy contract / runtime host](#8-deploy-contract--runtime-host) | — | The `default = { fetch?, rpc? }` contract and its native runtime owner. |
 | 9 | [Gateway](#9-gateway) | 41 | Edge layer: manifest dispatch, multi-arm auth, rate/concurrency limits, CHWBL routing. |
 | 10 | [Control plane](#10-control-plane-cratescontrol) | 38 | Creator/admin API: app CRUD, deploy ingest, env/secrets, route feeds, billing, admin. |
 | 11 | [Authorization (Cedar)](#11-authorization-cedar) | 32 | Cedar policy engine + control-plane AuthzGuard; P10/P11/P12 are documented but unbuilt. |
@@ -80,7 +80,7 @@ capability enforcement). All JS polyfills are replaced with native Rust v8_class
 | crypto.getRandomValues / randomUUID | 🟢 | `globalThis.crypto.getRandomValues()` / `randomUUID()` | `crates/zeroship-runtime/src/web/crypto/crypto_class.rs` | — | `crates/zeroship-runtime/tests/crypto.rs` | Part of the Crypto global. |
 | WebSocket client (outbound) | 🟢 | `globalThis.WebSocket` | `crates/zeroship-runtime/src/web/websocket/mod.rs` | `docs/reference/websocket-design.md` | `crates/zeroship-runtime/tests/websocket_e2e.rs` | SSRF checks; no permessage-deflate. |
 | WebSocketPair (server upgrade) | 🟢 | `globalThis.WebSocketPair` | `crates/zeroship-runtime/src/web/websocket/pair.rs` | `docs/reference/websocket-design.md` | `crates/zeroship-runtime/tests/websocket_e2e.rs` | `new Response(null, { status: 101, webSocket })`. |
-| WS Subscription transport | 🟢 | internal (bootstrap); via @zeroship/rpc subscriptions | `crates/zeroship-runtime/src/core/init.rs` | `docs/reference/websocket-design.md` | `crates/zeroship-runtime/tests/websocket_e2e.rs` | User-space JS; hello/data/end/error/ping/pong. |
+| WS Subscription transport | 🟢 | internal; via @zeroship/rpc subscriptions | `crates/zeroship-runtime/src/rpc/subscription.rs` | `docs/reference/websocket-design.md` | `crates/zeroship-runtime/tests/subscription.rs` | Native lookup, iterator ownership, framing and cancellation. |
 | URL / URLSearchParams | 🟢 | `globalThis.URL` / `URLSearchParams` | `crates/zeroship-runtime/src/web/url/` | — | `crates/zeroship-runtime/tests/url_native.rs` | ada-url backed; live-sync params. |
 | TextEncoder / TextDecoder | 🟢 | `globalThis.TextEncoder` / `TextDecoder` | `crates/zeroship-runtime/src/web/encoding/mod.rs` | — | `crates/zeroship-runtime/tests/wpt_text_encoding.rs` | All WHATWG encodings (encoding_rs). |
 | TextEncoderStream / TextDecoderStream | 🟢 | `globalThis.TextEncoderStream` / `TextDecoderStream` | `crates/zeroship-runtime/src/web/encoding/streams.rs` | — | `crates/zeroship-runtime/tests/text_encoding_streams.rs` | Loaded after native streams. |
@@ -226,7 +226,7 @@ provides the native V8 surface; the TS SDK (`@zeroship/db`) wraps it. Both Postg
 | Unmask audit log (__zeroship_audit_unmask) | 🟢 | descriptor-declared ORM collection | `crates/zeroship-data-orm/src/protection/unmask.rs` | `docs/reference/db.md` | — | Audit writes commit independently; its prefix does not alter ORM or CDC behavior. |
 | Worker database teardown | removed | none | `crates/zeroship-data-v8/src/service.rs` | `docs/architecture/data-system.md` | `xtask/tests/data_architecture.rs` | The adapter releases local subscriptions. Privileged schema teardown belongs to a separate service. |
 | Pluggable ORM backends | green | host `ConnectionFactory` | `crates/zeroship-data-orm/src/connection/factory.rs`, `crates/zeroship-data-v8/src/service.rs` | `docs/architecture/data-orm.md` | `crates/zeroship-data-v8/src/v8_classes/cold_open.rs` | Built-in PostgreSQL and file-backed SQLite, or a host-defined factory; V8 uses the same adapter. |
-| Per-app auth schema (PG roles, sessions) | 🟢 | internal (bootstrap) | `crates/zeroship-data-orm/src/auth/` | — | — | PG-only; SQLite has shim. |
+| Per-app auth schema (PG roles, sessions) | 🟢 | internal (schema initialization) | `crates/zeroship-data-orm/src/auth/` | — | — | PG-only; SQLite has shim. |
 | DataLoader (batched get by id) | 🟢 | internal (Collection.get) | `sdks/db/src/loader.ts` | — | `sdks/db/tests/loader.test.ts` | Per-collection, per-tx-depth. |
 | Input validation | 🟢 | automatic on insert/update | `sdks/db/src/validate.ts` | `docs/reference/db.md` | `sdks/db/tests/validate.test.ts` | Runs in JS before native call. |
 | env.db generated type augmentation | 🟢 | `generated/zeroship/env.db.ts` in tsconfig include | `sdks/vite-plugin/src/gen-types/` | `docs/reference/db.md` | `sdks/vite-plugin/test/gen-types/` | Folded migration set is canonical; `@zeroship/db/env` is retired. |
@@ -387,13 +387,13 @@ subscriptions. The gateway enforces fail-closed auth (default `user` for all `rp
 | synthetic server entry (virtual) | 🟢 | `virtual:zeroship/_server-entry` | `sdks/vite-plugin/src/rpc-registry.ts` | `docs/reference/zeroship-standard.md` | `sdks/vite-plugin/test/` | namespace-walk default; Phase-2 dict optional. |
 | lazy procedure loading | 🟢 | `query(handler, { lazy: true })` | `sdks/vite-plugin/src/transform.ts`, `rpc-registry.ts` | — | — | Literal boolean only. |
 | procedure wire ID (id config) | 🟢 | `query(handler, { id: 'todos.list' })` | `sdks/vite-plugin/src/manifest.ts`, `sdks/rpc/src/server.ts` | `docs/reference/rpc.md` | — | Prod rejects bare-name; collision check. |
-| bootstrap dispatcher (__zsDispatch) | 🟢 | internal | `sdks/bootstrap/src/dispatcher.ts` | — | `sdks/bootstrap/tests/` | Single dispatch source; dev+prod. |
-| fetch handler (createFetchHandler) | 🟢 | internal | `sdks/bootstrap/src/fetch-handler.ts` | — | `sdks/bootstrap/tests/` | GET base64url / POST JSON; SuperJSON envelope. |
-| Zod input validation | 🟢 | `query(handler, { input })` | `sdks/bootstrap/src/dispatcher.ts` | `docs/reference/rpc.md` | `sdks/rpc/test/make-procedure.test.ts` | Any .parse()-able. |
-| Zod output validation (dev-only) | 🟡 | `query(handler, { output })` | `sdks/bootstrap/src/dispatcher.ts` | `docs/reference/rpc.md` | — | __zsValidateOutput never set true today. |
-| B3 capability frame enforcement | 🟢 | internal (__zsEnterKind/__zsExitKind) | `crates/zeroship-runtime/src/core/init.rs`, `sdks/bootstrap/src/dispatcher.ts` | — | — | Falls back to no-op without natives. |
-| runQuery / runMutation composition | 🟢 | `runQuery(fn, args)` / `runMutation(...)` | `crates/zeroship-runtime/src/core/init.rs` | — | — | Only in action/stream/subscription. |
-| per-request context getters | 🟢 | `currentUser()` / `currentRequestId()` / ... | `crates/zeroship-runtime/src/core/init.rs` | — | — | Via `zeroship` synthetic module. |
+| native RPC dispatcher | 🟢 | internal | `crates/zeroship-runtime/src/rpc/dispatch/` | `docs/reference/zeroship-standard.md` | `crates/zeroship-runtime/tests/rpc_dispatch.rs` | Resolves string-keyed dictionaries in built and dev entries. |
+| native RPC HTTP routing | 🟢 | internal | `crates/zeroship-runtime/src/core/runtime.rs` | `docs/reference/rpc.md` | `crates/zeroship-runtime/tests/call_fetch_handler.rs` | Decodes query and body input, then serializes the response envelope. |
+| application input validation | 🟢 | `query(handler, { input })` | `crates/zeroship-runtime/src/rpc/dispatch/call.rs` | `docs/reference/rpc.md` | `sdks/rpc/test/make-procedure.test.ts` | Rust calls the procedure's JavaScript validator with its original receiver. |
+| application output validation | 🟢 | `query(handler, { output })` | `crates/zeroship-runtime/src/rpc/dispatch/call.rs` | `docs/reference/rpc.md` | `crates/zeroship-runtime/tests/rpc_dispatch.rs` | Controlled by host runtime configuration. |
+| capability frame enforcement | 🟢 | internal | `crates/zeroship-runtime/src/rpc/capability.rs` | — | `crates/zeroship-runtime/tests/capability.rs` | Continuation-scoped state survives asynchronous procedure work. |
+| runQuery / runMutation composition | 🟢 | `runQuery(fn, args)` / `runMutation(...)` | `crates/zeroship-runtime/src/core/zeroship_module.rs` | — | `crates/zeroship-runtime/tests/zeroship_module.rs` | Only in action/stream/subscription. |
+| per-request context getters | 🟢 | `currentUser()` / `currentRequestId()` / ... | `crates/zeroship-runtime/src/core/zeroship_module.rs` | — | `crates/zeroship-runtime/tests/rpc_ctx.rs` | Native module reads continuation state directly. |
 | transport — query (GET/POST fallback) | 🟢 | `rpc.query(id)` | `sdks/rpc/src/transport.ts` | `docs/reference/rpc.md` | `sdks/rpc/test/transport.test.ts` | 6 KB URL threshold. |
 | transport — mutation/action (POST) | 🟢 | `rpc.mutation(id)` / `rpc.action(id)` | `sdks/rpc/src/transport.ts` | `docs/reference/rpc.md` | `sdks/rpc/test/transport.test.ts` | Idempotency-Key UUIDv7. |
 | transport — stream (SSE/AI-SDK) | 🟢 | `rpc.stream(id)` | `sdks/rpc/src/transport.ts` | `docs/reference/rpc.md` | `sdks/rpc/test/stream.test.ts` | Demand-driven iteration. |
@@ -418,7 +418,7 @@ subscriptions. The gateway enforces fail-closed auth (default `user` for all `rp
 | per-procedure timeout | 🟡 | `query(handler, { timeout })` | `sdks/server/src/types.ts`, `crates/zeroship-bundle/src/compiled.rs` | `docs/reference/rpc.md` | — | timeout_ms hardcoded None; not enforced. |
 | per-procedure max input bytes | 🟢 | `mutation(handler, { maxInputBytes })` | `sdks/server/src/types.ts`, `crates/zeroship-gateway/src/router/dispatch.rs` | `docs/reference/rpc.md` | — | Gateway enforces. |
 | per-procedure middleware list | 🟠 | `query(handler, { middleware })` | `sdks/server/src/types.ts`, `sdks/vite-plugin/src/manifest.ts` | `docs/reference/rpc.md` | — | Carried in manifest; runtime chain not wired. |
-| dev HMR registry (__registerModule) | 🟢 | internal | `sdks/vite-plugin/src/dev-bootstrap/rpc-registry.ts`, `transform.ts` | — | — | No-op in production. |
+| dev entry snapshot loader | 🟢 | internal | `sdks/vite-plugin/src/dev-bootstrap/{entry,index}.ts` | `docs/reference/vite-environment-api.md` | `sdks/vite-plugin/test/dev-entry-snapshot.test.ts` | Returns callable targets to native dispatch and invalidates by module graph. |
 | configureRpcClient global defaults | 🟢 | `configureRpcClient(opts)` | `sdks/rpc/src/runtime.ts` | `docs/reference/rpc.md` | — | Returns restore fn. |
 | onError / onAuthExpired global hooks | 🟢 | `createRpcClient({ onError, onAuthExpired })` | `sdks/rpc/src/transport.ts`, `client.ts` | `docs/reference/rpc.md` | — | onAuthExpired once per expiry. |
 | @zeroship/rpc-react adapter | 🟡 | `ZeroshipProvider` / `useStream` / `rpcInvalidate` | `sdks/rpc-react/dist/` | — | — | Dist-only; TanStack hook integration not done. |
@@ -428,35 +428,33 @@ subscriptions. The gateway enforces fail-closed auth (default `user` for all `rp
 
 ---
 
-## 8. Deploy contract / bootstrap
+## 8. Deploy contract / runtime host
 
-How a zeroship app module is loaded and dispatched. It centers on a standard default-export
-shape (`{ fetch?, rpc? }`), which the runtime bootstrap
-(`crates/zeroship-runtime/src/core/init.rs` + `sdks/bootstrap/`) wraps around every user module before
-V8 evaluates it. The bootstrap package is framework-internal: the runtime crate `include_str!`s
-its compiled dist files and the Vite plugin imports it for dev. User code must not import it.
+How a zeroship app module is loaded and dispatched. It centers on the standard
+default-export shape (`{ fetch?, rpc? }`). The Rust runtime owns startup and
+dispatch. The Vite plugin supplies a thin production entry and development
+ModuleRunner snapshots containing callable references.
 
 | Feature | Status | Surface | Code | Docs | Example | Notes |
 | --- | --- | --- | --- | --- | --- | --- |
-| default-export contract | 🟢 | internal (user module namespace) | `crates/zeroship-runtime/src/core/init.rs` | `docs/reference/zeroship-standard.md` | `examples/raw-rpc.js` | fetchFast recognized but undocumented. |
-| normalizeUserModule | 🟢 | `@zeroship/bootstrap` API | `sdks/bootstrap/src/normalize.ts` | — | `sdks/bootstrap/tests/install-schema.test.ts` | Named exports win over default.rpc; registry wins. |
-| installSchema / schema auto-discovery | &#x1F7E2; | `@zeroship/bootstrap/install-schema` | `sdks/bootstrap/src/install-schema.ts` | &mdash; | `sdks/bootstrap/tests/install-schema.test.ts` | Plants typed Collection wrappers from the generated descriptor; native boot already bound Rust schema metadata. |
-| normalizeSchema + expandUnionToFlatColumns | 🟢 | `@zeroship/bootstrap/install-schema` | `sdks/bootstrap/src/install-schema.ts` | — | `sdks/bootstrap/tests/install-schema.test.ts` | Keeps native method names; colliding collections use `collection(name)`. |
-| validateRefTargets | 🟢 | `@zeroship/bootstrap/install-schema` | `sdks/bootstrap/src/install-schema.ts` | — | `sdks/bootstrap/tests/install-schema.test.ts` | Every `t.ref` target must be a key of the same schema map, else `REF_TARGET_NOT_FOUND`. A qualified `other_app.users` fails that membership test, but as an undeclared name, not by a cross-app rule. |
-| __zsDispatch (embedded RPC dispatcher) | 🟢 | internal | `sdks/bootstrap/src/dispatcher.ts` | `docs/reference/zeroship-standard.md` | `examples/raw-rpc.js` | Idempotent IIFE; dev+prod identical JS. |
-| runtime-entry (prod TLA orchestrator) | 🟢 | internal (include_str!) | `sdks/bootstrap/src/runtime-entry.ts`, `crates/zeroship-runtime/src/core/init.rs` | `docs/reference/zeroship-standard.md` | `examples/raw-rpc.js` | Runs after dispatcher; skips if env.db absent. |
-| dev-entry (dev coordinator) | 🟢 | internal (@zeroship/bootstrap dev) | `sdks/bootstrap/src/dev-entry.ts` | — | — | Not in barrel; lazy schema install. |
-| createFetchHandler (WinterCG wrapper) | 🟢 | internal | `sdks/bootstrap/src/fetch-handler.ts` | — | `sdks/bootstrap/tests/fetch-handler.test.ts` | 5xx sanitized in prod; SuperJSON optional. |
-| dev-tier auth provider | 🟢 | internal (@zeroship/bootstrap/dev-auth) | `sdks/bootstrap/src/dev-auth.ts` | `docs/reference/auth-dev-tier.md` | `sdks/bootstrap/tests/dev-auth.test.ts` | Absent from .zship; byte-compatible with Rust. |
-| WS subscription dispatch | 🟢 | `default.subscribe` (kernel-called) | `crates/zeroship-runtime/src/core/init.rs` | — | `examples/raw-streaming.js` | hello/data/ping/pong; close 4400/4408. |
+| default-export contract | 🟢 | internal (user module namespace) | `crates/zeroship-runtime/src/core/application_entry.rs` | `docs/reference/zeroship-standard.md` | `examples/raw-rpc.js` | Fetch and string-keyed RPC dictionaries are independent entry points. |
+| entry normalization | 🟢 | internal | `sdks/vite-plugin/src/rpc-registry.ts`, `crates/zeroship-runtime/src/core/init.rs` | `docs/reference/vite-plugin.md` | `sdks/vite-plugin/test/rpc-registry.test.ts` | Preserves callable references and the fetch receiver; contains no dispatcher. |
+| installSchema facade projection | 🟢 | internal DB adapter | `sdks/db/src/install-schema.ts` | `docs/reference/db.md` | `sdks/db/tests/install-schema.test.ts` | Plants SDK collections from the host-validated descriptor over native handles. |
+| normalizeSchema + expandUnionToFlatColumns | 🟢 | `@zeroship/db/internal` | `sdks/db/src/install-schema.ts` | `docs/reference/db.md` | `sdks/db/tests/install-schema.test.ts` | Keeps native method names; colliding collections use `collection(name)`. |
+| validateRefTargets | 🟢 | `@zeroship/db/internal` | `sdks/db/src/install-schema.ts` | `docs/reference/db.md` | `sdks/db/tests/b2-ref-validation.test.ts` | Every reference target must resolve within the descriptor. |
+| native RPC dispatcher | 🟢 | internal | `crates/zeroship-runtime/src/rpc/dispatch/` | `docs/reference/zeroship-standard.md` | `crates/zeroship-runtime/tests/rpc_dispatch.rs` | One invocation path handles built and development dictionaries. |
+| Native startup lifecycle | 🟢 | internal | `crates/zeroship-runtime/src/core/runtime_startup.rs` | `docs/reference/plugin-system.md` | `crates/zeroship-runtime/tests/startup.rs` | Prepares adapters, evaluates the app, validates entries and finalizes declarations before dispatch. |
+| development entry loader | 🟢 | internal | `sdks/vite-plugin/src/dev-bootstrap/{entry,index}.ts`, `crates/zeroship-runtime/src/core/dev_entry.rs` | `docs/reference/vite-environment-api.md` | `sdks/vite-plugin/test/dev-entry-snapshot.test.ts` | Returns generation-pinned targets without invoking them. |
+| native fetch routing | 🟢 | internal | `crates/zeroship-runtime/src/core/runtime.rs` | `docs/reference/zeroship-standard.md` | `crates/zeroship-runtime/tests/call_fetch_handler.rs` | Preserves the WinterCG handler receiver and request context. |
+| dev-tier auth provider | 🟢 | internal | `sdks/vite-plugin/src/dev-auth.ts` | `docs/reference/auth-dev-tier.md` | `sdks/vite-plugin/test/dev-auth.test.ts` | Vite middleware owns browser routes; Rust verifies the cookie before dispatch. |
+| WS subscription dispatch | 🟢 | native RPC transport | `crates/zeroship-runtime/src/rpc/subscription.rs` | `docs/reference/rpc.md` | `crates/zeroship-runtime/tests/subscription.rs` | Retains and pulls the procedure iterator under native invocation context. |
 | fetchFast extension | 🟢 | internal (user namespace) | `crates/zeroship-runtime/src/core/init.rs` | — | — | Signature undocumented; no example. |
-| zeroship facade module | 🟢 | `import { env } from 'zeroship'` | `crates/zeroship-runtime/src/core/init.rs` | — | `examples/http-handler.js` | env/waitUntil/getRequest/current*/runQuery. |
-| raw-JS deploy (no-tooling) | 🟢 | `zeroship serve <file>.js` | `crates/zeroship-runtime/src/core/init.rs` | `docs/reference/zeroship-standard.md` | `examples/raw-rpc.js` | Dict or function-shape rpc; fn.config drives frames. |
-| mask policy flush at boot | 🟢 | internal | `sdks/bootstrap/src/runtime-entry.ts`, `dev-entry.ts` | — | — | Single-shot at cold start. |
-| __zsDbPlatform resolver + capability boundary | 🟢 | internal (V8 Private symbol) | `crates/zeroship-runtime/src/core/init.rs` | — | — | Resolver deleted after use (P9 §8). |
+| zeroship facade module | 🟢 | `import { env } from 'zeroship'` | `crates/zeroship-runtime/src/core/zeroship_module.rs` | `docs/reference/zeroship-standard.md` | `examples/http-handler.js` | env/waitUntil/getRequest/current*/runQuery. |
+| raw-JS deploy (no-tooling) | 🟢 | `zeroship serve <file>.js` | `crates/zeroship-runtime/src/core/init.rs` | `docs/reference/zeroship-standard.md` | `examples/raw-rpc.js` | RPC is a procedure dictionary; function-shaped dispatchers are rejected. |
+| Native mask-policy finalization | 🟢 | internal | `crates/zeroship-data-v8/src/startup_policy.rs` | `docs/reference/db.md` | `crates/zeroship-data-v8/src/tests/startup_policy.rs` | Captures declarations during startup and seals the deployment policy without database I/O. |
 | legacy fallback fetch / user.index() | 🟡 | internal (fallbackFetch) | `crates/zeroship-runtime/src/core/init.rs` | — | — | Undocumented "legacy"; unary RPC fallthrough → 404. |
 | manifest.exports.schema (deprecated field) | ⚫ | internal (manifest wire) | `crates/zeroship-bundle/src/manifest.rs` | — | — | No longer read/written; kept for archive upgrade. |
-| bootstrap build ordering (pnpm before cargo) | 🟢 | internal (build toolchain) | `sdks/bootstrap/scripts/post-build.mjs` | `sdks/bootstrap/README.md` | — | post-build strips export marker for splice. |
+| DB adapter build ordering | 🟢 | internal | `crates/zeroship-data-v8/src/lib.rs` | `docs/reference/plugin-system.md` | — | The DB adapter embeds its compiled SDK module. |
 
 ---
 
@@ -731,13 +729,12 @@ plugins. The `build.mode` field in `zeroship.jsonc` selects the build posture.
 | virtual:zeroship/client-manifest | 🟢 | `import manifest from 'virtual:zeroship/client-manifest'` | `sdks/vite-plugin/src/build.ts` | — | `examples/ssr-blog/vite.config.ts` | Reads dist/.vite/manifest.json. |
 | Node.js compat shims | 🟢 | internal (SSR/zeroship env) | `sdks/vite-plugin/src/node-compat.ts` | `docs/reference/node-compat.md` | — | Native modules external; custom polyfills. |
 | Virtual zeroship module resolution | 🟢 | `import { env } from 'zeroship'` | `sdks/vite-plugin/src/zeroship-module.ts` | — | — | Imports the runtime-owned native module. |
-| @zeroship/bootstrap resolver | 🟢 | internal (resolveId) | `sdks/vite-plugin/src/zeroship-module.ts` | — | — | Resolves to framework-installed copy. |
+| Reserved host module resolution | 🟢 | internal (resolveId) | `sdks/vite-plugin/src/zeroship-module.ts` | `docs/reference/zeroship-standard.md` | `sdks/vite-plugin/test/zeroship-env-resolution.test.ts` | Preserves runtime-owned `zeroship` imports for native evaluation. |
 | Vite Environment API integration | 🟢 | internal (environments.zeroship) | `sdks/vite-plugin/src/environment.ts` | `docs/reference/vite-environment-api.md` | — | Intercepts node:* fetchModule. |
 | Dev server bridge (spawn + proxy) | 🟢 | internal (configureServer) | `sdks/vite-plugin/src/dev-server.ts` | `docs/reference/vite-environment-api.md` | — | Crash-restart; ZEROSHIP_BIN override. |
 | HTTP module-fetch endpoint | 🟢 | POST /__zeroship_fetch | `sdks/vite-plugin/src/dev-server.ts` | `docs/reference/vite-environment-api.md` | — | fetchModule/getBuiltins only; 64 KB cap. |
 | Poll-based HMR | 🟢 | GET /__zeroship_hmr_check | `sdks/vite-plugin/src/dev-server.ts` | `docs/reference/vite-environment-api.md` | — | V8 polls every 500ms. |
-| Dev-bootstrap ModuleRunner | 🟢 | internal (V8 entry) | `sdks/vite-plugin/src/dev-bootstrap/index.ts` | `docs/reference/vite-environment-api.md` | — | eval-based evaluator; preserves TypeBuilder identity. |
-| Dev RPC registry | 🟢 | internal (__registerModule/__lookup) | `sdks/vite-plugin/src/dev-bootstrap/rpc-registry.ts` | — | `sdks/vite-plugin/test/dev-bootstrap-rpc-registry.test.ts` | Module-scoped ownership; HMR prune. |
+| Development ModuleRunner host | 🟢 | internal (V8 entry) | `sdks/vite-plugin/src/dev-bootstrap/index.ts` | `docs/reference/vite-environment-api.md` | `sdks/vite-plugin/test/dev-entry-snapshot.test.ts` | Loads generation-pinned entry snapshots for the native dispatcher. |
 | Dev-tier auth provider config | 🟢 | `zeroship({ devAuth: ... })` | `sdks/vite-plugin/src/dev-auth-config.ts` | `docs/reference/auth-dev-tier.md` | — | Fresh secret per start; dev-only by construction. |
 | Dev SQLite database fallback | 🟢 | internal | `sdks/vite-plugin/src/dev-db.ts` | `docs/reference/vite-environment-api.md` | — | shell > .env > sqlite:.zeroship/dev.sqlite. |
 | Server-entry auto-detection | 🟢 | internal (findServerEntry) | `sdks/vite-plugin/src/build.ts` | — | — | Fixed candidate list; `build.serverEntry` in `zeroship.jsonc` overrides. |
@@ -958,7 +955,7 @@ replaces the external auth/gateway stack. Production builds produce a `.zship` a
 | Vite plugin — zeroship() factory | 🟢 | `import { zeroship } from '@zeroship/vite-plugin'` | `sdks/vite-plugin/src/index.ts` | `docs/reference/vite-plugin.md` | `sdks/create-zeroship-app/template/vite.config.ts` | Five options: devServerPort, devAuth, configPath, env, config. Build shape lives in `zeroship.jsonc`. |
 | Vite plugin — dev server spawn + proxy | 🟢 | internal | `sdks/vite-plugin/src/dev-server.ts` | `docs/reference/vite-plugin.md` | `examples/db-todos` | Spawns zeroship serve; crash-restart. |
 | Vite plugin — Vite Environment API | 🟢 | internal | `sdks/vite-plugin/src/environment.ts` | `docs/reference/vite-environment-api.md` | — | /__zeroship_fetch + /__zeroship_hmr_check. |
-| Vite plugin — dev HMR poll | 🟢 | internal (V8 polls) | `sdks/vite-plugin/src/dev-bootstrap/hmr.ts` | — | — | 500ms; transitive importer walk. |
+| Vite plugin — dev HMR poll | 🟢 | internal (V8 polls) | `sdks/vite-plugin/src/dev-bootstrap/hmr.ts` | — | — | Transitive importer invalidation. |
 | Vite plugin — dev-auth provider | 🟢 | `ZeroshipOptions.devAuth` | `sdks/vite-plugin/src/dev-auth-config.ts` | `docs/reference/auth-dev-tier.md` | — | Fresh secret per lifetime; dev-only. |
 | Vite plugin — dev-db (SQLite zero-config) | 🟢 | internal | `sdks/vite-plugin/src/dev-db.ts` | `docs/reference/auth-dev-tier.md` | — | shell > .env > sqlite default. |
 | Vite plugin — .dotenv parsing | 🟢 | internal | `sdks/vite-plugin/src/dev-server.ts` | — | — | Bespoke; shell wins over .env. |
@@ -972,7 +969,7 @@ replaces the external auth/gateway stack. Production builds produce a `.zship` a
 | Vite plugin — .zship packing + precompress | 🟢 | internal (emitZship) | `sdks/vite-plugin/src/zship.ts` | `docs/reference/zship.md` | — | brotli default; canonical JSON. |
 | Vite plugin — static mode | 🟢 | `"build": { "mode": "static" }` in `zeroship.jsonc` | `sdks/vite-plugin/src/build.ts` | `docs/reference/project-config.md` | `examples/ssg-docs/zeroship.jsonc` | Stub input then deleted. |
 | Vite plugin — client-manifest virtual module | 🟢 | `virtual:zeroship/client-manifest` | `sdks/vite-plugin/src/build.ts` | — | — | Graceful {} fallback. |
-| Vite plugin — dev-bootstrap | 🟢 | internal | `sdks/vite-plugin/src/dev-bootstrap/index.ts` | — | — | ModuleRunner; deps reoptimize rebuild. |
+| Vite plugin — development host | 🟢 | internal | `sdks/vite-plugin/src/dev-bootstrap/index.ts` | — | — | ModuleRunner entry snapshots; dependency refresh rebuild. |
 | CLI serve — dev KV backend (redb/Redis) | 🟢 | ZEROSHIP_KV_URL / ZEROSHIP_KV_PATH | `crates/zeroship-cli/src/main.rs` | — | — | URL→Redis, else redb. |
 | CLI serve — dev storage (LocalFs) | 🟢 | ZEROSHIP_STORAGE_ROOT | `crates/zeroship-cli/src/main.rs` | — | — | Default .zeroship/storage. |
 | CLI serve — heap limit configuration | 🟢 | --heap-limit-mb / ZEROSHIP_HEAP_LIMIT_MB | `crates/zeroship-cli/src/main.rs` | `docs/reference/runtime-limits.md` | — | Dev default 512MB vs prod 128MB. |
@@ -1188,15 +1185,14 @@ validation, account eligibility, the `@zeroship/auth` React adapter, `requestSco
 `onAuthStateChange`, TOTP backup codes, and the pairwise subject identifier.
 
 **RPC:** `streamResponse`, lazy loading, query auto-batching, the `__SERVER_REFERENCE` brand,
-module-level `$config`, the WebSocket subscription wire protocol, the B3 capability frame,
-`runQuery`/`runMutation`, the per-request context getters, `__zsDispatch`, `createFetchHandler`,
-the dev HMR registry, `defineRpcProcedures`, `newUuidV7`, the `@zeroship/rpc-react` /
+module-level `$config`, the WebSocket subscription wire protocol, the capability frame,
+`runQuery`/`runMutation`, the per-request context getters, the dev entry snapshot loader,
+`defineRpcProcedures`, `newUuidV7`, the `@zeroship/rpc-react` /
 `@zeroship/rpc-client` packages, and the `onError`/`onAuthExpired` hooks.
 
-**Deploy / bootstrap:** `fetchFast` signature/semantics, the `zeroship` module exports
-(`waitUntil`/`getRequest`/`current*`/`runQuery`), the dev-entry API, `createFetchHandler` wire
-protocol, the WS subscription frame protocol + close codes, mask-policy flush, the `__zsDbPlatform`
-capability boundary (P9 §8), the `user.index()` fallback, and the `@zeroship/bootstrap` package.
+**Deploy / runtime host:** `fetchFast` signature/semantics, the `zeroship` module exports
+(`waitUntil`/`getRequest`/`current*`/`runQuery`), the development entry loader,
+the WS subscription frame protocol and the `user.index()` fallback.
 
 **Gateway:** back-channel logout endpoint, the auth.zeroship.ai reverse-proxy split, app-response
 header sanitization (SEC-9), trust-proxy IP derivation, the native OP circuit breaker, the per-thread
@@ -1224,7 +1220,7 @@ the ingest limits (the zship.md "Limits" section does not exist), the legacy `Bu
 VFS, and the CLI `deploy` command.
 
 **Vite plugin / CLI:** the Phase-2 static-binding entry,
-`probeUserDefaultExport`, `findServerEntry`, the dev RPC registry, the dev-bootstrap ModuleRunner,
+`probeUserDefaultExport`, `findServerEntry`, the development snapshot loader and ModuleRunner,
 the `client-manifest` type shim, SSR/SSG build modes, the `ZEROSHIP_BIN` override, auto-derived URL
 resources, the custom node polyfills, function-level `"use server"`, the `.dotenv` parser, and the
 `zeroship login`/`logout`/`whoami`/`secret`/`var` commands and `create-zeroship-app`.

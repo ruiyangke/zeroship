@@ -141,6 +141,78 @@ async fn exercise_literal_filters(db: &Database) {
     }
 }
 
+#[expect(
+    clippy::future_not_send,
+    reason = "ORM fixtures use thread-local compio sessions"
+)]
+async fn scalar_json_filters(db: &Database) {
+    let table = db.entity::<documents::Entity>().unwrap();
+    let expected = [
+        value!(u64::MAX),
+        value!(u64::MAX.to_string()),
+        value!(true),
+        value!("true"),
+        value!({"$eq":2}),
+    ];
+    for payload in &expected {
+        table
+            .insert::<_, Document>(NewDocument {
+                label: "scalar".into(),
+                payload: payload.clone(),
+            })
+            .await
+            .unwrap();
+    }
+    let d = table.alias("d").unwrap();
+    for payload in expected {
+        for predicate in [
+            d.column(documents::payload).eq(payload.clone()).unwrap(),
+            d.column(documents::payload)
+                .select::<Value>()
+                .eq(payload.clone())
+                .unwrap(),
+            d.column(documents::payload)
+                .select_optional::<Value>()
+                .eq(payload.clone())
+                .unwrap(),
+        ] {
+            let rows = db
+                .from(&d)
+                .filter(predicate)
+                .select(d.column(documents::payload).select::<Value>())
+                .unwrap()
+                .all()
+                .await
+                .unwrap();
+            assert_eq!(rows, vec![payload.clone()]);
+        }
+    }
+}
+
+#[compio::test]
+async fn sqlite_scalar_json_comparisons_preserve_value_types() {
+    let owner = CollectionFixture::sqlite_native(
+        "documents",
+        documents::Entity::schema().clone(),
+        super::fixtures::document_migration_fields(),
+    )
+    .await;
+    scalar_json_filters(&owner.database).await;
+    owner.close().await;
+}
+
+#[compio::test]
+async fn postgres_scalar_json_comparisons_preserve_value_types() {
+    let owner = CollectionFixture::postgres_native(
+        "documents",
+        documents::Entity::schema().clone(),
+        super::fixtures::document_migration_fields(),
+    )
+    .await;
+    scalar_json_filters(&owner.database).await;
+    owner.close().await;
+}
+
 #[test]
 fn composing_patches_refuses_duplicate_columns() {
     for value in ["first", "second"] {

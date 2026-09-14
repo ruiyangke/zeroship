@@ -357,12 +357,9 @@ impl<E: Entity> EntityCollection<E> {
         let future = self
             .validate()
             .and_then(|()| changes.into_changes())
-            .map(|fields| {
-                self.collection.update_model(
-                    filter.into_predicate(),
-                    Value::Object([("$set".into(), Value::Object(fields))].into()),
-                    false,
-                )
+            .map(|patch| {
+                self.collection
+                    .update_model(filter.into_predicate(), patch.into_update(), false)
             });
         let future = self.dispatch(future);
         async move { Ok(decode_rows::<E, R>(future.await?)?.pop()) }

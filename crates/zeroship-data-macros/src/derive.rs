@@ -1,7 +1,7 @@
 use proc_macro2::TokenStream;
 use quote::quote;
 use std::collections::HashSet;
-use syn::{Data, DeriveInput, Fields, LitStr, Path, spanned::Spanned};
+use syn::{spanned::Spanned, Data, DeriveInput, Fields, LitStr, Path};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
@@ -159,10 +159,10 @@ pub fn expand(input: DeriveInput, kind: Kind) -> syn::Result<TokenStream> {
         },
         Kind::Update => quote! {
             impl #implementation #orm::Changeset<#entity::Entity> for #name #arguments #constraints {
-                fn into_changes(self) -> ::core::result::Result<#orm::Record, #orm::DbError> {
+                fn into_changes(self) -> ::core::result::Result<#orm::Patch<#entity::Entity>, #orm::DbError> {
                     let mut record = #orm::Record::new();
                     #(#statements)*
-                    Ok(record)
+                    Ok(#orm::Patch::from_assignments(record))
                 }
             }
         },

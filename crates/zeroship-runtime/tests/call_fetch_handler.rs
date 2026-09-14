@@ -550,21 +550,15 @@ fn zs_env_returns_snapshot() {
 }
 
 #[test]
-fn zs_bind_and_get_request_ctx() {
+fn fetch_context_is_direct_and_legacy_context_globals_are_absent() {
     let modules = m(r#"
         export default {
             fetch(request, env, ctx) {
-                // Simulate what the bootstrap (PR 2) will do:
-                // bind ctx on entry.
-                __zs_bind_request_ctx(ctx);
-
-                // Nested lookup — must return the SAME object reference.
-                const nested = __zs_get_request_ctx();
-
                 return Response.json({
-                    sameRef: nested === ctx,
-                    hasWaitUntil: typeof nested?.waitUntil === "function",
-                    hasPassThrough: typeof nested?.passThroughOnException === "function"
+                    bindGlobal: typeof globalThis.__zs_bind_request_ctx,
+                    getGlobal: typeof globalThis.__zs_get_request_ctx,
+                    hasWaitUntil: typeof ctx.waitUntil === "function",
+                    hasPassThrough: typeof ctx.passThroughOnException === "function"
                 });
             }
         };
@@ -575,7 +569,8 @@ fn zs_bind_and_get_request_ctx() {
     };
     let body = body_to_string(&body);
     assert_eq!(status, 200, "body: {}", body);
-    assert!(body.contains(r#""sameRef":true"#), "body: {}", body);
+    assert!(body.contains(r#""bindGlobal":"undefined""#), "body: {}", body);
+    assert!(body.contains(r#""getGlobal":"undefined""#), "body: {}", body);
     assert!(body.contains(r#""hasWaitUntil":true"#), "body: {}", body);
     assert!(body.contains(r#""hasPassThrough":true"#), "body: {}", body);
 }
@@ -725,7 +720,7 @@ fn streaming_async_closes_cleanly() {
 //
 // These lock in the three exports of the user-facing `zeroship` module:
 // `env`, `waitUntil`, `getRequest`. The module is injected by the runtime
-// alongside the bootstrap (see crates/zeroship-runtime/src/core/zeroship_module.rs).
+// directly by the runtime (see crates/zeroship-runtime/src/core/zeroship_module.rs).
 
 #[test]
 fn zeroship_module_env_import() {
@@ -857,118 +852,13 @@ fn zeroship_get_request_returns_request() {
 // hits `default.fetch(request, env, ctx)`. See
 // `docs/reference/zeroship-standard.md` for the full contract.
 //
-// Tests synthesize a tiny `default.{fetch, rpc}` shim that wears
-// function-shape `default.rpc` (the advanced / back-compat path). The
-// bootstrap's WS-subscription path and the kernel's HTTP path both call
-// into this shape. The dict-shape contract is exercised by
-// `crates/zeroship-runtime/tests/rpc_dispatch.rs`.
-
-const SYNTHETIC_ENTRY_PROLOG: &str = r#"
-function _zsErrResponse(status, code, message) {
-    return new Response(JSON.stringify({ message, name: "Error", code }), {
-        status, headers: { "content-type": "application/json" },
-    });
-}
-async function _zsRpcAndRespond(rpc, name, input) {
-    try {
-        const result = await rpc(name, input);
-        if (result != null && typeof result === "object"
-            && typeof result[Symbol.asyncIterator] === "function"
-            && typeof result.next === "function") {
-            const enc = new TextEncoder();
-            const body = new ReadableStream({
-                async start(controller) {
-                    try {
-                        while (true) {
-                            const step = await result.next();
-                            if (step.done) { controller.enqueue(enc.encode("d:{}\n")); break; }
-                            const v = step.value;
-                            if (typeof v === "string") {
-                                controller.enqueue(enc.encode("0:" + JSON.stringify(v) + "\n"));
-                            } else {
-                                controller.enqueue(enc.encode("2:[" + JSON.stringify(v) + "]\n"));
-                            }
-                        }
-                    } catch (e) {
-                        const env = { message: e?.message ?? String(e), name: e?.name ?? "Error" };
-                        if (e && typeof e.code === "string") env.code = e.code;
-                        if (e && e.details !== undefined) env.details = e.details;
-                        if (e && typeof e.retryable === "boolean") env.retryable = e.retryable;
-                        controller.enqueue(enc.encode("e:" + JSON.stringify(env) + "\n"));
-                        controller.enqueue(enc.encode("d:{}\n"));
-                    } finally { controller.close(); }
-                },
-            });
-            return new Response(body, {
-                status: 200,
-                headers: { "content-type": "text/event-stream", "cache-control": "no-cache" },
-            });
-        }
-        if (result instanceof Response) return result;
-        return new Response(
-            JSON.stringify({ json: result === undefined ? null : result }),
-            { status: 200, headers: { "content-type": "application/json" } },
-        );
-    } catch (err) {
-        const status = (err && Number.isInteger(err.status) && err.status >= 400 && err.status < 600) ? err.status : 500;
-        const body = { message: err?.message ?? String(err), name: err?.name ?? "Error" };
-        if (err && typeof err.code === "string") body.code = err.code;
-        if (err && err.details !== undefined) body.details = err.details;
-        if (err && typeof err.retryable === "boolean") body.retryable = err.retryable;
-        return new Response(JSON.stringify(body), {
-            status, headers: { "content-type": "application/json" },
-        });
-    }
-}
-async function _zsFetchEntry(request, rpc) {
-    const url = new URL(request.url);
-    if (!url.pathname.startsWith("/__zeroship/v1/")) {
-        return new Response("Not Found", { status: 404 });
-    }
-    const id = decodeURIComponent(url.pathname.slice("/__zeroship/v1/".length));
-    if (!id) return _zsErrResponse(400, "INVALID_ARGUMENT", "missing wireId");
-    let input = undefined;
-    if (request.method === "POST") {
-        const text = await request.text();
-        if (text) {
-            try {
-                const env = JSON.parse(text);
-                input = env && typeof env === "object" && "json" in env ? env.json : env;
-            } catch (e) {
-                return _zsErrResponse(400, "INVALID_ARGUMENT", "invalid JSON body: " + (e?.message ?? e));
-            }
-        }
-    }
-    return await _zsRpcAndRespond(rpc, id, input);
-}
-"#;
-
+// Fixtures expose procedure references and exercise native dispatch.
 fn synthetic_entry(procs: &str) -> Vec<zeroship_runtime::ModuleEntry> {
-    let src = format!(
-        r#"
-{prolog}
-{procs}
-const _procedures = _makeProcedures();
-async function _zsRpc(name, input, _ctx) {{
-    const fn = _procedures[name];
-    if (typeof fn !== "function") {{
-        throw Object.assign(new Error("Method not found: " + name), {{ status: 404, code: "NOT_FOUND" }});
-    }}
-    return await fn(input);
-}}
-export default {{
-    fetch: (request) => _zsFetchEntry(request, _zsRpc),
-    rpc: _zsRpc,
-}};
-"#,
-        prolog = SYNTHETIC_ENTRY_PROLOG,
-        procs = procs,
-    );
-    m(&src)
+    m(&format!("{procs}\nexport default {{ rpc: _makeProcedures() }};"))
 }
 
 #[test]
-fn bootstrap_routes_rpc_to_named_export() {
+fn native_rpc_routes_to_named_export() {
     let modules = synthetic_entry(r#"
         function greet(name) { return { hello: name }; }
         function _makeProcedures() { return { greet }; }
@@ -995,7 +885,7 @@ fn bootstrap_routes_rpc_to_named_export() {
 }
 
 #[test]
-fn bootstrap_rpc_method_not_found_returns_404() {
+fn native_rpc_method_not_found_returns_404() {
     let modules = synthetic_entry(r#"
         function greet() { return "hi"; }
         function _makeProcedures() { return { greet }; }
@@ -1021,7 +911,7 @@ fn bootstrap_rpc_method_not_found_returns_404() {
 }
 
 #[test]
-fn bootstrap_rpc_malformed_json_returns_400() {
+fn native_rpc_malformed_json_returns_400() {
     let modules = synthetic_entry(r#"
         function greet(x) { return x; }
         function _makeProcedures() { return { greet }; }
@@ -1047,7 +937,7 @@ fn bootstrap_rpc_malformed_json_returns_400() {
 }
 
 #[test]
-fn bootstrap_rpc_input_extracted_from_json_envelope() {
+fn native_rpc_input_extracted_from_json_envelope() {
     // New wire: body is `{"json": <input>}`. The input is unwrapped before
     // being passed to the handler.
     let modules = synthetic_entry(r#"
@@ -1078,8 +968,8 @@ fn bootstrap_rpc_input_extracted_from_json_envelope() {
 // Structured-error envelope (code / details / retryable)
 // ===========================================================================
 //
-// The bootstrap's `errorResponse` helper forwards optional fields from a
-// thrown error — `code` (gRPC-style string), `details` (any JSON), and
+// Native error serialization forwards optional fields from a thrown error —
+// `code` (gRPC-style string), `details` (any JSON), and
 // `retryable` (boolean) — alongside the existing `message` / `name` /
 // `status`. Lets RPC procedures throw structured errors that the wire
 // preserves, so callers (and the SSE path) can branch on `.code` or read
@@ -1088,7 +978,7 @@ fn bootstrap_rpc_input_extracted_from_json_envelope() {
 #[test]
 fn rpc_error_envelope_carries_code_details_retryable() {
     // Procedure throws an Error with `code`, `details`, `retryable`, and
-    // `status`. The synthetic entry's error envelope must forward all
+    // `status`. The runtime's error envelope must forward all
     // four to the wire — regression guard for the structured-error path
     // the WebSocket subscription / fetch paths rely on.
     let modules = synthetic_entry(r#"
@@ -1214,9 +1104,8 @@ fn rpc_error_envelope_ignores_non_string_code_and_non_bool_retryable() {
 }
 
 #[test]
-fn sse_error_frame_carries_code_details_retryable() {
-    // Async generator throws partway through. The synthetic entry's
-    // SSE encoder wraps the throw as an `e:` envelope frame (AI-SDK
+fn sse_client_error_frame_carries_code_details_retryable() {
+    // The native iterator encoder wraps a client error as an `e:` frame (AI-SDK
     // Data Stream Protocol; the `e:` typeId is our extension — ai-sdk
     // parsers tolerate unknown ids). The payload carries the same
     // envelope shape as the RPC error wire. Always followed by `d:{}`.
@@ -1224,10 +1113,10 @@ fn sse_error_frame_carries_code_details_retryable() {
         async function* stream() {
             yield { tick: 0 };
             throw Object.assign(new Error("upstream gone"), {
-                code: "UNAVAILABLE",
+                code: "CONFLICT",
                 details: { upstream: "db", attempt: 3 },
                 retryable: true,
-                status: 503,
+                status: 409,
             });
         }
         function _makeProcedures() { return { stream }; }
@@ -1254,7 +1143,13 @@ fn sse_error_frame_carries_code_details_retryable() {
             FetchOutcome::Response { body, .. } => body_to_string(&body),
             FetchOutcome::Stream { body_reader, .. } => {
                 let mut out = Vec::new();
-                for chunk in body_reader.drain() { out.extend_from_slice(&chunk); }
+                compio::time::timeout(Duration::from_secs(5), async {
+                    loop {
+                        while let Some(chunk) = body_reader.pop() { out.extend_from_slice(&chunk); }
+                        if body_reader.is_done() { break; }
+                        body_reader.wait_for_data().await;
+                    }
+                }).await.expect("stream deadline");
                 String::from_utf8_lossy(&out).into_owned()
             }
             FetchOutcome::Pending { rx, cancel: _ } => {
@@ -1290,7 +1185,7 @@ fn sse_error_frame_carries_code_details_retryable() {
         .unwrap_or_else(|e| panic!("error data not JSON: {} (line: {})", e, &after[..line_end]));
     assert_eq!(payload["message"], "upstream gone", "payload: {}", payload);
     assert_eq!(payload["name"], "Error", "payload: {}", payload);
-    assert_eq!(payload["code"], "UNAVAILABLE", "payload: {}", payload);
+    assert_eq!(payload["code"], "CONFLICT", "payload: {}", payload);
     assert_eq!(payload["retryable"], true, "payload: {}", payload);
     assert_eq!(
         payload["details"],

@@ -44,7 +44,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      # Build SDK sources before Cargo: zeroship-runtime embeds bootstrap's
+      # Build SDK sources before Cargo: zeroship-data-v8 embeds the database facade.
       # runtime entry, and zeroship-data-v8 embeds the DB internal adapter.
       # These gitignored build outputs are absent from a fresh checkout.
       - uses: actions/setup-node@v4
@@ -1095,8 +1095,7 @@ jobs:
       # The vendored engine ships no dist/ and the vite-plugin imports it, so it
       # has to be built before the SDKs. Same ordering as the `sdk` job.
       - run: pnpm --filter @zeroship/migrate build
-      # `pnpm build` FIRST and cargo second is load-bearing, not stylistic: the
-      # runtime crate `include_str!`s sdks/bootstrap/dist/{runtime-entry,dispatcher}.js.
+      # Build JavaScript first because zeroship-data-v8 embeds the database facade.
       - run: pnpm build
       # THE ONE EXAMPLE THE HARNESS DOES NOT BUILD ITSELF, and until now nothing
       # built it here either. golden_path.sh builds starter, db-todos, the
@@ -1366,8 +1365,7 @@ jobs:
       # The vendored engine ships no dist/ and the vite-plugin imports it, so it
       # has to be built before the SDKs. Same ordering as the `sdk` job.
       - run: pnpm --filter @zeroship/migrate build
-      # `pnpm build` FIRST and cargo second is load-bearing, not stylistic: the
-      # runtime crate `include_str!`s sdks/bootstrap/dist/{runtime-entry,dispatcher}.js.
+      # Build JavaScript first because zeroship-data-v8 embeds the database facade.
       - run: pnpm build
       # dev-provision (from -p zeroship-control --bins) serves the stream
       # harness; `-p zeroship-cli` produces the binary used by local examples.
@@ -1755,8 +1753,7 @@ jobs:
       # The vendored engine ships no dist/ and the vite-plugin imports it, so it
       # builds before the SDKs. Same ordering as the `sdk` and golden-path jobs.
       - run: pnpm --filter @zeroship/migrate build
-      # `pnpm build` before cargo is load-bearing: the runtime crate
-      # include_str!s sdks/bootstrap/dist/{runtime-entry,dispatcher}.js.
+      # Build JavaScript first because zeroship-data-v8 embeds the database facade.
       - run: pnpm build
       # zeroship-migrate-server is in this list because e03f00353 wired a migration
       # apply into the harness - the probe is migration-first now, and without

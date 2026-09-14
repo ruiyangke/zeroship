@@ -111,6 +111,7 @@ fn cmd_serve(args: &[String]) {
         .map(std::time::Duration::from_millis);
     let wall_timeout = parse_flag_u64(args, "--wall-timeout")
         .map(std::time::Duration::from_millis);
+    let dev_entry_loader = parse_flag(args, "--dev-entry-loader");
     // Dev default: 512 MB. Single-tenant dev apps routinely load big libraries
     // (LangChain + provider SDKs = ~100 MB by themselves). The production
     // worker's 128 MB default is sized for multi-tenant isolation, not for
@@ -372,6 +373,7 @@ fn cmd_serve(args: &[String]) {
             cpu_limit,
             wall_timeout,
             heap_limit_bytes,
+            dev_entry_loader,
             env_vars,
             plugins,
         },
@@ -1192,6 +1194,7 @@ const SERVE_KNOWN_FLAGS: &[&str] = &[
     "--cpu-limit",
     "--wall-timeout",
     "--heap-limit-mb",
+    "--dev-entry-loader",
 ];
 
 /// Return `Err` if any `--flag` argument in `args[2..]` is not a known `serve` flag.
@@ -1459,6 +1462,7 @@ mod tests {
             "zeroship", "serve", "app.js",
             "--port=3000", "--workers=2", "--cpu-limit=500",
             "--wall-timeout=2000", "--heap-limit-mb=512",
+            "--dev-entry-loader=createDevEntryLoader",
         ]);
         assert!(check_unknown_serve_flags(&args).is_ok());
     }

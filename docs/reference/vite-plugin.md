@@ -50,7 +50,7 @@ is what keeps `zeroship()` working in a scratch directory.
 ### `devAuth`
 
 The `pnpm dev` implementation of the platform auth contract - the peer of
-`env.db` to SQLite and `env.kv` to redb. When enabled, the dev runtime serves
+`env.db` to SQLite and `env.kv` to redb. When enabled, Vite middleware serves
 the same-origin `/__zeroship/auth/*` endpoints the `@zeroship/auth` client
 drives and supplies a logged-in identity to `env.auth.getUser()` server-side,
 with no gateway, no external auth service and no control plane.
@@ -63,16 +63,13 @@ with no gateway, no external auth service and no control plane.
 | `false` | Disabled. `/__zeroship/auth/*` falls through to the user module and `env.auth.getUser()` returns `null`. |
 
 A configured user is `{ id?, email?, name?, avatar?, scopes? }`. **There is no
-`password` field.** The dev login form prefills and validates a password derived
-from the id (`devPasswordFor` in `sdks/bootstrap/src/dev-auth.ts`): `"dev-"`
-plus the first eight characters of the id with any leading `pws_` stripped
-(fewer if the remainder is shorter), so `pws_alice000000000000000` gives
-`dev-alice000`. It is not a secret; it exists
-so the credential check and its failure path are real, and it is deliberately
-short enough that the deployed platform's signup policy refuses it.
+`password` field.** The dev login form prefills and validates the deterministic
+password produced by `devPasswordFor` in `sdks/vite-plugin/src/dev-auth.ts`.
+It is a local test credential rather than a secret, and the deployed platform's
+signup policy refuses it.
 
-The provider lives in the dev runtime (`@zeroship/bootstrap/dev`) and is
-structurally absent from any production `.zship`. Full contract:
+The provider lives in Vite's development middleware and is structurally absent
+from any production `.zship`. Full contract:
 [`auth-dev-tier.md`](auth-dev-tier.md).
 
 ## Migration-first type generation (`gen-types`)
@@ -178,21 +175,36 @@ Kind resolution is:
 
 Names are never used to infer `query`. Reads opt in via `query(...)` or an explicit `config.kind = "query"` so cache and retry policy do not depend on identifier spelling.
 
-`lazy: true` is supported in either the wrapper config or `fn.config`. When present, the synthetic server entry emits a dynamic `import()` wrapper instead of an eager namespace import. Non-literal `lazy` values warn and stay eager.
+`lazy: true` is recorded from either the wrapper config or `fn.config`.
+When the entry generator receives explicit server bindings, it emits a
+`{ load: () => Promise<Procedure> }` record for a lazy binding. The loader
+returns the actual exported procedure, including its validation and kind
+metadata. Non-literal `lazy` values warn and stay eager. A module already
+statically imported by the app still evaluates during startup.
 
 ## Synthetic server entry
 
-[`sdks/vite-plugin/src/rpc-registry.ts`](../../sdks/vite-plugin/src/rpc-registry.ts) emits `virtual:zeroship/_server-entry`. Its job is to normalize the app module and delegate RPC fall-through to `@zeroship/bootstrap`:
+[`sdks/vite-plugin/src/rpc-registry.ts`](../../sdks/vite-plugin/src/rpc-registry.ts)
+emits `virtual:zeroship/_server-entry`. It normalizes the app's exports for
+native runtime dispatch:
 
-- schema comes from the generated `schema.runtime.json` descriptor, not the synthetic default export
-- `default.fetch` is a shared bootstrap fetch handler that routes `/__zeroship/v1/<wireId>` and falls through to the user's own fetch for non-RPC paths
-- `default.rpc` is a plain object keyed by `wireId`
+- Schema preparation uses the host's generated `schema.runtime.json` descriptor.
+- `default.fetch` retains the user's handler and original default-object
+  receiver. When absent, a top-level `fetch` export is used. When neither is
+  present, the runtime handles the missing handler.
+- `default.rpc` is a dictionary of procedure references or lazy load records,
+  keyed by string wire IDs. Declared own string properties are copied first;
+  named exports or explicit bindings take precedence. Names such as
+  `__proto__` and `constructor` are ordinary own keys. A callable or array
+  `default.rpc` is rejected.
 
-The runtime-side dispatcher and stream encoder live in [`sdks/bootstrap/README.md`](../../sdks/bootstrap/README.md) and [`zeroship-standard.md`](zeroship-standard.md), not as generated helper code in the entry.
+The generated entry supplies callable references and module imports. The
+[native dispatcher](../../crates/zeroship-runtime/src/rpc/dispatch/mod.rs)
+owns HTTP RPC invocation, validation, capability context and response framing.
+See [the deploy contract](zeroship-standard.md).
 
 ## See also
 
 - [`vite-environment-api.md`](vite-environment-api.md)
 - [`rpc.md`](rpc.md)
 - [`zeroship-standard.md`](zeroship-standard.md)
-- [`sdks/bootstrap/README.md`](../../sdks/bootstrap/README.md)

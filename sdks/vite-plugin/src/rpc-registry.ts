@@ -1,313 +1,194 @@
-// sdks/vite-plugin/src/rpc-registry.ts
-//
-// Synthetic SSR entry generator (ZS-standard, descriptor-only cutover).
-//
-// The plugin emits one virtual module — `virtual:zeroship/_server-entry`
-// — that imports the user's entry and normalises its exports into the
-// `default = { fetch?, rpc? }` shape consumed by the runtime.
-//
-// `default.rpc` is a PLAIN OBJECT (dict-shape: `{ wireId: handler }`).
-// Dispatch (input validation, capability frame, stream framing,
-// dev-only output validation) is owned by `@zeroship/bootstrap`'s
-// `__zsDispatch` + `createFetchHandler`. The plugin only wires the
-// generated module to those shared runtime helpers; it does not inline
-// dispatcher source.
-//
-// Two code paths:
-//   - Namespace-walk (default): the entry walks `_zsUser`'s keys at
-//     module-init time and rolls every callable non-`default`/`fetch`
-//     export into `_zsRpc`, keyed by `fn.config.id ?? exportName`.
-//     User's own `default.rpc` (if a plain object) merges in first;
-//     named-export procedures take precedence on key conflict.
-//   - Phase-2 (binding-fed): a caller hands us a pre-computed
-//     `Map<string, ServerBinding>`. We emit one namespace import per
-//     target file and a static dict literal mapping wireId → handler
-//     reference (or an async arrow that does a dynamic import for
-//     lazy bindings).
+// The synthetic entry supplies procedure references to native dispatch.
+// Explicit bindings select their declaring modules; otherwise the entry
+// normalizes the user's declared RPC dictionary. Named creator exports are
+// forwarded unchanged for runtime-owned consumers such as workflow replay.
 
 import type { Plugin } from "vite";
+import { createHash } from "node:crypto";
 import type { TransformState } from "./transform.js";
 
-// ── Server bindings ────────────────────────────────────────────────────────
-
-/**
- * One server-binding entry consumed by the Phase-2 static-dispatch
- * emitter below. The map is keyed by `<sourceFile>::<exportName>` so
- * the synthetic-entry generator can emit a stable per-target import.
- */
+/** A discovered procedure, keyed by <sourceFile>::<exportName> in the binding map. */
 export interface ServerBinding {
   wireId: string;
   sourceFile: string;
   exportName: string;
-  kind: "query" | "mutation" | "stream" | "subscription";
-  /** When true, the synthetic entry emits a dynamic-import wrapper so
-   *  the procedure's source module loads only on first call. Defaults
-   *  to false (eager). Detected from `fn.config.lazy = true` or the
-   *  wrapper's `lazy: true` option (Wave #188). The dynamic import
-   *  rides V8's host callback (Wave #187) — second call to the same
-   *  lazy procedure resolves to the cached namespace. */
+  kind: "query" | "mutation" | "action" | "stream" | "subscription";
+  /** Return the actual procedure through a dynamic import when Rust requests it. */
   lazy?: boolean;
 }
 
-// ── Public IDs ─────────────────────────────────────────────────────────────
+export interface ServerBindingSnapshot {
+  version: string;
+  bindings: ServerBinding[];
+}
 
-/** Public specifier for the synthetic server entry. */
 export const SERVER_ENTRY_VIRTUAL_ID = "virtual:zeroship/_server-entry";
-/** Internal (\0-prefixed) id Vite uses for the synthetic entry. */
 export const SERVER_ENTRY_RESOLVED_ID = "\0" + SERVER_ENTRY_VIRTUAL_ID;
 
-// ── Synthetic entry source ─────────────────────────────────────────────────
-
-/**
- * Pick the wireId for a procedure. Mirrors `pickWireId()` in manifest.ts:
- * explicit `fn.config.id` (when string and non-empty) wins; default is
- * the bare export name. Kept in sync because the synthetic entry's
- * dispatch table must use the same key the manifest emitter advertises.
- */
+/** Use the same public name as the manifest's pickWireId. */
 export function pickEntryWireId(p: {
   exportName: string;
   config?: Record<string, unknown>;
 }): string {
   const explicit = p.config?.id;
-  if (typeof explicit === "string" && explicit.length > 0) return explicit;
-  return p.exportName;
+  return typeof explicit === "string" && explicit.length > 0 ? explicit : p.exportName;
 }
 
+/** Convert the transform's current discovery records into entry imports. */
+export function serverBindingsFromState(
+  state: Pick<TransformState, "discoveredProcedures">,
+): Map<string, ServerBinding> {
+  const bindings = new Map<string, ServerBinding>();
+  for (const procedure of state.discoveredProcedures) {
+    const key = `${procedure.filePath}::${procedure.exportName}`;
+    bindings.set(key, {
+      wireId: pickEntryWireId(procedure),
+      sourceFile: procedure.filePath,
+      exportName: procedure.exportName,
+      kind: procedure.kind,
+      ...(procedure.lazy ? { lazy: true } : {}),
+    });
+  }
+  return bindings;
+}
+
+/** Produce the stable host response consumed by the development loader. */
+export function serverBindingSnapshotFromState(
+  state: Pick<TransformState, "discoveredProcedures">,
+): ServerBindingSnapshot {
+  const bindings = sortedServerBindings(state);
+  const owners = new Map<string, ServerBinding>();
+  for (const binding of bindings) {
+    const previous = owners.get(binding.wireId);
+    if (previous) {
+      throw new Error(
+        `duplicate procedure id ${JSON.stringify(binding.wireId)}: ` +
+        `${previous.sourceFile}::${previous.exportName} and ` +
+        `${binding.sourceFile}::${binding.exportName}`,
+      );
+    }
+    owners.set(binding.wireId, binding);
+  }
+  return {
+    version: hashServerBindings(bindings),
+    bindings,
+  };
+}
+
+/** Track binding changes even while an invalid duplicate set cannot load. */
+export function serverBindingVersionFromState(
+  state: Pick<TransformState, "discoveredProcedures">,
+): string {
+  return hashServerBindings(sortedServerBindings(state));
+}
+
+function sortedServerBindings(
+  state: Pick<TransformState, "discoveredProcedures">,
+): ServerBinding[] {
+  return [...serverBindingsFromState(state).values()].sort((left, right) =>
+    left.sourceFile.localeCompare(right.sourceFile) ||
+    left.exportName.localeCompare(right.exportName)
+  );
+}
+
+function hashServerBindings(bindings: readonly ServerBinding[]): string {
+  return createHash("sha256").update(JSON.stringify(bindings)).digest("hex");
+}
+
+// These statements only normalize exports. The host owns schema preparation,
+// RPC invocation, validation, capability frames and response framing.
+const normalizeDefault = `
+const _zsUserDefaultExport = Reflect.get(_zsUser, "default");
+const _zsUserDefault = (_zsUserDefaultExport && typeof _zsUserDefaultExport === "object")
+  ? _zsUserDefaultExport
+  : {};
+const _zsDeclaredRpc = _zsUserDefault.rpc;
+if (_zsDeclaredRpc != null && (typeof _zsDeclaredRpc !== "object" || Array.isArray(_zsDeclaredRpc))) {
+  throw new TypeError("default.rpc must be a procedure dictionary");
+}
+const _zsRpc = Object.create(null);
+if (_zsDeclaredRpc != null) {
+  for (const _zsId of Object.getOwnPropertyNames(_zsDeclaredRpc)) {
+    _zsRpc[_zsId] = _zsDeclaredRpc[_zsId];
+  }
+}
+`;
+
+const exportEntry = `
+const _zsUserFetch = _zsUserDefault.fetch;
+const _zsTopLevelFetch = Reflect.get(_zsUser, "fetch");
+const _zsFetch = typeof _zsUserFetch === "function"
+  ? Function.prototype.bind.call(_zsUserFetch, _zsUserDefault)
+  : (typeof _zsTopLevelFetch === "function" ? _zsTopLevelFetch : undefined);
+
+export default {
+  fetch: _zsFetch,
+  rpc: _zsRpc,
+};
+`;
+
 /**
- * Build the source of the synthetic server entry.
- *
- * Emits a normaliser that imports the user module and re-exports its
- * `default.{fetch, rpc}` after rolling callable non-`default` exports
- * into the dict-shape `rpc`. RPC fall-through is delegated to
- * `@zeroship/bootstrap` so input validation, capability frames, and
- * stream framing stay shared with dev/runtime.
- *
- * @param opts.userEntryRel  Specifier the synthetic entry should use to
- *                           import the user module.
- * @param opts.bindings      Optional pre-computed server-binding map.
- *                           When provided, switches to the Phase-2
- *                           static-dispatch shape (see below).
+ * Build a module exporting { fetch?, rpc }. RPC values are actual
+ * procedures or { load: () => Promise<Procedure> } records. The native runtime
+ * retains their metadata and dispatches requests. Default fetch keeps its
+ * original receiver through a bound function. Named creator exports pass
+ * through without framework classification.
  */
 export function buildServerEntrySource(opts: {
   userEntryRel: string;
-  /** Explicit server-binding map. When provided, the synthetic entry
-   *  emits per-target imports and a static `_zsRpc` dict literal.
-   *  Falls back to namespace-walk normalisation when omitted or empty. */
+  /** Explicit bindings take precedence over default.rpc. An empty map uses named exports. */
   bindings?: Map<string, ServerBinding>;
 }): string {
   const userImport = JSON.stringify(opts.userEntryRel);
-
   if (opts.bindings && opts.bindings.size > 0) {
-    return buildPhase2Entry(userImport, opts.bindings);
+    return buildBindingEntry(userImport, opts.bindings);
   }
 
-  // Namespace-walk normaliser. Static glue only: build the dict-shape
-  // `default.rpc`, then hand `/__zeroship/v1/*` fall-through to the shared
-  // bootstrap fetch handler so stream RPCs work in production too.
-  return `// virtual:zeroship/_server-entry — auto-generated by @zeroship/vite-plugin
-//
-// Wire shape — \`default\`:
-//   fetch    The user's own \`default.fetch\` (or a top-level \`fetch\`
-//            export when no \`default\` object), wrapped by the bootstrap
-//            fetch handler.
-//   rpc      Dict-shape: { wireId: handler }. Dispatch is owned by the
-//            bootstrap dispatcher. The plugin only normalises —
-//            capability/Zod/stream framing live in shared runtime helpers.
-
-import { createFetchHandler } from "@zeroship/bootstrap/fetch-handler";
-import { collectWorkflowClasses, isWorkflowClass } from "@zeroship/bootstrap/normalize";
-
+  return `// Generated by @zeroship/vite-plugin. Dispatch is supplied by the runtime.
 import * as _zsUser from ${userImport};
-
-const _zsUserDefaultExport = Reflect.get(_zsUser, "default");
-const _zsUserDefault = (_zsUserDefaultExport && typeof _zsUserDefaultExport === "object")
-  ? _zsUserDefaultExport
-  : {};
-const _zsUserDefaultThis = (_zsUserDefaultExport && typeof _zsUserDefaultExport === "object")
-  ? _zsUserDefaultExport
-  : null;
-
-// Build the rpc dict from:
-//   1. user.default.rpc (if it's a plain object — passed through verbatim
-//      so users can declare procedures inline).
-//   2. user.<name> for every callable non-\`default\`/\`fetch\` export
-//      (rolled in; named-export procedures take precedence on key
-//      conflict — they're the canonical source-level declaration).
-const _zsRpc = (typeof _zsUserDefault.rpc === "object" && _zsUserDefault.rpc != null)
-  ? { ..._zsUserDefault.rpc }
-  : {};
-// Durable workflow classes, keyed by EXPORT name. They must be lifted out
-// BEFORE the rpc rollup: a class is a function, so without this it would be
-// published as an RPC procedure named after the class -- one that is not in
-// \`manifest.resources\` and would be invoked without \`new\`. The collector also
-// pins each class's \`.name\` to its export name, because production minifies
-// \`class DoubleChild\` to \`var Pi = class ...\` and \`step.call\` addresses a
-// child by \`Class.name\`.
-const _zsWorkflows = collectWorkflowClasses(_zsUser);
-
-for (const _zsName of Object.keys(_zsUser)) {
-  if (_zsName === "default" || _zsName === "fetch") continue;
-  const _zsFn = _zsUser[_zsName];
-  if (typeof _zsFn !== "function") continue;
-  if (isWorkflowClass(_zsFn)) continue;
-  const _zsId = (_zsFn.config && typeof _zsFn.config.id === "string" && _zsFn.config.id) || _zsName;
-  _zsRpc[_zsId] = _zsFn;
+export * from ${userImport};
+${normalizeDefault}
+${exportEntry}`;
 }
 
-// Pick user's default.fetch, with fall-through to a top-level export.
-const _zsTopLevelFetch = Reflect.get(_zsUser, "fetch");
-const _zsFetch = (typeof _zsUserDefault.fetch === "function")
-  ? _zsUserDefault.fetch
-  : (typeof _zsTopLevelFetch === "function" ? _zsTopLevelFetch : undefined);
-
-const _zsFetchHandler = createFetchHandler(async () => ({
-  fetch: _zsFetch,
-  rpc: _zsRpc,
-  userDefault: _zsUserDefaultThis,
-}));
-
-export default {
-  fetch: _zsFetchHandler,
-  rpc: _zsRpc,
-  workflows: _zsWorkflows,
-};
-`;
-}
-
-// ── Server-Binding Synthetic Entry (Phase-2) ──────────────────────────────
-//
-// When the caller supplies a pre-computed `ServerBinding` map keyed by
-// `<sourceFile>::<exportName>`, the generator uses it directly. We emit
-// one ESM import per target file (deduplicated) and a static `_zsRpc`
-// literal keyed by wireId. The user's own `default.rpc` (when present)
-// merges with the binding-derived entries — bindings win on key conflict
-// because they're the explicit registration surface.
-
-function buildPhase2Entry(
+function buildBindingEntry(
   userImport: string,
   bindings: Map<string, ServerBinding>,
 ): string {
-  // Group bindings by source file so we emit ONE namespace import per
-  // target. A file with both eager AND lazy exports lands in BOTH
-  // columns: the namespace import for the eager ones, the dynamic-import
-  // wrapper for the lazy ones. V8 de-dupes the module — the dynamic
-  // import resolves to the same namespace the static import already
-  // evaluated (Wave #187 host callback cache). The lazy wrapper is then
-  // a Map lookup on the second call.
   const byFile = new Map<string, ServerBinding[]>();
-  for (const b of bindings.values()) {
-    const arr = byFile.get(b.sourceFile);
-    if (arr) arr.push(b);
-    else byFile.set(b.sourceFile, [b]);
+  for (const binding of bindings.values()) {
+    const entries = byFile.get(binding.sourceFile);
+    if (entries) entries.push(binding);
+    else byFile.set(binding.sourceFile, [binding]);
   }
+  const files = [...byFile.keys()].sort();
+  const eagerFiles = files.filter((file) => byFile.get(file)!.some((binding) => !binding.lazy));
+  const aliases = new Map(eagerFiles.map((file, index) => [file, `_zsTarget${index}`]));
+  const imports = eagerFiles.map((file) =>
+    `import * as ${aliases.get(file)} from ${JSON.stringify(file)};`,
+  );
 
-  // Files needing a static namespace import — those with at least one
-  // EAGER binding. Lazy-only files get no static import.
-  const eagerFiles = [...byFile.keys()]
-    .filter((f) => byFile.get(f)!.some((b) => !b.lazy))
-    .sort();
-  const aliasOf = new Map<string, string>();
-  eagerFiles.forEach((file, idx) => aliasOf.set(file, `_user_TARGET_${idx}_`));
-
-  const importLines = eagerFiles
-    .map((file) => `import * as ${aliasOf.get(file)} from ${JSON.stringify(file)};`)
-    .join("\n");
-
-  // Dict entries — eager bindings reference the static namespace alias,
-  // lazy bindings emit an async arrow that dynamic-imports the target
-  // and forwards (Wave #188).
-  const tableEntries: string[] = [];
-  const allFiles = [...byFile.keys()].sort();
-  for (const file of allFiles) {
-    for (const b of byFile.get(file)!) {
-      if (b.lazy) {
-        tableEntries.push(
-          `  ${JSON.stringify(b.wireId)}: async (input, ctx) => ` +
-            `(await import(${JSON.stringify(file)})).${b.exportName}(input, ctx),`,
-        );
-      } else {
-        tableEntries.push(
-          `  ${JSON.stringify(b.wireId)}: ${aliasOf.get(file)}.${b.exportName},`,
-        );
-      }
+  const assignments: string[] = [];
+  for (const file of files) {
+    for (const binding of byFile.get(file)!) {
+      const exported = JSON.stringify(binding.exportName);
+      const target = binding.lazy
+        ? `{ load: async () => (await import(${JSON.stringify(file)}))[${exported}] }`
+        : `${aliases.get(file)}[${exported}]`;
+      assignments.push(`_zsRpc[${JSON.stringify(binding.wireId)}] = ${target};`);
     }
   }
 
-  return `// virtual:zeroship/_server-entry — auto-generated by @zeroship/vite-plugin
-//
-// Phase-2 (binding-fed) shape. The dispatch dict is statically derived
-// from the reference-graph walk. Each entry maps a wireId to a per-target
-// namespace member (eager) or to an async dynamic-import wrapper (lazy).
-// User code never reaches this module; the resolveId hook keeps it
-// behind a \\0-prefix. Dispatch lives in bootstrap's shared dispatcher
-// and fetch handler — this file is glue, not a dispatcher fork.
-
-import { createFetchHandler } from "@zeroship/bootstrap/fetch-handler";
-import { collectWorkflowClasses } from "@zeroship/bootstrap/normalize";
-
+  return `// Generated by @zeroship/vite-plugin. Dispatch is supplied by the runtime.
 import * as _zsUser from ${userImport};
-${importLines}
-
-const _zsUserDefaultExport = Reflect.get(_zsUser, "default");
-const _zsUserDefault = (_zsUserDefaultExport && typeof _zsUserDefaultExport === "object")
-  ? _zsUserDefaultExport
-  : {};
-const _zsUserDefaultThis = (_zsUserDefaultExport && typeof _zsUserDefaultExport === "object")
-  ? _zsUserDefaultExport
-  : null;
-
-// Build the rpc dict from:
-//   1. user.default.rpc (if a plain object — merged first).
-//   2. The binding-derived static map (wins on key conflict; bindings
-//      are the explicit registration surface).
-const _zsRpc = (typeof _zsUserDefault.rpc === "object" && _zsUserDefault.rpc != null)
-  ? { ..._zsUserDefault.rpc }
-  : {};
-Object.assign(_zsRpc, {
-${tableEntries.join("\n")}
-});
-
-// Workflow classes come from the user entry's namespace, not the binding map:
-// bindings enumerate RPC procedures only. Same collector as the namespace-walk
-// entry, so both build shapes expose the same \`default.workflows\`.
-const _zsWorkflows = collectWorkflowClasses(_zsUser);
-
-const _zsTopLevelFetch = Reflect.get(_zsUser, "fetch");
-const _zsFetch = (typeof _zsUserDefault.fetch === "function")
-  ? _zsUserDefault.fetch
-  : (typeof _zsTopLevelFetch === "function" ? _zsTopLevelFetch : undefined);
-
-const _zsFetchHandler = createFetchHandler(async () => ({
-  fetch: _zsFetch,
-  rpc: _zsRpc,
-  userDefault: _zsUserDefaultThis,
-}));
-
-export default {
-  fetch: _zsFetchHandler,
-  rpc: _zsRpc,
-  workflows: _zsWorkflows,
-};
-`;
+export * from ${userImport};
+${imports.join("\n")}
+${normalizeDefault}
+${assignments.join("\n")}
+${exportEntry}`;
 }
 
-// ── Vite plugin ────────────────────────────────────────────────────────────
-
-/**
- * Vite plugin that resolves and loads the synthetic SSR entry.
- *
- * `enforce: "pre"` — runs before user-installed plugins so the virtual id
- * never leaks to the file resolver. The plugin owns this specifier in
- * full: any `virtual:zeroship/_server-entry` import in the graph routes
- * through `load` here.
- *
- * @param opts.userEntryRel  Path the synthetic entry should import from.
- * @param opts.state         TransformState (unused; kept so call sites
- *                           can pass shared state without a refactor).
- * @param opts.getBindings   Optional accessor for a pre-computed server-
- *                           binding map. When it returns a non-empty map,
- *                           the generator emits the Phase-2 static dict.
- */
+/** Resolve the host's synthetic entry and generate it from the current bindings. */
 export function rpcRegistryPlugin(opts: {
   root?: string;
   userEntryRel: string;
@@ -318,15 +199,15 @@ export function rpcRegistryPlugin(opts: {
     name: "zeroship:server-entry",
     enforce: "pre",
     resolveId(id: string) {
-      if (id === SERVER_ENTRY_VIRTUAL_ID) return SERVER_ENTRY_RESOLVED_ID;
-      return null;
+      return id === SERVER_ENTRY_VIRTUAL_ID ? SERVER_ENTRY_RESOLVED_ID : null;
     },
     load(id: string) {
       if (id !== SERVER_ENTRY_RESOLVED_ID) return null;
-      const bindings = opts.getBindings?.();
       return buildServerEntrySource({
         userEntryRel: opts.userEntryRel,
-        bindings,
+        bindings: opts.getBindings?.() ?? (
+          opts.state ? serverBindingsFromState(opts.state) : undefined
+        ),
       });
     },
   };

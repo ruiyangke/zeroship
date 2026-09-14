@@ -142,30 +142,18 @@ service reaches it over HTTP via `SANDBOX_URL` / `SANDBOX_TOKEN`.
 
 ### Image build
 
-The single `Dockerfile` builds all SIX binaries (`zeroship-control`,
-`zeroship-gate`, `zeroship-worker`, `zeroship-auth`, the `zeroship` CLI, and
-`zeroship-migrate-server` - the creator migration service) in three stages.
-The SIXTH used to be `zeroship-platform-migrate`; it was deleted on 2026-08-28
-and the platform one-shot is now the Node `zero-migrate` CLI, which ships in a
-separate `migrate` stage rather than in `runtime`, so that the control, gateway,
-worker and auth containers keep carrying no JavaScript runtime:
+The single `Dockerfile` builds the platform services and the Node migration
+command in separate image stages. The `sdks` stage runs the root JavaScript
+build, including `sdks/db/dist/internal.js`, before Rust compilation because
+`zeroship-data-v8` embeds that DB facade. The Rust builder then compiles the
+native services with the SDK output and authorization policies. Runtime images
+carry native binaries; the Node migration command has its own image stage.
 
-1. **`sdks` (node:22)** runs `pnpm install --frozen-lockfile && pnpm build` to
-   emit `sdks/bootstrap/dist/{runtime-entry,dispatcher}.js`. The runtime crate
-   `include_str!`s those files at compile time
-   (`crates/zeroship-runtime/src/core/init.rs`), so they must exist before cargo touches
-   `zeroship-runtime`. This stage also builds the console app's `.zship`, which
-   the runtime stage copies to `/opt/zeroship/console/app.zship` for control's
-   `--bootstrap-console` seed.
-2. **`builder` (rust)** copies `crates/`, the freshly-built `sdks/`, and the
-   `deploy/policies/` tree (`crates/zeroship-authz/build.rs` parses
-   `../../deploy/policies/*.cedar` at build time) and compiles the six binaries.
-3. The runtime stage (ubuntu:24.04) copies all six binaries plus the prebuilt
-   console `.zship`.
+Because SDK dist files are generated, the image build creates them with:
 
-Because the SDK dist files are gitignored and absent from a fresh checkout, the
-image must be (re)built with `--build` the first time; `docker compose -f deploy/compose/docker-compose.yml build`
-regenerates them inside the image.
+```sh
+docker compose -f deploy/compose/docker-compose.yml build
+```
 
 ### OpenAI key (console)
 

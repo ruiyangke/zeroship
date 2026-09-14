@@ -111,8 +111,8 @@ interface Manifest {
    * migration service and are not carried by the `.zship`. Mirrors the Rust
    * `bundle::manifest::RuntimeDescriptorEntry`.
    *
-   * The runtime/worker path reads this descriptor and exposes it as
-   * `globalThis.__zsRuntimeDescriptor` for bootstrap schema install.
+   * The runtime/worker path reads and validates this descriptor, then passes
+   * the snapshot directly to native plugins and the DB facade installer.
    */
   runtime_descriptor?: RuntimeDescriptorEntry;
 }

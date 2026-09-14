@@ -702,18 +702,11 @@ fn encode_literal(
                 .collect(),
         ),
     };
+    // MIN/MAX keep the column codec; COUNT/SUM/AVG bind against their result type.
     let path = match operand {
-        ResolvedOperand::Column(column) => sources.iter().find_map(|source| {
-            source.resolved.table.owns(column).then(|| {
-                source
-                    .resolved
-                    .inputs
-                    .iter()
-                    .find(|(_, input)| input.column == column.name().as_str())
-                    .map(|(field, _)| (field.as_str(), &source.schema))
-            })
-        }),
-        ResolvedOperand::Aggregate {
+        ResolvedOperand::Column(column)
+        | ResolvedOperand::Aggregate {
+            function: crate::sql::AggregateFunc::Min | crate::sql::AggregateFunc::Max,
             column: Some(column),
             ..
         } => sources.iter().find_map(|source| {
@@ -727,7 +720,7 @@ fn encode_literal(
             })
         }),
         ResolvedOperand::RowPresence
-        | ResolvedOperand::Aggregate { column: None, .. }
+        | ResolvedOperand::Aggregate { .. }
         | ResolvedOperand::Comparison(_) => None,
     }
     .flatten();
@@ -1287,6 +1280,50 @@ mod tests {
                 [("sum".into(), Value::Decimal("9223372036854775808".into()))].into(),
             )];
             assert!(decode_scalars(&registration, &schema, &mut invalid).is_err());
+        }
+    }
+
+    #[test]
+    fn count_comparisons_use_the_aggregate_result_type() {
+        use crate::sql::{AggregateFunc, AggregateRef};
+        let mut schema = fields(&[
+            ("enabled", LogicalType::Boolean),
+            ("day", LogicalType::CalendarDate),
+            ("tags", LogicalType::Array),
+            ("embedding", LogicalType::Vector),
+            ("amount", LogicalType::Number),
+        ]);
+        schema["tags"].items = Some(LogicalType::Text);
+        schema["embedding"].vector_dims = Some(2);
+        schema["amount"].precision = Some(18);
+        schema["amount"].scale = Some(2);
+        let sources = vec![source(schema)];
+        for registration in [
+            crate::sql::registration::SqlRegistration::postgres(),
+            crate::sql::registration::SqlRegistration::sqlite(),
+        ] {
+            for field in ["enabled", "day", "tags", "embedding", "amount"] {
+                let aggregate = Operand::Aggregate(
+                    AggregateRef::over_path(
+                        AggregateFunc::Count,
+                        sources[0].source.column(field).unwrap(),
+                        false,
+                    )
+                    .unwrap(),
+                );
+                let predicate = Predicate::compare(
+                    aggregate,
+                    CompareOp::Gt,
+                    Operand::Lit(crate::sql::Literal::Int(0)),
+                );
+                let result = resolve_predicate(&predicate, &sources, &registration);
+                assert!(
+                    matches!(result, Ok(ResolvedPredicate::Compare {
+                    rhs: ResolvedPredicateValue::Bind { ref value, .. }, ..
+                }) if value.as_i64() == Some(0)),
+                    "{field}: {result:?}"
+                );
+            }
         }
     }
 
