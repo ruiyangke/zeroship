@@ -2116,7 +2116,10 @@ mod tests {
             .expect_err("an unanswered command is not a success");
 
         assert!(err.contains("outcome is unknown"), "{err}");
-        assert!(err.contains("HTTP 504"), "the last cause is reported: {err}");
+        assert!(
+            err.contains("HTTP 504"),
+            "the last cause is reported: {err}"
+        );
         assert!(
             err.contains(&format!("--command-id={}", command.as_str())),
             "the resume flag names the command: {err}"

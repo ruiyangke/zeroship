@@ -74,9 +74,10 @@ impl ControlStub {
                 let (status, body) = if request.line == expected {
                     (
                         route.status,
-                        route
-                            .body
-                            .replace("{command}", request.idempotency_key.as_deref().unwrap_or("")),
+                        route.body.replace(
+                            "{command}",
+                            request.idempotency_key.as_deref().unwrap_or(""),
+                        ),
                     )
                 } else {
                     (
@@ -293,7 +294,10 @@ fn a_lost_reply_resends_the_same_command_and_bytes() {
     let requests = control.finish();
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(output.status.success(), "deploy failed\nstderr={stderr}");
-    assert_eq!(lines(&requests), [format!("POST {deploy}"), format!("POST {deploy}")]);
+    assert_eq!(
+        lines(&requests),
+        [format!("POST {deploy}"), format!("POST {deploy}")]
+    );
     let key = requests[0]
         .idempotency_key
         .clone()
@@ -335,7 +339,10 @@ fn an_unanswered_deploy_can_be_resumed_by_its_command_id() {
     let output = run_deploy(project.path());
     let requests = control.finish();
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(!output.status.success(), "an unanswered deploy must fail:\n{stderr}");
+    assert!(
+        !output.status.success(),
+        "an unanswered deploy must fail:\n{stderr}"
+    );
     assert_eq!(requests.len(), 3, "attempts stop at the retry bound");
     let key = requests[0]
         .idempotency_key
@@ -360,7 +367,10 @@ fn an_unanswered_deploy_can_be_resumed_by_its_command_id() {
     let output = run_deploy_with(project.path(), &[&resume]);
     let requests = control.finish();
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(output.status.success(), "the resumed deploy failed:\n{stderr}");
+    assert!(
+        output.status.success(),
+        "the resumed deploy failed:\n{stderr}"
+    );
     assert_eq!(requests[0].idempotency_key.as_deref(), Some(key.as_str()));
 }
 
