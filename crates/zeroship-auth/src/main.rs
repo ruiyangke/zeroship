@@ -515,8 +515,8 @@ mod tests {
         validate_startup_secrets(&cfg).expect("a strong stash key boots");
 
         // Does NOT cover: that `main` actually calls this function, nor that it
-        // exits 1 rather than continuing. `main` is not callable from a test;
-        // the process-level behaviour is what tests/config_check_e2e.sh drives.
+        // exits 1 rather than continuing. The crate's process-level config
+        // integration targets drive the real binary.
     }
 
     // The TOTP at-rest key. Same bridge, a different validator shape (decoded

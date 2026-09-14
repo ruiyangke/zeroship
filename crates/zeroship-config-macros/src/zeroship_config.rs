@@ -1250,8 +1250,8 @@ mod tests {
             "two consumers of one shared identity projected different names"
         );
 
-        // Does not cover: that the two binaries' RESOLVED values differ at run
-        // time. That is `tests/config_check_e2e.sh`, which starts both.
+        // Does not cover: the binaries' resolved run-time values. Each owning
+        // service crate drives its real binary in a config integration target.
     }
 
     #[test]

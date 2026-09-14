@@ -1907,8 +1907,7 @@ mod tests {
         }
 
         // Does NOT cover whether the environment is actually READ at that name;
-        // that is the generated resolver's `read_config_env!` and is exercised
-        // end to end by tests/config_check_e2e.sh.
+        // the config_env_tier integration target drives the generated resolver.
     }
 
     // A resolved secret publishes presence and nothing else. The sentinel is

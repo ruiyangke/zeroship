@@ -858,8 +858,8 @@ snapshots are shared across threads via a process-wide RwLock.
 | App console log capture + /logs endpoint | 🟢 | GET /logs/{app_id} | `crates/zeroship-worker/src/logs.rs` | — | `crates/zeroship-worker/src/handler.rs` | Ring buffer 1000 lines; no persistence. |
 | Prometheus metrics endpoint | 🟢 | GET /metrics | `crates/zeroship-worker/src/metrics.rs` | — | — | 13 counters; no auth. |
 | Health + readiness endpoints | 🟢 | GET /healthz, GET /readyz | `crates/zeroship-worker/src/health.rs` | — | `tests/e2e_platform.sh` | /healthz is a constant 200 (liveness); /readyz needs a current control poll AND a reachable blob store. |
-| Config validation dry-run | 🟢 | --check-config [--format] | `crates/zeroship-worker/src/main.rs` | — | `tests/config_check_e2e.sh` | Non-secret summary. |
-| Secret reference resolution | 🟢 | ZEROSHIP_CONTROL_KEY / ZEROSHIP_PAIRWISE_SALT / ... | `crates/zeroship-core/src/config/secrets.rs` | — | `tests/config_check_e2e.sh` | Literal or urn:zeroship:file only; secrets sit at their canonical overlay path. |
+| Config validation dry-run | 🟢 | --check-config [--format] | `crates/zeroship-worker/src/main.rs` | — | `crates/zeroship-worker/tests/check_config.rs` | Non-secret summary. Each service owns its process test. |
+| Secret reference resolution | 🟢 | ZEROSHIP_CONTROL_KEY / ZEROSHIP_PAIRWISE_SALT / ... | `crates/zeroship-core/src/config/secrets.rs` | — | `crates/zeroship-core/src/config/names.rs` | Literal or urn:zeroship:file only; secrets sit at their canonical overlay path. |
 | Unix domain socket listener | 🟢 | --socket / ZEROSHIP_WORKER_SOCKET | `crates/zeroship-worker/src/main.rs` | — | — | Stale socket removed at startup. |
 | Graceful shutdown with drain timeout | 🟢 | --shutdown-timeout | `crates/zeroship-worker/src/main.rs` | — | — | 0 skips the drain and drops in-flight work at once; use a large value to wait. |
 | mimalloc global allocator | 🟢 | internal | `crates/zeroship-worker/src/main.rs` | — | — | #[global_allocator]. |
