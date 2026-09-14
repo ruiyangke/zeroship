@@ -86,12 +86,7 @@ impl Input {
                 .immutable_after_insert()
                 .any(|field| field == name)
             {
-                return Err(
-                    crate::sql::mapping::QueryError::ImmutableAssignedField(format!(
-                        "UPDATE attempted to overwrite immutable assigned field '{name}'"
-                    ))
-                    .into(),
-                );
+                return Err(super::assignment_pass::immutable_assigned_field(name, None));
             }
             if column.logical_type != LogicalType::Timestamp {
                 return Err(DbError::validation(
