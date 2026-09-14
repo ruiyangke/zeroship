@@ -11,6 +11,8 @@ use zeroship_data_orm::{
     value, Value,
 };
 
+mod retained_deployment;
+
 #[compio::test]
 async fn sqlite_restart_copies_complete_scoped_prefix_and_rolls_back_failed_pages() {
     let directory = tempfile::tempdir().unwrap();

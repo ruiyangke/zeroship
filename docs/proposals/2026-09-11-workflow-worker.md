@@ -508,7 +508,7 @@ with this queue namespace; it is not a second authoritative placement store.
 | `workflow_manager.placement_receipts` | Immutable assignment/release request identity and recorded result. |
 | `workflow_manager.management` | Authorized command metadata, request provenance and reported closed outcome. |
 | `workflow_manager.jobs` | Immutable job specification, availability, current attempt, delivery fence and settlement digest/outcome. It currently also supplies submission and settlement deduplication. |
-| `workflow_manager.recovery_scopes` | Durable reconciliation responsibility, activation revision, future-job deployment, next due time and retained pending job. |
+| `workflow_manager.recovery_scopes` | Durable reconciliation responsibility, activation provenance and revision, next due time and retained pending job. |
 | `workflow_manager.schedule_deployments` | Immutable allowlisted schedule descriptors and the calendar interpretation for a normal deployment. No business input. |
 | `workflow_manager.schedule_activations` | Stable activation job, deployment, app revision and activation instant. Job settlement determines dispatch readiness. |
 | `workflow_manager.schedule_disables` | Historical Control disable commands in the shared activation revision sequence. Exact replay cannot change a newer scope state. |
@@ -1328,12 +1328,28 @@ A pause or cancellation outcome may record an applied intent while a
 task is leased. Its acknowledgement is not proof that execution stopped; the
 executor must observe that intent and stop and join before reporting quiescence.
 
-`ManageRun` currently contains no deployment while `JobSpec` requires one. The
-cutover must represent these operation-specific prerequisites explicitly, add
-the complete command and its revision, and carry the closed management outcome
-through the exact creator receipt and queue settlement. Queue ordering and barrier
-filters need native scalar linkage fields before limiting candidates. The existing
-separate inbox has no production consumer and should disappear with this handler
+The wire cutover removes the blanket `JobSpec.deployment_id`. Activation, advance
+and cron carry their required deployment inside their operation. Delivered
+management carries its request, run and management revision with a resolved
+command: transition with its operation, started restart with its optional task
+boundary, or latest restart with its frozen deployment. Latest has no task-boundary
+field, so a partial latest restart cannot be represented. Normalize the effective
+restart policy before resolving this command, while preserving exact acceptance
+request matching in the manager.
+
+Reconciliation and collection have no executable prerequisite. Reconciliation
+must also stop acquiring the desired deployment's queue hold and keeping that
+hold alive through its recovery scope. Recovery registration still validates
+desired-activation provenance; it does not need executable retention to repair
+app journal publications. Queue persistence may project an optional deployment
+for native joins, but must validate it against the closed operation. Acquisition,
+claim, renewal, settlement and successor insertion enforce retention only for
+operations that actually require code.
+
+This representation is still pending implementation. Carry the closed management
+outcome through the exact creator receipt and queue settlement. Queue ordering and
+barrier filters need native scalar linkage fields before limiting candidates.
+The existing separate inbox has no production consumer and should disappear with this handler
 cohort; it does not implement the delivered protocol. The manager must never query
 the customer journal to fill a deployment gap.
 
@@ -1374,7 +1390,8 @@ observe an unpublished customer commit. Bounded immediate publication retry is
 an optimization; periodic manager-issued reconciliation supplies correctness.
 The native `recovery::Recovery` ledger supplies the deadline and pending job.
 `ensure` registers a trusted activation without postponing existing work; a newer
-activation changes only the deployment selected for future jobs. `dispatch`
+activation updates its recorded provenance. Reconciliation remains app-scoped
+and does not depend on retaining that activation's executable. `dispatch`
 serializes with queue operations under the app lock and commits the job identity
 with the next deadline. A pending job is returned unchanged across retries and
 replicas until it settles. A fresh `Waiting` reconciliation settlement advances
@@ -1966,6 +1983,13 @@ management receipts across outer commit, abort and policy invalidation. This
 supplies the atomic application primitive; ordered management jobs, delivery
 receipts and manager settlement remain part of the pending protocol cutover.
 
+Started restart validates the locked run against its current generation's
+deployment, then checks that deployment's registration and existing held journal
+retention. An inactive available deployment remains usable; source inconsistency
+is a retryable infrastructure failure. This path uses only the creator journal
+and requires no artifact client. The manager-frozen latest target and ordered
+management delivery remain to be wired.
+
 The crate split includes the metadata client, closed job/delivery contracts,
 manager ORM queue and platform deployment ledger. Native coordinator placement
 and management now share the queue's ORM namespace and transaction handle.
@@ -2217,7 +2241,9 @@ overlap through continuation, admission changes, retained code, expired authorit
 and rollback of the run, publication and occurrence together.
 
 Queue retention is now required by the native queue, scheduler and recovery
-operations. PostgreSQL and SQLite tests cover lost hold replies, stale generations,
+operations. The pending operation-specific envelope cutover removes recovery-only
+holds while preserving retention for operations that need code.
+PostgreSQL and SQLite tests cover lost hold replies, stale generations,
 failed publication, schedule replacement, pending jobs after replacement and
 independent journal retention. They use a separate deployment catalog and ordinary
 app artifacts. Authorization tests preserve post-write revocation and cancellation
