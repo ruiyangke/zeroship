@@ -35,6 +35,7 @@ mod project_keys;
 mod secret_cipher;
 pub mod erasure;
 pub mod fee_policy;
+pub mod health;
 pub mod http_util;
 pub mod internal;
 pub mod invoice_payments;

@@ -27,7 +27,7 @@ use zeroship_bundle::{
 };
 use zeroship_control::config::{ControlSettings, ControlSettingsSources};
 use zeroship_control::{
-    api, device_handlers, env_handlers, erasure,
+    api, device_handlers, env_handlers, erasure, health,
     internal, oauth_grants_handlers, plan_catalog, stripe_handlers,
     workflow_instance_api,
     AppState, EnvStore, Quota, RateLimiter, Registry, StripeStore,
@@ -1179,6 +1179,7 @@ fn main() -> std::io::Result<()> {
     web::server(async move || {
         web::App::new()
             .state(state.clone())
+            .state(state.control_pg.clone())
             .state(readiness.clone())
             // --- Admin API ---
             .service(
@@ -1379,15 +1380,7 @@ fn main() -> std::io::Result<()> {
                     .state(stripe_handlers::webhook_payload_config())
                     .route(web::post().to(stripe_handlers::webhook)),
             )
-            // --- Health ---
-            .service(
-                web::resource("/healthz")
-                    .route(web::get().to(internal::healthz)),
-            )
-            .service(
-                web::resource("/readyz")
-                    .route(web::get().to(internal::readyz)),
-            )
+            .configure(health::configure)
     })
     .bind(&bind_addr)?
     .run()
