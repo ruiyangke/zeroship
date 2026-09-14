@@ -1418,13 +1418,13 @@ Each obligation has exactly one source generation and one kind:
 | Cascade | A generation settles as failed or cancelled, including entry into compensation, while some run names it as a cascading parent. | The next page of that generation's cascading children, in run identity order: live children record cancellation intent, and idle ones also receive an Advance intent. Terminal children are passed over. |
 | Notify | A continuation head's current generation becomes terminal while a current parent wait accepted a member of that head. | The next page of those waits, in wait identity order, through the head-directed member join: each idle parent is woken once per page with an Advance intent. |
 
-Settlement probes for a single cascading child and terminal completion for a
-single current waiting parent before recording anything; both probes read at
-most one row. Without one, no obligation is recorded, and none can become
-necessary later: a settled generation creates no further children, and a parent
-that accepts a terminal head resolves that wait when it next prepares. Repeated
-settlement of the same generation, such as cancelling a run that is already
-compensating, reuses its existing obligation.
+Settlement probes the parent linkage index for a single cascading child, and
+terminal completion probes the head's member join for a single current waiting
+parent; neither probe changes a run. Without a match, no obligation is
+recorded, and none can become necessary later: a settled generation creates no
+further children, and a parent that accepts a terminal head resolves that wait
+when it next prepares. Repeated settlement of the same generation, such as
+cancelling a run that is already compensating, reuses its existing obligation.
 
 Creator storage adds two tables, each with `id` as its sole primary key:
 
@@ -1437,9 +1437,10 @@ The publication journal gains Propagate projections: obligation identity and
 page revision are required for Propagate and absent for every other operation,
 and app/obligation/revision is unique. Cascade pages select through an index on
 the parent linkage, cascade flag and run identity, so each page is an index
-range scan. Notify pages reuse the head's member join, which returns one page
-in wait identity order; its database work still grows with the waits remaining
-behind the cursor.
+range scan. Notify pages and the notify probe reuse the head's member join,
+which returns one page in wait identity order; its reads still grow with the
+waits remaining behind the cursor and with earlier joiners whose checkpoints
+already resolved. Every page's writes stay within its bound.
 
 A delivered page captures original policy and delivery authority before journal
 I/O. Exact committed receipt replay is checked first under the app lock and
@@ -1465,15 +1466,16 @@ Pages reach children lazily, so an unfinished cascade obligation is also the
 effective cancellation fence. A cascading child whose parent generation has an
 unfinished cascade obligation is treated as cancelled by frontier preparation,
 task completion and heartbeat renewal, exactly as if its cancellation were
-recorded. Before any page reaches it, it cannot continue as new, resume into
-forward execution or commit a forward transition, whatever order continuation
-identities sort in. A completing child that creates new children settles with
-its own cascade obligation, so work created mid-propagation is reached through
-its owner. Restarting a cascading child while its parent's cascade is still
-propagating is a durable conflict, so a restarted generation never meets a
-pending page. Once the obligation finishes, every child it selected had recorded
-cancellation or was already terminal; a later restart is an explicit override
-that no remaining page can cancel.
+recorded. Before any page reaches it, it cannot continue as new or suspend into
+another wait: its next preparation, completion or resumed frontier settles it as
+cancelled, whatever order continuation identities sort in. A completing child
+that creates new children settles with its own cascade obligation, so work
+created mid-propagation is reached through its owner. Restarting a cascading
+child while its parent's cascade is still propagating is a durable conflict, so
+a restarted generation never meets a pending page. Once the obligation
+finishes, every child it selected had recorded cancellation or was already
+terminal; a later restart is an explicit override that no remaining page can
+cancel.
 
 ### Management and delivery barriers
 
@@ -2765,7 +2767,7 @@ ingress responsibility. Explicit release still checks all manager dependencies
 under the app lock. Automatic held-deployment release policy, capacity activation,
 and ordinary worker/CLI consumer composition remain to integrate.
 The consumer accepts activation, cron, advance, reconciliation, management,
-collection and fanout jobs. Collection uses the assigned creator journal and object store
+collection, fanout and propagation jobs. Collection uses the assigned creator journal and object store
 without loading an executable, creating a task or publishing unrelated intents.
 Fanout uses the assigned creator journal without an executable or object store;
 its bounded page commits recipient signals, affected frontiers and the successor
@@ -2784,9 +2786,26 @@ and historical restart, inherited cancellation and compensation, rollback,
 retired authority and scope refusal. Provenance contracts retain inline and
 referenced child results through a later child restart, a parent prefix copy
 and delivered collection of an abandoned preparation. Checkpoint references
-keep their members and generations until the checkpoint itself is removed, and
-a completion wakes parents across wait pages within one transaction deadline.
-Terminal-history retirement and bounded dependency delivery remain open.
+keep their members and generations until the checkpoint itself is removed.
+Terminal-history retirement remains open.
+
+Delivered dependency propagation replaces the inline cascade and parent wakeup.
+Settlement and terminal completion record only an obligation and its first
+Propagate intent; `AppWorkflows::propagation_job` commits each bounded page, and
+the delivery slot and consumer route it without an executor or object store.
+Paired PostgreSQL and SQLite contracts page cascades and notification past
+`MAX_ROW_LIMIT`, replay pages exactly after later pages and with exhausted
+authority, wake a parent with several waits once per page, and supersede a
+notify page after a head restart. They leave a restarted cascade source's new
+children untouched, cancel continuation and child creation mid-propagation
+through the fence, refuse restart until the obligation finishes, report the
+fence at delivered and legacy renewal, and fail closed on damaged projections,
+obligations and page records. Injected page failures roll back the cursor,
+effects and receipt together. Manager contracts accept worker-published
+Propagate pages and successors without holds or run projections, keep them
+deliverable behind blocking management commands, and leave maintenance duties
+unchanged; the consumer contract settles a page through separate manager and
+creator databases.
 The server injects an authenticated Control hold client into its native queue.
 Production deployment registration and activation publication still require
 host integration. The normal Control deployment transaction needs a durable
@@ -2841,7 +2860,7 @@ archive and retains the last valid deployment when current sources fail to build
 | Enrollment bootstrap and revocation | A revoked worker cannot regain equivalent authority by automatic enrollment. Finalize bootstrap trust, replacement authorization and registry freshness with auth ownership. |
 | Placement eligibility and capacity provider | Only platform-authorized app/zone combinations may be assigned. Select the trusted eligibility source and host adapter's durable request/progress contract. |
 | Archive acknowledgement | The direct Control source provides bounded convergence under original observation validity. Define any stronger execution-quiescence evidence separately from calendar acknowledgement or lease expiry. |
-| Complete job envelopes | Operation-specific deployment prerequisites, frozen manager restart targets and linked management outcomes are implemented. Collection and topic fanout have durable pages, receipts and delivered consumers. Complete bounded dependency continuation delivery. |
+| Complete job envelopes | Operation-specific deployment prerequisites, frozen manager restart targets and linked management outcomes are implemented. Collection, topic fanout and dependency propagation have durable pages, receipts and delivered consumers. |
 | Normal deployment publication | Bind activation revision issuance to a stable deploy command and immutable body. Artifact identity alone cannot distinguish a delayed retry from an intentional rollback. Compose mutable deployment side effects with command acceptance, connect archive/stage/restore to the durable handoff, and keep the calendar's activation origin explicit across delayed delivery. |
 | Scope retirement | Define ingress epoch closure and durable drain evidence. Registration expiry and empty polling cannot retire unpublished-work responsibility. |
 | Receipt retirement | Define admissibility fences and publication/settlement watermarks before deleting job deduplication state. Retain it until that proof exists. |
@@ -2880,7 +2899,9 @@ disjoint crates may proceed in parallel; the numbering is the merge order.
    parent notification, become paged jobs with durable progress in the creator
    journal, following the fanout and collection pattern. This touches only the
    creator engine and manager job contracts, so it can proceed alongside the
-   next slice.
+   next slice. The native contracts are implemented; see
+   [delivered dependency propagation](#delivered-dependency-propagation). The
+   local host delivers these pages once slice one's consumer runs there.
 3. **Normal deployment publication.** Control's deploy transaction records an
    idempotent command receipt and a lifecycle intent together. A Control
    publisher delivers register, activate and disable to the manager and confirms
