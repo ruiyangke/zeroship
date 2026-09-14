@@ -1397,6 +1397,10 @@ async fn provision_runtime_app_role(
 }
 
 #[cfg(test)]
+#[path = "apply/tests/workflow_provisioning.rs"]
+mod workflow_provisioning_tests;
+
+#[cfg(test)]
 mod tests {
     use serde_json::json;
 

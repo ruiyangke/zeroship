@@ -238,11 +238,11 @@ macro_rules! declare_entity_id {
                 );
                 assert!(
                     !probe_from_str_ref::Probe::<$name>::IMPLEMENTED,
-                    "construction is mint or parse; there is no third way in"
+                    "construction requires minting or validated parsing"
                 );
                 assert!(
                     !probe_from_string::Probe::<$name>::IMPLEMENTED,
-                    "construction is mint or parse; there is no third way in"
+                    "construction requires minting or validated parsing"
                 );
                 assert!(
                     !probe_partial_eq_str::Probe::<$name>::IMPLEMENTED,
