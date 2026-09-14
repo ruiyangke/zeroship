@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { mkdtemp, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -19,6 +22,21 @@ function appRecord(name) {
     created_at: "2026-09-12T00:00:00Z",
     updated_at: "2026-09-12T00:00:00Z",
   };
+}
+
+/** Control's acceptance of the deploy command `request` carries. */
+function acceptance(request, headers = {}) {
+  return Response.json(
+    {
+      command_id: request.headers.get("idempotency-key"),
+      deploy_id: "dep_0000000002e4nenowz3qmamtd",
+      deploy_hash: "sha256:accepted",
+      blobs_uploaded: 1,
+      blobs_deduped: 0,
+      lifecycle_revision: 1,
+    },
+    { headers },
+  );
 }
 
 async function withMcp(fetchImpl, run) {
@@ -53,7 +71,7 @@ test("deploy_app keeps typed ids and names as explicit target variants", async (
     calls.push({ method, url, body });
 
     if (method === "POST" && url.endsWith(`/${APP_ID}/deploy`)) {
-      return Response.json({ deploy_hash: "sha256:existing" });
+      return acceptance(new Request(input, init));
     }
     return new Response("unexpected request", { status: 599 });
   }, async (client) => {
@@ -88,7 +106,7 @@ test("deploy_app keeps typed ids and names as explicit target variants", async (
       return Response.json(appRecord(body.name), { status: 201 });
     }
     if (method === "POST" && url.endsWith(`/${APP_ID}/deploy`)) {
-      return Response.json({ deploy_hash: "sha256:created" });
+      return acceptance(new Request(input, init));
     }
     return new Response("unexpected request", { status: 599 });
   }, async (client) => {
@@ -140,4 +158,53 @@ test("deploy_app refuses raw UUIDs and the removed ambiguous app input", async (
     assert.match(removedInput.content[0].text, /Invalid arguments/);
   });
   assert.deepEqual(calls, []);
+});
+
+test("deploy_app reports an unknown outcome by command id and resumes it", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "zeroship-mcp-"));
+  const zshipPath = join(dir, "app.zship");
+  await writeFile(zshipPath, new Uint8Array([4, 5, 6]));
+  const sent = [];
+  const answers = [
+    () => {
+      throw new TypeError("fetch failed");
+    },
+    (request) => acceptance(request, { "idempotent-replayed": "true" }),
+  ];
+  await withMcp(async (input, init = {}) => {
+    const request = new Request(input, init);
+    sent.push({
+      key: request.headers.get("idempotency-key"),
+      bytes: [...new Uint8Array(await request.clone().arrayBuffer())],
+    });
+    return answers.shift()(request);
+  }, async (client) => {
+    const unknown = await client.callTool({
+      name: "deploy_app",
+      arguments: { target: { kind: "id", appId: APP_ID }, zshipPath },
+    });
+    assert.equal(unknown.isError, true);
+    const commandId = /"(dcm_[0-9a-z]{25})"/.exec(unknown.content[0].text)?.[1];
+    assert.ok(commandId, unknown.content[0].text);
+    assert.match(unknown.content[0].text, /outcome is unknown/);
+
+    const resumed = await client.callTool({
+      name: "deploy_app",
+      arguments: { target: { kind: "id", appId: APP_ID }, zshipPath, commandId },
+    });
+    assert.equal(resumed.isError, undefined, resumed.content[0].text);
+    const result = JSON.parse(resumed.content[0].text);
+    assert.equal(result.command_id, commandId);
+    assert.equal(result.replayed, true);
+
+    const malformed = await client.callTool({
+      name: "deploy_app",
+      arguments: { target: { kind: "id", appId: APP_ID }, zshipPath, commandId: APP_ID },
+    });
+    assert.equal(malformed.isError, true);
+    assert.match(malformed.content[0].text, /commandId must be a canonical deploy command id/);
+  });
+  assert.equal(sent.length, 2);
+  assert.deepEqual(sent[1], sent[0]);
+  assert.deepEqual(sent[0].bytes, [4, 5, 6]);
 });
