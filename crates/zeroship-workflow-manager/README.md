@@ -77,8 +77,11 @@ activation job to complete; replacement stops future generation without changing
 already queued jobs. Claims and receipt replay verify stored job linkage, and
 frontier extension checks the immutable descriptor and calendar interpretation.
 Creator activation and cron acceptance are handled by the customer engine.
-The server drives due scheduling through the native manager. Normal deployment
-publication and ordinary worker/CLI composition still need integration.
+`Scheduler::selection` reads the app's current revision, enabled state and
+selected activation, including whether that activation job settled as completed.
+The server and the local CLI host drive due scheduling through the native
+manager. Normal Control deployment publication and ordinary worker composition
+still need integration.
 
 Calendar disable shares the platform's activation revision sequence. Its durable
 receipt remains replayable after restore, and disabling before the first
@@ -116,6 +119,13 @@ It records normal app deployments and generation-fenced retention holds. Manager
 queue ownership and customer journal ownership require separate host authority;
 the journal hold API does not grant manager access.
 
+`local::LocalPlatform` binds the local host's single platform metadata file. Its
+explicit SQLite bootstrap installs the deployment catalog and manager schemas
+together into an empty file and refuses, without rewriting, any file whose stored
+DDL differs from that combined compiler output, including a deployment-only
+catalog. The catalog and the queue use separate ORM bindings to the file; the
+queue acquires its deployment holds through that catalog.
+
 `deployments::latest::LatestDeploymentSource` observes the ordinary app deployment
 pointer through a native ORM join to the same app's catalog row. It selects only
 identity, hash and retention state; missing or unavailable targets refuse without
@@ -142,12 +152,13 @@ Control reclamation must consult the shared ledger before deleting manifests.
 `schema/` and `schema/deployments/` record definitions through the migration DSL
 and generate migration metadata and dialect DDL. Rust ORM models use native
 `schema!` declarations, checked against that metadata in tests. Runtime queue and
-retention operations use collections and models. Database clock queries and local catalog
-provisioning remain explicit host operations.
+retention operations use collections and models. Database clock queries and local platform
+bootstrap remain explicit host operations.
 
-The native library is composed by the workflow server under
-the [workflow proposal](../../docs/proposals/2026-09-11-workflow-worker.md).
-Normal deployment publication, the worker consumer and CLI composition still require cutover.
+The native library is composed by the workflow server and by `zeroship serve`
+under the [workflow proposal](../../docs/proposals/2026-09-11-workflow-worker.md).
+Normal Control deployment publication and the production worker consumer still
+require cutover.
 
 Run `cargo test -p zeroship-workflow-manager` for PostgreSQL Testcontainers and
 SQLite queue, scheduling and retention contracts.
