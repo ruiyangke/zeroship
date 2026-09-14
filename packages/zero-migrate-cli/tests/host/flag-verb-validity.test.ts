@@ -31,19 +31,31 @@
 
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const CLI_BIN = resolve(HERE, "../../src/cli-bin.ts");
-const CLI_SRC = resolve(HERE, "../../src/cli.ts");
 const ABI = process.platform === "linux" ? "-gnu" : "";
 const ADDON_PATH = resolve(
   HERE,
   `../../../../crates/zeroship-migrate-node/zeroship-migrate-node.${process.platform}-${process.arch}${ABI}.node`,
 );
+
+function helpText(): string {
+  const result = spawnSync(process.execPath, ["--import", "tsx", CLI_BIN, "--help"], {
+    encoding: "utf8",
+    env: { ...process.env, ZERO_MIGRATE_ADDON_PATH: ADDON_PATH },
+  });
+  const text = `${result.stdout ?? ""}\n${result.stderr ?? ""}`;
+  assert.equal(result.status, 0, `zero-migrate --help failed:\n${text}`);
+  assert.match(text, /Usage:/, "zero-migrate --help must print its usage block");
+  return text;
+}
+
+const HELP = helpText();
 
 /** Flags whose per-verb validity the CLI enforces, with a usable value for the
  *  ones that take one. `null` marks a boolean. */
@@ -92,13 +104,7 @@ export default {
 
 /** What the usage block claims for one verb. */
 function flagsInUsage(verb: string): ReadonlySet<string> {
-  const source = readFileSync(CLI_SRC, "utf8");
-  const start = source.indexOf("Usage:");
-  const end = source.indexOf("zero-migrate --version", start);
-  assert.ok(start !== -1 && end !== -1, "the usage block must be findable in cli.ts");
-  const line = source
-    .slice(start, end)
-    .split("\n")
+  const line = HELP.split("\n")
     .find((candidate) => candidate.trim().startsWith(`zero-migrate ${verb} `));
   assert.ok(line !== undefined, `--help must document the ${verb} command`);
   return new Set(line.match(/--[a-z-]+/g) ?? []);
