@@ -1,0 +1,29 @@
+error[E0277]: the trait bound `std::string::String: DecodeValue<Nullable<zeroship_data_orm::orm::sql_types::Text>>` is not satisfied
+  --> tests/ui/conversion_wrong_read_type.rs:17:10
+   |
+17 | #[derive(FromRow)]
+   |          ^^^^^^^ the trait `DecodeValue<Nullable<zeroship_data_orm::orm::sql_types::Text>>` is not implemented for `std::string::String`
+   |
+help: the following other types implement trait `DecodeValue<S>`
+  --> src/orm/codecs.rs
+   |
+   |         impl DecodeValue<$sql> for String {
+   |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |         |
+   |         `std::string::String` implements `DecodeValue<zeroship_data_orm::orm::sql_types::Text>`
+   |         `std::string::String` implements `DecodeValue<zeroship_data_orm::orm::sql_types::Time>`
+...
+   | text_codec!(Text, Time);
+   | ----------------------- in this macro invocation
+...
+   | impl DecodeValue<CalendarDate> for String {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `std::string::String` implements `DecodeValue<zeroship_data_orm::orm::sql_types::CalendarDate>`
+note: required by a bound in `zeroship_data_orm::orm::Row::take_with`
+  --> src/orm/model.rs
+   |
+   |     pub fn take_with<C, T, U>(
+   |            --------- required by a bound in this associated function
+...
+   |         T: DecodeValue<C::SqlType>,
+   |            ^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `Row::take_with`
+   = note: this error originates in the derive macro `FromRow` which comes from the expansion of the macro `text_codec` (in Nightly builds, run with -Z macro-backtrace for more info)

@@ -99,6 +99,21 @@ impl Row {
         })?;
         T::decode_value(value).map_err(|error| field_error::<C>("decode", error))
     }
+
+    /// Decode a column's native value, then apply a caller-owned conversion.
+    ///
+    /// # Errors
+    /// Returns missing-field, codec, or conversion errors with column context.
+    pub fn take_with<C, T, U>(
+        &mut self,
+        convert: impl FnOnce(T) -> Result<U, DbError>,
+    ) -> Result<U, DbError>
+    where
+        C: ReadableColumn,
+        T: DecodeValue<C::SqlType>,
+    {
+        convert(self.take::<C, T>()?).map_err(|error| field_error::<C>("decode", error))
+    }
 }
 fn field_error<C: Column>(operation: &str, error: DbError) -> DbError {
     DbError::validation(
@@ -119,6 +134,61 @@ where
         .encode_value()
         .map_err(|error| field_error::<C>("encode", error))?;
     record.insert(C::NAME.into(), value);
+    Ok(())
+}
+
+/// Convert a caller's value before encoding it through the column's native codec.
+///
+/// # Errors
+/// Returns conversion or codec errors with column context.
+pub fn encode_field_with<C, T, U>(
+    record: &mut Record,
+    value: T,
+    convert: impl FnOnce(T) -> Result<U, DbError>,
+) -> Result<(), DbError>
+where
+    C: WritableColumn,
+    U: EncodeValue<C::SqlType>,
+{
+    let value = convert(value).map_err(|error| field_error::<C>("encode", error))?;
+    encode_field::<C, U>(record, value)
+}
+
+/// Apply a conversion only when the insert supplies a value.
+///
+/// # Errors
+/// Returns conversion or codec errors with column context.
+pub fn encode_default_with<C, T, U>(
+    record: &mut Record,
+    value: Defaulted<T>,
+    convert: impl FnOnce(T) -> Result<U, DbError>,
+) -> Result<(), DbError>
+where
+    C: DefaultableColumn,
+    U: EncodeValue<C::SqlType>,
+{
+    if let Defaulted::Value(value) = value {
+        encode_field_with::<C, T, U>(record, value, convert)?;
+    }
+    Ok(())
+}
+
+/// Apply a conversion only when the update supplies a value.
+///
+/// # Errors
+/// Returns conversion or codec errors with column context.
+pub fn encode_change_with<C, T, U>(
+    record: &mut Record,
+    value: Change<T>,
+    convert: impl FnOnce(T) -> Result<U, DbError>,
+) -> Result<(), DbError>
+where
+    C: UpdatableColumn,
+    U: EncodeValue<C::SqlType>,
+{
+    if let Change::Set(value) = value {
+        encode_field_with::<C, T, U>(record, value, convert)?;
+    }
     Ok(())
 }
 /// Used by insert fields carrying `#[orm(default)]`.
