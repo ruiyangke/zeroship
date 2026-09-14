@@ -4,7 +4,7 @@ use std::{path::PathBuf, sync::Mutex};
 use zeroship_bundle::{BlobError, PutOutcome};
 use zeroship_control::{
     cron::deploy_retention::{Collector, DeployRetentionConfig},
-    registry::RegistryError,
+    publication::{Acceptance, CatalogError, VerifiedDeployment},
 };
 use zeroship_workflow_manager::deployments::{self, DeploymentHolds};
 
@@ -76,6 +76,23 @@ async fn seed_versions(fixture: &Fixture, label: &str) -> Versions {
         current,
         current_hash,
     }
+}
+
+/// Redeploy the old version through the catalog command, as a seeded actor.
+async fn redeploy_old(fixture: &Fixture, versions: &Versions) -> Result<Acceptance, CatalogError> {
+    let actor = fixture.actor().await;
+    let deployment =
+        VerifiedDeployment::verify(versions.old_manifest.clone(), versions.old_hash.clone())
+            .expect("the seeded manifest verifies");
+    fixture
+        .state
+        .registry
+        .deploy(&super::deployment_commands::command(
+            &versions.app,
+            &actor,
+            deployment,
+        ))
+        .await
 }
 
 async fn state(fixture: &Fixture, id: &str) -> String {
@@ -432,17 +449,8 @@ async fn committed_reclamation_refuses_activation_and_survives_cancellation() {
         };
         assert_eq!(state(&fixture, &versions.old).await, "reclaiming");
         assert!(matches!(
-            fixture
-                .state
-                .registry
-                .set_deploy_with_manifest(
-                    &versions.app,
-                    &versions.old_hash,
-                    &versions.old_manifest,
-                    None
-                )
-                .await,
-            Err(RegistryError::Conflict(_))
+            redeploy_old(&fixture, &versions).await,
+            Err(CatalogError::DeploymentReclaimed)
         ));
         assert_current(&fixture, &versions.app, &versions.current_hash).await;
         fixture
@@ -460,17 +468,8 @@ async fn committed_reclamation_refuses_activation_and_survives_cancellation() {
     assert_eq!(restart.tick().await.unwrap().finished, 1);
     assert_eq!(state(&fixture, &versions.old).await, "deleted");
     assert!(matches!(
-        fixture
-            .state
-            .registry
-            .set_deploy_with_manifest(
-                &versions.app,
-                &versions.old_hash,
-                &versions.old_manifest,
-                None
-            )
-            .await,
-        Err(RegistryError::Conflict(_))
+        redeploy_old(&fixture, &versions).await,
+        Err(CatalogError::DeploymentReclaimed)
     ));
     assert_current(&fixture, &versions.app, &versions.current_hash).await;
 }
@@ -523,12 +522,7 @@ async fn activation_holds_app_lock_before_collector_rechecks_current_deployment(
         .unwrap();
     let mut scan = collector(&fixture, fixture.state.blob_store.clone(), 128).await;
     compio::time::timeout(Duration::from_secs(20), async {
-        let activation = fixture.state.registry.set_deploy_with_manifest(
-            &versions.app,
-            &versions.old_hash,
-            &versions.old_manifest,
-            None,
-        );
+        let activation = redeploy_old(&fixture, &versions);
         let observer = async {
             let activation_pid = waiter(&fixture.platform.admin, blocker_pid).await;
             let collect = scan.tick();
@@ -546,7 +540,7 @@ async fn activation_holds_app_lock_before_collector_rechecks_current_deployment(
             assert_eq!(stats.unwrap().failed, 0);
         };
         let (activated, ()) = futures::join!(activation, observer);
-        assert!(activated.unwrap());
+        assert!(!activated.unwrap().replayed());
     })
     .await
     .expect("activation/collection race stalled");

@@ -20,10 +20,14 @@ use std::process::ExitCode;
 
 use clap::Parser;
 use compio_postgres::{Client, NoTls};
+use sha2::{Digest, Sha256};
 use zeroship_bundle::{build_blob_store, StoreUrl};
 use zeroship_control::plan_catalog::{free_plan_id, seed_plans};
+use zeroship_control::publication::{
+    CatalogError, CommandBinding, DeployCommand, VerifiedDeployment, ZSHIP_CONTENT_TYPE,
+};
 use zeroship_control::registry::{Registry, RegistryError};
-use zeroship_core::UserId;
+use zeroship_core::{DeployCommandId, UserId};
 
 zeroship_core::declare_env_consumer!(
     /// This one-shot has no `#[zeroship_config]` declaration, so it declares its
@@ -61,7 +65,7 @@ struct Cli {
     /// Create the app and ingest the artifact, but do NOT make the deploy live.
     ///
     /// An app whose `.zship` carries a runtime schema descriptor cannot be made
-    /// live until its migrations are applied - `Registry::set_deploy_with_manifest`
+    /// live until its migrations are applied - `Registry::deploy`
     /// refuses it, the same way the deploy API refuses a creator. But the
     /// migration service needs the app row to exist before it will authorize
     /// database creation or apply anything, and this tool is what creates that
@@ -180,41 +184,41 @@ async fn run(cli: Cli) -> Result<zeroship_core::types::AppRecord, DevProvisionEr
         );
         return Ok(app);
     }
-    // Read from the SAME manifest bytes the registry is about to store, so the
-    // descriptor this call presents is the descriptor that would go live.
-    let descriptor_sha256 =
-        serde_json::from_str::<zeroship_bundle::Manifest>(&success.manifest_json)
-            .map_err(|e| err(format!("re-parse ingested manifest: {e}")))?
-            .runtime_descriptor
-            .map(|entry| entry.hash);
-    let updated = registry
-        .set_deploy_with_manifest(
-            &app.id,
-            &success.deploy_hash,
-            &success.manifest_json,
-            descriptor_sha256.as_deref(),
-        )
-        .await
-        .map_err(|e| match e {
-            // The schema precondition, restated for a tool whose caller is a
-            // shell script rather than the deploy CLI. Without the second
-            // sentence this reads as a bug in the artifact.
-            RegistryError::SchemaNotApplied { .. } => err(format!(
-                "deploy commit refused: {e}\n\
-                 app {0} exists and its blobs are ingested. Create its database with POST \
-                 /v1/databases/{0}, apply its migrations through zeroship-migrate-server, then \
-                 re-run this command. To create the app WITHOUT this failure, pass \
-                 --defer-deploy on the first call.",
-                app.id.as_str(),
-            )),
-            other => err(format!("deploy commit: {other}")),
-        })?;
-    if !updated {
-        return Err(err(format!(
+    // Deploy through the same catalog command the API uses: one command id,
+    // bound to this tool's owner and the bytes it read, so the receipt, the
+    // app pointer and the lifecycle intent commit together.
+    let deployment = VerifiedDeployment::verify(success.manifest_json, success.deploy_hash)
+        .map_err(|e| err(format!("verify ingested deployment: {e}")))?;
+    let command = DeployCommand {
+        binding: CommandBinding {
+            id: DeployCommandId::mint(),
+            app: app.id.clone(),
+            actor: owner_id.clone(),
+            content_type: ZSHIP_CONTENT_TYPE,
+            archive_sha256: hex::encode(Sha256::digest(&bytes)),
+        },
+        deployment,
+        blobs_uploaded: success.blobs_uploaded,
+        blobs_deduped: success.blobs_deduped,
+    };
+    registry.deploy(&command).await.map_err(|e| match e {
+        // The schema precondition, restated for a tool whose caller is a
+        // shell script rather than the deploy CLI. Without the second
+        // sentence this reads as a bug in the artifact.
+        CatalogError::SchemaNotApplied { .. } => err(format!(
+            "deploy commit refused: {e}\n\
+             app {0} exists and its blobs are ingested. Create its database with POST \
+             /v1/databases/{0}, apply its migrations through zeroship-migrate-server, then \
+             re-run this command. To create the app WITHOUT this failure, pass \
+             --defer-deploy on the first call.",
+            app.id.as_str(),
+        )),
+        CatalogError::AppAbsent => err(format!(
             "app {} vanished between create/reuse and deploy commit",
             app.id.as_str()
-        )));
-    }
+        )),
+        other => err(format!("deploy commit: {other}")),
+    })?;
 
     Ok(app)
 }

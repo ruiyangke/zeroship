@@ -873,8 +873,9 @@ and instance credentials grant neither operation. Registration returns the
 accepted typed declaration, which the client compares in full; native storage
 canonicalizes its ordering independently. Activation returns the stable job,
 whose app, deployment, operation and revision must match the original request.
-These routes require no enrolled or assigned worker. Normal deployment callers
-still need the durable publication handoff described below.
+These routes require no enrolled or assigned worker. Control's lifecycle
+publisher is their production caller, delivering the durable intents described
+under [normal deployment publication](#normal-deployment-publication).
 
 ### Delivery, execution and settlement
 
@@ -1029,6 +1030,7 @@ reconstruct or overwrite creator history.
 | Job, manager | Pending work becomes deliverable at its deadline, receives a leased attempt, and settles against that attempt. Expiry permits redelivery of the same job. |
 | Run generation, creator | The journal owns `queued`, `running`, `sleeping`, `waiting`, `paused`, `stalled`, `compensating`, `completed`, `failed` and `cancelled`. The existing lifecycle rules determine legal transitions. |
 | Publication intent, creator | A committed pending intent remains recoverable until a matching manager receipt confirms publication. An unknown remote result remains pending. |
+| Lifecycle intent, Control | A committed pending intent blocks later revisions of its app and, for activation, retains its deployment until the manager's exact receipt confirms it. |
 | Management request, both owners | Manager acceptance creates delivery responsibility. Creator application/refusal produces the durable outcome; manager confirmation reports that outcome and settles the matching barrier. |
 | Deployment, both owners | Platform activation selects code for new work; creator activation confirms local prerequisites. A run's existing pin changes only through an explicit lifecycle operation. |
 
@@ -1236,6 +1238,129 @@ Already queued occurrences remain accepted manager work under their original
 deployment and activation prerequisite; removal does not silently withdraw them.
 Accepted runs retain their normal lifecycle. Queue-owned deployment retention
 starts before dispatch, not after the worker first opens its journal.
+
+### Normal deployment publication
+
+A normal deploy is a command with a stable identity. Control accepts it once,
+commits the app's desired lifecycle and its publication intent together, and
+delivers that intent to the manager afterwards. No HTTP call to the manager is
+the only record of a lifecycle change.
+
+```text
+Client               Control / Control DB                    Manager
+  |                          |                                   |
+  |-- deploy (command id) -->| authorize app; hash upload         |
+  |                          | receipt? -> replay original result|
+  |                          | ingest blobs; project schedules   |
+  |                          | transaction: app lock, receipt,   |
+  |                          |   admission, deployment, pointer, |
+  |                          |   revision + intent               |
+  |<-- acceptance result ----| COMMIT                            |
+  |                          |                                   |
+  |                  publisher: lowest pending revision per app  |
+  |                          |-- register deployment ----------->|
+  |                          |-- activate or disable revision -->| queue hold, then
+  |                          |<-- exact receipt -----------------| commit activation
+  |                          | transaction: acknowledge intent   |
+```
+
+**Command identity.** A deploy request carries a canonical deploy command id
+(`dcm_` typed id) in exactly one `Idempotency-Key` header. Control refuses a
+missing, repeated or malformed key before reading the body. The client mints
+the id once per logical deploy; its transport retries reuse the id with the
+bytes it captured. A later invocation is a new command unless it explicitly
+resumes a surfaced id. The artifact hash is never the command identity: a
+redeploy of the same artifact, including an intentional rollback, is a new
+command and a new activation.
+
+**Receipt.** Control hashes the bounded upload it actually consumed. The
+immutable receipt binds the command id to the app, the authenticated actor, the
+operation, the normalized content type and that archive digest, and stores the
+selected deployment id and hash with the acceptance result, including the blob
+counters of the first acceptance. Authorization and app scope run before any
+receipt lookup, so a deleted or unauthorized app is refused without disclosing
+a receipt. An exact retry returns the stored result without ingest, admission,
+retargeting or a new revision. The same id with another digest, actor, app or
+content type is a conflict that reveals nothing about the stored receipt.
+Refusals by ingest, schedule projection or schema admission create no receipt,
+so a retry after the creator fixes the cause is evaluated afresh. Receipts
+outlive bundle retention. Erasing the actor clears the receipt's attribution; a
+later retry under that id conflicts. Receipt retirement is not defined.
+
+**Catalog transaction.** One native ORM transaction on the Control database
+performs every write through its callback database: lock the app row, treating
+a deleted app as absent; recheck the receipt; apply the existing schema
+admission against the newest applied descriptor; acquire or insert the
+deployment row after the app row, refusing reclaiming or deleted storage;
+update the app pointer and manifest; for an active app, allocate the next
+lifecycle revision and insert its activation intent; insert the receipt. Any
+error, including a workflow projection or domain refusal raised inside the
+callback, rolls all of it back. Manager and blob I/O stay outside the
+transaction.
+
+**Revisions and intents.** `zeroship.apps.lifecycle_revision` is the app's
+revision high-water mark, shared by activation and disable and never reused.
+Each transition inserts one intent `(app, revision, action)`. Activation
+carries the deployment id and the exact `RegisterSchedules` projection;
+disable carries neither. The projection is read from the verified manifest by
+the creator engine's declaration parser and checked against the manager's
+schedule limits, so static input and unknown fields stay in the artifact and a
+projection the manager would refuse fails the deploy before acceptance. An app
+without schedules still publishes an activation with an empty list: replacement
+fences the previous calendar and recovery follows the new deployment.
+
+| Transition | Catalog effect |
+| --- | --- |
+| Deploy, active app | Pointer update and activation intent at the next revision. |
+| Deploy, archived app | Staged pointer update only; no revision and no intent. |
+| Archive | Archive marker and disable intent at the next revision; archiving an archived app changes nothing. |
+| Restore | After the existing migration checks, activation of the staged deployment at the next revision. Restoring an active app, or an app with no staged deployment, adds no intent. |
+| Delete | No new intent. Pending intents still publish in order; a deleted app is absent to deploy, restore and command replay. |
+
+Restoring the deployment the manager last selected resumes its retained
+calendars; restoring a different staged deployment replaces them. A fresh
+redeploy of the active deployment is an intentional activation.
+
+**Publisher.** A Control driver reads a bounded page of pending intents in
+`(app, revision)` order. It publishes each app's lowest pending revision and
+continues with that app's next revision only after confirming the previous one;
+the app's first failure ends its turn. Activation registers the deployment's
+projection, which the manager keeps immutable per deployment, then activates
+the revision; disable disables the revision. Calls use the exact-Control signed
+register, activate and disable routes, outside any database transaction and
+under a per-attempt deadline. A fresh transaction records only the receipt the
+manager returned for that exact request: the Activate job for the app,
+deployment and revision, or the exact disable echo. A lost reply, timeout,
+refusal or failed confirmation leaves the intent pending, and the next attempt
+resends the same revision, which the manager replays exactly. A conflict never
+becomes an acknowledgement, and a changed app pointer never implies one. The
+page cursor rotates across apps, so a blocked app cannot starve others, and a
+later intent of a blocked app is never sent ahead of an earlier one. Replicas
+may publish concurrently: the manager serializes each app scope, an identical
+confirmation is idempotent, and a different receipt for an acknowledged intent
+is a storage failure.
+
+A disable queued behind an unsent activation is delivered after that
+activation. The archived app's execution fence is creator admission policy;
+manager acknowledgement of a disable proves only that later calendar turns
+observe it.
+
+**Retention.** The collector treats a pending activation intent as a direct
+dependency of its deployment, checked under the app lock beside the current and
+staged pointers, the newest deployment and both holder classes. The manager
+acquires its queue hold before committing activation, so the hold exists before
+Control acknowledges; acknowledgement is the same row update that removes the
+intent dependency. Disable adds no executable dependency.
+
+**Clients.** `zeroship deploy` mints one command id per invocation or resumes
+one named by `--command-id`, reads the artifact once, retries transport
+failures and server errors with the same id and bytes, and prints the id with
+the resume command when the outcome remains unknown. `@zeroship/control`
+deploys an immutable command value holding the id and a `Blob` snapshot; it
+accepts no stream or form body.
+
+**Legacy schedules.** The `zeroship.workflow_schedules` reconciler, its sweep
+and its table are deleted; only the manager creates occurrences.
 
 ### Sleeps, workflow retries and bounded turns
 
@@ -2305,8 +2430,9 @@ Authenticated job submission, claim, heartbeat and settlement routes are in
 [`workflow-server/src/api/jobs.rs`](../../crates/zeroship-workflow-server/src/api/jobs.rs).
 Control schedule preparation, activation and disable routes are in
 [`workflow-server/src/api/schedules.rs`](../../crates/zeroship-workflow-server/src/api/schedules.rs).
-Normal deployment publication and ingress-scope host composition remain cutover
-work; endpoint availability alone does not provide their durable handoff.
+Control's lifecycle publisher is the durable handoff for normal deployment
+publication. Ingress-scope host composition remains cutover work; endpoint
+availability alone does not provide its durable handoff.
 The inventory includes required semantics beyond the currently available routes.
 
 | Operation | Authorized caller and receiving owner | Successful result |
@@ -2899,8 +3025,8 @@ preserving calendar progress; replacing it selects the replacement's calendar.
 Historical command replay cannot undo a newer selection. Disabled scopes are
 excluded before due-page limits. Exact-Control authenticated register, activate
 and disable routes expose these native operations independently of workers.
-Normal deployment and lifecycle commands still need their durable Control
-publication handoff.
+Control's deploy, archive and restore commands reach them through committed
+lifecycle intents that its publisher delivers in revision order.
 
 Creator activation now resolves the immutable deployment hash through the
 authenticated journal hold receipt and verifies the normal app artifact. Its
@@ -3007,13 +3133,18 @@ deliverable behind blocking management commands, and leave maintenance duties
 unchanged; the consumer contract settles a page through separate manager and
 creator databases.
 The server injects an authenticated Control hold client into its native queue.
-Production deployment registration and activation publication still require
-host integration. The normal Control deployment transaction needs a durable
-publication intent and stable activation identity; an HTTP attempt after commit
-cannot be its only handoff. Pending activation consumers must retain their code
-until the manager's exact acceptance receipt discharges that intent. The manager
-acquires its queue hold through Control outside Control's deployment transaction
-to avoid a callback waiting on the transaction that initiated it.
+Control's deployment transaction records a lifecycle intent at a stable app
+revision, and its publisher delivers registration, activation and disable
+afterwards, so no HTTP attempt after commit is the only handoff. The collector
+keeps a pending activation's code until the manager's exact receipt discharges
+the intent. The manager acquires its queue hold through Control outside
+Control's deployment transaction, so the callback never waits on the
+transaction that initiated it. Control contracts drive the signed manager routes
+over the canonical platform schema: revision order across deploy, archive,
+staged deploy, restore and rollback; empty schedule removal; a publisher killed
+after commit, a reply lost after remote activation and a failed confirmation;
+a manager conflict; a blocked app beside others; retention until the queue hold
+takes over; and rollback of every staged catalog write.
 Publication intents and advance-job receipts exist in the journal; their
 delivered reconciliation and queue settlement are integrated natively. Creator
 reconciliation tests exercise persisted progress, failed publication, lost hold
@@ -3061,7 +3192,6 @@ archive and retains the last valid deployment when current sources fail to build
 | --- | --- |
 | Archive acknowledgement | The direct Control source provides bounded convergence under original observation validity. Define any stronger execution-quiescence evidence separately from calendar acknowledgement or lease expiry. |
 | Complete job envelopes | Operation-specific deployment prerequisites, frozen manager restart targets and linked management outcomes are implemented. Collection, topic fanout and dependency propagation have durable pages, receipts and delivered consumers. |
-| Normal deployment publication | Bind activation revision issuance to a stable deploy command and immutable body. Artifact identity alone cannot distinguish a delayed retry from an intentional rollback. Compose mutable deployment side effects with command acceptance, connect archive/stage/restore to the durable handoff, and keep the calendar's activation origin explicit across delayed delivery. |
 | Receipt retirement | Define admissibility fences and publication/settlement watermarks before deleting job deduplication state. Retain it until that proof exists. |
 | Dispatch fairness and persistent failure | Per-app dispatch tickets rotate successfully claimed jobs behind waiting work without changing due times. Define cross-app host fairness, management priority and observable parking/retry policy for failures before claim without deleting accepted work. |
 | Snapshot restore | Define restore epochs, fenced admission and cross-owner reconciliation with the storage owners; process-restart recovery alone cannot protect lost receipts or resurrected authority. |
@@ -3103,13 +3233,16 @@ is the merge order.
    next slice. The native contracts are implemented; see
    [delivered dependency propagation](#delivered-dependency-propagation). The
    local host delivers these pages once slice one's consumer runs there.
-3. **Normal deployment publication.** Control's deploy transaction records an
-   idempotent command receipt and a lifecycle intent together. A Control
-   publisher delivers register, activate and disable to the manager and confirms
-   only exact receipts. Pending activations keep their bundle until confirmed.
-   Archive and restore use the same intents, and the CLI and
-   `@zeroship/control` carry the command identity. The legacy schedule
-   reconciler is deleted.
+3. **Normal deployment publication (implemented).** Control's deploy
+   transaction records an idempotent command receipt and a lifecycle intent
+   together. A Control publisher delivers register, activate and disable to the
+   manager and confirms only exact receipts. Pending activations keep their
+   bundle until confirmed. Archive and restore use the same intents, and the
+   CLI and `@zeroship/control` carry the command identity. The legacy schedule
+   reconciler is deleted. Proof: Control's deploy HTTP contracts for replay,
+   conflict, concurrent duplicates, rollback and refusal; its publication
+   contracts against the signed manager routes; and the CLI and SDK command
+   contracts.
 4. **Worker executable.** The production worker runs `WorkerHost` on a
    dedicated thread with a trusted creator-resource provider, the enrolled
    instance signer and joined shutdown. `WorkerHost` publishes an app's backend

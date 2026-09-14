@@ -56,7 +56,7 @@ await control.organizations.createProject(organizationId, { name: "Checkout" });
 await control.projects.addMember(projectId, { user_id: userId, role: "viewer" });
 
 await control.apps.create({ name: "demo", plan_id: "free" });
-await control.apps.deploy(appId, zshipBytes);
+await control.apps.deploy(appId, await createDeployCommand(zshipBytes));
 await control.apps.setPlan(appId, { plan_id: "pro" });
 await control.apps.logs(appId);
 await control.apps.archive(appId);
@@ -251,7 +251,11 @@ call is refused, because ending the app cuts the edge every authority check on
 it is resolved through. See "App deletion" below for what survives it and why.
 
 After the gateway route feed and workflow schedulers converge, archive stops
-new gateway dispatch and scheduled workflow dispatch. Work already admitted
+new gateway dispatch and scheduled workflow dispatch. Archive and unarchive
+each take the app's next lifecycle revision and commit a lifecycle intent in
+the same transaction: archive a disable, unarchive a fresh activation of the
+app's current deployment. Control's publisher delivers them to the workflow
+manager in revision order, which is the scheduler half of that convergence. Work already admitted
 during that convergence window may finish and be metered. Route invalidation is
 pull-based, so a gateway that cannot complete another control-plane poll keeps
 its stale route snapshot; archive also does not terminate an already-open HTTP
@@ -436,15 +440,80 @@ appears in product code.
 
 ## Deploys
 
-`control.apps.deploy(appId, artifact)` sends `application/x-zship` by default.
-The control plane no longer accepts raw JavaScript deploy bodies; callers should
-upload the `.zship` artifact emitted by the build pipeline.
+A deploy is a command. `createDeployCommand(archive, id?)` snapshots the
+`.zship` bytes and binds them to a deploy command id (`dcm_...`), and
+`control.apps.deploy(appId, command)` sends that snapshot as
+`application/x-zship` with the command id in the `Idempotency-Key` header. The
+archive is the artifact the build pipeline emits; there is no stream, form or
+raw JavaScript deploy body.
 
 ```ts
-const artifact = await fs.promises.readFile("dist/app.zship");
-const result = await control.apps.deploy(appId, artifact);
-console.log(result.deploy_hash);
+import { createDeployCommand, DeployOutcomeUnknownError } from "@zeroship/control";
+
+const command = await createDeployCommand(await fs.promises.readFile("dist/app.zship"));
+let result;
+try {
+  result = await control.apps.deploy(appId, command);
+} catch (error) {
+  if (!(error instanceof DeployOutcomeUnknownError)) throw error;
+  // The command may already be accepted; sending it again is safe.
+  result = await control.apps.deploy(appId, command);
+}
+console.log(result.deploy_id, result.deploy_hash, result.replayed);
 ```
+
+A successful deploy answers `200` with the command's acceptance:
+
+```json
+{
+  "command_id": "dcm_...",
+  "deploy_id": "dep_...",
+  "deploy_hash": "sha256:...",
+  "blobs_uploaded": 3,
+  "blobs_deduped": 12,
+  "lifecycle_revision": 4
+}
+```
+
+**The command id names one deploy, never its artifact.** Mint a new id for
+every deploy, including a rollback that uploads an earlier artifact again, and
+reuse an id only to resend the same deploy. Control refuses a request without
+exactly one canonical `Idempotency-Key` with `400 invalid_idempotency_key`
+before it reads the body.
+
+**Control records an immutable receipt.** It hashes the bytes it actually
+consumed and binds the app, the caller, the operation, the normalized content
+type and that digest to the command id, together with the acceptance it
+returned. The receipt commits in one database transaction with the deployment
+row, the app's current deployment pointer, the app's next lifecycle revision
+and the lifecycle intent that publishes it, so a refused or failed deploy
+leaves none of them behind.
+
+**An exact repeat replays.** The same id with the same bytes, from the same
+caller, for the same app returns the original acceptance with the
+`idempotent-replayed: true` header (`replayed` in the SDK) and changes
+nothing: no new revision, no retargeting, no second schema admission. The same
+id with different bytes, another app or another caller is refused with `409
+idempotency_key_conflict`, which says nothing about the original. A command
+for a deleted app is `404` even when its receipt exists.
+
+**Some failures leave the outcome unknown.** A network failure or a `5xx`
+does not say whether Control committed the command. The SDK throws
+`DeployOutcomeUnknownError`, which carries the `commandId`, and the same
+command can be sent again. Every other non-2xx is a refusal (`ControlError`)
+and nothing was accepted. `zeroship deploy` prints its `command_id` before it
+uploads, resends an unanswered command a bounded number of times, and resumes
+one with `--command-id=<id>`.
+
+**Acceptance is durable publication, not activation.** A live app's deploy
+takes the app's next lifecycle revision and commits an activation intent.
+Control delivers intents to the workflow manager afterwards, per app in
+revision order, and records only the manager's exact receipt, so a `200` means
+the deployment is durably published, not that its schedules already run. A
+pending activation also keeps the deployment's bundle from the collector until
+the manager acknowledges it. An archived app's deploy is staged: its
+`lifecycle_revision` is `null`, and restoring the app activates the staged
+deployment under a fresh revision.
 
 ## Errors
 

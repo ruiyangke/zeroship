@@ -237,6 +237,23 @@ pub const APP_PREFIX: &str = "app";
 /// Immutable normal app deployment identity.
 pub const DEPLOYMENT_PREFIX: &str = "dep";
 
+/// Normal deploy command identity.
+///
+/// The client sends it as the deploy request's `Idempotency-Key`; retries reuse
+/// it and a new deploy, including a rollback to an earlier artifact, mints
+/// another. Minted only by [`crate::deploy_command::DeployCommandId::mint`].
+pub const DEPLOY_COMMAND_PREFIX: &str = "dcm";
+
+/// Control's lifecycle publication intent: one row per app lifecycle revision,
+/// delivered to the workflow manager in revision order.
+pub const LIFECYCLE_INTENT_PREFIX: &str = "lci";
+
+/// Generate a new lifecycle intent ID: `lci_{base36(uuidv7)}`.
+#[must_use]
+pub fn new_lifecycle_intent_id() -> String {
+    generate(LIFECYCLE_INTENT_PREFIX)
+}
+
 pub const SESSION_PREFIX: &str = "ses";
 
 /// Grant typed-id prefix: one row per (person, audience) in `zeroship.grants`,
@@ -574,8 +591,9 @@ pub const WORKFLOW_SIGNAL_PREFIX: &str = "sig";
 /// Workflow cron handle typed-id prefix, distinct from the workflow-schedule prefix.
 pub const WORKFLOW_CRON_PREFIX: &str = "cron";
 
-/// Workflow-schedule typed-id prefix. `zeroship.workflow_schedules.id` stores
-/// the full `sch_<base36>` string.
+/// Workflow-schedule typed-id prefix: the logical schedule identity
+/// ([`crate::workflow::ScheduleId`]) the manager retains across deployment
+/// revisions.
 pub const WORKFLOW_SCHEDULE_PREFIX: &str = "sch";
 
 /// Workflow dispatch/batch typed-id prefix. Deliberately `wfd`, not `dsp`
@@ -624,11 +642,6 @@ pub fn new_workflow_signal_id() -> String {
 /// Generate a new workflow cron ID: `cron_{base36(uuidv7)}`.
 pub fn new_workflow_cron_id() -> String {
     generate(WORKFLOW_CRON_PREFIX)
-}
-
-/// Generate a new workflow-schedule ID: `sch_{base36(uuidv7)}`.
-pub fn new_workflow_schedule_id() -> String {
-    generate(WORKFLOW_SCHEDULE_PREFIX)
 }
 
 /// Generate a new workflow dispatch/batch ID: `wfd_{base36(uuidv7)}`.
@@ -967,7 +980,6 @@ mod tests {
             (new_workflow_run_id as fn() -> String, WORKFLOW_RUN_PREFIX),
             (new_workflow_signal_id as fn() -> String, WORKFLOW_SIGNAL_PREFIX),
             (new_workflow_cron_id as fn() -> String, WORKFLOW_CRON_PREFIX),
-            (new_workflow_schedule_id as fn() -> String, WORKFLOW_SCHEDULE_PREFIX),
             (new_workflow_dispatch_id as fn() -> String, WORKFLOW_DISPATCH_PREFIX),
             (new_workflow_signal_key_id as fn() -> String, WORKFLOW_SIGNAL_KEY_PREFIX),
             (new_workflow_subscription_id as fn() -> String, WORKFLOW_SUBSCRIPTION_PREFIX),
@@ -1095,6 +1107,66 @@ mod tests {
                 "wkr must be disjoint from every registered prefix; {owner} already uses it"
             );
         }
+    }
+
+    /// Deploy commands and lifecycle intents are named by Control and by the
+    /// clients that retry deploys. The sweep covers the whole registry because a
+    /// command id arrives from outside and must not parse as any other entity.
+    #[test]
+    fn deploy_publication_prefixes_are_three_chars_and_disjoint() {
+        let intent = new_lifecycle_intent_id();
+        assert!(intent.starts_with("lci_"), "got {intent}");
+        assert_eq!(parse(&intent).expect("intent id must roundtrip").0, "lci");
+        let registry = [
+            ("users", USER_PREFIX),
+            ("apps", APP_PREFIX),
+            ("app_deploys", DEPLOYMENT_PREFIX),
+            ("sessions", SESSION_PREFIX),
+            ("grants", GRANT_PREFIX),
+            ("organizations", ORGANIZATION_PREFIX),
+            ("projects", PROJECT_PREFIX),
+            ("organization_invites", INVITE_PREFIX),
+            ("wake_jobs", WAKE_PREFIX),
+            ("app_oauth_clients", APP_OAUTH_CLIENT_PREFIX),
+            ("plans", PLAN_PREFIX),
+            ("invoices", INVOICE_PREFIX),
+            ("invoice_payments", INVOICE_PAYMENT_PREFIX),
+            ("credit_ledger", CREDIT_PREFIX),
+            ("refunds", REFUND_PREFIX),
+            ("plan_change_events", PLAN_CHANGE_EVENT_PREFIX),
+            ("spend_state_history", SPEND_HISTORY_PREFIX),
+            ("organization_billing_status_history", ORGANIZATION_BILLING_HISTORY_PREFIX),
+            ("billing_disputes", DISPUTE_PREFIX),
+            ("payout_failures", PAYOUT_FAILURE_PREFIX),
+            ("connect_checkout_failures", CHECKOUT_FAILURE_PREFIX),
+            ("billing_reconciliation_findings", RECONCILE_FINDING_PREFIX),
+            ("workflow_runs", WORKFLOW_RUN_PREFIX),
+            ("workflow_jobs", WORKFLOW_JOB_PREFIX),
+            ("workflow_signals", WORKFLOW_SIGNAL_PREFIX),
+            ("workflow_crons", WORKFLOW_CRON_PREFIX),
+            ("workflow_schedules", WORKFLOW_SCHEDULE_PREFIX),
+            ("workflow_dispatches", WORKFLOW_DISPATCH_PREFIX),
+            ("workflow_requests", WORKFLOW_REQUEST_PREFIX),
+            ("workflow_capabilities", WORKFLOW_CAPABILITY_PREFIX),
+            ("workflow_payloads", WORKFLOW_PAYLOAD_PREFIX),
+            ("workflow_signal_keys", WORKFLOW_SIGNAL_KEY_PREFIX),
+            ("workflow_subscriptions", WORKFLOW_SUBSCRIPTION_PREFIX),
+            ("workflow_broadcasts", WORKFLOW_BROADCAST_PREFIX),
+            ("workflow_propagations", WORKFLOW_PROPAGATION_PREFIX),
+            ("workflow_signal_tokens", WORKFLOW_SIGNAL_TOKEN_PREFIX),
+            ("provider_dead_letter", PROVIDER_DEAD_LETTER_PREFIX),
+            ("worker_instances", WORKER_INSTANCE_PREFIX),
+        ];
+        for prefix in [DEPLOY_COMMAND_PREFIX, LIFECYCLE_INTENT_PREFIX] {
+            assert_eq!(prefix.len(), 3, "{prefix} prefix must be 3 chars");
+            for (owner, other) in registry {
+                assert_ne!(
+                    prefix, other,
+                    "{prefix} must be disjoint from every registered prefix; {owner} uses it"
+                );
+            }
+        }
+        assert_ne!(DEPLOY_COMMAND_PREFIX, LIFECYCLE_INTENT_PREFIX);
     }
 
     #[test]

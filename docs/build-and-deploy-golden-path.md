@@ -86,7 +86,10 @@ collision boundary and the exact Caddy handler.
   stderr before it uploads. Authentication is separate and never comes from that
   file: `zeroship login`, or `--token=<PAT>` / `ZEROSHIP_TOKEN`. Overrides:
   `zeroship deploy ./other.zship --app=<id> --control=<url>`, and `--env=<name>`
-  to select a named environment.
+  to select a named environment. Each invocation is one deploy command and
+  prints its `command_id` before uploading; when the outcome is not reported,
+  `--command-id=<id>` with the same archive resumes that deploy instead of
+  starting another.
 - **Migrate** (apps that use `env.db`): `zeroship migrate`. It posts
   `<migrations.out>/migrations.ir.json` - by default
   `generated/zeroship/migrations.ir.json`, which the build writes beside the
