@@ -23,6 +23,8 @@ const SUPPORT: SqlSupport = SqlSupport {
     identity_allocation: true,
     default_expression: false,
     row_locks: false,
+    advisory_locks: false,
+    transaction_settings: false,
     max_bind_parameters: super::SQLITE_BIND_LIMIT,
 };
 
@@ -213,6 +215,11 @@ impl SqlCompiler for SqliteCompiler {
             }
             Statement::Delete(statement) => {
                 super::shared::compile_delete(SYNTAX, effective, statement)
+            }
+            // A file-local engine has no server-wide locks and no settings.
+            Statement::AdvisoryLock(_) => Err(CompileError::Unsupported("advisory locks")),
+            Statement::SetTransactionSetting(_) => {
+                Err(CompileError::Unsupported("transaction settings"))
             }
         }
     }

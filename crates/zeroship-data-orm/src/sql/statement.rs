@@ -805,6 +805,10 @@ pub enum Statement {
     Upsert(Upsert),
     Update(Update),
     Delete(Delete),
+    /// Coordination rather than data: an advisory lock request.
+    AdvisoryLock(super::coordination::AdvisoryLock),
+    /// Coordination rather than data: a transaction-local setting.
+    SetTransactionSetting(super::coordination::SetTransactionSetting),
 }
 
 fn validate_vector_search(parts: &VectorSearchParts) -> Result<(), CompileError> {

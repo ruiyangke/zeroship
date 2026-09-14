@@ -3,6 +3,8 @@
 #[cfg(test)]
 mod comparison_tests;
 #[cfg(test)]
+mod coordination_tests;
+#[cfg(test)]
 mod lock_tests;
 mod postgres;
 mod query;
