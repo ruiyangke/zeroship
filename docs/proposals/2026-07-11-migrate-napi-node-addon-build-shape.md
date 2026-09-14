@@ -128,10 +128,9 @@ and rollback, cursor-batched resumable backfill, shadow verification - whose ste
 driver I/O. It runs on its own thread so that machine neither interleaves into nor blocks the
 Node event loop.
 
-**Core may not name a vendor.** `core_names_no_vendor_crate` forbids the engine from naming a
-vendor crate outside its registry, so `zeroship-migrate` re-exports no backend. The addon
-names `zeroship-migrate-postgres`, `-mysql` and `-sqlite` itself. Any new host must do the
-same rather than asking for a re-export.
+**Core may not name a vendor.** `zeroship-migrate` re-exports no backend. The addon names
+`zeroship-migrate-postgres`, `-mysql` and `-sqlite` itself. Any new host must do the same
+rather than asking for a re-export.
 
 **`unsafe` is scoped to this crate alone.** The workspace pins `unsafe_code = "deny"`, correct
 for the pure-Rust engine crates. The napi bridge FFIs into the Node ABI

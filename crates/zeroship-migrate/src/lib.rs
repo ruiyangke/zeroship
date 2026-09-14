@@ -111,12 +111,8 @@ pub fn shipping_backends() -> BackendRegistry {
 // THERE IS NO `#[cfg(test)] mod tests` HERE, AND ITS ABSENCE IS A RULE RATHER THAN AN
 // OMISSION.
 //
-// This file names each vendor crate EXACTLY ONCE, in the three `*_VENDOR` consts, and
-// `tests/dialect_matrix/backend_modules_name_one_dialect.rs` asserts that count as the
-// positive control for its cross-vendor needle. A unit test here that reached
-// `zeroship_migrate_postgres::DIALECT` for an assertion would make the count two and turn
-// the one place designed to name a vendor into a place that names it for two different
-// reasons.
+// This file owns the shipping vendor composition. Tests drive that composition
+// through the integration-test host rather than adding a unit-test composition here.
 //
 // The assertion that would have lived here — the shipping set composes into a
 // `BackendRegistry` with three distinct ids — is

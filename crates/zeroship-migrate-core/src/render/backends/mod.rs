@@ -34,14 +34,8 @@
 //!
 //! # The one-dialect-literal rule, now across a crate boundary
 //!
-//! A backend module names its own dialect exactly ONCE, as its `DIALECT` const, and
-//! names no other dialect at all. Everything else reads `DIALECT`. That rule is what
-//! made this step mechanical, and it is still ENFORCED:
-//! `crates/zeroship-migrate/tests/dialect_matrix/backend_modules_name_one_dialect.rs` reads all nine vendor
-//! modules with `include_str!` and asserts both halves - own dialect exactly once, as
-//! the `const DIALECT` line, and no other dialect at all. It was repointed at the new
-//! crate paths in the commit that moved them; a re-export shim at the old path would
-//! NOT have satisfied it, because a shim has zero carriers.
+//! A backend module reads the `DIALECT` identity exported by its vendor crate. This
+//! keeps dialect selection with the backend that owns the renderer.
 //!
 //! # The rule does NOT catch implicit coupling, and there was some
 //!
