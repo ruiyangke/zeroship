@@ -8,7 +8,18 @@ use std::{
     process::{Child, Command, Stdio},
     time::{Duration, Instant},
 };
-use zeroship_core::app_id::{local_dev_app_id, AppId};
+use zeroship_core::{
+    app_id::{local_dev_app_id, AppId},
+    schema_name::SchemaName,
+    workflow_deployments::HoldScope,
+};
+use zeroship_data_orm::{
+    binding::DbBinding,
+    encryption::ProjectKeySource,
+    orm::{Database, Output},
+    value, ConnectOptions, Value as Record,
+};
+use zeroship_workflow_manager::deployments;
 
 struct Host {
     child: Child,
@@ -17,6 +28,10 @@ struct Host {
 }
 impl Host {
     fn start(root: &Path, app: Option<&AppId>, native_dev: bool) -> Self {
+        Self::launch(root, app, native_dev, None)
+    }
+
+    fn launch(root: &Path, app: Option<&AppId>, native_dev: bool, config: Option<&Path>) -> Self {
         let port = TcpListener::bind("127.0.0.1:0")
             .unwrap()
             .local_addr()
@@ -35,6 +50,9 @@ impl Host {
             .stderr(Stdio::from(log.reopen().unwrap()));
         if let Some(app) = app {
             command.env("APP_ID", app.as_str());
+        }
+        if let Some(config) = config {
+            command.arg(format!("--workflow-config={}", config.display()));
         }
         for key in [
             "DATABASE_URL",
@@ -191,17 +209,19 @@ export function createDevEntryLoader() {{
     .unwrap();
 }
 
-fn resume_after_process_death(configured_app: Option<&AppId>, native_dev: bool) {
-    let expected_app = configured_app.cloned().unwrap_or_else(local_dev_app_id);
-    let root = tempfile::tempdir().unwrap();
+/// Compile the fixture app into `root/app.zship`, replacing an earlier build.
+/// Its run waits for a signal until `signal_timeout`.
+fn compile(root: &Path, version: &str, signal_timeout: &str) {
     let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
     let workspace = manifest.parent().unwrap().parent().unwrap();
     let compiled = Command::new("pnpm")
         .current_dir(workspace.join("packages/vite-plugin"))
         .args(["exec", "tsx"])
         .arg(manifest.join("tests/fixtures/app-bundle.ts"))
-        .arg(root.path())
-        .arg("original")
+        .arg(root)
+        .arg(version)
+        .arg("10ms")
+        .arg(signal_timeout)
         .output()
         .expect("build the workflow fixture");
     assert!(
@@ -209,6 +229,12 @@ fn resume_after_process_death(configured_app: Option<&AppId>, native_dev: bool) 
         "{}",
         String::from_utf8_lossy(&compiled.stderr)
     );
+}
+
+fn resume_after_process_death(configured_app: Option<&AppId>, native_dev: bool) {
+    let expected_app = configured_app.cloned().unwrap_or_else(local_dev_app_id);
+    let root = tempfile::tempdir().unwrap();
+    compile(root.path(), "original", "1h");
     if native_dev {
         write_dev_entry(root.path(), "live-original");
     }
@@ -255,6 +281,199 @@ fn resume_after_process_death(configured_app: Option<&AppId>, native_dev: bool) 
     host.request(&format!("/signal?id={run}")).unwrap();
     let completed = host.until(&status, |value| value["state"] == "completed");
     assert_eq!(completed["output"], "original:original:lazy");
+}
+
+/// The running host writes the same file; retry only its brief lock contention.
+async fn contended<T>(
+    mut operation: impl AsyncFnMut() -> Result<T, zeroship_data_orm::error::DbError>,
+) -> T {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        match operation().await {
+            Ok(value) => return value,
+            Err(zeroship_data_orm::error::DbError::LockContention { .. })
+                if Instant::now() < deadline =>
+            {
+                compio::time::sleep(Duration::from_millis(25)).await;
+            }
+            Err(error) => panic!("platform metadata read failed: {error}"),
+        }
+    }
+}
+
+/// Read-only views of the host's platform metadata file, through bindings of
+/// its own beside the running host.
+struct Platform {
+    runtime: compio::runtime::Runtime,
+    manager: Database,
+    catalog: Database,
+    app: AppId,
+}
+
+impl Platform {
+    fn open(root: &Path, app: &AppId) -> Self {
+        let runtime = compio::runtime::Runtime::new().unwrap();
+        let url = format!(
+            "sqlite:{}",
+            root.join(".zeroship/platform/metadata.sqlite").display()
+        );
+        let (manager, catalog) = runtime.block_on(async {
+            let connect = async |schema: &zeroship_data_orm::schema::Schema| {
+                contended(async || {
+                    Database::connect(
+                        DbBinding::new(
+                            "platform",
+                            "workflow-local-test",
+                            SchemaName::new("main").unwrap(),
+                        ),
+                        ConnectOptions::new(url.as_str(), ProjectKeySource::unavailable())
+                            .connection_authority(),
+                        schema.clone(),
+                    )
+                    .await
+                })
+                .await
+            };
+            (
+                connect(&zeroship_workflow_manager::collections().unwrap()).await,
+                connect(&deployments::collections().unwrap()).await,
+            )
+        });
+        Self {
+            runtime,
+            manager,
+            catalog,
+            app: app.clone(),
+        }
+    }
+
+    fn rows(&self, database: &Database, collection: &str, filter: Record) -> Vec<Record> {
+        self.runtime.block_on(async {
+            let output = contended(async || {
+                database
+                    .collection(collection)?
+                    .find(filter.clone(), value!({"limit":64}))
+                    .await
+            })
+            .await;
+            let Output::Rows { rows, .. } = output else {
+                panic!("expected platform metadata rows");
+            };
+            rows
+        })
+    }
+
+    /// Deployments in the order the manager activated them.
+    fn activated(&self) -> Vec<String> {
+        let mut activations = self.rows(
+            &self.manager,
+            "schedule_activations",
+            value!({"app_id":self.app.as_str()}),
+        );
+        activations.sort_by_key(|row| row["revision"].as_i64());
+        activations
+            .iter()
+            .map(|row| row["deployment_id"].as_str().unwrap().to_owned())
+            .collect()
+    }
+
+    /// Every holder of `deployment` in the ledger the collector consults.
+    fn holders(&self, deployment: &str) -> Vec<(String, String)> {
+        self.rows(
+            &self.catalog,
+            "app_deploy_holds",
+            value!({"app_id":self.app.as_str(),"deploy_id":deployment}),
+        )
+        .iter()
+        .map(|row| {
+            (
+                row["holder_id"].as_str().unwrap().to_owned(),
+                row["state"].as_str().unwrap().to_owned(),
+            )
+        })
+        .collect()
+    }
+
+    /// The manager's queue hold intent and the ledger state of the queue
+    /// holder for `deployment`.
+    fn queue_hold(&self, deployment: &str) -> (String, String) {
+        let intent = self.rows(
+            &self.manager,
+            "deployment_holds",
+            value!({"app_id":self.app.as_str(),"deployment_id":deployment}),
+        );
+        let queue = HoldScope::for_queue(self.app.clone());
+        let ledger: Vec<_> = self
+            .holders(deployment)
+            .into_iter()
+            .filter(|(holder, _)| holder == queue.holder())
+            .collect();
+        assert_eq!((intent.len(), ledger.len()), (1, 1));
+        (
+            intent[0]["state"].as_str().unwrap().to_owned(),
+            ledger[0].1.clone(),
+        )
+    }
+}
+
+#[test]
+fn republished_bundle_releases_the_superseded_queue_hold() {
+    let root = tempfile::tempdir().unwrap();
+    // The signal wait's timeout job outlives the signal, so a short timeout
+    // lets every job pinned to the original deployment settle within the test.
+    compile(root.path(), "original", "2s");
+    // Frequent maintenance passes and the shortest grace the manager accepts.
+    let config = root.path().join("workflow.toml");
+    std::fs::write(
+        &config,
+        "[manager]\ndriver_interval_ms = 50\nhold_grace_ms = 5001\n",
+    )
+    .unwrap();
+    let mut host = Host::launch(root.path(), None, false, Some(&config));
+    let started = host.request("/start").unwrap();
+    let run = started["id"].as_str().unwrap().to_owned();
+    let status = format!("/status?id={run}");
+    host.until(&status, |value| value["state"] == "waiting");
+    host.request(&format!("/signal?id={run}")).unwrap();
+    let completed = host.until(&status, |value| value["state"] == "completed");
+    assert_eq!(completed["output"], "original:original:lazy");
+    drop(host);
+
+    // Publishing a new bundle activates it and supersedes the original.
+    compile(root.path(), "replacement", "2s");
+    let mut host = Host::launch(root.path(), None, false, Some(&config));
+    assert_eq!(
+        host.request("/version").unwrap(),
+        json!({"version": "replacement:lazy"})
+    );
+    let platform = Platform::open(root.path(), &local_dev_app_id());
+    let [original, replacement] = <[String; 2]>::try_from(platform.activated()).unwrap();
+    assert_ne!(original, replacement);
+    let held = (String::from("held"), String::from("held"));
+
+    // Once the original deployment's jobs settle and its grace passes, the
+    // manager releases its queue hold, in its own intent and in the ledger.
+    let released = (String::from("released"), String::from("released"));
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while platform.queue_hold(&original) != released {
+        assert!(
+            Instant::now() < deadline,
+            "the superseded deployment stayed held: {}",
+            std::fs::read_to_string(host.log.path()).unwrap()
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert_eq!(platform.queue_hold(&replacement), held);
+    // The queue no longer retains the superseded code; only the creator
+    // journal's own holder can, under its separate release contract.
+    let journal = HoldScope::for_app(local_dev_app_id());
+    for (holder, state) in platform.holders(&original) {
+        assert!(
+            state == "released" || holder == journal.holder(),
+            "{holder} still holds the superseded deployment"
+        );
+    }
+    drop(host);
 }
 
 #[test]
