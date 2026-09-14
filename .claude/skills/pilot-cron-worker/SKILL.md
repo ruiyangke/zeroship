@@ -138,7 +138,7 @@ CLAUDE.md's default "never push without confirmation" is OVERRIDDEN by explicit 
 
 The cron's prompt should explicitly name:
 - **Target directory** — e.g., `crates/plugin-db/`
-- **Allowed sibling deps** — e.g., the `@zeroship/bootstrap` package's `installSchema` path
+- **Allowed sibling deps** — e.g., `sdks/db/src/install-schema.ts`
 - **Forbidden zones** — public deploy contracts, unrelated crates (`gateway`, `control`, `worker`)
 - **Cross-crate change rule** — only when a finding genuinely demands it; otherwise document and defer
 
