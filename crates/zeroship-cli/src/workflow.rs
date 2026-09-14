@@ -1,10 +1,19 @@
-//! Customer-owned local workflow host, independent of HTTP request isolates.
+//! The local workflow host, independent of HTTP request isolates.
+//!
+//! `zeroship serve` composes the native workflow manager over its local
+//! platform metadata file with the ordinary job consumer over the app's own
+//! database and storage. Publishing the app archive registers and activates
+//! its schedules, so creator activation arrives as a delivered job.
 
-#![expect(clippy::future_not_send, reason = "the worker owns a compio thread")]
+#![expect(clippy::future_not_send, reason = "the host owns a compio thread")]
 
-use futures::{channel::oneshot, FutureExt};
+mod host;
+mod manager;
+
+use futures::channel::oneshot;
 use serde::{Deserialize, Serialize};
 use std::{
+    cell::Cell,
     collections::HashMap,
     path::{Path, PathBuf},
     rc::Rc,
@@ -13,28 +22,30 @@ use std::{
         Arc,
     },
     thread::JoinHandle,
+    time::Duration,
 };
 use zeroship_bundle::LoadedWorker;
-use zeroship_core::{app_id::AppId, typed_id, workflow_deployments::HoldScope};
+use zeroship_core::app_id::AppId;
 use zeroship_runtime::{NativePlugin, RuntimeLimits};
-use zeroship_workflow::{
-    service::{
-        runner::{TaskPayloadLimits, WorkerOptions, WorkflowWorker},
-        schema,
-        store::HostStorage,
-        AppBackend, AppPolicy, HostPolicies, PolicySnapshot, WorkerIdentity, WorkflowService,
-    },
-    WorkflowServiceError,
+use zeroship_workflow::service::{
+    collection::CollectionOptions,
+    fanout::FanoutOptions,
+    reconciliation::ReconciliationOptions,
+    runner::{consumer::ConsumerOptions, delivery::DeliveryOptions, TaskPayloadLimits},
+    store::HostStorage,
+    AppBackend,
 };
-use zeroship_workflow_manager::deployments::DeploymentHolds;
-use zeroship_workflow_v8::{AppRuntimeLoader, V8TaskExecutor, WorkflowBinding};
+use zeroship_workflow_v8::WorkflowBinding;
+
+pub use host::{Composition, Production};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct LocalConfig {
     pub max_archive_bytes: usize,
     pub max_source_bytes: usize,
-    pub worker: WorkerOptions,
+    pub consumer: ConsumerConfig,
+    pub manager: ManagerConfig,
     pub payloads: TaskPayloadLimits,
 }
 impl Default for LocalConfig {
@@ -42,11 +53,75 @@ impl Default for LocalConfig {
         Self {
             max_archive_bytes: zeroship_bundle::MAX_COMPRESSED_BYTES,
             max_source_bytes: 32 * 1024 * 1024,
-            worker: WorkerOptions::default(),
+            consumer: ConsumerConfig::default(),
+            manager: ManagerConfig::default(),
             payloads: TaskPayloadLimits::default(),
         }
     }
 }
+
+/// Execution capacity and delivery bounds of the local job consumer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ConsumerConfig {
+    /// Delivered jobs executing at once on the workflow thread.
+    pub slots: usize,
+    /// Delay before claiming again after the queue had no eligible work.
+    pub idle_poll_ms: u64,
+    /// Delay before claiming again after a failed claim or delivery.
+    pub error_backoff_ms: u64,
+    /// Hard bound on one delivered job's execution.
+    pub execution_timeout_ms: u64,
+    /// Bound on each claim, renewal, settlement and journal finalization.
+    pub operation_timeout_ms: u64,
+    /// Delay between settlement retries after an uncertain reply.
+    pub retry_delay_ms: u64,
+}
+impl Default for ConsumerConfig {
+    fn default() -> Self {
+        Self {
+            slots: 1,
+            idle_poll_ms: 50,
+            error_backoff_ms: 1_000,
+            execution_timeout_ms: 30_000,
+            operation_timeout_ms: 5_000,
+            retry_delay_ms: 100,
+        }
+    }
+}
+
+/// Bounds of the native manager running inside the local host.
+#[expect(
+    clippy::struct_field_names,
+    reason = "configuration keys state their unit"
+)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ManagerConfig {
+    /// Delivery lease; heartbeats renew it while a job executes.
+    pub lease_ms: u64,
+    /// Lifetime of this process's registration and placement. The host
+    /// renews both at a third of it.
+    pub placement_ttl_ms: u64,
+    /// Delay between bounded calendar, recovery and hold maintenance passes.
+    pub driver_interval_ms: u64,
+    /// Bound on each maintenance lane's pass.
+    pub lane_timeout_ms: u64,
+    /// Periodic reconciliation and collection deadline.
+    pub recovery_interval_ms: u64,
+}
+impl Default for ManagerConfig {
+    fn default() -> Self {
+        Self {
+            lease_ms: 30_000,
+            placement_ttl_ms: 30_000,
+            driver_interval_ms: 1_000,
+            lane_timeout_ms: 10_000,
+            recovery_interval_ms: 30_000,
+        }
+    }
+}
+
 pub fn config_from_args(args: &[String]) -> Result<LocalConfig, String> {
     let path = crate::parse_flag(args, "--workflow-config").map(PathBuf::from);
     LocalConfig::read(path.as_deref())
@@ -64,9 +139,26 @@ impl LocalConfig {
     }
 
     fn validate(self) -> Result<Self, String> {
+        let consumer = self.consumer;
+        let manager = self.manager;
         if self.max_archive_bytes == 0
             || self.max_archive_bytes > zeroship_bundle::MAX_COMPRESSED_BYTES
             || self.max_source_bytes == 0
+            || consumer.slots == 0
+            || [
+                consumer.idle_poll_ms,
+                consumer.error_backoff_ms,
+                consumer.execution_timeout_ms,
+                consumer.operation_timeout_ms,
+                consumer.retry_delay_ms,
+                manager.lease_ms,
+                manager.driver_interval_ms,
+                manager.lane_timeout_ms,
+                manager.recovery_interval_ms,
+            ]
+            .contains(&0)
+            // Renewal at a third of the lifetime must still be positive.
+            || manager.placement_ttl_ms < 3
         {
             return Err("invalid local workflow limits".into());
         }
@@ -75,37 +167,123 @@ impl LocalConfig {
             .map_err(|error| error.to_string())?;
         Ok(self)
     }
+
+    fn consumer_options(&self) -> ConsumerOptions {
+        let consumer = self.consumer;
+        ConsumerOptions {
+            slots: consumer.slots,
+            max_scopes: 1,
+            idle_poll: Duration::from_millis(consumer.idle_poll_ms),
+            error_backoff: Duration::from_millis(consumer.error_backoff_ms),
+            delivery: DeliveryOptions {
+                execution_timeout: Duration::from_millis(consumer.execution_timeout_ms),
+                operation_timeout: Duration::from_millis(consumer.operation_timeout_ms),
+                retry_delay: Duration::from_millis(consumer.retry_delay_ms),
+                reconciliation: ReconciliationOptions::default(),
+                collection: CollectionOptions::default(),
+                fanout: FanoutOptions::default(),
+            },
+        }
+    }
+
+    const fn manager_options(&self) -> manager::ManagerOptions {
+        manager::ManagerOptions {
+            lease: Duration::from_millis(self.manager.lease_ms),
+            placement_ttl: Duration::from_millis(self.manager.placement_ttl_ms),
+            recovery_interval: Duration::from_millis(self.manager.recovery_interval_ms),
+            lane_timeout: Duration::from_millis(self.manager.lane_timeout_ms),
+            driver_interval: Duration::from_millis(self.manager.driver_interval_ms),
+        }
+    }
+
+    const fn renew_interval(&self) -> Duration {
+        Duration::from_millis(self.manager.placement_ttl_ms / 3)
+    }
+
+    /// A predecessor may hold the activation's delivery lease; its expiry,
+    /// redelivery and the bounded activation itself must fit this wait.
+    const fn activation_wait(&self) -> Duration {
+        Duration::from_millis(
+            self.manager
+                .lease_ms
+                .saturating_add(self.consumer.execution_timeout_ms)
+                .saturating_add(self.consumer.operation_timeout_ms),
+        )
+    }
 }
 
 pub struct LocalHost {
     pub app: AppId,
-    pub binding: WorkflowBinding,
+    /// The app's workflow client; the HTTP and workflow isolates share it.
+    pub backend: AppBackend,
     pub executable: Option<LoadedWorker>,
     stop: Option<oneshot::Sender<()>>,
     thread: Option<JoinHandle<()>>,
     stopping: Arc<AtomicBool>,
 }
 impl LocalHost {
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the serve command supplies each independently configured host resource"
+    )]
     pub fn start(
         root: &Path,
         app: AppId,
         config: LocalConfig,
-        deployment: Option<PathBuf>,
+        deployment: Option<&Path>,
         storage: HostStorage,
         env_vars: HashMap<String, String>,
         peers: Vec<Arc<dyn NativePlugin>>,
         limits: RuntimeLimits,
     ) -> Result<Self, String> {
+        Self::start_with(
+            root,
+            app,
+            config,
+            deployment,
+            storage,
+            env_vars,
+            peers,
+            limits,
+            Production,
+        )
+    }
+
+    /// Start after the delivered activation of the published archive has
+    /// committed, so new runs select that deployment.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "tests substitute only the composition of an otherwise normal host"
+    )]
+    pub(crate) fn start_with<C: Composition>(
+        root: &Path,
+        app: AppId,
+        config: LocalConfig,
+        deployment: Option<&Path>,
+        storage: HostStorage,
+        env_vars: HashMap<String, String>,
+        peers: Vec<Arc<dyn NativePlugin>>,
+        limits: RuntimeLimits,
+        composition: C,
+    ) -> Result<Self, String> {
         let config = config.validate()?;
-        let deployment = crate::deployment::AppDeployment::new(root, deployment.as_deref())?;
-        let worker_app = app.clone();
+        let wait = config.activation_wait();
+        let settings = host::Settings {
+            app: app.clone(),
+            config,
+            deployment: crate::deployment::AppDeployment::new(root, deployment)?,
+            storage,
+            env_vars,
+            peers,
+            limits,
+        };
         let (ready, receive) = std::sync::mpsc::sync_channel(1);
-        let (stop, stopped) = oneshot::channel();
+        let (stop, stopped) = oneshot::channel::<()>();
         let stopping = Arc::new(AtomicBool::new(false));
-        let worker_stopping = stopping.clone();
+        let host_stopping = stopping.clone();
         zeroship_runtime::init_v8();
         let thread = std::thread::Builder::new()
-            .name("workflow-worker".into())
+            .name("workflow-host".into())
             .spawn(move || {
                 let runtime = match compio::runtime::Runtime::new() {
                     Ok(runtime) => runtime,
@@ -115,50 +293,81 @@ impl LocalHost {
                     }
                 };
                 runtime.block_on(async move {
-                    let initialized = initialize(
-                        &config,
-                        &deployment,
-                        &worker_app,
-                        storage,
-                        env_vars,
-                        peers,
-                        limits,
-                    )
-                    .await;
-                    let (backend, mut worker, installed) = match initialized {
-                        Ok(host) => host,
+                    let opened = match host::open(settings, composition).await {
+                        Ok(opened) => opened,
                         Err(error) => {
                             let _ = ready.send(Err(error.to_string()));
                             return;
                         }
                     };
-                    let executable = installed.map(|app| app.executable.into_executable());
-                    if ready.send(Ok((backend, executable))).is_err() {
-                        return;
-                    }
-                    let _liveness = WorkerLiveness(worker_stopping);
-                    worker.run_until(stopped.map(|_| ())).await;
+                    let host::Opened {
+                        api,
+                        backend,
+                        executable,
+                        activation,
+                        host,
+                    } = opened;
+                    let (abandon, abandoned) = oneshot::channel::<()>();
+                    let liveness = HostLiveness {
+                        armed: Rc::new(Cell::new(false)),
+                        stopping: host_stopping,
+                    };
+                    let armed = liveness.armed.clone();
+                    let announce = async move {
+                        let applied = match &activation {
+                            Some(job) => host::applied(&api, job, wait).await,
+                            None => Ok(()),
+                        };
+                        match applied {
+                            Ok(()) => {
+                                armed.set(true);
+                                let _ = ready.send(Ok((backend, executable)));
+                            }
+                            Err(error) => {
+                                let _ = ready.send(Err(error.to_string()));
+                                let _ = abandon.send(());
+                            }
+                        }
+                    };
+                    // Only an explicit abandonment stops the host; a successful
+                    // announcement drops its sender without sending.
+                    let abandoned = async move {
+                        if abandoned.await.is_err() {
+                            std::future::pending::<()>().await;
+                        }
+                    };
+                    let stop = async move {
+                        futures::future::select(stopped, Box::pin(abandoned)).await;
+                    };
+                    futures::join!(host.run_until(stop), announce);
+                    drop(liveness);
                 });
             })
-            .map_err(|error| format!("start workflow worker: {error}"))?;
+            .map_err(|error| format!("start workflow host: {error}"))?;
         let (backend, executable) = match receive.recv() {
-            Ok(Ok(backend)) => backend,
+            Ok(Ok(started)) => started,
             outcome => {
                 let _ = thread.join();
                 return Err(match outcome {
                     Ok(Err(error)) => error,
-                    _ => "workflow worker stopped during startup".into(),
+                    _ => "workflow host stopped during startup".into(),
                 });
             }
         };
         Ok(Self {
             app,
-            binding: WorkflowBinding::service(backend),
+            backend,
             executable,
             stop: Some(stop),
             thread: Some(thread),
             stopping,
         })
+    }
+
+    /// The `env.workflows` plugin for request isolates.
+    #[must_use]
+    pub fn binding(&self) -> WorkflowBinding {
+        WorkflowBinding::service(self.backend.clone())
     }
 }
 impl Drop for LocalHost {
@@ -173,95 +382,18 @@ impl Drop for LocalHost {
     }
 }
 
-// A request server must not keep accepting durable work after its worker dies.
-struct WorkerLiveness(Arc<AtomicBool>);
-impl Drop for WorkerLiveness {
+// A request server must not keep accepting durable work after its host dies.
+struct HostLiveness {
+    armed: Rc<Cell<bool>>,
+    stopping: Arc<AtomicBool>,
+}
+impl Drop for HostLiveness {
     fn drop(&mut self) {
-        if !self.0.load(Ordering::Acquire) {
-            eprintln!("[zeroship] workflow worker stopped unexpectedly");
+        if self.armed.get() && !self.stopping.load(Ordering::Acquire) {
+            eprintln!("[zeroship] workflow host stopped unexpectedly");
             std::process::exit(1);
         }
     }
-}
-
-async fn initialize(
-    config: &LocalConfig,
-    deployment: &crate::deployment::AppDeployment,
-    app: &AppId,
-    storage: HostStorage,
-    env_vars: HashMap<String, String>,
-    peers: Vec<Arc<dyn NativePlugin>>,
-    limits: RuntimeLimits,
-) -> Result<
-    (
-        AppBackend,
-        WorkflowWorker,
-        Option<crate::deployment::LoadedApp>,
-    ),
-    WorkflowServiceError,
-> {
-    let store = storage.open().await?;
-    schema::initialize_local(&store).await?;
-    let storage = storage.objects;
-    let catalog = deployment.catalog().await?;
-    let client = crate::deployment::LocalDeploymentHolds::new(
-        catalog.clone(),
-        HoldScope::for_app(app.clone()),
-    );
-    let policies = Arc::new(HostPolicies::default());
-    let policy = policies.bind(app.clone())?;
-    policy
-        .begin_refresh()?
-        .install(PolicySnapshot::configuration(
-            1.try_into().expect("initial host policy revision"),
-            AppPolicy::default(),
-        )?)?;
-    let service = WorkflowService::open(Rc::new(store), policies)
-        .await?
-        .with_payload_storage(storage)?
-        .with_deployments(
-            deployment
-                .artifacts(config.max_source_bytes)?
-                .with_hold_client(Rc::new(client)),
-        );
-    let api = service.register_app(&policy).await?;
-    let installed = install_bundle(config, deployment, &catalog, &service, app).await?;
-    let backend = api.into_backend(config.payloads.max_payload_bytes)?;
-    let tasks = Rc::new(service.tasks(WorkerIdentity::new(typed_id::generate("wkr"))?));
-    let env = zeroship_runtime::serve::app_env_from_prefixed_vars(&env_vars);
-    let loader = Rc::new(AppRuntimeLoader::new(
-        backend.clone(),
-        env_vars,
-        env,
-        peers,
-        limits,
-    )?);
-    let executor = Rc::new(V8TaskExecutor::new(loader, tasks.clone(), config.payloads)?);
-    let worker = WorkflowWorker::new(tasks, executor, config.worker)?;
-    Ok((backend, worker, installed))
-}
-
-async fn install_bundle(
-    config: &LocalConfig,
-    deployment: &crate::deployment::AppDeployment,
-    catalog: &DeploymentHolds,
-    service: &WorkflowService,
-    app: &AppId,
-) -> Result<Option<crate::deployment::LoadedApp>, WorkflowServiceError> {
-    let Some(installed) = deployment
-        .load(
-            app,
-            catalog,
-            config.max_archive_bytes,
-            config.max_source_bytes,
-        )
-        .await?
-    else {
-        return Ok(None);
-    };
-    let registration = &installed.registration;
-    service.activate_deploy(app, registration).await?;
-    Ok(Some(installed))
 }
 
 #[cfg(test)]
