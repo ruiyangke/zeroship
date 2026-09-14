@@ -109,21 +109,18 @@ fn fresh_instance_id() -> String {
 /// the enrolment endpoint, because what is under test is the monitor's treatment
 /// of a row, not how the row came to exist.
 ///
-/// Option 1A froze `worker_instances.enroller_id` NOT NULL with a restrict FK
-/// to `zeroship.worker_enrollers`, so this helper seeds a fresh enroller row
-/// per instance rather than driving the enrolment endpoint for that too -
-/// what monitor behaviour this file tests does not depend on enroller identity
-/// at all.
+/// `worker_instances.enroller_id` is NOT NULL with a restrict FK to
+/// `zeroship.worker_enrollers`, so this helper seeds a fresh enroller row per
+/// instance rather than driving the enrolment endpoint for that too - what
+/// monitor behaviour this file tests does not depend on enroller identity at
+/// all. Both public keys are distinct per call, because both columns are
+/// UNIQUE and this helper runs more than once in a test.
 async fn insert_active_instance(pg: &compio_postgres::Client, id: &str, port: i32) {
     let ring_key = vec![7u8; 32];
-    let public_key = vec![9u8; 32];
+    let mut public_key = vec![9u8; 32];
+    public_key[..id.len().min(32)].copy_from_slice(&id.as_bytes()[..id.len().min(32)]);
     let host: std::net::IpAddr = "127.0.0.1".parse().expect("loopback parses");
-    let enroller_id = format!(
-        "wen_{}",
-        &uuid::Uuid::new_v4().simple().to_string()[..25]
-    );
-    // Distinct per call (not a fixed literal): worker_enrollers.public_key is
-    // UNIQUE, and this helper may run more than once in a test.
+    let enroller_id = zeroship_core::typed_id::new_worker_enroller_id();
     let mut enroller_public_key = vec![0u8; 32];
     let id_bytes = id.as_bytes();
     let copy_len = id_bytes.len().min(32);
@@ -158,13 +155,25 @@ async fn status_of(pg: &compio_postgres::Client, id: &str) -> Option<String> {
     rows.first().map(|row| row.get(0))
 }
 
+/// Remove the instance and the enroller row its helper seeded for it.
 async fn delete_instance(pg: &compio_postgres::Client, id: &str) {
-    let _ = pg
-        .execute(
-            "DELETE FROM zeroship.worker_instances WHERE id = $1",
+    let enroller: Option<String> = pg
+        .query_opt(
+            "DELETE FROM zeroship.worker_instances WHERE id = $1 RETURNING enroller_id",
             &[&id],
         )
-        .await;
+        .await
+        .ok()
+        .flatten()
+        .map(|row| row.get(0));
+    if let Some(enroller) = enroller {
+        let _ = pg
+            .execute(
+                "DELETE FROM zeroship.worker_enrollers WHERE id = $1",
+                &[&enroller],
+            )
+            .await;
+    }
 }
 
 #[compio::test]

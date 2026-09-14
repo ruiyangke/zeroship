@@ -267,7 +267,7 @@
   {
     "file": "20260914000000_execution_zones_and_worker_enrollers.ts",
     "name": "execution_zones_and_worker_enrollers",
-    "opCount": 13
+    "opCount": 14
   },
   {
     "file": "20260914000050_execution_zones_default_zone.ts",

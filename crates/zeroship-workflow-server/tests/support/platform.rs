@@ -21,6 +21,11 @@ pub struct Platform {
     /// table) has a satisfying value to reference without minting its own
     /// enroller per call site. Tests exercising enroller-level behaviour
     /// itself (revocation, a second enroller) seed their own rows instead.
+    #[allow(
+        dead_code,
+        reason = "Control's deployment-hold suite includes this file and enrols through an \
+                  enroller whose private key it holds, so it never reads this row"
+    )]
     pub default_enroller_id: String,
 }
 impl Platform {

@@ -143,11 +143,10 @@ fn new_enroller_id() -> String {
     format!("wen_{}", &Uuid::new_v4().simple().to_string()[..25])
 }
 
-/// Insert one `zeroship.worker_enrollers` row directly. There is no import
-/// mechanism built in this PoC (the design defers it, along with worker/CLI
-/// wiring, as a follow-up), so tests seed the row the way an operator's import
-/// file would, with a public key nothing here needs to hold the private half
-/// of.
+/// Insert one `zeroship.worker_enrollers` row directly, the row an operator's
+/// import file would leave (the import itself is measured in
+/// `worker_enroller_import_test`), with a public key nothing here needs to hold
+/// the private half of.
 async fn seed_enroller(pg: &compio_postgres::Client, status: &str) -> String {
     let id = new_enroller_id();
     let mut public = [0_u8; PUBLIC_KEY_LENGTH];
@@ -675,9 +674,9 @@ async fn an_active_instance_cannot_enrol_but_its_enroller_can() {
         "an active worker instance must not be able to enrol another instance"
     );
 
-    // A bare `svc/worker` role assertion is refused the same way: no process
-    // holds this key any more in the design this PoC proves, but the
-    // allowlist row itself is what is under test here.
+    // A bare `svc/worker` role assertion is refused the same way, although this
+    // fixture's peer document still publishes the key: Control refuses the
+    // worker role at role arity before any grant is consulted.
     assert_eq!(
         call(fixture.worker_header(), instance_key(0x54))
             .await
@@ -1155,10 +1154,19 @@ async fn count_blocked_on(observer: &compio_postgres::Client, blocker_pid: i32) 
         .get(0)
 }
 
-async fn wait_until_blocked_on(observer: &compio_postgres::Client, blocker_pid: i32) -> bool {
+/// Wait until at least `waiters` backends queue behind `blocker_pid`.
+///
+/// The count is the whole point: returning at the FIRST waiter and then
+/// sampling for the second races the second waiter's own connection set-up,
+/// and a loaded machine loses that race while the lock order is fine.
+async fn wait_until_blocked_on(
+    observer: &compio_postgres::Client,
+    blocker_pid: i32,
+    waiters: i64,
+) -> bool {
     compio::time::timeout(Duration::from_secs(15), async {
         loop {
-            if count_blocked_on(observer, blocker_pid).await >= 1 {
+            if count_blocked_on(observer, blocker_pid).await >= waiters {
                 return;
             }
             compio::time::sleep(Duration::from_millis(20)).await;
@@ -1273,10 +1281,9 @@ async fn run_the_enrol_revoke_race() -> RaceOutcome {
         Box::pin(async move {
             futures::join!(
                 async move {
-                    let queued = wait_until_blocked_on(pg_client_ref, blocker_pid).await;
                     // Two waiters: the enrolment's guarded lock UPDATE and
                     // revocation's own first UPDATE, both against the same row.
-                    let both = queued && count_blocked_on(pg_client_ref, blocker_pid).await >= 2;
+                    let both = wait_until_blocked_on(pg_client_ref, blocker_pid, 2).await;
                     blocker_tx.commit().await.expect("release the blocker lock");
                     both
                 },

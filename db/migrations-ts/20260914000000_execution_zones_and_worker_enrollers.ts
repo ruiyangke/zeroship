@@ -52,6 +52,16 @@ export default {
       reason: "typed-id text domains need bytewise comparison",
     });
 
+    // Control's enroller import (crates/zeroship-control/src/worker_enrolment.rs,
+    // `import_enrollers`) resolves each enroller's zone NAME to its id here, and
+    // refuses a file naming a zone this deployment does not declare. Read only:
+    // zones are declared by migrations, never by Control.
+    grant({
+      privileges: ["select"],
+      on: { kind: "table", schema: "zeroship", names: ["execution_zones"] },
+      to: ["zeroship_control"],
+    });
+
     // The deployment's single execution zone is seeded by the next migration,
     // 20260914000050_execution_zones_default_zone.ts, as DATA rather than
     // here: `schema()` accepts DDL only, and the host recorder refuses a
