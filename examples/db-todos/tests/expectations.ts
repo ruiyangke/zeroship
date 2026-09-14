@@ -1,4 +1,5 @@
 import { expect } from "vitest";
+import { isTypedId } from "@zeroship/server/typed-id";
 import { object, rows, type Capture } from "./rpc";
 
 export function assertDeployed(captured: Capture, run: string) {
@@ -8,10 +9,12 @@ export function assertDeployed(captured: Capture, run: string) {
   };
   const alice = object(result("seedA"));
   const bob = object(result("seedB"));
-  expect(alice.id).toMatch(/^user_[0-9A-Za-z]{20,24}$/);
-  expect(object(result("mkT1"))).toMatchObject({
-    id: expect.stringMatching(/^todo_[0-9A-Za-z]{20,24}$/), userId: alice.id, priority: "low",
-  });
+  expect(alice.id).toEqual(expect.any(String));
+  expect(isTypedId(alice.id as string, "user")).toBe(true);
+  const firstTodo = object(result("mkT1"));
+  expect(firstTodo.id).toEqual(expect.any(String));
+  expect(isTypedId(firstTodo.id as string, "todo")).toBe(true);
+  expect(firstTodo).toMatchObject({ userId: alice.id, priority: "low" });
   expect(object(result("mkT1"))).not.toHaveProperty("userid");
   const second = object(result("mkT2"));
   expect(second).toMatchObject({ title: "walk dog", priority: "medium", done: false, tags: [], version: 1 });
