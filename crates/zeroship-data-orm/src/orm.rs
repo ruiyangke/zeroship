@@ -403,6 +403,8 @@ fn decode_rows<E: Entity, R: FromRow<E>>(output: Output) -> Result<Vec<R>, DbErr
         .collect()
 }
 mod codecs;
+mod postgres;
+pub use postgres::{AdvisoryKey, Postgres, SessionLease, TransactionSetting};
 mod timestamp;
 pub use timestamp::TimestampExpr;
 mod model;

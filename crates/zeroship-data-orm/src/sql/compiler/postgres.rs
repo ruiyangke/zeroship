@@ -23,6 +23,8 @@ const SUPPORT: SqlSupport = SqlSupport {
     identity_allocation: true,
     default_expression: true,
     row_locks: true,
+    advisory_locks: true,
+    transaction_settings: true,
     max_bind_parameters: super::POSTGRES_BIND_LIMIT,
 };
 
@@ -130,6 +132,90 @@ fn write_column(writer: &mut SqlWriter, column: &Column) {
     writer.identifier(column.name().as_str());
 }
 
+/// Render an advisory lock request. The database hashes and folds case, so a
+/// caller spelling the same form in SQL contends on the identical lock.
+fn compile_advisory_lock(
+    lock: crate::sql::coordination::AdvisoryLock,
+    effective: &SqlSupport,
+) -> Result<CompiledQuery, CompileError> {
+    use crate::sql::coordination::{AdvisoryKey, AdvisoryLockAction, AdvisoryLockScope};
+    lock.validate()?;
+    let mut writer = SqlWriter::new(effective.max_bind_parameters);
+    writer.sql.push_str(match (lock.scope(), lock.action()) {
+        (AdvisoryLockScope::Transaction, AdvisoryLockAction::Wait) => {
+            "SELECT pg_advisory_xact_lock("
+        }
+        (AdvisoryLockScope::Transaction, AdvisoryLockAction::Try) => {
+            "SELECT pg_try_advisory_xact_lock("
+        }
+        (AdvisoryLockScope::Session, AdvisoryLockAction::Wait) => "SELECT pg_advisory_lock(",
+        (AdvisoryLockScope::Session, AdvisoryLockAction::Try) => "SELECT pg_try_advisory_lock(",
+        (AdvisoryLockScope::Session, AdvisoryLockAction::Release) => "SELECT pg_advisory_unlock(",
+        (AdvisoryLockScope::Transaction, AdvisoryLockAction::Release) => {
+            return Err(CompileError::InvalidStatement(
+                "transaction advisory locks are released when the transaction settles".into(),
+            ));
+        }
+    });
+    match lock.key() {
+        AdvisoryKey::Single(key) => {
+            writer.write_param(Value::from(*key))?;
+            writer.sql.push_str("::int8");
+        }
+        AdvisoryKey::Pair(high, low) => {
+            writer.write_param(Value::from(i64::from(*high)))?;
+            writer.sql.push_str("::int4, ");
+            writer.write_param(Value::from(i64::from(*low)))?;
+            writer.sql.push_str("::int4");
+        }
+        AdvisoryKey::HashedPair { namespace, text } => {
+            writer.write_param(Value::from(i64::from(*namespace)))?;
+            writer.sql.push_str("::int4, hashtext(");
+            writer.write_param(Value::from(text.as_str()))?;
+            writer.sql.push_str("::text)");
+        }
+        AdvisoryKey::Hashed(text) => {
+            writer.sql.push_str("hashtext(");
+            writer.write_param(Value::from(text.as_str()))?;
+            writer.sql.push_str("::text)::int8");
+        }
+        AdvisoryKey::HashedLowercase(text) => {
+            writer.sql.push_str("hashtext(lower(");
+            writer.write_param(Value::from(text.as_str()))?;
+            writer.sql.push_str("::text))::int8");
+        }
+    }
+    writer.sql.push(')');
+    match lock.action() {
+        AdvisoryLockAction::Wait => {}
+        AdvisoryLockAction::Try => {
+            writer.sql.push_str(" AS ");
+            writer.identifier(crate::sql::coordination::ADVISORY_ACQUIRED);
+        }
+        AdvisoryLockAction::Release => {
+            writer.sql.push_str(" AS ");
+            writer.identifier(crate::sql::coordination::ADVISORY_RELEASED);
+        }
+    }
+    Ok(writer.finish())
+}
+
+/// Render a transaction-local setting. Name and value are both bound.
+fn compile_transaction_setting(
+    setting: crate::sql::coordination::SetTransactionSetting,
+    effective: &SqlSupport,
+) -> Result<CompiledQuery, CompileError> {
+    setting.validate()?;
+    let (name, value) = setting.into_parts();
+    let mut writer = SqlWriter::new(effective.max_bind_parameters);
+    writer.sql.push_str("SELECT set_config(");
+    writer.write_param(Value::from(name.as_str()))?;
+    writer.sql.push_str("::text, ");
+    writer.write_param(Value::from(value))?;
+    writer.sql.push_str("::text, true)");
+    Ok(writer.finish())
+}
+
 fn write_array_mutation(
     writer: &mut SqlWriter,
     column: &Column,
@@ -225,6 +311,10 @@ impl SqlCompiler for PostgresCompiler {
             }
             Statement::Delete(statement) => {
                 super::shared::compile_delete(SYNTAX, effective, statement)
+            }
+            Statement::AdvisoryLock(statement) => compile_advisory_lock(statement, effective),
+            Statement::SetTransactionSetting(statement) => {
+                compile_transaction_setting(statement, effective)
             }
         }
     }

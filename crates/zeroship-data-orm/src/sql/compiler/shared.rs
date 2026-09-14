@@ -24,6 +24,10 @@ pub struct SqlSupport {
     pub default_expression: bool,
     /// Caller-required exclusive row locks on selected rows.
     pub row_locks: bool,
+    /// Advisory locks coordinated by the database server.
+    pub advisory_locks: bool,
+    /// Custom settings scoped to a transaction.
+    pub transaction_settings: bool,
     pub max_bind_parameters: usize,
 }
 
@@ -41,6 +45,8 @@ pub struct Requirements {
     pub identity_allocation: bool,
     pub default_expression: bool,
     pub row_locks: bool,
+    pub advisory_locks: bool,
+    pub transaction_settings: bool,
     pub bind_parameters: usize,
 }
 
@@ -135,6 +141,8 @@ impl Requirements {
                     identity_allocation: false,
                     default_expression: values.clone().any(|v| matches!(v, Expression::Default)),
                     row_locks: false,
+                    advisory_locks: false,
+                    transaction_settings: false,
                     bind_parameters: values.map(expression_binds).sum::<usize>()
                         + usize::from(parts.condition.is_some()),
                 }
@@ -160,6 +168,16 @@ impl Requirements {
                     ..Self::default()
                 }
             }
+            Statement::AdvisoryLock(lock) => Self {
+                advisory_locks: true,
+                bind_parameters: lock.key().bind_parameters(),
+                ..Self::default()
+            },
+            Statement::SetTransactionSetting(_) => Self {
+                transaction_settings: true,
+                bind_parameters: 2,
+                ..Self::default()
+            },
         }
     }
 }
@@ -380,6 +398,18 @@ pub(crate) fn check(
             effective.row_locks,
             implemented.row_locks,
             "row locks",
+        ),
+        (
+            required.advisory_locks,
+            effective.advisory_locks,
+            implemented.advisory_locks,
+            "advisory locks",
+        ),
+        (
+            required.transaction_settings,
+            effective.transaction_settings,
+            implemented.transaction_settings,
+            "transaction settings",
         ),
     ] {
         if available && !implementation {

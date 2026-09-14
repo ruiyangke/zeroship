@@ -67,6 +67,8 @@ pub(crate) fn requirements(schema: &FieldMap, guard_identity: bool) -> Requireme
         identity_allocation: allocates_identity,
         default_expression: false,
         row_locks: false,
+        advisory_locks: false,
+        transaction_settings: false,
         bind_parameters: 0,
     }
 }
