@@ -2175,17 +2175,20 @@ impl RuntimeInner {
         let is_ws_upgrade = headers.iter().any(|(k, v)| {
             k.eq_ignore_ascii_case("upgrade") && v.eq_ignore_ascii_case("websocket")
         });
-        let rpc_id_str: Option<&str> = if application.rpc.is_some() && !is_ws_upgrade {
-            extract_zs_v1_id(method, url)
+        let rpc_path = if !is_ws_upgrade {
+            classify_zs_v1_path(url)
         } else {
-            None
+            ZsV1Path::Other
         };
         #[cfg(feature = "runtime_native_websocket")]
         let subscription_id_str: Option<&str> = if application.rpc.is_some()
             && is_ws_upgrade
             && method.eq_ignore_ascii_case("GET")
         {
-            extract_zs_v1_id(method, url)
+            match classify_zs_v1_path(url) {
+                ZsV1Path::Procedure(id) => Some(id),
+                ZsV1Path::Other | ZsV1Path::Missing => None,
+            }
         } else {
             None
         };
@@ -2253,10 +2256,18 @@ impl RuntimeInner {
                 }
 
                 // ---- Tier 1: RPC fast path ----
-                // `rpc_id_str.is_some()` implies `application.rpc.is_some()`
-                // by construction above, so the published registry is available.
-                if let Some(rpc_id) = rpc_id_str {
-                    let registry = application.rpc.as_ref().unwrap().clone();
+                // The reserved path is recognized independently of the HTTP
+                // method. Procedure metadata decides whether that method is
+                // allowed after the string name resolves.
+                if matches!(rpc_path, ZsV1Path::Missing) {
+                    break 'dispatch Ok(rpc_invalid_argument_response("missing wireId"));
+                }
+                if let ZsV1Path::Procedure(rpc_id) = rpc_path {
+                    let Some(registry) = application.rpc.as_ref().cloned() else {
+                        break 'dispatch Ok(crate::rpc::dispatch::response::error_value(
+                            format!("Method not found: {rpc_id}"), 404, "NOT_FOUND",
+                        ));
+                    };
                     let input_arg: v8::Local<v8::Value> = match parse_rpc_input(scope, method, url, body) {
                         InputParse::Ok(v) => v,
                         InputParse::Reject400(msg) => {
@@ -2310,7 +2321,16 @@ impl RuntimeInner {
                         }
                         Err(error) => break 'dispatch Ok(DispatchResult::Error(error.to_string())),
                     };
-                    let (result, call) = call_rpc_inner(scope, registry, rpc_id, input_arg, rpc_ctx_object);
+                    let rpc_path = format!("/__zeroship/v1/{rpc_id}");
+                    let (result, call) = call_rpc_inner(
+                        scope,
+                        registry,
+                        rpc_id,
+                        input_arg,
+                        rpc_ctx_object,
+                        method,
+                        &rpc_path,
+                    );
                     if result.is_err() {
                         pending_origin = PendingOrigin::Rpc;
                         pending_rpc_call = call;
@@ -4092,8 +4112,16 @@ fn url_path_start(url: &str) -> Option<usize> {
     rest[..authority_end].find('/').map(|i| after_scheme + i)
 }
 
-/// Slice `<id>` out of a URL whose path BEGINS `/__zeroship/v1/<id>`. Returns
-/// None for non-POST/GET methods, or when the tag is not at the path root.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ZsV1Path<'a> {
+    Other,
+    Missing,
+    Procedure(&'a str),
+}
+
+/// Classify a URL whose path begins `/__zeroship/v1/`, independent of method.
+/// The reserved path must not fall through to creator `fetch` merely because
+/// its name is empty or the procedure kind rejects the request method.
 ///
 /// The prefix anchor is load-bearing, not tidiness. This used to be
 /// `url.find(TAG)` — a substring search — while the gateway's own RPC lookup
@@ -4106,20 +4134,26 @@ fn url_path_start(url: &str) -> Option<usize> {
 /// canonical URL (T7a, the one-variable control). No exotic byte was needed —
 /// any leading segment at all was enough.
 ///
-/// Still cheap: one `find` for the path start, one prefix compare, one `find`
-/// for the query/fragment terminator. No URL object is constructed.
-fn extract_zs_v1_id<'a>(method: &str, url: &'a str) -> Option<&'a str> {
-    if !(method.eq_ignore_ascii_case("POST") || method.eq_ignore_ascii_case("GET")) {
-        return None;
-    }
+/// This scans the request target directly and does not construct a URL object.
+fn classify_zs_v1_path(url: &str) -> ZsV1Path<'_> {
+    const ROOT: &str = "/__zeroship/v1";
     const TAG: &str = "/__zeroship/v1/";
-    let path = &url[url_path_start(url)?..];
-    let rest = path.strip_prefix(TAG)?;
-    let end = rest.find(['?', '#']).unwrap_or(rest.len());
-    if end == 0 {
-        return None;
+    let Some(start) = url_path_start(url) else {
+        return ZsV1Path::Other;
+    };
+    let path = &url[start..];
+    let end = path.find(['?', '#']).unwrap_or(path.len());
+    let path = &path[..end];
+    if path == ROOT {
+        return ZsV1Path::Missing;
     }
-    Some(&rest[..end])
+    let Some(rest) = path.strip_prefix(TAG) else {
+        return ZsV1Path::Other;
+    };
+    if rest.is_empty() {
+        return ZsV1Path::Missing;
+    }
+    ZsV1Path::Procedure(rest)
 }
 
 /// Outcome of `parse_rpc_input`. `Reject400` carries a static message
@@ -4387,9 +4421,19 @@ fn call_rpc_inner<'s>(
     name: &str,
     input: v8::Local<'s, v8::Value>,
     context: v8::Local<'s, v8::Object>,
+    method: &str,
+    path: &str,
 ) -> (Result<DispatchResult, v8::Global<v8::Promise>>, Option<crate::rpc::dispatch::RpcCall>) {
     let mut call = crate::rpc::with_rpc_context(scope, context, |scope| {
-        crate::rpc::dispatch::RpcCall::new(scope, registry, name.into(), input, context.into())
+        crate::rpc::dispatch::RpcCall::new_http(
+            scope,
+            registry,
+            name.into(),
+            input,
+            context.into(),
+            method.into(),
+            path.into(),
+        )
     });
     let result = advance_rpc_call(scope, &mut call);
     let retained = if result.is_err() { Some(call) } else { None };
@@ -4419,6 +4463,13 @@ fn advance_rpc_call(
             Ok(CallProgress::Missing(name)) => return Ok(response::error_value(
                 format!("Method not found: {name}"), 404, "NOT_FOUND",
             )),
+            Ok(CallProgress::MethodNotAllowed { method, path }) => {
+                return Ok(response::error_value(
+                    format!("method {method} not allowed on {path}"),
+                    405,
+                    "FAILED_PRECONDITION",
+                ));
+            }
             Err(error) => return Ok(response::failure(scope, error)),
         }
     }
@@ -4521,7 +4572,7 @@ fn call_fetch_inner(
 
 #[cfg(test)]
 mod rpc_path_anchor_tests {
-    use super::{extract_zs_v1_id, url_path_start};
+    use super::{ZsV1Path, classify_zs_v1_path, url_path_start};
 
     /// The bypass this anchor exists to close. Before the fix the tag was
     /// located with `url.find(TAG)` — a SUBSTRING search — while the gateway
@@ -4535,46 +4586,78 @@ mod rpc_path_anchor_tests {
     #[test]
     fn tag_must_be_at_the_path_root_not_anywhere_in_the_url() {
         // Control: the canonical shape still resolves.
-        assert_eq!(extract_zs_v1_id("GET", "/__zeroship/v1/secret"), Some("secret"));
         assert_eq!(
-            extract_zs_v1_id("POST", "http://h/__zeroship/v1/secret"),
-            Some("secret")
+            classify_zs_v1_path("/__zeroship/v1/secret"),
+            ZsV1Path::Procedure("secret")
+        );
+        assert_eq!(
+            classify_zs_v1_path("http://h/__zeroship/v1/secret"),
+            ZsV1Path::Procedure("secret")
         );
 
         // One variable changed: a leading segment. Captured on the wire as
         // GET /apps/bslash/x/__zeroship/v1/secret -> 200 RPC-SECRET-DATA.
-        assert_eq!(extract_zs_v1_id("GET", "/x/__zeroship/v1/secret"), None);
-        assert_eq!(extract_zs_v1_id("GET", "/apps/a/x/__zeroship/v1/secret"), None);
-        assert_eq!(extract_zs_v1_id("POST", "http://h/x/__zeroship/v1/secret"), None);
+        assert_eq!(
+            classify_zs_v1_path("/x/__zeroship/v1/secret"),
+            ZsV1Path::Other
+        );
+        assert_eq!(
+            classify_zs_v1_path("/apps/a/x/__zeroship/v1/secret"),
+            ZsV1Path::Other
+        );
+        assert_eq!(
+            classify_zs_v1_path("http://h/x/__zeroship/v1/secret"),
+            ZsV1Path::Other
+        );
 
         // The tag appearing in the query or fragment is not a path either.
-        assert_eq!(extract_zs_v1_id("GET", "/foo?u=/__zeroship/v1/secret"), None);
-        assert_eq!(extract_zs_v1_id("GET", "/foo#/__zeroship/v1/secret"), None);
+        assert_eq!(
+            classify_zs_v1_path("/foo?u=/__zeroship/v1/secret"),
+            ZsV1Path::Other
+        );
+        assert_eq!(
+            classify_zs_v1_path("/foo#/__zeroship/v1/secret"),
+            ZsV1Path::Other
+        );
 
         // A leading segment that itself contains `://`. This reaches the bypass
         // through `url_path_start` rather than through the prefix compare: drop
         // the scheme-detection bound below and the origin moves past `/a:/`,
         // leaving the tag looking root-anchored. Found by mutating that filter.
-        assert_eq!(extract_zs_v1_id("GET", "/a://b/__zeroship/v1/secret"), None);
+        assert_eq!(
+            classify_zs_v1_path("/a://b/__zeroship/v1/secret"),
+            ZsV1Path::Other
+        );
     }
 
     #[test]
     fn id_is_terminated_by_query_or_fragment_and_never_empty() {
-        assert_eq!(extract_zs_v1_id("GET", "/__zeroship/v1/a?input=x"), Some("a"));
-        assert_eq!(extract_zs_v1_id("GET", "/__zeroship/v1/a#f"), Some("a"));
+        assert_eq!(
+            classify_zs_v1_path("/__zeroship/v1/a?input=x"),
+            ZsV1Path::Procedure("a")
+        );
+        assert_eq!(
+            classify_zs_v1_path("/__zeroship/v1/a#f"),
+            ZsV1Path::Procedure("a")
+        );
         // A bare tag names no procedure.
-        assert_eq!(extract_zs_v1_id("GET", "/__zeroship/v1/"), None);
-        assert_eq!(extract_zs_v1_id("GET", "/__zeroship/v1/?input=x"), None);
+        assert_eq!(
+            classify_zs_v1_path("/__zeroship/v1/"),
+            ZsV1Path::Missing
+        );
+        assert_eq!(classify_zs_v1_path("/__zeroship/v1"), ZsV1Path::Missing);
+        assert_eq!(
+            classify_zs_v1_path("/__zeroship/v1/?input=x"),
+            ZsV1Path::Missing
+        );
     }
 
     #[test]
-    fn only_get_and_post_reach_the_rpc_rail() {
-        for m in ["get", "GET", "post", "POST"] {
-            assert_eq!(extract_zs_v1_id(m, "/__zeroship/v1/a"), Some("a"), "{m}");
-        }
-        for m in ["PUT", "DELETE", "PATCH", "OPTIONS", "HEAD"] {
-            assert_eq!(extract_zs_v1_id(m, "/__zeroship/v1/a"), None, "{m}");
-        }
+    fn path_classification_is_independent_of_the_request_method() {
+        assert_eq!(
+            classify_zs_v1_path("/__zeroship/v1/a"),
+            ZsV1Path::Procedure("a")
+        );
     }
 
     /// `url_path_start` bounds scheme detection on `/ ? #` so a `://` that is

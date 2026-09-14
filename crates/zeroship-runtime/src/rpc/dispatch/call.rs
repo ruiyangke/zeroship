@@ -12,6 +12,12 @@ struct Target {
     name: String,
     input: v8::Global<v8::Value>,
     context: v8::Global<v8::Value>,
+    http: Option<HttpRequest>,
+}
+
+struct HttpRequest {
+    method: String,
+    path: String,
 }
 
 enum Phase {
@@ -27,6 +33,10 @@ pub(crate) enum CallProgress {
         value: v8::Global<v8::Value>,
     },
     Missing(String),
+    MethodNotAllowed {
+        method: String,
+        path: String,
+    },
 }
 
 pub(crate) struct RpcCall {
@@ -42,6 +52,36 @@ impl RpcCall {
         input: v8::Local<'s, v8::Value>,
         context: v8::Local<'s, v8::Value>,
     ) -> Self {
+        Self::new_target(scope, registry, name, input, context, None)
+    }
+
+    pub(crate) fn new_http<'s>(
+        scope: &mut v8::PinScope<'s, '_>,
+        registry: ProcedureRegistry,
+        name: String,
+        input: v8::Local<'s, v8::Value>,
+        context: v8::Local<'s, v8::Value>,
+        method: String,
+        path: String,
+    ) -> Self {
+        Self::new_target(
+            scope,
+            registry,
+            name,
+            input,
+            context,
+            Some(HttpRequest { method, path }),
+        )
+    }
+
+    fn new_target<'s>(
+        scope: &mut v8::PinScope<'s, '_>,
+        registry: ProcedureRegistry,
+        name: String,
+        input: v8::Local<'s, v8::Value>,
+        context: v8::Local<'s, v8::Value>,
+        http: Option<HttpRequest>,
+    ) -> Self {
         Self {
             frame: capture_context(scope),
             phase: Phase::Resolving(Target {
@@ -49,6 +89,7 @@ impl RpcCall {
                 name,
                 input: v8::Global::new(scope, input),
                 context: v8::Global::new(scope, context),
+                http,
             }),
         }
     }
@@ -87,6 +128,14 @@ impl RpcCall {
                                 return Ok(CallProgress::Pending(promise));
                             }
                             Resolution::Ready(procedure) => {
+                                if let Some(request) = &target.http
+                                    && !procedure.allows_http_method(&request.method)
+                                {
+                                    return Ok(CallProgress::MethodNotAllowed {
+                                        method: request.method.clone(),
+                                        path: request.path.clone(),
+                                    });
+                                }
                                 let input = v8::Local::new(scope, target.input);
                                 let context = v8::Local::new(scope, target.context);
                                 self.phase =

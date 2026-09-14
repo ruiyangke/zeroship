@@ -26,6 +26,7 @@ import assert from "node:assert/strict";
 import { promises as fs } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 import { randomUUID } from "node:crypto";
 import { zstdDecompressSync } from "node:zlib";
 import { build as viteBuild } from "vite";
@@ -37,11 +38,13 @@ import { zeroship } from "../src/index.js";
 function readZship(archive: Buffer): {
   manifest: Record<string, unknown>;
   entries: Set<string>;
+  bodies: Map<string, Buffer>;
 } {
   const tar = zstdDecompressSync(archive);
   let offset = 0;
   let manifest: Record<string, unknown> | undefined;
   const entries = new Set<string>();
+  const bodies = new Map<string, Buffer>();
   while (offset + 512 <= tar.length) {
     const header = tar.subarray(offset, offset + 512);
     if (header.every((b) => b === 0)) break;
@@ -54,22 +57,26 @@ function readZship(archive: Buffer): {
     const size = parseInt(sizeOctal, 8) || 0;
     const body = tar.subarray(offset + 512, offset + 512 + size);
     entries.add(name);
+    bodies.set(name, body);
     if (name === "manifest.json") {
       manifest = JSON.parse(body.toString("utf8"));
     }
     offset += 512 + Math.ceil(size / 512) * 512;
   }
   if (manifest == null) throw new Error("manifest.json not found in archive");
-  return { manifest, entries };
+  return { manifest, entries, bodies };
 }
 
 // A pure-backend app: `default = { fetch }`, NO `index.html`, NO client
-// entry. The runtime dispatches via the bundled worker. We intentionally
-// keep this dependency-free (no `@zeroship/*` imports) so the fixture
-// resolves from an isolated tmp root — the bug under test is purely about
-// the SSR build never running when there's no client output, independent
-// of which procedures the entry declares.
+// entry. The runtime dispatches via the bundled worker. Minimal local
+// framework packages keep the fixture isolated while exercising procedure
+// discovery when no client graph has already transformed the server entry.
 const SERVER_TS = `
+"use server";
+import { query } from "@zeroship/rpc/server";
+
+export const ping = query(async () => "pong", { id: "probe.ping" });
+
 export default {
   fetch(req) {
     return new Response("hello from a server-only app");
@@ -80,7 +87,34 @@ export default {
 async function makeServerOnlyApp(): Promise<string> {
   const root = join(tmpdir(), `zs-server-only-${randomUUID()}`);
   await fs.mkdir(resolve(root, "src"), { recursive: true });
+  await fs.mkdir(resolve(root, "node_modules/@zeroship/rpc"), { recursive: true });
+  await fs.mkdir(resolve(root, "node_modules/@zeroship/server"), { recursive: true });
   await fs.writeFile(resolve(root, "src", "server.ts"), SERVER_TS, "utf8");
+  await fs.writeFile(
+    resolve(root, "node_modules/@zeroship/rpc/package.json"),
+    JSON.stringify({ type: "module", exports: { "./server": "./server.js" } }),
+  );
+  await fs.writeFile(
+    resolve(root, "node_modules/@zeroship/rpc/server.js"),
+    `export function query(handler, config = {}) {
+      Object.defineProperty(handler, "config", {
+        value: { ...config, kind: "query" },
+        enumerable: true,
+        configurable: true,
+      });
+      return handler;
+    }`,
+  );
+  await fs.writeFile(
+    resolve(root, "node_modules/@zeroship/server/package.json"),
+    JSON.stringify({ type: "module", exports: "./index.js" }),
+  );
+  await fs.writeFile(
+    resolve(root, "node_modules/@zeroship/server/index.js"),
+    `export function __makeServerProcedure(handler, metadata) {
+      return Object.assign((input) => handler(input), metadata);
+    }`,
+  );
   // Deliberately NO index.html and NO rollupOptions.input — this is the
   // exact shape that broke ISS-59.
   return root;
@@ -102,7 +136,7 @@ describe("ISS-59 — server-only app (no index.html) builds to a valid .zship", 
       // Pre-fix: vite build throws before we get here. If it somehow
       // produced no archive, this assertion still pins the contract.
       const archive = await fs.readFile(archivePath);
-      const { manifest } = readZship(archive);
+      const { manifest, bodies } = readZship(archive);
 
       assert.equal(manifest.version, 1, "manifest schema version");
 
@@ -117,6 +151,14 @@ describe("ISS-59 — server-only app (no index.html) builds to a valid .zship", 
         worker.entry in worker.modules,
         "worker.entry is a key in worker.modules",
       );
+      const workerHash = worker.modules[worker.entry];
+      const workerBody = bodies.get(`blobs/${workerHash}`);
+      assert.ok(workerBody, "worker module body must be packed");
+      const workerPath = resolve(root, "worker.mjs");
+      await fs.writeFile(workerPath, workerBody);
+      const loaded = await import(pathToFileURL(workerPath).href);
+      assert.deepEqual(Object.keys(loaded.default.rpc), ["probe.ping"]);
+      assert.equal(await loaded.default.rpc["probe.ping"](), "pong");
 
       // No client SPA shell exists, but the worker exports `default.fetch`,
       // so the catch-all forwards every unmatched URL to the worker (SSR).
@@ -125,6 +167,7 @@ describe("ISS-59 — server-only app (no index.html) builds to a valid .zship", 
         Record<string, unknown>
       >;
       const catchAll = resources["/[...rest]"];
+      assert.ok(resources["rpc:probe.ping"], "expected the RPC resource");
       assert.ok(catchAll, "expected an SSR catch-all resource");
       // A worker(SSR) catch-all has NO `static` action — it falls through
       // to worker dispatch (marked anonymous + publicly_accessible).

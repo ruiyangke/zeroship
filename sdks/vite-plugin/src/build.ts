@@ -221,6 +221,24 @@ export async function buildServerBundle(opts: {
       }
     },
   };
+  // Discover procedure bindings before generating the static server entry.
+  // Server-only builds and retained dev archives may have no client graph
+  // to populate this state before the synthetic entry loads.
+  const userEntryRel = opts.entry.replace(/\\/g, "/");
+  const discoveryConfig = buildSsrInlineConfig({
+    root: opts.root,
+    ssrEntry: userEntryRel,
+    outDir: opts.outDir,
+    ssrPlugins: [
+      nodeCompatPlugin(),
+      zeroshipModulePlugin(),
+      transformPlugin(opts.state),
+      zeroshipFrameworkResolverPlugin(),
+      clientManifestPlugin({ root: opts.root, distDir: opts.clientDistDir }),
+    ],
+  });
+  (discoveryConfig.build as Record<string, unknown>).write = false;
+  await viteBuild(discoveryConfig as Parameters<typeof viteBuild>[0]);
   const config = buildSsrInlineConfig({
     root: opts.root,
     ssrEntry: SERVER_ENTRY_VIRTUAL_ID,
@@ -232,7 +250,7 @@ export async function buildServerBundle(opts: {
       zeroshipFrameworkResolverPlugin(),
       rpcRegistryPlugin({
         root: opts.root,
-        userEntryRel: opts.entry.replace(/\\/g, "/"),
+        userEntryRel,
         state: opts.state,
       }),
       clientManifestPlugin({ root: opts.root, distDir: opts.clientDistDir }),

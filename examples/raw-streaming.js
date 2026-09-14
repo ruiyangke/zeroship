@@ -21,8 +21,7 @@
 //                                          a `{"t":"hello",input}` frame.
 //                                          The runtime's
 //                                          `dispatchSubscription` invokes
-//                                          the dict-shape handler via
-//                                          `__zsDispatch` and pumps each
+//                                          the dict-shape handler and pumps each
 //                                          yield as a `{"t":"data",value}`
 //                                          frame.
 //   4. plain fn that calls `fetch(...)` → action-like. No kind set; the
