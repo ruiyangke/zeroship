@@ -174,9 +174,10 @@ const fn worker_publication(job: &JobSpec) -> Result<(), Error> {
         JobOperation::Activate { .. }
         | JobOperation::Cron { .. }
         | JobOperation::Management { .. } => Err(denied()),
-        JobOperation::Advance { .. } | JobOperation::Reconcile {} | JobOperation::Collect {} => {
-            Ok(())
-        }
+        JobOperation::Advance { .. }
+        | JobOperation::Fanout { .. }
+        | JobOperation::Reconcile {}
+        | JobOperation::Collect {} => Ok(()),
     }
 }
 

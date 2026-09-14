@@ -8,8 +8,8 @@ use zeroship_core::{
         RestartTarget, RunId, RunOperation, RunState, WorkerId,
     },
     workflow_jobs::{
-        Delivery, DeliveryLease, DeploymentId, JobId, JobOperation, JobOutcome, JobSpec,
-        ManagementCommand, Settlement, SettlementReceipt, SubmitJob,
+        BroadcastId, Delivery, DeliveryLease, DeploymentId, JobId, JobOperation, JobOutcome,
+        JobSpec, ManagementCommand, Settlement, SettlementReceipt, SubmitJob,
     },
     workflow_schedules::ScheduleId,
 };
@@ -32,6 +32,7 @@ fn operations() -> Vec<(JobOperation, Value)> {
     let request = RequestId::mint();
     let schedule = ScheduleId::mint();
     let deployment = DeploymentId::mint();
+    let broadcast = BroadcastId::mint();
     let mut operations = vec![
         (
             JobOperation::Activate {
@@ -60,6 +61,13 @@ fn operations() -> Vec<(JobOperation, Value)> {
                 scheduled_at: 123.try_into().unwrap(),
             },
             json!({"kind":"cron","deploymentId":deployment,"scheduleId":schedule,"scheduleName":"daily-report","requestId":request,"runId":run,"revision":2,"scheduledAt":123}),
+        ),
+        (
+            JobOperation::Fanout {
+                broadcast_id: broadcast.clone(),
+                revision: 1.try_into().unwrap(),
+            },
+            json!({"kind":"fanout", "broadcastId":broadcast, "revision":1}),
         ),
         (JobOperation::Reconcile {}, json!({"kind":"reconcile"})),
         (JobOperation::Collect {}, json!({"kind":"collect"})),
@@ -709,6 +717,7 @@ fn workflow_operations_require_native_revisions_and_cron_identity() {
                 JobOperation::Activate { .. }
                     | JobOperation::Cron { .. }
                     | JobOperation::Management { .. }
+                    | JobOperation::Fanout { .. }
             )
         })
         .collect();
@@ -816,5 +825,40 @@ fn missing_fields_and_unknown_operations_or_outcomes_are_rejected() {
         let mut invalid = wire.clone();
         invalid["successors"] = successors;
         refuses::<Settlement>(invalid);
+    }
+}
+
+#[test]
+fn fanout_requires_broadcast_identity_and_rejects_customer_routing_state() {
+    let operation = JobOperation::Fanout {
+        broadcast_id: BroadcastId::mint(),
+        revision: 1.try_into().unwrap(),
+    };
+    let wire = round_trip(&operation);
+    for bad in [
+        Value::Null,
+        json!(1),
+        json!("wbc_"),
+        json!(JobId::mint()),
+        json!(RunId::mint()),
+    ] {
+        let mut invalid = wire.clone();
+        invalid["broadcastId"] = bad;
+        refuses::<JobOperation>(invalid);
+    }
+    for field in [
+        "topic",
+        "cursor",
+        "cutoff",
+        "recipients",
+        "subscriptions",
+        "body",
+        "deploymentId",
+        "runId",
+        "generation",
+    ] {
+        let mut invalid = wire.clone();
+        invalid[field] = json!("private");
+        refuses::<JobOperation>(invalid);
     }
 }

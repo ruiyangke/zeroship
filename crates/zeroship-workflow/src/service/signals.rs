@@ -1,12 +1,9 @@
 use super::{
-    app::{
-        emit, encode, lock_app, lock_app_state, lock_run, parse_state, request_result,
-        store_request,
-    },
+    app::{emit, encode, lock_app_state, lock_run, parse_state, request_result, store_request},
     models,
     store::Transaction,
     types::digest,
-    AppWorkflows, RequestId, WorkflowService,
+    AppWorkflows, RequestId,
 };
 use crate::{
     engine::StepCheckpoint,
@@ -17,28 +14,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use zeroship_core::{app_id::AppId, typed_id};
 use zeroship_data_orm::{
-    orm::{Entity, FindOptions, FromRow, Operation, Output},
+    orm::{Entity, FindOptions, Output},
     value,
 };
-
-#[derive(FromRow)]
-#[orm(entity = models::broadcasts)]
-struct PendingBroadcast {
-    app_id: String,
-    id: String,
-}
-
-#[derive(FromRow)]
-#[orm(entity = models::broadcasts)]
-struct BroadcastRecord {
-    topic: String,
-    signal_type: String,
-    payload: String,
-    created_at: i64,
-    cursor: i64,
-    cutoff_sequence: i64,
-    origin: String,
-}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AcceptedBroadcast {
@@ -116,10 +94,32 @@ pub(crate) async fn deliver(
     let result = DeliveredSignal {
         id: typed_id::new_workflow_signal_id(),
     };
-    tx.database().collection(models::signals::Entity::COLLECTION)?.insert(value!({
-        "app_id":app.as_str(), "run_id":run_id, "id":result.id.clone(), "signal_type":options.signal_type.clone(),
-        "payload":encode(&options.payload)?, "created_at":now, "origin":origin, "delivery":"direct",
-    })).await?;
+    let sequence = super::fanout::signals::allocate(tx, app).await?;
+    let saved = tx
+        .database()
+        .entity::<models::signals::Entity>()?
+        .insert::<_, super::fanout::signals::SignalRecord>(super::fanout::signals::SignalRecord {
+            app_id: app.as_str().to_owned(),
+            run_id: run_id.to_owned(),
+            id: result.id.clone(),
+            signal_type: options.signal_type.clone(),
+            payload: encode(&options.payload)?,
+            created_at: now,
+            delivery_sequence: sequence,
+            origin: origin.to_owned(),
+            delivery: "direct".into(),
+            broadcast_id: None,
+            topic: None,
+            target_generation: None,
+            target_ordinal: None,
+        })
+        .await?;
+    if saved.id != result.id || saved.delivery_sequence != sequence {
+        return Err(WorkflowServiceError::Internal(
+            "invalid persisted workflow signal".into(),
+        ));
+    }
+
     if run.optional_text("task_id")?.is_none()
         && run.text("control")? == "none"
         && run.text("state")? == "waiting"
@@ -186,197 +186,6 @@ pub(crate) async fn subscribe(
     Ok(())
 }
 
-impl WorkflowService {
-    /// Resume durable fanout from its recipient cursor. A publication includes
-    /// subscriptions accepted before it, even when the host restarts mid-fanout.
-    pub async fn tick_broadcasts(&self) -> Result<usize, WorkflowServiceError> {
-        let tx = self.begin().await?;
-        let db = tx.database();
-        let broadcast = db.entity::<models::broadcasts::Entity>()?.alias("b")?;
-        let pending = db
-            .from(&broadcast)
-            .filter(
-                broadcast
-                    .column(models::broadcasts::app_id)
-                    .in_values(
-                        tx.host_app_ids()?
-                            .into_iter()
-                            .map(|app| app.as_str().to_owned()),
-                    )?
-                    .and(broadcast.column(models::broadcasts::finished).eq(0_i64)?),
-            )
-            .order_by(broadcast.column(models::broadcasts::created_at).asc())
-            .order_by(broadcast.column(models::broadcasts::app_id).asc())
-            .order_by(broadcast.column(models::broadcasts::id).asc())
-            .select(broadcast.row::<PendingBroadcast>())?
-            .limit(128)?
-            .all()
-            .await?;
-        tx.commit().await?;
-        let mut delivered = 0;
-        for candidate in pending {
-            let app = AppId::parse(&candidate.app_id).map_err(|_| {
-                WorkflowServiceError::Internal("invalid persisted workflow app identity".into())
-            })?;
-            let id = candidate.id;
-            let mut tx = self.begin().await?;
-            lock_app(&mut tx, &app).await?;
-            let now = tx.now().await?;
-            // Every fanout mutation holds the app lock, including publication.
-            // Read the receipt after acquiring it so concurrent ticks serialize.
-            let rows = tx
-                .database()
-                .entity::<models::broadcasts::Entity>()?
-                .find::<BroadcastRecord>(
-                    models::broadcasts::app_id
-                        .eq(app.as_str())?
-                        .and(models::broadcasts::id.eq(id.as_str())?)
-                        .and(models::broadcasts::finished.eq(0_i64)?),
-                    FindOptions {
-                        limit: Some(1),
-                        ..Default::default()
-                    },
-                )
-                .await?;
-            let Some(broadcast) = rows.first() else {
-                tx.commit().await?;
-                continue;
-            };
-            let db = tx.database();
-            let subscription = db.entity::<models::subscriptions::Entity>()?.alias("s")?;
-            let run = db.entity::<models::runs::Entity>()?.alias("r")?;
-            let wait = db.entity::<models::waits::Entity>()?.alias("w")?;
-            let recipients = db
-                .from(&subscription)
-                .inner_join(
-                    &run,
-                    subscription
-                        .column(models::subscriptions::app_id)
-                        .eq(run.column(models::runs::app_id))?
-                        .and(
-                            subscription
-                                .column(models::subscriptions::run_id)
-                                .eq(run.column(models::runs::id))?,
-                        )
-                        .and(
-                            subscription
-                                .column(models::subscriptions::generation)
-                                .eq(run.column(models::runs::generation))?,
-                        ),
-                )?
-                .inner_join(
-                    &wait,
-                    subscription
-                        .column(models::subscriptions::app_id)
-                        .eq(wait.column(models::waits::app_id))?
-                        .and(
-                            subscription
-                                .column(models::subscriptions::run_id)
-                                .eq(wait.column(models::waits::run_id))?,
-                        )
-                        .and(
-                            subscription
-                                .column(models::subscriptions::generation)
-                                .eq(wait.column(models::waits::generation))?,
-                        )
-                        .and(
-                            subscription
-                                .column(models::subscriptions::ordinal)
-                                .eq(wait.column(models::waits::ordinal))?,
-                        ),
-                )?
-                .filter(
-                    subscription
-                        .column(models::subscriptions::app_id)
-                        .eq(app.as_str())?
-                        .and(
-                            subscription
-                                .column(models::subscriptions::topic)
-                                .eq(broadcast.topic.as_str())?,
-                        )
-                        .and(
-                            subscription
-                                .column(models::subscriptions::sequence)
-                                .gt(broadcast.cursor)?,
-                        )
-                        .and(
-                            subscription
-                                .column(models::subscriptions::sequence)
-                                .lte(broadcast.cutoff_sequence)?,
-                        )
-                        .and(
-                            wait.column(models::waits::signal_type)
-                                .eq(Some(broadcast.signal_type.as_str()))?,
-                        )
-                        .and(
-                            run.column(models::runs::state)
-                                .in_values(["completed", "failed", "cancelled"])?
-                                .negate(),
-                        ),
-                )
-                .order_by(subscription.column(models::subscriptions::sequence).asc())
-                .select(subscription.row::<models::SubscriptionRecipient>())?
-                .limit(128)?
-                .all()
-                .await?;
-            let signals = db.collection(models::signals::Entity::COLLECTION)?;
-            let mut cursor = broadcast.cursor;
-            for recipient in &recipients {
-                cursor = recipient.sequence;
-                let Output::Count(existing) = signals
-                    .count(
-                        value!({"app_id":app.as_str(), "broadcast_id":id.clone(), "run_id":recipient.run_id.clone()}),
-                        value!({}),
-                    )
-                    .await?
-                else {
-                    return Err(WorkflowServiceError::Internal(
-                        "workflow signal count returned rows".into(),
-                    ));
-                };
-                if existing != 0 {
-                    continue;
-                }
-                let signal_id = typed_id::new_workflow_signal_id();
-                signals.insert(value!({
-                    "app_id":app.as_str(), "id":signal_id.clone(), "run_id":recipient.run_id.clone(),
-                    "signal_type":broadcast.signal_type.clone(), "payload":broadcast.payload.clone(),
-                    "created_at":broadcast.created_at, "broadcast_id":id.clone(), "origin":broadcast.origin.clone(),
-                    "delivery":"topic", "topic":broadcast.topic.clone(), "target_generation":recipient.generation,
-                    "target_ordinal":recipient.ordinal,
-                })).await?;
-                delivered += 1;
-                let woke = tx.database().collection(models::runs::Entity::COLLECTION)?.execute(Operation::Update {
-                    filter:
-                    value!({"app_id":app.as_str(), "id":recipient.run_id.clone(), "generation":recipient.generation,
-                        "task_id":null, "control":"none", "state":"waiting"}), patch:value!({"due_at":now}), many:true,
-                }).await?;
-                if matches!(woke, Output::Count(1)) {
-                    super::publication::advance(&tx, &app, &recipient.run_id, now).await?;
-                }
-                emit(
-                    &mut tx,
-                    &app,
-                    &signal_id,
-                    "workflow.signal",
-                    json!({"runId":recipient.run_id,"broadcastId":id}),
-                    now,
-                )
-                .await?;
-            }
-            tx.database()
-                .collection(models::broadcasts::Entity::COLLECTION)?
-                .update(
-                    value!({"app_id":app.as_str(), "id":id}),
-                    value!({"cursor":cursor, "finished":i64::from(recipients.len() < 128)}),
-                )
-                .await?;
-            tx.commit().await?;
-        }
-        Ok(delivered)
-    }
-}
-
 pub(crate) async fn publish(
     tx: &mut Transaction,
     app: &AppId,
@@ -386,14 +195,10 @@ pub(crate) async fn publish(
     now: i64,
 ) -> Result<AcceptedBroadcast, WorkflowServiceError> {
     let cutoff = subscription_sequence(tx, app).await?;
-    let result = AcceptedBroadcast {
-        id: typed_id::new_workflow_broadcast_id(),
-    };
-    tx.database().collection(models::broadcasts::Entity::COLLECTION)?.insert(value!({
-        "app_id":app.as_str(), "id":result.id.clone(), "topic":topic, "signal_type":options.signal_type.clone(),
-        "payload":encode(&options.payload)?, "created_at":now, "cursor":0, "cutoff_sequence":cutoff,
-        "origin":origin, "finished":0,
-    })).await?;
+    let result = Box::pin(super::fanout::accept(
+        tx, app, topic, options, origin, cutoff, now,
+    ))
+    .await?;
     emit(
         tx,
         app,

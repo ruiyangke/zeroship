@@ -412,3 +412,48 @@ async fn concurrent_kinds(fixture: &Fixture, kind: DutyKind) {
         Some(second_job)
     );
 }
+
+case!(
+    sqlite_fanout_receipts_preserve_maintenance_duties,
+    postgres_fanout_receipts_preserve_maintenance_duties,
+    fanout_receipts
+);
+
+async fn fanout_receipts(fixture: &Fixture, kind: DutyKind) {
+    let (recovery, queue) = host(fixture).await;
+    let app = AppId::mint();
+    recovery
+        .ensure(&app, &DeploymentId::mint(), 1.try_into().unwrap())
+        .await
+        .unwrap();
+    let owner = assignment(&app);
+    for duty in [kind, other(kind)] {
+        let pending = recovery.dispatch(&app, duty).await.unwrap().unwrap();
+        let leased = queue.claim(&owner).await.unwrap().unwrap();
+        assert_eq!(leased.delivery().job, pending);
+        set_deadline(fixture, &app, duty, i64::MAX).await;
+    }
+    let selected = snapshot(fixture, &app, kind).await;
+    let opposite = snapshot(fixture, &app, other(kind)).await;
+    let job = JobSpec {
+        id: JobId::mint(),
+        app_id: app.clone(),
+        operation: JobOperation::Fanout {
+            broadcast_id: zeroship_core::workflow_jobs::BroadcastId::mint(),
+            revision: 1.try_into().unwrap(),
+        },
+        available_at: 0.try_into().unwrap(),
+    };
+    queue.submit(&job).await.unwrap();
+    let delivery = queue.claim(&owner).await.unwrap().unwrap();
+    assert_eq!(delivery.delivery().job, job);
+    let command = Settlement {
+        delivery: delivery.delivery().clone(),
+        outcome: JobOutcome::Waiting {},
+        successors: vec![],
+    };
+    let receipt = queue.settle(&owner, &command).await.unwrap();
+    assert_eq!(queue.settle(&owner, &command).await.unwrap(), receipt);
+    assert_eq!(snapshot(fixture, &app, kind).await, selected);
+    assert_eq!(snapshot(fixture, &app, other(kind)).await, opposite);
+}

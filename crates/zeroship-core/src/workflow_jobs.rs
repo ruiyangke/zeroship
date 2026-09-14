@@ -3,7 +3,7 @@
 //! Customer inputs, history and outputs stay in creator storage. The manager
 //! validates app scope, execution authority and successor bounds separately.
 
-pub use zeroship_id::workflow::{DeploymentId, JobId};
+pub use zeroship_id::workflow::{BroadcastId, DeploymentId, JobId};
 
 use crate::{
     app_id::AppId,
@@ -49,6 +49,10 @@ pub enum JobOperation {
         run_id: RunId,
         revision: Revision,
         command: ManagementCommand,
+    },
+    Fanout {
+        broadcast_id: BroadcastId,
+        revision: Revision,
     },
     // Empty struct variants reject extra fields on internally tagged messages.
     Reconcile {},
@@ -106,6 +110,7 @@ impl JobSpec {
                     ManagementCommand::Transition { .. } | ManagementCommand::RestartStarted { .. },
                 ..
             }
+            | JobOperation::Fanout { .. }
             | JobOperation::Reconcile {}
             | JobOperation::Collect {} => None,
         }
@@ -154,8 +159,10 @@ pub trait JobLease {
 
 /// Scheduling classification without customer results or free-form failures.
 ///
-/// For reconciliation, `Waiting` requests another page or intent phase and
-/// `Completed` closes the scan cycle. Neither result proves that intents drained.
+/// For Fanout, `Waiting` confirms a committed successor page and `Completed`
+/// finishes the broadcast expansion. For reconciliation and collection, `Waiting`
+/// requests another scan page or phase and `Completed` closes that scan cycle.
+/// Neither classification asserts that the manager queue or app intents drained.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum JobOutcome {

@@ -144,9 +144,10 @@ fn delivery_selector(worker: &WorkerId, delivery: &Delivery) -> Result<VerifyAss
 
 const fn worker_operation(operation: &JobOperation) -> Result<(), Error> {
     match operation {
-        JobOperation::Advance { .. } | JobOperation::Reconcile {} | JobOperation::Collect {} => {
-            Ok(())
-        }
+        JobOperation::Advance { .. }
+        | JobOperation::Fanout { .. }
+        | JobOperation::Reconcile {}
+        | JobOperation::Collect {} => Ok(()),
         JobOperation::Activate { .. }
         | JobOperation::Cron { .. }
         | JobOperation::Management { .. } => Err(Error::Denied),

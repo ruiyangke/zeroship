@@ -70,12 +70,14 @@ Lifecycle changes do not free an accepted request identity for reuse. Replaying
 a signal-token request returns the original token, whose expiration and
 revocation still apply. Receipt retirement requires explicit admission fences;
 the journal does not infer them from elapsed time.
-`service::publication` records immutable advance-job intents with creator
-transitions. `AppWorkflows::pending_jobs` and `publish_job` publish under a bound
+`service::publication` records immutable Advance and Fanout intents with creator
+transitions. Exact optional projections distinguish executable frontiers from
+code-free broadcast pages. `AppWorkflows::pending_jobs` and `publish_job` publish under a bound
 app scope without holding a creator transaction across manager I/O. The entire
 returned specification must match before confirmation; retries preserve job
 identities, and pending intents retain deployment dependencies independently of
-run history. `AssignedPublisher` uses the authenticated worker client.
+run history. Release checks validate every pending app specification before
+trusting its deployment projection. `AssignedPublisher` uses the authenticated worker client.
 `service::delivery` accepts an advance job for its exact app, deployment, run,
 generation and frontier. Native manager grants and authenticated client leases
 implement the trusted Rust `JobLease` contract. The returned `DeliveredTask`
@@ -104,12 +106,23 @@ remain retryable. Historical activations keep their original input even after
 replacement or schedule removal. Receipt replay requires the exact occurrence
 linkage and performs no artifact I/O.
 `runner::delivery::DeliverySlot` routes activation, cron, management,
-reconciliation and collection jobs to bounded journal operations and advance jobs to the existing executor and
+reconciliation, collection and fanout jobs to bounded journal operations and advance jobs to the existing executor and
 payload pipeline. Its host supplies `JobTransport`;
 the authenticated worker client implements that metadata interface. The slot
 renews manager and creator authority together, retains interrupted execution
 until native shutdown joins, and retries exact settlement after a committed
 creator result. This slot performs no journal discovery or calendar evaluation.
+`AppWorkflows::fanout_job` expands a delivered topic page inside one creator
+transaction. Topic acceptance and completion sequences keep later broadcasts
+pending until their predecessor finishes. The page's original subscription
+cutoff, recipient signals, cursor, receipt and successor publication intents
+commit together. Fresh progress follows the previous retained page and completed
+topic head; exact historical pages replay after those heads advance. Waiting
+means the next page is committed in the creator outbox, whose normal
+reconciliation publishes it. Signal delivery sequence determines consumption
+order; timestamps govern age and deadline eligibility. Direct signals and
+different topics merge by materialization order. Fanout performs no deployment
+lookup, storage access or creator execution.
 `runner::consumer::JobConsumer` claims manager jobs through that transport and
 shares bounded execution capacity across trusted `ConsumerScope` bindings. Each
 binding pairs an app handle with its own executor and creator storage. The host

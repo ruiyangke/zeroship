@@ -14,6 +14,7 @@ pub mod delivery;
 mod deployment_retention;
 mod deployments;
 mod deploys;
+pub mod fanout;
 pub use deployments::AppDeployments;
 mod frontier;
 mod ingress;

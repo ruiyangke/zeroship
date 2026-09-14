@@ -20,7 +20,9 @@ use support::{Backend, Fixture};
 use zeroship_core::{
     app_id::AppId,
     workflow_coordination::{Assignment, RunId, VerifyAssignment, WorkerId},
-    workflow_jobs::{Delivery, DeploymentId, JobId, JobOperation, JobOutcome, JobSpec, Settlement},
+    workflow_jobs::{
+        BroadcastId, Delivery, DeploymentId, JobId, JobOperation, JobOutcome, JobSpec, Settlement,
+    },
 };
 use zeroship_data_orm::orm::{Database, FromRow};
 use zeroship_workflow_manager::{Error, Options, Queue};
@@ -477,4 +479,55 @@ async fn invalid_state(fixture: &Fixture) {
     assert_eq!(snapshot(&database, &app).await, exhausted);
     replace_rotation(&database, &spec, cursor, order).await;
     assert_eq!(claim(&queue, &authority).await.job, spec);
+}
+
+case!(
+    sqlite_deferred_fanout_yields_to_earlier_broadcast,
+    postgres_deferred_fanout_yields_to_earlier_broadcast,
+    fanout_reorders
+);
+
+async fn fanout_reorders(fixture: &Fixture) {
+    let queue = host(fixture).await;
+    let app = AppId::mint();
+    queue.register_scope(&app).await.unwrap();
+    let authority = assignment(&app);
+    let mut broadcasts = [BroadcastId::mint(), BroadcastId::mint()];
+    broadcasts.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+    let predecessor = JobSpec {
+        operation: JobOperation::Fanout {
+            broadcast_id: broadcasts[0].clone(),
+            revision: 1.try_into().unwrap(),
+        },
+        ..job(&app, 0)
+    };
+    let later = JobSpec {
+        operation: JobOperation::Fanout {
+            broadcast_id: broadcasts[1].clone(),
+            revision: 1.try_into().unwrap(),
+        },
+        ..job(&app, 0)
+    };
+    queue.submit(&later).await.unwrap();
+    queue.submit(&predecessor).await.unwrap();
+    let deferred = claim(&queue, &authority).await;
+    assert_eq!(deferred.job, later);
+    expire(&fixture.database().await, &deferred).await;
+    let earlier = claim(&queue, &authority).await;
+    assert_eq!(earlier.job, predecessor);
+    queue
+        .settle(
+            &authority,
+            &Settlement {
+                delivery: earlier,
+                outcome: JobOutcome::Completed {},
+                successors: vec![],
+            },
+        )
+        .await
+        .unwrap();
+    let retry = claim(&queue, &authority).await;
+    assert_eq!(retry.job, later);
+    assert!(retry.attempt > deferred.attempt);
+    assert_eq!(retry.job.deployment_id(), None);
 }

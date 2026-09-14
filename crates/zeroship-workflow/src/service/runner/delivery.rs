@@ -10,6 +10,7 @@ use crate::{
     service::{
         collection::CollectionOptions,
         delivery::{DeliveredTask, JobAcceptance, JobReceipt},
+        fanout::FanoutOptions,
         policy::PolicyAuthority,
         publication::JobPublisher,
         reconciliation::ReconciliationOptions,
@@ -97,12 +98,14 @@ pub struct DeliveryOptions {
     pub retry_delay: Duration,
     pub reconciliation: ReconciliationOptions,
     pub collection: CollectionOptions,
+    pub fanout: FanoutOptions,
 }
 
 impl DeliveryOptions {
     pub(super) fn validate(self) -> Result<(), WorkflowServiceError> {
         self.reconciliation.validate()?;
         self.collection.validate()?;
+        self.fanout.validate()?;
         if self.execution_timeout.is_zero()
             || self.operation_timeout.is_zero()
             || self.retry_delay.is_zero()
@@ -266,6 +269,17 @@ impl<T: JobTransport> DeliverySlot<T> {
             )
             .await?;
             return self.acknowledge(receipt, &lease).await;
+        }
+        if matches!(lease.delivery().job.operation, JobOperation::Fanout { .. }) {
+            let receipt = bounded(
+                self.options.execution_timeout,
+                app.fanout_job(&lease, self.options.fanout),
+            )
+            .await?;
+            return match receipt {
+                Some(receipt) => self.acknowledge(receipt, &lease).await,
+                None => Ok(DeliveryOutcome::Deferred),
+            };
         }
         let authority = app.capture_policy().authority().cloned();
         let accepted = app.accept_job(&lease).await?;

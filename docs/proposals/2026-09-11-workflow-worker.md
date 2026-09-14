@@ -3,7 +3,7 @@
 **Status:** Agreed architecture with protocol decisions still identified below.
 Implementation is in progress. Native coordinator and queue operations share ORM
 transactions. Their database, authenticated host and platform-schema contracts
-have passed verification; broader customer-engine verification remains open.
+have passed verification; remaining bounded creator operations are in progress.
 Manager scheduling, creator outbox publication and the simple worker consumer
 have not completed their production cutover.
 
@@ -558,14 +558,15 @@ table has the `__zeroship_workflow_` prefix; none belongs in Control's schema.
 | `steps` | Replay history, checkpoints and compensation state. |
 | `tasks` | Customer execution claims, frontier and lease fences, job/delivery identity and exact task completion receipts. |
 | `waits` | Recorded sleep, signal and child waits and their execution scope. |
-| `topics`, `broadcasts`, `signals`, `subscriptions` | Customer event bodies, ordering, targets, subscription state and fanout cursors. |
+| `topics`, `broadcasts`, `signals`, `subscriptions` | Customer event bodies, accepted/completed topic ordering, app-scoped signal delivery order, targets, subscription state and fanout cursors. |
+| `fanout_pages` | Exact delivered broadcast page, committed cursor transition, semantic outcome and successor specifications linked to the retained job receipt and publication. |
 | `requests` | Durable app-operation request identity, body digest and original result. Age alone cannot retire an accepted request. |
 | `management_receipts` | Exact delivered job identity, requested run, management revision and durable lifecycle outcome, independently scoped from app requests. |
 | `management_scopes` | Last applied management revision per app/requested run, linked to retained command history without requiring that the run exists. |
 | `schedules`, `occurrences` | Existing customer schedule definitions and accepted occurrences. Calendar discovery moves to the manager; customer acceptance, overlap state and input references remain customer-side. |
 | `payloads`, `payload_refs` | Prepared upload metadata, ownership, integrity and committed references. |
 | `outbox` | Customer events and their payloads; distinct from manager queue metadata. |
-| `job_publications` | Immutable advance job specifications, generation/frontier/due-time identity and manager confirmation time. Pending records retain deployment dependencies and survive history removal. |
+| `job_publications` | Closed immutable Advance or Fanout specifications, validated operation-specific projections and manager confirmation time. Pending Advance records retain deployment dependencies; publications survive history removal. |
 | `job_receipts` | Immutable logical job specification and committed semantic outcome, retained independently of run history and delivery attempts. App-wide reconciliation records a selected page and its durable attempt offset; its run identity is absent. |
 | `reconciliation_scans` | App-owned scan revision, publication/hold phase, ordering cursor and captured upper boundary. It schedules no work and grants no ingress authority. |
 | `collection_scans` | App-owned collection revision, expiry cutoff, ordering cursor and captured upper payload identity. |
@@ -1181,22 +1182,23 @@ wait. There is no resident isolate sleeping until the deadline.
 ```text
 App ingress          Worker / Creator DB                    Manager
      |                         |                               |
-     |-- signal(body, ID) ---->| durable scope duty already held|
-     |                         | commit signal + intent        |
+     |-- signal / broadcast -->| scope duty already held       |
+     |                         | commit body + job intent      |
      |<-- accepted ------------|                               |
-     |                         |-- event reference ----------->|
+     |                         |-- immutable job metadata ---->|
      |                         |<-- submission receipt --------|
      |                         |-- poll ---------------------->|
-     |                         |<-- event/fanout job ------------|
+     |                         |<-- Advance/Fanout job ---------|
      |                         | consume or persist fanout page|
      |                         | + frontiers + continuation    |
      |                         |-- outcome + ACK -------------->|
 ```
 
-Signal bodies and topic subscription details remain customer data. Direct event
-jobs reference a stored signal; fanout jobs reference a stored broadcast and a
-bounded cursor. A worker cannot use those references outside the assigned app.
-Target generation and wait revision are verified before consumption.
+Signal bodies and topic subscription details remain customer data. Direct signals
+publish the affected runnable frontier through Advance. Fanout jobs name an opaque
+broadcast identity and page revision; recipient cursors stay in the creator DB.
+A worker cannot use those references outside the assigned app. Target generation
+and wait revision are verified before consumption.
 
 Signal-before-wait is safe because events are durable and wait registration checks
 already stored events in the creator transaction. Event and timeout delivery
@@ -1207,13 +1209,13 @@ by arrival order at the manager.
 Topic fanout captures its subscription cutoff and commits progress with created
 deliveries and publication intents. A retry resumes that cursor without duplicate
 semantic delivery. New subscriptions cannot retroactively join an already
-captured broadcast. Continuation jobs keep processing bounded; the queue needs
-closed event/cursor fields before this flow can replace existing local fanout.
+captured broadcast. The following delivered-fanout contract defines bounded
+continuations and ordering independently of manager arrival order.
 
 ### Delivered topic fanout
 
-This contract is the next creator delivery implementation. Direct run signals
-already persist their body and runnable Advance intent in the creator transaction;
+The native creator delivery path implements this contract. Direct run signals
+persist their body and runnable Advance intent in the creator transaction;
 they do not require another event job merely to repeat that acceptance.
 
 The closed code-free operation is `Fanout { broadcast_id, revision }`, where
@@ -1245,11 +1247,19 @@ matching persisted publication and current page revision, and the broadcast must
 be the topic's next unfinished sequence. A later broadcast defers without creating
 a receipt, moving a cursor or acknowledging the job. Manager delivery expiry and
 fair dispatch retry it; an unavailable predecessor cannot be silently skipped.
+The initial page must begin at the initial cursor. Later progress must match the
+previous committed Waiting page and its exact successor publication. A completed
+topic head must resolve a finished broadcast and its retained Completed receipt;
+an advanced or regressed scalar head alone cannot authorize skipping work.
 
 A bounded page selects only eligible subscriptions within the captured cutoff,
 verifies their current run generation and wait, and inserts each semantic delivery
 once. The creator transaction commits recipient signals, affected Advance intents,
 fanout cursor, immutable page receipt and the next Fanout publication together.
+The receipt retains those exact successor specifications; the existing creator
+outbox and Reconcile path publish them after commit. Settlement sends the page
+outcome without coupling its recipient bound to the manager's inline successor
+limit. Waiting certifies a durable creator successor, not manager acceptance.
 The final page also advances the topic's completed sequence. Waiting denotes a
 durable successor page; Completed denotes finished expansion. Historical page
 receipts retain their exact job and publication linkage when current topic and
@@ -1302,6 +1312,61 @@ the journal. Cascading cancellation and large dependency sets yield bounded
 continuation jobs rather than an unbounded worker loop. All relationships remain
 within the assigned app; cross-app workflow calls are ordinary authenticated app
 integration, not a bypass around these journal boundaries.
+
+### Stable continuation identity
+
+The next creator identity change removes eager rewrites of every waiting parent
+when a child continues. A stable creator-owned head identifies the current
+physical run and generation; generation membership records its history. Pending
+parents follow that head through fixed native joins. They never consume an
+intermediate continuation marker or recursively traverse run links.
+
+The native model uses the existing generation journal identity as its membership
+identity. Every table retains `id` as its sole primary key, with scoped uniqueness
+and references:
+
+| Planned model | Identity and relationship |
+| --- | --- |
+| `continuation_heads` | Journal identity, app, current generation identity and positive head revision. References the generation table. |
+| `continuation_members` | Generation identity as `id`, app, head identity and its immutable head revision. References both its generation and its head; app/head/revision is unique. |
+| Parent checkpoint | Accepted child member and, after consumption, exact terminal result member. Both are service-owned scoped references. |
+| Parent wait | Uses its exact parent checkpoint relationship to resolve the logical child; the duplicated mutable physical child target disappears. |
+
+Heads reference generations rather than members, keeping insertion acyclic.
+Create a run and generation before its head and initial member. Continuation
+creates the successor generation and member before comparing and advancing the
+existing head. Native reads must validate that the head's generation has a member
+under that exact head and revision. Missing or inconsistent linkage is a storage
+failure, never permission to read another current generation.
+
+Continue-as-new commits source completion, successor creation, head advancement,
+promoted input, inherited ownership and the ordinary Advance intent together.
+Completing the intermediate source does not notify parents. Only a terminal head
+produces the parent notification obligation. The existing bulk checkpoint/wait
+retargeting and unused physical continuation links disappear.
+
+Restarting the current head advances the same chain to its new generation.
+Restarting a historical continued source creates a fresh head for that source's
+new generation; existing waiters remain attached to the original successor
+chain. The usual task, descendant and compensation safety checks still apply.
+Physical run status continues to describe the requested run. Completed parent
+checkpoints never re-resolve a mutable head: they retain the exact result member,
+physical result-producing run and copied inline or referenced output. Prefix
+replay preserves this provenance; a wait timeout has no child terminal member.
+
+Continuation preserves the creation-owner relationship, cascade policy, depth
+and schedule association. A keyed join creates a waiting relationship without
+acquiring ownership. Cycle admission, restart dependency checks and parent wakeup
+queries must resolve through the same head protocol. Retention preserves members
+and generations needed by heads, unresolved waits and result checkpoints; copied
+parent payload references remain independently owned.
+
+This identity slice can precede bounded dependency delivery. Existing synchronous
+failure/cancellation cascading and parent notification remain until their closed
+page protocol and effective cancellation fence are implemented. A delayed page
+must neither cancel a restarted generation nor let ordinary continuation escape
+an applicable cancellation. Durable parent completion records its propagation
+obligation; it does not certify that every descendant has stopped.
 
 ### Management and delivery barriers
 
@@ -1915,6 +1980,58 @@ container build inputs, xtask selection and dependency gates with each move.
 The existing client's `cyper` carrier follows the client crate; do not retain
 duplicate clients or add Tokio as a normal dependency to avoid updating a gate.
 Use main's shared ORM API and coordinate its changes with the ORM owner.
+
+### Executable host composition
+
+`WorkerHost`, `AssignmentBindings`, `JobConsumer` and `WorkflowCreatorFactory`
+provide native composition seams; the worker executable does not yet construct
+them. The production host owns its enrolled identity, configured capacity and
+assignment registry on a dedicated compio thread. HTTP runtime threads call fixed
+`AppBackend` senders published by that owner. Starting independent hosts under
+the same enrolled identity in every HTTP thread would duplicate capacity and let
+their policy generations retire each other.
+
+Publish a ready backend only after assignment preparation's final current-entry
+and original-authority checks. Successful resource construction alone is not
+readiness: its association may retire before installation. Installation and
+removal carry the immutable app and binding identity. Removal closes admission
+synchronously; previously cloned handles retain their retired generation. An
+unknown or unready app receives a retryable refusal. It cannot acquire an ambient
+policy binding or fall back to the old Control workflow backend.
+
+The creator-resource provider supplies the exact `ConnectionFactory`,
+`ProjectKeySource`, `DbBinding`, object store, deployment capability and signal
+authority independently of manager metadata. Assignment scope cannot select
+credentials or a schema. Context refresh may supply environment and runtime
+limits under explicit freshness, while the workflow backend remains fixed.
+Production journal provisioning belongs to the migration path; the worker does
+not run local schema initialization. Signal authority provisioning and rotation,
+resource eligibility and zone placement remain explicit host contracts.
+
+Construct the authenticated manager client from the enrolled instance signer,
+validated manager origin and bounded transport options. A scope-only retention
+adapter must accept an `AssignedScope` and its fixed signer; it must not fabricate
+a complete `Assignment` or expiry to satisfy a constructor. Control revalidates
+the actual assignment when authorizing each hold operation.
+
+The local host uses the same `JobConsumer` with a CLI-owned native `JobTransport`
+over the manager coordinator's real delivery grants. It runs the manager Driver
+independently from consumption and replaces `WorkflowWorker` polling. The normal
+creator storage and retained app archive remain unchanged. Generic local host
+metadata can combine the deployment catalog with manager metadata only through
+an explicit combined schema bootstrap: the current deployment-only bootstrap
+rejects additional queue tables. This adds no deployable service or workflow-only
+database or bundle switch.
+
+The production cutover changes creator request bindings and consumer startup
+together with removal of the old claim/provision/advance path. Worker database
+posture currently requires Control catalog reads and workflow-owner membership;
+those checks and their canonical grants must disappear with their callers.
+Control must likewise lose creator-journal access, and the Control/Gateway
+advance transport must disappear. The decisive process contract uses isolated
+creator and Control databases, ordinary app ingress, manager delivery, revocation
+of retained request handles and joined shutdown. Native library availability
+alone does not prove this boundary.
 
 ### Service operation inventory
 
@@ -2540,11 +2657,19 @@ empty queue or expired worker as permission to release held code or retire an
 ingress responsibility. Explicit release still checks all manager dependencies
 under the app lock. Automatic held-deployment release policy, capacity activation,
 and ordinary worker/CLI consumer composition remain to integrate.
-The consumer accepts activation, cron, advance, reconciliation, management and
-collection jobs. Collection uses the assigned creator journal and object store
+The consumer accepts activation, cron, advance, reconciliation, management,
+collection and fanout jobs. Collection uses the assigned creator journal and object store
 without loading an executable, creating a task or publishing unrelated intents.
-The queue claim is not filtered by operation. Event fanout still needs its
-closed operation and delivered consumer before joining this protocol.
+Fanout uses the assigned creator journal without an executable or object store;
+its bounded page commits recipient signals, affected frontiers and the successor
+intent together. The former creator broadcast scanner has been removed. The queue
+claim is not filtered by operation.
+The paired native fanout contracts cover reordered delivery, immutable page
+replay, signal ordering under timestamp regression, expired original authority,
+counter exhaustion, corrupt progress and atomic rollback. Delivery tests verify
+deferral and lost acknowledgements without an executor or storage access, and
+the consumer contract progresses a published broadcast through separate creator
+and manager databases. The full creator library and changed-code lint pass.
 The server injects an authenticated Control hold client into its native queue.
 Production deployment registration and activation publication still require
 host integration. The normal Control deployment transaction needs a durable
@@ -2599,7 +2724,7 @@ archive and retains the last valid deployment when current sources fail to build
 | Enrollment bootstrap and revocation | A revoked worker cannot regain equivalent authority by automatic enrollment. Finalize bootstrap trust, replacement authorization and registry freshness with auth ownership. |
 | Placement eligibility and capacity provider | Only platform-authorized app/zone combinations may be assigned. Select the trusted eligibility source and host adapter's durable request/progress contract. |
 | Archive acknowledgement | The direct Control source provides bounded convergence under original observation validity. Define any stronger execution-quiescence evidence separately from calendar acknowledgement or lease expiry. |
-| Complete job envelopes | Operation-specific deployment prerequisites, frozen manager restart targets and linked management outcomes are implemented. Collection now has durable pages and receipts. Complete event/fanout and continuation cursors with their delivered consumers. |
+| Complete job envelopes | Operation-specific deployment prerequisites, frozen manager restart targets and linked management outcomes are implemented. Collection and topic fanout have durable pages, receipts and delivered consumers. Complete bounded dependency continuation delivery. |
 | Normal deployment publication | Bind activation revision issuance to a stable deploy command and immutable body. Artifact identity alone cannot distinguish a delayed retry from an intentional rollback. Compose mutable deployment side effects with command acceptance, connect archive/stage/restore to the durable handoff, and keep the calendar's activation origin explicit across delayed delivery. |
 | Scope retirement | Define ingress epoch closure and durable drain evidence. Registration expiry and empty polling cannot retire unpublished-work responsibility. |
 | Receipt retirement | Define admissibility fences and publication/settlement watermarks before deleting job deduplication state. Retain it until that proof exists. |
@@ -2621,9 +2746,9 @@ outside the queue cutover.
 - Connect normal deployment registration, activation and queue holds to manager
   scheduling through a durable Control publication intent; connect lifecycle
   commands to native disable/restore and remove the standalone scheduler host.
-- Add bounded topic fanout and dependency continuation delivery. Creator collection
-  pages, receipts and shared payload deletion fences are implemented, alongside
-  delivered management and its lifecycle fences.
+- Add bounded dependency continuation delivery. Creator collection and topic
+  fanout pages, receipts and consumers are implemented, alongside shared payload
+  deletion fences and delivered management with its lifecycle fences.
 - Complete the ingress responsibility handshake before admitting new work through
   the production host; retain pending work through outage and restart.
 - Compose the bounded worker consumer, payload/retention jobs and trusted runtime

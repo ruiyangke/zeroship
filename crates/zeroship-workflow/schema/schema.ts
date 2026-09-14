@@ -54,6 +54,7 @@ export function workflowSchema(namespace) {
     ...identity(), signal_epoch: integer().default(0),
     last_polled_at: integer().default(0),
     subscription_sequence: integer().default(0),
+    signal_sequence: integer().default(0),
   }, ["app_id"]);
   create("deploys", {
     ...identity(), id: text(), hash: text(), manifest: text(), created_at: integer(),
@@ -154,15 +155,19 @@ export function workflowSchema(namespace) {
   ]);
   create("topics", {
     ...identity(), topic: text(), signal_epoch: integer(),
+    accepted_sequence: integer().default(0), completed_sequence: integer().default(0),
   }, ["app_id", "topic"], [appFk("topics")]);
   create("broadcasts", {
     ...identity(), id: text(), topic: text(), signal_type: text(), payload: text(),
     created_at: integer(), cursor: integer(), cutoff_sequence: integer(),
     origin: text(), finished: integer(),
-  }, ["app_id", "id"], [appFk("broadcasts")]);
+    sequence: integer(), revision: integer(),
+  }, ["app_id", "id"], [appFk("broadcasts"),
+    fk("broadcast_topic", ["app_id", "topic"], "topics", ["app_id", "topic"]),
+  ], [{ name: "broadcast_order", columns: ["app_id", "topic", "sequence"] }]);
   create("signals", {
     ...runIdentity(), id: text(), signal_type: text(), payload: text(),
-    created_at: integer(), consumed_generation: t.bigInt(), consumed_ordinal: t.bigInt(),
+    created_at: integer(), delivery_sequence: integer(), consumed_generation: t.bigInt(), consumed_ordinal: t.bigInt(),
     broadcast_id: t.text(),
     origin: text().default("app"), delivery: text().default("direct"), topic: t.text(),
     target_generation: t.bigInt(), target_ordinal: t.bigInt(),
@@ -171,8 +176,10 @@ export function workflowSchema(namespace) {
     fk("signal_consumption", ["app_id", "run_id", "consumed_generation", "consumed_ordinal"], "steps", ["app_id", "run_id", "generation", "ordinal"]),
     fk("signal_broadcast", ["app_id", "broadcast_id"], "broadcasts", ["app_id", "id"]),
     fk("signal_target", ["app_id", "run_id", "target_generation", "target_ordinal"], "steps", ["app_id", "run_id", "generation", "ordinal"]),
-  ], [{ name: "broadcast_delivery", columns: ["app_id", "broadcast_id", "run_id"] }]);
-  index("signals", "mailbox", ["app_id", "run_id", "signal_type", "consumed_generation", "created_at"]);
+  ], [{ name: "broadcast_delivery", columns: ["app_id", "broadcast_id", "run_id"] },
+    { name: "signal_delivery_order", columns: ["app_id", "delivery_sequence"] },
+  ]);
+  index("signals", "mailbox", ["app_id", "run_id", "signal_type", "consumed_generation", "delivery_sequence"]);
   create("subscriptions", {
     ...generation(), ordinal: integer(), id: text(), topic: text(), created_at: integer(), sequence: integer(),
   }, ["app_id", "run_id", "generation", "ordinal"], [
@@ -224,14 +231,23 @@ export function workflowSchema(namespace) {
   }, ["app_id", "id"], [appFk("outbox")]);
   index("outbox", "delivery", ["delivered_at", "created_at"]);
   create("job_publications", {
-    ...runIdentity(), id: text(), deploy_id: text(), generation: integer(),
-    frontier_revision: integer(), available_at: integer(), specification: text(),
+    ...identity(), id: text(), run_id: t.text(), deploy_id: t.text(), generation: t.bigInt(),
+    frontier_revision: t.bigInt(), broadcast_id: t.text(), broadcast_revision: t.bigInt(),
+    available_at: integer(), specification: text(),
     created_at: integer(), confirmed_at: t.bigInt(),
   }, ["app_id", "id"], [appFk("job_publications")], [
     { name: "job_publication_frontier", columns: ["app_id", "run_id", "generation", "frontier_revision", "available_at"] },
+    { name: "job_publication_fanout", columns: ["app_id", "broadcast_id", "broadcast_revision"] },
   ]);
   index("job_publications", "pending", ["app_id", "confirmed_at", "id"]);
   index("job_publications", "deployment", ["app_id", "deploy_id", "confirmed_at"]);
+  create("fanout_pages", {
+    ...identity(), broadcast_id: text(), revision: integer(), result: text(),
+  }, ["app_id", "id"], [
+    fk("fanout_page_receipt", ["app_id", "id"], "job_receipts", ["app_id", "id"]),
+    fk("fanout_page_publication", ["app_id", "id"], "job_publications", ["app_id", "id"]),
+    fk("fanout_page_broadcast", ["app_id", "broadcast_id"], "broadcasts", ["app_id", "id"]),
+  ], [{ name: "fanout_page_revision", columns: ["app_id", "broadcast_id", "revision"] }]);
   create("reconciliation_scans", {
     revision: integer(), phase: text(), after_id: t.text(), upper_id: t.text(),
   }, ["id"], [fk("reconciliation_scan_app", ["id"], "app_state", ["app_id"])]);
@@ -240,7 +256,10 @@ export function workflowSchema(namespace) {
   dialect({
     postgres() {
       for (const [name, columns] of Object.entries({
-        job_publications: ["id", "app_id", "run_id", "deploy_id"],
+        job_publications: ["id", "app_id", "run_id", "deploy_id", "broadcast_id"],
+        fanout_pages: ["id", "app_id", "broadcast_id"],
+        broadcasts: ["id", "app_id", "topic"],
+        topics: ["app_id", "topic"],
         deployment_holds: ["deploy_id"],
         job_receipts: ["id", "app_id", "run_id"],
         collection_pages: ["id", "app_id"],

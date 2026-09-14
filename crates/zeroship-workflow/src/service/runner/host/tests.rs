@@ -33,6 +33,7 @@ fn options() -> HostOptions {
                 retry_delay: Duration::from_secs(1),
                 reconciliation: ReconciliationOptions::default(),
                 collection: crate::service::collection::CollectionOptions::default(),
+                fanout: crate::service::fanout::FanoutOptions::default(),
             },
         },
         assignments: AssignmentOptions {
