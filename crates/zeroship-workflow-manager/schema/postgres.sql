@@ -3,7 +3,7 @@ CREATE TABLE "workflow_manager"."schema_version" ("id" text PRIMARY KEY NOT NULL
 
 CREATE TABLE "workflow_manager"."queue_scopes" ("id" text PRIMARY KEY NOT NULL, "lock_version" bigint NOT NULL DEFAULT 0, "dispatch_cursor" bigint NOT NULL DEFAULT 0);
 
-CREATE TABLE "workflow_manager"."deployment_holds" ("id" text PRIMARY KEY NOT NULL, "app_id" text NOT NULL, "deployment_id" text NOT NULL, "holder_id" text NOT NULL, "deploy_hash" text, "generation" bigint NOT NULL, "state" text NOT NULL, CONSTRAINT "deployment_hold_scope" FOREIGN KEY ("app_id") REFERENCES "workflow_manager"."queue_scopes" (id) ON DELETE RESTRICT);
+CREATE TABLE "workflow_manager"."deployment_holds" ("id" text PRIMARY KEY NOT NULL, "app_id" text NOT NULL, "deployment_id" text NOT NULL, "holder_id" text NOT NULL, "deploy_hash" text, "generation" bigint NOT NULL, "state" text NOT NULL, "held_at" bigint, CONSTRAINT "deployment_hold_scope" FOREIGN KEY ("app_id") REFERENCES "workflow_manager"."queue_scopes" (id) ON DELETE RESTRICT);
 
 CREATE INDEX IF NOT EXISTS "deployment_hold_scope_idx" ON "workflow_manager"."deployment_holds" ("app_id");
 
@@ -168,4 +168,4 @@ ALTER TABLE "workflow_manager"."schedule_scopes" ALTER COLUMN "id" TYPE text COL
 ALTER TABLE "workflow_manager"."schedules" ALTER COLUMN "id" TYPE text COLLATE "C", ALTER COLUMN "app_id" TYPE text COLLATE "C", ALTER COLUMN "name" TYPE text COLLATE "C", ALTER COLUMN "activation_id" TYPE text COLLATE "C";
 
 ALTER TABLE "workflow_manager"."schedule_occurrences" ALTER COLUMN "id" TYPE text COLLATE "C", ALTER COLUMN "app_id" TYPE text COLLATE "C", ALTER COLUMN "schedule_id" TYPE text COLLATE "C", ALTER COLUMN "run_id" TYPE text COLLATE "C", ALTER COLUMN "job_id" TYPE text COLLATE "C", ALTER COLUMN "activation_id" TYPE text COLLATE "C";
-INSERT INTO workflow_manager.schema_version (id, fingerprint) VALUES ('manager', '863bb2a50204158529345d03f3daebbcc4c068f0fc483ce04505bbf7c9a0db58');
+INSERT INTO workflow_manager.schema_version (id, fingerprint) VALUES ('manager', '5f77eb463a5ab5a371fd58a5868a7631e1f213197588bf77408e5502531d994b');
