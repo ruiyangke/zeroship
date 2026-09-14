@@ -211,8 +211,7 @@ impl LocalManager {
         .map_err(manager_error)?;
         let scheduler =
             Scheduler::new(queue.clone(), SchedulingOptions::default()).map_err(manager_error)?;
-        let recovery =
-            Recovery::new(queue.clone(), recovery_options(options)).map_err(manager_error)?;
+        let recovery = Recovery::new(queue, recovery_options(options)).map_err(manager_error)?;
         Ok(Self {
             platform,
             coordinator,
