@@ -370,6 +370,85 @@ async fn native_last_login_uses_the_database_clock_without_changing_lockout_stat
 }
 
 #[compio::test]
+async fn native_dummy_login_failure_issues_the_update_of_a_real_failure() {
+    Database::run(async |database| {
+        let orm = database.orm().await;
+        let admin = database.connect().await;
+        let user = users::create(&orm, "dummy-failure@example.test", "Dummy failure", None)
+            .await
+            .unwrap();
+        // Statement triggers fire even when an UPDATE matches no row. The
+        // counter is fixture state, so the definer owns every write to it.
+        admin
+            .batch_execute(
+                "CREATE SCHEMA fixture; \
+                 CREATE TABLE fixture.user_updates ( \
+                   statement bigserial PRIMARY KEY, changed_rows bigint NOT NULL); \
+                 CREATE FUNCTION fixture.record_user_update() RETURNS trigger \
+                 LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog AS $$ \
+                 BEGIN \
+                   INSERT INTO fixture.user_updates (changed_rows) SELECT count(*) FROM changed; \
+                   RETURN NULL; \
+                 END $$; \
+                 CREATE TRIGGER record_user_update AFTER UPDATE ON zeroship.users \
+                 REFERENCING NEW TABLE AS changed FOR EACH STATEMENT \
+                 EXECUTE FUNCTION fixture.record_user_update()",
+            )
+            .await
+            .unwrap();
+
+        users::find_by_id(&orm, &user.id).await.unwrap().unwrap();
+        users::find_by_email(&orm, "dummy-failure@example.test")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            take_user_updates(&admin).await,
+            Vec::<i64>::new(),
+            "reads must not register as user updates"
+        );
+
+        assert_eq!(
+            users::record_login_failure(&orm, &user.id).await.unwrap(),
+            1
+        );
+        let real = take_user_updates(&admin).await;
+        assert_eq!(
+            real,
+            [1],
+            "a failure below the threshold updates only its counter"
+        );
+
+        let baseline = login_state(&admin, &user.id).await;
+        users::record_login_failure_dummy(&orm).await.unwrap();
+        let dummy = take_user_updates(&admin).await;
+        assert_eq!(
+            dummy.len(),
+            real.len(),
+            "the dummy must issue the user updates of a real failure: {dummy:?}"
+        );
+        assert_eq!(dummy, [0], "the dummy update must match no stored user");
+        assert_eq!(login_state(&admin, &user.id).await, baseline);
+    })
+    .await;
+}
+
+/// Changed-row counts of the user UPDATE statements recorded since the last call.
+async fn take_user_updates(admin: &compio_postgres::Client) -> Vec<i64> {
+    admin
+        .query(
+            "WITH taken AS (DELETE FROM fixture.user_updates RETURNING statement, changed_rows) \
+             SELECT changed_rows FROM taken ORDER BY statement",
+            &[],
+        )
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|row| row.get(0))
+        .collect()
+}
+
+#[compio::test]
 async fn concurrent_native_login_failures_preserve_increments_and_the_longest_lock() {
     Database::run(async |database| {
         let orm = database.orm().await;
