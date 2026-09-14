@@ -1,28 +1,15 @@
-// `t.encrypted({ of })` creates TWO columns, and only two of three targets record
-// what they are for.
-//
-// The whole documented surface for this type is one table row in
-// `writing-migrations.md`: "Application-encrypted storage". Everything below was
-// measured, because none of it is written down anywhere and none of it is
-// guessable from the declaration:
+// `t.encrypted({ of })` stores ciphertext in the hidden raw sibling and the
+// creator-facing mask in the declared field. The catalogs must match that storage
+// contract on every supported target:
 //
 //   authored   secret: t.encrypted({ of: t.text() })
 //
-//   PostgreSQL   secret         bytea          COMMENT zero-migrate:enc:string
-//                secret_masked  text           COMMENT zero-migrate:mask:kind=full,classification=pii
-//   SQLite       secret         BLOB           /* … enc sentinel … */ inline in the DDL
-//                secret_masked  TEXT           /* … mask sentinel … */ inline
-//   MySQL        secret         longblob       (no comment)
-//                secret_masked  varchar(191)   (no comment)
-//
-// TWO THINGS WORTH PINNING, for different reasons.
-//
-// The COMPANION COLUMN. One authored column becomes two, and the second carries a
-// classification (`kind=full,classification=pii`) the author never chose — the DSL
-// takes only `of`, with no masking options at all. An author who counts their
-// columns, writes a `SELECT *`, or reviews a migration against a schema diff will
-// meet `secret_masked` without having written it. It lands on all three targets, so
-// this is an undocumented surprise rather than a portability defect.
+//   PostgreSQL   __zs_raw__secret  bytea          encryption sentinel
+//                secret            text           mask sentinel
+//   SQLite       __zs_raw__secret  BLOB           encryption sentinel in the DDL
+//                secret            TEXT           mask sentinel in the DDL
+//   MySQL        __zs_raw__secret  longblob        no comment
+//                secret            varchar(191)    no comment
 //
 // The SENTINEL, which is how anything downstream can tell an encrypted column from
 // an ordinary blob. PostgreSQL carries it in a column comment; SQLite — which has
@@ -33,8 +20,8 @@
 // the assertion is a record of current behaviour, and it is the one that should
 // fail if the sentinel is ever emitted there.
 //
-// GATES: SQLite always runs; the others need `ZERO_MIGRATE_TEST_PG_URL` and
-// `ZERO_MIGRATE_MYSQL_URL`.
+// The package test runner supplies owned PostgreSQL and MySQL containers; SQLite
+// runs in process.
 
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
@@ -44,7 +31,7 @@ import { dirname, join, resolve } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { MYSQL_URL_ENV, PG_URL_ENV, pgUrl, requireLiveDb } from "./live-db.js";
+import { mysqlUrl, pgUrl } from "./live-db.js";
 
 // The host suite builds and resolves its addon in one place.
 import "./addon.js";
@@ -130,8 +117,7 @@ function apply(
   };
 }
 
-test("PostgreSQL creates the companion column and records both sentinels", async (ctx) => {
-  requireLiveDb(process.env.ZERO_MIGRATE_TEST_PG_URL, PG_URL_ENV, "PostgreSQL");
+test("PostgreSQL creates the raw and mask columns and records both sentinels", async () => {
   const pg = await import("pg");
   const client = new pg.Client({ connectionString: pgUrl() });
   await client.connect();
@@ -152,8 +138,8 @@ test("PostgreSQL creates the companion column and records both sentinels", async
 
     assert.deepEqual(
       rows.map((row: { column_name: string }) => row.column_name),
-      ["id", "secret", "secret_masked"],
-      "one authored encrypted column produces TWO stored columns",
+      ["id", "__zs_raw__secret", "secret"],
+      "the catalog matches the encrypted field's physical storage contract",
     );
     assert.equal(rows[1].data_type, "bytea", "the encrypted column is opaque bytes");
     assert.ok(
@@ -192,7 +178,7 @@ test("SQLite carries both sentinels inline, having no comment feature", () => {
     ).map((row) => row.name);
     db.close();
 
-    assert.deepEqual(columns, ["id", "secret", "secret_masked"], "two stored columns");
+    assert.deepEqual(columns, ["id", "__zs_raw__secret", "secret"]);
     // Preserved in `sqlite_master.sql`, which is how a reader recovers them.
     assert.ok(ddl.includes(ENC_SENTINEL), `the DDL must carry the enc sentinel; got ${ddl}`);
     assert.ok(ddl.includes(MASK_SENTINEL), `the DDL must carry the mask sentinel; got ${ddl}`);
@@ -201,12 +187,11 @@ test("SQLite carries both sentinels inline, having no comment feature", () => {
   }
 });
 
-test("MySQL creates both columns but records NEITHER sentinel", async (ctx) => {
-  const mysqlUrl = process.env.ZERO_MIGRATE_MYSQL_URL;
-  requireLiveDb(mysqlUrl, MYSQL_URL_ENV, "MySQL");
+test("MySQL creates both columns but records NEITHER sentinel", async () => {
+  const databaseUrl = mysqlUrl();
   const driver = (await import("mysql2/promise")).default;
-  const admin = await driver.createConnection({ uri: String(mysqlUrl) });
-  const base = String(mysqlUrl).replace(/\/[^/]*$/, "");
+  const admin = await driver.createConnection({ uri: databaseUrl });
+  const base = databaseUrl.replace(/\/[^/]*$/, "");
   const namespace = uniqueNamespace("encshape_my");
   const work = project();
   try {
@@ -224,8 +209,8 @@ test("MySQL creates both columns but records NEITHER sentinel", async (ctx) => {
 
     assert.deepEqual(
       columns.map((row) => row.n),
-      ["id", "secret", "secret_masked"],
-      "the companion column IS created here too -- the structure is the same",
+      ["id", "__zs_raw__secret", "secret"],
+      "the physical storage contract is the same on MySQL",
     );
 
     // Recorded, not endorsed. MySQL supports COLUMN_COMMENT natively, so this is

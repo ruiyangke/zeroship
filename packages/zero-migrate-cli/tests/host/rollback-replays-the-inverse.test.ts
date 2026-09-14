@@ -14,7 +14,7 @@
 // refusal that protects an operator from a fabricated reverse would be gone, and
 // these two arms are the only thing that tells the difference.
 //
-// GATES: `connectLivePg` (see `live-db.ts`) and `ZERO_MIGRATE_MYSQL_URL`.
+// The package runner owns the PostgreSQL and MySQL servers; SQLite runs in process.
 
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
@@ -407,6 +407,7 @@ export default {
         "--registry", join(dir, "registry.json"),
         "--owner-app", OWNER_APP,
         "--database-url", `sqlite:${appPath}`,
+        "--schema", "main",
       ],
       { cwd: dir, encoding: "utf8", env: { ...process.env, DATABASE_URL: "" } },
     );
