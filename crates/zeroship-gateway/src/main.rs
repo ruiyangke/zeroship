@@ -140,7 +140,8 @@ fn enforce_gateway_credentials(
     }
 }
 
-/// A [`ReplayStore`] over the gateway's per-worker-thread Postgres pool.
+/// A [`ReplayStore`](zeroship_core::service_assertion::ReplayStore) over the
+/// gateway's per-worker-thread Postgres pool.
 ///
 /// The gateway is a callee on exactly one internal edge -
 /// `/__zeroship/internal/workflow-advance` - and that edge takes the FULL

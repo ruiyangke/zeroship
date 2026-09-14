@@ -246,8 +246,14 @@ jobs:
       # declares. (#273)
       - name: Dev-readiness diagnosis self-test
         run: tests/lib/dev_ready_selftest.sh
-      - name: Doc links resolve
-        run: tests/run_doc_gate.sh
+      - name: Rustdoc links resolve with default features
+        env:
+          RUSTDOCFLAGS: -D rustdoc::broken_intra_doc_links
+        run: cargo doc --locked --no-deps --workspace
+      - name: Rustdoc links resolve with all features
+        env:
+          RUSTDOCFLAGS: -D rustdoc::broken_intra_doc_links
+        run: cargo doc --locked --no-deps --workspace --all-features
       - name: Data architecture and database posture
         run: cargo xtask test data-architecture
       - name: KV storage remains independent of the V8 binding
@@ -399,9 +405,8 @@ jobs:
       # let alone run: `tls` appeared ZERO times in .github/ until this step.
       # The default feature set is empty, so `cargo test --workspace` above
       # builds none of it - the rustls connector, the six-mode verification
-      # policy and its unit tests were reachable only through
-      # `tests/run_doc_gate.sh --all-features`, which type-checks the module
-      # through rustdoc and executes nothing.
+      # policy and its unit tests are otherwise only type-checked by the
+      # all-features rustdoc invocation above.
       #
       # This is the step that runs the certificate-verifier proofs. They need no
       # server: they drive the real verifiers, through the real mode-to-verifier
