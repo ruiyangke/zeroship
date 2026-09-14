@@ -83,6 +83,9 @@ export type AddonHostDriver = (
 /** The addon's exposed surface — the TYPED verb boundary: every
  *  verb takes + returns a generated `#[napi(object)]` DTO, NO JSON strings. */
 export interface MigrateAddon {
+  /** Configure engine diagnostics from the host process. */
+  setEngineDiagnostics(value?: string | null): boolean;
+
   /** The IR-format version this addon was built against — the single source of
    *  truth across the boundary. */
   irVersion(): number;
