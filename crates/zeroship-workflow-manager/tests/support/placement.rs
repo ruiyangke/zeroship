@@ -232,7 +232,7 @@ impl Host {
     }
 }
 
-pub fn ready(capacity: u32) -> RegisterWorker {
+pub const fn ready(capacity: u32) -> RegisterWorker {
     RegisterWorker {
         capacity: NonZeroU32::new(capacity).unwrap(),
         state: WorkerState::Ready,
@@ -271,7 +271,7 @@ pub enum Step {
     /// Announce entry, then wait for the test to release the step to take.
     Gate {
         entered: oneshot::Sender<()>,
-        release: oneshot::Receiver<Step>,
+        release: oneshot::Receiver<Self>,
     },
 }
 
@@ -465,7 +465,7 @@ impl<P> Counted<P> {
         })
     }
 
-    pub fn calls(&self) -> usize {
+    pub const fn calls(&self) -> usize {
         self.calls.get()
     }
 }

@@ -195,12 +195,61 @@ impl Driver {
 
     async fn lane(&mut self, lane: usize) -> LaneReport {
         let deadline = Deadline(Instant::now() + self.options.lane_timeout);
-        let declarative = matches!(self.capacity.contract(), Contract::Declarative(_));
+        let page = if lane < 4 {
+            self.maintenance_page(lane, deadline).await
+        } else {
+            Box::pin(self.placement_page(lane, deadline)).await
+        };
+        let mut report = LaneReport::default();
+        let (page, fetched) = match page {
+            Ok(page) => page,
+            Err(error) => {
+                report.scan_error = Some(error);
+                report.timed_out = deadline.expired();
+                return report;
+            }
+        };
+        for candidate in &page {
+            if deadline.expired() {
+                report.timed_out = true;
+                break;
+            }
+            let id = candidate.id();
+            self.cursors[lane].after = Some(id.to_owned());
+            report.visited += 1;
+            match deadline.run(self.dispatch(candidate)).await {
+                Ok(()) => report.completed += 1,
+                Err(error) => report.failures.push(CandidateFailure {
+                    id: id.to_owned(),
+                    error,
+                }),
+            }
+            if deadline.expired() {
+                report.timed_out = true;
+                break;
+            }
+        }
+        report.unvisited = page.len() - report.visited;
+        let cursor = &mut self.cursors[lane];
+        if !report.timed_out
+            && (fetched < self.options.page_limit as usize || cursor.after == cursor.upper)
+        {
+            *cursor = Cursor::default();
+            report.sweep_complete = true;
+        }
+        report
+    }
+
+    /// Calendar, recovery and retention pages. Each page reports the rows its
+    /// scan fetched; a full fetch means the sweep has more to visit.
+    async fn maintenance_page(
+        &mut self,
+        lane: usize,
+        deadline: Deadline,
+    ) -> Result<(Vec<Candidate>, usize), Error> {
         let limit = self.options.page_limit;
         let cursor = &mut self.cursors[lane];
-        // Each page reports the rows its scan fetched, which a deduplicated
-        // page can exceed; a full fetch means the sweep has more to visit.
-        let page = match lane {
+        match lane {
             0 => scan_schedules(&self.queue, cursor, deadline, limit)
                 .await
                 .map(|rows| whole(rows.into_iter().map(Candidate::Scheduled).collect())),
@@ -238,6 +287,22 @@ impl Driver {
             )
             .await
             .map(|rows| whole(rows.into_iter().map(Candidate::Hold).collect())),
+            _ => Err(Error::Invalid),
+        }
+    }
+
+    /// The placement lanes' pages: claimable jobs by app, recorded demand,
+    /// and capacity requests. A deduplicated page reports the rows its scan
+    /// fetched, which can exceed the candidates it yields.
+    async fn placement_page(
+        &mut self,
+        lane: usize,
+        deadline: Deadline,
+    ) -> Result<(Vec<Candidate>, usize), Error> {
+        let declarative = matches!(self.capacity.contract(), Contract::Declarative(_));
+        let limit = self.options.page_limit;
+        let cursor = &mut self.cursors[lane];
+        match lane {
             // Claimable jobs by app, including leases a dead worker let lapse.
             // Rows arrive in app order, so one app's jobs are adjacent.
             4 => scan::<_, Claimable>(&self.queue, cursor, deadline, limit, jobs::app_id, |now| {
@@ -304,45 +369,7 @@ impl Driver {
             )
             .await
             .map(|rows| whole(rows.into_iter().map(|row| Candidate::Intent(row.id)).collect())),
-        };
-        let mut report = LaneReport::default();
-        let (page, fetched) = match page {
-            Ok(page) => page,
-            Err(error) => {
-                report.scan_error = Some(error);
-                report.timed_out = deadline.expired();
-                return report;
-            }
-        };
-        for candidate in &page {
-            if deadline.expired() {
-                report.timed_out = true;
-                break;
-            }
-            let id = candidate.id();
-            self.cursors[lane].after = Some(id.to_owned());
-            report.visited += 1;
-            match deadline.run(self.dispatch(candidate)).await {
-                Ok(()) => report.completed += 1,
-                Err(error) => report.failures.push(CandidateFailure {
-                    id: id.to_owned(),
-                    error,
-                }),
-            }
-            if deadline.expired() {
-                report.timed_out = true;
-                break;
-            }
         }
-        report.unvisited = page.len() - report.visited;
-        let cursor = &mut self.cursors[lane];
-        if !report.timed_out
-            && (fetched < self.options.page_limit as usize || cursor.after == cursor.upper)
-        {
-            *cursor = Cursor::default();
-            report.sweep_complete = true;
-        }
-        report
     }
 
     async fn dispatch(&self, candidate: &Candidate) -> Result<(), Error> {
@@ -503,7 +530,7 @@ impl Candidate {
 }
 
 /// A page visited exactly as fetched.
-fn whole(candidates: Vec<Candidate>) -> (Vec<Candidate>, usize) {
+const fn whole(candidates: Vec<Candidate>) -> (Vec<Candidate>, usize) {
     let fetched = candidates.len();
     (candidates, fetched)
 }
