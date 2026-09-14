@@ -216,12 +216,23 @@ fn dependency_closures_preserve_library_and_service_boundaries() {
         "macro parsing must be in the closure"
     );
     let closure = repo::normal_closure("zeroship-data-orm");
-    for forbidden in ["zeroship-runtime", "zeroship-data-v8", "v8"] {
+    for forbidden in [
+        "zeroship-runtime",
+        "zeroship-data-v8",
+        "v8",
+        "zeroship-metering",
+    ] {
         assert!(!closure.contains(forbidden), "ORM reaches {forbidden}");
     }
     assert!(
         closure.contains("compio-postgres"),
         "the dependency detector must find the ORM's real driver"
+    );
+    // Usage attribution is the host's: the adapter meters creator bindings and
+    // hands the ORM a sink. The control proves the detector sees the meter.
+    assert!(
+        repo::normal_closure("zeroship-data-v8").contains("zeroship-metering"),
+        "the dependency detector must find the adapter's meter"
     );
     let mut binaries = 0;
     let mut control = false;
