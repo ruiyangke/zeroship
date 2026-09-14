@@ -193,6 +193,19 @@ impl Procedure {
             })
         })
     }
+
+    pub(crate) fn allows_http_method(&self, method: &str) -> bool {
+        match self.kind {
+            Some(ProcedureKind::Query) => {
+                method.eq_ignore_ascii_case("GET")
+                    || method.eq_ignore_ascii_case("POST")
+                    || method.eq_ignore_ascii_case("HEAD")
+            }
+            Some(ProcedureKind::Mutation) => method.eq_ignore_ascii_case("POST"),
+            Some(ProcedureKind::Subscription) => method.eq_ignore_ascii_case("GET"),
+            Some(ProcedureKind::Action | ProcedureKind::Stream) | None => true,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
