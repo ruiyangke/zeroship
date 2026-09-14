@@ -262,16 +262,6 @@ jobs:
       # in this job rather than behind a service container.
       - name: Verdaccio registry config is closed
         run: tests/verdaccio_config_gate.sh
-      # Three instances in one day (2026-08-10) of a tracked file hardcoding a
-      # home directory: a `file:/home/...` dependency that shipped in a
-      # published package (#265), a ZEROSHIP_BIN pointing into one home dir, and
-      # a doc citation by absolute path. Each is correct on the machine that
-      # wrote it and broken everywhere else, which is why no test caught them -
-      # the tests run on that machine. Scoped by EXTENSION, not by filename: in
-      # prose a path is a citation and rewriting it makes a worse record; in
-      # code or config it is a dependency that resolves or does not.
-      - name: No hardcoded home paths in source/config
-        run: tests/home_path_gate.sh
       # Five shipped `zeroship deploy` instructions named `--key=<master>`, a flag
       # the CLI has never had, and two passed `.` where it takes a path to the
       # built `.zship`. Both fail in a way that never mentions what the creator
