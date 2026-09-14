@@ -63,7 +63,7 @@ The 7 architecture docs were refreshed for *accuracy* in the prior pass. This ph
 - [x] docs/architecture/builder.md — VERIFIED: Backend docker/k8s/nomad-ch, nomad_ch.rs, sandbox routes match.
 
 ## Phase 3 — cross-cutting (optional, after Phase 2)
-- [x] Ensure AGENTS.md task-router links all resolve — VERIFIED: every cited docs/crates/sdks path resolves; 4 broken docs/reference→proposals links repointed to docs/archive/ (c71a6a7a).
+- [x] Ensure AGENTS.md task-router links all resolve — VERIFIED: every cited docs/crates/packages path resolves; broken docs/reference-to-proposals links repointed to docs/archive/ (c71a6a7a).
 - [x] Verify docs/reference/ index in AGENTS.md matches docs/reference/ contents — DONE: added vite-plugin/runtime-limits/sqlite-divergences (fa7c7dcf); index now complete.
 
 - 9 ADR-backed native-API proposals — archived to docs/archive/ + headers — 82adcefd (renames) + e8564b49 (headers)

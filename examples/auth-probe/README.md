@@ -47,7 +47,7 @@ The harness re-derives them from that file on every run, so the dev config and
 the claims it mints for the deployed session cannot drift apart silently.
 
 The sign-in passwords are not in that file: the dev tier derives one per user
-from the id (`devPasswordFor` in `sdks/vite-plugin/src/dev-auth.ts` -- `"dev-"`
+from the id (`devPasswordFor` in `packages/vite-plugin/src/dev-auth.ts` -- `"dev-"`
 plus the first 8 characters after `pws_`), so alpha signs in with
 `dev-probealp` and beta with `dev-probebet`. The harness derives them the same
 way, and fails if a `password:` field reappears in the config.

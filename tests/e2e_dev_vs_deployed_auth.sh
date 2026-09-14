@@ -137,7 +137,7 @@ BETA_ID="pws_probebeta00000000000"
 BETA_EMAIL="beta@probe.zeroship.test"
 BETA_NAME="Probe Beta"
 # The dev password is DERIVED from the id, not declared in the vite config:
-# `devPasswordFor` (`sdks/vite-plugin/src/dev-auth.ts`) returns
+# `devPasswordFor` (`packages/vite-plugin/src/dev-auth.ts`) returns
 # "dev-" + the first 8 characters of the id after "pws_". Derived here the same
 # way from the ids above, so it tracks an id change automatically and the two
 # users get DIFFERENT passwords (they used to share one literal).
@@ -181,7 +181,7 @@ trap cleanup EXIT
 # shellcheck source=lib/binary_freshness.sh
 source "$ROOT/tests/lib/binary_freshness.sh"
 zs_check_binary_freshness "$ROOT" "$BIN" \
-  "crates/zeroship-runtime/src crates/zeroship-worker/src crates/zeroship-gateway/src crates/zeroship-control/src crates/zeroship-core/src sdks/auth/src sdks/vite-plugin/src" \
+  "crates/zeroship-runtime/src crates/zeroship-worker/src crates/zeroship-gateway/src crates/zeroship-control/src crates/zeroship-core/src packages/auth/src packages/vite-plugin/src" \
   "zeroship zeroship-worker zeroship-gate zeroship-control" \
   || { _zs_fresh_rc=$?; [ "$_zs_fresh_rc" -ne 0 ] && exit "$_zs_fresh_rc"; }
 
@@ -351,7 +351,7 @@ assert_identity_pair
 # longer reads -- the derivation below would then disagree with what dev
 # actually accepts and every authenticated row would fail as "login broken".
 if grep -qE '^[[:space:]]*password:' "$APP/vite.config.ts"; then
-  fail "credential drift: $APP/vite.config.ts declares a 'password:' field, which the dev tier ignores (see sdks/vite-plugin/src/dev-auth.ts devPasswordFor)"
+  fail "credential drift: $APP/vite.config.ts declares a 'password:' field, which the dev tier ignores (see packages/vite-plugin/src/dev-auth.ts devPasswordFor)"
 else
   pass "dev passwords are derived from the ids (alpha=$ALPHA_PASSWORD beta=$BETA_PASSWORD), not declared in vite.config.ts"
 fi

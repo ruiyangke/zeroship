@@ -610,7 +610,7 @@ cannot say so. For the six server binaries it selects the operator TOML overlay
 project file `zeroship.jsonc`: `crates/zeroship-cli/src/project_config/mod.rs` reads it
 in `deploy`, `migrate`, `secret`, `var` and `config` (and `login` reads the
 file's `control`, though it accepts no `--config` of its own), and the Vite
-plugin reads the same name in `sdks/vite-plugin/src/project-config/index.ts`. Both readers
+plugin reads the same name in `packages/vite-plugin/src/project-config/index.ts`. Both readers
 take it second, after the explicit `--config=` flag / `configPath` option, and a
 path that does not exist is an error rather than a fall-through to
 auto-discovery. Exporting it globally in a shell that runs both a server binary
@@ -761,7 +761,7 @@ cargo run -p zeroship-config-contract -- env-vars-doc --check
 grep -ohE '\$\{[A-Z_0-9]+(:-[^}]*)?\}' deploy/compose/docker-compose.yml | sort -u
 
 # JavaScript, which no Rust registry can see.
-grep -rEo 'process\.env\.[A-Z][A-Z_0-9]*' sdks/ examples/ \
+grep -rEo 'process\.env\.[A-Z][A-Z_0-9]*' packages/ examples/ \
   --exclude-dir=node_modules --exclude-dir=dist | sed 's/process\.env\.//' | sort -u
 ```
 

@@ -1,7 +1,7 @@
 //! **The generation verb refuses a creator-declared reserved identifier.**
 //!
 //! `genArtifacts` is the one production entry family that writes a creator's
-//! `generated/zeroship/` (`sdks/vite-plugin/src/gen-types/index.ts` calls it for BOTH
+//! `generated/zeroship/` (`packages/vite-plugin/src/gen-types/index.ts` calls it for BOTH
 //! the recorded-migration source and the manual `schema.ts` source, and the addon's
 //! two `api` functions are its only shipped Rust callers). `loadVerify` - the OTHER
 //! DB-free verb in the same addon, the same binary - has run the engine's declaration
@@ -18,7 +18,7 @@
 //!   exactly the `documents[].body` array the vite plugin hands to `genArtifacts`;
 //! - the charter is `policy_version = 1` + `policies/confined-system-shape.inject.toml`,
 //!   which is byte-for-byte what `CONFINED_SCHEMA_EMIT_CEILING_TOML` composes in
-//!   `sdks/vite-plugin/src/gen-types/confined-ceiling.ts` (TypeScript reads the same
+//!   `packages/vite-plugin/src/gen-types/confined-ceiling.ts` (TypeScript reads the same
 //!   fragment through `policies/codegen.mjs`);
 //! - the dialect (`postgres`) and project schema (`public`) are the plugin's literals.
 //!
@@ -41,7 +41,7 @@ use zeroship_migrate_node::wire::GenArtifactsReply;
 
 /// The platform-wide injection fragment, taken from the SAME file the TypeScript
 /// ceiling is generated from. Rust `include_str!`s it; `policies/codegen.mjs` mirrors
-/// it into `sdks/vite-plugin/src/gen-types/confined-system-shape.generated.ts`, and
+/// it into `packages/vite-plugin/src/gen-types/confined-system-shape.generated.ts`, and
 /// `pnpm gen-types:check` byte-compares the two.
 const CONFINED_SYSTEM_SHAPE_INJECT_TOML: &str =
     include_str!("../../../policies/confined-system-shape.inject.toml");

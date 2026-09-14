@@ -194,7 +194,7 @@ harness's platform OP and passes it on `--token=`.
 The claim below, as originally written: an app **outside the monorepo** installs `@zeroship/*` **from a registry** and
 builds a deploy artifact, with zero workspace/file coupling. The script stands up
 the `verdaccio` compose service (`deploy/verdaccio/`), publishes all SDKs
-(`deploy/scripts/publish-sdks.sh`), scaffolds with `create-zeroship-app` into a temp
+(`deploy/scripts/publish-packages.sh`), scaffolds with `create-zeroship-app` into a temp
 dir, `npm install`s (`@zeroship:registry=http://localhost:4873`) — verified to
 resolve every `@zeroship/*` from Verdaccio with **no `workspace:`/`file:` links**
 — and runs `npm run build` → `dist/app.zship`. So the SDK-distribution mechanism

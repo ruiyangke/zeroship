@@ -1,7 +1,12 @@
 //! `zeroship.users` CRUD.
 
+#![allow(clippy::future_not_send, reason = "the ORM belongs to its compio runtime")]
+
 use compio_postgres::{Client, GenericClient};
 use zeroship_core::UserId;
+use zeroship_data_orm::orm::{Database, DbError};
+
+use super::native::models::users as model;
 
 use crate::advisory_lock::lock_refresh_user_xact;
 use crate::error::{AuthError, Result};
@@ -35,82 +40,54 @@ pub struct UserRow {
     pub disabled_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
-/// Look up a user by email. Returns `None` if not found.
+/// Look up a user using the schema's case-insensitive email column.
 ///
 /// # Errors
-///
-/// Returns `AuthError::Db` on PG failure.
-pub async fn find_by_email(conn: &Client, email: &str) -> Result<Option<UserRow>> {
-    let rows = conn
-        .query(
-            "SELECT id, email::text, email_verified_at, name, avatar_url, password_hash, \
-                    credential_version, locked_until, disabled_at \
-             FROM zeroship.users WHERE email = $1",
-            &[&email],
-        )
+/// Returns database or model-conversion errors.
+pub async fn find_by_email(
+    db: &Database,
+    email: &str,
+) -> std::result::Result<Option<UserRow>, DbError> {
+    db.entity::<model::Entity>()?
+        .query()
+        .filter(model::email.eq(email)?)
+        .first()
         .await
-        .map_err(|e| AuthError::Db(format!("users find_by_email: {e}")))?;
-    rows.first().map(row_to_user).transpose()
 }
 
-/// Look up a user by their primary key (`zeroship.users.id`).
-///
-/// Returns `Ok(None)` if no row matches.
+/// Look up a user by their typed identity.
 ///
 /// # Errors
-///
-/// Returns `AuthError::Db` on PG failure.
+/// Returns database or model-conversion errors.
 pub async fn find_by_id(
-    conn: &(impl GenericClient + ?Sized),
+    db: &Database,
     id: &UserId,
-) -> Result<Option<UserRow>> {
-    let rows = conn
-        .query(
-            "SELECT id, email::text, email_verified_at, name, avatar_url, password_hash, \
-                    credential_version, locked_until, disabled_at \
-             FROM zeroship.users WHERE id = $1",
-            &[&id.as_str()],
-        )
+) -> std::result::Result<Option<UserRow>, DbError> {
+    db.entity::<model::Entity>()?
+        .query()
+        .filter(model::id.eq(id.as_str())?)
+        .first()
         .await
-        .map_err(|e| AuthError::Db(format!("users find_by_id: {e}")))?;
-    rows.first().map(row_to_user).transpose()
 }
 
-/// Insert a new user. Returns the created row.
+/// Create a user with an identity minted by auth.
 ///
 /// # Errors
-///
-/// Preserves PostgreSQL's SQLSTATE in `AuthError::DbCode`; transport failures
-/// return `AuthError::Db`.
+/// Returns database constraints or model-conversion errors.
 pub async fn create(
-    conn: &Client,
+    db: &Database,
     email: &str,
     name: &str,
     password_hash: Option<&str>,
-) -> Result<UserRow> {
-    let id = UserId::mint();
-    let rows = conn
-        .query(
-            "INSERT INTO zeroship.users (id, email, name, password_hash) \
-             VALUES ($1, $2, $3, $4) \
-             RETURNING id, email::text, email_verified_at, name, avatar_url, password_hash, \
-                       credential_version, locked_until, disabled_at",
-            &[&id.as_str(), &email, &name, &password_hash],
-        )
+) -> std::result::Result<UserRow, DbError> {
+    db.entity::<model::Entity>()?
+        .insert(NewUser {
+            id: UserId::mint(),
+            email,
+            name,
+            password_hash,
+        })
         .await
-        .map_err(|e| {
-            if let Some(db_err) = e.as_db_error() {
-                return AuthError::DbCode {
-                    code: db_err.code().code().to_string(),
-                    message: format!("users create: {e}"),
-                };
-            }
-            AuthError::Db(format!("users create: {e}"))
-        })?;
-    let row = rows
-        .first()
-        .ok_or_else(|| AuthError::Db("users create: no row returned".into()))?;
-    row_to_user(row)
 }
 
 /// Replace `zeroship.users.password_hash` with a fresh PHC string (Argon2id).
@@ -473,20 +450,6 @@ pub async fn touch_last_login(conn: &Client, id: &UserId) -> Result<()> {
     .await
     .map_err(|e| AuthError::Db(format!("users touch_last_login: {e}")))?;
     Ok(())
-}
-
-fn row_to_user(row: &compio_postgres::Row) -> Result<UserRow> {
-    Ok(UserRow {
-        id: crate::entity_ids::user_id_with_context(row, "id", "users row")?,
-        email: row.get::<_, String>("email"),
-        email_verified_at: row.try_get("email_verified_at").ok(),
-        name: row.get("name"),
-        avatar_url: row.try_get("avatar_url").ok(),
-        password_hash: row.try_get("password_hash").ok(),
-        credential_version: row.get("credential_version"),
-        locked_until: row.try_get("locked_until").ok(),
-        disabled_at: row.try_get("disabled_at").ok(),
-    })
 }
 
 #[cfg(test)]

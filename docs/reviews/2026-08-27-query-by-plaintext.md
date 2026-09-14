@@ -144,7 +144,7 @@ than stated and the second half is true for a different reason than implied.
   (`crates/zeroship-migrate-core/src/render/lower.rs:9509-9524`), pinned by
   `encrypted_via_op_star_is_default_mode_only_fail_closed_by_construction`
   (`fold.rs:9427-9465`). So a creator who writes `mode: "deterministic"` in the
-  SDK (accepted and validated at `sdks/db/src/types.ts:1704-1712`) gets a
+  SDK (accepted and validated at `packages/db/src/types.ts:1704-1712`) gets a
   descriptor that says `randomised`. The deterministic arm in plugin-db is
   reachable today only by hand-writing descriptor JSON, which is what the tests
   do.
@@ -164,7 +164,7 @@ than stated and the second half is true for a different reason than implied.
 
 ### 0.6 The SDK fence that already exists
 
-`sdks/db/src/collection/encryption-fence.ts` refuses **any** filter on a
+`packages/db/src/collection/encryption-fence.ts` refuses **any** filter on a
 randomised-encrypted field (`:62-72`, `RANDOMISED_ENCRYPTED_FIELD_NOT_FILTERABLE`)
 and restricts a deterministic field to `$eq`/`$in` (`:15-18`, `:73-88`). It is
 SDK-side only; there is no Rust counterpart. After the flip that fence is
@@ -198,7 +198,7 @@ accounts: {
 ```
 
 `.equalityIndex()` is refused (at declare time, synchronously, like the other
-builder validations at `sdks/db/src/types.ts:1239-1305`) on a field with no
+builder validations at `packages/db/src/types.ts:1239-1305`) on a field with no
 non-`none` mask declaration: the verb's whole contract is that the value is
 protected, and an unprotected field is queried with `find`.
 
@@ -321,7 +321,7 @@ findByUnmasked(
 
 `TxCollection<S>` carries the mirror returning `Promise<Row<S>[]>` and throwing,
 per the `Result`-rail convention (`docs/reference/api-design-guidelines.md:100-112`,
-`sdks/db/src/db-types.ts:107-160`).
+`packages/db/src/db-types.ts:107-160`).
 
 **The name.** `unmask` reads the value for a row you already have;
 `findByUnmasked` finds the row for a value you already have. The symmetry is the
@@ -333,7 +333,7 @@ call is privileged and audited), `findByProtected` and `findByRealValue`
 which side is protected).
 
 **`actor` is required, not optional.** `find`'s `actor` is optional
-(`sdks/db/src/collection.ts:77-81`); here an absent actor is a guaranteed
+(`packages/db/src/collection.ts:77-81`); here an absent actor is a guaranteed
 denial (`unmask.rs:295-297`), so leaving it optional only converts a compile
 error into a runtime one.
 
@@ -342,7 +342,7 @@ filled with a constant. The audit row's load is carried by the actor, the
 digest and the match count (section 6).
 
 **Return is a settled array, not a `Query` builder.** `find` returns a thenable
-builder (`sdks/db/src/collection.ts:360-371`, `sdks/db/src/query.ts`) carrying
+builder (`packages/db/src/collection.ts:360-371`, `packages/db/src/query.ts`) carrying
 `.sort()`, `.after()`, `.limit()`, `.paginate()`. A builder is a composition
 surface, and every composition point is somewhere the oracle can be
 reintroduced; worse, a builder defers execution, so one authorization could
@@ -351,7 +351,7 @@ breaks. `findByUnmasked` resolves once.
 
 **Type-level closure.** `LookupField<S>` is the set of fields whose descriptor
 carries a `storage.lookupColumn`. The generator already re-emits mask metadata
-into `env.db.ts` (`sdks/vite-plugin/src/gen-types/render-env-db.ts:289-298`), so
+into `env.db.ts` (`packages/vite-plugin/src/gen-types/render-env-db.ts:289-298`), so
 this is a derivation from the same artifact. For a collection with no
 lookup-enabled field, `match` has no admissible key and the call does not
 compile. This is the flip's own argument applied one level up: unrepresentable
@@ -429,7 +429,7 @@ implemented on it, not only on the old one**:
 ### 1.9 Failure modes
 
 All codes are `lower_snake_case` at the raise site and surface to JS as
-`UPPER_SNAKE` through `canonicalErrorCode` (`sdks/db/src/errors.ts:27-36`),
+`UPPER_SNAKE` through `canonicalErrorCode` (`packages/db/src/errors.ts:27-36`),
 matching guideline 9. The `unmask_lookup_` prefix groups them with the existing
 `unmask_*` family, because they are the same family of act.
 
@@ -674,7 +674,7 @@ ciphertext differs by construction, so a unique index on `ssn_raw` is satisfied
 by every possible pair of rows: it enforces nothing, and it fails open exactly
 the way the mask-sibling index fails closed. The SDK already knows this - it
 refuses `.unique()` on a randomised-encrypted field and tells the creator to
-switch to deterministic (`sdks/db/src/types.ts:1147-1159`,
+switch to deterministic (`packages/db/src/types.ts:1147-1159`,
 `UNIQUE_ENCRYPTED_RANDOMISED_UNSUPPORTED`).
 
 The token column is the only place uniqueness over the real value can be
@@ -719,7 +719,7 @@ raising an error, which makes them the dangerous half.
    now an answer about a different column, and any future mask kind that emits
    NULL for a present value would diverge. Flagged as fragile, not broken.
 7. **`distinct` on the field** (`Collection.distinct`,
-   `sdks/db/src/collection.ts:434`). Returns distinct **masks**. Under `last4`,
+   `packages/db/src/collection.ts:434`). Returns distinct **masks**. Under `last4`,
    two different SSNs sharing a suffix collapse into one value, so the cardinality
    is wrong. **Silent.**
 8. **`$group.by` on the field** (`aggregate_read_ident`, `query.rs:3431-3433`,
@@ -760,7 +760,7 @@ raising an error, which makes them the dangerous half.
     the query surface at all, even though the FK constraint can live on the raw
     column. SC-3's relation grammar and item 2 share this one.
 15. **Full-text search over the field.** `Collection.search`
-    (`sdks/db/src/collection.ts:457`) over a masked column indexes the mask.
+    (`packages/db/src/collection.ts:457`) over a masked column indexes the mask.
     **Silent.**
 16. **Vector search over a masked field.** `Collection.near` (`:469`) has the
     same shape; a vector column is not a plausible mask target, so this is listed

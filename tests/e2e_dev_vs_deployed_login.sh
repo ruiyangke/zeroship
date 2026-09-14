@@ -132,7 +132,7 @@ HOST="$APP_SLUG.$ZEROSHIP_CONTROL_APP_BASE_DOMAIN"
 # two tiers do not accept the same one, which is itself a measured finding:
 #
 #   dev      the password is not configured at all. `devPasswordFor`
-#            (`sdks/vite-plugin/src/dev-auth.ts`) DERIVES it from
+#            (`packages/vite-plugin/src/dev-auth.ts`) DERIVES it from
 #            the user id declared in `examples/auth-probe/vite.config.ts`:
 #            "dev-" + the first 8 characters of the id after "pws_", so
 #            pws_probealpha0000000000 -> "dev-probealp" (12 chars). The dev
@@ -198,7 +198,7 @@ trap cleanup EXIT
 # shellcheck source=lib/binary_freshness.sh
 source "$ROOT/tests/lib/binary_freshness.sh"
 zs_check_binary_freshness "$ROOT" "$BIN" \
-  "crates/zeroship-runtime/src crates/zeroship-worker/src crates/zeroship-gateway/src crates/zeroship-control/src crates/zeroship-auth/src crates/zeroship-core/src sdks/auth/src sdks/vite-plugin/src" \
+  "crates/zeroship-runtime/src crates/zeroship-worker/src crates/zeroship-gateway/src crates/zeroship-control/src crates/zeroship-auth/src crates/zeroship-core/src packages/auth/src packages/vite-plugin/src" \
   "zeroship zeroship-worker zeroship-gate zeroship-control zeroship-auth" \
   || { _zs_fresh_rc=$?; [ "$_zs_fresh_rc" -ne 0 ] && exit "$_zs_fresh_rc"; }
 
@@ -320,7 +320,7 @@ for v in "$LOGIN_EMAIL" "$LOGIN_ID"; do
   grep -qF -- "$v" "$APP/vite.config.ts" || { fail "credential drift: '$v' is not in $APP/vite.config.ts"; exit 1; }
 done
 if grep -qE '^[[:space:]]*password:' "$APP/vite.config.ts"; then
-  fail "credential drift: $APP/vite.config.ts declares a 'password:' field the dev tier ignores (see sdks/vite-plugin/src/dev-auth.ts devPasswordFor)"
+  fail "credential drift: $APP/vite.config.ts declares a 'password:' field the dev tier ignores (see packages/vite-plugin/src/dev-auth.ts devPasswordFor)"
   exit 1
 fi
 pass "dev credential ($LOGIN_EMAIL / $DEV_PASSWORD, derived from $LOGIN_ID) is declared in vite.config.ts"

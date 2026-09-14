@@ -55,6 +55,7 @@ use crate::sessions::login as session_cookie;
 use crate::store::sessions;
 use crate::store::users::{self, UserRow};
 use crate::ui::{DeletionBlockedPage, DeletionBlocker, DeletionCancelPage, DeletionDebt};
+use zeroship_data_orm::Database;
 use zeroship_mailer::templates::{
     build_email, AccountDeletionRequestedHtml, AccountDeletionRequestedText,
 };
@@ -92,6 +93,7 @@ pub async fn request(
     form: web::types::Form<CsrfForm>,
     cfg: web::types::State<Arc<AuthConfig>>,
     db: web::types::State<Arc<compio_postgres::Client>>,
+    orm: web::types::State<Database>,
     refresh_pool: web::types::State<RefreshSessionPool>,
     mailer: web::types::State<Arc<dyn Mailer>>,
     issuer: web::types::State<Arc<oidc::Issuer>>,
@@ -100,7 +102,7 @@ pub async fn request(
     if !csrf_ok(&req, &form.csrf) {
         return redirect_to_login();
     }
-    let Some(user) = resolve_user(&req, db.as_ref()).await else {
+    let Some(user) = resolve_user(&req, db.as_ref(), &orm).await else {
         return redirect_to_login();
     };
 
@@ -525,7 +527,11 @@ fn csrf_ok(req: &HttpRequest, form_token: &str) -> bool {
 /// Resolve the signed-in user from the `__Host-zsidp_session` cookie, or
 /// `None`. Mirrors `me::resolve_user` (kept local — that one is private).
 #[allow(clippy::future_not_send)]
-async fn resolve_user(req: &HttpRequest, db: &compio_postgres::Client) -> Option<UserRow> {
+async fn resolve_user(
+    req: &HttpRequest,
+    db: &compio_postgres::Client,
+    orm: &Database,
+) -> Option<UserRow> {
     let cookie_header = req
         .headers()
         .get(COOKIE)
@@ -533,7 +539,7 @@ async fn resolve_user(req: &HttpRequest, db: &compio_postgres::Client) -> Option
         .unwrap_or("");
     let session_id = session_cookie::parse_cookie(cookie_header)?;
     let session = sessions::validate(db, session_id).await.ok().flatten()?;
-    users::find_by_id(db, &session.user_id).await.ok().flatten()
+    users::find_by_id(orm, &session.user_id).await.ok().flatten()
 }
 
 fn redirect_to_login() -> HttpResponse {

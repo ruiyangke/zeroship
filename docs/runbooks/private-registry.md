@@ -57,7 +57,7 @@ export NPM_CONFIG_USERCONFIG
 ```bash
 ZEROSHIP_NPM_REGISTRY=http://localhost:4873 \
 NPM_CONFIG_USERCONFIG="$(pwd)/.verdaccio-npmrc" \
-pnpm publish:sdks
+pnpm publish:packages
 ```
 
 The script builds the SDK workspace first, then publishes the SDK package set in dependency order. If the same version is already present, it unpublishes that exact version and publishes it again so repeated pre-launch local runs are deterministic.
@@ -80,7 +80,7 @@ Published packages:
 
 Skipped package:
 
-- `zeroship` from `sdks/zeroship-stub`: a Node-side test shim for the runtime's virtual `zeroship` module, not a creator-consumable SDK package.
+- `zeroship` from `packages/zeroship-stub`: a Node-side test shim for the runtime's virtual `zeroship` module, not a creator-consumable SDK package.
 
 ## Verify Registry Resolution
 
@@ -165,4 +165,4 @@ workspace `.npmrc` carries only the scoped `@zeroship` line, that
 output contains ZeroShip UI classes such as `zs-theme-root` or `zs-button`.
 
 The registry side of that flow is exercisable from this repo alone with the
-`pnpm publish:sdks` and throwaway-consumer steps above.
+`pnpm publish:packages` and throwaway-consumer steps above.

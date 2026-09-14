@@ -954,7 +954,7 @@ fetched and cached by exactly the machinery that already fetches asset *bytes*.
 MEASURED support that the split is clean today: no PRODUCER writes a non-empty
 `runtime_assets`. Every producer writes an empty map - the two construction sites
 in `crates/zeroship-bundle/src/manifest.rs`, the emitter in
-`sdks/vite-plugin/src/zship.ts`, and the worker's own construction in
+`packages/vite-plugin/src/zship.ts`, and the worker's own construction in
 `crates/zeroship-worker/src/handler.rs`. One test in
 `crates/zeroship-core/tests/types_test.rs` constructs a populated one to exercise
 variant validation, which is why this says "producer" rather than "nothing in the

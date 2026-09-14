@@ -177,7 +177,7 @@ pub enum RequiredPrincipal {
 /// `#[serde(default, skip_serializing_if = "Option::is_none")]`. The
 /// vite-plugin emitter ALWAYS writes it — `kind` is a required field of
 /// its `WireResource` and `autoDeriveRpcEntry` assigns it
-/// unconditionally (`sdks/vite-plugin/src/manifest.ts`). Omitting it for
+/// unconditionally (`packages/vite-plugin/src/manifest.ts`). Omitting it for
 /// `action(...)` was a defect, not a convention: an absent kind left an
 /// action reachable over `GET` with no origin check, which is why that
 /// emitter carries a comment saying every capability reaches the wire.

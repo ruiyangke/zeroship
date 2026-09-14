@@ -153,7 +153,7 @@ function reportSurface(o: Surface): SurfaceReport {
  *
  * This spelling is load-bearing. The production `.zship` build runs Vite/rolldown
  * with `ssr.target: "webworker"`, which STATICALLY REWRITES `process.env` to
- * `{}`; `sdks/vite-plugin/src/build.ts` carries `define: { "process.env":
+ * `{}`; `packages/vite-plugin/src/build.ts` carries `define: { "process.env":
  * "process.env" }` specifically to defeat that rewrite. The define recognises
  * this chain. It does NOT recognise `globalThis.process?.env` - an earlier
  * revision of this fixture used that spelling and the build folded it to a

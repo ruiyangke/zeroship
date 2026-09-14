@@ -81,7 +81,7 @@ fn main() {
 fn cmd_serve(args: &[String]) {
     // THE ONE PLACE THE DEV RELAXATION IS STATED. `zeroship serve` is the
     // single-process dev-tier runtime by identity - it is what
-    // `@zeroship/vite-plugin` spawns (`sdks/vite-plugin/src/dev-server.ts:970`)
+    // `@zeroship/vite-plugin` spawns (`packages/vite-plugin/src/dev-server.ts:970`)
     // with `ZEROSHIP_DEV=1` (`dev-server.ts:939`), and the only vector on
     // which SQLite is an accepted `env.db` backend.
     //

@@ -427,7 +427,7 @@ echo "  zeroship golden path (build-local → deploy)"
 echo "============================================"
 
 # Step 1 runs `pnpm build` inside the EXAMPLE, which consumes whatever
-# `sdks/vite-plugin/dist/` is already on disk. It never rebuilds the plugin. So
+# `packages/vite-plugin/dist/` is already on disk. It never rebuilds the plugin. So
 # an edit to the plugin's own source can be silently untested: the run is green
 # about a dist that predates the change, and nothing in the output says so.
 #
@@ -438,11 +438,11 @@ echo "============================================"
 # ZS_FRESHNESS_STRICT=1 to refuse, which is what CI wants.
 # shellcheck source=lib/binary_freshness.sh
 source "$ROOT/tests/lib/binary_freshness.sh"
-zs_check_artifact_freshness "$ROOT" "sdks/vite-plugin/dist/index.js" \
-  "sdks/vite-plugin/src" || {
+zs_check_artifact_freshness "$ROOT" "packages/vite-plugin/dist/index.js" \
+  "packages/vite-plugin/src" || {
     rc=$?
     [ "$rc" = "2" ] && { fail "vite-plugin freshness check could not run"; exit 2; }
-    fail "sdks/vite-plugin/dist is stale (ZS_FRESHNESS_STRICT=1)"; exit 1;
+    fail "packages/vite-plugin/dist is stale (ZS_FRESHNESS_STRICT=1)"; exit 1;
   }
 
 # Check the Vite diagnostic token against the compiled Rust storage constant.
@@ -2014,7 +2014,7 @@ else
     fail "7d: runtime $SUP_A_RT2 SURVIVED vite $SUP_A_VITE for 20s - this is task #221"
     echo "    It still holds $STARTER/.zeroship/kv.redb, so the next \`pnpm dev\` in that"
     echo "    directory cannot boot on ANY port. Check that the vite plugin sets"
-    echo "    ZEROSHIP_DIE_WITH_PARENT (sdks/vite-plugin/src/dev-server.ts) and that the"
+    echo "    ZEROSHIP_DIE_WITH_PARENT (packages/vite-plugin/src/dev-server.ts) and that the"
     echo "    zeroship binary on PATH is new enough to arm the guard."
     echo "    holders: $(lsof -t "$STARTER/.zeroship/kv.redb" 2>/dev/null | tr '\n' ' ')"
   fi
@@ -2330,11 +2330,11 @@ TODOS="$ROOT/examples/db-todos"
 # PASS/FAIL tally alone would have under-reported.
 #
 # Invoked through `node <dist>` rather than `pnpm migrate` on purpose: the bin
-# is declared in sdks/vite-plugin/package.json but only symlinked by an install
+# is declared in packages/vite-plugin/package.json but only symlinked by an install
 # that post-dates ee2c352aa, so a developer with an older node_modules gets
 # `zeroship-dev-migrate: command not found` (I did). The dist path works either
 # way, and this harness must not depend on when someone last installed.
-MIGRATE_CLI="$ROOT/sdks/vite-plugin/dist/cli/migrate-dev.js"
+MIGRATE_CLI="$ROOT/packages/vite-plugin/dist/cli/migrate-dev.js"
 if [ ! -f "$MIGRATE_CLI" ]; then
   fail "dev-migrate CLI missing at $MIGRATE_CLI (run pnpm build)"
 else
@@ -2347,7 +2347,7 @@ fi
 
 # The step above is a step a CREATOR must now run too, so the artifact we hand
 # them has to be able to run it. `npm create zeroship-app` copies
-# sdks/create-zeroship-app/template/, and ee2c352aa added the `migrate` script
+# packages/create-zeroship-app/template/, and ee2c352aa added the `migrate` script
 # to examples/db-todos/package.json ONLY -- so a scaffolded app with a
 # migrations/ directory had no command that could apply it.
 #
@@ -2361,7 +2361,7 @@ fi
 # only that the command exists to be run. tests/external_chain.sh is the one
 # that scaffolds for real, and it stops at `test -f dist/app.zship` without
 # deploying or invoking anything (see docs/pilot/e2e-scenarios.md, scenario 1).
-TEMPLATE_PKG="$ROOT/sdks/create-zeroship-app/template/package.json"
+TEMPLATE_PKG="$ROOT/packages/create-zeroship-app/template/package.json"
 if node -e '
     const p = require(process.argv[1]);
     process.exit((p.scripts || {}).migrate ? 0 : 1);
@@ -2392,7 +2392,7 @@ if node -e '
     const { readFileSync, readdirSync, existsSync } = require("fs");
     const { join } = require("path");
     const root = process.argv[1];
-    const tpl = JSON.parse(readFileSync(join(root, "sdks/create-zeroship-app/template/package.json"), "utf8"));
+    const tpl = JSON.parse(readFileSync(join(root, "packages/create-zeroship-app/template/package.json"), "utf8"));
     const script = (tpl.scripts || {}).migrate;
     if (!script) { console.error("no migrate script"); process.exit(1); }
     const cmd = script.trim().split(/\s+/)[0];
@@ -2400,10 +2400,10 @@ if node -e '
       ...Object.keys(tpl.dependencies || {}),
       ...Object.keys(tpl.devDependencies || {}),
     ]);
-    const sdks = join(root, "sdks");
+    const packages = join(root, "packages");
     let provider = null;
-    for (const d of readdirSync(sdks)) {
-      const pj = join(sdks, d, "package.json");
+    for (const d of readdirSync(packages)) {
+      const pj = join(packages, d, "package.json");
       if (!existsSync(pj)) continue;
       const p = JSON.parse(readFileSync(pj, "utf8"));
       const bins = typeof p.bin === "string"
@@ -2424,7 +2424,7 @@ fi
 
 # --- The dev server must tell a creator's mistake from a platform fault ----
 #
-# `regenTypesDev` (sdks/vite-plugin/src/dev-server.ts) carries a catch written
+# `regenTypesDev` (packages/vite-plugin/src/dev-server.ts) carries a catch written
 # for ONE fault: "a malformed migration must not take down the server". Right
 # for that fault. But since zero-migrate's bc4d1c9b put catch_unwind on all 14
 # napi exports, an ENGINE PANIC arrives at the same arm instead of killing the
@@ -2795,7 +2795,7 @@ fi
 # THE SEAM THIS TESTS, and why every step above is blind to it: steps 1-9 build
 # `examples/starter` and `examples/db-todos`. Neither is what `npm create
 # zeroship-app` produces. That command copies
-# `sdks/create-zeroship-app/template/`, and the template differs from the
+# `packages/create-zeroship-app/template/`, and the template differs from the
 # starter in the one place that decides whether a deployed app answers at all --
 # the starter ships `src/server/config.ts` declaring its RPC policy, and the
 # template ships no policy anywhere. A harness that only ever builds the
@@ -2829,7 +2829,7 @@ fi
 # descriptor, and the real vite-plugin build. 10a keeps that claim true.
 step 10 "Scaffold: the app \`npm create zeroship-app\` produces, on both tiers"
 SCAFFOLD="$ROOT/examples/scaffold-app"
-TEMPLATE="$ROOT/sdks/create-zeroship-app/template"
+TEMPLATE="$ROOT/packages/create-zeroship-app/template"
 SC_APP="scaffoldapp"
 # A crashed earlier run can leave the CONTROL leg's policy file behind, which
 # would silently turn this run's measurement into the control. Remove it before
@@ -2856,7 +2856,7 @@ rm -rf "$SCAFFOLD/src/server"
 # inside this monorepo because the ROOT .gitignore covers it (line 12); a
 # creator's repo has only the template's.
 SC_FRESH="$(mktemp -d -t gp-scaffold-XXXXXX)"
-if ( cd "$SC_FRESH" && node "$ROOT/sdks/create-zeroship-app/bin/create.js" scaffold-app ) >/tmp/gp-scaffold-create.log 2>&1; then
+if ( cd "$SC_FRESH" && node "$ROOT/packages/create-zeroship-app/bin/create.js" scaffold-app ) >/tmp/gp-scaffold-create.log 2>&1; then
   SC_EXCL=(--exclude=package.json --exclude=zeroship.jsonc)
   while IFS= read -r ig; do
     case "$ig" in ""|"#"*) continue ;; esac
@@ -2866,7 +2866,7 @@ if ( cd "$SC_FRESH" && node "$ROOT/sdks/create-zeroship-app/bin/create.js" scaff
   if [ -z "$SC_DIFF" ]; then
     pass "examples/scaffold-app is byte-identical to the shipped template (source files)"
   else
-    fail "the scaffold copy has DRIFTED from sdks/create-zeroship-app/template -- it no longer
+    fail "the scaffold copy has DRIFTED from packages/create-zeroship-app/template -- it no longer
     reproduces what a creator receives, so every verdict below is about a different app:
 $(printf '%s' "$SC_DIFF" | sed 's/^/      /')"
   fi
@@ -3113,7 +3113,7 @@ fi
 #
 # The generated @zeroship/rpc client mints a UUIDv7 Idempotency-Key for every
 # `idempotent: true` write and sends it on BOTH tiers
-# (sdks/rpc/src/transport.ts:131). A probe that omits it is not reproducing the
+# (packages/rpc/src/transport.ts:131). A probe that omits it is not reproducing the
 # creator's call: measured that way first, the gateway answered 400
 # missing_idempotency_key while dev answered 200, and the "divergence" was the
 # probe's own. It is supplied here for exactly the two ids the manifest marks
@@ -3150,7 +3150,7 @@ else
   # created by the same separate step a creator now runs.
   rm -rf "$SCAFFOLD/.zeroship"
   free_ports "$SC_V" "$SC_RT"
-  ( cd "$SCAFFOLD" && node "$ROOT/sdks/vite-plugin/dist/cli/migrate-dev.js" ) >/tmp/gp-scaffold-devmigrate.log 2>&1
+  ( cd "$SCAFFOLD" && node "$ROOT/packages/vite-plugin/dist/cli/migrate-dev.js" ) >/tmp/gp-scaffold-devmigrate.log 2>&1
   ( cd "$SCAFFOLD" && ./node_modules/.bin/vite --port "$SC_V" --strictPort ) >/tmp/gp-scaffold-dev.log 2>&1 &
   PIDS+=($!)
   SC_DEV_UP=0
@@ -3677,7 +3677,7 @@ gp_close_step
 #
 #   pnpm dev   unbounded  (crates/zeroship-runtime/src/core/serve.rs, `wall_timeout: None`;
 #                          the vite dev server spawns `zeroship serve` WITHOUT
-#                          --wall-timeout, sdks/vite-plugin/src/dev-server.ts:958)
+#                          --wall-timeout, packages/vite-plugin/src/dev-server.ts:958)
 #   deployed   5s         (FREE_TIER_RUNTIME_LIMITS, crates/zeroship-core/src/types.rs;
 #                          crates/zeroship-worker/src/handler.rs answers
 #                          `make_error_msg(504, "request timed out")`)
@@ -3776,7 +3776,7 @@ else
       log line never appeared in /tmp/gp-dev.log.
       THE CAPTURE PATH IS NOT THE EXPLANATION, and that was checked rather than
       assumed: the same file carries the runtime's own startup lines forwarded
-      under the \`[zeroship:api]\` prefix that sdks/vite-plugin/src/dev-server.ts
+      under the \`[zeroship:api]\` prefix that packages/vite-plugin/src/dev-server.ts
       :967 attaches to the child's stdout. So the terminal is receiving what the
       runtime prints; the app's per-request console output is simply not among
       it. The runtime collects per-request output into FetchOutcome.logs, which
@@ -4443,7 +4443,7 @@ gp_close_step
 # task #269), with the SAME provenance caveat as the +3 above: measured as a
 # standalone reproduction of the 9b block alone (the full script still needs a
 # stack this machine did not have), against the real examples/db-todos dev
-# server, one variable being which build of sdks/vite-plugin/dist was in place:
+# server, one variable being which build of packages/vite-plugin/dist was in place:
 #
 #     with the classification fix built:   3 passed, 0 failed
 #     with the two src files stashed

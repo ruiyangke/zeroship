@@ -48,7 +48,7 @@ pub fn run() -> Result<()> {
         ]),
         "workflow API, persistence and deployed acceptance tests",
     )?;
-    for package in ["sdks/workflows", "sdks/eslint-plugin-workflow"] {
+    for package in ["packages/workflows", "packages/eslint-plugin-workflow"] {
         checked(
             Command::new("pnpm")
                 .current_dir(root().join(package))

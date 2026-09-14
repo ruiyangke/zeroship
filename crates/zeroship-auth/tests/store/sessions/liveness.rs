@@ -60,10 +60,11 @@ impl Change {
     reason = "keep each lifecycle change beside its successful controls and refusals"
 )]
 async fn check(change: Change, database: &Database) {
+    let orm = database.orm().await;
     let mut db = database.connect_as_auth().await;
     let keys = keys();
     let tag = tag();
-    let (person, _, grant) = seed(&db, &tag).await;
+    let (person, _, grant) = seed(&db, &orm, &tag).await;
     let subject = format!("pws_{tag}");
     let scopes = vec!["openid".into(), "offline_access".into()];
     let amr = vec!["pwd".into()];

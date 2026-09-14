@@ -30,7 +30,7 @@ fn probe_kind(
 
 fn build_modules() -> Vec<ModuleEntry> {
     let plugin_root =
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../sdks/vite-plugin");
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../packages/vite-plugin");
     let built = std::process::Command::new("node")
         .current_dir(plugin_root)
         .args([

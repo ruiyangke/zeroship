@@ -467,7 +467,7 @@ fn scalar_to_bind(s: &IrScalar) -> BindValue {
 /* `pub fn placeholder(dialect, n)` USED TO LIVE HERE, and its doc claimed to be
  * "the SINGLE placeholder-emission point the one-shot assembler and the batched-
  * backfill SQLite executor both call". It was not: it had ZERO callers in
- * `crates/`, `sdks/` or `packages/`, and had had none for as long as the two
+ * `crates/` or `packages/`, and had had none for as long as the two
  * places it named have existed. The one-shot assembler emits through
  * `BindCtx::push`, which asks its RESOLVED backend (`self.backend.placeholder(n)`);
  * the SQLite executor uses its own crate's helper, described below.

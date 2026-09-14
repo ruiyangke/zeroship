@@ -79,7 +79,7 @@ on the production read path removes an unknown key from a returned row. The only
 key removal is `mask_pass::wrap_row_on_read`, which removes exactly
 `format!("{col}_masked")` (`crates/zeroship-data-v8/src/protection/mask_pass.rs`,
 `:480-482`). So `<col>_raw` survives to `mapResultDoc`
-(`sdks/db/src/utils.ts:28-33`) for the reason the note gives, just not via the
+(`packages/db/src/utils.ts:28-33`) for the reason the note gives, just not via the
 function it names.
 
 **And there is a second silent arm the note misses.** `decrypt_row_on_read` gates
@@ -468,7 +468,7 @@ not test this against a live WAL stream.
 mask-only field, wrong for a randomised-encrypted one, and the SDK already knows
 it.**
 
-`sdks/db/src/types.ts:1146-1163` refuses `.unique()` on
+`packages/db/src/types.ts:1146-1163` refuses `.unique()` on
 `encrypted.mode === "randomised"` with `UNIQUE_ENCRYPTED_RANDOMISED_UNSUPPORTED`,
 and the comment at `:1147-1152` gives the reason: a fresh nonce per write means
 the same plaintext produces different ciphertext per row, so ciphertext equality

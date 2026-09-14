@@ -20,7 +20,7 @@
 //!   async) is intentional: closing is a local state flip on the
 //!   broker entry and has no I/O.
 //!
-//! The SDK layer (`sdks/db/src/subscribe.ts`) wraps this into the
+//! The SDK layer (`packages/db/src/subscribe.ts`) wraps this into the
 //! public `AsyncIterable<SubscriptionEvent>` shape consumed by user
 //! `for await ... of` loops.
 

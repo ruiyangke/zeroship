@@ -34,7 +34,7 @@
 //!
 //! [`resolve_dev_user_json`] is a no-op unless dev mode is on, which for a
 //! process the Vite plugin spawned means `ZEROSHIP_DEV=1` (see
-//! `sdks/vite-plugin/src/constants.ts` `ENV_DEV`). The cookie format is NOT the
+//! `packages/vite-plugin/src/constants.ts` `ENV_DEV`). The cookie format is NOT the
 //! production `__Host-zeroship_app_session` cookie, carries a dev-only HMAC, and is
 //! never read by the gateway. There is no untrusted gateway in front of the dev
 //! runtime — the only client is the developer's own browser via the Vite proxy

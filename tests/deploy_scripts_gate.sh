@@ -151,7 +151,7 @@ fi
 # So: take every repo-relative path deploy-remote.sh hands to a command, and
 # open it. One verdict per path.
 ROLL_SOURCE_PATHS="$(
-  grep -oE '(crates|sdks|libs|db|deploy|examples)/[A-Za-z0-9_./-]+\.(rs|toml|tsv|json|yml|yaml)' "$REMOTE" \
+  grep -oE '(crates|packages|libs|db|deploy|examples)/[A-Za-z0-9_./-]+\.(rs|toml|tsv|json|yml|yaml)' "$REMOTE" \
     | sort -u
 )"
 N_ROLL_PATHS=0
@@ -785,7 +785,7 @@ importers:
 
   .: {}
 
-  sdks/vite-plugin:
+  packages/vite-plugin:
     dependencies: {}
 
   third_party/zero-migrate/crates/zeroship-migrate-node:

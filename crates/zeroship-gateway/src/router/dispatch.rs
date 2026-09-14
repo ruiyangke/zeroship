@@ -2601,7 +2601,7 @@ fn client_not_provisioned_response() -> HttpResponse {
 ///   error-code token there is the RFC-registered `insufficient_scope`, and
 ///   the `scope` parameter lists the required scopes space-delimited. This is
 ///   the value HTTP-aware clients / proxies read.
-/// * **JSON body** — the SDK contract. `sdks/auth` `mapError()` reads
+/// * **JSON body** — the SDK contract. `packages/auth` `mapError()` reads
 ///   `body.error` and maps it onto an `AuthErrorCode`; the registered code is
 ///   `scope_required`, and there is NO
 ///   `insufficient_scope` code. We therefore emit `{"error":"scope_required",

@@ -68,14 +68,14 @@ This is the line that decides every inclusion question below, and it is why
 
 | | `zeroship.jsonc` | `.zship` manifest |
 | --- | --- | --- |
-| Written by | the creator (plus one CLI writeback, 5.2) | the build (`sdks/vite-plugin/src/zship.ts:296-304`) |
+| Written by | the creator (plus one CLI writeback, 5.2) | the build (`packages/vite-plugin/src/zship.ts:296-304`) |
 | Read by | `zeroship` CLI, Vite plugin, `zeroship-dev-migrate`, `gen-types-all` | control plane, gateway, worker |
 | Travels | never leaves the machine | uploaded on every deploy |
 | Contains | how the tooling operates | how the app behaves |
 
 **The invariant holds today by construction, and that is exactly why it will
 erode quietly.** **VERIFIED**: the packer walks only `distDir`
-(`sdks/vite-plugin/src/zship.ts:288-300`, walk entry at `:649`), and
+(`packages/vite-plugin/src/zship.ts:288-300`, walk entry at `:649`), and
 `zeroship.jsonc` lives at the project root, one level above it. Nothing forbids a
 future `copyPublicDir`-style step, a `dist/` that is the project root in some
 static configuration, or a well-meaning "the gateway could read the resource tree
@@ -117,17 +117,17 @@ of the four is configurable.
 
 | # | Consumer | How it learns the gen-types output dir | Citation |
 | --- | --- | --- | --- |
-| 1 | Vite plugin (build) | `options.migrations?.genTypesOut ?? GEN_TYPES_OUT_DEFAULT` | `sdks/vite-plugin/src/build.ts:631` |
-| 1b | Vite plugin (dev, packer) | same expression, four more sites | `sdks/vite-plugin/src/dev-server.ts:308`, `:318`, `sdks/vite-plugin/src/zship.ts:479` |
+| 1 | Vite plugin (build) | `options.migrations?.genTypesOut ?? GEN_TYPES_OUT_DEFAULT` | `packages/vite-plugin/src/build.ts:631` |
+| 1b | Vite plugin (dev, packer) | same expression, four more sites | `packages/vite-plugin/src/dev-server.ts:308`, `:318`, `packages/vite-plugin/src/zship.ts:479` |
 | 2 | `zeroship migrate` (Rust) | hardcoded `DEFAULT_IR_PATH` | `crates/zeroship-cli/src/migrate.rs:43` |
 | 2b | `zeroship deploy` reminder (Rust) | same const | `crates/zeroship-cli/src/main.rs:423` |
-| 3 | `gen-types-all.ts` (repo runner) | hardcoded `join(app.root, "migrations")` | `sdks/vite-plugin/scripts/gen-types-all.ts:136` |
-| 4 | `zeroship-dev-migrate` (separate bin) | its own `--migrations` / `--out` flags with independently written defaults | `sdks/vite-plugin/src/cli/migrate-dev.ts:77-78` |
+| 3 | `gen-types-all.ts` (repo runner) | hardcoded `join(app.root, "migrations")` | `packages/vite-plugin/scripts/gen-types-all.ts:136` |
+| 4 | `zeroship-dev-migrate` (separate bin) | its own `--migrations` / `--out` flags with independently written defaults | `packages/vite-plugin/src/cli/migrate-dev.ts:77-78` |
 
 **VERIFIED.** The plugin's default is `GEN_TYPES_OUT_DEFAULT = "generated/zeroship"`
-(`sdks/vite-plugin/src/gen-types/index.ts:60`) and the filename is
-`MIGRATIONS_IR_FILE = "migrations.ir.json"` (`sdks/vite-plugin/src/gen-types/index.ts:52`),
-joined at write time (`sdks/vite-plugin/src/gen-types/index.ts:419`, written at
+(`packages/vite-plugin/src/gen-types/index.ts:60`) and the filename is
+`MIGRATIONS_IR_FILE = "migrations.ir.json"` (`packages/vite-plugin/src/gen-types/index.ts:52`),
+joined at write time (`packages/vite-plugin/src/gen-types/index.ts:419`, written at
 `:436`). The Rust const is the literal concatenation of those two
 (`crates/zeroship-cli/src/migrate.rs:43`). Set `genTypesOut: "src/gen"` and the build
 writes `src/gen/migrations.ir.json`; `zeroship migrate` with no positional path
@@ -135,7 +135,7 @@ reads `generated/zeroship/migrations.ir.json`
 (`crates/zeroship-cli/src/migrate.rs:57`) and fails at
 `std::fs::read_to_string` (`crates/zeroship-cli/src/migrate.rs:72`). Nothing reconciles
 them. The `.zship` archive is not a back-channel either: the packer explicitly
-never carries migration documents (`sdks/vite-plugin/src/zship.ts:216-220`).
+never carries migration documents (`packages/vite-plugin/src/zship.ts:216-220`).
 
 Consumer 3 is the most interesting, because somebody already hit this. The repo
 runner **refuses to run** when it detects a `migrations: {` block or the token
@@ -144,7 +144,7 @@ runner **refuses to run** when it detects a `migrations: {` block or the token
 > `gen-types-all: ... configures the gen-types inputs (migrations.dir /
 > migrations.genTypesOut). This runner derives them from disk and will not
 > guess - teach it to read the config, or drop the override.`
-> (`sdks/vite-plugin/scripts/gen-types-all.ts:117-129`)
+> (`packages/vite-plugin/scripts/gen-types-all.ts:117-129`)
 
 That error message is the proposal, written by an earlier author who chose to
 fail loudly instead of building the file. **VERIFIED.** It also detects the
@@ -152,9 +152,9 @@ override by regex over the config *source text* - which is itself the shape a
 machine-readable config file removes.
 
 Consumer 4 is a second, independently shipped CLI that re-derives both defaults
-by hand (`sdks/vite-plugin/src/cli/migrate-dev.ts:77-78`) and is wired into two
+by hand (`packages/vite-plugin/src/cli/migrate-dev.ts:77-78`) and is wired into two
 scaffolds as `"migrate": "zeroship-dev-migrate"`
-(`sdks/create-zeroship-app/template/package.json`, `examples/db-todos/package.json`).
+(`packages/create-zeroship-app/template/package.json`, `examples/db-todos/package.json`).
 
 **Conclusion.** The defect is real, verified, and its true blast radius is four
 independent derivations of two facts, one of which has already been converted
@@ -162,7 +162,7 @@ into a hard refusal rather than fixed.
 
 ### 2.2 `ZeroshipOptions` - the Vite plugin surface
 
-`sdks/vite-plugin/src/index.ts:46-105`. **VERIFIED** by reading the interface and
+`packages/vite-plugin/src/index.ts:46-105`. **VERIFIED** by reading the interface and
 each consumption site.
 
 | Option | Declared | Default | Consumed at | Notes |
@@ -190,7 +190,7 @@ enumerated here for completeness and then **excluded** by the scope invariant
 omitted it would leave a reader believing `zeroship.jsonc` is the only
 creator-facing declarative surface, which is false.
 
-**VERIFIED.** `sdks/server/src/define-app.ts:41-46` exports `defineApp`. Its doc
+**VERIFIED.** `packages/server/src/define-app.ts:41-46` exports `defineApp`. Its doc
 comment (`define-app.ts:10-14`) reads:
 
 > Lives at exactly **one** path: `<projectRoot>/src/server/config.ts`. The
@@ -199,19 +199,19 @@ comment (`define-app.ts:10-14`) reads:
 > `$config.ts` - every app-level setting is declared here.
 
 The shape is `AppDefinition { resources?, net?, rpc? }`
-(`sdks/server/src/types.ts:230-243`). It is loaded from the fixed path
-`src/server/config.ts` (`sdks/vite-plugin/src/manifest.ts:634-641`), and there is
+(`packages/server/src/types.ts:230-243`). It is loaded from the fixed path
+`src/server/config.ts` (`packages/vite-plugin/src/manifest.ts:634-641`), and there is
 a test asserting a root `zeroship.config.ts` is ignored
-(`sdks/vite-plugin/test/manifest-resources.test.ts:408-430`).
+(`packages/vite-plugin/test/manifest-resources.test.ts:408-430`).
 
 **How it is parsed matters.** The plugin does not execute the module. It strips
 import lines and `as` casts by regex, locates `defineApp(`, matches parens, and
-`Function`-evals the slice (`sdks/vite-plugin/src/manifest.ts:610-700`). Its own
+`Function`-evals the slice (`packages/vite-plugin/src/manifest.ts:610-700`). Its own
 comment says so: "we extract the `defineApp({ resources: { ... } })` argument via
 a coarse JS-evaluation approach ... Computed expressions (e.g.
 `auth: env.PROD ? ... : ...`) fail with a clear message asking the user to flatten
 the literal ... A full ts-morph based parse is future work."
-(`sdks/vite-plugin/src/manifest.ts:612-620`).
+(`packages/vite-plugin/src/manifest.ts:612-620`).
 
 **INFERRED.** A config surface that must be a flat literal, is parsed by regex
 plus `eval`, and refuses computed expressions is a JSON document that has been
@@ -221,7 +221,7 @@ deliver, and costs the platform a parser it has already documented as inadequate
 **That is a parsing defect, and it is not an argument for relocating this tree.**
 See 7.4. The fix is a real parser (ts-morph, which the plugin's own comment
 already names as the intended future work at
-`sdks/vite-plugin/src/manifest.ts:619-620`), tracked as separate work.
+`packages/vite-plugin/src/manifest.ts:619-620`), tracked as separate work.
 
 ### 2.4 The CLI surface
 
@@ -295,13 +295,13 @@ into the `linkme` slice `DECLARED_ENV_READS`
 | `ZEROSHIP_DIE_WITH_PARENT` | cli | `parent_death.rs:82-87` | every subcommand, armed at `main.rs:41` |
 | whole-process snapshot | creator | `main.rs:286-288` | `serve` -> V8 `process.env` |
 
-**There is no app-id environment variable.** `grep -rn "ZEROSHIP_APP" crates/ sdks/ docs/`
+**There is no app-id environment variable.** `grep -rn "ZEROSHIP_APP" crates/ packages/ docs/`
 returns nothing (**VERIFIED**, empty result; see 2.7 for what that grep cannot
 see). The app id is typed by hand on every single command, and its absence is a
 panic, not an error message (`crates/zeroship-cli/src/main.rs:362`).
 
 TS side, set by the Vite plugin for the spawned child
-(`sdks/vite-plugin/src/constants.ts`): `ZEROSHIP_DEV` (`:8`),
+(`packages/vite-plugin/src/constants.ts`): `ZEROSHIP_DEV` (`:8`),
 `ZEROSHIP_VITE_ORIGIN` (`:9`), `ZEROSHIP_ENTRY` (`:10`),
 `ZEROSHIP_RUNTIME_DESCRIPTOR` (`:11`), `ZEROSHIP_DEV_AUTH` (`:24`),
 `ZEROSHIP_DEV_AUTH_SECRET` (`:25`), `ZEROSHIP_DIE_WITH_PARENT` (`:46`). These are
@@ -312,22 +312,22 @@ an internal parent-to-child transport, not a creator surface.
 **VERIFIED** by reading each file and by `git ls-files`.
 
 - **`.env` at the project root is already a real creator config surface.**
-  `sdks/vite-plugin/src/dev-database-url.ts:26-43` parses it;
-  `sdks/vite-plugin/src/dev-database-url.ts:46-59` establishes the precedence
+  `packages/vite-plugin/src/dev-database-url.ts:26-43` parses it;
+  `packages/vite-plugin/src/dev-database-url.ts:46-59` establishes the precedence
   **shell env > `.env` > dev default**; and the dev server splats the whole file
   into the child's environment: `const childEnv: NodeJS.ProcessEnv = { ...dotenvVars, ... }`
-  (`sdks/vite-plugin/src/dev-server.ts:910-922`). Since the child snapshots its
+  (`packages/vite-plugin/src/dev-server.ts:910-922`). Since the child snapshots its
   whole environment into V8's `process.env` (`crates/zeroship-cli/src/main.rs:286-288`),
   `.env` is functionally already this platform's `.dev.vars`.
 - `.env` and `.env.local` are gitignored by the scaffold
-  (`sdks/create-zeroship-app/template/_gitignore:5-6`), although no scaffold ships
+  (`packages/create-zeroship-app/template/_gitignore:5-6`), although no scaffold ships
   one today.
 - `generated/zeroship/{env.db.ts,schema.runtime.json,migrations.ir.json}` **are
   committed** in both the template and `examples/db-todos` (**VERIFIED** via
   `git ls-files`).
 - **No scaffold script passes `--app=` or `--control=`.** Scripts are `dev`,
   `build`, `typecheck`, plus `"migrate": "zeroship-dev-migrate"` in two of three
-  (`sdks/create-zeroship-app/template/package.json`,
+  (`packages/create-zeroship-app/template/package.json`,
   `examples/db-todos/package.json`, `examples/starter/package.json`).
 - `examples/starter/vite.config.ts:8` and `examples/db-todos/vite.config.ts:8`
   both compute `devServerPort` as `Number(process.env.<NAME>_API_PORT ?? 3001)`.
@@ -366,7 +366,7 @@ before.
    `secret`, `var` and `login` have no unknown-flag allow-list came from reading
    each file for the *absence* of `check_unknown_*`. A `KNOWN_FLAGS` grep returns
    three hits and silently implies the rest are covered.
-5. **Regex-detected config.** `sdks/vite-plugin/scripts/gen-types-all.ts:122`
+5. **Regex-detected config.** `packages/vite-plugin/scripts/gen-types-all.ts:122`
    detects an override by matching `/\bgenTypesOut\b/` against config source text.
    That will match a comment or a string and miss a spread (`...opts`). Anything
    downstream of it inherits both errors.
@@ -375,7 +375,7 @@ before.
    `src/server/config.ts` under a different name (2.3). A name-shaped search would
    have reported "no project config exists" and been wrong.
 7. **Scope, which bit this document twice.** The brief names three scaffolds
-   (`sdks/create-zeroship-app/template/`, `examples/starter/`,
+   (`packages/create-zeroship-app/template/`, `examples/starter/`,
    `examples/db-todos/`). A first pass enumerated only those and concluded the
    whole deletion set was unused. Widening to all 30 `examples/*/vite.config.ts`
    found `mode` live in `examples/ssg-docs/vite.config.ts:74`, `devAuth` live in
@@ -444,7 +444,7 @@ Note what is **absent** from this table and was present in revision 1:
 | --- | --- | --- |
 | `resources` (the policy tree) | `src/server/config.ts` | Compiled into `Manifest.resources` (`crates/zeroship-bundle/src/manifest.rs:51-59`) and turned into per-resource `EffectivePolicy` records by the **gateway** at app-load time. It is enforced on every end-user request, on a machine the creator does not own. |
 | `rpc.defaults` | `src/server/config.ts` | Same path: app-wide defaults inherited by procedures, resolved into the manifest and enforced at dispatch. |
-| `net` | `src/server/config.ts` | "Inert outbound TCP request hints ... the control plane diffs them against operator-authored grants for review" (`sdks/server/src/types.ts:232-236`). The consumer is the control plane, reached via the deploy artifact. |
+| `net` | `src/server/config.ts` | "Inert outbound TCP request hints ... the control plane diffs them against operator-authored grants for review" (`packages/server/src/types.ts:232-236`). The consumer is the control plane, reached via the deploy artifact. |
 
 These are the sharpest test of the invariant, because they are genuinely
 declarative, genuinely creator-authored, and genuinely badly parsed today - every
@@ -457,7 +457,7 @@ argument in 7.4.
 | --- | --- |
 | `--token` / `ZEROSHIP_TOKEN` | Secret. Already resolved flag > env > `~/.config/zeroship/token.json` at mode `0600` (`crates/zeroship-cli/src/auth.rs:412-436`, `:439-448`). A tracked file must never be able to supply it. |
 | `devServerPort` | Must vary per machine and per concurrently-running example. Two of three scaffolds compute it from an env var at config-eval time (`examples/starter/vite.config.ts:8`, `examples/db-todos/vite.config.ts:8`). A committed value would make two examples collide. Keep it a plugin option and add `ZEROSHIP_DEV_PORT` as the per-machine override. |
-| `DATABASE_URL` (dev) | Per-machine, already has a working home in `.env` with documented precedence (`sdks/vite-plugin/src/dev-database-url.ts:46-59`). Moving it to a tracked file is a regression. |
+| `DATABASE_URL` (dev) | Per-machine, already has a working home in `.env` with documented precedence (`packages/vite-plugin/src/dev-database-url.ts:46-59`). Moving it to a tracked file is a regression. |
 | `serve` runtime limits (`--cpu-limit`, `--wall-timeout`, `--heap-limit-mb`, `--workers`, `--port`) | These configure a **local process**, not the app. The deployed equivalents are per-app `AppRuntimeLimits` held by the control plane (`docs/reference/runtime-limits.md`). Putting local process tuning in the app's config file invites the belief that it applies in production. It does not. |
 | `dev init` flags | Operator command for the Compose stack (`crates/zeroship-cli/src/dev.rs:13-15`). Not a creator surface. |
 | `ZEROSHIP_CONFIG_HOME` / `XDG_CONFIG_HOME` / `HOME` | Machine identity, not project identity. |
@@ -471,8 +471,8 @@ Not in scope.
 
 ### 3.5 The one judgement call: `mode`
 
-`mode` is read only by the Vite build today (`sdks/vite-plugin/src/index.ts:127`,
-`sdks/vite-plugin/src/build.ts:427`). By the strict producer/consumer test it
+`mode` is read only by the Vite build today (`packages/vite-plugin/src/index.ts:127`,
+`packages/vite-plugin/src/build.ts:427`). By the strict producer/consumer test it
 should stay a plugin option.
 
 It moves anyway, for one reason: `mode: "static"` is the difference between a
@@ -542,7 +542,7 @@ Wrangler requires `name`, `main`, `compatibility_date` (**VERIFIED** against
 Cloudflare's current configuration doc, fetched 2026-08-14). The zeroship
 analogue is `name`, `app`, `control`, and - if section 6 is accepted -
 `runtime_date`. `main` has no analogue: the server entry is discovered, and
-discovery works (`sdks/vite-plugin/src/index.ts:50` documents `serverEntry` as an
+discovery works (`packages/vite-plugin/src/index.ts:50` documents `serverEntry` as an
 override of auto-detection, not a requirement).
 
 Deliberately **not** required: `app`. A brand-new project has no app id, and
@@ -602,7 +602,7 @@ Adopt the shape exactly, with one simplification:
 
 **Auto-discovery is what makes the common case `zeroship()` with no arguments**,
 which is what the template ships today
-(`sdks/create-zeroship-app/template/vite.config.ts:6`) and must keep shipping.
+(`packages/create-zeroship-app/template/vite.config.ts:6`) and must keep shipping.
 
 **No upward directory walk.** The file is found in the app root or it is not
 found. A walk means a `pnpm build` in a subdirectory can silently pick up a
@@ -629,7 +629,7 @@ abandon the file. This tree already shows what that looks like - eight examples
 compute a port from a bespoke `process.env.*_API_PORT`
 (`examples/starter/vite.config.ts:8` and seven siblings, 10.1), and
 `src/server/config.ts` is a `.ts` file whose parser then has to refuse computed
-expressions anyway (`sdks/vite-plugin/src/manifest.ts:612-620`). **INFERRED, and
+expressions anyway (`packages/vite-plugin/src/manifest.ts:612-620`). **INFERRED, and
 I think it is the most useful inference in this document: the absence of an
 escape hatch is a plausible cause of `defineApp` being TypeScript in the first
 place.** A declarative file without a pressure valve does not stay declarative;
@@ -684,7 +684,7 @@ already does for `--control` (`crates/zeroship-cli/src/main.rs:363-367`) and `--
 swallow unknown flags (2.4), every command that resolves a value from the file
 must **print the resolved value and its source** on stderr before acting -
 exactly as the dev-database resolver already does
-(`sdks/vite-plugin/src/dev-database-url.ts:61-72`, which prints
+(`packages/vite-plugin/src/dev-database-url.ts:61-72`, which prints
 "using DATABASE_URL from `.env`" versus "from shell environment"). A config file
 that silently supplies a control URL is strictly more dangerous than a flag that
 must be typed. The provenance line is what makes it safe, and it is cheap.
@@ -775,7 +775,7 @@ misremembered key name fails loudly on both sides.
 
 The failure mode that actually survives is **divergent defaults**. If
 `zeroship.jsonc` omits `migrations.out`, the TS side falls back to
-`GEN_TYPES_OUT_DEFAULT` (`sdks/vite-plugin/src/gen-types/index.ts:60`) and the
+`GEN_TYPES_OUT_DEFAULT` (`packages/vite-plugin/src/gen-types/index.ts:60`) and the
 Rust side falls back to `DEFAULT_IR_PATH` (`crates/zeroship-cli/src/migrate.rs:43`) - and
 we have reproduced the exact bug the file was built to remove, one layer up. A
 second, quieter mode: a key the TS side reads and the Rust side silently ignores,
@@ -802,7 +802,7 @@ no Compose surface, no multi-binary fan-out. **REJECT.**
 
 - `schema/project-v1.json` is a hand-written JSON Schema and is **the single
   source of truth**, including every `default`.
-- `sdks/vite-plugin/src/project-config.ts` (TS types + defaults) and
+- `packages/vite-plugin/src/project-config.ts` (TS types + defaults) and
   `crates/zeroship-cli/src/project_config.rs` (serde structs + defaults) are both
   **generated from it** and committed.
 - One gate, `tests/project_config_gate.sh`, does three things: (1) regenerate
@@ -822,7 +822,7 @@ ignored keys, and type coercion differences in a single comparison, without a
 second parser being written to catch the first.
 
 **Option C - accept the risk, no gate.** Rely on review. *Verdict: reject.* This
-repo has the receipts: `sdks/vite-plugin/scripts/gen-types-all.ts:117-129` is a
+repo has the receipts: `packages/vite-plugin/scripts/gen-types-all.ts:117-129` is a
 hard refusal added because review did not catch the drift, and
 `docs/reference/vite-plugin.md:26-31` omits two live options today.
 
@@ -834,7 +834,7 @@ The scaffold always writes `migrations.dir` and `migrations.out` explicitly. If
 `zeroship.jsonc` is present and the key is absent, `zeroship migrate` **errors**
 naming the key rather than falling back. The TS side keeps its defaults, because
 a plugin must work with `zeroship()` and no file at all (this is what
-`sdks/create-zeroship-app/template/vite.config.ts` does today).
+`packages/create-zeroship-app/template/vite.config.ts` does today).
 
 The result: exactly one place in the world holds the default for a cross-tool
 fact, and it is the JSON Schema. Check (2) of the gate then has only one
@@ -852,16 +852,16 @@ because the wrong answer is the attractive one.
 
 **The case for moving it, which is genuinely strong.** Its parser is a regex plus
 `Function`-eval that the plugin itself documents as inadequate
-(`sdks/vite-plugin/src/manifest.ts:612-620`). It already forbids computed
+(`packages/vite-plugin/src/manifest.ts:612-620`). It already forbids computed
 expressions, so it is a JSON document wearing a `.ts` extension (2.3). It is
 creator-authored and declarative. `docs/decisions/` contains no ADR defending
 `src/server/config.ts` - only a doc comment asserting it
-(`sdks/server/src/define-app.ts:10-14`). Every one of those is true and none of
+(`packages/server/src/define-app.ts:10-14`). Every one of those is true and none of
 them is refuted below.
 
 **Why it is not enough.** The parser is bad; that is a **parsing** problem. Its
 fix is a real parser - ts-morph, which the plugin's own comment already names as
-the intended work (`sdks/vite-plugin/src/manifest.ts:619-620`) - and that fix is
+the intended work (`packages/vite-plugin/src/manifest.ts:619-620`) - and that fix is
 available without moving a single field. Revision 1 used a defect in *how* the
 tree is read as an argument about *where* the tree should live. Those are
 independent, and conflating them would have bought a better parser at the price
@@ -872,7 +872,7 @@ are compiled into `Manifest.resources` (`crates/zeroship-bundle/src/manifest.rs:
 and turned into per-resource `EffectivePolicy` records by the gateway at
 app-load time. They are enforced on every end-user request on infrastructure the
 creator does not own. `net` is diffed by the control plane against
-operator-authored grants (`sdks/server/src/types.ts:232-236`). These are facts
+operator-authored grants (`packages/server/src/types.ts:232-236`). These are facts
 about **the app's behaviour**; they travel in the `.zship` and are read by the
 runtime. `migrations.out` and `control` are facts about **how the tooling
 operates**; they never leave the machine. One file per audience.
@@ -887,7 +887,7 @@ nothing except a longer file and a field the `config` escape hatch (4.5) must
 now be taught to refuse. Neither is worth having.
 
 **Recorded as separate work, not as a follow-on to this proposal:** replace the
-regex-plus-eval extractor at `sdks/vite-plugin/src/manifest.ts:610-700` with a
+regex-plus-eval extractor at `packages/vite-plugin/src/manifest.ts:610-700` with a
 real TypeScript parse. That work is now strictly smaller than revision 1 made it,
 because nothing has to move first.
 
@@ -916,9 +916,9 @@ halves of Wrangler's split.**
   rule: 1-64 bytes, `^[A-Z][A-Z0-9_]*$` (`crates/zeroship-cli/src/secrets.rs:31`,
   `:404-413`).
 - **Local dev values:** `<root>/.env`, parsed at
-  `sdks/vite-plugin/src/dev-database-url.ts:26-43`, splatted whole into the dev
-  runtime child at `sdks/vite-plugin/src/dev-server.ts:910-922`, and gitignored by
-  the scaffold (`sdks/create-zeroship-app/template/_gitignore:5-6`).
+  `packages/vite-plugin/src/dev-database-url.ts:26-43`, splatted whole into the dev
+  runtime child at `packages/vite-plugin/src/dev-server.ts:910-922`, and gitignored by
+  the scaffold (`packages/create-zeroship-app/template/_gitignore:5-6`).
 - **Platform credentials:** never in the project at all -
   `~/.config/zeroship/token.json` at mode `0600`
   (`crates/zeroship-cli/src/auth.rs:412-436`, `:439-448`).
@@ -932,16 +932,16 @@ dev-boot warning when `.env` lacks a declared name.
 
 ### 8.3 Where `devAuth.password` goes
 
-`DevAuthUser.password` is at `sdks/vite-plugin/src/index.ts:43`. Two things are
+`DevAuthUser.password` is at `packages/vite-plugin/src/index.ts:43`. Two things are
 true and the second is the one that matters.
 
 **First, it is not actually a secret.** Its own doc comment says so: "Not a
 secret - it only makes the dev credential check (and its failure path) real"
-(`sdks/vite-plugin/src/index.ts:38-43`). The default is the well-known literal
+(`packages/vite-plugin/src/index.ts:38-43`). The default is the well-known literal
 `DEFAULT_DEV_PASSWORD` (`sdks/bootstrap/src/dev-auth.ts:127`), the dev login form
 **prefills** it (`sdks/bootstrap/src/dev-auth.ts:522-528`), and the provider is
 structurally absent from any production `.zship`
-(`sdks/vite-plugin/src/index.ts:80-83`). Nothing here leaks.
+(`packages/vite-plugin/src/index.ts:80-83`). Nothing here leaks.
 
 **Second, the shape is the problem.** A field named `password` in a file named
 `zeroship.jsonc` that a creator commits will, eventually, receive a real
@@ -979,7 +979,7 @@ defence is that the field must not exist in that file.
    If a literal is still wanted for a specific case, it comes from `.env` as
    `ZEROSHIP_DEV_PASSWORD_<userid>` - untracked, per-machine, and consistent with
    how `ZEROSHIP_DEV_AUTH_SECRET` already works (generated fresh per dev server,
-   never persisted - `sdks/vite-plugin/src/constants.ts:18-25`).
+   never persisted - `packages/vite-plugin/src/constants.ts:18-25`).
 
    **I had this wrong on the first pass.** I grepped only the three scaffolds
    named in the brief, found nothing, and was about to record "no evidence anyone
@@ -1056,17 +1056,17 @@ scope it out; (1) through (3) are the load-bearing ones.
 Pre-launch. `AGENTS.md`: rename, delete the old name, one PR. No aliases, no
 detect-and-warn.
 
-### 10.1 Deleted from `ZeroshipOptions` (`sdks/vite-plugin/src/index.ts:46-105`)
+### 10.1 Deleted from `ZeroshipOptions` (`packages/vite-plugin/src/index.ts:46-105`)
 
 | Option | Disposition |
 | --- | --- |
-| `rpcEndpoint` | **Deleted outright.** Inert (`docs/reference/vite-plugin.md:64-69`). Not replaced. Delete `DEFAULT_RPC_ENDPOINT` (`sdks/vite-plugin/src/constants.ts:81`) and the parameter threaded through `index.ts:108,123` and `build.ts:544`. |
+| `rpcEndpoint` | **Deleted outright.** Inert (`docs/reference/vite-plugin.md:64-69`). Not replaced. Delete `DEFAULT_RPC_ENDPOINT` (`packages/vite-plugin/src/constants.ts:81`) and the parameter threaded through `index.ts:108,123` and `build.ts:544`. |
 | `migrations.dir` | **Deleted from the option.** Moves to `zeroship.jsonc` `migrations.dir`. |
 | `migrations.genTypesOut` | **Deleted from the option.** Moves to `zeroship.jsonc` `migrations.out` - renamed, because "genTypes" names the producer and the directory is read by four consumers. |
 | `mode` | **Deleted from the option.** Moves to `build.mode`. |
 | `serverEntry` | **Deleted from the option.** Moves to `build.serverEntry`. |
 | `devServerPort` | **Kept** as a plugin option (3.3). Add `ZEROSHIP_DEV_PORT` as the per-machine override so examples can stop inventing per-example port variables. **VERIFIED**: 17 examples pass `devServerPort`, and 8 of those compute it from a bespoke `process.env.<NAME>_API_PORT` (`CSR_TODO_API_PORT`, `DB_CHAT_API_PORT`, `DB_E2E_API_PORT`, `DB_TODOS_API_PORT`, `HR_SYSTEM_API_PORT`, `STARTER_API_PORT`, `STORAGE_GALLERY_API_PORT`, and one more). That is eight undeclared names doing one job. |
-| `devAuth` | **Kept** as a plugin option, with `DevAuthUser.password` **deleted** (`sdks/vite-plugin/src/index.ts:43`, and `password` handling at `sdks/bootstrap/src/dev-auth.ts:97,105-106,290-312,347-353,533-543`). |
+| `devAuth` | **Kept** as a plugin option, with `DevAuthUser.password` **deleted** (`packages/vite-plugin/src/index.ts:43`, and `password` handling at `sdks/bootstrap/src/dev-auth.ts:97,105-106,290-312,347-353,533-543`). |
 
 `ZeroshipOptions` after this change is two fields: `devServerPort` and `devAuth`.
 **That is a result worth stating plainly** - it suggests the plugin option bag was
@@ -1075,7 +1075,7 @@ enumeration reached from the other direction.
 
 ### 10.2 Deleted elsewhere
 
-- **`sdks/vite-plugin/scripts/gen-types-all.ts:117-129` - `assertNoConfigOverride`
+- **`packages/vite-plugin/scripts/gen-types-all.ts:117-129` - `assertNoConfigOverride`
   is deleted.** It exists solely because the runner could not read the config. It
   now reads `zeroship.jsonc`, and the hardcoded `join(app.root, "migrations")` at
   `:136` goes with it. This is the clearest single proof the file was needed.
@@ -1083,18 +1083,18 @@ enumeration reached from the other direction.
   comes from the file or the command errors naming the key. The positional
   override at `crates/zeroship-cli/src/migrate.rs:57,99-103` stays as an escape hatch;
   `crates/zeroship-cli/src/main.rs:423`'s reminder reads the resolved path.
-- **`sdks/vite-plugin/src/cli/migrate-dev.ts:77-78` - the `--migrations` / `--out`
+- **`packages/vite-plugin/src/cli/migrate-dev.ts:77-78` - the `--migrations` / `--out`
   defaults are deleted**; the flags stay as overrides, defaults come from the file.
 **Explicitly NOT deleted**, reversing revision 1: `src/server/config.ts`,
-`sdks/server/src/define-app.ts`, the extractor at
-`sdks/vite-plugin/src/manifest.ts:610-700`, and the test block at
-`sdks/vite-plugin/test/manifest-resources.test.ts:378-434` all stay exactly as
+`packages/server/src/define-app.ts`, the extractor at
+`packages/vite-plugin/src/manifest.ts:610-700`, and the test block at
+`packages/vite-plugin/test/manifest-resources.test.ts:378-434` all stay exactly as
 they are. See 7.4. The extractor's replacement with a real TypeScript parse is
 separate work and is not a dependency of anything here.
 
 ### 10.3 What the scaffolds ship instead
 
-- **`sdks/create-zeroship-app/template/`**: add `zeroship.jsonc` with `name`
+- **`packages/create-zeroship-app/template/`**: add `zeroship.jsonc` with `name`
   (from the directory name the scaffolder already prompts for), `control`,
   `runtime_date`, and explicit `build` / `migrations` blocks (7.3 requires them
   explicit). `app` is **absent** - the first `zeroship deploy` auto-creates and
@@ -1160,8 +1160,8 @@ fix that is one afternoon of work:
 - Add `ZEROSHIP_APP`, resolved exactly like `ZEROSHIP_CONTROL_URL` already is
   (`crates/zeroship-cli/src/main.rs:363-367`). Ten lines, four call sites.
 - Put both in `.env`, which already exists, is already gitignored, and is already
-  parsed and forwarded (`sdks/vite-plugin/src/dev-database-url.ts:26-43`,
-  `sdks/vite-plugin/src/dev-server.ts:910-922`).
+  parsed and forwarded (`packages/vite-plugin/src/dev-database-url.ts:26-43`,
+  `packages/vite-plugin/src/dev-server.ts:910-922`).
 - Fix `crates/zeroship-cli/src/main.rs:362`'s `.expect()` panic into an error naming the
   env var.
 
@@ -1241,7 +1241,7 @@ runtime branches on it. Ours would not.
 
 Three facts move me past 11.1, and only three:
 
-1. **`sdks/vite-plugin/scripts/gen-types-all.ts:117-129` already exists.** Someone
+1. **`packages/vite-plugin/scripts/gen-types-all.ts:117-129` already exists.** Someone
    hit this and shipped a hard refusal because there was no file to read. That is
    not a hypothetical; it is a feature that is worse than it should be, today, in
    this tree.
@@ -1297,5 +1297,5 @@ which is why it is called out rather than quietly dropped.
 **Explicitly NOT in this proposal**, reversing revision 1: `defineApp` /
 `src/server/config.ts` does not move (7.4). Replacing its regex-plus-eval
 extractor with a real TypeScript parse
-(`sdks/vite-plugin/src/manifest.ts:610-700`) is separate work with no dependency
+(`packages/vite-plugin/src/manifest.ts:610-700`) is separate work with no dependency
 on any of the above.

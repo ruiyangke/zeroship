@@ -357,7 +357,7 @@ submodule_paths() {
 # repo root. Two producers, because deploy/Dockerfile hands the tree to two
 # toolchains and each has its own idea of what must be there:
 #
-#   - pnpm-lock.yaml importers under $1  -> the `sdks` stage's
+#   - pnpm-lock.yaml importers under $1  -> the `js-packages` stage's
 #     `pnpm install --frozen-lockfile`, which validates the on-disk workspace
 #     against the lockfile and fails on an importer that is not present.
 #   - Cargo.toml workspace members and path dependencies under $1 -> the
@@ -803,7 +803,7 @@ main() {
   # created so the image would not be tagged -dirty. `git worktree add` DOES NOT
   # POPULATE SUBMODULES, so third_party/zero-migrate was an EMPTY DIRECTORY - 0
   # entries against 18 in the main checkout. deploy/Dockerfile COPYs third_party/
-  # into both the `sdks` and the `builder` stage, docker copied the empty tree,
+  # into both the `js-packages` and the `builder` stage, docker copied the empty tree,
   # and the build died twenty minutes in:
   #
   #   src/gen-types/addon.ts(66,8): error TS2307:
@@ -848,7 +848,7 @@ main() {
       done
     done
     [ -z "$EMPTY_SUBS" ] || fail "submodule directories are EMPTY in $ROOT:$EMPTY_SUBS
-  deploy/Dockerfile COPYs them into the sdks and builder stages, so the build
+  deploy/Dockerfile COPYs them into the js-packages and builder stages, so the build
   would run for about twenty minutes and then die on TS2307 'Cannot find module
   zeroship-migrate-node'. \`git worktree add\` does not populate submodules; this is
   almost always a deploy run from a fresh worktree. Fix it with:

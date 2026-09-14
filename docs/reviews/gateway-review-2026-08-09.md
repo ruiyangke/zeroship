@@ -9,7 +9,7 @@ labels are reused across reviews in this repo, so searching by an `F` label
 silently crosses review boundaries. Cite findings from this review as
 `gateway-review-2026-08-09 G3`, never bare `G3`.
 
-Out of scope by operator instruction (active edit): `sdks/db`, `sdks/migrate`,
+Out of scope by operator instruction (active edit): `packages/db`, `sdks/migrate`,
 `sdks/bootstrap`, `crates/plugin-db`, `crates/zeroship-schema`,
 `crates/zeroship-migrate-server`, `crates/zeroship-migrate-adapter`, `db/`,
 `docs/reference/db.md`. Where a gateway finding touches one of those the

@@ -264,8 +264,9 @@ async fn stale_pending_redeem_burns_link_as_consumed() {
 #[compio::test]
 async fn redeem_rejects_reset_purpose_without_consuming_its_token() {
     Database::run(async |database| {
+        let orm = database.orm().await;
         let client = database.connect_as_auth().await;
-        zeroship_auth::store::users::create(&client, EMAIL, "Magic", None)
+        zeroship_auth::store::users::create(&orm, EMAIL, "Magic", None)
             .await
             .unwrap();
         let reset = password_reset::issue(&client, EMAIL).await.unwrap();
@@ -344,13 +345,14 @@ async fn new_issue_supersedes_previous_unconsumed() {
 #[compio::test]
 async fn login_issue_does_not_supersede_reset_token() {
     Database::run(async |database| {
+        let orm = database.orm().await;
         let client = database.connect_as_auth().await;
 
         let email = EMAIL;
         // A reset token binds to the issuing user's immutable id (security finding
         // L4), so `issue` only writes a row when the email maps to a real user —
         // mirroring the production `/forgot` caller, which guards on `find_by_email`.
-        zeroship_auth::store::users::create(&client, email, "Test", None)
+        zeroship_auth::store::users::create(&orm, email, "Test", None)
             .await
             .expect("seed user");
         let reset = password_reset::issue(&client, email)

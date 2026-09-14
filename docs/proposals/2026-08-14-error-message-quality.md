@@ -2,7 +2,7 @@
 
 Status: proposal (investigation only; nothing implemented)
 Date: 2026-08-14
-Scope: read-only investigation of user-reachable error text in `crates/`, `sdks/`, `libs/`
+Scope: read-only investigation of user-reachable error text in `crates/`, `packages/`, `libs/`
 
 This document is ASCII-only, deliberately. Non-ASCII characters found in the
 codebase are transcribed by codepoint (`U+2014`) or by name (em-dash), never
@@ -83,7 +83,7 @@ indistinguishable from an error that says it, and this repository is unusually
 comment-dense. So the census tokenizes.
 
 A ~150-line scanner (Node, run from the repo root; kept in scratch, not
-committed) walks `crates/`, `sdks/`, `libs/`, skipping `target`, `node_modules`,
+committed) walks `crates/`, `packages/`, `libs/`, skipping `target`, `node_modules`,
 `dist`, `.git`, `wpt`, `coverage`, `build`. For Rust it handles `//`, nested
 `/* */`, `"..."` with escapes, `r"..."` / `r#"..."#`, and skips char literals and
 lifetimes; for TS/JS it handles `//`, `/* */`, and all three quote forms.
@@ -156,17 +156,17 @@ files, non-test:
 | --- | --- |
 | 44 | `crates/zeroship-control/src/stripe_handlers.rs` |
 | 26 | `crates/zeroship-control/src/proration.rs` |
-| 24 | `sdks/ui/src/stories/Input.stories.tsx` |
+| 24 | `packages/ui/src/stories/Input.stories.tsx` |
 | 21 | `crates/zeroship-control/src/pricing.rs` |
-| 19 | `sdks/ui/src/stories/NavigationMenu.stories.tsx` |
+| 19 | `packages/ui/src/stories/NavigationMenu.stories.tsx` |
 | 17 | `crates/zeroship-control/src/cron/billing_reconcile.rs` |
 | 17 | `crates/zeroship-control/src/notify.rs` |
 
-By crate, non-test: `sdks/ui` 425, `crates/control` 217, `crates/plugin-db` 59,
-`sdks/vite-plugin` 38, `crates/runtime` 27, `crates/auth` 25,
-`crates/runtime-macros` 24, `sdks/db` 24, `crates/gateway` 23.
+By crate, non-test: `packages/ui` 425, `crates/control` 217, `crates/plugin-db` 59,
+`packages/vite-plugin` 38, `crates/runtime` 27, `crates/auth` 25,
+`crates/runtime-macros` 24, `packages/db` 24, `crates/gateway` 23.
 
-Note the shape: `sdks/ui` leads on raw count but those are Storybook demo
+Note the shape: `packages/ui` leads on raw count but those are Storybook demo
 strings, not errors. `crates/control` is the real error-surface concentration.
 
 **The single highest-value non-ASCII site is one line:**
@@ -396,7 +396,7 @@ bearing and accidental: **no platform component mints a 4xx carrying internals.*
 `OpErrorKind::CodedError` sets only `.code` and `.hint`, never `.status`
 (`crates/zeroship-runtime/src/core/state.rs:224-237`); `reject_op` builds a bare exception
 with neither (`dispatch.rs:627`); `@zeroship/db` re-stamps `.code` but never
-`.status` (`sdks/db/src/errors.ts`). So every `env.db` / `env.kv` / `env.storage`
+`.status` (`packages/db/src/errors.ts`). So every `env.db` / `env.kv` / `env.storage`
 error lands at 500 and is blanked -- which is precisely why the anchor failure
 produced "internal error" rather than a leak.
 
@@ -434,7 +434,7 @@ greps -- my own `Accept-Language` search returned hits **only** in WPT):
 Two adjacent capabilities do exist and should not be oversold: ICU data is
 loaded into V8 (`crates/zeroship-runtime/src/core/init.rs:59-64`) so app code has
 `Intl.*` -- but the comment says this was done because npm packages crash
-without it, a dependency fix rather than a feature. And `sdks/ui` has real RTL
+without it, a dependency fix rather than a feature. And `packages/ui` has real RTL
 support (logical properties, `[dir="rtl"]` selectors, `lang="ar"`/`lang="he"`
 stories). Direction is handled; translation is not.
 
@@ -465,9 +465,9 @@ exist."** VERIFIED:
 
 | # | Namespace | Convention | Where |
 | --- | --- | --- | --- |
-| 1 | `ZsErrorCode` / `ErrorCode`, 14-15 gRPC codes | UPPER_SNAKE | `crates/zeroship-runtime/src/rpc/error.rs:63-153`, `sdks/rpc/src/error.ts:20-52` |
-| 2 | plugin-db codes | lower_snake, canonicalised to UPPER_SNAKE | `crates/zeroship-data-v8/src/error.rs`, `sdks/db/src/errors.ts:27-36` |
-| 3 | `AuthErrorCode` | lower_snake | `sdks/auth/src/types.ts:72-100` |
+| 1 | `ZsErrorCode` / `ErrorCode`, 14-15 gRPC codes | UPPER_SNAKE | `crates/zeroship-runtime/src/rpc/error.rs:63-153`, `packages/rpc/src/error.ts:20-52` |
+| 2 | plugin-db codes | lower_snake, canonicalised to UPPER_SNAKE | `crates/zeroship-data-v8/src/error.rs`, `packages/db/src/errors.ts:27-36` |
+| 3 | `AuthErrorCode` | lower_snake | `packages/auth/src/types.ts:72-100` |
 | 4 | `PublicErrorMessage` | lower_snake | `crates/zeroship-auth/src/ui/mod.rs:83-113` |
 | 5 | Workflow codes | UPPER_SNAKE, not in the enum | `sdks/bootstrap/src/dispatcher.ts:305,1331` |
 | 6 | Billing gates | UPPER_SNAKE, not in the enum | `crates/zeroship-gateway/src/enforce.rs:25-26,43-44` |
@@ -484,7 +484,7 @@ The gaps that make this fragile:
   (`cron/workflow_engine.rs:1638`). The `"error"` field mixes prose
   (`"app not found"`), slugs (`"invalid_scope"`), and leaked Rust type names
   (`"LimitExceededError"`, `"RunConflict"`). Meanwhile
-  `sdks/control/src/index.ts:36-51` already reads `body.code` -- the client is
+  `packages/control/src/index.ts:36-51` already reads `body.code` -- the client is
   ready for codes the server does not send.
 - **The 5xx allow-lists are hand-mirrored across a language boundary**
   (`dispatch.rs:276-305` and `:336-347`) because canonicalisation is a table, not
@@ -551,7 +551,7 @@ pervasive the habit is.)
   usage. Regression test at `main.rs:1049-1065`.
 - `crates/zeroship-cli/src/main.rs:909-910` -- "no API token found; run `zeroship login`,
   pass `--token=<PAT>`, or set ZEROSHIP_TOKEN" (three exact next actions).
-- `sdks/vite-plugin/src/dev-server.ts:431-436` -- names the missing collections,
+- `packages/vite-plugin/src/dev-server.ts:431-436` -- names the missing collections,
   the exact next command (`pnpm migrate`), and the db path. (Contains an em-dash.)
 - `crates/zeroship-migrate-server/src/api.rs:321-345` -- the correct two-audience split.
 
@@ -583,10 +583,10 @@ of them. The single highest-value edit is `crates/zeroship-data-v8/src/error.rs`
 (` <U+2014> caused by: ` becomes ` -- caused by: `), which fixes every
 multi-layer DB error at once.
 Cost: hours. Risk: low, but **not zero** -- any test asserting on an em-dash
-would break, and `sdks/ui` strings (425 of the 952) are user-visible demo copy
+would break, and `packages/ui` strings (425 of the 952) are user-visible demo copy
 where typographic dashes are arguably correct. Recommend scoping to
-`crates/` and `sdks/{db,rpc,bootstrap,vite-plugin}`, explicitly excluding
-`sdks/ui`.
+`crates/` and the relevant packages, explicitly excluding
+`packages/ui`.
 
 **Option 1b. Delete doc markers and guard IDs from the four runtime sites.**
 `crates/zeroship-data-orm/src/exec.rs,326,344` and
@@ -647,7 +647,7 @@ platform-authored, so probably yes, on the same allow-list basis as codes).
 **Option 2c. Consolidate the six code vocabularies and derive the allow-list.**
 Replace the hand-mirrored `is_public_error_code` lists
 (`dispatch.rs:276-305`, `:336-347`) with a single registry that both the Rust
-rail and `sdks/db/src/errors.ts` read, plus a cross-language parity test (which
+rail and `packages/db/src/errors.ts` read, plus a cross-language parity test (which
 does not exist today).
 Cost: several days. Risk: touches the wire contract -- acceptable pre-launch.
 
@@ -740,7 +740,7 @@ markers, fix the 4-8 known sites (Option 1b) and rely on review; a semantic gate
 would generate more false positives than findings, and the repository's own
 history shows that a gate people learn to work around is worse than none.
 
-Even the non-ASCII gate needs a path allow-list (`sdks/ui` demo copy, WPT,
+Even the non-ASCII gate needs a path allow-list (`packages/ui` demo copy, WPT,
 vendored trees) and an exemption mechanism with a stated reason per entry, per
 the `AMBIENT_COMPOSE_KEYS` pattern (`config_name_alignment_gate.sh:63-70`).
 
@@ -780,7 +780,7 @@ gate shape into a domain that lacks the property that made it work is a real
 risk, and it is why I recommend gating only the character-class check, which
 needs no registry.
 
-**7.4 The em-dash cleanup may be net-negative in `sdks/ui`.** 425 of the 952
+**7.4 The em-dash cleanup may be net-negative in `packages/ui`.** 425 of the 952
 non-test non-ASCII literals are there, and typographic dashes in user-facing demo
 copy are a deliberate typographic choice, not a defect. A blanket strip would
 degrade them. My scoping recommendation handles this, but it means the headline
