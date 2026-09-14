@@ -42,6 +42,7 @@ mod typed_mutations;
 mod typed_predicates;
 mod typed_reads;
 mod typed_relations;
+mod typed_row_locks;
 mod typed_schema_lifetime;
 mod typed_updates;
 mod update_operators;

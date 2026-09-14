@@ -361,6 +361,65 @@ Repeated `filter` and `having` calls combine with AND. Ordering accepts
 `nulls_first` and `nulls_last`. An alias's `include_deleted()` applies only
 to that source, including a joined source's visibility condition.
 
+## Row locks
+
+Typed reads on a transaction handle can take exclusive row locks, held until
+the transaction commits or rolls back:
+
+```rust,ignore
+db.transaction(|tx| async move {
+    let state: Option<CredentialState> = tx.entity::<schema::users::Entity>()?
+        .query()
+        .filter(schema::users::id.eq(user_id)?)
+        .for_update()?
+        .first()
+        .await?;
+    let s = tx.entity::<schema::sessions::Entity>()?.alias("s")?;
+    let g = tx.entity::<schema::grants::Entity>()?.alias("g")?;
+    let rows = tx.from(&s)
+        .inner_join(&g, g.column(schema::grants::id).eq(s.column(schema::sessions::grantId))?)?
+        .for_update_of(&s)?
+        .select((s.row::<Session>(), g.row::<Grant>()))?
+        .all()
+        .await?;
+    Ok(())
+}).await?;
+```
+
+`for_update` locks the rows of every source. `for_update_of` names the sources
+to lock and can be repeated; the two cannot be mixed on one read. PostgreSQL
+renders `FOR UPDATE [OF ...]` after the page bounds, using the aliases the read
+already emits, so only the locked sources need `UPDATE` privilege. The strength
+is always exclusive and a competing lock waits. There is no `NOWAIT` or
+`SKIP LOCKED`: skipping locked rows would silently omit them. Waits are bounded
+by the transaction's lock timeout (`budgets::DB_LOCK_TIMEOUT_MS`) and surface as
+`lock_not_available`.
+
+Under read committed, a waiter returns the latest committed version of the row
+it waited for. Under repeatable read or serializable, locking a row changed
+after the transaction's snapshot fails with `serialization_failure`. A lock
+taken inside a nested callback whose savepoint rolls back is released with that
+savepoint; locks taken in the enclosing frame survive it.
+
+The builders refuse a root handle with `transaction_required`. A root handle
+stays a pooled receiver even inside another handle's callback. A lock target
+must be a source already registered on the same database handle. Preparation
+checks the captured transaction route again and refuses, before any SQL runs,
+`count`, `exists`, aggregates, grouping, relation loading, an unqualified lock
+on a read with a left join, and a lock on the nullable side of a left join
+(`invalid_read`). SQLite has no row locks and refuses locking reads with
+`unsupported_backend_feature`; the transaction stays usable. The V8 adapter's
+`ReadQuery` decoding has no lock input.
+
+Every ORM read carries a row limit. A lock set larger than one page is taken as
+keyset pages in one transaction, in a stable order; each page's locks
+accumulate until settlement.
+
+Single-row updates and deletes lock their target through a first-row
+subselect, and protected writes probe their targets the same way. These
+internal write-target probes render no locking clause on SQLite, whose single
+writer serializes writes.
+
 ## Named relations
 
 A foreign-key descriptor can carry a logical `relation` name. Authoring declares
