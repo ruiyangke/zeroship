@@ -3,8 +3,8 @@ import { grant, now, raw, t, table } from "@zeroship/migrate";
 // Decision 1 (worker enrollment bootstrap and revocation, option 1A) from the
 // workflow-refactor design. An ENROLLER is a deployment unit's bootstrap
 // identity: the operator generates one Ed25519 keypair per host or pool and
-// mounts the private half into that unit's worker containers, in place of the
-// old shared `svc-worker.pem`. Control records the public half here. Revoking
+// mounts the private half into that unit's worker containers; no worker holds a
+// `svc/worker` role key. Control records the public half here. Revoking
 // an enroller is the boundary against a compromised or decommissioned unit: a
 // revoked unit cannot regain equivalent authority by enrolling a fresh
 // instance identity, because CONTROL_WORKER_ENROL belongs to the enroller
