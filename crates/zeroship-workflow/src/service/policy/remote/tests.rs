@@ -15,7 +15,7 @@ use zeroship_core::{
     },
     service_peers::{ServiceAuth, ServiceKeyring},
     workflow_coordination::{Revision, WorkerId},
-    workflow_policy::{AppPolicy, PolicyLease, PolicyLeaseRequest},
+    workflow_policy::{AppPolicy, EstablishIngress, PolicyLease, PolicyLeaseRequest},
 };
 use zeroship_workflow_client::Options;
 
@@ -400,6 +400,140 @@ async fn source_failure_leaves_previous_authority_at_its_original_deadline() {
             assert_eq!(
                 assigned.binding().authority().unwrap().deadline,
                 original.deadline
+            );
+        },
+    )
+    .await;
+}
+
+impl Fixture {
+    /// An exchange for `establish`, replying with the manager's `epoch`.
+    fn lease(
+        &self,
+        establish: Option<EstablishIngress>,
+        ingress_used: bool,
+        epoch: Option<i64>,
+    ) -> Exchange {
+        let mut exchange = self.reply(&self.scope, 60_000);
+        exchange.request = json!(PolicyLeaseRequest {
+            scope: self.scope.clone(),
+            establish,
+            ingress_used,
+        });
+        exchange.response["ingressEpoch"] = json!(epoch);
+        exchange
+    }
+
+    fn refused(&self, establish: EstablishIngress, code: &str, status: u16) -> Exchange {
+        let mut exchange = self.lease(Some(establish), false, None);
+        exchange.response = json!({ "code": code });
+        exchange.status = status;
+        exchange
+    }
+}
+
+fn after(epoch: i64) -> EstablishIngress {
+    EstablishIngress {
+        after: Some(epoch.try_into().unwrap()),
+    }
+}
+
+/// Establishment names the refused epoch, reports accepted ingress, and
+/// installs the manager's newer epoch; a newer installed epoch then satisfies
+/// a later establishment without another exchange.
+#[compio::test]
+async fn establishment_installs_the_epoch_above_the_refused_one() {
+    let fixture = Fixture::new();
+    peer(
+        &fixture,
+        vec![
+            fixture.lease(None, false, Some(1)),
+            fixture.lease(Some(after(1)), true, Some(3)),
+        ],
+        async |client| {
+            let assigned = fixture.assigned(client);
+            assigned.refresh().await.unwrap();
+            assert_eq!(
+                assigned.binding().ingress_epoch(),
+                Some(1.try_into().unwrap())
+            );
+            IngressEpochs::accepted(&assigned);
+            IngressEpochs::establish(&assigned, Some(1.try_into().unwrap()))
+                .await
+                .unwrap();
+            assert_eq!(
+                assigned.binding().ingress_epoch(),
+                Some(3.try_into().unwrap())
+            );
+            // Epoch three already exceeds two: no exchange is made.
+            assigned
+                .establish(Some(2.try_into().unwrap()))
+                .await
+                .unwrap();
+            assigned.establish(None).await.unwrap();
+        },
+    )
+    .await;
+}
+
+/// The manager's refusals keep their meaning, without a second exchange: a
+/// denial becomes `PermissionDenied` and an unestablishable epoch `Conflict`.
+#[compio::test]
+async fn refused_establishment_reports_denial_and_conflict() {
+    let fixture = Fixture::new();
+    peer(
+        &fixture,
+        vec![
+            fixture.refused(EstablishIngress { after: None }, "denied", 403),
+            fixture.refused(after(4), "conflict", 409),
+        ],
+        async |client| {
+            let assigned = fixture.assigned(client);
+            assert_eq!(
+                assigned.establish(None).await,
+                Err(WorkflowServiceError::PermissionDenied)
+            );
+            assert!(matches!(
+                assigned.establish(Some(4.try_into().unwrap())).await,
+                Err(WorkflowServiceError::Conflict(_))
+            ));
+            assert_eq!(assigned.binding().ingress_epoch(), None);
+        },
+    )
+    .await;
+}
+
+/// A refresh that supersedes an establishment's ticket installs an older epoch;
+/// the establishment exchanges once more and installs the committed one.
+#[compio::test]
+async fn establishment_superseded_by_a_refresh_exchanges_once_more() {
+    let fixture = Fixture::new();
+    let (first, arrived, release) = fixture.lease(Some(after(1)), false, Some(2)).gated();
+    peer(
+        &fixture,
+        vec![
+            first,
+            fixture.lease(None, false, Some(1)),
+            fixture.lease(Some(after(1)), false, Some(2)),
+        ],
+        async |client| {
+            let assigned = fixture.assigned(client);
+            let refreshing = assigned.clone();
+            let driver = async {
+                arrived.await.unwrap();
+                refreshing.refresh().await.unwrap();
+                assert_eq!(
+                    refreshing.binding().ingress_epoch(),
+                    Some(1.try_into().unwrap())
+                );
+                release.send(()).unwrap();
+            };
+            let (established, ()) =
+                futures::join!(assigned.establish(Some(1.try_into().unwrap())), driver);
+            established.unwrap();
+            assert_eq!(
+                assigned.binding().ingress_epoch(),
+                Some(2.try_into().unwrap())
             );
         },
     )

@@ -263,6 +263,12 @@ impl Exchange {
         self
     }
 
+    pub fn denied(mut self) -> Self {
+        self.status = 403;
+        self.response = json!({"code":"denied"});
+        self
+    }
+
     fn new(endpoint: ServiceEndpoint, request: Value, response: Value) -> Self {
         Self {
             endpoint,
