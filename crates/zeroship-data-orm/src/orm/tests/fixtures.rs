@@ -293,6 +293,17 @@ impl CollectionFixture {
         }
     }
 
+    /// Run a raw PostgreSQL oracle query; `{table}` names the qualified collection.
+    pub async fn postgres_oracle(&self, collection: &str, sql: &str) -> Vec<compio_postgres::Row> {
+        let (backend, schema, _) = self.postgres.as_ref().expect("PostgreSQL fixture");
+        let table = format!("{schema}.{}", crate::sql::mapping::quote_ident(collection));
+        backend
+            .pool()
+            .query(&sql.replace("{table}", &table), &[])
+            .await
+            .unwrap()
+    }
+
     pub async fn install_case_insensitive_text(&self) {
         if let Some((backend, _, _)) = &self.postgres {
             backend

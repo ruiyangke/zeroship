@@ -23,11 +23,38 @@ pub enum StorageType {
     Json,
     Vector,
     GeoPoint,
+    /// A one-dimensional array in the database's own array type.
+    Array(ArrayElement),
+}
+
+/// Element type of a native database array.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ArrayElement {
+    Text,
+}
+
+impl ArrayElement {
+    /// Storage of a single element, such as an array mutation operand.
+    pub const fn storage(self) -> StorageType {
+        match self {
+            Self::Text => StorageType::Text,
+        }
+    }
 }
 
 impl StorageType {
     pub fn exact_decimal(precision: u64, scale: u64) -> Result<Self, CompileError> {
         DecimalStorage::new(precision, scale).map(Self::ExactDecimal)
+    }
+
+    /// Storage of an array mutation operand: an element for native arrays, a
+    /// JSON value for JSON documents.
+    pub const fn array_operand(self) -> Option<Self> {
+        match self {
+            Self::Json => Some(Self::Json),
+            Self::Array(element) => Some(element.storage()),
+            _ => None,
+        }
     }
 
     fn accepts(self, value: &Value) -> bool {
@@ -52,6 +79,10 @@ impl StorageType {
             Self::Json => matches!(value, Value::Json(_) | Value::Array(_) | Value::Object(_)),
             Self::Vector => matches!(value, Value::Array(_) | Value::Bytes(_)),
             Self::GeoPoint => matches!(value, Value::Object(_) | Value::Bytes(_)),
+            Self::Array(element) => matches!(
+                value,
+                Value::Array(values) if values.iter().all(|value| element.storage().accepts(value))
+            ),
         }
     }
 
@@ -1193,11 +1224,12 @@ fn validate_update_expression(
         } => {
             table.check_column(column)?;
             if column.index != assigned.index
-                || storage != StorageType::Json
-                || !StorageType::Json.accepts(operand)
+                || !storage
+                    .array_operand()
+                    .is_some_and(|element| element.accepts(operand))
             {
                 return Err(invalid(
-                    "array mutation requires its assigned JSON column and encoded operand",
+                    "array mutation requires its assigned array column and an encoded element",
                 ));
             }
             Ok(())

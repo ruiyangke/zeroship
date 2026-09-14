@@ -165,8 +165,14 @@ fn normalize_row_on_read(
 
         match def.logical_type {
             LogicalType::Boolean => normalize_boolean_value(value)?,
-            LogicalType::Json | LogicalType::Object | LogicalType::Array | LogicalType::Union => {
-                prepare_value(key, &schema[key], value).map_err(|_| CodecError::Decode {
+            LogicalType::Array => {
+                prepare_value(key, def, value).map_err(|_| CodecError::Decode {
+                    column: key.clone(),
+                    reason: "invalid array storage",
+                })?;
+            }
+            LogicalType::Json | LogicalType::Object | LogicalType::Union => {
+                prepare_value(key, def, value).map_err(|_| CodecError::Decode {
                     column: key.clone(),
                     reason: "invalid typed JSON storage",
                 })?;
