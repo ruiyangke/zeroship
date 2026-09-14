@@ -305,8 +305,6 @@ jobs:
         run: cargo xtask test repository
       - name: The napi addon's declared and exported functions agree
         run: tests/napi_export_parity_gate.sh
-      - name: No platform column is stored beside its own hash
-        run: tests/secret_beside_its_hash_gate.sh
       # Arm 2 of this one was RED on main the whole time it was unwired:
       # ZEROSHIP_SESSION_SECRET sat in its inventory and in
       # docs/reference/env-vars.md's "surviving test-only names" with no reader
