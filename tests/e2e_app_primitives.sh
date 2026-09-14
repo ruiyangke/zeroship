@@ -33,8 +33,8 @@
 #     OP) session. There is no shortcut to mint an app session,
 #     so authenticated env.db RPC through the gateway is not headlessly
 #     reachable without standing up the native OP. (gateway-auth gap)
-#   * Schema adapter resolution is owned by DbPlugin. It supplies the compiled
-#     DB SDK under zeroship:db/internal, independently of creator bundling.
+#   * Schema adapter resolution is owned by DbPlugin. It supplies its compiled
+#     host module independently of creator bundling.
 #     Exercise that delivery with the native plugin and its PostgreSQL fixture:
 #       cargo test -p zeroship-data-v8 --lib tests::postgres::plugin_modules
 #

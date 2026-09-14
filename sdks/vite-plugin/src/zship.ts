@@ -26,8 +26,6 @@ import {
 import { promisify, TextDecoder } from "node:util";
 import { create as tarCreate } from "tar";
 import mime from "mime";
-import { validateCollectionIdentity, type NormalizedSchema } from "@zeroship/db/internal";
-
 import {
   RUNTIME_DESCRIPTOR_FILE,
 } from "./gen-types/index.js";
@@ -931,6 +929,50 @@ function validateRuntimeDescriptorBytes(bytes: Buffer): void {
   validateRuntimeDescriptorValue(value);
 }
 
+function validateRuntimeCollectionIdentity(
+  schema: Record<string, Record<string, unknown>>,
+): void {
+  const id = schema.id;
+  let message: string | undefined;
+  if (!id || id.primaryKey !== true) {
+    message = "collection requires 'id' declared as its primary key";
+  } else if (id.required !== true) {
+    message = "collection 'id' must be required and non-null";
+  } else if (
+    !["string", "text", "id", "integer", "int", "bigint", "bigInt"].includes(
+      id.type as string,
+    )
+  ) {
+    message = "collection 'id' must use text or integer storage";
+  } else if (id.encrypted === true || (
+    id.mask !== undefined && (
+      typeof id.mask !== "object" ||
+      id.mask === null ||
+      (id.mask as { kind?: unknown }).kind !== "none"
+    )
+  )) {
+    message = "collection 'id' cannot be encrypted or masked";
+  } else if (
+    id.assign !== undefined &&
+    (typeof id.assign !== "object" ||
+      id.assign === null ||
+      (id.assign as { on?: unknown }).on !== "insert")
+  ) {
+    message = "collection 'id' can only be assigned on insertion";
+  } else if (
+    Object.entries(schema).some(
+      ([name, field]) => name !== "id" && field.primaryKey === true,
+    )
+  ) {
+    message = "collection 'id' must be its sole primary key";
+  }
+  if (message) {
+    throw Object.assign(new Error(message), {
+      code: "INVALID_COLLECTION_IDENTITY",
+    });
+  }
+}
+
 function validateRuntimeDescriptorValue(value: unknown): void {
   if (
     value === null ||
@@ -966,7 +1008,9 @@ function validateRuntimeDescriptorValue(value: unknown): void {
       }
     }
     try {
-      validateCollectionIdentity(collection.fields as NormalizedSchema);
+      validateRuntimeCollectionIdentity(
+        collection.fields as Record<string, Record<string, unknown>>,
+      );
     } catch (error) {
       throw new Error(`zship: runtime_descriptor collection ${JSON.stringify(name)}: ${error instanceof Error ? error.message : String(error)}`);
     }

@@ -18,8 +18,8 @@ import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import { env } from "zeroship";
 import { installSchemaForTest } from "./_install-helper.js";
-import { t } from "@zeroship/db";
-import type { Id } from "@zeroship/db";
+import { t } from "../src/index.js";
+import type { Id } from "../src/index.js";
 import type { NativeDb } from "../src/native.js";
 
 type AnyRec = Record<string, unknown>;
@@ -104,7 +104,7 @@ function makeMockNative(options?: { ready?: (name: string) => Promise<void> }) {
   const calls = { find: 0, findCollections: [] as string[], openSubscription: 0, ready: 0 };
 
   const native = {
-    // The bootstrap callback context makes db.live reject without sharing
+    // The host facade callback context makes db.live reject without sharing
     // transaction state with sibling continuations.
     transaction: async (cb: (raw: unknown) => unknown) => cb(undefined),
     collection(name: string) {

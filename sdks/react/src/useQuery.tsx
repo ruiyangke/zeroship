@@ -39,7 +39,7 @@
  */
 
 import * as React from "react";
-import { subscribe as internalSubscribe } from "@zeroship/db/internal";
+import { subscribe as defaultSubscribe } from "@zeroship/db";
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -133,7 +133,7 @@ export interface QueryClientProviderProps {
 /**
  * Provides the broker `QueryClient` to all `useQuery` calls below.
  * Pass an instance built via `createDefaultClient()` (which wires up
- * the framework-internal `@zeroship/db/internal` subscription bridge)
+ * the public `@zeroship/db` subscription API)
  * or a test stub.
  */
 export function QueryClientProvider({ client, children }: QueryClientProviderProps): React.ReactElement {
@@ -145,13 +145,12 @@ export function QueryClientProvider({ client, children }: QueryClientProviderPro
 }
 
 /**
- * Build the default broker client wired to the framework-internal
- * `@zeroship/db/internal` subscription bridge. Pure indirection —
- * keeps `@zeroship/react` testable while avoiding a public dependency
- * on `@zeroship/db`'s low-level reactive primitive.
+ * Build the default broker client wired to the public `@zeroship/db`
+ * subscription API. The parameter keeps `@zeroship/react` testable with a
+ * local subscription source.
  */
 export function createDefaultClient(
-  subscribeImpl: (collection: string) => SubscriptionLike = internalSubscribe,
+  subscribeImpl: (collection: string) => SubscriptionLike = defaultSubscribe,
 ): QueryClient {
   return { subscribe: subscribeImpl };
 }

@@ -8,7 +8,7 @@ import { test, describe, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { env } from "zeroship";
 import { installSchemaForTest } from "./_install-helper.js";
-import { schema, t } from "@zeroship/db";
+import { schema, t } from "../src/index.js";
 import { __zeroshipDbResetIndexWarnings } from "../src/collection.js";
 import type { NativeDb } from "../src/native.js";
 

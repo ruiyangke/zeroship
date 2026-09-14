@@ -15,9 +15,9 @@
  */
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { model } from "@zeroship/db/internal";
-import { t } from "@zeroship/db";
-import { naming } from "@zeroship/db";
+import { model } from "../../../crates/zeroship-data-v8/js/testing.js";
+import { t } from "../src/index.js";
+import { naming } from "../src/index.js";
 import type { NativeDb } from "../src/native.js";
 
 type AnyRec = Record<string, unknown>;

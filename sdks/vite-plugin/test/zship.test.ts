@@ -318,6 +318,80 @@ describe("emitZship", () => {
     }
   });
 
+  test("carries a valid runtime descriptor as a referenced blob", async () => {
+    const descriptor = JSON.stringify({
+      version: 2,
+      collections: {
+        notes: {
+          fields: {
+            id: { type: "string", required: true, primaryKey: true },
+            title: { type: "string", required: true },
+          },
+          options: { softDelete: false, versioning: false },
+          indexes: [],
+        },
+      },
+    });
+    const fix = await makeFixture({
+      "dist/index.html": "<!doctype html>",
+      "generated/schema.runtime.json": descriptor,
+    });
+    try {
+      const result = await emitZship({
+        root: fix.root,
+        builtAt: "2026-04-29T00:00:00Z",
+        silent: true,
+        migrations: { dir: "migrations", genTypesOut: "generated" },
+      });
+      const tarBytes = zstdDecompressSync(await fs.readFile(result.outputPath));
+      const entries = parseTar(tarBytes);
+      const manifest = JSON.parse(entries[0].bytes.toString("utf8"));
+      const descriptorHash = sha256Hex(descriptor);
+
+      assert.deepEqual(manifest.runtime_descriptor, { hash: descriptorHash });
+      assert.equal(
+        entries
+          .find((entry) => entry.name === `blobs/${descriptorHash}`)
+          ?.bytes.toString("utf8"),
+        descriptor,
+      );
+    } finally {
+      await fix.cleanup();
+    }
+  });
+
+  test("rejects a runtime descriptor with an invalid collection identity", async () => {
+    const descriptor = JSON.stringify({
+      version: 2,
+      collections: {
+        notes: {
+          fields: {
+            id: { type: "string", required: false, primaryKey: true },
+          },
+          options: { softDelete: false, versioning: false },
+          indexes: [],
+        },
+      },
+    });
+    const fix = await makeFixture({
+      "dist/index.html": "<!doctype html>",
+      "generated/schema.runtime.json": descriptor,
+    });
+    try {
+      await assert.rejects(
+        emitZship({
+          root: fix.root,
+          builtAt: "2026-04-29T00:00:00Z",
+          silent: true,
+          migrations: { dir: "migrations", genTypesOut: "generated" },
+        }),
+        /collection 'id' must be required and non-null/,
+      );
+    } finally {
+      await fix.cleanup();
+    }
+  });
+
   test("carries workflow schedules into the manifest", async () => {
     const fix = await makeFixture({
       "dist/server/index.js":

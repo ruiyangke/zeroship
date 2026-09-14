@@ -1,7 +1,7 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { t } from "@zeroship/db";
-import { TypeBuilder } from "@zeroship/db/internal";
+import { t } from "../src/index.js";
+import { TypeBuilder } from "../../../crates/zeroship-data-v8/js/testing.js";
 
 describe("t type builder", () => {
   test("t.string() creates string TypeBuilder", () => {

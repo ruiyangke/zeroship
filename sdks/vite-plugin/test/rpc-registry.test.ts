@@ -273,7 +273,7 @@ test("generated imports contain only application targets", () => {
     const allowed = new Set(["./user.mjs", "./bound.mjs"]);
     assertEntryImports(code, allowed);
     assert.throws(
-      () => assertEntryImports(code + '\nimport "@zeroship/db/internal";', allowed),
+      () => assertEntryImports(code + '\nimport "framework:private";', allowed),
       /unexpected entry import/,
     );
   }

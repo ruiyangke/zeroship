@@ -54,7 +54,7 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { t, schema, type Db, type TransactionOptions } from "@zeroship/db";
+import { t, schema, type Db, type TransactionOptions } from "../src/index.js";
 
 const s = { widgets: schema({ name: t.string().required() }) } as const;
 // Every check below lives inside a function that is declared but never
@@ -64,7 +64,7 @@ const s = { widgets: schema({ name: t.string().required() }) } as const;
 // const` would compile away to a real `undefined.transaction(...)` call
 // and crash at runtime with no bearing on the thing under test.
 function typeOnly_neverCalledAtRuntime(db: Db<typeof s>, rawTransaction: ZeroshipDb["transaction"]) {
-  // --- @zeroship/db's published surface (TransactionOptions.isolationLevel) ---
+  // --- ../src/index.js's published surface (TransactionOptions.isolationLevel) ---
 
   const okSdkSpaced: TransactionOptions = { isolationLevel: "read uncommitted" };
   const okSdkSerializable: TransactionOptions = { isolationLevel: "serializable" };

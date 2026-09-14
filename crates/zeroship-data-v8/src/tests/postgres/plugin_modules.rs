@@ -1,10 +1,10 @@
-//! DB adapter source delivery through the native plugin.
+//! DB facade preparation through the native plugin.
 
 use super::fixtures::{drain_pg, require_pg};
 use crate::tests::fixtures::parity;
 
 #[compio::test]
-async fn db_plugin_supplies_the_installer_and_shares_its_module_instance() {
+async fn db_plugin_prepares_the_creator_facade_before_module_evaluation() {
     let (_postgres, url) = require_pg().await;
     let app = crate::tests::fixtures::test_app_id!();
     let descriptor = parity::runtime_descriptor(
@@ -16,19 +16,14 @@ async fn db_plugin_supplies_the_installer_and_shares_its_module_instance() {
     );
     let source = r#"
         import { env } from "zeroship";
-        import * as sdk from "zeroship:db/internal";
-        const collectionAtEvaluation = env.db.posts instanceof sdk.Collection;
-        const initial = await import("zeroship:db/internal");
+        const queryAtEvaluation = typeof env.db.posts.find({}).sort === 'function';
         export default { rpc: { inspect: async () => {
-            const later = await import("zeroship:db/internal");
             return {
-                same: initial === sdk && later === sdk,
-                collectionAtEvaluation,
-                installer: typeof sdk.installSchema === 'function',
-                collection: env.db.posts instanceof sdk.Collection,
-                naming: typeof sdk.naming === 'object',
+                queryAtEvaluation,
+                collection: typeof env.db.posts.insert === 'function',
+                transaction: typeof env.db.transaction === 'function',
+                live: typeof env.db.live === 'function',
                 policy: typeof env.db.declareMaskPolicy === 'function',
-                policyInstaller: typeof sdk._flushPendingMaskPolicy,
             };
         } } };
     "#;
@@ -38,9 +33,8 @@ async fn db_plugin_supplies_the_installer_and_shares_its_module_instance() {
     assert_eq!(
         value["json"],
         zeroship_data_orm::value!({
-            "same": true, "installer": true, "collection": true,
-            "collectionAtEvaluation": true,
-            "naming": true, "policy": true, "policyInstaller": "undefined",
+            "queryAtEvaluation": true, "collection": true,
+            "transaction": true, "live": true, "policy": true,
         })
     );
     drain_pg().await;

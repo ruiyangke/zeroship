@@ -8,8 +8,8 @@
 //! The target keeps V8 runtimes alive on separate OS threads:
 //!
 //! - isolate A opens an anchor subscription through the ORM relay client;
-//! - isolate B serves a stream RPC backed by the shipped `createLive` SDK
-//!   implementation;
+//! - isolate B serves a stream RPC backed by the installed `env.db.live`
+//!   facade;
 //! - isolate C performs the native insert.
 //!
 //! Keeping A alive until B has received the write is load-bearing. It forces
@@ -436,10 +436,9 @@ fn subscriber_modules() -> Vec<ModuleEntry> {
         specifier: "index.js".to_string(),
         source: r#"
 import { env } from "zeroship";
-import { createLive } from "@zeroship/db/internal";
 
 async function* todosSubscribe() {
-    const live = createLive(
+    const live = env.db.live(
         () => env.db.collection("events").find({}, {}),
         { tables: ["events"] },
     );
@@ -511,11 +510,7 @@ export default { fetch: fetchHandler, rpc: procedures };
 "#
         .to_string(),
     };
-    let sdk = ModuleEntry {
-        specifier: "@zeroship/db/internal".to_string(),
-        source: include_str!("../../../sdks/db/dist/internal.js").to_string(),
-    };
-    vec![entry, sdk]
+    vec![entry]
 }
 
 #[derive(Debug)]

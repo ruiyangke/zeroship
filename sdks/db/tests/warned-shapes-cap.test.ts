@@ -15,12 +15,12 @@
  */
 import { test, describe, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { schema, t } from "@zeroship/db";
+import { schema, t } from "../src/index.js";
 import { installSchemaForTest } from "./_install-helper.js";
 import {
   __zeroshipDbResetIndexWarnings,
   __zeroshipDbWarnedShapesSize,
-} from "@zeroship/db/internal";
+} from "../../../crates/zeroship-data-v8/js/testing.js";
 
 const MAX_WARNED_SHAPES = 1024;
 
