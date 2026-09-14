@@ -814,13 +814,6 @@ main() {
   #
   # That is detectable in well under a second before the build starts, so it is.
   #
-  # WHY tests/dockerfile_copy_paths_gate.sh DOES NOT ALREADY COVER THIS, which is
-  # the obvious objection and has been measured rather than argued. That gate
-  # asks `[ -e ]` of every context COPY source; `third_party/` EXISTS, it is just
-  # empty. Run in a worktree with the submodule unpopulated it reports 15 passed,
-  # 0 failed - green on the exact tree whose build fails. It is a path lint, and
-  # this is a content problem.
-  #
   # CONTENT, NOT GIT STATE. `git submodule status` is the instrument that first
   # suggests itself and it is the wrong one: it prints `-` (uninitialised) for a
   # worktree whose submodule content arrived by rsync rather than by `submodule
