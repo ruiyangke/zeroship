@@ -362,7 +362,7 @@ pub(super) async fn advance(
     run: &str,
     now: i64,
 ) -> Result<(), WorkflowServiceError> {
-    advance_job(tx, app, run, now).await.map(|_| ())
+    Box::pin(advance_job(tx, app, run, now)).await.map(|_| ())
 }
 
 /// [`advance`] that also returns the recorded runnable intent, if any, so a
@@ -387,7 +387,7 @@ pub(super) async fn advance_job(
             "workflow frontier revision exhausted".into(),
         ));
     }
-    record_job(tx, app, run, now).await
+    Box::pin(record_job(tx, app, run, now)).await
 }
 
 /// Record the final runnable frontier in the same transaction as its cause.

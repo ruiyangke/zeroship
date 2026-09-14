@@ -119,7 +119,7 @@ pub async fn waiting(
 /// Whether any current parent wait accepted a member of `child`'s head.
 ///
 /// Follows the same head-directed join as [`waiting`] without ordering, so it
-/// reads at most one joined row however many parents wait on the head.
+/// stops at the first current parent wait instead of sorting every waiter.
 pub async fn has_waiting(
     tx: &Transaction,
     app: &AppId,

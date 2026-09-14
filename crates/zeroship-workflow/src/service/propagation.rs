@@ -121,7 +121,8 @@ pub(super) async fn receipt(
 }
 
 /// Record the cascade obligation of a settling generation and its first page.
-/// The probe reads at most one child; repeated settlement reuses the obligation.
+/// The probe is one parent-linkage index lookup; repeated settlement reuses
+/// the obligation.
 pub(super) async fn cascade(
     tx: &Transaction,
     app: &AppId,
@@ -143,11 +144,11 @@ pub(super) async fn cascade(
     if !owns_child {
         return Ok(());
     }
-    record(tx, app, Kind::Cascade, run, generation, now).await
+    Box::pin(record(tx, app, Kind::Cascade, run, generation, now)).await
 }
 
 /// Record the notify obligation of a terminal head generation and its first
-/// page. The probe reads at most one current parent wait.
+/// page. The probe stops at the first current parent wait on the head.
 pub(super) async fn notify(
     tx: &Transaction,
     app: &AppId,
@@ -160,14 +161,14 @@ pub(super) async fn notify(
     if !continuations::has_waiting(tx, app, member).await? {
         return Ok(());
     }
-    record(
+    Box::pin(record(
         tx,
         app,
         Kind::Notify,
         &member.run_id,
         member.generation,
         now,
-    )
+    ))
     .await
 }
 
