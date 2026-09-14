@@ -41,18 +41,17 @@ command. It defaults to the gitignored `deploy/compose/secrets` directory and
 the sibling `deploy/compose/.env` file. The deployment runbook covers custom
 paths because Compose must receive both the custom env-file and mount path.
 
-The secret directory contains exactly seven files:
+The secret directory contains these private files:
 
 `migrate-dsn` `gateway-signing.pem` `auth-signing.pem` `broker-secret`
 `pairwise-salt` `refresh-hash-key` `refresh-idem-key`
 
-That is `secret_specs()` in `crates/zeroship-cli/src/dev.rs` (six) plus `pairwise-salt`,
-which is written separately because its bytes must equal the `.env` scalar
-below. This list said "eight" and named six until 2026-08-21; the one it left
-out was `migrate-dsn`, the privileged DSN, which is also the file
-`tests/config_name_alignment_gate.sh` cited `dev.rs` as proof did not exist.
+The list comes from `secret_specs()` in `crates/zeroship-cli/src/dev.rs` plus
+`pairwise-salt`, which is written separately because its bytes must equal the
+`.env` scalar below. An earlier version omitted `migrate-dsn`, the privileged
+DSN.
 
-The env overlay contains eight generated scalar values:
+The env overlay contains these generated scalar values:
 
 `ZEROSHIP_CONTROL_KEY` `ZEROSHIP_CONTROL_MASTER_KEY`
 `ZEROSHIP_MIGRATE_SERVER_POLICY_SEAL_KEY` `ZEROSHIP_GATEWAY_STASH_SIGNING_KEY`
@@ -116,9 +115,7 @@ point; non-edge publications are loopback-only debugging paths):
 - `gateway` (`zeroship-gate`) -> `localhost:8000`
 - `auth` (`zeroship-auth`) -> `localhost:9092`
 - `redpanda` (Kafka-wire billing stream) -> `127.0.0.1:19092`. The producers
-  take it as `--metering-brokers` / `ZEROSHIP_METERING_BROKERS`;
-  `REDPANDA_BROKERS` is now only the name the host-side `zeroship-stream` and
-  `zeroship-control` integration tests gate themselves on.
+  take it as `--metering-brokers` / `ZEROSHIP_METERING_BROKERS`.
 - `redis` (`env.kv` store) has no host port
 - `worker` (`zeroship-worker`) has no host port; scale it with `--scale worker=N`
 
@@ -407,15 +404,15 @@ curl -sf http://127.0.0.1:8000/readyz    # gateway, 503 until the first route pu
 
 Both are unauthenticated, so `/readyz` is built not to be a lever: each
 dependency probe has a short explicit timeout, the outcome is cached for a
-couple of seconds and concurrent probes collapse into one, and the response
+short interval and concurrent probes collapse into one, and the response
 body is `{"ready":true|false}` with no DSN, host, driver text or version in
 it. The gateway and worker read a stamp written by the background poll they
 already run, so their probes issue no upstream request at all.
 
 There is no `/health`. It was deleted rather than aliased.
 
-`tests/health_endpoints.sh` walks the whole contract against the real
-binaries, including the arms where a dependency is taken away.
+Each service owns its health routes and readiness cases in its Rust crate. The
+database-backed cases use the crate's required PostgreSQL fixture.
 
 ## Database migrations
 

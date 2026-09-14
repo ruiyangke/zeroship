@@ -137,6 +137,7 @@ schema = "config_schema"
 registry = "./config-registry.json"
 policy = ["./config-root.toml", "./config-leaf.toml"]
 `,
+      { mode: 0o600 },
     );
     const resolved = resolveCliConfig({
       cwd: project.child,

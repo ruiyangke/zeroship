@@ -10,8 +10,7 @@
 //! NO VENDOR IS LEFT IN THIS MODULE. All three execution halves live in
 //! `zeroship-migrate-postgres`, `zeroship-migrate-sqlite` and `zeroship-migrate-mysql`, and core
 //! re-exports none of them, because a `pub use zeroship_migrate_postgres::...` here would
-//! be core NAMING a vendor outside the registry - the thing
-//! `crates/zeroship-migrate/tests/dialect_matrix/core_names_no_vendor_crate.rs` exists to forbid. A caller
+//! make core name a vendor outside the registry. A caller
 //! that wants `PostgresBackend` names the vendor crate, exactly as the registry
 //! composition does. PostgreSQL was the last one inside, and the governing rule
 //! asked for exactly this: the core is neutral, and that is the hard limit.

@@ -11,11 +11,19 @@ use crate::{
 };
 use async_trait::async_trait;
 use futures::{channel::oneshot, future::LocalBoxFuture, FutureExt, StreamExt};
+use std::sync::Arc;
 use zeroship_core::app_id::AppId;
 
 const MAX_QUEUED_REQUESTS: usize = 64;
 const MAX_ACTIVE_REQUESTS: usize = 16;
 type Request = Box<dyn FnOnce(AppWorkflows) -> LocalBoxFuture<'static, ()> + Send>;
+
+/// Tells the trusted host that a mutating call finished.
+///
+/// The call's committed publication intents may be pending, and the host can
+/// publish them immediately; manager reconciliation still recovers any intent
+/// the host misses. The hint carries no customer data and grants no authority.
+pub type CommitHint = Arc<dyn Fn() + Send + Sync>;
 
 /// A thread-safe client. The customer database remains on the engine's thread.
 #[derive(Clone)]
@@ -24,6 +32,7 @@ pub struct AppBackend {
     binding: PolicyBinding,
     requests: flume::Sender<Request>,
     max_output_bytes: usize,
+    commit_hint: Option<CommitHint>,
 }
 impl std::fmt::Debug for AppBackend {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -45,6 +54,7 @@ impl AppBackend {
             binding: api.binding.clone(),
             requests,
             max_output_bytes,
+            commit_hint: None,
         };
         compio::runtime::spawn(async move {
             receiver
@@ -59,6 +69,32 @@ impl AppBackend {
     #[must_use]
     pub fn app_id(&self) -> &AppId {
         &self.app
+    }
+
+    /// Signal the host after every start, signal, transition and restart,
+    /// including failed calls whose commit outcome may be uncertain. Clones
+    /// share the hint; reads never trigger it.
+    #[must_use]
+    pub fn with_commit_hint(mut self, hint: CommitHint) -> Self {
+        self.commit_hint = Some(hint);
+        self
+    }
+
+    #[expect(
+        clippy::future_not_send,
+        reason = "caller cancellation is driven by its compio runtime"
+    )]
+    async fn mutate<T: Send + 'static>(
+        &self,
+        operation: impl FnOnce(AppWorkflows) -> LocalBoxFuture<'static, Result<T, WorkflowServiceError>>
+            + Send
+            + 'static,
+    ) -> Result<T, WorkflowServiceError> {
+        let result = self.call(operation).await;
+        if let Some(hint) = &self.commit_hint {
+            hint();
+        }
+        result
     }
 
     #[expect(
@@ -140,7 +176,7 @@ impl WorkflowBackend for AppBackend {
         workflow_name: String,
         options: StartOptions,
     ) -> Result<StartedRun, WorkflowServiceError> {
-        self.call(move |api| {
+        self.mutate(move |api| {
             async move { api.start(&RequestId::mint(), &workflow_name, options).await }
                 .boxed_local()
         })
@@ -158,7 +194,7 @@ impl WorkflowBackend for AppBackend {
         run_id: String,
         options: SignalOptions,
     ) -> Result<DeliveredSignal, WorkflowServiceError> {
-        self.call(move |api| {
+        self.mutate(move |api| {
             async move { api.signal(&RequestId::mint(), &run_id, options).await }.boxed_local()
         })
         .await
@@ -168,7 +204,7 @@ impl WorkflowBackend for AppBackend {
         run_id: String,
         op: RunOperation,
     ) -> Result<TransitionedRun, WorkflowServiceError> {
-        self.call(move |api| {
+        self.mutate(move |api| {
             async move { api.transition(&RequestId::mint(), &run_id, op).await }.boxed_local()
         })
         .await
@@ -178,7 +214,7 @@ impl WorkflowBackend for AppBackend {
         run_id: String,
         options: RestartOptions,
     ) -> Result<RestartedRun, WorkflowServiceError> {
-        self.call(move |api| {
+        self.mutate(move |api| {
             async move { api.restart(&RequestId::mint(), &run_id, options).await }.boxed_local()
         })
         .await

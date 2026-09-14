@@ -260,6 +260,7 @@ async fn executable_reuses_declarations_and_charges_full_creator_metadata() {
         loaded.registration("deployment".into(), "b".repeat(64)),
         registration
     );
+    assert_eq!(loaded.declarations(), &declarations);
     assert_eq!(loaded.executable().modules()["entry.js"].as_bytes(), source);
     manifest.workflows = Some(json!(["Alpha", "Alpha"]));
     assert!(matches!(

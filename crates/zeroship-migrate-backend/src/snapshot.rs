@@ -1527,9 +1527,8 @@ impl FunctionKey {
 /// alias table it applies IS the way one backend spells types, which the doc below
 /// states, but the JOB is the comparison's.
 ///
-/// `crates/zeroship-migrate/tests/dialect_matrix/backend_snapshot_privates_stay_core_only.rs` files this
-/// under its VERDICT half, and that stays true: both callers are engine code, and a
-/// vendor calling it would be answering the engine's question with its own opinion.
+/// Both callers are engine code; a vendor calling this would answer the engine's
+/// comparison question with its own opinion.
 ///
 /// Two reductions, in order:
 ///

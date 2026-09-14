@@ -35,6 +35,7 @@ mod project_keys;
 mod secret_cipher;
 pub mod erasure;
 pub mod fee_policy;
+pub mod health;
 pub mod http_util;
 pub mod internal;
 pub mod invoice_payments;
@@ -65,34 +66,8 @@ pub mod deployment_hold_api;
 pub(crate) mod workflow_limits;
 pub(crate) mod workflow_rollout;
 
-/// The live-database preflight for this crate's LIB test binary.
-///
-/// A twin of `tests/common/mod.rs::require_control_db`, and it has to be a twin
-/// rather than a call: `cargo test --lib` and `cargo test --test live_db` are
-/// two processes, and `tests/common` is compiled into the second one only. Both
-/// dial the same database, so both need the same refusal - the `#[cfg(test)]`
-/// modules under `src/` were the half that kept the silent fallback when the
-/// integration targets lost theirs.
 #[cfg(test)]
-pub(crate) mod test_live_db {
-    use std::sync::OnceLock;
-
-    /// The database this crate's lib tests dial, or a refusal that ends the run.
-    ///
-    /// See `tests/common/mod.rs::require_control_db` for what the preflight is
-    /// for and why it exits rather than panicking.
-    pub(crate) fn require() -> String {
-        static CHECKED: OnceLock<String> = OnceLock::new();
-        CHECKED
-            .get_or_init(|| {
-                crate::platform_fixture::live_db::require_configured(
-                    zeroship_core::config::test_database_url_opt(),
-                    crate::platform_fixture::live_db::PLATFORM_SCHEMAS,
-                )
-            })
-            .clone()
-    }
-}
+mod test_database;
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -831,7 +806,3 @@ mod billing_stream_group_tests {
         );
     }
 }
-
-#[cfg(test)]
-#[path = "../../../tests/fixtures/platform_db/mod.rs"]
-mod platform_fixture;

@@ -3,7 +3,7 @@
 //! SCOPE INVARIANT: this file is
 //! read by the `zeroship` CLI and by the build toolchain. It is NEVER read by
 //! the runtime, NEVER packed into a `.zship`, and never leaves the creator's
-//! machine. `tests/project_config_gate.sh` enforces all three.
+//! machine. The Vite package's archive tests enforce the packing boundary.
 //!
 //! CLI-read defaults live here only when the schema explicitly marks them safe.
 //! Otherwise, when the file is present and an operationally read key is absent,
@@ -807,10 +807,8 @@ impl Resolved {
 
     /// The resolved config as canonical JSON: object keys sorted, compact.
     ///
-    /// Byte-compared against the TypeScript reader's dump by
-    /// `tests/project_config_gate.sh`. That single comparison catches divergent
-    /// defaults, silently ignored keys and type-coercion differences at once,
-    /// without a second parser being written to catch the first.
+    /// The CLI unit tests pin the output shape. The build-side reader owns its
+    /// corresponding canonicalization cases.
     pub fn canonical_json(&self) -> String {
         canonical(&Value::Object(self.value.clone()))
     }
@@ -930,15 +928,13 @@ pub fn print_provenance(command: &str, pairs: &[(&str, &Sourced)]) {
 
 /// `zeroship config show [--config=PATH] [--env=NAME]`.
 ///
-/// Prints the resolved configuration as CANONICAL JSON (object keys sorted,
-/// compact) on stdout. It exists for two readers:
+/// Prints the resolved configuration as canonical JSON on stdout. It lets a
+/// creator ask which app and control plane this directory points at, which the
+/// file alone cannot answer once `--env` and flag precedence are in play.
 ///
-/// - a creator asking "which app and control plane is this directory pointed
-///   at", which is a question the file alone cannot answer once `--env` and the
-///   flag precedence are in play;
-/// - `tests/project_config_gate.sh`, which byte-compares this output against
-///   the TypeScript reader's dump of the same file. That single comparison is
-///   what makes two parsers safe.
+/// The build-side reader has its own generated schema contract and parser
+/// cases; `config show` remains a creator-facing diagnostic rather than a test
+/// protocol between the implementations.
 pub fn cmd_config(args: &[String]) -> Result<(), String> {
     let sub = args.get(2).map(String::as_str).unwrap_or("");
     let cwd = std::env::current_dir().map_err(|e| format!("cannot read the working directory: {e}"))?;

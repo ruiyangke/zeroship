@@ -733,7 +733,8 @@ test("live plan leaves a fresh SQLite journal absent", () => {
   const dir = temporaryDirectory(".cli-plan-sqlite-read-only-");
   try {
     writeSimpleMigration(dir);
-    const policyPath = writePolicy(dir);
+    const policyPath = join(dir, "policy.toml");
+    writeFileSync(policyPath, noInjectPolicy("public"));
     const appPath = join(dir, "fresh.db");
     const journalPath = join(dir, "fresh.migrations.db");
     assert.equal(existsSync(appPath), false, "application database starts absent");
@@ -848,6 +849,7 @@ schema = "config_schema"
 registry = "./config-registry.json"
 policy = ["./root.toml", "./leaf.toml"]
 `,
+      { mode: 0o600 },
     );
 
     const resolved = resolveCliConfig({

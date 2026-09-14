@@ -1897,10 +1897,9 @@ mod physical_contract_tests {
     //! sides is consulted, that anything less falls through to the portable
     //! comparison, and that the report follows the comparator.
     //!
-    //! The contract used here is a STAND-IN declared in this module, not a shipping
-    //! backend's. That is deliberate twice over. Core may not name a vendor crate -
-    //! `dialect_matrix/core_names_no_vendor_crate.rs` is the ratchet - and the
-    //! property under test is not any vendor's rule but the seam's: whatever the
+    //! The contract used here is a stand-in declared in this module, not a shipping
+    //! backend's. The property under test is not any vendor's rule but the seam's:
+    //! whatever the
     //! vendor answers, core asks it exactly when a leg is present on both sides.
     //! What makes two MySQL contracts equal is asserted where that rule lives, in
     //! `zeroship_migrate_mysql::physical_type`.

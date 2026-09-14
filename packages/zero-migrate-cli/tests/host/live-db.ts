@@ -1,55 +1,21 @@
-// The live-database requirement the host suites share.
+// Database addresses supplied by the parent test runner.
 //
-// A gated suite used to have three outcomes, and a skip and a pass print the same
-// exit code. That is the whole problem: a run with no database reported exactly
-// like a run with one, so a machine that never started Docker and a machine that
-// exercised every verb produced the same green summary. An opt-in environment
-// variable existed to turn the skip into a failure, but opt-IN meant the DEFAULT
-// was a suite that passed while testing nothing.
-//
-// There are two outcomes now:
-//
-//   - the DSN is set and connects -> run against it;
-//   - anything else               -> FAIL, carrying the reason. An unset DSN, a
-//     wrong password, a missing database and a driver regression are all "this run
-//     has no live coverage", and none of them may report green.
-//
-// There is also no compose-DSN fallback. A default that happens to answer on one
-// machine is not evidence that a run was configured for live coverage, and a
-// fallback is just a gate that decides silently. `crates/zeroship-migrate/tests/support/
-// mod.rs` holds the same requirement for the Rust side.
+// `tests/host/run.ts` owns the PostgreSQL and MySQL containers and passes their
+// mapped addresses to Node's isolated test processes. These variables are an
+// internal process boundary, not configuration a developer supplies.
 
 import type { Client } from "pg";
 
-/** The DSN of the PostgreSQL the gated suites run against. Required. */
+/** The DSN of the PostgreSQL container owned by this test run. */
 export const PG_URL_ENV = "ZERO_MIGRATE_TEST_PG_URL";
 
-/** The DSN of the MySQL the gated suites run against. Required. */
+/** The DSN of the MySQL container owned by this test run. */
 export const MYSQL_URL_ENV = "ZERO_MIGRATE_MYSQL_URL";
 
-/** What the requirement decided, and the text explaining it. */
-export type LiveDbGate = { action: "run"; dsn: string } | { action: "fail"; reason: string };
-
 /**
- * The failure text for a live-database variable that is unset or blank.
+ * Require the runner-owned address to be present in this test process.
  *
- * Names the variable AND the server, so an operator reading it knows which service
- * to start as well as which DSN to export.
- */
-export function missingLiveDbDsn(envVar: string, server: string): string {
-  return (
-    `${envVar} is unset, so this test has no live ${server} to run against and cannot ` +
-    `report coverage it never gathered. Start a ${server} and export ${envVar} with its ` +
-    `DSN (see CONTRIBUTING.md, "Live-database tests").`
-  );
-}
-
-/**
- * Require `dsn` to be a real DSN, throwing [`missingLiveDbDsn`] when it is not.
- *
- * An assertion signature rather than a `string` return, so the ~150 call sites that
- * already hold the value in a module-level `const` keep their narrowing without
- * rebinding it.
+ * The assertion signature preserves narrowing at existing call sites.
  */
 export function requireLiveDb(
   dsn: string | undefined,
@@ -57,49 +23,25 @@ export function requireLiveDb(
   server: string,
 ): asserts dsn is string {
   if (dsn === undefined || dsn.trim() === "") {
-    throw new Error(missingLiveDbDsn(envVar, server));
+    throw new Error(
+      `${envVar} is missing from the ${server} test process. Run the suite through ` +
+        `the package test command so tests/host/run.ts can own its containers.`,
+    );
   }
 }
 
-/** The configured DSN, or undefined when unset or blank (a blank export is unset). */
-export function pgUrlFromEnv(): string | undefined {
-  const raw = process.env[PG_URL_ENV];
-  return raw === undefined || raw.trim() === "" ? undefined : raw;
-}
-
-/** The DSN the gated suites use. Throws when it is not configured. */
+/** The PostgreSQL container address for this run. */
 export function pgUrl(): string {
-  const dsn = pgUrlFromEnv();
+  const dsn = process.env[PG_URL_ENV];
   requireLiveDb(dsn, PG_URL_ENV, "PostgreSQL");
   return dsn;
 }
 
-/**
- * Decide run / fail from the two facts the requirement turns on, with no I/O so
- * every case is testable on a machine that has a test PostgreSQL running.
- *
- * @param envDsn the configured DSN, or undefined/blank when unset.
- * @param connectError the driver's message when the connect failed, else undefined.
- */
-export function liveDbGate(input: {
-  envDsn: string | undefined;
-  connectError: string | undefined;
-}): LiveDbGate {
-  const configured =
-    input.envDsn !== undefined && input.envDsn.trim() !== "" ? input.envDsn : undefined;
-
-  if (configured === undefined) {
-    return { action: "fail", reason: missingLiveDbDsn(PG_URL_ENV, "PostgreSQL") };
-  }
-
-  if (input.connectError !== undefined) {
-    return {
-      action: "fail",
-      reason: `${PG_URL_ENV} is set to ${configured} but connecting to it failed: ${input.connectError}`,
-    };
-  }
-
-  return { action: "run", dsn: configured };
+/** The MySQL container address for this run. */
+export function mysqlUrl(): string {
+  const dsn = process.env[MYSQL_URL_ENV];
+  requireLiveDb(dsn, MYSQL_URL_ENV, "MySQL");
+  return dsn;
 }
 
 /**
@@ -113,20 +55,9 @@ export function liveDbGate(input: {
  * call decides both cases; the client is closed again on a failure.
  */
 export async function connectLivePg(): Promise<Client> {
-  const envDsn = pgUrlFromEnv();
+  const dsn = pgUrl();
   const pg = (await import("pg")).default;
-  const client = new pg.Client({ connectionString: envDsn ?? "" });
-
-  let connectError: string | undefined;
-  try {
-    await client.connect();
-  } catch (e) {
-    connectError = (e as Error).message;
-  }
-
-  const gate = liveDbGate({ envDsn, connectError });
-  if (gate.action === "run") return client;
-
-  await client.end().catch(() => {});
-  throw new Error(gate.reason);
+  const client = new pg.Client({ connectionString: dsn });
+  await client.connect();
+  return client;
 }

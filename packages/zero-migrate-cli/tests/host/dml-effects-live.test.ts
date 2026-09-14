@@ -38,7 +38,7 @@ import type { MigrationModule } from "@zeroship/migrate/internal/recorder";
 
 import { connectLivePg, pgUrl } from "./live-db.js";
 
-// The host suite's addon is resolved and freshness-checked in one place.
+// The host suite builds and resolves its addon in one place.
 import "./addon.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));

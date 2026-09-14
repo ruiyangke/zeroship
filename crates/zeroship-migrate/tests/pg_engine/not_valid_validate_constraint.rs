@@ -337,8 +337,8 @@ fn create_time_not_valid_is_refused_in_both_spellings_by_validate() {
 
 #[test]
 fn recorder_golden_carries_not_valid_and_validate_constraint() {
-    // The op fixture corpus records `constraint_not_valid.mig.js` via the REAL
-    // V8 recorder; this asserts the committed golden shape the surface produces.
+    // The package-owned corpus records `constraint_not_valid.mig.js` through the
+    // production recorder; this asserts the committed Rust golden it produces.
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("tests/op_fixtures/constraint_not_valid.golden.json");
     let golden: MigrationIr = serde_json::from_str(

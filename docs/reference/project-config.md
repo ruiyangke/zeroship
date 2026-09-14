@@ -39,11 +39,9 @@ stay in `src/server/config.ts`, where `defineApp` compiles them into the
 manifest. Anything Vite alone reads (`plugins`, `resolve`, `server.watch`,
 `build.rollupOptions`) stays in `vite.config.ts`.
 
-`tests/project_config_gate.sh` enforces the invariant rather than trusting it:
-it packs a fixture app whose `zeroship.jsonc` carries a sentinel, asserts the
-sentinel appears nowhere in the decompressed archive bytes, and pairs that with
-a control that plants the same sentinel inside `dist/` and requires it to be
-found, so a search that cannot see a present sentinel cannot pass.
+The Vite plugin's archive suite enforces the invariant against emitted bytes: a
+fixture puts one marker in `zeroship.jsonc` and another inside `dist/`, then
+requires only the `dist/` marker to reach the archive.
 
 **It never holds a secret value.** See [Secrets](#secrets).
 
@@ -368,10 +366,9 @@ $ zeroship config show --env=prod
 ```
 
 It answers "which app and which control plane is this directory pointed at",
-which the file alone stops answering as soon as `environments` exists. It is
-also what `tests/project_config_gate.sh` byte-compares against the TypeScript
-reader's dump of the same file, so the two parsers cannot drift on defaults,
-ignored keys, or type coercion without a gate failing.
+which the file alone stops answering as soon as `environments` exists. The
+Rust and TypeScript readers each exercise the shared committed fixture and the
+same parser edge cases in their owning suites.
 
 `show` prints the file's own facts and the environment overlay. It does not
 show flag or environment-variable overrides; those appear in the provenance
@@ -469,9 +466,8 @@ node schema/codegen.mjs   # -> packages/vite-plugin/src/project-config/generated
 
 The generated modules carry the known-key sets, the required-key sets, the
 patterns and enums, the `x-cli-read` deny-list, and - on the TypeScript side
-only - the defaults. `tests/project_config_gate.sh` fails when either generated
-file drifts from the schema, and when the two readers disagree about the same
-file.
+only - the defaults. CI runs the generator's comparison mode and its rejection
+tests, then executes both owning reader suites.
 
 ## See also
 

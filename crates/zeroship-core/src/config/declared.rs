@@ -24,11 +24,9 @@
 //! operator-visible platform configuration belongs in a `#[zeroship_config]`
 //! declaration instead.
 //!
-//! One class, [`EnvClass::Platform`], names exactly the settings that have not
-//! made that trip yet. It is the honest record of an incomplete conversion
-//! rather than a place to hide: read its documentation before using it, and
-//! `crates/zeroship-config-contract/tests/declared_env.rs` holds its census to a ceiling
-//! that only comes down.
+//! One class, [`EnvClass::Platform`], names settings that have not made that
+//! trip yet. It records an incomplete conversion rather than hiding it; read
+//! its documentation before using it.
 
 use std::ffi::OsString;
 use std::marker::PhantomData;
@@ -84,14 +82,13 @@ pub enum EnvClass {
     /// they would have been a lie about who owns them. Recorded here they are
     /// counted, located, and impossible to confuse with a converted setting.
     ///
-    /// `crates/zeroship-config-contract/tests/declared_env.rs` asserts the count only
-    /// shrinks. Do not add to it without saying why the generated declaration
-    /// is not possible in the same change.
+    /// Do not add to it without saying why a generated declaration is not
+    /// possible in the same change.
     Platform,
 }
 
 impl EnvClass {
-    /// Stable lowercase spelling used by reports and the source gate.
+    /// Stable lowercase spelling used by reports.
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -608,12 +605,9 @@ macro_rules! read_declared_env_os {
 /// [`crate::read_declared_env`], so the read is registered exactly as the
 /// explicit two-step form is; what it saves is a named constant per site.
 ///
-/// The name must be a LITERAL. A `const NAME: &str` would satisfy the compiler
-/// but not the source gate, which lifts key literals out of the syntax tree to
-/// check their spelling and their class - so a name behind a constant would be
-/// declared to the type system and invisible to the audit. A site that needs
-/// one name in several places declares the key itself and uses
-/// [`crate::read_declared_env`].
+/// The name must be a LITERAL so the declaration remains visible at the call
+/// site. A site that needs one name in several places declares the key itself
+/// and uses [`crate::read_declared_env`].
 ///
 /// Returns `Option<String>`, dropping a non-Unicode value exactly as the
 /// `std::env::var(..).ok()` it replaces did. That is deliberate: making the
@@ -649,12 +643,8 @@ macro_rules! declared_env_os {
 /// target, so there is nothing for a per-crate marker to name that the read
 /// site's file path does not already say. One shared marker keeps a test read
 /// attributable (class `test`, plus file and line) without inventing a
-/// fictional binary per crate.
-///
-/// WHAT THIS GIVES UP: a test read is not bound to its crate at the TYPE level,
-/// so the compiler will not stop `crates/a`'s test from using a name that
-/// `crates/b` owns. The source gate's class check is what keeps a test-class
-/// name out of production code; this marker only makes the read enumerable.
+/// fictional binary per crate. A test read is not bound to its crate at the
+/// type level, so review must keep crate-owned test settings local.
 #[derive(Clone, Copy, Debug)]
 pub struct TestHarness;
 

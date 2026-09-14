@@ -40,10 +40,8 @@
 //! The rule used to be per-MODULE: each renderer held its own
 //! `const DIALECT: DialectId = MYSQL;` and imported that name from
 //! `zeroship-migrate-ir`, the neutral vocabulary crate, which declared the ids for all
-//! three shipping vendors. The ids moved into the vendors, so the rule tightened to
-//! per-crate: `"mysql"` is now spelled in exactly one place in this crate and in
-//! exactly one place in the workspace. It is ENFORCED, across the crate boundary, by
-//! `zero-migrate/tests/dialect_matrix/backend_modules_name_one_dialect.rs`.
+//! the shipping vendors. The ids moved into the vendor crates; this crate exports
+//! its `DIALECT` identity and its modules read that value.
 //!
 //! # What the rule does NOT catch
 //!

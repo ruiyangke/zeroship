@@ -151,6 +151,12 @@ impl BundleExecutable {
         &self.executable
     }
 
+    /// The declarations parsed from this executable's manifest.
+    #[must_use]
+    pub const fn declarations(&self) -> &BundleDeclarations {
+        &self.declarations
+    }
+
     #[must_use]
     pub fn into_executable(self) -> LoadedWorker {
         self.executable

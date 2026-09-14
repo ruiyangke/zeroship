@@ -312,8 +312,6 @@ pub const MAX_BIND_PARAMS: usize = 65535;
 /// The fail-closed engine-identifier gate is separately exposed as
 /// [`quote_ident_checked_for_backend`]. It also requires a backend explicitly;
 /// there is no dialect-free spelling or default backend.
-///
-/// Pinned by `crates/zeroship-migrate/tests/dialect_matrix/sqlite_trigger_quoting_reaches_postgres.rs`.
 pub fn quote_ident_for_backend(
     what: &'static str,
     ident: &str,
@@ -620,8 +618,6 @@ fn homogeneous_in_list_kind(elems: &[IrScalar]) -> Result<Option<InListScalarKin
 /// a `_pg`-suffixed one here. SQLite quotes decimals to match its lossless TEXT
 /// storage and MySQL emits strings as a UTF-8 hex literal, so this helper genuinely
 /// needs a vendor. It just needs the CALLER's, which the caller already is.
-///
-/// Pinned by `crates/zeroship-migrate/tests/dialect_matrix/dml_emitters_do_not_relookup_a_backend.rs`.
 pub fn render_in_list_elem_portable(
     elem: &IrScalar,
     backend: &dyn DmlRenderer,
@@ -1463,8 +1459,7 @@ where
 /// on itself.
 /// A vendor now passes `self`: `zeroship-migrate-postgres` for the vendor
 /// `CREATE POLICY` / `CREATE TRIGGER` clauses, `zeroship-migrate-sqlite` for its trigger
-/// bodies. Neither can reach the other's spelling any more, which is the property
-/// `sqlite_trigger_quoting_reaches_postgres.rs` exists to protect.
+/// bodies. Each call therefore reaches the spelling of the vendor that owns it.
 pub fn render_predicate(expr: &Expr, backend: &dyn DmlRenderer) -> Result<String, DmlError> {
     render_expr_inline_for_backend(expr, backend)
 }

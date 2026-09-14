@@ -162,12 +162,11 @@ Do-not notes, each recording something that broke:
   authority, so the parser that checked was not the parser that dialled.
   `hostsDesignatedBy` (`packages/zero-migrate-cli/src/net-allowlist.ts`) enumerates
   every host a URL could designate and all must pass.
-- Do not add a napi export by editing `index.d.ts` alone. The `baseline` verb landed
-  in the declaration and not in `index.js`; it compiled, type-checked and tested green
-  because the authoring worktree had a built artifact the commit did not carry, and
-  would have failed at the first invocation with
-  `nativeBinding.baselineIr is not a function`. `tests/napi_export_parity_gate.sh`
-  now compares the committed bytes.
+- Do not add a napi export by editing generated artifacts. The `baseline` verb once
+  landed in the declaration without a matching named assignment in `index.js`.
+  The generated loader now exports `nativeBinding` wholesale, so its public runtime
+  surface comes from the binding rather than a parallel function list. Run the napi
+  build and the Node-hosted addon tests after changing the Rust exports.
 - ~~Do not run a bare `cargo test -p zeroship-migrate-node`.~~ **CORRECTED 2026-09-04:
   run it; it works with `napi` ON.** The link failure this described was real (exit 101,
   1719 `undefined reference` lines) and is fixed by a `napi` entry in `[dev-dependencies]`

@@ -152,8 +152,7 @@ stash_signing_key = "urn:zeroship:file:/etc/zeroship/secrets/stash_signing_key"
 # (`gateway.broker_secret_file`) because it must read the same raw bytes auth
 # does, and a `Secret<String>` round trip normalizes them. An overlay key
 # spelled `broker_secret` configured nothing at all; it was found and removed
-# when tests/config_name_alignment_gate.sh started joining these leaves against
-# the compiled contract.
+# by the retired configuration alignment gate.
 broker_secret_file = "/etc/zeroship/secrets/broker_secret"
 
 [worker]

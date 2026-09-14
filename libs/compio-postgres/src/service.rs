@@ -71,8 +71,7 @@ impl std::error::Error for ServiceError {}
 // `$PGSYSCONFDIR/pg_service.conf`. This crate resolves none of them: it is a
 // standalone, publishable driver, and a published library takes resolved
 // options from its caller rather than reading process configuration. The
-// workspace enforces that in `crates/zeroship-core/tests/config_env_access_gate.rs`
-// against a deliberately empty exemption list.
+// workspace Clippy policy rejects direct environment reads in library code.
 //
 // So naming a `service` also means naming the file it lives in, through
 // `Config::service_file`. An application that wants libpq's search order

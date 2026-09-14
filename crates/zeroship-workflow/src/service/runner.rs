@@ -1,4 +1,4 @@
-//! Execution slots for customer workers and local development.
+//! Execution slots and delivered-job consumption for workflow hosts.
 
 pub mod assignments;
 mod budget;
@@ -6,10 +6,7 @@ pub mod consumer;
 pub mod delivery;
 pub mod host;
 pub use budget::{ExecutionBudget, ExecutionGuard};
-mod worker;
-pub use worker::{WorkerOptions, WorkflowWorker};
 mod payloads;
-mod retention;
 pub use payloads::{TaskPayloadReader, TaskPayloads};
 mod outputs;
 pub use outputs::{PreparedExecution, TaskPayloadLimits};
