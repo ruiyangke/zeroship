@@ -45,7 +45,7 @@ pub struct RouteCache {
     authentication: RwLock<AuthenticationSnapshot>,
     /// When the control plane last served a route table this cache accepted.
     /// `/readyz` reads it instead of issuing its own control-plane request.
-    sync_freshness: SyncFreshness,
+    sync_freshness: Arc<SyncFreshness>,
 }
 
 impl Default for RouteCache {
@@ -61,7 +61,7 @@ impl RouteCache {
             routes: RwLock::new(HashMap::new()),
             name_index: RwLock::new(HashMap::new()),
             authentication: RwLock::new(AuthenticationSnapshot::default()),
-            sync_freshness: SyncFreshness::new(),
+            sync_freshness: Arc::new(SyncFreshness::new()),
         }
     }
 
@@ -69,6 +69,12 @@ impl RouteCache {
     #[must_use]
     pub fn sync_freshness(&self) -> &SyncFreshness {
         &self.sync_freshness
+    }
+
+    /// Share the route-pull freshness stamp with the HTTP readiness service.
+    #[must_use]
+    pub fn sync_freshness_handle(&self) -> Arc<SyncFreshness> {
+        Arc::clone(&self.sync_freshness)
     }
 
     /// Apply the complete control-plane snapshot and derive the offline
