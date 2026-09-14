@@ -86,6 +86,7 @@ fn route_the_runtime_descriptor() -> Routing {
         references,
         reference_column,
         reference_name,
+        relation,
         on_delete,
         on_update,
         deferrable,
@@ -220,6 +221,12 @@ fn route_the_runtime_descriptor() -> Routing {
     );
     routing.would_join_the_model("reference_column", reference_column, "as `references`.");
     routing.would_join_the_model("reference_name", reference_name, "as `references`.");
+    routing.would_join_the_model(
+        "relation",
+        relation,
+        "the authored ORM navigation name for the reference. It is stated beside \
+         `references` and, like it, has no field in the neutral model.",
+    );
     routing.would_join_the_model("on_delete", on_delete, "as `references`.");
     routing.would_join_the_model("on_update", on_update, "as `references`.");
     routing.would_join_the_model("deferrable", deferrable, "as `references`.");
@@ -244,7 +251,7 @@ fn route_the_runtime_descriptor() -> Routing {
 
 /// **The answer.** Counted, pinned, and a compile error to ignore.
 #[test]
-fn the_unified_model_would_grow_eighteen_fields_and_has_no_projection_private_state() {
+fn the_unified_model_would_grow_nineteen_fields_and_has_no_projection_private_state() {
     let routing = route_the_runtime_descriptor();
     let total = routing.already_in_the_model.len()
         + routing.would_join_the_model.len()
@@ -258,8 +265,11 @@ fn the_unified_model_would_grow_eighteen_fields_and_has_no_projection_private_st
     // 30 -> 28: the two full-text descriptor fields went with full-text support. Both
     // were routed as `would_join_the_model`, so the whole movement lands on that bucket
     // (20 -> 18) and none of it on the other three.
+    //
+    // 28 -> 29: `relation`, the authored navigation name for a reference. It is routed
+    // like `references`, so the movement lands on `would_join_the_model` (18 -> 19).
     assert_eq!(
-        total, 28,
+        total, 29,
         "`FieldDescriptor` changed field count; every field must be routed: {routing:#?}"
     );
 
@@ -271,7 +281,7 @@ fn the_unified_model_would_grow_eighteen_fields_and_has_no_projection_private_st
     );
     assert_eq!(
         routing.would_join_the_model.len(),
-        18,
+        19,
         "descriptor facts a UNIFIED model would have to grow. This number IS the spike's \
          answer and it is not a threshold to relax - a diff that moves it is a diff that \
          changes how big the neutral model becomes: {:?}",
@@ -294,12 +304,12 @@ fn the_unified_model_would_grow_eighteen_fields_and_has_no_projection_private_st
 
     // The load-bearing conclusion, asserted rather than left in prose: the authored
     // unbounded-text fact is now a neutral renderer input, so none of the descriptor's
-    // fields is projection-private. The remaining cost is SIZE: 18 + 18 = 36 fields.
+    // fields is projection-private. The remaining cost is SIZE: 18 + 19 = 37 fields.
     assert!(routing.projection_local.is_empty());
     assert_eq!(
         18 + routing.would_join_the_model.len(),
-        36,
-        "the neutral `Column` has 18 fields today; a unified one would have 36. Recorded \
+        37,
+        "the neutral `Column` has 18 fields today; a unified one would have 37. Recorded \
          so the cost is a number in a test rather than an opinion in a proposal."
     );
 }
