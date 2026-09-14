@@ -72,10 +72,18 @@ jobs:
             exit 1
           fi
           pnpm --dir sdks/vite-plugin exec node --import tsx --eval ""
-      - name: Build the CLI used by the project config gate
-        run: cargo build -p zeroship-cli --bin zeroship
-      - name: Project config contract
-        run: bash tests/project_config_gate.sh
+      - name: Project config schema and generator
+        run: |
+          node --test schema/codegen.test.mjs
+          node schema/codegen.mjs --check
+      - name: Project config Rust behavior
+        run: |
+          cargo test --locked -p zeroship-cli --bin zeroship project_config::tests
+          cargo test --locked -p zeroship-cli --test deploy_test
+      - name: Project config build behavior
+        run: >-
+          pnpm --dir sdks/vite-plugin exec node --import tsx --test
+          test/project-config.test.ts test/zship.test.ts
       # Keep test targets out of this build: their dev-dependency features may
       # unify into normal dependencies and hide a broken shipped configuration.
       - name: Shipped Rust targets compile
