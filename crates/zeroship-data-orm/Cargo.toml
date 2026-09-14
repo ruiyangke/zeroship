@@ -22,7 +22,8 @@ rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs", 
 futures = { workspace = true }
 url = { workspace = true }
 zeroship-data-cdc-wire = { workspace = true }
-compio-postgres = { workspace = true, features = ["with-uuid-1"] }
+compio-postgres = { workspace = true, features = ["with-uuid-1", "with-cidr-0_3"] }
+cidr = "0.3.2"
 rusqlite = { workspace = true, features = ["bundled", "preupdate_hook", "functions"] }
 num-bigint = { workspace = true }
 flume = { workspace = true }
