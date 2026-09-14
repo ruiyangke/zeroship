@@ -19,18 +19,31 @@ use crate::{
 pub(crate) struct Input {
     pub(crate) values: Value,
     pub(crate) expressions: indexmap::IndexMap<String, crate::orm::TimestampExpr>,
+    /// Whether the caller supplied timestamp expressions and no value patch.
+    /// [`Input::inspect`] decides it from the patch as supplied, before fields
+    /// the descriptor reassigns on write are removed, so a value patch that
+    /// removal empties is never treated as expression-only.
+    expression_only: bool,
 }
 
 impl From<Value> for Input {
     fn from(values: Value) -> Self {
-        Self {
-            values,
-            expressions: Default::default(),
-        }
+        Self::new(values, indexmap::IndexMap::new())
     }
 }
 
 impl Input {
+    pub(crate) fn new(
+        values: Value,
+        expressions: indexmap::IndexMap<String, crate::orm::TimestampExpr>,
+    ) -> Self {
+        Self {
+            values,
+            expressions,
+            expression_only: false,
+        }
+    }
+
     pub(crate) fn result_checks(
         &self,
         schema: &FieldMap,
@@ -107,12 +120,12 @@ impl Input {
                 ));
             }
         }
-        let expression_only = !self.expressions.is_empty()
+        self.expression_only = !self.expressions.is_empty()
             && self
                 .values
                 .as_object()
                 .is_some_and(|values| values.is_empty());
-        if !expression_only {
+        if !self.expression_only {
             for assignment in crate::sql::update::assignments(&self.values)? {
                 if self.expressions.contains_key(assignment.field) {
                     return Err(DbError::validation(
@@ -128,26 +141,29 @@ impl Input {
                 .reassigned_on_write()
                 .any(|assigned| assigned == field)
         });
+        // Once fields the descriptor reassigns on write are removed, an
+        // expression-only patch must keep an expression and a value patch must
+        // keep a value. A patch emptied that way would otherwise write only the
+        // generated assignments.
+        if self.expression_only {
+            if self.expressions.is_empty() {
+                return Err(DbError::validation(
+                    "invalid_update",
+                    "update fields cannot be empty",
+                ));
+            }
+        } else {
+            crate::sql::update::assignments(&self.values)?;
+        }
         Ok(())
     }
 
     pub(crate) fn validate_values(&self, schema: &FieldMap) -> Result<(), crate::error::DbError> {
-        if empty_values(&self.values) {
+        if self.expression_only {
             return Ok(());
         }
         super::update_validation::validate(schema, &self.values)
     }
-}
-
-fn empty_values(value: &Value) -> bool {
-    value.as_object().is_some_and(|values| {
-        values.is_empty()
-            || values.len() == 1
-                && values
-                    .get("$set")
-                    .and_then(Value::as_object)
-                    .is_some_and(|sets| sets.is_empty())
-    })
 }
 
 pub(crate) struct ResultCheck {
@@ -305,7 +321,7 @@ pub(crate) fn resolve_assignments(
     resolved: &ResolvedTable,
     registration: &SqlRegistration,
 ) -> Result<Vec<Assignment>, QueryError> {
-    let values = if empty_values(&update.values) {
+    let values = if update.expression_only {
         Vec::new()
     } else {
         crate::sql::update::into_assignments(update.values)
@@ -431,14 +447,14 @@ mod tests {
             ),
         ]
         .into();
-        let input = Input {
-            values: crate::value!({}),
-            expressions: [(
+        let input = Input::new(
+            crate::value!({}),
+            [(
                 "private_stamp".into(),
                 crate::orm::TimestampExpr::database_now(),
             )]
             .into(),
-        };
+        );
         let checks = input.result_checks(&schema, false).unwrap();
         assert_ne!(checks[0].output, "_timestamp_expr_0");
         let mut row = crate::value!({"id":"row", "_timestamp_expr_0":"public"});
@@ -471,12 +487,92 @@ mod tests {
             let fields = definition
                 .map(|definition| [(name.to_owned(), definition)].into())
                 .unwrap_or_default();
-            let mut input = Input {
-                values: crate::value!({}),
-                expressions: [(name.into(), crate::orm::TimestampExpr::database_now())].into(),
-            };
+            let mut input = Input::new(
+                crate::value!({}),
+                [(name.into(), crate::orm::TimestampExpr::database_now())].into(),
+            );
             assert!(input.inspect(&fields).is_err());
         }
+    }
+
+    fn assigned_timestamp_fields() -> FieldMap {
+        use crate::schema::{Assignment, AssignmentEvent, AssignmentGenerator, LogicalType};
+        let mut id = ColumnSchema::new(LogicalType::Text);
+        id.primary_key = true;
+        let mut touched = ColumnSchema::new(LogicalType::Timestamp);
+        touched.writable = false;
+        touched.assignment = Some(Assignment {
+            by: AssignmentGenerator::Now,
+            on: AssignmentEvent::Write,
+        });
+        let mut revision = ColumnSchema::new(LogicalType::Integer);
+        revision.writable = false;
+        revision.assignment = Some(Assignment {
+            by: AssignmentGenerator::Increment(1),
+            on: AssignmentEvent::Write,
+        });
+        [
+            ("id".into(), id),
+            ("stamp".into(), ColumnSchema::new(LogicalType::Timestamp)),
+            ("touched".into(), touched),
+            ("revision".into(), revision),
+        ]
+        .into()
+    }
+
+    fn expressions(fields: &[&str]) -> indexmap::IndexMap<String, crate::orm::TimestampExpr> {
+        fields
+            .iter()
+            .map(|field| {
+                (
+                    (*field).to_owned(),
+                    crate::orm::TimestampExpr::database_now(),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn patches_left_without_caller_fields_after_write_assignments_are_refused() {
+        let fields = assigned_timestamp_fields();
+        for (values, supplied) in [
+            (crate::value!({"touched":0}), &[][..]),
+            (crate::value!({"$set":{"touched":0}}), &[]),
+            (crate::value!({"revision":{"$inc":1}}), &[]),
+            (crate::value!({}), &["touched"]),
+            (crate::value!({"revision":5}), &["touched"]),
+            (crate::value!({"touched":0}), &["stamp"]),
+        ] {
+            let mut input = Input::new(values.clone(), expressions(supplied));
+            let error = input.inspect(&fields).unwrap_err();
+            assert!(
+                matches!(
+                    error,
+                    crate::error::DbError::ValidationFailed {
+                        code: "invalid_update",
+                        ..
+                    }
+                ),
+                "{values:?} with {supplied:?}: {error:?}"
+            );
+        }
+
+        let mut expression_only = Input::new(crate::value!({}), expressions(&["stamp"]));
+        expression_only.inspect(&fields).unwrap();
+        expression_only.validate_values(&fields).unwrap();
+        assert_eq!(
+            expression_only.expressions.keys().collect::<Vec<_>>(),
+            ["stamp"]
+        );
+
+        let mut stripped = Input::new(
+            crate::value!({"stamp":0,"revision":3}),
+            expressions(&["touched"]),
+        );
+        stripped.inspect(&fields).unwrap();
+        stripped.validate_values(&fields).unwrap();
+        assert_eq!(stripped.values, crate::value!({"$set":{"stamp":0}}));
+        assert!(stripped.expressions.is_empty());
     }
 
     #[derive(Clone)]

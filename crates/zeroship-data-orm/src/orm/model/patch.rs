@@ -81,10 +81,7 @@ impl<E> Patch<E> {
         if !sets.is_empty() {
             update.insert("$set".into(), Value::Object(sets));
         }
-        crate::crud::update::Input {
-            values: Value::Object(update),
-            expressions,
-        }
+        crate::crud::update::Input::new(Value::Object(update), expressions)
     }
 }
 
