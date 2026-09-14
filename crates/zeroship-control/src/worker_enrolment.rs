@@ -1,5 +1,6 @@
-//! Worker-instance enrolment: the operator-declared address envelope, the
-//! address derivation, the ring-key mint, and the row control writes.
+//! Worker-instance enrolment: the operator's enroller import, the
+//! operator-declared address envelope, the address derivation, the ring-key
+//! mint, the row control writes, and the instance's own retirement.
 //!
 //! ONE ROW IS ONE LIVE WORKER PROCESS. The worker generates an Ed25519 instance
 //! keypair at boot, in memory, never on disk, and enrols the public half over
@@ -11,12 +12,19 @@
 //! `db/migrations-ts/20260914000000_execution_zones_and_worker_enrollers.ts` /
 //! `db/migrations-ts/20260914000100_worker_instances_enroller_binding.ts`.
 //!
+//! Control learns enrollers from ONE place: the operator's import file,
+//! `control.worker_enrollers_file`, read at startup by [`import_enrollers`]. The
+//! import only ever ADDS: it inserts enrollers Control has not recorded, never
+//! reactivates a revoked one, and refuses the whole file when any entry
+//! disagrees with what is recorded. Revocation is the other direction and is
+//! not configuration at all - see `docs/runbooks/worker-enrollers.md`.
+//!
 //! WHAT THIS BUYS, STATED SO NOTHING HERE OVERSELLS IT (option 1A of the
 //! worker-enrollment-bootstrap design). Enrolment authenticates with a key
 //! SHARED BY THE DEPLOYMENT UNIT, so a holder of it can enrol many instances in
 //! that unit and zone. Per-instance identity is a DISTINGUISHER against a
 //! unit-key holder, NOT a boundary WITHIN the unit. What it buys is
-//! attribution, per-instance revocation, a countable event, and - because
+//! attribution, per-instance retirement, a countable event, and - because
 //! every instance carries the `enroller_id` of the unit that admitted it -
 //! revoking that ONE enroller row (`zeroship.revoke_worker_enroller`, an
 //! explicit operator database operation with no runtime EXECUTE grant) retires
@@ -42,9 +50,10 @@
 //! `crates/zeroship-gateway/src/router/dispatch.rs` strips a named header set
 //! and COOKIE IS NOT IN IT, and `forward_dispatch` posts the full request -
 //! body, cookies, and the gateway-signed user envelope - to whatever address the
-//! ring returns. A registrant-supplied address would therefore let a role-key
-//! holder intercept and impersonate end-user sessions under the app's own
-//! origin, which is worse than the exposure the registry exists to reduce.
+//! ring returns. A registrant-supplied address would therefore let an
+//! enroller-key holder intercept and impersonate end-user sessions under the
+//! app's own origin, which is worse than the exposure the registry exists to
+//! reduce.
 //!
 //! Derivation is also what makes the design deployable: a per-process address
 //! setting has no producer, because compose replicas share one environment block
@@ -60,8 +69,9 @@
 //!
 //! 1. A worker restart is a NEW instance by construction - the keypair is
 //!    generated at boot in memory, so there is nothing to deduplicate across
-//!    restarts. The old row stays `active` with no process behind it, exactly
-//!    as before; nothing here adds a reaper or a liveness sweep.
+//!    restarts. A worker that exited gracefully has already retired its old
+//!    row through [`retire`]; one that crashed leaves it `active` with no
+//!    process behind it, and nothing here adds a reaper or a liveness sweep.
 //! 2. A retried enrolment inside one boot - the response was lost, the worker
 //!    asks again with the SAME instance key - returns the id of the row the
 //!    first attempt (or a concurrent racing attempt) already committed,
@@ -96,8 +106,10 @@
 //! `draining`/`gone`/`revoked` mean anything, which is why it is stated on the
 //! reader rather than left to the caller.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::net::SocketAddr;
 use std::ops::RangeInclusive;
+use std::path::Path;
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine as _;
@@ -107,7 +119,9 @@ use ntex::web;
 use rand::RngCore as _;
 use serde::Deserialize;
 
-use crate::AppState;
+use zeroship_core::worker_enrollers::{parse_enroller_import, EnrollerRecord};
+
+use crate::{AppState, Registry};
 
 /// Width of the ring key control mints, in bytes.
 ///
@@ -118,11 +132,20 @@ use crate::AppState;
 /// not the weak term in any placement argument.
 pub const RING_KEY_BYTES: usize = 32;
 
-/// The status control writes on an admitted enrolment.
+/// The status control writes on an admitted enrolment, and on an imported
+/// enroller.
 ///
-/// The other two members of the column's closed set (`draining`, `gone`) have no
-/// writer in this tree. See the module header.
+/// Of the instance column's other two members, `gone` has exactly two writers
+/// - `zeroship.revoke_worker_enroller`, an operator's database operation, and
+/// [`retire`], the instance declaring its own exit - and `draining` has none.
 const ENROLLED_STATUS: &str = "active";
+
+/// The status an instance declares when it retires itself. Terminal: a `gone`
+/// row never authenticates again, and nothing moves it back.
+const RETIRED_STATUS: &str = "gone";
+
+/// The status `zeroship.revoke_worker_enroller` writes on an enroller. Terminal.
+const REVOKED_STATUS: &str = "revoked";
 
 /// Mint a ring key from the operating system's CSPRNG.
 ///
@@ -145,7 +168,7 @@ pub fn mint_ring_key() -> [u8; RING_KEY_BYTES] {
 ///
 /// The reason travels to the caller. That leaks nothing a probe could not
 /// already learn from success-versus-failure, and the caller here has already
-/// proved it holds `svc/worker` before any of these are reachable.
+/// proved it holds an active enroller's key before any of these are reachable.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum EnrolmentRefusal {
     /// No envelope was declared. ABSENCE REFUSES; it does not default open.
@@ -334,7 +357,8 @@ impl EnrolmentEnvelope {
     /// The address is still OBSERVED rather than claimed, so a registrant cannot
     /// choose it; ring position is minted by control and never derived from the
     /// address, so there is nothing to grind toward; and a same-host caller
-    /// already reads the `svc/worker` key file, so it gains no reach it lacked.
+    /// already reads the unit's enroller key file, so it gains no reach it
+    /// lacked.
     /// The collapse case - every peer looking identical because a proxy sits in
     /// front - is a DIFFERENT arm, `ProxyFronted`, which stays unconditional and
     /// stays first.
@@ -667,6 +691,295 @@ pub(crate) async fn active_enroller_public_key(
     // `worker_enrollers_public_key_shape` already refuses every other width;
     // see the parallel comment on `active_instance_public_key`.
     Ok(<[u8; PUBLIC_KEY_LENGTH]>::try_from(stored).ok())
+}
+
+// ---------------------------------------------------------------------------
+// Retirement: an instance declaring its own exit
+// ---------------------------------------------------------------------------
+
+/// Serve one self-retirement: mark the calling instance `gone`.
+///
+/// `instance_id` is the instance segment of the issuer the caller VERIFIED as
+/// (`crate::internal::retire_worker_instance`), never a value from a body, so
+/// no caller can name another instance here.
+///
+/// Answers 204 whether or not this call was the one that moved the row: the
+/// only way the update finds nothing to change is that the row stopped being
+/// live between verification and now - revoked with its enroller, or retired
+/// by a racing call from the same process - and in either case the instance
+/// is exactly as retired as the caller asked.
+pub async fn retire(state: &AppState, instance_id: &str) -> web::HttpResponse {
+    match retire_instance(&state.control_pg, instance_id).await {
+        Ok(moved) => {
+            tracing::info!(
+                instance_id,
+                moved,
+                "control-internal: worker instance retired itself"
+            );
+            web::HttpResponse::NoContent().finish()
+        }
+        Err(error) => {
+            // Retryable infrastructure, not a verdict on the caller: the row
+            // is untouched and still `active`.
+            tracing::error!(
+                instance_id,
+                %error,
+                "control-internal: worker instance retirement could not be recorded"
+            );
+            web::HttpResponse::ServiceUnavailable()
+                .json(&serde_json::json!({"error":"service unavailable"}))
+        }
+    }
+}
+
+/// Move one instance to `gone`, returning whether this statement moved it.
+///
+/// `gone` is terminal and the frozen-columns trigger lets only `status` change,
+/// so this touches nothing but the one column the instance may speak for.
+async fn retire_instance(
+    pg: &compio_postgres::Client,
+    instance_id: &str,
+) -> Result<bool, compio_postgres::Error> {
+    let moved = pg
+        .execute(
+            "UPDATE zeroship.worker_instances SET status = $2 WHERE id = $1 AND status <> $2",
+            &[&instance_id, &RETIRED_STATUS],
+        )
+        .await?;
+    Ok(moved == 1)
+}
+
+// ---------------------------------------------------------------------------
+// The operator's enroller import
+// ---------------------------------------------------------------------------
+
+// The document's shape and its validation are
+// `zeroship_core::worker_enrollers`, shared with `zeroship dev init`, which
+// writes it. `zone` is an execution zone's NAME
+// (`zeroship.execution_zones.name`), the word an operator provisions units by;
+// the id it resolves to is Control's, and resolving it is the import's job.
+
+/// What one import pass found, entry by entry.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct EnrollerImportReport {
+    /// Entries Control had not recorded. Inserted `active`.
+    pub inserted: usize,
+    /// Entries already recorded exactly as the file states them, and active.
+    pub unchanged: usize,
+    /// Entries already recorded exactly as the file states them, and revoked.
+    /// They STAY revoked: the import never writes `status` on a recorded row.
+    pub revoked: usize,
+}
+
+/// Import the operator's enroller file, or refuse it.
+///
+/// An empty `path` - the setting's default - imports nothing and returns
+/// `None`: a deployment that provisions no workers has no enrollers, and every
+/// enrolment it receives is refused because no enroller resolves.
+///
+/// # What the import may do, which is only ever to ADD
+///
+/// - An entry Control has not recorded is inserted `active`.
+/// - An entry recorded with the same key and zone is left exactly as it is. A
+///   REVOKED one stays revoked: revocation is terminal, and leaving a revoked
+///   unit's line in the file must not restore it on the next restart. That is
+///   what makes revocation survive a file nobody edited.
+/// - An entry that DISAGREES with what is recorded refuses the whole file:
+///   the same id under another key or zone, or the same key under another id.
+///   A key names exactly one enroller for its life, so a replacement unit is a
+///   new id AND a new key, never a re-keyed row.
+/// - Recorded enrollers the file no longer names are left alone. Removing a
+///   line revokes nothing; `zeroship.revoke_worker_enroller` does.
+///
+/// Every entry is decided inside ONE transaction and nothing commits unless
+/// every entry is admissible, so a refused file writes no row. Two Control
+/// replicas importing concurrently converge: the loser of an insert race finds
+/// the winner's row and judges it like any other recorded row.
+///
+/// # Errors
+///
+/// Returns a message naming every refused entry when the file is unreadable,
+/// malformed, internally inconsistent, names an unknown zone, or conflicts
+/// with a recorded enroller, and when the database cannot be reached. Callers
+/// treat this as fatal: a boot that skipped its enrollers would refuse every
+/// enrolment while looking configured.
+pub async fn import_enrollers(
+    registry: &Registry,
+    path: &Path,
+) -> Result<Option<EnrollerImportReport>, String> {
+    if path.as_os_str().is_empty() {
+        return Ok(None);
+    }
+    let enrollers = read_enroller_file(path)?;
+    let mut conn = registry
+        .conn()
+        .await
+        .map_err(|error| format!("worker enroller import: connect: {error}"))?;
+    let tx = conn
+        .transaction()
+        .await
+        .map_err(|error| format!("worker enroller import: begin: {error}"))?;
+
+    let zones = resolve_zones(&tx, &enrollers).await?;
+    let mut report = EnrollerImportReport::default();
+    let mut refusals = Vec::new();
+    for enroller in &enrollers {
+        let zone_id = &zones[&enroller.zone];
+        match import_one(&tx, enroller, zone_id).await? {
+            Imported::Inserted => report.inserted += 1,
+            Imported::Unchanged => report.unchanged += 1,
+            Imported::Revoked => {
+                tracing::warn!(
+                    enroller_id = enroller.id.as_str(),
+                    "control: the worker enroller file still names a REVOKED enroller; it stays \
+                     revoked - remove the line, and provision a new enroller for that unit"
+                );
+                report.revoked += 1;
+            }
+            Imported::Conflict(reason) => refusals.push(format!("{}: {reason}", enroller.id)),
+        }
+    }
+    if !refusals.is_empty() {
+        // Dropping the transaction rolls it back; this is explicit so a refused
+        // file is visibly a write-nothing outcome rather than one by omission.
+        tx.rollback()
+            .await
+            .map_err(|error| format!("worker enroller import: rollback: {error}"))?;
+        return Err(format!(
+            "worker enroller file {} conflicts with recorded enrollers, and nothing was \
+             imported: {}",
+            path.display(),
+            refusals.join("; ")
+        ));
+    }
+    tx.commit()
+        .await
+        .map_err(|error| format!("worker enroller import: commit: {error}"))?;
+    Ok(Some(report))
+}
+
+/// Read and validate the import file, before any database work.
+///
+/// The document holds PUBLIC keys, so it is deliberately not held to a
+/// private file's permission rule - the same call as the peer document.
+fn read_enroller_file(path: &Path) -> Result<Vec<EnrollerRecord>, String> {
+    let display = path.display();
+    let bytes = std::fs::read(path)
+        .map_err(|error| format!("worker enroller file {display}: read: {error}"))?;
+    parse_enroller_import(&bytes)
+        .map_err(|reason| format!("worker enroller file {display}: {reason}"))
+}
+
+/// Map every zone name the file uses to its id, or refuse the file.
+async fn resolve_zones(
+    tx: &compio_postgres::Transaction<'_>,
+    enrollers: &[EnrollerRecord],
+) -> Result<BTreeMap<String, String>, String> {
+    let mut zones = BTreeMap::new();
+    for name in enrollers
+        .iter()
+        .map(|enroller| enroller.zone.as_str())
+        .collect::<BTreeSet<_>>()
+    {
+        let row = tx
+            .query_opt(
+                "SELECT id FROM zeroship.execution_zones WHERE name = $1 AND status = $2",
+                &[&name, &ENROLLED_STATUS],
+            )
+            .await
+            .map_err(|error| format!("worker enroller import: read execution zones: {error}"))?;
+        let Some(row) = row else {
+            return Err(format!(
+                "worker enroller file names execution zone {name:?}, which this deployment \
+                 does not declare"
+            ));
+        };
+        zones.insert(name.to_owned(), row.get::<_, String>(0));
+    }
+    Ok(zones)
+}
+
+/// How one entry was judged.
+enum Imported {
+    Inserted,
+    Unchanged,
+    Revoked,
+    Conflict(String),
+}
+
+/// Insert one entry if nothing claims its id or key, else judge what does.
+///
+/// `ON CONFLICT DO NOTHING` names no target on purpose: the id and the public
+/// key are both unique, and a clash on EITHER must fall through to the
+/// comparison below rather than abort the transaction.
+async fn import_one(
+    tx: &compio_postgres::Transaction<'_>,
+    enroller: &EnrollerRecord,
+    zone_id: &str,
+) -> Result<Imported, String> {
+    let fault = |error: compio_postgres::Error| {
+        format!("worker enroller import: enroller {}: {error}", enroller.id)
+    };
+    let inserted = tx
+        .execute(
+            "INSERT INTO zeroship.worker_enrollers (id, public_key, execution_zone_id, status) \
+             VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING",
+            &[
+                &enroller.id,
+                &enroller.public_key.as_slice(),
+                &zone_id,
+                &ENROLLED_STATUS,
+            ],
+        )
+        .await
+        .map_err(fault)?;
+    if inserted == 1 {
+        return Ok(Imported::Inserted);
+    }
+    let rows = tx
+        .query(
+            "SELECT id, public_key, execution_zone_id, status FROM zeroship.worker_enrollers \
+             WHERE id = $1 OR public_key = $2",
+            &[&enroller.id, &enroller.public_key.as_slice()],
+        )
+        .await
+        .map_err(fault)?;
+    let mut verdict = None;
+    for row in &rows {
+        let id: String = row.get(0);
+        let public_key: &[u8] = row.get(1);
+        let recorded_zone: String = row.get(2);
+        let status: String = row.get(3);
+        if id != enroller.id {
+            return Ok(Imported::Conflict(format!(
+                "its public key is already recorded for enroller {id}"
+            )));
+        }
+        if public_key != enroller.public_key.as_slice() {
+            return Ok(Imported::Conflict(
+                "it is already recorded with a different public key; a changed key is a new \
+                 enroller with a new id"
+                    .to_owned(),
+            ));
+        }
+        if recorded_zone != zone_id {
+            return Ok(Imported::Conflict(format!(
+                "it is already recorded in execution zone {recorded_zone}, not {}",
+                enroller.zone
+            )));
+        }
+        verdict = Some(if status == REVOKED_STATUS {
+            Imported::Revoked
+        } else {
+            Imported::Unchanged
+        });
+    }
+    // The insert found a clash, so a row must have come back. If none did, a
+    // concurrent writer removed it between the two statements - which nothing
+    // in this tree does - and the honest answer is to refuse, not to guess.
+    Ok(verdict.unwrap_or_else(|| {
+        Imported::Conflict("a conflicting row disappeared during the import".to_owned())
+    }))
 }
 
 #[cfg(test)]
