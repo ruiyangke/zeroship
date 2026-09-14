@@ -1315,3 +1315,102 @@ async fn consumer_closes_retires_once_after_lost_ack_and_redelivery() {
     assert_eq!(retired.ingress_epoch, Revision::try_from(1).unwrap());
     assert!(manager.claim(&manager.scope).await.unwrap().is_none());
 }
+
+/// Archive masks admission, dispatch and ingress. The manager refuses to
+/// establish ingress, yet the consumer still delivers the manager-origin Close
+/// to the creator handler, the evidence drains and the scope retires.
+#[compio::test]
+async fn consumer_delivers_close_under_archived_policy_and_the_scope_retires() {
+    use zeroship_workflow_manager::recovery::ScopeState;
+    let fixture = Fixture::new(AppPolicy::default()).await;
+    let app = fixture.app.app_id().clone();
+    let manager = NativeManager::new(&fixture).await;
+    let recovery = recovery(&manager);
+    recovery
+        .ensure(
+            &app,
+            fixture.job.deployment_id().unwrap(),
+            Revision::try_from(1).unwrap(),
+        )
+        .await
+        .unwrap();
+    for job in fixture.app.pending_jobs(None, 100).await.unwrap() {
+        fixture
+            .app
+            .publish_job(&job.id, &Settled(app.clone()))
+            .await
+            .unwrap();
+    }
+    let archived = AppPolicy {
+        admission: false,
+        dispatch: false,
+        ingress: false,
+        ..AppPolicy::default()
+    };
+    let source = Policies(
+        zeroship_workflow_manager::policy::PolicyObservation::new(
+            app.clone(),
+            Revision::try_from(2).unwrap(),
+            archived.clone(),
+            Instant::now() + Duration::from_secs(600),
+        )
+        .unwrap(),
+    );
+    let refused = manager
+        .coordinator
+        .policy_lease(
+            &manager.worker,
+            "enrolled-key",
+            &zeroship_core::workflow_policy::PolicyLeaseRequest {
+                scope: manager.scope.clone(),
+                establish_after: Some(Revision::try_from(1).unwrap()),
+                ingress_used: false,
+            },
+            &source,
+            || async { Ok(manager.worker.clone()) },
+        )
+        .await
+        .map(|grant| grant.ingress_epoch());
+    assert_eq!(refused, Err(zeroship_workflow_manager::Error::Denied));
+    // The host installs the archived policy with the epoch it still holds.
+    fixture
+        .service
+        .policies
+        .fixture_install(
+            &app,
+            PolicySnapshot::configuration(Revision::try_from(2).unwrap(), archived)
+                .unwrap()
+                .with_ingress_epoch(Some(Revision::try_from(1).unwrap())),
+        )
+        .unwrap();
+    let close = recovery.begin_close(&app).await.unwrap().unwrap();
+    let mut consumer =
+        JobConsumer::new(manager.clone(), manager.worker.clone(), options(1)).unwrap();
+    consumer
+        .bindings()
+        .replace(vec![scope(
+            &fixture,
+            manager.scope.assignment_revision.get(),
+        )])
+        .unwrap();
+    finished(consumer.run_until(async {
+        manager.completion.recv_async().await.unwrap();
+    }))
+    .await;
+    assert_eq!(
+        fixture.app.job_receipt(&close).await.unwrap().unwrap().outcome,
+        JobOutcome::Closed { drained: true }
+    );
+    assert_eq!(fixture.probe.starts.get(), 0);
+    let retired = recovery.responsibility(&app).await.unwrap().unwrap();
+    assert_eq!(retired.state, ScopeState::Retired);
+    assert_eq!(
+        fixture
+            .app
+            .start(&RequestId::mint(), "Example", StartOptions::default())
+            .await
+            .unwrap_err(),
+        WorkflowServiceError::PermissionDenied,
+        "archive refuses admission itself"
+    );
+}
