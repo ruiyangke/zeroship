@@ -224,6 +224,7 @@ impl Record {
                     && self.reconciliation_next.is_none()
             }
             JobOperation::Collect {}
+            | JobOperation::Close { .. }
             | JobOperation::Fanout { .. }
             | JobOperation::Propagate { .. } => {
                 self.run_id.is_none()
@@ -260,7 +261,9 @@ impl Record {
             let valid = match outcome {
                 JobOutcome::Completed {} => self.run_id.as_deref() == Some(run_id.as_str()),
                 JobOutcome::Rejected {} => self.run_id.is_none(),
-                JobOutcome::Waiting {} | JobOutcome::Management { .. } => false,
+                JobOutcome::Waiting {} | JobOutcome::Management { .. } | JobOutcome::Closed { .. } => {
+                    false
+                }
             };
             if !valid {
                 return Err(invalid());
@@ -284,6 +287,7 @@ const fn valid_outcome(operation: &JobOperation, outcome: JobOutcome) -> bool {
             matches!(outcome, JobOutcome::Completed {} | JobOutcome::Waiting {})
         }
         JobOperation::Management { .. } => matches!(outcome, JobOutcome::Management { .. }),
+        JobOperation::Close { .. } => matches!(outcome, JobOutcome::Closed { .. }),
         JobOperation::Collect {} | JobOperation::Fanout { .. } | JobOperation::Propagate { .. } => {
             matches!(outcome, JobOutcome::Completed {} | JobOutcome::Waiting {})
         }
@@ -647,6 +651,12 @@ impl AppWorkflows {
         if matches!(job.operation, JobOperation::Collect {}) {
             lock_app_state(&mut tx, &self.app).await?;
             let receipt = super::collection::receipt(&tx, job).await?;
+            tx.commit().await?;
+            return Ok(receipt);
+        }
+        if matches!(job.operation, JobOperation::Close { .. }) {
+            lock_app_state(&mut tx, &self.app).await?;
+            let receipt = super::closure::receipt(&tx, job).await?;
             tx.commit().await?;
             return Ok(receipt);
         }
