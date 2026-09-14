@@ -141,6 +141,10 @@ async fn exercise_literal_filters(db: &Database) {
     }
 }
 
+#[expect(
+    clippy::future_not_send,
+    reason = "ORM fixtures use thread-local compio sessions"
+)]
 async fn scalar_json_filters(db: &Database) {
     let table = db.entity::<documents::Entity>().unwrap();
     let expected = [
