@@ -339,6 +339,190 @@ fn native_expansion_emits_collection_metadata_and_relation_targets() {
     );
 }
 
+fn column_sql_type(columns: &[syn::Item], column: &str) -> String {
+    columns
+        .iter()
+        .find_map(|item| match item {
+            syn::Item::Impl(implementation)
+                if matches!(&*implementation.self_ty, syn::Type::Path(ty) if ty.path.is_ident(column))
+                    && implementation.trait_.as_ref().is_some_and(|(_, path, _)| {
+                        path.segments.last().unwrap().ident == "Column"
+                    }) =>
+            {
+                implementation.items.iter().find_map(|item| match item {
+                    syn::ImplItem::Type(item) if item.ident == "SqlType" => Some(&item.ty),
+                    _ => None,
+                })
+            }
+            _ => None,
+        })
+        .map(|ty| {
+            let syn::Type::Path(ty) = ty else {
+                panic!("SQL type must be a path")
+            };
+            let segment = ty.path.segments.last().unwrap();
+            let mut spelled = segment.ident.to_string();
+            let mut arguments = &segment.arguments;
+            while let syn::PathArguments::AngleBracketed(generic) = arguments {
+                let Some(syn::GenericArgument::Type(syn::Type::Path(inner))) = generic.args.first()
+                else {
+                    break;
+                };
+                let inner = inner.path.segments.last().unwrap();
+                spelled = format!("{spelled}<{}", inner.ident);
+                arguments = &inner.arguments;
+            }
+            let depth = spelled.matches('<').count();
+            spelled + &">".repeat(depth)
+        })
+        .expect(column)
+}
+
+fn storage_mapping(expression: &syn::ExprStruct) -> Option<String> {
+    expression
+        .fields
+        .iter()
+        .find_map(|field| match (&field.member, &field.expr) {
+            (syn::Member::Named(name), syn::Expr::Struct(storage)) if name == "storage" => storage
+                .fields
+                .iter()
+                .find_map(|field| match (&field.member, &field.expr) {
+                    (syn::Member::Named(name), syn::Expr::Path(path)) if name == "array" => {
+                        Some(path.path.segments.last().unwrap().ident.to_string())
+                    }
+                    _ => None,
+                }),
+            _ => None,
+        })
+}
+
+#[test]
+fn array_columns_select_element_codecs_and_declared_storage() {
+    let source: Input = syn::parse_str(
+        r#"pub models {
+        grants {
+            #[orm(primary_key)] id: Text,
+            #[orm(array_storage = "native")] scopes: Array<Text>,
+            #[orm(array_storage = "native")] amr: Nullable<Array<Text>>,
+            #[orm(array_storage = "json")] tags: Array<Text>,
+            labels: Array<Text>,
+            documents: Array,
+            instants: Nullable<Array<Timestamp>>,
+        }
+    }"#,
+    )
+    .unwrap();
+    let orm = syn::parse_quote!(::zeroship_data_orm::orm);
+    let columns = source.collections[0].columns.clone();
+    let file: syn::File = syn::parse2(generate(source, &orm).unwrap()).unwrap();
+    let grants = module(module(&file.items, "models"), "grants");
+    let generated = module(grants, "columns");
+    for (column, expected, storage) in [
+        ("scopes", "Array<Text>", Some("Native")),
+        ("amr", "Nullable<Array<Text>>", Some("Native")),
+        ("tags", "Array<Text>", Some("Json")),
+        ("labels", "Array<Text>", None),
+        ("documents", "Array<Json>", None),
+        ("instants", "Nullable<Array<Timestamp>>", None),
+    ] {
+        assert_eq!(column_sql_type(generated, column), expected, "{column}");
+        assert!(implemented_traits(generated, column).contains("ArrayColumn"));
+        let definition = columns
+            .iter()
+            .find(|definition| spelling(&definition.name) == column)
+            .unwrap();
+        let expression: syn::ExprStruct = syn::parse2(column_schema(definition, &orm)).unwrap();
+        assert_eq!(storage_mapping(&expression).as_deref(), storage, "{column}");
+    }
+    assert_eq!(column_sql_type(generated, "id"), "Text");
+    assert!(!implemented_traits(generated, "id").contains("ArrayColumn"));
+}
+
+#[test]
+fn native_array_storage_rejects_columns_without_a_native_representation() {
+    let column = |declaration: &str| {
+        format!("pub models {{ grants {{ #[orm(primary_key)] id: Text, {declaration} }} }}")
+    };
+    for (declaration, expected) in [
+        (
+            r#"#[orm(array_storage = "native")] counts: Array<Number>"#,
+            "Array<Text> only",
+        ),
+        (
+            r#"#[orm(array_storage = "native")] flags: Array<Boolean>"#,
+            "Array<Text> only",
+        ),
+        (
+            r#"#[orm(array_storage = "native")] instants: Array<Timestamp>"#,
+            "Array<Text> only",
+        ),
+        (
+            r#"#[orm(array_storage = "native")] documents: Array<Json>"#,
+            "Array<Text> only",
+        ),
+        (
+            r#"#[orm(array_storage = "native")] documents: Array"#,
+            "Array<Text> only",
+        ),
+        (
+            r#"#[orm(array_storage = "native")] name: Text"#,
+            "requires an Array column",
+        ),
+        (
+            r#"#[orm(array_storage = "json")] payload: Object"#,
+            "requires an Array column",
+        ),
+        (
+            r#"#[orm(array_storage = "native", encrypted)] scopes: Array<Text>"#,
+            "encrypted or masked",
+        ),
+        (
+            r#"#[orm(array_storage = "native", mask(kind = "full", classification = "pii"))] scopes: Array<Text>"#,
+            "encrypted or masked",
+        ),
+        (
+            r#"#[orm(shape(#[orm(array_storage = "native")] inner: Array<Text>))] payload: Object"#,
+            "only to top-level columns",
+        ),
+        (
+            r#"#[orm(discriminator = "kind", variants({ #[orm(literal_value = "a")] kind: Literal, #[orm(array_storage = "native")] inner: Array<Text> }))] event: Union"#,
+            "only to top-level columns",
+        ),
+        (
+            r#"#[orm(array_storage = "jsonb")] scopes: Array<Text>"#,
+            "expected \"json\" or \"native\"",
+        ),
+        (
+            r#"#[orm(array_storage = native)] scopes: Array<Text>"#,
+            "expected string literal",
+        ),
+        (
+            r#"#[orm(array_storage = "native", array_storage = "native")] scopes: Array<Text>"#,
+            "duplicate column option",
+        ),
+    ] {
+        let source = column(declaration);
+        let error = syn::parse_str::<Input>(&source).err().expect(declaration);
+        assert!(
+            error.to_string().contains(expected),
+            "{declaration}: {error}"
+        );
+    }
+    for accepted in [
+        r#"#[orm(array_storage = "native")] scopes: Array<Text>"#,
+        r#"#[orm(array_storage = "native")] scopes: Nullable<Array<Text>>"#,
+        r#"#[orm(array_storage = "json")] counts: Array<Number>"#,
+    ] {
+        let source = column(accepted);
+        let declaration = syn::parse_str::<Input>(&source);
+        assert!(
+            declaration.is_ok(),
+            "{accepted}: {}",
+            declaration.err().unwrap()
+        );
+    }
+}
+
 #[test]
 fn native_literals_preserve_numbers_bytes_and_nested_values() {
     use literal::Literal;
