@@ -197,3 +197,98 @@ pub(super) async fn retirement(store: Rc<OrmStore>) {
     assert!(manager.close(&fixture.scope).await);
     assert_eq!(manager.state().await, ScopeState::Retired);
 }
+
+/// Two resweeps of one tombstone race. The attempt that fenced the tombstone
+/// first makes it final; the later one, which fenced the row the first left
+/// in deletion, finds it purged and settles without error.
+pub(super) async fn concurrent_resweep(store: Rc<OrmStore>) {
+    let fixture = Fixture::new(store).await;
+    let app = fixture.scope.app_id().clone();
+    let id = fixture.stage().await;
+    fixture.expire(&id).await;
+    fixture
+        .scope
+        .collect_job(&Grant::new(&app), options(1))
+        .await
+        .unwrap();
+    assert_eq!(fixture.payload(&id).await.state, "deleted");
+    fixture.expire(&id).await;
+    let (first_entered, first_resume) = fixture.backend.gate(&id);
+    let (second_entered, second_resume) = fixture.backend.gate(&id);
+    let other_host = fixture.reopen(true).await;
+    let (finished, first_done) = flume::bounded(1);
+    let first = async {
+        let receipt = fixture
+            .scope
+            .collect_job(&Grant::new(&app), options(1))
+            .await;
+        finished.send_async(()).await.unwrap();
+        receipt
+    };
+    let second = async {
+        first_entered.recv_async().await.unwrap();
+        other_host
+            .collect_job(&Grant::new(&app), options(1))
+            .await
+    };
+    let order = async {
+        second_entered.recv_async().await.unwrap();
+        first_resume.send_async(()).await.unwrap();
+        first_done.recv_async().await.unwrap();
+        second_resume.send_async(()).await.unwrap();
+    };
+    let (first, second, ()) = futures::join!(first, second, order);
+    assert_eq!(first.unwrap().outcome, JobOutcome::Completed {});
+    assert_eq!(second.unwrap().outcome, JobOutcome::Completed {});
+    assert_eq!(fixture.payload(&id).await.state, "purged");
+    assert_eq!(fixture.backend.calls(), [id.clone(), id.clone(), id]);
+}
+
+/// A final tombstone no longer counts toward the app's payload quota: once the
+/// only permitted object is purged, the app can stage another.
+pub(super) async fn quota(store: Rc<OrmStore>) {
+    let fixture = Fixture::new(store).await;
+    let app = fixture.scope.app_id().clone();
+    fixture
+        .service
+        .policies
+        .fixture_install(
+            &app,
+            leased_policy(
+                2,
+                AppPolicy {
+                    max_payload_objects: 1,
+                    ..AppPolicy::default()
+                },
+            ),
+        )
+        .unwrap();
+    let first = fixture.stage().await;
+    let stage = async || {
+        fixture
+            .service
+            .stage_payload(
+                &fixture.worker,
+                &fixture.task.id,
+                &fixture.task.token,
+                &RequestId::mint(),
+                reference(b"collect-me"),
+                body(b"collect-me"),
+            )
+            .await
+    };
+    assert!(matches!(
+        stage().await,
+        Err(WorkflowServiceError::ResourceExhausted(_))
+    ));
+    for expected in ["deleted", "purged"] {
+        fixture.expire(&first).await;
+        fixture
+            .scope
+            .collect_job(&Grant::new(&app), options(1))
+            .await
+            .unwrap();
+        assert_eq!(fixture.payload(&first).await.state, expected);
+    }
+    stage().await.unwrap();
+}
