@@ -30,6 +30,7 @@ use zeroship_runtime::{NativePlugin, RuntimeLimits};
 use zeroship_workflow::service::{
     collection::CollectionOptions,
     fanout::FanoutOptions,
+    propagation::PropagationOptions,
     reconciliation::ReconciliationOptions,
     runner::{consumer::ConsumerOptions, delivery::DeliveryOptions, TaskPayloadLimits},
     store::HostStorage,
@@ -182,6 +183,7 @@ impl LocalConfig {
                 reconciliation: ReconciliationOptions::default(),
                 collection: CollectionOptions::default(),
                 fanout: FanoutOptions::default(),
+                propagation: PropagationOptions::default(),
             },
         }
     }

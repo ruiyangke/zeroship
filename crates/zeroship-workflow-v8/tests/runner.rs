@@ -1035,6 +1035,7 @@ impl Manager {
         use zeroship_workflow::service::{
             collection::CollectionOptions,
             fanout::FanoutOptions,
+            propagation::PropagationOptions,
             reconciliation::ReconciliationOptions,
             runner::{
                 consumer::{ConsumerOptions, ConsumerScope, JobConsumer},
@@ -1065,6 +1066,7 @@ impl Manager {
                     reconciliation: ReconciliationOptions::default(),
                     collection: CollectionOptions::default(),
                     fanout: FanoutOptions::default(),
+                    propagation: PropagationOptions::default(),
                 },
             },
         )
