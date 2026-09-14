@@ -404,15 +404,15 @@ curl -sf http://127.0.0.1:8000/readyz    # gateway, 503 until the first route pu
 
 Both are unauthenticated, so `/readyz` is built not to be a lever: each
 dependency probe has a short explicit timeout, the outcome is cached for a
-couple of seconds and concurrent probes collapse into one, and the response
+short interval and concurrent probes collapse into one, and the response
 body is `{"ready":true|false}` with no DSN, host, driver text or version in
 it. The gateway and worker read a stamp written by the background poll they
 already run, so their probes issue no upstream request at all.
 
 There is no `/health`. It was deleted rather than aliased.
 
-`tests/health_endpoints.sh` walks the whole contract against the real
-binaries, including the arms where a dependency is taken away.
+Each service owns its health routes and readiness cases in its Rust crate. The
+database-backed cases use the crate's required PostgreSQL fixture.
 
 ## Database migrations
 
