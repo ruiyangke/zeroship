@@ -309,6 +309,60 @@ relay remains the authoritative PostgreSQL change source. Removing returned
 records avoids result-buffer growth; it does not eliminate database locking,
 WAL work, or SQLite's bounded CDC buffers.
 
+## Array storage
+
+An array column has a logical element type and a declared physical storage.
+JSON storage keeps the array in a JSON document. Native storage uses the
+database's own array type and is available for text elements:
+
+```rust,ignore
+schema! { pub models { grants {
+    #[orm(primary_key)] id: Text,
+    #[orm(array_storage = "native")] scopes: Array<Text>,
+    #[orm(array_storage = "native")] amr: Nullable<Array<Text>>,
+    tags: Array<Text>,
+}}}
+```
+
+Runtime descriptors spell the same declaration as the migration engine's
+`textArray` column type. Native storage on another element type, on a nested
+member, or combined with encryption or masking fails schema validation with
+`invalid_schema`; the `schema!` macro refuses the same declarations at compile
+time.
+
+```text
+Array<Text> + storage        PostgreSQL                 SQLite
+-------------------------    -----------------------    --------------------
+Json (default)               jsonb                      JSON text
+Native                       text[]                     JSON text
+```
+
+Every array column uses the `sql_types::Array<S>` codec. Models read `Vec<T>`
+and nullable columns `Option<Vec<T>>`; writes accept `Vec<T>` or `&[T]` whose
+elements encode through `S`. Arrays support `eq`, `ne`, `in_values`,
+`not_in_values`, `is_null` and `is_not_null` against whole values, and `push`,
+`pull` and `add_to_set` for elements. Equality is exact: element order and
+duplicates are significant. Arrays have no ordered comparisons, grouping,
+distinct selection or column-to-column comparisons; those do not compile or are
+refused before execution.
+
+PostgreSQL binds native arrays in the binary array protocol with an explicit
+`text[]` cast, so order, duplicates, empty strings and the text `NULL` reach the
+database unchanged. Equality and membership use PostgreSQL array equality.
+`push` uses `array_append`, `pull` uses `array_remove`, and `add_to_set` appends
+only when `array_position` finds no equal element, leaving existing duplicates in
+place. SQLite has no array type, so native declarations keep JSON text, the
+structural JSON equality function and the JSON array renderer described below.
+Both backends return the same values for the same operations.
+
+Native text elements are strings without NUL characters, and a null element is
+refused on write with `invalid_array_element` on both backends. SQL NULL, an
+empty array and an array containing the text `NULL` remain distinct. A
+PostgreSQL value with a NULL element, more than one dimension or a lower bound
+other than one fails to decode with `row_decode_failed` rather than being
+flattened. JSON array values bind as JSON text, so a declaration whose storage
+differs from the physical column fails at its first bind in either direction.
+
 ## Explicit joins
 
 `Database::from` builds source-qualified reads from generated entity aliases.
@@ -455,9 +509,10 @@ includes SQL and native parameter types without parameter contents. Execution
 borrows the bindings or consumes the output through `into_parts`.
 
 Parameters and result records use native `Value` types. Dynamic dispatch does
-not require JSON serialization. Strings and binary buffers remain native;
-JSON encoding is reserved for JSON columns and explicit wire contracts. The
-implementation still allocates records and futures and copies some inputs.
+not require JSON serialization. Strings, binary buffers and native text arrays
+remain native; JSON encoding is reserved for JSON columns and explicit wire
+contracts. The implementation still allocates records and futures and copies
+some inputs.
 
 The ORM refuses caller-supplied typed-ID assignments before insert, batch insert, or
 upsert can mutate rows. Upsert conflict keys must be declared, supplied,
@@ -507,8 +562,10 @@ Array mutations compile into an atomic SQL update. `$push` appends the operand
 as a complete element; `$pull` removes every structurally equal element;
 `$addToSet` appends only when no equal element exists. Objects compare without
 key order, arrays retain order, and numbers compare by exact decimal value.
-JSON null is an element when used as an operand; null columns remain null.
-The dialect renderer lives in `zeroship_data_orm::sql`.
+In JSON storage, JSON null is an element when used as an operand; native
+arrays refuse a null operand. Null columns remain null. The operand is encoded
+as one element of the column's storage: JSON for JSON arrays, the element type
+for native arrays. The dialect renderer lives in `zeroship_data_orm::sql`.
 
 The SQL module also owns the shared update grammar. It validates assignments
 before declared generators and protection transforms, rejecting conflicting writes and
