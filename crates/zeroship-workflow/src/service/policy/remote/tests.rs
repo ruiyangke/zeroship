@@ -62,7 +62,7 @@ impl Fixture {
         Exchange {
             request: json!(PolicyLeaseRequest {
                 scope: scope.clone(),
-                establish_after: None,
+                establish: None,
                 ingress_used: false,
             }),
             response: json!(PolicyLease {
@@ -365,7 +365,7 @@ async fn installation_preserves_the_original_validated_client_deadline() {
             let lease = client
                 .policy_lease(&PolicyLeaseRequest {
                     scope: assigned.scope().clone(),
-                    establish_after: None,
+                    establish: None,
                     ingress_used: false,
                 })
                 .await

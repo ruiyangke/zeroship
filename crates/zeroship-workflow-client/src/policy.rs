@@ -93,7 +93,8 @@ impl LeasedPolicy {
 impl WorkerCoordinator {
     /// Obtain policy under this client's enrolled key and current app assignment.
     /// The host must install it through the refresh ticket reserved before I/O.
-    /// An establishment request is honored only by an epoch above the named one.
+    /// An establishment request is honored only by an epoch above the named one,
+    /// or by any epoch when it names none.
     ///
     /// # Errors
     /// Refuses substituted identities, invalid or incomplete policy, an
@@ -109,9 +110,11 @@ impl WorkerCoordinator {
             || lease.worker_id != self.worker_id
             || lease.signing_key_id != self.signing_key_id
             || lease.assignment_revision != request.scope.assignment_revision
-            || request
-                .establish_after
-                .is_some_and(|after| lease.ingress_epoch.is_none_or(|epoch| epoch <= after))
+            || request.establish.is_some_and(|establish| {
+                lease
+                    .ingress_epoch
+                    .is_none_or(|epoch| establish.after.is_some_and(|after| epoch <= after))
+            })
         {
             return Err(Error::InvalidResponse);
         }

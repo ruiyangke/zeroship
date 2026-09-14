@@ -29,7 +29,7 @@ use zeroship_core::{
         BroadcastId, DeploymentId, JobId, JobOperation, JobOutcome, JobSpec, Settlement,
         SettlementReceipt, SubmitJob,
     },
-    workflow_policy::{AppPolicy, PolicyLeaseRequest},
+    workflow_policy::{AppPolicy, EstablishIngress, PolicyLeaseRequest},
 };
 use zeroship_data_orm::{
     orm::{Operation, Output},
@@ -207,6 +207,7 @@ async fn host_with(fixture: &Fixture, app: AppId) -> Host {
             interval: Duration::from_secs(3600),
             page_size: 16,
             closing_timeout: Duration::from_secs(3600),
+            ..recovery::Options::default()
         },
     )
     .unwrap();
@@ -270,7 +271,9 @@ impl Host {
     ) -> Result<Option<Revision>, Error> {
         let request = PolicyLeaseRequest {
             scope: self.scope.clone(),
-            establish_after: establish_after.map(revision),
+            establish: establish_after.map(|after| EstablishIngress {
+                after: (after > 0).then(|| revision(after)),
+            }),
             ingress_used,
         };
         let grant = self
@@ -430,10 +433,15 @@ async fn fall_due(available_at: i64) {
 async fn establishment(fixture: &Fixture) {
     let host = host(fixture).await;
     let source = Source::new(&host.app, AppPolicy::default());
+    let opened = host.state().await.active_at;
+    compio::time::sleep(Duration::from_millis(5)).await;
     assert_eq!(host.lease(&source, None, false).await, Ok(Some(revision(1))));
-    assert_eq!(host.state().await.last_ingress_at, None);
+    assert_eq!(host.state().await.active_at, opened, "a plain refresh is no activity");
+    // Startup names no refused epoch and keeps the open one.
+    assert_eq!(host.lease(&source, Some(0), false).await, Ok(Some(revision(1))));
+    assert_eq!(host.state().await.active_at, opened);
     assert_eq!(host.lease(&source, None, true).await, Ok(Some(revision(1))));
-    assert!(host.state().await.last_ingress_at.is_some());
+    assert!(host.state().await.active_at > opened, "reported ingress is activity");
     let original_duties = duties(fixture, &host.app).await;
     assert_eq!(original_duties.len(), 2);
 
@@ -1031,7 +1039,9 @@ fn replica_establishment(
             let source = Source::new(&app, AppPolicy::default());
             let request = PolicyLeaseRequest {
                 scope,
-                establish_after: Some(revision(after)),
+                establish: Some(EstablishIngress {
+                    after: Some(revision(after)),
+                }),
                 ingress_used: false,
             };
             coordinator

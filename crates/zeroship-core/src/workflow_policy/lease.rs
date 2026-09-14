@@ -8,17 +8,28 @@ use std::num::NonZeroU64;
 
 /// A worker's policy request for its current placement.
 ///
-/// `establish_after` asks the manager for an open ingress epoch greater than the
-/// named one, re-establishing recovery responsibility when needed. A request
-/// without it is a plain refresh and never reopens responsibility.
-/// `ingress_used` reports that the host accepted ingress since its previous
-/// refresh; it only feeds the manager's idle closure trigger.
+/// `establish` asks the manager for an open ingress epoch, re-establishing
+/// recovery responsibility when needed. A request without it is a plain
+/// refresh and never reopens responsibility. `ingress_used` reports that the
+/// host accepted ingress since its previous refresh; it only feeds the
+/// manager's idle closure trigger.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PolicyLeaseRequest {
     pub scope: AssignedScope,
-    pub establish_after: Option<Revision>,
+    pub establish: Option<EstablishIngress>,
     pub ingress_used: bool,
+}
+
+/// Ask for an open ingress epoch greater than `after`.
+///
+/// `after` names the epoch the creator journal refused. It is absent when the
+/// host holds no epoch and the journal has closed none, as at startup; the
+/// manager then returns its open epoch or opens the next one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct EstablishIngress {
+    pub after: Option<Revision>,
 }
 
 /// Complete policy bound to the enrolled signer and its current placement.

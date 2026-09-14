@@ -1060,14 +1060,37 @@
             "valueColumn": "close_job_id"
           }
         },
-        "last_ingress_at": {
+        "active_at": {
+          "type": "bigInt",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "active_at"
+          }
+        },
+        "close_after": {
           "type": "bigInt",
           "readable": true,
           "filterable": true,
           "sortable": true,
           "projectable": true,
           "storage": {
-            "valueColumn": "last_ingress_at"
+            "valueColumn": "close_after"
+          }
+        },
+        "close_attempts": {
+          "type": "bigInt",
+          "required": true,
+          "default": 0,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "close_attempts"
           }
         }
       },
