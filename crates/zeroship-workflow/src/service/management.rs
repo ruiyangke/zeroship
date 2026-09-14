@@ -75,46 +75,58 @@ impl AppWorkflows {
                     }
                     return decode(&receipt.outcome);
                 }
-                Box::pin(self.apply_management_authorized(tx, command, &digest, authority?)).await
+                let outcome = Box::pin(
+                    self.apply_management_authorized(&mut tx, command, &digest, authority?),
+                )
+                .await?;
+                tx.commit().await?;
+                Ok(outcome)
             })
             .await
     }
 
-    async fn apply_management_authorized(
+    /// Apply a fresh command inside the caller's app-locked transaction.
+    /// The caller matches immutable receipts first and commits the resulting
+    /// lifecycle, publication and receipt changes with its delivery bookkeeping.
+    /// It must run the entire attempt through commit under the original captured
+    /// authority, and abandon the transaction on any application or bookkeeping
+    /// error. Checking authority only before this helper returns is insufficient.
+    pub(in crate::service) async fn apply_management_authorized(
         &self,
-        mut tx: Transaction,
+        tx: &mut Transaction,
         command: &ManageRun,
         digest: &str,
         authority: &PolicyAuthority,
     ) -> Result<ManagementOutcome, WorkflowServiceError> {
+        if command.app_id != self.app || !authority.belongs_to(&self.binding) {
+            return Err(WorkflowServiceError::PermissionDenied);
+        }
+        tx.check_app(&self.app)?;
         authority.check()?;
         let policy = &authority.policy;
         let now = tx.now().await?;
         let run_id = command.run_id.as_str();
         let outcome = match &command.command {
             ManagementOperation::Transition { operation } => {
-                match control::prepare_transition(
-                    &mut tx, &self.app, run_id, *operation, policy, now,
-                )
-                .await?
+                match control::prepare_transition(tx, &self.app, run_id, *operation, policy, now)
+                    .await?
                 {
                     Preparation::Ready(plan) => {
                         authority.check()?;
                         ManagementOutcome::Applied {
-                            state: plan.apply(&tx, &self.app, run_id).await?.state,
+                            state: plan.apply(tx, &self.app, run_id).await?.state,
                         }
                     }
                     Preparation::Rejected(reason) => reason.outcome(),
                 }
             }
             ManagementOperation::Restart { options } => {
-                match control::restart::prepare(&mut tx, &self.app, run_id, options, policy, now)
-                    .await?
+                match control::restart::prepare(tx, &self.app, run_id, options, policy, now).await?
                 {
                     Preparation::Ready(plan) => {
                         authority.check()?;
                         ManagementOutcome::Applied {
-                            state: plan.apply(&mut tx, &self.app, run_id, now).await?.state,
+                            state: plan.apply(tx, &self.app, run_id, now).await?.state,
                         }
                     }
                     Preparation::Rejected(reason) => reason.outcome(),
@@ -130,7 +142,6 @@ impl AppWorkflows {
             }))
             .await?;
         authority.check()?;
-        tx.commit().await?;
         Ok(outcome)
     }
 }
