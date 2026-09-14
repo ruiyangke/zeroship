@@ -283,8 +283,6 @@ jobs:
       # this repo has been burned by twice.
       - name: Shipped deploy instructions match the CLI
         run: tests/deploy_instructions_gate.sh
-      - name: The two [[inject]] ceilings agree
-        run: tests/inject_policy_mirror_gate.sh
       - name: The app-id sweep's frontier does not go backwards
         run: tests/app_id_frontier_gate.sh
       - name: Every write that could resurrect a deleted app carries its fence

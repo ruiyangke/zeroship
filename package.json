@@ -23,7 +23,7 @@
     "publish:sdks": "deploy/scripts/publish-sdks.sh",
     "test": "pnpm -r --filter './sdks/*' test",
     "check": "pnpm -r --filter './sdks/*' check",
-    "gen-types": "pnpm --filter @zeroship/vite-plugin gen-types:all",
-    "gen-types:check": "pnpm --filter @zeroship/vite-plugin gen-types:all -- --check"
+    "gen-types": "node policies/codegen.mjs && pnpm --filter @zeroship/vite-plugin gen-types:all",
+    "gen-types:check": "node policies/codegen.mjs --check && pnpm --filter @zeroship/vite-plugin gen-types:all -- --check"
   }
 }
