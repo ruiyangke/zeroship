@@ -546,3 +546,195 @@ async fn archived_and_replayed(store: Rc<OrmStore>) {
         Err(WorkflowServiceError::InvalidRequest(_))
     ));
 }
+
+/// A run accepted under epoch one, then a delivered Close fenced epoch one
+/// while the app's binding still holds it.
+struct Fenced {
+    service: WorkflowService,
+    app: AppId,
+    scope: super::super::AppWorkflows,
+    run: String,
+    _deployments: Deployments,
+}
+
+async fn fenced_app(store: Rc<OrmStore>) -> Fenced {
+    use super::super::SignalAuthority;
+    use zeroship_core::service_assertion::{ServiceSigningKey, ServiceTrustBundle};
+    let (service, app, _, deployments) = registered_service(store).await;
+    let authority = SignalAuthority::new(
+        Arc::new(ServiceSigningKey::generate()),
+        ServiceTrustBundle::new(),
+    )
+    .unwrap();
+    let service = service.with_signal_authority(Arc::new(authority));
+    let scope = service.fixture_app(app.clone());
+    let run = scope
+        .start(&RequestId::mint(), "Example", StartOptions::default())
+        .await
+        .unwrap()
+        .id;
+    assert!(!drained(&scope, 1).await);
+    Fenced {
+        service,
+        app,
+        scope,
+        run,
+        _deployments: deployments,
+    }
+}
+
+impl Fenced {
+    /// The closed `epoch` refuses the path under a still-valid lease; the
+    /// manager's next epoch, installed in the same binding, admits it.
+    async fn refuses_then_admits<T: std::fmt::Debug>(
+        &self,
+        epoch: i64,
+        attempt: impl AsyncFn(&super::super::AppWorkflows) -> Result<T, WorkflowServiceError>,
+    ) -> T {
+        fenced(attempt(&self.scope).await, Some(epoch));
+        install(&self.service, &self.app, 1, AppPolicy::default(), Some(epoch + 1));
+        attempt(&self.scope).await.unwrap()
+    }
+
+    /// Issue a capability for `target`. Issuing commits no work, so the
+    /// closed epoch does not refuse it; redeeming it is fenced.
+    async fn token(
+        &self,
+        target: &super::super::capability::SignalTarget,
+    ) -> super::super::capability::CapabilityToken {
+        self.scope
+            .issue_signal_token(
+                &RequestId::mint(),
+                super::super::SignalTokenRequest {
+                    target: target.clone(),
+                    types: ["approved".into()].into(),
+                    lifetime_seconds: 60,
+                },
+            )
+            .await
+            .unwrap()
+    }
+}
+
+async fn broadcast_path(fixture: &Fenced, epoch: i64) {
+    fixture
+        .refuses_then_admits(epoch, async |scope| {
+            scope
+                .broadcast(&RequestId::mint(), "orders", approved())
+                .await
+        })
+        .await;
+}
+
+async fn ingestion_path(fixture: &Fenced, epoch: i64, topic: bool) {
+    use super::super::capability::SignalTarget;
+    let target = if topic {
+        SignalTarget::Topic {
+            topic: "orders".into(),
+        }
+    } else {
+        SignalTarget::Run {
+            run_id: fixture.run.clone(),
+        }
+    };
+    let token = fixture.token(&target).await;
+    fixture
+        .refuses_then_admits(epoch, async |scope| {
+            scope
+                .ingest_signal(&RequestId::mint(), token.as_str(), &target, approved())
+                .await
+        })
+        .await;
+}
+
+async fn transition_path(fixture: &Fenced, epoch: i64) {
+    use crate::operations::RunOperation;
+    for operation in [RunOperation::Resume, RunOperation::Cancel] {
+        fenced(
+            fixture
+                .scope
+                .transition(&RequestId::mint(), &fixture.run, operation)
+                .await,
+            Some(epoch),
+        );
+    }
+    fixture
+        .refuses_then_admits(epoch, async |scope| {
+            scope
+                .transition(&RequestId::mint(), &fixture.run, RunOperation::Pause)
+                .await
+        })
+        .await;
+}
+
+async fn restart_path(fixture: &Fenced, epoch: i64) {
+    let restarted = fixture
+        .refuses_then_admits(epoch, async |scope| {
+            scope
+                .restart(
+                    &RequestId::mint(),
+                    &fixture.run,
+                    crate::operations::RestartOptions::default(),
+                )
+                .await
+        })
+        .await;
+    assert_eq!(restarted.run_id, fixture.run);
+}
+
+async fn sqlite_fenced_app() -> (tempfile::TempDir, Fenced) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("zs-workflow.sqlite");
+    schema::initialize_sqlite(&path).unwrap();
+    let fixture = fenced_app(Rc::new(sqlite_store(&path).await)).await;
+    (dir, fixture)
+}
+
+#[compio::test]
+async fn sqlite_closed_epoch_fences_broadcast() {
+    let (_dir, fixture) = sqlite_fenced_app().await;
+    broadcast_path(&fixture, 1).await;
+}
+
+#[compio::test]
+async fn sqlite_closed_epoch_fences_signal_ingestion_to_a_run() {
+    let (_dir, fixture) = sqlite_fenced_app().await;
+    ingestion_path(&fixture, 1, false).await;
+}
+
+#[compio::test]
+async fn sqlite_closed_epoch_fences_signal_ingestion_to_a_topic() {
+    let (_dir, fixture) = sqlite_fenced_app().await;
+    ingestion_path(&fixture, 1, true).await;
+}
+
+#[compio::test]
+async fn sqlite_closed_epoch_fences_transitions() {
+    let (_dir, fixture) = sqlite_fenced_app().await;
+    transition_path(&fixture, 1).await;
+}
+
+#[compio::test]
+async fn sqlite_closed_epoch_fences_restart() {
+    let (_dir, fixture) = sqlite_fenced_app().await;
+    restart_path(&fixture, 1).await;
+}
+
+/// Every fenced path on PostgreSQL, each after Close fenced the epoch the
+/// previous path's admission installed.
+#[compio::test]
+async fn postgres_closed_epoch_fences_every_ingress_path() {
+    let postgres = PostgresFixture::start().await;
+    let fixture = fenced_app(Rc::new(postgres.store.clone())).await;
+    broadcast_path(&fixture, 1).await;
+    for (epoch, path) in (2..).zip(0..4) {
+        assert!(!drained(&fixture.scope, epoch).await);
+        match path {
+            0 => ingestion_path(&fixture, epoch, false).await,
+            1 => ingestion_path(&fixture, epoch, true).await,
+            2 => transition_path(&fixture, epoch).await,
+            _ => restart_path(&fixture, epoch).await,
+        }
+    }
+    assert_eq!(closed(&fixture.service, &fixture.app).await, 5);
+}

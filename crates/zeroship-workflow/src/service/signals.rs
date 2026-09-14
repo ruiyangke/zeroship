@@ -1,6 +1,10 @@
 use super::{
-    app::{emit, encode, lock_app_state, lock_run, parse_state, request_result, store_request},
+    app::{
+        emit, encode, lock_app_state, lock_run, parse_state, request_result, require_open_epoch,
+        store_request,
+    },
     models,
+    policy::CapturedPolicy,
     store::Transaction,
     types::digest,
     AppWorkflows, RequestId,
@@ -33,47 +37,68 @@ pub(crate) fn validate_topic(topic: &str) -> Result<(), WorkflowServiceError> {
 }
 
 impl AppWorkflows {
+    /// Accept a topic broadcast. Its fanout pages become publication intents,
+    /// so acceptance is fenced by the ingress epoch like any other ingress.
+    ///
+    /// # Errors
+    /// Rejects invalid topics and signals, oversized payloads, reused request
+    /// identities, unavailable authority, a closed ingress epoch and journal
+    /// failures.
     pub async fn broadcast(
         &self,
         request: &RequestId,
         topic: &str,
         options: SignalOptions,
     ) -> Result<AcceptedBroadcast, WorkflowServiceError> {
-        let captured = self.capture_policy();
-        captured
-            .run(async {
-                validate_topic(topic)?;
-                validation::signal_type(&options.signal_type)?;
-                let digest = digest(&(topic, &options))?;
-                let mut tx = self.service.begin().await?;
-                lock_app_state(&mut tx, &self.app).await?;
-                let now = tx.now().await?;
-                if let Some(receipt) =
-                    request_result(&tx, &self.app, request, "broadcast", &digest).await?
-                {
-                    return Ok(receipt);
-                }
-                captured.check()?;
-                let policy = &captured.authority()?.policy;
-                if encode(&options.payload)?.len() > policy.max_input_bytes {
-                    return Err(WorkflowServiceError::PayloadTooLarge);
-                }
-                let result = publish(&mut tx, &self.app, topic, &options, "app", now).await?;
-                store_request(
-                    &mut tx,
-                    &self.app,
-                    request,
-                    "broadcast",
-                    &digest,
-                    &result,
-                    now,
-                )
-                .await?;
-                captured.check()?;
-                tx.commit().await?;
-                Ok(result)
+        self.accept(|scope| {
+            let options = options.clone();
+            Box::pin(async move {
+                let captured = scope.capture_policy();
+                captured
+                    .run(scope.broadcast_captured(request, topic, &options, &captured))
+                    .await
             })
-            .await
+        })
+        .await
+    }
+
+    async fn broadcast_captured(
+        &self,
+        request: &RequestId,
+        topic: &str,
+        options: &SignalOptions,
+        captured: &CapturedPolicy,
+    ) -> Result<AcceptedBroadcast, WorkflowServiceError> {
+        validate_topic(topic)?;
+        validation::signal_type(&options.signal_type)?;
+        let digest = digest(&(topic, options))?;
+        let mut tx = self.service.begin().await?;
+        lock_app_state(&mut tx, &self.app).await?;
+        let now = tx.now().await?;
+        if let Some(receipt) = request_result(&tx, &self.app, request, "broadcast", &digest).await?
+        {
+            return Ok(receipt);
+        }
+        captured.check()?;
+        require_open_epoch(&tx, &self.app, captured).await?;
+        let policy = &captured.authority()?.policy;
+        if encode(&options.payload)?.len() > policy.max_input_bytes {
+            return Err(WorkflowServiceError::PayloadTooLarge);
+        }
+        let result = publish(&mut tx, &self.app, topic, options, "app", now).await?;
+        store_request(
+            &mut tx,
+            &self.app,
+            request,
+            "broadcast",
+            &digest,
+            &result,
+            now,
+        )
+        .await?;
+        captured.check()?;
+        tx.commit().await?;
+        Ok(result)
     }
 }
 
