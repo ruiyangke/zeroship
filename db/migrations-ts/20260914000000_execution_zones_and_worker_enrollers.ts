@@ -52,14 +52,12 @@ export default {
       reason: "typed-id text domains need bytewise comparison",
     });
 
-    // The deployment's single execution zone. A fixed, hand-assigned id rather
-    // than a runtime-minted one: nothing in this migration can call the Rust
-    // base36 typed-id encoder, and a literal satisfying the CHECK above is
-    // exactly as authoritative as a minted one for a row this migration itself
-    // is the sole author of.
-    table("execution_zones", { schema: "zeroship" }).insert({
-      rows: [{ id: "ezn_default000000000000000000", name: "default", status: "active" }],
-    });
+    // The deployment's single execution zone is seeded by the next migration,
+    // 20260914000050_execution_zones_default_zone.ts, as DATA rather than
+    // here: `schema()` accepts DDL only, and the host recorder refuses a
+    // recorded DML operation inside it (`zero-migrate: host recorder: schema()
+    // recorded the DML operation insert; move this operation to data() and
+    // declare inverse() or irreversible`, measured against this exact file).
 
     // ---- worker_enrollers ---------------------------------------------------
     table("worker_enrollers", { schema: "zeroship" }).create({
