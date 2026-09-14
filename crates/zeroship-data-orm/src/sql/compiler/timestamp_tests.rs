@@ -82,6 +82,41 @@ fn database_timestamp_requirements_account_for_every_offset_parameter() {
     }
 }
 
+// The bound offset carries the sign and every millisecond of the requested
+// shift. PostgreSQL binds interval text, SQLite binds the integer offset.
+#[test]
+fn database_timestamp_offsets_bind_their_signed_millisecond_value() {
+    use crate::value::Value;
+    for (offset, interval) in [
+        (-1, "-0.001 seconds"),
+        (1, "0.001 seconds"),
+        (-1_234, "-1.234 seconds"),
+        (1_234, "1.234 seconds"),
+    ] {
+        for upsert in [false, true] {
+            // An upsert binds its inserted identity before the conflict update.
+            let identity = upsert.then(|| crate::value!(1));
+            for (compiler, bound_offset) in [
+                (&PostgresCompiler as &dyn SqlCompiler, Value::from(interval)),
+                (&SqliteCompiler, Value::from(offset)),
+            ] {
+                let query = compiler
+                    .compile(
+                        timestamp_statement(upsert, offset).unwrap(),
+                        &compiler.support(),
+                    )
+                    .unwrap();
+                let expected: Vec<Value> = identity.iter().cloned().chain([bound_offset]).collect();
+                assert_eq!(
+                    query.params(),
+                    expected.as_slice(),
+                    "offset {offset}, upsert {upsert}"
+                );
+            }
+        }
+    }
+}
+
 #[test]
 fn database_timestamp_ast_enforces_the_native_offset_domain() {
     let span =

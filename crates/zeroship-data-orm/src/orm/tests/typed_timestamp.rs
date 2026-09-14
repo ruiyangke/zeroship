@@ -79,6 +79,55 @@ fn assert_outside_calendar<T: std::fmt::Debug>(result: Result<T, DbError>) {
     );
 }
 
+// Commit negative and sub-second offsets and read the stored instants back.
+//
+// `happened` records the database clock in the same statement as `deadline`,
+// so their difference is the offset the database applied. SQLite reads one
+// clock for the whole statement. PostgreSQL reads `clock_timestamp()` once per
+// expression, so its difference also carries the gap between those two reads;
+// the allowed window stays far below the error of a misrendered sign or
+// fraction.
+async fn committed_offsets_shift_the_database_clock(
+    table: &EntityCollection<moments::Entity>,
+    postgres: bool,
+) {
+    let clock_read_gap_millis = if postgres { 100 } else { 0 };
+    for (offset_millis, expression) in [
+        (
+            -1_500,
+            TimestampExpr::database_now()
+                .minus(Duration::from_millis(1_500))
+                .unwrap(),
+        ),
+        (
+            5,
+            TimestampExpr::database_now()
+                .plus(Duration::from_millis(5))
+                .unwrap(),
+        ),
+    ] {
+        Box::pin(
+            table.update::<_, Moment>(
+                moments::id.eq("row").unwrap(),
+                moments::happened
+                    .set_expression(TimestampExpr::database_now())
+                    .unwrap()
+                    .and(moments::deadline.set_expression(expression).unwrap())
+                    .unwrap(),
+            ),
+        )
+        .await
+        .unwrap()
+        .expect("the row exists");
+        let stored = table.query().first::<Moment>().await.unwrap().unwrap();
+        let applied = stored.deadline.expect("the offset was committed") - stored.happened;
+        assert!(
+            (applied - offset_millis).abs() <= clock_read_gap_millis,
+            "an offset of {offset_millis} ms was stored {applied} ms from the database clock"
+        );
+    }
+}
+
 async fn exercise(postgres: bool) {
     let owner = fixture(postgres).await;
     let table = owner.database.entity::<moments::Entity>().unwrap();
@@ -218,6 +267,7 @@ async fn exercise(postgres: bool) {
             .happened,
         7
     );
+    Box::pin(committed_offsets_shift_the_database_clock(&table, postgres)).await;
     let ids = (0..crate::budgets::MAX_PER_ROW_UPDATE_TARGETS)
         .map(|index| format!("extra_{index}")).collect::<Vec<_>>();
     for batch in ids.chunks(crate::budgets::MAX_INSERT_MANY_BATCH) {
