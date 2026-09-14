@@ -278,5 +278,10 @@
     "file": "20260914000100_worker_instances_enroller_binding.ts",
     "name": "worker_instances_enroller_binding",
     "opCount": 10
+  },
+  {
+    "file": "20260914000200_placement_eligibility.ts",
+    "name": "placement_eligibility",
+    "opCount": 9
   }
 ]
