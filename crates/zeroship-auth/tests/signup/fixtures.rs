@@ -166,7 +166,7 @@ pub(super) async fn post(
 }
 
 pub(super) async fn created(server: &AuthServer, email: &str) -> users::UserRow {
-    let user = users::find_by_email(&server.pg, email)
+    let user = users::find_by_email(&server.orm, email)
         .await
         .unwrap()
         .expect("signup creates the account");

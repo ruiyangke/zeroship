@@ -53,7 +53,7 @@ async fn existing_password_account_requires_confirmation_before_identity_and_ses
         let password = "federation confirmation password phrase";
         let hash = password::hash(password).unwrap();
         let account = users::create(
-            &fixture.server.pg,
+            &fixture.server.orm,
             &fixture.provider.user().email,
             "Local account",
             Some(&hash),

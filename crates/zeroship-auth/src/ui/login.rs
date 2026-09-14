@@ -7,6 +7,7 @@ use serde::Deserialize;
 use serde_json::json;
 use std::sync::Arc;
 use zeroship_core::UserId;
+use zeroship_data_orm::Database;
 
 use crate::audit::{self, AuditEvent};
 use crate::config::AuthConfig;
@@ -131,6 +132,7 @@ pub async fn post(
     form: ntex::web::types::Form<LoginForm>,
     cfg: ntex::web::types::State<Arc<AuthConfig>>,
     db: ntex::web::types::State<Arc<compio_postgres::Client>>,
+    orm: ntex::web::types::State<Database>,
 ) -> HttpResponse {
     let query = query.into_inner();
     let form = form.into_inner();
@@ -140,6 +142,7 @@ pub async fn post(
         &form,
         cfg.as_ref(),
         db.as_ref(),
+        &orm,
     )
     .await
 }
@@ -151,6 +154,7 @@ async fn post_native(
     form: &LoginForm,
     cfg: &AuthConfig,
     db: &compio_postgres::Client,
+    orm: &Database,
 ) -> HttpResponse {
     let return_to = return_to::sanitize(
         form.return_to.as_deref().or(query_return_to),
@@ -180,7 +184,7 @@ async fn post_native(
 
     let ip = crate::headers::client_ip(&req);
     let verified =
-        match verify_password_credentials(db, &req, &client_id, &ip, &form.email, &form.password)
+        match verify_password_credentials(db, orm, &req, &client_id, &ip, &form.email, &form.password)
             .await
         {
             Ok(v) => v,
@@ -376,6 +380,7 @@ pub async fn post_2fa(
     form: ntex::web::types::Form<TotpForm>,
     cfg: ntex::web::types::State<Arc<AuthConfig>>,
     db: ntex::web::types::State<Arc<compio_postgres::Client>>,
+    orm: ntex::web::types::State<Database>,
 ) -> HttpResponse {
     let query = query.into_inner();
     let form = form.into_inner();
@@ -410,7 +415,7 @@ pub async fn post_2fa(
 
     // 3. Re-fetch the user; credential_version must still match (a password
     // change / forced logout since factor 1 invalidates this challenge).
-    let user = match users::find_by_id(db.as_ref(), &stash.user_id).await {
+    let user = match users::find_by_id(&orm, &stash.user_id).await {
         Ok(Some(u)) => u,
         Ok(None) => return redirect_to_login(&return_to),
         Err(e) => {

@@ -17,30 +17,52 @@ pub struct ScopeGatedIdentityClaims {
     pub picture: Option<String>,
 }
 
+pub(super) struct IdentityProfile<'a> {
+    pub email: &'a str,
+    pub email_verified: bool,
+    pub name: &'a str,
+    pub picture: Option<&'a str>,
+}
+
 /// Build the identity claim subset for a user and granted OIDC scopes.
 #[must_use]
 pub fn scope_gated_identity_claims<'a>(
     user: &UserRow,
     granted_scopes: impl IntoIterator<Item = &'a str>,
 ) -> ScopeGatedIdentityClaims {
-    let mut want_email = false;
-    let mut want_profile = false;
-    for scope in granted_scopes {
-        match scope {
-            "email" => want_email = true,
-            "profile" => want_profile = true,
-            _ => {}
-        }
+    IdentityProfile {
+        email: &user.email,
+        email_verified: user.email_verified_at.is_some(),
+        name: &user.name,
+        picture: user.avatar_url.as_deref(),
     }
+    .for_scopes(granted_scopes)
+}
 
-    ScopeGatedIdentityClaims {
-        email: want_email.then(|| user.email.clone()),
-        email_verified: want_email.then_some(user.email_verified_at.is_some()),
-        name: want_profile.then(|| user.name.clone()),
-        picture: if want_profile {
-            user.avatar_url.clone()
-        } else {
-            None
-        },
+impl IdentityProfile<'_> {
+    pub(super) fn for_scopes<'a>(
+        self,
+        granted_scopes: impl IntoIterator<Item = &'a str>,
+    ) -> ScopeGatedIdentityClaims {
+        let mut want_email = false;
+        let mut want_profile = false;
+        for scope in granted_scopes {
+            match scope {
+                "email" => want_email = true,
+                "profile" => want_profile = true,
+                _ => {}
+            }
+        }
+
+        ScopeGatedIdentityClaims {
+            email: want_email.then(|| self.email.to_owned()),
+            email_verified: want_email.then_some(self.email_verified),
+            name: want_profile.then(|| self.name.to_owned()),
+            picture: if want_profile {
+                self.picture.map(str::to_owned)
+            } else {
+                None
+            },
+        }
     }
 }

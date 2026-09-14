@@ -8,7 +8,7 @@ use zeroship_auth::identity::password_reset;
 async fn get_is_uncacheable_and_leaves_the_reset_token_live() {
     Database::run(async |database| {
         let server = AuthServer::start(database).await;
-        let user = super::fixtures::user(&server.pg, "reset-landing@example.test").await;
+        let user = super::fixtures::user(&server.orm, "reset-landing@example.test").await;
         let token = password_reset::issue(&server.pg, &user.email)
             .await
             .unwrap();

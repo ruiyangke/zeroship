@@ -349,7 +349,7 @@ async fn device_post_rate_limits_failed_user_code_guesses_but_allows_correct_cod
         let authz = request_device_authorization(&http, auth_base, &client_id, "openid").await;
 
         let email = format!("device-ratelimit-{client_id}@zeroship.test");
-        let user = users::create(&pg, &email, "Device Rate Limit User", None)
+        let user = users::create(&server.orm, &email, "Device Rate Limit User", None)
             .await
             .expect("create device rate-limit user");
         let session = session_store::create(
@@ -660,7 +660,7 @@ async fn native_device_confirmation_shows_client_scopes_and_requires_confirm() {
         );
 
         let email = format!("device-confirm-{client_id}@zeroship.test");
-        let user = users::create(&pg, &email, "Device Confirm User", None)
+        let user = users::create(&server.orm, &email, "Device Confirm User", None)
             .await
             .expect("create device confirm user");
         let session = session_store::create(
@@ -810,7 +810,7 @@ async fn native_device_grant_approves_via_auth_session_and_polls_op_token() {
         assert_eq!(pending_json["error"], "authorization_pending");
 
         let email = format!("native-device-{client_id}@zeroship.test");
-        let user = users::create(&pg, &email, "Native Device User", None)
+        let user = users::create(&server.orm, &email, "Native Device User", None)
             .await
             .expect("create native device user");
         let session = session_store::create(
@@ -947,7 +947,7 @@ async fn credential_bump_rejects_approved_device_code_after_deletion_is_cancelle
         .await;
         let authz = request_device_authorization(&http, auth_base, &client_id, "apps:read").await;
         let user = users::create(
-            &pg,
+            &server.orm,
             &format!("native-device-lifecycle-{client_id}@zeroship.test"),
             "Native Device Lifecycle User",
             None,
@@ -1070,7 +1070,7 @@ async fn device_user_code_redirects_anonymous_browser_to_login() {
         assert_eq!(location(&resp), "/login");
 
         let email = format!("device-grant-{client_id}@zeroship.test");
-        let user = users::create(&pg, &email, "Device Grant User", None)
+        let user = users::create(&server.orm, &email, "Device Grant User", None)
             .await
             .expect("create device grant user");
         let session = session_store::create(
@@ -1168,7 +1168,7 @@ async fn device_post_requires_csrf_token() {
         .await;
 
         let email = format!("device-csrf-{client_id}@zeroship.test");
-        let user = users::create(&pg, &email, "Device CSRF User", None)
+        let user = users::create(&server.orm, &email, "Device CSRF User", None)
             .await
             .expect("create device csrf user");
         let session = session_store::create(

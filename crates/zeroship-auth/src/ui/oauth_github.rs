@@ -27,6 +27,7 @@ use ntex::http::header::{HeaderValue, COOKIE, LOCATION, SET_COOKIE};
 use ntex::web::{HttpRequest, HttpResponse};
 use serde::Deserialize;
 use serde_json::json;
+use zeroship_data_orm::Database;
 
 use crate::audit::{self, AuditEvent};
 use crate::config::AuthConfig;
@@ -133,6 +134,7 @@ pub async fn callback(
     query: ntex::web::types::Query<CallbackQuery>,
     cfg: ntex::web::types::State<Arc<AuthConfig>>,
     db: ntex::web::types::State<Arc<compio_postgres::Client>>,
+    orm: ntex::web::types::State<Database>,
 ) -> HttpResponse {
     let cookie_header = req
         .headers()
@@ -258,6 +260,7 @@ pub async fn callback(
     let resume = LinkResume::ReturnTo(&native_return_to);
     let outcome = match linker::resolve_or_link(
         db.as_ref(),
+        &orm,
         &profile,
         resume,
         cfg.settings.stash_signing_key.expose_str().as_bytes(),

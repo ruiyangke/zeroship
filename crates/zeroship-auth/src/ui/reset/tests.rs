@@ -90,10 +90,11 @@ async fn stored_password(pg: &compio_postgres::Client, id: &zeroship_core::UserI
 async fn dead_tokens_never_reach_hashing() {
     Database::run(async |database| {
         let pg = Arc::new(database.connect_as_auth().await);
+        let orm = database.orm().await;
         let calls = Rc::new(Cell::new(0_usize));
         let (app, csrf) = reset_service!(pg.clone(), calls.clone(), observed_post);
         let email = "reset@example.test";
-        users::create(&pg, email, "Reset", None).await.unwrap();
+        users::create(&orm, email, "Reset", None).await.unwrap();
         let mut tokens = vec!["never-issued-token".to_owned()];
         let expired = password_reset::issue(&pg, email).await.unwrap();
         pg.execute(
@@ -135,7 +136,8 @@ async fn dead_tokens_never_reach_hashing() {
 async fn accepted_request_reaches_the_observed_hasher() {
     Database::run(async |database| {
         let pg = Arc::new(database.connect_as_auth().await);
-        let user = users::create(&pg, "reset@example.test", "Reset", None)
+        let orm = database.orm().await;
+        let user = users::create(&orm, "reset@example.test", "Reset", None)
             .await
             .unwrap();
         let token = password_reset::issue(&pg, &user.email).await.unwrap();
@@ -156,8 +158,9 @@ async fn accepted_request_reaches_the_observed_hasher() {
 async fn production_route_updates_the_credential_and_consumes_the_token() {
     Database::run(async |database| {
         let pg = Arc::new(database.connect_as_auth().await);
+        let orm = database.orm().await;
         let old_hash = hash_password(OLD_PASSWORD.to_owned()).await.unwrap();
-        let user = users::create(&pg, "reset@example.test", "Reset", Some(&old_hash))
+        let user = users::create(&orm, "reset@example.test", "Reset", Some(&old_hash))
             .await
             .unwrap();
         let token = password_reset::issue(&pg, &user.email).await.unwrap();
@@ -178,7 +181,8 @@ async fn production_route_updates_the_credential_and_consumes_the_token() {
 async fn exhausted_ip_is_rejected_before_hashing_a_live_token() {
     Database::run(async |database| {
         let pg = Arc::new(database.connect_as_auth().await);
-        let user = users::create(&pg, "reset@example.test", "Reset", None)
+        let orm = database.orm().await;
+        let user = users::create(&orm, "reset@example.test", "Reset", None)
             .await
             .unwrap();
         let token = password_reset::issue(&pg, &user.email).await.unwrap();
