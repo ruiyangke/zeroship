@@ -90,18 +90,35 @@ impl Platform {
     /// Control creates one, so placement can read its zone and deletion.
     /// Seeding an app that exists changes nothing.
     #[allow(dead_code, reason = "not every host contract places apps")]
-    pub async fn seed_app(&self, app: &zeroship_core::AppId) {
-        let exists = self
+    pub async fn seed_app(&self, app: &zeroship_core::AppId) -> String {
+        self.seed_app_in(app, None).await
+    }
+
+    /// As [`Self::seed_app`], in `zone` when given. An app's zone is fixed
+    /// when the app is created. Returns the app's plan, which allows
+    /// workflows.
+    #[allow(dead_code, reason = "not every host contract places apps")]
+    pub async fn seed_app_in(&self, app: &zeroship_core::AppId, zone: Option<&str>) -> String {
+        let existing = self
             .admin
-            .query("SELECT 1 FROM zeroship.apps WHERE id=$1", &[&app.as_str()])
+            .query("SELECT plan_id FROM zeroship.apps WHERE id=$1", &[&app.as_str()])
             .await
             .unwrap();
-        if !exists.is_empty() {
-            return;
+        if let Some(row) = existing.first() {
+            return row.get(0);
         }
         let organization = zeroship_core::OrganizationId::mint();
         let project = zeroship_core::ProjectId::mint();
         let name = app.as_str().replace('_', "-");
+        let plan = zeroship_core::typed_id::new_plan_id();
+        self.admin
+            .execute(
+                "INSERT INTO zeroship.plans(id,name,runtime_limits_json,workflows_allowed) \
+                 VALUES($1,$2,'{}',true)",
+                &[&plan, &format!("plan-{name}")],
+            )
+            .await
+            .unwrap();
         self.admin
             .execute(
                 "INSERT INTO zeroship.organizations(id,slug,name,billing_email) \
@@ -118,13 +135,29 @@ impl Platform {
             )
             .await
             .unwrap();
-        self.admin
-            .execute(
-                "INSERT INTO zeroship.apps(id,name,project_id,organization_id) VALUES($1,$2,$3,$4)",
-                &[&app.as_str(), &name, &project.as_str(), &organization.as_str()],
-            )
-            .await
-            .unwrap();
+        // Without a zone the insert names none, as a single-zone Control does,
+        // and the column default places the app in the seeded zone.
+        let inserted = match zone {
+            Some(zone) => {
+                self.admin
+                    .execute(
+                        "INSERT INTO zeroship.apps(id,name,plan_id,project_id,organization_id,execution_zone_id) \
+                         VALUES($1,$2,$3,$4,$5,$6)",
+                        &[&app.as_str(), &name, &plan, &project.as_str(), &organization.as_str(), &zone],
+                    )
+                    .await
+            }
+            None => {
+                self.admin
+                    .execute(
+                        "INSERT INTO zeroship.apps(id,name,plan_id,project_id,organization_id) VALUES($1,$2,$3,$4,$5)",
+                        &[&app.as_str(), &name, &plan, &project.as_str(), &organization.as_str()],
+                    )
+                    .await
+            }
+        };
+        assert_eq!(inserted.unwrap(), 1);
+        plan
     }
 }
 
