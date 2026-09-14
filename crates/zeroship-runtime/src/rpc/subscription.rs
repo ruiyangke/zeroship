@@ -330,6 +330,15 @@ fn advance_session(scope: &mut v8::PinScope, state: &SharedState, session: &mut 
                     send_error_and_close(scope, state, session, error);
                     return false;
                 }
+                Ok(CallProgress::MethodNotAllowed { method, path }) => {
+                    let error = response::error_value(
+                        format!("method {method} not allowed on {path}"),
+                        405,
+                        "FAILED_PRECONDITION",
+                    );
+                    send_error_and_close(scope, state, session, error);
+                    return false;
+                }
                 Err(failure) => {
                     let error = response::failure(scope, failure);
                     send_error_and_close(scope, state, session, error);
