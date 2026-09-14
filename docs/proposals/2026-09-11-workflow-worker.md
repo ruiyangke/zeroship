@@ -2766,27 +2766,60 @@ implementations. They do not reopen the database boundary or require another
 broker/service. Mid-run upgrade has its own unresolved semantic contract and is
 outside the queue cutover.
 
-### Dependency-ordered completion
+### End-to-end path
 
-- Compose the authenticated policy lease path with production creator bindings
-  before workers depend on remote policy. Native generations, refresh tickets,
-  transport and the authoritative Control source already exist.
-- Finalize the missing closed delivery, scope-recovery and retention contracts;
-  add their manager models using the canonical migration/ORM pipeline.
-- Connect normal deployment registration, activation and queue holds to manager
-  scheduling through a durable Control publication intent; connect lifecycle
-  commands to native disable/restore and remove the standalone scheduler host.
-- Add bounded dependency continuation delivery. Creator collection and topic
-  fanout pages, receipts and consumers are implemented, alongside shared payload
-  deletion fences and delivered management with its lifecycle fences.
-- Complete the ingress responsibility handshake before admitting new work through
-  the production host; retain pending work through outage and restart.
-- Compose the bounded worker consumer, payload/retention jobs and trusted runtime
-  loader; remove worker schedule discovery and independent maintenance loops.
-- Route signals, dependent work and management through the common protocol;
-  integrate the capacity adapter and prove progress without a resident worker.
-- Embed the same manager/consumer in the thin local host, then remove legacy
-  Control/Gateway advancement, cross-zone SQL/grants and obsolete settings.
-- Run owning native, authenticated host, private-zone and example suites before
-  reporting the production cutover complete; integrate shared ORM changes from
-  their owner rather than introducing workflow-specific replacements.
+The native libraries are exercised in isolation; no executable composes them
+yet. Remaining work proceeds as vertical slices. Each slice ends with an
+executable path that its owning native suites and the workflow examples
+exercise, instead of adding further library breadth first. Slices that touch
+disjoint crates may proceed in parallel; the numbering is the merge order.
+
+1. **Local host on the native manager.** `zeroship serve` and the Vite
+   development host compose the manager `Coordinator`, queue, recovery and
+   `Driver` over a local platform metadata catalog, and the ordinary
+   `JobConsumer` over the app's creator storage. A CLI-owned `JobTransport`
+   calls native coordinator operations for a trusted local worker, with real
+   delivery grants and no enrollment ceremony. One explicit local catalog
+   bootstrap holds the deployment catalog and manager metadata together.
+   Publishing a bundle registers and activates its schedules through the
+   native manager, so creator activation arrives as a delivered job. Startup
+   establishes the app's recovery responsibility before the host accepts
+   requests. `WorkflowWorker` polling, local maintenance loops and direct
+   activation are removed in the same slice. Proof: the CLI `workflow::`
+   contracts and the local tier of both example suites run through delivered
+   jobs, including process restart with a sleeping run, a lost acknowledgement
+   and hot reload.
+2. **Bounded dependency delivery.** Cascading cancellation and failure, and
+   parent notification, become paged jobs with durable progress in the creator
+   journal, following the fanout and collection pattern. This touches only the
+   creator engine and manager job contracts, so it can proceed alongside the
+   next slice.
+3. **Normal deployment publication.** Control's deploy transaction records an
+   idempotent command receipt and a lifecycle intent together. A Control
+   publisher delivers register, activate and disable to the manager and confirms
+   only exact receipts. Pending activations keep their bundle until confirmed.
+   Archive and restore use the same intents, and the CLI and
+   `@zeroship/control` carry the command identity. The legacy schedule
+   reconciler is deleted.
+4. **Worker executable.** The production worker runs `WorkerHost` on a
+   dedicated thread with a trusted creator-resource provider, the enrolled
+   instance signer and joined shutdown. `WorkerHost` publishes an app's backend
+   to request isolates only after assignment preparation passes its final
+   authority checks, and retires it synchronously on removal; an unknown or
+   unready app receives a retryable refusal. `WorkflowBinding` uses that ready
+   registry instead of the old Control backend. Enrollment and placement
+   eligibility follow the decisions below.
+5. **Ingress responsibility and capacity.** The ingress handshake gates start
+   and signal acceptance, and the capacity adapter starts an eligible worker for
+   due work that has no placement, following the scope and placement decisions.
+6. **Atomic legacy removal and private-zone proof.** One change deletes worker
+   claim, provisioning and advance paths, Control and gateway advancement,
+   Control's creator-journal access, the cross-zone grants and posture checks,
+   and the runtime workflow bridge entry once no executor uses it. The decisive
+   process contract runs separate creator and Control PostgreSQL containers,
+   ordinary app ingress, manager delivery, revocation of retained handles and
+   joined shutdown, and both examples' deployed tier run through it.
+
+Integrate shared ORM changes from their owner rather than introducing
+workflow-specific replacements. Report the production cutover complete only
+after slice six's process contract and both example suites pass.
