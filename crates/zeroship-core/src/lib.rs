@@ -39,6 +39,7 @@ pub mod types;
 pub mod usage_event;
 pub mod workflow_signal_token;
 pub mod user_envelope;
+pub mod worker_enrollers;
 pub mod worker_ring;
 pub mod workflow_coordination;
 pub mod workflow_deployments;

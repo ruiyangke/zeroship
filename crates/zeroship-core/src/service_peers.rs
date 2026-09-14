@@ -139,19 +139,23 @@ pub const SERVICE_TRUST_DOMAIN: &str = "zeroship.ai";
 /// The hierarchical name of the gateway's service identity.
 pub const GATEWAY_SERVICE_NAME: &str = "svc/gateway";
 /// The hierarchical name of the worker's service identity.
+///
+/// Callers ADDRESS every worker by this name, and every worker MINTS under an
+/// instance of it (`svc/worker/<wkr_id>`) after enrolling. Nothing mints under
+/// the bare name: no process holds a `svc/worker` role key, the peer document
+/// publishes none, and Control refuses a role-arity assertion naming it.
 pub const WORKER_SERVICE_NAME: &str = "svc/worker";
-/// The hierarchical name of a deployment unit's enrolment identity (option 1A
-/// of the worker-enrollment-bootstrap design).
+/// The hierarchical name of a deployment unit's enrolment identity.
 ///
 /// An enroller is a HOST OR POOL's bootstrap credential, one Ed25519 keypair
-/// per deployment unit, provisioned by the operator and mounted into that
-/// unit's worker containers in place of a shared `svc/worker` role key. Only
-/// this principal holds `CONTROL_WORKER_ENROL`
+/// per deployment unit, provisioned by the operator, recorded by Control with
+/// an execution zone and a status, and mounted into that unit's worker
+/// containers as the credential file [`ServiceKeyring::load_worker_enroller`]
+/// reads. Only this principal holds `CONTROL_WORKER_ENROL`
 /// (`crates/zeroship-core/src/service_identity.rs`); an enrolled worker
-/// INSTANCE cannot enrol another instance, and no process holds a bare
-/// `svc/worker` role signing key at all. Every enroller mints under an
+/// INSTANCE cannot enrol another instance. Every enroller mints under an
 /// INSTANCE identifier of this role (`svc/worker-enroller/<wen_id>`), never
-/// under the bare role name, exactly as a worker instance does today under
+/// under the bare role name, exactly as a worker instance does under
 /// `svc/worker/<wkr_id>` -- see `crates/zeroship-control/src/worker_enrolment.rs`
 /// for how Control resolves and locks the enroller row that identifier names.
 pub const WORKER_ENROLLER_SERVICE_NAME: &str = "svc/worker-enroller";
@@ -325,6 +329,39 @@ impl PeerKeyError {
     }
 }
 
+/// A worker deployment unit's enroller credential, as the operator writes it.
+///
+/// ```json
+/// { "enroller_id": "wen_...",
+///   "private_key": "-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----\n" }
+/// ```
+///
+/// ONE document rather than a key file and a separate id setting, because the
+/// two are one credential: Control verifies the assertion against the key it
+/// recorded FOR THAT ID, so an id and a key that drifted apart would refuse
+/// every enrolment while each half looked configured. The shape is the one
+/// service-account key files use for the same reason.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EnrollerCredentialDocument {
+    enroller_id: String,
+    private_key: String,
+}
+
+/// The issuer a worker deployment unit's enroller mints under:
+/// `svc/worker-enroller/<enroller_id>`.
+///
+/// # Errors
+///
+/// Returns [`AssertionError::MalformedIssuer`] when `enroller_id` is not a
+/// `wen_` typed id. The id reaches this from an operator's file, and an id
+/// Control could not have recorded must not become an issuer at all.
+pub fn worker_enroller_issuer(enroller_id: &str) -> Result<ServiceIssuer, AssertionError> {
+    crate::typed_id::parse_with_prefix(enroller_id, crate::typed_id::WORKER_ENROLLER_PREFIX)
+        .map_err(|_| AssertionError::MalformedIssuer)?;
+    service_issuer(&format!("{WORKER_ENROLLER_SERVICE_NAME}/{enroller_id}"))
+}
+
 /// One published peer key.
 #[derive(Debug, Deserialize)]
 struct PeerKeyEntry {
@@ -399,6 +436,62 @@ impl ServiceKeyring {
             load_peer_bundle(peers_path)?,
         )
         .map_err(|error| error.naming_document(key_path, peers_path))
+    }
+
+    /// Load a worker deployment unit's ENROLLER keyring from its credential
+    /// file and the peer bundle.
+    ///
+    /// The keyring mints under `svc/worker-enroller/<enroller_id>`, the id the
+    /// credential names. It is the ONE key a worker loads from disk, and it
+    /// authenticates the enrolment call and nothing else: no worker holds a
+    /// `svc/worker` role key. See [`EnrollerCredentialDocument`] for the shape
+    /// and why it is one document.
+    ///
+    /// Held to the same rules as [`ServiceKeyring::load`]: both paths are
+    /// required and an empty one is a refusal, the credential is refused when
+    /// any other local user can read it, and the private key's public half may
+    /// be published in the peer document under no issuer but the enroller's
+    /// own. A key published under the gateway's issuer would otherwise let this
+    /// process's envelope signer stamp a `kid` its own verifier resolves.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PeerKeyError::NotConfigured`] when either path is empty, and
+    /// [`PeerKeyError`] otherwise when either file is unreadable, the
+    /// credential is insecurely permissioned, malformed, names an id that is
+    /// not a `wen_` typed id or holds no ed25519 PKCS#8 key, or the pair
+    /// publishes the key under a foreign issuer.
+    pub fn load_worker_enroller(
+        credential_path: &Path,
+        peers_path: &Path,
+    ) -> Result<Self, PeerKeyError> {
+        require_configured(credential_path, "worker enroller credential file")?;
+        require_configured(peers_path, "service peer document")?;
+        let bytes = read_file(credential_path)?;
+        reject_insecure_permissions(credential_path)?;
+        let fault = |reason: String| PeerKeyError::Document {
+            path: credential_path.display().to_string(),
+            reason,
+        };
+        let document: EnrollerCredentialDocument =
+            serde_json::from_slice(&bytes).map_err(|error| fault(error.to_string()))?;
+        let issuer = worker_enroller_issuer(&document.enroller_id).map_err(|_| {
+            fault(format!(
+                "enroller_id {:?} is not a worker enroller id",
+                document.enroller_id
+            ))
+        })?;
+        if !document.private_key.contains("-----BEGIN PRIVATE KEY-----") {
+            return Err(fault(
+                "private_key is not a PKCS#8 PEM private key".to_owned(),
+            ));
+        }
+        let der = pem_body(&document.private_key).ok_or_else(|| {
+            fault("private_key carries PEM armor but its body did not decode".to_owned())
+        })?;
+        let signing_key = ServiceSigningKey::from_pkcs8_der(&der)?;
+        Self::from_parts(issuer, signing_key, load_peer_bundle(peers_path)?)
+            .map_err(|error| error.naming_document(credential_path, peers_path))
     }
 
     /// Build a keyring from material already in memory.
@@ -572,10 +665,11 @@ mod instance_key {
     /// # Per-instance identity is a DISTINGUISHER, not a boundary
     ///
     /// A process minting under a name of its own is attributable, individually
-    /// revocable, and countable. It is not contained: enrolment authenticates
-    /// with the SHARED role key, so whoever holds that key can enrol as many
-    /// instances as they like and each one is as genuine as the last. Nothing
-    /// here narrows what an instance may do.
+    /// retirable, and countable. It is not contained: enrolment authenticates
+    /// with the key of the instance's deployment unit, its enroller, so whoever
+    /// holds that key can enrol as many instances in the unit as they like and
+    /// each one is as genuine as the last. Nothing here narrows what an
+    /// instance may do; revoking the enroller is what bounds the unit.
     pub struct InstanceSigningKey {
         key: ServiceSigningKey,
         /// Kept beside the key rather than re-derived, so the bytes the check
@@ -884,11 +978,11 @@ pub fn load_signing_key(path: &Path) -> Result<ServiceSigningKey, PeerKeyError> 
 /// a fresh, empty entry every time.
 ///
 /// The realistic producer is not a hand-edited file. `SERVICE_KEY_FILES` in
-/// `crates/zeroship-cli/src/dev.rs` states the rule in its own rustdoc - four
-/// keys, not one shared file - and a secret manager or compose override mapping
-/// one secret onto the four `*_SERVICE_KEY_FILE` mounts satisfies every check
-/// the generator makes. The document it then publishes has one key under all
-/// four issuers, which is a shared bearer secret with no shared secret visible
+/// `crates/zeroship-cli/src/dev.rs` states the rule in its own rustdoc - one
+/// key per service, not one shared file - and a secret manager or compose
+/// override mapping one secret onto every `*_SERVICE_KEY_FILE` mount would
+/// satisfy any per-file check. The document it then publishes has one key under
+/// every issuer, which is a shared bearer secret with no shared secret visible
 /// to notice: possession of any one private half becomes the ability to present
 /// as every service, because the assertion verifier resolves its key from the
 /// issuer parsed out of the assertion it was handed.
