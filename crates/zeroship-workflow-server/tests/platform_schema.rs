@@ -446,6 +446,9 @@ async fn manager_queue_authority(fixture: &platform::Platform, runtime: &compio_
             .collect::<Vec<_>>(),
         [
             "assignments",
+            "capacity_demands",
+            "capacity_intents",
+            "capacity_targets",
             "deployment_holds",
             "jobs",
             "management",

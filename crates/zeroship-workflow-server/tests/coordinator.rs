@@ -288,9 +288,11 @@ async fn release_needs_neither_a_wake_hint_nor_a_responsible_peer() {
         .assign(&assignment_request(&app, &w2))
         .await
         .unwrap();
+    // A worker holding no placement of the app releases nothing.
+    let stranger = register_worker(&a, 2).await;
     assert_eq!(
         a.manager
-            .release(&w2, &release(&first, ReleaseReason::Relinquished))
+            .release(&stranger, &release(&first, ReleaseReason::Relinquished))
             .await,
         Err(Error::Denied)
     );
