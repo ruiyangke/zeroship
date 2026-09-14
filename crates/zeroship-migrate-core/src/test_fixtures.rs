@@ -15,15 +15,8 @@ use crate::{effective_policy_from_charter_toml, EffectivePolicy};
 // one declaration of `"postgres"`, and every consumer OUTSIDE this crate - including
 // the composition's `tests/` binaries - reads it from there.
 //
-// Core's `src` does not, and this file is the ONLY place in it that could: the vendor
-// crates are dev-dependencies, so `#[cfg(test)]` code can reach them, and
-// `dialect_matrix/core_names_no_vendor_crate.rs` is the ratchet that keeps that one
-// file at one. `core_names_no_vendor_backend_module.rs` allows `postgres::` in path
-// position NOWHERE, test code included. A `#[cfg(test)] use zeroship_migrate_postgres::DIALECT`
-// in `render/lower.rs` would be a real regression of both, not a technicality - the
-// compiled engine would still not link differently, but the rule those censuses hold
-// is about what core's source is ALLOWED to know, and twenty-two files knowing it is
-// exactly the drift they exist to catch.
+// Core's production graph does not reach these crates. This test fixture can because
+// they are dev dependencies, and it composes the vendor set for core unit tests.
 //
 // So these are re-declared, which is what `DialectId`'s content equality is for:
 // `DialectId::new("postgres")` IS the PostgreSQL id, whoever writes it. Re-declaring
@@ -34,12 +27,8 @@ use crate::{effective_policy_from_charter_toml, EffectivePolicy};
 //
 // # Why one module and not a const per test module
 //
-// Twenty-two `#[cfg(test)]` modules under `src/` name a dialect. Declaring the
-// strings in each would put sixty-six copies of three literals in core and give a
-// reader twenty-two places to ask whether core is carrying vendor identity. One
-// module answers it once, and `core_names_no_vendor_at_all.rs` already resolves a
-// parent's `#[cfg(test)] mod` to its file and excludes the whole file from the
-// production count.
+// Core test modules share this composition so each behavior test receives the same
+// vendor implementations that production hosts compose.
 
 /// The shipping registry, for core's `#[cfg(test)]` modules.
 ///

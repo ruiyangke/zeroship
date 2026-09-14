@@ -48,10 +48,9 @@
 //! available for the spelling primitives. The difference is direction.
 //! `ansi_double_quote_ident` has to be reachable by the vendor crates, and
 //! `pub(in ...)` cannot say "these three crates and no other", so it had to become
-//! `pub`. `render_vendor_op` only ever needs to be reachable by PostgreSQL ITSELF -
+//! `pub`. `render_vendor_op` only ever needs to be reachable by PostgreSQL itself -
 //! it is one crate's own item, and one crate's own privacy still works. A rule that
-//! can be a privacy should be one; the textual census in
-//! `crates/zeroship-migrate/tests/dialect_matrix/core_names_no_vendor_crate.rs` is the backstop for the rest.
+//! can be expressed through privacy should use privacy.
 //!
 //! # The behaviour test the census cannot be
 //!

@@ -82,15 +82,11 @@ napi = ["dep:napi", "dep:napi-derive"]
 zeroship-migrate = { path = "../zeroship-migrate" }
 # The PostgreSQL backend, named DIRECTLY rather than through a `zeroship-migrate`
 # re-export. The apply and status/journal hosts below build `PostgresBackend` over
-# the napi `pg` seam; the engine stopped re-exporting it when
-# the execution half moved into this crate, and re-adding the re-export would be core
-# naming a vendor crate outside its registry, which `core_names_no_vendor_crate`
-# forbids. All three vendors are named the same way now.
+# the napi `pg` seam; the engine stopped re-exporting it when the execution half
+# moved into this crate. Hosts name the vendor implementations they compose.
 zeroship-migrate-postgres = { path = "../zeroship-migrate-postgres" }
-# The MySQL backend, named DIRECTLY rather than through a `zeroship-migrate` re-export.
-# The apply host below builds `MysqlBackend` over the `mysql2` seam, and the
-# engine no longer re-exports it: core naming a vendor crate outside its registry is
-# what `core_names_no_vendor_crate` forbids, so the host names the vendor it wants.
+# The MySQL backend, named directly rather than through a `zeroship-migrate`
+# re-export. The apply host builds `MysqlBackend` over the `mysql2` seam.
 zeroship-migrate-mysql = { path = "../zeroship-migrate-mysql" }
 # The SQLite backend, named the same way and for the same reason. `apply_ir_sqlite` and
 # its siblings below build `SqliteBackend` on the in-process rusqlite actor; the

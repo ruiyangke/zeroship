@@ -925,9 +925,7 @@ impl DmlRenderer for SqliteDmlRenderer {
     /// `render::vendor`, and that one was not the same shape: `render::vendor` was
     /// PostgreSQL by CONSTRUCTION rather than by gate (it carried no dialect literal
     /// at all), so every dialect-match census scored it zero. RESOLVED as well now -
-    /// see [`Self::render_vendor_op`] below and `zeroship_migrate::render::vendor`. The
-    /// census that DOES see it is `core_names_no_vendor_crate.rs`, which counts crate
-    /// idents rather than dialect literals.
+    /// see [`Self::render_vendor_op`] below and `zeroship_migrate::render::vendor`.
     fn render_trigger_op(
         &self,
         op: &Op,

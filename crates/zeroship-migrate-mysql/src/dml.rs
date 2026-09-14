@@ -532,19 +532,12 @@ impl DmlRenderer for MysqlDmlRenderer {
     /// `pub(in crate::render::backends)` so that core CANNOT reach it un-named.
     ///
     /// NOTHING WAS EMITTED WRONGLY BEFORE THE MOVE, and that is the point. Every
-    /// call site named MySQL in the callee's name, so no vendor was unnamed, and
-    /// `backend_modules_name_one_dialect` passed because the reach was by function
-    /// name rather than by a dialect-enum literal. What it blocked was the crate
+    /// call site named MySQL in the callee's name, so no vendor was unnamed. What it
+    /// blocked was the crate
     /// split: this crate would have needed core at RUNTIME to spell its own
     /// identifier - the core-to-backend cycle the split exists to break, and the
     /// same shape as the extraction spike's finding that one vendor crate needed
     /// another to quote a trigger name.
-    ///
-    /// (This doc may not spell a FOREIGN vendor crate's ident, even in prose.
-    /// `backend_modules_name_one_dialect` reads the vendor crates as TEXT, so a
-    /// comment is a carrier like any other line. An earlier draft of this paragraph
-    /// named one and turned that test red, which is the rule working as intended.)
-    ///
     /// The move was checked by neutering each candidate spelling with a single
     /// appended token and reading which tests went red. The two before-sets NEST
     /// rather than being disjoint - the inverse of the ANSI case, and exactly what
