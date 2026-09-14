@@ -16,6 +16,7 @@ use zeroship_workflow::{
 };
 use zeroship_workflow_manager::{
     local::LocalPlatform,
+    recovery::{Options as RecoveryOptions, Recovery, Responsibility, ScopeState},
     scheduling::{Options as SchedulingOptions, Scheduler, Selection},
     DeliveryGrant, Options as QueueOptions,
 };
@@ -167,21 +168,44 @@ fn metered_database(
     (vec![service.plugin()], meter)
 }
 
-/// A second creator handle on the app database, outside the host.
+/// A second creator handle on the app database, outside the host. It holds
+/// the manager's current ingress epoch, as another host would once it had
+/// established that epoch.
 async fn client(root: &Path, app: &AppId) -> AppWorkflows {
+    let epoch = responsibility(root, app)
+        .await
+        .map(|current| current.ingress_epoch);
     retry(async || {
         let policies = Arc::new(HostPolicies::default());
         let binding = policies.bind(app.clone())?;
-        binding
-            .begin_refresh()?
-            .install(PolicySnapshot::configuration(
-                1.try_into().unwrap(),
-                AppPolicy::default(),
-            )?)?;
+        binding.begin_refresh()?.install(
+            PolicySnapshot::configuration(1.try_into().unwrap(), AppPolicy::default())?
+                .with_ingress_epoch(epoch),
+        )?;
         let service =
             WorkflowService::open(Rc::new(test_storage(root, app).open().await?), policies).await?;
         service.register_app(&binding).await
     })
+    .await
+}
+
+/// The app's recovery responsibility, read through a second binding to the
+/// platform file.
+async fn responsibility(root: &Path, app: &AppId) -> Option<Responsibility> {
+    Box::pin(retry(async || {
+        let platform = LocalPlatform::open(&root.join(".zeroship/platform/metadata.sqlite"))
+            .await
+            .map_err(manager::catalog_error)?;
+        let queue = platform
+            .queue(QueueOptions::default())
+            .await
+            .map_err(manager::manager_error)?;
+        Recovery::new(queue, RecoveryOptions::default())
+            .map_err(manager::manager_error)?
+            .responsibility(app)
+            .await
+            .map_err(manager::manager_error)
+    }))
     .await
 }
 
@@ -463,6 +487,71 @@ async fn reconciliation_publishes_work_committed_outside_the_host() {
     state(&host.backend, &run.id, RunState::Waiting).await;
     signal(&host.backend, &run.id).await;
     state(&host.backend, &run.id, RunState::Completed).await;
+}
+
+/// Startup establishes the app's ingress epoch before the host accepts work.
+/// Once the app idles, the manager's closing lane delivers Close and retires
+/// its responsibility; the next acceptance is fenced, the host establishes a
+/// newer epoch and retries it, and delivered work resumes. A restarted host
+/// reopens a retired scope before accepting requests.
+#[compio::test]
+async fn idle_responsibility_retires_and_the_next_acceptance_reopens_it() {
+    let root = tempfile::tempdir().unwrap();
+    let bundle = publish(root.path(), "original", "10ms");
+    let app = AppId::mint();
+    let config = LocalConfig {
+        manager: ManagerConfig {
+            driver_interval_ms: 50,
+            recovery_interval_ms: 3_600_000,
+            idle_close_ms: 200,
+            closing_timeout_ms: 10_000,
+            closing_backoff_ms: 100,
+            closing_backoff_max_ms: 400,
+            ..ManagerConfig::default()
+        },
+        ..LocalConfig::default()
+    };
+    let host = start(root.path(), &app, config.clone(), Some(bundle.as_path()));
+    let retired = until(async || {
+        responsibility(root.path(), &app)
+            .await
+            .filter(|current| current.state == ScopeState::Retired)
+    })
+    .await;
+    assert_eq!(
+        retired.ingress_epoch.get(),
+        1,
+        "startup established epoch one"
+    );
+    let run = start_run(&host.backend, "reopened").await;
+    let reopened = responsibility(root.path(), &app).await.unwrap();
+    assert!(
+        reopened.ingress_epoch.get() > retired.ingress_epoch.get(),
+        "the fenced start established a newer epoch: {reopened:?}"
+    );
+    state(&host.backend, &run, RunState::Waiting).await;
+    signal(&host.backend, &run).await;
+    assert_eq!(
+        state(&host.backend, &run, RunState::Completed).await.output,
+        Some(json!("original:original:lazy"))
+    );
+    let idle = until(async || {
+        responsibility(root.path(), &app)
+            .await
+            .filter(|current| current.state == ScopeState::Retired)
+    })
+    .await;
+    drop(host);
+
+    let _host = start(root.path(), &app, config, Some(bundle.as_path()));
+    let restarted = responsibility(root.path(), &app).await.unwrap();
+    assert!(
+        matches!(
+            restarted.state,
+            ScopeState::Open | ScopeState::Closing | ScopeState::Retired
+        ) && restarted.ingress_epoch.get() > idle.ingress_epoch.get(),
+        "startup reopened the retired scope at a newer epoch: {restarted:?}"
+    );
 }
 
 #[derive(Default)]
