@@ -453,6 +453,27 @@ pub const MISSING_ROLE_HINT: &str =
      missing.";
 
 impl DbError {
+    /// Borrow the backend-independent error code for diagnostics and boundaries.
+    #[must_use]
+    pub fn code(&self) -> &str {
+        match self {
+            Self::SchemaRefused { code, .. }
+            | Self::ValidationFailed { code, .. }
+            | Self::Configuration { code, .. }
+            | Self::PermissionDenied { code, .. }
+            | Self::AccessDenied { code } => code,
+            Self::Coded { code, .. } => code,
+            Self::UniqueViolation { .. } => "unique_violation",
+            Self::FkViolation { .. } => "fk_violation",
+            Self::NotNullViolation { .. } => "not_null_violation",
+            Self::CheckViolation { .. } => "check_violation",
+            Self::Serialization { .. } => "serialization_failure",
+            Self::LockContention { .. } => "lock_not_available",
+            Self::Transient { .. } => "transient",
+            Self::Internal { .. } => "internal",
+        }
+    }
+
     /// Render a flat string for remaining non-V8 and test callers. New V8
     /// boundary code should prefer `to_op_error()` so the typed code survives.
     pub fn into_string(self) -> String {
