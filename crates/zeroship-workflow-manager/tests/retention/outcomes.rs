@@ -47,6 +47,7 @@ async fn snapshot(fixture: &Fixture) -> BTreeMap<&'static str, Vec<Value>> {
         "queue_scopes",
         "deployment_holds",
         "management",
+        "management_scopes",
         "recovery_scopes",
         "schedule_occurrences",
     ] {

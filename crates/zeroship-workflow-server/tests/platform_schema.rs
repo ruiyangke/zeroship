@@ -32,6 +32,8 @@ async fn platform_role_can_coordinate_without_customer_or_journal_privileges() {
         .unwrap();
     for sql in [
         "SELECT id FROM workflow_manager.queue_scopes",
+        "SELECT id,deploy_hash FROM zeroship.apps",
+        "SELECT id,app_id,deploy_hash,retention_state FROM zeroship.app_deploys",
         "SELECT id,status,public_key FROM zeroship.worker_instances",
         "SELECT replay_key FROM service_authn.service_assertion_replay",
     ] {
@@ -45,6 +47,8 @@ async fn platform_role_can_coordinate_without_customer_or_journal_privileges() {
         "SELECT * FROM zeroship.app_deploys",
         "SELECT * FROM zeroship.plans",
         "UPDATE zeroship.worker_instances SET status='active'",
+        "UPDATE zeroship.apps SET deploy_hash=NULL",
+        "UPDATE zeroship.app_deploys SET retention_state='available'",
         "UPDATE workflow_manager.schema_version SET fingerprint='forged'",
         "CREATE TABLE workflow_manager.extra(id text PRIMARY KEY,data text)",
         "SET ROLE zeroship_workflow_migrator",
@@ -114,6 +118,7 @@ async fn platform_role_can_coordinate_without_customer_or_journal_privileges() {
         .unwrap();
     service.verify().await.unwrap();
     for table in [
+        "management_scopes",
         "schedule_deployments",
         "schedule_activations",
         "schedule_disables",
@@ -142,6 +147,30 @@ async fn platform_role_can_coordinate_without_customer_or_journal_privileges() {
             .unwrap();
         service.verify().await.unwrap();
     }
+    for (table, columns) in [
+        ("apps", "deploy_hash"),
+        ("app_deploys", "id,app_id,deploy_hash,retention_state"),
+    ] {
+        fixture
+            .admin
+            .batch_execute(&format!(
+                "REVOKE SELECT({columns}) ON zeroship.{table} FROM zeroship_workflow"
+            ))
+            .await
+            .unwrap();
+        assert!(
+            service.verify().await.is_err(),
+            "missing latest-deployment source privilege on {table}"
+        );
+        fixture
+            .admin
+            .batch_execute(&format!(
+                "GRANT SELECT({columns}) ON zeroship.{table} TO zeroship_workflow"
+            ))
+            .await
+            .unwrap();
+        service.verify().await.unwrap();
+    }
     assert!(fixture.work.path().join("migrate.toml").is_file());
 }
 
@@ -157,8 +186,8 @@ async fn manager_recovery_authority(fixture: &platform::Platform) {
     };
     use zeroship_data_orm::binding::DbBinding;
     use zeroship_workflow_manager::{
-        Options as QueueOptions, Queue,
         recovery::{Options as RecoveryOptions, Recovery},
+        Options as QueueOptions, Queue,
     };
 
     let queue = Queue::connect(
@@ -217,8 +246,8 @@ async fn manager_scheduling_authority(fixture: &platform::Platform) {
     };
     use zeroship_data_orm::binding::DbBinding;
     use zeroship_workflow_manager::{
-        Options as QueueOptions, Queue,
         scheduling::{Options as SchedulingOptions, Scheduler},
+        Options as QueueOptions, Queue,
     };
 
     let queue = Queue::connect(
@@ -317,6 +346,7 @@ async fn manager_queue_authority(fixture: &platform::Platform, runtime: &compio_
             "deployment_holds",
             "jobs",
             "management",
+            "management_scopes",
             "placement_receipts",
             "queue_scopes",
             "recovery_scopes",
@@ -365,7 +395,7 @@ async fn manager_queue_authority(fixture: &platform::Platform, runtime: &compio_
         1
     );
     assert_eq!(runtime.execute(
-        "INSERT INTO workflow_manager.jobs(id,app_id,deployment_id,operation,spec_digest,available_at,dispatch_order,state,created_at) VALUES($1,$2,$3,$4,$5,0,1,'ready',0)",
+        "INSERT INTO workflow_manager.jobs(id,app_id,deployment_id,operation,operation_kind,run_id,spec_digest,available_at,dispatch_order,state,created_at) VALUES($1,$2,$3,$4,'activate',NULL,$5,0,1,'ready',0)",
         &[&job.as_str(), &app.as_str(), &deployment.as_str(), &operation, &digest],
     ).await.unwrap(), 1);
     let stored = runtime

@@ -31,8 +31,6 @@ const CATALOG: &[ServiceEndpoint] = &[
     endpoints::WORKFLOW_RENEW,
     endpoints::WORKFLOW_RELEASE,
     endpoints::WORKFLOW_WAKE,
-    endpoints::WORKFLOW_MANAGEMENT_POLL,
-    endpoints::WORKFLOW_MANAGEMENT_ACK,
     endpoints::WORKFLOW_POLICY_LEASE,
     endpoints::WORKFLOW_JOB_SUBMIT,
     endpoints::WORKFLOW_JOB_CLAIM,
@@ -189,18 +187,6 @@ fn endpoint_catalog_records_exact_measured_operations() {
             "workflow",
             "POST",
             "/v1/wake-hints/publish",
-        ),
-        (
-            endpoints::WORKFLOW_MANAGEMENT_POLL,
-            "workflow",
-            "POST",
-            "/v1/management/poll",
-        ),
-        (
-            endpoints::WORKFLOW_MANAGEMENT_ACK,
-            "workflow",
-            "POST",
-            "/v1/management/acknowledge",
         ),
         (
             endpoints::WORKFLOW_JOB_SUBMIT,
@@ -405,8 +391,6 @@ fn measured_allowlist_is_encoded_and_enforced_row_by_row() {
             endpoints::WORKFLOW_RENEW,
             endpoints::WORKFLOW_RELEASE,
             endpoints::WORKFLOW_WAKE,
-            endpoints::WORKFLOW_MANAGEMENT_POLL,
-            endpoints::WORKFLOW_MANAGEMENT_ACK,
             endpoints::WORKFLOW_POLICY_LEASE,
             endpoints::WORKFLOW_JOB_SUBMIT,
             endpoints::WORKFLOW_JOB_CLAIM,
@@ -440,6 +424,20 @@ fn authorization_keys_on_individual_compound_identity() {
         &wrong_domain,
         endpoints::GATEWAY_WORKFLOW_ADVANCE
     ));
+}
+
+#[test]
+fn retired_management_delivery_paths_have_no_service_grant() {
+    let worker = identity("zeroship.ai", "svc/worker");
+    assert!(authorize(&worker, endpoints::WORKFLOW_JOB_CLAIM));
+    assert!(authorize(&worker, endpoints::WORKFLOW_JOB_SETTLE));
+    for path in ["/v1/management/poll", "/v1/management/acknowledge"] {
+        assert!(service_allowlist()
+            .iter()
+            .all(|row| row.endpoints().iter().all(|endpoint| {
+                endpoint.destination() != "workflow" || endpoint.path_template() != path
+            })));
+    }
 }
 
 /// `authorize` resolves a principal to the FIRST matching row, so a second row

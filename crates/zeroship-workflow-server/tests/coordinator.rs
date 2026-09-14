@@ -19,6 +19,7 @@ use zeroship_core::{
     service_peers::{service_issuer, CONTROL_SERVICE_NAME, WORKER_SERVICE_NAME},
     typed_id,
     workflow_coordination::*,
+    workflow_jobs::{JobOperation, JobOutcome, ManagementCommand, Settlement},
 };
 use zeroship_workflow_manager::Error;
 use zeroship_workflow_server::coordinator::{Coordinator, Error as HostError, Options, SCHEMA_SQL};
@@ -56,6 +57,8 @@ impl Fixture {
             .batch_execute(
                 "CREATE ROLE coordinator_test LOGIN;
              CREATE SCHEMA workflow_manager;
+             CREATE SCHEMA zeroship;
+             CREATE TABLE zeroship.apps(id text PRIMARY KEY,deploy_hash text);
              CREATE SCHEMA customer;
              CREATE TABLE customer.__zeroship_workflow_history(id text PRIMARY KEY,secret text);
              REVOKE ALL ON SCHEMA customer FROM PUBLIC;",
@@ -70,12 +73,18 @@ impl Fixture {
             .await
             .unwrap();
         admin.batch_execute(SCHEMA_SQL).await.unwrap();
+        admin
+            .batch_execute(zeroship_workflow_manager::deployments::POSTGRES_SCHEMA)
+            .await
+            .unwrap();
         admin.batch_execute(
-            "GRANT USAGE ON SCHEMA workflow_manager TO coordinator_test;
+            "GRANT USAGE ON SCHEMA workflow_manager,zeroship TO coordinator_test;
+             GRANT SELECT(id,deploy_hash) ON zeroship.apps TO coordinator_test;
+             GRANT SELECT(id,app_id,deploy_hash,retention_state) ON zeroship.app_deploys TO coordinator_test;
              GRANT SELECT ON workflow_manager.schema_version TO coordinator_test;
              GRANT SELECT,INSERT,UPDATE,DELETE ON workflow_manager.workers,
                workflow_manager.queue_scopes,workflow_manager.deployment_holds,workflow_manager.assignments,
-               workflow_manager.placement_receipts,workflow_manager.management,workflow_manager.jobs,
+               workflow_manager.placement_receipts,workflow_manager.management,workflow_manager.management_scopes,workflow_manager.jobs,
                workflow_manager.schedule_deployments,workflow_manager.schedule_activations,
                workflow_manager.schedule_disables,workflow_manager.schedule_scopes,
                workflow_manager.schedules,workflow_manager.schedule_occurrences,
@@ -101,7 +110,8 @@ impl Fixture {
              UNION ALL SELECT 'queue_scopes',id,'',id FROM workflow_manager.queue_scopes
              UNION ALL SELECT 'assignments',app_id,worker_id,id FROM workflow_manager.assignments
              UNION ALL SELECT 'placement_receipts',app_id,request_id,id FROM workflow_manager.placement_receipts
-             UNION ALL SELECT 'management',app_id,request_id,id FROM workflow_manager.management",
+             UNION ALL SELECT 'management',app_id,request_id,id FROM workflow_manager.management
+             UNION ALL SELECT 'management_scopes',app_id,run_id,id FROM workflow_manager.management_scopes",
             &[],
         ).await.unwrap();
         assert!(!rows.is_empty());
@@ -116,7 +126,8 @@ impl Fixture {
                 "workers" | "queue_scopes" => assert_eq!(id, scope),
                 "assignments" => assert!(typed_id::parse_with_prefix(&id, "wca").is_ok()),
                 "placement_receipts" => assert!(typed_id::parse_with_prefix(&id, "wcp").is_ok()),
-                "management" => assert!(typed_id::parse_with_prefix(&id, "wcm").is_ok()),
+                "management" => assert!(typed_id::parse_with_prefix(&id, "wjb").is_ok()),
+                "management_scopes" => assert!(typed_id::parse_with_prefix(&id, "wmo").is_ok()),
                 _ => panic!("unexpected metadata table"),
             }
             assert!(unique.insert(id.clone()));
@@ -371,9 +382,12 @@ async fn wake_hints_and_release_require_current_ownership_and_a_responsible_peer
         .unwrap();
     assert_eq!(
         a.manager
-            .pending_management(&w1, &assigned(&foreign_assignment))
-            .await,
-        Err(Error::Denied)
+            .claim_job(&w1, &assigned(&foreign_assignment), || async {
+                Ok(w1.clone())
+            })
+            .await
+            .unwrap_err(),
+        Error::Denied
     );
 }
 
@@ -483,13 +497,17 @@ async fn management_is_durable_bounded_typed_and_assignment_scoped() {
     let one = command(&app);
     assert_eq!(
         a.manager
-            .manage(&service_issuer(WORKER_SERVICE_NAME).unwrap(), &one)
+            .manage(
+                &service_issuer(WORKER_SERVICE_NAME).unwrap(),
+                &one,
+                &a.latest
+            )
             .await,
         Err(Error::Denied)
     );
     let (left, right) = futures::join!(
-        a.manager.manage(&actor, &one),
-        b.manager.manage(&actor, &one)
+        a.manager.manage(&actor, &one, &a.latest),
+        b.manager.manage(&actor, &one, &b.latest)
     );
     let receipt = left.unwrap();
     assert_eq!(receipt, right.unwrap());
@@ -501,7 +519,7 @@ async fn management_is_durable_bounded_typed_and_assignment_scoped() {
     let mut changed = one.clone();
     changed.run_id = RunId::mint();
     assert_eq!(
-        b.manager.manage(&actor, &changed).await,
+        b.manager.manage(&actor, &changed, &b.latest).await,
         Err(Error::Conflict)
     );
     let mut two = command(&app);
@@ -514,70 +532,94 @@ async fn management_is_durable_bounded_typed_and_assignment_scoped() {
             deploy: Some(RestartDeploy::Started),
         },
     };
-    a.manager.manage(&actor, &two).await.unwrap();
+    a.manager.manage(&actor, &two, &a.latest).await.unwrap();
     assert_eq!(
-        a.manager.manage(&actor, &command(&app)).await,
+        a.manager.manage(&actor, &command(&app), &a.latest).await,
         Err(Error::Capacity)
     );
     let worker = register_worker(&a, 1).await;
     let assigned_request = assignment_request(&app, &worker);
     let assignment = a.manager.assign(&assigned_request).await.unwrap();
     let scope = assigned(&assignment);
+    let grant = b
+        .manager
+        .claim_job(&worker, &scope, || async { Ok(worker.clone()) })
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(
-        b.manager.pending_management(&worker, &scope).await.unwrap(),
-        vec![one.clone()]
+        grant.delivery().job.operation,
+        JobOperation::Management {
+            request_id: one.request_id.clone(),
+            run_id: one.run_id.clone(),
+            revision: 1.try_into().unwrap(),
+            command: ManagementCommand::Transition {
+                operation: RunOperation::Pause
+            },
+        }
     );
-    let ack = AcknowledgeManagement {
-        request_id: one.request_id.clone(),
-        app_id: app.clone(),
-        assignment_revision: assignment.revision,
-        outcome: ManagementOutcome::Applied {
-            state: RunState::Paused,
-        },
+    let outcome = ManagementOutcome::Applied {
+        state: RunState::Paused,
     };
+    let settlement = Settlement {
+        delivery: grant.delivery().clone(),
+        outcome: JobOutcome::Management { outcome },
+        successors: vec![],
+    };
+    let foreign_worker = WorkerId::mint();
     assert_eq!(
         a.manager
-            .acknowledge_management(&WorkerId::mint(), &ack)
+            .settle_job(&foreign_worker, &settlement, || async {
+                Ok(foreign_worker.clone())
+            })
             .await,
         Err(Error::Denied)
     );
     let receipt = a
         .manager
-        .acknowledge_management(&worker, &ack)
+        .settle_job(&worker, &settlement, || async { Ok(worker.clone()) })
         .await
         .unwrap();
     assert_eq!(
         b.manager
-            .acknowledge_management(&worker, &ack)
+            .settle_job(&worker, &settlement, || async { Ok(worker.clone()) })
             .await
             .unwrap(),
         receipt
     );
-    assert_eq!(b.manager.manage(&actor, &one).await.unwrap(), receipt);
+    let management_receipt = ManagementReceipt {
+        app_id: app.clone(),
+        request_id: one.request_id.clone(),
+        outcome: Some(outcome),
+    };
+    assert_eq!(
+        b.manager.manage(&actor, &one, &b.latest).await.unwrap(),
+        management_receipt
+    );
     assert_ids_retained(&initial_ids, &fixture.stored_ids().await);
     assert_eq!(
         b.manager
             .management_receipt(&app, &one.request_id)
             .await
             .unwrap(),
-        Some(receipt)
+        Some(management_receipt)
     );
-    assert_eq!(
-        b.manager.pending_management(&worker, &scope).await.unwrap(),
-        vec![two.clone()]
-    );
-    let mut conflicting_ack = ack.clone();
-    conflicting_ack.outcome = ManagementOutcome::NotFound {};
+    let mut conflicting = settlement.clone();
+    conflicting.outcome = JobOutcome::Management {
+        outcome: ManagementOutcome::NotFound {},
+    };
     assert_eq!(
         b.manager
-            .acknowledge_management(&worker, &conflicting_ack)
+            .settle_job(&worker, &conflicting, || async { Ok(worker.clone()) })
             .await,
         Err(Error::Conflict)
     );
-    let mut foreign = ack.clone();
-    foreign.app_id = AppId::mint();
+    let mut foreign = settlement.clone();
+    foreign.delivery.job.app_id = AppId::mint();
     assert_eq!(
-        a.manager.acknowledge_management(&worker, &foreign).await,
+        a.manager
+            .settle_job(&worker, &foreign, || async { Ok(worker.clone()) })
+            .await,
         Err(Error::Denied)
     );
     let renewed = a
@@ -589,20 +631,38 @@ async fn management_is_durable_bounded_typed_and_assignment_scoped() {
         })
         .await
         .unwrap();
+    // Exact committed settlement remains readable after placement replacement.
     assert_eq!(
-        b.manager.acknowledge_management(&worker, &ack).await,
-        Err(Error::Denied)
+        b.manager
+            .settle_job(&worker, &settlement, || async { Ok(worker.clone()) })
+            .await
+            .unwrap(),
+        receipt
     );
     drop(a);
     drop(b);
     let reopened = fixture.options(options).await;
+    let grant = reopened
+        .manager
+        .claim_job(&worker, &assigned(&renewed), || async {
+            Ok(worker.clone())
+        })
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(
-        reopened
-            .manager
-            .pending_management(&worker, &assigned(&renewed))
-            .await
-            .unwrap(),
-        vec![two]
+        grant.delivery().job.operation,
+        JobOperation::Management {
+            request_id: two.request_id.clone(),
+            run_id: two.run_id.clone(),
+            revision: 1.try_into().unwrap(),
+            command: ManagementCommand::RestartStarted {
+                from: Some(RestartTarget {
+                    name: "checkpoint".into(),
+                    occurrence: Some(0),
+                })
+            },
+        }
     );
     let mut invalid = command(&app);
     invalid.command = ManagementOperation::Restart {
@@ -615,7 +675,10 @@ async fn management_is_durable_bounded_typed_and_assignment_scoped() {
         },
     };
     assert_eq!(
-        reopened.manager.manage(&actor, &invalid).await,
+        reopened
+            .manager
+            .manage(&actor, &invalid, &reopened.latest)
+            .await,
         Err(Error::Invalid)
     );
 }
@@ -765,7 +828,7 @@ async fn metadata_schema_has_no_customer_authority_and_ids_are_bytewise() {
          JOIN pg_class target ON target.oid=constraint_row.confrelid \
          JOIN pg_namespace namespace ON namespace.oid=relation.relnamespace \
          WHERE namespace.nspname='workflow_manager' \
-           AND constraint_row.conname IN ('assignment_scope','assignment_worker','receipt_scope','management_scope','jobs_app_id_fkey') \
+           AND constraint_row.conname IN ('assignment_scope','assignment_worker','receipt_scope','management_job','management_order','management_order_app','jobs_app_id_fkey') \
          ORDER BY relation.relname,target.relname", &[],
     ).await.unwrap();
     assert_eq!(
@@ -778,16 +841,18 @@ async fn metadata_schema_has_no_customer_authority_and_ids_are_bytewise() {
             ))
             .collect::<Vec<_>>(),
         [
-            ("assignments", "queue_scopes"),
-            ("assignments", "workers"),
-            ("jobs", "queue_scopes"),
-            ("management", "queue_scopes"),
-            ("placement_receipts", "queue_scopes"),
+            ("assignments", "queue_scopes", vec!["id"]),
+            ("assignments", "workers", vec!["id"]),
+            ("jobs", "queue_scopes", vec!["id"]),
+            ("management", "jobs", vec!["app_id", "id"]),
+            ("management", "management_scopes", vec!["app_id", "run_id"]),
+            ("management_scopes", "queue_scopes", vec!["id"]),
+            ("placement_receipts", "queue_scopes", vec!["id"]),
         ]
-        .map(|(table, target)| (
+        .map(|(table, target, columns)| (
             table.to_owned(),
             target.to_owned(),
-            vec!["id".to_owned()]
+            columns.into_iter().map(str::to_owned).collect::<Vec<_>>()
         ))
     );
     fixture

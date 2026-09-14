@@ -7,6 +7,9 @@
 #[path = "support/retention.rs"]
 mod catalog_support;
 mod support;
+#[allow(dead_code, reason = "shared source also supports latest admission tests")]
+#[path = "support/latest.rs"]
+mod latest_support;
 
 use catalog_support::{Catalog, Published};
 use futures::channel::oneshot;

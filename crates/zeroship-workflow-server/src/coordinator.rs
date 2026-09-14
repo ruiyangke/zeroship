@@ -8,9 +8,12 @@
 use compio_postgres::{types::FromSql, Pool, PoolConfig, Row};
 use std::{rc::Rc, time::Duration};
 use zeroship_core::schema_name::SchemaName;
-use zeroship_data_orm::binding::DbBinding;
+use zeroship_data_orm::{
+    binding::DbBinding, encryption::ProjectKeySource, orm::Database, ConnectOptions,
+};
 use zeroship_workflow_manager::{
     coordinator::{Coordinator as NativeCoordinator, Options as NativeOptions},
+    deployments::latest::{self, LatestDeploymentSource},
     retention::HoldClient,
     Options as QueueOptions, Queue,
 };
@@ -99,6 +102,7 @@ pub struct Coordinator {
     pool: Pool,
     pub(crate) queue: Queue,
     pub manager: NativeCoordinator,
+    pub latest: LatestDeploymentSource,
 }
 impl Coordinator {
     /// # Errors
@@ -146,10 +150,31 @@ impl Coordinator {
                 max_pending_management: options.max_pending_management,
             },
         )?;
+        let latest = compio::time::timeout(options.acquire_timeout, async {
+            let database = Database::connect(
+                DbBinding::new(
+                    "platform",
+                    "workflow-latest-deployment",
+                    SchemaName::new("zeroship").map_err(|_| Error::Invalid)?,
+                ),
+                ConnectOptions::new(url, ProjectKeySource::unavailable())
+                    .max_connections(
+                        std::num::NonZeroUsize::new(options.connections).ok_or(Error::Invalid)?,
+                    )
+                    .connection_authority(),
+                latest::collections().map_err(Error::from)?,
+            )
+            .await
+            .map_err(|_| Error::Unavailable)?;
+            LatestDeploymentSource::new(database).map_err(Error::from)
+        })
+        .await
+        .map_err(|_| Error::Unavailable)??;
         let service = Self {
             pool,
             queue,
             manager,
+            latest,
         };
         service.verify().await?;
         Ok(service)
@@ -194,6 +219,7 @@ impl Coordinator {
             "assignments",
             "placement_receipts",
             "management",
+            "management_scopes",
             "schedule_deployments",
             "schedule_activations",
             "schedule_disables",
@@ -231,19 +257,22 @@ impl Coordinator {
         }
         self.pool.batch_execute(
             "SELECT id,capacity,state,expires_at,lock_version FROM workflow_manager.workers LIMIT 0;
-             SELECT id,lock_version FROM workflow_manager.queue_scopes LIMIT 0;
+             SELECT id,lock_version,dispatch_cursor FROM workflow_manager.queue_scopes LIMIT 0;
              SELECT id,app_id,deployment_id,holder_id,deploy_hash,generation,state FROM workflow_manager.deployment_holds LIMIT 0;
-             SELECT id,app_id,deployment_id,operation,spec_digest,available_at,state,attempt,worker_id,assignment_revision,lease_deadline,outcome,settlement_digest,created_at FROM workflow_manager.jobs LIMIT 0;
+             SELECT id,app_id,deployment_id,operation,operation_kind,run_id,management_request_id,spec_digest,available_at,dispatch_order,state,attempt,worker_id,assignment_revision,lease_deadline,outcome,settlement_digest,created_at FROM workflow_manager.jobs LIMIT 0;
              SELECT app_id,worker_id,revision,expires_at,released,wake_revision,next_due_at FROM workflow_manager.assignments LIMIT 0;
              SELECT app_id,request_id,operation,worker_id,expected_revision,wake_revision,result_revision,result_expires_at FROM workflow_manager.placement_receipts LIMIT 0;
-             SELECT app_id,request_id,run_id,actor,operation,restart_name,restart_occurrence,restart_deploy,created_at,outcome,run_state,ack_worker_id,ack_revision FROM workflow_manager.management LIMIT 0;
+             SELECT id,app_id,request_id,run_id,revision,actor,request,request_digest,blocks_execution,created_at,outcome FROM workflow_manager.management LIMIT 0;
+             SELECT id,app_id,run_id,accepted_revision,settled_revision FROM workflow_manager.management_scopes LIMIT 0;
              SELECT id,app_id,definition,interpretation,created_at FROM workflow_manager.schedule_deployments LIMIT 0;
              SELECT id,app_id,deployment_id,revision,activated_at FROM workflow_manager.schedule_activations LIMIT 0;
              SELECT id,app_id,revision,created_at FROM workflow_manager.schedule_disables LIMIT 0;
              SELECT id,revision,activation_id,enabled FROM workflow_manager.schedule_scopes LIMIT 0;
              SELECT id,app_id,name,activation_id,revision,definition,next_at,anchor_at,catch_up_until,catch_up_remaining FROM workflow_manager.schedules LIMIT 0;
              SELECT id,app_id,schedule_id,revision,scheduled_at,run_id,job_id,activation_id FROM workflow_manager.schedule_occurrences LIMIT 0;
-             SELECT id,deployment_id,activation_revision,next_due_at,pending_job_id FROM workflow_manager.recovery_scopes LIMIT 0;"
+             SELECT id,deployment_id,activation_revision,next_due_at,pending_job_id FROM workflow_manager.recovery_scopes LIMIT 0;
+             SELECT id,deploy_hash FROM zeroship.apps LIMIT 0;
+             SELECT id,app_id,deploy_hash,retention_state FROM zeroship.app_deploys LIMIT 0;"
         ).await?;
         Ok(())
     }

@@ -1,10 +1,16 @@
 use super::*;
 use std::future::ready;
 use zeroship_core::{
-    workflow_coordination::{ManagementOutcome, RequestId, RestartTarget, RunOperation, RunState},
-    workflow_jobs::ManagementCommand,
+    service_peers::{service_issuer, CONTROL_SERVICE_NAME},
+    workflow_coordination::{
+        ManageRun, ManagementOperation, ManagementOutcome, RequestId, RestartDeploy,
+        RestartOptions, RestartTarget, RunOperation, RunState,
+    },
 };
-use zeroship_workflow_manager::retention::HoldFuture;
+use zeroship_workflow_manager::{
+    coordinator::{Coordinator, Options as CoordinatorOptions},
+    retention::HoldFuture,
+};
 
 case!(
     sqlite_journal_jobs_never_call_deployment_holds,
@@ -55,38 +61,12 @@ impl HoldClient for ForbiddenHolds {
     }
 }
 
-fn management(command: ManagementCommand) -> JobOperation {
-    JobOperation::Management {
-        request_id: RequestId::mint(),
-        run_id: RunId::mint(),
-        revision: 1.try_into().unwrap(),
-        command,
-    }
-}
-
 async fn journal_jobs(fixture: &Fixture) {
     let queue = queue(fixture, Rc::new(ForbiddenHolds)).await;
-    let mut operations = vec![JobOperation::Reconcile {}, JobOperation::Collect {}];
-    operations.extend(
-        [
-            RunOperation::Pause,
-            RunOperation::Resume,
-            RunOperation::Cancel,
-        ]
-        .map(|operation| management(ManagementCommand::Transition { operation })),
-    );
-    for from in [
-        None,
-        Some(RestartTarget {
-            name: "retained-step".into(),
-            occurrence: Some(0),
-        }),
-    ] {
-        operations.push(management(ManagementCommand::RestartStarted { from }));
-    }
-    for operation in operations {
+    for operation in [JobOperation::Reconcile {}, JobOperation::Collect {}] {
         exercise_journal_job(fixture, &queue, operation).await;
     }
+    journal_commands(fixture, &queue).await;
 
     let app = AppId::mint();
     let recovery = Recovery::new(queue.clone(), RecoveryOptions::default()).unwrap();
@@ -135,10 +115,6 @@ async fn exercise_journal_job(fixture: &Fixture, queue: &Queue, operation: JobOp
         .heartbeat(&authority, granted.delivery())
         .await
         .unwrap();
-    if matches!(spec.operation, JobOperation::Management { .. }) {
-        unsupported_management(fixture, queue, &authority, renewed.delivery()).await;
-        return;
-    }
     let successor = JobSpec {
         id: JobId::mint(),
         ..spec.clone()
@@ -166,38 +142,90 @@ async fn exercise_journal_job(fixture: &Fixture, queue: &Queue, operation: JobOp
     assert!(stored.iter().all(|row| row["deployment_id"] == Value::Null));
 }
 
-async fn unsupported_management(
-    fixture: &Fixture,
-    queue: &Queue,
-    authority: &Assignment,
-    delivery: &zeroship_core::workflow_jobs::Delivery,
-) {
-    for outcome in [
-        ManagementOutcome::Applied {
-            state: RunState::Queued,
-        },
-        ManagementOutcome::NotFound {},
-        ManagementOutcome::Conflict {},
-        ManagementOutcome::Denied {},
+async fn journal_commands(fixture: &Fixture, queue: &Queue) {
+    let source = latest_support::Source::new(fixture).await;
+    let coordinator = Coordinator::new(queue.clone(), CoordinatorOptions::default()).unwrap();
+    let actor = service_issuer(CONTROL_SERVICE_NAME).unwrap();
+    let mut commands: Vec<_> = [
+        RunOperation::Pause,
+        RunOperation::Resume,
+        RunOperation::Cancel,
+    ]
+    .into_iter()
+    .map(|operation| ManagementOperation::Transition { operation })
+    .collect();
+    for from in [
+        None,
+        Some(RestartTarget {
+            name: "retained-step".into(),
+            occurrence: Some(0),
+        }),
     ] {
-        let settlement = Settlement {
-            delivery: delivery.clone(),
-            outcome: JobOutcome::Management { outcome },
-            successors: vec![job(&delivery.job.app_id, &DeploymentId::mint())],
-        };
-        super::outcomes::refused(fixture, queue, authority, &settlement, Error::Unavailable).await;
+        commands.push(ManagementOperation::Restart {
+            options: RestartOptions {
+                from,
+                deploy: Some(RestartDeploy::Started),
+            },
+        });
     }
-    for outcome in [
-        JobOutcome::Completed {},
-        JobOutcome::Waiting {},
-        JobOutcome::Rejected {},
-    ] {
+    for command in commands {
+        let app = AppId::mint();
+        let request = ManageRun {
+            app_id: app.clone(),
+            request_id: RequestId::mint(),
+            run_id: RunId::mint(),
+            command,
+        };
+        let pending = coordinator
+            .manage(&actor, &request, &source.latest)
+            .await
+            .unwrap();
+        assert_eq!(
+            coordinator
+                .manage(&actor, &request, &source.latest)
+                .await
+                .unwrap(),
+            pending
+        );
+        let authority = assignment(&app);
+        let granted = queue.claim(&authority).await.unwrap().unwrap();
+        assert_eq!(granted.delivery().job.deployment_id(), None);
+        let renewed = queue
+            .heartbeat(&authority, granted.delivery())
+            .await
+            .unwrap();
+        for outcome in [
+            JobOutcome::Completed {},
+            JobOutcome::Waiting {},
+            JobOutcome::Rejected {},
+        ] {
+            let rejected = Settlement {
+                delivery: renewed.delivery().clone(),
+                outcome,
+                successors: vec![job(&app, &DeploymentId::mint())],
+            };
+            super::outcomes::refused(fixture, queue, &authority, &rejected, Error::Invalid).await;
+        }
         let settlement = Settlement {
-            delivery: delivery.clone(),
-            outcome,
+            delivery: renewed.delivery().clone(),
+            outcome: JobOutcome::Management {
+                outcome: ManagementOutcome::Applied {
+                    state: RunState::Queued,
+                },
+            },
             successors: vec![],
         };
-        super::outcomes::refused(fixture, queue, authority, &settlement, Error::Invalid).await;
+        let settled = queue.settle(&authority, &settlement).await.unwrap();
+        assert_eq!(
+            queue.settle(&authority, &settlement).await.unwrap(),
+            settled
+        );
+        assert!(coordinator
+            .manage(&actor, &request, &source.latest)
+            .await
+            .unwrap()
+            .outcome
+            .is_some());
     }
 }
 

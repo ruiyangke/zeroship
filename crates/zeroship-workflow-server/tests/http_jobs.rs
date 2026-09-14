@@ -696,6 +696,153 @@ async fn enrollment_revocation_and_key_replacement_fence_blocked_queue_operation
     }
 }
 
+#[ntex::test]
+async fn management_receipt_replay_rechecks_enrollment_after_linkage_reads() {
+    use zeroship_core::workflow_coordination::{ManageRun, ManagementOperation, ManagementOutcome};
+
+    let fixture = Fixture::new().await;
+    let request = ManageRun {
+        app_id: fixture.assignment.app_id.clone(),
+        request_id: RequestId::mint(),
+        run_id: RunId::mint(),
+        command: ManagementOperation::Transition {
+            operation: RunOperation::Pause,
+        },
+    };
+    let accepted = post(
+        &fixture.http,
+        &fixture.server.url,
+        endpoints::WORKFLOW_MANAGE,
+        &assertion(&fixture.control, &fixture.control_key, AUDIENCE),
+        &request,
+    )
+    .await;
+    assert_eq!(accepted.0, StatusCode::OK, "{:?}", accepted.1);
+    let (status, body) = fixture
+        .post(endpoints::WORKFLOW_JOB_CLAIM, &fixture.scope())
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let lease: DeliveryLease = serde_json::from_value(body).unwrap();
+    assert_eq!(
+        lease.delivery.job.operation,
+        JobOperation::Management {
+            request_id: request.request_id,
+            run_id: request.run_id,
+            revision: 1.try_into().unwrap(),
+            command: ManagementCommand::Transition {
+                operation: RunOperation::Pause
+            },
+        }
+    );
+    let settlement = Settlement {
+        delivery: lease.delivery,
+        outcome: JobOutcome::Management {
+            outcome: ManagementOutcome::NotFound {},
+        },
+        successors: vec![],
+    };
+    let receipt = fixture
+        .post(endpoints::WORKFLOW_JOB_SETTLE, &settlement)
+        .await;
+    assert_eq!(receipt.0, StatusCode::OK, "{:?}", receipt.1);
+    // Receipt recovery depends on enrollment rather than renewed placement.
+    fixture
+        .platform
+        .admin
+        .execute(
+            "UPDATE workflow_manager.assignments SET expires_at=0 WHERE app_id=$1",
+            &[&settlement.delivery.job.app_id.as_str()],
+        )
+        .await
+        .unwrap();
+    let before = management_snapshot(&fixture).await;
+    for replace_key in [false, true] {
+        deny_management_replay_after_linkage_wait(&fixture, &settlement, replace_key).await;
+        assert_eq!(management_snapshot(&fixture).await, before);
+        assert_eq!(
+            fixture
+                .post(endpoints::WORKFLOW_JOB_SETTLE, &settlement)
+                .await
+                .0,
+            StatusCode::UNAUTHORIZED
+        );
+        replace_enrollment(&fixture, fixture.worker.key.verifying_key_bytes()).await;
+        assert_eq!(
+            fixture
+                .post(endpoints::WORKFLOW_JOB_SETTLE, &settlement)
+                .await,
+            receipt
+        );
+        assert_eq!(management_snapshot(&fixture).await, before);
+    }
+}
+
+async fn management_snapshot(fixture: &Fixture) -> Vec<(String, String)> {
+    let rows = fixture.platform.admin.query(
+        "SELECT 'job' AS kind,to_jsonb(j)::text AS body FROM workflow_manager.jobs j WHERE app_id=$1 \
+         UNION ALL SELECT 'command',to_jsonb(m)::text FROM workflow_manager.management m WHERE app_id=$1 \
+         UNION ALL SELECT 'order',to_jsonb(o)::text FROM workflow_manager.management_scopes o WHERE app_id=$1 \
+         UNION ALL SELECT 'queue_scope',to_jsonb(s)::text FROM workflow_manager.queue_scopes s WHERE id=$1 \
+         UNION ALL SELECT 'assignment',to_jsonb(a)::text FROM workflow_manager.assignments a WHERE app_id=$1 \
+         ORDER BY kind,body",
+        &[&fixture.assignment.app_id.as_str()],
+    ).await.unwrap();
+    assert_eq!(
+        rows.len(),
+        5,
+        "fixture must include all linked receipt and scope records"
+    );
+    rows.iter().map(|row| (row.get(0), row.get(1))).collect()
+}
+
+async fn deny_management_replay_after_linkage_wait(
+    fixture: &Fixture,
+    settlement: &Settlement,
+    replace_key: bool,
+) {
+    let admin_url = fixture
+        .platform
+        .runtime_url
+        .replacen("zeroship_workflow@", "postgres@", 1);
+    let mut blocker = platform::connect(&admin_url).await;
+    let pid: i32 = blocker
+        .query_one("SELECT pg_backend_pid()", &[])
+        .await
+        .unwrap()
+        .get(0);
+    let lock = blocker.transaction().await.unwrap();
+    lock.batch_execute("LOCK TABLE workflow_manager.management IN ACCESS EXCLUSIVE MODE")
+        .await
+        .unwrap();
+    let request = fixture.post(endpoints::WORKFLOW_JOB_SETTLE, settlement);
+    let revoke = async {
+        compio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                let waiting: bool = fixture.platform.admin.query_one(
+                    "SELECT EXISTS(SELECT 1 FROM pg_stat_activity a JOIN pg_locks l ON l.pid=a.pid \
+                     WHERE a.usename='zeroship_workflow' AND a.state='active' \
+                     AND $1=ANY(pg_blocking_pids(a.pid)) AND NOT l.granted \
+                     AND l.relation='workflow_manager.management'::regclass \
+                     AND l.mode='AccessShareLock' AND a.query ILIKE '%management%')", &[&pid],
+                ).await.unwrap().get(0);
+                if waiting {
+                    break;
+                }
+                compio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .expect("exact settlement must reach the blocked management linkage SELECT");
+        change_enrollment(fixture, replace_key).await;
+        lock.commit().await.unwrap();
+    };
+    let ((status, body), ()) = futures::join!(Box::pin(request), Box::pin(revoke));
+    assert_eq!(
+        (status, body),
+        (StatusCode::FORBIDDEN, json!({"code":"denied"}))
+    );
+}
+
 #[derive(Clone, Copy)]
 enum RequestKind {
     Submit,

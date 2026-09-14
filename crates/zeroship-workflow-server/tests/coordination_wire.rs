@@ -4,10 +4,10 @@ use std::fmt::Debug;
 use zeroship_core::{
     app_id::AppId,
     workflow_coordination::{
-        AcknowledgeManagement, AssignScope, AssignedScope, Assignment, Failure, ManageRun,
-        ManagementOperation, ManagementOutcome, ManagementReceipt, ManagementStatus,
-        PublishWakeHint, RegisterWorker, RegisteredWorker, ReleaseScope, RequestId, Revision,
-        RunId, ScopePage, UnixMillis, VerifyAssignment, WakeHintReceipt, WorkerId, WorkerPage,
+        AssignScope, AssignedScope, Assignment, Failure, ManageRun, ManagementOperation,
+        ManagementOutcome, ManagementReceipt, ManagementStatus, PublishWakeHint, RegisterWorker,
+        RegisteredWorker, ReleaseScope, RequestId, Revision, RunId, ScopePage, UnixMillis,
+        VerifyAssignment, WakeHintReceipt, WorkerId, WorkerPage,
     },
 };
 
@@ -127,9 +127,9 @@ fn management_and_nested_receipts_cannot_carry_execution_data() {
         json!({"kind":"denied"}),
     ] {
         rejects_customer_fields::<ManagementOutcome>(&outcome);
-        rejects_customer_fields::<AcknowledgeManagement>(&json!({
-            "requestId":request,"appId":app,"assignmentRevision":1,"outcome":outcome
-        }));
+        rejects_customer_fields::<zeroship_core::workflow_jobs::JobOutcome>(
+            &json!({"kind":"management","outcome":outcome}),
+        );
     }
     for command in [
         json!({"kind":"start","input":"private"}),

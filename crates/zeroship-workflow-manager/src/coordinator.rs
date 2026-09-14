@@ -60,6 +60,7 @@ impl Options {
         duration_ms(self.assignment_ttl)?;
         if self.batch_limit == 0
             || self.max_pending_management == 0
+            || self.max_pending_management > crate::management::MAX_PENDING_COMMANDS
             || i64::try_from(self.batch_limit).is_err()
             || i64::try_from(self.max_pending_management).is_err()
         {
@@ -93,6 +94,7 @@ impl Coordinator {
         queue.database.entity::<assignments::Entity>()?;
         queue.database.entity::<placement_receipts::Entity>()?;
         queue.database.entity::<management_records::Entity>()?;
+        queue.database.entity::<crate::models::management_scopes::Entity>()?;
         Ok(Self { queue, options })
     }
 

@@ -29,14 +29,20 @@
     "id",
     "app_id",
     "request_id",
-    "run_id",
-    "ack_worker_id"
+    "run_id"
+  ],
+  "management_scopes": [
+    "id",
+    "app_id",
+    "run_id"
   ],
   "jobs": [
     "id",
     "app_id",
     "deployment_id",
-    "worker_id"
+    "worker_id",
+    "run_id",
+    "management_request_id"
   ],
   "recovery_scopes": [
     "id",

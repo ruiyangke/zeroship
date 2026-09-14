@@ -16,10 +16,9 @@ use zeroship_core::{
     service_identity::{endpoints, verify_identity, PeerCredentials, ServiceEndpoint},
     service_peers::{ServiceAuth, ServiceKeyring},
     workflow_coordination::{
-        AcknowledgeManagement, AssignScope, AssignedScope, FailureCode, ManageRun,
-        ManagementOperation, ManagementOutcome, ManagementStatus, PublishWakeHint, RegisterWorker,
-        RequestId, RunId, RunOperation, ScopePage, VerifyAssignment, WorkerId, WorkerPage,
-        WorkerState, AUDIENCE,
+        AssignScope, AssignedScope, FailureCode, ManageRun, ManagementOperation, ManagementStatus,
+        PublishWakeHint, RegisterWorker, RequestId, RunId, RunOperation, ScopePage,
+        VerifyAssignment, WorkerId, WorkerPage, WorkerState, AUDIENCE,
     },
 };
 use zeroship_workflow_client::{ControlCoordinator, Error, Options, WorkerCoordinator};
@@ -548,48 +547,6 @@ async fn scope_and_receipt_substitution_are_rejected() {
                 };
                 assert_eq!(
                     client.publish_wake(&request).await.unwrap_err(),
-                    Error::InvalidResponse
-                );
-            },
-        )
-        .await;
-    }
-    let request_id = RequestId::mint();
-    for commands in [
-        json!([{"appId":other,"requestId":request_id,"runId":RunId::mint(),"command":{"kind":"transition","operation":"cancel"}}]),
-        json!([{"appId":app,"requestId":request_id,"runId":RunId::mint(),"command":{"kind":"transition","operation":"pause"}},{"appId":app,"requestId":request_id,"runId":RunId::mint(),"command":{"kind":"transition","operation":"cancel"}}]),
-        json!([{"appId":app,"requestId":request_id,"runId":RunId::mint(),"command":{"kind":"transition","operation":"cancel","input":{"secret":"customer-data"}}}]),
-    ] {
-        reply(
-            response(200, &commands),
-            Options::default(),
-            async |client| {
-                assert_eq!(
-                    client.pending_management(&scope).await.unwrap_err(),
-                    Error::InvalidResponse
-                );
-            },
-        )
-        .await;
-    }
-    let ack = AcknowledgeManagement {
-        request_id: request_id.clone(),
-        app_id: app.clone(),
-        assignment_revision: scope.assignment_revision,
-        outcome: ManagementOutcome::Conflict {},
-    };
-    for receipt in [
-        json!({"appId":other,"requestId":request_id,"outcome":{"kind":"conflict"}}),
-        json!({"appId":app,"requestId":RequestId::mint(),"outcome":{"kind":"conflict"}}),
-        json!({"appId":app,"requestId":request_id,"outcome":null}),
-        json!({"appId":app,"requestId":request_id,"outcome":{"kind":"denied"}}),
-    ] {
-        reply(
-            response(200, &receipt),
-            Options::default(),
-            async |client| {
-                assert_eq!(
-                    client.acknowledge_management(&ack).await.unwrap_err(),
                     Error::InvalidResponse
                 );
             },

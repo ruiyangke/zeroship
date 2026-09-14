@@ -59,6 +59,25 @@ of the original worker even after placement expires. Claim and heartbeat replies
 transfer remaining lease duration after commit; worker wall clocks are not used
 to interpret the manager's absolute timestamps.
 
+Control accepts lifecycle commands through `POST /v1/management/enqueue` and
+reads their durable outcome through `POST /v1/management/status`. Commands become
+ordered `Management` jobs in the same queue as execution work. Workers claim and
+settle them through the job endpoints with a closed management outcome; there is
+no separate command polling or acknowledgement route. Acceptance atomically
+records the command, job, run ordering and execution barrier. Settlement commits
+the queue receipt, command outcome and matching barrier change together. Exact
+settlement replay preserves that result after placement replacement while still
+checking the original worker's enrollment.
+
+Latest restart observes the ordinary app deployment pointer through the native
+`LatestDeploymentSource`, obtains queue retention, then freezes the selected
+identity in the accepted job. Exact command retry never resolves Latest again.
+The source selects only app identity and current hash plus deployment identity,
+app, hash and retention state; it supplies neither admission nor execution
+authority. Startup and readiness require those column grants. Creator-side
+management delivery remains pending; the server performs no customer lifecycle
+mutation or restart execution.
+
 `POST /v1/policy/lease` accepts only an `AssignedScope` from an enrolled worker.
 The response binds complete policy to that app, worker, signing-key thumbprint
 and assignment revision. The native manager validates assignment before source
@@ -75,7 +94,7 @@ cannot update app or plan inputs or access creator storage.
 Assignments and mutation receipts survive restart. Wake revisions reject stale
 or conflicting publication. A worker cannot release the last active placement;
 missing owners expose the app for host-driven recovery and a customer-journal
-rescan, even when the previous worker never published a hint. Actual task claims
+rescan, even when the previous worker never published a hint. Creator task claims
 and management application remain transactions in the customer's database.
 
 The platform migration creates `workflow_manager` metadata under a migration

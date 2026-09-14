@@ -9,8 +9,9 @@ export const managerIdentityColumns = {
   workers: ["id"],
   assignments: ["id", "app_id", "worker_id"],
   placement_receipts: ["id", "app_id", "request_id", "worker_id"],
-  management: ["id", "app_id", "request_id", "run_id", "ack_worker_id"],
-  jobs: ["id", "app_id", "deployment_id", "worker_id"],
+  management: ["id", "app_id", "request_id", "run_id"],
+  management_scopes: ["id", "app_id", "run_id"],
+  jobs: ["id", "app_id", "deployment_id", "worker_id", "run_id", "management_request_id"],
   recovery_scopes: ["id", "deployment_id", "pending_job_id"],
   schedule_deployments: ["id", "app_id"],
   schedule_activations: ["id", "app_id", "deployment_id"],
@@ -75,14 +76,6 @@ export function workflowManagerSchema(namespace) {
     expected_revision: t.bigInt(), wake_revision: t.bigInt(),
     result_revision: integer(), result_expires_at: integer(),
   }, ["app_id", "request_id"], [fk("receipt_scope", ["app_id"], "queue_scopes", ["id"])]);
-  create("management", {
-    app_id: text(), request_id: text(), run_id: text(), actor: text(), operation: text(),
-    restart_name: t.text(), restart_occurrence: t.bigInt(), restart_deploy: t.text(),
-    created_at: integer(), outcome: t.text(), run_state: t.text(),
-    ack_worker_id: t.text(), ack_revision: t.bigInt(),
-  }, ["app_id", "request_id"], [fk("management_scope", ["app_id"], "queue_scopes", ["id"])]);
-  index("management", "pending", ["app_id", "outcome", "created_at", "request_id"]);
-
   const jobs = table("jobs", { schema: namespace });
   jobs.create({
     columns: {
@@ -90,6 +83,9 @@ export function workflowManagerSchema(namespace) {
       app_id: text(),
       deployment_id: t.text(),
       operation: text(),
+      operation_kind: text(),
+      management_request_id: t.text(),
+      run_id: t.text(),
       spec_digest: text(),
       available_at: integer(),
       dispatch_order: integer(),
@@ -116,6 +112,24 @@ export function workflowManagerSchema(namespace) {
   jobs.index("jobs_deployment_idx").add({ on: ["app_id", "deployment_id", "state"] });
   jobs.index("jobs_dispatch_key").add({ on: ["app_id", "dispatch_order"], unique: true });
   jobs.index("jobs_dispatch_idx").add({ on: ["app_id", "state", "dispatch_order"] });
+
+  jobs.index("jobs_management_request_key").add({ on: ["app_id", "management_request_id"], unique: true });
+  jobs.index("jobs_operation_idx").add({ on: ["app_id", "operation_kind", "state", "id"] });
+
+  create("management_scopes", {
+    app_id: text(), run_id: text(), accepted_revision: integer(), settled_revision: integer(),
+  }, ["app_id", "run_id"], [fk("management_order_app", ["app_id"], "queue_scopes", ["id"])]);
+  create("management", {
+    app_id: text(), request_id: text(), run_id: text(), revision: integer(), actor: text(),
+    request: text(), request_digest: text(), blocks_execution: t.boolean().notNull(),
+    created_at: integer(), outcome: t.text(),
+  }, ["app_id", "request_id"], [
+    fk("management_job", ["app_id", "id"], "jobs", ["app_id", "id"]),
+    fk("management_order", ["app_id", "run_id"], "management_scopes", ["app_id", "run_id"]),
+  ]);
+  table("management", { schema: namespace }).index("management_revision_key").add({ on: ["app_id", "run_id", "revision"], unique: true });
+  index("management", "pending", ["app_id", "outcome", "id"]);
+  index("management", "barrier", ["app_id", "run_id", "outcome", "blocks_execution", "revision"]);
 
   create("schedule_deployments", {
     app_id: text(), definition: text(), interpretation: text(), created_at: integer(),

@@ -6,6 +6,12 @@
 
 #[allow(
     dead_code,
+    reason = "source fixture also supports latest selection tests"
+)]
+#[path = "support/latest.rs"]
+mod latest_support;
+#[allow(
+    dead_code,
     reason = "shared queue fixtures also expose backend administration"
 )]
 mod support;
@@ -16,9 +22,9 @@ use zeroship_core::{
     app_id::AppId,
     service_peers::{service_issuer, CONTROL_SERVICE_NAME, WORKER_SERVICE_NAME},
     workflow_coordination::{
-        AcknowledgeManagement, AssignScope, AssignedScope, Assignment, ManageRun,
-        ManagementOperation, ManagementOutcome, RegisterWorker, RegisteredWorker, RequestId, RunId,
-        RunOperation, RunState, WorkerId, WorkerState,
+        AssignScope, AssignedScope, Assignment, ManageRun, ManagementOperation, ManagementOutcome,
+        RegisterWorker, RegisteredWorker, RequestId, RunId, RunOperation, RunState, WorkerId,
+        WorkerState,
     },
     workflow_jobs::{
         DeploymentId, JobId, JobOperation, JobOutcome, JobSpec, Settlement, SubmitJob,
@@ -353,10 +359,6 @@ async fn registration_race(
     }
 }
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "the scenario follows receipt identity through placement and lifecycle changes"
-)]
 async fn management_receipts(fixture: &Fixture) {
     let (coordinator, _) = host(
         fixture,
@@ -366,69 +368,19 @@ async fn management_receipts(fixture: &Fixture) {
         },
     )
     .await;
+    let source = latest_support::Source::new(fixture).await;
     let worker = WorkerId::mint();
     register(&coordinator, &worker, 2).await;
     let app = AppId::mint();
     let foreign = AppId::mint();
     let assignment = coordinator.assign(&placement(&app, &worker)).await.unwrap();
-    let foreign_assignment = coordinator
+    let other = coordinator
         .assign(&placement(&foreign, &worker))
         .await
         .unwrap();
-    let database = fixture.database().await;
-    let assignment_filter = value!({"app_id":app.as_str(),"worker_id":worker.as_str()});
-    let original = row(&database, "assignments", assignment_filter.clone()).await;
-    register(&coordinator, &worker, 2).await;
-    let renewed = coordinator
-        .renew(&worker, &scope(&assignment))
-        .await
-        .unwrap();
-    assert_eq!(renewed.revision, assignment.revision);
-    assert!(renewed.expires_at >= assignment.expires_at);
-    assert_eq!(
-        row(&database, "assignments", assignment_filter).await["id"],
-        original["id"]
-    );
     let actor = service_issuer(CONTROL_SERVICE_NAME).unwrap();
     let request = command(&app);
-    assert_eq!(
-        coordinator
-            .manage(&service_issuer(WORKER_SERVICE_NAME).unwrap(), &request)
-            .await,
-        Err(Error::Denied)
-    );
-    let pending = coordinator.manage(&actor, &request).await.unwrap();
-    assert_eq!(pending.app_id, app);
-    assert_eq!(pending.request_id, request.request_id);
-    assert_eq!(pending.outcome, None);
-    assert_eq!(coordinator.manage(&actor, &request).await.unwrap(), pending);
-    assert_eq!(
-        coordinator.manage(&actor, &command(&app)).await,
-        Err(Error::Capacity)
-    );
-    let changed = ManageRun {
-        run_id: RunId::mint(),
-        ..request.clone()
-    };
-    assert_eq!(
-        coordinator.manage(&actor, &changed).await,
-        Err(Error::Conflict)
-    );
-    let management_filter =
-        value!({"app_id":app.as_str(),"request_id":request.request_id.as_str()});
-    let stored = row(&database, "management", management_filter.clone()).await;
-    assert_eq!(
-        coordinator
-            .pending_management(&worker, &scope(&renewed))
-            .await
-            .unwrap(),
-        vec![request.clone()]
-    );
-    assert!(coordinator
-        .pending_management(&worker, &scope(&foreign_assignment))
-        .await
-        .unwrap()
-        .is_empty());
+    accept_management_receipt(&coordinator, &source, &request).await;
     assert_eq!(
         coordinator
             .management_receipt(&foreign, &request.request_id)
@@ -436,75 +388,153 @@ async fn management_receipts(fixture: &Fixture) {
             .unwrap(),
         None
     );
-    let ack = AcknowledgeManagement {
-        request_id: request.request_id.clone(),
-        app_id: app.clone(),
-        assignment_revision: renewed.revision,
-        outcome: ManagementOutcome::Applied {
-            state: RunState::Paused,
-        },
-    };
-    assert_eq!(
-        coordinator
-            .acknowledge_management(&WorkerId::mint(), &ack)
-            .await,
-        Err(Error::Denied)
-    );
-    let foreign_ack = AcknowledgeManagement {
-        app_id: foreign,
-        assignment_revision: foreign_assignment.revision,
-        ..ack.clone()
-    };
-    assert_eq!(
-        coordinator
-            .acknowledge_management(&worker, &foreign_ack)
-            .await,
-        Err(Error::Denied)
-    );
-    let receipt = coordinator
-        .acknowledge_management(&worker, &ack)
-        .await
-        .unwrap();
-    assert_eq!(receipt.outcome, Some(ack.outcome));
-    assert_eq!(
-        row(&database, "management", management_filter).await["id"],
-        stored["id"]
-    );
-    let (reopened, _) = host(fixture, Options::default()).await;
-    assert_eq!(
-        reopened
-            .acknowledge_management(&worker, &ack)
-            .await
-            .unwrap(),
-        receipt
-    );
-    assert_eq!(reopened.manage(&actor, &request).await.unwrap(), receipt);
-    assert_eq!(
-        reopened
-            .management_receipt(&app, &request.request_id)
-            .await
-            .unwrap(),
-        Some(receipt)
-    );
-    assert!(reopened
-        .pending_management(&worker, &scope(&renewed))
+    assert!(coordinator
+        .claim_job(&worker, &scope(&other), || ready(Ok(worker.clone())))
         .await
         .unwrap()
-        .is_empty());
-    let conflicting = AcknowledgeManagement {
-        outcome: ManagementOutcome::NotFound {},
-        ..ack
+        .is_none());
+    let delivery = coordinator
+        .claim_job(&worker, &scope(&assignment), || ready(Ok(worker.clone())))
+        .await
+        .unwrap()
+        .unwrap()
+        .delivery()
+        .clone();
+    let database = fixture.database().await;
+    let stored = row(
+        &database,
+        "management",
+        value!({"request_id":request.request_id.as_str()}),
+    )
+    .await;
+    assert_eq!(stored["id"], value!(delivery.job.id.as_str()));
+    let settlement = Settlement {
+        delivery,
+        outcome: JobOutcome::Management {
+            outcome: ManagementOutcome::Applied {
+                state: RunState::Paused,
+            },
+        },
+        successors: vec![],
     };
-    assert_eq!(
-        reopened.acknowledge_management(&worker, &conflicting).await,
-        Err(Error::Conflict)
-    );
+    replay_management_receipt(
+        fixture,
+        &coordinator,
+        &source,
+        &worker,
+        &request,
+        &settlement,
+    )
+    .await;
     assert!(coordinator
-        .manage(&actor, &command(&app))
+        .manage(&actor, &command(&app), &source.latest)
         .await
         .unwrap()
         .outcome
         .is_none());
+}
+
+async fn accept_management_receipt(
+    coordinator: &Coordinator,
+    source: &latest_support::Source,
+    request: &ManageRun,
+) {
+    let actor = service_issuer(CONTROL_SERVICE_NAME).unwrap();
+    assert_eq!(
+        coordinator
+            .manage(
+                &service_issuer(WORKER_SERVICE_NAME).unwrap(),
+                request,
+                &source.latest
+            )
+            .await,
+        Err(Error::Denied)
+    );
+    let pending = coordinator
+        .manage(&actor, request, &source.latest)
+        .await
+        .unwrap();
+    assert_eq!(pending.outcome, None);
+    assert_eq!(
+        coordinator
+            .manage(&actor, request, &source.latest)
+            .await
+            .unwrap(),
+        pending
+    );
+    assert_eq!(
+        coordinator
+            .manage(&actor, &command(&request.app_id), &source.latest)
+            .await,
+        Err(Error::Capacity)
+    );
+    let changed = ManageRun {
+        run_id: RunId::mint(),
+        ..request.clone()
+    };
+    assert_eq!(
+        coordinator.manage(&actor, &changed, &source.latest).await,
+        Err(Error::Conflict)
+    );
+}
+
+async fn replay_management_receipt(
+    fixture: &Fixture,
+    coordinator: &Coordinator,
+    source: &latest_support::Source,
+    worker: &WorkerId,
+    request: &ManageRun,
+    settlement: &Settlement,
+) {
+    assert_eq!(
+        coordinator
+            .settle_job(&WorkerId::mint(), settlement, || ready(Ok(worker.clone())))
+            .await,
+        Err(Error::Denied)
+    );
+    let receipt = coordinator
+        .settle_job(worker, settlement, || ready(Ok(worker.clone())))
+        .await
+        .unwrap();
+    let actor = service_issuer(CONTROL_SERVICE_NAME).unwrap();
+    let app = &request.app_id;
+    let (reopened, _) = host(fixture, Options::default()).await;
+    assert_eq!(
+        reopened
+            .settle_job(worker, settlement, || ready(Ok(worker.clone())))
+            .await
+            .unwrap(),
+        receipt
+    );
+    let closed = reopened
+        .manage(&actor, request, &source.latest)
+        .await
+        .unwrap();
+    assert_eq!(
+        closed.outcome,
+        Some(ManagementOutcome::Applied {
+            state: RunState::Paused
+        })
+    );
+    assert_eq!(
+        reopened
+            .management_receipt(app, &request.request_id)
+            .await
+            .unwrap(),
+        Some(closed)
+    );
+    let changed = Settlement {
+        outcome: JobOutcome::Management {
+            outcome: ManagementOutcome::NotFound {},
+        },
+        ..settlement.clone()
+    };
+    assert_eq!(
+        reopened
+            .settle_job(worker, &changed, || ready(Ok(worker.clone())))
+            .await,
+        Err(Error::Conflict)
+    );
 }
 
 async fn assert_ready(database: &Database, spec: &JobSpec) {
