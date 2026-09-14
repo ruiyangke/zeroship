@@ -106,7 +106,50 @@ fn is_ready(control_ok: bool, blob_ok: bool, dev_escape: bool) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ntex::http::StatusCode;
+    use ntex::web::test;
+    use zeroship_bundle::{BlobStore, LocalDiskBlobStore, LocalWorkflowBlobStore};
     use zeroship_core::readiness::staleness_budget;
+
+    fn config(root: &std::path::Path) -> Arc<WorkerConfig> {
+        let blob_store: Arc<dyn BlobStore> = Arc::new(
+            LocalDiskBlobStore::new(root.to_owned()).expect("create test blob store"),
+        );
+        Arc::new(WorkerConfig {
+            service_auth: crate::identity_fixture::service_auth(),
+            control_url: "http://127.0.0.1:1".to_owned(),
+            control_key: String::new(),
+            db_url: None,
+            kv_store: None,
+            storage_backend: None,
+            max_isolates: 1,
+            max_pinned_isolates_per_app: 1,
+            poll_interval_secs: 60,
+            shutdown_timeout_secs: 0,
+            blob_store,
+            workflow_blob_store: Arc::new(
+                LocalWorkflowBlobStore::new(root.to_owned())
+                    .expect("create test workflow blob store"),
+            ),
+            max_step_blob_bytes: 1024,
+            workflow_advance_unsigned: false,
+        })
+    }
+
+    async fn status(
+        app: &ntex::Pipeline<
+            impl ntex::Service<
+                ntex::http::Request,
+                Response = ntex::web::WebResponse,
+                Error = ntex::web::Error,
+            >,
+        >,
+        path: &str,
+    ) -> StatusCode {
+        test::call_service(app, test::TestRequest::get().uri(path).to_request())
+            .await
+            .status()
+    }
 
     #[test]
     fn either_dependency_alone_is_not_enough() {
@@ -135,8 +178,32 @@ mod tests {
         assert!(readiness.control.is_fresh(budget));
     }
 
-    // What these do NOT catch: that `readyz` actually calls `is_ready` with
-    // the freshness stamp and the blob probe rather than with two constants,
-    // and that the route is mounted at /readyz at all. Both are covered end to
-    // end against the real binary by tests/health_endpoints.sh.
+    #[ntex::test]
+    async fn routes_report_liveness_and_dependency_readiness() {
+        let storage = tempfile::tempdir().expect("private health-test storage");
+        let config = config(storage.path());
+        let readiness = Arc::new(WorkerReadiness::new());
+        let app = test::init_service(
+            web::App::new()
+                .state(config)
+                .state(readiness.clone())
+                .configure(configure),
+        )
+        .await;
+
+        assert_eq!(status(&app, "/healthz").await, StatusCode::OK);
+        assert_eq!(
+            status(&app, "/readyz").await,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "a worker that has not reached control must refuse traffic"
+        );
+
+        readiness.control.mark_success();
+        assert_eq!(status(&app, "/readyz").await, StatusCode::OK);
+
+        let retired = status(&app, "/health").await;
+        let unknown = status(&app, "/route-that-does-not-exist").await;
+        assert_ne!(retired, StatusCode::OK);
+        assert_eq!(retired, unknown, "the retired alias must not be a route");
+    }
 }

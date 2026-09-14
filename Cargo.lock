@@ -7911,10 +7911,8 @@ version = "0.1.0"
 dependencies = [
  "cargo_metadata",
  "clap",
- "proc-macro2",
  "serde",
  "serde_json",
- "syn 2.0.117",
  "thiserror 2.0.18",
  "toml 0.8.23",
  "trybuild",
@@ -8035,7 +8033,6 @@ dependencies = [
  "xxhash-rust",
  "zeroize",
  "zeroship-bundle",
- "zeroship-config-contract",
  "zeroship-config-macros",
  "zeroship-id",
 ]
@@ -8312,6 +8309,7 @@ dependencies = [
  "url",
  "uuid",
  "zeroship-core",
+ "zeroship-id",
  "zeroship-migrate-backend",
  "zeroship-migrate-core",
  "zeroship-migrate-ir",
@@ -8606,9 +8604,9 @@ dependencies = [
  "rdkafka",
  "serde",
  "serde_json",
+ "testcontainers",
  "thiserror 2.0.18",
  "tracing",
- "zeroship-core",
 ]
 
 [[package]]

@@ -22,11 +22,11 @@
 #
 # WHAT THIS DOES NOT PROVE:
 #   - It does not exercise `--env=`; the environments overlay is covered by the
-#     Rust unit tests and by `tests/project_config_gate.sh`, not here.
-#   - It does not repeat the writeback. `tests/project_config_gate.sh` has a
-#     focused real-CLI first-deploy probe with an isolated curl stub, then runs
-#     both readers on the file it wrote. This expensive harness keeps its app
-#     pre-created so it can focus on real migration and database-backed RPC.
+#     Rust and TypeScript reader suites, not here.
+#   - It does not repeat the writeback. The CLI's deploy integration test owns
+#     a focused first-deploy case with an isolated control server. This harness
+#     keeps its app pre-created so it can focus on real migration and
+#     database-backed RPC.
 #   - The RPC is driven at the worker's `/dispatch`, not through the gateway.
 #     db-todos' procedures declare no `auth`, so the gateway fail-closes them at
 #     401 without an OIDC session - the same documented gate

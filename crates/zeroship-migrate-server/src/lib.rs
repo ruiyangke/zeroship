@@ -25,6 +25,9 @@ pub mod rate_limit;
 pub mod schema_apply_store;
 pub mod session;
 
+#[cfg(test)]
+pub(crate) mod test_database;
+
 use std::path::PathBuf;
 use std::sync::Arc;
 

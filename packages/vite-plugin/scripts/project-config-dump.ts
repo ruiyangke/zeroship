@@ -3,14 +3,11 @@
  *
  *   node --import tsx scripts/project-config-dump.ts <config-path> [--env=<name>]
  *
- * The ONLY consumer is `tests/project_config_gate.sh`, which byte-compares this
- * against `zeroship config show` on the same file. That comparison catches
- * divergent defaults, keys one side silently ignores, and type-coercion
- * differences in one diff, without a third parser policing the first two.
+ * Scaffold acceptance tests use this executable adapter to validate generated
+ * projects through the production build-side reader.
  *
  * It prints nothing else on stdout. Errors go to stderr with exit 1, so the
- * gate can tell "the two disagree" from "one of them refused", which are
- * different findings.
+ * the caller can distinguish a rejected config from an empty result.
  */
 
 import { resolve } from "node:path";

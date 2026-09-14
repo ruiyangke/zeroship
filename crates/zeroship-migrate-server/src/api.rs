@@ -18,6 +18,12 @@ use crate::provisioning::{provision_database, provision_workflow_journal_schema}
 use crate::session::CompioPgSession;
 use crate::MigrationServiceState;
 
+/// JSON extractor budget for a migration apply request.
+///
+/// The CLI posts its generated IR envelope verbatim, so this route needs an
+/// explicit budget above Ntex's small default while retaining a bounded body.
+const APPLY_REQUEST_BODY_BYTES: usize = 8 * 1024 * 1024;
+
 /// THE APPROVAL AND POLICY ENDPOINTS ARE GONE, and their absence is the change
 /// rather than a gap.
 ///
@@ -35,7 +41,11 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
     cfg.service(
         web::resource("/v1/databases/{database_id}").route(web::post().to(create_database)),
     )
-    .service(web::resource("/v1/apps/{app_id}/migrations/apply").route(web::post().to(apply)))
+    .service(
+        web::resource("/v1/apps/{app_id}/migrations/apply")
+            .state(web::types::JsonConfig::default().limit(APPLY_REQUEST_BODY_BYTES))
+            .route(web::post().to(apply)),
+    )
     .service(
         web::resource("/v1/apps/{app_id}/workflows/provision")
             .route(web::post().to(provision_workflows)),

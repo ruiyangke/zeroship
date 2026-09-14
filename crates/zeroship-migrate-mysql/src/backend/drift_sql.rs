@@ -20,10 +20,9 @@ use zeroship_migrate_ir::ir::{IdentityCol, IndexSortOrder};
 /// generator spellings it compares against.
 ///
 /// Named directly rather than resolved out of the engine's registry from `DIALECT`:
-/// this crate knows which vendor it is, and asking a registry which backend handles
-/// MySQL is the round trip `registry_resolution_stays_core_only` reads this crate
-/// for. They are the same `&'static` objects `VENDOR` registers, so the comparison
-/// is byte-for-byte the one the engine's own door performs.
+/// this crate knows which vendor it is. These are the same `&'static` objects
+/// `VENDOR` registers, so the comparison is byte-for-byte the one the engine's own
+/// door performs.
 const VALUE_FORMAT: &dyn zeroship_migrate_backend::value_format::ValueFormatRenderer =
     crate::VENDOR.value_format;
 const DML: &dyn zeroship_migrate_backend::renderer::DmlRenderer = crate::VENDOR.dml;

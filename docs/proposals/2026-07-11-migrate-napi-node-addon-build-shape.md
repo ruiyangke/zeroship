@@ -92,12 +92,10 @@ dry-run returns `DryRunError::ShadowUnsupported`.
 
 **Distribution.** `@napi-rs/cli` (`napi build --platform --release`) compiles the cdylib into a
 platform `.node` plus a generated `index.d.ts`. `package.json` declares `binaryName`
-`zeroship-migrate-node` and five targets: `x86_64-unknown-linux-gnu`,
-`aarch64-unknown-linux-gnu`, `x86_64-apple-darwin`, `aarch64-apple-darwin`,
-`x86_64-pc-windows-msvc`. The generated `index.js` loader resolves the right prebuild and is
-committed; `.node` binaries are gitignored. `engines.node` is `>=18`. `npm test` drives the
-real `.node` through `__test__/*.mjs`; `tests/napi_export_parity_gate.sh` checks the committed
-`index.d.ts` and `index.js` against each other.
+`zeroship-migrate-node` and the supported platform targets. The generated `index.js`
+loader resolves the matching prebuild and exports the loaded binding object directly;
+it is committed, while `.node` binaries are gitignored. The package's Node tests drive
+the real addon through `__test__/*.mjs`.
 
 ## Why it is this way
 
@@ -130,10 +128,9 @@ and rollback, cursor-batched resumable backfill, shadow verification - whose ste
 driver I/O. It runs on its own thread so that machine neither interleaves into nor blocks the
 Node event loop.
 
-**Core may not name a vendor.** `core_names_no_vendor_crate` forbids the engine from naming a
-vendor crate outside its registry, so `zeroship-migrate` re-exports no backend. The addon
-names `zeroship-migrate-postgres`, `-mysql` and `-sqlite` itself. Any new host must do the
-same rather than asking for a re-export.
+**Core may not name a vendor.** `zeroship-migrate` re-exports no backend. The addon names
+`zeroship-migrate-postgres`, `-mysql` and `-sqlite` itself. Any new host must do the same
+rather than asking for a re-export.
 
 **`unsafe` is scoped to this crate alone.** The workspace pins `unsafe_code = "deny"`, correct
 for the pure-Rust engine crates. The napi bridge FFIs into the Node ABI
@@ -219,12 +216,11 @@ Do-not notes, each recording something that was tried or measured:
   on libuv on Linux or macOS, and callbacks registered on the default loop never fire there.
   napi-rs's `ThreadsafeFunction` routes through the N-API primitives and is safe by
   construction; dropping below it gives that up.
-- Do not replace `tests/napi_export_parity_gate.sh` with a regeneration step. The `baseline`
-  verb shipped in `index.d.ts` and not in `index.js` on 2026-08-28: it compiled, it
-  type-checked (TypeScript reads the `.d.ts` and never `index.js`), and it tested green
-  because the authoring worktree held a built artifact the commit did not carry. Regenerating
-  on build would have fixed the local tree and left the commit just as wrong. The gate rules
-  on committed bytes.
+- Do not hand-edit `index.js` or `index.d.ts`. The napi build generates both from the
+  Rust exports, and the loader assigns the loaded `nativeBinding` object directly to
+  `module.exports`. The earlier `baseline` omission occurred when the loader depended
+  on a parallel named-export list; that list is no longer the runtime authority. Build
+  the addon and run its Node-hosted tests after changing the export surface.
 - Do not host-provide SQLite. The confinement and journal-immutability proofs are
   in-process-rusqlite shaped and cannot be reproduced over a `bun:sqlite` or
   `better-sqlite3` callback; doing it would require re-proving journal immutability against a

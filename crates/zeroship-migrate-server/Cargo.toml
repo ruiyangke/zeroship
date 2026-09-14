@@ -79,8 +79,8 @@ testcontainers = { version = "0.28", default-features = false, features = ["bloc
 zeroship-runtime = { workspace = true }
 v8 = { workspace = true }
 
-# Database verification is mandatory in ordinary cargo test runs.
-# tests/run_billing_suite.sh provisions the migrated platform database.
+# Database verification is mandatory in ordinary cargo test runs. PostgreSQL
+# targets own their servers through private Testcontainers fixtures.
 
 [[test]]
 name = "apply_api_test"
