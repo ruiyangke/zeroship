@@ -179,6 +179,13 @@ pub(in crate::service) async fn prepare_draft<'tx>(
         return Ok(Preparation::Rejected(Rejection::Conflict(message)));
     }
     safety?;
+    // A pending cascade page would cancel the restarted generation. The
+    // restart becomes admissible once the parent's obligation finishes.
+    if super::super::propagation::fenced(tx, app, &run).await? {
+        return Ok(Preparation::Rejected(Rejection::Conflict(
+            "workflow cancellation is still propagating to this run".into(),
+        )));
+    }
     if retained.iter().any(|step| step.state == "running") {
         return Ok(Preparation::Rejected(Rejection::Conflict(
             "restart prefix contains unresolved operations".into(),

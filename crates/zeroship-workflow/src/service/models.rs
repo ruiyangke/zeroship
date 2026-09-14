@@ -27,6 +27,8 @@ pub use journal::{
     __zeroship_workflow_management_scopes as management_scopes,
     __zeroship_workflow_occurrences as occurrences, __zeroship_workflow_outbox as outbox,
     __zeroship_workflow_payload_refs as payload_refs, __zeroship_workflow_payloads as payloads,
+    __zeroship_workflow_propagation_pages as propagation_pages,
+    __zeroship_workflow_propagations as propagations,
     __zeroship_workflow_reconciliation_scans as reconciliation_scans,
     __zeroship_workflow_requests as requests, __zeroship_workflow_runs as runs,
     __zeroship_workflow_schedules as schedules,

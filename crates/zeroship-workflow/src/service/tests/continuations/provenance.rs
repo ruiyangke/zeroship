@@ -147,6 +147,7 @@ async fn completed_family(service: &WorkflowService, app_id: &AppId, kind: Outpu
     assert_eq!(child.invocation.workflow_name, "Child");
     assert_ne!(child.invocation.run_id, accepted.invocation.run_id);
     complete_child(service, &child, kind, ORIGINAL).await;
+    assert_eq!(deliver_propagations(&scope).await.len(), 1);
     let resumed = service.poll(&worker()).await.unwrap().unwrap();
     assert_eq!(resumed.invocation.run_id, parent.id);
     assert_eq!(

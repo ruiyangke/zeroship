@@ -50,3 +50,10 @@ declare_entity_id! {
     typed_id::WORKFLOW_BROADCAST_PREFIX,
     broadcast_id_tests,
 }
+
+declare_entity_id! {
+    /// A creator-owned dependency propagation obligation paged by durable jobs.
+    PropagationId,
+    typed_id::WORKFLOW_PROPAGATION_PREFIX,
+    propagation_id_tests,
+}

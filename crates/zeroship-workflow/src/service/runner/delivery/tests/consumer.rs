@@ -102,6 +102,7 @@ fn options(slots: usize) -> ConsumerOptions {
             reconciliation: ReconciliationOptions::default(),
             collection: crate::service::collection::CollectionOptions::default(),
             fanout: crate::service::fanout::FanoutOptions::default(),
+            propagation: crate::service::propagation::PropagationOptions::default(),
         },
     }
 }
@@ -908,6 +909,52 @@ async fn manager_delivers_committed_fanout_publication_without_executor() {
     assert_eq!(requests.len(), 2);
     assert_eq!(requests[0], requests[1]);
     assert_eq!(requests[0].delivery.job, fanout);
+}
+
+#[compio::test]
+async fn manager_delivers_committed_propagation_page_without_executor() {
+    let fixture = Fixture::new(AppPolicy::default()).await;
+    let (page, child) = super::propagation::cascade(&fixture).await;
+    assert!(page.deployment_id().is_none());
+    let manager = NativeManager::new(&fixture).await;
+    fixture
+        .app
+        .publish_job(&page.id, manager.as_ref())
+        .await
+        .unwrap();
+    let mut consumer =
+        JobConsumer::new(manager.clone(), manager.worker.clone(), options(1)).unwrap();
+    consumer
+        .bindings()
+        .replace(vec![scope(
+            &fixture,
+            manager.scope.assignment_revision.get(),
+        )])
+        .unwrap();
+    finished(consumer.run_until(async {
+        manager.completion.recv_async().await.unwrap();
+    }))
+    .await;
+    assert_eq!(fixture.probe.starts.get(), 0);
+    assert_eq!(super::propagation::control(&fixture, &child).await, "cancel");
+    let receipt = fixture.app.job_receipt(&page).await.unwrap().unwrap();
+    assert_eq!(receipt.outcome, JobOutcome::Completed {});
+    // The page's successor is the child's committed Advance intent at its new
+    // frontier, which the creator outbox publishes independently of settlement.
+    assert!(fixture
+        .app
+        .pending_jobs(None, 100)
+        .await
+        .unwrap()
+        .iter()
+        .any(|job| matches!(&job.operation, JobOperation::Advance { run_id, revision, .. }
+            if run_id.as_str() == child && revision.get() == 2)));
+    assert!(manager.claim(&manager.scope).await.unwrap().is_none());
+    let requests = manager.requests.borrow();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0], requests[1]);
+    assert_eq!(requests[0].delivery.job, page);
+    assert!(requests[0].successors.is_empty());
 }
 
 #[compio::test]

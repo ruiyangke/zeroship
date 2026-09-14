@@ -5,6 +5,7 @@ mod consumer;
 mod cron;
 mod fanout;
 mod management;
+mod propagation;
 use crate::{
     operations::{RunState, StartOptions},
     service::{
@@ -332,6 +333,7 @@ impl Fixture {
                 reconciliation: ReconciliationOptions::default(),
                 collection: crate::service::collection::CollectionOptions::default(),
                 fanout: crate::service::fanout::FanoutOptions::default(),
+                propagation: crate::service::propagation::PropagationOptions::default(),
             },
         )
         .unwrap()
@@ -371,6 +373,7 @@ async fn unrepresentable_retry_delay_is_rejected_before_execution() {
             reconciliation: ReconciliationOptions::default(),
             collection: crate::service::collection::CollectionOptions::default(),
             fanout: crate::service::fanout::FanoutOptions::default(),
+            propagation: crate::service::propagation::PropagationOptions::default(),
         },
     );
     assert!(matches!(

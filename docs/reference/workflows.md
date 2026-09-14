@@ -466,7 +466,9 @@ the child is cancelled, the parent receives `ChildCancelledError`. If the child
 does not finish before `timeout`, the parent receives `ChildTimeoutError`.
 
 `cascade: true` means cancelling the parent also requests cancellation of a live
-child. Without it, the child remains independent.
+child. Without it, the child remains independent. The request reaches children
+in bounded batches after the parent settles; a cascading child cannot continue as
+new or restart while its parent's cancellation is still reaching its children.
 
 `step.startMany(WorkflowClass, items, opts?)` is the in-workflow fan-out helper:
 
@@ -591,8 +593,9 @@ without running compensators, and ends it as `cancelled`.
 `restart(opts?)` requeues the same run ID:
 
 The SQLite and PostgreSQL adapters share deploy-policy and quiescence checks.
-A restart rejects live execution leases, active descendants and active
-compensation. A partial restart retains the prefix and its original deploy;
+A restart rejects live execution leases, active descendants, active
+compensation, and a cascading child whose parent's cancellation is still
+propagating. A partial restart retains the prefix and its original deploy;
 it cannot retain steps whose compensation already finished. SQLite rewrites
 the discarded checkpoints, their signal consumption and run state in a
 transaction, so a failed restart preserves the previous journal.

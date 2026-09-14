@@ -116,6 +116,63 @@ pub async fn waiting(
         .collect()
 }
 
+/// Whether any current parent wait accepted a member of `child`'s head.
+///
+/// Follows the same head-directed join as [`waiting`] without ordering, so it
+/// reads at most one joined row however many parents wait on the head.
+pub async fn has_waiting(
+    tx: &Transaction,
+    app: &AppId,
+    child: &Member,
+) -> Result<bool, WorkflowServiceError> {
+    use models::{continuation_members as m, runs as r, steps as s, waits as w};
+    tx.check_app(app)?;
+    if !child.is_current {
+        return Err(invalid());
+    }
+    let db = tx.database();
+    let member = db.entity::<m::Entity>()?.alias("accepted")?;
+    let step = db.entity::<s::Entity>()?.alias("parent_step")?;
+    let wait = db.entity::<w::Entity>()?.alias("parent_wait")?;
+    let run = db.entity::<r::Entity>()?.alias("parent_run")?;
+    let rows = db
+        .from(&member)
+        .inner_join(
+            &step,
+            member
+                .column(m::app_id)
+                .eq(step.column(s::app_id))?
+                .and(member.column(m::id).eq(step.column(s::child_member_id))?),
+        )?
+        .inner_join(
+            &wait,
+            step.column(s::app_id)
+                .eq(wait.column(w::app_id))?
+                .and(step.column(s::run_id).eq(wait.column(w::run_id))?)
+                .and(step.column(s::generation).eq(wait.column(w::generation))?)
+                .and(step.column(s::ordinal).eq(wait.column(w::ordinal))?),
+        )?
+        .inner_join(
+            &run,
+            wait.column(w::app_id)
+                .eq(run.column(r::app_id))?
+                .and(wait.column(w::run_id).eq(run.column(r::id))?)
+                .and(wait.column(w::generation).eq(run.column(r::generation))?),
+        )?
+        .filter(
+            member
+                .column(m::app_id)
+                .eq(app.as_str())?
+                .and(member.column(m::head_id).eq(child.head_id.as_str())?)
+                .and(wait.column(w::kind).eq("child")?),
+        )
+        .select(wait.row::<WaitingParent>())?
+        .limit(1)?
+        .all()
+        .await?;
+    Ok(!rows.is_empty())
+}
+
 pub async fn member(
     tx: &Transaction,
     app: &AppId,
