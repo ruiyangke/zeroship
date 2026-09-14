@@ -56,8 +56,8 @@ pub mod workflow_schedules;
 // keys can be depended on by an artifact format. One `AppId` for the whole tree
 // is the property being bought.
 pub use zeroship_id::{
-    app_id, entity_id, invite_id, organization_id, project_id, typed_id, user_id, AppId,
-    InviteId, OrganizationId, ProjectId, UserId,
+    app_id, deploy_command, entity_id, invite_id, organization_id, project_id, typed_id, user_id,
+    AppId, DeployCommandId, InviteId, OrganizationId, ProjectId, UserId,
 };
 
 pub use superjson::Envelope;
