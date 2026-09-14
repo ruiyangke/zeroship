@@ -229,14 +229,8 @@ impl Recovery {
             .transact(|tx| async move {
                 queue::register_scope_in(&tx, app).await?;
                 queue::lock_scope(&tx, app).await?;
-                ensure_in(
-                    &tx,
-                    app,
-                    deployment,
-                    activation_revision,
-                    self.queue.clock.now().await?,
-                )
-                .await
+                let now = self.queue.clock.now().await?;
+                Box::pin(ensure_in(&tx, app, deployment, activation_revision, now)).await
             })
             .await
     }
@@ -460,7 +454,7 @@ pub(crate) async fn ensure_in(
         let revision = validate_revision(&stored, deployment, activation_revision)?;
         let current = stored.responsibility()?;
         if current.state == ScopeState::Retired {
-            reopen(tx, app, &current, now).await?;
+            Box::pin(reopen(tx, app, &current, now)).await?;
         } else {
             duties::validate_pair(tx, app).await?;
         }
@@ -554,7 +548,7 @@ pub(crate) async fn lease_epoch_in(
     if !admission {
         return Err(Error::Denied);
     }
-    reopen(tx, app, &current, now).await.map(Some)
+    Box::pin(reopen(tx, app, &current, now)).await.map(Some)
 }
 
 /// Claim-time re-arm, under the claim transaction's app lock. A claimed
@@ -563,7 +557,7 @@ pub(crate) async fn lease_epoch_in(
 /// closing watermark, which cancels that attempt's retirement at settlement.
 pub(crate) async fn claimed_in(tx: &Database, job: &JobSpec, now: i64) -> Result<(), Error> {
     if job.produces_intents() {
-        rearm_retired(tx, &job.app_id, now).await?;
+        Box::pin(rearm_retired(tx, &job.app_id, now)).await?;
     }
     Ok(())
 }
@@ -571,7 +565,7 @@ pub(crate) async fn claimed_in(tx: &Database, job: &JobSpec, now: i64) -> Result
 /// Publication re-arm, under the submission's app lock. A worker publication to
 /// a retired scope indicates stale evidence or a restored creator journal.
 pub(crate) async fn published_in(tx: &Database, app: &AppId, now: i64) -> Result<(), Error> {
-    rearm_retired(tx, app, now).await
+    Box::pin(rearm_retired(tx, app, now)).await
 }
 
 async fn rearm_retired(tx: &Database, app: &AppId, now: i64) -> Result<(), Error> {
@@ -580,7 +574,7 @@ async fn rearm_retired(tx: &Database, app: &AppId, now: i64) -> Result<(), Error
     };
     let current = stored.responsibility()?;
     if current.state == ScopeState::Retired {
-        reopen(tx, app, &current, now).await?;
+        Box::pin(reopen(tx, app, &current, now)).await?;
     }
     Ok(())
 }
@@ -677,7 +671,7 @@ async fn transition(
     tx: &Database,
     app: &AppId,
     current: &Responsibility,
-    changes: zeroship_data_orm::orm::Patch<recovery_scopes::Entity>,
+    patch: zeroship_data_orm::orm::Patch<recovery_scopes::Entity>,
 ) -> Result<(), Error> {
     let changed = tx
         .entity::<recovery_scopes::Entity>()?
@@ -686,7 +680,7 @@ async fn transition(
                 .eq(app.as_str())?
                 .and(recovery_scopes::ingress_epoch.eq(current.ingress_epoch.get())?)
                 .and(recovery_scopes::state.eq(current.state.as_str())?),
-            changes,
+            patch,
         )
         .await?;
     if changed != 1 {

@@ -859,7 +859,7 @@ async fn no_starvation(fixture: &Fixture) {
     assert_eq!(reopened.ingress_epoch, revision(1));
     assert_eq!(
         host.recovery.due(DutyKind::Reconcile, None).await.unwrap(),
-        [host.app.clone()]
+        std::slice::from_ref(&host.app)
     );
     let duty = host
         .recovery
@@ -923,7 +923,7 @@ async fn worker_denial(fixture: &Fixture) {
 }
 
 /// Wait until `waiters` manager sessions are queued behind a lock. The admin
-/// polls from inside its own open transaction, where PostgreSQL would otherwise
+/// polls from inside its own open transaction, where the server would otherwise
 /// keep serving the activity statistics it cached at first access.
 async fn blocked_manager(admin: &compio_postgres::Client, predicate: &str, waiters: i64) {
     let sql = format!(

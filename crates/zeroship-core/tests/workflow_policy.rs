@@ -171,7 +171,7 @@ fn lease_requests_are_closed_and_name_an_optional_prior_epoch() {
             "establishAfter":null,"ingressUsed":false})
     );
     assert_eq!(
-        serde_json::from_value::<PolicyLeaseRequest>(wire.clone()).unwrap(),
+        serde_json::from_value::<PolicyLeaseRequest>(wire).unwrap(),
         plain
     );
     let establish = PolicyLeaseRequest {

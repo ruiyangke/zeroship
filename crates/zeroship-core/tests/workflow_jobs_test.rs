@@ -202,7 +202,7 @@ fn outcomes() -> Vec<(JobOutcome, Value)> {
 
 /// Management and closure each own a private outcome family; every other
 /// operation shares the ordinary scheduling outcomes.
-fn operation_family(operation: &JobOperation) -> u8 {
+const fn operation_family(operation: &JobOperation) -> u8 {
     match operation {
         JobOperation::Management { .. } => 1,
         JobOperation::Close { .. } => 2,
@@ -210,7 +210,7 @@ fn operation_family(operation: &JobOperation) -> u8 {
     }
 }
 
-fn outcome_family(outcome: JobOutcome) -> u8 {
+const fn outcome_family(outcome: JobOutcome) -> u8 {
     match outcome {
         JobOutcome::Management { .. } => 1,
         JobOutcome::Closed { .. } => 2,

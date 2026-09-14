@@ -519,7 +519,7 @@ async fn metadata_lease_bounds_grants_and_duplicate_delivery_keeps_its_deadline(
     let until = Instant::now() + lifetime;
     let snapshot = PolicySnapshot::lease(2.try_into().unwrap(), AppPolicy::default(), until)
         .unwrap()
-        .with_ingress_epoch(open_epoch());
+        .with_ingress_epoch(Some(open_epoch()));
     service
         .policies
         .fixture_install(&app, snapshot.clone())
@@ -1139,7 +1139,7 @@ async fn postgres_ingress_binding_change_cancels_blocked_write() {
                     Instant::now() + Duration::from_secs(30),
                 )
                 .unwrap()
-                .with_ingress_epoch(open_epoch()),
+                .with_ingress_epoch(Some(open_epoch())),
             )
             .unwrap();
         assert!(matches!(
@@ -1209,7 +1209,7 @@ async fn postgres_ingress_expiry_cancels_blocked_write_without_refreshing_the_at
                 &app,
                 PolicySnapshot::lease(revision.try_into().unwrap(), AppPolicy::default(), deadline)
                     .unwrap()
-                    .with_ingress_epoch(open_epoch()),
+                    .with_ingress_epoch(Some(open_epoch())),
             )
             .unwrap();
         let (worker, pending) =
@@ -1230,7 +1230,7 @@ async fn postgres_ingress_expiry_cancels_blocked_write_without_refreshing_the_at
                         deadline + Duration::from_secs(30),
                     )
                     .unwrap()
-                    .with_ingress_epoch(open_epoch()),
+                    .with_ingress_epoch(Some(open_epoch())),
                 )
                 .unwrap();
         }

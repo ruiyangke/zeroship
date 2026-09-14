@@ -290,7 +290,7 @@ impl Queue {
                             }
                         }
                         self.insert(&tx, job, sample.millis).await?;
-                        crate::recovery::published_in(&tx, &job.app_id, sample.millis).await?;
+                        Box::pin(crate::recovery::published_in(&tx, &job.app_id, sample.millis)).await?;
                         let observed = authorize(tx.clone()).await?;
                         let sample = self.clock.sample().await?;
                         let authority = current(assignment, observed, sample.millis)?;
@@ -376,7 +376,7 @@ impl Queue {
             ).await?;
             // Responsibility must exist before an intent-producing job executes.
             // The reopen shares this claim's app lock and rolls back with it.
-            crate::recovery::claimed_in(&tx, &grant.delivery().job, now).await?;
+            Box::pin(crate::recovery::claimed_in(&tx, &grant.delivery().job, now)).await?;
             let observed = authorize(tx.clone()).await?;
             let sample = self.clock.sample().await?;
             let authority = current(assignment, observed, sample.millis)?;
@@ -592,12 +592,12 @@ impl Queue {
                             sample.millis,
                         )
                         .await?;
-                        crate::recovery::settled_close(
+                        Box::pin(crate::recovery::settled_close(
                             &tx,
                             &delivery.job,
                             settlement.outcome,
                             sample.millis,
-                        )
+                        ))
                         .await?;
                         let observed = authorize(tx.clone()).await?;
                         let sample = self.clock.sample().await?;
