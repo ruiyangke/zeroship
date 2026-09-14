@@ -7806,6 +7806,7 @@ dependencies = [
  "zeroship-authn",
  "zeroship-authz",
  "zeroship-core",
+ "zeroship-data-orm",
  "zeroship-mailer",
 ]
 

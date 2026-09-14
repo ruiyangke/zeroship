@@ -7,16 +7,31 @@ use crate::advisory_lock::lock_refresh_user_xact;
 use crate::error::{AuthError, Result};
 use crate::oidc::refresh::revoke_person_sessions_in_transaction;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, zeroship_data_orm::orm::Insertable)]
+#[orm(entity = super::native::models::users)]
+pub struct NewUser<'a> {
+    #[orm(encode_with = super::native::user_id_text)]
+    pub id: UserId,
+    pub email: &'a str,
+    pub name: &'a str,
+    pub password_hash: Option<&'a str>,
+}
+
+#[derive(Debug, Clone, zeroship_data_orm::orm::FromRow)]
+#[orm(entity = super::native::models::users)]
 pub struct UserRow {
+    #[orm(decode_with = super::native::user_id)]
     pub id: UserId,
     pub email: String,
+    #[orm(decode_with = super::native::optional_timestamp)]
     pub email_verified_at: Option<chrono::DateTime<chrono::Utc>>,
     pub name: String,
     pub avatar_url: Option<String>,
     pub password_hash: Option<String>,
     pub credential_version: i64,
+    #[orm(decode_with = super::native::optional_timestamp)]
     pub locked_until: Option<chrono::DateTime<chrono::Utc>>,
+    #[orm(decode_with = super::native::optional_timestamp)]
     pub disabled_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
@@ -65,17 +80,8 @@ pub async fn find_by_id(
 ///
 /// # Errors
 ///
-/// Returns `AuthError::DbCode` carrying the SQLSTATE whenever PostgreSQL
-/// supplied one, and `AuthError::Db` for a transport-level failure that has no
-/// code. The SQLSTATE is load-bearing, not diagnostics: `/signup` answers a
-/// duplicate email (23505) with the SAME redirect a fresh insert gets, and
-/// renders the generic error page for anything else. Flatten the code into a
-/// string and that arm becomes unreachable -- every duplicate then renders
-/// "contact support" while a fresh one redirects, which is an oracle for
-/// "is this address registered" and an unusable page for a returning user.
-/// That is not hypothetical: it is what this function did until 2026-08-13,
-/// after a merge silently reverted f18c123bc and left the (now unreachable)
-/// `db_code() == Some("23505")` arm in `ui/signup.rs` reading like a defense.
+/// Preserves PostgreSQL's SQLSTATE in `AuthError::DbCode`; transport failures
+/// return `AuthError::Db`.
 pub async fn create(
     conn: &Client,
     email: &str,
