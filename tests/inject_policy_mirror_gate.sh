@@ -16,7 +16,7 @@ FRAGMENT="policies/confined-system-shape.inject.toml"
 
 # The one GENERATED copy. Committed on purpose (see the header); regenerated and
 # byte-compared by arm 3.
-GENERATED="sdks/vite-plugin/src/gen-types/confined-system-shape.generated.ts"
+GENERATED="packages/vite-plugin/src/gen-types/confined-system-shape.generated.ts"
 CODEGEN="policies/codegen.mjs"
 
 # Files that carry an inject rule and are deliberately neither the fragment nor

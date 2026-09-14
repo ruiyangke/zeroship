@@ -5,7 +5,7 @@ committed `index.js` + `index.d.ts`, `package.json`, `__test__/`, `tests/`), and
 `pnpm build` compiles it first in the chain. The driver seam it plugs into is
 `crates/zeroship-migrate-backend/src/driver.rs` (`pub trait SqlSession`, line 71). Native
 SQLite is `crates/zeroship-migrate-sqlite` (rusqlite, `bundled` + `load_extension`).
-`packages/zero-migrate-cli` and `sdks/vite-plugin` both consume it as
+`packages/zero-migrate-cli` and `packages/vite-plugin` both consume it as
 `zeroship-migrate-node: workspace:*`.
 
 Three things the shipped crate settles differently from the shape first written here, and

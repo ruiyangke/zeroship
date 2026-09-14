@@ -133,7 +133,7 @@ export async function startDemo(demo: Demo): Promise<RunningDemo> {
   //
   // Invoked as `node <dist>/cli/migrate-dev.js` rather than `pnpm migrate`, for
   // the reason golden_path.sh step 9 records: the bin is declared in
-  // sdks/vite-plugin/package.json but only symlinked by an install post-dating
+  // packages/vite-plugin/package.json but only symlinked by an install post-dating
   // ee2c352aa, so `pnpm migrate` is "command not found" on an older
   // node_modules while the dist path works either way.
   //
@@ -143,12 +143,12 @@ export async function startDemo(demo: Demo): Promise<RunningDemo> {
   // `no such table` error back where it came from: the app's own error toast.
   const migrationsDir = resolve(cwd, "migrations");
   if (existsSync(migrationsDir)) {
-    const migrateCli = resolve(REPO_ROOT, "sdks/vite-plugin/dist/cli/migrate-dev.js");
+    const migrateCli = resolve(REPO_ROOT, "packages/vite-plugin/dist/cli/migrate-dev.js");
     if (!existsSync(migrateCli)) {
       throw new DemoBootError(
         demo.name,
         `dev-migrate CLI missing at ${migrateCli}`,
-        "(run `pnpm build` in sdks/vite-plugin; the dev server was never started)",
+        "(run `pnpm build` in packages/vite-plugin; the dev server was never started)",
       );
     }
     const applied = spawnSync("node", [migrateCli], { cwd, env, encoding: "utf8" });

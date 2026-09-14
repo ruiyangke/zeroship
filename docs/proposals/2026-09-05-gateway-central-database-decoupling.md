@@ -821,7 +821,7 @@ MEASURED. Two live defects travel with this table and must not be ported.
    becomes unreachable. An index for a slide that does not happen exists in
    `db/migrations-ts/20260702000600_constraints_indexes_fks.ts`.
 2. **The table has no retention and stores the real email.** The mint path
-   inserts rather than upserts, `checkSession` in `sdks/auth/src/client.ts`
+   inserts rather than upserts, `checkSession` in `packages/auth/src/client.ts`
    probes the mint path on every fresh page load, and no sweeper in
    `crates/zeroship-auth/src/cron/` names either session table.
 

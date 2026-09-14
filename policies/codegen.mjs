@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const FRAGMENT = join(ROOT, "policies/confined-system-shape.inject.toml");
-const TARGET_TOML = join(ROOT, "sdks/vite-plugin/src/gen-types/confined-system-shape.generated.ts");
+const TARGET_TOML = join(ROOT, "packages/vite-plugin/src/gen-types/confined-system-shape.generated.ts");
 const fragment = readFileSync(FRAGMENT, "utf8");
 if (!/^\[\[inject\]\]$/m.test(fragment) || !/^author_primary_key\s*=/m.test(fragment)
     || ["`", "${", "\\"].some((token) => fragment.includes(token))) {

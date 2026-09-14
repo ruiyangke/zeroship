@@ -98,7 +98,7 @@ impl std::fmt::Debug for RedbBackend {
 /// advising a port change.
 ///
 /// So the prose match lives HERE, next to the crate that produces the prose,
-/// and what crosses the language boundary is a token we own. `sdks/vite-plugin/
+/// and what crosses the language boundary is a token we own. `packages/vite-plugin/
 /// src/dev-server.ts` matches this literal.
 ///
 /// The token is still duplicated in two languages and nothing yet enforces that

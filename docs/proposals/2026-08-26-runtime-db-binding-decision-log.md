@@ -644,7 +644,7 @@ measurements under it were wrong, and each was wrong in a different way.
    the production read path removes an unknown key from a returned row. The only
    key removal is `mask_pass::wrap_row_on_read`, which removes exactly
    `format!("{col}_masked")` (`crud/mask_pass.rs:469`, `:480-482`), so a raw
-   column survives to `mapResultDoc` (`sdks/db/src/utils.ts:28-33`). And a
+   column survives to `mapResultDoc` (`packages/db/src/utils.ts:28-33`). And a
    second silent arm the note missed: `decrypt_row_on_read` gates decryption on
    the same hardcoded sibling name (`crud/encryption_pass.rs:295-301`), so
    post-flip an encrypted+masked field skips the decrypt stage entirely and
@@ -1214,7 +1214,7 @@ corrections table's row 9 is where it was first stated.)*
 deleting `defineMaskPolicy` "removes the only way a creator can declare a
 policy, and neither manifest shape carries one", and SC-6 elaborated that the
 string `mask` appears zero times in `crates/zeroship-bundle/src/manifest.rs` and
-zero times in `sdks/vite-plugin/src/zship.ts`. The **carrier** is now decided -
+zero times in `packages/vite-plugin/src/zship.ts`. The **carrier** is now decided -
 the artifact channel that already carries the descriptor - and the five concrete
 artifacts SC-6 enumerates are owed against a decided target rather than an open
 one. *("Neither manifest shape carries one" was also narrower than the truth:

@@ -18,7 +18,7 @@ Their implementations live under [crates/zeroship-runtime/src/node/mod.rs](../..
 
 ## Build-time compatibility
 
-The Vite plugin compatibility layer is implemented in [sdks/vite-plugin/src/node-compat.ts](../../sdks/vite-plugin/src/node-compat.ts).
+The Vite plugin compatibility layer is implemented in [packages/vite-plugin/src/node-compat.ts](../../packages/vite-plugin/src/node-compat.ts).
 
 That layer currently combines:
 

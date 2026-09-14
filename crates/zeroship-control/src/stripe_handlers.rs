@@ -2360,7 +2360,7 @@ mod verification_tests {
     use super::*;
 
     // Shared cross-validation fixture — these MUST match the constants
-    // in `sdks/payments/tests/webhook.test.ts` exactly. If either side
+    // in `packages/payments/tests/webhook.test.ts` exactly. If either side
     // drifts (algorithm change, payload-format change, hex casing,
     // anything), `cross_validates_with_sdk_format` fails immediately.
     const CROSS_SECRET: &str = "whsec_cross_validation_FIXTURE_v1";
@@ -2443,7 +2443,7 @@ mod verification_tests {
     #[test]
     fn cross_validates_with_sdk_format() {
         // Pinned cross-validation: same secret + body + timestamp as the
-        // TS test in sdks/payments/tests/webhook.test.ts. If either
+        // TS test in packages/payments/tests/webhook.test.ts. If either
         // side's HMAC implementation drifts (algorithm, encoding,
         // payload format, hex casing), one of these assertions fails
         // immediately and forces the maintainer to investigate.

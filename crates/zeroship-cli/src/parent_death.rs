@@ -1,7 +1,7 @@
 //! Die when the process that spawned us dies.
 //!
 //! `zeroship serve` is spawned as a CHILD of the vite dev server
-//! (`sdks/vite-plugin/src/dev-server.ts`). When vite is killed by its recorded
+//! (`packages/vite-plugin/src/dev-server.ts`). When vite is killed by its recorded
 //! PID - a harness, a crash, an OOM kill, a `kill -9` in a terminal - the
 //! runtime child SURVIVES. It keeps its listening socket and, worse, keeps an
 //! exclusive redb lock on the example's `.zeroship/kv.redb` forever.
@@ -61,7 +61,7 @@
 
 /// Opt-in gate. Value is the pid of the spawning process.
 ///
-/// Declared here and mirrored in `sdks/vite-plugin/src/constants.ts`
+/// Declared here and mirrored in `packages/vite-plugin/src/constants.ts`
 /// (`ENV_DIE_WITH_PARENT`). Neither side's suite can see the other's spelling,
 /// so the two are held together by behaviour rather than by string comparison:
 /// step 7d of `tests/golden_path.sh` kills a REAL vite dev server and requires

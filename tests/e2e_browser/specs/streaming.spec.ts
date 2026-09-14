@@ -8,7 +8,7 @@ import { appSlug, appUrl } from "../helpers";
 // (ISS-69), so the anonymous browser reaches it through the gateway.
 //
 // These specs caught ISS-71. Two distinct issues, isolated with raw-fetch probes:
-//   (a) a stale local `sdks/rpc/dist` shipped a stream consumer that stalled
+//   (a) a stale local `packages/rpc/dist` shipped a stream consumer that stalled
 //       after the first frame — fixed by rebuilding the SDK (dist is gitignored;
 //       the source was already correct, so not a committed bug); and
 //   (b) a runtime stream-lifecycle bug (FIXED): the 2nd+ streamed response on an

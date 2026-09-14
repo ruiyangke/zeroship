@@ -37,7 +37,7 @@
 //! Two point-of-use sites were removed to get there —
 //! `dml::render_in_list_elem_portable` and `lower::render_table_ref` — and a third,
 //! `dml::placeholder`, was deleted outright as a `pub` fn with zero callers anywhere
-//! in `crates/`, `sdks/` or `packages/`. Two more `renderer(` sites exist in `src/`
+//! in `crates/` or `packages/`. Two more `renderer(` sites exist in `src/`
 //! and are excluded above because they are inside `#[cfg(test)] mod tests`: the
 //! pointer-identity checks that assert `BindCtx` and `IrAuthor` carry the SAME
 //! `&'static` the registry hands out. They are also invisible to the scan below,

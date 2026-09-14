@@ -4,7 +4,7 @@
 # makes both survivable.
 #
 #   Two readers: `crates/cli/src/project_config/` (Rust) and
-#   `sdks/vite-plugin/src/project-config/` (TypeScript). Both are generated
+#   `packages/vite-plugin/src/project-config/` (TypeScript). Both are generated
 #   from `schema/project-v1.json`, which holds every default. The failure mode
 #   that survives generation is DIVERGENT DEFAULTS -- and one layer up, that is
 #   the exact bug `zeroship.jsonc` was built to remove: four independent
@@ -75,8 +75,8 @@ BIN="${ZEROSHIP_BIN:-$ROOT/target/debug/zeroship}"
 FIXTURE="$ROOT/tests/fixtures/project-config/zeroship.jsonc"
 MINIMAL_FIXTURE="$ROOT/tests/fixtures/project-config/zeroship-minimal.jsonc"
 SCHEMA="$ROOT/schema/project-v1.json"
-TS_DUMP="$ROOT/sdks/vite-plugin/scripts/project-config-dump.ts"
-VITE_PLUGIN="$ROOT/sdks/vite-plugin"
+TS_DUMP="$ROOT/packages/vite-plugin/scripts/project-config-dump.ts"
+VITE_PLUGIN="$ROOT/packages/vite-plugin"
 PROBE="$ROOT/tests/lib/project_config_pack_probe.mjs"
 CODEGEN_PROBE="$ROOT/tests/lib/project_config_codegen_probe.mjs"
 WORK="$(mktemp -d)"
@@ -267,7 +267,7 @@ else
   ts_missing=""; rs_missing=""
   while IFS=$'\t' read -r path lit; do
     [ -n "$path" ] || continue
-    grep -qF -- "\"$path\": $lit" sdks/vite-plugin/src/project-config/generated.ts \
+    grep -qF -- "\"$path\": $lit" packages/vite-plugin/src/project-config/generated.ts \
       || ts_missing="$ts_missing $path"
     # The Rust reader must NAME every defaulted path. Check 3 tests bindings
     # behaviorally: CLI-read facts remain fallback-free, while optional
@@ -306,7 +306,7 @@ else
   fail "operational callers bypass the shared control resolver:$missing_control_resolver"
 fi
 
-GEN_TYPES_ALL="sdks/vite-plugin/scripts/gen-types-all.ts"
+GEN_TYPES_ALL="packages/vite-plugin/scripts/gen-types-all.ts"
 if grep -Fq 'const migrationsDir = resolve(app.root, config.migrations.dir);' \
   "$GEN_TYPES_ALL"; then
   pass "gen-types-all preserves an absolute config-rooted migrations path"
@@ -319,7 +319,7 @@ echo "== 3. round trip: the two readers agree byte for byte =="
 while IFS='|' read -r fixture ENVSEL label; do
   envflag=()
   if [ -n "$ENVSEL" ]; then envflag=("--env=$ENVSEL"); fi
-  ( cd "$ROOT/sdks/vite-plugin" && "${NODE_RUN[@]}" "$TS_DUMP" "$fixture" "${envflag[@]+"${envflag[@]}"}" ) \
+  ( cd "$ROOT/packages/vite-plugin" && "${NODE_RUN[@]}" "$TS_DUMP" "$fixture" "${envflag[@]+"${envflag[@]}"}" ) \
     >"$WORK/ts.json" 2>"$WORK/ts.err"
   ts_rc=$?
   ( cd "$(dirname "$fixture")" && "$BIN" config show "--config=$fixture" "${envflag[@]+"${envflag[@]}"}" ) \
@@ -355,7 +355,7 @@ const text = fs.readFileSync(source, "utf8")
   .replaceAll("\n", "\r\n");
 fs.writeFileSync(target, text);
 NODE
-( cd "$ROOT/sdks/vite-plugin" && "${NODE_RUN[@]}" "$TS_DUMP" "$EDGE_FIXTURE" ) \
+( cd "$ROOT/packages/vite-plugin" && "${NODE_RUN[@]}" "$TS_DUMP" "$EDGE_FIXTURE" ) \
   >"$WORK/edge-ts.json" 2>"$WORK/edge-ts.err"
 edge_ts_rc=$?
 ( cd "$WORK" && "$BIN" config show "--config=$EDGE_FIXTURE" ) \
@@ -374,7 +374,7 @@ const fs = require("node:fs");
 const [source, target] = process.argv.slice(2);
 fs.writeFileSync(target, "\uFEFF" + fs.readFileSync(source, "utf8"));
 NODE
-( cd "$ROOT/sdks/vite-plugin" && "${NODE_RUN[@]}" "$TS_DUMP" "$BOM_FIXTURE" ) \
+( cd "$ROOT/packages/vite-plugin" && "${NODE_RUN[@]}" "$TS_DUMP" "$BOM_FIXTURE" ) \
   >"$WORK/bom-ts.json" 2>"$WORK/bom-ts.err"
 bom_ts_rc=$?
 ( cd "$WORK" && "$BIN" config show "--config=$BOM_FIXTURE" ) \
@@ -392,7 +392,7 @@ const fs = require("node:fs");
 const [source, target] = process.argv.slice(2);
 fs.writeFileSync(target, fs.readFileSync(source, "utf8").replace("{", "{\f"));
 NODE
-( cd "$ROOT/sdks/vite-plugin" && "${NODE_RUN[@]}" "$TS_DUMP" "$FORM_FEED_FIXTURE" ) \
+( cd "$ROOT/packages/vite-plugin" && "${NODE_RUN[@]}" "$TS_DUMP" "$FORM_FEED_FIXTURE" ) \
   >"$WORK/form-feed-ts.json" 2>"$WORK/form-feed-ts.err"
 form_feed_ts_rc=$?
 ( cd "$WORK" && "$BIN" config show "--config=$FORM_FEED_FIXTURE" ) \
@@ -412,7 +412,7 @@ const text = fs.readFileSync(source, "utf8")
   .replace("https://control.zeroship.ai", "https://control.\nzeroship.ai");
 fs.writeFileSync(target, text);
 NODE
-( cd "$ROOT/sdks/vite-plugin" && "${NODE_RUN[@]}" "$TS_DUMP" "$RAW_CONTROL_FIXTURE" ) \
+( cd "$ROOT/packages/vite-plugin" && "${NODE_RUN[@]}" "$TS_DUMP" "$RAW_CONTROL_FIXTURE" ) \
   >"$WORK/raw-control-ts.json" 2>"$WORK/raw-control-ts.err"
 raw_control_ts_rc=$?
 ( cd "$WORK" && "$BIN" config show "--config=$RAW_CONTROL_FIXTURE" ) \
@@ -430,7 +430,7 @@ const fs = require("node:fs");
 const [source, target] = process.argv.slice(2);
 fs.writeFileSync(target, fs.readFileSync(source, "utf8").replaceAll("\n", "\r"));
 NODE
-( cd "$ROOT/sdks/vite-plugin" && "${NODE_RUN[@]}" "$TS_DUMP" "$BARE_CR_FIXTURE" ) \
+( cd "$ROOT/packages/vite-plugin" && "${NODE_RUN[@]}" "$TS_DUMP" "$BARE_CR_FIXTURE" ) \
   >"$WORK/bare-cr-ts.json" 2>"$WORK/bare-cr-ts.err"
 bare_cr_ts_rc=$?
 ( cd "$WORK" && "$BIN" config show "--config=$BARE_CR_FIXTURE" ) \
@@ -454,7 +454,7 @@ const after = before.replace(
 if (after === before) throw new Error("fixture insertion did not apply");
 fs.writeFileSync(target, after);
 NODE
-( cd "$ROOT/sdks/vite-plugin" && "${NODE_RUN[@]}" "$TS_DUMP" "$UNPAIRED_FIXTURE" ) \
+( cd "$ROOT/packages/vite-plugin" && "${NODE_RUN[@]}" "$TS_DUMP" "$UNPAIRED_FIXTURE" ) \
   >"$WORK/unpaired-ts.json" 2>"$WORK/unpaired-ts.err"
 unpaired_ts_rc=$?
 ( cd "$WORK" && "$BIN" config show "--config=$UNPAIRED_FIXTURE" ) \
@@ -475,7 +475,7 @@ sed 's|"out": "generated/zeroship",||' "$FIXTURE" >"$MUT/zeroship.jsonc"
 if grep -q '"out": "generated/zeroship"' "$MUT/zeroship.jsonc"; then
   fail "mutation A did not apply - a setup failure and a proved hypothesis print the same green"
 else
-  ( cd "$ROOT/sdks/vite-plugin" && "${NODE_RUN[@]}" "$TS_DUMP" "$MUT/zeroship.jsonc" ) \
+  ( cd "$ROOT/packages/vite-plugin" && "${NODE_RUN[@]}" "$TS_DUMP" "$MUT/zeroship.jsonc" ) \
     >"$WORK/mut-ts.json" 2>"$WORK/mut-ts.err"
   mut_ts_rc=$?
   ( cd "$MUT" && "$BIN" config show ) >"$WORK/mut-rs.json" 2>"$WORK/mut-rs.err"
@@ -504,7 +504,7 @@ fi
 #
 # Both answering the same way is the failure, in either direction.
 EMPTY="$WORK/empty"; mkdir -p "$EMPTY"
-( cd "$ROOT/sdks/vite-plugin" && "${NODE_RUN[@]}" "$TS_DUMP" "--root=$EMPTY" ) \
+( cd "$ROOT/packages/vite-plugin" && "${NODE_RUN[@]}" "$TS_DUMP" "--root=$EMPTY" ) \
   >"$WORK/empty-ts.json" 2>"$WORK/empty-ts.err"
 empty_ts_rc=$?
 ( cd "$EMPTY" && "$BIN" config show ) >"$WORK/empty-rs.json" 2>"$WORK/empty-rs.err"
@@ -581,7 +581,7 @@ else
 fi
 
 (
-  cd "$ROOT/sdks/vite-plugin" || exit 1
+  cd "$ROOT/packages/vite-plugin" || exit 1
   "${NODE_RUN[@]}" "$TS_DUMP" "$WRITEBACK_PROJECT/zeroship.jsonc"
 ) > "$WORK/writeback-ts.json" 2> "$WORK/writeback-ts.err"
 writeback_ts_rc=$?
@@ -703,13 +703,13 @@ echo
 echo "== 4. the scope invariant: zeroship.jsonc is never packed =="
 SENTINEL="zsprojectcfg$(date +%s)$$"
 probe() {
-  ( cd "$ROOT/sdks/vite-plugin" && "${NODE_RUN[@]}" "$PROBE" "--sentinel=$SENTINEL" "--plant=$1" ) \
+  ( cd "$ROOT/packages/vite-plugin" && "${NODE_RUN[@]}" "$PROBE" "--sentinel=$SENTINEL" "--plant=$1" ) \
     2>"$WORK/probe-$1.err"
 }
 
 P_NONE="$(probe none)"; P_ROOT="$(probe root)"; P_DIST="$(probe dist)"
 P_UNSAFE="$(
-  cd "$ROOT/sdks/vite-plugin" &&
+  cd "$ROOT/packages/vite-plugin" &&
     "${NODE_RUN[@]}" "$PROBE" "--sentinel=$SENTINEL" --plant=root --dist=.
 )" 2>"$WORK/probe-unsafe.err"
 ran=1
