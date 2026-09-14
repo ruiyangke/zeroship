@@ -84,25 +84,25 @@ async fn seed_pricing(client: &compio_postgres::Client) -> String {
 }
 
 async fn seed_priced_app(client: &compio_postgres::Client, plan_id: &str) -> AppId {
+    let app_id = AppId::mint();
     let name = format!("e2e-probe-{}", Uuid::new_v4());
-    // `common::seed_app` is shared by every other fixture in this crate's test
-    // suite and returns the row's raw uuid decode for callers that still key
-    // on it; this pipeline compares the seeded app against the AppId-typed
-    // usage-event and spend-transition surfaces, so it reads the same row's
-    // `id` column as text and parses the canonical id instead of going
-    // through that shared decode.
     let organization_id = common::seed_organization(client).await;
     let project_id = common::unowned_project_in(client, &organization_id).await;
-    let rows = client
-        .query(
-            "INSERT INTO zeroship.apps (name, plan_id, project_id, organization_id) \
-             VALUES ($1, $2, $3, $4) RETURNING id",
-            &[&name, &plan_id, &project_id, &organization_id],
+    client
+        .execute(
+            "INSERT INTO zeroship.apps (id, name, plan_id, project_id, organization_id) \
+             VALUES ($1, $2, $3, $4, $5)",
+            &[
+                &app_id.as_str(),
+                &name,
+                &plan_id,
+                &project_id,
+                &organization_id,
+            ],
         )
         .await
         .expect("seed fixture app");
-    let id_raw: String = rows[0].get("id");
-    AppId::parse(&id_raw).expect("seeded app id is canonical")
+    app_id
 }
 
 async fn usage_total(client: &compio_postgres::Client, app: &AppId) -> i64 {
