@@ -7,8 +7,7 @@
 use sha2::{Digest, Sha256};
 use zeroship_bundle::Manifest;
 use zeroship_control::publication::{
-    Acceptance, CatalogError, CommandBinding, DeployCommand, VerifiedDeployment,
-    ZSHIP_CONTENT_TYPE,
+    Acceptance, CatalogError, CommandBinding, DeployCommand, VerifiedDeployment, ZSHIP_CONTENT_TYPE,
 };
 use zeroship_control::Registry;
 use zeroship_core::{AppId, DeployCommandId, UserId};

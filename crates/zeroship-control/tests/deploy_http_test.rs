@@ -1732,7 +1732,10 @@ async fn an_exact_retry_returns_the_first_acceptance_without_republishing() {
         post_command(&app, &app_id, &pat.bearer(), &[first.as_str()], first_body).await;
     assert_eq!(status, StatusCode::OK, "{replay}");
     assert!(replayed, "an exact retry is marked as a replay");
-    assert_eq!(replay, accepted, "the retry returns the first acceptance unchanged");
+    assert_eq!(
+        replay, accepted,
+        "the retry returns the first acceptance unchanged"
+    );
     assert_eq!(publication_rows(&fx.state, &app_id).await, before);
     assert_eq!(
         live_deploy_hash(&fx.state, &app_id).await.as_deref(),
@@ -1766,8 +1769,14 @@ async fn a_reused_command_id_conflicts_without_disclosing_its_receipt() {
     let (changed, changed_module) = marked_zship("changed");
     let command = DeployCommandId::mint();
 
-    let (status, _, accepted) =
-        post_command(&app, &app_id, &pat.bearer(), &[command.as_str()], body.clone()).await;
+    let (status, _, accepted) = post_command(
+        &app,
+        &app_id,
+        &pat.bearer(),
+        &[command.as_str()],
+        body.clone(),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK, "{accepted}");
 
     // A second member who may deploy the same app. An admin reaches every
@@ -1817,12 +1826,23 @@ async fn a_reused_command_id_conflicts_without_disclosing_its_receipt() {
         assert_eq!(status, StatusCode::CONFLICT, "{case}: {json}");
         assert!(!replayed, "{case}");
         assert_eq!(json["error"], "idempotency_key_conflict", "{case}");
-        for field in ["deploy_hash", "deploy_id", "command_id", "lifecycle_revision"] {
-            assert!(json.get(field).is_none(), "{case} disclosed {field}: {json}");
+        for field in [
+            "deploy_hash",
+            "deploy_id",
+            "command_id",
+            "lifecycle_revision",
+        ] {
+            assert!(
+                json.get(field).is_none(),
+                "{case} disclosed {field}: {json}"
+            );
         }
     }
     assert_eq!(publication_rows(&fx.state, &app_id).await, before);
-    assert_eq!(publication_rows(&fx.state, &other_app).await, (0, vec![], 0));
+    assert_eq!(
+        publication_rows(&fx.state, &other_app).await,
+        (0, vec![], 0)
+    );
     assert!(
         !fx.blob_store.has_blob(&changed_module).await.unwrap(),
         "a conflicting artifact must not be ingested"
@@ -1851,14 +1871,16 @@ async fn concurrent_duplicate_deploys_accept_once() {
 
     let bearer = pat.bearer();
     let keys = [command.as_str()];
-    let ((first, first_replayed, first_body), (second, second_replayed, second_body)) =
-        futures::join!(
-            post_command(&app, &app_id, &bearer, &keys, body.clone()),
-            post_command(&app, &app_id, &bearer, &keys, body.clone()),
-        );
+    let ((first, first_replayed, first_body), (second, second_replayed, second_body)) = futures::join!(
+        post_command(&app, &app_id, &bearer, &keys, body.clone()),
+        post_command(&app, &app_id, &bearer, &keys, body.clone()),
+    );
     assert_eq!(first, StatusCode::OK, "{first_body}");
     assert_eq!(second, StatusCode::OK, "{second_body}");
-    assert_eq!(first_body, second_body, "both callers see the one acceptance");
+    assert_eq!(
+        first_body, second_body,
+        "both callers see the one acceptance"
+    );
     assert!(
         !(first_replayed && second_replayed),
         "one of the two requests performed the acceptance"
@@ -1944,8 +1966,14 @@ async fn a_refused_deploy_commits_nothing_and_the_same_command_can_succeed_later
     let body = zship_with_descriptor(Some(&blob));
     let command = DeployCommandId::mint();
 
-    let (status, _, json) =
-        post_command(&app, &app_id, &pat.bearer(), &[command.as_str()], body.clone()).await;
+    let (status, _, json) = post_command(
+        &app,
+        &app_id,
+        &pat.bearer(),
+        &[command.as_str()],
+        body.clone(),
+    )
+    .await;
     assert_eq!(status, StatusCode::CONFLICT, "{json}");
     assert_eq!(json["error"], "schema_not_applied");
     assert_eq!(publication_rows(&fx.state, &app_id).await, (0, vec![], 0));
@@ -2011,8 +2039,14 @@ async fn a_deleted_app_refuses_command_replay() {
     let (body, _) = marked_zship("deleted");
     let command = DeployCommandId::mint();
 
-    let (status, _, json) =
-        post_command(&app, &app_id, &pat.bearer(), &[command.as_str()], body.clone()).await;
+    let (status, _, json) = post_command(
+        &app,
+        &app_id,
+        &pat.bearer(),
+        &[command.as_str()],
+        body.clone(),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK, "{json}");
     fx.state
         .registry
@@ -2044,7 +2078,11 @@ async fn a_deleted_app_refuses_command_replay() {
         .await
         .map(|row| (row.get(0), row.get(1)))
         .unwrap();
-    assert_eq!(deleted, (None, true), "the deleted app stays deleted and empty");
+    assert_eq!(
+        deleted,
+        (None, true),
+        "the deleted app stays deleted and empty"
+    );
 
     pat.cleanup(&fx.state).await;
     drop(app);

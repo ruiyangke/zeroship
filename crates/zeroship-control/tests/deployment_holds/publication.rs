@@ -12,16 +12,16 @@ use zeroship_bundle::Manifest;
 use zeroship_control::{
     cron::deploy_retention::{Collector, DeployRetentionConfig},
     publication::{
-        AcceptanceResult, CatalogError, Transition,
         catalog::{self, ACKNOWLEDGED, PENDING},
         publisher::{Exchange, Publisher, PublisherConfig, ScheduleManager},
+        AcceptanceResult, CatalogError, Transition,
     },
 };
 use zeroship_core::{
-    UserId,
     workflow_coordination::Revision,
     workflow_jobs::{DeploymentId, JobOperation, JobSpec},
     workflow_schedules::{ActivateSchedules, DisableSchedules, RegisterSchedules},
+    UserId,
 };
 use zeroship_workflow_manager::deployments::DeploymentHolds;
 
@@ -87,7 +87,12 @@ fn scheduled(label: &str, schedules: &[&str]) -> Manifest {
     manifest
 }
 
-async fn accept(fixture: &Fixture, app: &AppId, actor: &UserId, manifest: Manifest) -> AcceptanceResult {
+async fn accept(
+    fixture: &Fixture,
+    app: &AppId,
+    actor: &UserId,
+    manifest: Manifest,
+) -> AcceptanceResult {
     deploy(&fixture.state.registry, app, actor, manifest)
         .await
         .expect("deploy accepted")
@@ -193,7 +198,10 @@ async fn lifecycle_intents_reach_the_manager_in_revision_order() {
     // Archiving again invents no transition.
     fixture.state.registry.archive_app(&app).await.unwrap();
     let staged = accept(&fixture, &app, &actor, scheduled("staged", &["nightly"])).await;
-    assert_eq!(staged.lifecycle_revision, None, "an archived app only stages code");
+    assert_eq!(
+        staged.lifecycle_revision, None,
+        "an archived app only stages code"
+    );
     let restored = fixture.state.registry.unarchive_app(&app).await.unwrap();
     assert!(restored.unwrap().archived_at.is_none());
     fixture.state.registry.unarchive_app(&app).await.unwrap();
@@ -218,8 +226,14 @@ async fn lifecycle_intents_reach_the_manager_in_revision_order() {
             .collect::<Vec<_>>(),
         expected
     );
-    assert!(pending.iter().all(|row| row.3 == PENDING && row.4.is_none()));
-    assert_eq!(selection(&fixture, &app).await, None, "nothing reached the manager");
+    assert!(pending
+        .iter()
+        .all(|row| row.3 == PENDING && row.4.is_none()));
+    assert_eq!(
+        selection(&fixture, &app).await,
+        None,
+        "nothing reached the manager"
+    );
 
     let mut publisher = manager_publisher(&fixture, &manager).await;
     assert_eq!(publish_all(&mut publisher).await, expected.len());
@@ -265,7 +279,9 @@ async fn lifecycle_intents_reach_the_manager_in_revision_order() {
         .map(|row| row.get(0))
         .collect();
     assert_eq!(definitions.len(), 3);
-    assert!(definitions.iter().all(|definition| !definition.contains("private")));
+    assert!(definitions
+        .iter()
+        .all(|definition| !definition.contains("private")));
 }
 
 /// Removing every schedule is still a normal activation: the manager selects
@@ -278,7 +294,13 @@ async fn an_empty_schedule_list_fences_the_previous_calendar() {
     let app = app(&fixture, "publication-empty").await;
     let mut publisher = manager_publisher(&fixture, &manager).await;
 
-    accept(&fixture, &app, &actor, scheduled("with-schedule", &["nightly"])).await;
+    accept(
+        &fixture,
+        &app,
+        &actor,
+        scheduled("with-schedule", &["nightly"]),
+    )
+    .await;
     assert_eq!(publish_all(&mut publisher).await, 1);
     let calendar = || async {
         fixture
@@ -310,7 +332,11 @@ async fn an_empty_schedule_list_fences_the_previous_calendar() {
     .unwrap();
     assert!(registration.schedules.is_empty());
     assert_eq!(publish_all(&mut publisher).await, 1);
-    assert_eq!(calendar().await, None, "the removed schedule no longer generates");
+    assert_eq!(
+        calendar().await,
+        None,
+        "the removed schedule no longer generates"
+    );
     assert_eq!(
         selection(&fixture, &app).await,
         Some((2, true, Some((without.deploy_id.as_str().to_owned(), 2))))
@@ -362,10 +388,11 @@ impl ScheduleManager for Manager {
     }
     fn activate<'a>(&'a self, request: &'a ActivateSchedules) -> Exchange<'a, JobSpec> {
         Box::pin(async move {
-            self.0
-                .calls
-                .borrow_mut()
-                .push((request.app_id.clone(), "activate", request.revision.get()));
+            self.0.calls.borrow_mut().push((
+                request.app_id.clone(),
+                "activate",
+                request.revision.get(),
+            ));
             let job = self.0.inner.activate_schedules(request).await?;
             if self.0.script(&request.app_id) == Script::LoseReply {
                 self.0.lost.borrow_mut().push(job);
@@ -376,10 +403,11 @@ impl ScheduleManager for Manager {
     }
     fn disable<'a>(&'a self, request: &'a DisableSchedules) -> Exchange<'a, DisableSchedules> {
         Box::pin(async move {
-            self.0
-                .calls
-                .borrow_mut()
-                .push((request.app_id.clone(), "disable", request.revision.get()));
+            self.0.calls.borrow_mut().push((
+                request.app_id.clone(),
+                "disable",
+                request.revision.get(),
+            ));
             self.0.inner.disable_schedules(request).await
         })
     }
@@ -413,7 +441,10 @@ async fn lost_replies_and_restarts_confirm_only_the_original_receipt() {
 
     // Killed after the catalog commit, mid-exchange.
     let script = scripted(&fixture, &manager);
-    script.scripts.borrow_mut().push((app.clone(), Script::Block));
+    script
+        .scripts
+        .borrow_mut()
+        .push((app.clone(), Script::Block));
     let database = catalog::connect(&fixture.control_url).await.unwrap();
     let mut killed = Publisher::new(
         database,
@@ -535,7 +566,12 @@ async fn a_blocked_app_does_not_starve_other_apps() {
     .unwrap();
     let stats = publisher.tick().await.unwrap();
     assert_eq!(
-        (stats.attempted, stats.acknowledged, stats.failed, stats.deferred),
+        (
+            stats.attempted,
+            stats.acknowledged,
+            stats.failed,
+            stats.deferred
+        ),
         (3, 2, 1, 1),
         "{stats:?}"
     );
@@ -555,7 +591,10 @@ async fn a_blocked_app_does_not_starve_other_apps() {
 
     let mut released = manager_publisher(&fixture, &manager).await;
     assert_eq!(publish_all(&mut released).await, 2);
-    assert_eq!(selection(&fixture, &blocked).await.map(|s| (s.0, s.1)), Some((2, false)));
+    assert_eq!(
+        selection(&fixture, &blocked).await.map(|s| (s.0, s.1)),
+        Some((2, false))
+    );
 }
 
 /// A refusal from the manager is never recorded as an acknowledgement.
@@ -669,7 +708,10 @@ async fn a_pending_activation_keeps_its_bundle_until_the_queue_hold_takes_over()
 
     let mut publisher = manager_publisher(&fixture, &manager).await;
     assert_eq!(publish_all(&mut publisher).await, 3);
-    assert!(intents(&fixture, &app).await.iter().all(|row| row.3 == ACKNOWLEDGED));
+    assert!(intents(&fixture, &app)
+        .await
+        .iter()
+        .all(|row| row.3 == ACKNOWLEDGED));
     collect_once(&fixture).await;
     for older in &accepted[..2] {
         assert_eq!(
@@ -689,8 +731,14 @@ async fn a_pending_activation_keeps_its_bundle_until_the_queue_hold_takes_over()
         .await
         .unwrap();
     collect_once(&fixture).await;
-    assert_eq!(retention(&fixture, accepted[0].deploy_id.as_str()).await, "deleted");
-    assert_eq!(retention(&fixture, accepted[1].deploy_id.as_str()).await, "available");
+    assert_eq!(
+        retention(&fixture, accepted[0].deploy_id.as_str()).await,
+        "deleted"
+    );
+    assert_eq!(
+        retention(&fixture, accepted[1].deploy_id.as_str()).await,
+        "available"
+    );
     assert!(matches!(
         fixture
             .state
@@ -713,8 +761,8 @@ async fn a_callback_fault_rolls_back_every_staged_catalog_write() {
     let empty = snapshot(&fixture, &app).await;
     let faulted = command(&app, &actor, verified(labelled("faulted")));
     let outcome = catalog::transact(&database, |tx| async move {
-        let accepted = catalog::accept(&tx, &faulted, zeroship_control::publication::now_millis())
-            .await?;
+        let accepted =
+            catalog::accept(&tx, &faulted, zeroship_control::publication::now_millis()).await?;
         assert!(!accepted.replayed());
         Err::<(), _>(CatalogError::Storage("injected fault after staged writes"))
     })
@@ -744,7 +792,11 @@ async fn a_callback_fault_rolls_back_every_staged_catalog_write() {
         assert!(matches!(outcome, Err(CatalogError::Storage(_))));
         assert_eq!(snapshot(&fixture, &app).await, before, "restore={restore}");
     }
-    assert_eq!(committed.1 + 1, snapshot(&fixture, &app).await.1, "only the real archive advanced");
+    assert_eq!(
+        committed.1 + 1,
+        snapshot(&fixture, &app).await.1,
+        "only the real archive advanced"
+    );
 }
 
 async fn retention(fixture: &Fixture, id: &str) -> String {

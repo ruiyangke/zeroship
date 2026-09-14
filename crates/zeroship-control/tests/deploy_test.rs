@@ -252,7 +252,9 @@ async fn deploy_round_trip() {
     )
     .expect("ingest produced a verified deployment");
     let accepted = registry
-        .deploy(&common::deployments::command(&app_id2, &owner_id, deployment))
+        .deploy(&common::deployments::command(
+            &app_id2, &owner_id, deployment,
+        ))
         .await
         .expect("set deploy");
     assert!(!accepted.replayed());

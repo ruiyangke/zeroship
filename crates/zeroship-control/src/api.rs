@@ -1003,23 +1003,22 @@ pub async fn deploy(
     // before acceptance, so a committed publication is never refused for its
     // content. The same bytes carry the runtime descriptor schema admission
     // compares, so there is one interpretation of the manifest on this path.
-    let deployment =
-        match VerifiedDeployment::verify(success.manifest_json, success.deploy_hash) {
-            Ok(deployment) => deployment,
-            Err(DeploymentRejected::Schedules(detail)) => {
-                return web::HttpResponse::BadRequest().json(&serde_json::json!({
-                    "error": "invalid_workflow_schedules",
-                    "detail": detail,
-                }));
-            }
-            Err(error @ DeploymentRejected::Manifest) => {
-                return infrastructure_error_response(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "ingested manifest failed verification",
-                    error,
-                );
-            }
-        };
+    let deployment = match VerifiedDeployment::verify(success.manifest_json, success.deploy_hash) {
+        Ok(deployment) => deployment,
+        Err(DeploymentRejected::Schedules(detail)) => {
+            return web::HttpResponse::BadRequest().json(&serde_json::json!({
+                "error": "invalid_workflow_schedules",
+                "detail": detail,
+            }));
+        }
+        Err(error @ DeploymentRejected::Manifest) => {
+            return infrastructure_error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "ingested manifest failed verification",
+                error,
+            );
+        }
+    };
 
     // Attempt OAuth-client reconciliation BEFORE the manifest commit. When
     // reconciliation succeeds, the gateway's next route-sync pull sees the

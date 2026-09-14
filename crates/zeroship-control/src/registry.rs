@@ -591,8 +591,10 @@ impl Registry {
         binding: &CommandBinding,
     ) -> Result<Option<AcceptanceResult>, CatalogError> {
         let database = catalog::connect(&self.db_url).await?;
-        catalog::transact(&database, |tx| async move { catalog::lookup(&tx, binding).await })
-            .await
+        catalog::transact(&database, |tx| async move {
+            catalog::lookup(&tx, binding).await
+        })
+        .await
     }
 
     /// Whether the app exists and has not been deleted.
