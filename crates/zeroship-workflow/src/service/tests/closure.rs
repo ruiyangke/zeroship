@@ -426,13 +426,16 @@ async fn drain_predicates(store: Rc<OrmStore>) {
     assert!(evidence().await, "a lapsed claim is not live");
     set("tasks", &task, json!({"state":"completed"})).await;
 
-    // A payload in preparation or deletion, and a tombstone in its window.
+    // A payload in preparation or deletion, and a tombstone owed its resweep
+    // inside or past its window.
     for state in ["uploading", "staged", "deleting", "deleted"] {
         set("payloads", &payload, json!({"state":state, "expires_at":far})).await;
         assert!(!evidence().await, "{state} payload");
     }
     set("payloads", &payload, json!({"state":"deleted", "expires_at":0})).await;
-    assert!(evidence().await, "a tombstone past its resweep window");
+    assert!(!evidence().await, "a tombstone past its window awaits its resweep");
+    set("payloads", &payload, json!({"state":"purged", "expires_at":0})).await;
+    assert!(evidence().await, "a final tombstone");
     assert_eq!(closed(&service, &app).await, next);
 }
 

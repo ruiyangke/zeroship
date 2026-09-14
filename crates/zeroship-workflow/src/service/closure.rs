@@ -164,7 +164,8 @@ async fn raise_closed_epoch(
 /// Closed drain evidence, read under the app state lock in the fencing
 /// transaction: no unconfirmed publication intent, no deployment hold in
 /// transition, no payload in preparation or deletion, no deletion tombstone
-/// inside its resweep window and no live task claim.
+/// still owed its final resweep and no live task claim. A purged tombstone is
+/// final and never blocks retirement.
 pub(super) async fn drained(
     tx: &Transaction,
     app: &AppId,
@@ -200,8 +201,7 @@ pub(super) async fn drained(
         .exists(
             payloads::app_id
                 .eq(app.as_str())?
-                .and(payloads::state.eq("deleted")?)
-                .and(payloads::expires_at.gt(now)?),
+                .and(payloads::state.eq("deleted")?),
         )
         .await?;
     let claims = db
