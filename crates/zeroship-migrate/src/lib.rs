@@ -151,8 +151,6 @@ pub fn shipping_backends() -> BackendRegistry {
 /// visible (the policy example shows its charter string) and hiding only `fn main`
 /// scaffolding.
 ///
-/// The TypeScript docs are gated the same way from the other side, by the
-/// `doc-examples` tests in both JS packages.
 #[cfg(doctest)]
 #[doc = include_str!("../../../docs/embedding.md")]
 pub struct EmbeddingGuideDocTests;
