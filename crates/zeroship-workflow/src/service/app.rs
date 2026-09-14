@@ -32,6 +32,7 @@ pub struct WorkflowService {
     pub(crate) deployments: Option<super::AppDeployments>,
     pub(crate) signal_authority: Option<Arc<super::SignalAuthority>>,
     pub(crate) payload_storage: Option<zeroship_storage::Storage>,
+    ingress: Option<Rc<dyn super::IngressEpochs>>,
 }
 impl std::fmt::Debug for WorkflowService {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -66,6 +67,7 @@ impl WorkflowService {
             deployments: None,
             signal_authority: None,
             payload_storage: None,
+            ingress: None,
         })
     }
     #[must_use]
@@ -226,16 +228,56 @@ impl AppWorkflows {
         &self.app
     }
 
+    /// Establish ingress epochs through the host's policy binding for this app.
+    /// A fenced acceptance then obtains a newer epoch and retries once.
+    #[must_use]
+    pub fn with_ingress(mut self, epochs: Rc<dyn super::IngressEpochs>) -> Self {
+        self.service.ingress = Some(epochs);
+        self
+    }
+
+    /// Run one creator ingress acceptance. When the journal refuses it because
+    /// it closed the captured ingress epoch, establish a newer epoch through
+    /// the host and retry once, capturing the binding's newly installed
+    /// authority under the same request identity. The refused attempt
+    /// committed nothing.
+    pub(super) async fn accept<'a, T>(
+        &'a self,
+        attempt: impl Fn(Self) -> futures::future::LocalBoxFuture<'a, Result<T, WorkflowServiceError>>,
+    ) -> Result<T, WorkflowServiceError> {
+        let result = match (attempt(self.clone()).await, &self.service.ingress) {
+            (Err(WorkflowServiceError::IngressFenced(after)), Some(epochs)) => {
+                epochs.establish(after).await?;
+                let mut fresh = self.clone();
+                fresh.service.operation_policy = None;
+                attempt(fresh).await
+            }
+            (result, _) => result,
+        };
+        if result.is_ok() {
+            if let Some(epochs) = &self.service.ingress {
+                epochs.accepted();
+            }
+        }
+        result
+    }
+
     pub async fn start(
         &self,
         request_id: &RequestId,
         name: &str,
         options: StartOptions,
     ) -> Result<StartedRun, WorkflowServiceError> {
-        let captured = self.capture_policy();
-        captured
-            .run(self.start_captured(request_id, name, options, &captured))
-            .await
+        self.accept(|scope| {
+            let options = options.clone();
+            Box::pin(async move {
+                let captured = scope.capture_policy();
+                captured
+                    .run(scope.start_captured(request_id, name, options, &captured))
+                    .await
+            })
+        })
+        .await
     }
 
     async fn start_captured(
@@ -354,38 +396,50 @@ impl AppWorkflows {
         run_id: &str,
         options: SignalOptions,
     ) -> Result<DeliveredSignal, WorkflowServiceError> {
-        let captured = self.capture_policy();
-        captured
-            .run(async {
-                validate_run(run_id)?;
-                validation::signal_type(&options.signal_type)?;
-                let digest = digest(&(run_id, &options))?;
-                let mut tx = self.service.begin().await?;
-                lock_app_state(&mut tx, &self.app).await?;
-                let now = tx.now().await?;
-                if let Some(receipt) =
-                    request_result(&tx, &self.app, request_id, "signal", &digest).await?
-                {
-                    return Ok(receipt);
-                }
-                captured.check()?;
-                require_open_epoch(&tx, &self.app, &captured).await?;
-                let policy = &captured.authority()?.policy;
-                if encode(&options.payload)?.len() > policy.max_input_bytes {
-                    return Err(WorkflowServiceError::PayloadTooLarge);
-                }
-                let result =
-                    super::signals::deliver(&mut tx, &self.app, run_id, &options, "app", now)
-                        .await?;
-                store_request(
-                    &mut tx, &self.app, request_id, "signal", &digest, &result, now,
-                )
-                .await?;
-                captured.check()?;
-                tx.commit().await?;
-                Ok(result)
+        self.accept(|scope| {
+            let options = options.clone();
+            Box::pin(async move {
+                let captured = scope.capture_policy();
+                captured
+                    .run(scope.signal_captured(request_id, run_id, &options, &captured))
+                    .await
             })
-            .await
+        })
+        .await
+    }
+
+    async fn signal_captured(
+        &self,
+        request_id: &RequestId,
+        run_id: &str,
+        options: &SignalOptions,
+        captured: &CapturedPolicy,
+    ) -> Result<DeliveredSignal, WorkflowServiceError> {
+        validate_run(run_id)?;
+        validation::signal_type(&options.signal_type)?;
+        let digest = digest(&(run_id, options))?;
+        let mut tx = self.service.begin().await?;
+        lock_app_state(&mut tx, &self.app).await?;
+        let now = tx.now().await?;
+        if let Some(receipt) = request_result(&tx, &self.app, request_id, "signal", &digest).await?
+        {
+            return Ok(receipt);
+        }
+        captured.check()?;
+        require_open_epoch(&tx, &self.app, captured).await?;
+        let policy = &captured.authority()?.policy;
+        if encode(&options.payload)?.len() > policy.max_input_bytes {
+            return Err(WorkflowServiceError::PayloadTooLarge);
+        }
+        let result =
+            super::signals::deliver(&mut tx, &self.app, run_id, options, "app", now).await?;
+        store_request(
+            &mut tx, &self.app, request_id, "signal", &digest, &result, now,
+        )
+        .await?;
+        captured.check()?;
+        tx.commit().await?;
+        Ok(result)
     }
 }
 
