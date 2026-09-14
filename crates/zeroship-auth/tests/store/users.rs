@@ -5,6 +5,40 @@ use zeroship_auth::store::users;
 use zeroship_core::UserId;
 use zeroship_data_orm::orm::{Entity, Insertable};
 
+#[compio::test]
+async fn user_repository_uses_native_ids_and_case_insensitive_email() {
+    Database::run(async |database| {
+        let orm = zeroship_auth::store::native::connect(database.auth_url().as_str())
+            .await
+            .unwrap();
+        assert!(
+            users::find_by_id(&orm, &UserId::mint())
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            users::find_by_email(&orm, "absent@example.test")
+                .await
+                .unwrap()
+                .is_none()
+        );
+        let created = users::create(&orm, "Creator@Example.test", "Creator", Some("phc"))
+            .await
+            .unwrap();
+        let by_email = users::find_by_email(&orm, "CREATOR@EXAMPLE.TEST")
+            .await
+            .unwrap()
+            .unwrap();
+        let by_id = users::find_by_id(&orm, &created.id).await.unwrap().unwrap();
+        assert_eq!(by_email.id, created.id);
+        assert_eq!(by_id.email, created.email);
+        assert_eq!(by_id.password_hash.as_deref(), Some("phc"));
+        assert_eq!(by_id.credential_version, 0);
+    })
+    .await;
+}
+
 #[test]
 fn native_user_insert_preserves_the_owned_id_buffer() {
     let id = UserId::mint();
@@ -75,14 +109,18 @@ async fn native_user_rows_apply_the_callers_identity_conversion() {
 async fn duplicate_email_preserves_the_existing_user_and_reports_unique_violation() {
     Database::run(async |database| {
         let pg = database.connect_as_auth().await;
-        let first = users::create(&pg, "creator@example.test", "Original creator", None)
+        let orm = database.orm().await;
+        let first = users::create(&orm, "creator@example.test", "Original creator", None)
             .await
             .unwrap();
-        let error = users::create(&pg, "CREATOR@EXAMPLE.TEST", "Duplicate creator", None)
+        let error = users::create(&orm, "CREATOR@EXAMPLE.TEST", "Duplicate creator", None)
             .await
             .unwrap_err();
-        assert_eq!(error.db_code(), Some("23505"));
-        let retained = users::find_by_email(&pg, "creator@example.test")
+        assert!(matches!(
+            error,
+            zeroship_data_orm::orm::DbError::UniqueViolation { .. }
+        ));
+        let retained = users::find_by_email(&orm, "creator@example.test")
             .await
             .unwrap()
             .unwrap();

@@ -12,7 +12,7 @@ async fn disabled_account_cannot_redeem_but_the_link_survives_for_an_eligible_re
     Database::run(async |database| {
         let mailer = Arc::new(CapturingMailer::default());
         let server = AuthServer::with_mailer(database, mailer.clone()).await;
-        let user = users::create(&server.pg, "disabled@example.test", "Disabled", None)
+        let user = users::create(&server.orm, "disabled@example.test", "Disabled", None)
             .await
             .unwrap();
         let login = RequestedLogin::start(&server, &mailer, &user.email).await;
@@ -48,7 +48,7 @@ async fn disabled_account_cannot_complete_but_the_code_survives_for_an_eligible_
     Database::run(async |database| {
         let mailer = Arc::new(CapturingMailer::default());
         let server = AuthServer::with_mailer(database, mailer.clone()).await;
-        let user = users::create(&server.pg, "disabled@example.test", "Disabled", None)
+        let user = users::create(&server.orm, "disabled@example.test", "Disabled", None)
             .await
             .unwrap();
         let login = RequestedLogin::start(&server, &mailer, &user.email).await;

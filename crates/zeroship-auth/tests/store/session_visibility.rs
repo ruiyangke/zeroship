@@ -90,9 +90,10 @@ async fn seed_idp_session(client: &Client, user_id: &zeroship_core::UserId) -> s
 #[compio::test]
 async fn list_returns_idp_and_gateway_sessions() {
     Database::run(async |database| {
+        let orm = database.orm().await;
         let client = database.connect_as_auth().await;
         let email = format!("iss10-list-{}@zeroship.test", Uuid::new_v4().simple());
-        let user = users::create(&client, &email, "Test", None)
+        let user = users::create(&orm, &email, "Test", None)
             .await
             .expect("seed user");
 
@@ -143,9 +144,10 @@ async fn list_returns_idp_and_gateway_sessions() {
 #[compio::test]
 async fn list_excludes_revoked_and_expired() {
     Database::run(async |database| {
+        let orm = database.orm().await;
         let client = database.connect_as_auth().await;
         let email = format!("iss10-excl-{}@zeroship.test", Uuid::new_v4().simple());
-        let user = users::create(&client, &email, "Test", None)
+        let user = users::create(&orm, &email, "Test", None)
             .await
             .expect("seed user");
 
@@ -212,13 +214,14 @@ async fn list_excludes_revoked_and_expired() {
 #[compio::test]
 async fn list_excludes_other_users_sessions() {
     Database::run(async |database| {
+        let orm = database.orm().await;
         let client = database.connect_as_auth().await;
         let email_a = format!("iss10-a-{}@zeroship.test", Uuid::new_v4().simple());
         let email_b = format!("iss10-b-{}@zeroship.test", Uuid::new_v4().simple());
-        let user_a = users::create(&client, &email_a, "A", None)
+        let user_a = users::create(&orm, &email_a, "A", None)
             .await
             .expect("seed user a");
-        let user_b = users::create(&client, &email_b, "B", None)
+        let user_b = users::create(&orm, &email_b, "B", None)
             .await
             .expect("seed user b");
 
@@ -254,9 +257,10 @@ async fn list_excludes_other_users_sessions() {
 #[compio::test]
 async fn revoke_one_idp_session_succeeds() {
     Database::run(async |database| {
+        let orm = database.orm().await;
         let client = database.connect_as_auth().await;
         let email = format!("iss10-revidp-{}@zeroship.test", Uuid::new_v4().simple());
-        let user = users::create(&client, &email, "Test", None)
+        let user = users::create(&orm, &email, "Test", None)
             .await
             .expect("seed user");
         let s = seed_idp_session(&client, &user.id).await;
@@ -288,9 +292,10 @@ async fn revoke_one_idp_session_succeeds() {
 #[compio::test]
 async fn revoke_one_gateway_session_succeeds() {
     Database::run(async |database| {
+        let orm = database.orm().await;
         let client = database.connect_as_auth().await;
         let email = format!("iss10-revgw-{}@zeroship.test", Uuid::new_v4().simple());
-        let user = users::create(&client, &email, "Test", None)
+        let user = users::create(&orm, &email, "Test", None)
             .await
             .expect("seed user");
         let app_id = seed_app(database).await;
@@ -324,13 +329,14 @@ async fn revoke_one_gateway_session_succeeds() {
 #[compio::test]
 async fn revoke_other_users_session_is_noop_idor_guard() {
     Database::run(async |database| {
+        let orm = database.orm().await;
         let client = database.connect_as_auth().await;
         let email_a = format!("iss10-idor-a-{}@zeroship.test", Uuid::new_v4().simple());
         let email_b = format!("iss10-idor-b-{}@zeroship.test", Uuid::new_v4().simple());
-        let user_a = users::create(&client, &email_a, "A", None)
+        let user_a = users::create(&orm, &email_a, "A", None)
             .await
             .expect("seed user a");
-        let user_b = users::create(&client, &email_b, "B", None)
+        let user_b = users::create(&orm, &email_b, "B", None)
             .await
             .expect("seed user b");
 
@@ -395,9 +401,10 @@ async fn revoke_other_users_session_is_noop_idor_guard() {
 #[compio::test]
 async fn revoke_already_revoked_or_missing_is_noop() {
     Database::run(async |database| {
+        let orm = database.orm().await;
         let client = database.connect_as_auth().await;
         let email = format!("iss10-noop-{}@zeroship.test", Uuid::new_v4().simple());
-        let user = users::create(&client, &email, "Test", None)
+        let user = users::create(&orm, &email, "Test", None)
             .await
             .expect("seed user");
         let s = seed_idp_session(&client, &user.id).await;

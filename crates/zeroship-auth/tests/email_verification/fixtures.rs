@@ -10,8 +10,12 @@ use compio_postgres::Client;
 use zeroship_auth::{identity::verification, store::users};
 use zeroship_core::UserId;
 
-pub(super) async fn issue(pg: &Client, email: &str) -> (UserId, String) {
-    let user = users::create(pg, email, "Verification", None)
+pub(super) async fn issue(
+    pg: &Client,
+    orm: &zeroship_data_orm::Database,
+    email: &str,
+) -> (UserId, String) {
+    let user = users::create(orm, email, "Verification", None)
         .await
         .unwrap();
     let issued = verification::issue(pg, &user.id, email).await.unwrap();

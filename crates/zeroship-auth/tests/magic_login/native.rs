@@ -12,7 +12,7 @@ async fn same_device_login_requires_csrf_and_recovers_a_soft_locked_account() {
         let mailer = Arc::new(CapturingMailer::default());
         let server = AuthServer::with_mailer(database, mailer.clone()).await;
         let email = "same-device@example.test";
-        let user = users::create(&server.pg, email, "Magic recovery", None)
+        let user = users::create(&server.orm, email, "Magic recovery", None)
             .await
             .unwrap();
         soft_lock(&server, &user.id).await;
@@ -100,7 +100,7 @@ async fn cross_device_login_binds_the_completion_to_its_target_and_consumes_it()
         assert_completion_state(&server, &login.nonce, false, 0).await;
         assert_eq!(session_count(&server).await, 0, "the redeeming browser is not signed in");
 
-        let user = users::find_by_email(&server.pg, email).await.unwrap().unwrap();
+        let user = users::find_by_email(&server.orm, email).await.unwrap().unwrap();
         soft_lock(&server, &user.id).await;
 
         let other_target = common::native_authorize_return_to(

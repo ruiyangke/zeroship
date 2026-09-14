@@ -22,6 +22,7 @@ pub struct AuthServer {
     _server: web::test::TestServer,
     pub auth_base: String,
     pub pg: Arc<Client>,
+    pub orm: zeroship_data_orm::Database,
     pub http: cyper::Client,
     pub refresh_pool: RefreshSessionPool,
     pub config: Arc<AuthConfig>,
@@ -89,6 +90,7 @@ impl AuthServer {
     ) -> Self {
         let database_url = database.auth_url().to_string();
         let pg = Arc::new(database.connect_as_auth().await);
+        let orm = database.orm().await;
         if let Some(issuer) = &issuer {
             issuer
                 .publish_active_key(&pg)
@@ -156,6 +158,7 @@ impl AuthServer {
             _server: server,
             auth_base,
             pg,
+            orm,
             http: cyper::Client::new(),
             refresh_pool,
             config,

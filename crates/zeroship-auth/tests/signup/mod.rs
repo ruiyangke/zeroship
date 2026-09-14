@@ -45,7 +45,7 @@ async fn the_login_pages_signup_link_creates_an_account_with_a_usable_verificati
                 .as_deref()
         );
         assert!(
-            users::find_by_id(server.pg.as_ref(), &user.id)
+            users::find_by_id(&server.orm, &user.id)
                 .await
                 .unwrap()
                 .unwrap()
@@ -63,7 +63,7 @@ async fn the_login_pages_signup_link_creates_an_account_with_a_usable_verificati
         assert_eq!(response.status().as_u16(), 200);
         assert!(response.text().await.unwrap().contains("Email verified"));
         assert!(
-            users::find_by_id(server.pg.as_ref(), &user.id)
+            users::find_by_id(&server.orm, &user.id)
                 .await
                 .unwrap()
                 .unwrap()

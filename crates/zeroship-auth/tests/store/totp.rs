@@ -13,10 +13,11 @@ fn key() -> [u8; 32] {
 #[compio::test]
 async fn enroll_stores_encrypted_and_unconfirmed() {
     Database::run(async |database| {
+        let orm = database.orm().await;
         let db = database.connect_as_auth().await;
         let tag = Uuid::new_v4().simple().to_string();
         let user = users::create(
-            &db,
+            &orm,
             &format!("totp-enroll-{tag}@zeroship.test"),
             "Enroll",
             Some("phc"),
@@ -69,10 +70,11 @@ async fn enroll_stores_encrypted_and_unconfirmed() {
 #[compio::test]
 async fn confirm_activates_and_issues_backup_codes() {
     Database::run(async |database| {
+        let orm = database.orm().await;
         let db = database.connect_as_auth().await;
         let tag = Uuid::new_v4().simple().to_string();
         let user = users::create(
-            &db,
+            &orm,
             &format!("totp-confirm-{tag}@zeroship.test"),
             "Confirm",
             Some("phc"),
@@ -124,10 +126,11 @@ async fn confirm_activates_and_issues_backup_codes() {
 #[compio::test]
 async fn confirm_without_enrollment_is_a_noop() {
     Database::run(async |database| {
+        let orm = database.orm().await;
         let db = database.connect_as_auth().await;
         let tag = Uuid::new_v4().simple().to_string();
         let user = users::create(
-            &db,
+            &orm,
             &format!("totp-noconf-{tag}@zeroship.test"),
             "NoConf",
             Some("phc"),
@@ -154,10 +157,11 @@ async fn confirm_without_enrollment_is_a_noop() {
 #[compio::test]
 async fn stored_secret_verifies_at_a_known_time() {
     Database::run(async |database| {
+        let orm = database.orm().await;
         let db = database.connect_as_auth().await;
         let tag = Uuid::new_v4().simple().to_string();
         let user = users::create(
-            &db,
+            &orm,
             &format!("totp-verify-{tag}@zeroship.test"),
             "Verify",
             Some("phc"),
@@ -182,10 +186,11 @@ async fn stored_secret_verifies_at_a_known_time() {
 #[compio::test]
 async fn backup_code_works_once_then_is_rejected() {
     Database::run(async |database| {
+        let orm = database.orm().await;
         let db = database.connect_as_auth().await;
         let tag = Uuid::new_v4().simple().to_string();
         let user = users::create(
-            &db,
+            &orm,
             &format!("totp-backup-{tag}@zeroship.test"),
             "Backup",
             Some("phc"),
@@ -242,10 +247,11 @@ async fn backup_code_works_once_then_is_rejected() {
 #[compio::test]
 async fn disable_removes_credential_and_codes() {
     Database::run(async |database| {
+        let orm = database.orm().await;
         let db = database.connect_as_auth().await;
         let tag = Uuid::new_v4().simple().to_string();
         let user = users::create(
-            &db,
+            &orm,
             &format!("totp-disable-{tag}@zeroship.test"),
             "Disable",
             Some("phc"),
@@ -285,10 +291,11 @@ async fn disable_removes_credential_and_codes() {
 #[compio::test]
 async fn re_enroll_resets_to_pending() {
     Database::run(async |database| {
+        let orm = database.orm().await;
         let db = database.connect_as_auth().await;
         let tag = Uuid::new_v4().simple().to_string();
         let user = users::create(
-            &db,
+            &orm,
             &format!("totp-reenroll-{tag}@zeroship.test"),
             "ReEnroll",
             Some("phc"),
@@ -366,10 +373,11 @@ async fn re_enroll_resets_to_pending() {
 #[compio::test]
 async fn credential_cascades_on_user_delete() {
     Database::run(async |database| {
+        let orm = database.orm().await;
         let db = database.connect_as_auth().await;
         let tag = Uuid::new_v4().simple().to_string();
         let user = users::create(
-            &db,
+            &orm,
             &format!("totp-cascade-{tag}@zeroship.test"),
             "Cascade",
             Some("phc"),

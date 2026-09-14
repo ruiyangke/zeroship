@@ -20,7 +20,7 @@ pub(super) enum LockState {
 
 pub(super) async fn user(server: &AuthServer, email: &str) -> users::UserRow {
     let hash = password::hash(PASSWORD).unwrap();
-    users::create(&server.pg, email, "Password login", Some(&hash))
+    users::create(&server.orm, email, "Password login", Some(&hash))
         .await
         .unwrap()
 }

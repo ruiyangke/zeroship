@@ -104,7 +104,7 @@ async fn reset_email_budget_is_shared_across_ips_without_changing_the_public_con
         let email = "creator@example.test";
         let other_email = "other@example.test";
         for email in [email, other_email] {
-            users::create(&server.pg, email, "Reset request", None)
+            users::create(&server.orm, email, "Reset request", None)
                 .await
                 .unwrap();
         }
