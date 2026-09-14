@@ -1,4 +1,4 @@
-# The compiler half of the raw-environment gate.
+# Compiler-enforced policy for direct process-environment access.
 #
 # TWO POPULATIONS, one lint. The READ side (`var`, `var_os`, `vars`,
 # `vars_os`) is gated because an undeclared read is invisible; the WRITE side

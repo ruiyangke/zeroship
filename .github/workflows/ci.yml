@@ -406,7 +406,7 @@ jobs:
       # THE CONFIGURATION-NAME CONTRACT. Nothing invoked the checker binary in
       # any workflow until now: `cargo test --workspace` above ran the crate's
       # unit and fixture tests, but the four subcommands that inspect the REAL
-      # tree (check-metadata, audit, env-vars-doc, raw-env) had never run in CI,
+      # tree (check-metadata, audit, env-vars-doc) had never run in CI,
       # so the compiled registries of the five servers were checked against
       # nothing outside a developer's shell.
       #

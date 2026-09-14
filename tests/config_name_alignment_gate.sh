@@ -13,8 +13,6 @@
 #                        sets must be equal in BOTH directions
 #   4 the reference      docs/reference/env-vars.md's generated region equals a
 #                        fresh render of the compiled contract
-#   5 raw environment    no undeclared std::env read outside the planted fixtures,
-#                        AND the planted fixtures are still detected
 #   6 Compose           every ZEROSHIP_* variable a platform service sets is a
 #                        name that exact binary declares
 #   6b alias equality    a container value that is EXACTLY one interpolation
@@ -1080,15 +1078,6 @@ else
 fi
 
 echo ""
-echo "=== 5. No undeclared raw environment read ==="
-if "$BIN" raw-env --gate >/dev/null 2>"$TMP/rawenv.log"; then
-    pass "$(tail -1 "$TMP/rawenv.log")"
-else
-    fail "raw environment access"
-    sed 's/^/  /' "$TMP/rawenv.log"
-fi
-
-echo ""
 echo "=== 6. Compose sets only variables the receiving binary declares ==="
 check_compose compose "$COMPOSE" "compose" "$TMP/contract.tsv"
 
@@ -1134,9 +1123,8 @@ gate_arms_finish || arms_rc=1
 
 # ANTI-HOLLOW FLOOR. Every check above passes at zero if its extraction stops
 # matching, and this catches the case where several do at once. MEASURED on a
-# clean tree 2026-08-13: 9, then 10 once check 6b was armed, then 11 once 6c
-# was, then 12 once check 8 was, then 13 once 6d was.
-CONFIG_GATE_MIN_PASSED=13
+# clean tree after the raw source scanner was retired.
+CONFIG_GATE_MIN_PASSED=12
 if [ "$PASS" -lt "$CONFIG_GATE_MIN_PASSED" ]; then
     echo "" >&2
     echo "FLOOR: only $PASS checks passed, expected at least $CONFIG_GATE_MIN_PASSED." >&2

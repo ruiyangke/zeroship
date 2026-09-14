@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use zeroship_core::config::ConfigSpec;
@@ -7,16 +7,14 @@ use zeroship_config_contract::audit::{compare, from_inventory, from_specs};
 use zeroship_config_contract::contract::validate_contract;
 use zeroship_config_contract::docs;
 use zeroship_config_contract::inventory::{
-    collect_rust_sources, collect_tracked_rust_sources, format_tsv, scan_sources, InventoryRow,
-    OverlayLeaves,
+    collect_rust_sources, format_tsv, scan_sources, InventoryRow, OverlayLeaves,
 };
 use zeroship_config_contract::metadata::check_workspace;
-use zeroship_config_contract::raw_env::{collect_declared_keys, scan_sources_by_role, RawEnvViolation};
 use zeroship_config_contract::registry::{platform_read_sites, platform_specs, DECLARING_BINARIES};
 
 const USAGE: &str = "usage: zeroship-config-contract \
 [check-metadata [path/to/Cargo.toml] | inventory [--format tsv] [--root DIR] \
-| raw-env [--root DIR] | audit [--root DIR] | contract | env-vars-doc [--root DIR] [--check]]";
+| audit [--root DIR] | contract | env-vars-doc [--root DIR] [--check]]";
 
 /// The generated half of the environment reference.
 const ENV_VARS_DOC: &str = "docs/reference/env-vars.md";
@@ -26,7 +24,6 @@ fn main() {
     match args.first().map(String::as_str) {
         None | Some("check-metadata") => check_metadata(args.get(1).map(PathBuf::from)),
         Some("inventory") => inventory(&args[1..]),
-        Some("raw-env") => raw_env(&args[1..]),
         Some("audit") => audit(&args[1..]),
         Some("contract") => contract(&args[1..]),
         Some("env-vars-doc") => env_vars_doc(&args[1..]),
@@ -321,242 +318,6 @@ fn check_metadata(manifest: Option<PathBuf>) {
     }
 }
 
-/// Print every declared key and the per-class totals.
-fn report_declared_keys(sources: &[(String, String)]) {
-    let keys = match collect_declared_keys(sources) {
-        Ok(keys) => keys,
-        Err(errors) => {
-            for error in errors {
-                eprintln!("config raw-env: census: {error}");
-            }
-            return;
-        }
-    };
-    let mut classes: BTreeMap<&str, (usize, BTreeSet<&str>)> = BTreeMap::new();
-    for key in &keys {
-        println!("declared\t{}\t{}\t{}", key.class, key.name, key.file);
-        let entry = classes.entry(key.class.as_str()).or_default();
-        entry.0 += 1;
-        entry.1.insert(key.name.as_str());
-    }
-    eprintln!("config raw-env: {} declared key sites", keys.len());
-    for (class, (sites, names)) in classes {
-        eprintln!(
-            "config raw-env: class {class}: {sites} sites, {} distinct names",
-            names.len()
-        );
-    }
-}
-
-/// Report every remaining raw environment access and every declared key.
-///
-/// This is the Step 4 worklist and, once it reaches zero violations, the
-/// evidence that the gate in `crates/zeroship-config-contract/tests/` can be believed.
-/// Rows go to stdout, counts to stderr, so a redirected run keeps a clean list.
-fn raw_env(args: &[String]) {
-    let mut root = PathBuf::from(".");
-    let mut gate = false;
-    let mut index = 0;
-    while index < args.len() {
-        match args[index].as_str() {
-            "--root" => {
-                let Some(value) = args.get(index + 1) else {
-                    eprintln!("{USAGE}");
-                    std::process::exit(2);
-                };
-                root = PathBuf::from(value);
-                index += 2;
-            }
-            "--gate" => {
-                gate = true;
-                index += 1;
-            }
-            other => {
-                eprintln!("{USAGE}; got {other:?}");
-                std::process::exit(2);
-            }
-        }
-    }
-
-    let sources = match collect_tracked_rust_sources(&root) {
-        Ok(sources) => sources,
-        Err(errors) => {
-            for error in errors {
-                eprintln!("config raw-env: {error}");
-            }
-            std::process::exit(1);
-        }
-    };
-
-    if gate && !planted_fixtures_are_tracked(&sources) {
-        eprintln!(
-            "config raw-env: gate: REFUSED: no tracked Rust file lies under \
-             {PLANTED_VIOLATION_DIR}, so the constant this mode classifies by names \
-             nothing. Every planted violation would be reported as an unexpected one \
-             and every real one would be indistinguishable from them. Repoint the \
-             constant at the fixtures rather than reading this run's verdict."
-        );
-        std::process::exit(1);
-    }
-
-    match scan_sources_by_role(&sources) {
-        Ok(report) => {
-            report_declared_keys(&sources);
-            for permitted in &report.permitted_raw {
-                println!("permitted-raw\t-\t-\t{permitted}");
-            }
-            eprintln!(
-                "config raw-env: {} tracked files, 0 violations, {} declared keys, \
-                 {} role-permitted raw accesses",
-                report.files,
-                report.declared_keys.len(),
-                report.permitted_raw.len()
-            );
-            if gate {
-                // A CLEAN scan is the FAILING case for the gate. The planted
-                // fixtures under crates/zeroship-config-contract/tests/fixtures/ break
-                // the rule on purpose, so zero violations means the scanner
-                // stopped seeing them - the exact false green this mode exists
-                // to make impossible.
-                eprintln!(
-                    "config raw-env: gate: zero violations, but {PLANTED_VIOLATIONS} are \
-                     planted under {PLANTED_VIOLATION_DIR}. A scan that misses a deliberate \
-                     violation cannot be trusted to catch an accidental one."
-                );
-                std::process::exit(1);
-            }
-        }
-        Err(violations) => {
-            // Print the census ANYWAY. A report that withholds the class counts
-            // whenever anything is still unconverted is useless during the
-            // conversion it exists to measure, which is the only time anyone
-            // runs it.
-            report_declared_keys(&sources);
-            let mut kinds: BTreeMap<&str, usize> = BTreeMap::new();
-            for violation in &violations {
-                let kind = match violation {
-                    RawEnvViolation::Read(_) => "read",
-                    RawEnvViolation::Write(_) => "write",
-                    RawEnvViolation::Import(_) => "import",
-                    RawEnvViolation::CompileTime(_) => "compile-time",
-                    RawEnvViolation::UnregisteredRead(_) => "unregistered",
-                    RawEnvViolation::IllicitAllow(_) => "illicit-allow",
-                    RawEnvViolation::SealedShape(_) => "sealed-shape",
-                    RawEnvViolation::InvalidKeyName(_) => "invalid-key-name",
-                    RawEnvViolation::MisclassifiedKey(_) => "misclassified-key",
-                    RawEnvViolation::Parse(_) => "parse",
-                    RawEnvViolation::EmptyScan => "empty-scan",
-                };
-                *kinds.entry(kind).or_default() += 1;
-                println!("violation\t{kind}\t{violation}");
-            }
-            eprintln!(
-                "config raw-env: {} tracked files, {} violations",
-                sources.len(),
-                violations.len()
-            );
-            for (kind, count) in kinds {
-                eprintln!("config raw-env: {kind}: {count}");
-            }
-            if gate {
-                std::process::exit(gate_verdict(&violations));
-            }
-            std::process::exit(1);
-        }
-    }
-}
-
-/// Files whose raw reads are PLANTED, and whose absence is itself a failure.
-///
-/// The scanner is proved to discriminate by fixtures that break the rule on
-/// purpose. Those fixtures are tracked Rust, so a scan of the tracked tree
-/// finds them and a bare `raw-env` correctly exits 1 with two violations. That
-/// makes the subcommand unusable as a CI gate as written, which is why this
-/// mode exists.
-///
-/// DERIVED FROM THE PACKAGE NAME, not spelled out. This was the literal
-/// `crates/config-contract/tests/fixtures/` from `105a75131`
-/// ("every crate directory is named for the package it holds", which renamed the
-/// directory to `crates/zeroship-config-contract`) until 2026-09-04, and it named
-/// nothing for that whole period: `gate_verdict` classifies by
-/// `to_string().contains(...)`, so a prefix matching nothing put all four planted
-/// violations in the UNEXPECTED column and `--gate` exited 1 on every tree.
-/// `env!("CARGO_PKG_NAME")` makes the
-/// rename impossible to survive: cargo supplies the name, so a package rename
-/// moves this string in the same build.
-///
-/// The one assumption left is the `crates/` root, which cargo cannot supply.
-/// `refuse_unless_planted_fixtures_are_tracked` below is what stops that
-/// assumption failing silently.
-const PLANTED_VIOLATION_DIR: &str = concat!("crates/", env!("CARGO_PKG_NAME"), "/tests/fixtures/");
-
-/// The expected number of planted violations.
-///
-/// A FLOOR, not a ceiling, is the wrong shape here: fewer means the scanner
-/// stopped seeing a rule it is supposed to enforce, and more means someone
-/// added a fixture without saying so. Both are worth a failure.
-///
-/// FOUR, two per fixture: `raw_read_alias.rs` and `raw_write_alias.rs` each
-/// bind a `std::env` function under another name behind a false cfg and then
-/// call it, so each yields one import violation and one use violation. The
-/// write fixture is what keeps the WRITE rule provably alive - without it the
-/// rule could stop firing entirely and this gate would report clean.
-const PLANTED_VIOLATIONS: usize = 4;
-
-/// Whether any enumerated source actually lies under [`PLANTED_VIOLATION_DIR`].
-///
-/// The one-variable partner to the classification in [`gate_verdict`]. That
-/// function sorts violations into "planted" and "unexpected" by prefix, and a
-/// prefix matching nothing is indistinguishable from a prefix matching only
-/// clean files: both put everything in the second column, and the resulting
-/// failure names the fixtures rather than the constant. Asking the ENUMERATION
-/// whether the prefix resolves separates those two states before the verdict is
-/// computed.
-///
-fn planted_fixtures_are_tracked(sources: &[(String, String)]) -> bool {
-    sources
-        .iter()
-        .any(|(path, _)| path.starts_with(PLANTED_VIOLATION_DIR))
-}
-
-/// Decide the gate exit status from a violation set.
-///
-/// Splitting this out of `raw_env` keeps the rule readable: every violation
-/// must come from the planted-fixture directory, and the planted ones must all
-/// still be found. A gate that only checked the first half would pass on a
-/// scanner that had gone blind.
-fn gate_verdict(violations: &[RawEnvViolation]) -> i32 {
-    let mut unexpected = 0usize;
-    let mut planted = 0usize;
-    for violation in violations {
-        if violation.to_string().contains(PLANTED_VIOLATION_DIR) {
-            planted += 1;
-        } else {
-            unexpected += 1;
-            eprintln!("config raw-env: gate: unexpected violation: {violation}");
-        }
-    }
-    if unexpected > 0 {
-        eprintln!(
-            "config raw-env: gate: {unexpected} violation(s) outside {PLANTED_VIOLATION_DIR}"
-        );
-        return 1;
-    }
-    if planted != PLANTED_VIOLATIONS {
-        eprintln!(
-            "config raw-env: gate: expected exactly {PLANTED_VIOLATIONS} planted violations \
-             under {PLANTED_VIOLATION_DIR}, found {planted}. Fewer means the scanner stopped \
-             recognising a rule it enforces; more means an unannounced fixture."
-        );
-        return 1;
-    }
-    eprintln!(
-        "config raw-env: gate: clean; the {planted} planted fixture violations are still \
-         detected, so the scanner is not silently passing everything"
-    );
-    0
-}
-
 /// Emit every configuration name declared in the tracked crate tree.
 ///
 /// The summary goes to stderr and the rows to stdout, so a redirected run keeps
@@ -657,77 +418,5 @@ fn inventory(args: &[String]) {
             }
             std::process::exit(1);
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// `CARGO_MANIFEST_DIR` is this crate's directory; the workspace root is two
-    /// levels above it. Deliberately NOT derived from `PLANTED_VIOLATION_DIR`,
-    /// which is the thing under test.
-    fn workspace_root() -> PathBuf {
-        Path::new(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .and_then(Path::parent)
-            .expect("this crate directory has a workspace root two levels above it")
-            .to_path_buf()
-    }
-
-    /// The regression. `PLANTED_VIOLATION_DIR` must name a directory that really
-    /// holds tracked Rust.
-    ///
-    /// FAILS BEFORE THE FIX: the constant read `crates/config-contract/tests/fixtures/`
-    /// from the `105a75131` crate-directory rename until 2026-09-04, matched no
-    /// tracked file, and so put all four planted violations in the "unexpected"
-    /// column - `tests/config_name_alignment_gate.sh` section 5 was red on every
-    /// tree for that whole period, blaming the two fixture files that exist to
-    /// prove the scanner works.
-    ///
-    /// This test lives in the `[[bin]]` because the constant does.
-    #[test]
-    fn planted_violation_dir_names_tracked_fixtures() {
-        let sources = collect_tracked_rust_sources(&workspace_root())
-            .unwrap_or_else(|errors| panic!("could not enumerate tracked Rust source: {errors:?}"));
-
-        // Anti-vacuity: an empty or tiny enumeration would fail the assertion
-        // below for the wrong reason, and "the prefix names nothing" would be
-        // reported when the truth is "nothing was enumerated".
-        assert!(
-            sources.len() > 500,
-            "only {} tracked Rust files were enumerated; the enumeration is broken, \
-             so this test cannot rule on the prefix",
-            sources.len()
-        );
-
-        let matched = sources
-            .iter()
-            .filter(|(path, _)| path.starts_with(PLANTED_VIOLATION_DIR))
-            .count();
-        assert!(
-            matched > 0,
-            "no tracked file starts with {PLANTED_VIOLATION_DIR:?}, so `gate_verdict` \
-             classifies every planted violation as an unexpected one. A directory moved \
-             and this constant did not."
-        );
-    }
-
-    /// The one-variable partner: prove the resolve check says NO for the shape
-    /// that caused the defect. Without it `planted_fixtures_are_tracked` could
-    /// return `true` unconditionally and the test above would still pass.
-    #[test]
-    fn the_resolve_check_rejects_a_prefix_that_names_nothing() {
-        let elsewhere = vec![(
-            "crates/zeroship-core/src/config/env.rs".to_owned(),
-            String::new(),
-        )];
-        assert!(!planted_fixtures_are_tracked(&elsewhere));
-
-        let under_the_prefix = vec![(
-            format!("{PLANTED_VIOLATION_DIR}raw_read_alias.rs"),
-            String::new(),
-        )];
-        assert!(planted_fixtures_are_tracked(&under_the_prefix));
     }
 }

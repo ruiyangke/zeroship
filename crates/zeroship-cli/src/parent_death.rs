@@ -68,11 +68,10 @@
 /// the runtime it spawned to be gone. A rename on either side alone leaves the
 /// variable unset on the child and turns that step red.
 ///
-/// This constant is the spelling the diagnostics interpolate. The READ below
-/// inlines the literal instead of using it, because the source gate lifts key
-/// literals out of the syntax tree and cannot see a name behind a `&str`
-/// constant. The two must not drift; a rename here without a rename there
-/// leaves the guard reading a name nothing sets.
+/// This constant is the spelling the diagnostics interpolate. The read below
+/// keeps the literal at its call site as required by `declared_env!`. The two
+/// must not drift; a rename here without a rename there leaves the guard reading
+/// a name nothing sets.
 pub const ENV_DIE_WITH_PARENT: &str = "ZEROSHIP_DIE_WITH_PARENT";
 
 /// Arm the guard from the environment. No-op when the variable is unset.
