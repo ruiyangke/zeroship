@@ -184,15 +184,24 @@ pub async fn exec_mutation_with_emit(
 ) -> Result<Vec<Value>, DbError> {
     crate::descriptor::collection_schema(binding, collection)?;
     let rows = exec_mutation(route, bq).await?;
+    emit_mutation_rows(&rows, route, collection, op);
+    Ok(rows)
+}
+
+pub(crate) fn emit_mutation_rows(
+    rows: &[Value],
+    route: &TxRoute,
+    collection: &str,
+    op: zeroship_data_orm::cdc::ChangeOp,
+) {
     emit_for_rows(
-        &rows,
+        rows,
         route.app_id(),
         route.in_tx(),
         backend_publishes_committed_changes(route.backend()),
         collection,
         op,
     );
-    Ok(rows)
 }
 
 /// Execute a count-only mutation and queue a collection invalidation on success.
@@ -203,9 +212,19 @@ pub async fn exec_mutation_count_with_emit(
     op: zeroship_data_orm::cdc::ChangeOp,
 ) -> Result<u64, DbError> {
     let affected = run_statement(route, &bq.sql, &bq.params).await?;
-    let app_id = route.app_id();
     emit_db_metric(route.meter(), DB_WRITES, 1);
     emit_db_metric(route.meter(), DB_ROWS_WRITTEN, affected);
+    emit_mutation_count(route, collection, op, affected);
+    Ok(affected)
+}
+
+pub(crate) fn emit_mutation_count(
+    route: &TxRoute,
+    collection: &str,
+    op: zeroship_data_orm::cdc::ChangeOp,
+    affected: u64,
+) {
+    let app_id = route.app_id();
     if affected != 0
         && !backend_publishes_committed_changes(route.backend())
         && !crate::cdc::broker::is_app_suppressed(app_id)
@@ -221,7 +240,6 @@ pub async fn exec_mutation_count_with_emit(
             std::collections::HashMap::new(),
         );
     }
-    Ok(affected)
 }
 
 /// Does the backend publish committed changes on its own?

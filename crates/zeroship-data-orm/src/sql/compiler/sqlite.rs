@@ -27,6 +27,7 @@ const SUPPORT: SqlSupport = SqlSupport {
 
 const SYNTAX: super::shared::Syntax = super::shared::Syntax {
     current_timestamp: "(strftime('%Y-%m-%dT%H:%M:%fZ','now'))",
+    database_timestamp: write_database_timestamp,
     generated_identity_override: None,
     timestamp_cast: "",
     vector_cast: "",
@@ -41,6 +42,18 @@ const SYNTAX: super::shared::Syntax = super::shared::Syntax {
     vector_distance: write_vector_distance,
     array_mutation: write_array_mutation,
 };
+
+fn write_database_timestamp(
+    writer: &mut SqlWriter,
+    offset_millis: i64,
+) -> Result<(), CompileError> {
+    writer
+        .sql
+        .push_str("zeroship_timestamp_add(strftime('%Y-%m-%dT%H:%M:%fZ','now'), ");
+    writer.write_param(Value::from(offset_millis))?;
+    writer.sql.push(')');
+    Ok(())
+}
 
 fn write_vector_distance(
     writer: &mut SqlWriter,

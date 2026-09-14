@@ -6,6 +6,8 @@ mod postgres;
 mod query;
 mod shared;
 mod sqlite;
+#[cfg(test)]
+mod timestamp_tests;
 mod writer;
 pub use postgres::PostgresCompiler;
 pub use query::{CompiledQuery, ParameterType};

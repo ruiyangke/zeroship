@@ -27,6 +27,7 @@ const SUPPORT: SqlSupport = SqlSupport {
 
 const SYNTAX: super::shared::Syntax = super::shared::Syntax {
     current_timestamp: "NOW()",
+    database_timestamp: write_database_timestamp,
     generated_identity_override: Some(" OVERRIDING SYSTEM VALUE"),
     timestamp_cast: "::timestamptz",
     vector_cast: "::vector",
@@ -41,6 +42,25 @@ const SYNTAX: super::shared::Syntax = super::shared::Syntax {
     vector_distance: write_vector_distance,
     array_mutation: write_array_mutation,
 };
+
+fn write_database_timestamp(
+    writer: &mut SqlWriter,
+    offset_millis: i64,
+) -> Result<(), CompileError> {
+    writer.sql.push_str("(clock_timestamp() + ");
+    let seconds = offset_millis / 1000;
+    let fraction = (offset_millis % 1000).unsigned_abs();
+    let sign = if offset_millis < 0 && seconds == 0 {
+        "-"
+    } else {
+        ""
+    };
+    writer.write_param(Value::from(format!(
+        "{sign}{seconds}.{fraction:03} seconds"
+    )))?;
+    writer.sql.push_str("::interval)");
+    Ok(())
+}
 
 fn write_vector_distance(
     writer: &mut SqlWriter,

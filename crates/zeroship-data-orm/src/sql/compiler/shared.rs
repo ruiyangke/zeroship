@@ -1,11 +1,11 @@
 use super::{CompileError, CompiledQuery, SqlWriter};
 use crate::sql::{
+    CompareOp, MembershipOp, PatternOp,
     statement::{
         ArithmeticOperator, ArrayOperator, Column, Delete, Expression, Insert, MutationScope,
         ResolvedOperand, ResolvedPredicate, ResolvedPredicateValue, SelectStatement, Statement,
         StorageType, Table, Update, Upsert, VectorSearchStatement,
     },
-    CompareOp, MembershipOp, PatternOp,
 };
 use crate::value::Value;
 
@@ -127,9 +127,7 @@ impl Requirements {
                     insert_generated_identity: parts.insert_generated_identity,
                     identity_allocation: false,
                     default_expression: values.clone().any(|v| matches!(v, Expression::Default)),
-                    bind_parameters: values
-                        .filter(|v| matches!(v, Expression::Bind(_) | Expression::Increment { .. }))
-                        .count()
+                    bind_parameters: values.map(expression_binds).sum::<usize>()
                         + usize::from(parts.condition.is_some()),
                 }
             }
@@ -187,6 +185,7 @@ fn expression_binds(expression: &Expression) -> usize {
             | Expression::Increment { .. }
             | Expression::Arithmetic { .. }
             | Expression::ArrayMutation { .. }
+            | Expression::DatabaseTimestamp { .. }
     ))
 }
 
@@ -266,6 +265,7 @@ pub enum IdentityReadPlan {
 #[derive(Clone, Copy)]
 pub(crate) struct Syntax {
     pub(crate) current_timestamp: &'static str,
+    pub(crate) database_timestamp: fn(&mut SqlWriter, i64) -> Result<(), CompileError>,
     pub(crate) generated_identity_override: Option<&'static str>,
     pub(crate) timestamp_cast: &'static str,
     pub(crate) vector_cast: &'static str,
@@ -1149,6 +1149,9 @@ fn write_expression(
             ));
         }
         Expression::CurrentTimestamp => writer.sql.push_str(syntax.current_timestamp),
+        Expression::DatabaseTimestamp { offset_millis } => {
+            (syntax.database_timestamp)(writer, offset_millis)?;
+        }
     }
     Ok(())
 }

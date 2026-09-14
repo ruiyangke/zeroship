@@ -1,9 +1,9 @@
 //! Resolved physical statements. Application policy is applied before this boundary.
 
 use super::{
+    Ident, IdentRole, SchemaName,
     compiler::CompileError,
     predicate::{CompareOp, MembershipOp, PatternOp},
-    Ident, IdentRole, SchemaName,
 };
 use crate::value::Value;
 use std::{
@@ -258,6 +258,9 @@ pub enum Expression {
         operand: Value,
     },
     CurrentTimestamp,
+    DatabaseTimestamp {
+        offset_millis: i64,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1087,10 +1090,11 @@ fn validate_upsert(parts: &UpsertParts) -> Result<(), CompileError> {
                 Expression::Arithmetic { .. } | Expression::ArrayMutation { .. } => {
                     return Err(invalid("upsert assignments cannot use update operators"));
                 }
-                Expression::CurrentTimestamp => {
+                Expression::CurrentTimestamp | Expression::DatabaseTimestamp { .. } => {
                     if storage != StorageType::Timestamp {
                         return Err(invalid("current timestamp requires timestamp storage"));
                     }
+                    validate_timestamp_expression(&assignment.value)?;
                 }
             }
         }
@@ -1161,7 +1165,11 @@ fn validate_update_expression(
             "bound value does not match its physical storage type",
         )),
         Expression::Bind(_) | Expression::Null => Ok(()),
-        Expression::CurrentTimestamp if storage == StorageType::Timestamp => Ok(()),
+        Expression::CurrentTimestamp | Expression::DatabaseTimestamp { .. }
+            if storage == StorageType::Timestamp =>
+        {
+            validate_timestamp_expression(expression)
+        }
         Expression::Increment { column, .. } => {
             table.check_column(column)?;
             if column.index != assigned.index || storage != StorageType::Integer {
@@ -1197,10 +1205,19 @@ fn validate_update_expression(
         Expression::Default | Expression::Current(_) | Expression::Incoming(_) => {
             Err(invalid("expression is not valid in an ordinary update"))
         }
-        Expression::CurrentTimestamp => {
+        Expression::CurrentTimestamp | Expression::DatabaseTimestamp { .. } => {
             Err(invalid("current timestamp requires timestamp storage"))
         }
     }
+}
+
+fn validate_timestamp_expression(expression: &Expression) -> Result<(), CompileError> {
+    if let Expression::DatabaseTimestamp { offset_millis } = expression {
+        if !super::temporal::is_timestamp_offset_millis(*offset_millis) {
+            return Err(invalid("timestamp offset is outside the portable calendar"));
+        }
+    }
+    Ok(())
 }
 
 fn validate_predicate(table: &Table, predicate: &ResolvedPredicate) -> Result<(), CompileError> {
@@ -1413,6 +1430,7 @@ impl std::fmt::Debug for Expression {
                 .field("operator", operator)
                 .finish_non_exhaustive(),
             Self::CurrentTimestamp => f.write_str("CurrentTimestamp"),
+            Self::DatabaseTimestamp { .. } => f.write_str("DatabaseTimestamp"),
         }
     }
 }

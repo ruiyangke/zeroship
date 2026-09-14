@@ -34,6 +34,7 @@ pub mod cdc;
 mod decimal;
 pub mod error;
 mod json;
+mod temporal;
 pub mod lock;
 pub mod reservation;
 pub mod row_json;
