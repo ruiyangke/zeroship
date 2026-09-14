@@ -31,20 +31,20 @@ async fn unknown_assignment_and_wrong_policy_are_refused_before_creator_io() {
         assignment_revision: fixture.scope.assignment_revision,
     };
     assert!(matches!(
-        factory.open(&unknown, &fixture.policy).await,
+        factory.open(&unknown, &fixture.policy, fixture.ingress()).await,
         Err(WorkflowServiceError::PermissionDenied)
     ));
     assert!(fixture.provider.calls().is_empty());
     let foreign_registry = Arc::new(HostPolicies::default());
     let foreign_policy = install(&foreign_registry, fixture.scope.app_id.clone());
     assert!(matches!(
-        factory.open(&fixture.scope, &foreign_policy).await,
+        factory.open(&fixture.scope, &foreign_policy, fixture.ingress()).await,
         Err(WorkflowServiceError::PermissionDenied)
     ));
     assert!(fixture.provider.calls().is_empty());
     let unknown_policy = install(&fixture.policies, unknown.app_id.clone());
     assert!(matches!(
-        factory.open(&unknown, &unknown_policy).await,
+        factory.open(&unknown, &unknown_policy, fixture.ingress()).await,
         Err(WorkflowServiceError::PermissionDenied)
     ));
     assert_eq!(fixture.provider.calls(), vec![unknown]);
@@ -68,7 +68,7 @@ async fn foreign_storage_app_is_refused_before_context_or_database_open() {
     assert!(matches!(
         fixture
             .factory()
-            .open(&fixture.scope, &fixture.policy)
+            .open(&fixture.scope, &fixture.policy, fixture.ingress())
             .await,
         Err(WorkflowServiceError::PermissionDenied)
     ));
@@ -90,7 +90,7 @@ async fn initial_context_must_match_the_storage_app_and_physical_schema() {
         assert!(matches!(
             fixture
                 .factory()
-                .open(&fixture.scope, &fixture.policy)
+                .open(&fixture.scope, &fixture.policy, fixture.ingress())
                 .await,
             Err(WorkflowServiceError::PermissionDenied)
         ));
@@ -103,14 +103,14 @@ async fn initial_context_must_match_the_storage_app_and_physical_schema() {
 async fn factory_verifies_missing_journal_without_provisioning_it() {
     let fixture = Fixture::new().await;
     let factory = fixture.factory();
-    assert!(factory.open(&fixture.scope, &fixture.policy).await.is_err());
+    assert!(factory.open(&fixture.scope, &fixture.policy, fixture.ingress()).await.is_err());
     let store = fixture.provider.resources().storage.open().await.unwrap();
     assert!(
         store.verify().await.is_err(),
         "failed assembly must not install the workflow schema"
     );
     fixture.provision().await;
-    let runtime = factory.open(&fixture.scope, &fixture.policy).await.unwrap();
+    let runtime = factory.open(&fixture.scope, &fixture.policy, fixture.ingress()).await.unwrap();
     assert_eq!(runtime.app.app_id(), &fixture.scope.app_id);
     assert!(runtime.app.pending_jobs(None, 1).await.unwrap().is_empty());
 }
@@ -120,7 +120,7 @@ async fn policy_replacement_cancels_pending_resource_resolution_without_storage_
     let fixture = Fixture::new().await;
     let factory = fixture.factory();
     let (observed, release) = fixture.provider.gate();
-    let mut opening = Box::pin(factory.open(&fixture.scope, &fixture.policy));
+    let mut opening = Box::pin(factory.open(&fixture.scope, &fixture.policy, fixture.ingress()));
     assert!(matches!(
         futures::future::select(observed, opening.as_mut()).await,
         Either::Left((Ok(()), _))
@@ -146,9 +146,10 @@ async fn factory_executes_delivered_v8_frontiers_with_its_creator_artifact_and_p
     zeroship_runtime::init_v8();
     let fixture = Fixture::new().await;
     fixture.provision().await;
+    let ingress = fixture.ingress();
     let runtime = fixture
         .factory()
-        .open(&fixture.scope, &fixture.policy)
+        .open(&fixture.scope, &fixture.policy, ingress.clone())
         .await
         .unwrap();
     let deployment = fixture.activate(&runtime, r"
@@ -172,6 +173,10 @@ async fn factory_executes_delivered_v8_frontiers_with_its_creator_artifact_and_p
         )
         .await
         .unwrap();
+    // The factory attached the placement's establishment: the lease held no
+    // epoch, so the refused start obtained one and was accepted on retry.
+    assert_eq!(*ingress.requested.borrow(), vec![None]);
+    assert_eq!(ingress.accepted.get(), 1);
     let mut finished = false;
     for _ in 0..8 {
         let lease = fixture.next(&runtime.app, &started.id).await;
@@ -234,7 +239,7 @@ async fn dynamic_context_cannot_move_an_installed_creator_to_another_schema() {
     fixture.provision().await;
     let runtime = fixture
         .factory()
-        .open(&fixture.scope, &fixture.policy)
+        .open(&fixture.scope, &fixture.policy, fixture.ingress())
         .await
         .unwrap();
     fixture
