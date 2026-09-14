@@ -12,7 +12,7 @@ use zeroship_core::{
     service_identity::{endpoints, ServiceEndpoint},
     service_peers::{service_issuer, ServiceAuth, CONTROL_SERVICE_NAME, WORKER_SERVICE_NAME},
     typed_id,
-    workflow_coordination::{Assignment, FailureCode, Revision, WorkerId},
+    workflow_coordination::{AssignedScope, FailureCode, Revision, WorkerId},
 };
 use zeroship_workflow_client::{self as coordination, Options, Transport};
 
@@ -25,15 +25,18 @@ pub struct RemoteDeploymentHolds {
 }
 
 impl RemoteDeploymentHolds {
-    /// Bind retention to the authenticated worker's app assignment.
+    /// Bind retention to an app assignment of the enrolled worker `auth` signs
+    /// for. The assignment is named only by its scope: its worker is the
+    /// signer's own instance, and no expiry is claimed locally. Control
+    /// verifies the actual current placement on every call.
     ///
     /// # Errors
-    /// Rejects invalid endpoints, missing worker instance keys and assignments
-    /// issued to another worker. Control verifies current placement on every call.
+    /// Rejects invalid endpoints and signers that are not an enrolled worker
+    /// instance.
     pub fn new(
         url: &str,
         auth: Arc<ServiceAuth>,
-        assignment: &Assignment,
+        scope: &AssignedScope,
         options: Options,
     ) -> Result<Self, WorkflowServiceError> {
         let (issuer, _) = auth
@@ -44,15 +47,14 @@ impl RemoteDeploymentHolds {
             || issuer
                 .instance()
                 .and_then(|id| WorkerId::parse(id).ok())
-                .as_ref()
-                != Some(&assignment.worker_id)
+                .is_none()
         {
             return Err(WorkflowServiceError::PermissionDenied);
         }
         let audience = service_issuer(CONTROL_SERVICE_NAME).map_err(|_| unavailable())?;
         Ok(Self {
-            scope: HoldScope::for_app(assignment.app_id.clone()),
-            revision: assignment.revision,
+            scope: HoldScope::for_app(scope.app_id.clone()),
+            revision: scope.assignment_revision,
             transport: Transport::new(url, auth, audience, options).map_err(transport_error)?,
         })
     }
