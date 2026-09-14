@@ -27,7 +27,7 @@ use zeroship_core::{
         WorkerState,
     },
     workflow_jobs::{
-        DeploymentId, JobId, JobOperation, JobOutcome, JobSpec, Settlement, SubmitJob,
+        BroadcastId, DeploymentId, JobId, JobOperation, JobOutcome, JobSpec, Settlement, SubmitJob,
     },
     workflow_schedules::ScheduleId,
 };
@@ -1150,4 +1150,144 @@ async fn postgres_job_enrollment_is_checked_after_waiting_for_scope_lock() {
         .submit_job(&worker, &request, || ready(Ok(worker.clone())))
         .await
         .unwrap();
+}
+
+case!(
+    sqlite_worker_publishes_scoped_fanout_and_successors,
+    postgres_worker_publishes_scoped_fanout_and_successors,
+    fanout_publication
+);
+
+async fn fanout_publication(fixture: &Fixture) {
+    let (coordinator, _) = host(fixture, Options::default()).await;
+    let worker = WorkerId::mint();
+    register(&coordinator, &worker, 1).await;
+    let assigned = coordinator
+        .assign(&placement(&AppId::mint(), &worker))
+        .await
+        .unwrap();
+    let broadcast = BroadcastId::mint();
+    let spec = JobSpec {
+        operation: JobOperation::Fanout {
+            broadcast_id: broadcast.clone(),
+            revision: 1.try_into().unwrap(),
+        },
+        ..job(&assigned.app_id)
+    };
+    assert_fanout_publication_identity(&coordinator, &worker, &assigned, &spec, &broadcast).await;
+    let granted = coordinator
+        .claim_job(&worker, &scope(&assigned), || ready(Ok(worker.clone())))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(granted.delivery().job, spec);
+    let successor = JobSpec {
+        id: JobId::mint(),
+        operation: JobOperation::Fanout {
+            broadcast_id: broadcast,
+            revision: 2.try_into().unwrap(),
+        },
+        ..spec.clone()
+    };
+    let mut settlement = Settlement {
+        delivery: granted.delivery().clone(),
+        outcome: JobOutcome::Management {
+            outcome: ManagementOutcome::Denied {},
+        },
+        successors: vec![successor.clone()],
+    };
+    let db = fixture.database().await;
+    let before = rows(&db, "jobs", value!({"app_id":assigned.app_id.as_str()})).await;
+    assert_eq!(
+        coordinator
+            .settle_job(&worker, &settlement, || ready(Ok(worker.clone())))
+            .await,
+        Err(Error::Invalid)
+    );
+    assert_eq!(
+        rows(&db, "jobs", value!({"app_id":assigned.app_id.as_str()})).await,
+        before
+    );
+    settlement.outcome = JobOutcome::Waiting {};
+    let receipt = coordinator
+        .settle_job(&worker, &settlement, || ready(Ok(worker.clone())))
+        .await
+        .unwrap();
+    assert_eq!(
+        coordinator
+            .settle_job(&worker, &settlement, || ready(Ok(worker.clone())))
+            .await
+            .unwrap(),
+        receipt
+    );
+    let stored = row(&db, "jobs", value!({"id":successor.id.as_str()})).await;
+    assert_eq!(stored["operation_kind"], value!("fanout"));
+    assert!(
+        stored["deployment_id"].is_null()
+            && stored["run_id"].is_null()
+            && stored["management_request_id"].is_null()
+    );
+    assert!(rows(
+        &db,
+        "deployment_holds",
+        value!({"app_id":assigned.app_id.as_str()})
+    )
+    .await
+    .is_empty());
+}
+
+async fn assert_fanout_publication_identity(
+    coordinator: &Coordinator,
+    worker: &WorkerId,
+    assigned: &Assignment,
+    spec: &JobSpec,
+    broadcast: &BroadcastId,
+) {
+    let request = publication(assigned, spec.clone());
+    for _ in 0..2 {
+        assert_eq!(
+            coordinator
+                .submit_job(worker, &request, || ready(Ok(worker.clone())))
+                .await
+                .unwrap(),
+            *spec
+        );
+    }
+    for operation in [
+        JobOperation::Fanout {
+            broadcast_id: BroadcastId::mint(),
+            revision: 1.try_into().unwrap(),
+        },
+        JobOperation::Fanout {
+            broadcast_id: broadcast.clone(),
+            revision: 2.try_into().unwrap(),
+        },
+    ] {
+        let changed = publication(
+            assigned,
+            JobSpec {
+                operation,
+                ..spec.clone()
+            },
+        );
+        assert_eq!(
+            coordinator
+                .submit_job(worker, &changed, || ready(Ok(worker.clone())))
+                .await,
+            Err(Error::Conflict)
+        );
+    }
+    let foreign = publication(
+        assigned,
+        JobSpec {
+            app_id: AppId::mint(),
+            ..spec.clone()
+        },
+    );
+    assert_eq!(
+        coordinator
+            .submit_job(worker, &foreign, || ready(Ok(worker.clone())))
+            .await,
+        Err(Error::Denied)
+    );
 }

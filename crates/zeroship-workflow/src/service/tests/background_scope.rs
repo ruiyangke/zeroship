@@ -140,6 +140,12 @@ async fn background_contract(store: Rc<OrmStore>, path: &Path) {
         )
         .await
         .unwrap();
+    let assigned_job = fanout::job(
+        &service.fixture_app(assigned.clone()),
+        &assigned_broadcast.id,
+        1,
+    )
+    .await;
     let tx = service.begin().await.unwrap();
     for (table, column) in [
         ("tasks", "deadline"),
@@ -163,7 +169,16 @@ async fn background_contract(store: Rc<OrmStore>, path: &Path) {
         .with_payload_storage(storage)
         .unwrap();
     assert!(reopened.poll(&worker).await.unwrap().is_none());
-    assert_eq!(reopened.tick_broadcasts().await.unwrap(), 0);
+    assert!(matches!(
+        reopened
+            .fixture_app(assigned.clone())
+            .fanout_job(
+                &fanout::Grant::new(&assigned_job),
+                crate::service::fanout::FanoutOptions::default()
+            )
+            .await,
+        Err(WorkflowServiceError::Unavailable(_))
+    ));
     assert_eq!(reopened.collect_payloads(1).await.unwrap(), 0);
     reopened
         .fixture_register(&assigned, leased_policy(1, AppPolicy::default()))
@@ -171,7 +186,10 @@ async fn background_contract(store: Rc<OrmStore>, path: &Path) {
         .unwrap();
     let task = reopened.poll(&worker).await.unwrap().unwrap();
     assert_eq!(task.invocation.app_id, assigned.as_str());
-    assert_eq!(reopened.tick_broadcasts().await.unwrap(), 0);
+    assert_eq!(
+        fanout::deliver_topic_page(&reopened.fixture_app(assigned.clone())).await,
+        0
+    );
     let tx = service.begin().await.unwrap();
     let completed = journal_rows(&tx, "broadcasts", json!({"finished":1})).await;
     assert_eq!(completed.len(), 1);

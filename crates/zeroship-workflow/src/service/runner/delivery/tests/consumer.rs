@@ -101,6 +101,7 @@ fn options(slots: usize) -> ConsumerOptions {
             retry_delay: Duration::from_millis(5),
             reconciliation: ReconciliationOptions::default(),
             collection: crate::service::collection::CollectionOptions::default(),
+            fanout: crate::service::fanout::FanoutOptions::default(),
         },
     }
 }
@@ -860,6 +861,53 @@ async fn manager_collect_duty_settles_without_publishing_or_executing_creator_wo
     assert_eq!(requests[0], requests[1]);
     assert_eq!(requests[0].delivery.job, collect);
     assert!(requests[0].successors.is_empty());
+}
+
+#[compio::test]
+async fn manager_delivers_committed_fanout_publication_without_executor() {
+    let fixture = Fixture::new(AppPolicy::default()).await;
+    let fanout = super::fanout::accepted(&fixture).await;
+    assert!(fanout.deployment_id().is_none());
+    let manager = NativeManager::new(&fixture).await;
+    fixture
+        .app
+        .publish_job(&fanout.id, manager.as_ref())
+        .await
+        .unwrap();
+    let mut consumer =
+        JobConsumer::new(manager.clone(), manager.worker.clone(), options(1)).unwrap();
+    consumer
+        .bindings()
+        .replace(vec![scope(
+            &fixture,
+            manager.scope.assignment_revision.get(),
+        )])
+        .unwrap();
+    finished(consumer.run_until(async {
+        manager.completion.recv_async().await.unwrap();
+    }))
+    .await;
+    assert_eq!(fixture.probe.starts.get(), 0);
+    assert!(!super::collection::has_task(&fixture).await);
+    assert_eq!(
+        fixture
+            .app
+            .job_receipt(&fanout)
+            .await
+            .unwrap()
+            .unwrap()
+            .outcome,
+        JobOutcome::Completed {}
+    );
+    assert_eq!(
+        fixture.app.pending_jobs(None, 1).await.unwrap(),
+        std::slice::from_ref(&fixture.job)
+    );
+    assert!(manager.claim(&manager.scope).await.unwrap().is_none());
+    let requests = manager.requests.borrow();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0], requests[1]);
+    assert_eq!(requests[0].delivery.job, fanout);
 }
 
 #[compio::test]

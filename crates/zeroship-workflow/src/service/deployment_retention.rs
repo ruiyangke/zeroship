@@ -456,17 +456,10 @@ async fn close_admission(
             return Err(conflict("deployment retains workflow journal dependencies"));
         }
     }
-    let pending = tx
-        .database()
-        .collection(models::job_publications::Entity::COLLECTION)?
-        .count(
-            value!({"app_id":app.as_str(), "deploy_id":deployment, "confirmed_at":null}),
-            value!({}),
-        )
-        .await?;
-    if !matches!(pending, Output::Count(0)) {
+    if super::publication::retains_deployment(tx, app, deployment).await? {
         return Err(conflict("deployment retains unpublished workflow jobs"));
     }
+
     Ok(())
 }
 

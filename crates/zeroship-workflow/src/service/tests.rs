@@ -93,6 +93,7 @@ mod delivery;
 pub(super) mod deployment_fixture;
 mod deployment_retention;
 mod deployments;
+mod fanout;
 mod frontier_models;
 mod graph;
 mod ingress_models;
@@ -1578,12 +1579,21 @@ async fn broadcast_contract(store: Rc<OrmStore>) {
         Err(WorkflowServiceError::Conflict(_))
     ));
     let late = wait_on_topic(&service, &scope, &worker).await;
-    assert_eq!(service.tick_broadcasts().await.unwrap(), 128);
+    assert_eq!(
+        fanout::deliver_topic_page(&service.fixture_app(app.clone())).await,
+        128
+    );
     let recovered = WorkflowService::open(store.clone(), service.policies.clone())
         .await
         .unwrap();
-    assert_eq!(recovered.tick_broadcasts().await.unwrap(), 1);
-    assert_eq!(recovered.tick_broadcasts().await.unwrap(), 0);
+    assert_eq!(
+        fanout::deliver_topic_page(&recovered.fixture_app(app.clone())).await,
+        1
+    );
+    assert_eq!(
+        fanout::deliver_topic_page(&recovered.fixture_app(app.clone())).await,
+        0
+    );
     let mut actual = std::collections::BTreeSet::new();
     let mut signals = std::collections::BTreeSet::new();
     while let Some(task) = recovered.poll(&worker).await.unwrap() {
@@ -1629,7 +1639,10 @@ async fn broadcast_contract(store: Rc<OrmStore>) {
     let task = recovered.poll(&worker).await.unwrap().unwrap();
     assert_eq!(task.invocation.run_id, late);
     recovered.complete(&worker,&task.id,&task.token,execution(json!([{"kind":"Wait","ordinal":0,"name":"event","signalType":"news","topic":"updates"}]))).await.unwrap();
-    assert_eq!(recovered.tick_broadcasts().await.unwrap(), 0);
+    assert_eq!(
+        fanout::deliver_topic_page(&recovered.fixture_app(app.clone())).await,
+        0
+    );
     assert!(recovered.poll(&worker).await.unwrap().is_none());
     scope
         .signal(
@@ -1888,7 +1901,10 @@ async fn ingress_contract(store: Rc<OrmStore>) {
         .await
         .unwrap()
         .with_signal_authority(authority);
-    assert_eq!(recovered.tick_broadcasts().await.unwrap(), 1);
+    assert_eq!(
+        fanout::deliver_topic_page(&recovered.fixture_app(app.clone())).await,
+        1
+    );
     let task = recovered.poll(&worker).await.unwrap().unwrap();
     assert_eq!(task.invocation.run_id, waiting);
     assert_eq!(

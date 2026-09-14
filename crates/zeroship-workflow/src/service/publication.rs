@@ -20,10 +20,10 @@ use std::future::Future;
 use zeroship_core::{
     app_id::AppId,
     workflow_coordination::{AssignedScope, FailureCode, Revision, RunId},
-    workflow_jobs::{DeploymentId, JobId, JobOperation, JobSpec, SubmitJob},
+    workflow_jobs::{BroadcastId, DeploymentId, JobId, JobOperation, JobSpec, SubmitJob},
 };
 use zeroship_data_orm::{
-    orm::{Entity, FindOptions, FromRow, Operation, Output},
+    orm::{Entity, FindOptions, FromRow, Insertable, Operation, Output},
     sql::MAX_ROW_LIMIT,
     value,
 };
@@ -78,44 +78,103 @@ impl JobPublisher for AssignedPublisher<'_> {
     }
 }
 
-#[derive(FromRow)]
+#[derive(FromRow, Insertable)]
 #[orm(entity = publications)]
 struct Intent {
     id: String,
     app_id: String,
-    deploy_id: String,
-    run_id: String,
-    generation: i64,
-    frontier_revision: i64,
+    deploy_id: Option<String>,
+    run_id: Option<String>,
+    generation: Option<i64>,
+    frontier_revision: Option<i64>,
+    broadcast_id: Option<String>,
+    broadcast_revision: Option<i64>,
     available_at: i64,
     specification: String,
+    created_at: i64,
     confirmed_at: Option<i64>,
 }
 
 impl Intent {
     fn job(&self, app: &AppId) -> Result<JobSpec, WorkflowServiceError> {
         let job: JobSpec = decode(&self.specification)?;
-        let JobOperation::Advance {
-            deployment_id,
-            run_id,
-            generation,
-            revision,
-        } = &job.operation
-        else {
-            return Err(invalid());
-        };
         if job.app_id != *app
             || self.app_id != app.as_str()
             || job.id.as_str() != self.id
-            || deployment_id.as_str() != self.deploy_id
-            || run_id.as_str() != self.run_id
-            || i64::from(*generation) != self.generation
-            || revision.get() != self.frontier_revision
             || job.available_at.get() != self.available_at
         {
             return Err(invalid());
         }
+        let valid = match &job.operation {
+            JobOperation::Advance {
+                deployment_id,
+                run_id,
+                generation,
+                revision,
+            } => {
+                self.deploy_id.as_deref() == Some(deployment_id.as_str())
+                    && self.run_id.as_deref() == Some(run_id.as_str())
+                    && self.generation == Some(i64::from(*generation))
+                    && self.frontier_revision == Some(revision.get())
+                    && self.broadcast_id.is_none()
+                    && self.broadcast_revision.is_none()
+            }
+            JobOperation::Fanout {
+                broadcast_id,
+                revision,
+            } => {
+                self.broadcast_id.as_deref() == Some(broadcast_id.as_str())
+                    && self.broadcast_revision == Some(revision.get())
+                    && self.deploy_id.is_none()
+                    && self.run_id.is_none()
+                    && self.generation.is_none()
+                    && self.frontier_revision.is_none()
+            }
+            _ => false,
+        };
+        if !valid {
+            return Err(invalid());
+        }
         Ok(job)
+    }
+
+    fn new(job: &JobSpec, now: i64) -> Result<Self, WorkflowServiceError> {
+        let mut intent = Self {
+            id: job.id.as_str().to_owned(),
+            app_id: job.app_id.as_str().to_owned(),
+            deploy_id: None,
+            run_id: None,
+            generation: None,
+            frontier_revision: None,
+            broadcast_id: None,
+            broadcast_revision: None,
+            available_at: job.available_at.get(),
+            specification: encode(job)?,
+            created_at: now,
+            confirmed_at: None,
+        };
+        match &job.operation {
+            JobOperation::Advance {
+                deployment_id,
+                run_id,
+                generation,
+                revision,
+            } => {
+                intent.deploy_id = Some(deployment_id.as_str().to_owned());
+                intent.run_id = Some(run_id.as_str().to_owned());
+                intent.generation = Some(i64::from(*generation));
+                intent.frontier_revision = Some(revision.get());
+            }
+            JobOperation::Fanout {
+                broadcast_id,
+                revision,
+            } => {
+                intent.broadcast_id = Some(broadcast_id.as_str().to_owned());
+                intent.broadcast_revision = Some(revision.get());
+            }
+            _ => return Err(invalid()),
+        }
+        Ok(intent)
     }
 }
 
@@ -296,6 +355,15 @@ pub(super) async fn record(
     run: &str,
     now: i64,
 ) -> Result<(), WorkflowServiceError> {
+    record_job(tx, app, run, now).await.map(|_| ())
+}
+
+pub(super) async fn record_job(
+    tx: &Transaction,
+    app: &AppId,
+    run: &str,
+    now: i64,
+) -> Result<Option<JobSpec>, WorkflowServiceError> {
     let frontier = tx
         .database()
         .entity::<runs::Entity>()?
@@ -305,10 +373,10 @@ pub(super) async fn record(
         .next()
         .ok_or_else(|| not_found("workflow run"))?;
     let Some(due) = frontier.due_at else {
-        return Ok(());
+        return Ok(None);
     };
     if frontier.task_id.is_some() || parse_state(&frontier.state)?.is_terminal() {
-        return Ok(());
+        return Ok(None);
     }
     let operation = JobOperation::Advance {
         deployment_id: DeploymentId::parse(&frontier.deploy_id).map_err(|_| invalid())?,
@@ -322,9 +390,9 @@ pub(super) async fn record(
         .find::<Intent>(
             publications::app_id
                 .eq(app.as_str())?
-                .and(publications::run_id.eq(run)?)
-                .and(publications::generation.eq(frontier.generation)?)
-                .and(publications::frontier_revision.eq(frontier.frontier_revision)?)
+                .and(publications::run_id.eq(Some(run))?)
+                .and(publications::generation.eq(Some(frontier.generation))?)
+                .and(publications::frontier_revision.eq(Some(frontier.frontier_revision))?)
                 .and(publications::available_at.eq(due)?),
             one(),
         )
@@ -343,14 +411,10 @@ pub(super) async fn record(
         if existing.job(app)? != job {
             return Err(invalid());
         }
-        return Ok(());
+        return Ok(Some(job));
     }
-    tx.database().collection(publications::Entity::COLLECTION)?.insert(value!({
-        "id":job.id.as_str(), "app_id":app.as_str(), "deploy_id":frontier.deploy_id,
-        "run_id":run, "generation":frontier.generation, "frontier_revision":frontier.frontier_revision,
-        "available_at":due, "specification":encode(&job)?, "created_at":now,
-    })).await?;
-    Ok(())
+    insert(tx, &job, now).await?;
+    Ok(Some(job))
 }
 
 async fn read(tx: &Transaction, app: &AppId, id: &JobId) -> Result<Intent, WorkflowServiceError> {
@@ -377,4 +441,112 @@ fn one() -> FindOptions {
 
 fn invalid() -> WorkflowServiceError {
     WorkflowServiceError::Internal("invalid workflow job publication journal".into())
+}
+
+async fn insert(tx: &Transaction, job: &JobSpec, now: i64) -> Result<(), WorkflowServiceError> {
+    let saved = tx
+        .database()
+        .entity::<publications::Entity>()?
+        .insert::<_, Intent>(Intent::new(job, now)?)
+        .await?;
+    if saved.job(&job.app_id)? != *job {
+        return Err(invalid());
+    }
+    Ok(())
+}
+
+pub(super) async fn exact(tx: &Transaction, job: &JobSpec) -> Result<(), WorkflowServiceError> {
+    if read(tx, &job.app_id, &job.id).await?.job(&job.app_id)? != *job {
+        return Err(invalid());
+    }
+    Ok(())
+}
+
+pub(super) async fn intent_job(
+    tx: &Transaction,
+    app: &AppId,
+    id: &JobId,
+) -> Result<JobSpec, WorkflowServiceError> {
+    read(tx, app, id).await?.job(app)
+}
+
+pub(super) async fn fanout(
+    tx: &Transaction,
+    app: &AppId,
+    broadcast: &BroadcastId,
+    revision: Revision,
+    now: i64,
+) -> Result<JobSpec, WorkflowServiceError> {
+    let existing = tx
+        .database()
+        .entity::<publications::Entity>()?
+        .find::<Intent>(
+            publications::app_id
+                .eq(app.as_str())?
+                .and(publications::broadcast_id.eq(Some(broadcast.as_str()))?)
+                .and(publications::broadcast_revision.eq(Some(revision.get()))?),
+            one(),
+        )
+        .await?;
+    let operation = JobOperation::Fanout {
+        broadcast_id: broadcast.clone(),
+        revision,
+    };
+    if let Some(existing) = existing.first() {
+        let job = existing.job(app)?;
+        if job.operation != operation {
+            return Err(invalid());
+        }
+        return Ok(job);
+    }
+    let job = JobSpec {
+        id: JobId::mint(),
+        app_id: app.clone(),
+        operation,
+        available_at: now.try_into().map_err(|_| invalid())?,
+    };
+    insert(tx, &job, now).await?;
+    Ok(job)
+}
+
+/// The app lock prevents new intents while every pending specification is checked.
+/// Nullable projections cannot conceal a code-dependent publication from release.
+pub(super) async fn retains_deployment(
+    tx: &Transaction,
+    app: &AppId,
+    deployment: &str,
+) -> Result<bool, WorkflowServiceError> {
+    let source = tx.database().entity::<publications::Entity>()?.alias("p")?;
+    let mut after: Option<String> = None;
+    loop {
+        let mut predicate = source
+            .column(publications::app_id)
+            .eq(app.as_str())?
+            .and(source.column(publications::confirmed_at).eq(None::<i64>)?);
+        if let Some(after) = after.as_deref() {
+            predicate = predicate.and(source.column(publications::id).gt(after)?);
+        }
+        let rows = tx
+            .database()
+            .from(&source)
+            .filter(predicate)
+            .order_by(source.column(publications::id).asc())
+            .select(source.row::<Intent>())?
+            .limit(128)?
+            .all()
+            .await?;
+        if rows.is_empty() {
+            return Ok(false);
+        }
+        for row in &rows {
+            let job = row.job(app)?;
+            if job
+                .deployment_id()
+                .is_some_and(|id| id.as_str() == deployment)
+            {
+                return Ok(true);
+            }
+        }
+        after = rows.last().map(|row| row.id.clone());
+    }
 }

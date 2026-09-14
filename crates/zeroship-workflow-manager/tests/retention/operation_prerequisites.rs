@@ -6,6 +6,7 @@ use zeroship_core::{
         ManageRun, ManagementOperation, ManagementOutcome, RequestId, RestartDeploy,
         RestartOptions, RestartTarget, RunOperation, RunState,
     },
+    workflow_jobs::BroadcastId,
 };
 use zeroship_workflow_manager::{
     coordinator::{Coordinator, Options as CoordinatorOptions},
@@ -64,7 +65,14 @@ impl HoldClient for ForbiddenHolds {
 
 async fn journal_jobs(fixture: &Fixture) {
     let queue = queue(fixture, Rc::new(ForbiddenHolds)).await;
-    for operation in [JobOperation::Reconcile {}, JobOperation::Collect {}] {
+    for operation in [
+        JobOperation::Reconcile {},
+        JobOperation::Collect {},
+        JobOperation::Fanout {
+            broadcast_id: BroadcastId::mint(),
+            revision: 1.try_into().unwrap(),
+        },
+    ] {
         exercise_journal_job(fixture, &queue, operation).await;
     }
     journal_commands(fixture, &queue).await;
@@ -353,6 +361,10 @@ async fn projection_mismatch(fixture: &Fixture) {
             revision: 1.try_into().unwrap(),
         },
         JobOperation::Reconcile {},
+        JobOperation::Fanout {
+            broadcast_id: BroadcastId::mint(),
+            revision: 1.try_into().unwrap(),
+        },
     ] {
         let app = AppId::mint();
         queue.register_scope(&app).await.unwrap();

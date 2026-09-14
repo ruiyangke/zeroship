@@ -27,6 +27,8 @@ zeroship_data_orm::orm::schema! {
             last_polled_at: BigInt,
             #[orm(default = 0)]
             subscription_sequence: BigInt,
+            #[orm(default = 0)]
+            signal_sequence: BigInt,
         }
 
         __zeroship_workflow_broadcasts {
@@ -41,6 +43,8 @@ zeroship_data_orm::orm::schema! {
             cutoff_sequence: BigInt,
             origin: Text,
             finished: BigInt,
+            sequence: BigInt,
+            revision: BigInt,
         }
 
         __zeroship_workflow_collection_pages {
@@ -83,6 +87,15 @@ zeroship_data_orm::orm::schema! {
             availability_epoch: BigInt,
         }
 
+        __zeroship_workflow_fanout_pages {
+            #[orm(primary_key)]
+            id: Text,
+            app_id: Text,
+            broadcast_id: Text,
+            revision: BigInt,
+            result: Text,
+        }
+
         __zeroship_workflow_generations {
             #[orm(primary_key)]
             id: Text,
@@ -104,10 +117,12 @@ zeroship_data_orm::orm::schema! {
             #[orm(primary_key)]
             id: Text,
             app_id: Text,
-            run_id: Text,
-            deploy_id: Text,
-            generation: BigInt,
-            frontier_revision: BigInt,
+            run_id: Nullable<Text>,
+            deploy_id: Nullable<Text>,
+            generation: Nullable<BigInt>,
+            frontier_revision: Nullable<BigInt>,
+            broadcast_id: Nullable<Text>,
+            broadcast_revision: Nullable<BigInt>,
             available_at: BigInt,
             specification: Text,
             created_at: BigInt,
@@ -265,6 +280,7 @@ zeroship_data_orm::orm::schema! {
             signal_type: Text,
             payload: Text,
             created_at: BigInt,
+            delivery_sequence: BigInt,
             consumed_generation: Nullable<BigInt>,
             consumed_ordinal: Nullable<BigInt>,
             broadcast_id: Nullable<Text>,
@@ -338,6 +354,10 @@ zeroship_data_orm::orm::schema! {
             app_id: Text,
             topic: Text,
             signal_epoch: BigInt,
+            #[orm(default = 0)]
+            accepted_sequence: BigInt,
+            #[orm(default = 0)]
+            completed_sequence: BigInt,
         }
 
         __zeroship_workflow_waits {

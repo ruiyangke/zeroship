@@ -43,3 +43,10 @@ declare_entity_id! {
     typed_id::WORKFLOW_SCHEDULE_PREFIX,
     schedule_id_tests,
 }
+
+declare_entity_id! {
+    /// A creator-owned broadcast expanded by durable fanout jobs.
+    BroadcastId,
+    typed_id::WORKFLOW_BROADCAST_PREFIX,
+    broadcast_id_tests,
+}

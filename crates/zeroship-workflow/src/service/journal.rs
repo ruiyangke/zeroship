@@ -496,13 +496,15 @@ pub(crate) async fn resolve(
                                     )),
                         ),
                 )
-                .order_by(signals.column(models::signals::created_at).asc())
+                .order_by(signals.column(models::signals::delivery_sequence).asc())
                 .order_by(signals.column(models::signals::id).asc())
                 .select(signals.row::<models::SignalMessage>())?
                 .limit(1)?
                 .all()
                 .await?;
             if let Some(signal) = rows.first() {
+                super::fanout::signals::validate_sequence(tx, app, signal.delivery_sequence)
+                    .await?;
                 let signal_id = signal.id.clone();
                 let created_at = chrono::DateTime::from_timestamp_millis(signal.created_at)
                     .ok_or_else(|| {

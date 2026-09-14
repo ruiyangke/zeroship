@@ -24,8 +24,8 @@ use zeroship_core::{
         RunOperation, RunState, WorkerId, AUDIENCE,
     },
     workflow_jobs::{
-        Delivery, DeploymentId, JobId, JobOperation, JobOutcome, JobSpec, ManagementCommand,
-        Settlement, SettlementReceipt, SubmitJob,
+        BroadcastId, Delivery, DeploymentId, JobId, JobOperation, JobOutcome, JobSpec,
+        ManagementCommand, Settlement, SettlementReceipt, SubmitJob,
     },
     workflow_schedules::ScheduleId,
 };
@@ -84,6 +84,16 @@ impl Fixture {
             spec,
             delivery,
         }
+    }
+
+    fn fanout() -> Self {
+        let mut fixture = Self::new();
+        fixture.spec.operation = JobOperation::Fanout {
+            broadcast_id: BroadcastId::mint(),
+            revision: 1.try_into().unwrap(),
+        };
+        fixture.delivery.job = fixture.spec.clone();
+        fixture
     }
 
     fn submission(&self) -> SubmitJob {
@@ -267,17 +277,21 @@ async fn request(stream: &mut compio::net::TcpStream) -> Request {
 
 #[compio::test]
 async fn job_methods_preserve_identity_and_use_remaining_authority() {
-    let fixture = Fixture::new();
+    exercise_job_methods(&Fixture::new(), Vec::new()).await;
+}
+
+async fn exercise_job_methods(fixture: &Fixture, successors: Vec<JobSpec>) {
     let submit = fixture.submission();
     let mut renewed = fixture.delivery.clone();
     renewed.deadline = 0.try_into().unwrap();
     let settlement = Settlement {
         delivery: renewed.clone(),
+        successors,
         ..fixture.settlement()
     };
     let settled = receipt(&settlement);
     peer(
-        &fixture,
+        fixture,
         vec![
             Exchange::new(endpoints::WORKFLOW_JOB_SUBMIT, &submit, json!(fixture.spec)),
             Exchange::new(
@@ -447,6 +461,10 @@ async fn incompatible_outcome_families_refuse_before_http() {
                 fixture.spec.operation.clone(),
                 JobOperation::Reconcile {},
                 JobOperation::Collect {},
+                JobOperation::Fanout {
+                    broadcast_id: BroadcastId::mint(),
+                    revision: 1.try_into().unwrap(),
+                },
             ]
             .into_iter()
             .chain(manager_operations());
@@ -846,4 +864,86 @@ async fn job_refusals_keep_the_closed_error_contract() {
         })
         .await;
     }
+}
+
+#[compio::test]
+async fn fanout_publication_and_successors_preserve_remaining_authority() {
+    let fixture = Fixture::fanout();
+    let JobOperation::Fanout { broadcast_id, .. } = &fixture.spec.operation else {
+        unreachable!()
+    };
+    let successor = JobSpec {
+        id: JobId::mint(),
+        operation: JobOperation::Fanout {
+            broadcast_id: broadcast_id.clone(),
+            revision: 2.try_into().unwrap(),
+        },
+        ..fixture.spec.clone()
+    };
+    exercise_job_methods(&fixture, vec![successor]).await;
+}
+
+#[compio::test]
+async fn fanout_replies_cannot_substitute_broadcast_or_revision() {
+    let fixture = Fixture::fanout();
+    let JobOperation::Fanout { broadcast_id, .. } = &fixture.spec.operation else {
+        unreachable!()
+    };
+    let changes = [
+        JobOperation::Fanout {
+            broadcast_id: BroadcastId::mint(),
+            revision: 1.try_into().unwrap(),
+        },
+        JobOperation::Fanout {
+            broadcast_id: broadcast_id.clone(),
+            revision: 2.try_into().unwrap(),
+        },
+    ];
+    let submit = fixture.submission();
+    let mut exchanges = Vec::new();
+    for operation in &changes {
+        exchanges.push(Exchange::new(
+            endpoints::WORKFLOW_JOB_SUBMIT,
+            &submit,
+            json!(JobSpec {
+                operation: operation.clone(),
+                ..fixture.spec.clone()
+            }),
+        ));
+    }
+    exchanges.push(Exchange::new(
+        endpoints::WORKFLOW_JOB_CLAIM,
+        &fixture.scope,
+        lease(&fixture.delivery, 60_000),
+    ));
+    for operation in &changes {
+        let changed = Delivery {
+            job: JobSpec {
+                operation: operation.clone(),
+                ..fixture.spec.clone()
+            },
+            ..fixture.delivery.clone()
+        };
+        exchanges.push(Exchange::new(
+            endpoints::WORKFLOW_JOB_HEARTBEAT,
+            &fixture.delivery,
+            lease(&changed, 60_000),
+        ));
+    }
+    peer(&fixture, exchanges, async |client| {
+        for _ in &changes {
+            assert_eq!(
+                client.submit_job(&submit).await,
+                Err(Error::InvalidResponse)
+            );
+        }
+        let job = client.claim_job(&fixture.scope).await.unwrap().unwrap();
+        for _ in &changes {
+            assert_eq!(
+                client.heartbeat_job(&job).await.unwrap_err(),
+                Error::InvalidResponse
+            );
+        }
+    })
+    .await;
 }
