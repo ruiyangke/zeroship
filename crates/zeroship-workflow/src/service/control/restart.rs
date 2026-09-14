@@ -1,21 +1,34 @@
 use super::super::{
     app::{active_deploy, emit, live_runs},
-    journal,
+    deployment_retention::admission_generation,
+    deployments::unavailable,
+    deploys, journal,
 };
 use super::{
     lock_run, models, parse_state, replay, value, AppId, AppPolicy, Entity, Preparation, Rejection,
     RestartOptions, RestartedRun, RunState, Transaction, WorkflowServiceError,
 };
 use crate::service::policy::admit;
-use crate::{engine::StepCheckpoint, lifecycle::RestartSafety, operations::RestartDeploy};
+use crate::{
+    deployment_holds::HoldScope, engine::StepCheckpoint, lifecycle::RestartSafety,
+    operations::RestartDeploy,
+};
 use serde_json::json;
 use std::collections::BTreeSet;
 use zeroship_data_orm::{
-    orm::{FindOptions, Operation, Output},
+    orm::{FindOptions, FromRow, Operation, Output},
     sql::RowLimit,
 };
 
 const MAX_DESCENDANT_INSPECTIONS: usize = 16_384;
+
+#[derive(FromRow)]
+#[orm(entity = models::generations)]
+struct SourceGeneration {
+    deploy_id: String,
+    input: String,
+    input_ref: Option<String>,
+}
 
 pub(in crate::service) struct RestartPlan {
     current: i64,
@@ -24,7 +37,7 @@ pub(in crate::service) struct RestartPlan {
     steps: Vec<StepCheckpoint>,
     from: Option<i32>,
     deploy: String,
-    previous: models::GenerationInput,
+    previous: SourceGeneration,
 }
 
 pub(in crate::service) async fn prepare(
@@ -56,6 +69,9 @@ pub(in crate::service) async fn prepare(
         Err(error) => return Err(error),
     };
     let current = run.integer("generation")?;
+    if current < 0 {
+        return Err(unavailable());
+    }
     let steps = journal::load(tx, app, run_id, current).await?;
     let from = if let Some(target) = &options.from {
         let matches: Vec<_> = steps
@@ -158,27 +174,10 @@ pub(in crate::service) async fn prepare(
             "restart prefix contains unresolved operations".into(),
         )));
     }
-    let deploy = if deploy_policy == RestartDeploy::Latest {
-        let deploy = active_deploy(tx, app).await?;
-        if !deploy.workflows.contains(&run.text("workflow_name")?) {
-            return Ok(Preparation::Rejected(Rejection::Conflict(
-                "workflow is absent from the active deployment".into(),
-            )));
-        }
-        deploy.id
-    } else {
-        run.text("deploy_id")?
-    };
-    let generation = current.checked_add(1).ok_or_else(|| {
-        WorkflowServiceError::ResourceExhausted("workflow generation exhausted".into())
-    })?;
-    let signal_epoch = run.integer("signal_epoch")?.checked_add(1).ok_or_else(|| {
-        WorkflowServiceError::ResourceExhausted("workflow signal epoch exhausted".into())
-    })?;
     let previous = tx
         .database()
         .entity::<models::generations::Entity>()?
-        .find::<models::GenerationInput>(
+        .find::<SourceGeneration>(
             models::generations::app_id
                 .eq(app.as_str())?
                 .and(models::generations::run_id.eq(run_id)?)
@@ -191,9 +190,30 @@ pub(in crate::service) async fn prepare(
         .await?
         .into_iter()
         .next()
-        .ok_or_else(|| {
-            WorkflowServiceError::Internal("workflow current generation is missing".into())
-        })?;
+        .ok_or_else(unavailable)?;
+    let source_deployment = run.text("deploy_id")?;
+    if previous.deploy_id != source_deployment {
+        return Err(unavailable());
+    }
+    let workflow = run.text("workflow_name")?;
+    let deploy = if deploy_policy == RestartDeploy::Latest {
+        let deploy = active_deploy(tx, app).await?;
+        if !deploy.workflows.contains(&workflow) {
+            return Ok(Preparation::Rejected(Rejection::Conflict(
+                "workflow is absent from the active deployment".into(),
+            )));
+        }
+        deploy.id
+    } else {
+        retained_source(tx, app, &source_deployment, &workflow).await?;
+        source_deployment
+    };
+    let generation = current.checked_add(1).ok_or_else(|| {
+        WorkflowServiceError::ResourceExhausted("workflow generation exhausted".into())
+    })?;
+    let signal_epoch = run.integer("signal_epoch")?.checked_add(1).ok_or_else(|| {
+        WorkflowServiceError::ResourceExhausted("workflow signal epoch exhausted".into())
+    })?;
 
     Ok(Preparation::Ready(RestartPlan {
         current,
@@ -204,6 +224,47 @@ pub(in crate::service) async fn prepare(
         deploy,
         previous,
     }))
+}
+
+/// The app lock protects this source through the new generation's commit.
+/// Started restart needs its existing journal hold, without loading an artifact
+/// or consulting the active deployment or a platform service.
+async fn retained_source(
+    tx: &Transaction,
+    app: &AppId,
+    deployment: &str,
+    workflow: &str,
+) -> Result<(), WorkflowServiceError> {
+    let record = deploys::read(tx, app, deployment)
+        .await?
+        .ok_or_else(unavailable)?;
+    record.available()?;
+    let registration = record.registration()?;
+    if registration.id != deployment
+        || registration.hash != record.hash
+        || !zeroship_bundle::validate_hash_format(&record.hash)
+        || record.availability_epoch < 0
+        || !registration.workflows.contains(workflow)
+        || registration
+            .workflows
+            .iter()
+            .any(|name| crate::validation::workflow_name(name).is_err())
+    {
+        return Err(unavailable());
+    }
+    admission_generation(
+        tx,
+        app,
+        deployment,
+        &record.hash,
+        &HoldScope::for_app(app.clone()),
+    )
+    .await
+    .map_err(|error| match error {
+        WorkflowServiceError::Conflict(_) => unavailable(),
+        other => other,
+    })?;
+    Ok(())
 }
 
 impl RestartPlan {
