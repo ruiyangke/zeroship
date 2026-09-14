@@ -83,7 +83,7 @@ async fn a_database_refusal_creates_no_account_or_mail_and_the_same_submission_c
             .unwrap();
         assert_eq!(row.get::<_, String>(0), "failure");
         assert_eq!(row.get::<_, String>(1), "users_create_failed");
-        assert_eq!(row.get::<_, String>(2), "23514");
+        assert_eq!(row.get::<_, String>(2), "check_violation");
 
         admin
             .batch_execute("ALTER TABLE zeroship.users DROP CONSTRAINT signup_refusal")
