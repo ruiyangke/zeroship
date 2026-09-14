@@ -492,6 +492,25 @@ export function buildPlugin(
     // schema side channel. The generated `schema.runtime.json` descriptor
     // is packed into `manifest.runtime_descriptor` below.
 
+    // Populate static procedure bindings before the synthetic entry is loaded.
+    // A server-only app has no client graph to perform this discovery first;
+    // generating the entry from the initially empty state would produce a
+    // manifest that advertises procedures whose runtime dictionary is empty.
+    const discoveryConfig = buildSsrInlineConfig({
+      root,
+      ssrEntry: userEntryRel,
+      outDir: resolve(clientOutDir, "server"),
+      ssrPlugins: [
+        nodeCompatPlugin(),
+        zeroshipModulePlugin(),
+        transformPlugin(state),
+        zeroshipFrameworkResolverPlugin(),
+        clientManifestPlugin({ root, distDir: relative(root, clientOutDir) }),
+      ],
+    });
+    (discoveryConfig.build as Record<string, unknown>).write = false;
+    await viteBuild(discoveryConfig as Parameters<typeof viteBuild>[0]);
+
     const ssrConfig = buildSsrInlineConfig({
       root,
       ssrEntry: SERVER_ENTRY_VIRTUAL_ID,
