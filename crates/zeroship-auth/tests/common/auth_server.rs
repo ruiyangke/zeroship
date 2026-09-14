@@ -13,7 +13,7 @@ use std::sync::Arc;
 use zeroship_auth::{
     config::AuthConfig,
     headers::SecurityHeaders,
-    oidc::{Issuer, refresh::RefreshSessionPool},
+    oidc::{refresh::RefreshSessionPool, Issuer},
     server,
 };
 use zeroship_core::oidc_verify::JwksCache;
@@ -118,7 +118,11 @@ impl AuthServer {
             let google_jwks = google_jwks.clone();
             let frame_ancestor_origins = frame_ancestor_origins.clone();
             async move {
+                let database_url = cfg.settings.database_url.expose_str().to_owned();
                 let app = web::App::new()
+                    .state_factory(async move || {
+                        zeroship_auth::store::native::connect(&database_url).await
+                    })
                     .state(cfg)
                     .state(db_state)
                     .state(refresh_pool)
