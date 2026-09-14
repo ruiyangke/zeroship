@@ -79,7 +79,7 @@
 # enabled on the account.
 #
 # NOT WIRED INTO CI: nothing in .github/workflows/ names this script, and
-# tests/run_billing_suite.sh does not invoke it either. It needs an operator's
+# `cargo xtask test billing` does not invoke it either. It needs an operator's
 # live Stripe TEST keys and a Connect-enabled account, neither of which CI can
 # hold, so refusing cannot turn a CI job permanently red. It refuses to the
 # person who ran it by hand, which is the only reader it has.

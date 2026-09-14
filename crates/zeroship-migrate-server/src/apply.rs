@@ -1714,8 +1714,7 @@ mod tests {
 // Live provisioning proofs for the unmask audit table
 // ---------------------------------------------------------------------------
 //
-// These ordinary cargo tests require PostgreSQL and permission to create roles.
-// tests/run_billing_suite.sh prepares the migrated database.
+// These ordinary cargo tests own PostgreSQL through the crate's private fixture.
 //
 // WHAT THESE COVER THAT THE UNIT TESTS ABOVE CANNOT. `audit_unmask_tests` in
 // `provisioning.rs` greps the generated string: it proves the DDL SAYS
