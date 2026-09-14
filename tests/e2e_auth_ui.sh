@@ -171,8 +171,10 @@ step "Build release binaries"
 # Build the database facade before compiling the native adapter that embeds it.
 pnpm --filter @zeroship/db build >"$BUILD_LOG" 2>&1 \
   || fail_from_log "$BUILD_LOG" "database SDK prerequisite build"
+pnpm build:data-v8-adapter >>"$BUILD_LOG" 2>&1 \
+  || fail_from_log "$BUILD_LOG" "database host adapter prerequisite build"
 for path in \
-  "$ROOT/sdks/db/dist/internal.js"; do
+  "$ROOT/crates/zeroship-data-v8/dist/adapter.js"; do
   [ -f "$path" ] || die "SDK build did not produce $path"
 done
 cargo build --release -p zeroship-cli -p zeroship-auth \

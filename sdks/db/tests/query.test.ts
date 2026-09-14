@@ -1,7 +1,7 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import { FixtureQuery as Query } from "./_query-fixture.js";
-import { naming } from "@zeroship/db";
+import { naming } from "../src/index.js";
 
 type PlainObject = Record<string, unknown>;
 

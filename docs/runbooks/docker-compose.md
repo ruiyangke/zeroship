@@ -142,7 +142,7 @@ service reaches it over HTTP via `SANDBOX_URL` / `SANDBOX_TOKEN`.
 
 The single `Dockerfile` builds the platform services and the Node migration
 command in separate image stages. The `sdks` stage runs the root JavaScript
-build, including `sdks/db/dist/internal.js`, before Rust compilation because
+build, including `crates/zeroship-data-v8/dist/adapter.js`, before Rust compilation because
 `zeroship-data-v8` embeds that DB facade. The Rust builder then compiles the
 native services with the SDK output and authorization policies. Runtime images
 carry native binaries; the Node migration command has its own image stage.

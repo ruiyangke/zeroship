@@ -602,9 +602,8 @@ pub fn run_startup_database_probe(url: &str, app_id: &str) -> Value {
     apply_matrix_schema_ahead_of_runtime(url, app_id, &collection);
     let source = r#"
         import {env} from 'zeroship';
-        import {Collection} from 'zeroship:db/internal';
         const table = env.db[__COLLECTION__];
-        const prepared = table instanceof Collection;
+        const prepared = typeof table.find({}).sort === 'function';
         const inserted = await table.insert({title: 'startup row', flag: true, meta: {}, rank: 1});
         if (inserted.error) throw inserted.error;
         const rows = await table.find({title: 'startup row'});

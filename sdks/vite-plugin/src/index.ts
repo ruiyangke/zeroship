@@ -27,7 +27,7 @@ import {
 import { devServerPlugin } from "./dev-server.js";
 import { buildPlugin } from "./build.js";
 import { nodeCompatPlugin, nodeInjectPlugin } from "./node-compat.js";
-import { zeroshipFrameworkResolverPlugin, zeroshipModulePlugin } from "./zeroship-module.js";
+import { zeroshipModulePlugin } from "./zeroship-module.js";
 
 /**
  * One configured dev-auth user (all fields optional; sensible defaults).
@@ -139,7 +139,6 @@ export function zeroship(options: ZeroshipOptions = {}): Plugin[] {
     nodeCompatPlugin(),
     nodeInjectPlugin(),
     zeroshipModulePlugin(),
-    zeroshipFrameworkResolverPlugin(),
     transformPlugin(state),
     ...devServerPlugin(options, state, project),
     buildPlugin(state, project),

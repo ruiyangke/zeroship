@@ -9,18 +9,15 @@
  */
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { t } from "@zeroship/db";
-import { normalizeSchema, expandUnionToFlatColumns } from "@zeroship/db/internal";
-// Import validation helpers via the internal subpath so the
-// `ValidationError` instances they throw come from the same module
-// instance as the public `ValidationError` we instanceof-check against.
-import { validateDoc, checkPartial } from "@zeroship/db/internal";
-// Public export — matches the ValidationError instances that
-// Collection's CRUD path throws (which goes through compiled dist).
-// Importing from `../src/errors.js` would compile a separate class
-// via tsx and `instanceof` checks would return false.
-import { ValidationError } from "@zeroship/db";
-import { model } from "@zeroship/db/internal";
+import { t } from "../src/index.js";
+import { normalizeSchema, expandUnionToFlatColumns } from "../../../crates/zeroship-data-v8/js/testing.js";
+// Import validation helpers through crate test support so thrown errors share
+// the source entry's module instance.
+import { validateDoc, checkPartial } from "../../../crates/zeroship-data-v8/js/testing.js";
+// Public source export — matches the ValidationError instances that
+// Collection's CRUD path throws.
+import { ValidationError } from "../src/index.js";
+import { model } from "../../../crates/zeroship-data-v8/js/testing.js";
 import type { NativeDb } from "../src/native.js";
 
 // ---------------------------------------------------------------------------

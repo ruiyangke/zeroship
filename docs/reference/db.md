@@ -1077,9 +1077,28 @@ commit or roll back as a unit.
 
 ## Live queries (`db.live`)
 
-`db.live(queryFn)` is the creator-facing reactive API. The lower-level
-broker subscription primitive exists for framework-internal consumers;
-app code should use `db.live(...)`, not `openSubscription()`.
+`db.live(queryFn)` is the query-shaped reactive API. The package also exports
+the lower-level `subscribe(collection)` primitive for framework adapters and
+advanced consumers. App code that wants refreshed query results should use
+`db.live(...)`; `subscribe(...)` reports invalidations and leaves the re-read to
+the caller. `openSubscription()` on the native collection remains an adapter
+detail.
+
+```ts
+import { subscribe } from "@zeroship/db";
+
+const changes = subscribe("todos");
+await changes.ready();
+for await (const event of changes) {
+  if (event.kind === "change") {
+    console.log(event.op, event.pk, event.columns);
+  }
+}
+```
+
+The returned `Subscription` is an async iterable with idempotent `ready()` and
+`close()` methods. It emits `change`, `resync`, and `closed` events. Breaking
+out of the loop closes the native subscription.
 
 `db.live(queryFn)` wraps the raw subscription stream into a
 query-shaped reactive primitive. It first runs `queryFn` only to discover
@@ -1196,11 +1215,13 @@ calls fail with `MASK_POLICY_IMMUTABLE`; unmask operations issued before
 finalization fail with `database_startup_pending`.
 
 Runtime boot validates the generated descriptor and asks the data adapter to
-publish its complete collection field maps before creator modules run. The DB
-SDK internal entry supplies `installSchema`, which reads that descriptor to
-install JavaScript collection and transaction wrappers. Vite does not inject
-an installer import or call into the creator entry. Ordinary database operations
-may run during startup once the descriptor and SDK facade are prepared.
+publish its complete collection field maps before creator modules run.
+`zeroship-data-v8` embeds and invokes its host-only `installSchema` adapter,
+which reads that descriptor to install JavaScript collection and transaction
+wrappers. Vite does not inject an installer import or call into the creator
+entry, and `@zeroship/db` exposes no framework subpath. Ordinary database
+operations may run during startup once the descriptor and SDK facade are
+prepared.
 
 Native policy installation has no JavaScript capability handle or readiness
 global. Replication operations belong to the relay service. Public type

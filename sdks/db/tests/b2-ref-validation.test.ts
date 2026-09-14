@@ -12,14 +12,10 @@ import assert from "node:assert/strict";
 // Import directly from the schema / types modules so the test bundle
 // does not transitively pull in `db-types.ts`, which imports `env` from the
 // runtime-supplied "zeroship" module (unavailable in node test env).
-import { validateRefTargets } from "@zeroship/db/internal";
-// Import t and schema through the package entry (the compiled dist)
-// so the `TypeBuilder` instance identity matches the one bootstrap's
-// dist imports via `@zeroship/db/internal`. Importing from `../src/`
-// would compile through tsx at runtime and produce a separate
-// `TypeBuilder` class — `instanceof` checks inside `validateRefTargets`
-// would then return false for objects this test constructs.
-import { t, schema as schemaWrap } from "@zeroship/db";
+import { validateRefTargets } from "../../../crates/zeroship-data-v8/js/testing.js";
+// Use the source entry so builders share the adapter test support's module
+// instance and its TypeBuilder identity checks.
+import { t, schema as schemaWrap } from "../src/index.js";
 
 test("reference builders preserve an explicit target column without inventing one", () => {
   assert.equal(t.ref("users", { column: "account_key" }).toFieldDef().refColumn, "account_key");

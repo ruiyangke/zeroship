@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { t } from "@zeroship/db";
-import type { Filter } from "@zeroship/db";
+import { t } from "../src/index.js";
+import type { Filter } from "../src/index.js";
 
 const fields = {
   name: t.string().required(),

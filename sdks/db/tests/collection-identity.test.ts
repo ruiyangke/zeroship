@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { Collection } from "@zeroship/db";
-import { installSchema, type RuntimeSchemaDescriptor } from "@zeroship/db/internal";
+import { Collection } from "../src/index.js";
+import { installSchema, type RuntimeSchemaDescriptor } from "../../../crates/zeroship-data-v8/js/testing.js";
 
 const id = { type: "string" as const, required: true, primaryKey: true };
 

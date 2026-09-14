@@ -20,7 +20,7 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import { installSchemaForTest } from "./_install-helper.js";
-import { t, schema as schemaWrap } from "@zeroship/db";
+import { t, schema as schemaWrap } from "../src/index.js";
 import type { NativeDb } from "../src/native.js";
 
 type AnyRec = Record<string, unknown>;

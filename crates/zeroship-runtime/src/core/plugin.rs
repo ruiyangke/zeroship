@@ -65,10 +65,20 @@ pub trait NativePlugin: Send + Sync + 'static {
     /// on it (one per app in multi-tenant workers). Init must be idempotent.
     fn register(&self, r: &mut NativeRegistrar);
 
-    /// Provide SDK adapter modules independently of the creator artifact.
-    /// These modules may import other plugin modules, native modules and
-    /// `zeroship`. They receive no additional authority through this API.
+    /// Provide creator-importable SDK adapter modules independently of the
+    /// creator artifact. These modules may import other public plugin modules,
+    /// native modules and `zeroship`. They receive no additional authority
+    /// through this API.
     fn javascript_modules(&self) -> &'static [JavaScriptModule] {
+        &[]
+    }
+
+    /// Provide adapter modules that only native startup may invoke.
+    ///
+    /// These modules may import other plugin modules, native modules and
+    /// `zeroship`, but creator modules cannot import them. Use this for host
+    /// lifecycle code rather than relying on an undocumented specifier.
+    fn host_javascript_modules(&self) -> &'static [JavaScriptModule] {
         &[]
     }
 
