@@ -90,7 +90,9 @@ export function workflowSchema(namespace) {
     fk("run_schedule", ["app_id", "schedule_id"], "schedules", ["app_id", "id"]),
   ], [{ name: "live_workflow_key", columns: ["app_id", "workflow_name", "key"] }]);
   index("runs", "due", ["due_at", "app_id", "id"]);
-  index("runs", "parent", ["app_id", "parent_id", "parent_generation"]);
+  // Cascade propagation pages range-scan one generation's cascading children
+  // in run identity order.
+  index("runs", "parent", ["app_id", "parent_id", "parent_generation", "cascade", "id"]);
   create("generations", {
     ...generation(), deploy_id: text(), input: text(), input_ref: t.text(), output: t.text(), output_ref: t.text(), error: t.text(),
     state: text(), started_at: integer(), terminal_at: t.bigInt(),
@@ -260,11 +262,13 @@ export function workflowSchema(namespace) {
   create("job_publications", {
     ...identity(), id: text(), run_id: t.text(), deploy_id: t.text(), generation: t.bigInt(),
     frontier_revision: t.bigInt(), broadcast_id: t.text(), broadcast_revision: t.bigInt(),
+    propagation_id: t.text(), propagation_revision: t.bigInt(),
     available_at: integer(), specification: text(),
     created_at: integer(), confirmed_at: t.bigInt(),
   }, ["app_id", "id"], [appFk("job_publications")], [
     { name: "job_publication_frontier", columns: ["app_id", "run_id", "generation", "frontier_revision", "available_at"] },
     { name: "job_publication_fanout", columns: ["app_id", "broadcast_id", "broadcast_revision"] },
+    { name: "job_publication_propagation", columns: ["app_id", "propagation_id", "propagation_revision"] },
   ]);
   index("job_publications", "pending", ["app_id", "confirmed_at", "id"]);
   index("job_publications", "deployment", ["app_id", "deploy_id", "confirmed_at"]);
@@ -275,6 +279,21 @@ export function workflowSchema(namespace) {
     fk("fanout_page_publication", ["app_id", "id"], "job_publications", ["app_id", "id"]),
     fk("fanout_page_broadcast", ["app_id", "broadcast_id"], "broadcasts", ["app_id", "id"]),
   ], [{ name: "fanout_page_revision", columns: ["app_id", "broadcast_id", "revision"] }]);
+  // One obligation per source generation and kind. Its scope key also answers
+  // the cancellation fence lookup for a cascading child's parent generation.
+  create("propagations", {
+    ...generation(), kind: text(), cursor: t.text(), revision: integer(),
+    finished: integer(), created_at: integer(),
+  }, ["app_id", "run_id", "generation", "kind"], [generationFk("propagations")], [
+    { name: "propagation_identity", columns: ["app_id", "id"] },
+  ]);
+  create("propagation_pages", {
+    ...identity(), propagation_id: text(), revision: integer(), result: text(),
+  }, ["app_id", "id"], [
+    fk("propagation_page_receipt", ["app_id", "id"], "job_receipts", ["app_id", "id"]),
+    fk("propagation_page_publication", ["app_id", "id"], "job_publications", ["app_id", "id"]),
+    fk("propagation_page_obligation", ["app_id", "propagation_id"], "propagations", ["app_id", "id"]),
+  ], [{ name: "propagation_page_revision", columns: ["app_id", "propagation_id", "revision"] }]);
   create("reconciliation_scans", {
     revision: integer(), phase: text(), after_id: t.text(), upper_id: t.text(),
   }, ["id"], [fk("reconciliation_scan_app", ["id"], "app_state", ["app_id"])]);
@@ -285,6 +304,7 @@ export function workflowSchema(namespace) {
       for (const [name, columns] of Object.entries({
         job_publications: ["id", "app_id", "run_id", "deploy_id", "broadcast_id"],
         fanout_pages: ["id", "app_id", "broadcast_id"],
+        propagation_pages: ["id", "app_id"],
         broadcasts: ["id", "app_id", "topic"],
         topics: ["app_id", "topic"],
         deployment_holds: ["deploy_id"],

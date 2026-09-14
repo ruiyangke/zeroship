@@ -1,10 +1,7 @@
-// Dropping a masked column removes its `<col>_masked` sibling too, end to end.
+// Dropping a masked column removes its `__zs_raw__<col>` sibling too, end to end.
 //
-// A masked column is TWO physical columns: the declared one and a `<col>_masked`
-// sibling the engine injects, carrying a `zero-migrate:mask` sentinel COMMENT. One
-// authored `create` makes both - `lower_create_table` reconciles siblings through
-// `ensure_create_table_masked_siblings`, and a masked `addColumn` lowers the sibling
-// as a second unit.
+// The declared column holds the masked value. The raw sibling holds the real value,
+// and the declared column carries the `zero-migrate:mask` sentinel.
 //
 // The mirror op did not. `Op::DropColumn` in crates/zeroship-migrate/src/render/lower.rs
 // emitted a single unit for the named column and nothing for the sibling, so
@@ -33,15 +30,15 @@ import { apply, type DriverConfig, type MigrationModule } from "zero-migrate-cli
 import { table, t } from "@zeroship/migrate";
 import { noInjectPolicy } from "./policy.js";
 
-// The host suite's addon is resolved and freshness-checked in one place.
+// The host suite builds and resolves its addon in one place.
 import "./addon.js";
-import { PG_URL_ENV, requireLiveDb } from "./live-db.js";
+import { pgUrl } from "./live-db.js";
 
-const PG_URL = process.env.ZERO_MIGRATE_TEST_PG_URL;
+const PG_URL = pgUrl();
 const OWNER_APP = "app_masked_drop";
 const TABLE = "masked_drop_people";
 const MASKED_COLUMN = "ssn";
-const SIBLING = `${MASKED_COLUMN}_masked`;
+const SIBLING = `__zs_raw__${MASKED_COLUMN}`;
 
 type NamedMigration = MigrationModule & { readonly name: string };
 
@@ -57,8 +54,7 @@ function pgIdent(value: string): string {
   return `"${value.replaceAll('"', '""')}"`;
 }
 
-/** One table whose `ssn` column carries a standalone mask, so the engine injects the
- *  `ssn_masked` sibling beside it. */
+/** One table whose `ssn` column carries a standalone mask and raw sibling. */
 function createMasked(): NamedMigration {
   return authoredMigration("masked_drop_base", () => {
     table(TABLE).create({
@@ -167,8 +163,7 @@ async function withPgSchema(
   }
 }
 
-test("PostgreSQL: dropping a masked column takes its _masked sibling with it", async (ctx) => {
-  requireLiveDb(PG_URL, PG_URL_ENV, "PostgreSQL");
+test("PostgreSQL: dropping a masked column takes its raw sibling with it", async () => {
   await withPgSchema("maskeddrop_pg", async (client, schema) => {
     const base = createMasked();
     const driver = { kind: "postgres" as const, url: PG_URL };

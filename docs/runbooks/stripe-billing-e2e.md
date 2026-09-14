@@ -54,7 +54,7 @@ remedy. It also refuses if `STRIPE_TEST_SECRET_KEY` is not an `sk_test_` key.
 
 It used to exit 0 on all of those, which is why this section once called it
 "CI-safe". Nothing in `.github/workflows/` runs it and neither does
-`tests/run_billing_suite.sh`, so nothing depended on that: the exit 0 bought no
+`cargo xtask test billing`, so nothing depended on that: the exit 0 bought no
 CI job and cost the hand-runner a green that had measured nothing.
 
 ## Secrets handling

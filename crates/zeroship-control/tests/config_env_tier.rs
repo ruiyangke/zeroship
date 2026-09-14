@@ -18,9 +18,8 @@
 //!
 //! WHAT THIS DOES NOT COVER: settings absent from `CheckConfigReport`. The
 //! report is the observation surface here, so a tier bug in an unreported
-//! field is invisible. The cross-BINARY half - control and auth resolving the
-//! same shared variable identically - is `tests/config_check_e2e.sh`, the only
-//! vector that can watch two processes at once.
+//! field is invisible. Auth owns the other process-level half of shared
+//! provider resolution in its corresponding integration target.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};

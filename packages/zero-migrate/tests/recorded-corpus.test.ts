@@ -1,16 +1,16 @@
 // Executes every `.mig.js` in the op fixture corpus through the production
 // `buildEnvelope` seam and compares the drained envelope to the committed
-// raw-author envelope in `op_fixtures/recorded.json`.
+// raw-author envelope beside it.
 //
 // This is one half of a two-part check. `recorded.json` is the join: the Rust half
-// (`crates/zeroship-migrate/tests/op_fixture_goldens.rs`) reads the same file, resolves
+// (`crates/zeroship-migrate/tests/ir_contract/op_fixture_goldens.rs`) reads the same file, resolves
 // those recorded ops through the real `resolve_create_table_policy`, and compares
 // the result to `<stem>.golden.json`. Composed, the halves check `.mig.js` ->
-// golden for all 27 stems. Neither half alone does, and each runs in the job that
+// golden for every named stem. Neither half alone does, and each runs in the job that
 // already has its toolchain.
 //
 // Before this, nothing executed a `.mig.js` at all. The Rust op matrix enumerated
-// `*.golden.json` and skipped everything else, and this file re-authored six
+// `*.golden.json` and skipped everything else, and this file re-authored several
 // migration bodies INLINE in TypeScript and compared those against the goldens. A
 // fixture and the golden it claimed to produce could therefore disagree forever in
 // silence. The inline re-authorings and the projection helper they leaned on are
@@ -28,13 +28,12 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { test } from "node:test";
 
-import { buildEnvelope, type MigrationModule } from "../src/internal/recorder.js";
+import { buildEnvelope, type MigrationModule } from "@zeroship/migrate/internal/recorder";
 
 const here = dirname(fileURLToPath(import.meta.url));
-const fixturesDir = resolve(here, "../../../crates/zeroship-migrate/tests/op_fixtures");
+const fixturesDir = resolve(here, "fixtures/op-corpus");
 
 const MIG_SUFFIX = ".mig.js";
-const GOLDEN_SUFFIX = ".golden.json";
 const RECORDED_FILE = "recorded.json";
 
 /** The corpus, committed rather than globbed. A directory listing cannot notice a
@@ -91,34 +90,15 @@ async function readRecorded(): Promise<Record<string, RecordedEnvelope>> {
  * Import one fixture and drain its migration phase through the production recorder
  * seam.
  *
- * A `.mig.js` under `crates/` imports the BARE specifier `@zeroship/migrate`. Node
- * resolves a bare specifier by walking up from the IMPORTING file, and nothing
- * under `crates/` can see this package, so importing the file where it lives fails
- * with ERR_MODULE_NOT_FOUND (a working directory does not affect ESM resolution).
- * The source is read and its single bare import rewritten to an absolute URL, the
- * same in-memory rewrite `ops.test.ts` already uses -- chosen over a `node --import`
- * loader hook because it needs no change to the test command, and because pointing
- * the rewrite at a URL this file also imports is what keeps the recorder single.
- *
- * The rewrite targets `src/`, not `dist/`: letting the package export map resolve
- * the bare specifier would test the built output, and the authoring source is the
- * surface these fixtures exercise. Both this module's `internal/recorder.js` import
- * and the rewritten URL resolve to the same `src/ops.ts` instance, which is
- * load-bearing -- `__begin`/`__drain` and the fixture's `table()` must share one
- * ambient recorder or the drain returns an empty list.
+ * The authoring modules live inside their package so their bare self-import and
+ * this recorder import resolve through the same package export map. That shared
+ * module instance is load-bearing: the phase and recorder must use one ambient
+ * recorder or the drain returns an empty list.
  */
 async function recordFixture(stem: string): Promise<RecordedEnvelope> {
-  const source = await readFile(resolve(fixturesDir, `${stem}${MIG_SUFFIX}`), "utf8");
-  const indexUrl = pathToFileURL(resolve(here, "../src/index.js")).href;
-  const parts = source.split(`from "@zeroship/migrate"`);
-  assert.equal(
-    parts.length,
-    2,
-    `${stem}${MIG_SUFFIX} must carry exactly one bare "@zeroship/migrate" import to rewrite`,
-  );
-  const rewritten = parts.join(`from "${indexUrl}"`);
-  const dataUrl = `data:text/javascript;base64,${Buffer.from(rewritten).toString("base64")}`;
-  const mod = (await import(dataUrl)) as MigrationModule;
+  const fixtureUrl = pathToFileURL(resolve(fixturesDir, `${stem}${MIG_SUFFIX}`));
+  fixtureUrl.searchParams.set("test", stem);
+  const mod = (await import(fixtureUrl.href)) as MigrationModule;
   // The name fallback is passed explicitly because `deriveNameFromPath` strips ONE
   // extension, which would turn `views.mig.js` into `views.mig`. The double
   // extension is an artifact of this corpus alone -- real migrations are
@@ -133,28 +113,24 @@ async function recordFixture(stem: string): Promise<RecordedEnvelope> {
 
 test("the op fixture corpus is exactly the committed stem list", async () => {
   assert.equal(new Set(EXPECTED_STEMS).size, EXPECTED_STEMS.length, "the stem list has no duplicates");
-  assert.equal(EXPECTED_STEMS.length, 27, "the corpus is 27 stems");
 
   const migStems: string[] = [];
-  const goldenStems: string[] = [];
   const unrecognized: string[] = [];
   for (const entry of await readdir(fixturesDir)) {
     // No skip branch: an entry that matches nothing is a failure, not a pass. A
     // loop that quietly continues past unmatched entries is how a corpus shrinks
     // without any test noticing.
     if (entry.endsWith(MIG_SUFFIX)) migStems.push(entry.slice(0, -MIG_SUFFIX.length));
-    else if (entry.endsWith(GOLDEN_SUFFIX)) goldenStems.push(entry.slice(0, -GOLDEN_SUFFIX.length));
     else if (entry !== RECORDED_FILE) unrecognized.push(entry);
   }
   assert.deepEqual(
     unrecognized,
     [],
-    `every op_fixtures entry is a ${MIG_SUFFIX}, a ${GOLDEN_SUFFIX}, or ${RECORDED_FILE}`,
+    `every op-corpus entry is a ${MIG_SUFFIX} or ${RECORDED_FILE}`,
   );
 
   const expected = [...EXPECTED_STEMS].sort();
   assert.deepEqual(migStems.sort(), expected, `the ${MIG_SUFFIX} set equals the committed stem list`);
-  assert.deepEqual(goldenStems.sort(), expected, `the ${GOLDEN_SUFFIX} set equals the committed stem list`);
   assert.deepEqual(
     Object.keys(await readRecorded()).sort(),
     expected,

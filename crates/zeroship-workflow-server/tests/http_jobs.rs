@@ -15,6 +15,8 @@ mod server_process;
 
 #[path = "http_jobs/fanout.rs"]
 mod fanout;
+#[path = "http_jobs/propagation.rs"]
+mod propagation;
 
 use compio::io::{AsyncRead, AsyncWriteExt};
 use ntex::{client::Client, http::StatusCode};

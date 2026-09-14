@@ -196,9 +196,7 @@ pub use apply::backend::{
 // `PostgresBackend` IS NOT RE-EXPORTED HERE, and neither is any other vendor's.
 // It lives in `zeroship-migrate-postgres` with the rest of the PostgreSQL execution
 // half, and a `pub use zeroship_migrate_postgres::PostgresBackend` at this root would be
-// core naming a vendor CRATE outside the registry - the thing
-// `crates/zeroship-migrate/tests/dialect_matrix/core_names_no_vendor_crate.rs` exists to forbid. Closing one
-// coupling by opening the other would have been a wash. A host that wants a
+// core naming a vendor crate outside the registry. A host that wants a
 // PostgreSQL backend names `zeroship_migrate_postgres::PostgresBackend`, exactly as it
 // already names `zeroship_migrate_sqlite::SqliteBackend` and
 // `zeroship_migrate_mysql::MysqlBackend`.
@@ -220,9 +218,7 @@ pub use apply::backend::{
 // any more, and they did not move to another path in core - they left the crate.
 // The SQLite execution half is `zeroship_migrate_sqlite::backend` now, and a
 // `pub use zeroship_migrate_sqlite::SqliteBackend` here would be core naming a vendor
-// CRATE outside the registry, which is exactly what
-// `crates/zeroship-migrate/tests/dialect_matrix/core_names_no_vendor_crate.rs` forbids: closing one coupling
-// by opening the other would have been a wash. MySQL went the same way one commit
+// crate outside the registry. MySQL went the same way one commit
 // earlier. A host that wants the SQLite backend names the vendor crate, as
 // `zeroship-migrate-node`'s bridge does.
 pub use apply::baseline::{BaselineError, BaselineOutcome};
@@ -304,11 +300,6 @@ pub use guard::{GuardConfig, GuardError, GuardOutcome, MigrationGuard};
 // which now build the same guard the same way the engine does. So no behaviour left
 // with the lines - the tests assert on the same guards, selected through the
 // registry instead of constructed by name.
-//
-// The property is pinned by `crates/zeroship-migrate/tests/dialect_matrix/core_names_no_vendor_crate.rs`,
-// which is a ratchet rather than prose: `lib.rs` is on its DENY side, so putting a
-// vendor crate back at the crate root is a red test, not a review question.
-
 /// Select the LINE-1 guard for a config's dialect, from that dialect's own vendor
 /// crate.
 ///

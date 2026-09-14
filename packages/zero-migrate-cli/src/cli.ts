@@ -2114,6 +2114,7 @@ export async function main(argv: string[]): Promise<number> {
     return args.command === "" ? 1 : 0;
   }
   try {
+    loadAddon().setEngineDiagnostics(process.env.ZERO_MIGRATE_LOG);
     if (
       args.databaseUrlFromFlag &&
       args.databaseUrl !== undefined &&

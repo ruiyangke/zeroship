@@ -402,7 +402,8 @@ pub fn app_oauth_client_id(app_id: &crate::app_id::AppId) -> String {
     format!("{APP_OAUTH_CLIENT_PREFIX}_{body}")
 }
 
-/// Decode a per-app OAuth `client_id` (`oac_<body>`) back to its [`AppId`].
+/// Decode a per-app OAuth `client_id` (`oac_<body>`) back to its
+/// [`AppId`](crate::app_id::AppId).
 ///
 /// Returns `None` for any client id that is not a per-app end-user client - a
 /// missing `oac_` prefix, or a body that is not a legal app-id body - e.g. the
@@ -599,6 +600,9 @@ pub const WORKFLOW_SUBSCRIPTION_PREFIX: &str = "wsb";
 
 /// Workflow broadcast typed-id prefix.
 pub const WORKFLOW_BROADCAST_PREFIX: &str = "wbc";
+
+/// Creator-owned workflow dependency propagation obligation prefix.
+pub const WORKFLOW_PROPAGATION_PREFIX: &str = "wdp";
 
 /// Stateless per-run/per-topic signal capability token prefix. Unlike normal
 /// row ids, `wst_…` is not UUID-backed; it encodes signed claims.
@@ -993,6 +997,7 @@ mod tests {
             ("workflow_signal_keys", WORKFLOW_SIGNAL_KEY_PREFIX),
             ("workflow_subscriptions", WORKFLOW_SUBSCRIPTION_PREFIX),
             ("workflow_broadcasts", WORKFLOW_BROADCAST_PREFIX),
+            ("workflow_propagations", WORKFLOW_PROPAGATION_PREFIX),
             ("workflow_signal_tokens", WORKFLOW_SIGNAL_TOKEN_PREFIX),
         ];
         for (i, (name_a, pa)) in prefixes.iter().enumerate() {
@@ -1080,6 +1085,7 @@ mod tests {
             ("workflow_signal_keys", WORKFLOW_SIGNAL_KEY_PREFIX),
             ("workflow_subscriptions", WORKFLOW_SUBSCRIPTION_PREFIX),
             ("workflow_broadcasts", WORKFLOW_BROADCAST_PREFIX),
+            ("workflow_propagations", WORKFLOW_PROPAGATION_PREFIX),
             ("workflow_signal_tokens", WORKFLOW_SIGNAL_TOKEN_PREFIX),
             ("provider_dead_letter", PROVIDER_DEAD_LETTER_PREFIX),
         ];

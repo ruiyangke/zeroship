@@ -2,8 +2,7 @@
 //!
 //! # Why this file exists: a coverage hole found by a control that came out wrong
 //!
-//! `sqlite_trigger_quoting_reaches_postgres.rs` next door measured that all six
-//! identifier quotes in the SQLite trigger render path resolved to
+//! The SQLite trigger render path previously resolved its identifier quotes through
 //! `PostgresDmlRenderer::quote_ident`. Fixing that had to be proven byte-neutral, and
 //! the tree's own established technique for proving a render dependency is NEUTERING:
 //! replace a renderer method with a marker and watch which suites go red.

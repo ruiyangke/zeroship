@@ -59,10 +59,10 @@ use tracing::{Level, Subscriber};
 use tracing_subscriber::filter::Targets;
 use tracing_subscriber::layer::SubscriberExt;
 
-/// The one target the switch turns on. Every event the engine emits is a `warn`
-/// (each one is a secondary failure the reply cannot carry), so the switch itself
-/// is the real control and this only keeps a future dependency's events out.
-const LOG_TARGET: &str = "zero_migrate";
+/// The migration-crate target prefix the switch turns on. Every engine event is a
+/// `warn`, so this keeps dependency events out while covering the backend crates
+/// that emit cleanup diagnostics.
+const LOG_TARGET: &str = "zeroship_migrate";
 
 /// Whether the host has asked for engine diagnostics. OFF until it says otherwise.
 ///

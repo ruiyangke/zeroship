@@ -1273,14 +1273,7 @@ async fn execute_resource_tree(
     //    surface 405 for the wrong method and 426 UPGRADE_REQUIRED
     //    when Upgrade headers are missing. NOTHING RUNS THE HANDSHAKE:
     //    a request that clears these checks reaches
-    //    `handle_subscription_dispatch`, which returns 501. Until
-    //    2026-08-20 this named a proxy-upgrade helper as the place it
-    //    ran; that name was in no file but this comment -- the same
-    //    defect as the one recorded at "THE TRANSPARENT WS PROXY DOES
-    //    NOT EXIST" below, and invisible to a gate hardcoded to that
-    //    one identifier. Backticks in this file
-    //    mean "a symbol that exists"; a deleted or never-built one is
-    //    described, not cited (tests/ws_subscription_stub_gate.sh).
+    //    `handle_subscription_dispatch`, which returns 501.
     if let Some(kind) = policy.kind {
         let method = req.method();
         let allow = match kind {
@@ -1516,8 +1509,6 @@ async fn execute_resource_tree(
             // `handle_subscription_dispatch` below, which says so plainly
             // and returns 501. Deployed subscriptions are a stub; only
             // single-tenant `zeroship serve` speaks WebSocket.
-            // `tests/ws_subscription_stub_gate.sh` now fails if a name
-            // like that comes back without a definition behind it.
             // Bounded: `docs/reference/rpc.md` states subscriptions are
             // not part of the public client surface, so no creator can
             // reach this today. Latent, not live.

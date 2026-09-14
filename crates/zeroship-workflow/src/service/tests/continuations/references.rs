@@ -37,6 +37,7 @@ async fn pinned_members(store: Rc<OrmStore>) {
     let (child, accepted) = accepted(&scope, &owner).await;
     let successor = continue_run(&service, &scope, &worker, &child).await;
     finish_run(&service, &worker, &successor, "done").await;
+    assert_eq!(deliver_propagations(&scope).await.len(), 1);
     let task = service.poll(&worker).await.unwrap().unwrap();
     assert_eq!(task.invocation.run_id, owner);
     assert_eq!(task.invocation.journal[0].output, Some(json!("done")));

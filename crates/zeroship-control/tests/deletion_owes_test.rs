@@ -46,7 +46,7 @@ use zeroship_control::billing_read::{BillingRemedy, LocalInvoicing};
 use zeroship_control::erasure::preflight;
 use zeroship_control::organizations::{self, CreateOrganizationBody, OrganizationError};
 use zeroship_control::Registry;
-use zeroship_core::UserId;
+use zeroship_core::{AppId, UserId};
 
 use crate::common;
 
@@ -211,7 +211,7 @@ impl Fx {
         plan: &str,
         units: i64,
         period_months_ago: i32,
-    ) -> Uuid {
+    ) -> AppId {
         let app = self.app(organization, plan).await;
         let metric = format!("owes_{}", Uuid::new_v4().simple());
         self.pg
@@ -240,7 +240,7 @@ impl Fx {
                 "INSERT INTO zeroship.usage_aggregates (app_id, period, metric, total) \
                  VALUES ($1, (date_trunc('month', NOW()) \
                               - make_interval(months => $2::int))::date, $3, $4)",
-                &[&app, &period_months_ago, &metric, &units],
+                &[&app.as_str(), &period_months_ago, &metric, &units],
             )
             .await
             .unwrap_or_else(|e| panic!("insert usage ({months} months back): {e}"));
@@ -251,7 +251,7 @@ impl Fx {
     /// served a request. It contributes no `usage_aggregates` row at all, so it
     /// is invisible to any read that starts from usage - which is exactly the
     /// property the roster case turns on.
-    async fn app(&self, organization: &str, plan: &str) -> Uuid {
+    async fn app(&self, organization: &str, plan: &str) -> AppId {
         let project: String = self
             .pg
             .query_one(
@@ -261,14 +261,14 @@ impl Fx {
             .await
             .expect("the organization's default project")
             .get("id");
-        let app = Uuid::new_v4();
+        let app = AppId::mint();
         self.pg
             .execute(
                 "INSERT INTO zeroship.apps (id, name, organization_id, project_id, plan_id) \
                  VALUES ($1, $2, $3, $4, $5)",
                 &[
-                    &app,
-                    &format!("owes-{}", app.simple()),
+                    &app.as_str(),
+                    &format!("owes-{}", app.as_str()),
                     &organization,
                     &project,
                     &plan,

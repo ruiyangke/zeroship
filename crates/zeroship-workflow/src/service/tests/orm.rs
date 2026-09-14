@@ -99,6 +99,57 @@ async fn native_client_crosses_runtime_threads_without_losing_app_scope() {
 }
 
 #[compio::test]
+async fn mutating_backend_calls_hint_the_host_and_reads_do_not() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let directory = tempfile::tempdir().unwrap();
+    let store = Rc::new(sqlite_store(&directory.path().join("zs-workflow.sqlite")).await);
+    let (service, app, _, _deployments) = registered_service(store).await;
+    let hints = Arc::new(AtomicUsize::new(0));
+    let observed = hints.clone();
+    let client = service
+        .fixture_app(app)
+        .into_backend(1024)
+        .unwrap()
+        .with_commit_hint(Arc::new(move || {
+            observed.fetch_add(1, Ordering::SeqCst);
+        }));
+    let cloned = client.clone();
+    let run = client
+        .start("Example".into(), StartOptions::default())
+        .await
+        .unwrap();
+    assert_eq!(hints.load(Ordering::SeqCst), 1);
+    client.status(run.id.clone()).await.unwrap();
+    assert_eq!(hints.load(Ordering::SeqCst), 1, "reads commit nothing");
+    // A refused mutation still hints: a failed call may follow its commit.
+    assert!(client
+        .signal(
+            "run_missing".into(),
+            SignalOptions {
+                signal_type: "resume".into(),
+                payload: json!(null),
+            },
+        )
+        .await
+        .is_err());
+    assert_eq!(hints.load(Ordering::SeqCst), 2);
+    cloned
+        .start("Example".into(), StartOptions::default())
+        .await
+        .unwrap();
+    assert_eq!(hints.load(Ordering::SeqCst), 3, "clones share the hint");
+    let plain = service
+        .fixture_app(client.app_id().clone())
+        .into_backend(1024)
+        .unwrap();
+    plain
+        .start("Example".into(), StartOptions::default())
+        .await
+        .unwrap();
+    assert_eq!(hints.load(Ordering::SeqCst), 3);
+}
+
+#[compio::test]
 async fn cancelled_queued_requests_do_not_mutate_and_overload_is_bounded() {
     let directory = tempfile::tempdir().unwrap();
     let store = Rc::new(sqlite_store(&directory.path().join("zs-workflow.sqlite")).await);

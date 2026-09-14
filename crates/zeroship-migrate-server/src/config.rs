@@ -150,8 +150,7 @@ mod tests {
     #[test]
     fn migrated_now_carries_the_same_bootstrap_controls_as_its_siblings() {
         // Before this conversion migrated had no --config, no --no-config and
-        // no --check-config at all, which is why tests/config_check_e2e.sh
-        // could not exercise it.
+        // no --check-config at all, so no process test could exercise it.
         let sources = MigrateServerSettingsSources::try_parse_from([
             "zeroship-migrate-server",
             "--check-config",
@@ -163,8 +162,8 @@ mod tests {
         assert!(sources.check_config);
         assert!(sources.no_config);
 
-        // Does not cover what main.rs then does with them; that is asserted end
-        // to end by tests/config_check_e2e.sh, which runs the real binary.
+        // Does not cover what main.rs then does with them; the crate's
+        // check_config integration target runs the real binary.
     }
 
     #[test]
@@ -233,6 +232,6 @@ mod tests {
 
         // Does NOT cover whether the paths are ever READ. Under --check-config
         // they must not be, and that is asserted in core against the resolver
-        // and end to end by tests/config_check_e2e.sh.
+        // and by the crate's check_config integration target.
     }
 }

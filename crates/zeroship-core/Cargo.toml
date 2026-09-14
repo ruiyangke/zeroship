@@ -71,15 +71,6 @@ ntex = { workspace = true }
 # `logout_token` verifier's unit tests. PKCS#8 encoding is needed
 # because `jsonwebtoken::EncodingKey::from_ed_der` takes the DER form.
 ed25519-dalek = { workspace = true, features = ["pkcs8"] }
-# The workspace raw-environment gate lives in tests/config_env_access_gate.rs
-# because Section 4.5 of docs/proposals/2026-08-11-config-name-alignment.md
-# puts it there, and because the exemption it grants
-# (crates/zeroship-core/src/config/env.rs) belongs to this crate. That makes a
-# DEV-dependency cycle:
-# zeroship-config-contract depends on zeroship-core. Cargo supports this - a
-# dev-dependency does not participate in the library build graph - and the
-# alternative was to move the gate away from the module it protects.
-zeroship-config-contract = { path = "../zeroship-config-contract" }
 
 [lints]
 workspace = true

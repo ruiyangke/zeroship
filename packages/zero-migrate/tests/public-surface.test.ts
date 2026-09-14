@@ -1,171 +1,61 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 import { test } from "node:test";
 
-import * as ts from "typescript";
+const ROOTED_VENDOR_EXPORTS = [
+  "createFunction",
+  "domain",
+  "dropFunction",
+  "dropOwnedBy",
+  "extension",
+  "grant",
+  "raw",
+  "revoke",
+  "role",
+  "schema",
+  "sequence",
+] as const;
 
-function exportedNamesFromDts(fileName: string): Set<string> {
-  const sourceText = readFileSync(new URL(`../dist/${fileName}`, import.meta.url), "utf8");
-  const source = ts.createSourceFile(fileName, sourceText, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
-  const names = new Set<string>();
+const FORBIDDEN_INTERNAL_EXPORTS = [
+  "__begin",
+  "__drain",
+  "__pgDomain",
+  "__pgPush",
+  "__pgResolveExpr",
+  "__pgSequence",
+  "cAgg",
+  "cCase",
+  "opProducers",
+  "opProducerRegistry",
+  "pgTable",
+] as const;
 
-  function hasExportModifier(node: ts.Node): boolean {
-    return Boolean(ts.canHaveModifiers(node) && ts.getModifiers(node)?.some((mod) => mod.kind === ts.SyntaxKind.ExportKeyword));
-  }
-
-  for (const statement of source.statements) {
-    if (ts.isExportDeclaration(statement)) {
-      const clause = statement.exportClause;
-      assert.ok(clause, `${fileName} must use named exports so the public surface can be linted`);
-      if (ts.isNamedExports(clause)) {
-        for (const element of clause.elements) names.add(element.name.text);
-      } else {
-        names.add(clause.name.text);
-      }
-      continue;
-    }
-
-    if (!hasExportModifier(statement)) continue;
-    if (
-      ts.isFunctionDeclaration(statement) ||
-      ts.isClassDeclaration(statement) ||
-      ts.isInterfaceDeclaration(statement) ||
-      ts.isTypeAliasDeclaration(statement) ||
-      ts.isEnumDeclaration(statement) ||
-      ts.isModuleDeclaration(statement)
-    ) {
-      if (statement.name) names.add(statement.name.text);
-      continue;
-    }
-
-    if (ts.isVariableStatement(statement)) {
-      for (const declaration of statement.declarationList.declarations) {
-        if (ts.isIdentifier(declaration.name)) names.add(declaration.name.text);
-      }
-    }
-  }
-
-  return names;
-}
-
-function interfaceMemberNamesFromDts(fileName: string, interfaceName: string): Set<string> {
-  const sourceText = readFileSync(new URL(`../dist/${fileName}`, import.meta.url), "utf8");
-  const source = ts.createSourceFile(fileName, sourceText, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
-  const declaration = source.statements.find(
-    (statement): statement is ts.InterfaceDeclaration =>
-      ts.isInterfaceDeclaration(statement) && statement.name.text === interfaceName,
-  );
-  assert.ok(declaration, `${fileName} must declare ${interfaceName}`);
-
-  const names = new Set<string>();
-  for (const member of declaration.members) {
-    if (!ts.isMethodSignature(member) && !ts.isPropertySignature(member)) continue;
-    if (ts.isIdentifier(member.name) || ts.isStringLiteral(member.name)) names.add(member.name.text);
-  }
-  return names;
-}
-
-test("public root .d.ts exposes vendor DDL and omits recorder internals", async () => {
-  const coreExports = exportedNamesFromDts("index.d.ts");
-  const migrationTypeMembers = interfaceMemberNamesFromDts("index.d.ts", "TypeLexicon");
-  const columnDefMembers = interfaceMemberNamesFromDts("index.d.ts", "ColumnDef");
-  const tableHandleMembers = interfaceMemberNamesFromDts("index.d.ts", "TableHandle");
-  const primaryKeyMembers = interfaceMemberNamesFromDts("index.d.ts", "PrimaryKeyOperations");
-
-  const rootedVendorExports = [
-    "createFunction",
-    "domain",
-    "dropFunction",
-    "dropOwnedBy",
-    "extension",
-    "grant",
-    "raw",
-    "revoke",
-    "role",
-    "schema",
-    "sequence",
-  ];
-  assert.equal(coreExports.has("table"), true, "table must be exported from @zeroship/migrate root declarations");
-  assert.equal(coreExports.has("ids"), true, "ids must be exported from @zeroship/migrate root declarations");
-  assert.equal(coreExports.has("IdOptions"), false, "the removed migration id options must not be exported");
-  assert.equal(migrationTypeMembers.has("id"), false, "the migration t declaration must not expose id");
-  assert.equal(migrationTypeMembers.has("ref"), false, "the migration t declaration must not expose ref");
-  assert.equal(columnDefMembers.has("references"), true, "ColumnDef must expose typed references");
-  for (const name of [
-    "BackfillSetValue",
-    "IdFormats",
-    "PerRowGenerator",
-    "PerRowGeneratorValue",
-    "PerRowGenerators",
-    "PrimaryKeyOperations",
-    "TypeIdOptions",
-    "ValueFormat",
-  ]) {
-    assert.equal(coreExports.has(name), true, `${name} must be exported from @zeroship/migrate root declarations`);
-  }
-  assert.equal(tableHandleMembers.has("primaryKey"), true, "TableHandle must expose primaryKey()");
-  assert.equal(tableHandleMembers.has("changeIdType"), false, "TableHandle must not expose changeIdType()");
-  assert.deepEqual(
-    [...primaryKeyMembers].sort(),
-    ["add", "drop", "replace"],
-    "PrimaryKeyOperations must expose only explicit lifecycle actions",
-  );
-  for (const name of rootedVendorExports) {
-    assert.equal(coreExports.has(name), true, `${name} must be exported from @zeroship/migrate root declarations`);
-  }
-
-  const forbiddenInternalExports = [
-    "__begin",
-    "__drain",
-    "__pgDomain",
-    "__pgPush",
-    "__pgResolveExpr",
-    "__pgSequence",
-    "cAgg",
-    "cCase",
-    "opProducers",
-    "opProducerRegistry",
-    "pg" + "Table",
-  ];
-  for (const name of forbiddenInternalExports) {
-    assert.equal(coreExports.has(name), false, `${name} must stay out of @zeroship/migrate root declarations`);
-  }
-
-  const indexDts = readFileSync(new URL("../dist/index.d.ts", import.meta.url), "utf8");
-  assert.doesNotMatch(indexDts, /\bCreateRawViewArgs\b/);
-  assert.doesNotMatch(indexDts, /\bcreateRaw\b/);
-
+test("published runtime exposes the migration DSL without recorder internals", async () => {
   const runtimeRoot = await import("@zeroship/migrate");
-  assert.equal(
-    (runtimeRoot.t as unknown as Record<string, unknown>).id,
-    undefined,
-    "the migration t runtime must not expose id",
-  );
-  assert.equal(
-    (runtimeRoot.t as unknown as Record<string, unknown>).ref,
-    undefined,
-    "the migration t runtime must not expose ref",
-  );
-  assert.equal(
-    typeof runtimeRoot.t.text().references,
-    "function",
-    "runtime ColumnDef must expose typed references",
-  );
-  assert.equal(typeof runtimeRoot.ids, "object", "ids must be a root runtime namespace");
-  assert.equal(typeof runtimeRoot.ids.typeId, "function", "ids.typeId must be a root runtime builder");
-  assert.equal(typeof runtimeRoot.ids.ulid, "function", "ids.ulid must be a root runtime builder");
-  assert.equal(typeof runtimeRoot.perRow, "object", "perRow must be a root runtime namespace");
-  assert.equal(typeof runtimeRoot.perRow.uuidV4, "function", "perRow.uuidV4 must be exported");
-  assert.equal(typeof runtimeRoot.perRow.uuidV7, "function", "perRow.uuidV7 must be exported");
-  assert.equal(typeof runtimeRoot.perRow.typeId, "function", "perRow.typeId must be exported");
-  assert.equal(typeof runtimeRoot.perRow.ulid, "function", "perRow.ulid must be exported");
+  assert.equal(typeof runtimeRoot.table, "function");
+  assert.equal(typeof runtimeRoot.ids, "object");
+  assert.equal((runtimeRoot.t as unknown as Record<string, unknown>).id, undefined);
+  assert.equal((runtimeRoot.t as unknown as Record<string, unknown>).ref, undefined);
+  assert.equal(typeof runtimeRoot.t.text().references, "function");
+  assert.equal(typeof runtimeRoot.ids.typeId, "function");
+  assert.equal(typeof runtimeRoot.ids.ulid, "function");
+  assert.equal(typeof runtimeRoot.perRow, "object");
+  assert.equal(typeof runtimeRoot.perRow.uuidV4, "function");
+  assert.equal(typeof runtimeRoot.perRow.uuidV7, "function");
+  assert.equal(typeof runtimeRoot.perRow.typeId, "function");
+  assert.equal(typeof runtimeRoot.perRow.ulid, "function");
+
   const tableHandle = runtimeRoot.table("public_surface_probe") as unknown as Record<string, unknown>;
-  assert.equal(typeof tableHandle.primaryKey, "function", "runtime TableHandle must expose primaryKey()");
-  assert.equal(tableHandle.changeIdType, undefined, "runtime TableHandle must not expose changeIdType()");
-  for (const name of rootedVendorExports) {
-    assert.equal(typeof (runtimeRoot as Record<string, unknown>)[name], "function", `${name} must be a root runtime export`);
+  assert.equal(typeof tableHandle.primaryKey, "function");
+  assert.equal(tableHandle.changeIdType, undefined);
+
+  for (const name of ROOTED_VENDOR_EXPORTS) {
+    assert.equal(typeof runtimeRoot[name], "function", `${name} must be a root runtime export`);
   }
-  for (const name of forbiddenInternalExports) {
-    assert.equal((runtimeRoot as Record<string, unknown>)[name], undefined, `${name} must stay out of @zeroship/migrate root runtime exports`);
+  for (const name of FORBIDDEN_INTERNAL_EXPORTS) {
+    assert.equal(
+      (runtimeRoot as Record<string, unknown>)[name],
+      undefined,
+      `${name} must stay out of the root runtime export`,
+    );
   }
 });

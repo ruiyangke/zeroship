@@ -224,9 +224,10 @@ impl WorkflowService {
             return Err(WorkflowServiceError::PermissionDenied);
         }
         claim.validate_live()?;
+        let control = super::propagation::effective_control(&tx, &claim.app, &claim.run).await?;
         if !claim.policy.admission || !claim.policy.dispatch {
             let deadline = claim.task.deadline;
-            let control = match ControlIntent::parse(&claim.run.text("control")?)? {
+            let control = match control {
                 ControlIntent::None => ControlIntent::Pause,
                 requested => requested,
             };
@@ -241,7 +242,6 @@ impl WorkflowService {
         claim.update_task(&tx, value!({"deadline":expires})).await?;
         claim.update_run(&tx, value!({"due_at":expires})).await?;
         claim.validate_at(tx.now().await?)?;
-        let control = ControlIntent::parse(&claim.run.text("control")?)?;
         tx.commit().await?;
         Ok(Heartbeat {
             deadline: expires,

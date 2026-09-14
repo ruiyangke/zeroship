@@ -6,6 +6,7 @@ pub mod coordinator;
 pub mod deployments;
 pub mod driver;
 mod error;
+pub mod local;
 mod models;
 mod management;
 pub mod policy;

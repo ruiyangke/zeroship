@@ -28,7 +28,7 @@ pub const NS_FAM: i32 = 0x7a55_0002;
 
 /// Every one-argument advisory key this crate takes, paired with what takes it.
 ///
-/// The registry is the coverage: [`tests::all_one_argument_keys_are_distinct`]
+/// The registry is the coverage: `tests::all_one_argument_keys_are_distinct`
 /// iterates it, so a key outside it is a key nothing checks. Two sweeps sharing
 /// a key block each other fleet-wide and the loser simply stops running, with
 /// nothing to read but an absence - the failure

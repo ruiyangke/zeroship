@@ -16,16 +16,10 @@ use chrono::DateTime;
 use serde_json::{json, Value};
 use zeroship_core::{app_id::AppId, typed_id};
 use zeroship_data_orm::{
-    orm::{Entity, FindOptions, FromRow, Operation},
+    orm::{Entity, FindOptions, Operation},
     sql::RowLimit,
     value,
 };
-
-#[derive(FromRow)]
-#[orm(entity = models::runs)]
-struct CancelledChild {
-    id: String,
-}
 
 pub(crate) async fn invocation(
     tx: &mut Transaction,
@@ -104,13 +98,14 @@ pub(crate) async fn invocation(
 }
 
 /// Reconcile control intent and durable waits before assigning an executor.
+/// A parent's still-propagating cascade counts as recorded cancellation.
 pub(crate) async fn prepare(
     tx: &mut Transaction,
     app: &AppId,
     run: &Row,
     now: i64,
 ) -> Result<bool, WorkflowServiceError> {
-    let intent = ControlIntent::parse(&run.text("control")?)?;
+    let intent = super::propagation::effective_control(tx, app, run).await?;
     if intent == ControlIntent::Cancel {
         settle(tx, app, run, RunUpdate::Cancelled, now).await?;
         return if has_compensation(tx, app, run).await? {
@@ -184,7 +179,8 @@ pub(crate) async fn apply(
     let (checkpoints, update) =
         fold_outcomes(&execution.outcomes).map_err(WorkflowServiceError::InvalidRequest)?;
     journal::append(tx, app, run, policy, checkpoints, now).await?;
-    let intent = ControlIntent::parse(&run.text("control")?)?;
+    // Checked before continuation so a fenced child cannot continue as new.
+    let intent = super::propagation::effective_control(tx, app, run).await?;
     if intent == ControlIntent::Cancel {
         return settle(tx, app, run, RunUpdate::Cancelled, now).await;
     }
@@ -381,16 +377,9 @@ async fn settle(
     let id = run.text("id")?;
     let target = parse_state(update.state())?;
     let runs = tx.database().collection(models::runs::Entity::COLLECTION)?;
-    // Child cancellation remains durable while a child owns an accepted task.
-    for leased in [true, false] {
-        runs.execute(Operation::Update {
-            filter:value!({"app_id":app.as_str(), "parent_id":id.clone(), "parent_generation":run.integer("generation")?,
-                "cascade":1, "state":{"$nin":["completed","failed","cancelled"]}, "task_id":{"$exists":leased}}),
-            patch:if leased { value!({"control":"cancel"}) } else { value!({"control":"cancel", "due_at":now}) },
-            many:true,
-        }).await?;
-    }
-    publish_cancelled_children(tx, app, &id, run.integer("generation")?, now).await?;
+    // Delivered pages reach the cascading children; until they finish, the
+    // recorded obligation fences every child of this generation.
+    super::propagation::cascade(tx, app, &id, run.integer("generation")?, now).await?;
     if has_compensation(tx, app, run).await? {
         tx.database().collection(models::generations::Entity::COLLECTION)?.update(
             value!({"app_id":app.as_str(), "run_id":id.clone(), "generation":run.integer("generation")?}),
@@ -404,49 +393,6 @@ async fn settle(
     }
 }
 
-async fn publish_cancelled_children(
-    tx: &Transaction,
-    app: &AppId,
-    parent: &str,
-    generation: i64,
-    now: i64,
-) -> Result<(), WorkflowServiceError> {
-    let source = tx.database().entity::<models::runs::Entity>()?.alias("r")?;
-    let mut after: Option<String> = None;
-    loop {
-        let mut filter = source
-            .column(models::runs::app_id)
-            .eq(app.as_str())?
-            .and(source.column(models::runs::parent_id).eq(Some(parent))?)
-            .and(
-                source
-                    .column(models::runs::parent_generation)
-                    .eq(Some(generation))?,
-            )
-            .and(source.column(models::runs::cascade).eq(1i64)?)
-            .and(source.column(models::runs::control).eq("cancel")?)
-            .and(source.column(models::runs::task_id).eq(None::<String>)?);
-        if let Some(after) = &after {
-            filter = filter.and(source.column(models::runs::id).gt(after.as_str())?);
-        }
-        let page = tx
-            .database()
-            .from(&source)
-            .filter(filter)
-            .order_by(source.column(models::runs::id).asc())
-            .select(source.row::<CancelledChild>())?
-            .limit(RowLimit::default().get())?
-            .all()
-            .await?;
-        if page.is_empty() {
-            return Ok(());
-        }
-        for child in page {
-            super::publication::advance(tx, app, &child.id, now).await?;
-            after = Some(child.id);
-        }
-    }
-}
 async fn compensation_ready(
     tx: &mut Transaction,
     app: &AppId,
@@ -549,7 +495,7 @@ async fn compensate(
         value!({"compensation_attempts":attempts, "compensation_due_at":due, "compensation_error":error.map(|value|encode(&value)).transpose()?}),
     ).await?;
     if has_compensation(tx, app, run).await? {
-        if ControlIntent::parse(&run.text("control")?)? == ControlIntent::Pause {
+        if super::propagation::effective_control(tx, app, run).await? == ControlIntent::Pause {
             park(tx, app, run).await?;
             return Ok(RunState::Paused);
         }
@@ -691,7 +637,7 @@ async fn finish_run(
     if notify_parents {
         let member = continuations::member(tx, app, &id, generation).await?;
         if member.is_current {
-            wake_parents(tx, app, &member, now).await?;
+            super::propagation::notify(tx, app, &member, now).await?;
         }
     }
     emit(
@@ -704,44 +650,6 @@ async fn finish_run(
     )
     .await?;
     Ok(state)
-}
-
-async fn wake_parents(
-    tx: &Transaction,
-    app: &AppId,
-    child: &continuations::Member,
-    now: i64,
-) -> Result<(), WorkflowServiceError> {
-    let page_limit = RowLimit::default().get();
-    let mut after: Option<String> = None;
-    loop {
-        let page = continuations::waiting(tx, app, child, after.as_deref(), page_limit).await?;
-        let count = page.len();
-        for parent in page {
-            let changed = tx
-                .database()
-                .entity::<models::runs::Entity>()?
-                .update_many(
-                    models::runs::app_id
-                        .eq(app.as_str())?
-                        .and(models::runs::id.eq(parent.run_id.as_str())?)
-                        .and(models::runs::generation.eq(parent.generation)?)
-                        .and(models::runs::task_id.eq(None::<&str>)?)
-                        .and(models::runs::control.eq("none")?)
-                        .and(models::runs::state.in_values(["waiting", "sleeping", "queued"])?),
-                    models::runs::due_at.set(Some(now))?,
-                )
-                .await?;
-            if changed == 1 {
-                super::publication::advance(tx, app, &parent.run_id, now).await?;
-            }
-            after = Some(parent.id);
-        }
-        if count < page_limit as usize {
-            break;
-        }
-    }
-    Ok(())
 }
 
 async fn link_continuation(

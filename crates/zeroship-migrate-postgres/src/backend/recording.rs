@@ -21,8 +21,7 @@
 //! reaches it through the `testing` feature, which `zero-migrate` turns on in its
 //! `[dev-dependencies]` only. Resolver 3 keeps dev-dependency features out of the
 //! normal build, so nothing here is compiled into a shipping
-//! `zeroship-migrate-postgres`. `crates/zeroship-migrate/tests/dialect_matrix/a_test_recorder_never_ships.rs` is what
-//! holds that line; this is the second recorder it covers.
+//! `zeroship-migrate-postgres`.
 
 use std::cell::RefCell;
 use std::sync::atomic::{AtomicBool, Ordering};
