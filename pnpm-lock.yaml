@@ -1320,6 +1320,9 @@ importers:
       '@types/pg':
         specifier: ^8.20.0
         version: 8.20.0
+      testcontainers:
+        specifier: ^12.1.0
+        version: 12.1.0(supports-color@8.1.1)
       tsup:
         specifier: ^8.5.1
         version: 8.5.1(@swc/core@1.15.40)(jiti@2.6.1)(postcss@8.5.13)(supports-color@8.1.1)(tsx@4.21.0)(typescript@5.9.3)(yaml@2.8.4)

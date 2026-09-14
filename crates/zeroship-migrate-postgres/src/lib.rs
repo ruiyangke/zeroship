@@ -14,10 +14,8 @@
 //! The rule used to be per-MODULE: each renderer held its own
 //! `const DIALECT: DialectId = POSTGRES;` and imported that name from
 //! `zeroship-migrate-ir`, the neutral vocabulary crate, which declared the ids for all
-//! three shipping vendors. The ids moved into the vendors, so the rule tightened to
-//! per-crate: `"postgres"` is now spelled in exactly one place in this crate and in
-//! exactly one place in the workspace. It is ENFORCED, across the crate boundary, by
-//! `zero-migrate/tests/dialect_matrix/backend_modules_name_one_dialect.rs`.
+//! the shipping vendors. The ids moved into the vendor crates; this crate exports
+//! its `DIALECT` identity and its modules read that value.
 //!
 //! # What the rule does NOT catch
 //!
@@ -68,9 +66,7 @@ mod vendor;
 // It is behind `DmlRenderer::render_vendor_op` now. `mod vendor` above is private,
 // so with this re-export gone the function is UNREACHABLE from outside this crate:
 // core naming it again is an E0603 privacy error at the use site, not a review
-// comment and not a census finding. That is strictly stronger than the textual
-// census in `crates/zeroship-migrate/tests/dialect_matrix/core_names_no_vendor_crate.rs`, which stays as the
-// backstop for the couplings a privacy rule cannot express across a crate boundary.
+// comment. Privacy enforces this boundary within the vendor crate.
 //
 // The function itself did not move and did not change. `crate::vendor` is the same
 // module it was; what changed is who may ask for it.

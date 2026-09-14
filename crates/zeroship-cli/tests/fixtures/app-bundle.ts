@@ -4,7 +4,7 @@ import { fileURLToPath } from "node:url";
 import { buildDevBundle } from "../../../../packages/vite-plugin/src/dev-bundle.js";
 import { defaultProjectConfig } from "../../../../packages/vite-plugin/src/project-config/index.js";
 
-const [root, version] = process.argv.slice(2);
+const [root, version, cooldown = "10ms"] = process.argv.slice(2);
 if (!root || !version) throw new Error("expected a fixture project and version");
 const dependencies = fileURLToPath(new URL("../../../../packages/vite-plugin/node_modules", import.meta.url));
 await fs.mkdir(join(root, "src"), { recursive: true });
@@ -20,7 +20,7 @@ import version from "./version.js";
 export class Example extends Workflow {
   async run(_trigger, step) {
     const saved = await step.run("saved", () => version);
-    await step.sleep("cooldown", "10ms");
+    await step.sleep("cooldown", ${JSON.stringify(cooldown)});
     await step.waitForSignal("resume", { type: "resume", timeout: "1h" });
     const { suffix } = await import("./tail.js");
     return saved + ":" + version + suffix;

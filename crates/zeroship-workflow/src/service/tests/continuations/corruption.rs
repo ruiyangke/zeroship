@@ -36,6 +36,7 @@ async fn pending_corruption(store: Rc<OrmStore>) {
         )
         .await
         .unwrap();
+    assert_eq!(deliver_propagations(&scope).await.len(), 1);
     let parent = service.poll(&worker).await.unwrap().unwrap();
     assert_eq!(parent.invocation.run_id, owner);
     assert_eq!(parent.invocation.journal[0].output, Some(json!("repaired")));

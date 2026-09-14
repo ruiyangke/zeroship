@@ -564,9 +564,7 @@ pub fn fk_referenced_columns(definition: &str) -> Vec<String> {
 // modifier that says "visible to the engine and to a vendor but to nobody else".
 // The property that matters is the one the boundary rule states and it is
 // unchanged: these SPELL, they do not COMPARE. None of them decides whether two
-// schemas differ, which is what
-// `zero-migrate/tests/dialect_matrix/backend_snapshot_privates_stay_core_only.rs`
-// forbids a vendor from reaching for.
+// schemas differ.
 
 /// Render a column's trailing `DEFAULT <expr>` clause from its emission-only
 /// `default` body. Empty string when the column has no default.

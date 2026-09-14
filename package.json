@@ -24,7 +24,7 @@
     "publish:packages": "deploy/scripts/publish-packages.sh",
     "test": "pnpm -r --filter './packages/*' --filter '!./packages/zero-migrate*' test",
     "check": "pnpm -r --filter './packages/*' --filter '!./packages/zero-migrate*' check",
-    "gen-types": "pnpm --filter @zeroship/vite-plugin gen-types:all",
-    "gen-types:check": "pnpm --filter @zeroship/vite-plugin gen-types:all -- --check"
+    "gen-types": "node policies/codegen.mjs && pnpm --filter @zeroship/vite-plugin gen-types:all",
+    "gen-types:check": "node policies/codegen.mjs --check && pnpm --filter @zeroship/vite-plugin gen-types:all -- --check"
   }
 }

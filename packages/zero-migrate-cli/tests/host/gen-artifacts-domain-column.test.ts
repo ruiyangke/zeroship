@@ -27,7 +27,7 @@ import { buildEnvelope } from "@zeroship/migrate/internal/recorder";
 import { currentIrVersion } from "zero-migrate-cli";
 import { noInjectPolicy } from "./policy.js";
 
-// The host suite's addon is resolved and freshness-checked in one place.
+// The host suite builds and resolves its addon in one place.
 import "./addon.js";
 
 interface GenArtifactsReply {

@@ -28,9 +28,10 @@
 //! zeroship-runtime's V8. Everything downstream of the envelope is the SAME native
 //! apply path as Stage 1.
 //!
-//! PostgreSQL apply requires the test overlay or `PG_TEST_URL`; missing
-//! configuration or connectivity fails the test. V8 authoring is also tested
-//! independently of the database.
+//! `PostgreSQL` apply owns its server through Testcontainers. V8 authoring is
+//! also tested independently of the database.
+
+mod fixture;
 
 use zeroship_migrate::driver::SqlSession;
 use zeroship_migrate::{
@@ -236,17 +237,6 @@ fn cfg_for(tok: &str) -> (ExecutorConfig, EffectivePolicy) {
     (c, effective)
 }
 
-/// The live `PostgreSQL` this target applies its migrations to.
-///
-/// # Panics
-///
-/// When neither `PG_TEST_URL` nor the test overlay names one, with the
-/// provisioning command. It used to announce a skip, so a run against no
-/// database reported the same green as one that had applied real DDL.
-fn pg_url() -> String {
-    zeroship_core::config::test_database_url()
-}
-
 async fn ensure_project_schema(session: &CompioPgSession, cfg: &ExecutorConfig) {
     session
         .batch(&format!(
@@ -324,11 +314,11 @@ fn sample_ts_authors_ir_version_1_envelope_in_v8() {
 }
 
 /// The full native loop: author in V8 → v1 envelope → published-engine lower+apply
-/// over the compio seam -> live PG. It REQUIRES a test database and fails
-/// without one; see `pg_url`.
+/// over the compio seam to an owned `PostgreSQL` server.
 #[compio::test]
 async fn authored_v1_envelope_lowers_and_applies_over_native_compio_seam() {
-    let url = pg_url();
+    let postgres = fixture::Postgres::start();
+    let url = postgres.url();
 
     // (1) AUTHOR the envelope in zeroship-runtime's V8 (the whole point of Stage 2).
     let authored = author_v1_envelope(SAMPLE_MIGRATION_TS, "create_notes_and_add_tag");
@@ -338,7 +328,7 @@ async fn authored_v1_envelope_lowers_and_applies_over_native_compio_seam() {
     let ir = resolved_envelope_json(&authored, &effective, &cfg.project_schema);
 
     // (3) live compio client wrapped in this crate's SqlSession adapter.
-    let session = CompioPgSession::connect(&url)
+    let session = CompioPgSession::connect(url)
         .await
         .expect("connect compio session to test PG");
     drop_schemas(&session, &cfg).await;

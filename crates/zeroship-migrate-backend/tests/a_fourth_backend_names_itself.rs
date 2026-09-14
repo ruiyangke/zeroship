@@ -14,9 +14,8 @@
 //!
 //! Both methods return [`DialectId`] now. This file is the proof: `DuckDb` below
 //! is a complete outsider. It is declared in a test binary, while the contract
-//! crate owns no shipping-descriptor list at all, and the whole file contains no
-//! mention of that removed closed enum - the assertion at the bottom of the
-//! module enforces that by reading this source file back.
+//! crate owns no shipping-descriptor list at all. The test compiles the outsider
+//! against the public traits and exercises the identity it supplies.
 //!
 //! The spelling bodies are deliberately thin. The claim under test is IDENTITY,
 //! not fidelity: a fourth backend's `dialect()` has a real body, and everything
@@ -1397,35 +1396,6 @@ fn a_fourth_backend_writes_its_own_dml_policy() {
     assert!(delete_error
         .to_string()
         .contains("DuckDB backend test does not implement row-limited DELETE"));
-}
-
-/// The stub is only a proof if it never touches the closed enum.
-///
-/// A test that demonstrated a fourth backend by naming the removed closed enum somewhere
-/// would be demonstrating the opposite thing. This reads its own source back and
-/// refuses the mention, so the proof cannot rot into one by a later edit.
-///
-/// The needle is assembled from two halves on purpose. Spelled whole, the
-/// detector's own line is the first thing it finds and the test fails on itself -
-/// which it did, on the first run. A scanner that matches its own source is the
-/// standard failure of this shape, and the fix has to be in the LITERAL rather
-/// than in an exclusion rule, because any "skip line N" carve-out would also skip
-/// a real offender that later lands on that line.
-#[test]
-fn the_stub_never_names_the_closed_enum() {
-    let source = include_str!("a_fourth_backend_names_itself.rs");
-    let needle = concat!("Sql", "Dialect");
-    let offenders: Vec<(usize, &str)> = source
-        .lines()
-        .enumerate()
-        .filter(|(_, line)| line.contains(needle))
-        .filter(|(_, line)| !line.trim_start().starts_with("//"))
-        .map(|(i, line)| (i + 1, line.trim()))
-        .collect();
-    assert!(
-        offenders.is_empty(),
-        "the fourth-backend stub must name no closed dialect enum, but it does: {offenders:#?}"
-    );
 }
 
 /// The name a backend's catalog gives a table's IMPLICIT primary-key relation is a

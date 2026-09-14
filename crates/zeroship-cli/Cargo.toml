@@ -40,9 +40,11 @@ ed25519-dalek = { workspace = true, features = ["pkcs8", "pem", "rand_core"] }
 hex = { workspace = true }
 rand = "0.8"
 compio = { workspace = true }
+flume = { workspace = true }
 futures = { workspace = true }
 tempfile = { workspace = true }
 toml = { workspace = true }
+tracing = { workspace = true }
 
 [lints]
 workspace = true

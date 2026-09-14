@@ -238,8 +238,7 @@ they need Docker and do not read shared Redis URLs. See the
 ```bash
 cargo test -p zeroship-core
 cargo test -p zeroship-gateway
-# These runners prepare migrated databases and run all package tests.
-tests/run_billing_suite.sh   # control and migration service
+cargo xtask test billing
 cargo xtask test worker
 cargo test -p zeroship-runtime --lib
 cargo test -p compio-postgres -- --test-threads=1
@@ -263,12 +262,16 @@ isolates and temporary storage when the case ends, including on failure.
 
 ```bash
 cargo xtask test auth
+cargo xtask test billing
 cargo xtask test worker
 tests/sweep_test_databases.sh          # inspect reclaimable shared databases
 tests/sweep_test_databases.sh --apply  # reclaim them
 ```
 
-`tests/run_billing_suite.sh` still takes a private database per run.
+`cargo xtask test billing` builds the migration host and runs control,
+migration-service, metering, and stream tests. Their Rust fixtures own
+PostgreSQL and Redpanda; neither an external test URL nor a generated overlay
+selects those services.
 `cargo xtask test workflow` owns PostgreSQL through Testcontainers. Its control
 plane tests clone private databases from a migrated, quiescent template. The
 fixture helper removes the cached server when the test process exits.

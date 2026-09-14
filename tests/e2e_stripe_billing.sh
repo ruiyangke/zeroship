@@ -64,7 +64,7 @@
 # the other exit-0 arms were left in place; they are gone now.
 #
 # NOT WIRED INTO CI, deliberately and by inspection: nothing in
-# .github/workflows/ names this script, and tests/run_billing_suite.sh (which CI
+# .github/workflows/ names this script, and `cargo xtask test billing` (which CI
 # does run) does not invoke it either. It needs an operator's live Stripe TEST
 # keys, which CI has no way to hold, so a refusal here cannot turn a CI job
 # permanently red. Refusing is only useful to the person who ran it by hand -

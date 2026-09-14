@@ -17,7 +17,27 @@ use ntex::web;
 use ntex::web::types::State;
 use zeroship_core::readiness::{staleness_budget, SyncFreshness};
 
-use crate::GateState;
+/// State required by the gateway health routes.
+///
+/// Keeping this separate from the full gateway state lets the route own only
+/// the background-poll signal and policy inputs it reads.
+#[derive(Debug)]
+pub struct GatewayReadiness {
+    freshness: Arc<SyncFreshness>,
+    poll_interval: Duration,
+    dev_escape: bool,
+}
+
+impl GatewayReadiness {
+    #[must_use]
+    pub fn new(freshness: Arc<SyncFreshness>, poll_interval: Duration, dev_escape: bool) -> Self {
+        Self {
+            freshness,
+            poll_interval,
+            dev_escape,
+        }
+    }
+}
 
 pub fn configure(cfg: &mut web::ServiceConfig) {
     cfg.service(web::resource("/healthz").route(web::get().to(healthz)))
@@ -37,13 +57,8 @@ pub async fn healthz() -> web::HttpResponse {
 ///
 /// The body is `{"ready":true|false}` and nothing else: no control URL, no
 /// error text, no route count.
-pub async fn readyz(state: State<Arc<GateState>>) -> web::HttpResponse {
-    let poll_interval = Duration::from_secs(state.config.poll_interval_secs);
-    if is_ready(
-        state.routes.sync_freshness(),
-        poll_interval,
-        zeroship_core::config::dev_escape_active(),
-    ) {
+pub async fn readyz(state: State<Arc<GatewayReadiness>>) -> web::HttpResponse {
+    if is_ready(&state.freshness, state.poll_interval, state.dev_escape) {
         web::HttpResponse::Ok().json(&serde_json::json!({"ready": true}))
     } else {
         web::HttpResponse::ServiceUnavailable().json(&serde_json::json!({"ready": false}))
@@ -72,6 +87,23 @@ fn is_ready(freshness: &SyncFreshness, poll_interval: Duration, dev_escape: bool
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ntex::http::StatusCode;
+    use ntex::web::test;
+
+    async fn status(
+        app: &ntex::Pipeline<
+            impl ntex::Service<
+                ntex::http::Request,
+                Response = ntex::web::WebResponse,
+                Error = ntex::web::Error,
+            >,
+        >,
+        path: &str,
+    ) -> StatusCode {
+        test::call_service(app, test::TestRequest::get().uri(path).to_request())
+            .await
+            .status()
+    }
 
     #[test]
     fn a_gateway_that_never_pulled_a_route_table_is_not_ready() {
@@ -114,5 +146,31 @@ mod tests {
             staleness_budget(Duration::from_secs(30)),
             Duration::from_secs(90)
         );
+    }
+
+    #[ntex::test]
+    async fn routes_report_liveness_and_route_pull_readiness() {
+        let freshness = Arc::new(SyncFreshness::new());
+        let readiness = Arc::new(GatewayReadiness::new(
+            freshness.clone(),
+            Duration::from_secs(5),
+            false,
+        ));
+        let app = test::init_service(web::App::new().state(readiness).configure(configure)).await;
+
+        assert_eq!(status(&app, "/healthz").await, StatusCode::OK);
+        assert_eq!(
+            status(&app, "/readyz").await,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "a gateway that has not reached control must refuse traffic"
+        );
+
+        freshness.mark_success();
+        assert_eq!(status(&app, "/readyz").await, StatusCode::OK);
+
+        let retired = status(&app, "/health").await;
+        let unknown = status(&app, "/route-that-does-not-exist").await;
+        assert_ne!(retired, StatusCode::OK);
+        assert_eq!(retired, unknown, "the retired alias must not be a route");
     }
 }

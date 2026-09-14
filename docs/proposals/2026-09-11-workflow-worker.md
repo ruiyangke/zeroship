@@ -4,6 +4,7 @@
 Implementation is in progress. Native coordinator and queue operations share ORM
 transactions. Their database, authenticated host and platform-schema contracts
 have passed verification; remaining bounded creator operations are in progress.
+The local CLI host runs on the native manager and the ordinary job consumer.
 Manager scheduling, creator outbox publication and the simple worker consumer
 have not completed their production cutover.
 
@@ -204,13 +205,48 @@ liveness and delivery authority while durable work and scope responsibility
 remain. Healthy registration does not discharge an obligation to recover an
 unpublished creator intent.
 
-**Implementation boundary:** Control enrollment already runs at worker startup.
-The workflow registration endpoint and authenticated client exist. Production
-startup registration, consumer wiring, zone eligibility and capacity activation
-remain cutover work. Bootstrap credentials must not allow a revoked deployment
-to restore authority by enrolling a fresh identity. The approved bootstrap trust
-source, replacement authorization and revocation freshness contract must be
-finalized with the authentication owner; registration alone does not solve them.
+### Enrollment bootstrap and revocation
+
+A worker enrolls with the credential of its deployment unit, called an
+enroller: an operator-provisioned key that Control records with exactly one
+execution zone. Only the enroller principal may call enrollment; an enrolled
+instance key cannot enroll, and no process holds a shared worker role signing
+key. Enrollment locks the active enroller row, inserts an instance bound to that
+enroller, and is idempotent on the instance public key. A changed key is always
+a new instance identity, and registration, leases and receipts keep comparing
+the exact key that verified each request.
+
+Revocation is an explicit operator database operation. Revoking an enroller
+marks it revoked and marks every instance it enrolled `gone` in one transaction
+that serializes with enrollments in flight, so a revoked unit cannot restore
+authority by enrolling a fresh identity; a replacement unit needs a newly
+provisioned enroller. Retiring a single instance is attribution and hygiene,
+not a boundary against a process that still holds its unit's key, so
+revocation for cause targets the enroller. Observed liveness never writes
+enrollment status.
+
+Every enrollment reader reads the authoritative row: Control on each internal
+request, the manager at ingress and again after lock waits and before commit,
+and the CDC relay on its session recheck. Revocation therefore stops new
+admissions at the next check; leases already issued keep their original
+deadlines while creator fences stay authoritative. An unavailable registry is a
+retryable infrastructure failure. Local development composes a trusted
+in-process worker and performs no enrollment.
+
+This contract suits long-lived worker replicas that mount their unit key. If
+production replicas churn under an orchestrator, the key moves into a
+creator-zone host agent that issues single-use enrollment grants; the Control
+records and revocation cascade stay the same. A native proof of concept on
+branch `poc/workflow-enrollment` passes the contract against a migrated
+PostgreSQL database: instance keys are refused at enrollment, revoking an
+enroller cascades to Control, the manager and the CDC relay while a sibling
+unit stays active, the revocation serializes with a concurrent enrollment on
+the enroller row lock, and a lost-reply retry returns the same instance.
+
+**Implementation boundary:** the worker still loads the shared role key, and
+Control has no startup import of enroller keys yet. Production startup
+registration, consumer wiring, zone eligibility and capacity activation remain
+cutover work.
 
 ## Policy bindings and authenticated leases
 
@@ -560,13 +596,15 @@ table has the `__zeroship_workflow_` prefix; none belongs in Control's schema.
 | `waits` | Recorded sleep, signal and child waits and their execution scope. |
 | `topics`, `broadcasts`, `signals`, `subscriptions` | Customer event bodies, accepted/completed topic ordering, app-scoped signal delivery order, targets, subscription state and fanout cursors. |
 | `fanout_pages` | Exact delivered broadcast page, committed cursor transition, semantic outcome and successor specifications linked to the retained job receipt and publication. |
+| `propagations` | Dependency propagation obligations: kind, source run and generation, cursor, next page revision and finished state. An unfinished cascade obligation fences its source generation's cascading children. |
+| `propagation_pages` | Exact delivered propagation page, cursor transition, closed result and successor specifications linked to the retained job receipt and publication. |
 | `requests` | Durable app-operation request identity, body digest and original result. Age alone cannot retire an accepted request. |
 | `management_receipts` | Exact delivered job identity, requested run, management revision and durable lifecycle outcome, independently scoped from app requests. |
 | `management_scopes` | Last applied management revision per app/requested run, linked to retained command history without requiring that the run exists. |
 | `schedules`, `occurrences` | Existing customer schedule definitions and accepted occurrences. Calendar discovery moves to the manager; customer acceptance, overlap state and input references remain customer-side. |
 | `payloads`, `payload_refs` | Prepared upload metadata, ownership, integrity and committed references. |
 | `outbox` | Customer events and their payloads; distinct from manager queue metadata. |
-| `job_publications` | Closed immutable Advance or Fanout specifications, validated operation-specific projections and manager confirmation time. Pending Advance records retain deployment dependencies; publications survive history removal. |
+| `job_publications` | Closed immutable Advance, Fanout or Propagate specifications, validated operation-specific projections and manager confirmation time. Pending Advance records retain deployment dependencies; publications survive history removal. |
 | `job_receipts` | Immutable logical job specification and committed semantic outcome, retained independently of run history and delivery attempts. App-wide reconciliation records a selected page and its durable attempt offset; its run identity is absent. |
 | `reconciliation_scans` | App-owned scan revision, publication/hold phase, ordering cursor and captured upper boundary. It schedules no work and grants no ingress authority. |
 | `collection_scans` | App-owned collection revision, expiry cutoff, ordering cursor and captured upper payload identity. |
@@ -690,9 +728,11 @@ The current closed contract lives in
 [`workflow_jobs.rs`](../../crates/zeroship-core/src/workflow_jobs.rs):
 `SubmitJob`, `JobSpec`, `JobOperation`, `Delivery`, `DeliveryLease`, `Settlement`
 and `SettlementReceipt`.
-It defines activation, advance, cron, management, reconciliation and collection operations.
+It defines activation, advance, cron, management, fanout, propagation,
+reconciliation and collection operations.
 Executable operations carry their deployment prerequisite inside the operation;
-journal-only commands, reconciliation and collection carry none. Management names
+journal-only commands, fanout, propagation, reconciliation and collection carry
+none. Management names
 its lifecycle revision and a closed resolved command, including the immutable
 target for a latest restart. Shared restart validation derives the effective
 policy before that target is selected.
@@ -1363,8 +1403,9 @@ result. Saving consumption updates the record and reference together; prefix
 replay copies them unchanged. Every native step uses this closed record shape,
 while the engine and V8 checkpoint contract remains unchanged.
 
-A terminal head wakes its parents by reading one bounded page at a time from
-that head's members through their accepted checkpoint references. The page
+A terminal head's delivered notify pages read its waiting parents one bounded
+page at a time from that head's members through their accepted checkpoint
+references. The page
 carries the member, generation and checkpoint rows it validates, so waking a
 parent costs no per-parent resolution and a completion never visits waits on
 other children. On PostgreSQL, a child checkpoint must name its accepted member
@@ -1381,12 +1422,96 @@ queries must resolve through the same head protocol. Retention preserves members
 and generations needed by heads, unresolved waits and result checkpoints; copied
 parent payload references remain independently owned.
 
-This identity slice can precede bounded dependency delivery. Existing synchronous
-failure/cancellation cascading and parent notification remain until their closed
-page protocol and effective cancellation fence are implemented. A delayed page
-must neither cancel a restarted generation nor let ordinary continuation escape
-an applicable cancellation. Durable parent completion records its propagation
+Failure/cancellation cascading and parent notification use the closed page
+protocol and effective cancellation fence defined next. A delayed page must
+neither cancel a restarted generation nor let ordinary continuation escape an
+applicable cancellation. Durable parent completion records its propagation
 obligation; it does not certify that every descendant has stopped.
+
+### Delivered dependency propagation
+
+Terminal and cancellation propagation across child relationships uses the same
+bounded delivery as topic fanout. The originating creator transition records a
+durable propagation obligation and its first page intent; delivered pages apply
+the effects. No creator transaction visits an unbounded set of children or
+parents, so large fan-out and fan-in progress page by page instead of failing
+against the transaction deadline.
+
+The closed code-free operation is `Propagate { propagation_id, revision }`, where
+`propagation_id` is the typed identity of one creator obligation and `revision`
+names its next bounded page. The manager sees no obligation kind, source run,
+cursor, affected run or count. Its scoped submission, delivery, fairness and
+settlement protocol applies unchanged. Propagate has no deployment prerequisite
+or run projection, acquires no hold and creates no maintenance duty, so an
+execution barrier cannot delay the cancellation it must finish. Workers publish
+it through the outbox like Fanout. `Waiting` confirms a committed successor page;
+`Completed` means the obligation is discharged.
+
+Each obligation has exactly one source generation and one kind:
+
+| Kind | Recorded when | Page effect |
+| --- | --- | --- |
+| Cascade | A generation settles as failed or cancelled, including entry into compensation, while some run names it as a cascading parent. | The next page of that generation's cascading children, in run identity order: live children record cancellation intent, and idle ones also receive an Advance intent. Terminal children are passed over. |
+| Notify | A continuation head's current generation becomes terminal while a current parent wait accepted a member of that head. | The next page of those waits, in wait identity order, through the head-directed member join: each idle parent is woken once per page with an Advance intent. |
+
+Settlement probes the parent linkage index for a single cascading child, and
+terminal completion probes the head's member join for a single current waiting
+parent; neither probe changes a run. Without a match, no obligation is
+recorded, and none can become necessary later: a settled generation creates no
+further children, and a parent that accepts a terminal head resolves that wait
+when it next prepares. Repeated settlement of the same generation, such as
+cancelling a run that is already compensating, reuses its existing obligation.
+
+Creator storage adds two tables, each with `id` as its sole primary key:
+
+| Model | Durable identity and fields |
+| --- | --- |
+| `propagations` | Typed obligation identity, app, kind, source run and generation, cursor, next page revision, finished flag and creation time. App/source run/generation/kind is unique and also serves the cancellation fence lookup. |
+| `propagation_pages` | Job identity linked to the exact job receipt and publication, obligation and page revision, and the closed result: cursor transition, finished and superseded flags, affected count and successor specifications. App/obligation/revision is unique. |
+
+The publication journal gains Propagate projections: obligation identity and
+page revision are required for Propagate and absent for every other operation,
+and app/obligation/revision is unique. Cascade pages select through an index on
+the parent linkage, cascade flag and run identity, so each page is an index
+range scan. Notify pages and the notify probe reuse the head's member join,
+which returns one page in wait identity order; its reads still grow with the
+waits remaining behind the cursor and with earlier joiners whose checkpoints
+already resolved. Every page's writes stay within its bound.
+
+A delivered page captures original policy and delivery authority before journal
+I/O. Exact committed receipt replay is checked first under the app lock and
+needs no fresh authority. Fresh work requires the matching persisted
+publication, the obligation's current revision and an unfinished obligation.
+The first page starts at the initial cursor; a later page must follow the
+previous page's Waiting receipt, its committed cursor and its exact successor
+publication. The page commits its effects, their Advance intents, the obligation
+cursor and revision, the immutable page record, the job receipt and the next
+Propagate publication together. A failed page commits nothing, so redelivery
+repeats the same page. Historical receipts replay after later pages advance the
+obligation; text cursors are validated by equality with neighbouring pages,
+never by comparing identity order outside the database.
+
+A cascade page always addresses its recorded source generation. Restarting the
+source run creates another generation number, whose children fall outside
+every page and outside the fence. A notify page first checks that the head's
+current generation is still the terminal source. After a head restart the
+obligation completes as superseded without effects: parents keep waiting, and
+the restarted generation records its own obligation when it terminates.
+
+Pages reach children lazily, so an unfinished cascade obligation is also the
+effective cancellation fence. A cascading child whose parent generation has an
+unfinished cascade obligation is treated as cancelled by frontier preparation,
+task completion and heartbeat renewal, exactly as if its cancellation were
+recorded. Before any page reaches it, it cannot continue as new or suspend into
+another wait: its next preparation, completion or resumed frontier settles it as
+cancelled, whatever order continuation identities sort in. A completing child
+that creates new children settles with its own cascade obligation, so work
+created mid-propagation is reached through its owner. Restarting a cascading
+child while its parent's cascade is still propagating is a durable conflict, so
+a restarted generation never meets a pending page. Once the obligation
+finishes, every child it selected had recorded cancellation or was already
+terminal; a later restart is an explicit override that no remaining page can
+cancel.
 
 ### Management and delivery barriers
 
@@ -1692,12 +1817,62 @@ intents behind the cursor or above the captured upper boundary join a subsequent
 and writes remain bounded by the original manager grant and host policy; this
 native metadata turn does not renew itself or run an independent timer.
 
-Retiring a responsibility requires closing ingress for its scope epoch, fencing
-new acceptance and proving the creator drain/publication state. Failed closure
-keeps the obligation. A last worker's release, an empty local queue or a successful
-heartbeat is not that proof. Future ingress must establish responsibility again
-before writing customer data. The drain handshake and its closed evidence fields
-remain a required protocol definition.
+### Ingress epochs and scope retirement
+
+A scope's recovery responsibility carries a monotonic ingress epoch and a state:
+open, closing or retired. Activation opens it. A worker obtains the epoch with
+its policy lease, bound to its exact key and placement; a plain refresh never
+reopens responsibility. Asking for an epoch greater than one the worker holds
+reopens a retired scope or advances a closing one, recreating reconciliation
+and collection duties under the app lock after enrollment, placement and
+admission checks and before the lease is issued. Establishment follows the
+admission policy; archive masks admission, so an archived app cannot be
+reopened by ingress. An epoch the manager never issued is a conflict.
+
+Every creator ingress acceptance captures the epoch with its policy and, under
+the app state lock before commit, requires it to exceed the journal's closed
+epoch. The fence runs after the authority and admission checks, so an expired
+lease or disabled admission reports its own refusal; a missing or closed epoch
+is a retryable refusal that leads the host to establish a newer epoch.
+
+The manager closes an archived or idle scope only when no job for the app is
+leased, no maintenance job is pending and no earlier Close is unsettled. It
+records the app's dispatch cursor as the closing watermark, suspends the
+scope's periodic duties for the attempt, and delivers a manager-origin Close job
+for the current epoch; an attempt that does not settle in time returns the
+scope to open. Under the same app state lock the worker raises the closed epoch
+and evaluates the drain predicates in one transaction: no unconfirmed
+publication intent, no hold in transition, no payload in preparation or
+deletion, no live task claim, and no deletion tombstone still inside its sweep
+window. Settlement retires the scope only when it is still closing at that
+epoch, the result is drained and no job was published or claimed above the
+watermark. Claims during closing do not cancel the attempt; the watermark
+refuses its retirement at settlement.
+
+Claiming an intent-producing job or a worker publication reopens a retired scope
+before execution. Workers cannot publish Reconcile, Collect or Close, and Close
+is never a settlement successor. Registration expiry, release, empty polling,
+healthy heartbeats, completed scans and calendar or policy acknowledgements
+never retire responsibility. Deletion retires responsibility by abandonment,
+keyed on Control's terminal deletion. A creator snapshot restore must reopen
+responsibility for the restored apps.
+
+A native proof of concept on branch `poc/workflow-retirement` passes this
+protocol on PostgreSQL and SQLite: a still-valid lease is fenced after Close,
+both orders of a racing acceptance and Close refuse retirement, a job claimed
+or published after closing began keeps the scope open (removing the watermark
+check lets these cases retire with an unconfirmed intent), each re-arm path
+reopens exactly once across retries and racing replicas, lost acknowledgements
+and redelivery converge to one retirement, archived apps drain, and duties that
+fall due during closing wait for the attempt.
+
+**Remaining before production:** the local host and worker establish an epoch
+at startup and after a fenced refusal; the fence covers broadcast, signal
+ingestion, transitions and restart; the manager driver gains the closing lane
+with its timeout and backoff; deletion abandons responsibility; and payload
+tombstones become final after one sweep window, because collection currently
+re-sweeps them indefinitely and an app that ever deleted a payload could not
+retire.
 
 The capacity adapter takes trusted app/zone/deployment demand and returns durable
 provisioning progress or a retryable refusal. Requests are idempotent across
@@ -1714,8 +1889,9 @@ does not permit platform SQL to inspect the journal or declare the app drained.
 
 ### Delivered payload collection
 
-The manager duties, creator handler and server driver implement this contract.
-The production worker and local CLI still require consumer composition.
+The manager duties, creator handler and server driver implement this contract,
+and the local CLI host consumes the delivered jobs. The production worker still
+requires consumer composition.
 
 Collection starts with abandoned payload preparations and deletion tombstones.
 The manager retains a periodic Collect duty independently of reconciliation.
@@ -1769,8 +1945,8 @@ outcome proves every object was deleted or the app drained.
 
 This cleanup does not retire terminal history, creator request receipts,
 management history, job receipts or deployment holds. Those require their own
-retention and drain contracts. The existing local host collector remains until
-the ordinary local manager-and-consumer composition takes over its duty.
+retention and drain contracts. The local host has no collector of its own; the
+manager's Collect duty delivers collection to its consumer.
 
 ## Deployment pins, upgrades and retention
 
@@ -2035,13 +2211,18 @@ a complete `Assignment` or expiry to satisfy a constructor. Control revalidates
 the actual assignment when authorizing each hold operation.
 
 The local host uses the same `JobConsumer` with a CLI-owned native `JobTransport`
-over the manager coordinator's real delivery grants. It runs the manager Driver
-independently from consumption and replaces `WorkflowWorker` polling. The normal
-creator storage and retained app archive remain unchanged. Generic local host
-metadata can combine the deployment catalog with manager metadata only through
-an explicit combined schema bootstrap: the current deployment-only bootstrap
-rejects additional queue tables. This adds no deployable service or workflow-only
-database or bundle switch.
+over the manager coordinator's real delivery grants. The manager, its Driver and
+the platform metadata file live on a dedicated manager thread; the consumer,
+creator engine and V8 executor live on the workflow host thread and reach the
+manager through a `Send` client. This mirrors the production zone split and keeps
+thread-local state of app isolates, such as the ORM usage meter an `env.db`
+isolate stamps on its thread, away from platform metadata. There is no journal
+polling or maintenance loop. The normal creator storage and retained app archive
+remain unchanged. `zeroship_workflow_manager::local::LocalPlatform` is the one
+explicit combined bootstrap for the local platform file: it installs the
+deployment catalog and manager schemas together and refuses any other stored DDL,
+including a deployment-only catalog. This adds no deployable service or
+workflow-only database or bundle switch.
 
 The production cutover changes creator request bindings and consumer startup
 together with removal of the old claim/provision/advance path. Worker database
@@ -2112,6 +2293,7 @@ fallbacks.
 | Native manager driver | `driver::Options::{page_limit, lane_timeout, scheduling, recovery}` bounds each calendar, recovery and unfinished-hold lane. The server maps `workflow.batch_limit` to the candidate page and owns cadence through `workflow.driver_interval_ms`; `workflow.driver_lane_timeout_ms` bounds each lane's complete turn. |
 | Metadata client | Client `Options::{timeout, max_request_bytes, max_response_bytes}` bounds the complete exchange. Each call uses the host signer. |
 | Customer host | Normal creator DB/storage, trusted app identity and policy snapshot. `ConsumerOptions` bounds slots, assigned scopes, claim polling and backoff; `DeliveryOptions` bounds execution and finalization. Worker maintenance scheduling settings disappear with their loops. |
+| Local CLI host | `--workflow-config` TOML: `[consumer]` maps to `ConsumerOptions` and `DeliveryOptions`; `[manager]` maps to the queue lease, the local worker's registration and placement lifetime, driver cadence and lane bound, and the recovery interval; `[payloads]` maps to `TaskPayloadLimits`. Unknown keys, including database or bundle settings, are refused. |
 | Scheduling/recovery host policy | Explicit misfire, overlap, reconciliation and capacity/backpressure bounds. New setting names are finalized with those modules, not invented CLI switches. |
 
 Policy snapshots are host-owned and revisioned. Expired remote metadata does not
@@ -2123,31 +2305,59 @@ are separate readiness concerns.
 ```text
 zeroship serve / Vite local host
        |
-       +--> native manager + queue --> normal local platform metadata/catalog
+       +--> manager thread: manager + queue + driver
+       |          |
+       |          +--> .zeroship/platform/metadata.sqlite
+       |               (deployment catalog + manager metadata)
        |
-       +--> native consumer -------> normal app database + app storage
-                   |
-                   +--------------> same V8 executor and normal app bundle
+       +--> workflow host thread: native consumer + creator engine
+                  |
+                  +--> normal app database + app storage
+                  +--> same V8 executor and normal app bundle
 
                shared protocol, separate storage bindings
 ```
 
 The CLI composes these libraries in process with normal app configuration. Local
-calls can omit network and enrollment ceremony while preserving scope checks,
-receipts, fences and recovery. The CLI owns setup/startup/shutdown; it contains no
-bespoke cron evaluator, workflow bundle loader, deployment watcher or journal
-scheduler. Supporting multiple app deployments in the CLI is a separate concern.
+calls omit network and enrollment ceremony while preserving scope checks, grants,
+receipts, fences and recovery. The CLI owns setup, startup and shutdown; it
+contains no bespoke cron evaluator, workflow bundle loader, deployment watcher or
+journal scheduler. Supporting multiple app deployments in the CLI is a separate
+concern.
+
+Startup opens the creator journal, starts the manager thread and registers a
+freshly minted worker identity as ready. The trusted host places exactly the
+configured app on that worker, so local eligibility is that one app. Serving an
+archive ingests it into the retained store, records the normal deployment in the
+catalog, prepares its schedule descriptors, which carry no creator input, and
+activates it at the next revision unless it is already the enabled selection.
+The creator applies that Activation as a delivered job; the CLI establishes
+recovery responsibility for the selected activation and accepts requests only
+after the creator has committed the activation receipt. Serving a plain script
+keeps the existing selection. Direct creator activation is not used.
+
+The host renews its registration and placement on an interval derived from the
+placement lifetime (`LocalConfig::renew_interval`) and places the app again
+under the next revision when the manager refuses the old one. The HTTP and
+workflow isolates share one app backend whose commit hint wakes a publication
+pass after every start, signal, transition or restart; the transport wakes it
+after every settled delivery, and startup wakes it once for intents a previous
+process left behind. A failed pass leaves intents pending for the manager's
+reconciliation job. Shutdown joins execution, reports draining and stops the
+manager thread after its in-flight operations and current pass.
 
 Customer history stays in the normal app database. The manager uses the normal
 local platform metadata/catalog binding alongside deployment identities and
-holds, not the customer binding. Do not add a dedicated workflow SQLite file,
+holds, not the customer binding. There is no dedicated workflow SQLite file,
 workflow database environment variable or `--workflow-bundle`. Creators need not
-supply `APP_ID`. Local co-location does not change the production database boundary.
+supply `APP_ID`. Local co-location does not change the production database
+boundary.
 
 Restart preserves queue metadata, journal receipts, pending intents and retained
-bundles. Hot reload activates a new immutable deployment while existing generations
-keep their pins. Local durability and failure behavior must match production;
-replacing the queue with an in-memory shortcut would defeat that parity.
+bundles. Vite's hot reload republishes the archive and restarts the CLI, which
+activates the new immutable deployment while existing generations keep their
+pins. Local durability and failure behavior match production; replacing the
+queue with an in-memory shortcut would defeat that parity.
 
 ## Operations, security and backpressure
 
@@ -2336,7 +2546,23 @@ cannot reach either ORM store. Test fixtures may compose both zones.
 The branch contains the customer-bound ORM journal, replay/lifecycle operations,
 durable creator management receipts, payload preparation, bounded runner, V8
 binding/executor, normal verified bundle loading and deployment-hold foundations.
-The local host currently composes that journal and runner.
+The local CLI host composes that journal with the native manager and the
+ordinary job consumer; see
+[configuration and local development](#configuration-and-local-development).
+
+Local host contracts in `crates/zeroship-cli/src/workflow/tests.rs` start the
+host on a real compiled archive. The delivered Activation selects the archive at
+the first revision and settles as dispatch ready, and a run started through the
+host's ingress completes through manager delivery while the workflow thread runs
+metered `env.db` isolates. A sleeping run resumes after a host restart from queue
+metadata alone. A republished archive activates at the next revision while
+existing runs finish on their pinned code, including after a restart without an
+archive. Reconciliation publishes an intent committed outside the host, and an
+acknowledgement lost before the manager replays the committed turn without
+executing it again. `crates/zeroship-cli/tests/workflow_local.rs` repeats restart
+after process death through the real `zeroship serve` binary, and
+`zeroship-workflow-manager` tests the combined platform bootstrap and its
+refusal of partial or changed files.
 
 Creator management now consumes ordered deliveries and commits lifecycle state,
 publication, applied order, command history and the job receipt atomically. The
@@ -2675,10 +2901,10 @@ passes and joins its current bounded pass during shutdown.
 The driver resumes acquiring/releasing queue holds. It does not interpret an
 empty queue or expired worker as permission to release held code or retire an
 ingress responsibility. Explicit release still checks all manager dependencies
-under the app lock. Automatic held-deployment release policy, capacity activation,
-and ordinary worker/CLI consumer composition remain to integrate.
+under the app lock. Automatic held-deployment release policy, capacity activation
+and production worker consumer composition remain to integrate.
 The consumer accepts activation, cron, advance, reconciliation, management,
-collection and fanout jobs. Collection uses the assigned creator journal and object store
+collection, fanout and propagation jobs. Collection uses the assigned creator journal and object store
 without loading an executable, creating a task or publishing unrelated intents.
 Fanout uses the assigned creator journal without an executable or object store;
 its bounded page commits recipient signals, affected frontiers and the successor
@@ -2697,9 +2923,26 @@ and historical restart, inherited cancellation and compensation, rollback,
 retired authority and scope refusal. Provenance contracts retain inline and
 referenced child results through a later child restart, a parent prefix copy
 and delivered collection of an abandoned preparation. Checkpoint references
-keep their members and generations until the checkpoint itself is removed, and
-a completion wakes parents across wait pages within one transaction deadline.
-Terminal-history retirement and bounded dependency delivery remain open.
+keep their members and generations until the checkpoint itself is removed.
+Terminal-history retirement remains open.
+
+Delivered dependency propagation replaces the inline cascade and parent wakeup.
+Settlement and terminal completion record only an obligation and its first
+Propagate intent; `AppWorkflows::propagation_job` commits each bounded page, and
+the delivery slot and consumer route it without an executor or object store.
+Paired PostgreSQL and SQLite contracts page cascades and notification past
+`MAX_ROW_LIMIT`, replay pages exactly after later pages and with exhausted
+authority, wake a parent with several waits once per page, and supersede a
+notify page after a head restart. They leave a restarted cascade source's new
+children untouched, cancel continuation and child creation mid-propagation
+through the fence, refuse restart until the obligation finishes, report the
+fence at delivered and legacy renewal, and fail closed on damaged projections,
+obligations and page records. Injected page failures roll back the cursor,
+effects and receipt together. Manager contracts accept worker-published
+Propagate pages and successors without holds or run projections, keep them
+deliverable behind blocking management commands, and leave maintenance duties
+unchanged; the consumer contract settles a page through separate manager and
+creator databases.
 The server injects an authenticated Control hold client into its native queue.
 Production deployment registration and activation publication still require
 host integration. The normal Control deployment transaction needs a durable
@@ -2717,8 +2960,10 @@ Manager contracts cover continuation deadlines, periodic responsibility, old ACK
 replay and atomic rollback. Consumer tests connect manager-issued reconciliation
 to outbox publication and subsequent execution in separate ORM databases. The
 production dispatch/activation host and ingress responsibility handshake remain
-unwired. Existing customer task polling and maintenance code remains to replace.
-Its existence does not satisfy manager-owned scheduling.
+unwired. No host polls the creator journal or runs journal maintenance loops any
+longer. Direct task polling (`RunnerSlot`), direct activation (`activate_deploy`)
+and the synchronous payload collector remain in the creator library only for
+executor and journal tests.
 
 Legacy production paths still include Control journal access, worker platform
 queries, grants incompatible with private zones and Control/Gateway workflow
@@ -2751,12 +2996,10 @@ archive and retains the last valid deployment when current sources fail to build
 
 | Decision | Fixed requirement and remaining choice |
 | --- | --- |
-| Enrollment bootstrap and revocation | A revoked worker cannot regain equivalent authority by automatic enrollment. Finalize bootstrap trust, replacement authorization and registry freshness with auth ownership. |
 | Placement eligibility and capacity provider | Only platform-authorized app/zone combinations may be assigned. Select the trusted eligibility source and host adapter's durable request/progress contract. |
 | Archive acknowledgement | The direct Control source provides bounded convergence under original observation validity. Define any stronger execution-quiescence evidence separately from calendar acknowledgement or lease expiry. |
-| Complete job envelopes | Operation-specific deployment prerequisites, frozen manager restart targets and linked management outcomes are implemented. Collection and topic fanout have durable pages, receipts and delivered consumers. Complete bounded dependency continuation delivery. |
+| Complete job envelopes | Operation-specific deployment prerequisites, frozen manager restart targets and linked management outcomes are implemented. Collection, topic fanout and dependency propagation have durable pages, receipts and delivered consumers. |
 | Normal deployment publication | Bind activation revision issuance to a stable deploy command and immutable body. Artifact identity alone cannot distinguish a delayed retry from an intentional rollback. Compose mutable deployment side effects with command acceptance, connect archive/stage/restore to the durable handoff, and keep the calendar's activation origin explicit across delayed delivery. |
-| Scope retirement | Define ingress epoch closure and durable drain evidence. Registration expiry and empty polling cannot retire unpublished-work responsibility. |
 | Receipt retirement | Define admissibility fences and publication/settlement watermarks before deleting job deduplication state. Retain it until that proof exists. |
 | Dispatch fairness and persistent failure | Per-app dispatch tickets rotate successfully claimed jobs behind waiting work without changing due times. Define cross-app host fairness, management priority and observable parking/retry policy for failures before claim without deleting accepted work. |
 | Snapshot restore | Define restore epochs, fenced admission and cross-owner reconciliation with the storage owners; process-restart recovery alone cannot protect lost receipts or resurrected authority. |
@@ -2768,32 +3011,36 @@ outside the queue cutover.
 
 ### End-to-end path
 
-The native libraries are exercised in isolation; no executable composes them
-yet. Remaining work proceeds as vertical slices. Each slice ends with an
-executable path that its owning native suites and the workflow examples
-exercise, instead of adding further library breadth first. Slices that touch
-disjoint crates may proceed in parallel; the numbering is the merge order.
+The local CLI host composes the native libraries, as slice one below describes;
+the production executables do not yet. Remaining work proceeds as vertical
+slices. Each slice ends with an executable path that its owning native suites
+and the workflow examples exercise, instead of adding further library breadth
+first. Slices that touch disjoint crates may proceed in parallel; the numbering
+is the merge order.
 
-1. **Local host on the native manager.** `zeroship serve` and the Vite
-   development host compose the manager `Coordinator`, queue, recovery and
-   `Driver` over a local platform metadata catalog, and the ordinary
-   `JobConsumer` over the app's creator storage. A CLI-owned `JobTransport`
-   calls native coordinator operations for a trusted local worker, with real
-   delivery grants and no enrollment ceremony. One explicit local catalog
-   bootstrap holds the deployment catalog and manager metadata together.
+1. **Local host on the native manager (implemented).** `zeroship serve` and
+   the Vite development host compose the manager `Coordinator`, queue,
+   scheduling, recovery and `Driver` over the local platform metadata file on a
+   manager thread, and the ordinary `JobConsumer` over the app's creator
+   storage on the workflow host thread. A CLI-owned `JobTransport` calls native
+   coordinator operations for a trusted local worker, with real delivery
+   grants and no enrollment ceremony. `LocalPlatform` is the one explicit
+   bootstrap holding the deployment catalog and manager metadata together.
    Publishing a bundle registers and activates its schedules through the
    native manager, so creator activation arrives as a delivered job. Startup
    establishes the app's recovery responsibility before the host accepts
-   requests. `WorkflowWorker` polling, local maintenance loops and direct
-   activation are removed in the same slice. Proof: the CLI `workflow::`
-   contracts and the local tier of both example suites run through delivered
-   jobs, including process restart with a sleeping run, a lost acknowledgement
-   and hot reload.
+   requests. `WorkflowWorker` polling, its maintenance loops and the host's
+   direct activation are gone. Proof: the CLI `workflow::` contracts and the
+   local tier of both example suites run through delivered jobs, including
+   restart with a sleeping run, a lost acknowledgement and a republished
+   bundle.
 2. **Bounded dependency delivery.** Cascading cancellation and failure, and
    parent notification, become paged jobs with durable progress in the creator
    journal, following the fanout and collection pattern. This touches only the
    creator engine and manager job contracts, so it can proceed alongside the
-   next slice.
+   next slice. The native contracts are implemented; see
+   [delivered dependency propagation](#delivered-dependency-propagation). The
+   local host delivers these pages once slice one's consumer runs there.
 3. **Normal deployment publication.** Control's deploy transaction records an
    idempotent command receipt and a lifecycle intent together. A Control
    publisher delivers register, activate and disable to the manager and confirms

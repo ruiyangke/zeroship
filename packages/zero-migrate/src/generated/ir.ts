@@ -10,9 +10,9 @@
 // here, while the closed STRING-ENUM tokens (`BinaryOp`, `SynthFn`, `CastTarget`,
 // …) are GENERATED into `./enums.ts` and imported below.
 //
-// DRIFT GUARD: `tests/ir-types-drift.test.ts` pins every enum token, every `Op`
-// variant tag, and every `Expr` node tag in THIS file against the schema, so the
-// manual transcription cannot silently drift from the engine contract.
+// `tests/ir-schema-contract.test.ts` checks the schema's tags and fields, while
+// `tests/types/type-tests.ts` asks the TypeScript compiler to verify critical
+// handwritten shapes without parsing this file as text.
 //
 // These types are ERGONOMICS for an advanced caller; the golden IR envelope corpus
 // + the `Checksum::of_ir` round-trip are the contract source of truth.

@@ -37,11 +37,8 @@
 //!
 //! # Scope, said out loud
 //!
-//! This file does not assert NEUTRALITY. That an item can be named here says nothing
-//! about whether it should have moved - `registry_resolution_stays_core_only` is what
-//! answers that, and it reads this crate too. The two are complements: this one fails
-//! when the contract is too SMALL, that one fails when a vendor reaches for something
-//! it should have answered for itself.
+//! This file asserts that the contract is large enough for the vendor execution
+//! half. It does not assert where vendor-neutral decisions belong.
 //!
 //! # What is deliberately NOT here yet
 //!
@@ -160,10 +157,9 @@ fn the_existence_guard_authorization_is_reachable() {
 /// asking the registry which backend handles MySQL.
 ///
 /// That distinction is the whole reason `decide` takes a `&BackendVendor` now: this
-/// crate knows which vendor it is, and `registry_resolution_stays_core_only` reads
-/// this crate. The case exercised is the one that must never depend on a vendor at
-/// all - an `IfNotExists` table probe against an EMPTY live catalog runs bare - so a
-/// `decide` wired to nothing would still have to answer it correctly.
+/// crate knows which vendor it is. The case exercised is vendor-neutral - an
+/// `IfNotExists` table probe against an empty live catalog runs bare - so a `decide`
+/// wired to nothing would still have to answer it correctly.
 #[test]
 fn the_existence_guard_decider_answers_for_this_vendor() {
     let probe = GuardProbe::Table {
@@ -210,9 +206,8 @@ fn the_constraint_definition_codec_is_reachable_and_spells_the_comparison_form()
          re-diff against a body the engine's lower never produces"
     );
 
-    // The FK body, built with MySQL's OWN vendor rather than by asking the registry
-    // which backend handles MySQL - the distinction `registry_resolution_stays_core_only`
-    // reads this crate for.
+    // The FK body is built with MySQL's own vendor rather than by asking the
+    // registry which backend handles MySQL.
     //
     // `RESTRICT` is the discriminator: InnoDB has no deferred checks, so MySQL folds
     // it into the omitted `NO ACTION` default, while PostgreSQL preserves it and

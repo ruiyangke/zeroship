@@ -626,6 +626,7 @@ async fn continuation_and_child(service: &WorkflowService, app: &AppId, worker: 
         )
         .await
         .unwrap();
+    assert_eq!(deliver_propagations(&scope).await.len(), 1);
     let parent = service.poll(worker).await.unwrap().unwrap();
     assert_eq!(parent.invocation.run_id, task.invocation.run_id);
     assert_eq!(

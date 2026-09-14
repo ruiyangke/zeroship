@@ -34,14 +34,8 @@
 //!
 //! # The one-dialect-literal rule, now across a crate boundary
 //!
-//! A backend module names its own dialect exactly ONCE, as its `DIALECT` const, and
-//! names no other dialect at all. Everything else reads `DIALECT`. That rule is what
-//! made this step mechanical, and it is still ENFORCED:
-//! `crates/zeroship-migrate/tests/dialect_matrix/backend_modules_name_one_dialect.rs` reads all nine vendor
-//! modules with `include_str!` and asserts both halves - own dialect exactly once, as
-//! the `const DIALECT` line, and no other dialect at all. It was repointed at the new
-//! crate paths in the commit that moved them; a re-export shim at the old path would
-//! NOT have satisfied it, because a shim has zero carriers.
+//! A backend module reads the `DIALECT` identity exported by its vendor crate. This
+//! keeps dialect selection with the backend that owns the renderer.
 //!
 //! # The rule does NOT catch implicit coupling, and there was some
 //!
@@ -71,12 +65,8 @@
 //! RESOLVED by VISIBILITY, and the crate split WEAKENED that fix. The primitive is
 //! now `zeroship_migrate_backend::spelling::ansi_double_quote_ident`, and across a crate
 //! boundary `pub(in ...)` cannot say "these three crates and no other" - the vendor
-//! crates must reach it, so it is `pub`, so the engine can name it too. The compiler
-//! no longer enforces the rule. It is replaced by a textual census,
-//! `crates/zeroship-migrate/tests/dialect_matrix/core_does_not_spell_a_vendors_bytes.rs`, which walks every
-//! crate `src` root and asserts the engine names neither spelling primitive. That is
-//! strictly weaker than a privacy error and it is recorded as a downgrade, not as an
-//! equal substitute.
+//! crates must reach it, so it is `pub`. Render paths keep the target explicit by
+//! carrying the backend renderer that owns the spelling.
 //!
 //! And a DELIBERATE non-defect that looks identical to a neuter: the
 //! `pg_get_constraintdef` normal form (`zeroship_migrate_backend::constraint_definition` -
@@ -127,10 +117,9 @@ use zeroship_migrate_ir::dialect::DialectId;
 // `ExpandContractAuthor`, `CatalogFold`, `MigrationEngine` and the raw/deterministic
 // authors all carry it, so their methods pay no signature for it at all.
 //
-// `zeroship_migrate::shipping_vendors()` is how a host asks for the composed value, and
-// `crates/zeroship-migrate/tests/dialect_matrix/the_registry_travels_as_a_value.rs` is what keeps the list of
-// places that may name it from growing back - a rule Cargo now enforces for this crate
-// but not for the `#[cfg(test)]` modules that reach the vendors through dev edges.
+// `zeroship_migrate::shipping_vendors()` is how a host asks for the composed value.
+// Cargo keeps the vendor crates out of this crate's normal dependency graph; test
+// modules reach them only through dev edges.
 //
 // (Earlier notes here recorded a `pub(crate) use zeroship_migrate_sqlite::VENDOR;` that
 // made one registry entry asymmetric with the other two, and a `SqliteSequencePolicy`

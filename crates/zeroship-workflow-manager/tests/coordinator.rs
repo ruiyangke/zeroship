@@ -27,7 +27,8 @@ use zeroship_core::{
         WorkerState,
     },
     workflow_jobs::{
-        BroadcastId, DeploymentId, JobId, JobOperation, JobOutcome, JobSpec, Settlement, SubmitJob,
+        BroadcastId, DeploymentId, JobId, JobOperation, JobOutcome, JobSpec, PropagationId,
+        Settlement, SubmitJob,
     },
     workflow_schedules::ScheduleId,
 };
@@ -1159,6 +1160,45 @@ case!(
 );
 
 async fn fanout_publication(fixture: &Fixture) {
+    let broadcast = BroadcastId::mint();
+    let page = |revision: i64| JobOperation::Fanout {
+        broadcast_id: broadcast.clone(),
+        revision: revision.try_into().unwrap(),
+    };
+    let foreign = JobOperation::Fanout {
+        broadcast_id: BroadcastId::mint(),
+        revision: 1.try_into().unwrap(),
+    };
+    journal_pages(fixture, "fanout", [page(1), page(2)], [foreign, page(2)]).await;
+}
+
+case!(
+    sqlite_worker_publishes_scoped_propagation_and_successors,
+    postgres_worker_publishes_scoped_propagation_and_successors,
+    propagation_publication
+);
+
+async fn propagation_publication(fixture: &Fixture) {
+    let obligation = PropagationId::mint();
+    let page = |revision: i64| JobOperation::Propagate {
+        propagation_id: obligation.clone(),
+        revision: revision.try_into().unwrap(),
+    };
+    let foreign = JobOperation::Propagate {
+        propagation_id: PropagationId::mint(),
+        revision: 1.try_into().unwrap(),
+    };
+    journal_pages(fixture, "propagate", [page(1), page(2)], [foreign, page(2)]).await;
+}
+
+/// A code-free page operation is worker-published, delivered and settled with
+/// its successor page, without holds or executable and run projections.
+async fn journal_pages(
+    fixture: &Fixture,
+    kind: &str,
+    [first, next]: [JobOperation; 2],
+    substitutes: [JobOperation; 2],
+) {
     let (coordinator, _) = host(fixture, Options::default()).await;
     let worker = WorkerId::mint();
     register(&coordinator, &worker, 1).await;
@@ -1166,15 +1206,11 @@ async fn fanout_publication(fixture: &Fixture) {
         .assign(&placement(&AppId::mint(), &worker))
         .await
         .unwrap();
-    let broadcast = BroadcastId::mint();
     let spec = JobSpec {
-        operation: JobOperation::Fanout {
-            broadcast_id: broadcast.clone(),
-            revision: 1.try_into().unwrap(),
-        },
+        operation: first,
         ..job(&assigned.app_id)
     };
-    assert_fanout_publication_identity(&coordinator, &worker, &assigned, &spec, &broadcast).await;
+    assert_publication_identity(&coordinator, &worker, &assigned, &spec, substitutes).await;
     let granted = coordinator
         .claim_job(&worker, &scope(&assigned), || ready(Ok(worker.clone())))
         .await
@@ -1183,10 +1219,7 @@ async fn fanout_publication(fixture: &Fixture) {
     assert_eq!(granted.delivery().job, spec);
     let successor = JobSpec {
         id: JobId::mint(),
-        operation: JobOperation::Fanout {
-            broadcast_id: broadcast,
-            revision: 2.try_into().unwrap(),
-        },
+        operation: next,
         ..spec.clone()
     };
     let mut settlement = Settlement {
@@ -1221,7 +1254,7 @@ async fn fanout_publication(fixture: &Fixture) {
         receipt
     );
     let stored = row(&db, "jobs", value!({"id":successor.id.as_str()})).await;
-    assert_eq!(stored["operation_kind"], value!("fanout"));
+    assert_eq!(stored["operation_kind"], value!(kind));
     assert!(
         stored["deployment_id"].is_null()
             && stored["run_id"].is_null()
@@ -1236,12 +1269,12 @@ async fn fanout_publication(fixture: &Fixture) {
     .is_empty());
 }
 
-async fn assert_fanout_publication_identity(
+async fn assert_publication_identity(
     coordinator: &Coordinator,
     worker: &WorkerId,
     assigned: &Assignment,
     spec: &JobSpec,
-    broadcast: &BroadcastId,
+    substitutes: [JobOperation; 2],
 ) {
     let request = publication(assigned, spec.clone());
     for _ in 0..2 {
@@ -1253,16 +1286,7 @@ async fn assert_fanout_publication_identity(
             *spec
         );
     }
-    for operation in [
-        JobOperation::Fanout {
-            broadcast_id: BroadcastId::mint(),
-            revision: 1.try_into().unwrap(),
-        },
-        JobOperation::Fanout {
-            broadcast_id: broadcast.clone(),
-            revision: 2.try_into().unwrap(),
-        },
-    ] {
+    for operation in substitutes {
         let changed = publication(
             assigned,
             JobSpec {

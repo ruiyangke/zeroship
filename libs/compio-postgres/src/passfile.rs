@@ -37,10 +37,8 @@ pub(crate) struct PassfileKey<'a> {
 // libpq resolves an unset `passfile` from `$PGPASSFILE` and then
 // `$HOME/.pgpass`. This crate is a standalone, publishable driver
 // (`AGENTS.md`, the `libs/` boundary) and a published library takes resolved
-// options from its caller rather than reading process configuration - a rule
-// the workspace enforces mechanically, in `crates/core/tests/
-// config_env_access_gate.rs`, with an exemption list that is deliberately
-// empty. Reading `$PGPASSFILE` here was exactly the thing it forbids.
+// options from its caller rather than reading process configuration. The
+// workspace Clippy policy rejects direct environment reads in library code.
 //
 // So an application that wants libpq's default locations resolves them itself
 // and passes the result to `Config::passfile`. That keeps the decision to read

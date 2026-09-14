@@ -59,9 +59,7 @@ docs/pilot/
 
 # The test backends' overlay, written by tests/provision_test_backends.sh.
 #
-# Generated rather than committed because every DSN leaf in the config schema is
-# secret-classed, and check 8 of tests/config_name_alignment_gate.sh fails any
-# TRACKED *.toml holding a literal at one - with no exception list, by design.
-# The same gate exempts untracked overlays deliberately, which is what this is.
+# Generated rather than committed because it contains live test credentials and
+# belongs to the local backend instance that the provisioner owns.
 deploy/ops/zeroship.test.toml
 __pycache__/

@@ -1,11 +1,48 @@
 use super::*;
 
+/// The local host's catalog lives in its combined platform metadata file.
+async fn local(path: &Path) -> Result<DeploymentHolds, Error> {
+    crate::local::LocalPlatform::open(path)
+        .await
+        .map(|platform| platform.deployments().clone())
+}
+
 fn manifest() -> (String, String) {
     let mut manifest = zeroship_bundle::Manifest::default();
     let hash =
         zeroship_bundle::deployment_manifest_hash(&serde_json::to_vec(&manifest).unwrap()).unwrap();
     manifest.deploy_hash = Some(hash.clone());
     (hash, serde_json::to_string(&manifest).unwrap())
+}
+
+#[test]
+fn opening_waits_for_a_host_that_still_holds_the_platform_file() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("platform/metadata.sqlite");
+    compio::runtime::Runtime::new()
+        .unwrap()
+        .block_on(async { local(&path).await.unwrap() });
+    // A replaced process can hold the file while it shuts down.
+    let holder = rusqlite::Connection::open(&path).unwrap();
+    holder.execute_batch("BEGIN EXCLUSIVE").unwrap();
+    let (finished, done) = std::sync::mpsc::channel();
+    let opener = {
+        let path = path.clone();
+        std::thread::spawn(move || {
+            let opened = compio::runtime::Runtime::new()
+                .unwrap()
+                .block_on(async { local(&path).await.map(|_| ()) });
+            finished.send(()).unwrap();
+            opened
+        })
+    };
+    assert!(
+        done.recv_timeout(std::time::Duration::from_secs(6))
+            .is_err(),
+        "opening must keep waiting through a restart handoff instead of failing"
+    );
+    holder.execute_batch("COMMIT").unwrap();
+    opener.join().unwrap().unwrap();
 }
 
 #[test]
@@ -31,7 +68,7 @@ fn concurrent_local_registration() {
         std::thread::spawn(move || {
             barrier.wait();
             compio::runtime::Runtime::new().unwrap().block_on(async {
-                DeploymentHolds::open_local(&path)
+                local(&path)
                     .await
                     .unwrap()
                     .record_deployment(&app, &hash, &encoded)
@@ -50,7 +87,7 @@ fn concurrent_local_registration() {
 async fn local_catalog_preserves_identity_holds_and_reclamation_after_reopen() {
     let root = tempfile::tempdir().unwrap();
     let path = root.path().join("deployments/index.sqlite");
-    let catalog = DeploymentHolds::open_local(&path).await.unwrap();
+    let catalog = local(&path).await.unwrap();
     let app = AppId::mint();
     let (hash, encoded) = manifest();
     let deployment = catalog
@@ -67,7 +104,7 @@ async fn local_catalog_preserves_identity_holds_and_reclamation_after_reopen() {
         .unwrap()
         .execute_batch("ANALYZE")
         .unwrap();
-    let catalog = DeploymentHolds::open_local(&path).await.unwrap();
+    let catalog = local(&path).await.unwrap();
     assert_eq!(
         catalog
             .record_deployment(&app, &hash, &encoded)
@@ -107,7 +144,7 @@ async fn local_catalog_preserves_identity_holds_and_reclamation_after_reopen() {
     finish_reclamation(&catalog.database, &app, &deployment)
         .await
         .unwrap();
-    let reopened = DeploymentHolds::open_local(&path).await.unwrap();
+    let reopened = local(&path).await.unwrap();
     assert_conflict(reopened.record_deployment(&app, &hash, &encoded).await);
     assert_conflict(reopened.acquire(&holder, &deployment, generation(2)).await);
 }
@@ -211,9 +248,7 @@ async fn postgres_collector_helpers_keep_the_lock_and_fence_in_one_transaction()
 #[compio::test]
 async fn registration_rejects_invalid_manifests_and_corrupt_existing_metadata() {
     let root = tempfile::tempdir().unwrap();
-    let catalog = DeploymentHolds::open_local(&root.path().join("index.sqlite"))
-        .await
-        .unwrap();
+    let catalog = local(&root.path().join("index.sqlite")).await.unwrap();
     let app = AppId::mint();
     let (hash, encoded) = manifest();
     for (invalid_hash, invalid_manifest) in [
@@ -249,7 +284,7 @@ async fn registration_rejects_invalid_manifests_and_corrupt_existing_metadata() 
 async fn local_catalog_uses_the_exact_host_selected_file() {
     let root = tempfile::tempdir().unwrap();
     let path = root.path().join("normal-app-deployments.sqlite");
-    let ledger = DeploymentHolds::open_local(&path).await.unwrap();
+    let ledger = local(&path).await.unwrap();
     let app = AppId::mint();
     let (hash, encoded) = manifest();
     let deployment = ledger
@@ -284,10 +319,7 @@ async fn local_catalog_rejects_incompatible_schema_without_rewriting_it() {
     let path = root.path().join("index.sqlite");
     let connection = rusqlite::Connection::open(&path).unwrap();
     connection.execute_batch("CREATE TABLE app_deploys (id TEXT PRIMARY KEY); INSERT INTO app_deploys VALUES ('keep')").unwrap();
-    assert!(matches!(
-        DeploymentHolds::open_local(&path).await,
-        Err(Error::Unavailable(_))
-    ));
+    assert!(matches!(local(&path).await, Err(Error::Unavailable(_))));
     assert_eq!(
         connection
             .query_row("SELECT id FROM app_deploys", [], |row| row

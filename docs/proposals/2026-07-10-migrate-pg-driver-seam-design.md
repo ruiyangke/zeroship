@@ -104,11 +104,8 @@ make that a checked property of every driver rather than an assumption.
 **Shadow-database dry runs stay off the seam.** They need a second connection and a
 `CREATE DATABASE` provisioning lifecycle with no host analogue. `ShadowDryRun` is therefore
 a capability passed as a parameter to `MigrationEngine::dry_run`, not a method on a backend,
-and it currently has no implementor anywhere in the workspace, so every dry run refuses with
+and no implementation ships, so every dry run refuses with
 `DryRunError::ShadowUnsupported` and no caller can be handed a false-success report.
-`crates/zeroship-migrate/tests/dialect_matrix/shadow_dry_run_has_no_implementor.rs` holds
-that line, with a file floor over its walk and a positive control on the trait declaration
-so a rename cannot make it report a meaningless zero.
 
 **Vendor types stay in vendor crates.** The engine crates name no vendor crate, backend
 module or grammar; the `dialect_matrix` gates under `crates/zeroship-migrate/tests/` enforce
@@ -158,8 +155,6 @@ Protective notes, kept because each records something that was tried and broke:
   two copies drift silently until one suite asserts against a row shape the other already
   corrected. There is one recorder per vendor, reached through the vendor crate's `testing`
   feature, which resolver 3 keeps out of the normal build.
-  `dialect_matrix/a_test_recorder_never_ships.rs` walks a table of vendors, so a third
-  recorder is a row rather than a copy of that file.
 - **Do not assert `backend.shadow().is_none()` per vendor.** Three such tests existed, all
   passed, all always would have, and together they still could not see a fourth backend or a
   host adapter quietly acquiring a shadow harness. One workspace-wide scan replaced them.

@@ -70,9 +70,9 @@ Lifecycle changes do not free an accepted request identity for reuse. Replaying
 a signal-token request returns the original token, whose expiration and
 revocation still apply. Receipt retirement requires explicit admission fences;
 the journal does not infer them from elapsed time.
-`service::publication` records immutable Advance and Fanout intents with creator
-transitions. Exact optional projections distinguish executable frontiers from
-code-free broadcast pages. `AppWorkflows::pending_jobs` and `publish_job` publish under a bound
+`service::publication` records immutable Advance, Fanout and Propagate intents
+with creator transitions. Exact optional projections distinguish executable
+frontiers from code-free broadcast and propagation pages. `AppWorkflows::pending_jobs` and `publish_job` publish under a bound
 app scope without holding a creator transaction across manager I/O. The entire
 returned specification must match before confirmation; retries preserve job
 identities, and pending intents retain deployment dependencies independently of
@@ -106,7 +106,7 @@ remain retryable. Historical activations keep their original input even after
 replacement or schedule removal. Receipt replay requires the exact occurrence
 linkage and performs no artifact I/O.
 `runner::delivery::DeliverySlot` routes activation, cron, management,
-reconciliation, collection and fanout jobs to bounded journal operations and advance jobs to the existing executor and
+reconciliation, collection, fanout and propagation jobs to bounded journal operations and advance jobs to the existing executor and
 payload pipeline. Its host supplies `JobTransport`;
 the authenticated worker client implements that metadata interface. The slot
 renews manager and creator authority together, retains interrupted execution
@@ -123,6 +123,19 @@ reconciliation publishes it. Signal delivery sequence determines consumption
 order; timestamps govern age and deadline eligibility. Direct signals and
 different topics merge by materialization order. Fanout performs no deployment
 lookup, storage access or creator execution.
+`service::propagation` carries cancellation cascades and parent notification.
+A settling generation that names cascading children, or a terminal head with
+waiting parents, records one obligation and its first Propagate intent instead
+of changing those runs inline. `AppWorkflows::propagation_job` applies one
+bounded page: cancellation intent and Advance intents for the next children, or
+wake-ups for the next idle waiting parents, committed with the obligation
+cursor, page record, job receipt and next page intent. A page never defers;
+exact historical pages replay after later pages advance. A notify page whose
+head was restarted completes as superseded without effects. An unfinished
+cascade obligation fences its source generation's cascading children:
+preparation, completion and renewal treat them as cancelled, so they cannot
+continue as new, and restarting one is a durable conflict until the obligation
+finishes.
 `runner::consumer::JobConsumer` claims manager jobs through that transport and
 shares bounded execution capacity across trusted `ConsumerScope` bindings. Each
 binding pairs an app handle with its own executor and creator storage. The host
@@ -151,8 +164,8 @@ joining execution. Cancellation also retires the host; explicit `drain` joins
 retained slots, and the same host cannot become ready again. The host does not
 release assignments or discharge manager recovery responsibility.
 Production enrollment, trusted creator resource providers, remaining delivered
-operation handlers and ordinary worker/CLI composition remain required before
-replacing the existing runner.
+operation handlers and production worker composition remain required before
+replacing the production runner. The local CLI host already runs the consumer.
 `zeroship-worker::workflow_creator::WorkflowCreatorFactory` assembles the creator
 ORM journal, payload storage, retained app artifacts and V8 executor from an
 injected `WorkflowResourceProvider`. It verifies app and schema identity before
@@ -347,25 +360,19 @@ named occurrence in the run's current generation. The service resolves that
 generation under the restart fence and checks reference ownership before
 opening storage. `PayloadRead::into_bytes` verifies the stream within a host
 memory limit. `into_backend` adapts the app handle to `WorkflowBackend`;
-its bound identity cannot change between operations.
+its bound identity cannot change between operations. `AppBackend::with_commit_hint`
+tells the trusted host when a start, signal, transition or restart finished, so
+the host can publish that commit's pending intents at once; manager
+reconciliation still recovers any intent the host misses. The hint carries no
+customer data.
 Task hosts instead use `runner::TaskPayloadReader`: it captures the assignment's
 journal, resolves named occurrences in that snapshot and reads referenced
 objects through the live task lease. `WorkerTasks` implements the
-payload read/write contract alongside the local task protocol.
-Until local host composition uses the manager's delivery loop,
-`runner::WorkflowWorker` drives bounded task slots and expired
-payload collection on its host's compio thread. Background discovery selects
-only host-assigned apps before applying batch limits; customer journal rows
-cannot register apps with the host. Expired assignments still permit lease and
-payload cleanup, while current policy is checked again before mutation.
-The loop keeps working without a
-request isolate, retries failed attempts with a delay, and bounds task polling
-and maintenance I/O. Shutdown cancels active execution and waits for it to stop
-before releasing claims. A cancelled host future must be drained before its
-slots are discarded or reused. `WorkerOptions` supplies the host limits, and
-construction requires customer payload and executable storage. The CLI starts
-this loop on a dedicated thread and supplies a persisted project identity.
-Production worker composition remains unfinished.
+payload read/write contract alongside the task protocol that `RunnerSlot` and
+executor tests exercise. Hosts run workflow work only through delivered jobs:
+`zeroship serve` feeds `runner::consumer::JobConsumer` from the native manager
+and has no journal polling or maintenance loop. Production worker composition
+remains unfinished.
 `runner::PreparedExecution` decodes runtime outcomes, leaves small values inline
 and prepares task-scoped uploads for large or explicitly referenced results.
 It retains upload request identities across retries, checks returned descriptors

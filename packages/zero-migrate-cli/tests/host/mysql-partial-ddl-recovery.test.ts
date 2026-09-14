@@ -39,7 +39,7 @@ import { table, t } from "@zeroship/migrate";
 import { apply, type DriverConfig } from "zero-migrate-cli";
 import type { MigrationModule } from "@zeroship/migrate/internal/recorder";
 
-// The host suite's addon is resolved and freshness-checked in one place.
+// The host suite builds and resolves its addon in one place.
 import "./addon.js";
 import { MYSQL_URL_ENV, requireLiveDb } from "./live-db.js";
 

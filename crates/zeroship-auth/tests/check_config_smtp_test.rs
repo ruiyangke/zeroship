@@ -19,8 +19,8 @@ fn auth_bin() -> &'static str {
     env!("CARGO_BIN_EXE_zeroship-auth")
 }
 
-/// Run the binary with a wiped environment (only PATH/HOME survive, mirroring the
-/// `env -i` discipline in `tests/config_check_e2e.sh`), capturing status+stdout.
+/// Run the binary with a wiped environment, retaining only the declared host
+/// paths needed by the child and capturing its status and output.
 fn run_auth(args: &[&str]) -> (std::process::ExitStatus, String, String) {
     run_auth_with_db("postgres://check-config", args)
 }

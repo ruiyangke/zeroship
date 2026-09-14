@@ -26,7 +26,7 @@ import { validate } from "zero-migrate-cli";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 
-// The host suite's addon is resolved and freshness-checked in one place.
+// The host suite builds and resolves its addon in one place.
 import "./addon.js";
 
 /** Every dialect the engine lowers for. A fixture must be valid for all of them. */

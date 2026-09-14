@@ -1,0 +1,39 @@
+{
+  "generated": [
+    "BinaryOp",
+    "UnaryOp",
+    "ScalarFn",
+    "SynthFn",
+    "EmptyContainerKind",
+    "CastTarget",
+    "ExtractField",
+    "AggFunc",
+    "IndexSortOrder",
+    "IndexMethod",
+    "CmpOp",
+    "OnUnmet",
+    "OnlinePhase",
+    "ExistenceGuard",
+    "RefAction",
+    "ExclusionMethod",
+    "ExclusionOperator",
+    "TriggerTiming",
+    "TriggerEvent",
+    "ForEach",
+    "RaiseLevel",
+    "JoinKind",
+    "OrderDir",
+    "Privilege",
+    "PolicyCmd",
+    "FuncArgMode",
+    "FuncLanguage",
+    "FuncVolatility",
+    "TableStrictness"
+  ],
+  "handAuthored": {
+    "VectorMetric": "VectorMetric",
+    "IrMaskKind": "MaskKind",
+    "IrClassification": "Classification",
+    "ColumnCollation": "ColumnCollation"
+  }
+}
