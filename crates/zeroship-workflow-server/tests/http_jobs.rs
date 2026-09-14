@@ -700,7 +700,7 @@ async fn enrollment_revocation_and_key_replacement_fence_blocked_queue_operation
 }
 
 /// Success criterion 3 (the manager half) of the option-1A worker-enrollment
-/// PoC: revoking enroller E's row - `SELECT zeroship.revoke_worker_enroller(E)`,
+/// `PoC`: revoking enroller E's row - `SELECT zeroship.revoke_worker_enroller(E)`,
 /// the same explicit operator database operation
 /// `db/migrations-ts/20260914000100_worker_instances_enroller_binding.ts`
 /// defines - cascades to `WorkflowAuth::worker`
