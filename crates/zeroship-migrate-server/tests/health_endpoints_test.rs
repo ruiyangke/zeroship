@@ -130,10 +130,16 @@ async fn readyz_is_200_when_postgres_answers() {
     assert!(body.contains("true"), "body: {body}");
 }
 
+#[ntex::test]
+async fn retired_health_alias_is_not_registered() {
+    let state = state_on(DEAD_DSN);
+    let retired = status_of(state.clone(), "/health").await.0;
+    let unknown = status_of(state, "/route-that-does-not-exist").await.0;
+    assert_ne!(retired, StatusCode::OK);
+    assert_eq!(retired, unknown, "the retired alias must not be a route");
+}
+
 // What these do NOT catch:
-//   - That `/health` is gone. These drive `configure`, which no longer
-//     registers it; the 404 is asserted against the real binary in
-//     tests/health_endpoints.sh.
 //   - The cache TTL. Each test builds a fresh state, so no test here observes
 //     a second probe hitting the cached answer; that is unit-tested in
 //     crates/zeroship-core/src/readiness.rs.

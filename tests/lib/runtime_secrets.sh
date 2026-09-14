@@ -208,10 +208,9 @@ e2e_platform_op_up() {
   mkdir -p "$dir"
   _e2e_write_platform_op_js "$E2E_PLATFORM_OP_JS" || return 1
 
-  # The pinned-issuer path needs neither node nor jose, and tests/health_endpoints.sh
-  # takes it precisely so the health contract stays testable on a checkout that
-  # has never run `pnpm install`. So these two are checked HERE, on the path that
-  # actually runs a node server, not at the top of the function.
+  # The pinned-issuer path needs neither node nor jose. These dependencies are
+  # checked here, on the path that actually runs a node server, rather than at
+  # the top of the function.
   if [ -n "$pinned_issuer" ]; then
     E2E_PLATFORM_OP_ISSUER="$pinned_issuer"
     # Empty, not unset: a caller doing `PIDS+=($E2E_PLATFORM_OP_PID)` must add
