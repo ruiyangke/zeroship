@@ -197,7 +197,7 @@ fn resume_after_process_death(configured_app: Option<&AppId>, native_dev: bool) 
     let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
     let workspace = manifest.parent().unwrap().parent().unwrap();
     let compiled = Command::new("pnpm")
-        .current_dir(workspace.join("sdks/vite-plugin"))
+        .current_dir(workspace.join("packages/vite-plugin"))
         .args(["exec", "tsx"])
         .arg(manifest.join("tests/fixtures/app-bundle.ts"))
         .arg(root.path())

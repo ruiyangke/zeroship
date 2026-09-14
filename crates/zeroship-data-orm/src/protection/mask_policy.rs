@@ -22,7 +22,7 @@ use zeroship_data_orm::error::DbError;
 use crate::binding::DbBinding;
 
 /// The six canonical classification values. Mirrors the SDK's
-/// `Classification` type (`sdks/db/src/types.ts`) and `crate::sql::catalog::Classification`.
+/// `Classification` type (`packages/db/src/types.ts`) and `crate::sql::catalog::Classification`.
 pub const VALID_CLASSIFICATIONS: &[&str] = &["public", "pii", "spi", "phi", "pci", "internal"];
 
 /// Actor roles and the classifications they may explicitly unmask.

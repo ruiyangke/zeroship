@@ -1,6 +1,6 @@
 # `@zeroship/vite-plugin`
 
-Reference for the public plugin exported from [`sdks/vite-plugin/src/index.ts`](../../sdks/vite-plugin/src/index.ts).
+Reference for the public plugin exported from [`packages/vite-plugin/src/index.ts`](../../packages/vite-plugin/src/index.ts).
 
 ## What it owns
 
@@ -64,7 +64,7 @@ with no gateway, no external auth service and no control plane.
 
 A configured user is `{ id?, email?, name?, avatar?, scopes? }`. **There is no
 `password` field.** The dev login form prefills and validates the deterministic
-password produced by `devPasswordFor` in `sdks/vite-plugin/src/dev-auth.ts`.
+password produced by `devPasswordFor` in `packages/vite-plugin/src/dev-auth.ts`.
 It is a local test credential rather than a secret, and the deployed platform's
 signup policy refuses it.
 
@@ -184,7 +184,7 @@ statically imported by the app still evaluates during startup.
 
 ## Synthetic server entry
 
-[`sdks/vite-plugin/src/rpc-registry.ts`](../../sdks/vite-plugin/src/rpc-registry.ts)
+[`packages/vite-plugin/src/rpc-registry.ts`](../../packages/vite-plugin/src/rpc-registry.ts)
 emits `virtual:zeroship/_server-entry`. It normalizes the app's exports for
 native runtime dispatch:
 

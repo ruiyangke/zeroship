@@ -95,7 +95,7 @@ export default async function setup(project: TestProject) {
 
   try {
     console.info(`DB example: build SDKs and runtime; logs at ${logs}`);
-    await run("pnpm", ["build"], root, "sdks", process.env);
+    await run("pnpm", ["build"], root, "packages", process.env);
     const artifacts = await run("cargo", ["build", "-p", "zeroship-cli", "--message-format=json"], root, "cargo", process.env);
     let binary: string | undefined;
     for (const line of artifacts.split("\n").filter((line) => line.startsWith("{"))) {

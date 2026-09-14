@@ -8,7 +8,7 @@ import { env } from "zeroship";
 import { Workflow, type WorkflowStep, type WorkflowTrigger } from "@zeroship/workflows";
 
 // `@zeroship/types` declares `env` as `[key: string]: unknown`, so there is no
-// `env.workflows` type today (checked: sdks/types/zeroship.d.ts has no
+// `env.workflows` type today (checked: packages/types/zeroship.d.ts has no
 // `workflows` mention). The cast below is the shape docs/reference/workflows.md
 // documents; keeping it in one place makes the missing declaration obvious
 // rather than scattering `as any` through the handlers.

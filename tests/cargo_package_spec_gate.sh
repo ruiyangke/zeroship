@@ -87,7 +87,7 @@ bad()  { printf '  FAIL %s\n' "$1"; FAIL=$((FAIL + 1)); }
 # for YAML: key on structure, not on the words. In markdown the executable
 # content is inside a fenced code block. All twelve prose false positives above
 # are outside fences; every broken command found was inside one.
-ROOTS=(tests deploy .github examples sdks)
+ROOTS=(tests deploy .github examples packages)
 
 # ---------------------------------------------------------------------------
 # The package set, from cargo itself rather than from a list we maintain.

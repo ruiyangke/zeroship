@@ -27,7 +27,7 @@
 # Usage:
 #   source "$ROOT/tests/lib/binary_freshness.sh"
 #   zs_check_binary_freshness "$ROOT" "$BIN" \
-#     "crates/zeroship-kv-v8/src crates/runtime/src sdks/kv/src" \
+#     "crates/zeroship-kv-v8/src crates/runtime/src packages/kv/src" \
 #     "zeroship zeroship-worker zeroship-gate zeroship-control dev-provision"
 #
 # Returns 0 when everything is fresh (or only warnings are wanted), 1 when
@@ -174,20 +174,20 @@ zs_report_staleness_here() {
 # The same question for a BUILT JS ARTEFACT rather than a Rust binary.
 #
 # `zs_check_binary_freshness` tests `-x`, which is right for binaries and wrong
-# here: `sdks/vite-plugin/dist/index.js` is not executable, so passing it to
+# here: `packages/vite-plugin/dist/index.js` is not executable, so passing it to
 # that function reports it MISSING and returns 2. Rather than relax the `-x`
 # (it is load-bearing there) or copy the logic, this is a companion sharing the
 # same severity contract: WARN by default, refuse under ZS_FRESHNESS_STRICT=1,
 # and return 2 for cannot-answer rather than passing quietly.
 #
 # The gap this closes: `tests/golden_path.sh` runs `pnpm build` inside an
-# EXAMPLE, which consumes whatever `sdks/vite-plugin/dist/` is already on disk.
+# EXAMPLE, which consumes whatever `packages/vite-plugin/dist/` is already on disk.
 # It never rebuilds the plugin, so a change to the plugin's own source can be
 # silently untested -- the run is green about a dist that predates the edit.
 #
 # Usage:
-#   zs_check_artifact_freshness "$ROOT" "sdks/vite-plugin/dist/index.js" \
-#     "sdks/vite-plugin/src"
+#   zs_check_artifact_freshness "$ROOT" "packages/vite-plugin/dist/index.js" \
+#     "packages/vite-plugin/src"
 zs_check_artifact_freshness() {
   local root="$1" artifact="$2" srcdirs="$3"
   local strict="${ZS_FRESHNESS_STRICT:-0}"

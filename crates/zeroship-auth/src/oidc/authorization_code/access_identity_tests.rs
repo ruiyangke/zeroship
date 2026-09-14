@@ -19,6 +19,91 @@ fn token_iat(token: &str) -> i64 {
 }
 
 #[compio::test]
+async fn identity_claim_projection_uses_the_mint_transaction_and_granted_scopes() {
+    Database::run(async |database| {
+        let fixture = MintFixture::seed(database).await;
+        let observer = database.connect_as_auth().await;
+        let mut mint = database.connect_as_auth().await;
+        let tx = mint.transaction().await.unwrap();
+        let proof = fixture.proof(&tx).await;
+        tx.execute(
+            "UPDATE zeroship.users SET email = $2, email_verified_at = NOW(), \
+             name = $3, avatar_url = $4 WHERE id = $1",
+            &[
+                &fixture.user_id.as_str(),
+                &"pending@example.test",
+                &"Pending profile",
+                &"https://example.test/pending.png",
+            ],
+        )
+        .await
+        .unwrap();
+        let observed = observer
+            .query_one(
+                "SELECT email::text, name FROM zeroship.users WHERE id = $1",
+                &[&fixture.user_id.as_str()],
+            )
+            .await
+            .unwrap();
+        assert_eq!(observed.get::<_, String>("email"), "recipient@example.test");
+        assert_eq!(observed.get::<_, String>("name"), "Mint subject");
+
+        for (scopes, expected) in [
+            (
+                vec!["openid".to_owned(), "email".to_owned(), "profile".to_owned()],
+                serde_json::json!({
+                    "email":"pending@example.test", "email_verified":true,
+                    "name":"Pending profile", "picture":"https://example.test/pending.png"
+                }),
+            ),
+            (
+                vec!["openid".to_owned(), "email".to_owned()],
+                serde_json::json!({"email":"pending@example.test", "email_verified":true}),
+            ),
+            (
+                vec!["openid".to_owned(), "profile".to_owned()],
+                serde_json::json!({"name":"Pending profile", "picture":"https://example.test/pending.png"}),
+            ),
+            (vec!["openid".to_owned()], serde_json::json!({})),
+        ] {
+            let claims = super::transaction_identity_claims(&tx, &proof, &scopes)
+                .await
+                .unwrap();
+            assert_eq!(serde_json::to_value(claims).unwrap(), expected);
+        }
+        tx.execute(
+            "UPDATE zeroship.users SET email_verified_at = NULL, avatar_url = NULL WHERE id = $1",
+            &[&fixture.user_id.as_str()],
+        )
+        .await
+        .unwrap();
+        let claims = super::transaction_identity_claims(
+            &tx,
+            &proof,
+            &["email".to_owned(), "profile".to_owned()],
+        )
+        .await
+        .unwrap();
+        assert_eq!(claims.email_verified, Some(false));
+        assert!(claims.picture.is_none());
+        tx.rollback().await.unwrap();
+        let restored = observer
+            .query_one(
+                "SELECT email::text, name, avatar_url, email_verified_at IS NOT NULL AS verified \
+                 FROM zeroship.users WHERE id = $1",
+                &[&fixture.user_id.as_str()],
+            )
+            .await
+            .unwrap();
+        assert_eq!(restored.get::<_, String>("email"), "recipient@example.test");
+        assert_eq!(restored.get::<_, String>("name"), "Mint subject");
+        assert!(restored.get::<_, Option<String>>("avatar_url").is_none());
+        assert!(!restored.get::<_, bool>("verified"));
+    })
+    .await;
+}
+
+#[compio::test]
 async fn access_token_mint_holds_the_user_lock_until_the_transaction_ends() {
     Database::run(async |database| {
         let fixture = MintFixture::seed(database).await;

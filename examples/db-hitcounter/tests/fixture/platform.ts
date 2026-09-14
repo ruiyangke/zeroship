@@ -126,7 +126,7 @@ export class Platform {
   async start(): Promise<void> {
     const { work, processes } = this;
     console.info("DB fixture: build platform binaries and database");
-    await processes.run("sdks", "pnpm", ["build"], root, process.env);
+    await processes.run("packages", "pnpm", ["build"], root, process.env);
     const artifacts = await processes.run("cargo", process.env.CARGO ?? "cargo", [
       "build", "--message-format=json", "--locked", "--bins",
       ...["zeroship-cli", "zeroship-worker", "zeroship-control", "zeroship-gateway", "zeroship-data-cdc-server", "zeroship-migrate-server"].flatMap((name) => ["-p", name]),

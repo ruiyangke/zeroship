@@ -56,7 +56,7 @@ life. A guard would not have been enough: the write path is reachable from any
 transitively bundled package, so any check it performs is a check on an input the
 attacker also controls the timing of. Rationale in the design document, section 11.
 
-**Evidence:** `sdks/db/src/policy.ts:87,93-94`;
+**Evidence:** `packages/db/src/policy.ts:87,93-94`;
 `crates/zeroship-data-orm/src/protection/mask_policy.rs`
 
 ### L2 (DECIDED) - mask policy suppressible via `_flushPendingMaskPolicy`
@@ -69,7 +69,7 @@ the real one landing - and they could not have closed separately: hardening the
 drain against suppression would have left forgery, and vice versa. The same
 deletion closes both; there is no pending slot to drain.
 
-**Evidence:** `sdks/db/src/internal.ts:83`; `sdks/bootstrap/src/runtime-entry.ts:196`;
+**Evidence:** `packages/db/src/internal.ts:83`; `sdks/bootstrap/src/runtime-entry.ts:196`;
 `sdks/bootstrap/src/dev-entry.ts:296`;
 `crates/zeroship-runtime/src/core/bootstrap_modules.rs:63`
 

@@ -771,10 +771,10 @@ list returns parsed Todo[]  ←  superjson decode
 
 | File | Role |
 | --- | --- |
-| `sdks/vite-plugin/src/transform.ts` | Per-file rewrite, function-level + file-level directive handling |
-| `sdks/vite-plugin/src/reference-graph.ts` | Module-graph walk for transitive marking |
-| `sdks/vite-plugin/src/synthetic-entry.ts` | Generates the bundle entry |
-| `sdks/vite-plugin/src/manifest.ts` | Emits `manifest.resources` at `closeBundle` |
+| `packages/vite-plugin/src/transform.ts` | Per-file rewrite, function-level + file-level directive handling |
+| `packages/vite-plugin/src/reference-graph.ts` | Module-graph walk for transitive marking |
+| `packages/vite-plugin/src/synthetic-entry.ts` | Generates the bundle entry |
+| `packages/vite-plugin/src/manifest.ts` | Emits `manifest.resources` at `closeBundle` |
 | `crates/zeroship-runtime/src/rpc/dispatch.rs` | NEW: fastcall dispatch entries |
 | `crates/zeroship-runtime/src/rpc/error.rs` | NEW: native `RpcError` `#[v8_class]` (§6) |
 | `crates/zeroship-runtime/src/rpc/superjson.rs` | NEW: superjson encode/decode |

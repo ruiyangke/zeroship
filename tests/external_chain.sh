@@ -245,7 +245,7 @@ npm whoami --registry "$REGISTRY" --userconfig "$TMP_NPMRC"
 log "3. Build + publish SDKs to local Verdaccio"
 pnpm install
 pnpm build
-NPM_CONFIG_USERCONFIG="$TMP_NPMRC" ZEROSHIP_NPM_REGISTRY="$REGISTRY" "$ROOT/deploy/scripts/publish-sdks.sh"
+NPM_CONFIG_USERCONFIG="$TMP_NPMRC" ZEROSHIP_NPM_REGISTRY="$REGISTRY" "$ROOT/deploy/scripts/publish-packages.sh"
 printf 'npm view @zeroship/rpc version: '
 npm view @zeroship/rpc version --registry "$REGISTRY"
 printf 'npm view @zeroship/migrate version: '

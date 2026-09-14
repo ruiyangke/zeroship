@@ -172,7 +172,7 @@ pub fn require_user_callback(
     // deployed (where the gateway's `unauthenticated_response` answers before
     // the worker runs) and silently not in dev, where this throw is the 401
     // source. Seam coverage: `require_user_anonymous_code_is_canonical_*`
-    // below, and `sdks/auth/tests/auth-expired-seam.test.ts` on the JS side.
+    // below, and `packages/auth/tests/auth-expired-seam.test.ts` on the JS side.
     let throw_auth_required = |scope: &mut v8::PinScope| {
         let msg = v8::String::new(scope, "Authentication required").unwrap();
         let exc = v8::Exception::error(scope, msg);

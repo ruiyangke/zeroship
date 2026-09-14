@@ -1,4 +1,4 @@
-use super::{resolve_or_link, LinkOutcome, LinkResume, PendingLink, ResolvedProfile};
+use super::{LinkOutcome, LinkResume, PendingLink, ResolvedProfile, resolve_or_link};
 use crate::{
     error::AuthError,
     identity::password,
@@ -24,8 +24,14 @@ fn profile(provider: &str, trusted: bool) -> ResolvedProfile<'_> {
     }
 }
 
-async fn require_confirmation(pg: &Client, profile: &ResolvedProfile<'_>, user_id: &UserId) {
-    let outcome = resolve_or_link(pg, profile, LinkResume::ReturnTo(RETURN_TO), KEY)
+#[allow(clippy::future_not_send, reason = "the ORM belongs to its compio runtime")]
+async fn require_confirmation(
+    pg: &Client,
+    orm: &zeroship_data_orm::Database,
+    profile: &ResolvedProfile<'_>,
+    user_id: &UserId,
+) {
+    let outcome = resolve_or_link(pg, orm, profile, LinkResume::ReturnTo(RETURN_TO), KEY)
         .await
         .unwrap();
     let LinkOutcome::NeedsConfirmation {
@@ -44,12 +50,14 @@ async fn require_confirmation(pg: &Client, profile: &ResolvedProfile<'_>, user_i
     assert_eq!(pending.subject, profile.subject);
     assert_eq!(pending.email, profile.email);
     assert_eq!(pending.return_to.as_deref(), Some(RETURN_TO));
-    assert!(identities::list_for_user(pg, user_id)
-        .await
-        .unwrap()
-        .is_empty());
+    assert!(
+        identities::list_for_user(pg, user_id)
+            .await
+            .unwrap()
+            .is_empty()
+    );
     assert_eq!(
-        users::find_by_id(pg, user_id).await.unwrap().unwrap().name,
+        users::find_by_id(orm, user_id).await.unwrap().unwrap().name,
         "Local name"
     );
 }
@@ -58,15 +66,16 @@ async fn require_confirmation(pg: &Client, profile: &ResolvedProfile<'_>, user_i
 async fn a_password_requires_confirmation_and_preserves_the_native_continuation() {
     Database::run(async |database| {
         let pg = database.connect_as_auth().await;
+        let orm = database.orm().await;
         let hash = password::hash("existing-password").unwrap();
-        let user = users::create(&pg, "recipient@example.test", "Local name", Some(&hash))
+        let user = users::create(&orm, "recipient@example.test", "Local name", Some(&hash))
             .await
             .unwrap();
         for provider in ["google", "github"] {
-            require_confirmation(&pg, &profile(provider, true), &user.id).await;
+            require_confirmation(&pg, &orm, &profile(provider, true), &user.id).await;
         }
         assert_eq!(
-            users::find_by_id(&pg, &user.id)
+            users::find_by_id(&orm, &user.id)
                 .await
                 .unwrap()
                 .unwrap()
@@ -82,10 +91,11 @@ async fn a_password_requires_confirmation_and_preserves_the_native_continuation(
 async fn untrusted_email_requires_confirmation_for_an_account_without_a_password() {
     Database::run(async |database| {
         let pg = database.connect_as_auth().await;
-        let user = users::create(&pg, "recipient@example.test", "Local name", None)
+        let orm = database.orm().await;
+        let user = users::create(&orm, "recipient@example.test", "Local name", None)
             .await
             .unwrap();
-        require_confirmation(&pg, &profile("google", false), &user.id).await;
+        require_confirmation(&pg, &orm, &profile("google", false), &user.id).await;
     })
     .await;
 }
@@ -94,11 +104,12 @@ async fn untrusted_email_requires_confirmation_for_an_account_without_a_password
 async fn trusted_email_links_an_existing_account_without_overwriting_its_profile() {
     Database::run(async |database| {
         let pg = database.connect_as_auth().await;
-        let user = users::create(&pg, "recipient@example.test", "Local name", None)
+        let orm = database.orm().await;
+        let user = users::create(&orm, "recipient@example.test", "Local name", None)
             .await
             .unwrap();
         let profile = profile("github", true);
-        let outcome = resolve_or_link(&pg, &profile, LinkResume::ReturnTo(RETURN_TO), KEY)
+        let outcome = resolve_or_link(&pg, &orm, &profile, LinkResume::ReturnTo(RETURN_TO), KEY)
             .await
             .unwrap();
         let LinkOutcome::Existing { user_id } = outcome else {
@@ -111,7 +122,7 @@ async fn trusted_email_links_an_existing_account_without_overwriting_its_profile
             .unwrap();
         assert_eq!(linked.user_id, user.id);
         assert_eq!(
-            users::find_by_id(&pg, &user.id)
+            users::find_by_id(&orm, &user.id)
                 .await
                 .unwrap()
                 .unwrap()
@@ -126,16 +137,22 @@ async fn trusted_email_links_an_existing_account_without_overwriting_its_profile
             1
         );
 
-        let other = users::create(&pg, "changed@example.test", "Other account", None)
+        let other = users::create(&orm, "changed@example.test", "Other account", None)
             .await
             .unwrap();
         let changed_profile = ResolvedProfile {
             email: "changed@example.test",
             ..profile
         };
-        let outcome = resolve_or_link(&pg, &changed_profile, LinkResume::ReturnTo(RETURN_TO), KEY)
-            .await
-            .unwrap();
+        let outcome = resolve_or_link(
+            &pg,
+            &orm,
+            &changed_profile,
+            LinkResume::ReturnTo(RETURN_TO),
+            KEY,
+        )
+        .await
+        .unwrap();
         let LinkOutcome::Existing { user_id } = outcome else {
             panic!("expected established identity, got {outcome:?}");
         };
@@ -143,10 +160,12 @@ async fn trusted_email_links_an_existing_account_without_overwriting_its_profile
             user_id, user.id,
             "a changed provider email cannot rebind the established subject"
         );
-        assert!(identities::list_for_user(&pg, &other.id)
-            .await
-            .unwrap()
-            .is_empty());
+        assert!(
+            identities::list_for_user(&pg, &other.id)
+                .await
+                .unwrap()
+                .is_empty()
+        );
         assert_eq!(
             identities::list_for_user(&pg, &user.id)
                 .await
@@ -162,16 +181,17 @@ async fn trusted_email_links_an_existing_account_without_overwriting_its_profile
 async fn untrusted_email_creates_no_account_or_identity_and_trusted_retry_can_succeed() {
     Database::run(async |database| {
         let pg = database.connect_as_auth().await;
+        let orm = database.orm().await;
         let profile = profile("google", false);
-        let error = resolve_or_link(&pg, &profile, LinkResume::ReturnTo(RETURN_TO), KEY).await.unwrap_err();
+        let error = resolve_or_link(&pg, &orm, &profile, LinkResume::ReturnTo(RETURN_TO), KEY).await.unwrap_err();
         assert!(matches!(error, AuthError::Internal(reason) if reason.contains("untrusted provider email")));
         assert!(pg.query("SELECT id FROM zeroship.users", &[]).await.unwrap().is_empty());
         assert!(pg.query("SELECT id FROM zeroship.federated_identities", &[]).await.unwrap().is_empty());
 
         let trusted_profile = ResolvedProfile { provider_trusted_for_email: true, ..profile };
-        let outcome = resolve_or_link(&pg, &trusted_profile, LinkResume::ReturnTo(RETURN_TO), KEY).await.unwrap();
+        let outcome = resolve_or_link(&pg, &orm, &trusted_profile, LinkResume::ReturnTo(RETURN_TO), KEY).await.unwrap();
         let LinkOutcome::Created { user_id } = outcome else { panic!("expected created account, got {outcome:?}"); };
-        let user = users::find_by_id(&pg, &user_id).await.unwrap().unwrap();
+        let user = users::find_by_id(&orm, &user_id).await.unwrap().unwrap();
         assert_eq!(user.email, trusted_profile.email);
         assert_eq!(user.name, trusted_profile.name.unwrap());
         assert!(user.email_verified_at.is_some());

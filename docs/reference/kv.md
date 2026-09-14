@@ -6,7 +6,7 @@ counters, short-lived leases, cache-aside values, session-like scratch data,
 and prefix scans. Use `@zeroship/db` for relational source-of-truth data,
 audited workflows, durable idempotency, and exact large-number accounting.
 
-The TypeScript wrapper lives in `sdks/kv/src/index.ts`. Rust support is split by
+The TypeScript wrapper lives in `packages/kv/src/index.ts`. Rust support is split by
 responsibility:
 
 - `crates/zeroship-kv/` owns the backend contract, Redis/redb implementations,

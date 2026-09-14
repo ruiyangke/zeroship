@@ -5077,7 +5077,7 @@ async fn bare_await_body_io_is_rejected() {
     // write if it ever gets that far - it must not. BareAwaitWorkflow's body-level
     // `fetch` is rejected synchronously by the dispatch-scoped I/O guard
     // (`installWorkflowIoGuards` replaces `globalThis.fetch` and throws
-    // NondeterministicError in body mode - sdks/workflows/src/journal.ts:250-254,
+    // NondeterministicError in body mode - packages/workflows/src/journal.ts:250-254,
     // :263-273) before the real fetch runs, and therefore before the SSRF floor
     // ever sees the URL. That ordering is what keeps this arm measuring the guard
     // rather than the network, and it is why the fixture's body-level call stayed

@@ -75,7 +75,7 @@ mapfile -t SRCS < <(
 # file, was measured on 2026-08-28, and was WRONG by eight on 2026-09-04 - so
 # this gate exited 1 on every tree, including main, from `18c6816aa`
 # ("record the measurement behind the wholesale crate copy") forward. That commit
-# collapsed the `sdks` stage's eight individually-named crate COPYs into one
+# collapsed the `js-packages` stage's eight individually-named crate COPYs into one
 # `COPY crates/ crates/`. Nothing about that is a defect; it is exactly the
 # ordinary edit a pinned census cannot survive, and the repository's convention
 # (tests/lib/gate_arms.sh) is that a number lives beside the code producing it
@@ -203,7 +203,7 @@ echo "  $PASS passed, $FAIL failed, $((PASS+FAIL)) ran"
 #
 # A PINNED `EXPECT_RAN=30` STOOD HERE UNTIL 2026-09-04 AND WAS RED ON MAIN. It was
 # re-measured three times in ten days (14 -> 15 -> 19 -> 29 -> 30, each with a
-# paragraph of arithmetic), and then `18c6816aa` collapsed the `sdks` stage's
+# paragraph of arithmetic), and then `18c6816aa` collapsed the `js-packages` stage's
 # eight per-crate COPYs into one `COPY crates/ crates/`. 22 ran, 30 was expected,
 # and the gate failed for eight commits on a Dockerfile that was correct - while
 # reporting "0 failed" one line above, which is what a census does when it

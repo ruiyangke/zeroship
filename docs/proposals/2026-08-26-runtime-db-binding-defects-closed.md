@@ -731,7 +731,7 @@ should be re-verified against.
 > removal, `4ee6b70dd` a sync merge, `49e579293` a guard against the deleted
 > migration mirrors reappearing). Two whole files deleted
 > (`backend/sqlite/fts.rs` 547 lines, `zeroship-schema/src/fts_sqlite.rs` 398)
-> plus references across `query.rs`, `sdks/db/src/types.ts`, the vite-plugin
+> plus references across `query.rs`, `packages/db/src/types.ts`, the vite-plugin
 > renderer, `docs/reference/db.md`, the divergence table, and four `.fts()`
 > calls in `examples/db-e2e`.
 >
@@ -769,7 +769,7 @@ folded `.fts()` into a `__fts` GENERATED `tsvector` column plus a GIN index on
 PostgreSQL. Nothing replaced it: `tsvector` appears in the whole tree only in
 that removal comment, and there is no producer in plugin-db's PostgreSQL
 backend. Meanwhile `t.string().fts(language?)` is still callable and documented
-in `@zeroship/db` (`sdks/db/src/types.ts:1172`),
+in `@zeroship/db` (`packages/db/src/types.ts:1172`),
 `docs/reference/sqlite-divergences.md:14-15` documents PostgreSQL FTS as working
 and merely *differing* from SQLite ("`language` selects the `tsvector`
 configuration"), and SQLite full-text still works because plugin-db's runtime
@@ -779,7 +779,7 @@ working backend and a non-existent one. The removal's stated rationale cites
 `docs/proposals/fts-macro.md` - **DELETED or never landed; it is not in the tree**.
 
 **Evidence:** `zeroship-migrate-core/src/render/declarative.rs:1823-1830,2971-2976`;
-`sdks/db/src/types.ts:1172`; `docs/reference/sqlite-divergences.md:14-15`;
+`packages/db/src/types.ts:1172`; `docs/reference/sqlite-divergences.md:14-15`;
 `backend/sqlite/fts.rs`; DELETED or never landed: `docs/proposals/fts-macro.md`
 
 L11 is listed here because it was found by implementation work on this design
@@ -844,7 +844,7 @@ The shipped design is stronger than "call the reaper from the operator side":
 
 **Evidence:** `worker/src/main.rs:15,48-66,639-641,714`;
 `crates/zeroship-worker/src/slot_reaper.rs:1-40`; `crates/zeroship-data-v8/src/slot_reaper.rs`;
-`grep -rn "dropAbandoned\|drop_abandoned" crates/ sdks/` returns nothing
+`grep -rn "dropAbandoned\|drop_abandoned" crates/ packages/` returns nothing
 
 **How this entry went stale, which is the reusable part.** It asserted "verified
 2026-08-27 that no control-plane or worker code calls it" - and the fix landed

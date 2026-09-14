@@ -411,7 +411,7 @@ failure is invisible to every same-key fixture, which is why the acceptance arm
 pairs it with a granted-path control.
 
 Deleted concretely: `defineMaskPolicy()` and the policy slot
-(`sdks/db/src/policy.ts:120`), the `_flushPendingMaskPolicy` /
+(`packages/db/src/policy.ts:120`), the `_flushPendingMaskPolicy` /
 `_peekPendingMaskPolicy` drain (`policy.ts:178`); the
 `zeroship.db.setMaskPolicy` native op
 (`crates/zeroship-data-v8/src/v8_classes/db_platform.rs`) and its
@@ -567,10 +567,10 @@ parsed by SQLite's URI parser and `?mode=rw` after an existing `?` would not be
 the mode parameter.
 
 A non-SQLite dev URL is typed-rejected before anything derives a path
-(`assertSqliteDevUrl`, `sdks/vite-plugin/src/dev-database-url.ts:83`, called
+(`assertSqliteDevUrl`, `packages/vite-plugin/src/dev-database-url.ts:83`, called
 inside `resolveDatabaseUrl` at `:142`). A descriptor change in dev restarts the
 runtime rather than mutating schema in place
-(`restartRuntimeForDescriptorChange`, `sdks/vite-plugin/src/dev-server.ts:1058`,
+(`restartRuntimeForDescriptorChange`, `packages/vite-plugin/src/dev-server.ts:1058`,
 invoked at `:1220`).
 
 ### 13. Caches and bounds
@@ -846,7 +846,7 @@ These constraints bind any future change to this design.
    the packer emission path, and the runtime read that turns bytes into a
    `MaskPolicy`. The string `mask` appears zero times in
    `crates/zeroship-bundle/src/manifest.rs` and zero times in
-   `sdks/vite-plugin/src/zship.ts`, so there is no latent route in either. Blocked
+   `packages/vite-plugin/src/zship.ts`, so there is no latent route in either. Blocked
    on Open 5 for the ceiling half.
 
 5. **What is the ceiling's configuration format and source?** NEEDS-DECISION. The

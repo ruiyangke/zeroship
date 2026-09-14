@@ -8,13 +8,14 @@ use zeroship_auth::store::users;
 #[compio::test]
 async fn concurrent_issue_leaves_one_active_verification_token() {
     Database::run(async |database| {
+        let orm = database.orm().await;
         let client = database.connect_as_auth().await;
 
         let email = format!(
             "verify-concurrent-{}@zeroship.test",
             Uuid::new_v4().simple()
         );
-        let user = users::create(&client, &email, "Test", None)
+        let user = users::create(&orm, &email, "Test", None)
             .await
             .expect("seed user");
         let original = verification::issue(&client, &user.id, &email)
@@ -99,10 +100,11 @@ async fn concurrent_issue_leaves_one_active_verification_token() {
 #[compio::test]
 async fn issue_then_redeem_roundtrip() {
     Database::run(async |database| {
+        let orm = database.orm().await;
         let client = database.connect_as_auth().await;
 
         let email = format!("verify-{}@zeroship.test", Uuid::new_v4().simple());
-        let user = users::create(&client, &email, "Test", None)
+        let user = users::create(&orm, &email, "Test", None)
             .await
             .expect("seed user");
 
@@ -136,10 +138,11 @@ async fn issue_then_redeem_roundtrip() {
 #[compio::test]
 async fn redeem_and_mark_verified_rolls_back_token_consume_with_transaction() {
     Database::run(async |database| {
+        let orm = database.orm().await;
         let mut client = database.connect_as_auth().await;
 
         let email = format!("verify-rollback-{}@zeroship.test", Uuid::new_v4().simple());
-        let user = users::create(&client, &email, "Test", None)
+        let user = users::create(&orm, &email, "Test", None)
             .await
             .expect("seed user");
         let issued = verification::issue(&client, &user.id, &email)
@@ -206,10 +209,11 @@ async fn redeem_and_mark_verified_rolls_back_token_consume_with_transaction() {
 #[compio::test]
 async fn new_issue_supersedes_previous() {
     Database::run(async |database| {
+        let orm = database.orm().await;
         let client = database.connect_as_auth().await;
 
         let email = format!("verify-supersede-{}@zeroship.test", Uuid::new_v4().simple());
-        let user = users::create(&client, &email, "Test", None)
+        let user = users::create(&orm, &email, "Test", None)
             .await
             .expect("seed user");
 

@@ -117,7 +117,7 @@ pub struct ErrorExtras<'a> {
 /// THIS function is what a deployed vite-built app's RPC error actually goes
 /// through, and the evidence is the `request_id` format, not a reading of the
 /// call graph. A vite-built app DOES install the TS handler as `default.fetch`
-/// on both tiers (`sdks/vite-plugin/src/rpc-registry.ts` generates the
+/// on both tiers (`packages/vite-plugin/src/rpc-registry.ts` generates the
 /// synthetic entry and calls `createFetchHandler`), so
 /// `fetch-handler.ts`'s own 5xx rail is reachable in principle. It did not
 /// serve the constraint errors measured by `examples/db-todos/tests/database.test.ts`:

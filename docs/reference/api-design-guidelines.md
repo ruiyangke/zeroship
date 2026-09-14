@@ -50,7 +50,7 @@ import { auth } from "@zeroship/auth";
 const user = auth.requireUser();
 ```
 
-The current auth helper lives in [sdks/auth/src/server.ts](../../sdks/auth/src/server.ts).
+The current auth helper lives in [packages/auth/src/server.ts](../../packages/auth/src/server.ts).
 
 ### 4. Zero setup for creator code
 
@@ -84,7 +84,7 @@ Collection methods should read naturally:
 - `count(filter?)`
 - `exists(filter?)`
 
-The public collection surface is defined in [sdks/db/src/collection.ts](../../sdks/db/src/collection.ts), with the `Db` / `Collections` / `TxCollection` types in [sdks/db/src/db-types.ts](../../sdks/db/src/db-types.ts).
+The public collection surface is defined in [packages/db/src/collection.ts](../../packages/db/src/collection.ts), with the `Db` / `Collections` / `TxCollection` types in [packages/db/src/db-types.ts](../../packages/db/src/db-types.ts).
 
 ### 6. Keep parameter order stable
 
@@ -133,7 +133,7 @@ schema({
 Zeroship surfaces error codes from two namespaces:
 
 - **SDK error-class codes** — `SCREAMING_SNAKE` literals stamped by the typed
-  error classes in [`sdks/db/src/errors.ts`](../../sdks/db/src/errors.ts):
+  error classes in [`packages/db/src/errors.ts`](../../packages/db/src/errors.ts):
   `VALIDATION` (`ValidationError`), `OPTIMISTIC_CONCURRENCY`
   (`OptimisticLockError`), `NOT_FOUND` (`NotFoundError`), `NOT_UNIQUE`
   (`NotUniqueError`).

@@ -83,7 +83,7 @@ pub fn dev_mode_enabled() -> bool {
 /// The one caller is `cmd_serve` in `crates/zeroship-cli/src/main.rs`: the
 /// single-process runtime `@zeroship/vite-plugin` spawns as
 /// `zeroship serve <entry>` with `ZEROSHIP_DEV=1`
-/// (`sdks/vite-plugin/src/dev-server.ts:939`). `zeroship-worker` does not call
+/// (`packages/vite-plugin/src/dev-server.ts:939`). `zeroship-worker` does not call
 /// it, which is what makes a leaked `ZEROSHIP_DEV=1` inert there.
 #[must_use]
 pub fn dev_mode_from_process_env() -> bool {
@@ -272,9 +272,9 @@ fn validate_url_under(url: &str, dev_loopback: bool) -> Result<(), String> {
     // Block localhost. This is the ONE name the dev relaxation admits, and it
     // is the name the Vite dev server is addressed by: the ModuleRunner
     // transport fetches `${ZEROSHIP_VITE_ORIGIN}/__zeroship_fetch_module`
-    // (`sdks/vite-plugin/src/dev-bootstrap/transport.ts:38`) and the plugin
+    // (`packages/vite-plugin/src/dev-bootstrap/transport.ts:38`) and the plugin
     // sets that origin to `http://localhost:<vitePort>`
-    // (`sdks/vite-plugin/src/dev-server.ts:947`). It is spawned as a CHILD of
+    // (`packages/vite-plugin/src/dev-server.ts:947`). It is spawned as a CHILD of
     // the Vite process (`dev-server.ts:970`), so the dev server is always on
     // this host and loopback always reaches it.
     if host == "localhost" {

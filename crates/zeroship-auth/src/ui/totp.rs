@@ -84,6 +84,7 @@ use crate::sessions::login as session_cookie;
 use crate::store::users::UserRow;
 use crate::store::{sessions, totp as totp_store, users};
 use zeroship_authn::rate_limit::{self, Quota, RateLimitDecision};
+use zeroship_data_orm::Database;
 
 /// Issuer shown in the authenticator app's account label.
 const TOTP_ISSUER: &str = "zeroship";
@@ -130,6 +131,7 @@ pub async fn enroll(
     form: web::types::Form<ReauthForm>,
     cfg: web::types::State<Arc<AuthConfig>>,
     db: web::types::State<Arc<compio_postgres::Client>>,
+    orm: web::types::State<Database>,
     mailer: web::types::State<Arc<dyn Mailer>>,
 ) -> HttpResponse {
     if !csrf_ok(&req, &form.csrf) {
@@ -138,7 +140,7 @@ pub async fn enroll(
             &json!({ "error": "invalid_request" }),
         );
     }
-    let Some(user) = resolve_user(&req, db.as_ref()).await else {
+    let Some(user) = resolve_user(&req, db.as_ref(), &orm).await else {
         return json_status(
             StatusCode::UNAUTHORIZED,
             &json!({ "error": "unauthenticated" }),
@@ -271,6 +273,7 @@ pub async fn confirm(
     form: web::types::Form<ConfirmForm>,
     cfg: web::types::State<Arc<AuthConfig>>,
     db: web::types::State<Arc<compio_postgres::Client>>,
+    orm: web::types::State<Database>,
 ) -> HttpResponse {
     if !csrf_ok(&req, &form.csrf) {
         return json_status(
@@ -278,7 +281,7 @@ pub async fn confirm(
             &json!({ "error": "invalid_request" }),
         );
     }
-    let Some(user) = resolve_user(&req, db.as_ref()).await else {
+    let Some(user) = resolve_user(&req, db.as_ref(), &orm).await else {
         return json_status(
             StatusCode::UNAUTHORIZED,
             &json!({ "error": "unauthenticated" }),
@@ -404,6 +407,7 @@ pub async fn disable(
     form: web::types::Form<ReauthForm>,
     cfg: web::types::State<Arc<AuthConfig>>,
     db: web::types::State<Arc<compio_postgres::Client>>,
+    orm: web::types::State<Database>,
     mailer: web::types::State<Arc<dyn Mailer>>,
 ) -> HttpResponse {
     if !csrf_ok(&req, &form.csrf) {
@@ -412,7 +416,7 @@ pub async fn disable(
             &json!({ "error": "invalid_request" }),
         );
     }
-    let Some(user) = resolve_user(&req, db.as_ref()).await else {
+    let Some(user) = resolve_user(&req, db.as_ref(), &orm).await else {
         return json_status(
             StatusCode::UNAUTHORIZED,
             &json!({ "error": "unauthenticated" }),
@@ -643,7 +647,11 @@ fn csrf_ok(req: &HttpRequest, form_token: &str) -> bool {
 /// Resolve the signed-in user from the `__Host-zsidp_session` cookie (mirrors
 /// `me::resolve_user` / `account_deletion::resolve_user`).
 #[allow(clippy::future_not_send)]
-async fn resolve_user(req: &HttpRequest, db: &compio_postgres::Client) -> Option<UserRow> {
+async fn resolve_user(
+    req: &HttpRequest,
+    db: &compio_postgres::Client,
+    orm: &Database,
+) -> Option<UserRow> {
     let cookie_header = req
         .headers()
         .get(COOKIE)
@@ -651,7 +659,7 @@ async fn resolve_user(req: &HttpRequest, db: &compio_postgres::Client) -> Option
         .unwrap_or("");
     let session_id = session_cookie::parse_cookie(cookie_header)?;
     let session = sessions::validate(db, session_id).await.ok().flatten()?;
-    users::find_by_id(db, &session.user_id).await.ok().flatten()
+    users::find_by_id(orm, &session.user_id).await.ok().flatten()
 }
 
 fn json_status(status: StatusCode, body: &serde_json::Value) -> HttpResponse {

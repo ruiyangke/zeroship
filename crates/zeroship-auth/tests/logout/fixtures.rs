@@ -27,7 +27,7 @@ pub(super) fn issuer() -> Arc<Issuer> {
 
 pub(super) async fn account(server: &AuthServer, email: &str) -> users::UserRow {
     users::create(
-        &server.pg,
+        &server.orm,
         email,
         "Logout fixture",
         Some(&password::hash(PASSWORD).unwrap()),

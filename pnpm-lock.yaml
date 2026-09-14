@@ -102,13 +102,13 @@ importers:
         version: 6.0.1(vite@8.0.10(@types/node@22.19.17)(esbuild@0.28.0)(jiti@2.6.1)(tsx@4.21.0)(yaml@2.8.4))
       '@zeroship/rpc':
         specifier: workspace:*
-        version: link:../../sdks/rpc
+        version: link:../../packages/rpc
       '@zeroship/server':
         specifier: workspace:*
-        version: link:../../sdks/server
+        version: link:../../packages/server
       '@zeroship/vite-plugin':
         specifier: workspace:*
-        version: link:../../sdks/vite-plugin
+        version: link:../../packages/vite-plugin
       ai:
         specifier: ^6.0.172
         version: 6.0.174(zod@4.4.2)
@@ -136,7 +136,7 @@ importers:
     dependencies:
       '@zeroship/ui':
         specifier: workspace:*
-        version: link:../../sdks/ui
+        version: link:../../packages/ui
       lucide-react:
         specifier: ^1.8.0
         version: 1.14.0(@types/react@19.2.14)(react@19.2.5)
@@ -167,23 +167,23 @@ importers:
     dependencies:
       '@zeroship/auth':
         specifier: workspace:*
-        version: link:../../sdks/auth
+        version: link:../../packages/auth
       '@zeroship/kv':
         specifier: workspace:*
-        version: link:../../sdks/kv
+        version: link:../../packages/kv
       '@zeroship/rpc':
         specifier: workspace:*
-        version: link:../../sdks/rpc
+        version: link:../../packages/rpc
       '@zeroship/server':
         specifier: workspace:*
-        version: link:../../sdks/server
+        version: link:../../packages/server
       '@zeroship/vite-plugin':
         specifier: workspace:*
-        version: link:../../sdks/vite-plugin
+        version: link:../../packages/vite-plugin
     devDependencies:
       '@zeroship/types':
         specifier: workspace:*
-        version: link:../../sdks/types
+        version: link:../../packages/types
       typescript:
         specifier: 'catalog:'
         version: 5.9.3
@@ -198,26 +198,26 @@ importers:
     dependencies:
       '@zeroship/auth':
         specifier: workspace:*
-        version: link:../../sdks/auth
+        version: link:../../packages/auth
       '@zeroship/db':
         specifier: workspace:*
-        version: link:../../sdks/db
+        version: link:../../packages/db
       '@zeroship/rpc':
         specifier: workspace:*
-        version: link:../../sdks/rpc
+        version: link:../../packages/rpc
       '@zeroship/server':
         specifier: workspace:*
-        version: link:../../sdks/server
+        version: link:../../packages/server
       '@zeroship/vite-plugin':
         specifier: workspace:*
-        version: link:../../sdks/vite-plugin
+        version: link:../../packages/vite-plugin
     devDependencies:
       '@zeroship/migrate':
         specifier: workspace:*
         version: link:../../packages/zero-migrate
       '@zeroship/types':
         specifier: workspace:*
-        version: link:../../sdks/types
+        version: link:../../packages/types
       typescript:
         specifier: 'catalog:'
         version: 5.9.3
@@ -232,20 +232,20 @@ importers:
     dependencies:
       '@zeroship/auth':
         specifier: workspace:*
-        version: link:../../sdks/auth
+        version: link:../../packages/auth
       '@zeroship/rpc':
         specifier: workspace:*
-        version: link:../../sdks/rpc
+        version: link:../../packages/rpc
       '@zeroship/server':
         specifier: workspace:*
-        version: link:../../sdks/server
+        version: link:../../packages/server
       '@zeroship/vite-plugin':
         specifier: workspace:*
-        version: link:../../sdks/vite-plugin
+        version: link:../../packages/vite-plugin
     devDependencies:
       '@zeroship/types':
         specifier: workspace:*
-        version: link:../../sdks/types
+        version: link:../../packages/types
       typescript:
         specifier: 'catalog:'
         version: 5.9.3
@@ -260,26 +260,26 @@ importers:
     dependencies:
       '@zeroship/auth':
         specifier: workspace:*
-        version: link:../../sdks/auth
+        version: link:../../packages/auth
       '@zeroship/kv':
         specifier: workspace:*
-        version: link:../../sdks/kv
+        version: link:../../packages/kv
       '@zeroship/rpc':
         specifier: workspace:*
-        version: link:../../sdks/rpc
+        version: link:../../packages/rpc
       '@zeroship/server':
         specifier: workspace:*
-        version: link:../../sdks/server
+        version: link:../../packages/server
       '@zeroship/storage':
         specifier: workspace:*
-        version: link:../../sdks/storage
+        version: link:../../packages/storage
       '@zeroship/vite-plugin':
         specifier: workspace:*
-        version: link:../../sdks/vite-plugin
+        version: link:../../packages/vite-plugin
     devDependencies:
       '@zeroship/types':
         specifier: workspace:*
-        version: link:../../sdks/types
+        version: link:../../packages/types
       typescript:
         specifier: 'catalog:'
         version: 5.9.3
@@ -294,13 +294,13 @@ importers:
     dependencies:
       '@zeroship/rpc':
         specifier: workspace:*
-        version: link:../../sdks/rpc
+        version: link:../../packages/rpc
       '@zeroship/server':
         specifier: workspace:*
-        version: link:../../sdks/server
+        version: link:../../packages/server
       '@zeroship/vite-plugin':
         specifier: workspace:*
-        version: link:../../sdks/vite-plugin
+        version: link:../../packages/vite-plugin
       zod:
         specifier: 'catalog:'
         version: 3.25.76
@@ -322,13 +322,13 @@ importers:
         version: 6.0.1(vite@8.0.10(@types/node@22.19.17)(esbuild@0.28.0)(jiti@2.6.1)(tsx@4.21.0)(yaml@2.8.4))
       '@zeroship/rpc':
         specifier: workspace:*
-        version: link:../../sdks/rpc
+        version: link:../../packages/rpc
       '@zeroship/server':
         specifier: workspace:*
-        version: link:../../sdks/server
+        version: link:../../packages/server
       '@zeroship/vite-plugin':
         specifier: workspace:*
-        version: link:../../sdks/vite-plugin
+        version: link:../../packages/vite-plugin
       react:
         specifier: catalog:react18
         version: 18.3.1
@@ -356,19 +356,19 @@ importers:
     dependencies:
       '@zeroship/db':
         specifier: workspace:*
-        version: link:../../sdks/db
+        version: link:../../packages/db
       '@zeroship/react':
         specifier: workspace:*
-        version: link:../../sdks/react
+        version: link:../../packages/react
       '@zeroship/rpc':
         specifier: workspace:*
-        version: link:../../sdks/rpc
+        version: link:../../packages/rpc
       '@zeroship/server':
         specifier: workspace:*
-        version: link:../../sdks/server
+        version: link:../../packages/server
       '@zeroship/vite-plugin':
         specifier: workspace:*
-        version: link:../../sdks/vite-plugin
+        version: link:../../packages/vite-plugin
       react:
         specifier: ^19.0.0
         version: 19.2.5
@@ -384,7 +384,7 @@ importers:
         version: 19.2.3(@types/react@19.2.14)
       '@zeroship/types':
         specifier: workspace:*
-        version: link:../../sdks/types
+        version: link:../../packages/types
       typescript:
         specifier: 'catalog:'
         version: 5.9.3
@@ -396,23 +396,23 @@ importers:
     dependencies:
       '@zeroship/db':
         specifier: workspace:*
-        version: link:../../sdks/db
+        version: link:../../packages/db
       '@zeroship/rpc':
         specifier: workspace:*
-        version: link:../../sdks/rpc
+        version: link:../../packages/rpc
       '@zeroship/server':
         specifier: workspace:*
-        version: link:../../sdks/server
+        version: link:../../packages/server
       '@zeroship/vite-plugin':
         specifier: workspace:*
-        version: link:../../sdks/vite-plugin
+        version: link:../../packages/vite-plugin
     devDependencies:
       '@types/node':
         specifier: 'catalog:'
         version: 22.19.17
       '@zeroship/types':
         specifier: workspace:*
-        version: link:../../sdks/types
+        version: link:../../packages/types
       playwright:
         specifier: 1.58.2
         version: 1.58.2
@@ -433,10 +433,10 @@ importers:
     dependencies:
       '@zeroship/db':
         specifier: workspace:*
-        version: link:../../sdks/db
+        version: link:../../packages/db
       '@zeroship/vite-plugin':
         specifier: workspace:*
-        version: link:../../sdks/vite-plugin
+        version: link:../../packages/vite-plugin
     devDependencies:
       '@types/node':
         specifier: 'catalog:'
@@ -446,7 +446,7 @@ importers:
         version: link:../../packages/zero-migrate
       '@zeroship/types':
         specifier: workspace:*
-        version: link:../../sdks/types
+        version: link:../../packages/types
       playwright:
         specifier: 1.58.2
         version: 1.58.2
@@ -482,16 +482,16 @@ importers:
         version: 6.0.1(vite@8.0.10(@types/node@22.19.17)(esbuild@0.28.0)(jiti@2.6.1)(tsx@4.21.0)(yaml@2.8.4))
       '@zeroship/db':
         specifier: workspace:*
-        version: link:../../sdks/db
+        version: link:../../packages/db
       '@zeroship/rpc':
         specifier: workspace:*
-        version: link:../../sdks/rpc
+        version: link:../../packages/rpc
       '@zeroship/server':
         specifier: workspace:*
-        version: link:../../sdks/server
+        version: link:../../packages/server
       '@zeroship/vite-plugin':
         specifier: workspace:*
-        version: link:../../sdks/vite-plugin
+        version: link:../../packages/vite-plugin
       react:
         specifier: catalog:react18
         version: 18.3.1
@@ -522,7 +522,7 @@ importers:
         version: 18.3.7(@types/react@18.3.28)
       '@zeroship/types':
         specifier: workspace:*
-        version: link:../../sdks/types
+        version: link:../../packages/types
       jsdom:
         specifier: ^29.1.1
         version: 29.1.1(@noble/hashes@1.8.0)
@@ -558,17 +558,17 @@ importers:
     dependencies:
       '@zeroship/rpc':
         specifier: workspace:*
-        version: link:../../sdks/rpc
+        version: link:../../packages/rpc
       '@zeroship/server':
         specifier: workspace:*
-        version: link:../../sdks/server
+        version: link:../../packages/server
       '@zeroship/vite-plugin':
         specifier: workspace:*
-        version: link:../../sdks/vite-plugin
+        version: link:../../packages/vite-plugin
     devDependencies:
       '@zeroship/types':
         specifier: workspace:*
-        version: link:../../sdks/types
+        version: link:../../packages/types
       typescript:
         specifier: 'catalog:'
         version: 5.9.3
@@ -583,20 +583,20 @@ importers:
     dependencies:
       '@zeroship/rpc':
         specifier: workspace:*
-        version: link:../../sdks/rpc
+        version: link:../../packages/rpc
       '@zeroship/server':
         specifier: workspace:*
-        version: link:../../sdks/server
+        version: link:../../packages/server
       '@zeroship/vite-plugin':
         specifier: workspace:*
-        version: link:../../sdks/vite-plugin
+        version: link:../../packages/vite-plugin
       zod:
         specifier: 'catalog:'
         version: 3.25.76
     devDependencies:
       '@zeroship/types':
         specifier: workspace:*
-        version: link:../../sdks/types
+        version: link:../../packages/types
       typescript:
         specifier: 'catalog:'
         version: 5.9.3
@@ -611,7 +611,7 @@ importers:
     dependencies:
       '@zeroship/vite-plugin':
         specifier: workspace:*
-        version: link:../../sdks/vite-plugin
+        version: link:../../packages/vite-plugin
       hono:
         specifier: ^4.6.0
         version: 4.12.16
@@ -636,13 +636,13 @@ importers:
         version: 4.2.4(vite@8.0.10(@types/node@22.19.17)(esbuild@0.28.0)(jiti@2.6.1)(tsx@4.21.0)(yaml@2.8.4))
       '@zeroship/db':
         specifier: workspace:*
-        version: link:../../sdks/db
+        version: link:../../packages/db
       '@zeroship/rpc':
         specifier: workspace:*
-        version: link:../../sdks/rpc
+        version: link:../../packages/rpc
       '@zeroship/server':
         specifier: workspace:*
-        version: link:../../sdks/server
+        version: link:../../packages/server
       class-variance-authority:
         specifier: ^0.7.1
         version: 0.7.1
@@ -706,10 +706,10 @@ importers:
         version: 6.0.1(vite@8.0.10(@types/node@22.19.17)(esbuild@0.28.0)(jiti@2.6.1)(tsx@4.21.0)(yaml@2.8.4))
       '@zeroship/types':
         specifier: workspace:*
-        version: link:../../sdks/types
+        version: link:../../packages/types
       '@zeroship/vite-plugin':
         specifier: workspace:*
-        version: link:../../sdks/vite-plugin
+        version: link:../../packages/vite-plugin
       typescript:
         specifier: 'catalog:'
         version: 5.9.3
@@ -724,16 +724,16 @@ importers:
         version: 6.0.1(vite@8.0.10(@types/node@22.19.17)(esbuild@0.28.0)(jiti@2.6.1)(tsx@4.21.0)(yaml@2.8.4))
       '@zeroship/kv':
         specifier: workspace:*
-        version: link:../../sdks/kv
+        version: link:../../packages/kv
       '@zeroship/rpc':
         specifier: workspace:*
-        version: link:../../sdks/rpc
+        version: link:../../packages/rpc
       '@zeroship/server':
         specifier: workspace:*
-        version: link:../../sdks/server
+        version: link:../../packages/server
       '@zeroship/vite-plugin':
         specifier: workspace:*
-        version: link:../../sdks/vite-plugin
+        version: link:../../packages/vite-plugin
       react:
         specifier: catalog:react18
         version: 18.3.1
@@ -752,7 +752,7 @@ importers:
         version: 18.3.7(@types/react@18.3.28)
       '@zeroship/types':
         specifier: workspace:*
-        version: link:../../sdks/types
+        version: link:../../packages/types
       playwright:
         specifier: 1.58.2
         version: 1.58.2
@@ -800,13 +800,13 @@ importers:
         version: 6.0.1(vite@8.0.10(@types/node@22.19.17)(esbuild@0.28.0)(jiti@2.6.1)(tsx@4.21.0)(yaml@2.8.4))
       '@zeroship/rpc':
         specifier: workspace:*
-        version: link:../../sdks/rpc
+        version: link:../../packages/rpc
       '@zeroship/server':
         specifier: workspace:*
-        version: link:../../sdks/server
+        version: link:../../packages/server
       '@zeroship/vite-plugin':
         specifier: workspace:*
-        version: link:../../sdks/vite-plugin
+        version: link:../../packages/vite-plugin
       langchain:
         specifier: ^1.3.3
         version: 1.3.5(@langchain/core@1.1.44(@opentelemetry/api@1.9.0)(openai@6.35.0(ws@8.20.0)(zod@4.4.2))(ws@8.20.0))(@opentelemetry/api@1.9.0)(openai@6.35.0(ws@8.20.0)(zod@4.4.2))(react-dom@19.2.5(react@19.2.5))(react@19.2.5)(ws@8.20.0)(zod-to-json-schema@3.25.2(zod@4.4.2))
@@ -834,17 +834,17 @@ importers:
     dependencies:
       '@zeroship/db':
         specifier: workspace:*
-        version: link:../../sdks/db
+        version: link:../../packages/db
       '@zeroship/vite-plugin':
         specifier: workspace:*
-        version: link:../../sdks/vite-plugin
+        version: link:../../packages/vite-plugin
     devDependencies:
       '@zeroship/migrate':
         specifier: workspace:*
         version: link:../../packages/zero-migrate
       '@zeroship/types':
         specifier: workspace:*
-        version: link:../../sdks/types
+        version: link:../../packages/types
       typescript:
         specifier: 'catalog:'
         version: 5.9.3
@@ -859,13 +859,13 @@ importers:
         version: 6.0.1(vite@8.0.10(@types/node@22.19.17)(esbuild@0.28.0)(jiti@2.6.1)(tsx@4.21.0)(yaml@2.8.4))
       '@zeroship/rpc':
         specifier: workspace:*
-        version: link:../../sdks/rpc
+        version: link:../../packages/rpc
       '@zeroship/server':
         specifier: workspace:*
-        version: link:../../sdks/server
+        version: link:../../packages/server
       '@zeroship/vite-plugin':
         specifier: workspace:*
-        version: link:../../sdks/vite-plugin
+        version: link:../../packages/vite-plugin
       openai:
         specifier: ^6.0.0
         version: 6.35.0(ws@8.20.0)(zod@4.4.2)
@@ -890,22 +890,22 @@ importers:
         version: 6.0.1(vite@8.0.10(@types/node@22.19.17)(esbuild@0.28.0)(jiti@2.6.1)(tsx@4.21.0)(yaml@2.8.4))
       '@zeroship/db':
         specifier: workspace:*
-        version: link:../../sdks/db
+        version: link:../../packages/db
       '@zeroship/kv':
         specifier: workspace:*
-        version: link:../../sdks/kv
+        version: link:../../packages/kv
       '@zeroship/rpc':
         specifier: workspace:*
-        version: link:../../sdks/rpc
+        version: link:../../packages/rpc
       '@zeroship/server':
         specifier: workspace:*
-        version: link:../../sdks/server
+        version: link:../../packages/server
       '@zeroship/storage':
         specifier: workspace:*
-        version: link:../../sdks/storage
+        version: link:../../packages/storage
       '@zeroship/vite-plugin':
         specifier: workspace:*
-        version: link:../../sdks/vite-plugin
+        version: link:../../packages/vite-plugin
       react:
         specifier: ^19.2.5
         version: 19.2.5
@@ -924,7 +924,7 @@ importers:
         version: link:../../packages/zero-migrate
       '@zeroship/types':
         specifier: workspace:*
-        version: link:../../sdks/types
+        version: link:../../packages/types
       typescript:
         specifier: ^5.0.0
         version: 5.9.3
@@ -936,7 +936,7 @@ importers:
     dependencies:
       '@zeroship/vite-plugin':
         specifier: workspace:*
-        version: link:../../sdks/vite-plugin
+        version: link:../../packages/vite-plugin
     devDependencies:
       typescript:
         specifier: 'catalog:'
@@ -955,13 +955,13 @@ importers:
         version: 6.0.1(vite@8.0.10(@types/node@22.19.17)(esbuild@0.28.0)(jiti@2.6.1)(tsx@4.21.0)(yaml@2.8.4))
       '@zeroship/rpc':
         specifier: workspace:*
-        version: link:../../sdks/rpc
+        version: link:../../packages/rpc
       '@zeroship/server':
         specifier: workspace:*
-        version: link:../../sdks/server
+        version: link:../../packages/server
       '@zeroship/vite-plugin':
         specifier: workspace:*
-        version: link:../../sdks/vite-plugin
+        version: link:../../packages/vite-plugin
       react:
         specifier: catalog:react18
         version: 18.3.1
@@ -998,13 +998,13 @@ importers:
         version: 6.0.1(vite@8.0.10(@types/node@22.19.17)(esbuild@0.28.0)(jiti@2.6.1)(tsx@4.21.0)(yaml@2.8.4))
       '@zeroship/rpc':
         specifier: workspace:*
-        version: link:../../sdks/rpc
+        version: link:../../packages/rpc
       '@zeroship/server':
         specifier: workspace:*
-        version: link:../../sdks/server
+        version: link:../../packages/server
       '@zeroship/vite-plugin':
         specifier: workspace:*
-        version: link:../../sdks/vite-plugin
+        version: link:../../packages/vite-plugin
       react:
         specifier: catalog:react18
         version: 18.3.1
@@ -1032,23 +1032,23 @@ importers:
     dependencies:
       '@zeroship/rpc':
         specifier: workspace:*
-        version: link:../../sdks/rpc
+        version: link:../../packages/rpc
       '@zeroship/server':
         specifier: workspace:*
-        version: link:../../sdks/server
+        version: link:../../packages/server
       '@zeroship/storage':
         specifier: workspace:*
-        version: link:../../sdks/storage
+        version: link:../../packages/storage
       '@zeroship/vite-plugin':
         specifier: workspace:*
-        version: link:../../sdks/vite-plugin
+        version: link:../../packages/vite-plugin
     devDependencies:
       '@types/node':
         specifier: 'catalog:'
         version: 22.19.17
       '@zeroship/types':
         specifier: workspace:*
-        version: link:../../sdks/types
+        version: link:../../packages/types
       aws4fetch:
         specifier: ^1
         version: 1.0.20
@@ -1084,23 +1084,23 @@ importers:
     dependencies:
       '@zeroship/rpc':
         specifier: workspace:*
-        version: link:../../sdks/rpc
+        version: link:../../packages/rpc
       '@zeroship/server':
         specifier: workspace:*
-        version: link:../../sdks/server
+        version: link:../../packages/server
       '@zeroship/storage':
         specifier: workspace:*
-        version: link:../../sdks/storage
+        version: link:../../packages/storage
       '@zeroship/vite-plugin':
         specifier: workspace:*
-        version: link:../../sdks/vite-plugin
+        version: link:../../packages/vite-plugin
     devDependencies:
       '@types/node':
         specifier: 'catalog:'
         version: 22.19.17
       '@zeroship/types':
         specifier: workspace:*
-        version: link:../../sdks/types
+        version: link:../../packages/types
       playwright:
         specifier: 1.58.2
         version: 1.58.2
@@ -1133,17 +1133,17 @@ importers:
     dependencies:
       '@zeroship/rpc':
         specifier: workspace:*
-        version: link:../../sdks/rpc
+        version: link:../../packages/rpc
       '@zeroship/server':
         specifier: workspace:*
-        version: link:../../sdks/server
+        version: link:../../packages/server
       '@zeroship/vite-plugin':
         specifier: workspace:*
-        version: link:../../sdks/vite-plugin
+        version: link:../../packages/vite-plugin
     devDependencies:
       '@zeroship/types':
         specifier: workspace:*
-        version: link:../../sdks/types
+        version: link:../../packages/types
       typescript:
         specifier: 'catalog:'
         version: 5.9.3
@@ -1158,7 +1158,7 @@ importers:
     dependencies:
       '@zeroship/vite-plugin':
         specifier: workspace:*
-        version: link:../../sdks/vite-plugin
+        version: link:../../packages/vite-plugin
     devDependencies:
       typescript:
         specifier: 'catalog:'
@@ -1171,17 +1171,17 @@ importers:
     dependencies:
       '@zeroship/rpc':
         specifier: workspace:*
-        version: link:../../sdks/rpc
+        version: link:../../packages/rpc
       '@zeroship/server':
         specifier: workspace:*
-        version: link:../../sdks/server
+        version: link:../../packages/server
       '@zeroship/vite-plugin':
         specifier: workspace:*
-        version: link:../../sdks/vite-plugin
+        version: link:../../packages/vite-plugin
     devDependencies:
       '@zeroship/types':
         specifier: workspace:*
-        version: link:../../sdks/types
+        version: link:../../packages/types
       typescript:
         specifier: 'catalog:'
         version: 5.9.3
@@ -1196,23 +1196,23 @@ importers:
     dependencies:
       '@zeroship/rpc':
         specifier: workspace:*
-        version: link:../../sdks/rpc
+        version: link:../../packages/rpc
       '@zeroship/server':
         specifier: workspace:*
-        version: link:../../sdks/server
+        version: link:../../packages/server
       '@zeroship/vite-plugin':
         specifier: workspace:*
-        version: link:../../sdks/vite-plugin
+        version: link:../../packages/vite-plugin
       '@zeroship/workflows':
         specifier: workspace:*
-        version: link:../../sdks/workflows
+        version: link:../../packages/workflows
     devDependencies:
       '@types/node':
         specifier: 'catalog:'
         version: 22.19.17
       '@zeroship/types':
         specifier: workspace:*
-        version: link:../../sdks/types
+        version: link:../../packages/types
       playwright:
         specifier: 1.58.2
         version: 1.58.2
@@ -1245,17 +1245,17 @@ importers:
     dependencies:
       '@zeroship/workflows':
         specifier: workspace:*
-        version: link:../../sdks/workflows
+        version: link:../../packages/workflows
     devDependencies:
       '@types/node':
         specifier: 'catalog:'
         version: 22.19.17
       '@zeroship/server':
         specifier: workspace:*
-        version: link:../../sdks/server
+        version: link:../../packages/server
       '@zeroship/types':
         specifier: workspace:*
-        version: link:../../sdks/types
+        version: link:../../packages/types
       playwright:
         specifier: 1.58.2
         version: 1.58.2
@@ -1382,7 +1382,7 @@ importers:
         specifier: 'catalog:'
         version: 5.9.3
 
-  sdks/auth:
+  packages/auth:
     devDependencies:
       '@arethetypeswrong/cli':
         specifier: ^0.18.2
@@ -1433,7 +1433,7 @@ importers:
         specifier: workspace:*
         version: link:../..
 
-  sdks/control:
+  packages/control:
     devDependencies:
       '@arethetypeswrong/cli':
         specifier: ^0.18.2
@@ -1454,9 +1454,9 @@ importers:
         specifier: 'catalog:'
         version: 5.9.3
 
-  sdks/create-zeroship-app: {}
+  packages/create-zeroship-app: {}
 
-  sdks/db:
+  packages/db:
     dependencies:
       '@zeroship/types':
         specifier: workspace:*
@@ -1487,7 +1487,7 @@ importers:
         specifier: workspace:*
         version: link:../..
 
-  sdks/eslint-config:
+  packages/eslint-config:
     devDependencies:
       tsx:
         specifier: 'catalog:'
@@ -1496,7 +1496,7 @@ importers:
         specifier: 'catalog:'
         version: 5.9.3
 
-  sdks/eslint-plugin-workflow:
+  packages/eslint-plugin-workflow:
     devDependencies:
       '@types/node':
         specifier: 'catalog:'
@@ -1508,7 +1508,7 @@ importers:
         specifier: 'catalog:'
         version: 5.9.3
 
-  sdks/kv:
+  packages/kv:
     devDependencies:
       '@arethetypeswrong/cli':
         specifier: ^0.18.2
@@ -1532,7 +1532,7 @@ importers:
         specifier: workspace:*
         version: link:../..
 
-  sdks/mcp:
+  packages/mcp:
     dependencies:
       '@modelcontextprotocol/sdk':
         specifier: ^1.29.0
@@ -1554,7 +1554,7 @@ importers:
         specifier: 'catalog:'
         version: 5.9.3
 
-  sdks/payments:
+  packages/payments:
     dependencies:
       '@zeroship/control':
         specifier: workspace:*
@@ -1570,7 +1570,7 @@ importers:
         specifier: ^2.1.0
         version: 2.1.9(@types/node@22.19.17)(happy-dom@20.9.0)(jsdom@29.1.1(@noble/hashes@1.8.0))(lightningcss@1.32.0)(msw@2.14.2(@types/node@22.19.17)(typescript@5.9.3))(supports-color@8.1.1)
 
-  sdks/react:
+  packages/react:
     devDependencies:
       '@arethetypeswrong/cli':
         specifier: ^0.18.2
@@ -1609,7 +1609,7 @@ importers:
         specifier: 'catalog:'
         version: 5.9.3
 
-  sdks/rpc:
+  packages/rpc:
     devDependencies:
       '@arethetypeswrong/cli':
         specifier: ^0.18.2
@@ -1634,7 +1634,7 @@ importers:
         specifier: ^2.2.6
         version: 2.2.6
 
-  sdks/server:
+  packages/server:
     dependencies:
       '@zeroship/types':
         specifier: workspace:*
@@ -1665,7 +1665,7 @@ importers:
         specifier: 'catalog:'
         version: 3.25.76
 
-  sdks/storage:
+  packages/storage:
     devDependencies:
       '@arethetypeswrong/cli':
         specifier: ^0.18.2
@@ -1689,9 +1689,9 @@ importers:
         specifier: workspace:*
         version: link:../..
 
-  sdks/types: {}
+  packages/types: {}
 
-  sdks/ui:
+  packages/ui:
     dependencies:
       '@base-ui/react':
         specifier: ^1.5.0
@@ -1791,7 +1791,7 @@ importers:
         specifier: ^9.0.0
         version: 9.0.10(debug@4.4.3(supports-color@8.1.1))(supports-color@8.1.1)
 
-  sdks/vite-plugin:
+  packages/vite-plugin:
     dependencies:
       '@rollup/plugin-inject':
         specifier: ^5.0.5
@@ -1852,7 +1852,7 @@ importers:
         specifier: 'catalog:'
         version: 8.0.10(@types/node@22.19.17)(esbuild@0.28.0)(jiti@2.6.1)(tsx@4.21.0)(yaml@2.8.4)
 
-  sdks/workflows:
+  packages/workflows:
     devDependencies:
       '@arethetypeswrong/cli':
         specifier: ^0.18.2
@@ -1873,7 +1873,7 @@ importers:
         specifier: 'catalog:'
         version: 5.9.3
 
-  sdks/zeroship-stub: {}
+  packages/zeroship-stub: {}
 
   tests/e2e-browser:
     devDependencies:

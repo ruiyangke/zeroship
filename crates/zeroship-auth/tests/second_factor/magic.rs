@@ -14,7 +14,7 @@ async fn magic_login_requires_second_factor(device: Device) {
     Database::run(async |database| {
         let mailer = Arc::new(CapturingMailer::default());
         let server = AuthServer::with_mailer(database, mailer.clone()).await;
-        let user = users::create(&server.pg, "creator@example.test", "Magic account", None).await.unwrap();
+        let user = users::create(&server.orm, "creator@example.test", "Magic account", None).await.unwrap();
         let authenticator = Authenticator::confirmed(&server, &user.id).await;
         let return_to = AuthServer::fresh_challenge();
         let form = server.http.get(format!("{}/login", server.auth_base)).unwrap().send().await.unwrap();

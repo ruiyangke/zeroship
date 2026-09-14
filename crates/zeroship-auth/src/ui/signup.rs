@@ -36,7 +36,6 @@ use crate::return_to;
 use crate::store::users;
 use crate::ui::{ErrorPage, PublicErrorMessage, SignupPage};
 use zeroship_authn::rate_limit::{self, Quota, RateLimitDecision};
-use zeroship_core::UserId;
 use zeroship_data_orm::orm::{Database, DbError};
 use zeroship_mailer::templates::{build_email, VerifyEmailHtml, VerifyEmailText};
 use zeroship_mailer::{Address, Mailer};
@@ -176,18 +175,7 @@ pub async fn post(
     // 7. Insert the user row. Account-enumeration defense: a duplicate
     // email is logged but produces the same response as a successful
     // insert — the attacker cannot probe email existence via this endpoint.
-    let inserted: Result<users::UserRow, DbError> = async {
-        orm.entity::<crate::store::native::models::users::Entity>()?
-            .insert(users::NewUser {
-                id: UserId::mint(),
-                email: &email,
-                name: &name,
-                password_hash: Some(&phc),
-            })
-            .await
-    }
-    .await;
-    let created = match inserted {
+    let created = match users::create(&orm, &email, &name, Some(&phc)).await {
         Ok(u) => Some(u),
         Err(e @ DbError::UniqueViolation { .. }) => {
             tracing::info!(error = %e, "signup rejected duplicate email");

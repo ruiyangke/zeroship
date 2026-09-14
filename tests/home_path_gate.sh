@@ -4,7 +4,7 @@
 #
 # WHY, from three instances in one day (2026-08-10):
 #
-#   1. sdks/vite-plugin/package.json depended on
+#   1. packages/vite-plugin/package.json depended on
 #      `file:/home/ruiyang/Projects/zero-migrate/sdks/migrate`. Published, it
 #      became a dependency on a path that exists on one machine (task #265).
 #   2. examples/db-todos/playwright.config.ts set

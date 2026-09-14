@@ -355,7 +355,7 @@ my-app/
     └── index.ts
 ```
 
-The build pipeline (`sdks/vite-plugin/`) reads `policies.cedar`, validates it via Cedar-WASM in node, and bakes it into the `.zship` manifest as `manifest.authz.policies = "..."`. At app boot, the worker compiles it once into a `cedar_policy::PolicySet` and pins it to the isolate. No DB round-trip per call.
+The build pipeline (`packages/vite-plugin/`) reads `policies.cedar`, validates it via Cedar-WASM in node, and bakes it into the `.zship` manifest as `manifest.authz.policies = "..."`. At app boot, the worker compiles it once into a `cedar_policy::PolicySet` and pins it to the isolate. No DB round-trip per call.
 
 End users get authz decisions free; creators get a declarative file that ships with their code.
 
@@ -956,7 +956,7 @@ permit(
 );
 ```
 
-At build time (`sdks/vite-plugin/`):
+At build time (`packages/vite-plugin/`):
 
 1. Read `policies.cedar` if present.
 2. Validate via Cedar-WASM (`cedar-policy-wasm` in node). Compilation errors fail the build.
@@ -1141,7 +1141,7 @@ NEW: dashboard/src/lib/policy/cedar-lint.ts                // wraps cedar-policy
 NEW: dashboard/src/lib/policy/conditions.ts                // condition library UI components
 NEW: dashboard/src/routes/tokens/[id]/audit/+page.svelte
 MOD: crates/zeroship-control/src/token_handlers.rs                  // GET /me/tokens/<id>/audit (paginated)
-MOD: sdks/control/src/tokens.ts                            // typed client for the above
+MOD: packages/control/src/tokens.ts                            // typed client for the above
 ```
 
 **Exit criteria.**
@@ -1187,9 +1187,9 @@ MOD: crates/zeroship-control/src/api.rs                   // every handler reads
 ```
 NEW: crates/plugin-authz/Cargo.toml
 NEW: crates/plugin-authz/src/lib.rs              // #[v8_class] bindings for is_authorized
-NEW: sdks/permissions/package.json
-NEW: sdks/permissions/src/{index,types,entity}.ts
-NEW: sdks/vite-plugin/src/authz.ts               // build-time policies.cedar discovery + manifest emit
+NEW: packages/permissions/package.json
+NEW: packages/permissions/src/{index,types,entity}.ts
+NEW: packages/vite-plugin/src/authz.ts               // build-time policies.cedar discovery + manifest emit
 MOD: crates/zeroship-bundle/src/manifest.rs               // Manifest.authz: Option<CedarSource>
 MOD: crates/zeroship-runtime/src/core/init.rs             // wire plugin-authz into the v8 env
 MOD: docs/reference/auth.md                     // (already covers authn; we keep this scoped)
@@ -1203,7 +1203,8 @@ NEW: docs/reference/permissions.md               // the @zeroship/permissions su
 - An app without `policies.cedar` permits everything (no breakage on existing apps when P12 ships).
 - The v8class binding is allocation-free in the hot path (verified by isolate heap snapshot diff before/after 100K calls).
 
-**~Test count delta.** ~60 new tests (most in `sdks/permissions` and `crates/runtime` integration tests).
+**Tests.** Cover the package surface in `packages/permissions` and the native
+boundary in `crates/runtime` integration tests.
 
 ---
 

@@ -201,7 +201,7 @@ impl Fixture {
         assert_eq!(session.amr, amr);
         assert_eq!(session.acr, Some(format!("urn:zeroship:{}", kind.name())));
         let profile = self.provider.user();
-        let user = users::find_by_email(&self.server.pg, &profile.email)
+        let user = users::find_by_email(&self.server.orm, &profile.email)
             .await
             .unwrap()
             .unwrap();
@@ -223,7 +223,7 @@ impl Fixture {
 
     pub async fn assert_created_profile(&self) {
         let profile = self.provider.user();
-        let user = users::find_by_email(&self.server.pg, &profile.email)
+        let user = users::find_by_email(&self.server.orm, &profile.email)
             .await
             .unwrap()
             .unwrap();
