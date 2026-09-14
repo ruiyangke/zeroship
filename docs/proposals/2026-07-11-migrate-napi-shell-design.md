@@ -100,13 +100,11 @@ entry in `[dev-dependencies]` adds `dyn-symbols`, so a bare
 cdylib keeps resolving the Node ABI from its host
 (`tests/napi_symbol_shape_gate.sh`).
 
-**The napi surface** (identical in `index.d.ts` and `index.js`, enforced by
-`tests/napi_export_parity_gate.sh`): `irVersion`, `buildInfo`, `setEngineDiagnostics`,
-`loadVerify`, `genArtifacts`, `previewSql`, `advisoriesFor` run inline and DB-free;
-`applyIr`, `rollback`, `resolvePending`, `status`, `statusIr`, `history`, `baselineIr`
-take a host driver callback and return a promise; `applyIrSqlite`, `rollbackSqlite`,
-`statusIrSqlite` go straight to the bundled in-process rusqlite backend with no host
-callback at all.
+**The napi surface** is generated from the Rust exports. The generated CommonJS
+loader assigns `nativeBinding` directly to `module.exports`, while the same napi
+build emits `index.d.ts`. DB-free verbs run inline, host-driven database verbs take
+a driver callback and return a promise, and SQLite verbs use the bundled in-process
+rusqlite backend. The package's Node tests load and call the real addon.
 
 **The JS half.** `packages/zero-migrate-cli` loads the addon (`src/addon.ts`), ships
 `driver-pg.ts` and `driver-mysql2.ts`, and exposes the facade: `apply`, `rollback`,
