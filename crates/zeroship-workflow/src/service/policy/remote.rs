@@ -17,15 +17,15 @@ use zeroship_workflow_client::{LeasedPolicy, WorkerCoordinator};
 ///
 /// Clones retain the same generation. Construct a replacement when placement or
 /// signer changes; refreshing never retargets the existing binding. Clones
-/// also share one exchange at a time, so a refresh cannot supersede an
-/// establishment's refresh ticket while it waits on the manager.
+/// share one establishment at a time, so concurrent fenced acceptances ask the
+/// manager once.
 #[derive(Clone, Debug)]
 pub struct AssignedPolicies {
     binding: PolicyBinding,
     client: WorkerCoordinator,
     scope: AssignedScope,
     ingress_used: Arc<AtomicBool>,
-    exchanges: Arc<futures::lock::Mutex<()>>,
+    establishing: Arc<futures::lock::Mutex<()>>,
 }
 
 impl AssignedPolicies {
@@ -47,7 +47,7 @@ impl AssignedPolicies {
             client,
             scope,
             ingress_used: Arc::new(AtomicBool::new(false)),
-            exchanges: Arc::new(futures::lock::Mutex::new(())),
+            establishing: Arc::new(futures::lock::Mutex::new(())),
         })
     }
 
@@ -74,7 +74,6 @@ impl AssignedPolicies {
         reason = "the metadata client stays on its owning compio runtime"
     )]
     pub async fn refresh(&self) -> Result<(), WorkflowServiceError> {
-        let _exchange = self.exchanges.lock().await;
         self.exchange(None).await
     }
 
@@ -83,6 +82,8 @@ impl AssignedPolicies {
     /// manager commits recovery responsibility before replying, so the
     /// installed epoch covers every acceptance that captures it. A newer epoch
     /// another exchange already installed satisfies the call without I/O.
+    /// A concurrent refresh can supersede this exchange's refresh ticket after
+    /// the manager committed the epoch; one more exchange then returns it.
     ///
     /// # Errors
     /// As [`Self::refresh`]; the manager refuses establishment with
@@ -93,15 +94,29 @@ impl AssignedPolicies {
         reason = "the metadata client stays on its owning compio runtime"
     )]
     pub async fn establish(&self, after: Option<Revision>) -> Result<(), WorkflowServiceError> {
-        let _exchange = self.exchanges.lock().await;
-        if self
-            .binding
-            .ingress_epoch()
-            .is_some_and(|held| after.is_none_or(|after| held > after))
-        {
+        let _establishing = self.establishing.lock().await;
+        let mut result = Ok(());
+        for _ in 0..2 {
+            if self.holds_above(after) {
+                return Ok(());
+            }
+            result = self.exchange(Some(EstablishIngress { after })).await;
+            if !matches!(result, Err(WorkflowServiceError::Unavailable(_))) {
+                return result;
+            }
+        }
+        if self.holds_above(after) {
             return Ok(());
         }
-        self.exchange(Some(EstablishIngress { after })).await
+        result
+    }
+
+    /// Whether the installed snapshot holds an epoch above `after`, or any
+    /// epoch when `after` names none.
+    fn holds_above(&self, after: Option<Revision>) -> bool {
+        self.binding
+            .ingress_epoch()
+            .is_some_and(|held| after.is_none_or(|after| held > after))
     }
 
     /// Report that this host accepted ingress since its previous exchange.
@@ -109,7 +124,6 @@ impl AssignedPolicies {
         self.ingress_used.store(true, Ordering::Relaxed);
     }
 
-    /// The caller holds the exchange lock.
     #[expect(
         clippy::future_not_send,
         reason = "the metadata client stays on its owning compio runtime"

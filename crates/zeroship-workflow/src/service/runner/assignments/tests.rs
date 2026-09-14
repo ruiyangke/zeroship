@@ -382,3 +382,39 @@ async fn slow_creator_preparation_does_not_block_another_apps_disabled_policy_re
     })
     .await;
 }
+
+/// A placement whose policy refuses establishment, as archive does, or whose
+/// app has no responsibility yet, still prepares under a plain lease so that
+/// delivered work such as the app's own closure can run.
+#[compio::test]
+async fn refused_establishment_prepares_the_app_under_a_plain_lease() {
+    for denied in [true, false] {
+        let fixture = Fixture::new();
+        let scope = scope();
+        let mut exchanges = fixture.scan(std::slice::from_ref(&scope));
+        let mut established = fixture.establish(&scope);
+        let refusal = established.pop().unwrap();
+        exchanges.extend(established);
+        exchanges.push(if denied {
+            refusal.denied()
+        } else {
+            refusal.conflict()
+        });
+        exchanges.push(fixture.policy(
+            &scope,
+            zeroship_core::workflow_policy::AppPolicy::default(),
+            1,
+            60_000,
+        ));
+        peer(&fixture, exchanges, async |client| {
+            let (mut consumer, probe) = fixture.consumer(1);
+            let bindings = fixture.bindings(client, &consumer, 1);
+            bindings.reconcile().await.unwrap();
+            let opened = fixture.factory.calls();
+            assert_eq!(opened.len(), 1);
+            opened[0].policy.authority().unwrap().check().unwrap();
+            assert_eq!(claims(&mut consumer, &probe).await, vec![scope.clone()]);
+        })
+        .await;
+    }
+}
