@@ -6,6 +6,11 @@ Public host: `auth.zeroship.ai`.
 
 See `docs/reference/auth.md` for the current architecture.
 
+Native ORM schemas and domain conversions live in `src/store/native.rs`;
+`src/store/users.rs` defines the typed user inputs and read models. The host
+opens the ORM with its provisioned auth role. Platform migrations own physical
+table creation; native Rust mappings need no runtime descriptor file.
+
 ## Build & run (local dev)
 
 ```bash
@@ -22,8 +27,9 @@ Browser flows always use Secure `__Host-*` cookies. The compose topology uses
 runs use the same cookie shape and have no plaintext-cookie mode.
 
 ## Important files
+
 - `src/main.rs` — binary entrypoint.
 - `src/oidc/` — native OAuth/OIDC protocol endpoints, tokens, metadata, signing, and client flows.
-- `src/store/` — `auth.*` schema CRUD.
-- `src/identity/` — password / federation / magic-link (Phase 2 onward).
-- `src/ui/` — server-rendered HTML (Phase 2 onward).
+- `src/store/` — persistence in the `zeroship` schema.
+- `src/identity/` — password, federation, and magic-link flows.
+- `src/ui/` — server-rendered HTML.
