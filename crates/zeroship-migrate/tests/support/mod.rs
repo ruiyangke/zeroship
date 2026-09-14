@@ -60,10 +60,8 @@ pub mod field_defs_corpus;
 /// protection.
 ///
 /// The claimants are not all Rust. `packages/zero-migrate-cli/tests/host/
-/// extension-claim.ts` is the host suite's half, and it hashes this same key by
-/// copying the string this module builds - `extension-claim-is-exclusive.test.ts`
-/// reads `extension_claim.rs` and asserts the two spellings agree, which is the only
-/// check in either tree that can see a one-sided rename.
+/// extension-claim.ts` is the host suite's half, and both sides load the key prefix
+/// from `tests/fixtures/extension-claim-prefix.txt`.
 pub mod extension_claim;
 
 use std::cell::{Cell, RefCell};
