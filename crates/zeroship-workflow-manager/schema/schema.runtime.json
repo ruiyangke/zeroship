@@ -294,6 +294,17 @@
             "valueColumn": "available_at"
           }
         },
+        "dispatch_order": {
+          "type": "bigInt",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "dispatch_order"
+          }
+        },
         "state": {
           "type": "string",
           "required": true,
@@ -417,6 +428,22 @@
             "app_id",
             "deployment_id",
             "state"
+          ]
+        },
+        {
+          "name": "jobs_dispatch_key",
+          "fields": [
+            "app_id",
+            "dispatch_order"
+          ],
+          "unique": true
+        },
+        {
+          "name": "jobs_dispatch_idx",
+          "fields": [
+            "app_id",
+            "state",
+            "dispatch_order"
           ]
         }
       ]
@@ -738,6 +765,18 @@
           "projectable": true,
           "storage": {
             "valueColumn": "lock_version"
+          }
+        },
+        "dispatch_cursor": {
+          "type": "bigInt",
+          "required": true,
+          "default": 0,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "dispatch_cursor"
           }
         }
       },

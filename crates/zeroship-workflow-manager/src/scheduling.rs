@@ -1264,7 +1264,7 @@ pub(crate) async fn candidate(
                         )),
                 ),
         )
-        .order_by(job.column(jobs::available_at).asc())
+        .order_by(job.column(jobs::dispatch_order).asc())
         .order_by(job.column(jobs::id).asc())
         .select(job.row::<Candidate>())?
         .limit(1)?
