@@ -87,6 +87,7 @@ impl WorkflowService {
 
 mod activation;
 mod background_scope;
+mod continuations;
 mod cron;
 mod delivery;
 #[path = "../../../../tests/fixtures/workflow_deployments.rs"]
@@ -197,7 +198,7 @@ async fn journal_update(
 }
 
 fn storage_id() -> String {
-    typed_id::generate("wfj")
+    super::types::storage_id()
 }
 
 async fn sqlite_store(path: &Path) -> OrmStore {
@@ -962,7 +963,7 @@ async fn behavior_contract(store: Rc<OrmStore>) {
     .await;
     assert_eq!(
         serde_json::from_str::<serde_json::Value>(&history[0].text("record").unwrap()).unwrap()
-            ["output"],
+            ["step"]["output"],
         json!(0)
     );
     tx.commit().await.unwrap();

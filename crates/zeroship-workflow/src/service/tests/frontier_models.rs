@@ -24,14 +24,14 @@ async fn postgres_compensation_failures_span_pages_without_crossing_scope() {
 }
 
 #[compio::test]
-async fn sqlite_continuation_retargets_every_parent_wait_across_pages() {
+async fn sqlite_continuation_keeps_accepted_parent_targets_across_pages() {
     let directory = tempfile::tempdir().unwrap();
     let store = sqlite_store(&directory.path().join("zs-workflow.sqlite")).await;
     continuation_contract(Rc::new(store)).await;
 }
 
 #[compio::test]
-async fn postgres_continuation_retargets_every_parent_wait_across_pages() {
+async fn postgres_continuation_keeps_accepted_parent_targets_across_pages() {
     let fixture = PostgresFixture::start().await;
     continuation_contract(Rc::new(fixture.store.clone())).await;
 }
@@ -216,11 +216,7 @@ async fn continuation_contract(store: Rc<OrmStore>) {
         app::lock_app(&mut tx, app_id).await.unwrap();
         for parent_id in parents {
             for generation in [0, 1] {
-                let expected = if app_id == &local {
-                    &successor
-                } else {
-                    child_id
-                };
+                let expected = child_id;
                 let expected_count = if app_id == &local && parent_id == &parent && generation == 0
                 {
                     count
@@ -235,7 +231,7 @@ async fn continuation_contract(store: Rc<OrmStore>) {
                     assert_eq!(step.child_run_id.as_ref(), Some(expected));
                 }
                 let waits = tx.database().collection(models::waits::Entity::COLLECTION).unwrap().count(
-                    value!({"app_id":app_id.as_str(), "run_id":parent_id.as_str(), "generation":generation, "child_id":expected.as_str()}), value!({}),
+                    value!({"app_id":app_id.as_str(), "run_id":parent_id.as_str(), "generation":generation}), value!({}),
                 ).await.unwrap();
                 assert!(matches!(waits, Output::Count(n) if n == i64::from(expected_count)));
             }
@@ -286,13 +282,28 @@ async fn seed_history(
     generation: i64,
     entries: Vec<(StepCheckpoint, Option<serde_json::Value>)>,
 ) {
-    let documents: Vec<_> = entries.iter().map(|(step, error)| value!({
-        "id":storage_id(), "app_id":app_id.as_str(), "run_id":id, "generation":generation,
-        "ordinal":i64::from(step.ordinal), "name":step.name.clone(), "occurrence":0,
-        "origin_generation":generation, "kind":step.kind.clone(), "state":step.state.clone(),
-        "record":serde_json::to_string(step).unwrap(), "compensation_attempts":i64::from(error.is_some()),
-        "compensation_error":error.as_ref().map(|value|value.to_string()),
-    })).collect();
+    let mut documents = Vec::new();
+    for (step, error) in &entries {
+        let accepted = if let Some(child) = &step.child_run_id {
+            Some(
+                crate::service::continuations::member(tx, app_id, child, 0)
+                    .await
+                    .unwrap()
+                    .id,
+            )
+        } else {
+            None
+        };
+        documents.push(value!({
+            "id":storage_id(), "app_id":app_id.as_str(), "run_id":id, "generation":generation,
+            "ordinal":i64::from(step.ordinal), "name":step.name.clone(), "occurrence":0,
+            "origin_generation":generation, "kind":step.kind.clone(), "state":step.state.clone(),
+            "record":journal::encode_checkpoint(step, accepted.as_deref(), None).unwrap(),
+            "child_member_id":accepted,
+            "compensation_attempts":i64::from(error.is_some()),
+            "compensation_error":error.as_ref().map(|value|value.to_string()),
+        }));
+    }
     for chunk in documents.chunks(MAX_INSERT_MANY_BATCH) {
         tx.database()
             .collection(models::steps::Entity::COLLECTION)
@@ -303,10 +314,16 @@ async fn seed_history(
             .await
             .unwrap();
     }
-    let waits: Vec<_> = entries.iter().filter(|(step, _)| step.kind == "child").map(|(step, _)| value!({
-        "id":storage_id(), "app_id":app_id.as_str(), "run_id":id, "generation":generation,
-        "ordinal":i64::from(step.ordinal), "kind":"child", "child_id":step.child_run_id.clone(),
-    })).collect();
+    let waits: Vec<_> = entries
+        .iter()
+        .filter(|(step, _)| step.kind == "child")
+        .map(|(step, _)| {
+            value!({
+                "id":storage_id(), "app_id":app_id.as_str(), "run_id":id, "generation":generation,
+                "ordinal":i64::from(step.ordinal), "kind":"child",
+            })
+        })
+        .collect();
     for chunk in waits.chunks(MAX_INSERT_MANY_BATCH) {
         tx.database()
             .collection(models::waits::Entity::COLLECTION)

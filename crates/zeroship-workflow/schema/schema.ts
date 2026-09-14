@@ -24,7 +24,13 @@ export function workflowSchema(namespace) {
     const domainUnique = domainKey.length === 1 && domainKey[0] === "id"
       ? []
       : [{ name: owned(`${name}_scope_key`), on: domainKey, unique: true }];
-    const definition = { columns, primaryKey: ["id"], foreignKeys, indexes: domainUnique };
+    // Declared uniques sit beside the scope key, so a unique index covering a
+    // foreign key's columns replaces that key's supporting index.
+    const indexes = [
+      ...domainUnique,
+      ...uniques.map(unique => ({ name: owned(unique.name), on: unique.columns, unique: true })),
+    ];
+    const definition = { columns, primaryKey: ["id"], foreignKeys, indexes };
     const selfReferences = foreignKeys.filter(key => key.references.table === name);
     if (selfReferences.length) {
       // PostgreSQL needs the scoped unique index before adding self references;
@@ -42,9 +48,6 @@ export function workflowSchema(namespace) {
       });
     } else {
       table(name, { schema: namespace }).create(definition);
-    }
-    for (const unique of uniques) {
-      table(name, { schema: namespace }).index(owned(unique.name)).add({ on: unique.columns, unique: true });
     }
   };
   const index = (name, purpose, columns) => table(name, { schema: namespace }).index(owned(`${name}_${purpose}_idx`)).add({ on: columns });
@@ -80,14 +83,11 @@ export function workflowSchema(namespace) {
     parent_id: t.text(), parent_generation: t.bigInt(), parent_ordinal: t.bigInt(),
     cascade: integer(), depth: integer(), created_at: integer(), terminal_at: t.bigInt(),
     signal_epoch: integer(), compensation_target: t.text(), schedule_id: t.text(),
-    continued_from_id: t.text(), continued_to_id: t.text(),
   }, ["app_id", "id"], [
     appFk("runs"),
     fk("run_deploy", ["app_id", "deploy_id"], "deploys", ["app_id", "id"]),
     fk("run_parent", ["app_id", "parent_id"], "runs", ["app_id", "id"]),
     fk("run_schedule", ["app_id", "schedule_id"], "schedules", ["app_id", "id"]),
-    fk("run_continued_from", ["app_id", "continued_from_id"], "runs", ["app_id", "id"]),
-    fk("run_continued_to", ["app_id", "continued_to_id"], "runs", ["app_id", "id"]),
   ], [{ name: "live_workflow_key", columns: ["app_id", "workflow_name", "key"] }]);
   index("runs", "due", ["due_at", "app_id", "id"]);
   index("runs", "parent", ["app_id", "parent_id", "parent_generation"]);
@@ -97,15 +97,43 @@ export function workflowSchema(namespace) {
   }, ["app_id", "run_id", "generation"], [
     runFk("generations"),
     fk("generation_deploy", ["app_id", "deploy_id"], "deploys", ["app_id", "id"]),
+  ], [{ name: "generation_identity", columns: ["app_id", "id"] }]);
+  create("continuation_heads", {
+    ...identity(), current_generation_id: text(), revision: integer(),
+  }, ["app_id", "id"], [
+    fk("continuation_head_generation", ["app_id", "current_generation_id"], "generations", ["app_id", "id"]),
   ]);
+  create("continuation_members", {
+    ...identity(), head_id: text(), revision: integer(),
+  }, ["app_id", "id"], [
+    fk("continuation_member_generation", ["app_id", "id"], "generations", ["app_id", "id"]),
+    fk("continuation_member_head", ["app_id", "head_id"], "continuation_heads", ["app_id", "id"]),
+  ], [{ name: "continuation_member_revision", columns: ["app_id", "head_id", "revision"] }]);
   create("steps", {
     ...generation(), ordinal: integer(), name: text(), occurrence: integer(),
     origin_generation: integer(), kind: text(), state: text(), record: text(),
+    child_member_id: t.text(), child_result_member_id: t.text(),
     compensation_attempts: integer().default(0), compensation_due_at: t.bigInt(),
     compensation_error: t.text(), compensation_retry_ms: integer().default(1000),
-  }, ["app_id", "run_id", "generation", "ordinal"], [generationFk("steps")], [
+  }, ["app_id", "run_id", "generation", "ordinal"], [
+    generationFk("steps"),
+    fk("step_child_member", ["app_id", "child_member_id"], "continuation_members", ["app_id", "id"]),
+    fk("step_child_result_member", ["app_id", "child_result_member_id"], "continuation_members", ["app_id", "id"]),
+  ], [
     { name: "step_name_occurrence", columns: ["app_id", "run_id", "generation", "name", "occurrence"] },
   ]);
+  // Child checkpoints always name their accepted member, so a completing head
+  // reaches every waiting parent through that reference. The compiler renders
+  // table checks for PostgreSQL only, so SQLite journals rely on the writer.
+  dialect({
+    postgres() {
+      table("steps", { schema: namespace }).check("step_child_linkage").add({
+        expr: col => col("kind").eq("child").and(col("child_member_id").isNotNull())
+          .or(col("kind").ne("child").and(col("child_member_id").isNull(), col("child_result_member_id").isNull())),
+      });
+    },
+    sqlite() {},
+  });
   create("job_receipts", {
     ...identity(), run_id: t.text(), id: text(), specification: text(), outcome: t.text(),
     reconciliation: t.text(), reconciliation_next: t.bigInt(),
@@ -148,10 +176,9 @@ export function workflowSchema(namespace) {
   index("tasks", "admission", ["app_id", "state", "deadline"]);
   create("waits", {
     ...generation(), ordinal: integer(), kind: text(), signal_type: t.text(),
-    topic: t.text(), max_signal_age: t.bigInt(), due_at: t.bigInt(), child_id: t.text(),
+    topic: t.text(), max_signal_age: t.bigInt(), due_at: t.bigInt(),
   }, ["app_id", "run_id", "generation", "ordinal"], [
     fk("wait_step", ["app_id", "run_id", "generation", "ordinal"], "steps", ["app_id", "run_id", "generation", "ordinal"]),
-    fk("wait_child", ["app_id", "child_id"], "runs", ["app_id", "id"]),
   ]);
   create("topics", {
     ...identity(), topic: text(), signal_epoch: integer(),

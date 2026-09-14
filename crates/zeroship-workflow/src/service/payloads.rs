@@ -1,29 +1,24 @@
 use super::{
-    AppWorkflows, RequestId, TaskToken, WorkerIdentity, WorkflowService,
     app::{deadline, emit, lock_app, lock_run, not_found, validate_run},
     models,
     policy::PolicyAuthority,
     store::{Row, Transaction},
     tasks::authorized_task,
+    AppWorkflows, RequestId, TaskToken, WorkerIdentity, WorkflowService,
 };
 use crate::service::policy::admit;
-use crate::{
-    WorkflowServiceError,
-    engine::{StepCheckpoint, WorkflowOutputRef},
-    validation,
-};
+use crate::{engine::WorkflowOutputRef, validation, WorkflowServiceError};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{cell::Cell, rc::Rc, sync::Arc, time::Duration};
 use zeroship_core::{app_id::AppId, typed_id};
 use zeroship_data_orm::{
-    Value,
     orm::{Entity, FindOptions, FromRow, Operation, Output},
-    value,
+    value, Value,
 };
 use zeroship_storage::{
-    Namespace, Storage, StorageError, StorageStore,
     backend::{BoxByteStream, BoxChunkSource, ChunkResult, ChunkSource, OnceChunk},
+    Namespace, Storage, StorageError, StorageStore,
 };
 
 mod collection;
@@ -458,7 +453,7 @@ impl AppWorkflows {
         let row = rows
             .first()
             .ok_or_else(|| not_found("workflow step output"))?;
-        let step: StepCheckpoint = super::app::decode(&row.record)?;
+        let step = super::journal::read_checkpoint(&tx, &self.app, row).await?;
         if step.state != "completed" {
             return Err(not_found("workflow step output"));
         }

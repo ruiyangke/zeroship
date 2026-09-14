@@ -577,6 +577,14 @@ pub(crate) async fn active_deploy(
     }
     decode(&rows[0].manifest)
 }
+/// Identity and input of a newly admitted run's first generation.
+pub(crate) struct NewRun<'a> {
+    pub id: &'a str,
+    pub name: &'a str,
+    pub deploy: &'a str,
+    pub options: &'a StartOptions,
+}
+
 pub(crate) async fn insert_root_run(
     tx: &mut Transaction,
     app: &AppId,
@@ -586,6 +594,38 @@ pub(crate) async fn insert_root_run(
     options: &StartOptions,
     now: i64,
 ) -> Result<(), WorkflowServiceError> {
+    let run = NewRun {
+        id,
+        name,
+        deploy,
+        options,
+    };
+    insert_run(tx, app, &run, now, None).await
+}
+
+pub(crate) async fn insert_continued_run(
+    tx: &mut Transaction,
+    app: &AppId,
+    run: &NewRun<'_>,
+    now: i64,
+    source: &super::continuations::Member,
+) -> Result<(), WorkflowServiceError> {
+    insert_run(tx, app, run, now, Some(source)).await
+}
+
+async fn insert_run(
+    tx: &mut Transaction,
+    app: &AppId,
+    run: &NewRun<'_>,
+    now: i64,
+    source: Option<&super::continuations::Member>,
+) -> Result<(), WorkflowServiceError> {
+    let NewRun {
+        id,
+        name,
+        deploy,
+        options,
+    } = *run;
     tx.database()
         .collection(models::runs::Entity::COLLECTION)?
         .insert(value!({
@@ -602,6 +642,14 @@ pub(crate) async fn insert_root_run(
             "input":encode(&options.input)?, "state":"queued", "started_at":now,
         }))
         .await?;
+    match source {
+        Some(source) => {
+            super::continuations::advance(tx, app, source, id, 0).await?;
+        }
+        None => {
+            super::continuations::create(tx, app, id, 0).await?;
+        }
+    }
     super::publication::record(tx, app, id, now).await?;
     emit(
         tx,

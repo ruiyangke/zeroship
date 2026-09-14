@@ -391,7 +391,13 @@ async fn retained_history(
 ) {
     let service = &scope.service;
     let tx = service.begin().await.unwrap();
-    for table in ["tasks", "generations", "runs"] {
+    for table in [
+        "tasks",
+        "continuation_members",
+        "continuation_heads",
+        "generations",
+        "runs",
+    ] {
         tx.database()
             .collection(&format!("__zeroship_workflow_{table}"))
             .unwrap()

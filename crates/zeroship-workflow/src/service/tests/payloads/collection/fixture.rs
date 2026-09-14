@@ -5,7 +5,7 @@ use zeroship_storage::backend::{BoxByteStream, ListPage, ListRequest, ObjectMeta
 use zeroship_storage::{Backend, StorageError};
 
 #[derive(Clone)]
-pub(super) struct Grant {
+pub(in crate::service::tests) struct Grant {
     pub delivery: Delivery,
     pub expires: Instant,
 }
@@ -45,7 +45,7 @@ impl JobLease for Grant {
     }
 }
 
-pub(super) const fn options(page_size: u32) -> CollectionOptions {
+pub(in crate::service::tests) const fn options(page_size: u32) -> CollectionOptions {
     CollectionOptions {
         page_size,
         item_timeout: Duration::from_secs(2),

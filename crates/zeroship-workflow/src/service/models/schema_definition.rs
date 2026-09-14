@@ -64,6 +64,22 @@ zeroship_data_orm::orm::schema! {
             observed_at: Nullable<BigInt>,
         }
 
+        __zeroship_workflow_continuation_heads {
+            #[orm(primary_key)]
+            id: Text,
+            app_id: Text,
+            current_generation_id: Text,
+            revision: BigInt,
+        }
+
+        __zeroship_workflow_continuation_members {
+            #[orm(primary_key)]
+            id: Text,
+            app_id: Text,
+            head_id: Text,
+            revision: BigInt,
+        }
+
         __zeroship_workflow_deployment_holds {
             #[orm(primary_key)]
             id: Text,
@@ -255,8 +271,6 @@ zeroship_data_orm::orm::schema! {
             signal_epoch: BigInt,
             compensation_target: Nullable<Text>,
             schedule_id: Nullable<Text>,
-            continued_from_id: Nullable<Text>,
-            continued_to_id: Nullable<Text>,
         }
 
         __zeroship_workflow_schedules {
@@ -306,6 +320,8 @@ zeroship_data_orm::orm::schema! {
             kind: Text,
             state: Text,
             record: Text,
+            child_member_id: Nullable<Text>,
+            child_result_member_id: Nullable<Text>,
             #[orm(default = 0)]
             compensation_attempts: BigInt,
             compensation_due_at: Nullable<BigInt>,
@@ -372,7 +388,6 @@ zeroship_data_orm::orm::schema! {
             topic: Nullable<Text>,
             max_signal_age: Nullable<BigInt>,
             due_at: Nullable<BigInt>,
-            child_id: Nullable<Text>,
         }
 
     }
@@ -428,5 +443,36 @@ mod tests {
         assert_eq!(scans["after_id"].logical_type, LogicalType::Text);
         assert!(!scans["upper_id"].required);
         assert_eq!(scans["upper_id"].logical_type, LogicalType::Text);
+    }
+
+    #[test]
+    fn continuation_metadata_binds_exact_generation_and_checkpoint_provenance() {
+        use zeroship_data_orm::{orm::Entity, schema::LogicalType};
+        let heads = journal::__zeroship_workflow_continuation_heads::Entity::schema();
+        let members = journal::__zeroship_workflow_continuation_members::Entity::schema();
+        for definition in [&heads, &members] {
+            assert!(definition["id"].primary_key);
+            assert!(definition["app_id"].required);
+            assert!(definition["revision"].required);
+            assert_eq!(definition["revision"].logical_type, LogicalType::BigInt);
+            assert_eq!(
+                definition
+                    .values()
+                    .filter(|field| field.primary_key)
+                    .count(),
+                1
+            );
+        }
+        assert!(heads["current_generation_id"].required);
+        assert!(members["head_id"].required);
+        let steps = journal::__zeroship_workflow_steps::Entity::schema();
+        for field in ["child_member_id", "child_result_member_id"] {
+            assert!(!steps[field].required);
+            assert_eq!(steps[field].logical_type, LogicalType::Text);
+        }
+        assert!(!journal::__zeroship_workflow_waits::Entity::schema().contains_key("child_id"));
+        let runs = journal::__zeroship_workflow_runs::Entity::schema();
+        assert!(!runs.contains_key("continued_from_id"));
+        assert!(!runs.contains_key("continued_to_id"));
     }
 }

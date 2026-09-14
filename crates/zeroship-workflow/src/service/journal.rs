@@ -1,6 +1,6 @@
 use super::{
-    app::{current_run, decode, encode, insert_root_run, keyed_run, live_runs, parse_state},
-    models,
+    app::{current_run, decode, encode, insert_root_run, keyed_run, live_runs},
+    continuations, models,
     store::{Row, Transaction},
     AppPolicy,
 };
@@ -9,6 +9,7 @@ use crate::{
     operations::{ConflictPolicy, StartOptions},
     validation, WorkflowServiceError,
 };
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::BTreeSet;
 use zeroship_core::{app_id::AppId, typed_id};
@@ -30,7 +31,9 @@ struct RunParent {
 #[orm(entity = models::waits)]
 struct ChildDependency {
     id: String,
-    child_id: Option<String>,
+    run_id: String,
+    generation: i64,
+    ordinal: i64,
 }
 
 pub(crate) async fn load(
@@ -64,7 +67,8 @@ pub(crate) async fn load(
         let count = page.len();
         for row in page {
             after = Some(row.ordinal);
-            journal.push(decode(&row.record)?);
+            let step = read_checkpoint(tx, app, &row).await?;
+            journal.push(step);
         }
         if count < page_limit as usize {
             break;
@@ -89,6 +93,161 @@ pub(crate) fn replay(steps: &[StepCheckpoint]) -> Vec<JournalStep> {
         })
         .collect()
 }
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StoredCheckpoint {
+    step: StepCheckpoint,
+    child_member_id: Option<String>,
+    child_result_member_id: Option<String>,
+}
+
+pub(super) fn encode_checkpoint(
+    step: &StepCheckpoint,
+    accepted: Option<&str>,
+    result: Option<&str>,
+) -> Result<String, WorkflowServiceError> {
+    encode(&StoredCheckpoint {
+        step: step.clone(),
+        child_member_id: accepted.map(str::to_owned),
+        child_result_member_id: result.map(str::to_owned),
+    })
+}
+
+pub(super) fn decode_checkpoint(
+    record: &str,
+    accepted: Option<&str>,
+    result: Option<&str>,
+) -> Result<StepCheckpoint, WorkflowServiceError> {
+    let record: StoredCheckpoint = decode(record)?;
+    if record.child_member_id.as_deref() != accepted
+        || record.child_result_member_id.as_deref() != result
+    {
+        return Err(WorkflowServiceError::Internal(
+            "workflow checkpoint projections changed".into(),
+        ));
+    }
+    Ok(record.step)
+}
+
+pub(super) async fn read_checkpoint(
+    tx: &Transaction,
+    app: &AppId,
+    row: &models::StoredStep,
+) -> Result<StepCheckpoint, WorkflowServiceError> {
+    let step = decode_checkpoint(
+        &row.record,
+        row.child_member_id.as_deref(),
+        row.child_result_member_id.as_deref(),
+    )?;
+    if i64::from(step.ordinal) != row.ordinal {
+        return Err(WorkflowServiceError::Internal(
+            "workflow checkpoint ordinal changed".into(),
+        ));
+    }
+    validate_child_checkpoint(tx, app, row, &step).await?;
+    Ok(step)
+}
+
+async fn validate_child_checkpoint(
+    tx: &Transaction,
+    app: &AppId,
+    row: &models::StoredStep,
+    step: &StepCheckpoint,
+) -> Result<(), WorkflowServiceError> {
+    let invalid =
+        || WorkflowServiceError::Internal("invalid workflow child checkpoint linkage".into());
+    if step.kind != "child" {
+        if row.child_member_id.is_some() || row.child_result_member_id.is_some() {
+            return Err(invalid());
+        }
+        return Ok(());
+    }
+    let accepted =
+        continuations::historical(tx, app, row.child_member_id.as_deref().ok_or_else(invalid)?)
+            .await?;
+    let expected = if let Some(result) = &row.child_result_member_id {
+        if !matches!(step.state.as_str(), "completed" | "failed") {
+            return Err(invalid());
+        }
+        let result = continuations::historical(tx, app, result).await?;
+        if result.head_id != accepted.head_id || result.revision < accepted.revision {
+            return Err(invalid());
+        }
+        validate_child_result(step, &result)?;
+        result.run_id
+    } else {
+        if step.state != "running"
+            && !(step.state == "failed"
+                && step
+                    .error
+                    .as_ref()
+                    .and_then(|error| error.get("name"))
+                    .and_then(Value::as_str)
+                    == Some("WorkflowTimeoutError"))
+        {
+            return Err(invalid());
+        }
+        accepted.run_id
+    };
+    if step.child_run_id.as_deref() != Some(expected.as_str()) {
+        return Err(invalid());
+    }
+    Ok(())
+}
+
+fn validate_child_result(
+    step: &StepCheckpoint,
+    result: &continuations::HistoricalMember,
+) -> Result<(), WorkflowServiceError> {
+    let invalid =
+        || WorkflowServiceError::Internal("workflow child result provenance changed".into());
+    match result.state.as_str() {
+        "completed" => {
+            let reference = result
+                .outcome
+                .output_ref
+                .as_deref()
+                .map(decode)
+                .transpose()?;
+            let output = if reference.is_some() {
+                None
+            } else {
+                Some(
+                    result
+                        .outcome
+                        .output
+                        .as_deref()
+                        .map(decode::<Value>)
+                        .transpose()?
+                        .unwrap_or(Value::Null),
+                )
+            };
+            // A stored checkpoint round-trips an inline JSON null as an absent
+            // output, so both spellings name the same consumed result.
+            if step.state != "completed"
+                || step.output.as_ref().filter(|value| !value.is_null())
+                    != output.as_ref().filter(|value| !value.is_null())
+                || step.output_ref != reference
+                || step.error.is_some()
+            {
+                return Err(invalid());
+            }
+        }
+        "failed" | "cancelled" => {
+            let error = result.outcome.error.as_deref().map(decode::<Value>).transpose()?.unwrap_or_else(|| json!({"name":"ChildWorkflowError","message":"child workflow was cancelled"}));
+            if step.state != "failed"
+                || step.error.as_ref() != Some(&error)
+                || step.output.is_some()
+                || step.output_ref.is_some()
+            {
+                return Err(invalid());
+            }
+        }
+        _ => return Err(invalid()),
+    }
+    Ok(())
+}
 pub(crate) async fn update(
     tx: &mut Transaction,
     app: &AppId,
@@ -96,9 +255,65 @@ pub(crate) async fn update(
     generation: i64,
     step: &StepCheckpoint,
 ) -> Result<(), WorkflowServiceError> {
-    tx.database().collection(models::steps::Entity::COLLECTION)?
-        .update(value!({"app_id":app.as_str(), "run_id":id, "generation":generation, "ordinal":i64::from(step.ordinal)}),
-            value!({"state":step.state.clone(), "record":encode(step)?})).await?;
+    save_checkpoint(tx, app, id, generation, step, None).await
+}
+
+async fn save_checkpoint(
+    tx: &Transaction,
+    app: &AppId,
+    id: &str,
+    generation: i64,
+    step: &StepCheckpoint,
+    result: Option<&str>,
+) -> Result<(), WorkflowServiceError> {
+    let mut row = tx
+        .database()
+        .entity::<models::steps::Entity>()?
+        .find::<models::StoredStep>(
+            models::steps::app_id
+                .eq(app.as_str())?
+                .and(models::steps::run_id.eq(id)?)
+                .and(models::steps::generation.eq(generation)?)
+                .and(models::steps::ordinal.eq(i64::from(step.ordinal))?),
+            FindOptions {
+                limit: Some(1),
+                ..FindOptions::default()
+            },
+        )
+        .await?
+        .into_iter()
+        .next()
+        .ok_or_else(|| WorkflowServiceError::Internal("workflow checkpoint is missing".into()))?;
+    read_checkpoint(tx, app, &row).await?;
+    if let Some(result) = result {
+        row.child_result_member_id = Some(result.to_owned());
+    }
+    row.record = encode_checkpoint(
+        step,
+        row.child_member_id.as_deref(),
+        row.child_result_member_id.as_deref(),
+    )?;
+    validate_child_checkpoint(tx, app, &row, step).await?;
+    let changed = tx
+        .database()
+        .entity::<models::steps::Entity>()?
+        .update_many(
+            models::steps::app_id
+                .eq(app.as_str())?
+                .and(models::steps::run_id.eq(id)?)
+                .and(models::steps::generation.eq(generation)?)
+                .and(models::steps::ordinal.eq(i64::from(step.ordinal))?),
+            models::steps::state
+                .set(step.state.as_str())?
+                .and(models::steps::record.set(row.record)?)?
+                .and(models::steps::child_result_member_id.set(row.child_result_member_id)?)?,
+        )
+        .await?;
+    if changed != 1 {
+        return Err(WorkflowServiceError::Internal(
+            "workflow checkpoint changed".into(),
+        ));
+    }
     Ok(())
 }
 
@@ -189,9 +404,16 @@ pub(crate) async fn append(
                 validation::signal_type(kind)?;
             }
         }
-        if step.kind == "child" {
-            step.child_run_id = Some(child(tx, app, run, policy, &step, now).await?);
-        }
+        let child_member = if step.kind == "child" {
+            if step.state != "running" {
+                return invalid("child acceptance requires a pending checkpoint");
+            }
+            let accepted = child(tx, app, run, policy, &step, now).await?;
+            step.child_run_id = Some(accepted.run_id);
+            Some(accepted.id)
+        } else {
+            None
+        };
         journal_bytes = journal_bytes
             .checked_add(encode(&step)?.len())
             .ok_or_else(|| {
@@ -206,7 +428,8 @@ pub(crate) async fn append(
             "id":super::types::storage_id(), "app_id":app.as_str(), "run_id":id.clone(), "generation":generation,
             "ordinal":i64::from(step.ordinal), "name":step.name.clone(), "occurrence":i64::from(step.name_occurrence),
             "origin_generation":generation, "kind":step.kind.clone(), "state":step.state.clone(),
-            "record":encode(&step)?, "compensation_retry_ms":policy.compensation_retry_ms,
+            "record":encode_checkpoint(&step, child_member.as_deref(), None)?, "compensation_retry_ms":policy.compensation_retry_ms,
+            "child_member_id":child_member, "child_result_member_id":null,
         })).await?;
         if step.state == "running" {
             tx.database().collection(models::waits::Entity::COLLECTION)?
@@ -214,7 +437,7 @@ pub(crate) async fn append(
                     "id":super::types::storage_id(), "app_id":app.as_str(), "run_id":id.clone(), "generation":generation,
                     "ordinal":i64::from(step.ordinal), "kind":step.kind.clone(), "signal_type":step.signal_type.clone(),
                     "topic":step.topic.clone(), "max_signal_age":step.max_signal_age_ms,
-                    "due_at":step.wake_at.map(|time|time.timestamp_millis()), "child_id":step.child_run_id.clone(),
+                    "due_at":step.wake_at.map(|time|time.timestamp_millis()),
                 })).await?;
             super::signals::subscribe(tx, app, &id, generation, &step, now).await?;
         }
@@ -230,7 +453,7 @@ async fn child(
     policy: &AppPolicy,
     step: &StepCheckpoint,
     now: i64,
-) -> Result<String, WorkflowServiceError> {
+) -> Result<continuations::Member, WorkflowServiceError> {
     let name = step.child_workflow_name.as_deref().ok_or_else(|| {
         WorkflowServiceError::InvalidRequest("child workflow name is missing".into())
     })?;
@@ -266,7 +489,10 @@ async fn child(
         if let Some(row) = keyed_run(tx, app, name, key).await? {
             let id = row.id;
             validate_child_dependency(tx, app, &parent.text("id")?, &id).await?;
-            return Ok(id);
+            let (run, _) = current_run(tx, app, &id).await?.ok_or_else(|| {
+                WorkflowServiceError::Internal("keyed workflow child is missing".into())
+            })?;
+            return continuations::member(tx, app, &id, run.generation).await;
         }
     }
     if parent.integer("depth")? >= policy.max_child_depth {
@@ -298,7 +524,7 @@ async fn child(
             }),
         )
         .await?;
-    Ok(id)
+    continuations::member(tx, app, &id, 0).await
 }
 
 /// The caller holds the app lock across validation and insertion of its wait.
@@ -373,7 +599,7 @@ async fn validate_child_dependency(
                 .column(models::waits::app_id)
                 .eq(app.as_str())?
                 .and(wait.column(models::waits::run_id).eq(id.as_str())?)
-                .and(wait.column(models::waits::child_id).is_not_null());
+                .and(wait.column(models::waits::kind).eq("child")?);
             if let Some(after) = &after {
                 filter = filter.and(wait.column(models::waits::id).gt(after.as_str())?);
             }
@@ -402,10 +628,10 @@ async fn validate_child_dependency(
             for edge in page {
                 inspect_dependency(&mut remaining)?;
                 after = Some(edge.id);
-                let target = edge.child_id.ok_or_else(|| {
-                    WorkflowServiceError::Internal("workflow child dependency is missing".into())
-                })?;
-                pending.push((target, false));
+                let target =
+                    continuations::resolve(tx, app, &edge.run_id, edge.generation, edge.ordinal)
+                        .await?;
+                pending.push((target.current.run_id, false));
             }
             if count < page_limit as usize {
                 break;
@@ -444,6 +670,7 @@ pub(crate) async fn resolve(
             .is_some_and(|due| due.timestamp_millis() <= now);
         let mut output = None;
         let mut error = None;
+        let mut child_result = None;
         if step.kind == "sleep" && expired {
             output = Some(Value::Null);
         }
@@ -530,13 +757,14 @@ pub(crate) async fn resolve(
             }
         }
         if step.kind == "child" {
-            let child_id = step.child_run_id.as_deref().ok_or_else(|| {
-                WorkflowServiceError::Internal("workflow child reference is missing".into())
-            })?;
-            let (child, outcome) = current_run(tx, app, child_id).await?.ok_or_else(|| {
-                WorkflowServiceError::Internal("workflow child reference is missing".into())
-            })?;
-            let state = parse_state(&child.state)?;
+            let child =
+                continuations::resolve(tx, app, &id, generation, i64::from(step.ordinal)).await?;
+            let state = child.state;
+            let outcome = child.outcome;
+            if state.is_terminal() {
+                step.child_run_id = Some(child.current.run_id.clone());
+                child_result = Some(child.current.id);
+            }
             if state == crate::operations::RunState::Completed {
                 if outcome.output_ref.is_some() {
                     step.output_ref = Some(
@@ -547,7 +775,7 @@ pub(crate) async fn resolve(
                                 id: step.child_run_id.as_deref().ok_or_else(|| {
                                     WorkflowServiceError::Internal("missing workflow child".into())
                                 })?,
-                                generation: child.generation,
+                                generation: child.current.generation,
                             },
                             super::payloads::RunGeneration {
                                 id: &id,
@@ -586,7 +814,7 @@ pub(crate) async fn resolve(
         .into();
         step.output = output;
         step.error = error;
-        update(tx, app, &id, generation, &step).await?;
+        save_checkpoint(tx, app, &id, generation, &step, child_result.as_deref()).await?;
         clear_wait(tx, app, &id, generation, step.ordinal).await?;
         progress = true;
     }

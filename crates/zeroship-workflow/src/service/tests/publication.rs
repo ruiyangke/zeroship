@@ -619,7 +619,13 @@ async fn retention(store: Rc<OrmStore>, _faults: &FaultDb) {
     // Model later history collection without erasing publication responsibility.
     let mut tx = service.begin().await.unwrap();
     super::super::app::lock_app(&mut tx, &app).await.unwrap();
-    for table in ["tasks", "generations", "runs"] {
+    for table in [
+        "tasks",
+        "continuation_members",
+        "continuation_heads",
+        "generations",
+        "runs",
+    ] {
         tx.database()
             .collection(&format!("__zeroship_workflow_{table}"))
             .unwrap()

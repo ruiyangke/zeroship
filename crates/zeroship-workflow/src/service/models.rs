@@ -16,6 +16,8 @@ pub use journal::{
     __zeroship_workflow_broadcasts as broadcasts,
     __zeroship_workflow_collection_pages as collection_pages,
     __zeroship_workflow_collection_scans as collection_scans,
+    __zeroship_workflow_continuation_heads as continuation_heads,
+    __zeroship_workflow_continuation_members as continuation_members,
     __zeroship_workflow_deployment_holds as deployment_holds,
     __zeroship_workflow_deploys as deploys, __zeroship_workflow_fanout_pages as fanout_pages,
     __zeroship_workflow_generations as generations,
@@ -75,7 +77,7 @@ pub struct RunHead {
     pub generation: i64,
 }
 
-#[derive(FromRow)]
+#[derive(Debug, Clone, PartialEq, Eq, FromRow)]
 #[orm(entity = generations)]
 pub struct GenerationOutcome {
     pub output: Option<String>,
@@ -96,6 +98,8 @@ pub struct GenerationInput {
 pub struct StoredStep {
     pub ordinal: i64,
     pub record: String,
+    pub child_member_id: Option<String>,
+    pub child_result_member_id: Option<String>,
 }
 
 #[derive(FromRow)]
@@ -111,15 +115,6 @@ pub struct CompensationRecord {
 pub struct CompensationFailure {
     pub ordinal: i64,
     pub compensation_error: Option<String>,
-}
-
-#[derive(FromRow)]
-#[orm(entity = steps)]
-pub struct ParentStep {
-    pub run_id: String,
-    pub generation: i64,
-    pub ordinal: i64,
-    pub record: String,
 }
 
 #[derive(FromRow)]

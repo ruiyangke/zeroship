@@ -24,6 +24,8 @@ struct Checkpoint {
     kind: String,
     state: String,
     record: String,
+    child_member_id: Option<String>,
+    child_result_member_id: Option<String>,
     compensation_attempts: i64,
     compensation_due_at: Option<i64>,
     compensation_error: Option<String>,
