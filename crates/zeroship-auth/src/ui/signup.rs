@@ -36,6 +36,8 @@ use crate::return_to;
 use crate::store::users;
 use crate::ui::{ErrorPage, PublicErrorMessage, SignupPage};
 use zeroship_authn::rate_limit::{self, Quota, RateLimitDecision};
+use zeroship_core::UserId;
+use zeroship_data_orm::orm::{Database, DbError};
 use zeroship_mailer::templates::{build_email, VerifyEmailHtml, VerifyEmailText};
 use zeroship_mailer::{Address, Mailer};
 
@@ -90,6 +92,7 @@ pub async fn post(
     form: ntex::web::types::Form<SignupForm>,
     cfg: ntex::web::types::State<Arc<AuthConfig>>,
     db: ntex::web::types::State<Arc<compio_postgres::Client>>,
+    orm: ntex::web::types::State<Database>,
     mailer: ntex::web::types::State<Arc<dyn Mailer>>,
 ) -> HttpResponse {
     // Form field first, query second -- the same precedence `/login`'s POST
@@ -173,14 +176,25 @@ pub async fn post(
     // 7. Insert the user row. Account-enumeration defense: a duplicate
     // email is logged but produces the same response as a successful
     // insert — the attacker cannot probe email existence via this endpoint.
-    let created = match users::create(db.as_ref(), &email, &name, Some(&phc)).await {
+    let inserted: Result<users::UserRow, DbError> = async {
+        orm.entity::<crate::store::native::models::users::Entity>()?
+            .insert(users::NewUser {
+                id: UserId::mint(),
+                email: &email,
+                name: &name,
+                password_hash: Some(&phc),
+            })
+            .await
+    }
+    .await;
+    let created = match inserted {
         Ok(u) => Some(u),
-        Err(e) if e.db_code() == Some("23505") => {
-            tracing::info!(error = %e, "signup users::create rejected duplicate email");
+        Err(e @ DbError::UniqueViolation { .. }) => {
+            tracing::info!(error = %e, "signup rejected duplicate email");
             None
         }
         Err(e) => {
-            tracing::error!(error = %e, "signup users::create failed");
+            tracing::error!(error = %e, "signup user insert failed");
             audit::emit(
                 db.as_ref(),
                 &AuditEvent {
@@ -189,7 +203,7 @@ pub async fn post(
                     auth_method: Some("password"),
                     detail: serde_json::json!({
                         "reason": "users_create_failed",
-                        "db_code": e.db_code(),
+                        "db_code": e.code(),
                     }),
                     ..AuditEvent::from_request(&req)
                 },
