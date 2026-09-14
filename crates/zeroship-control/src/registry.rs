@@ -596,6 +596,9 @@ impl Registry {
     }
 
     /// Whether the app exists and has not been deleted.
+    ///
+    /// # Errors
+    /// Reports an unreachable catalog.
     pub async fn live_app_exists(&self, id: &AppId) -> Result<bool, RegistryError> {
         let conn = self.conn().await?;
         let rows = conn
