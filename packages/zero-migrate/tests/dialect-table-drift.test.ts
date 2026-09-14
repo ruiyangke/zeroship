@@ -4,7 +4,7 @@
 // generator (`scripts/gen-dialect-table.mjs`) emits BOTH the committed TS mirror
 // (`src/generated/dialect-table.ts`) and the committed Rust table
 // (`crates/zeroship-migrate/tests/dialect_matrix/dialect_table.rs`). This test is the
-// "regenerate + diff" freshness gate (the same shape as ir-types-drift's enums
+// "regenerate + diff" freshness gate (the same shape as the IR enum artifact
 // gate): re-run the generator into temp files and assert byte-equality with both
 // committed artifacts, so neither can silently go stale vs the sidecar. It also
 // re-derives the expected TS rows straight from the sidecar and checks the

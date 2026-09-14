@@ -991,7 +991,7 @@ sc.delete({ where: (col) => col("code").isNull(), limit: 100 });   // method del
   "where": { "node":"unaryOp", "op":"isNull", "operand":{"node":"colRef","name":"code"} }, "limit": 100 }
 ```
 
-**TypeScript types for advanced callers.** `packages/zero-migrate/scripts/gen-ir-types.mjs` generates the closed string-enum tokens into `packages/zero-migrate/src/generated/enums.ts` from `op-ir.schema.json`. The **recursive structural types** (`MigrationIr`, `Op`, `Expr`, `ColType`, `IrConstraint`) are **hand-authored** in `packages/zero-migrate/src/generated/ir.ts` (codegen overflows the stack on the self-recursive `oneOf`); a drift test pins every enum token/`Op` tag/`Expr` tag against the schema. Both files stress: these are *ergonomics*; the golden `.ir.json` corpus + the `Checksum::of_ir` round-trip are the **contract source of truth**.
+**TypeScript types for advanced callers.** `packages/zero-migrate/scripts/gen-ir-types.mjs` generates the closed string-enum tokens into `packages/zero-migrate/src/generated/enums.ts` from `crates/zeroship-migrate/ir-envelope.schema.json`. The **recursive structural types** (`MigrationIr`, `Op`, `Expr`, `ColType`, `IrConstraint`) are **hand-authored** in `packages/zero-migrate/src/generated/ir.ts` because codegen cannot express the self-recursive `oneOf`. The schema contract test validates the wire vocabulary, and compiler tests exercise critical handwritten shapes without parsing TypeScript source. Both files stress: these are *ergonomics*; the golden `.ir.json` corpus + the `Checksum::of_ir` round-trip are the **contract source of truth**.
 
 ### 6.9 The pre-launch "update every producer/consumer together" stance
 
