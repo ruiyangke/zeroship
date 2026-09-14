@@ -72,10 +72,6 @@ pub(crate) fn placeholder(n: usize) -> String {
 // rather than an edit. It worked: the move renamed one identifier and touched
 // nothing else, and the name those thirteen sites read now is this crate's
 // `DIALECT`.
-//
-// Pinned by `crates/zeroship-migrate/tests/dialect_matrix/sqlite_trigger_quoting_reaches_postgres.rs`, whose
-// count went 6 -> 0 when the fix landed and whose subject-anchor followed the three
-// functions here.
 use crate::DIALECT;
 
 #[derive(Debug)]

@@ -20,9 +20,7 @@ description = "Portable, security-first, multi-dialect DB migration engine — t
 #
 # The engine's INTEGRATION TESTS live here, under `tests/`, and that is the correct
 # home rather than a leftover: an integration test is a HOST. It composes the product
-# and drives it through the public surface, which is precisely what this crate is for,
-# and it is why `tests/dialect_matrix/the_registry_travels_as_a_value.rs` reads only
-# `src` when it asserts that nothing reaches for the composition.
+# and drives it through the public surface, which is precisely what this crate is for.
 #
 # This crate has NO cargo features.
 
