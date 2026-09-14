@@ -8603,9 +8603,9 @@ dependencies = [
  "rdkafka",
  "serde",
  "serde_json",
+ "testcontainers",
  "thiserror 2.0.18",
  "tracing",
- "zeroship-core",
 ]
 
 [[package]]
