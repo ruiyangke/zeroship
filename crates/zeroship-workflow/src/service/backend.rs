@@ -18,10 +18,11 @@ const MAX_QUEUED_REQUESTS: usize = 64;
 const MAX_ACTIVE_REQUESTS: usize = 16;
 type Request = Box<dyn FnOnce(AppWorkflows) -> LocalBoxFuture<'static, ()> + Send>;
 
-/// Tells the trusted host that a mutating call finished and its committed
-/// publication intents may be pending. The host can publish them immediately;
-/// manager reconciliation still recovers any intent the host misses. The hint
-/// carries no customer data and grants no authority.
+/// Tells the trusted host that a mutating call finished.
+///
+/// The call's committed publication intents may be pending, and the host can
+/// publish them immediately; manager reconciliation still recovers any intent
+/// the host misses. The hint carries no customer data and grants no authority.
 pub type CommitHint = Arc<dyn Fn() + Send + Sync>;
 
 /// A thread-safe client. The customer database remains on the engine's thread.
