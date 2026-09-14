@@ -7,16 +7,8 @@
 //! anything other than the name the declaring binary parses, because both are
 //! the same compiled value.
 //!
-//! The syn-based [`crate::inventory`] scan stays, and its job is to DISAGREE.
-//! It re-derives the same projections from the source text with its own parser
-//! and its own `project_flag`/`project_env` implementations
-//! (`inventory.rs:704-720`), so the `audit` subcommand comparing the two sets
-//! is two independent derivations of one answer rather than one code path
-//! agreeing with itself. They share the source files on disk and the `syn`
-//! crate; they share no parsing, no projection and no registry code.
-//!
 //! WHAT THIS DOES NOT GENERATE, deliberately: everything zeroship does not
-//! declare. Stripe, Supabase, GoTrue, Lago and OpenMeter names, the Compose
+//! declare. Stripe, Supabase, `GoTrue`, Lago and `OpenMeter` names, the Compose
 //! `.env` interpolation surface, the JS packages' `process.env` reads and the
 //! test-only names are real and are not in any `ConfigSpec`, so they live in a
 //! hand-maintained section outside the markers and this module never touches
@@ -202,7 +194,7 @@ pub fn render(settings: &[Setting]) -> String {
     out.push_str(
         "<!--\n\
          DO NOT EDIT THIS REGION BY HAND. It is rendered from the COMPILED\n\
-         ConfigSpec registries of the seven declaring binaries by\n\
+         ConfigSpec registries of the declaring binaries by\n\
          `cargo run -p zeroship-config-contract -- env-vars-doc`, and\n\
          tests/config_name_alignment_gate.sh fails when it drifts. Everything\n\
          OUTSIDE these two markers is hand-maintained and is never rewritten\n\

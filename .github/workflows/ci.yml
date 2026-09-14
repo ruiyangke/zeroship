@@ -405,13 +405,13 @@ jobs:
           tests/lib_gate_arms_selftest.sh
       # THE CONFIGURATION-NAME CONTRACT. Nothing invoked the checker binary in
       # any workflow until now: `cargo test --workspace` above ran the crate's
-      # unit and fixture tests, but the four subcommands that inspect the REAL
-      # tree (check-metadata, audit, env-vars-doc) had never run in CI,
-      # so the compiled registries of the five servers were checked against
+      # unit and fixture tests, but the commands that inspect workspace metadata
+      # and the generated environment reference had never run in CI,
+      # so the compiled registries of the server binaries were checked against
       # nothing outside a developer's shell.
       #
-      # Two of its seven checks found a live defect the first time they ran,
-      # both of the same shape - a name that parses and that nothing reads:
+      # The gate found live defects the first time it ran, both of the same
+      # shape - a name that parses and that nothing reads:
       #   compose set ZEROSHIP_CONTROL_URL on the CONTROL service, and
       #     crates/control/src/ has no reader for it (it is auth's, gateway's
       #     and worker's name)

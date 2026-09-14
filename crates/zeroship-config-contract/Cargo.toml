@@ -16,11 +16,9 @@ reason = "Non-shipped configuration contract checker."
 
 [dependencies]
 zeroship-core = { workspace = true }
-# The seven generated registries this tool checks and documents. Linking them is
+# The generated registries this tool checks and documents. Linking them is
 # the point: `ConfigSpec` and `CONFIG_READ_SITES` are what the COMPILER produced
-# from the declarations, so a check against them cannot be satisfied by editing
-# a manifest, and the syn-based `inventory` scan stays an independent second
-# derivation to compare against.
+# from the declarations, so the checks exercise the same values the binaries use.
 zeroship-auth = { workspace = true }
 zeroship-control = { workspace = true }
 # THE ONE EXCEPTION TO "NOTHING DEPENDS ON THE CDC RELAY", and it is named as
@@ -45,13 +43,8 @@ zeroship-workflow-scheduler = { workspace = true }
 # so the shrink is symmetric rather than the silent one that file warns about.
 clap = { workspace = true }
 cargo_metadata = { workspace = true }
-# `span-locations` is what gives the inventory a file:LINE column. Resolver 3
-# keeps proc-macro dependencies on their own feature graph, so enabling it for
-# this ordinary dependency does not slow every macro expansion in the tree.
-proc-macro2 = { workspace = true, features = ["span-locations"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
-syn = { workspace = true }
 thiserror = { workspace = true }
 toml = { workspace = true }
 

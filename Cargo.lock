@@ -7910,10 +7910,8 @@ version = "0.1.0"
 dependencies = [
  "cargo_metadata",
  "clap",
- "proc-macro2",
  "serde",
  "serde_json",
- "syn 2.0.117",
  "thiserror 2.0.18",
  "toml 0.8.23",
  "trybuild",

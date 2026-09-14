@@ -4,10 +4,8 @@
 //! per-binary registries and Cargo targets without making the core leaf depend
 //! on platform services.
 
-pub mod audit;
 pub mod contract;
 pub mod docs;
 pub mod fixtures;
-pub mod inventory;
 pub mod metadata;
 pub mod registry;
