@@ -1,4 +1,8 @@
 //! The creator ingress fence and delivered closure evidence.
+#![allow(
+    clippy::future_not_send,
+    reason = "closure fixtures stay on their compio runtime"
+)]
 
 use super::*;
 use crate::{

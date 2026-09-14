@@ -64,7 +64,7 @@ async fn queued_backend(store: Rc<OrmStore>) {
         .install(
             PolicySnapshot::lease(2.try_into().unwrap(), AppPolicy::default(), deadline)
                 .unwrap()
-                .with_ingress_epoch(open_epoch()),
+                .with_ingress_epoch(Some(open_epoch())),
         )
         .unwrap();
     let mut pending = backend
@@ -83,7 +83,7 @@ async fn queued_backend(store: Rc<OrmStore>) {
                 deadline + Duration::from_secs(30),
             )
             .unwrap()
-            .with_ingress_epoch(open_epoch()),
+            .with_ingress_epoch(Some(open_epoch())),
         )
         .unwrap();
     assert!(matches!(

@@ -515,6 +515,10 @@ pub(super) async fn lock_app_state(
 }
 
 /// The journal's highest fenced ingress epoch. Read it under the app state lock.
+#[expect(
+    clippy::future_not_send,
+    reason = "journal reads use the creator transaction thread"
+)]
 pub(super) async fn closed_epoch(
     tx: &Transaction,
     app: &AppId,
@@ -545,6 +549,10 @@ pub(super) async fn closed_epoch(
 /// delivered Close also takes before raising the closed epoch, so acceptance and
 /// closure serialize in both orders. Acceptance needs the epoch captured with
 /// its policy and that epoch must still be open in this journal.
+#[expect(
+    clippy::future_not_send,
+    reason = "the fence reads the creator transaction on its owning thread"
+)]
 pub(super) async fn require_open_epoch(
     tx: &Transaction,
     app: &AppId,

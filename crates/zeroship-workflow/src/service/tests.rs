@@ -18,8 +18,8 @@ use testcontainers::{
 use zeroship_core::{app_id::AppId, typed_id};
 
 /// A manager-issued epoch for fixtures whose acceptance needs open responsibility.
-pub(super) fn open_epoch() -> Option<zeroship_core::workflow_coordination::Revision> {
-    Some(1.try_into().unwrap())
+pub(super) fn open_epoch() -> zeroship_core::workflow_coordination::Revision {
+    1.try_into().unwrap()
 }
 
 fn leased_policy(revision: i64, policy: AppPolicy) -> PolicySnapshot {
@@ -29,7 +29,7 @@ fn leased_policy(revision: i64, policy: AppPolicy) -> PolicySnapshot {
         std::time::Instant::now() + std::time::Duration::from_secs(3600),
     )
     .unwrap()
-    .with_ingress_epoch(open_epoch())
+    .with_ingress_epoch(Some(open_epoch()))
 }
 
 impl HostPolicies {

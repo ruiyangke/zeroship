@@ -102,14 +102,14 @@ impl Coordinator {
                         }
                         // Responsibility commits with this transaction, before the
                         // lease can reach the worker.
-                        let ingress_epoch = crate::recovery::lease_epoch_in(
+                        let ingress_epoch = Box::pin(crate::recovery::lease_epoch_in(
                             &tx,
                             &scope.app_id,
                             request.establish_after,
                             request.ingress_used,
                             observation.policy().admission,
                             sample.millis,
-                        )
+                        ))
                         .await?;
                         expires_at = expires_at.min(source_deadline(source, observation)?);
                         budget.cap_at(expires_at)?;

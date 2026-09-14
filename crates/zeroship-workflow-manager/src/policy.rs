@@ -100,6 +100,7 @@ pub trait PolicySource: Debug {
 
 /// An issued lease retains source authority through response construction.
 /// There is no public constructor and no serde implementation for this handle.
+///
 /// The ingress epoch was committed before the grant was built.
 #[derive(Clone, Debug)]
 pub struct PolicyGrant<'a> {
