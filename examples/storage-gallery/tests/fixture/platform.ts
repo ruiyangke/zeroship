@@ -153,7 +153,7 @@ export class Platform {
     } } }));
     await processes.run("migrate", process.execPath, [join(root, "packages/zero-migrate-cli/dist/cli-bin.js"), "apply", "--config", migration, "--env", "platform", "--approve"], root);
 
-    const minio = await this.container(new GenericContainer("minio/minio:latest")
+    const minio = await this.container(new GenericContainer("quay.io/minio/minio:latest")
       .withExposedPorts(9000)
       .withEnvironment({ MINIO_ROOT_USER: "minioadmin", MINIO_ROOT_PASSWORD: "minioadmin" })
       .withCommand(["server", "/data"])

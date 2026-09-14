@@ -20,7 +20,7 @@ pub struct Minio {
 
 impl Minio {
     pub fn start() -> Self {
-        let container = GenericImage::new("minio/minio", "latest")
+        let container = GenericImage::new("quay.io/minio/minio", "latest")
             .with_exposed_port(9000.tcp())
             .with_wait_for(WaitFor::message_on_stderr("API:"))
             .with_env_var("MINIO_ROOT_USER", ACCESS)
