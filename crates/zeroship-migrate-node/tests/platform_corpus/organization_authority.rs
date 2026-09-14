@@ -1,18 +1,12 @@
 use super::fixture::Platform;
 use compio_postgres::{Client, Error, error::SqlState};
 use std::collections::BTreeMap;
-
-const ORGANIZATION: &str = "org_0000000000000000000001";
-const OTHER_ORGANIZATION: &str = "org_0000000000000000000002";
-const PROJECT: &str = "prj_0000000000000000000001";
-const OTHER_PROJECT: &str = "prj_0000000000000000000002";
-const MEMBER: &str = "usr_0000000000000000000000001";
-const STRANGER: &str = "usr_0000000000000000000000002";
+use zeroship_id::{AppId, InviteId, OrganizationId, ProjectId, UserId};
 
 #[test]
 fn project_membership_requires_matching_organization_membership() {
     Platform::with_database(async |client| {
-        seed_graph(client).await;
+        let graph = seed_graph(client).await;
         let insert = "INSERT INTO zeroship.project_members
             (project_id, organization_id, user_id, role)
             VALUES ($1, $2, $3, $4)";
@@ -21,7 +15,12 @@ fn project_membership_requires_matching_organization_membership() {
             client
                 .execute(
                     insert,
-                    &[&OTHER_PROJECT, &ORGANIZATION, &MEMBER, &"developer"],
+                    &[
+                        &graph.other_project.as_str(),
+                        &graph.organization.as_str(),
+                        &graph.member.as_str(),
+                        &"developer",
+                    ],
                 )
                 .await,
             &SqlState::FOREIGN_KEY_VIOLATION,
@@ -29,14 +28,30 @@ fn project_membership_requires_matching_organization_membership() {
         );
         refuses(
             client
-                .execute(insert, &[&PROJECT, &ORGANIZATION, &STRANGER, &"developer"])
+                .execute(
+                    insert,
+                    &[
+                        &graph.project.as_str(),
+                        &graph.organization.as_str(),
+                        &graph.stranger.as_str(),
+                        &"developer",
+                    ],
+                )
                 .await,
             &SqlState::FOREIGN_KEY_VIOLATION,
             Some("project_members_organization_member_fkey"),
         );
         accepts(
             client
-                .execute(insert, &[&PROJECT, &ORGANIZATION, &MEMBER, &"developer"])
+                .execute(
+                    insert,
+                    &[
+                        &graph.project.as_str(),
+                        &graph.organization.as_str(),
+                        &graph.member.as_str(),
+                        &"developer",
+                    ],
+                )
                 .await,
         );
         assert_eq!(
@@ -52,30 +67,52 @@ fn project_membership_requires_matching_organization_membership() {
             (organization_id, user_id, role) VALUES ($1, $2, $3)";
         refuses(
             client
-                .execute(member_insert, &[&ORGANIZATION, &STRANGER, &"superuser"])
+                .execute(
+                    member_insert,
+                    &[
+                        &graph.organization.as_str(),
+                        &graph.stranger.as_str(),
+                        &"superuser",
+                    ],
+                )
                 .await,
             &SqlState::FOREIGN_KEY_VIOLATION,
             Some("organization_members_role_fkey"),
         );
         accepts(
             client
-                .execute(member_insert, &[&ORGANIZATION, &STRANGER, &"viewer"])
+                .execute(
+                    member_insert,
+                    &[
+                        &graph.organization.as_str(),
+                        &graph.stranger.as_str(),
+                        &"viewer",
+                    ],
+                )
                 .await,
         );
         accepts(
             client
-                .execute(insert, &[&PROJECT, &ORGANIZATION, &STRANGER, &"viewer"])
+                .execute(
+                    insert,
+                    &[
+                        &graph.project.as_str(),
+                        &graph.organization.as_str(),
+                        &graph.stranger.as_str(),
+                        &"viewer",
+                    ],
+                )
                 .await,
         );
 
         accepts(client.execute(
             "DELETE FROM zeroship.organization_members WHERE organization_id = $1 AND user_id = $2",
-            &[&ORGANIZATION, &MEMBER],
+            &[&graph.organization.as_str(), &graph.member.as_str()],
         ).await);
         let remaining = client
             .query(
                 "SELECT user_id::text FROM zeroship.project_members WHERE project_id = $1",
-                &[&PROJECT],
+                &[&graph.project.as_str()],
             )
             .await
             .unwrap();
@@ -84,7 +121,7 @@ fn project_membership_requires_matching_organization_membership() {
                 .iter()
                 .map(|row| row.get::<_, String>(0))
                 .collect::<Vec<_>>(),
-            [STRANGER]
+            [graph.stranger.as_str()]
         );
     });
 }
@@ -92,52 +129,94 @@ fn project_membership_requires_matching_organization_membership() {
 #[test]
 fn apps_keep_matching_ownership_until_deleted() {
     Platform::with_database(async |client| {
-        seed_graph(client).await;
+        let graph = seed_graph(client).await;
         client.execute(
             "INSERT INTO zeroship.plans (id, name, runtime_limits_json) VALUES ('free', 'Free', '{}')
              ON CONFLICT (id) DO NOTHING", &[],
         ).await.unwrap();
+        let app = AppId::mint();
         let insert = "INSERT INTO zeroship.apps (id, name, project_id, organization_id)
-            VALUES (gen_random_uuid(), 'authority-test', $1, $2)";
+            VALUES ($1, 'authority-test', $2, $3)";
+        let missing_project = ProjectId::mint();
         refuses(
             client
-                .execute(insert, &[&"prj_0000000000000000000009", &ORGANIZATION])
+                .execute(
+                    insert,
+                    &[
+                        &app.as_str(),
+                        &missing_project.as_str(),
+                        &graph.organization.as_str(),
+                    ],
+                )
                 .await,
             &SqlState::FOREIGN_KEY_VIOLATION,
             Some("apps_project_ownership_fkey"),
         );
         refuses(
             client
-                .execute(insert, &[&OTHER_PROJECT, &ORGANIZATION])
+                .execute(
+                    insert,
+                    &[
+                        &app.as_str(),
+                        &graph.other_project.as_str(),
+                        &graph.organization.as_str(),
+                    ],
+                )
                 .await,
             &SqlState::FOREIGN_KEY_VIOLATION,
             Some("apps_project_ownership_fkey"),
         );
         refuses(
             client
-                .execute(insert, &[&Option::<&str>::None, &ORGANIZATION])
+                .execute(
+                    insert,
+                    &[
+                        &app.as_str(),
+                        &Option::<&str>::None,
+                        &graph.organization.as_str(),
+                    ],
+                )
                 .await,
             &SqlState::CHECK_VIOLATION,
             Some("apps_live_app_has_project"),
         );
-        accepts(client.execute(insert, &[&PROJECT, &ORGANIZATION]).await);
+        accepts(
+            client
+                .execute(
+                    insert,
+                    &[
+                        &app.as_str(),
+                        &graph.project.as_str(),
+                        &graph.organization.as_str(),
+                    ],
+                )
+                .await,
+        );
 
         let delete_project = "DELETE FROM zeroship.projects WHERE id = $1";
         let delete_organization = "DELETE FROM zeroship.organizations WHERE id = $1";
         refuses(
-            client.execute(delete_project, &[&PROJECT]).await,
+            client
+                .execute(delete_project, &[&graph.project.as_str()])
+                .await,
             &SqlState::FOREIGN_KEY_VIOLATION,
             Some("apps_project_ownership_fkey"),
         );
         refuses(
-            client.execute(delete_organization, &[&ORGANIZATION]).await,
+            client
+                .execute(delete_organization, &[&graph.organization.as_str()])
+                .await,
             &SqlState::FOREIGN_KEY_VIOLATION,
             Some("projects_organization_id_fkey"),
         );
-        accepts(client.execute(delete_project, &[&OTHER_PROJECT]).await);
         accepts(
             client
-                .execute(delete_organization, &[&OTHER_ORGANIZATION])
+                .execute(delete_project, &[&graph.other_project.as_str()])
+                .await,
+        );
+        accepts(
+            client
+                .execute(delete_organization, &[&graph.other_organization.as_str()])
                 .await,
         );
 
@@ -145,14 +224,18 @@ fn apps_keep_matching_ownership_until_deleted() {
         accepts(client.execute(
             "UPDATE zeroship.apps SET archived_at = now(), deleted_at = now(), project_id = NULL
              WHERE organization_id = $1",
-            &[&ORGANIZATION],
+            &[&graph.organization.as_str()],
         ).await);
-        accepts(client.execute(delete_project, &[&PROJECT]).await);
+        accepts(
+            client
+                .execute(delete_project, &[&graph.project.as_str()])
+                .await,
+        );
         let app = client
             .query_one("SELECT organization_id, project_id FROM zeroship.apps", &[])
             .await
             .unwrap();
-        assert_eq!(app.get::<_, String>(0), ORGANIZATION);
+        assert_eq!(app.get::<_, String>(0), graph.organization.as_str());
         assert_eq!(app.get::<_, Option<String>>(1), None);
     });
 }
@@ -160,7 +243,7 @@ fn apps_keep_matching_ownership_until_deleted() {
 #[test]
 fn invitations_obey_migrated_role_ranks_and_address_uniqueness() {
     Platform::with_database(async |client| {
-        seed_graph(client).await;
+        let graph = seed_graph(client).await;
         let roles = roles(client).await;
         let admin = roles["admin"];
         let developer = roles["developer"];
@@ -172,7 +255,7 @@ fn invitations_obey_migrated_role_ranks_and_address_uniqueness() {
 
         // The same invitation is retried with each invalid grant. Failed
         // inserts must leave its identity available to the accepted control.
-        let id = "ivt_0000000000000000000001";
+        let id = InviteId::mint();
         let email = "invitee@authority.test";
         for (role, ranks, constraint, code) in [
             (
@@ -198,17 +281,29 @@ fn invitations_obey_migrated_role_ranks_and_address_uniqueness() {
             ),
         ] {
             refuses(
-                invite(client, id, email, role, ranks, admin).await,
+                invite(client, &graph, id.as_str(), email, role, ranks, admin).await,
                 code,
                 Some(constraint),
             );
         }
-        accepts(invite(client, id, email, "developer", developer, admin).await);
-        let second = "ivt_0000000000000000000002";
+        accepts(
+            invite(
+                client,
+                &graph,
+                id.as_str(),
+                email,
+                "developer",
+                developer,
+                admin,
+            )
+            .await,
+        );
+        let second = InviteId::mint();
         refuses(
             invite(
                 client,
-                second,
+                &graph,
+                second.as_str(),
                 &email.to_uppercase(),
                 "developer",
                 developer,
@@ -221,7 +316,8 @@ fn invitations_obey_migrated_role_ranks_and_address_uniqueness() {
         accepts(
             invite(
                 client,
-                second,
+                &graph,
+                second.as_str(),
                 "another@authority.test",
                 "developer",
                 developer,
@@ -249,7 +345,7 @@ fn invitations_obey_migrated_role_ranks_and_address_uniqueness() {
 #[test]
 fn control_can_manage_membership_but_cannot_redefine_roles() {
     Platform::with_database(async |client| {
-        seed_graph(client).await;
+        let graph = seed_graph(client).await;
         let before = roles(client).await;
         client
             .batch_execute("SET ROLE zeroship_control")
@@ -286,13 +382,17 @@ fn control_can_manage_membership_but_cannot_redefine_roles() {
                 .execute(
                     "INSERT INTO zeroship.organization_members (organization_id, user_id, role)
              VALUES ($1, $2, $3)",
-                    &[&ORGANIZATION, &STRANGER, &"viewer"],
+                    &[
+                        &graph.organization.as_str(),
+                        &graph.stranger.as_str(),
+                        &"viewer",
+                    ],
                 )
                 .await,
         );
         let membership = client.query_one(
             "SELECT role FROM zeroship.organization_members WHERE organization_id = $1 AND user_id = $2",
-            &[&ORGANIZATION, &STRANGER],
+            &[&graph.organization.as_str(), &graph.stranger.as_str()],
         ).await.unwrap();
         assert_eq!(membership.get::<_, String>(0), "viewer");
     });
@@ -301,6 +401,7 @@ fn control_can_manage_membership_but_cannot_redefine_roles() {
 #[test]
 fn organization_identifiers_and_case_insensitive_columns_keep_their_contract() {
     Platform::with_database(async |client| {
+        let organization = OrganizationId::mint();
         let insert = "INSERT INTO zeroship.organizations (id, slug, name, billing_email)
             VALUES ($1, 'acme', 'Acme', 'billing@authority.test')";
         refuses(
@@ -308,7 +409,7 @@ fn organization_identifiers_and_case_insensitive_columns_keep_their_contract() {
             &SqlState::CHECK_VIOLATION,
             Some("organizations_id_shape"),
         );
-        accepts(client.execute(insert, &[&ORGANIZATION]).await);
+        accepts(client.execute(insert, &[&organization.as_str()]).await);
 
         let rows = client.query(
             "SELECT c.relname || '.' || a.attname AS column_name,
@@ -356,14 +457,37 @@ fn organization_identifiers_and_case_insensitive_columns_keep_their_contract() {
     });
 }
 
-async fn seed_graph(client: &Client) {
+struct AuthorityGraph {
+    organization: OrganizationId,
+    other_organization: OrganizationId,
+    project: ProjectId,
+    other_project: ProjectId,
+    member: UserId,
+    stranger: UserId,
+}
+
+impl AuthorityGraph {
+    fn mint() -> Self {
+        Self {
+            organization: OrganizationId::mint(),
+            other_organization: OrganizationId::mint(),
+            project: ProjectId::mint(),
+            other_project: ProjectId::mint(),
+            member: UserId::mint(),
+            stranger: UserId::mint(),
+        }
+    }
+}
+
+async fn seed_graph(client: &Client) -> AuthorityGraph {
+    let graph = AuthorityGraph::mint();
     assert_eq!(
         client
             .execute(
                 "INSERT INTO zeroship.users (id, email, name) VALUES
          ($1, 'member@authority.test', 'Member'),
          ($2, 'stranger@authority.test', 'Stranger')",
-                &[&MEMBER, &STRANGER],
+                &[&graph.member.as_str(), &graph.stranger.as_str()],
             )
             .await
             .unwrap(),
@@ -374,7 +498,10 @@ async fn seed_graph(client: &Client) {
             .execute(
                 "INSERT INTO zeroship.organizations (id, slug, name, billing_email) VALUES
          ($1, 'acme', 'Acme', 'billing@acme.test'), ($2, 'other', 'Other', 'billing@other.test')",
-                &[&ORGANIZATION, &OTHER_ORGANIZATION],
+                &[
+                    &graph.organization.as_str(),
+                    &graph.other_organization.as_str(),
+                ],
             )
             .await
             .unwrap(),
@@ -385,7 +512,12 @@ async fn seed_graph(client: &Client) {
             .execute(
                 "INSERT INTO zeroship.projects (id, organization_id, slug, name) VALUES
          ($1, $2, 'web', 'Web'), ($3, $4, 'web', 'Web')",
-                &[&PROJECT, &ORGANIZATION, &OTHER_PROJECT, &OTHER_ORGANIZATION],
+                &[
+                    &graph.project.as_str(),
+                    &graph.organization.as_str(),
+                    &graph.other_project.as_str(),
+                    &graph.other_organization.as_str(),
+                ],
             )
             .await
             .unwrap(),
@@ -396,10 +528,11 @@ async fn seed_graph(client: &Client) {
             .execute(
                 "INSERT INTO zeroship.organization_members (organization_id, user_id, role)
          VALUES ($1, $2, 'admin')",
-                &[&ORGANIZATION, &MEMBER],
+                &[&graph.organization.as_str(), &graph.member.as_str()],
             )
             .await,
     );
+    graph
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -435,6 +568,7 @@ async fn roles(client: &Client) -> BTreeMap<String, RoleRanks> {
 
 async fn invite(
     client: &Client,
+    graph: &AuthorityGraph,
     id: &str,
     email: &str,
     role: &str,
@@ -450,12 +584,12 @@ async fn invite(
                  $7, $8, $9, 'organization_invite', now() + interval '1 day')",
             &[
                 &id,
-                &ORGANIZATION,
+                &graph.organization.as_str(),
                 &email,
                 &role,
                 &ranks.authority,
                 &ranks.billing,
-                &MEMBER,
+                &graph.member.as_str(),
                 &issuer.authority,
                 &issuer.billing,
             ],
