@@ -156,10 +156,12 @@ Revoke the enroller, and re-provision the unit's healthy peers.
 A worker stopped gracefully (SIGTERM) retires its own instance after its server
 drains: the row becomes `gone` and its key stops authenticating. A worker that
 crashes leaves its row `active` with no process behind it, and so does one the
-orchestrator kills before its drain finishes - give the worker a stop grace
-period longer than `worker.shutdown_timeout` if retirement on every stop
-matters. Nothing reaps those rows, and no liveness observation ever writes
-`status`. Retired and revoked rows are kept for attribution.
+orchestrator kills before its drain finishes. The compose file gives `worker`
+a `stop_grace_period` that covers `worker.shutdown_timeout` and the retirement
+call; give the worker the same under any other orchestrator, and raise it
+together with `worker.shutdown_timeout`. Nothing reaps rows left `active`, and
+no liveness observation ever writes `status`. Retired and revoked rows are kept
+for attribution.
 
 ## Restoring a Control database snapshot
 
