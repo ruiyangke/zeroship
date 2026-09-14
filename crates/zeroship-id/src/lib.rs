@@ -23,7 +23,8 @@
 //!
 //! # What an id deliberately cannot do
 //!
-//! The macro exposes `mint`, `parse`, `as_str`, serde, `Ord` and `Hash`, and
+//! The macro exposes minting, validated borrowed and owned text conversions,
+//! serde, `Ord` and `Hash`, and
 //! NOTHING else: no `Display`, no `AsRef<str>`, no `From<&str>`, no inherent
 //! `as_bytes`. Read [`entity_id`] for what each absence prevents - each one is
 //! asserted by a test the macro generates for every id that uses it.
