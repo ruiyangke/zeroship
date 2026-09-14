@@ -61,6 +61,12 @@ CREATE UNIQUE INDEX IF NOT EXISTS "__zeroship_workflow_job_receipts_scope_key" O
 
 CREATE INDEX IF NOT EXISTS "__zeroship_workflow_job_receipts_run_idx" ON "__zeroship_workflow_job_receipts" ("app_id", "run_id");
 
+CREATE TABLE "__zeroship_workflow_collection_pages" ("id" TEXT PRIMARY KEY NOT NULL, "app_id" TEXT NOT NULL, "plan" TEXT NOT NULL, "next_index" INTEGER NOT NULL, CONSTRAINT "__zeroship_workflow_collection_page_receipt" FOREIGN KEY (app_id, id) REFERENCES "__zeroship_workflow_job_receipts"(app_id, id) ON DELETE RESTRICT, CONSTRAINT "__zeroship_workflow_collection_pages_app" FOREIGN KEY (app_id) REFERENCES "__zeroship_workflow_app_state"(app_id) ON DELETE RESTRICT);
+
+CREATE UNIQUE INDEX IF NOT EXISTS "__zeroship_workflow_collection_pages_scope_key" ON "__zeroship_workflow_collection_pages" ("app_id", "id");
+
+CREATE TABLE "__zeroship_workflow_collection_scans" ("id" TEXT PRIMARY KEY NOT NULL, "revision" INTEGER NOT NULL, "after_id" TEXT, "upper_id" TEXT, "observed_at" INTEGER, CONSTRAINT "__zeroship_workflow_collection_scan_app" FOREIGN KEY (id) REFERENCES "__zeroship_workflow_app_state"(app_id) ON DELETE RESTRICT);
+
 CREATE TABLE "__zeroship_workflow_activations" ("id" TEXT PRIMARY KEY NOT NULL, "app_id" TEXT NOT NULL, "deploy_id" TEXT NOT NULL, "revision" INTEGER NOT NULL, CONSTRAINT "__zeroship_workflow_activation_deploy" FOREIGN KEY (app_id, deploy_id) REFERENCES "__zeroship_workflow_deploys"(app_id, id) ON DELETE RESTRICT, CONSTRAINT "__zeroship_workflow_activation_receipt" FOREIGN KEY (app_id, id) REFERENCES "__zeroship_workflow_job_receipts"(app_id, id) ON DELETE RESTRICT);
 
 CREATE INDEX IF NOT EXISTS "__zeroship_workflow_activation_deploy_idx" ON "__zeroship_workflow_activations" ("app_id", "deploy_id");
@@ -192,4 +198,4 @@ CREATE INDEX IF NOT EXISTS "__zeroship_workflow_job_publications_deployment_idx"
 CREATE TABLE "__zeroship_workflow_reconciliation_scans" ("id" TEXT PRIMARY KEY NOT NULL, "revision" INTEGER NOT NULL, "phase" TEXT NOT NULL, "after_id" TEXT, "upper_id" TEXT, CONSTRAINT "__zeroship_workflow_reconciliation_scan_app" FOREIGN KEY (id) REFERENCES "__zeroship_workflow_app_state"(app_id) ON DELETE RESTRICT);
 
 SELECT 1;
-INSERT INTO "main".__zeroship_workflow_schema_version (id, fingerprint) VALUES ('workflow', 'a781b7bb65854b385cc7328ca5693b22e7ff69b6e46cb239593302e28c6a9bff');
+INSERT INTO "main".__zeroship_workflow_schema_version (id, fingerprint) VALUES ('workflow', 'fb10353bb0d5e0b77a65c39748dca8a438aed990d4829f0219cf6facf8549fd5');

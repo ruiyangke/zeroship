@@ -43,6 +43,23 @@ zeroship_data_orm::orm::schema! {
             finished: BigInt,
         }
 
+        __zeroship_workflow_collection_pages {
+            #[orm(primary_key)]
+            id: Text,
+            app_id: Text,
+            plan: Text,
+            next_index: BigInt,
+        }
+
+        __zeroship_workflow_collection_scans {
+            #[orm(primary_key)]
+            id: Text,
+            revision: BigInt,
+            after_id: Nullable<Text>,
+            upper_id: Nullable<Text>,
+            observed_at: Nullable<BigInt>,
+        }
+
         __zeroship_workflow_deployment_holds {
             #[orm(primary_key)]
             id: Text,

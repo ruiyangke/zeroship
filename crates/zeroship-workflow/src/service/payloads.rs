@@ -1,28 +1,32 @@
 use super::{
+    AppWorkflows, RequestId, TaskToken, WorkerIdentity, WorkflowService,
     app::{deadline, emit, lock_app, lock_run, not_found, validate_run},
     models,
     policy::PolicyAuthority,
     store::{Row, Transaction},
     tasks::authorized_task,
-    AppWorkflows, RequestId, TaskToken, WorkerIdentity, WorkflowService,
 };
 use crate::service::policy::admit;
 use crate::{
+    WorkflowServiceError,
     engine::{StepCheckpoint, WorkflowOutputRef},
-    validation, WorkflowServiceError,
+    validation,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{cell::Cell, rc::Rc, sync::Arc, time::Duration};
 use zeroship_core::{app_id::AppId, typed_id};
 use zeroship_data_orm::{
+    Value,
     orm::{Entity, FindOptions, FromRow, Operation, Output},
-    value, Value,
+    value,
 };
 use zeroship_storage::{
-    backend::{BoxByteStream, BoxChunkSource, ChunkResult, ChunkSource, OnceChunk},
     Namespace, Storage, StorageError, StorageStore,
+    backend::{BoxByteStream, BoxChunkSource, ChunkResult, ChunkSource, OnceChunk},
 };
+
+mod collection;
 
 pub(crate) const MAX_COLLECTION_BATCH: usize = 1024;
 
@@ -260,7 +264,7 @@ impl WorkflowService {
             _ => {
                 return Err(WorkflowServiceError::Conflict(
                     "payload upload has expired".into(),
-                ))
+                ));
             }
         }
         let verified = Rc::new(Cell::new(false));
@@ -354,7 +358,7 @@ impl WorkflowService {
                 "invalid payload collection batch".into(),
             ));
         }
-        let storage = storage(self)?;
+        storage(self)?;
         let mut tx = self.begin().await?;
         let now = tx.now().await?;
         let db = tx.database();
@@ -390,64 +394,9 @@ impl WorkflowService {
             let app = AppId::parse(&candidate.app_id).map_err(|_| {
                 WorkflowServiceError::Internal("invalid payload app identity".into())
             })?;
-            let id = candidate.id;
-            let mut tx = self.begin().await?;
-            lock_app(&mut tx, &app).await?;
-            let now = tx.now().await?;
-            let row = payload(&tx, &app, &id).await?;
-            if !matches!(
-                row.state.as_str(),
-                "uploading" | "staged" | "deleting" | "deleted"
-            ) || row.expires_at > now
-            {
-                continue;
+            if Box::pin(self.collect_payload_checked(&app, &candidate.id, now, &|| Ok(()))).await? {
+                collected += 1;
             }
-            let Output::Rows {
-                rows: references, ..
-            } = tx
-                .database()
-                .collection(models::payload_refs::Entity::COLLECTION)?
-                .find(
-                    value!({"app_id":app.as_str(), "payload_id":id.clone()}),
-                    value!({"select":["payload_id"], "limit":1}),
-                )
-                .await?
-            else {
-                return Err(WorkflowServiceError::Internal(
-                    "workflow payload reference lookup returned a count".into(),
-                ));
-            };
-            if !references.is_empty() {
-                return Err(WorkflowServiceError::Internal(
-                    "referenced payload was scheduled for collection".into(),
-                ));
-            }
-            tx.database()
-                .collection(models::payloads::Entity::COLLECTION)?
-                .update(
-                    value!({"app_id":app.as_str(), "id":id.clone()}),
-                    value!({"state":"deleting"}),
-                )
-                .await?;
-            tx.commit().await?;
-            // The committed deleting state fences all upload and promotion paths.
-            storage
-                .delete(app.as_str(), &id)
-                .await
-                .map_err(storage_error)?;
-            let mut tx = self.begin().await?;
-            let policy = lock_app(&mut tx, &app).await?;
-            let now = tx.now().await?;
-            // Keep a tombstone and sweep it again. A remote store may finish an
-            // already-sent upload after the writer process dies. That object
-            // must remain inadmissible and must be collected on a later sweep.
-            tx.database().collection(models::payloads::Entity::COLLECTION)?.execute(Operation::Update {
-                filter:value!({"app_id":app.as_str(), "id":id, "state":"deleting"}),
-                patch:value!({"state":"deleted", "expires_at":deadline(now,policy.payload_staging_retention_ms)?}),
-                many:true,
-            }).await?;
-            tx.commit().await?;
-            collected += 1;
         }
         Ok(collected)
     }
@@ -908,7 +857,7 @@ pub(crate) fn validate_reference(
     }
     Ok(())
 }
-fn storage(service: &WorkflowService) -> Result<Storage, WorkflowServiceError> {
+pub(super) fn storage(service: &WorkflowService) -> Result<Storage, WorkflowServiceError> {
     service.payload_storage.clone().ok_or_else(|| {
         WorkflowServiceError::Unavailable("workflow payload storage is not configured".into())
     })

@@ -223,7 +223,11 @@ impl Record {
                     && self.reconciliation.is_none()
                     && self.reconciliation_next.is_none()
             }
-            JobOperation::Collect {} => false,
+            JobOperation::Collect {} => {
+                self.run_id.is_none()
+                    && self.reconciliation.is_none()
+                    && self.reconciliation_next.is_none()
+            }
         };
         if !valid {
             return Err(invalid());
@@ -278,7 +282,9 @@ const fn valid_outcome(operation: &JobOperation, outcome: JobOutcome) -> bool {
             matches!(outcome, JobOutcome::Completed {} | JobOutcome::Waiting {})
         }
         JobOperation::Management { .. } => matches!(outcome, JobOutcome::Management { .. }),
-        JobOperation::Collect {} => false,
+        JobOperation::Collect {} => {
+            matches!(outcome, JobOutcome::Completed {} | JobOutcome::Waiting {})
+        }
     }
 }
 
@@ -620,6 +626,12 @@ impl AppWorkflows {
         if matches!(job.operation, JobOperation::Management { .. }) {
             lock_app_state(&mut tx, &self.app).await?;
             let receipt = super::management::receipt(&tx, job).await?;
+            tx.commit().await?;
+            return Ok(receipt);
+        }
+        if matches!(job.operation, JobOperation::Collect {}) {
+            lock_app_state(&mut tx, &self.app).await?;
+            let receipt = super::collection::receipt(&tx, job).await?;
             tx.commit().await?;
             return Ok(receipt);
         }

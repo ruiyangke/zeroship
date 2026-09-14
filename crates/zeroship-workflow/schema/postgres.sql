@@ -67,6 +67,12 @@ CREATE UNIQUE INDEX IF NOT EXISTS "__zeroship_workflow_job_receipts_scope_key" O
 
 CREATE INDEX IF NOT EXISTS "__zeroship_workflow_job_receipts_run_idx" ON "__zeroship_workflow_schema"."__zeroship_workflow_job_receipts" ("app_id", "run_id");
 
+CREATE TABLE "__zeroship_workflow_schema"."__zeroship_workflow_collection_pages" ("id" text PRIMARY KEY NOT NULL, "app_id" text NOT NULL, "plan" text NOT NULL, "next_index" bigint NOT NULL, CONSTRAINT "__zeroship_workflow_collection_page_receipt" FOREIGN KEY ("app_id", "id") REFERENCES "__zeroship_workflow_schema"."__zeroship_workflow_job_receipts" ("app_id", id) ON DELETE RESTRICT, CONSTRAINT "__zeroship_workflow_collection_pages_app" FOREIGN KEY ("app_id") REFERENCES "__zeroship_workflow_schema"."__zeroship_workflow_app_state" ("app_id") ON DELETE RESTRICT);
+
+CREATE UNIQUE INDEX IF NOT EXISTS "__zeroship_workflow_collection_pages_scope_key" ON "__zeroship_workflow_schema"."__zeroship_workflow_collection_pages" ("app_id", "id");
+
+CREATE TABLE "__zeroship_workflow_schema"."__zeroship_workflow_collection_scans" ("id" text PRIMARY KEY NOT NULL, "revision" bigint NOT NULL, "after_id" text, "upper_id" text, "observed_at" bigint, CONSTRAINT "__zeroship_workflow_collection_scan_app" FOREIGN KEY ("id") REFERENCES "__zeroship_workflow_schema"."__zeroship_workflow_app_state" ("app_id") ON DELETE RESTRICT);
+
 CREATE TABLE "__zeroship_workflow_schema"."__zeroship_workflow_activations" ("id" text PRIMARY KEY NOT NULL, "app_id" text NOT NULL, "deploy_id" text NOT NULL, "revision" bigint NOT NULL, CONSTRAINT "__zeroship_workflow_activation_deploy" FOREIGN KEY ("app_id", "deploy_id") REFERENCES "__zeroship_workflow_schema"."__zeroship_workflow_deploys" ("app_id", id) ON DELETE RESTRICT, CONSTRAINT "__zeroship_workflow_activation_receipt" FOREIGN KEY ("app_id", "id") REFERENCES "__zeroship_workflow_schema"."__zeroship_workflow_job_receipts" ("app_id", id) ON DELETE RESTRICT);
 
 CREATE INDEX IF NOT EXISTS "__zeroship_workflow_activation_deploy_idx" ON "__zeroship_workflow_schema"."__zeroship_workflow_activations" ("app_id", "deploy_id");
@@ -203,6 +209,12 @@ ALTER TABLE "__zeroship_workflow_schema"."__zeroship_workflow_deployment_holds" 
 
 ALTER TABLE "__zeroship_workflow_schema"."__zeroship_workflow_job_receipts" ALTER COLUMN "id" TYPE text COLLATE "C", ALTER COLUMN "app_id" TYPE text COLLATE "C", ALTER COLUMN "run_id" TYPE text COLLATE "C";
 
+ALTER TABLE "__zeroship_workflow_schema"."__zeroship_workflow_collection_pages" ALTER COLUMN "id" TYPE text COLLATE "C", ALTER COLUMN "app_id" TYPE text COLLATE "C";
+
+ALTER TABLE "__zeroship_workflow_schema"."__zeroship_workflow_collection_scans" ALTER COLUMN "id" TYPE text COLLATE "C", ALTER COLUMN "after_id" TYPE text COLLATE "C", ALTER COLUMN "upper_id" TYPE text COLLATE "C";
+
+ALTER TABLE "__zeroship_workflow_schema"."__zeroship_workflow_payloads" ALTER COLUMN "id" TYPE text COLLATE "C", ALTER COLUMN "app_id" TYPE text COLLATE "C";
+
 ALTER TABLE "__zeroship_workflow_schema"."__zeroship_workflow_activations" ALTER COLUMN "id" TYPE text COLLATE "C", ALTER COLUMN "app_id" TYPE text COLLATE "C", ALTER COLUMN "deploy_id" TYPE text COLLATE "C";
 
 ALTER TABLE "__zeroship_workflow_schema"."__zeroship_workflow_activation_scopes" ALTER COLUMN "id" TYPE text COLLATE "C", ALTER COLUMN "activation_id" TYPE text COLLATE "C";
@@ -218,4 +230,4 @@ ALTER TABLE "__zeroship_workflow_schema"."__zeroship_workflow_occurrences" ALTER
 ALTER TABLE "__zeroship_workflow_schema"."__zeroship_workflow_reconciliation_scans" ALTER COLUMN "id" TYPE text COLLATE "C", ALTER COLUMN "after_id" TYPE text COLLATE "C", ALTER COLUMN "upper_id" TYPE text COLLATE "C";
 
 ALTER TABLE "__zeroship_workflow_schema"."__zeroship_workflow_tasks" ALTER COLUMN "job_id" TYPE text COLLATE "C";
-INSERT INTO "__zeroship_workflow_schema".__zeroship_workflow_schema_version (id, fingerprint) VALUES ('workflow', '147f8345840cd754f53a0d56472ffac8db8f8463ec98eb6a103af01d21587f42');
+INSERT INTO "__zeroship_workflow_schema".__zeroship_workflow_schema_version (id, fingerprint) VALUES ('workflow', '21eba8c1ade20919c707e3c28fe83c9f55ebf9b75eeb7348e7e69c955b4dd24a');

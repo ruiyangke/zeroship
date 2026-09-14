@@ -324,6 +324,133 @@
         }
       ]
     },
+    "__zeroship_workflow_collection_pages": {
+      "fields": {
+        "id": {
+          "type": "string",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "id"
+          },
+          "primaryKey": true
+        },
+        "app_id": {
+          "type": "string",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "app_id"
+          }
+        },
+        "plan": {
+          "type": "string",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "plan"
+          }
+        },
+        "next_index": {
+          "type": "bigInt",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "next_index"
+          }
+        }
+      },
+      "options": {
+        "softDelete": false,
+        "versioning": false,
+        "strictness": "strict"
+      },
+      "indexes": [
+        {
+          "name": "__zeroship_workflow_collection_pages_scope_key",
+          "fields": [
+            "app_id",
+            "id"
+          ],
+          "unique": true
+        }
+      ]
+    },
+    "__zeroship_workflow_collection_scans": {
+      "fields": {
+        "id": {
+          "type": "string",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "id"
+          },
+          "primaryKey": true
+        },
+        "revision": {
+          "type": "bigInt",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "revision"
+          }
+        },
+        "after_id": {
+          "type": "string",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "after_id"
+          }
+        },
+        "upper_id": {
+          "type": "string",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "upper_id"
+          }
+        },
+        "observed_at": {
+          "type": "bigInt",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "observed_at"
+          }
+        }
+      },
+      "options": {
+        "softDelete": false,
+        "versioning": false,
+        "strictness": "strict"
+      },
+      "indexes": []
+    },
     "__zeroship_workflow_deployment_holds": {
       "fields": {
         "id": {

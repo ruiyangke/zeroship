@@ -14,6 +14,7 @@ fn options() -> HostOptions {
                 operation_timeout: Duration::from_secs(5),
                 retry_delay: Duration::from_secs(1),
                 reconciliation: ReconciliationOptions::default(),
+                collection: crate::service::collection::CollectionOptions::default(),
             },
         },
         assignments: AssignmentOptions {

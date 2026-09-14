@@ -12,6 +12,8 @@ use zeroship_storage::{
     LocalFs, StorageStore,
 };
 
+mod collection;
+
 fn body(value: &'static [u8]) -> BoxChunkSource {
     Box::new(OnceChunk::new(Bytes::from_static(value)))
 }
