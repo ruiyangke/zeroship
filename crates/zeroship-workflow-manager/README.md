@@ -24,6 +24,11 @@ its durable receipt without adding successor jobs again.
 Claim and heartbeat return `DeliveryGrant`; converting it to a wire lease after
 commit charges elapsed time against the originally observed assignment authority.
 Worker publication cannot mint manager-owned activation, cron or management commands.
+Job outcomes use closed tagged objects. Management results cannot settle ordinary
+jobs, and generic completion cannot stand in for a management lifecycle result.
+Fresh management settlement remains unavailable until its authoritative command,
+order and barrier can commit with the queue receipt. Exact settled receipt replay
+continues to require matching identity, outcome and current worker enrollment.
 
 The app's persistent dispatch cursor assigns tickets to new jobs and successful
 claims in their existing transactions. Due and dependency filters run before ticket

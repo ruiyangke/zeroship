@@ -195,7 +195,7 @@ async fn pages(store: Rc<OrmStore>) {
         .reconcile_job(&first, &publisher, options(1))
         .await
         .unwrap();
-    assert_eq!(receipt.outcome, JobOutcome::Waiting);
+    assert_eq!(receipt.outcome, JobOutcome::Waiting {});
     assert_eq!(publisher.calls.borrow().as_slice(), &[jobs[0].id.clone()]);
     assert!(!confirmed(&service, &foreign, &other.id).await);
 
@@ -234,7 +234,7 @@ async fn pages(store: Rc<OrmStore>) {
         scope.reconcile_job(&changed, &publisher, options(1)).await,
         Err(WorkflowServiceError::Conflict(_))
     ));
-    for expected in [JobOutcome::Waiting, JobOutcome::Waiting] {
+    for expected in [JobOutcome::Waiting {}, JobOutcome::Waiting {}] {
         let grant = Grant::new(&jobs[0]);
         assert_eq!(
             scope
@@ -270,7 +270,7 @@ async fn assert_explicit_empty_phase_transitions(
             .await
             .unwrap()
             .outcome,
-        JobOutcome::Completed
+        JobOutcome::Completed {}
     );
     assert_eq!(
         scans(service, scope.app_id()).await[0]
@@ -290,7 +290,7 @@ async fn assert_explicit_empty_phase_transitions(
             .await
             .unwrap()
             .outcome,
-        JobOutcome::Waiting
+        JobOutcome::Waiting {}
     );
     assert_eq!(
         scope
@@ -298,7 +298,7 @@ async fn assert_explicit_empty_phase_transitions(
             .await
             .unwrap()
             .outcome,
-        JobOutcome::Completed
+        JobOutcome::Completed {}
     );
 }
 
@@ -326,7 +326,7 @@ async fn timeout_progress(store: Rc<OrmStore>) {
             .await
             .unwrap()
             .outcome,
-        JobOutcome::Waiting
+        JobOutcome::Waiting {}
     );
     assert_eq!(
         publisher.calls.borrow().as_slice(),
@@ -341,7 +341,7 @@ async fn timeout_progress(store: Rc<OrmStore>) {
             .await
             .unwrap()
             .outcome,
-        JobOutcome::Completed
+        JobOutcome::Completed {}
     );
     let next = Grant::new(&jobs[0]);
     scope
@@ -396,7 +396,7 @@ async fn failures(store: Rc<OrmStore>) {
             .await
             .unwrap()
             .outcome,
-        JobOutcome::Completed
+        JobOutcome::Completed {}
     );
     scope
         .reconcile_job(&Grant::new(&jobs[0]), &publisher, options(3))
@@ -442,7 +442,7 @@ async fn policy(store: Rc<OrmStore>) {
             .await
             .unwrap()
             .outcome,
-        JobOutcome::Completed
+        JobOutcome::Completed {}
     );
     scope
         .reconcile_job(&Grant::new(&jobs[0]), &publisher, options(1))
@@ -476,8 +476,8 @@ async fn concurrency(store: Rc<OrmStore>) {
         scope.reconcile_job(&second, &publisher, options(1)),
         competing
     );
-    assert_eq!(a.unwrap().outcome, JobOutcome::Waiting);
-    assert_eq!(b.unwrap().outcome, JobOutcome::Waiting);
+    assert_eq!(a.unwrap().outcome, JobOutcome::Waiting {});
+    assert_eq!(b.unwrap().outcome, JobOutcome::Waiting {});
     assert_eq!(
         scans(&service, &app).await[0].integer("revision").unwrap(),
         2
@@ -489,7 +489,7 @@ async fn concurrency(store: Rc<OrmStore>) {
             .await
             .unwrap()
             .outcome,
-        JobOutcome::Waiting
+        JobOutcome::Waiting {}
     );
     assert_eq!(
         scope.pending_jobs(None, 10).await.unwrap().len(),
@@ -502,7 +502,7 @@ async fn concurrency(store: Rc<OrmStore>) {
             .await
             .unwrap()
             .outcome,
-        JobOutcome::Completed
+        JobOutcome::Completed {}
     );
     scope
         .reconcile_job(&Grant::new(&jobs[0]), &publisher, options(1))
@@ -586,7 +586,7 @@ async fn receipt_rollback(store: Rc<OrmStore>, fault: ReceiptFault) {
         .reconcile_job(&grant.retry(), &publisher, options(1))
         .await
         .unwrap();
-    assert_eq!(receipt.outcome, JobOutcome::Waiting);
+    assert_eq!(receipt.outcome, JobOutcome::Waiting {});
     assert_eq!(
         publisher.calls.borrow().len(),
         1,
@@ -622,7 +622,7 @@ async fn receipt_rollback(store: Rc<OrmStore>, fault: ReceiptFault) {
             .await
             .unwrap()
             .outcome,
-        JobOutcome::Waiting
+        JobOutcome::Waiting {}
     );
     let advanced = scans(&service, &app).await;
     assert_eq!(advanced[0].integer("revision").unwrap(), 3);

@@ -1000,7 +1000,7 @@ pub(crate) async fn validate_delivery(
             if prerequisite.state != "settled"
                 || prerequisite.outcome.as_deref()
                     != Some(
-                        &serde_json::to_string(&JobOutcome::Completed)
+                        &serde_json::to_string(&JobOutcome::Completed {})
                             .map_err(|_| Error::Storage)?,
                     )
             {
@@ -1267,7 +1267,7 @@ pub(crate) async fn candidate(
                         .is_null()
                         .or(activation.column(jobs::state).eq("settled")?.and(
                             activation.column(jobs::outcome).eq(Some(
-                                serde_json::to_string(&JobOutcome::Completed)
+                                serde_json::to_string(&JobOutcome::Completed {})
                                     .map_err(|_| Error::Storage)?,
                             ))?,
                         )),

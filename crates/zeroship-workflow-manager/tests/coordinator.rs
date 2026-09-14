@@ -841,7 +841,7 @@ async fn worker_publication(fixture: &Fixture) {
         successor.operation = operation;
         let command = Settlement {
             delivery: grant.delivery().clone(),
-            outcome: JobOutcome::Completed,
+            outcome: JobOutcome::Completed {},
             successors: vec![successor.clone()],
         };
         assert_eq!(
@@ -958,7 +958,7 @@ async fn delivery_enrollment(fixture: &Fixture) {
     let successor = job(&assigned.app_id);
     let command = Settlement {
         delivery: renewed.delivery().clone(),
-        outcome: JobOutcome::Completed,
+        outcome: JobOutcome::Completed {},
         successors: vec![successor.clone()],
     };
     checks.set(0);
@@ -1040,7 +1040,7 @@ async fn delivery_enrollment(fixture: &Fixture) {
         Err(Error::Denied)
     );
     let mut changed = command.clone();
-    changed.outcome = JobOutcome::Waiting;
+    changed.outcome = JobOutcome::Waiting {};
     assert_eq!(
         coordinator
             .settle_job(&worker, &changed, || ready(Ok(worker.clone())))

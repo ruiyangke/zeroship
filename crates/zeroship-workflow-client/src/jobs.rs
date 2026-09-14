@@ -138,11 +138,14 @@ impl WorkerCoordinator {
     /// An exact settled receipt may be retried after delivery expiry.
     ///
     /// # Errors
-    /// Refuses foreign worker/app identities, manager-owned successors, failed
-    /// exchanges and receipts that substitute job, attempt or outcome.
+    /// Refuses foreign worker/app identities, incompatible outcome families,
+    /// manager-owned successors, failed exchanges and substituted receipts.
     pub async fn settle_job(&self, request: &Settlement) -> Result<SettlementReceipt, Error> {
         if request.delivery.worker_id != self.worker_id {
             return Err(denied());
+        }
+        if !request.outcome.valid_for(&request.delivery.job.operation) {
+            return Err(Error::Refused(FailureCode::Invalid));
         }
         for successor in &request.successors {
             if successor.app_id != request.delivery.job.app_id {
@@ -158,6 +161,7 @@ impl WorkerCoordinator {
             || receipt.job_id != request.delivery.job.id
             || receipt.attempt != request.delivery.attempt
             || receipt.outcome != request.outcome
+            || !receipt.outcome.valid_for(&request.delivery.job.operation)
         {
             return Err(Error::InvalidResponse);
         }

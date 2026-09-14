@@ -143,7 +143,7 @@ impl AppWorkflows {
                     }))
                     .await?;
                 select(&tx, job, revision.get(), &deploy).await?;
-                let receipt = delivery::finish(&tx, job, JobOutcome::Completed, now).await?;
+                let receipt = delivery::finish(&tx, job, JobOutcome::Completed {}, now).await?;
                 authority.check(self)?;
                 tx.commit().await?;
                 Ok(receipt)
@@ -161,7 +161,7 @@ pub(super) async fn receipt(
         return Ok(None);
     };
     let receipt = record.receipt(job)?.ok_or_else(invalid)?;
-    if receipt.outcome != JobOutcome::Completed {
+    if receipt.outcome != (JobOutcome::Completed {}) {
         return Err(invalid());
     }
     let JobOperation::Activate {

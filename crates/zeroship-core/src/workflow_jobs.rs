@@ -8,8 +8,8 @@ pub use zeroship_id::workflow::{DeploymentId, JobId};
 use crate::{
     app_id::AppId,
     workflow_coordination::{
-        AssignedScope, RequestId, RestartTarget, Revision, RunId, RunOperation, UnixMillis,
-        WorkerId,
+        AssignedScope, ManagementOutcome, RequestId, RestartTarget, Revision, RunId, RunOperation,
+        UnixMillis, WorkerId,
     },
     workflow_schedules::ScheduleId,
 };
@@ -157,11 +157,25 @@ pub trait JobLease {
 /// For reconciliation, `Waiting` requests another page or intent phase and
 /// `Completed` closes the scan cycle. Neither result proves that intents drained.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum JobOutcome {
-    Completed,
-    Waiting,
-    Rejected,
+    Completed {},
+    Waiting {},
+    Rejected {},
+    Management { outcome: ManagementOutcome },
+}
+
+impl JobOutcome {
+    /// Match the outcome family to its operation. Creator handlers separately
+    /// enforce their lifecycle rules; this check grants no execution authority.
+    #[must_use]
+    pub const fn valid_for(&self, operation: &JobOperation) -> bool {
+        match (self, operation) {
+            (Self::Management { .. }, JobOperation::Management { .. }) => true,
+            (Self::Management { .. }, _) | (_, JobOperation::Management { .. }) => false,
+            (Self::Completed {} | Self::Waiting {} | Self::Rejected {}, _) => true,
+        }
+    }
 }
 
 /// Successors use the same stable identities when published through an outbox.

@@ -785,7 +785,7 @@ async fn native_manager_delivery_and_lost_ack_finish_through_separate_orm_databa
             .unwrap()
             .unwrap()
             .outcome,
-        JobOutcome::Completed
+        JobOutcome::Completed {}
     );
     {
         let requests = manager.requests.borrow();
@@ -847,7 +847,7 @@ async fn manager_reconciliation_publishes_creator_work_before_the_consumer_execu
             .unwrap()
             .unwrap()
             .outcome,
-        JobOutcome::Waiting
+        JobOutcome::Waiting {}
     );
     assert!(fixture.app.pending_jobs(None, 1).await.unwrap().is_empty());
     assert!(manager.claim(&manager.scope).await.unwrap().is_none());

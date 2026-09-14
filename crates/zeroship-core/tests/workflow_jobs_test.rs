@@ -4,8 +4,8 @@ use std::fmt::Debug;
 use zeroship_core::{
     app_id::AppId,
     workflow_coordination::{
-        AssignedScope, InvalidRestart, RequestId, RestartDeploy, RestartOptions, RestartTarget,
-        RunId, RunOperation, WorkerId,
+        AssignedScope, InvalidRestart, ManagementOutcome, RequestId, RestartDeploy, RestartOptions,
+        RestartTarget, RunId, RunOperation, RunState, WorkerId,
     },
     workflow_jobs::{
         Delivery, DeliveryLease, DeploymentId, JobId, JobOperation, JobOutcome, JobSpec,
@@ -103,6 +103,15 @@ fn operations() -> Vec<(JobOperation, Value)> {
 }
 
 fn settlement(operation: JobOperation) -> Settlement {
+    let outcome = if matches!(operation, JobOperation::Management { .. }) {
+        JobOutcome::Management {
+            outcome: ManagementOutcome::Applied {
+                state: RunState::Paused,
+            },
+        }
+    } else {
+        JobOutcome::Waiting {}
+    };
     let job = JobSpec {
         id: JobId::mint(),
         app_id: AppId::mint(),
@@ -122,7 +131,7 @@ fn settlement(operation: JobOperation) -> Settlement {
             attempt: 3.try_into().unwrap(),
             deadline: 456.try_into().unwrap(),
         },
-        outcome: JobOutcome::Waiting,
+        outcome,
         successors: vec![successor],
     }
 }
@@ -134,12 +143,135 @@ fn operation_wire_shapes_are_explicit_and_round_trip() {
     for (operation, expected) in cases {
         assert_eq!(round_trip(&operation), expected);
     }
-    for (outcome, expected) in [
-        (JobOutcome::Completed, "completed"),
-        (JobOutcome::Waiting, "waiting"),
-        (JobOutcome::Rejected, "rejected"),
+}
+
+fn outcomes() -> Vec<(JobOutcome, Value)> {
+    let mut cases = vec![
+        (JobOutcome::Completed {}, json!({"kind":"completed"})),
+        (JobOutcome::Waiting {}, json!({"kind":"waiting"})),
+        (JobOutcome::Rejected {}, json!({"kind":"rejected"})),
+    ];
+    for (outcome, wire) in [
+        (
+            ManagementOutcome::Applied {
+                state: RunState::Paused,
+            },
+            json!({"kind":"applied","state":"paused"}),
+        ),
+        (ManagementOutcome::NotFound {}, json!({"kind":"not_found"})),
+        (ManagementOutcome::Conflict {}, json!({"kind":"conflict"})),
+        (ManagementOutcome::Denied {}, json!({"kind":"denied"})),
     ] {
-        assert_eq!(round_trip(&outcome), json!(expected));
+        cases.push((
+            JobOutcome::Management { outcome },
+            json!({"kind":"management","outcome":wire}),
+        ));
+    }
+    cases
+}
+
+#[test]
+fn outcome_objects_preserve_closed_management_results_and_operation_families() {
+    for (outcome, wire) in outcomes() {
+        assert_eq!(round_trip(&outcome), wire);
+        for (operation, _) in operations() {
+            let expected = matches!(operation, JobOperation::Management { .. })
+                == matches!(outcome, JobOutcome::Management { .. });
+            assert_eq!(
+                outcome.valid_for(&operation),
+                expected,
+                "{operation:?}: {outcome:?}"
+            );
+            if expected {
+                let mut command = settlement(operation);
+                command.outcome = outcome;
+                let encoded = round_trip(&command);
+                assert_eq!(encoded["outcome"], wire);
+                let receipt = SettlementReceipt {
+                    app_id: command.delivery.job.app_id,
+                    job_id: command.delivery.job.id,
+                    attempt: command.delivery.attempt,
+                    outcome,
+                };
+                assert_eq!(round_trip(&receipt)["outcome"], wire);
+            }
+        }
+    }
+}
+
+#[test]
+fn outcome_objects_reject_private_data_missing_fields_and_secondary_results() {
+    for (outcome, wire) in outcomes() {
+        let command = settlement(JobOperation::Reconcile {});
+        let receipt = SettlementReceipt {
+            app_id: command.delivery.job.app_id.clone(),
+            job_id: command.delivery.job.id.clone(),
+            attempt: command.delivery.attempt,
+            outcome,
+        };
+        let mut paths = vec![""];
+        if matches!(outcome, JobOutcome::Management { .. }) {
+            paths.push("/outcome");
+        }
+        for path in paths {
+            for field in [
+                "input",
+                "history",
+                "result",
+                "error",
+                "body",
+                "credentials",
+                "payloadUrl",
+            ] {
+                let mut invalid = wire.clone();
+                invalid
+                    .pointer_mut(path)
+                    .unwrap()
+                    .as_object_mut()
+                    .unwrap()
+                    .insert(field.into(), json!({"private":"data"}));
+                refuses::<JobOutcome>(invalid.clone());
+                let mut invalid_command = json!(command);
+                invalid_command["outcome"] = invalid.clone();
+                refuses::<Settlement>(invalid_command);
+                let mut invalid_receipt = json!(receipt);
+                invalid_receipt["outcome"] = invalid;
+                refuses::<SettlementReceipt>(invalid_receipt);
+            }
+            let object = wire.pointer(path).unwrap().as_object().unwrap();
+            for field in object.keys() {
+                let mut missing = wire.clone();
+                missing
+                    .pointer_mut(path)
+                    .unwrap()
+                    .as_object_mut()
+                    .unwrap()
+                    .remove(field);
+                refuses::<JobOutcome>(missing);
+            }
+        }
+        let mut secondary = json!(receipt);
+        secondary["managementOutcome"] = json!({"kind":"denied"});
+        refuses::<SettlementReceipt>(secondary);
+        let mut secondary = json!(command);
+        secondary["managementOutcome"] = json!({"kind":"denied"});
+        refuses::<Settlement>(secondary);
+        if !matches!(outcome, JobOutcome::Management { .. }) {
+            let mut foreign = wire;
+            foreign["outcome"] = json!({"kind":"denied"});
+            refuses::<JobOutcome>(foreign);
+        }
+    }
+    for nested in [
+        Value::Null,
+        json!("denied"),
+        json!({"kind":"unknown"}),
+        json!({"kind":"applied"}),
+        json!({"kind":"applied","state":"invented"}),
+        json!({"kind":"applied","state":null}),
+        json!({"kind":"denied","state":"paused"}),
+    ] {
+        refuses::<JobOutcome>(json!({"kind":"management","outcome":nested}));
     }
 }
 
@@ -299,7 +431,7 @@ fn delivery_and_settlement_preserve_logical_and_attempt_identities() {
     assert_eq!(
         round_trip(&settlement),
         json!({
-            "delivery":expected_delivery,"outcome":"waiting",
+            "delivery":expected_delivery,"outcome":{"kind":"waiting"},
             "successors":[{
                 "id":successor.id,"appId":job.app_id,
                 "operation":{"kind":"collect"},"availableAt":321,
@@ -314,11 +446,11 @@ fn delivery_and_settlement_preserve_logical_and_attempt_identities() {
     };
     assert_eq!(
         round_trip(&receipt),
-        json!({"jobId":job.id,"appId":job.app_id,"attempt":3,"outcome":"waiting"})
+        json!({"jobId":job.id,"appId":job.app_id,"attempt":3,"outcome":{"kind":"waiting"}})
     );
     round_trip(&Settlement {
         successors: Vec::new(),
-        outcome: JobOutcome::Completed,
+        outcome: JobOutcome::Completed {},
         ..settlement
     });
 }
@@ -387,6 +519,7 @@ fn customer_data_is_rejected_at_every_message_and_operation_boundary() {
         let wire = round_trip(&value);
         for path in [
             "",
+            "/outcome",
             "/delivery",
             "/delivery/job",
             "/delivery/job/operation",
@@ -418,7 +551,7 @@ fn customer_data_is_rejected_at_every_message_and_operation_boundary() {
         job_id: JobId::mint(),
         app_id: AppId::mint(),
         attempt: 1.try_into().unwrap(),
-        outcome: JobOutcome::Rejected,
+        outcome: JobOutcome::Rejected {},
     };
     let wire = round_trip(&receipt);
     for field in ["input", "history", "body", "result", "error"] {
@@ -660,6 +793,14 @@ fn missing_fields_and_unknown_operations_or_outcomes_are_rejected() {
         refuses::<Settlement>(invalid);
     }
     for outcome in [
+        json!("completed"),
+        json!("waiting"),
+        json!("rejected"),
+        json!("management"),
+        json!("applied"),
+        json!("not_found"),
+        json!("conflict"),
+        json!("denied"),
         json!("failed"),
         json!("Completed"),
         json!({"completed":{"result":1}}),

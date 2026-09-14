@@ -20,8 +20,8 @@ use zeroship_core::{
     service_identity::{endpoints, verify_service_call, ServiceEndpoint},
     service_peers::{ServiceAuth, ServiceKeyring},
     workflow_coordination::{
-        AssignedScope, FailureCode, RequestId, RestartTarget, RunId, RunOperation, WorkerId,
-        AUDIENCE,
+        AssignedScope, FailureCode, ManagementOutcome, RequestId, RestartTarget, RunId,
+        RunOperation, RunState, WorkerId, AUDIENCE,
     },
     workflow_jobs::{
         Delivery, DeploymentId, JobId, JobOperation, JobOutcome, JobSpec, ManagementCommand,
@@ -96,7 +96,15 @@ impl Fixture {
     fn settlement(&self) -> Settlement {
         Settlement {
             delivery: self.delivery.clone(),
-            outcome: JobOutcome::Waiting,
+            outcome: if matches!(self.delivery.job.operation, JobOperation::Management { .. }) {
+                JobOutcome::Management {
+                    outcome: ManagementOutcome::Applied {
+                        state: RunState::Paused,
+                    },
+                }
+            } else {
+                JobOutcome::Waiting {}
+            },
             successors: Vec::new(),
         }
     }
@@ -400,7 +408,7 @@ async fn submission_and_settlement_receipts_cannot_substitute_metadata() {
         ("jobId", json!(JobId::mint())),
         ("appId", json!(AppId::mint())),
         ("attempt", json!(2)),
-        ("outcome", json!("completed")),
+        ("outcome", json!({"kind":"completed"})),
         ("input", json!("private")),
     ] {
         let mut altered = json!(settled);
@@ -421,6 +429,159 @@ async fn submission_and_settlement_receipts_cannot_substitute_metadata() {
         )
         .await;
     }
+}
+
+#[compio::test]
+async fn incompatible_outcome_families_refuse_before_http() {
+    let fixture = Fixture::new();
+    let valid = fixture.settlement();
+    peer(
+        &fixture,
+        vec![Exchange::new(
+            endpoints::WORKFLOW_JOB_SETTLE,
+            &valid,
+            json!(receipt(&valid)),
+        )],
+        async |client| {
+            let operations = [
+                fixture.spec.operation.clone(),
+                JobOperation::Reconcile {},
+                JobOperation::Collect {},
+            ]
+            .into_iter()
+            .chain(manager_operations());
+            for operation in operations {
+                let mut invalid = fixture.settlement();
+                invalid.delivery.job.operation = operation;
+                let outcomes = if matches!(
+                    invalid.delivery.job.operation,
+                    JobOperation::Management { .. }
+                ) {
+                    vec![
+                        JobOutcome::Completed {},
+                        JobOutcome::Waiting {},
+                        JobOutcome::Rejected {},
+                    ]
+                } else {
+                    vec![JobOutcome::Management {
+                        outcome: ManagementOutcome::Denied {},
+                    }]
+                };
+                for outcome in outcomes {
+                    invalid.outcome = outcome;
+                    assert_eq!(
+                        client.settle_job(&invalid).await,
+                        Err(Error::Refused(FailureCode::Invalid))
+                    );
+                }
+            }
+            assert_eq!(client.settle_job(&valid).await.unwrap(), receipt(&valid));
+        },
+    )
+    .await;
+}
+
+#[compio::test]
+async fn settlement_receipts_reject_open_outcomes_and_changed_management_results() {
+    let mut fixture = Fixture::new();
+    let command = fixture.settlement();
+    for outcome in [
+        json!("completed"),
+        json!("waiting"),
+        json!("rejected"),
+        json!({"kind":"waiting","result":"private"}),
+        json!({"kind":"waiting","outcome":{"kind":"denied"}}),
+        json!({"kind":"management","outcome":{"kind":"denied"}}),
+        json!({"kind":"management"}),
+        json!({"kind":"management","outcome":null}),
+        json!({"kind":"management","outcome":{"kind":"applied","state":"invented"}}),
+        json!({"kind":"management","outcome":{"kind":"denied","history":[]}}),
+    ] {
+        let mut response = json!(receipt(&command));
+        response["outcome"] = outcome;
+        peer(
+            &fixture,
+            vec![Exchange::new(
+                endpoints::WORKFLOW_JOB_SETTLE,
+                &command,
+                response,
+            )],
+            async |client| {
+                assert_eq!(
+                    client.settle_job(&command).await,
+                    Err(Error::InvalidResponse)
+                );
+            },
+        )
+        .await;
+    }
+    fixture.spec.operation = JobOperation::Management {
+        request_id: RequestId::mint(),
+        run_id: RunId::mint(),
+        revision: 1.try_into().unwrap(),
+        command: ManagementCommand::Transition {
+            operation: RunOperation::Pause,
+        },
+    };
+    fixture.delivery.job = fixture.spec.clone();
+    let command = fixture.settlement();
+    for outcome in [
+        json!({"kind":"completed"}),
+        json!({"kind":"management","outcome":{"kind":"applied","state":"running"}}),
+        json!({"kind":"management","outcome":{"kind":"not_found"}}),
+        json!({"kind":"management","outcome":{"kind":"conflict"}}),
+        json!({"kind":"management","outcome":{"kind":"denied"}}),
+    ] {
+        let mut response = json!(receipt(&command));
+        response["outcome"] = outcome;
+        peer(
+            &fixture,
+            vec![Exchange::new(
+                endpoints::WORKFLOW_JOB_SETTLE,
+                &command,
+                response,
+            )],
+            async |client| {
+                assert_eq!(
+                    client.settle_job(&command).await,
+                    Err(Error::InvalidResponse)
+                );
+            },
+        )
+        .await;
+    }
+    let mut response = json!(receipt(&command));
+    response["managementOutcome"] = json!({"kind":"denied"});
+    peer(
+        &fixture,
+        vec![Exchange::new(
+            endpoints::WORKFLOW_JOB_SETTLE,
+            &command,
+            response,
+        )],
+        async |client| {
+            assert_eq!(
+                client.settle_job(&command).await,
+                Err(Error::InvalidResponse)
+            );
+        },
+    )
+    .await;
+    peer(
+        &fixture,
+        vec![Exchange::new(
+            endpoints::WORKFLOW_JOB_SETTLE,
+            &command,
+            json!(receipt(&command)),
+        )],
+        async |client| {
+            assert_eq!(
+                client.settle_job(&command).await.unwrap(),
+                receipt(&command)
+            );
+        },
+    )
+    .await;
 }
 
 #[compio::test]

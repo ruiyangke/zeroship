@@ -271,7 +271,9 @@ pub(crate) async fn settled_page(
     outcome: JobOutcome,
     now: i64,
 ) -> Result<(), Error> {
-    if matches!(job.operation, JobOperation::Reconcile {}) && outcome == JobOutcome::Waiting {
+    if matches!(job.operation, JobOperation::Reconcile {})
+        && matches!(outcome, JobOutcome::Waiting {})
+    {
         tx.entity::<recovery_scopes::Entity>()?
             .update_many(
                 recovery_scopes::id
