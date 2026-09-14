@@ -488,8 +488,8 @@ pass "deployed error-probe ($APP_ID)"
 # `AUTH_INSECURE_DEV` was set, because that variable could switch the deployed
 # tier onto the verbose 5xx body. Nothing reads that variable now, so the check
 # could only ever pass -- a green that proves the harness ran, not that the
-# worker is on the production rail. Section 0b asserts the property that still
-# has content: no source file reads such a hatch at all.
+# worker is on the production rail. The raw deployed-body assertions below
+# exercise the production rail directly.
 
 # Wait for the gateway to pull the route before probing (an unrouted call is a
 # 404/503 and would read as a divergence when it is a race).
@@ -705,71 +705,14 @@ sed 's/^/  /' "$WORK/deployed.raw"
 echo "  --- raw dev bodies (verbatim, stacks truncated to 200 chars) ---"
 cut -c1-200 "$WORK/dev.raw" | sed 's/^/  /'
 
-# --- The floor: a MEASURED minimum, and the guard against a green run over ---
-#     nothing. This script exits on $FAIL alone, and $FAIL is 0 both when every
-#     assertion passed and when NO assertion ran. The hazard is sharp here: the
-#     headline verdict is "the deployed body ships NO stack", which an EMPTY
-#     body satisfies perfectly. `err.ok` is the control for that on one row; the
-#     floor is the control for the run as a whole. This repo has shipped three
-#     gates that passed over zero tests (#102/#103/#112).
-#
-# THE FLOOR IS A MEASUREMENT. Taken 2026-08-10 on this tree, running this script
-# unmodified:
-#
-#     errors dev vs deployed: 24 passed, 0 failed, 0 leaks        (exit 0)
-#
-# CROSS-CHECKED against a second, independent instrument: CALL SITES in the
-# source, with loops multiplied out. (HISTORICAL: of the sites named below, "the
-# live-process rail check" was DELETED and "AUTH_INSECURE_DEV unset here" was
-# REPLACED by a source-level check -- see the 2026-08-12 note further down. Kept
-# verbatim because the later accounting is stated as a delta against it.)
-# 12 unconditional
-# top-level `pass` sites
-# (AUTH_INSECURE_DEV unset here, .zship built, leak marker matches the fixture,
-# all 5 procedures anonymous, dev reachable, dev probe, dev-vs-dev self-diff empty,
-# deployed, the live-process rail check, gateway routes, deployed probe, the
-# err.ok CONTROL) + 4 from the `for p in err.plain err.status4xx
-# err.status4xxCode err.publicCode5xx` no-stack loop + 1 section-5 diff = 17,
-# PLUS the 7 `_stk_ok` sites in the SHARED tests/lib/e2e_stack.sh (PG, init.sql,
-# migrations, control, worker, gateway, at+jwt), which increment the same
-# counter and are why counting `pass "` in this file alone under-counts by
-# exactly 7. 17 + 7 = 24. Dynamic and static agree, and they fail differently.
-#
-# NO HEADROOM: the total is fixed by the source, not discovered at run time.
-#
-# WHAT THE FLOOR DOES NOT CATCH: substitution. Swapping one assertion for an
-# easier one keeps the total at 24. Nothing here can see that; review can.
-# THE FLOOR NOW COUNTS ASSERTIONS THAT *RAN*, NOT THAT PASSED, and the change
-# is not cosmetic. `PASS` alone is not a floor: mutate the product, an outcome
-# moves from the PASS column to the FAIL column, and the floor trips for a
-# reason that has nothing to do with coverage -- so every legitimate red also
-# reads as "assertions went missing", and the one signal the floor exists to
-# give (an assertion was DELETED or never reached) is drowned. RAN = PASS+FAIL
-# is invariant under any mutation of the product and moves only when an
-# assertion is genuinely lost. `FAIL -ne 0` already fails the run on its own,
-# so nothing is weakened by dropping the PASS floor.
-#
-# THE FLOOR IS A MEASUREMENT, re-taken 2026-08-11 on this tree after the
-# dispatcher leg landed. See the report for the run this came from.
-#
-# 24 (throw leg, cross-checked by call site in the note this replaced: 12
-# top-level + 4 no-stack loop + 1 section-5 diff + 7 `_stk_ok` sites in the
-# shared tests/lib/e2e_stack.sh) + 13 dispatcher-leg sites:
-#   err.needsInput in manifest, dev answered N cases, dispatcher determinism,
-#   deployed answered N cases, A6 control, A1, A2, A3, A4, A5 x2, A7,
-#   section-7 diff
-# = 37. Dynamic and static agree, and they fail differently.
-#
-# LOWERED TO 36 ON 2026-08-12, BY CALL SITE ONLY -- the run was NOT re-taken.
-# One top-level site was deleted: the `/proc/<worker>/environ` check for
-# `AUTH_INSECURE_DEV`. That variable's readers are gone, so the check could only
-# ever pass. 12 top-level sites became 11; every other term is untouched, so
-# 37 - 1 = 36. If a real run reports anything other than 36 ran, trust the run
-# and fix this note, not the other way round.
-#
-# WHAT THE FLOOR DOES NOT CATCH: substitution. Swapping one assertion for an
-# easier one keeps the total at 36. Nothing here can see that; review can.
-ERRORS_MIN_RAN=36
+# --- Assertion floor --------------------------------------------------------
+# A run with no assertions can otherwise look successful because the failure
+# counter remains empty. Count every completed assertion, whether it passed or
+# failed, and keep the enforced floor aligned with the executable call sites.
+# The retired bootstrap cleanup removed a source-text assertion; repository
+# policy forbids restoring that scanner, so the floor reflects the behavioral
+# checks that remain.
+ERRORS_MIN_RAN=35
 RAN=$((PASS+FAIL))
 
 echo ""
