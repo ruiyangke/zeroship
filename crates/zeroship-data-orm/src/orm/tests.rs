@@ -47,6 +47,7 @@ mod typed_updates;
 mod update_operators;
 mod update_validation;
 mod upsert_contract;
+mod usage;
 
 #[derive(Debug, FromRow)]
 #[orm(entity = posts)]

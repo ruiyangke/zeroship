@@ -12,7 +12,6 @@ scoped-tls = "1"
 async-trait = { workspace = true }
 zeroship-data-macros = { workspace = true }
 zeroship-core = { workspace = true }
-zeroship-metering = { workspace = true }
 zeroship-migrate-policy = { workspace = true }
 compio = { workspace = true }
 compio-ws = { workspace = true }
