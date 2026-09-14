@@ -15,7 +15,7 @@ use zeroship_core::{
     },
     service_peers::{ServiceAuth, ServiceKeyring},
     workflow_coordination::{Revision, WorkerId},
-    workflow_policy::{AppPolicy, PolicyLease},
+    workflow_policy::{AppPolicy, PolicyLease, PolicyLeaseRequest},
 };
 use zeroship_workflow_client::Options;
 
@@ -60,7 +60,11 @@ impl Fixture {
 
     fn reply(&self, scope: &AssignedScope, remaining_ms: u64) -> Exchange {
         Exchange {
-            request: json!(scope),
+            request: json!(PolicyLeaseRequest {
+                scope: scope.clone(),
+                establish_after: None,
+                ingress_used: false,
+            }),
             response: json!(PolicyLease {
                 app_id: scope.app_id.clone(),
                 worker_id: self.worker.clone(),
@@ -68,6 +72,7 @@ impl Fixture {
                 assignment_revision: scope.assignment_revision,
                 policy_revision: self.revision,
                 policy: self.policy.clone(),
+                ingress_epoch: Some(1.try_into().unwrap()),
                 remaining_ms: remaining_ms.try_into().unwrap(),
             }),
             status: 200,
@@ -357,7 +362,14 @@ async fn installation_preserves_the_original_validated_client_deadline() {
         async |client| {
             let assigned = fixture.assigned(client.clone());
             let ticket = assigned.binding().begin_refresh().unwrap();
-            let lease = client.policy_lease(assigned.scope()).await.unwrap();
+            let lease = client
+                .policy_lease(&PolicyLeaseRequest {
+                    scope: assigned.scope().clone(),
+                    establish_after: None,
+                    ingress_used: false,
+                })
+                .await
+                .unwrap();
             let original = lease.expires_at();
             assert!(original > Instant::now());
             assigned.install(ticket, &lease).unwrap();

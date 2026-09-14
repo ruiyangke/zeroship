@@ -7,6 +7,7 @@ mod bundle;
 pub use backend::AppBackend;
 pub use bundle::{BundleDeclarations, BundleExecutable};
 pub mod capability;
+mod closure;
 pub mod collection;
 mod continuations;
 mod control;

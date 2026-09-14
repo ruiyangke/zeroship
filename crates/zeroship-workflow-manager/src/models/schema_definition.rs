@@ -108,6 +108,11 @@ zeroship_data_orm::orm::schema! {
             id: Text,
             deployment_id: Text,
             activation_revision: BigInt,
+            ingress_epoch: BigInt,
+            state: Text,
+            closing_watermark: Nullable<BigInt>,
+            close_job_id: Nullable<Text>,
+            last_ingress_at: Nullable<BigInt>,
         }
 
         schedule_activations {
