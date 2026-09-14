@@ -389,35 +389,6 @@ async fn scan_schedules(
         .await
 }
 
-async fn scan_holds(
-    queue: &Queue,
-    cursor: &mut Cursor,
-    deadline: Deadline,
-    limit: u32,
-    grace: Duration,
-) -> Result<Vec<Hold>, Error> {
-    let grace = i64::try_from(grace.as_millis()).map_err(|_| Error::Invalid)?;
-    if cursor.upper.is_none() {
-        let upper = deadline
-            .run(queue.transact(|tx| async move {
-                let cutoff = queue.clock.now().await?.saturating_sub(grace);
-                retention::maintenance_in(&tx, cutoff, None, None, true, 1).await
-            }))
-            .await?;
-        cursor.upper = upper.into_iter().next().map(|row: Hold| row.id);
-    }
-    let Some(upper) = cursor.upper.as_deref() else {
-        return Ok(Vec::new());
-    };
-    let after = cursor.after.as_deref();
-    deadline
-        .run(queue.transact(|tx| async move {
-            let cutoff = queue.clock.now().await?.saturating_sub(grace);
-            retention::maintenance_in(&tx, cutoff, after, Some(upper), false, limit).await
-        }))
-        .await
-}
-
 async fn scan<C, R>(
     queue: &Queue,
     cursor: &mut Cursor,
@@ -463,6 +434,35 @@ where
                 .limit(i64::from(limit))?
                 .all::<R>()
                 .await?)
+        }))
+        .await
+}
+
+async fn scan_holds(
+    queue: &Queue,
+    cursor: &mut Cursor,
+    deadline: Deadline,
+    limit: u32,
+    grace: Duration,
+) -> Result<Vec<Hold>, Error> {
+    let grace = i64::try_from(grace.as_millis()).map_err(|_| Error::Invalid)?;
+    if cursor.upper.is_none() {
+        let upper = deadline
+            .run(queue.transact(|tx| async move {
+                let cutoff = queue.clock.now().await?.saturating_sub(grace);
+                retention::maintenance_in(&tx, cutoff, None, None, true, 1).await
+            }))
+            .await?;
+        cursor.upper = upper.into_iter().next().map(|row: Hold| row.id);
+    }
+    let Some(upper) = cursor.upper.as_deref() else {
+        return Ok(Vec::new());
+    };
+    let after = cursor.after.as_deref();
+    deadline
+        .run(queue.transact(|tx| async move {
+            let cutoff = queue.clock.now().await?.saturating_sub(grace);
+            retention::maintenance_in(&tx, cutoff, after, Some(upper), false, limit).await
         }))
         .await
 }
