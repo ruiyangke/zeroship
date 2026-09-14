@@ -61,7 +61,7 @@ function uniqueName(prefix: string): string {
   return `${prefix}_${Date.now().toString(36)}_${Math.floor(Math.random() * 1e6).toString(36)}`;
 }
 
-/** `widgets(label)` plus a per-dialect column: `pg_only` on Postgres, `mysql_only`
+/** `widgets(label)` plus a per-dialect column: `postgres_only` on Postgres, `mysql_only`
  *  on MySQL. The two legs are the observable divergence - nothing else about the
  *  table differs between targets. */
 const migration = {
@@ -69,7 +69,7 @@ const migration = {
   schema() {
     table("widgets").create({ columns: { label: t.text() } });
     dialect({
-      postgres: () => table("widgets").column("pg_only").add({ type: t.text() }),
+      postgres: () => table("widgets").column("postgres_only").add({ type: t.text() }),
       mysql: () => table("widgets").column("mysql_only").add({ type: t.text() }),
     });
   },
@@ -77,7 +77,7 @@ const migration = {
 
 /** Every column either leg can contribute. The one the target did NOT take must be
  *  absent from both artifacts, and `live` decides which that is. */
-const DIALECTAL_LEG_COLUMNS = ["pg_only", "mysql_only"] as const;
+const DIALECTAL_LEG_COLUMNS = ["postgres_only", "mysql_only"] as const;
 
 /** Generate both artifacts for `target` and assert each describes exactly the live
  *  column set. `schema.runtime.json` is compared structurally; `env.db.ts` is a
@@ -150,7 +150,10 @@ test("genArtifacts folds the MySQL target's own dialectal leg (matches the live 
     // Guard the harness itself: if MySQL did not take the MySQL leg there is no
     // divergence left to observe and the arm proves nothing.
     assert.ok(live.has("mysql_only"), `live MySQL widgets has mysql_only (got ${[...live]})`);
-    assert.ok(!live.has("pg_only"), `live MySQL widgets has no pg_only (got ${[...live]})`);
+    assert.ok(
+      !live.has("postgres_only"),
+      `live MySQL widgets has no postgres_only (got ${[...live]})`,
+    );
 
     assertArtifactsMatchLive(database, "mysql", live);
   } finally {
@@ -162,10 +165,7 @@ test("genArtifacts folds the MySQL target's own dialectal leg (matches the live 
 });
 
 test("genArtifacts folds the Postgres target's own dialectal leg (matches the live Postgres catalog)", async (ctx) => {
-  // `connectLivePg` owns the connect and has two outcomes, not three: it either
-  // hands back a live client or throws carrying the reason. "This machine has no
-  // database" is one of the throwing cases, not a skip, because a skip and a pass
-  // print the same exit code. The client it hands back is closed here.
+  // The package runner owns this server; a failed connection fails the suite.
   const admin = await connectLivePg();
   const schema = uniqueName("gad_pg");
 
@@ -189,7 +189,10 @@ test("genArtifacts folds the Postgres target's own dialectal leg (matches the li
       [schema],
     );
     const live = new Set(res.rows.map((r) => r.column_name));
-    assert.ok(live.has("pg_only"), `live Postgres widgets has pg_only (got ${[...live]})`);
+    assert.ok(
+      live.has("postgres_only"),
+      `live Postgres widgets has postgres_only (got ${[...live]})`,
+    );
     assert.ok(!live.has("mysql_only"), `live Postgres widgets has no mysql_only (got ${[...live]})`);
 
     assertArtifactsMatchLive(schema, "postgres", live);

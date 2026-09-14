@@ -25,7 +25,7 @@
 // version would trade one broken workflow for another, and the step version is the
 // one `apply`'s output gives, which is what the docs told operators to use.
 //
-// GATE: `ZERO_MIGRATE_TEST_PG_URL`.
+// The package runner owns the PostgreSQL server used here.
 
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
@@ -274,12 +274,19 @@ test("a version in neither space is still refused", async (ctx) => {
     const setup = await setUp(namespace);
     work = setup.work;
 
+    const known = new Set([...setup.planVersions, ...setup.stepVersions]);
+    const base = setup.stepVersions[0];
+    const unknownVersion = [..."0123456789abcdefghijklmnopqrstuvwxyz"]
+      .map((suffix) => `${base.slice(0, -1)}${suffix}`)
+      .find((candidate) => !known.has(candidate));
+    assert.ok(unknownVersion, "the fixture must be able to derive an unknown valid version");
+
     // Widening what `--to` accepts must not turn it into a flag that accepts
     // anything: an unknown version is still an error, and nothing is unwound.
     const result = await cli(setup.work, namespace, "rollback", [
       "--approve",
       "--to",
-      "mig_0000000000000000000000",
+      unknownVersion,
     ]);
     assert.equal(result.code, 1, `an unknown version must still be refused; ${result.text}`);
     assert.match(result.text, /not currently applied/i, result.text);

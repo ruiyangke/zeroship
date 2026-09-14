@@ -1,5 +1,6 @@
 // On SQLite the migration journal lives in its OWN database file, never in the
-// application's.
+// application's. The application file still carries platform-owned data-plane
+// tables, including the unmask audit log.
 //
 // PostgreSQL and MySQL put the journal in a sibling SCHEMA, which is invisible to
 // an application querying its own. SQLite has no schemas, so the same separation
@@ -16,10 +17,8 @@
 //   default      `app.db`  ->  `app.migrations.db`   (`<name>.migrations.<ext>`)
 //   explicit     `--journal <path>`
 //
-// THE ASSERTION IS EXCLUSIVE, not inclusive. Checking that the journal file
-// contains the journal would pass just as well if the app database ALSO contained
-// it, which is the failure this file exists to catch. So the app database is
-// required to contain EXACTLY the authored table and nothing else.
+// The application table set is asserted exactly so a journal leak cannot hide
+// beside the expected platform audit table.
 //
 // GATE: none. SQLite runs everywhere.
 
@@ -44,6 +43,7 @@ const ADDON_PATH = resolve(
 
 const OWNER_APP = "app_journal";
 const TABLE = "jr_t";
+const APP_TABLES = ["__zeroship_audit_unmask", TABLE];
 
 function project(): string {
   const work = mkdtempSync(join(HERE, "sqjournal-"));
@@ -141,10 +141,9 @@ test("the derived journal file holds the journal, and the app database does not"
 
     assert.deepEqual(
       tablesIn(appPath),
-      [TABLE],
-      "the application database must hold the authored table and NOTHING else -- " +
-        "a journal that leaked into it would add its tables to every backup and " +
-        "every sqlite_master listing the application makes",
+      APP_TABLES,
+      "the application database must hold the authored and platform data-plane tables " +
+        "without any migration-journal tables",
     );
     assert.deepEqual(
       tablesIn(journalPath).filter((name) => JOURNAL_TABLES.includes(name)).sort(),
@@ -175,8 +174,8 @@ test("--journal relocates the journal and leaves the app database alone", () => 
 
     assert.deepEqual(
       tablesIn(appPath),
-      [TABLE],
-      "the application database must still hold only the authored table",
+      APP_TABLES,
+      "the application database must still exclude migration-journal tables",
     );
     assert.deepEqual(
       tablesIn(journalPath).filter((name) => JOURNAL_TABLES.includes(name)).sort(),

@@ -1,26 +1,9 @@
-// Authored identifiers are quoted, not interpolated - on every dialect.
+// Authored identifiers must satisfy the portable identifier contract before any
+// dialect sees SQL.
 //
-// A column name comes from a migration file, and a migration file is code the
-// team writes. So this is not an untrusted-input boundary in the usual sense. It
-// is worth testing anyway, for two reasons: names arrive from generators and from
-// existing databases during adoption, and a quoting slip does not fail loudly -
-// it either mangles the name or executes the rest of the string.
-//
-// Each payload carries a statement terminator and a comment opener, so an
-// interpolating implementation would run `DROP TABLE bystander` and swallow the
-// remainder of the statement. The BYSTANDER TABLE IS THE ASSERTION: it exists
-// before the migration runs, and it has to still be there afterwards. Checking
-// only that the column was created would pass even if the payload had also
-// executed.
-//
-// Both escape characters are exercised on all three dialects rather than each on
-// its own: `"` is the delimiter PostgreSQL and SQLite escape by doubling, and
-// backtick is MySQL's. Sending both everywhere means a dialect that reached for
-// the wrong escape - or a shared code path that hardcoded one - shows up on the
-// dialect it does not belong to.
-//
-// GATE: PG needs `ZERO_MIGRATE_TEST_PG_URL`, MySQL needs `ZERO_MIGRATE_MYSQL_URL`,
-// SQLite always runs.
+// Each payload carries a statement terminator and comment opener. Every backend
+// must reject it during guarded lowering, leave the pre-existing bystander table
+// intact, and create no authored table.
 
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
@@ -33,14 +16,14 @@ import { table, t } from "@zeroship/migrate";
 import { apply, type DriverConfig } from "zero-migrate-cli";
 import type { MigrationModule } from "@zeroship/migrate/internal/recorder";
 
-import { MYSQL_URL_ENV, connectLivePg, pgUrl, requireLiveDb } from "./live-db.js";
+import { connectLivePg, mysqlUrl, pgUrl } from "./live-db.js";
 
 // The host suite builds and resolves its addon in one place.
 import "./addon.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
-const OWNER_APP = "app_identifier_quoting";
-const MYSQL_URL = process.env.ZERO_MIGRATE_MYSQL_URL;
+const OWNER_APP = "app_identifier_validation";
+const MYSQL_URL = mysqlUrl();
 
 /** Payloads that would execute if an identifier were interpolated. */
 const PAYLOADS: ReadonlyArray<readonly [string, string]> = [
@@ -81,7 +64,7 @@ function migrationNaming(column: string): MigrationModule {
   } as MigrationModule;
 }
 
-test("PostgreSQL quotes an authored identifier rather than interpolating it", async (ctx) => {
+test("PostgreSQL rejects a non-portable authored identifier before mutation", async () => {
   const client = await connectLivePg();
   const driver: DriverConfig = { kind: "postgres", url: pgUrl() };
 
@@ -92,26 +75,21 @@ test("PostgreSQL quotes an authored identifier rather than interpolating it", as
         await client.query(`CREATE SCHEMA "${schema}"`);
         await client.query(`CREATE TABLE "${schema}".bystander (id int)`);
 
-        await apply({
-          migration: migrationNaming(payload),
-          ownerApp: OWNER_APP,
-          projectSchema: schema,
-          driver,
-          registry: {},
-          policy: [charter(schema)],
-          approved: true,
-          appliedBy: "identifier-quoting",
-          nameFallback: "name_it",
-        });
-
-        const { rows: columns } = await client.query(
-          `SELECT column_name FROM information_schema.columns
-            WHERE table_schema = $1 AND table_name = 'items'`,
-          [schema],
-        );
-        assert.ok(
-          columns.some((row) => row.column_name === payload),
-          `${label}: the column must carry the payload as its literal name`,
+        await assert.rejects(
+          () =>
+            apply({
+              migration: migrationNaming(payload),
+              ownerApp: OWNER_APP,
+              projectSchema: schema,
+              driver,
+              registry: {},
+              policy: [charter(schema)],
+              approved: true,
+              appliedBy: "identifier-validation",
+              nameFallback: "name_it",
+            }),
+          /invalid identifier:.*ASCII alphanumeric \+ underscore/i,
+          `${label}: guarded lowering must reject the identifier`,
         );
 
         const { rows: tables } = await client.query(
@@ -120,7 +98,11 @@ test("PostgreSQL quotes an authored identifier rather than interpolating it", as
         );
         assert.ok(
           tables.some((row) => row.table_name === "bystander"),
-          `${label}: the bystander table must survive - if it did not, the payload ran`,
+          `${label}: the bystander table must survive`,
+        );
+        assert.ok(
+          !tables.some((row) => row.table_name === "items"),
+          `${label}: no table landed`,
         );
       } finally {
         await client
@@ -136,8 +118,7 @@ test("PostgreSQL quotes an authored identifier rather than interpolating it", as
   }
 });
 
-test("MySQL quotes an authored identifier rather than interpolating it", async (ctx) => {
-  requireLiveDb(MYSQL_URL, MYSQL_URL_ENV, "MySQL");
+test("MySQL rejects a non-portable authored identifier before mutation", async () => {
   const mysql = (await import("mysql2/promise")).default;
 
   for (const [label, payload] of PAYLOADS) {
@@ -147,26 +128,21 @@ test("MySQL quotes an authored identifier rather than interpolating it", async (
       await admin.query(`CREATE DATABASE \`${database}\``);
       await admin.query(`CREATE TABLE \`${database}\`.bystander (id int) ENGINE=InnoDB`);
 
-      await apply({
-        migration: migrationNaming(payload),
-        ownerApp: OWNER_APP,
-        projectSchema: database,
-        driver: { kind: "mysql", url: MYSQL_URL },
-        registry: {},
-        policy: [charter(database)],
-        approved: true,
-        appliedBy: "identifier-quoting",
-        nameFallback: "name_it",
-      });
-
-      const [columns] = await admin.query(
-        `SELECT COLUMN_NAME AS c FROM information_schema.COLUMNS
-          WHERE TABLE_SCHEMA = ? AND TABLE_NAME = 'items'`,
-        [database],
-      );
-      assert.ok(
-        (columns as Array<{ c: string }>).some((row) => row.c === payload),
-        `${label}: the column must carry the payload as its literal name`,
+      await assert.rejects(
+        () =>
+          apply({
+            migration: migrationNaming(payload),
+            ownerApp: OWNER_APP,
+            projectSchema: database,
+            driver: { kind: "mysql", url: MYSQL_URL },
+            registry: {},
+            policy: [charter(database)],
+            approved: true,
+            appliedBy: "identifier-validation",
+            nameFallback: "name_it",
+          }),
+        /invalid identifier:.*ASCII alphanumeric \+ underscore/i,
+        `${label}: guarded lowering must reject the identifier`,
       );
 
       const [tables] = await admin.query(
@@ -175,7 +151,11 @@ test("MySQL quotes an authored identifier rather than interpolating it", async (
       );
       assert.ok(
         (tables as Array<{ t: string }>).some((row) => row.t === "bystander"),
-        `${label}: the bystander table must survive - if it did not, the payload ran`,
+        `${label}: the bystander table must survive`,
+      );
+      assert.ok(
+        !(tables as Array<{ t: string }>).some((row) => row.t === "items"),
+        `${label}: no table landed`,
       );
     } finally {
       await admin
@@ -188,7 +168,7 @@ test("MySQL quotes an authored identifier rather than interpolating it", async (
   }
 });
 
-test("SQLite quotes an authored identifier rather than interpolating it", async () => {
+test("SQLite rejects a non-portable authored identifier before mutation", async () => {
   for (const [label, payload] of PAYLOADS) {
     const work = mkdtempSync(join(HERE, "ident-sq-"));
     const dbPath = join(work, "app.db");
@@ -197,37 +177,34 @@ test("SQLite quotes an authored identifier rather than interpolating it", async 
       seed.exec("CREATE TABLE bystander (id INTEGER)");
       seed.close();
 
-      await apply({
-        migration: migrationNaming(payload),
-        ownerApp: OWNER_APP,
-        projectSchema: "main",
-        driver: { kind: "sqlite", appPath: dbPath, journalPath: join(work, "mig.db") },
-        registry: {},
-        policy: [charter("main")],
-        approved: true,
-        appliedBy: "identifier-quoting",
-        nameFallback: "name_it",
-      });
+      await assert.rejects(
+        () =>
+          apply({
+            migration: migrationNaming(payload),
+            ownerApp: OWNER_APP,
+            projectSchema: "main",
+            driver: { kind: "sqlite", appPath: dbPath, journalPath: join(work, "mig.db") },
+            registry: {},
+            policy: [charter("main")],
+            approved: true,
+            appliedBy: "identifier-validation",
+            nameFallback: "name_it",
+          }),
+        /invalid identifier:.*ASCII alphanumeric \+ underscore/i,
+        `${label}: guarded lowering must reject the identifier`,
+      );
 
       const db = new DatabaseSync(dbPath);
       try {
-        const columns = db
-          .prepare("SELECT name FROM pragma_table_info('items')")
-          .all()
-          .map((row: Record<string, unknown>) => row.name as string);
-        assert.ok(
-          columns.includes(payload),
-          `${label}: the column must carry the payload as its literal name`,
-        );
-
         const tables = db
           .prepare("SELECT name FROM sqlite_master WHERE type = 'table'")
           .all()
           .map((row: Record<string, unknown>) => row.name as string);
         assert.ok(
           tables.includes("bystander"),
-          `${label}: the bystander table must survive - if it did not, the payload ran`,
+          `${label}: the bystander table must survive`,
         );
+        assert.ok(!tables.includes("items"), `${label}: no table landed`);
       } finally {
         db.close();
       }
