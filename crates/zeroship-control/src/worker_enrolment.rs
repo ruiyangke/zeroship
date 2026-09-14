@@ -1,6 +1,8 @@
-//! Worker-instance enrolment: the operator's enroller import, the
-//! operator-declared address envelope, the address derivation, the ring-key
-//! mint, the row control writes, and the instance's own retirement.
+//! Worker-instance enrolment, the enroller import, and instance retirement.
+//!
+//! It holds the operator's enroller import, the operator-declared address
+//! envelope, the address derivation, the ring-key mint, the row control writes,
+//! and the instance's own retirement.
 //!
 //! ONE ROW IS ONE LIVE WORKER PROCESS. The worker generates an Ed25519 instance
 //! keypair at boot, in memory, never on disk, and enrols the public half over
@@ -106,7 +108,7 @@
 //! `draining`/`gone`/`revoked` mean anything, which is why it is stated on the
 //! reader rather than left to the caller.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::ops::RangeInclusive;
 use std::path::Path;
@@ -135,9 +137,9 @@ pub const RING_KEY_BYTES: usize = 32;
 /// The status control writes on an admitted enrolment, and on an imported
 /// enroller.
 ///
-/// Of the instance column's other two members, `gone` has exactly two writers
-/// - `zeroship.revoke_worker_enroller`, an operator's database operation, and
-/// [`retire`], the instance declaring its own exit - and `draining` has none.
+/// Of the instance column's other two members, `gone` has exactly two writers,
+/// `zeroship.revoke_worker_enroller` (an operator's database operation) and
+/// [`retire`] (the instance declaring its own exit), and `draining` has none.
 const ENROLLED_STATUS: &str = "active";
 
 /// The status an instance declares when it retires itself. Terminal: a `gone`
@@ -876,11 +878,11 @@ async fn resolve_zones(
     enrollers: &[EnrollerRecord],
 ) -> Result<BTreeMap<String, String>, String> {
     let mut zones = BTreeMap::new();
-    for name in enrollers
-        .iter()
-        .map(|enroller| enroller.zone.as_str())
-        .collect::<BTreeSet<_>>()
-    {
+    for enroller in enrollers {
+        let name = enroller.zone.as_str();
+        if zones.contains_key(name) {
+            continue;
+        }
         let row = tx
             .query_opt(
                 "SELECT id FROM zeroship.execution_zones WHERE name = $1 AND status = $2",
