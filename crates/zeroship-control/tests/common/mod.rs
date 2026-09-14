@@ -410,15 +410,15 @@ pub async fn seed_app_in_organization(
     organization_id: &str,
 ) -> AppId {
     let project_id = unowned_project_in(pg, organization_id).await;
-    let rows = pg
-        .query(
-            "INSERT INTO zeroship.apps (name, plan_id, project_id, organization_id) \
-             VALUES ($1, $2, $3, $4) RETURNING id",
-            &[&name, &plan_id, &project_id, &organization_id],
-        )
-        .await
-        .expect("seed fixture app");
-    AppId::parse(rows[0].get("id")).expect("fixture app id")
+    let app_id = AppId::mint();
+    pg.execute(
+        "INSERT INTO zeroship.apps (id, name, plan_id, project_id, organization_id) \
+             VALUES ($1, $2, $3, $4, $5)",
+        &[&app_id.as_str(), &name, &plan_id, &project_id, &organization_id],
+    )
+    .await
+    .expect("seed fixture app");
+    app_id
 }
 
 /// Seat `user` directly in `organization` at `role`.
