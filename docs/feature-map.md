@@ -975,7 +975,7 @@ replaces the external auth/gateway stack. Production builds produce a `.zship` a
 | CLI serve — heap limit configuration | 🟢 | --heap-limit-mb / ZEROSHIP_HEAP_LIMIT_MB | `crates/zeroship-cli/src/main.rs` | `docs/reference/runtime-limits.md` | — | Dev default 512MB vs prod 128MB. |
 | zeroship build | ⚫ | (removed) | `crates/zeroship-cli/src/main.rs` | — | — | Build path is @zeroship/vite-plugin. |
 | zeroship inspect | ⚫ | (removed) | `crates/zeroship-cli/src/main.rs` | — | — | Removed in artifact-layout redesign. |
-| zeroship config show / path | 🟢 | `zeroship config show [--env] [--config]` | `crates/zeroship-cli/src/project_config/mod.rs` | `docs/reference/project-config.md` | `tests/project_config_gate.sh` | Canonical JSON of the resolved file; byte-compared against the TS reader's dump. |
+| zeroship config show / path | 🟢 | `zeroship config show [--env] [--config]` | `crates/zeroship-cli/src/project_config/mod.rs` | `docs/reference/project-config.md` | `crates/zeroship-cli/src/project_config/tests.rs` | Canonical JSON of the resolved file; exercised with the shared reader fixture. |
 | zeroship.jsonc reader (CLI side) | 🟢 | `--config=<path>` / `ZEROSHIP_CONFIG` / auto-discovery | `crates/zeroship-cli/src/project_config/` | `docs/reference/project-config.md` | `crates/zeroship-cli/src/project_config/tests.rs` | No defaults on this side: a key the file omits is an error naming it. Writeback splices the root `app` only; `login` reads `control` softly. |
 | subscription procedures | 🟡 | `subscription(handler, config)` | `sdks/vite-plugin/src/transform.ts` | `docs/reference/vite-plugin.md` | — | Server discovered; client UNIMPLEMENTED. |
 

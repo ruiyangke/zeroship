@@ -19,10 +19,9 @@
 // investigation that went seven red before anyone looked at the database.
 //
 // WHAT A REFUSAL IS, AND WHY IT IS NOT A FAILURE. A failure is a verdict about
-// the code. A refusal is the statement that no verdict was reachable. The
-// shell gates in `tests/` already draw that line -- `tests/project_config_gate.sh`
-// prints `FAIL: no zeroship binary at <path>` and emits ZERO arm lines rather
-// than ruling on nothing -- and this is the same shape for a cargo test binary.
+// the code. A refusal is the statement that no verdict was reachable. This
+// fixture refuses before any case can report a result when the required
+// database contract is unavailable.
 //
 // WHY IT EXITS THE PROCESS INSTEAD OF PANICKING. A panic in a shared fixture
 // helper is reported once per test that called it. The control live-DB target
