@@ -122,8 +122,8 @@ mod backup_sqlite {
     }
 
     /// Classify a session-level `DbError` from `VACUUM INTO` as the
-    /// `SQLITE_BUSY`-equivalent retryable error. SQLite's
-    /// `busy_timeout=5000` PRAGMA absorbs most contention internally;
+    /// `SQLITE_BUSY`-equivalent retryable error. The connection's busy
+    /// timeout (`budgets::DB_LOCK_TIMEOUT_MS`) absorbs most contention internally;
     /// surfacing here means a schema-change race or checkpointer
     /// holding the exclusive lock past the timeout. The
     /// `error::from_sqlite` classifier maps `SQLITE_BUSY` to
