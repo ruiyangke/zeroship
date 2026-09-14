@@ -129,6 +129,21 @@ fn unsigned_advance_bind_allowed(bind_host: &str, unsigned_advance: bool) -> boo
     !unsigned_advance || is_loopback_bind(bind_host)
 }
 
+/// A workflow host prepares creator journals in the worker's own database and
+/// stages payloads in its own object store, so it cannot run without either.
+/// Refusing the boot beats a host that registers capacity it can never use.
+fn workflow_host_prerequisites(database: bool, storage: bool) -> Result<(), &'static str> {
+    if !database {
+        return Err("worker.workflow_manager_url requires worker.database_url: creator \
+                    workflow journals live in the app database");
+    }
+    if !storage {
+        return Err("worker.workflow_manager_url requires worker.storage_url: workflow \
+                    payloads live in the app object store");
+    }
+    Ok(())
+}
+
 /// Load this worker's deployment-unit ENROLLER key material, or refuse to
 /// start.
 ///
@@ -288,6 +303,29 @@ fn main() -> std::io::Result<()> {
     };
     let bind_host = settings.bind.get().clone();
     let socket_path = settings.socket.get().clone();
+    // The workflow host is optional: without a manager origin no host runs
+    // and `env.workflows` refuses every app. A configured one must be usable.
+    let workflow_manager_url = settings.workflow_manager_url.get().clone();
+    let workflow_host_config = (!workflow_manager_url.is_empty()).then(|| {
+        zeroship_worker::workflow_host::WorkflowHostConfig {
+            manager_url: workflow_manager_url.clone(),
+            capacity: *settings.workflow_capacity.get(),
+            slots: *settings.workflow_slots.get(),
+        }
+    });
+    if let Some(config) = &workflow_host_config {
+        if let Err(message) = config.validate() {
+            tracing::error!("worker: {message}");
+            std::process::exit(2);
+        }
+        if let Err(message) = workflow_host_prerequisites(
+            settings.database_url.is_configured(),
+            storage_backend.is_some(),
+        ) {
+            tracing::error!("worker: {message}");
+            std::process::exit(1);
+        }
+    }
 
     // THE BOOT GATE, before the bind guard below and before the
     // `--check-config` report, so a dry run over a placeholder credential exits
@@ -367,6 +405,22 @@ fn main() -> std::io::Result<()> {
         report.field(
             "socket_configured",
             CheckValue::Flag(!socket_path.is_empty()),
+        );
+        report.field(
+            "workflow_host_configured",
+            CheckValue::Flag(workflow_host_config.is_some()),
+        );
+        report.field(
+            "workflow_manager_url",
+            CheckValue::Plain(workflow_manager_url.clone()),
+        );
+        report.field(
+            "workflow_capacity",
+            CheckValue::Count(*settings.workflow_capacity.get()),
+        );
+        report.field(
+            "workflow_slots",
+            CheckValue::Count(*settings.workflow_slots.get()),
         );
         // Both are reported by PRESENCE, which is all a resolved `Secret<T>`
         // will answer. `!value.is_empty()` used to stand in for that and could
@@ -760,6 +814,51 @@ fn main() -> std::io::Result<()> {
         db_service.clone(),
     );
 
+    // ── THE WORKFLOW HOST ────────────────────────────────────────────────
+    //
+    // ONE host for the whole process, on its own thread, holding this
+    // instance's identity towards the manager. HTTP threads only ever see the
+    // `ReadyApps` it publishes into: an app is reachable through
+    // `env.workflows` once its assignment's preparation passed its final
+    // checks, and not before or after. With no manager configured the
+    // registry simply stays empty.
+    let workflows = zeroship_workflow::service::runner::ready::ReadyApps::default();
+    let workflow_host = match workflow_host_config {
+        Some(host_config) => {
+            let resources = zeroship_worker::workflow_host::HostResources {
+                service_auth: Arc::clone(&config.service_auth),
+                control_url: config.control_url.clone(),
+                db_service: db_service
+                    .clone()
+                    .expect("the boot refused a workflow host without a database"),
+                storage: config
+                    .storage_backend
+                    .clone()
+                    .expect("the boot refused a workflow host without storage"),
+                kv_store: config.kv_store.clone(),
+                blob_store: Arc::clone(&config.blob_store),
+                meter: Arc::clone(&meter),
+                versions: shared_versions.clone(),
+                envs: shared_envs.clone(),
+            };
+            match zeroship_worker::workflow_host::WorkflowHost::start(
+                host_config,
+                resources,
+                workflows.clone(),
+            ) {
+                Ok(host) => Some(host),
+                Err(error) => {
+                    tracing::error!(%error, "worker: refusing to start - the workflow host did not start");
+                    std::process::exit(1);
+                }
+            }
+        }
+        None => {
+            tracing::info!("worker: no workflow manager configured; env.workflows refuses every app");
+            None
+        }
+    };
+
     tracing::info!(
         bind = %bind_addr,
         threads = workers_count,
@@ -784,8 +883,7 @@ fn main() -> std::io::Result<()> {
             config.max_isolates,
             config.max_pinned_isolates_per_app,
             cache::KernelConfig {
-                control_url: config.control_url.clone(),
-                control_key: config.control_key.clone(),
+                workflows: workflows.clone(),
                 db_service: db_service.clone(),
                 kv_store: config.kv_store.clone(),
                 storage_backend: config.storage_backend.clone(),
@@ -834,7 +932,40 @@ fn main() -> std::io::Result<()> {
     // serving their current requests, and returns. Detached tasks
     // (fetch body readers, stream drainers) whose futures the pump is
     // polling get one last chance to run during the drain window.
-    let run_result = server.run().await;
+    let server = server.run();
+
+    // A request server must not keep accepting durable work after its
+    // workflow host died: stop serving and exit non-zero so the orchestrator
+    // replaces this process, which enrols as a new instance.
+    let host_failure = std::rc::Rc::new(std::cell::RefCell::new(None::<String>));
+    if let Some(host) = &workflow_host {
+        let failure = host.failure();
+        let failed = host_failure.clone();
+        let handle = server.clone();
+        ntex::rt::spawn(async move {
+            let reason = failure.await;
+            tracing::error!(%reason, "worker: the workflow host stopped unexpectedly; stopping");
+            *failed.borrow_mut() = Some(reason);
+            handle.stop(true).await;
+        });
+    }
+
+    // `server` resolves once SIGINT/SIGTERM (or a failed host) stopped it and
+    // the HTTP drain finished.
+    let run_result = server.await;
+
+    // HTTP HAS DRAINED; NOW THE WORKFLOW HOST. No request can resolve an app
+    // backend any more, so the host closes its assignment bindings - which
+    // withdraws every published backend and revokes its policy generation -
+    // reports draining to the manager while delivered executions join, and
+    // its thread is joined. Only then does the instance retire, because the
+    // host's final manager exchange is signed with the instance key.
+    if let Some(host) = workflow_host {
+        match host.shutdown().await {
+            Ok(()) => tracing::info!("worker: workflow host drained"),
+            Err(error) => tracing::warn!(%error, "worker: workflow host drain failed"),
+        }
+    }
 
     // THE INSTANCE RETIRES ITSELF, and only here: after the drain, so no
     // request still in flight loses its identity mid-read, and only on the
@@ -853,6 +984,9 @@ fn main() -> std::io::Result<()> {
         ),
     }
     tracing::info!("worker shutdown complete");
+    if let Some(reason) = host_failure.borrow_mut().take() {
+        return Err(std::io::Error::other(format!("workflow host failed: {reason}")));
+    }
     run_result
         })
 }

@@ -446,9 +446,26 @@ pub async fn fetch_app_env(
     service_auth: &zeroship_core::service_peers::ServiceAuth,
     app_id: &AppId,
 ) -> Result<String, String> {
+    fetch_app_env_supplying(
+        url_base,
+        service_auth,
+        app_id,
+        crate::cache::project_keys().as_deref(),
+    )
+    .await
+}
+
+/// [`fetch_app_env`] for a thread without the HTTP kernel, such as the
+/// workflow host: `keys` is the database service's process-wide key source.
+pub async fn fetch_app_env_supplying(
+    url_base: &str,
+    service_auth: &zeroship_core::service_peers::ServiceAuth,
+    app_id: &AppId,
+    keys: Option<&zeroship_data_orm::encryption::SuppliedProjectKeys>,
+) -> Result<String, String> {
     // Resolve host material before publishing the environment or creating an
     // isolate. Every thread uses the database service's shared source.
-    if let Some(keys) = crate::cache::project_keys() {
+    if let Some(keys) = keys {
         let app = app_id.as_str();
         if !keys.is_bound(app).map_err(|error| error.to_string())? {
             let url = format!("{url_base}/internal/apps/{}/data-key", app_id.as_str());
