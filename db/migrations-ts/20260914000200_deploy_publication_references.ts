@@ -5,7 +5,10 @@ import { table } from "@zeroship/migrate";
 // 20260914000100_deploy_publication.ts because a composite key must match the
 // referenced `app_deploys` collation at every position when it is lowered
 // against the live catalog, and that migration is where these columns take the
-// bytewise collation.
+// bytewise collation. It also declares the full `(app_id, deploy_id)` index on
+// both tables, so lowering these references never synthesizes a supporting
+// index whose presence would then change how the same migration lowers
+// against an already migrated catalog.
 //
 // NO ACTION rather than RESTRICT: the app row's own cascades can then remove
 // the deployment and its receipts and intents in one statement. Retention never
