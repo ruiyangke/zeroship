@@ -38,6 +38,10 @@ pub const SQLITE_SCHEMA: &str = concat!(
 ///
 /// The deployment catalog and the queue use separate ORM bindings to the same
 /// file. The queue acquires its deployment holds through this catalog.
+/// How long opening waits on a file another local host still holds, such as
+/// the process a restart replaces while it finishes shutting down.
+const CONTENTION_BOUND: Duration = Duration::from_secs(30);
+
 #[derive(Debug, Clone)]
 pub struct LocalPlatform {
     url: String,
@@ -53,7 +57,7 @@ impl LocalPlatform {
     pub async fn open(path: &Path) -> Result<Self, deployments::Error> {
         initialize(path)?;
         let url = format!("sqlite:{}", path.display());
-        let deadline = Instant::now() + Duration::from_secs(5);
+        let deadline = Instant::now() + CONTENTION_BOUND;
         let database = loop {
             let result = Database::connect(
                 binding()?,
@@ -113,7 +117,7 @@ fn initialize(path: &Path) -> Result<(), deployments::Error> {
     }
     let mut connection = rusqlite::Connection::open(path).map_err(|_| unavailable())?;
     connection
-        .busy_timeout(Duration::from_secs(5))
+        .busy_timeout(CONTENTION_BOUND)
         .map_err(|_| unavailable())?;
     let tx = connection
         .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)

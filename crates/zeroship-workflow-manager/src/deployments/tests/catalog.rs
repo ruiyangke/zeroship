@@ -16,6 +16,36 @@ fn manifest() -> (String, String) {
 }
 
 #[test]
+fn opening_waits_for_a_host_that_still_holds_the_platform_file() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("platform/metadata.sqlite");
+    compio::runtime::Runtime::new()
+        .unwrap()
+        .block_on(async { local(&path).await.unwrap() });
+    // A replaced process can hold the file while it shuts down.
+    let holder = rusqlite::Connection::open(&path).unwrap();
+    holder.execute_batch("BEGIN EXCLUSIVE").unwrap();
+    let (finished, done) = std::sync::mpsc::channel();
+    let opener = {
+        let path = path.clone();
+        std::thread::spawn(move || {
+            let opened = compio::runtime::Runtime::new()
+                .unwrap()
+                .block_on(async { local(&path).await.map(|_| ()) });
+            finished.send(()).unwrap();
+            opened
+        })
+    };
+    assert!(
+        done.recv_timeout(std::time::Duration::from_secs(6))
+            .is_err(),
+        "opening must keep waiting through a restart handoff instead of failing"
+    );
+    holder.execute_batch("COMMIT").unwrap();
+    opener.join().unwrap().unwrap();
+}
+
+#[test]
 fn concurrent_local_hosts_share_the_normal_deployment_identity() {
     for _ in 0..8 {
         concurrent_local_registration();
