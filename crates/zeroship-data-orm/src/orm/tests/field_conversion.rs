@@ -90,14 +90,12 @@ fn conversion_hooks_keep_domain_types_outside_native_codecs() {
     let decoded = ConvertedPost::from_row(Row::new(record)).unwrap();
     assert_eq!(decoded.key, key);
     assert_eq!(ConvertedPost::COLUMNS, &["title"]);
+    let allocation = key.0.as_ptr();
     let record = OwnedConvertedPost { title: key }.into_record().unwrap();
-    assert_eq!(
-        OwnedConvertedPost::from_row(Row::new(record))
-            .unwrap()
-            .title
-            .0,
-        "key:chosen"
-    );
+    assert_eq!(record["title"].as_str().unwrap().as_ptr(), allocation);
+    let decoded = OwnedConvertedPost::from_row(Row::new(record)).unwrap();
+    assert_eq!(decoded.title.0, "key:chosen");
+    assert_eq!(decoded.title.0.as_ptr(), allocation);
 }
 
 #[test]
