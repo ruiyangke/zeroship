@@ -2,12 +2,12 @@
 //!
 //! WHAT THESE DO NOT CATCH, stated so the coverage is not overread:
 //!
-//! - They do not compare this reader against the TypeScript one. Byte-equality
-//!   of the two resolved dumps is checked by `tests/project_config_gate.sh` and
-//!   needs both binaries; nothing here can see a divergent TS default.
+//! - They do not compare this reader against the TypeScript one in process.
+//!   Both readers consume generated contracts from the shared schema, and each
+//!   owning suite exercises the committed cross-tool fixture.
 //! - They do not exercise `locate` against a real `ZEROSHIP_CONFIG`, because
 //!   setting process environment in a threaded test runner races every other
-//!   test in the binary. The env arm is covered by the shell gate.
+//!   test in the binary. Process-level CLI tests own that environment boundary.
 //! - `write_app` is tested on temp files, including a real disk edit after load.
 
 use super::*;
@@ -19,6 +19,26 @@ fn app_id(raw: &str) -> AppId {
 fn cfg(text: &str) -> ProjectConfig {
     ProjectConfig::parse(PathBuf::from("zeroship.jsonc"), text.to_string())
         .expect("fixture must parse")
+}
+
+#[test]
+fn committed_cross_tool_fixture_resolves_in_rust() {
+    let text = include_str!("../../../../tests/fixtures/project-config/zeroship.jsonc");
+    let config = ProjectConfig::parse(PathBuf::from("zeroship.jsonc"), text.to_string())
+        .expect("committed cross-tool fixture must parse");
+    let root = config.resolve(None).expect("resolve fixture root");
+    assert_eq!(root.str("name"), Some("config-fixture"));
+    assert_eq!(root.str("migrations.out"), Some("generated/zeroship"));
+
+    let staging = config
+        .resolve(Some("staging"))
+        .expect("resolve fixture environment");
+    assert_eq!(
+        staging.str("control"),
+        Some("https://control.staging.zeroship.ai")
+    );
+    assert_eq!(staging.str("migrations.out"), Some("generated/staging"));
+    assert!(staging.is_protected());
 }
 
 const FULL: &str = r#"{
