@@ -1312,6 +1312,7 @@ fn open_lane_connection(
     let conn = Connection::open(db_path).map_err(from_sqlite)?;
     super::json::register(&conn).map_err(from_sqlite)?;
     super::decimal::register(&conn).map_err(from_sqlite)?;
+    super::temporal::register(&conn).map_err(from_sqlite)?;
     conn.execute_batch(BOOT_PRAGMAS).map_err(from_sqlite)?;
     let dispatcher = match packet_tx {
         Some(tx) => Some(crate::backend::sqlite::cdc::install(&conn, tx.clone())?),

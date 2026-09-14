@@ -549,12 +549,37 @@ pub(crate) async fn run_update_one(
     coll: String,
     route: crate::tx_route::TxRoute,
     filter: predicate::Input,
-    update: Value,
+    update: update::Input,
+    actor_id: Option<String>,
+) -> Result<(Vec<Value>, bool), DbError> {
+    if update.expressions.is_empty() {
+        return run_update_one_inner(binding, coll, route, filter, update, actor_id).await;
+    }
+    let frame = crate::transaction::AtomicWriteFrame::begin(route).await?;
+    let result = run_update_one_inner(
+        binding,
+        coll,
+        frame.route().clone(),
+        filter,
+        update,
+        actor_id,
+    )
+    .await;
+    frame.finish(result).await
+}
+
+async fn run_update_one_inner(
+    binding: DbBinding,
+    coll: String,
+    route: crate::tx_route::TxRoute,
+    filter: predicate::Input,
+    update: update::Input,
     actor_id: Option<String>,
 ) -> Result<(Vec<Value>, bool), DbError> {
     let mut update = update;
     let schema = crate::descriptor::collection_schema(&binding, &coll)?;
-    write_pipeline::inspect_update(&schema, &mut update)?;
+    update.inspect(&schema)?;
+    let result_checks = update.result_checks(&schema, false)?;
     // A concurrency predicate must identify one row.
     let concurrency = extract_concurrency_guard(&filter, &coll, &schema)?;
     if !filter.has_non_null_equality("id") {
@@ -566,10 +591,10 @@ pub(crate) async fn run_update_one(
         }
     }
 
-    update_validation::validate(&schema, &update)?;
-    crate::sql::codecs::prepare_update(&schema, &mut update)?;
+    update.validate_values(&schema)?;
+    crate::sql::codecs::prepare_update(&schema, &mut update.values)?;
     let per_row_encrypted_update =
-        write_pipeline::update_requires_per_row_encryption(&schema, &update);
+        write_pipeline::update_requires_per_row_encryption(&schema, &update.values);
     let target_row = if per_row_encrypted_update {
         let target_rows =
             write_pipeline::resolve_target_row_ids(&route, &coll, filter.clone(), 1, &schema)
@@ -599,7 +624,7 @@ pub(crate) async fn run_update_one(
         &route,
         &binding,
         &coll,
-        &mut update,
+        &mut update.values,
         write_pipeline::ApplyMode::Update { row_pk },
     )
     .await?;
@@ -630,14 +655,14 @@ pub(crate) async fn run_update_one(
         route.sql_registration(),
     );
     let bq = built.map_err(DbError::from)?;
-    let rows = exec_mutation_with_emit(
-        bq,
+    let mut rows = crate::exec::exec_mutation(&route, bq).await?;
+    update::validate_results(&mut rows, &result_checks)?;
+    crate::exec::emit_mutation_rows(
+        &rows,
         &route,
         &coll,
         zeroship_data_orm::cdc::ChangeOp::Update,
-        &binding,
-    )
-    .await?;
+    );
     let result = read_pipeline::apply(
         &route,
         &binding,
@@ -678,7 +703,7 @@ pub(crate) async fn run_update_many(
     coll: String,
     route: crate::tx_route::TxRoute,
     filter: predicate::Input,
-    update: Value,
+    update: update::Input,
     actor_id: Option<String>,
 ) -> Result<u64, DbError> {
     let mut update = update;
@@ -687,7 +712,7 @@ pub(crate) async fn run_update_many(
     // stamp, so this is the same value either arm would read, taken before the
     // move rather than through two different accessors.
     let schema = crate::descriptor::collection_schema(&binding, &coll)?;
-    write_pipeline::inspect_update(&schema, &mut update)?;
+    update.inspect(&schema)?;
     let concurrency = extract_concurrency_guard(&filter, &coll, &schema)?;
     if !filter.has_non_null_equality("id") {
         if let Some(guard) = &concurrency {
@@ -698,10 +723,10 @@ pub(crate) async fn run_update_many(
         }
     }
 
-    update_validation::validate(&schema, &update)?;
-    crate::sql::codecs::prepare_update(&schema, &mut update)?;
+    update.validate_values(&schema)?;
+    crate::sql::codecs::prepare_update(&schema, &mut update.values)?;
     let per_row_encrypted_update =
-        write_pipeline::update_requires_per_row_encryption(&schema, &update);
+        write_pipeline::update_requires_per_row_encryption(&schema, &update.values);
     // No `skip_*` knob is set: the pass stripped every column the
     // charter re-assigns on write, so the patch cannot carry a
     // competing assignment for the builder to defer to.
@@ -711,7 +736,8 @@ pub(crate) async fn run_update_many(
         false,
         false,
     );
-    if per_row_encrypted_update {
+    let result_checks = update.result_checks(&schema, true)?;
+    if per_row_encrypted_update || !result_checks.is_empty() {
         let frame = crate::transaction::AtomicWriteFrame::begin(route).await?;
         let work_result: Result<u64, DbError> = async {
             let target_rows = write_pipeline::resolve_target_row_ids(
@@ -765,7 +791,7 @@ pub(crate) async fn run_update_many(
                     frame.route(),
                     &binding,
                     &coll,
-                    &mut row_update,
+                    &mut row_update.values,
                     write_pipeline::ApplyMode::Update { row_pk: &row_pk },
                 )
                 .await?;
@@ -794,13 +820,26 @@ pub(crate) async fn run_update_many(
 
             let mut affected = 0u64;
             for built in row_queries {
-                affected += exec_mutation_count_with_emit(
-                    built,
-                    frame.route(),
-                    &coll,
-                    zeroship_data_orm::cdc::ChangeOp::Update,
-                )
-                .await?;
+                if result_checks.is_empty() {
+                    affected += exec_mutation_count_with_emit(
+                        built,
+                        frame.route(),
+                        &coll,
+                        zeroship_data_orm::cdc::ChangeOp::Update,
+                    )
+                    .await?;
+                } else {
+                    let mut rows = crate::exec::exec_mutation(frame.route(), built).await?;
+                    update::validate_results(&mut rows, &result_checks)?;
+                    let count = rows.len() as u64;
+                    crate::exec::emit_mutation_count(
+                        frame.route(),
+                        &coll,
+                        zeroship_data_orm::cdc::ChangeOp::Update,
+                        count,
+                    );
+                    affected += count;
+                }
             }
 
             if let Some(guard) = &concurrency {
@@ -828,7 +867,7 @@ pub(crate) async fn run_update_many(
         &route,
         &binding,
         &coll,
-        &mut update,
+        &mut update.values,
         write_pipeline::ApplyMode::Update { row_pk: "" },
     )
     .await?;

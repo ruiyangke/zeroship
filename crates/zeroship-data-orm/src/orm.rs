@@ -205,7 +205,7 @@ impl Collection {
     fn update_model(
         &self,
         filter: model::ModelPredicate,
-        patch: Value,
+        patch: crud::update::Input,
         many: bool,
     ) -> impl Future<Output = Result<Output, DbError>> + use<> {
         let db = &self.database;
@@ -384,6 +384,8 @@ fn decode_rows<E: Entity, R: FromRow<E>>(output: Output) -> Result<Vec<R>, DbErr
         .collect()
 }
 mod codecs;
+mod timestamp;
+pub use timestamp::TimestampExpr;
 mod model;
 mod mutations;
 mod relations;
@@ -488,7 +490,7 @@ enum Plan {
     InsertMany(Value),
     Update {
         filter: crud::predicate::Input,
-        patch: Value,
+        patch: crud::update::Input,
         many: bool,
     },
     Mutation {
@@ -582,7 +584,7 @@ impl PreparedOperation {
                 many,
             } => Plan::Update {
                 filter: filter.into(),
-                patch,
+                patch: patch.into(),
                 many,
             },
             Operation::Delete { filter, many } => Plan::Mutation {
@@ -669,7 +671,7 @@ impl PreparedOperation {
         route: CapturedRoute,
         actor_id: Option<String>,
         filter: model::ModelPredicate,
-        patch: Value,
+        patch: crud::update::Input,
         many: bool,
     ) -> Result<Self, DbError> {
         validate_target(&binding, collection, &route)?;
