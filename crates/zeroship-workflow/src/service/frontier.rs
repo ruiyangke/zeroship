@@ -1,6 +1,8 @@
 use super::{
-    app::{active_deploy, deadline, decode, emit, encode, insert_root_run, parse_state},
-    journal, models,
+    app::{
+        active_deploy, deadline, decode, emit, encode, insert_continued_run, parse_state, NewRun,
+    },
+    continuations, journal, models,
     store::{Row, Transaction},
     AppPolicy, ControlIntent,
 };
@@ -18,14 +20,6 @@ use zeroship_data_orm::{
     sql::RowLimit,
     value,
 };
-
-#[derive(FromRow)]
-#[orm(entity = models::waits)]
-struct WaitingParent {
-    id: String,
-    run_id: String,
-    generation: i64,
-}
 
 #[derive(FromRow)]
 #[orm(entity = models::runs)]
@@ -255,32 +249,28 @@ pub(crate) async fn apply(
         if !deploy.workflows.contains(&name) {
             return journal::invalid("workflow is absent from the active deployment");
         }
+        let source =
+            continuations::member(tx, app, &run.text("id")?, run.integer("generation")?).await?;
         let id = typed_id::new_workflow_run_id();
         let key = run.optional_text("key")?;
-        finish(
-            tx,
-            app,
-            run,
-            RunState::Completed,
-            Some(json!({"continuedAsNew":id})),
-            None,
-            now,
-        )
-        .await?;
-        insert_root_run(
-            tx,
-            app,
-            &id,
-            &name,
-            &deploy.id,
-            &StartOptions {
-                input: seed_input.unwrap_or(Value::Null),
-                key,
-                ..Default::default()
-            },
-            now,
-        )
-        .await?;
+        let completed = Terminal {
+            state: RunState::Completed,
+            output: Some(json!({"continuedAsNew":id})),
+            error: None,
+        };
+        finish_run(tx, app, run, completed, now, false).await?;
+        let options = StartOptions {
+            input: seed_input.unwrap_or(Value::Null),
+            key,
+            ..Default::default()
+        };
+        let successor = NewRun {
+            id: &id,
+            name: &name,
+            deploy: &deploy.id,
+            options: &options,
+        };
+        insert_continued_run(tx, app, &successor, now, &source).await?;
         if let Some(reference) = seed_input_ref {
             super::payloads::promote(
                 tx,
@@ -617,6 +607,34 @@ pub(crate) async fn finish(
     error: Option<Value>,
     now: i64,
 ) -> Result<RunState, WorkflowServiceError> {
+    let terminal = Terminal {
+        state,
+        output,
+        error,
+    };
+    finish_run(tx, app, run, terminal, now, true).await
+}
+
+/// Result recorded on a run's current generation when it becomes terminal.
+struct Terminal {
+    state: RunState,
+    output: Option<Value>,
+    error: Option<Value>,
+}
+
+async fn finish_run(
+    tx: &mut Transaction,
+    app: &AppId,
+    run: &Row,
+    terminal: Terminal,
+    now: i64,
+    notify_parents: bool,
+) -> Result<RunState, WorkflowServiceError> {
+    let Terminal {
+        state,
+        output,
+        error,
+    } = terminal;
     let id = run.text("id")?;
     let generation = run.integer("generation")?;
     tx.database().collection(models::runs::Entity::COLLECTION)?.update(
@@ -639,7 +657,12 @@ pub(crate) async fn finish(
             filter:value!({"app_id":app.as_str(), "run_id":id.clone(), "generation":generation}), many:true,
         }).await?;
     }
-    wake_parents(tx, app, &id, now).await?;
+    if notify_parents {
+        let member = continuations::member(tx, app, &id, generation).await?;
+        if member.is_current {
+            wake_parents(tx, app, &member, now).await?;
+        }
+    }
     emit(
         tx,
         app,
@@ -655,61 +678,32 @@ pub(crate) async fn finish(
 async fn wake_parents(
     tx: &Transaction,
     app: &AppId,
-    child: &str,
+    child: &continuations::Member,
     now: i64,
 ) -> Result<(), WorkflowServiceError> {
-    let db = tx.database();
-    let run = db.entity::<models::runs::Entity>()?.alias("r")?;
-    let wait = db.entity::<models::waits::Entity>()?.alias("w")?;
-    let runs = db.collection(models::runs::Entity::COLLECTION)?;
     let page_limit = RowLimit::default().get();
     let mut after: Option<String> = None;
     loop {
-        let mut filter = wait
-            .column(models::waits::app_id)
-            .eq(app.as_str())?
-            .and(wait.column(models::waits::child_id).eq(Some(child))?)
-            .and(run.column(models::runs::task_id).eq(None::<String>)?)
-            .and(run.column(models::runs::control).eq("none")?)
-            .and(
-                run.column(models::runs::state)
-                    .eq("waiting")?
-                    .or(run.column(models::runs::state).eq("sleeping")?)
-                    .or(run.column(models::runs::state).eq("queued")?),
-            );
-        if let Some(after) = &after {
-            filter = filter.and(wait.column(models::waits::id).gt(after.as_str())?);
-        }
-        let page = db
-            .from(&wait)
-            .inner_join(
-                &run,
-                wait.column(models::waits::app_id)
-                    .eq(run.column(models::runs::app_id))?
-                    .and(
-                        wait.column(models::waits::run_id)
-                            .eq(run.column(models::runs::id))?,
-                    )
-                    .and(
-                        wait.column(models::waits::generation)
-                            .eq(run.column(models::runs::generation))?,
-                    ),
-            )?
-            .filter(filter)
-            .order_by(wait.column(models::waits::id).asc())
-            .select(wait.row::<WaitingParent>())?
-            .limit(page_limit)?
-            .all()
-            .await?;
+        let page = continuations::waiting(tx, app, child, after.as_deref(), page_limit).await?;
         let count = page.len();
         for parent in page {
-            runs.execute(Operation::Update {
-                filter: value!({"app_id":app.as_str(), "id":parent.run_id.clone(), "generation":parent.generation,
-                    "task_id":null, "control":"none", "state":{"$in":["waiting","sleeping","queued"]}}),
-                patch: value!({"due_at":now}),
-                many: true,
-            }).await?;
-            super::publication::advance(tx, app, &parent.run_id, now).await?;
+            let changed = tx
+                .database()
+                .entity::<models::runs::Entity>()?
+                .update_many(
+                    models::runs::app_id
+                        .eq(app.as_str())?
+                        .and(models::runs::id.eq(parent.run_id.as_str())?)
+                        .and(models::runs::generation.eq(parent.generation)?)
+                        .and(models::runs::task_id.eq(None::<&str>)?)
+                        .and(models::runs::control.eq("none")?)
+                        .and(models::runs::state.in_values(["waiting", "sleeping", "queued"])?),
+                    models::runs::due_at.set(Some(now))?,
+                )
+                .await?;
+            if changed == 1 {
+                super::publication::advance(tx, app, &parent.run_id, now).await?;
+            }
             after = Some(parent.id);
         }
         if count < page_limit as usize {
@@ -720,34 +714,35 @@ async fn wake_parents(
 }
 
 async fn link_continuation(
-    tx: &mut Transaction,
+    tx: &Transaction,
     app: &AppId,
     run: &Row,
     successor: &str,
 ) -> Result<(), WorkflowServiceError> {
-    let id = run.text("id")?;
-    let runs = tx.database().collection(models::runs::Entity::COLLECTION)?;
-    runs.update(
-        value!({"app_id":app.as_str(), "id":id.clone()}),
-        value!({"continued_to_id":successor}),
-    )
-    .await?;
-    runs.update(value!({"app_id":app.as_str(), "id":successor}), value!({
-        "continued_from_id":id.clone(), "parent_id":run.optional_text("parent_id")?,
-        "parent_generation":run.optional_integer("parent_generation")?, "parent_ordinal":run.optional_integer("parent_ordinal")?,
-        "cascade":run.integer("cascade")?, "depth":run.integer("depth")?, "schedule_id":run.optional_text("schedule_id")?,
-    })).await?;
-    // A parent's durable wait follows the continuation. It must not observe the
-    // intermediate run's terminal acknowledgement as the child's final result.
-    retarget_parent_steps(tx, app, &id, successor).await?;
-    tx.database()
-        .collection(models::waits::Entity::COLLECTION)?
-        .execute(Operation::Update {
-            filter: value!({"app_id":app.as_str(), "child_id":id}),
-            patch: value!({"child_id":successor}),
-            many: true,
-        })
+    let changed = tx
+        .database()
+        .entity::<models::runs::Entity>()?
+        .update_many(
+            models::runs::app_id
+                .eq(app.as_str())?
+                .and(models::runs::id.eq(successor)?),
+            models::runs::parent_id
+                .set(run.optional_text("parent_id")?)?
+                .and(
+                    models::runs::parent_generation
+                        .set(run.optional_integer("parent_generation")?)?,
+                )?
+                .and(models::runs::parent_ordinal.set(run.optional_integer("parent_ordinal")?)?)?
+                .and(models::runs::cascade.set(run.integer("cascade")?)?)?
+                .and(models::runs::depth.set(run.integer("depth")?)?)?
+                .and(models::runs::schedule_id.set(run.optional_text("schedule_id")?)?)?,
+        )
         .await?;
+    if changed != 1 {
+        return Err(WorkflowServiceError::Internal(
+            "workflow continuation successor is missing".into(),
+        ));
+    }
     Ok(())
 }
 
@@ -825,76 +820,4 @@ async fn compensation_failures(
         }
     }
     Ok(failures)
-}
-
-async fn retarget_parent_steps(
-    tx: &mut Transaction,
-    app: &AppId,
-    id: &str,
-    successor: &str,
-) -> Result<(), WorkflowServiceError> {
-    let db = tx.database().clone();
-    let step = db.entity::<models::steps::Entity>()?.alias("s")?;
-    let wait = db.entity::<models::waits::Entity>()?.alias("w")?;
-    let page_limit = RowLimit::default().get();
-    let mut after: Option<(String, i64, i64)> = None;
-    loop {
-        let mut filter = wait
-            .column(models::waits::app_id)
-            .eq(app.as_str())?
-            .and(wait.column(models::waits::child_id).eq(Some(id))?);
-        if let Some((run_id, generation, ordinal)) = &after {
-            filter = filter.and(
-                step.column(models::steps::run_id)
-                    .gt(run_id.as_str())?
-                    .or(step
-                        .column(models::steps::run_id)
-                        .eq(run_id.as_str())?
-                        .and(step.column(models::steps::generation).gt(*generation)?))
-                    .or(step
-                        .column(models::steps::run_id)
-                        .eq(run_id.as_str())?
-                        .and(step.column(models::steps::generation).eq(*generation)?)
-                        .and(step.column(models::steps::ordinal).gt(*ordinal)?)),
-            );
-        }
-        let page = db
-            .from(&step)
-            .inner_join(
-                &wait,
-                step.column(models::steps::app_id)
-                    .eq(wait.column(models::waits::app_id))?
-                    .and(
-                        step.column(models::steps::run_id)
-                            .eq(wait.column(models::waits::run_id))?,
-                    )
-                    .and(
-                        step.column(models::steps::generation)
-                            .eq(wait.column(models::waits::generation))?,
-                    )
-                    .and(
-                        step.column(models::steps::ordinal)
-                            .eq(wait.column(models::waits::ordinal))?,
-                    ),
-            )?
-            .filter(filter)
-            .order_by(step.column(models::steps::run_id).asc())
-            .order_by(step.column(models::steps::generation).asc())
-            .order_by(step.column(models::steps::ordinal).asc())
-            .select(step.row::<models::ParentStep>())?
-            .limit(page_limit)?
-            .all()
-            .await?;
-        let count = page.len();
-        for parent in page {
-            let mut record: crate::engine::StepCheckpoint = decode(&parent.record)?;
-            record.child_run_id = Some(successor.into());
-            journal::update(tx, app, &parent.run_id, parent.generation, &record).await?;
-            after = Some((parent.run_id, parent.generation, parent.ordinal));
-        }
-        if count < page_limit as usize {
-            break;
-        }
-    }
-    Ok(())
 }

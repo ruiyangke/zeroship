@@ -494,6 +494,143 @@
       },
       "indexes": []
     },
+    "__zeroship_workflow_continuation_heads": {
+      "fields": {
+        "id": {
+          "type": "string",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "id"
+          },
+          "primaryKey": true
+        },
+        "app_id": {
+          "type": "string",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "app_id"
+          }
+        },
+        "current_generation_id": {
+          "type": "string",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "current_generation_id"
+          }
+        },
+        "revision": {
+          "type": "bigInt",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "revision"
+          }
+        }
+      },
+      "options": {
+        "softDelete": false,
+        "versioning": false,
+        "strictness": "strict"
+      },
+      "indexes": [
+        {
+          "name": "__zeroship_workflow_continuation_heads_scope_key",
+          "fields": [
+            "app_id",
+            "id"
+          ],
+          "unique": true
+        }
+      ]
+    },
+    "__zeroship_workflow_continuation_members": {
+      "fields": {
+        "id": {
+          "type": "string",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "id"
+          },
+          "primaryKey": true
+        },
+        "app_id": {
+          "type": "string",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "app_id"
+          }
+        },
+        "head_id": {
+          "type": "string",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "head_id"
+          }
+        },
+        "revision": {
+          "type": "bigInt",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "revision"
+          }
+        }
+      },
+      "options": {
+        "softDelete": false,
+        "versioning": false,
+        "strictness": "strict"
+      },
+      "indexes": [
+        {
+          "name": "__zeroship_workflow_continuation_members_scope_key",
+          "fields": [
+            "app_id",
+            "id"
+          ],
+          "unique": true
+        },
+        {
+          "name": "__zeroship_workflow_continuation_member_revision",
+          "fields": [
+            "app_id",
+            "head_id",
+            "revision"
+          ],
+          "unique": true
+        }
+      ]
+    },
     "__zeroship_workflow_deployment_holds": {
       "fields": {
         "id": {
@@ -952,6 +1089,14 @@
             "app_id",
             "run_id",
             "generation"
+          ],
+          "unique": true
+        },
+        {
+          "name": "__zeroship_workflow_generation_identity",
+          "fields": [
+            "app_id",
+            "id"
           ],
           "unique": true
         }
@@ -2302,26 +2447,6 @@
           "storage": {
             "valueColumn": "schedule_id"
           }
-        },
-        "continued_from_id": {
-          "type": "string",
-          "readable": true,
-          "filterable": true,
-          "sortable": true,
-          "projectable": true,
-          "storage": {
-            "valueColumn": "continued_from_id"
-          }
-        },
-        "continued_to_id": {
-          "type": "string",
-          "readable": true,
-          "filterable": true,
-          "sortable": true,
-          "projectable": true,
-          "storage": {
-            "valueColumn": "continued_to_id"
-          }
         }
       },
       "options": {
@@ -2789,6 +2914,26 @@
           "projectable": true,
           "storage": {
             "valueColumn": "record"
+          }
+        },
+        "child_member_id": {
+          "type": "string",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "child_member_id"
+          }
+        },
+        "child_result_member_id": {
+          "type": "string",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "child_result_member_id"
           }
         },
         "compensation_attempts": {
@@ -3416,16 +3561,6 @@
           "projectable": true,
           "storage": {
             "valueColumn": "due_at"
-          }
-        },
-        "child_id": {
-          "type": "string",
-          "readable": true,
-          "filterable": true,
-          "sortable": true,
-          "projectable": true,
-          "storage": {
-            "valueColumn": "child_id"
           }
         }
       },

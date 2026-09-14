@@ -13,7 +13,7 @@ use zeroship_core::{
 use zeroship_data_orm::orm::{FindOptions, FromRow};
 
 mod authority;
-mod fixture;
+pub(in crate::service::tests) mod fixture;
 mod pages;
 mod references;
 mod rollback;

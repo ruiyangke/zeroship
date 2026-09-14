@@ -158,41 +158,10 @@ pub(in crate::service) async fn prepare_draft<'tx>(
         ));
     };
     let active_descendants = has_active_descendants(tx, app, run_id).await?;
-    let db = tx.database();
-    let child = db.entity::<models::runs::Entity>()?.alias("r")?;
-    let wait = db.entity::<models::waits::Entity>()?.alias("w")?;
-    let waiting_children = db
-        .from(&child)
-        .inner_join(
-            &wait,
-            wait.column(models::waits::app_id)
-                .eq(child.column(models::runs::app_id))?
-                .and(
-                    wait.column(models::waits::child_id)
-                        .eq(child.column(models::runs::id))?,
-                ),
-        )?
-        .filter(
-            wait.column(models::waits::app_id)
-                .eq(app.as_str())?
-                .and(wait.column(models::waits::run_id).eq(run_id)?)
-                .and(wait.column(models::waits::generation).eq(current)?)
-                .and(
-                    child
-                        .column(models::runs::state)
-                        .eq("completed")?
-                        .or(child.column(models::runs::state).eq("failed")?)
-                        .or(child.column(models::runs::state).eq("cancelled")?)
-                        .negate(),
-                ),
-        )
-        .select(child.row::<models::KeyedRun>())?
-        .limit(1)?
-        .all()
-        .await?;
+    let waiting_children = has_active_children(tx, app, run_id, current).await?;
     let safety = RestartSafety {
         live_lease: live != 0,
-        active_descendants: active_descendants || !waiting_children.is_empty(),
+        active_descendants: active_descendants || waiting_children,
         active_compensation: run.optional_text("compensation_target")?.is_some()
             && steps.iter().any(|step| {
                 step.compensation_state
@@ -423,6 +392,7 @@ impl RestartPlan<'_> {
         let app = &context.app;
         let run_id = context.run_id.as_str();
         let now = context.now;
+        let source = super::super::continuations::member(tx, app, run_id, current).await?;
         let prefix = from.unwrap_or(0);
         let restarted_from_ordinal = from
             .map(|ordinal| {
@@ -471,10 +441,6 @@ impl RestartPlan<'_> {
                 many: true,
             })
             .await?;
-        tx.database().collection(models::generations::Entity::COLLECTION)?.update(
-            value!({"app_id":app.as_str(), "run_id":run_id, "generation":current, "terminal_at":null}),
-            value!({"state":"restarted", "terminal_at":now}),
-        ).await?;
         tx.database()
             .collection(models::generations::Entity::COLLECTION)?
             .insert(value!({
@@ -483,6 +449,11 @@ impl RestartPlan<'_> {
                 "state":"queued", "started_at":now,
             }))
             .await?;
+        super::super::continuations::restart(tx, app, &source, run_id, generation).await?;
+        tx.database().collection(models::generations::Entity::COLLECTION)?.update(
+            value!({"app_id":app.as_str(), "run_id":run_id, "generation":current, "terminal_at":null}),
+            value!({"state":"restarted", "terminal_at":now}),
+        ).await?;
         replay::copy_prefix(tx, app, run_id, current, generation, prefix).await?;
         tx.database().collection(models::runs::Entity::COLLECTION)?.update(
             value!({"app_id":app.as_str(), "id":run_id}),
@@ -490,6 +461,7 @@ impl RestartPlan<'_> {
                 "due_at":now, "task_id":null, "terminal_at":null, "compensation_target":null, "signal_epoch":signal_epoch,
                 "frontier_revision":1}),
         ).await?;
+        super::super::continuations::member(tx, app, run_id, generation).await?;
         super::super::publication::record(tx, app, run_id, now).await?;
         let result = RestartedRun {
             run_id: run_id.into(),
@@ -568,4 +540,62 @@ async fn has_active_descendants(
         }
     }
     Ok(false)
+}
+
+#[derive(FromRow)]
+#[orm(entity = models::waits)]
+struct ChildWait {
+    id: String,
+    ordinal: i64,
+}
+
+async fn has_active_children(
+    tx: &Transaction,
+    app: &AppId,
+    run: &str,
+    generation: i64,
+) -> Result<bool, WorkflowServiceError> {
+    let db = tx.database();
+    let source = db.entity::<models::waits::Entity>()?.alias("w")?;
+    let page_limit = RowLimit::default().get();
+    let mut after: Option<String> = None;
+    let mut inspected = 0;
+    loop {
+        let mut filter = source
+            .column(models::waits::app_id)
+            .eq(app.as_str())?
+            .and(source.column(models::waits::run_id).eq(run)?)
+            .and(source.column(models::waits::generation).eq(generation)?)
+            .and(source.column(models::waits::kind).eq("child")?);
+        if let Some(after) = &after {
+            filter = filter.and(source.column(models::waits::id).gt(after.as_str())?);
+        }
+        let waits = db
+            .from(&source)
+            .filter(filter)
+            .order_by(source.column(models::waits::id).asc())
+            .select(source.row::<ChildWait>())?
+            .limit(page_limit)?
+            .all()
+            .await?;
+        let count = waits.len();
+        for wait in waits {
+            inspected += 1;
+            if inspected > MAX_DESCENDANT_INSPECTIONS {
+                return Err(WorkflowServiceError::ResourceExhausted(
+                    "workflow child inspection limit reached".into(),
+                ));
+            }
+            let child =
+                super::super::continuations::resolve(tx, app, run, generation, wait.ordinal)
+                    .await?;
+            if !child.state.is_terminal() {
+                return Ok(true);
+            }
+            after = Some(wait.id);
+        }
+        if count < page_limit as usize {
+            return Ok(false);
+        }
+    }
 }

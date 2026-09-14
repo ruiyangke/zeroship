@@ -124,10 +124,16 @@ async fn contract(store: Rc<OrmStore>, fault: Fault) {
         )
         .await
         .unwrap();
+        let source = crate::service::continuations::member(&tx, app_id, run_id, 0)
+            .await
+            .unwrap();
         tx.database().collection(models::generations::Entity::COLLECTION).unwrap()
             .insert(value!({"id":storage_id(), "app_id":app_id.as_str(), "run_id":*run_id, "generation":1,
                 "deploy_id":deploy.id, "input":"null", "state":"completed", "started_at":now, "terminal_at":now}))
             .await.unwrap();
+        crate::service::continuations::restart(&tx, app_id, &source, run_id, 1)
+            .await
+            .unwrap();
         tx.database()
             .collection(models::runs::Entity::COLLECTION)
             .unwrap()
@@ -166,7 +172,7 @@ async fn contract(store: Rc<OrmStore>, fault: Fault) {
                 value!({"id":storage_id(), "app_id":app_id.as_str(), "run_id":*run_id, "generation":generation,
                     "ordinal":i64::from(*ordinal), "name":step.name.clone(), "occurrence":i64::from(*ordinal),
                     "origin_generation":0, "kind":step.kind.clone(), "state":step.state.clone(),
-                    "record":serde_json::to_string(&step).unwrap(), "compensation_attempts":i64::from(*ordinal),
+                    "record":crate::service::journal::encode_checkpoint(&step, None, None).unwrap(), "compensation_attempts":i64::from(*ordinal),
                     "compensation_due_at":now, "compensation_error":"retained diagnostic", "compensation_retry_ms":17})
             }).collect();
             insert(&tx, models::steps::Entity::COLLECTION, documents).await;

@@ -1354,6 +1354,26 @@ checkpoints never re-resolve a mutable head: they retain the exact result member
 physical result-producing run and copied inline or referenced output. Prefix
 replay preserves this provenance; a wait timeout has no child terminal member.
 
+The private stored checkpoint wraps the ordinary step checkpoint with its
+accepted and consumed member identities. Reads compare those identities with
+the native reference columns before decoding the engine checkpoint, then
+validate any consumed result against its immutable terminal generation. A
+later generation returning the same output cannot substitute for the original
+result. Saving consumption updates the record and reference together; prefix
+replay copies them unchanged. Every native step uses this closed record shape,
+while the engine and V8 checkpoint contract remains unchanged.
+
+A terminal head wakes its parents by reading one bounded page at a time from
+that head's members through their accepted checkpoint references. The page
+carries the member, generation and checkpoint rows it validates, so waking a
+parent costs no per-parent resolution and a completion never visits waits on
+other children. On PostgreSQL, a child checkpoint must name its accepted member
+and no other step may name one, so a pending parent cannot fall out of that
+path. The migration compiler does not yet render table checks for SQLite; there
+the journal writer alone upholds that rule. Continuation identities keep the
+default collation of the generation identities they join, so each join uses
+the other side's index.
+
 Continuation preserves the creation-owner relationship, cascade policy, depth
 and schedule association. A keyed join creates a waiting relationship without
 acquiring ownership. Cycle admission, restart dependency checks and parent wakeup
@@ -2670,6 +2690,16 @@ counter exhaustion, corrupt progress and atomic rollback. Delivery tests verify
 deferral and lost acknowledgements without an executor or storage access, and
 the consumer contract progresses a published broadcast through separate creator
 and manager databases. The full creator library and changed-code lint pass.
+
+Stable continuation heads replace the eager parent rewrites. Paired native
+contracts cover repeated continuation with paused and keyed joiners, current
+and historical restart, inherited cancellation and compensation, rollback,
+retired authority and scope refusal. Provenance contracts retain inline and
+referenced child results through a later child restart, a parent prefix copy
+and delivered collection of an abandoned preparation. Checkpoint references
+keep their members and generations until the checkpoint itself is removed, and
+a completion wakes parents across wait pages within one transaction deadline.
+Terminal-history retirement and bounded dependency delivery remain open.
 The server injects an authenticated Control hold client into its native queue.
 Production deployment registration and activation publication still require
 host integration. The normal Control deployment transaction needs a durable

@@ -331,12 +331,18 @@ async fn seed_run(tx: &mut Transaction, app_id: &AppId, name: &str, key: Option<
 }
 
 async fn advance_generation(tx: &mut Transaction, app_id: &AppId, run: &str) {
+    let source = crate::service::continuations::member(tx, app_id, run, 0)
+        .await
+        .unwrap();
     let deploy = app::active_deploy(tx, app_id).await.unwrap();
     let now = tx.now().await.unwrap();
     tx.database().collection(models::generations::Entity::COLLECTION).unwrap()
         .insert(value!({"id":storage_id(), "app_id":app_id.as_str(), "run_id":run,
             "generation":1, "deploy_id":deploy.id, "input":"null", "state":"queued", "started_at":now}))
         .await.unwrap();
+    crate::service::continuations::advance(tx, app_id, &source, run, 1)
+        .await
+        .unwrap();
     tx.database()
         .collection(models::runs::Entity::COLLECTION)
         .unwrap()
@@ -369,20 +375,38 @@ struct Wait {
 
 async fn seed_waits(tx: &Transaction, app_id: &AppId, waits: &[Wait]) {
     assert!(!waits.is_empty());
-    let steps: Vec<_> = waits.iter().map(|wait| {
-        let mut step = StepCheckpoint::completed_run(wait.ordinal as i32, format!("child-{}", wait.ordinal), json!(null));
+    let mut steps = Vec::new();
+    for wait in waits {
+        let (head, _) = app::current_run(tx, app_id, &wait.child)
+            .await
+            .unwrap()
+            .unwrap();
+        let accepted =
+            crate::service::continuations::member(tx, app_id, &wait.child, head.generation)
+                .await
+                .unwrap();
+        let mut step = StepCheckpoint::completed_run(
+            wait.ordinal as i32,
+            format!("child-{}", wait.ordinal),
+            json!(null),
+        );
         step.kind = "child".into();
         step.state = "running".into();
         step.output = None;
         step.child_run_id = Some(wait.child.clone());
-        value!({"id":storage_id(), "app_id":app_id.as_str(), "run_id":wait.run.clone(),
+        steps.push(value!({"id":storage_id(), "app_id":app_id.as_str(), "run_id":wait.run.clone(),
             "generation":wait.generation, "ordinal":wait.ordinal, "name":step.name.clone(), "occurrence":0,
-            "origin_generation":wait.generation, "kind":"child", "state":"running", "record":serde_json::to_string(&step).unwrap()})
-    }).collect();
-    let edges: Vec<_> = waits.iter().map(|wait| value!({
-        "id":wait.id.clone(), "app_id":app_id.as_str(), "run_id":wait.run.clone(),
-        "generation":wait.generation, "ordinal":wait.ordinal, "kind":"child", "child_id":wait.child.clone(),
-    })).collect();
+            "origin_generation":wait.generation, "kind":"child", "state":"running", "record":journal::encode_checkpoint(&step, Some(&accepted.id), None).unwrap(), "child_member_id":accepted.id}));
+    }
+    let edges: Vec<_> = waits
+        .iter()
+        .map(|wait| {
+            value!({
+                "id":wait.id.clone(), "app_id":app_id.as_str(), "run_id":wait.run.clone(),
+                "generation":wait.generation, "ordinal":wait.ordinal, "kind":"child",
+            })
+        })
+        .collect();
     for (collection, documents) in [
         (models::steps::Entity::COLLECTION, steps),
         (models::waits::Entity::COLLECTION, edges),

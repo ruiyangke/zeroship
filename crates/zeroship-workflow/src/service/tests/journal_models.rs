@@ -74,6 +74,18 @@ async fn read_contract(store: Rc<OrmStore>) {
             )
             .await
             .unwrap();
+        tx.database()
+            .collection(models::runs::Entity::COLLECTION)
+            .unwrap()
+            .update(
+                value!({"app_id":app_id.as_str(), "id":*run_id}),
+                value!({"state":"completed", "terminal_at":now}),
+            )
+            .await
+            .unwrap();
+        let source = crate::service::continuations::member(&tx, app_id, run_id, 0)
+            .await
+            .unwrap();
         generations
             .insert(value!({
                 "id":storage_id(), "app_id":app_id.as_str(), "run_id":*run_id, "generation":1, "deploy_id":deploy.id,
@@ -81,6 +93,11 @@ async fn read_contract(store: Rc<OrmStore>) {
                 "state":"completed", "started_at":now, "terminal_at":now,
                 "output":json!({"scope":scope, "generation":1}).to_string(),
             }))
+            .await
+            .unwrap();
+        // Generation 1 is the head's restart successor, as production restart
+        // records it before moving the run pointer.
+        crate::service::continuations::restart(&tx, app_id, &source, run_id, 1)
             .await
             .unwrap();
 
@@ -107,7 +124,7 @@ async fn read_contract(store: Rc<OrmStore>) {
                 "id":storage_id(), "app_id":app_id.as_str(), "run_id":*run_id, "generation":generation,
                 "ordinal":i64::from(step.ordinal), "name":step.name.clone(), "occurrence":0,
                 "origin_generation":generation, "kind":step.kind.clone(), "state":step.state.clone(),
-                "record":serde_json::to_string(step).unwrap(),
+                "record":crate::service::journal::encode_checkpoint(step, None, None).unwrap(),
             })).collect();
             for chunk in documents.chunks(MAX_INSERT_MANY_BATCH) {
                 tx.database()
