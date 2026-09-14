@@ -248,6 +248,14 @@ impl<T: JobTransport> DeliverySlot<T> {
             let receipt = bounded(self.options.execution_timeout, app.cron_job(&lease)).await?;
             return self.acknowledge(receipt, &lease).await;
         }
+        if matches!(
+            lease.delivery().job.operation,
+            JobOperation::Management { .. }
+        ) {
+            let receipt =
+                bounded(self.options.execution_timeout, app.management_job(&lease)).await?;
+            return self.acknowledge(receipt, &lease).await;
+        }
         let authority = app.capture_policy().authority().cloned();
         let accepted = app.accept_job(&lease).await?;
         let task = match accepted {

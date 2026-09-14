@@ -7,12 +7,17 @@ use futures::{
 };
 use std::time::{Duration, Instant};
 use zeroship_core::workflow_coordination::{
-    ManageRun, ManagementOperation, ManagementOutcome, RestartOptions, RestartTarget, RunId,
-    RunOperation, RunState,
+    ManagementOutcome, RestartOptions, RestartTarget, RunId, RunOperation, RunState,
 };
+use zeroship_core::workflow_jobs::ManagementCommand;
 use zeroship_data_orm::{orm::Operation, value};
 
 mod atomic_application;
+pub(super) mod fixture;
+mod latest;
+mod ordering;
+mod readback;
+use fixture::{started, transition, Grant};
 
 #[compio::test]
 async fn sqlite_management_receipts_survive_app_receipt_loss_and_worker_reopen() {
@@ -59,13 +64,13 @@ async fn postgres_management_receipt_failure_rolls_back_restart() {
 }
 
 #[compio::test]
-async fn postgres_management_receipt_wait_cannot_outlive_host_authority() {
+async fn postgres_management_receipt_wait_keeps_original_authority_after_refresh() {
     let fixture = PostgresFixture::start().await;
     let (service, local, _, _deployments) =
         registered_service(Rc::new(fixture.store.clone())).await;
     let run = start(&service, &local).await;
     let scope = service.fixture_app(local.clone());
-    let request = restart(&local, &run);
+    let request = started(&local, &run, 1);
     let barrier = PgBarrier::install(&fixture.admin_url, BarrierSite::Receipt).await;
     service
         .fixture_register(
@@ -81,7 +86,7 @@ async fn postgres_management_receipt_wait_cannot_outlive_host_authority() {
         .unwrap();
     let (worker, pending) = match select(
         barrier.blocked_worker().boxed_local(),
-        scope.apply_management(&request).boxed_local(),
+        scope.management_outcome(&request).boxed_local(),
     )
     .await
     {
@@ -90,6 +95,18 @@ async fn postgres_management_receipt_wait_cannot_outlive_host_authority() {
             panic!("management ended before the receipt barrier: {result:?}")
         }
     };
+    service
+        .policies
+        .fixture_install(
+            &local,
+            PolicySnapshot::lease(
+                2.try_into().unwrap(),
+                AppPolicy::default(),
+                Instant::now() + Duration::from_secs(30),
+            )
+            .unwrap(),
+        )
+        .unwrap();
     let result = compio::time::timeout(Duration::from_secs(10), pending)
         .await
         .expect("host authority expiry must cancel its blocked receipt write");
@@ -97,6 +114,12 @@ async fn postgres_management_receipt_wait_cannot_outlive_host_authority() {
         matches!(result, Err(WorkflowServiceError::Unavailable(_))),
         "{result:?}"
     );
+    service
+        .policies
+        .fixture_authority(&local)
+        .unwrap()
+        .check()
+        .unwrap();
     barrier.wait_for_rollback(worker).await;
     barrier.remove().await;
     assert_rolled_back(&service, &local, &run, &request).await;
@@ -105,7 +128,7 @@ async fn postgres_management_receipt_wait_cannot_outlive_host_authority() {
         .await
         .unwrap();
     assert_eq!(
-        scope.apply_management(&request).await.unwrap(),
+        scope.management_outcome(&request).await.unwrap(),
         ManagementOutcome::Applied {
             state: RunState::Queued
         }
@@ -131,11 +154,11 @@ async fn postgres_management_database_denial_remains_retryable() {
         registered_service(Rc::new(fixture.store.clone())).await;
     let run = start(&service, &local).await;
     let scope = service.fixture_app(local.clone());
-    let request = restart(&local, &run);
+    let request = started(&local, &run, 1);
     let admin = connect(&fixture.admin_url).await;
     admin.batch_execute("REVOKE INSERT ON customer.__zeroship_workflow_management_receipts FROM app_customer_role")
         .await.unwrap();
-    let result = scope.apply_management(&request).await;
+    let result = scope.management_outcome(&request).await;
     assert!(
         result.is_err(),
         "database authority failure became a durable outcome: {result:?}"
@@ -148,36 +171,13 @@ async fn postgres_management_database_denial_remains_retryable() {
         .await
         .unwrap();
     assert_eq!(
-        scope.apply_management(&request).await.unwrap(),
+        scope.management_outcome(&request).await.unwrap(),
         ManagementOutcome::Applied {
             state: RunState::Queued
         }
     );
     assert_eq!(receipt_count(&service, &request).await, 1);
     assert_eq!(head(&service, &local, &run).await, (1, "queued".into()));
-}
-
-fn command(app: &AppId, run: &str, operation: ManagementOperation) -> ManageRun {
-    ManageRun {
-        request_id: RequestId::mint(),
-        app_id: app.clone(),
-        run_id: RunId::parse(run).unwrap(),
-        command: operation,
-    }
-}
-
-fn restart(app: &AppId, run: &str) -> ManageRun {
-    command(
-        app,
-        run,
-        ManagementOperation::Restart {
-            options: RestartOptions::default(),
-        },
-    )
-}
-
-fn transition(app: &AppId, run: &str, operation: RunOperation) -> ManageRun {
-    command(app, run, ManagementOperation::Transition { operation })
 }
 
 async fn start(service: &WorkflowService, app: &AppId) -> String {
@@ -201,13 +201,17 @@ async fn head(service: &WorkflowService, app_id: &AppId, run: &str) -> (i64, Str
     result
 }
 
-async fn receipt_count(service: &WorkflowService, command: &ManageRun) -> i64 {
+#[expect(
+    clippy::future_not_send,
+    reason = "management fixtures use the owning compio journal"
+)]
+async fn receipt_count(service: &WorkflowService, command: &Grant) -> i64 {
     let tx = service.begin().await.unwrap();
     let count = journal_count(
         &tx,
         "management_receipts",
         json!({
-            "app_id":command.app_id.as_str(), "request_id":command.request_id.as_str(),
+            "app_id":command.delivery.job.app_id.as_str(), "request_id":command.request_id().as_str(),
         }),
     )
     .await;
@@ -219,8 +223,8 @@ async fn replay_contract(store: Rc<OrmStore>) {
     let (service, local, foreign, deployments) = registered_service(store.clone()).await;
     let run = start(&service, &local).await;
     let scope = service.fixture_app(local.clone());
-    let request = restart(&local, &run);
-    let original = scope.apply_management(&request).await.unwrap();
+    let request = started(&local, &run, 1);
+    let original = scope.management_outcome(&request).await.unwrap();
     assert_eq!(
         original,
         ManagementOutcome::Applied {
@@ -231,29 +235,33 @@ async fn replay_contract(store: Rc<OrmStore>) {
     assert_eq!(receipt_count(&service, &request).await, 1);
 
     let mut mismatch = request.clone();
-    mismatch.command = ManagementOperation::Transition {
+    *mismatch.command_mut() = ManagementCommand::Transition {
         operation: RunOperation::Pause,
     };
     assert!(matches!(
-        scope.apply_management(&mismatch).await,
+        scope.management_outcome(&mismatch).await,
         Err(WorkflowServiceError::Conflict(_))
     ));
     mismatch = request.clone();
-    mismatch.run_id = RunId::mint();
+    if let zeroship_core::workflow_jobs::JobOperation::Management { run_id, .. } =
+        &mut mismatch.delivery.job.operation
+    {
+        *run_id = RunId::mint();
+    }
     assert!(matches!(
-        scope.apply_management(&mismatch).await,
+        scope.management_outcome(&mismatch).await,
         Err(WorkflowServiceError::Conflict(_))
     ));
     mismatch = request.clone();
-    mismatch.app_id = foreign.clone();
+    mismatch.delivery.job.app_id = foreign.clone();
     assert_eq!(
-        scope.apply_management(&mismatch).await,
+        scope.management_outcome(&mismatch).await,
         Err(WorkflowServiceError::PermissionDenied)
     );
     assert_eq!(
         service
             .fixture_app(foreign.clone())
-            .apply_management(&request)
+            .management_outcome(&request)
             .await,
         Err(WorkflowServiceError::PermissionDenied)
     );
@@ -292,21 +300,21 @@ async fn replay_contract(store: Rc<OrmStore>) {
             .unwrap();
     }
     let scope = service.fixture_app(local.clone());
-    assert_eq!(scope.apply_management(&request).await.unwrap(), original);
+    assert_eq!(scope.management_outcome(&request).await.unwrap(), original);
     assert_eq!(head(&service, &local, &run).await, (1, "queued".into()));
     scope
         .transition(&RequestId::mint(), &run, RunOperation::Pause)
         .await
         .unwrap();
-    assert_eq!(scope.apply_management(&request).await.unwrap(), original);
+    assert_eq!(scope.management_outcome(&request).await.unwrap(), original);
     assert_eq!(head(&service, &local, &run).await, (1, "paused".into()));
     assert_eq!(receipt_count(&service, &request).await, 1);
 
     let concurrent_run = start(&service, &local).await;
-    let concurrent = restart(&local, &concurrent_run);
+    let concurrent = started(&local, &concurrent_run, 1);
     let mut requests = FuturesUnordered::new();
     for _ in 0..4 {
-        requests.push(scope.apply_management(&concurrent));
+        requests.push(scope.management_outcome(&concurrent));
     }
     let mut completed = Vec::new();
     while let Some(result) = requests.next().await {
@@ -327,26 +335,26 @@ async fn replay_contract(store: Rc<OrmStore>) {
 )]
 async fn unconfigured_replay(
     service: &WorkflowService,
-    request: &ManageRun,
+    request: &Grant,
     original: ManagementOutcome,
 ) {
-    let local = &request.app_id;
+    let local = &request.delivery.job.app_id;
     let unconfigured = service.fixture_app(local.clone());
     assert_eq!(
-        unconfigured.apply_management(request).await.unwrap(),
+        unconfigured.management_outcome(request).await.unwrap(),
         original
     );
     let mut changed = request.clone();
-    changed.command = ManagementOperation::Transition {
+    *changed.command_mut() = ManagementCommand::Transition {
         operation: RunOperation::Pause,
     };
     assert!(matches!(
-        unconfigured.apply_management(&changed).await,
+        unconfigured.management_outcome(&changed).await,
         Err(WorkflowServiceError::Conflict(_))
     ));
-    let fresh = restart(local, request.run_id.as_str());
+    let fresh = started(local, request.run_id().as_str(), 2);
     assert!(matches!(
-        unconfigured.apply_management(&fresh).await,
+        unconfigured.management_outcome(&fresh).await,
         Err(WorkflowServiceError::Unavailable(_))
     ));
     assert_eq!(receipt_count(service, &fresh).await, 0);
@@ -359,11 +367,11 @@ async fn unconfigured_replay(
         )
         .unwrap();
     assert_eq!(
-        unconfigured.apply_management(request).await.unwrap(),
+        unconfigured.management_outcome(request).await.unwrap(),
         original
     );
     assert!(matches!(
-        unconfigured.apply_management(&fresh).await,
+        unconfigured.management_outcome(&fresh).await,
         Err(WorkflowServiceError::Unavailable(_))
     ));
     assert_eq!(receipt_count(service, &fresh).await, 0);
@@ -373,9 +381,9 @@ async fn outcome_contract(store: Rc<OrmStore>) {
     let (service, local, _, _deployments) = registered_service(store).await;
     let scope = service.fixture_app(local.clone());
     let absent = RunId::mint();
-    let missing = restart(&local, absent.as_str());
+    let missing = started(&local, absent.as_str(), 1);
     assert_eq!(
-        scope.apply_management(&missing).await.unwrap(),
+        scope.management_outcome(&missing).await.unwrap(),
         ManagementOutcome::NotFound {}
     );
     assert_eq!(receipt_count(&service, &missing).await, 1);
@@ -396,7 +404,7 @@ async fn outcome_contract(store: Rc<OrmStore>) {
     .unwrap();
     tx.commit().await.unwrap();
     assert_eq!(
-        scope.apply_management(&missing).await.unwrap(),
+        scope.management_outcome(&missing).await.unwrap(),
         ManagementOutcome::NotFound {}
     );
     assert_eq!(
@@ -405,30 +413,28 @@ async fn outcome_contract(store: Rc<OrmStore>) {
     );
 
     let run = start(&service, &local).await;
-    let invalid = command(
+    let invalid = Grant::new(
         &local,
         &run,
-        ManagementOperation::Restart {
-            options: RestartOptions {
-                from: Some(RestartTarget {
-                    name: String::new(),
-                    occurrence: None,
-                }),
-                ..Default::default()
-            },
+        1,
+        ManagementCommand::RestartStarted {
+            from: Some(RestartTarget {
+                name: String::new(),
+                occurrence: None,
+            }),
         },
     );
     assert_eq!(
-        scope.apply_management(&invalid).await.unwrap(),
+        scope.management_outcome(&invalid).await.unwrap(),
         ManagementOutcome::Conflict {}
     );
     assert_eq!(receipt_count(&service, &invalid).await, 1);
     assert_eq!(head(&service, &local, &run).await, (0, "queued".into()));
 
     finish(&service, &local, &run).await;
-    let conflict = transition(&local, &run, RunOperation::Pause);
+    let conflict = transition(&local, &run, 2, RunOperation::Pause);
     assert_eq!(
-        scope.apply_management(&conflict).await.unwrap(),
+        scope.management_outcome(&conflict).await.unwrap(),
         ManagementOutcome::Conflict {}
     );
     scope
@@ -436,7 +442,7 @@ async fn outcome_contract(store: Rc<OrmStore>) {
         .await
         .unwrap();
     assert_eq!(
-        scope.apply_management(&conflict).await.unwrap(),
+        scope.management_outcome(&conflict).await.unwrap(),
         ManagementOutcome::Conflict {}
     );
     assert_eq!(head(&service, &local, &run).await, (1, "queued".into()));
@@ -455,9 +461,9 @@ async fn outcome_contract(store: Rc<OrmStore>) {
         )
         .await
         .unwrap();
-    let denied = restart(&local, &run);
+    let denied = started(&local, &run, 3);
     assert_eq!(
-        scope.apply_management(&denied).await.unwrap(),
+        scope.management_outcome(&denied).await.unwrap(),
         ManagementOutcome::Denied {}
     );
     service
@@ -465,14 +471,14 @@ async fn outcome_contract(store: Rc<OrmStore>) {
         .await
         .unwrap();
     assert_eq!(
-        scope.apply_management(&denied).await.unwrap(),
+        scope.management_outcome(&denied).await.unwrap(),
         ManagementOutcome::Denied {}
     );
     assert_eq!(head(&service, &local, &run).await, (1, "queued".into()));
     assert_eq!(receipt_count(&service, &denied).await, 1);
-    let accepted = restart(&local, &run);
+    let accepted = started(&local, &run, 4);
     assert_eq!(
-        scope.apply_management(&accepted).await.unwrap(),
+        scope.management_outcome(&accepted).await.unwrap(),
         ManagementOutcome::Applied {
             state: RunState::Queued
         }
@@ -493,9 +499,9 @@ async fn outcome_contract(store: Rc<OrmStore>) {
         )
         .await
         .unwrap();
-    let capacity = restart(&local, &run);
+    let capacity = started(&local, &run, 5);
     assert!(matches!(
-        scope.apply_management(&capacity).await,
+        scope.management_outcome(&capacity).await,
         Err(WorkflowServiceError::ResourceExhausted(_))
     ));
     assert_eq!(receipt_count(&service, &capacity).await, 0);
@@ -504,7 +510,7 @@ async fn outcome_contract(store: Rc<OrmStore>) {
         .await
         .unwrap();
     assert_eq!(
-        scope.apply_management(&capacity).await.unwrap(),
+        scope.management_outcome(&capacity).await.unwrap(),
         ManagementOutcome::Applied {
             state: RunState::Queued
         }
@@ -522,14 +528,14 @@ async fn outcome_contract(store: Rc<OrmStore>) {
     // An acknowledged decision remains readable after authority expires. Only
     // previously unseen commands need renewed mutation authority.
     assert_eq!(
-        scope.apply_management(&capacity).await.unwrap(),
+        scope.management_outcome(&capacity).await.unwrap(),
         ManagementOutcome::Applied {
             state: RunState::Queued
         }
     );
-    let expired = transition(&local, &run, RunOperation::Pause);
+    let expired = transition(&local, &run, 6, RunOperation::Pause);
     assert!(matches!(
-        scope.apply_management(&expired).await,
+        scope.management_outcome(&expired).await,
         Err(WorkflowServiceError::Unavailable(_))
     ));
     assert_eq!(receipt_count(&service, &expired).await, 0);
@@ -539,7 +545,7 @@ async fn outcome_contract(store: Rc<OrmStore>) {
         .await
         .unwrap();
     assert_eq!(
-        scope.apply_management(&expired).await.unwrap(),
+        scope.management_outcome(&expired).await.unwrap(),
         ManagementOutcome::Applied {
             state: RunState::Paused
         }
@@ -562,22 +568,27 @@ async fn atomicity_contract(store: Rc<OrmStore>, fault: ReceiptFault) {
     let (service, local, _, _deployments) = registered_service(store).await;
     let run = start(&service, &local).await;
     let scope = service.fixture_app(local.clone());
-    let request = restart(&local, &run);
+    let request = started(&local, &run, 1);
+    let before = atomic_application::persisted(&service, &local).await;
     fault.install().await;
     assert!(matches!(
-        scope.apply_management(&request).await,
+        scope.management_outcome(&request).await,
         Err(WorkflowServiceError::Internal(_) | WorkflowServiceError::Unavailable(_))
     ));
     assert_rolled_back(&service, &local, &run, &request).await;
+    assert_eq!(
+        atomic_application::persisted(&service, &local).await,
+        before
+    );
     fault.remove().await;
-    let outcome = scope.apply_management(&request).await.unwrap();
+    let outcome = scope.management_outcome(&request).await.unwrap();
     assert_eq!(
         outcome,
         ManagementOutcome::Applied {
             state: RunState::Queued
         }
     );
-    assert_eq!(scope.apply_management(&request).await.unwrap(), outcome);
+    assert_eq!(scope.management_outcome(&request).await.unwrap(), outcome);
     assert_eq!(head(&service, &local, &run).await, (1, "queued".into()));
     assert_eq!(receipt_count(&service, &request).await, 1);
     let tx = service.begin().await.unwrap();
@@ -593,20 +604,34 @@ async fn atomicity_contract(store: Rc<OrmStore>, fault: ReceiptFault) {
     tx.commit().await.unwrap();
 }
 
-async fn assert_rolled_back(
-    service: &WorkflowService,
-    local: &AppId,
-    run: &str,
-    request: &ManageRun,
-) {
+#[expect(
+    clippy::future_not_send,
+    reason = "management fixtures use the owning compio journal"
+)]
+async fn assert_rolled_back(service: &WorkflowService, local: &AppId, run: &str, request: &Grant) {
     assert_eq!(head(service, local, run).await, (0, "queued".into()));
     assert_eq!(receipt_count(service, request).await, 0);
     let tx = service.begin().await.unwrap();
+    for table in ["management_scopes", "job_receipts"] {
+        assert_eq!(
+            journal_count(&tx, table, json!({"app_id":local.as_str()})).await,
+            0
+        );
+    }
     assert_eq!(
         journal_count(
             &tx,
             "generations",
             json!({"app_id":local.as_str(), "run_id":run, "generation":1})
+        )
+        .await,
+        0
+    );
+    assert_eq!(
+        journal_count(
+            &tx,
+            "job_publications",
+            json!({"app_id":local.as_str(),"run_id":run,"generation":1})
         )
         .await,
         0
@@ -646,14 +671,14 @@ impl ReceiptFault {
                     [], |row| row.get::<_, bool>(0),
                 ).unwrap());
                 connection.execute_batch(
-                    "CREATE TRIGGER management_receipt_fault BEFORE INSERT ON __zeroship_workflow_management_receipts
+                    "CREATE TRIGGER management_receipt_fault BEFORE UPDATE OF outcome ON __zeroship_workflow_job_receipts
                      BEGIN SELECT RAISE(ABORT,'management receipt fault'); END;",
                 ).unwrap();
             },
             Self::Postgres(url) => connect(url).await.batch_execute(
                 "CREATE FUNCTION customer.management_receipt_fault() RETURNS trigger LANGUAGE plpgsql AS $$
                  BEGIN RAISE EXCEPTION 'management receipt fault'; END $$;
-                 CREATE TRIGGER management_receipt_fault BEFORE INSERT ON customer.__zeroship_workflow_management_receipts
+                 CREATE TRIGGER management_receipt_fault BEFORE UPDATE OF outcome ON customer.__zeroship_workflow_job_receipts
                  FOR EACH ROW EXECUTE FUNCTION customer.management_receipt_fault();",
             ).await.unwrap(),
         }
@@ -664,7 +689,7 @@ impl ReceiptFault {
             Self::Sqlite(path) => rusqlite::Connection::open(path).unwrap()
                 .execute_batch("DROP TRIGGER management_receipt_fault").unwrap(),
             Self::Postgres(url) => connect(url).await.batch_execute(
-                "DROP TRIGGER management_receipt_fault ON customer.__zeroship_workflow_management_receipts;
+                "DROP TRIGGER management_receipt_fault ON customer.__zeroship_workflow_job_receipts;
                  DROP FUNCTION customer.management_receipt_fault();",
             ).await.unwrap(),
         }
@@ -694,7 +719,7 @@ impl PgBarrier {
         ).await.unwrap();
         blocker.batch_execute(match site {
             BarrierSite::AppLock => "CREATE TRIGGER management_barrier BEFORE UPDATE ON customer.__zeroship_workflow_app_state FOR EACH ROW EXECUTE FUNCTION customer.management_barrier()",
-            BarrierSite::Receipt => "CREATE TRIGGER management_barrier BEFORE INSERT ON customer.__zeroship_workflow_management_receipts FOR EACH ROW EXECUTE FUNCTION customer.management_barrier()",
+            BarrierSite::Receipt => "CREATE TRIGGER management_barrier BEFORE UPDATE OF outcome ON customer.__zeroship_workflow_job_receipts FOR EACH ROW EXECUTE FUNCTION customer.management_barrier()",
             BarrierSite::Lifecycle => "CREATE TRIGGER management_barrier BEFORE UPDATE ON customer.__zeroship_workflow_runs FOR EACH ROW WHEN (OLD.generation IS DISTINCT FROM NEW.generation) EXECUTE FUNCTION customer.management_barrier()",
         }).await.unwrap();
         let blocker_pid = blocker
@@ -764,11 +789,20 @@ impl PgBarrier {
     }
 
     async fn remove_trigger(self) {
-        self.blocker.batch_execute(match self.site {
-            BarrierSite::AppLock => "DROP TRIGGER management_barrier ON customer.__zeroship_workflow_app_state",
-            BarrierSite::Receipt => "DROP TRIGGER management_barrier ON customer.__zeroship_workflow_management_receipts",
-            BarrierSite::Lifecycle => "DROP TRIGGER management_barrier ON customer.__zeroship_workflow_runs",
-        }).await.unwrap();
+        self.blocker
+            .batch_execute(match self.site {
+                BarrierSite::AppLock => {
+                    "DROP TRIGGER management_barrier ON customer.__zeroship_workflow_app_state"
+                }
+                BarrierSite::Receipt => {
+                    "DROP TRIGGER management_barrier ON customer.__zeroship_workflow_job_receipts"
+                }
+                BarrierSite::Lifecycle => {
+                    "DROP TRIGGER management_barrier ON customer.__zeroship_workflow_runs"
+                }
+            })
+            .await
+            .unwrap();
         self.blocker
             .batch_execute("DROP FUNCTION customer.management_barrier()")
             .await
@@ -782,11 +816,11 @@ async fn cancellation_contract(site: BarrierSite) {
         registered_service(Rc::new(fixture.store.clone())).await;
     let run = start(&service, &local).await;
     let scope = service.fixture_app(local.clone());
-    let request = restart(&local, &run);
+    let request = started(&local, &run, 1);
     let barrier = PgBarrier::install(&fixture.admin_url, site).await;
     let (worker, pending) = match select(
         barrier.blocked_worker().boxed_local(),
-        scope.apply_management(&request).boxed_local(),
+        scope.management_outcome(&request).boxed_local(),
     )
     .await
     {
@@ -799,14 +833,14 @@ async fn cancellation_contract(site: BarrierSite) {
     barrier.wait_for_rollback(worker).await;
     barrier.remove().await;
     assert_rolled_back(&service, &local, &run, &request).await;
-    let outcome = scope.apply_management(&request).await.unwrap();
+    let outcome = scope.management_outcome(&request).await.unwrap();
     assert_eq!(
         outcome,
         ManagementOutcome::Applied {
             state: RunState::Queued
         }
     );
-    assert_eq!(scope.apply_management(&request).await.unwrap(), outcome);
+    assert_eq!(scope.management_outcome(&request).await.unwrap(), outcome);
     assert_eq!(head(&service, &local, &run).await, (1, "queued".into()));
     assert_eq!(receipt_count(&service, &request).await, 1);
 }
@@ -818,11 +852,11 @@ async fn postgres_management_revocation_during_app_lock_is_retryable() {
         registered_service(Rc::new(fixture.store.clone())).await;
     let run = start(&service, &local).await;
     let scope = service.fixture_app(local.clone());
-    let request = restart(&local, &run);
+    let request = started(&local, &run, 1);
     let barrier = PgBarrier::install(&fixture.admin_url, BarrierSite::AppLock).await;
     let pending = match select(
         barrier.blocked_worker().boxed_local(),
-        scope.apply_management(&request).boxed_local(),
+        scope.management_outcome(&request).boxed_local(),
     )
     .await
     {
@@ -850,7 +884,7 @@ async fn postgres_management_revocation_during_app_lock_is_retryable() {
     barrier.remove_trigger().await;
     assert_rolled_back(&service, &local, &run, &request).await;
     assert_eq!(
-        scope.apply_management(&request).await.unwrap(),
+        scope.management_outcome(&request).await.unwrap(),
         ManagementOutcome::Denied {}
     );
     assert_eq!(receipt_count(&service, &request).await, 1);
@@ -859,12 +893,12 @@ async fn postgres_management_revocation_during_app_lock_is_retryable() {
         .fixture_install(&local, leased_policy(3, AppPolicy::default()))
         .unwrap();
     assert_eq!(
-        scope.apply_management(&request).await.unwrap(),
+        scope.management_outcome(&request).await.unwrap(),
         ManagementOutcome::Denied {}
     );
     assert_eq!(
         scope
-            .apply_management(&restart(&local, &run))
+            .management_outcome(&started(&local, &run, 2))
             .await
             .unwrap(),
         ManagementOutcome::Applied {
@@ -880,7 +914,7 @@ async fn postgres_management_app_lock_wait_keeps_original_policy_deadline() {
         registered_service(Rc::new(fixture.store.clone())).await;
     let run = start(&service, &local).await;
     let scope = service.fixture_app(local.clone());
-    let request = restart(&local, &run);
+    let request = started(&local, &run, 1);
     let barrier = PgBarrier::install(&fixture.admin_url, BarrierSite::AppLock).await;
     let deadline = Instant::now() + Duration::from_secs(3);
     service
@@ -892,7 +926,7 @@ async fn postgres_management_app_lock_wait_keeps_original_policy_deadline() {
         .unwrap();
     let (worker, pending) = match select(
         barrier.blocked_worker().boxed_local(),
-        scope.apply_management(&request).boxed_local(),
+        scope.management_outcome(&request).boxed_local(),
     )
     .await
     {
@@ -925,7 +959,7 @@ async fn postgres_management_app_lock_wait_keeps_original_policy_deadline() {
     barrier.remove().await;
     assert_rolled_back(&service, &local, &run, &request).await;
     assert_eq!(
-        scope.apply_management(&request).await.unwrap(),
+        scope.management_outcome(&request).await.unwrap(),
         ManagementOutcome::Applied {
             state: RunState::Queued
         }
@@ -954,10 +988,10 @@ async fn waiting_authority_contract(store: Rc<OrmStore>) {
     let (service, local, _, _deployments) = registered_service(store).await;
     let run = start(&service, &local).await;
     let scope = service.fixture_app(local.clone());
-    let request = restart(&local, &run);
+    let request = started(&local, &run, 1);
     let mut blocker = service.begin().await.unwrap();
     app::lock_app(&mut blocker, &local).await.unwrap();
-    let mut pending = scope.apply_management(&request).boxed_local();
+    let mut pending = scope.management_outcome(&request).boxed_local();
     assert!(matches!(
         futures::poll!(&mut pending),
         std::task::Poll::Pending
@@ -996,7 +1030,7 @@ async fn waiting_authority_contract(store: Rc<OrmStore>) {
             PolicySnapshot::lease(4.try_into().unwrap(), AppPolicy::default(), deadline).unwrap(),
         )
         .unwrap();
-    let mut pending = scope.apply_management(&request).boxed_local();
+    let mut pending = scope.management_outcome(&request).boxed_local();
     assert!(matches!(
         futures::poll!(&mut pending),
         std::task::Poll::Pending
@@ -1026,7 +1060,7 @@ async fn waiting_authority_contract(store: Rc<OrmStore>) {
     blocker.commit().await.unwrap();
     assert_rolled_back(&service, &local, &run, &request).await;
     assert_eq!(
-        scope.apply_management(&request).await.unwrap(),
+        scope.management_outcome(&request).await.unwrap(),
         ManagementOutcome::Applied {
             state: RunState::Queued
         }

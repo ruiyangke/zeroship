@@ -50,8 +50,12 @@ Their native crates exist; production scheduling and delivery still await
 cutover. Workers may access only creator databases; Control and other
 platform services may access only the Control database. Authenticated service
 contracts carry cross-boundary requests without sharing database credentials.
-`AppWorkflows::apply_management` commits coordinator lifecycle commands with
-durable customer-journal receipts. Repeated commands return their recorded
+`AppWorkflows::management_job` accepts manager-delivered lifecycle commands
+with explicit per-run revisions and durable customer-journal receipts. Lifecycle
+state, publication intents, command history, the applied revision and the job
+receipt commit together. Started restarts use retained journal code; Latest
+restarts verify and retain the exact deployment named by the command. Neither
+path reselects a deployment after accepting the delivery. Repeated commands return their recorded
 outcome after later lifecycle changes or policy expiry. Changed command
 bodies conflict; infrastructure failures remain retryable. Lifecycle rejection
 and database failure are separate paths, so a failed write cannot become a
@@ -99,8 +103,8 @@ Overlap skips retain a rejected receipt; capacity and unavailable prerequisites
 remain retryable. Historical activations keep their original input even after
 replacement or schedule removal. Receipt replay requires the exact occurrence
 linkage and performs no artifact I/O.
-`runner::delivery::DeliverySlot` routes activation, cron and reconciliation jobs to
-bounded journal operations and advance jobs to the existing executor and
+`runner::delivery::DeliverySlot` routes activation, cron, management and
+reconciliation jobs to bounded journal operations and advance jobs to the existing executor and
 payload pipeline. Its host supplies `JobTransport`;
 the authenticated worker client implements that metadata interface. The slot
 renews manager and creator authority together, retains interrupted execution

@@ -19,6 +19,7 @@ pub use journal::{
     __zeroship_workflow_job_publications as job_publications,
     __zeroship_workflow_job_receipts as job_receipts,
     __zeroship_workflow_management_receipts as management_receipts,
+    __zeroship_workflow_management_scopes as management_scopes,
     __zeroship_workflow_occurrences as occurrences, __zeroship_workflow_outbox as outbox,
     __zeroship_workflow_payload_refs as payload_refs, __zeroship_workflow_payloads as payloads,
     __zeroship_workflow_reconciliation_scans as reconciliation_scans,
@@ -55,13 +56,6 @@ pub struct RequestResult {
     pub operation: String,
     pub digest: String,
     pub result: String,
-}
-
-#[derive(FromRow)]
-#[orm(entity = management_receipts)]
-pub struct ManagementResult {
-    pub digest: String,
-    pub outcome: String,
 }
 
 #[derive(FromRow)]

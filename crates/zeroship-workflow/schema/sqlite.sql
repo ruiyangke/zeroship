@@ -131,9 +131,19 @@ CREATE TABLE "__zeroship_workflow_requests" ("id" TEXT PRIMARY KEY NOT NULL, "ap
 
 CREATE UNIQUE INDEX IF NOT EXISTS "__zeroship_workflow_requests_scope_key" ON "__zeroship_workflow_requests" ("app_id", "request_id");
 
-CREATE TABLE "__zeroship_workflow_management_receipts" ("id" TEXT PRIMARY KEY NOT NULL, "app_id" TEXT NOT NULL, "request_id" TEXT NOT NULL, "digest" TEXT NOT NULL, "outcome" TEXT NOT NULL, "created_at" INTEGER NOT NULL, CONSTRAINT "__zeroship_workflow_management_receipts_app" FOREIGN KEY (app_id) REFERENCES "__zeroship_workflow_app_state"(app_id) ON DELETE RESTRICT);
+CREATE TABLE "__zeroship_workflow_management_receipts" ("id" TEXT PRIMARY KEY NOT NULL, "app_id" TEXT NOT NULL, "run_id" TEXT NOT NULL, "request_id" TEXT NOT NULL, "revision" INTEGER NOT NULL, "digest" TEXT NOT NULL, "outcome" TEXT NOT NULL, "created_at" INTEGER NOT NULL, CONSTRAINT "__zeroship_workflow_management_job_receipt" FOREIGN KEY (app_id, id) REFERENCES "__zeroship_workflow_job_receipts"(app_id, id) ON DELETE RESTRICT, CONSTRAINT "__zeroship_workflow_management_receipts_app" FOREIGN KEY (app_id) REFERENCES "__zeroship_workflow_app_state"(app_id) ON DELETE RESTRICT);
+
+CREATE INDEX IF NOT EXISTS "__zeroship_workflow_management_job_receipt_idx" ON "__zeroship_workflow_management_receipts" ("app_id", "id");
 
 CREATE UNIQUE INDEX IF NOT EXISTS "__zeroship_workflow_management_receipts_scope_key" ON "__zeroship_workflow_management_receipts" ("app_id", "request_id");
+
+CREATE UNIQUE INDEX IF NOT EXISTS "__zeroship_workflow_management_revision_identity" ON "__zeroship_workflow_management_receipts" ("app_id", "run_id", "revision");
+
+CREATE TABLE "__zeroship_workflow_management_scopes" ("id" TEXT PRIMARY KEY NOT NULL, "app_id" TEXT NOT NULL, "run_id" TEXT NOT NULL, "revision" INTEGER NOT NULL, CONSTRAINT "__zeroship_workflow_management_scope_head" FOREIGN KEY (app_id, run_id, revision) REFERENCES "__zeroship_workflow_management_receipts"(app_id, run_id, revision) ON DELETE RESTRICT, CONSTRAINT "__zeroship_workflow_management_scopes_app" FOREIGN KEY (app_id) REFERENCES "__zeroship_workflow_app_state"(app_id) ON DELETE RESTRICT);
+
+CREATE INDEX IF NOT EXISTS "__zeroship_workflow_management_scope_head_idx" ON "__zeroship_workflow_management_scopes" ("app_id", "run_id", "revision");
+
+CREATE UNIQUE INDEX IF NOT EXISTS "__zeroship_workflow_management_scopes_scope_key" ON "__zeroship_workflow_management_scopes" ("app_id", "run_id");
 
 CREATE TABLE "__zeroship_workflow_occurrences" ("id" TEXT PRIMARY KEY NOT NULL, "app_id" TEXT NOT NULL, "schedule_id" TEXT NOT NULL, "revision" INTEGER NOT NULL, "at" INTEGER NOT NULL, "job_id" TEXT NOT NULL, "run_id" TEXT, CONSTRAINT "__zeroship_workflow_occurrence_job" FOREIGN KEY (app_id, job_id) REFERENCES "__zeroship_workflow_job_receipts"(app_id, id) ON DELETE RESTRICT, CONSTRAINT "__zeroship_workflow_occurrence_run" FOREIGN KEY (app_id, run_id) REFERENCES "__zeroship_workflow_runs"(app_id, id) ON DELETE RESTRICT, CONSTRAINT "__zeroship_workflow_occurrence_schedule" FOREIGN KEY (app_id, schedule_id) REFERENCES "__zeroship_workflow_schedules"(app_id, id) ON DELETE RESTRICT);
 
@@ -182,4 +192,4 @@ CREATE INDEX IF NOT EXISTS "__zeroship_workflow_job_publications_deployment_idx"
 CREATE TABLE "__zeroship_workflow_reconciliation_scans" ("id" TEXT PRIMARY KEY NOT NULL, "revision" INTEGER NOT NULL, "phase" TEXT NOT NULL, "after_id" TEXT, "upper_id" TEXT, CONSTRAINT "__zeroship_workflow_reconciliation_scan_app" FOREIGN KEY (id) REFERENCES "__zeroship_workflow_app_state"(app_id) ON DELETE RESTRICT);
 
 SELECT 1;
-INSERT INTO "main".__zeroship_workflow_schema_version (id, fingerprint) VALUES ('workflow', 'cce1410632109e726359d10dd3701ec0322fe864131f38bdaf418e337146c514');
+INSERT INTO "main".__zeroship_workflow_schema_version (id, fingerprint) VALUES ('workflow', 'a781b7bb65854b385cc7328ca5693b22e7ff69b6e46cb239593302e28c6a9bff');

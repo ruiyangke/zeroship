@@ -559,7 +559,8 @@ table has the `__zeroship_workflow_` prefix; none belongs in Control's schema.
 | `waits` | Recorded sleep, signal and child waits and their execution scope. |
 | `topics`, `broadcasts`, `signals`, `subscriptions` | Customer event bodies, ordering, targets, subscription state and fanout cursors. |
 | `requests` | Durable app-operation request identity, body digest and original result. Age alone cannot retire an accepted request. |
-| `management_receipts` | Durable creator outcomes keyed by coordinator management request, independently scoped from app requests. |
+| `management_receipts` | Exact delivered job identity, requested run, management revision and durable lifecycle outcome, independently scoped from app requests. |
+| `management_scopes` | Last applied management revision per app/requested run, linked to retained command history without requiring that the run exists. |
 | `schedules`, `occurrences` | Existing customer schedule definitions and accepted occurrences. Calendar discovery moves to the manager; customer acceptance, overlap state and input references remain customer-side. |
 | `payloads`, `payload_refs` | Prepared upload metadata, ownership, integrity and committed references. |
 | `outbox` | Customer events and their payloads; distinct from manager queue metadata. |
@@ -1277,18 +1278,17 @@ the creator independently rejects gaps and changed identities, and records durab
 refusals in that same ordering. Its attempt captures the delivery lease and policy
 before waiting for the app lock or performing I/O.
 
-The manager's native models now replace the separate worker inbox with queue
-linkage. The creator models below remain the delivered-handler target. Every
-table keeps `id` as its sole primary key and uses unique indexes for scoped
-domain identities.
+The native manager and creator models link ordered commands to queue delivery
+and retained creator outcomes. Every table keeps `id` as its sole primary key
+and uses unique indexes for scoped domain identities.
 
 | Owner and model | Durable identity and fields |
 | --- | --- |
 | Manager `management` | Job identity as `id`, with scoped job linkage. Original request and actor remain separate from the resolved job command. Required run identity and management revision, unique app/request and app/run/revision, derived `blocks_execution` and closed outcome. Queue settlement owns acknowledgement; separate run-state and inbox-ACK fields are removed. |
 | Manager `management_scopes` | Opaque typed `id`, unique app/run identity, accepted revision and settled revision. It has no creator-run foreign key. |
 | Manager `jobs` | Native operation-kind, optional run identity and optional management request identity. Validate these projections against the immutable specification and digest. Unique app/management-request supplies an independent replay anchor; the linked command supplies management revision. |
-| Creator `management_receipts` | Link its job identity to the exact job receipt; retain app/request uniqueness and add required requested-run identity and management revision, unique app/run/revision. Preserve the resolved identity digest and closed outcome. Requested-run identity has no run foreign key, so `NotFound` needs no invented run. |
-| Creator `management_scopes` | Opaque typed `id`, unique app/requested-run identity and the last applied management revision. It survives run and history retention. |
+| Creator `management_receipts` | Job identity linked to the exact job receipt, app/request uniqueness, required requested-run identity and management revision, unique app/run/revision. Retains the resolved identity digest and closed outcome. Requested-run identity has no run foreign key, so `NotFound` needs no invented run. |
+| Creator `management_scopes` | Opaque typed `id`, unique app/requested-run identity and the last applied management revision, linked to retained command history. It survives run and execution-history retention. |
 
 Creator application advances its management revision for both applied commands
 and durable lifecycle refusals. Gaps, substituted identities and unknown older
@@ -1389,13 +1389,27 @@ code. If preparation ever needs external I/O, persist the frozen source generati
 and target before releasing the lock. Retries of accepted latest restarts never
 re-resolve the current catalog.
 
-Creator application now has the transaction-local `apply_management_authorized`
-helper in `crates/zeroship-workflow/src/service/management.rs`. Its caller owns the app
-lock, immutable receipt matching, delivery bookkeeping and commit, and must keep
-the original captured policy and delivery authority active through that commit.
-The public `apply_management` wrapper retains its original receipt replay and
-cancellation behavior. The delivered handler must use the helper: calling the
-public method and then writing a job receipt would leave a crash gap.
+`AppWorkflows::management_job` accepts the exact manager `JobLease`. It captures
+delivery and policy authority before opening the journal transaction and keeps
+their original deadlines through app-lock waits, external I/O and commit. The
+handler checks retained job/command identity and management order under the app
+lock, then commits lifecycle state, publication intents, command history, the
+applied revision and the semantic job receipt together. There is no separate
+raw-command application API.
+
+Transitions and Started restarts use the app-locked journal directly. Latest
+first checks lifecycle refusal precedence under that lock, then discards its
+draft before loading the frozen target outside the transaction. Final application
+rechecks receipt/order and the retained target generation, prepares a new draft,
+binds the verified registration exactly and commits under the original authority.
+An infrastructure failure retains no lifecycle refusal.
+
+Exact completed replay needs neither fresh policy nor deployment clients. Both
+application replay and public management `job_receipt` readback take the app
+lock before inspecting the linked receipt, command history and applied head, so
+their reads cannot straddle atomic application. Requested-run identity belongs
+to command history; the generic job receipt carries no invented run reference.
+
 A pause or cancellation outcome may record an applied intent while a
 task is leased. Its acknowledgement is not proof that execution stopped; the
 executor must observe that intent and stop and join before reporting quiescence.
@@ -1430,10 +1444,10 @@ retained linkage before its final enrollment check; it cannot clear a newer
 barrier. Public queue submission and successors cannot create management jobs.
 Only authorized manager acceptance creates those jobs. The separate inbox polling
 and acknowledgement wire routes, client methods and worker grants are removed.
-Creator management and collection delivery remain to be implemented. Their
-handlers must carry the closed outcome through the exact creator receipt and
-queue settlement. The manager must never query the customer journal to fill a
-deployment gap.
+The creator management handler carries its closed outcome through the exact
+receipt and ordinary queue settlement without starting an executor. Collection
+delivery remains to be implemented. The manager must never query the customer
+journal to fill a deployment gap.
 
 ## Recovery responsibility and execution capacity
 
@@ -1704,7 +1718,7 @@ metadata and authentication, not either side's persistence.
 | --- | --- |
 | `zeroship-core` | Closed workflow metadata and transport-independent capability contracts; canonical entity identities are supplied by `zeroship-id`. No ORM, HTTP implementation or customer replay envelopes. |
 | `zeroship-workflow-calendar` | Shared schedule definitions and pure cron/interval calculations with an explicit interpretation identity. No clock owner, ORM, runtime or scheduling loop. |
-| `zeroship-workflow` | `WorkflowService`, bound `AppWorkflows`, creator journal transitions, replay, payloads, bounded job acceptance/execution and publication intents. `apply_management` is a customer operation. |
+| `zeroship-workflow` | `WorkflowService`, bound `AppWorkflows`, creator journal transitions, replay, payloads, bounded job acceptance/execution and publication intents. `management_job` applies delivered lifecycle commands in the creator journal. |
 | `zeroship-workflow-manager` | `Queue`, native `coordinator::Coordinator`, scheduling/recovery modules and platform `deployments` ledger. No creator engine, V8 or listener. |
 | `zeroship-workflow-client` | `WorkerCoordinator`, `ControlCoordinator` and bounded authenticated transport, extended with the job/hold protocol as callers cut over. No ORM or scheduler. |
 | `zeroship-workflow-v8` | `WorkflowBinding`, V8 argument conversion, trusted app binding and executor shutdown barrier over the customer engine. |
@@ -2059,12 +2073,14 @@ durable creator management receipts, payload preparation, bounded runner, V8
 binding/executor, normal verified bundle loading and deployment-hold foundations.
 The local host currently composes that journal and runner.
 
-Creator management application can join a caller-owned transaction. Native
-PostgreSQL/SQLite tests exercise staged lifecycle changes, publication and
-management receipts across outer commit, abort and policy invalidation. This
-supplies the atomic application primitive. The manager now provides ordered
-management jobs and linked settlement; creator delivered receipts remain part
-of the pending protocol cutover.
+Creator management now consumes ordered deliveries and commits lifecycle state,
+publication, applied order, command history and the job receipt atomically. The
+manager accepts the command and settles the reported outcome in its separate
+queue transaction. The creator native suite passes, including PostgreSQL and
+SQLite lifecycle, atomic receipt/order application, original-authority expiry,
+exact deployment retention and lost-acknowledgement coverage. Generated schemas
+match the migration DSL, and changed code has no Clippy diagnostics. The
+production host cutover remains separate from these native handlers.
 
 Started restart validates the locked run against its current generation's
 deployment, then checks that deployment's registration and existing held journal
@@ -2079,9 +2095,9 @@ restart uses the same exact-target binding needed by delivered commands. That
 binding validates the complete locally verified registration, availability and
 journal hold without reselecting the current deployment. Existing lifecycle
 refusal precedence remains before deployment binding and counter exhaustion.
-The delivered handler must still obtain and verify its frozen target outside
-the journal transaction, then prepare again under the final creator app lock with the
-original captured authority. Ordered management delivery remains to be wired.
+The delivered handler obtains and verifies its frozen target outside the journal
+transaction, then prepares again under the final creator app lock with the
+original captured authority. Started delivery remains code free.
 
 The crate split includes the metadata client, closed job/delivery contracts,
 manager ORM queue and platform deployment ledger. Native coordinator placement
@@ -2094,8 +2110,8 @@ revision and resolved restart policy. The native current-deployment reader,
 column-scoped platform grants and server readiness checks are composed into
 authoritative acceptance. Management request anchors, per-run ordering and
 provisional barriers share the queue transaction; barrier and command eligibility
-filters precede candidate limiting. Linked management settlement is implemented;
-creator management and collection handlers remain pending.
+filters precede candidate limiting. Linked management settlement and creator
+management delivery are implemented; the collection handler remains pending.
 
 Native management contracts exercise source changes during hold acquisition,
 competing acceptance, original-request replay after catalog changes, damaged
@@ -2441,7 +2457,7 @@ archive and retains the last valid deployment when current sources fail to build
 | Enrollment bootstrap and revocation | A revoked worker cannot regain equivalent authority by automatic enrollment. Finalize bootstrap trust, replacement authorization and registry freshness with auth ownership. |
 | Placement eligibility and capacity provider | Only platform-authorized app/zone combinations may be assigned. Select the trusted eligibility source and host adapter's durable request/progress contract. |
 | Archive acknowledgement | The direct Control source provides bounded convergence under original observation validity. Define any stronger execution-quiescence evidence separately from calendar acknowledgement or lease expiry. |
-| Complete job envelopes | Operation-specific deployment prerequisites, frozen manager restart targets and linked management outcomes are implemented. Complete creator management delivery, collection, event/fanout and continuation cursors with their delivered consumers. |
+| Complete job envelopes | Operation-specific deployment prerequisites, frozen manager restart targets and linked management outcomes are implemented. Complete collection, event/fanout and continuation cursors with their delivered consumers. |
 | Normal deployment publication | Bind activation revision issuance to a stable deploy command and immutable body. Artifact identity alone cannot distinguish a delayed retry from an intentional rollback. Compose mutable deployment side effects with command acceptance, connect archive/stage/restore to the durable handoff, and keep the calendar's activation origin explicit across delayed delivery. |
 | Scope retirement | Define ingress epoch closure and durable drain evidence. Registration expiry and empty polling cannot retire unpublished-work responsibility. |
 | Receipt retirement | Define admissibility fences and publication/settlement watermarks before deleting job deduplication state. Retain it until that proof exists. |
