@@ -16,8 +16,8 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]
-zeroship-core = { workspace = true }
 futures = { workspace = true }
+testcontainers = { version = "0.28", default-features = false, features = ["blocking", "watchdog"] }
 
 [lints]
 workspace = true
