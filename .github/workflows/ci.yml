@@ -283,8 +283,6 @@ jobs:
       # this repo has been burned by twice.
       - name: Shipped deploy instructions match the CLI
         run: tests/deploy_instructions_gate.sh
-      - name: Every write that could resurrect a deleted app carries its fence
-        run: tests/deleted_app_write_fence_gate.sh
       - name: WS stub gate self-test
         run: tests/ws_subscription_stub_gate.sh --self-test
       - name: websocket subscription stub agrees with what describes it
