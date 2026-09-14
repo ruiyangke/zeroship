@@ -223,6 +223,16 @@ fn resume_after_process_death(configured_app: Option<&AppId>, native_dev: bool) 
         .join(".zeroship")
         .join(format!("zs-{}.sqlite", expected_app.as_str()));
     assert!(database.exists());
+    // Manager metadata shares the one local platform file with the deployment
+    // catalog; there is no workflow-only database or object directory.
+    assert!(root
+        .path()
+        .join(".zeroship/platform/metadata.sqlite")
+        .exists());
+    assert!(!root
+        .path()
+        .join(".zeroship/deployments/index.sqlite")
+        .exists());
     assert!(!root.path().join(".zeroship/workflows.sqlite").exists());
     assert!(!root.path().join(".zeroship/workflow-objects").exists());
     let started = host.request("/start").unwrap();

@@ -8,47 +8,46 @@ use std::{
     sync::Arc,
 };
 use zeroship_bundle::{verify_deployment_manifest, BlobStore, LocalDiskBlobStore};
-use zeroship_core::{
-    app_id::AppId,
-    workflow_deployments::{HoldGeneration, HoldReceipt, HoldScope},
-};
+use zeroship_core::app_id::AppId;
 use zeroship_workflow::{
-    deployment_holds::DeploymentHoldClient,
-    service::{AppDeployments, BundleExecutable, DeployRegistration},
+    service::{AppDeployments, BundleExecutable},
     WorkflowServiceError,
 };
-use zeroship_workflow_manager::deployments::DeploymentHolds;
 
 pub struct AppDeployment {
     archive: Option<PathBuf>,
-    index: PathBuf,
+    platform: PathBuf,
     blobs: Arc<dyn BlobStore>,
 }
-pub struct LoadedApp {
-    pub registration: DeployRegistration,
+
+/// A verified app archive whose manifest and blobs are in the local store.
+/// The platform catalog assigns its deployment identity separately.
+pub struct IngestedApp {
+    pub hash: String,
+    pub manifest: String,
     pub executable: BundleExecutable,
 }
+
 impl AppDeployment {
     pub fn new(root: &Path, archive: Option<&Path>) -> Result<Self, String> {
         let archive = archive
             .map(|archive| std::fs::canonicalize(root.join(archive)))
             .transpose()
             .map_err(|error| format!("resolve app archive: {error}"))?;
-        let directory = root.join(".zeroship/deployments");
-        let blobs = LocalDiskBlobStore::new(directory.clone())
+        let state = root.join(".zeroship");
+        let blobs = LocalDiskBlobStore::new(state.join("deployments"))
             .map_err(|error| format!("open local app deployments: {error}"))?;
         Ok(Self {
             archive,
-            index: directory.join("index.sqlite"),
+            platform: state.join("platform/metadata.sqlite"),
             blobs: Arc::new(blobs),
         })
     }
 
-    pub async fn catalog(&self) -> Result<DeploymentHolds, WorkflowServiceError> {
-        zeroship_workflow_manager::local::LocalPlatform::open(&self.index)
-            .await
-            .map(|platform| platform.deployments().clone())
-            .map_err(deployment_error)
+    /// The local platform metadata file: the normal deployment catalog and
+    /// the workflow manager's queue, placement, scheduling and recovery.
+    pub fn platform(&self) -> &Path {
+        &self.platform
     }
 
     pub fn artifacts(
@@ -58,13 +57,16 @@ impl AppDeployment {
         AppDeployments::new(self.blobs.clone(), max_source_bytes)
     }
 
+    /// Ingest and verify the served archive, if any, into the retained store.
+    ///
+    /// # Errors
+    /// Refuses unreadable, oversized and invalid archives.
     pub async fn load(
         &self,
         app: &AppId,
-        catalog: &DeploymentHolds,
         max_archive_bytes: usize,
         max_source_bytes: usize,
-    ) -> Result<Option<LoadedApp>, WorkflowServiceError> {
+    ) -> Result<Option<IngestedApp>, WorkflowServiceError> {
         let Some(archive) = &self.archive else {
             return Ok(None);
         };
@@ -81,17 +83,14 @@ impl AppDeployment {
         let ingested = zeroship_bundle::ingest(&self.blobs, app, &archive)
             .await
             .map_err(|_| unavailable())?;
-        let deploy_hash = ingested.deploy_hash;
-        let manifest = verify_deployment_manifest(ingested.manifest_json.as_bytes(), &deploy_hash)
-            .map_err(|_| unavailable())?;
+        let manifest =
+            verify_deployment_manifest(ingested.manifest_json.as_bytes(), &ingested.deploy_hash)
+                .map_err(|_| unavailable())?;
         let executable =
             BundleExecutable::load(&manifest, self.blobs.as_ref(), max_source_bytes).await?;
-        let id = catalog
-            .record_deployment(app, &deploy_hash, &ingested.manifest_json)
-            .await
-            .map_err(deployment_error)?;
-        Ok(Some(LoadedApp {
-            registration: executable.registration(id, deploy_hash),
+        Ok(Some(IngestedApp {
+            hash: ingested.deploy_hash,
+            manifest: ingested.manifest_json,
             executable,
         }))
     }
@@ -99,56 +98,4 @@ impl AppDeployment {
 
 fn unavailable() -> WorkflowServiceError {
     WorkflowServiceError::Unavailable("app deployment could not be read or validated".into())
-}
-
-/// Local host adapter exposing only one journal's retention operations.
-#[derive(Clone, Debug)]
-pub(crate) struct LocalDeploymentHolds {
-    ledger: DeploymentHolds,
-    scope: HoldScope,
-}
-impl LocalDeploymentHolds {
-    pub(crate) fn new(ledger: DeploymentHolds, scope: HoldScope) -> Self {
-        Self { ledger, scope }
-    }
-}
-#[async_trait::async_trait(?Send)]
-impl DeploymentHoldClient for LocalDeploymentHolds {
-    fn scope(&self) -> &HoldScope {
-        &self.scope
-    }
-    async fn acquire(
-        &self,
-        deployment: &str,
-        generation: HoldGeneration,
-    ) -> Result<HoldReceipt, WorkflowServiceError> {
-        self.ledger
-            .acquire(&self.scope, deployment, generation)
-            .await
-            .map_err(deployment_error)
-    }
-    async fn release(
-        &self,
-        deployment: &str,
-        generation: HoldGeneration,
-    ) -> Result<HoldReceipt, WorkflowServiceError> {
-        self.ledger
-            .release(&self.scope, deployment, generation)
-            .await
-            .map_err(deployment_error)
-    }
-}
-
-fn deployment_error(error: zeroship_workflow_manager::deployments::Error) -> WorkflowServiceError {
-    use zeroship_workflow_manager::deployments::Error;
-    match error {
-        Error::InvalidRequest(message) => WorkflowServiceError::InvalidRequest(message),
-        Error::Unauthenticated => WorkflowServiceError::Unauthenticated,
-        Error::PermissionDenied => WorkflowServiceError::PermissionDenied,
-        Error::Conflict(message) => WorkflowServiceError::Conflict(message),
-        Error::ResourceExhausted(message) => WorkflowServiceError::ResourceExhausted(message),
-        Error::Unavailable(message) => WorkflowServiceError::Unavailable(message),
-        Error::Timeout => WorkflowServiceError::Timeout,
-        Error::Internal(message) => WorkflowServiceError::Internal(message),
-    }
 }

@@ -338,7 +338,7 @@ fn cmd_serve(args: &[String]) {
         &std::env::current_dir().expect("project directory"),
         dev_app_id.clone(),
         workflow_config,
-        is_archive.then(|| input_path.clone()),
+        is_archive.then_some(input_path.as_path()),
         zeroship_workflow::service::store::HostStorage {
             connection: database.connection().clone(),
             keys: zeroship_data_orm::encryption::ProjectKeySource::supplied(
@@ -366,7 +366,7 @@ fn cmd_serve(args: &[String]) {
         eprintln!("[zeroship] workflows: {error}");
         std::process::exit(1);
     });
-    plugins.push(Arc::new(workflow_host.binding.clone()));
+    plugins.push(Arc::new(workflow_host.binding()));
     let modules = if is_archive && dev_bootstrap.is_none() {
         let executable = workflow_host
             .executable
@@ -394,7 +394,7 @@ fn cmd_serve(args: &[String]) {
         modules
     };
     eprintln!(
-        "[zeroship] workflow worker ready (app={})",
+        "[zeroship] workflow host ready (app={})",
         workflow_host.app.as_str()
     );
 
