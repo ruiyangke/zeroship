@@ -600,12 +600,7 @@ is in `docs/runbooks/deploy-server.md`.
 Not every environment read is a server SETTING. The creator CLI, the
 single-tenant runtime, the data plugins and the test suites all read names that
 no `ConfigSpec` declares, and they are not invented: each goes through a typed
-declared key whose class the raw-environment gate checks. Re-derive the current
-census with
-
-```bash
-cargo run -p zeroship-config-contract -- raw-env 2>&1 >/dev/null | grep class
-```
+declared key that records its class and consumer.
 
 **creator CLI** (`CliEnv`): `ZEROSHIP_TOKEN` `ZEROSHIP_CONTROL_URL`
 `ZEROSHIP_CONFIG` `ZEROSHIP_CONFIG_HOME` `ZEROSHIP_KV_PATH` `ZEROSHIP_KV_CONFIG_FILE`
@@ -773,9 +768,6 @@ cargo run -p zeroship-config-contract -- env-vars-doc --check
 # extraction is no longer the source of truth for this document; its job is to
 # disagree with the compiled contract if either one is wrong.
 cargo run -p zeroship-config-contract -- audit
-
-# The declared non-contract census behind the hand-maintained sections.
-cargo run -p zeroship-config-contract -- raw-env 2>&1 >/dev/null | grep class
 
 # The compose knobs an operator can set.
 grep -ohE '\$\{[A-Z_0-9]+(:-[^}]*)?\}' deploy/compose/docker-compose.yml | sort -u

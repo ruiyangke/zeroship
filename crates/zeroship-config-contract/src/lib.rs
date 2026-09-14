@@ -10,5 +10,4 @@ pub mod docs;
 pub mod fixtures;
 pub mod inventory;
 pub mod metadata;
-pub mod raw_env;
 pub mod registry;
