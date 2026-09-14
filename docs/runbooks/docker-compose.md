@@ -41,18 +41,17 @@ command. It defaults to the gitignored `deploy/compose/secrets` directory and
 the sibling `deploy/compose/.env` file. The deployment runbook covers custom
 paths because Compose must receive both the custom env-file and mount path.
 
-The secret directory contains exactly seven files:
+The secret directory contains these private files:
 
 `migrate-dsn` `gateway-signing.pem` `auth-signing.pem` `broker-secret`
 `pairwise-salt` `refresh-hash-key` `refresh-idem-key`
 
-That is `secret_specs()` in `crates/zeroship-cli/src/dev.rs` (six) plus `pairwise-salt`,
-which is written separately because its bytes must equal the `.env` scalar
-below. This list said "eight" and named six until 2026-08-21; the one it left
-out was `migrate-dsn`, the privileged DSN, which is also the file
-`tests/config_name_alignment_gate.sh` cited `dev.rs` as proof did not exist.
+The list comes from `secret_specs()` in `crates/zeroship-cli/src/dev.rs` plus
+`pairwise-salt`, which is written separately because its bytes must equal the
+`.env` scalar below. An earlier version omitted `migrate-dsn`, the privileged
+DSN.
 
-The env overlay contains eight generated scalar values:
+The env overlay contains these generated scalar values:
 
 `ZEROSHIP_CONTROL_KEY` `ZEROSHIP_CONTROL_MASTER_KEY`
 `ZEROSHIP_MIGRATE_SERVER_POLICY_SEAL_KEY` `ZEROSHIP_GATEWAY_STASH_SIGNING_KEY`

@@ -4,15 +4,15 @@ This file has TWO HALVES and they carry different guarantees.
 
 **The generated half** is the table between the
 `BEGIN/END GENERATED CONFIGURATION CONTRACT` markers below. It is rendered from
-the COMPILED `ConfigSpec` registries of the six declaring binaries by
+the COMPILED `ConfigSpec` registries of the declaring binaries by
 
 ```bash
 cargo run -p zeroship-config-contract -- env-vars-doc
 ```
 
 Every name in it is the name the binary parses, because both are the same
-compiled value. It cannot be stale: `tests/config_name_alignment_gate.sh` fails
-CI when the committed region differs from a fresh render.
+compiled value. Pass `--check` to compare the committed region with a fresh
+render without rewriting the file.
 
 **The hand-maintained half** is everything else. It documents what zeroship does
 NOT declare - Stripe, Supabase, AWS and other third-party names, the Compose
@@ -200,8 +200,7 @@ a command control has no environment name, so no ambient variable can trigger it
 <!--
 DO NOT EDIT THIS REGION BY HAND. It is rendered from the COMPILED
 ConfigSpec registries of the declaring binaries by
-`cargo run -p zeroship-config-contract -- env-vars-doc`, and
-tests/config_name_alignment_gate.sh fails when it drifts. Everything
+`cargo run -p zeroship-config-contract -- env-vars-doc`. Everything
 OUTSIDE these two markers is hand-maintained and is never rewritten
 by the generator.
 -->
@@ -467,9 +466,9 @@ each one into the container variable OF THE SAME NAME, so
 contract table has a working default or belongs to a service the stack does not
 run.
 
-The `.env` name and the container name are now always identical; that equality
-is enforced by check 6b of `tests/config_name_alignment_gate.sh`. It used to be
-that eight values were spelled one way in `.env` and another in the container.
+The checked-in Compose file passes each direct `.env` interpolation through to
+the container under the same name. Earlier versions used different host and
+container spellings for some values.
 
 Before the first local compose run, provision the file and its sibling secret
 directory from the repository root:
@@ -548,8 +547,7 @@ mounted file the platform-migration one-shot reads. Setting the variable to a
 literal DSN still works and is what a `.env` override does; the point is that
 the checked-in file no longer carries superuser material, and that repointing
 `secrets/migrate-dsn` at a real database now moves BOTH privileged readers
-instead of only the one-shot. `check 6d` of `tests/config_name_alignment_gate.sh`
-refuses a superuser DSN reappearing in any `environment:` value.
+instead of only the one-shot.
 
 Optional: `OPENAI_API_KEY` (defaults empty).
 
@@ -565,8 +563,7 @@ passes that path along; it is not read by any container.
 
 Section 4.3 of `docs/proposals/2026-08-11-config-name-alignment.md` requires
 `LEFT == RIGHT` for any container value whose whole scalar is one interpolation.
-As of 2026-08-13 the deployment satisfies it and check 6b of
-`tests/config_name_alignment_gate.sh` enforces it.
+The checked-in deployment uses that form.
 
 ### Operational literals not supplied by the generator
 
@@ -709,11 +706,8 @@ read through the platform's own `FileConfig` parser
 shell). `deny_unknown_fields` applies, so a misspelled key in it is an error
 rather than a value that silently configures nothing.
 
-It is generated and gitignored rather than committed because every
-`*.database_url` and `worker.kv_config` leaf is `secret`-classed, and check 8 of
-`tests/config_name_alignment_gate.sh` fails any TRACKED `*.toml` holding a
-literal at a secret-classed leaf - with no exception list, by design. That same
-gate exempts untracked overlays deliberately, which is exactly what this is.
+It is generated and gitignored rather than committed because its database and
+KV values contain credentials for the local backend instances.
 
 `PG_TEST_URL` is the PostgreSQL test override, including the workflow engine
 fixtures. Otherwise tests read the generated overlay. Suite runners export this
@@ -760,7 +754,7 @@ in every run it would have helped; it is deleted, not renamed.
 # Rewrite the generated region above from the COMPILED contract.
 cargo run -p zeroship-config-contract -- env-vars-doc
 
-# Verify it, exactly as CI does.
+# Compare the generated region without rewriting it.
 cargo run -p zeroship-config-contract -- env-vars-doc --check
 
 # The compose knobs an operator can set.

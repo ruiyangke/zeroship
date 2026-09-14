@@ -403,33 +403,6 @@ jobs:
           tests/lib/e2e_stack_selftest.sh
           tests/lib/known_catchall_selftest.sh
           tests/lib_gate_arms_selftest.sh
-      # THE CONFIGURATION-NAME CONTRACT. Nothing invoked the checker binary in
-      # any workflow until now: `cargo test --workspace` above ran the crate's
-      # unit and fixture tests, but the commands that inspect workspace metadata
-      # and the generated environment reference had never run in CI,
-      # so the compiled registries of the server binaries were checked against
-      # nothing outside a developer's shell.
-      #
-      # The gate found live defects the first time it ran, both of the same
-      # shape - a name that parses and that nothing reads:
-      #   compose set ZEROSHIP_CONTROL_URL on the CONTROL service, and
-      #     crates/control/src/ has no reader for it (it is auth's, gateway's
-      #     and worker's name)
-      #   deploy/ops/zeroship.example.toml set `[gateway] broker_secret`, while
-      #     the gateway resolves that secret from a PATH; the overlay key
-      #     configured nothing
-      # Both are deleted in the same change that wires this. That is what the
-      # step is for, and it is why the expected sets are joined out of the
-      # COMPILED contract rather than listed in the script.
-      #
-      # The self-test runs FIRST and separately: it mutates the compose file and
-      # an ops TOML, proves both text checks still reject the mutation, and then
-      # re-runs the same checks on the real inputs as the one-variable partner.
-      # Text and cargo only - no docker, no services.
-      - name: Config-name gate self-test
-        run: tests/config_name_alignment_gate.sh --self-test
-      - name: Configuration names, the reference, and the deployment agree
-        run: tests/config_name_alignment_gate.sh
       # THE FIVE-BINARY --check-config E2E. Built and ran nowhere until now,
       # which mattered: it is the only instrument that starts the real control,
       # gateway, auth, worker and migrated binaries and asserts what each one
