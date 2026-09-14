@@ -924,12 +924,18 @@ fn dev_enroller_refuses_a_zone_control_would_refuse_and_writes_nothing() {
     ]);
     assert!(!output.status.success(), "a padded zone name was accepted");
     assert!(!unit.exists() && !import.exists(), "a refused run wrote a file");
-    // The control: the same command with a clean zone name succeeds.
+    // The control: the same command with a clean zone name succeeds - spelled
+    // with separate values, the other form `dev init` also takes.
+    let unit_arg = unit.display().to_string();
+    let import_arg = import.display().to_string();
     assert_success(
         &run_dev_enroller(&[
-            &format!("--credential={}", unit.display()),
-            &format!("--import-file={}", import.display()),
-            "--zone=edge",
+            "--credential",
+            &unit_arg,
+            "--import-file",
+            &import_arg,
+            "--zone",
+            "edge",
         ]),
         "zeroship dev enroller with a clean zone",
     );
