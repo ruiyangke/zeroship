@@ -12,7 +12,7 @@
  */
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { t } from "@zeroship/db";
+import { t } from "../src/index.js";
 
 describe("P7 — t.id(prefix) fence", () => {
   test("t_id_blog_carries_idPrefix", () => {

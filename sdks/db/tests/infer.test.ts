@@ -6,9 +6,9 @@ import { generatedSchema } from "./_install-helper.js";
  */
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { model } from "@zeroship/db/internal";
-import { schema, t } from "@zeroship/db";
-import type { Db, Id, InferId, InferRow, InferRowInput } from "@zeroship/db";
+import { model } from "../../../crates/zeroship-data-v8/js/testing.js";
+import { schema, t } from "../src/index.js";
+import type { Db, Id, InferId, InferRow, InferRowInput } from "../src/index.js";
 import type { NativeDb } from "../src/native.js";
 
 const native = {

@@ -1,4 +1,4 @@
-import { t, type Query } from "@zeroship/db";
+import { t, type Query } from "../src/index.js";
 import { installSchemaForTest } from "./_install-helper.js";
 import type { NativeDb } from "../src/native.js";
 

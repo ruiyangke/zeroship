@@ -10,8 +10,10 @@
  * wraps it into an `AsyncIterable` so callers can write:
  *
  * ```ts
- * for await (const ev of db.subscribe("messages")) {
- *   // ev.kind === "change" | "resync" | "closed"
+ * import { subscribe } from "@zeroship/db";
+ *
+ * for await (const event of subscribe("messages")) {
+ *   // event.kind === "change" | "resync" | "closed"
  * }
  * ```
  *
@@ -90,7 +92,7 @@ function getNativeDbCollection(name: string): NativeCollection {
   const db = (env as { db?: unknown } | undefined)?.db;
   return requireCollectionResolver(db, {
     code: "NATIVE_SUBSCRIPTION_UNAVAILABLE",
-    message: "@zeroship/db/subscribe: env.db.collection is unavailable",
+    message: "@zeroship/db: env.db.collection is unavailable for subscribe()",
   })(name);
 }
 
@@ -103,7 +105,7 @@ export function subscribe(collection: string): Subscription {
   if (typeof collection !== "string" || collection.length === 0) {
     throw Object.assign(
       new TypeError(
-        "@zeroship/db/subscribe: collection must be a non-empty string",
+        "@zeroship/db: subscribe() collection must be a non-empty string",
       ),
       { code: "SUBSCRIBE_INVALID_COLLECTION" as const },
     );

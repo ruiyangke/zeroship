@@ -1,7 +1,7 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { t, type Row, type RowInput } from "@zeroship/db";
-import { normalizeSchema } from "@zeroship/db/internal";
+import { t, type Row, type RowInput } from "../src/index.js";
+import { normalizeSchema } from "../../../crates/zeroship-data-v8/js/testing.js";
 
 describe("assignment builders", () => {
   test("ID type carries its prefix without assigning a value", () => {

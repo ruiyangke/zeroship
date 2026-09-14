@@ -1,7 +1,7 @@
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
 import { Collection, eq, count, gt, type Row } from "../dist/index.js";
-import { readFrom, type NativeDb } from "../dist/internal.js";
+import { readFrom, type NativeDb } from "../../../crates/zeroship-data-v8/js/testing.js";
 
 function fixture() {
   const calls: Record<string, unknown>[] = [];

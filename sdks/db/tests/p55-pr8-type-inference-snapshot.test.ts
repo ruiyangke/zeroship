@@ -9,9 +9,9 @@ import { generatedSchema } from "./_install-helper.js";
 
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { t } from "@zeroship/db";
+import { t } from "../src/index.js";
 // `MaskedValue` is a type-only declaration for the native V8 class.
-import type { Row, RowInput, MaskedValue } from "@zeroship/db";
+import type { Row, RowInput, MaskedValue } from "../src/index.js";
 
 // Helper: compile-time assertion that `T` matches the actual value's
 // type. The body is a no-op at runtime; the win is `tsc` rejecting

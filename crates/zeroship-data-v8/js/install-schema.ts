@@ -1,25 +1,27 @@
 /**
- * Internal DB SDK facade installation over descriptor-bound native collections.
+ * Host-owned DB facade installation over descriptor-bound native collections.
  * The host supplies the native handle and generated runtime descriptor.
- * Collection, transaction, relation and live-query conveniences belong to this
- * SDK; authoritative schema binding and database operations remain native.
+ * Collection, transaction, relation and live-query conveniences come from the
+ * public SDK implementation; authoritative schema binding and database
+ * operations remain native. This adapter is bundled into zeroship-data-v8 and
+ * is not an npm package entry.
  */
-import { Collection } from "./collection";
-import { TRANSACTION_READ } from "./collection/crud";
-import { captureNativeTransaction, type NativeDb, type NativeCollection, type NativeTransactionFn } from "./native";
-import { Query, type PaginationResult } from "./query";
-import { createLive, type LiveOptions, type LiveQuery } from "./live";
-import { drainCollectionLoaders } from "./tx-state";
-import { readFrom, scopeAliasedCollection, type ReadFrom, type AliasedCollection } from "./read";
-import type { TransactionDb, TxCollection, TxQuery, TransactionOptions } from "./db-types";
+import { Collection } from "../../../sdks/db/src/collection";
+import { TRANSACTION_READ } from "../../../sdks/db/src/collection/crud";
+import { captureNativeTransaction, type NativeDb, type NativeCollection, type NativeTransactionFn } from "../../../sdks/db/src/native";
+import { Query, type PaginationResult } from "../../../sdks/db/src/query";
+import { createLive, type LiveOptions, type LiveQuery } from "../../../sdks/db/src/live";
+import { drainCollectionLoaders } from "../../../sdks/db/src/tx-state";
+import { readFrom, scopeAliasedCollection, type ReadFrom, type AliasedCollection } from "../../../sdks/db/src/read";
+import type { TransactionDb, TxCollection, TxQuery, TransactionOptions } from "../../../sdks/db/src/db-types";
 import {
   naming, SchemaBuilder, TypeBuilder, ok, err,
   type NamingStrategy, type NamedIndexSpec, type Result, type Row, type RowId,
   type RowInput, type UpsertOptions, type UpdateExpression, type Filter,
   type DistinctField, type SelectInput, type SortInput, type SortSpec,
   type WithSpec, type PlainObject, type Actor, type FieldDef,
-} from "./types";
-export type { TransactionDb, TxCollection, TxQuery, TransactionOptions } from "./db-types";
+} from "../../../sdks/db/src/types";
+export type { TransactionDb, TxCollection, TxQuery, TransactionOptions } from "../../../sdks/db/src/db-types";
 
 type AsyncLocalStorageLike<T> = {
   getStore(): T | undefined;
