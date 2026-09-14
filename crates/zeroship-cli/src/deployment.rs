@@ -45,8 +45,9 @@ impl AppDeployment {
     }
 
     pub async fn catalog(&self) -> Result<DeploymentHolds, WorkflowServiceError> {
-        DeploymentHolds::open_local(&self.index)
+        zeroship_workflow_manager::local::LocalPlatform::open(&self.index)
             .await
+            .map(|platform| platform.deployments().clone())
             .map_err(deployment_error)
     }
 

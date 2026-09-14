@@ -77,8 +77,12 @@ impl Deployments {
         directory: Arc<tempfile::TempDir>,
         source: Arc<dyn BlobStore>,
     ) -> Self {
-        let path = directory.path().join("index.sqlite");
-        let ledger = DeploymentHolds::open_local(&path).await.unwrap();
+        let path = directory.path().join("platform.sqlite");
+        let ledger = zeroship_workflow_manager::local::LocalPlatform::open(&path)
+            .await
+            .unwrap()
+            .deployments()
+            .clone();
         let database = Database::connect(
             DbBinding::new(
                 "platform",
