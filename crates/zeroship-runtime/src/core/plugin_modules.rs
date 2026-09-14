@@ -7,7 +7,10 @@ use super::modules::ModuleEntry;
 use super::plugin::{JavaScriptModule, NativePlugin};
 
 #[derive(Clone, Default)]
-pub struct PluginModules(pub Vec<JavaScriptModule>);
+pub struct PluginModules {
+    pub modules: Vec<JavaScriptModule>,
+    pub host_only: HashSet<&'static str>,
+}
 
 pub fn register(
     scope: &mut v8::PinScope<'_, '_>,
@@ -28,9 +31,20 @@ pub fn register(
     }
     let mut modules = Vec::new();
     let mut names = HashSet::new();
+    let mut host_only = HashSet::new();
     for plugin in plugins {
         let prefix = format!("zeroship:{}/", plugin.namespace());
-        for module in plugin.javascript_modules() {
+        for (module, is_host_only) in plugin
+            .javascript_modules()
+            .iter()
+            .map(|module| (module, false))
+            .chain(
+                plugin
+                    .host_javascript_modules()
+                    .iter()
+                    .map(|module| (module, true)),
+            )
+        {
             let suffix = module.specifier.strip_prefix(&prefix).ok_or_else(|| {
                 format!(
                     "runtime: plugin {:?} must provide modules under {prefix:?}",
@@ -59,9 +73,12 @@ pub fn register(
                     module.specifier
                 ));
             }
+            if is_host_only {
+                host_only.insert(module.specifier);
+            }
             modules.push(*module);
         }
     }
-    scope.set_slot(PluginModules(modules));
+    scope.set_slot(PluginModules { modules, host_only });
     Ok(())
 }

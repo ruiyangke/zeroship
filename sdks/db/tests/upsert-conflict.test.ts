@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { t } from "@zeroship/db";
+import { t } from "../src/index.js";
 import type { Collection } from "../src/collection";
 import type { TxCollection } from "../src/db-types";
 import type { NativeDb } from "../src/native";

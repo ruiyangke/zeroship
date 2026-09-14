@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { installSchema, type NativeDb, type RuntimeSchemaDescriptor } from "@zeroship/db/internal";
+import { installSchema, type NativeDb, type RuntimeSchemaDescriptor } from "../../../crates/zeroship-data-v8/js/testing.js";
 
 test("artifact binary defaults reach inserts as independent native buffers", async () => {
   const writes: Record<string, unknown>[] = [];

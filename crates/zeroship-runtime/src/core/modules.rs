@@ -25,6 +25,7 @@ pub struct ModuleRegistry {
     compiled: HashMap<String, v8::Global<v8::Module>>,
     sources: HashMap<String, String>,
     host_names: HashSet<String>,
+    host_only_names: HashSet<String>,
 }
 
 pub type SharedRegistry = Rc<RefCell<ModuleRegistry>>;
@@ -41,6 +42,7 @@ impl ModuleRegistry {
             compiled: HashMap::new(),
             sources: HashMap::new(),
             host_names: HashSet::new(),
+            host_only_names: HashSet::new(),
         }
     }
 
@@ -64,6 +66,11 @@ impl ModuleRegistry {
     }
 
     fn check_source_import(&self, referrer: &str, resolved: &str) -> Result<(), String> {
+        if !self.host_only_names.contains(referrer) && self.host_only_names.contains(resolved) {
+            return Err(format!(
+                "Module {referrer:?} cannot import host-only module {resolved:?}"
+            ));
+        }
         if self.host_names.contains(referrer) && !self.host_names.contains(resolved) {
             return Err(format!(
                 "Plugin module {referrer:?} cannot import creator module {resolved:?}"
@@ -153,7 +160,7 @@ pub(crate) fn compile_modules(
         .get_slot::<super::plugin_modules::PluginModules>()
         .cloned()
         .unwrap_or_default();
-    for module in &plugin_modules.0 {
+    for module in &plugin_modules.modules {
         if sources
             .insert(module.specifier.to_string(), module.source.to_string())
             .is_some()
@@ -164,11 +171,20 @@ pub(crate) fn compile_modules(
     let registry = Rc::new(RefCell::new(ModuleRegistry {
         compiled: HashMap::new(),
         sources,
-        host_names: plugin_modules.0.iter().map(|module| module.specifier.to_owned()).collect(),
+        host_names: plugin_modules
+            .modules
+            .iter()
+            .map(|module| module.specifier.to_owned())
+            .collect(),
+        host_only_names: plugin_modules
+            .host_only
+            .iter()
+            .map(|specifier| (*specifier).to_owned())
+            .collect(),
     }));
     scope.set_slot(registry.clone());
     let entry = compile_registered_graph(scope, &registry, &entries[0].specifier)?;
-    for module in &plugin_modules.0 {
+    for module in &plugin_modules.modules {
         compile_registered_graph(scope, &registry, module.specifier)?;
     }
     Ok(entry)
@@ -193,6 +209,12 @@ pub(crate) fn dynamic_module(
     let Some(root) = resolved else {
         return Ok(None);
     };
+    {
+        let registry = registry.borrow();
+        if registry.host_only_names.contains(&root) && !registry.host_only_names.contains(referrer) {
+            return Err(format!("Cannot find module '{specifier}'"));
+        }
+    }
     if !super::native_modules::is_native(scope, &root) {
         registry.borrow().check_source_import(referrer, &root)?;
     }

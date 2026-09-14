@@ -1,7 +1,7 @@
 import { afterEach, test } from "node:test";
 import assert from "node:assert/strict";
 import { env } from "zeroship";
-import { defineMaskPolicy } from "@zeroship/db";
+import { defineMaskPolicy } from "../src/index.js";
 
 const mutableEnv = env as unknown as Record<string, unknown>;
 const original = mutableEnv.db;

@@ -12,6 +12,7 @@ The runtime-native plugin interface is defined in [crates/zeroship-runtime/src/c
 - optional `build_instance(...)`
 - optional `bind_runtime_descriptor(...)`
 - optional `javascript_modules()`
+- optional `host_javascript_modules()`
 - optional `prepare_runtime(...)`
 - optional `finalize_runtime(...)`
 
@@ -31,12 +32,17 @@ shares module instances across static and dynamic imports. Creator artifacts
 cannot replace these sources. An adapter may import other registered adapters,
 native modules and `zeroship`; it cannot statically import creator modules.
 
+Modules returned from `host_javascript_modules()` use the same compilation and
+dependency rules, but only native lifecycle hooks can invoke them. Static and
+dynamic creator imports cannot resolve a host module.
+
 Module delivery grants no additional authority. Privileged finalization remains
 in native lifecycle hooks; adapter JavaScript uses the app-scoped primitives.
 
-The [DB adapter](../../crates/zeroship-data-v8/src/lib.rs) supplies the DB SDK
-internal entry as `zeroship:db/internal`. Its source and build dependency belong
-to `zeroship-data-v8`; the runtime core loads the registered module graph.
+The [DB adapter](../../crates/zeroship-data-v8/src/lib.rs) supplies its host-only
+module as `zeroship:db/adapter`. Its source and compiled artifact live under
+`crates/zeroship-data-v8`; the runtime core loads the registered module graph.
+The module is not an `@zeroship/db` package export.
 
 ## Startup lifecycle
 

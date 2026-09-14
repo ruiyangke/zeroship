@@ -13,13 +13,13 @@
 //! A typed entity id is characterised by what it refuses:
 //!
 //! - **No `Display`, no `ToString`.** An id reaching a format string is a
-//!   decision. Rendering goes through `as_str`, which is greppable.
+//!   decision. Rendering uses explicit `as_str` or `into_string` calls.
 //! - **No `Deref<Target = str>`, `AsRef<str>` or `Borrow<str>`.** These are the
 //!   routes by which one entity's id reaches a parameter that wanted another's.
 //!   Every id declared here is a bare `text` column in PostgreSQL, so a
 //!   `&str`-typed parameter would accept any of them interchangeably.
 //! - **No `From<&str>`, `From<String>`, `new_unchecked` or public field.** In is
-//!   `mint` or the fallible `parse`, and there is no third way.
+//!   `mint` or fallible parsing.
 //! - **No `PartialEq<str>`.** Comparing against a raw string is a decision.
 //!
 //! # Ordering
@@ -36,8 +36,8 @@
 /// Declare a typed entity id: a newtype over the printed `<prefix>_<base36>`
 /// form, constructible only by minting or parsing, with its absences asserted.
 ///
-/// Generates the type, `PREFIX`, `mint`, `parse`, `as_str`, `Serialize`,
-/// `Deserialize`, and a test module proving the absences against a control.
+/// Generates the type, explicit borrowed and owned text conversions, Serde
+/// implementations, and tests for its type boundaries.
 macro_rules! declare_entity_id {
     (
         $(#[$type_meta:meta])*
@@ -45,7 +45,7 @@ macro_rules! declare_entity_id {
     ) => {
         $(#[$type_meta])*
         ///
-        /// Constructed only through `mint` or `parse`. See
+        /// Constructed only through minting or validated parsing. See
         /// [`crate::entity_id`] for the absences this type is required to keep
         /// and why an id column holding it must be registered in the collation
         /// migration.
@@ -95,6 +95,15 @@ macro_rules! declare_entity_id {
                 })
             }
 
+            /// Validate owned text and retain its string buffer.
+            ///
+            /// # Errors
+            /// Returns the same validation errors as [`Self::parse`].
+            pub fn parse_owned(raw: String) -> Result<Self, $crate::typed_id::ParseError> {
+                $crate::typed_id::parse_with_prefix(&raw, $prefix)?;
+                Ok(Self { text: raw })
+            }
+
             /// The printed id.
             ///
             /// Named rather than an `AsRef`/`Deref` impl so that every place
@@ -102,6 +111,12 @@ macro_rules! declare_entity_id {
             #[must_use]
             pub fn as_str(&self) -> &str {
                 &self.text
+            }
+
+            /// Consume the id and return its existing string buffer.
+            #[must_use]
+            pub fn into_string(self) -> String {
+                self.text
             }
         }
 
@@ -324,6 +339,30 @@ macro_rules! declare_entity_id {
                 let minted = $name::mint();
                 let reparsed = $name::parse(minted.as_str()).expect("minted id must parse");
                 assert_eq!(minted, reparsed);
+            }
+
+            #[test]
+            fn owned_conversions_preserve_the_string_buffer() {
+                let minted = $name::mint();
+                let text = minted.as_str().to_owned();
+                let buffer = text.as_ptr();
+                let parsed = $name::parse_owned(text).expect("minted id must parse");
+                assert_eq!(parsed, minted);
+                assert_eq!(parsed.as_str().as_ptr(), buffer);
+                let text = parsed.into_string();
+                assert_eq!(text, minted.as_str());
+                assert_eq!(text.as_ptr(), buffer);
+            }
+
+            #[test]
+            fn owned_parser_preserves_validation_errors() {
+                let foreign = $name::mint().as_str().replacen($name::PREFIX, "zzz", 1);
+                let overflow = format!("{}_{}", $name::PREFIX, "z".repeat($crate::typed_id::BODY_LEN));
+                for value in [String::new(), foreign, overflow, format!("{}_!!!", $name::PREFIX)] {
+                    let borrowed_error = $name::parse(&value).expect_err("invalid id");
+                    let owned_error = $name::parse_owned(value).expect_err("invalid id");
+                    assert_eq!(owned_error, borrowed_error);
+                }
             }
 
             #[test]

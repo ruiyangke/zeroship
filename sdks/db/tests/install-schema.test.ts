@@ -6,8 +6,8 @@ import {
   validateRefTargets,
   normalizeSchema,
   type NativeDb,
-} from "@zeroship/db/internal";
-import { t } from "@zeroship/db";
+} from "../../../crates/zeroship-data-v8/js/testing.js";
+import { t } from "../src/index.js";
 
 describe("normalizeSchema — minimal smoke", () => {
   test("turns a record of t.* builders into a NormalizedSchema", () => {
