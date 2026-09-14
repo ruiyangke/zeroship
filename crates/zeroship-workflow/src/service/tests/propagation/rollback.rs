@@ -92,7 +92,12 @@ async fn rollback(store: Rc<OrmStore>, database: Database) {
     assert_eq!(receipt.outcome, JobOutcome::Waiting {});
     let mut changed = 0;
     for child in &children {
-        if run_row(&service, &app, child).await.text("control").unwrap() == "cancel" {
+        if run_row(&service, &app, child)
+            .await
+            .text("control")
+            .unwrap()
+            == "cancel"
+        {
             changed += 1;
         }
     }
@@ -102,7 +107,10 @@ async fn rollback(store: Rc<OrmStore>, database: Database) {
     assert_eq!(rest.last().unwrap().outcome, JobOutcome::Completed {});
     for child in &children {
         assert_eq!(
-            run_row(&service, &app, child).await.text("control").unwrap(),
+            run_row(&service, &app, child)
+                .await
+                .text("control")
+                .unwrap(),
             "cancel"
         );
     }

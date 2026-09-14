@@ -45,6 +45,7 @@ async fn propagation_delivery_and_receipts_preserve_scope_without_holds() {
     command.outcome = JobOutcome::Management {
         outcome: ManagementOutcome::Denied {},
     };
+    let before = fixture.job_snapshot(&job).await;
     assert_eq!(
         fixture
             .post(endpoints::WORKFLOW_JOB_SETTLE, &command)
@@ -99,7 +100,10 @@ async fn propagation_http_rejects_customer_routing_state() {
         let mut invalid = submit.clone();
         invalid.pointer_mut("/job/operation").unwrap()[field] = value;
         assert_eq!(
-            fixture.post(endpoints::WORKFLOW_JOB_SUBMIT, &invalid).await.0,
+            fixture
+                .post(endpoints::WORKFLOW_JOB_SUBMIT, &invalid)
+                .await
+                .0,
             StatusCode::BAD_REQUEST,
             "{field}: {invalid}"
         );

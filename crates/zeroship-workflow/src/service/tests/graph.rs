@@ -240,7 +240,10 @@ async fn wake_contract(store: Rc<OrmStore>) {
     let pages = deliver_propagations(&service.fixture_app(local.clone())).await;
     assert!(pages.len() > 1);
     let (last, earlier) = pages.split_last().unwrap();
-    assert_eq!(last.outcome, zeroship_core::workflow_jobs::JobOutcome::Completed {});
+    assert_eq!(
+        last.outcome,
+        zeroship_core::workflow_jobs::JobOutcome::Completed {}
+    );
     assert!(earlier
         .iter()
         .all(|page| page.outcome == zeroship_core::workflow_jobs::JobOutcome::Waiting {}));

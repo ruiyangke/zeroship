@@ -51,7 +51,9 @@ pub(super) async fn mid_propagation(store: Rc<OrmStore>) {
         ControlIntent::Cancel
     );
     // Continuing as new mid-propagation settles the child as cancelled instead.
-    let runs = rows(&service, "runs", json!({"app_id":app.as_str()})).await.len();
+    let runs = rows(&service, "runs", json!({"app_id":app.as_str()}))
+        .await
+        .len();
     let receipt = service
         .complete(
             &worker,
@@ -63,7 +65,9 @@ pub(super) async fn mid_propagation(store: Rc<OrmStore>) {
         .unwrap();
     assert_eq!(receipt.state, RunState::Cancelled);
     assert_eq!(
-        rows(&service, "runs", json!({"app_id":app.as_str()})).await.len(),
+        rows(&service, "runs", json!({"app_id":app.as_str()}))
+            .await
+            .len(),
         runs
     );
     assert_eq!(
@@ -95,9 +99,13 @@ pub(super) async fn mid_propagation(store: Rc<OrmStore>) {
     assert_eq!(grandchild.len(), 1);
     let grandchild = grandchild[0].text("id").unwrap();
     assert_eq!(
-        rows(&service, "propagations", json!({"app_id":app.as_str(), "finished":0}))
-            .await
-            .len(),
+        rows(
+            &service,
+            "propagations",
+            json!({"app_id":app.as_str(), "finished":0})
+        )
+        .await
+        .len(),
         2
     );
     assert!(service.poll(&worker).await.unwrap().is_none());
@@ -111,9 +119,13 @@ pub(super) async fn mid_propagation(store: Rc<OrmStore>) {
     let pages = deliver_propagations_with(&scope, PropagationOptions { page_size: 1 }).await;
     assert!(pages.len() > 2);
     assert_eq!(
-        rows(&service, "propagations", json!({"app_id":app.as_str(), "finished":0}))
-            .await
-            .len(),
+        rows(
+            &service,
+            "propagations",
+            json!({"app_id":app.as_str(), "finished":0})
+        )
+        .await
+        .len(),
         0
     );
     let row = run_row(&service, &app, &running.invocation.run_id).await;
@@ -128,7 +140,14 @@ pub(super) async fn mid_propagation(store: Rc<OrmStore>) {
         .await
         .unwrap();
     assert_eq!(receipt.state, RunState::Cancelled);
-    assert_eq!(scope.status(&running.invocation.run_id).await.unwrap().output, None);
+    assert_eq!(
+        scope
+            .status(&running.invocation.run_id)
+            .await
+            .unwrap()
+            .output,
+        None
+    );
 }
 
 pub(super) async fn restart(store: Rc<OrmStore>) {
@@ -161,9 +180,13 @@ pub(super) async fn restart(store: Rc<OrmStore>) {
 
     let pages = deliver_propagations(&scope).await;
     assert_eq!(pages.len(), 1);
-    let page = rows(&service, "propagation_pages", json!({"app_id":app.as_str()}))
-        .await
-        .remove(0);
+    let page = rows(
+        &service,
+        "propagation_pages",
+        json!({"app_id":app.as_str()}),
+    )
+    .await
+    .remove(0);
     let page_job = scope
         .pending_jobs(None, 500)
         .await
@@ -172,7 +195,10 @@ pub(super) async fn restart(store: Rc<OrmStore>) {
         .find(|job| job.id.as_str() == page.text("id").unwrap())
         .unwrap();
     assert_eq!(
-        run_row(&service, &app, &children[1]).await.text("control").unwrap(),
+        run_row(&service, &app, &children[1])
+            .await
+            .text("control")
+            .unwrap(),
         "cancel"
     );
     // After the obligation finishes, restart is an explicit override.
@@ -218,7 +244,10 @@ pub(super) async fn delivered_renewal(store: Rc<OrmStore>) {
     assert_eq!(control, ControlIntent::None);
     cancel_idle(&scope, &parent).await;
     assert_eq!(
-        run_row(&service, &app, &child).await.text("control").unwrap(),
+        run_row(&service, &app, &child)
+            .await
+            .text("control")
+            .unwrap(),
         "none"
     );
     // Renewal reports the fence before any page records the cancellation.
@@ -228,7 +257,10 @@ pub(super) async fn delivered_renewal(store: Rc<OrmStore>) {
     let (_, control) = scope.heartbeat_job(&task, &grant).await.unwrap();
     assert_eq!(control, ControlIntent::Cancel);
     assert_eq!(
-        run_row(&service, &app, &child).await.text("control").unwrap(),
+        run_row(&service, &app, &child)
+            .await
+            .text("control")
+            .unwrap(),
         "cancel"
     );
 }

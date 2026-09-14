@@ -16,6 +16,7 @@ use zeroship_core::workflow_jobs::{JobLease, JobOperation, JobOutcome, JobSpec};
 use zeroship_data_orm::sql::MAX_ROW_LIMIT;
 
 mod cascade;
+mod corruption;
 mod fence;
 mod notify;
 mod rollback;
@@ -72,9 +73,19 @@ paired!(
     postgres_delivered_renewal_reports_a_fenced_cancellation,
     fence::delivered_renewal
 );
+paired!(
+    sqlite_damaged_propagation_journal_fails_closed_without_effects,
+    postgres_damaged_propagation_journal_fails_closed_without_effects,
+    corruption::damage
+);
 
 /// Seed runs in batches so fixture setup stays within one transaction's bound.
-async fn seed_runs(service: &WorkflowService, app: &AppId, name: &str, count: usize) -> Vec<String> {
+async fn seed_runs(
+    service: &WorkflowService,
+    app: &AppId,
+    name: &str,
+    count: usize,
+) -> Vec<String> {
     let mut runs = Vec::with_capacity(count);
     while runs.len() < count {
         let mut tx = service.begin().await.unwrap();
@@ -87,7 +98,12 @@ async fn seed_runs(service: &WorkflowService, app: &AppId, name: &str, count: us
     runs
 }
 
-async fn update_runs(service: &WorkflowService, app: &AppId, runs: &[String], patch: serde_json::Value) {
+async fn update_runs(
+    service: &WorkflowService,
+    app: &AppId,
+    runs: &[String],
+    patch: serde_json::Value,
+) {
     for chunk in runs.chunks(100) {
         let tx = service.begin().await.unwrap();
         for run in chunk {
@@ -152,7 +168,12 @@ async fn frontier_job(scope: &AppWorkflows, run: &str) -> JobSpec {
     let mut after = None;
     loop {
         let page = scope.pending_jobs(after.as_ref(), 100).await.unwrap();
-        after = Some(page.last().expect("the run's frontier is published").id.clone());
+        after = Some(
+            page.last()
+                .expect("the run's frontier is published")
+                .id
+                .clone(),
+        );
         if let Some(job) = page.into_iter().find(|job| {
             matches!(&job.operation, JobOperation::Advance { run_id, generation, revision, .. }
                 if run_id.as_str() == run && (i64::from(*generation), revision.get()) == current)
@@ -219,7 +240,10 @@ async fn assert_exact_replay(
             .unwrap(),
         receipt
     );
-    assert_eq!(scope.job_receipt(job).await.unwrap().as_ref(), Some(receipt));
+    assert_eq!(
+        scope.job_receipt(job).await.unwrap().as_ref(),
+        Some(receipt)
+    );
     assert_eq!(snapshot(service, scope.app_id()).await, before);
 }
 
@@ -243,7 +267,8 @@ async fn deliver_chain(
         let page = rows(service, "propagation_pages", json!({"id":job.id.as_str()}))
             .await
             .remove(0);
-        let result: serde_json::Value = serde_json::from_str(&page.text("result").unwrap()).unwrap();
+        let result: serde_json::Value =
+            serde_json::from_str(&page.text("result").unwrap()).unwrap();
         assert!(result["affected"].as_i64().unwrap() <= i64::from(options.page_size));
         if let Some((previous, previous_receipt, previous_result)) = chain.last() {
             assert_eq!(previous_receipt.outcome, JobOutcome::Waiting {});
@@ -251,7 +276,10 @@ async fn deliver_chain(
             let JobOperation::Propagate { revision, .. } = &job.operation else {
                 panic!("propagation page")
             };
-            let JobOperation::Propagate { revision: earlier, .. } = &previous.operation else {
+            let JobOperation::Propagate {
+                revision: earlier, ..
+            } = &previous.operation
+            else {
                 panic!("propagation page")
             };
             assert_eq!(revision.get(), earlier.get() + 1);

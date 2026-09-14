@@ -936,7 +936,10 @@ async fn manager_delivers_committed_propagation_page_without_executor() {
     }))
     .await;
     assert_eq!(fixture.probe.starts.get(), 0);
-    assert_eq!(super::propagation::control(&fixture, &child).await, "cancel");
+    assert_eq!(
+        super::propagation::control(&fixture, &child).await,
+        "cancel"
+    );
     let receipt = fixture.app.job_receipt(&page).await.unwrap().unwrap();
     assert_eq!(receipt.outcome, JobOutcome::Completed {});
     // The page's successor is the child's committed Advance intent at its new
@@ -947,8 +950,10 @@ async fn manager_delivers_committed_propagation_page_without_executor() {
         .await
         .unwrap()
         .iter()
-        .any(|job| matches!(&job.operation, JobOperation::Advance { run_id, revision, .. }
-            if run_id.as_str() == child && revision.get() == 2)));
+        .any(
+            |job| matches!(&job.operation, JobOperation::Advance { run_id, revision, .. }
+            if run_id.as_str() == child && revision.get() == 2)
+        ));
     assert!(manager.claim(&manager.scope).await.unwrap().is_none());
     let requests = manager.requests.borrow();
     assert_eq!(requests.len(), 2);

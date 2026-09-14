@@ -64,7 +64,10 @@ pub(super) async fn pages(store: Rc<OrmStore>) {
     assert_eq!(obligations[0].optional_text("cursor").unwrap(), None);
     for child in children.iter().chain(&outside) {
         assert_eq!(
-            run_row(&service, &app, child).await.text("control").unwrap(),
+            run_row(&service, &app, child)
+                .await
+                .text("control")
+                .unwrap(),
             "none"
         );
     }
