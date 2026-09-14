@@ -169,7 +169,9 @@ async fn access_token_roundtrip_served_jwks_public_only_and_issuer_consistency()
             .issue_access_token(&db, &access_mint(&person_id, &scopes), &proof)
             .await
             .expect("issue access token");
-        let jwks = jwks_document(&db).await.expect("served JWKS document");
+        let jwks = jwks_document(&database.orm().await)
+            .await
+            .expect("served JWKS document");
         let header = decode_header(&token).expect("access token header");
         assert_eq!(header.typ.as_deref(), Some(ACCESS_TOKEN_TYP));
         assert_eq!(header.kid.as_deref(), Some(issuer.kid()));

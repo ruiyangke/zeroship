@@ -15,7 +15,7 @@ async fn locked_account_cannot_link_until_the_lock_expires() {
         let confirmation =
             Confirmation::new(&server, "locked@example.test", "locked-profile").await;
         for _ in 0..users::lockout::THRESHOLD {
-            users::record_login_failure(&server.pg, &confirmation.user.id)
+            users::record_login_failure(&server.orm, &confirmation.user.id)
                 .await
                 .unwrap();
         }
