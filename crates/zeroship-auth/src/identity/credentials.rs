@@ -189,7 +189,7 @@ pub async fn verify_password_credentials(
         // wrong-password arm (which runs `record_login_failure` before audit)
         // so the locked/disabled arm does not become a faster — hence
         // distinguishable — path. Best-effort; never alters the decision.
-        if let Err(e) = users::record_login_failure_dummy(db).await {
+        if let Err(e) = users::record_login_failure_dummy(orm).await {
             tracing::error!(error = %e, "record_login_failure_dummy failed");
         }
         audit::emit(
@@ -243,7 +243,7 @@ pub async fn verify_password_credentials(
         // whether the email belongs to a real, password-bearing account. This
         // is the DB analog of the dummy-hash above. Best-effort: a fault must
         // not change the credential decision.
-        if let Err(e) = users::record_login_failure_dummy(db).await {
+        if let Err(e) = users::record_login_failure_dummy(orm).await {
             tracing::error!(error = %e, "record_login_failure_dummy failed");
         }
         audit::emit(
@@ -269,7 +269,7 @@ pub async fn verify_password_credentials(
         // `locked_until` so the NEXT attempt is rejected as locked even with
         // the right password. Best-effort — a counter-store fault must not
         // change the credential decision (still `invalid_credentials`).
-        if let Err(e) = users::record_login_failure(db, &u.id).await {
+        if let Err(e) = users::record_login_failure(orm, &u.id).await {
             tracing::error!(error = %e, user_id = u.id.as_str(), "record_login_failure failed");
         }
         audit::emit(
@@ -322,7 +322,7 @@ pub async fn verify_password_credentials(
     // hand the verified user back. Best-effort reset: a failure here must not
     // block a legitimate login (the eligibility gate above already cleared a
     // live lock).
-    if let Err(e) = users::reset_login_failures(db, &u.id).await {
+    if let Err(e) = users::reset_login_failures(orm, &u.id).await {
         tracing::error!(error = %e, user_id = u.id.as_str(), "reset_login_failures failed");
     }
     audit::emit(

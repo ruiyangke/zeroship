@@ -1,10 +1,13 @@
 //! `zeroship.users` CRUD.
 
-#![allow(clippy::future_not_send, reason = "the ORM belongs to its compio runtime")]
+#![allow(
+    clippy::future_not_send,
+    reason = "the ORM belongs to its compio runtime"
+)]
 
 use compio_postgres::{Client, GenericClient};
 use zeroship_core::UserId;
-use zeroship_data_orm::orm::{Database, DbError};
+use zeroship_data_orm::orm::{Database, DbError, TimestampExpr};
 
 use super::native::models::users as model;
 
@@ -90,31 +93,6 @@ pub async fn create(
         .await
 }
 
-/// Replace `zeroship.users.password_hash` with a fresh PHC string (Argon2id).
-/// Used by the password-reset flow (P5-U6) to set a new credential after
-/// a valid reset-token redeem.
-///
-/// # Errors
-///
-/// Returns `AuthError::Db` on PG failure.
-pub async fn update_password_hash(
-    conn: &(impl GenericClient + Sync),
-    id: &UserId,
-    phc: &str,
-) -> Result<()> {
-    conn.execute(
-        "UPDATE zeroship.users \
-         SET password_hash = $1, \
-             credential_version = credential_version + 1, \
-             updated_at = NOW() \
-         WHERE id = $2",
-        &[&phc, &id.as_str()],
-    )
-    .await
-    .map_err(|e| AuthError::Db(format!("users update_password_hash: {e}")))?;
-    Ok(())
-}
-
 /// Account-lockout policy (security finding L5). Per-user, conservative on
 /// purpose so an attacker can't trivially lock out a victim — the per-email
 /// leaky bucket (cap 10/hr) is the broad throttle; this is the escalation arm
@@ -149,96 +127,72 @@ pub mod lockout {
     }
 }
 
-/// Record a failed password attempt against a real user: bump
-/// `failed_login_count` and, once it reaches [`lockout::THRESHOLD`], stamp
-/// `locked_until` with exponential backoff. Idempotent per-call (one increment
-/// per invocation). Returns the resulting consecutive-failure count.
+/// Increment the failure count and apply its lockout deadline atomically.
 ///
 /// # Errors
-///
-/// Returns `AuthError::Db` on PG failure.
-pub async fn record_login_failure(conn: &Client, id: &UserId) -> Result<i32> {
-    // Increment atomically and read back the new count so the lock decision is
-    // made against the row's authoritative value (no read-modify-write race).
-    let rows = conn
-        .query(
-            "UPDATE zeroship.users \
-             SET failed_login_count = failed_login_count + 1, \
-                 updated_at = NOW() \
-             WHERE id = $1 \
-             RETURNING failed_login_count",
-            &[&id.as_str()],
-        )
-        .await
-        .map_err(|e| AuthError::Db(format!("users record_login_failure: {e}")))?;
-    let Some(row) = rows.first() else {
-        // No such user — nothing to lock (the enumeration-defense path never
-        // reaches here, since it only fires for a real user).
-        return Ok(0);
-    };
-    let count: i32 = row.get("failed_login_count");
-
-    if let Some(secs) = lockout::backoff_secs(count) {
-        conn.execute(
-            "UPDATE zeroship.users \
-             SET locked_until = NOW() + ($2 || ' seconds')::interval, \
-                 updated_at = NOW() \
-             WHERE id = $1",
-            &[&id.as_str(), &secs.to_string()],
-        )
-        .await
-        .map_err(|e| AuthError::Db(format!("users record_login_failure lock: {e}")))?;
-    }
-    Ok(count)
+/// Returns database or model-conversion errors.
+pub async fn record_login_failure(db: &Database, id: &UserId) -> Result<i32> {
+    db.transaction(|tx| async move {
+        let users = tx.entity::<model::Entity>()?;
+        let Some(row) = users
+            .update::<_, LoginFailures>(
+                model::id.eq(id.as_str())?,
+                model::failed_login_count.increment(1_i32)?,
+            )
+            .await?
+        else {
+            return Ok(0);
+        };
+        if let Some(seconds) = lockout::backoff_secs(row.failed_login_count) {
+            let duration = std::time::Duration::from_secs(seconds.unsigned_abs());
+            users
+                .update::<_, LoginFailures>(
+                    model::id.eq(id.as_str())?,
+                    model::locked_until
+                        .set_expression(TimestampExpr::database_now().plus(duration)?)?,
+                )
+                .await?;
+        }
+        Ok(row.failed_login_count)
+    })
+    .await
+    .map_err(Into::into)
 }
 
-/// Enumeration-defense companion to [`record_login_failure`]: send a failed-login
-/// UPDATE using an unpersisted user id before auditing the refusal. This preserves
-/// database work on the absent, passwordless and ineligible credential paths.
-/// It does not establish equal latency: a matching row can incur contention and
-/// crossing the lockout threshold requires an additional UPDATE.
-///
-/// Best-effort by contract: like the real arm, a fault here must NOT change the
-/// credential decision. The caller logs and proceeds.
+#[derive(zeroship_data_orm::orm::FromRow)]
+#[orm(entity = super::native::models::users)]
+struct LoginFailures {
+    failed_login_count: i32,
+}
+
+/// Perform the failure write against an unpersisted identity for refused logins.
+/// The caller logs errors without changing its credential decision.
 ///
 /// # Errors
-///
-/// Returns `AuthError::Db` on PG failure.
-pub async fn record_login_failure_dummy(conn: &Client) -> Result<()> {
-    // The fresh id is not persisted. The statement follows the real failure
-    // update's shape without changing an existing account.
-    let absent = UserId::mint();
-    conn.query(
-        "UPDATE zeroship.users \
-         SET failed_login_count = failed_login_count + 1, \
-             updated_at = NOW() \
-         WHERE id = $1 \
-         RETURNING failed_login_count",
-        &[&absent.as_str()],
-    )
-    .await
-    .map_err(|e| AuthError::Db(format!("users record_login_failure_dummy: {e}")))?;
+/// Returns database or model-conversion errors.
+pub async fn record_login_failure_dummy(db: &Database) -> Result<()> {
+    record_login_failure(db, &UserId::mint()).await?;
     Ok(())
 }
 
-/// Clear the lockout state after a successful login: zero `failed_login_count`
-/// and clear `locked_until`. No-op write when already clean.
+/// Clear accumulated lockout state after a successful login.
+/// An already clean account is left untouched.
 ///
 /// # Errors
-///
-/// Returns `AuthError::Db` on PG failure.
-pub async fn reset_login_failures(conn: &Client, id: &UserId) -> Result<()> {
-    conn.execute(
-        "UPDATE zeroship.users \
-         SET failed_login_count = 0, \
-             locked_until = NULL, \
-             updated_at = NOW() \
-         WHERE id = $1 \
-           AND (failed_login_count <> 0 OR locked_until IS NOT NULL)",
-        &[&id.as_str()],
-    )
-    .await
-    .map_err(|e| AuthError::Db(format!("users reset_login_failures: {e}")))?;
+/// Returns database or model-conversion errors.
+pub async fn reset_login_failures(db: &Database, id: &UserId) -> Result<()> {
+    db.entity::<model::Entity>()?
+        .update::<_, LoginFailures>(
+            model::id.eq(id.as_str())?.and(
+                model::failed_login_count
+                    .ne(0_i32)?
+                    .or(model::locked_until.is_not_null()),
+            ),
+            model::failed_login_count
+                .set(0_i32)?
+                .and(model::locked_until.set(None::<i64>)?)?,
+        )
+        .await?;
     Ok(())
 }
 
@@ -437,18 +391,47 @@ async fn revoke_user_app_credentials_in_transaction(
 // clears the schedule in ONE statement -- so the authority and the effect are
 // the same act, and there is no by-id back door beside it.
 
-/// Bump `last_login_at` to `NOW()`.
+/// Stamp the last successful login using the database clock.
 ///
 /// # Errors
+/// Returns database or model-conversion errors.
+pub async fn touch_last_login(db: &Database, id: &UserId) -> Result<()> {
+    db.entity::<model::Entity>()?
+        .update::<_, UserRow>(
+            model::id.eq(id.as_str())?,
+            model::last_login_at.set_expression(TimestampExpr::database_now())?,
+        )
+        .await?;
+    Ok(())
+}
+
+/// Record email verification without replacing an existing verification time.
 ///
-/// Returns `AuthError::Db` on PG failure.
-pub async fn touch_last_login(conn: &Client, id: &UserId) -> Result<()> {
-    conn.execute(
-        "UPDATE zeroship.users SET last_login_at = NOW(), updated_at = NOW() WHERE id = $1",
-        &[&id.as_str()],
-    )
-    .await
-    .map_err(|e| AuthError::Db(format!("users touch_last_login: {e}")))?;
+/// # Errors
+/// Returns database or model-conversion errors.
+pub async fn mark_email_verified(db: &Database, id: &UserId) -> Result<()> {
+    db.entity::<model::Entity>()?
+        .update::<_, UserRow>(
+            model::id
+                .eq(id.as_str())?
+                .and(model::email_verified_at.is_null()),
+            model::email_verified_at.set_expression(TimestampExpr::database_now())?,
+        )
+        .await?;
+    Ok(())
+}
+
+/// Use a provider avatar only when the account has no avatar.
+///
+/// # Errors
+/// Returns database or model-conversion errors.
+pub async fn set_avatar_if_missing(db: &Database, id: &UserId, avatar: &str) -> Result<()> {
+    db.entity::<model::Entity>()?
+        .update::<_, UserRow>(
+            model::id.eq(id.as_str())?.and(model::avatar_url.is_null()),
+            model::avatar_url.set(Some(avatar))?,
+        )
+        .await?;
     Ok(())
 }
 

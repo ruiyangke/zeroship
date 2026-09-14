@@ -23,6 +23,7 @@ mod config_env_tier;
 mod device_grant_test;
 mod federation;
 mod gotrue;
+mod jwks_native_test;
 mod logout;
 mod email_verification;
 mod magic_login;

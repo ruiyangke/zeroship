@@ -406,7 +406,7 @@ pub async fn post(
     };
 
     // 5c. Bump last_login_at (non-fatal).
-    if let Err(e) = users::touch_last_login(db.as_ref(), &u.id).await {
+    if let Err(e) = users::touch_last_login(&orm, &u.id).await {
         tracing::warn!(error = %e, user_id = u.id.as_str(), "touch_last_login failed");
     }
 
@@ -484,6 +484,7 @@ fn render_link_error_with_status(
 pub(crate) async fn finish_after_second_factor(
     _cfg: &AuthConfig,
     db: &compio_postgres::Client,
+    orm: &Database,
     user: &users::UserRow,
     provider: &str,
     subject: &str,
@@ -524,7 +525,7 @@ pub(crate) async fn finish_after_second_factor(
         }
     };
 
-    if let Err(e) = users::touch_last_login(db, &user.id).await {
+    if let Err(e) = users::touch_last_login(orm, &user.id).await {
         tracing::warn!(error = %e, user_id = user.id.as_str(), "touch_last_login failed");
     }
 
