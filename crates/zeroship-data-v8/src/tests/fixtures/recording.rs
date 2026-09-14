@@ -99,8 +99,8 @@ impl ScopedExecutor for RecordingBackend {
     fn pool_counts(&self) -> Option<(usize, usize, usize)> {
         self.0.pool_counts()
     }
-    async fn prepare_for_app(&self, app_id: &str) -> Result<(), DbError> {
-        self.0.prepare_for_app(app_id).await
+    async fn prepare_for_app(&self, app_id: &str, schema: &SchemaName) -> Result<(), DbError> {
+        self.0.prepare_for_app(app_id, schema).await
     }
     async fn query(
         &self,
