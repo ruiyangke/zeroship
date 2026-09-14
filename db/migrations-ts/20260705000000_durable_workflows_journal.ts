@@ -120,6 +120,7 @@ export default {
 
     zs("workflow_blobs").create({
       columns: {
+        id: t.bigInt().notNull().identity(),
         hash: t.char({ length: 64 }).notNull(),
         size: t.bigInt().notNull(),
         content_type: t.text().notNull(),
@@ -127,8 +128,9 @@ export default {
         first_seen_at: t.timestamp().notNull().default(now()),
         last_referenced_at: t.timestamp().notNull().default(now()),
       },
-      primaryKey: ["hash"],
+      primaryKey: ["id"],
     });
+    zs("workflow_blobs").unique("workflow_blobs_natural_key").add({ columns: ["hash"] });
     pzs("workflow_blobs").check("workflow_blobs_hash_check").add({ expr: (c) => c("hash").regex("^[0-9a-f]{64}$") });
     pzs("workflow_blobs").index("workflow_blobs_gc_idx").add({
       on: ["last_referenced_at"],
@@ -183,6 +185,7 @@ export default {
 
     zs("workflow_steps").create({
       columns: {
+        id: t.bigInt().notNull().identity(),
         run_id: t.text().notNull(),
         ordinal: t.int().notNull(),
         name: t.text().notNull(),
@@ -214,8 +217,9 @@ export default {
         compensation_batch_id: t.text(),
         compensation_finished_at: t.timestamp(),
       },
-      primaryKey: ["run_id", "ordinal"],
+      primaryKey: ["id"],
     });
+    zs("workflow_steps").unique("workflow_steps_natural_key").add({ columns: ["run_id", "ordinal"] });
     zs("workflow_steps").check("workflow_steps_kind_check").add({ expr: (c) => c("kind").in(["run", "sideEffect", "sleep", "wait_signal", "child"]) });
     zs("workflow_steps").check("workflow_steps_state_check").add({ expr: (c) => c("state").in(["running", "completed", "failed"]) });
     pzs("workflow_steps").check("workflow_steps_check").add({

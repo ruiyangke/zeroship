@@ -213,15 +213,18 @@ export default {
     // ---- and declare them against the new subject --------------------------
     table("organization_billing", { schema: "zeroship" }).create({
       columns: {
+        id: t.bigInt().notNull().identity(),
         organization_id: t.text().notNull(),
         default_pm_set: t.boolean().notNull().default(false),
         created_at: t.timestamp().notNull().default(now()),
         updated_at: t.timestamp().notNull().default(now()),
       },
-      primaryKey: ["organization_id"],
+      primaryKey: ["id"],
     });
+    table("organization_billing", { schema: "zeroship" }).unique("organization_billing_natural_key").add({ columns: ["organization_id"] });
     table("organization_billing_status", { schema: "zeroship" }).create({
       columns: {
+        id: t.bigInt().notNull().identity(),
         organization_id: t.text().notNull(),
         state: t.domain("account_state").notNull().default("active"),
         past_due_since: t.timestamp(),
@@ -232,8 +235,9 @@ export default {
         last_recovered_at: t.timestamp(),
         updated_at: t.timestamp().notNull().default(now()),
       },
-      primaryKey: ["organization_id"],
+      primaryKey: ["id"],
     });
+    table("organization_billing_status", { schema: "zeroship" }).unique("organization_billing_status_natural_key").add({ columns: ["organization_id"] });
     table("organization_billing_status_history", { schema: "zeroship" }).create({
       columns: {
         id: t.text().notNull(),
@@ -247,6 +251,7 @@ export default {
     });
     table("organization_accounts", { schema: "zeroship" }).create({
       columns: {
+        id: t.bigInt().notNull().identity(),
         organization_id: t.text().notNull(),
         stripe_account_id: t.text().notNull(),
         onboarded_at: t.timestamp().notNull().default(now()),
@@ -255,8 +260,9 @@ export default {
         payouts_enabled: t.boolean().notNull().default(false),
         details_submitted: t.boolean().notNull().default(false),
       },
-      primaryKey: ["organization_id"],
+      primaryKey: ["id"],
     });
+    table("organization_accounts", { schema: "zeroship" }).unique("organization_accounts_natural_key").add({ columns: ["organization_id"] });
     table("organization_account_history", { schema: "zeroship" }).create({
       columns: {
         id: t.uuid().notNull().default(uuidV4()),
@@ -269,6 +275,7 @@ export default {
     });
     table("organization_fee_policy", { schema: "zeroship" }).create({
       columns: {
+        id: t.bigInt().notNull().identity(),
         organization_id: t.text().notNull(),
         kind: t.text().notNull(),
         amount_cents: t.bigInt(),
@@ -277,8 +284,9 @@ export default {
         floor_cents: t.bigInt(),
         updated_at: t.timestamp().notNull().default(now()),
       },
-      primaryKey: ["organization_id"],
+      primaryKey: ["id"],
     });
+    table("organization_fee_policy", { schema: "zeroship" }).unique("organization_fee_policy_natural_key").add({ columns: ["organization_id"] });
     table("organization_fee_policy", { schema: "zeroship" })
       .check("organization_fee_policy_cap_nonneg")
       .add({ expr: (col) => col("cap_cents").isNull().or(col("cap_cents").ge(0)) });
@@ -315,18 +323,21 @@ export default {
     // The children that key on the subject rather than merely carrying it.
     table("billing_customer_refs", { schema: "zeroship" }).create({
       columns: {
+        id: t.bigInt().notNull().identity(),
         organization_id: t.text().notNull(),
         provider: t.text().notNull(),
         external_id: t.text().notNull(),
         created_at: t.timestamp().notNull().default(now()),
       },
-      primaryKey: ["organization_id", "provider"],
+      primaryKey: ["id"],
     });
+    table("billing_customer_refs", { schema: "zeroship" }).unique("billing_customer_refs_natural_key").add({ columns: ["organization_id", "provider"] });
     table("billing_customer_refs", { schema: "zeroship" })
       .unique("billing_customer_refs_external_id_key")
       .add({ columns: ["external_id"] });
     table("billing_notifications", { schema: "zeroship" }).create({
       columns: {
+        id: t.bigInt().notNull().identity(),
         organization_id: t.text().notNull(),
         kind: t.domain("billing_notification_kind").notNull(),
         transition_id: t.text().notNull(),
@@ -334,8 +345,9 @@ export default {
         claimed_at: t.timestamp().notNull().default(now()),
         sent_at: t.timestamp(),
       },
-      primaryKey: ["organization_id", "kind", "transition_id"],
+      primaryKey: ["id"],
     });
+    table("billing_notifications", { schema: "zeroship" }).unique("billing_notifications_natural_key").add({ columns: ["organization_id", "kind", "transition_id"] });
 
     // ---- bytewise ordering for every typed-id text column ------------------
     // The map is semantic, exactly as
