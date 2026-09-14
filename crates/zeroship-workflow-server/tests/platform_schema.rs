@@ -351,7 +351,7 @@ async fn manager_queue_authority(fixture: &platform::Platform, runtime: &compio_
         1
     );
     assert_eq!(runtime.execute(
-        "INSERT INTO workflow_manager.jobs(id,app_id,deployment_id,operation,spec_digest,available_at,state,created_at) VALUES($1,$2,$3,$4,$5,0,'ready',0)",
+        "INSERT INTO workflow_manager.jobs(id,app_id,deployment_id,operation,spec_digest,available_at,dispatch_order,state,created_at) VALUES($1,$2,$3,$4,$5,0,1,'ready',0)",
         &[&job.as_str(), &app.as_str(), &deployment.as_str(), &operation, &digest],
     ).await.unwrap(), 1);
     let stored = runtime
