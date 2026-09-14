@@ -7,22 +7,22 @@
   {
     "file": "20260702000200_control_tables.ts",
     "name": "control_tables",
-    "opCount": 46
+    "opCount": 58
   },
   {
     "file": "20260702000300_auth_oauth_tables.ts",
     "name": "auth_oauth_tables",
-    "opCount": 59
+    "opCount": 79
   },
   {
     "file": "20260702000400_billing_metering_invoice_tables.ts",
     "name": "billing_metering_invoice_tables",
-    "opCount": 96
+    "opCount": 113
   },
   {
     "file": "20260702000500_sandbox_tables.ts",
     "name": "sandbox_tables",
-    "opCount": 43
+    "opCount": 42
   },
   {
     "file": "20260702000600_constraints_indexes_fks.ts",
@@ -47,7 +47,7 @@
   {
     "file": "20260705000000_durable_workflows_journal.ts",
     "name": "durable_workflows_journal",
-    "opCount": 77
+    "opCount": 79
   },
   {
     "file": "20260708000100_billing_provider_corrections.ts",
@@ -67,7 +67,7 @@
   {
     "file": "20260811000100_workflow_scheduler_store.ts",
     "name": "workflow_scheduler_store",
-    "opCount": 5
+    "opCount": 7
   },
   {
     "file": "20260811000200_control_audit_grants.ts",
@@ -112,7 +112,7 @@
   {
     "file": "20260816000100_service_assertion_replay.ts",
     "name": "service_assertion_replay",
-    "opCount": 6
+    "opCount": 7
   },
   {
     "file": "20260817000000_drop_permission_tokens.ts",
@@ -172,7 +172,7 @@
   {
     "file": "20260820000100_app_egress_rules.ts",
     "name": "app_egress_rules",
-    "opCount": 9
+    "opCount": 10
   },
   {
     "file": "20260831000000_archive_apps.ts",
@@ -202,12 +202,12 @@
   {
     "file": "20260906000000_organization_entity_model.ts",
     "name": "organization_entity_model",
-    "opCount": 67
+    "opCount": 70
   },
   {
     "file": "20260906000100_apps_organization_and_billing_subject.ts",
     "name": "apps_organization_and_billing_subject",
-    "opCount": 92
+    "opCount": 98
   },
   {
     "file": "20260906000200_apps_project_ownership_key.ts",
@@ -257,6 +257,6 @@
   {
     "file": "20260911000100_project_data_keys.ts",
     "name": "project_data_keys",
-    "opCount": 4
+    "opCount": 5
   }
 ]

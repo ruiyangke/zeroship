@@ -1,13 +1,14 @@
 use super::fixture::Platform;
-use compio_postgres::{Client, Error, error::SqlState};
-use std::collections::BTreeMap;
+use compio_postgres::{error::SqlState, Client, Error};
+use std::{collections::BTreeMap, sync::LazyLock};
+use zeroship_id::{AppId, InviteId, OrganizationId, ProjectId, UserId};
 
-const ORGANIZATION: &str = "org_0000000000000000000001";
-const OTHER_ORGANIZATION: &str = "org_0000000000000000000002";
-const PROJECT: &str = "prj_0000000000000000000001";
-const OTHER_PROJECT: &str = "prj_0000000000000000000002";
-const MEMBER: &str = "usr_0000000000000000000000001";
-const STRANGER: &str = "usr_0000000000000000000000002";
+static ORGANIZATION: LazyLock<OrganizationId> = LazyLock::new(OrganizationId::mint);
+static OTHER_ORGANIZATION: LazyLock<OrganizationId> = LazyLock::new(OrganizationId::mint);
+static PROJECT: LazyLock<ProjectId> = LazyLock::new(ProjectId::mint);
+static OTHER_PROJECT: LazyLock<ProjectId> = LazyLock::new(ProjectId::mint);
+static MEMBER: LazyLock<UserId> = LazyLock::new(UserId::mint);
+static STRANGER: LazyLock<UserId> = LazyLock::new(UserId::mint);
 
 #[test]
 fn project_membership_requires_matching_organization_membership() {
@@ -21,7 +22,12 @@ fn project_membership_requires_matching_organization_membership() {
             client
                 .execute(
                     insert,
-                    &[&OTHER_PROJECT, &ORGANIZATION, &MEMBER, &"developer"],
+                    &[
+                        &OTHER_PROJECT.as_str(),
+                        &ORGANIZATION.as_str(),
+                        &MEMBER.as_str(),
+                        &"developer",
+                    ],
                 )
                 .await,
             &SqlState::FOREIGN_KEY_VIOLATION,
@@ -29,14 +35,30 @@ fn project_membership_requires_matching_organization_membership() {
         );
         refuses(
             client
-                .execute(insert, &[&PROJECT, &ORGANIZATION, &STRANGER, &"developer"])
+                .execute(
+                    insert,
+                    &[
+                        &PROJECT.as_str(),
+                        &ORGANIZATION.as_str(),
+                        &STRANGER.as_str(),
+                        &"developer",
+                    ],
+                )
                 .await,
             &SqlState::FOREIGN_KEY_VIOLATION,
             Some("project_members_organization_member_fkey"),
         );
         accepts(
             client
-                .execute(insert, &[&PROJECT, &ORGANIZATION, &MEMBER, &"developer"])
+                .execute(
+                    insert,
+                    &[
+                        &PROJECT.as_str(),
+                        &ORGANIZATION.as_str(),
+                        &MEMBER.as_str(),
+                        &"developer",
+                    ],
+                )
                 .await,
         );
         assert_eq!(
@@ -52,30 +74,44 @@ fn project_membership_requires_matching_organization_membership() {
             (organization_id, user_id, role) VALUES ($1, $2, $3)";
         refuses(
             client
-                .execute(member_insert, &[&ORGANIZATION, &STRANGER, &"superuser"])
+                .execute(
+                    member_insert,
+                    &[&ORGANIZATION.as_str(), &STRANGER.as_str(), &"superuser"],
+                )
                 .await,
             &SqlState::FOREIGN_KEY_VIOLATION,
             Some("organization_members_role_fkey"),
         );
         accepts(
             client
-                .execute(member_insert, &[&ORGANIZATION, &STRANGER, &"viewer"])
+                .execute(
+                    member_insert,
+                    &[&ORGANIZATION.as_str(), &STRANGER.as_str(), &"viewer"],
+                )
                 .await,
         );
         accepts(
             client
-                .execute(insert, &[&PROJECT, &ORGANIZATION, &STRANGER, &"viewer"])
+                .execute(
+                    insert,
+                    &[
+                        &PROJECT.as_str(),
+                        &ORGANIZATION.as_str(),
+                        &STRANGER.as_str(),
+                        &"viewer",
+                    ],
+                )
                 .await,
         );
 
         accepts(client.execute(
             "DELETE FROM zeroship.organization_members WHERE organization_id = $1 AND user_id = $2",
-            &[&ORGANIZATION, &MEMBER],
+            &[&ORGANIZATION.as_str(), &MEMBER.as_str()],
         ).await);
         let remaining = client
             .query(
                 "SELECT user_id::text FROM zeroship.project_members WHERE project_id = $1",
-                &[&PROJECT],
+                &[&PROJECT.as_str()],
             )
             .await
             .unwrap();
@@ -84,7 +120,7 @@ fn project_membership_requires_matching_organization_membership() {
                 .iter()
                 .map(|row| row.get::<_, String>(0))
                 .collect::<Vec<_>>(),
-            [STRANGER]
+            [STRANGER.as_str()]
         );
     });
 }
@@ -93,51 +129,83 @@ fn project_membership_requires_matching_organization_membership() {
 fn apps_keep_matching_ownership_until_deleted() {
     Platform::with_database(async |client| {
         seed_graph(client).await;
+        let app = AppId::mint();
+        let absent_project = ProjectId::mint();
         client.execute(
             "INSERT INTO zeroship.plans (id, name, runtime_limits_json) VALUES ('free', 'Free', '{}')
              ON CONFLICT (id) DO NOTHING", &[],
         ).await.unwrap();
         let insert = "INSERT INTO zeroship.apps (id, name, project_id, organization_id)
-            VALUES (gen_random_uuid(), 'authority-test', $1, $2)";
+            VALUES ($3, 'authority-test', $1, $2)";
         refuses(
             client
-                .execute(insert, &[&"prj_0000000000000000000009", &ORGANIZATION])
+                .execute(
+                    insert,
+                    &[
+                        &absent_project.as_str(),
+                        &ORGANIZATION.as_str(),
+                        &app.as_str(),
+                    ],
+                )
                 .await,
             &SqlState::FOREIGN_KEY_VIOLATION,
             Some("apps_project_ownership_fkey"),
         );
         refuses(
             client
-                .execute(insert, &[&OTHER_PROJECT, &ORGANIZATION])
+                .execute(
+                    insert,
+                    &[
+                        &OTHER_PROJECT.as_str(),
+                        &ORGANIZATION.as_str(),
+                        &app.as_str(),
+                    ],
+                )
                 .await,
             &SqlState::FOREIGN_KEY_VIOLATION,
             Some("apps_project_ownership_fkey"),
         );
         refuses(
             client
-                .execute(insert, &[&Option::<&str>::None, &ORGANIZATION])
+                .execute(
+                    insert,
+                    &[&Option::<&str>::None, &ORGANIZATION.as_str(), &app.as_str()],
+                )
                 .await,
             &SqlState::CHECK_VIOLATION,
             Some("apps_live_app_has_project"),
         );
-        accepts(client.execute(insert, &[&PROJECT, &ORGANIZATION]).await);
+        accepts(
+            client
+                .execute(
+                    insert,
+                    &[&PROJECT.as_str(), &ORGANIZATION.as_str(), &app.as_str()],
+                )
+                .await,
+        );
 
         let delete_project = "DELETE FROM zeroship.projects WHERE id = $1";
         let delete_organization = "DELETE FROM zeroship.organizations WHERE id = $1";
         refuses(
-            client.execute(delete_project, &[&PROJECT]).await,
+            client.execute(delete_project, &[&PROJECT.as_str()]).await,
             &SqlState::FOREIGN_KEY_VIOLATION,
             Some("apps_project_ownership_fkey"),
         );
         refuses(
-            client.execute(delete_organization, &[&ORGANIZATION]).await,
+            client
+                .execute(delete_organization, &[&ORGANIZATION.as_str()])
+                .await,
             &SqlState::FOREIGN_KEY_VIOLATION,
             Some("projects_organization_id_fkey"),
         );
-        accepts(client.execute(delete_project, &[&OTHER_PROJECT]).await);
         accepts(
             client
-                .execute(delete_organization, &[&OTHER_ORGANIZATION])
+                .execute(delete_project, &[&OTHER_PROJECT.as_str()])
+                .await,
+        );
+        accepts(
+            client
+                .execute(delete_organization, &[&OTHER_ORGANIZATION.as_str()])
                 .await,
         );
 
@@ -145,14 +213,14 @@ fn apps_keep_matching_ownership_until_deleted() {
         accepts(client.execute(
             "UPDATE zeroship.apps SET archived_at = now(), deleted_at = now(), project_id = NULL
              WHERE organization_id = $1",
-            &[&ORGANIZATION],
+            &[&ORGANIZATION.as_str()],
         ).await);
-        accepts(client.execute(delete_project, &[&PROJECT]).await);
+        accepts(client.execute(delete_project, &[&PROJECT.as_str()]).await);
         let app = client
             .query_one("SELECT organization_id, project_id FROM zeroship.apps", &[])
             .await
             .unwrap();
-        assert_eq!(app.get::<_, String>(0), ORGANIZATION);
+        assert_eq!(app.get::<_, String>(0), ORGANIZATION.as_str());
         assert_eq!(app.get::<_, Option<String>>(1), None);
     });
 }
@@ -172,7 +240,7 @@ fn invitations_obey_migrated_role_ranks_and_address_uniqueness() {
 
         // The same invitation is retried with each invalid grant. Failed
         // inserts must leave its identity available to the accepted control.
-        let id = "ivt_0000000000000000000001";
+        let id = InviteId::mint();
         let email = "invitee@authority.test";
         for (role, ranks, constraint, code) in [
             (
@@ -198,17 +266,17 @@ fn invitations_obey_migrated_role_ranks_and_address_uniqueness() {
             ),
         ] {
             refuses(
-                invite(client, id, email, role, ranks, admin).await,
+                invite(client, &id, email, role, ranks, admin).await,
                 code,
                 Some(constraint),
             );
         }
-        accepts(invite(client, id, email, "developer", developer, admin).await);
-        let second = "ivt_0000000000000000000002";
+        accepts(invite(client, &id, email, "developer", developer, admin).await);
+        let second = InviteId::mint();
         refuses(
             invite(
                 client,
-                second,
+                &second,
                 &email.to_uppercase(),
                 "developer",
                 developer,
@@ -221,7 +289,7 @@ fn invitations_obey_migrated_role_ranks_and_address_uniqueness() {
         accepts(
             invite(
                 client,
-                second,
+                &second,
                 "another@authority.test",
                 "developer",
                 developer,
@@ -286,13 +354,13 @@ fn control_can_manage_membership_but_cannot_redefine_roles() {
                 .execute(
                     "INSERT INTO zeroship.organization_members (organization_id, user_id, role)
              VALUES ($1, $2, $3)",
-                    &[&ORGANIZATION, &STRANGER, &"viewer"],
+                    &[&ORGANIZATION.as_str(), &STRANGER.as_str(), &"viewer"],
                 )
                 .await,
         );
         let membership = client.query_one(
             "SELECT role FROM zeroship.organization_members WHERE organization_id = $1 AND user_id = $2",
-            &[&ORGANIZATION, &STRANGER],
+            &[&ORGANIZATION.as_str(), &STRANGER.as_str()],
         ).await.unwrap();
         assert_eq!(membership.get::<_, String>(0), "viewer");
     });
@@ -308,7 +376,7 @@ fn organization_identifiers_and_case_insensitive_columns_keep_their_contract() {
             &SqlState::CHECK_VIOLATION,
             Some("organizations_id_shape"),
         );
-        accepts(client.execute(insert, &[&ORGANIZATION]).await);
+        accepts(client.execute(insert, &[&ORGANIZATION.as_str()]).await);
 
         let rows = client.query(
             "SELECT c.relname || '.' || a.attname AS column_name,
@@ -363,7 +431,7 @@ async fn seed_graph(client: &Client) {
                 "INSERT INTO zeroship.users (id, email, name) VALUES
          ($1, 'member@authority.test', 'Member'),
          ($2, 'stranger@authority.test', 'Stranger')",
-                &[&MEMBER, &STRANGER],
+                &[&MEMBER.as_str(), &STRANGER.as_str()],
             )
             .await
             .unwrap(),
@@ -374,7 +442,7 @@ async fn seed_graph(client: &Client) {
             .execute(
                 "INSERT INTO zeroship.organizations (id, slug, name, billing_email) VALUES
          ($1, 'acme', 'Acme', 'billing@acme.test'), ($2, 'other', 'Other', 'billing@other.test')",
-                &[&ORGANIZATION, &OTHER_ORGANIZATION],
+                &[&ORGANIZATION.as_str(), &OTHER_ORGANIZATION.as_str()],
             )
             .await
             .unwrap(),
@@ -385,7 +453,12 @@ async fn seed_graph(client: &Client) {
             .execute(
                 "INSERT INTO zeroship.projects (id, organization_id, slug, name) VALUES
          ($1, $2, 'web', 'Web'), ($3, $4, 'web', 'Web')",
-                &[&PROJECT, &ORGANIZATION, &OTHER_PROJECT, &OTHER_ORGANIZATION],
+                &[
+                    &PROJECT.as_str(),
+                    &ORGANIZATION.as_str(),
+                    &OTHER_PROJECT.as_str(),
+                    &OTHER_ORGANIZATION.as_str()
+                ],
             )
             .await
             .unwrap(),
@@ -396,7 +469,7 @@ async fn seed_graph(client: &Client) {
             .execute(
                 "INSERT INTO zeroship.organization_members (organization_id, user_id, role)
          VALUES ($1, $2, 'admin')",
-                &[&ORGANIZATION, &MEMBER],
+                &[&ORGANIZATION.as_str(), &MEMBER.as_str()],
             )
             .await,
     );
@@ -435,7 +508,7 @@ async fn roles(client: &Client) -> BTreeMap<String, RoleRanks> {
 
 async fn invite(
     client: &Client,
-    id: &str,
+    id: &InviteId,
     email: &str,
     role: &str,
     ranks: RoleRanks,
@@ -449,13 +522,13 @@ async fn invite(
          VALUES ($1, decode($1, 'escape'), $2, $3, $4, $5, $6,
                  $7, $8, $9, 'organization_invite', now() + interval '1 day')",
             &[
-                &id,
-                &ORGANIZATION,
+                &id.as_str(),
+                &ORGANIZATION.as_str(),
                 &email,
                 &role,
                 &ranks.authority,
                 &ranks.billing,
-                &MEMBER,
+                &MEMBER.as_str(),
                 &issuer.authority,
                 &issuer.billing,
             ],
