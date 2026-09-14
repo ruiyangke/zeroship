@@ -11,9 +11,8 @@ authoring DSL is `packages/zero-migrate/`, published as `@zeroship/migrate`. The
 no separate step (see the Development section of `AGENTS.md`).
 
 The one part of this design that did not ship is the host-side shadow dry-run.
-`ShadowDryRun` is declared and has **zero implementors anywhere in the workspace**, so
-every `dry_run` refuses with `DryRunError::ShadowUnsupported`; that fact is held in
-place by `crates/zeroship-migrate/tests/dialect_matrix/shadow_dry_run_has_no_implementor.rs`.
+No `ShadowDryRun` implementation ships, so every `dry_run` refuses with
+`DryRunError::ShadowUnsupported`.
 See Open 1.
 
 ## What it is
