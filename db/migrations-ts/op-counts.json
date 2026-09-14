@@ -263,5 +263,20 @@
     "file": "20260911000100_project_data_keys.ts",
     "name": "project_data_keys",
     "opCount": 5
+  },
+  {
+    "file": "20260914000000_app_lifecycle_revision.ts",
+    "name": "app_lifecycle_revision",
+    "opCount": 2
+  },
+  {
+    "file": "20260914000100_deploy_publication.ts",
+    "name": "deploy_publication",
+    "opCount": 23
+  },
+  {
+    "file": "20260914000200_deploy_publication_references.ts",
+    "name": "deploy_publication_references",
+    "opCount": 2
   }
 ]

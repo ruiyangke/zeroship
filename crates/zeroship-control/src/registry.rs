@@ -6,6 +6,10 @@ use compio_postgres::error::SqlState;
 use compio_postgres::{Client, NoTls};
 use zeroship_core::app_derivation;
 use zeroship_core::app_id::AppId;
+
+use crate::publication::{
+    catalog, Acceptance, AcceptanceResult, CatalogError, CommandBinding, DeployCommand,
+};
 use zeroship_core::types::{
     AppNetPolicy, AppNetPolicyLimits, AppRecord, AppRuntimeLimits, AppVersionInfo,
     GatewayFamilyRevocation, GatewayPrincipalLifecycle, GatewaySnapshot, NetEgressEntry,
@@ -109,6 +113,33 @@ impl From<compio_postgres::Error> for RegistryError {
             };
             Self::Database(full)
         }
+    }
+}
+
+/// Archive and restore report catalog refusals in the registry's vocabulary.
+fn catalog_registry_error(app: &AppId, error: CatalogError) -> RegistryError {
+    match error {
+        CatalogError::AppAbsent => RegistryError::NotFound("app not found".into()),
+        CatalogError::SchemaNotApplied {
+            descriptor_sha256,
+            applied_sha256,
+        } => RegistryError::SchemaNotApplied {
+            descriptor_sha256,
+            applied_sha256,
+        },
+        CatalogError::ApplyInProgress => RegistryError::Conflict(format!(
+            "app {} has a schema apply in progress; retry restore after it finishes",
+            app.as_str()
+        )),
+        CatalogError::InvalidRetained(detail) => RegistryError::Conflict(format!(
+            "archived app {} has an invalid retained manifest: {detail}",
+            app.as_str()
+        )),
+        CatalogError::DeploymentReclaimed
+        | CatalogError::CommandConflict
+        | CatalogError::RevisionExhausted => RegistryError::Conflict(error.to_string()),
+        CatalogError::Storage(detail) => RegistryError::Database(detail.into()),
+        CatalogError::Database(error) => RegistryError::Database(error.to_string()),
     }
 }
 
@@ -440,43 +471,24 @@ impl Registry {
 
     /// Archive an app without deleting any app-attributed state.
     ///
-    /// The first transition records its timestamp; retries return the same
-    /// record without moving that timestamp or `updated_at`. Route publication
-    /// and workflow admission enforce this marker. A deploy may replace the
-    /// retained artifact while archived, but cannot make it routable or
-    /// schedulable. Database schema and role lifecycle is intentionally absent
-    /// here: control has no provisioning DSN and privileged teardown belongs to
-    /// migrate-server.
+    /// The first transition records its timestamp and commits a disable
+    /// intent at the app's next lifecycle revision in the same catalog
+    /// transaction; retries return the same record without a new revision or
+    /// a moved timestamp. Route publication and workflow admission enforce the
+    /// marker. A deploy may replace the retained artifact while archived, but
+    /// cannot make it routable or schedulable. Database schema and role
+    /// lifecycle is intentionally absent here: control has no provisioning DSN
+    /// and privileged teardown belongs to migrate-server.
     pub async fn archive_app(&self, id: &AppId) -> Result<Option<AppRecord>, RegistryError> {
-        let mut conn = self.conn().await?;
-        let tx = conn.transaction().await?;
-        // Workflow admissions and the worker's final claim take the shared
-        // form of this lock. Once archive returns, no claim can have crossed
-        // the marker; work admitted before it may still finish.
-        tx.query_one(
-            "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
-            &[&app_derivation::lifecycle_lock_seed(id)],
-        )
-        .await?;
-        let rows = tx
-            .query(
-                "UPDATE zeroship.apps \
-                    SET archived_at = COALESCE(archived_at, NOW()), \
-                        updated_at = CASE WHEN archived_at IS NULL THEN NOW() ELSE updated_at END \
-                  WHERE id = $1 AND deleted_at IS NULL \
-                  RETURNING id, name, plan_id, deploy_hash, \
-                            archived_at::text, created_at::text, updated_at::text",
-                &[&id.as_str()],
-            )
-            .await?;
-        tx.commit().await?;
-        rows.first().map(row_to_record).transpose()
+        self.lifecycle_transition(id, false).await
     }
 
     /// Restore an archived app. Retained name, manifests, billing evidence, and
     /// workflow records become active through their normal polling paths. The
     /// retained deploy is checked against the latest applied schema descriptor
     /// while the app row is locked; restore must not bypass the deploy gate.
+    /// A restored staged deployment is published as a fresh activation at the
+    /// app's next lifecycle revision in the same transaction.
     ///
     /// A DELETED app is reported absent rather than restored. Deletion is the
     /// terminal transition (`crate::organizations::delete_app`) and archive is
@@ -486,247 +498,118 @@ impl Registry {
     /// resolves an app's organization through the project the delete detaches -
     /// so this guard is the one that holds if that ever stops being true.
     pub async fn unarchive_app(&self, id: &AppId) -> Result<Option<AppRecord>, RegistryError> {
-        let mut conn = self.conn().await?;
-        let tx = conn.transaction().await?;
-        tx.query_one(
-            "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
-            &[&app_derivation::lifecycle_lock_seed(id)],
-        )
-        .await?;
-        let state = tx
-            .query(
-                "SELECT archived_at IS NOT NULL AS archived, manifest_json \
-                   FROM zeroship.apps \
-                  WHERE id = $1 AND deleted_at IS NULL \
-                  FOR UPDATE",
-                &[&id.as_str()],
-            )
-            .await?;
-        let Some(state) = state.first() else {
-            tx.commit().await?;
-            return Ok(None);
-        };
-
-        if state.get::<_, bool>("archived") {
-            let apply_in_progress: bool = tx
-                .query_one(
-                    "SELECT EXISTS ( \
-                         SELECT 1 FROM zeroship.app_schema_applies \
-                          WHERE app_id = $1 AND status = 'submitted' \
-                     ) AS applying",
-                    &[&id.as_str()],
-                )
-                .await?
-                .get("applying");
-            if apply_in_progress {
-                return Err(RegistryError::Conflict(format!(
-                    "app {} has a schema apply in progress; retry restore after it finishes",
-                    id.as_str()
-                )));
-            }
-            let manifest_json: Option<String> = state.get("manifest_json");
-            let descriptor_sha256 = match manifest_json {
-                Some(json) => {
-                    let manifest = serde_json::from_str::<zeroship_bundle::Manifest>(&json)
-                        .map_err(|error| {
-                            RegistryError::Conflict(format!(
-                                "archived app {} has an invalid retained manifest: {error}",
-                                id.as_str()
-                            ))
-                        })?;
-                    manifest.validate().map_err(|error| {
-                        RegistryError::Conflict(format!(
-                            "archived app {} has an invalid retained manifest: {error}",
-                            id.as_str()
-                        ))
-                    })?;
-                    manifest.runtime_descriptor.map(|entry| entry.hash)
-                }
-                None => None,
-            };
-            let applied_sha256 = tx
-                .query(
-                    "SELECT m.descriptor_sha256 \
-                       FROM zeroship.app_schema_applies m \
-                      WHERE m.app_id = $1 AND m.status = 'applied' \
-                      ORDER BY m.applied_at DESC NULLS LAST, m.submitted_at DESC, \
-                               m.migration_id DESC \
-                      LIMIT 1",
-                    &[&id.as_str()],
-                )
-                .await?
-                .first()
-                .map(|row| row.get::<_, String>("descriptor_sha256"));
-            if descriptor_sha256 != applied_sha256 {
-                return Err(RegistryError::SchemaNotApplied {
-                    descriptor_sha256,
-                    applied_sha256,
-                });
-            }
-        }
-
-        let rows = tx
-            .query(
-                "UPDATE zeroship.apps \
-                    SET archived_at = NULL, \
-                        updated_at = CASE WHEN archived_at IS NOT NULL THEN NOW() ELSE updated_at END \
-                  WHERE id = $1 AND deleted_at IS NULL \
-                  RETURNING id, name, plan_id, deploy_hash, \
-                            archived_at::text, created_at::text, updated_at::text",
-                &[&id.as_str()],
-            )
-            .await?;
-        tx.commit().await?;
-        rows.first().map(row_to_record).transpose()
+        self.lifecycle_transition(id, true).await
     }
 
-    /// Atomic deploy commit. Sets `deploy_hash` and `manifest_json` in
-    /// the same UPDATE so the gateway never observes a half-applied
-    /// deploy. Used by the .zship ingest path. Archived apps accept this as a
-    /// staged deploy: active-route and workflow projections continue to omit
-    /// the app until restore.
-    ///
-    /// THIS STATEMENT IS WHAT "LIVE" MEANS. The gateway reads exactly these two
-    /// columns ([`Self::get_gateway_snapshot`]) and polls them; the
-    /// `zeroship.app_deploys` insert below is history. So the schema
-    /// precondition is a PREDICATE ON THIS UPDATE, not a check in the handler.
-    /// The precedent is [`Self::set_plan`] directly below: a separate
-    /// validate-then-UPDATE there had a TOCTOU window and was replaced by an
-    /// `EXISTS` subquery in the same statement. The same window here is worse,
-    /// because what races is a concurrent migration.
-    ///
-    /// `descriptor_sha256` is `manifest.runtime_descriptor.hash` — the sha256 of
-    /// the `schema.runtime.json` this artifact carries, or `None` for an app
-    /// that declares no schema. The predicate has two arms and both are load-
-    /// bearing:
-    ///
-    /// - Present: it must equal the descriptor recorded on the app's NEWEST
-    ///   APPLIED migration row. Newest, not "any" — membership would let a
-    ///   rollback through, since N-1's hash was applied once and an `IN (...)`
-    ///   test passes while the database sits at N.
-    /// - Absent: allowed only when the app has NO applied schema.
-    ///   `runtime_descriptor` is `skip_serializing_if = "Option::is_none"` on a
-    ///   creator-produced artifact, so a one-armed guard is bypassed by deleting
-    ///   one JSON key — and the app then boots with `env.db` uninstalled over a
-    ///   live database. A guard whose bypass is "omit the field" is not a guard.
-    ///
-    /// The ledger is `zeroship.app_schema_applies`, which the migration service
-    /// writes one row of per APPLY REQUEST - including a request that applied
-    /// nothing because every document was already journalled. That is deliberate:
-    /// an engine upgrade which changes descriptor bytes without changing any
-    /// schema is repaired by running a migrate that applies nothing, and it is
-    /// only a repair because the row is still written. The engine's OWN journal
-    /// cannot be read here and must not be: it lives in the app's schema, whose
-    /// migrator role owns it and can drop it.
-    ///
-    /// There is no operator override, and that is not a policy about overrides.
-    /// The remedy is a creator-reachable endpoint that is already mandatory in
-    /// the golden path, and the case that feels like it needs one — a code
-    /// rollback across a migration boundary — is not made safe by an override.
-    pub async fn set_deploy_with_manifest(
+    async fn lifecycle_transition(
         &self,
         id: &AppId,
-        deploy_hash: &str,
-        manifest_json: &str,
-        descriptor_sha256: Option<&str>,
-    ) -> Result<bool, RegistryError> {
-        let mut conn = self.conn().await?;
-        let tx = conn.transaction().await?;
-        let n = tx
-            .execute(
-                "UPDATE zeroship.apps SET deploy_hash = $1, manifest_json = $2, \
-                 updated_at = NOW() WHERE id = $3 AND deleted_at IS NULL \
-                   AND CASE WHEN $4::text IS NULL \
-                            THEN NOT EXISTS (SELECT 1 FROM zeroship.app_schema_applies \
-                                              WHERE app_id = $3 AND status = 'applied') \
-                            ELSE $4::text = (SELECT m.descriptor_sha256 \
-                                               FROM zeroship.app_schema_applies m \
-                                              WHERE m.app_id = $3 AND m.status = 'applied' \
-                                              ORDER BY m.applied_at DESC NULLS LAST, \
-                                                       m.submitted_at DESC, \
-                                                       m.migration_id DESC \
-                                              LIMIT 1) \
-                       END",
-                &[
-                    &deploy_hash,
-                    &manifest_json,
-                    &id.as_str(),
-                    &descriptor_sha256,
-                ],
+        restore: bool,
+    ) -> Result<Option<AppRecord>, RegistryError> {
+        // Workflow admissions and the worker's final claim take the shared
+        // form of this lock. Holding the exclusive form around the catalog
+        // transaction means that once archive returns, no claim can have
+        // crossed the marker; work admitted before it may still finish.
+        let mut guard = self.conn().await?;
+        let guard_tx = guard.transaction().await?;
+        guard_tx
+            .query_one(
+                "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
+                &[&app_derivation::lifecycle_lock_seed(id)],
             )
             .await?;
-        if n == 0 {
-            // Zero rows is ambiguous: no such app, the app is DELETED, or the
-            // schema predicate refused. Disambiguate for the MESSAGE only — the
-            // decision was already taken atomically above, so this read cannot
-            // re-open it.
-            //
-            // A deleted app reads as ABSENT rather than as a schema refusal,
-            // which is both the truthful answer and the one `unarchive_app`
-            // already gives (`Ok(None)`). Reporting `SchemaNotApplied` for a
-            // corpse would send a creator to re-run a migration against an app
-            // that no longer has a schema to migrate.
-            let app_rows = tx
-                .query(
-                    "SELECT 1 FROM zeroship.apps WHERE id = $1 AND deleted_at IS NULL",
-                    &[&id.as_str()],
-                )
-                .await?;
-            if app_rows.is_empty() {
-                tx.commit().await?;
-                return Ok(false);
+        let database = catalog::connect(&self.db_url)
+            .await
+            .map_err(|error| RegistryError::Database(error.to_string()))?;
+        let now = crate::publication::now_millis();
+        let transition = catalog::transact(&database, |tx| async move {
+            if restore {
+                catalog::restore(&tx, id, now).await
+            } else {
+                catalog::archive(&tx, id, now).await
             }
-            let applied_sha256 = tx
+        })
+        .await
+        .map_err(|error| catalog_registry_error(id, error))?;
+        drop(database);
+        let record = match transition {
+            Some(_) => guard_tx
                 .query(
-                    "SELECT m.descriptor_sha256 FROM zeroship.app_schema_applies m \
-                      WHERE m.app_id = $1 AND m.status = 'applied' \
-                      ORDER BY m.applied_at DESC NULLS LAST, m.submitted_at DESC, \
-                               m.migration_id DESC \
-                      LIMIT 1",
+                    "SELECT id, name, plan_id, deploy_hash, archived_at::text, \
+                            created_at::text, updated_at::text \
+                       FROM zeroship.apps WHERE id = $1 AND deleted_at IS NULL",
                     &[&id.as_str()],
                 )
                 .await?
                 .first()
-                .and_then(|row| row.get::<_, Option<String>>("descriptor_sha256"));
-            return Err(RegistryError::SchemaNotApplied {
-                descriptor_sha256: descriptor_sha256.map(str::to_owned),
-                applied_sha256,
-            });
-        }
+                .map(row_to_record)
+                .transpose()?,
+            None => None,
+        };
+        guard_tx.commit().await?;
+        Ok(record)
+    }
 
-        let deploy_id = zeroship_core::typed_id::generate("dep");
-        let row = tx
-            .query_opt(
-                "INSERT INTO zeroship.app_deploys \
-                    (id, app_id, deploy_hash, manifest_json, activated_at) \
-                 VALUES ($1, $2, $3, $4, now()) \
-                 ON CONFLICT (app_id, deploy_hash) DO UPDATE SET \
-                    manifest_json = EXCLUDED.manifest_json, \
-                    activated_at = now() \
-                 WHERE app_deploys.retention_state = 'available' \
-                 RETURNING id",
-                &[&deploy_id, &id.as_str(), &deploy_hash, &manifest_json],
+    /// Accept a deploy command in one catalog transaction: receipt recheck,
+    /// schema admission, deployment selection, the app pointer, an activation
+    /// intent for an active app, and the immutable receipt. An exact retry
+    /// returns the stored result without changing anything.
+    ///
+    /// THE POINTER UPDATE IS WHAT "LIVE" MEANS. The gateway reads the app's
+    /// `deploy_hash` and `manifest_json` ([`Self::get_gateway_snapshot`]), so
+    /// the schema precondition is checked under the same app row lock that
+    /// guards the update, never in a separate read before it. The ledger it
+    /// reads is `zeroship.app_schema_applies`, which the migration service
+    /// writes one row of per apply request - including a request that applied
+    /// nothing, which is how an engine upgrade that changes descriptor bytes
+    /// without changing any schema is repaired. The engine's own journal lives
+    /// in the app's schema, whose migrator role owns it, and is never read.
+    ///
+    /// There is no operator override. The remedy is a creator-reachable
+    /// endpoint that is already mandatory in the golden path, and the case that
+    /// feels like it needs one - a code rollback across a migration boundary -
+    /// is not made safe by an override.
+    ///
+    /// # Errors
+    /// Returns the catalog's refusals and database failures unchanged.
+    pub async fn deploy(&self, command: &DeployCommand) -> Result<Acceptance, CatalogError> {
+        let database = catalog::connect(&self.db_url).await?;
+        let now = crate::publication::now_millis();
+        catalog::transact(&database, |tx| async move {
+            catalog::accept(&tx, command, now).await
+        })
+        .await
+    }
+
+    /// Answer an exact retry from its receipt before any blob is ingested.
+    /// `Ok(None)` means the command has not been accepted.
+    ///
+    /// # Errors
+    /// Refuses absent or deleted apps and receipt conflicts.
+    pub async fn deploy_receipt(
+        &self,
+        binding: &CommandBinding,
+    ) -> Result<Option<AcceptanceResult>, CatalogError> {
+        let database = catalog::connect(&self.db_url).await?;
+        catalog::transact(&database, |tx| async move {
+            catalog::lookup(&tx, binding).await
+        })
+        .await
+    }
+
+    /// Whether the app exists and has not been deleted.
+    ///
+    /// # Errors
+    /// Reports an unreachable catalog.
+    pub async fn live_app_exists(&self, id: &AppId) -> Result<bool, RegistryError> {
+        let conn = self.conn().await?;
+        let rows = conn
+            .query(
+                "SELECT 1 FROM zeroship.apps WHERE id = $1 AND deleted_at IS NULL",
+                &[&id.as_str()],
             )
             .await?;
-        // The collector holds apps before fencing app_deploys, matching this
-        // transaction's lock order. A tombstone refuses the complete activation,
-        // including the live pointer UPDATE above; it must never reopen admission.
-        let Some(row) = row else {
-            return Err(RegistryError::Conflict(
-                "deployment retention has closed activation".into(),
-            ));
-        };
-        let deploy_id: String = row.get("id");
-        crate::cron::workflow_schedules::reconcile_deploy_schedules(
-            &tx,
-            id,
-            &deploy_id,
-            deploy_hash,
-            manifest_json,
-        )
-        .await?;
-        tx.commit().await?;
-        Ok(true)
+        Ok(!rows.is_empty())
     }
 
     /// Fetch the raw manifest JSON for an app, if it has one. Used by

@@ -38,6 +38,7 @@
 //! differ, and that degrades silently rather than erroring.
 
 pub mod app_id;
+pub mod deploy_command;
 pub mod entity_id;
 pub mod invite_id;
 pub mod organization_id;
@@ -47,6 +48,7 @@ pub mod user_id;
 pub mod workflow;
 
 pub use app_id::AppId;
+pub use deploy_command::DeployCommandId;
 pub use invite_id::InviteId;
 pub use organization_id::OrganizationId;
 pub use project_id::ProjectId;

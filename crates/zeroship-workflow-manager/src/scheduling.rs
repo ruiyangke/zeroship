@@ -43,6 +43,49 @@ impl Default for Options {
     }
 }
 
+impl Options {
+    /// Refuse schedule metadata that preparation or activation would refuse
+    /// under these bounds. A deployment host checks its projection before
+    /// accepting a deployment, so a committed publication cannot be refused
+    /// for its content. Schedule order is irrelevant.
+    ///
+    /// # Errors
+    /// `Capacity` for too many schedules or an excessive backfill allowance,
+    /// `Invalid` for reserved or malformed names, intervals and calendars, and
+    /// `Conflict` for a repeated schedule name.
+    pub fn validate(&self, schedules: &[ScheduleDescriptor]) -> Result<(), Error> {
+        if schedules.len() > self.max_schedules {
+            return Err(Error::Capacity);
+        }
+        let mut names = std::collections::BTreeSet::new();
+        for descriptor in schedules {
+            for name in [&descriptor.name, &descriptor.workflow_name] {
+                if name.is_empty() || name.len() > 128 || name.starts_with("__zs.") {
+                    return Err(Error::Invalid);
+                }
+            }
+            if let ScheduleCatchUp::Backfill { max } = descriptor.catch_up {
+                if max == 0 || max > self.max_backfill {
+                    return Err(Error::Capacity);
+                }
+            }
+            if let ScheduleTiming::Interval { interval_ms, .. } = descriptor.schedule {
+                if interval_ms < self.min_interval_ms {
+                    return Err(Error::Invalid);
+                }
+            }
+            descriptor
+                .schedule
+                .next_after(0, 0)
+                .map_err(|_| Error::Invalid)?;
+            if !names.insert(descriptor.name.as_str()) {
+                return Err(Error::Conflict);
+            }
+        }
+        Ok(())
+    }
+}
+
 /// The platform host supplies verified deployment metadata and activation order.
 /// No creator database or worker registration is required to produce due jobs.
 #[derive(Clone, Debug)]
@@ -271,36 +314,7 @@ impl Scheduler {
     }
 
     fn validate(&self, request: &RegisterSchedules) -> Result<(), Error> {
-        if request.schedules.len() > self.options.max_schedules {
-            return Err(Error::Capacity);
-        }
-        let mut previous: Option<&str> = None;
-        for descriptor in &request.schedules {
-            for name in [&descriptor.name, &descriptor.workflow_name] {
-                if name.is_empty() || name.len() > 128 || name.starts_with("__zs.") {
-                    return Err(Error::Invalid);
-                }
-            }
-            if previous == Some(descriptor.name.as_str()) {
-                return Err(Error::Conflict);
-            }
-            previous = Some(&descriptor.name);
-            if let ScheduleCatchUp::Backfill { max } = descriptor.catch_up {
-                if max == 0 || max > self.options.max_backfill {
-                    return Err(Error::Capacity);
-                }
-            }
-            if let ScheduleTiming::Interval { interval_ms, .. } = descriptor.schedule {
-                if interval_ms < self.options.min_interval_ms {
-                    return Err(Error::Invalid);
-                }
-            }
-            descriptor
-                .schedule
-                .next_after(0, 0)
-                .map_err(|_| Error::Invalid)?;
-        }
-        Ok(())
+        self.options.validate(&request.schedules)
     }
 
     /// Stop calendar production while preserving accepted jobs and recovery.

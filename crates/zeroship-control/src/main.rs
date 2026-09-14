@@ -1170,6 +1170,23 @@ fn main() -> std::io::Result<()> {
         "control: worker health monitor spawned"
     );
 
+    // Deliver committed lifecycle intents - deploy activations, archive
+    // disables and restore activations - to the workflow manager in per-app
+    // revision order. The deploy and archive handlers never call the manager.
+    {
+        let state = Arc::clone(&state);
+        let coordinator_url = workflow_coordinator_url.clone();
+        compio::runtime::spawn(async move {
+            zeroship_control::publication::publisher::run(
+                state,
+                coordinator_url,
+                zeroship_control::publication::publisher::DEFAULT_TICK,
+            )
+            .await;
+        })
+        .detach();
+    }
+
     let bind_addr = format!("{bind_host}:{port}");
     tracing::info!(bind = %bind_addr, "zeroship-control listening");
 

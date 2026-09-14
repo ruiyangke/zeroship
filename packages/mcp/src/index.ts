@@ -6,7 +6,10 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import {
   ControlError,
   createControlClient,
+  createDeployCommand,
+  DeployOutcomeUnknownError,
   isAppId,
+  isDeployCommandId,
   type AppId,
   type AppRecord,
   type ControlClient,
@@ -145,26 +148,40 @@ export function createZeroshipMcpServer(
   server.registerTool(
     "deploy_app",
     {
-      description: "Deploy a local .zship to an app, creating missing named apps.",
+      description:
+        "Deploy a local .zship to an app, creating missing named apps. Each call is a new deploy " +
+        "unless commandId resumes one whose outcome was not reported.",
       inputSchema: {
         ...appTargetInput,
         zshipPath: z
           .string()
           .min(1)
           .describe("Path to the local .zship artifact."),
+        commandId: z
+          .string()
+          .refine(isDeployCommandId, "commandId must be a canonical deploy command id")
+          .optional()
+          .describe(
+            "Resume a deploy whose outcome was unknown: the command id its error reported, " +
+              "sent with the same .zship.",
+          ),
       },
     },
-    async ({ target, zshipPath }) =>
+    async ({ target, zshipPath, commandId }) =>
       withClient(client, async (control) => {
-        const artifact = await readFile(zshipPath);
+        const command = await createDeployCommand(await readFile(zshipPath), commandId);
         const { id, created } = await resolveAppTargetForDeploy(control, target);
-        const deploy = await control.apps.deploy(id, artifact);
+        const deploy = await control.apps.deploy(id, command);
         return jsonResult({
           app_id: id,
           created: created ? appDetails(created) : null,
+          command_id: deploy.command_id,
+          deploy_id: deploy.deploy_id,
           deploy_hash: deploy.deploy_hash,
           blobs_uploaded: deploy.blobs_uploaded,
           blobs_deduped: deploy.blobs_deduped,
+          lifecycle_revision: deploy.lifecycle_revision,
+          replayed: deploy.replayed,
         });
       }),
   );
@@ -321,6 +338,13 @@ function errorResult(message: string): ToolResult {
 }
 
 function formatError(error: unknown): string {
+  if (error instanceof DeployOutcomeUnknownError) {
+    const cause = error.cause === undefined ? "" : ` (${formatError(error.cause)})`;
+    return (
+      `the deploy outcome is unknown${cause}; call deploy_app again with commandId ` +
+      `"${error.commandId}" and the same zshipPath to resume it without deploying twice`
+    );
+  }
   if (error instanceof ControlError) {
     return `control plane returned HTTP ${error.status}: ${error.message}`;
   }

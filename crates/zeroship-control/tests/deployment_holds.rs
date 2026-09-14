@@ -7,10 +7,14 @@
 #[path = "../../zeroship-workflow-server/tests/support/platform.rs"]
 mod platform;
 
+#[path = "common/deployments.rs"]
+mod deployment_commands;
 #[path = "deployment_holds/queue.rs"]
 mod queue_holds;
 #[path = "deployment_holds/collector.rs"]
 mod collector;
+#[path = "deployment_holds/publication.rs"]
+mod publication;
 
 use ntex::{
     client::Client,
@@ -260,6 +264,23 @@ impl Fixture {
             .unwrap();
         assert_eq!(inserted, 1);
         (app, deployment, hash)
+    }
+
+    /// A platform user that can author deploy commands.
+    async fn actor(&self) -> zeroship_core::UserId {
+        let actor = zeroship_core::UserId::mint();
+        let email = format!("{}@zeroship.test", actor.as_str());
+        let inserted = self
+            .platform
+            .admin
+            .execute(
+                "INSERT INTO zeroship.users(id,email,name) VALUES($1,$2::citext,'Deploy actor')",
+                &[&actor.as_str(), &email],
+            )
+            .await
+            .unwrap();
+        assert_eq!(inserted, 1);
+        actor
     }
 
     async fn coordinator(&self) -> test::TestServer {

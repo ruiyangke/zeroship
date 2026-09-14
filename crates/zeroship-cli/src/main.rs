@@ -2,7 +2,7 @@
 //!
 //! Commands:
 //!   zeroship serve   <file-or-dir> [--port=3000] [--workers=0]
-//!   zeroship deploy  [<path-to-.zship>] [--app=<id>] [--app-name=<name>] [--control=URL] [--token=TOKEN] [--no-create] [--config=PATH] [--env=NAME]
+//!   zeroship deploy  [<path-to-.zship>] [--app=<id>] [--app-name=<name>] [--control=URL] [--token=TOKEN] [--no-create] [--command-id=<id>] [--config=PATH] [--env=NAME]
 //!   zeroship migrate [<path-to-migrations.ir.json>] [--app=<id>] [--app-name=<name>]
 //!                    [--control=URL] [--token=TOKEN] [--config=PATH] [--env=NAME] [--yes]
 //!   zeroship config show [--config=PATH] [--env=NAME]
@@ -19,7 +19,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use zeroship_core::AppId;
+use zeroship_core::{AppId, DeployCommandId};
 use zeroship_runtime::{ModuleEntry, NativePlugin};
 
 mod auth;
@@ -443,6 +443,10 @@ fn cmd_deploy(args: &[String]) {
         std::process::exit(1);
     });
     let auto_create = deploy_auto_create(args);
+    let command = deploy_command_id(args).unwrap_or_else(|e| {
+        eprintln!("zeroship deploy: {e}");
+        std::process::exit(1);
+    });
     let declared_secrets = resolved
         .as_ref()
         .and_then(|cfg| cfg.get("secrets"))
@@ -476,17 +480,19 @@ fn cmd_deploy(args: &[String]) {
         input_path.display(),
         body.len() as f64 / 1024.0,
     );
+    eprintln!("  command_id: {}", command.as_str());
 
     let mut client = CurlControlClient;
-    match deploy_archive(
-        &mut client,
-        &control_url,
-        &target,
-        &token,
-        &body,
-        &declared_secrets,
+    let request = DeployRequest {
+        control_url: &control_url,
+        target: &target,
+        token: &token,
+        command: &command,
+        archive: &body,
+        declared_secrets: &declared_secrets,
         auto_create,
-    ) {
+    };
+    match deploy_archive(&mut client, &request, DeployRetry::DEFAULT) {
         Ok(outcome) => {
             if let Some(created) = outcome.created_app {
                 eprintln!("created app {} ({})", created.name, created.id.as_str());
@@ -497,9 +503,19 @@ fn cmd_deploy(args: &[String]) {
                     &created.id,
                 );
             }
+            let accepted = outcome.accepted;
             eprintln!("Deployed successfully!");
-            if let Some(hash) = outcome.deploy_hash {
-                eprintln!("  deploy_hash: {hash}");
+            eprintln!("  deploy_id: {}", accepted.deploy_id);
+            eprintln!("  deploy_hash: {}", accepted.deploy_hash);
+            eprintln!(
+                "  blobs: {} uploaded, {} already stored",
+                accepted.blobs_uploaded, accepted.blobs_deduped
+            );
+            if accepted.lifecycle_revision.is_none() {
+                eprintln!(
+                    "  the app is archived: this deployment is staged and becomes live when \
+                     the app is restored"
+                );
             }
         }
         Err(e) => {
@@ -551,7 +567,8 @@ fn deploy_target(args: &[String]) -> Result<DeployTarget, String> {
             Some(cfg) => cfg.require_path("build.output")?,
             None => {
                 return Err("Usage: zeroship deploy <path-to-.zship> --app=<id> \
-                     [--app-name=<name>] [--control=<url>] [--token=<token>] [--no-create]\n\
+                     [--app-name=<name>] [--control=<url>] [--token=<token>] [--no-create] \
+                     [--command-id=<id>]\n\
                      With a zeroship.jsonc the path, app and control all come from the file \
                      and `zeroship deploy` takes no arguments."
                     .to_string())
@@ -686,7 +703,7 @@ fn record_created_app(
 /// handler compares the artifact's `runtime_descriptor.hash` against the
 /// descriptor recorded on the app's newest applied migration and answers 409
 /// `schema_not_applied` when they disagree
-/// (`Registry::set_deploy_with_manifest`). This line is the warning on the way
+/// (`Registry::deploy`). This line is the warning on the way
 /// in; that refusal is the guarantee. Printing it after a 200, as this used to,
 /// named a step the deploy had already made it too late to take in order.
 fn print_migrate_reminder(
@@ -717,12 +734,15 @@ pub(crate) struct ControlResponse {
 }
 
 trait ControlClient {
+    /// Send one attempt of deploy command `command`: `archive` as the body and
+    /// the command id as its `Idempotency-Key`.
     fn deploy_zship(
         &mut self,
         control_url: &str,
         app: &AppId,
         token: &str,
-        body: &[u8],
+        command: &DeployCommandId,
+        archive: &[u8],
     ) -> Result<ControlResponse, String>;
 
     fn list_apps(&mut self, control_url: &str, token: &str) -> Result<ControlResponse, String>;
@@ -750,12 +770,14 @@ impl ControlClient for CurlControlClient {
         control_url: &str,
         app: &AppId,
         token: &str,
-        body: &[u8],
+        command: &DeployCommandId,
+        archive: &[u8],
     ) -> Result<ControlResponse, String> {
         let deploy_url = format!("{control_url}/api/apps/{}/deploy", app.as_str());
         let auth = format!("Authorization: Bearer {token}");
-        let mut command = std::process::Command::new("curl");
-        command.args([
+        let key = format!("Idempotency-Key: {}", command.as_str());
+        let mut curl = std::process::Command::new("curl");
+        curl.args([
             "-s",
             "-w",
             "\n%{http_code}",
@@ -765,11 +787,13 @@ impl ControlClient for CurlControlClient {
             "-H",
             &auth,
             "-H",
+            &key,
+            "-H",
             "Content-Type: application/x-zship",
             "--data-binary",
             "@-",
         ]);
-        run_curl(&mut command, Some(body))
+        run_curl(&mut curl, Some(archive))
     }
 
     fn list_apps(&mut self, control_url: &str, token: &str) -> Result<ControlResponse, String> {
@@ -869,8 +893,51 @@ fn parse_curl_response(output: std::process::Output) -> ControlResponse {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct DeployOutcome {
-    deploy_hash: Option<String>,
+    accepted: Accepted,
     created_app: Option<CreatedApp>,
+}
+
+/// Control's acceptance of one deploy command. An exact retry receives the
+/// same acceptance the first attempt produced.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Accepted {
+    command_id: DeployCommandId,
+    deploy_id: String,
+    deploy_hash: String,
+    blobs_uploaded: u64,
+    blobs_deduped: u64,
+    /// The app lifecycle revision that activates this deployment; absent when
+    /// the app is archived and the deployment is only staged.
+    lifecycle_revision: Option<u64>,
+}
+
+/// One deploy command, sent as often as the retry policy allows.
+struct DeployRequest<'a> {
+    control_url: &'a str,
+    target: &'a AppTarget,
+    token: &'a str,
+    command: &'a DeployCommandId,
+    archive: &'a [u8],
+    declared_secrets: &'a [String],
+    auto_create: bool,
+}
+
+/// How often one deploy command is sent when an attempt ends without a
+/// definitive answer. Every attempt carries the same bytes and command id, so
+/// Control accepts the command at most once however many attempts arrive.
+#[derive(Debug, Clone, Copy)]
+struct DeployRetry {
+    attempts: u32,
+    /// Wait before the second attempt; each later wait doubles.
+    backoff: std::time::Duration,
+}
+
+impl DeployRetry {
+    const DEFAULT: Self = Self {
+        attempts: 3,
+        backoff: std::time::Duration::from_secs(1),
+    };
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -885,7 +952,7 @@ struct ResolvedApp {
     created: Option<CreatedApp>,
 }
 
-/// Upload `body` to the app `app` names.
+/// Upload the request's archive to the app its target names.
 ///
 /// TWO ARMS, ONE PER KIND OF TARGET, and the kind is decided by the caller.
 /// Auto-create belongs to the NAME arm alone: creating an app is the answer to
@@ -896,27 +963,104 @@ struct ResolvedApp {
 /// untouched.
 fn deploy_archive<C: ControlClient>(
     client: &mut C,
-    control_url: &str,
-    app: &AppTarget,
-    token: &str,
-    body: &[u8],
-    declared_secrets: &[String],
-    auto_create: bool,
+    request: &DeployRequest<'_>,
+    retry: DeployRetry,
 ) -> Result<DeployOutcome, String> {
-    let (id, created) = match app {
+    let DeployRequest {
+        control_url,
+        target,
+        token,
+        command,
+        ..
+    } = *request;
+    let (id, created) = match target {
         AppTarget::Name(name) => {
-            let resolved = resolve_or_create_app(client, control_url, token, name, auto_create)?;
+            let resolved =
+                resolve_or_create_app(client, control_url, token, name, request.auto_create)?;
             (resolved.id, resolved.created)
         }
         AppTarget::Id(id) => (id.clone(), None),
     };
 
-    warn_for_missing_declared_secrets(client, control_url, &id, token, declared_secrets);
-    let response = client.deploy_zship(control_url, &id, token, body)?;
+    warn_for_missing_declared_secrets(client, control_url, &id, token, request.declared_secrets);
+    let response = send_deploy_command(client, request, &id, retry)?;
     if response.status != 200 {
-        return Err(deploy_failure_message(app, &response));
+        return Err(deploy_failure_message(target, &response));
     }
-    deploy_success(response.body, created)
+    let accepted = serde_json::from_str::<Accepted>(&response.body)
+        .ok()
+        .filter(|accepted| &accepted.command_id == command)
+        .ok_or_else(|| {
+            unknown_outcome(
+                &id,
+                command,
+                &format!(
+                    "control answered HTTP 200 with an unrecognized body: {}",
+                    response.body
+                ),
+            )
+        })?;
+    Ok(DeployOutcome {
+        accepted,
+        created_app: created,
+    })
+}
+
+/// Send the deploy command until Control answers it definitively.
+///
+/// A transport failure or a server-side (5xx) answer leaves the outcome
+/// unknown: Control may have committed the command before the reply was lost.
+/// Those attempts are repeated with the same bytes and command id, and Control
+/// answers a repeat of an accepted command with its original acceptance. Every
+/// other status is Control's decision and is returned as it is.
+fn send_deploy_command<C: ControlClient>(
+    client: &mut C,
+    request: &DeployRequest<'_>,
+    app: &AppId,
+    retry: DeployRetry,
+) -> Result<ControlResponse, String> {
+    let mut wait = retry.backoff;
+    let mut attempt = 1;
+    loop {
+        let response = client
+            .deploy_zship(
+                request.control_url,
+                app,
+                request.token,
+                request.command,
+                request.archive,
+            )
+            .map_err(|error| unknown_outcome(app, request.command, &error))?;
+        let unanswered = match response.status {
+            0 => "control did not answer".to_string(),
+            500..=599 => format!("HTTP {}: {}", response.status, response.body),
+            _ => return Ok(response),
+        };
+        if attempt >= retry.attempts {
+            return Err(unknown_outcome(app, request.command, &unanswered));
+        }
+        eprintln!(
+            "zeroship deploy: {unanswered}; resending deploy command {}",
+            request.command.as_str()
+        );
+        std::thread::sleep(wait);
+        wait = wait.saturating_mul(2);
+        attempt += 1;
+    }
+}
+
+/// The failure a creator reads when a deploy may or may not have been accepted:
+/// it names the command so the same deploy can be resumed rather than repeated.
+fn unknown_outcome(app: &AppId, command: &DeployCommandId, cause: &str) -> String {
+    format!(
+        "the deploy outcome is unknown ({cause}).\n  \
+         Control may already have accepted deploy command {command} for app {app}. \
+         Re-run the same deploy with --command-id={command} to resume it: Control \
+         answers a repeated command with its original result and never publishes \
+         it twice.",
+        command = command.as_str(),
+        app = app.as_str(),
+    )
 }
 
 /// The deploy failure a creator reads, with the id arm's 404 spelled out.
@@ -1052,22 +1196,30 @@ fn find_existing_app<C: ControlClient>(
     find_app_id_by_name(&list.body, name)
 }
 
-fn deploy_success(body: String, created_app: Option<CreatedApp>) -> Result<DeployOutcome, String> {
-    let deploy_hash = serde_json::from_str::<serde_json::Value>(&body)
-        .ok()
-        .and_then(|json| {
-            json.get("deploy_hash")
-                .and_then(|hash| hash.as_str())
-                .map(|hash| hash.to_string())
-        });
-    Ok(DeployOutcome {
-        deploy_hash,
-        created_app,
-    })
-}
-
 fn deploy_auto_create(args: &[String]) -> bool {
     !args.iter().any(|arg| arg == "--no-create")
+}
+
+/// The command this invocation sends: a fresh id for a new deploy, or the id an
+/// earlier invocation printed when its outcome was not reported.
+fn deploy_command_id(args: &[String]) -> Result<DeployCommandId, String> {
+    // Deploy flags are equals-only. A bare `--command-id` would otherwise pass
+    // the flag check, leave its value to be read as the archive path, and send
+    // a NEW command instead of resuming the old one.
+    if args.iter().any(|arg| arg == "--command-id") {
+        return Err("--command-id takes its value after `=`: --command-id=<dcm_...>".to_string());
+    }
+    flag_str(args, "--command-id=").map_or_else(
+        || Ok(DeployCommandId::mint()),
+        |raw| {
+            DeployCommandId::parse(&raw).map_err(|_| {
+                format!(
+                    "--command-id takes the deploy command id an earlier deploy printed \
+                     (dcm_...), and `{raw}` is not one"
+                )
+            })
+        },
+    )
 }
 
 fn resolve_dev_app_id(
@@ -1146,9 +1298,10 @@ fn print_usage() {
     eprintln!("  zeroship serve    <app.zship|file.js> [--port=3000] [--workers=0]");
     eprintln!("                   [--workflow-config=PATH]");
     eprintln!("                   Run the app deployment or a JS file with the V8 runtime.");
-    eprintln!("  zeroship deploy   [<path-to-.zship>] [--app=<id>] [--app-name=<name>] [--control=URL] [--token=TOKEN] [--no-create] [--config=PATH] [--env=NAME]");
+    eprintln!("  zeroship deploy   [<path-to-.zship>] [--app=<id>] [--app-name=<name>] [--control=URL] [--token=TOKEN] [--no-create] [--command-id=<id>] [--config=PATH] [--env=NAME]");
     eprintln!("                   Upload a pre-built .zship to the control plane.");
     eprintln!("                   --app takes the app's ID; --app-name its routing label.");
+    eprintln!("                   --command-id resumes a deploy whose outcome was not reported.");
     eprintln!("                   Token source: --token, ZEROSHIP_TOKEN, or zeroship login.");
     eprintln!("  zeroship migrate  [<path-to-migrations.ir.json>] [--app=<id>] [--app-name=<name>] [--control=URL] [--token=TOKEN] [--config=PATH] [--env=NAME] [--yes]");
     eprintln!("                   Apply the app's committed migrations to its DEPLOYED database.");
@@ -1269,7 +1422,8 @@ pub(crate) fn check_unknown_serve_flags(args: &[String]) -> Result<(), String> {
 /// This is the set `cmd_deploy` actually CONSUMES, read off the call sites
 /// rather than off the usage string: `--app=` and `--control=` via `flag_str`,
 /// `--token=` via `resolve_bearer_token`, `--no-create` via
-/// `deploy_auto_create`. Keep this list aligned with those parser branches;
+/// `deploy_auto_create`, `--command-id=` via `deploy_command_id`. Keep this
+/// list aligned with those parser branches;
 /// native parser tests cover accepted and rejected argument forms.
 const DEPLOY_KNOWN_FLAGS: &[&str] = &[
     "--app",
@@ -1277,6 +1431,7 @@ const DEPLOY_KNOWN_FLAGS: &[&str] = &[
     "--control",
     "--token",
     "--no-create",
+    "--command-id",
     "--config",
     "--env",
 ];
@@ -1308,7 +1463,7 @@ pub(crate) fn check_unknown_deploy_flags(args: &[String]) -> Result<(), String> 
                  `--control` falling back to its default would deploy to \
                  http://localhost:9090 instead of the control plane you named. \
                  Usage: zeroship deploy [<path-to-.zship>] [--app=<id>] [--app-name=<name>] \
-                 [--control=<url>] [--token=<token>] [--no-create] \
+                 [--control=<url>] [--token=<token>] [--no-create] [--command-id=<id>] \
                  [--config=<path>] [--env=<name>]"
             ));
         }
@@ -1552,6 +1707,7 @@ mod tests {
             "--control=http://localhost:9090",
             "--token=pat",
             "--no-create",
+            "--command-id=dcm_034klb07lrb9jgma6imvmx000",
         ]);
         assert!(check_unknown_deploy_flags(&args).is_ok());
 
@@ -1572,9 +1728,14 @@ mod tests {
         Create(String),
     }
 
+    /// Where a scripted acceptance names the command it answers.
+    const COMMAND: &str = "<command>";
+
     #[derive(Default)]
     struct FakeControlClient {
         calls: Vec<FakeCall>,
+        /// Every deploy attempt's command id and archive bytes.
+        sent: Vec<(DeployCommandId, Vec<u8>)>,
         deploys: VecDeque<ControlResponse>,
         lists: VecDeque<ControlResponse>,
         creates: VecDeque<ControlResponse>,
@@ -1608,17 +1769,24 @@ mod tests {
     }
 
     impl ControlClient for FakeControlClient {
+        /// A scripted deploy body may name the received command as
+        /// [`COMMAND`], the way Control echoes it in an acceptance.
         fn deploy_zship(
             &mut self,
             _control_url: &str,
             app: &AppId,
             _token: &str,
-            _body: &[u8],
+            command: &DeployCommandId,
+            archive: &[u8],
         ) -> Result<ControlResponse, String> {
             self.calls.push(FakeCall::Deploy(app.as_str().to_string()));
-            self.deploys
+            self.sent.push((command.clone(), archive.to_vec()));
+            let mut response = self
+                .deploys
                 .pop_front()
-                .ok_or_else(|| "unexpected deploy call".to_string())
+                .ok_or_else(|| "unexpected deploy call".to_string())?;
+            response.body = response.body.replace(COMMAND, command.as_str());
+            Ok(response)
         }
 
         fn list_apps(
@@ -1658,6 +1826,35 @@ mod tests {
         }
     }
 
+    /// Control's acceptance of the received command, deploying `hash`.
+    fn accepted(hash: &str) -> String {
+        format!(
+            r#"{{"command_id":"<command>","deploy_id":"dep_034klb07lrb9jgma6imvmx000","deploy_hash":"{hash}","blobs_uploaded":1,"blobs_deduped":0,"lifecycle_revision":1}}"#
+        )
+    }
+
+    /// Retries that do not wait, so the policy is exercised at full count.
+    const NO_WAIT: DeployRetry = DeployRetry {
+        attempts: 3,
+        backoff: std::time::Duration::ZERO,
+    };
+
+    fn request<'a>(
+        target: &'a AppTarget,
+        command: &'a DeployCommandId,
+        auto_create: bool,
+    ) -> DeployRequest<'a> {
+        DeployRequest {
+            control_url: "http://control.test",
+            target,
+            token: "token",
+            command,
+            archive: b"zship",
+            declared_secrets: &[],
+            auto_create,
+        }
+    }
+
     /// A missing identity must never trigger name-based app creation.
     #[test]
     fn a_missing_app_id_is_refused_rather_than_created() {
@@ -1669,18 +1866,12 @@ mod tests {
                 201,
                 r#"{"id":"app_034klb07lrb9jgma6imvmx001","name":"missing"}"#,
             )
-            .with_deploy(200, r#"{"deploy_hash":"sha256:abc"}"#);
+            .with_deploy(200, &accepted("sha256:abc"));
 
-        let err = deploy_archive(
-            &mut client,
-            "http://control.test",
-            &AppTarget::Id(app_id(missing_app)),
-            "token",
-            b"zship",
-            &[],
-            true,
-        )
-        .expect_err("a 404 on an id must not be answered by creating an app");
+        let target = AppTarget::Id(app_id(missing_app));
+        let command = DeployCommandId::mint();
+        let err = deploy_archive(&mut client, &request(&target, &command, true), NO_WAIT)
+            .expect_err("a 404 on an id must not be answered by creating an app");
 
         assert!(err.contains("HTTP 404"), "{err}");
         assert!(
@@ -1733,23 +1924,16 @@ mod tests {
                 201,
                 r#"{"id":"app_034klb07lrb9jgma6imvmx001","name":"scratch-test"}"#,
             )
-            .with_deploy(200, r#"{"deploy_hash":"sha256:def"}"#);
+            .with_deploy(200, &accepted("sha256:def"));
 
-        let outcome = deploy_archive(
-            &mut client,
-            "http://control.test",
-            &target,
-            "token",
-            b"zship",
-            &[],
-            true,
-        )
-        .expect("name deploy should create and retry by id");
+        let command = DeployCommandId::mint();
+        let outcome = deploy_archive(&mut client, &request(&target, &command, true), NO_WAIT)
+            .expect("name deploy should create and retry by id");
 
         let created = outcome.created_app.expect("scratch app was created");
         record_created_app(Some(&config), None, &app.source, &created.id);
 
-        assert_eq!(outcome.deploy_hash.as_deref(), Some("sha256:def"));
+        assert_eq!(outcome.accepted.deploy_hash, "sha256:def");
         assert_eq!(
             client.calls,
             vec![
@@ -1863,14 +2047,12 @@ mod tests {
         let mut client =
             FakeControlClient::default().with_deploy(404, r#"{"error":"app not found"}"#);
 
+        let target = AppTarget::Id(app_id(missing_app));
+        let command = DeployCommandId::mint();
         let err = deploy_archive(
             &mut client,
-            "http://control.test",
-            &AppTarget::Id(app_id(missing_app)),
-            "token",
-            b"zship",
-            &[],
-            deploy_auto_create(&args),
+            &request(&target, &command, deploy_auto_create(&args)),
+            NO_WAIT,
         )
         .expect_err("--no-create should keep the original deploy failure");
 
@@ -1884,22 +2066,119 @@ mod tests {
     #[test]
     fn deploy_existing_app_success_path_is_unchanged() {
         let mut client =
-            FakeControlClient::default().with_deploy(200, r#"{"deploy_hash":"sha256:existing"}"#);
+            FakeControlClient::default().with_deploy(200, &accepted("sha256:existing"));
 
-        let outcome = deploy_archive(
-            &mut client,
-            "http://control.test",
-            &AppTarget::Id(app_id(APP_ID)),
-            "token",
-            b"zship",
-            &[],
-            true,
-        )
-        .expect("existing app deploy");
+        let target = AppTarget::Id(app_id(APP_ID));
+        let command = DeployCommandId::mint();
+        let outcome = deploy_archive(&mut client, &request(&target, &command, true), NO_WAIT)
+            .expect("existing app deploy");
 
-        assert_eq!(outcome.deploy_hash.as_deref(), Some("sha256:existing"));
+        assert_eq!(outcome.accepted.deploy_hash, "sha256:existing");
+        assert_eq!(outcome.accepted.command_id, command);
         assert_eq!(outcome.created_app, None);
         assert_eq!(client.calls, vec![FakeCall::Deploy(APP_ID.to_string())]);
+        assert_eq!(client.sent, vec![(command, b"zship".to_vec())]);
+    }
+
+    /// A lost reply and a server-side failure both leave the outcome unknown;
+    /// the command is resent with the same id and the same bytes, and the
+    /// acceptance that finally arrives is the command's.
+    #[test]
+    fn an_unanswered_attempt_resends_the_same_command_and_bytes() {
+        let mut client = FakeControlClient::default()
+            .with_deploy(0, "")
+            .with_deploy(503, r#"{"error":"unavailable"}"#)
+            .with_deploy(200, &accepted("sha256:resent"));
+        let target = AppTarget::Id(app_id(APP_ID));
+        let command = DeployCommandId::mint();
+
+        let outcome = deploy_archive(&mut client, &request(&target, &command, true), NO_WAIT)
+            .expect("the third attempt is answered");
+
+        assert_eq!(outcome.accepted.command_id, command);
+        assert_eq!(outcome.accepted.deploy_hash, "sha256:resent");
+        assert_eq!(client.sent, vec![(command, b"zship".to_vec()); 3]);
+    }
+
+    /// When no attempt is answered the creator is told the command id and how
+    /// to resume it, and the attempts stop at the policy's bound.
+    #[test]
+    fn an_unanswered_command_names_its_id_for_resumption() {
+        let mut client = FakeControlClient::default()
+            .with_deploy(0, "")
+            .with_deploy(502, "bad gateway")
+            .with_deploy(504, "gateway timeout")
+            .with_deploy(200, &accepted("sha256:never"));
+        let target = AppTarget::Id(app_id(APP_ID));
+        let command = DeployCommandId::mint();
+
+        let err = deploy_archive(&mut client, &request(&target, &command, true), NO_WAIT)
+            .expect_err("an unanswered command is not a success");
+
+        assert!(err.contains("outcome is unknown"), "{err}");
+        assert!(
+            err.contains("HTTP 504"),
+            "the last cause is reported: {err}"
+        );
+        assert!(
+            err.contains(&format!("--command-id={}", command.as_str())),
+            "the resume flag names the command: {err}"
+        );
+        assert_eq!(client.sent.len(), 3, "attempts stop at the retry bound");
+        assert_eq!(client.deploys.len(), 1);
+    }
+
+    /// Control's refusals are decisions, not lost replies, and are never
+    /// resent; neither is a success that answers a different command.
+    #[test]
+    fn a_refusal_or_a_foreign_acceptance_is_not_resent() {
+        let target = AppTarget::Id(app_id(APP_ID));
+        let command = DeployCommandId::mint();
+        let mut client = FakeControlClient::default()
+            .with_deploy(409, r#"{"error":"idempotency_key_conflict"}"#)
+            .with_deploy(200, &accepted("sha256:unreached"));
+        let err = deploy_archive(&mut client, &request(&target, &command, true), NO_WAIT)
+            .expect_err("a conflict is a refusal");
+        assert!(err.contains("HTTP 409"), "{err}");
+        assert_eq!(client.sent.len(), 1);
+
+        let other = DeployCommandId::mint();
+        let foreign = accepted("sha256:foreign").replace(COMMAND, other.as_str());
+        let mut client = FakeControlClient::default().with_deploy(200, &foreign);
+        let err = deploy_archive(&mut client, &request(&target, &command, true), NO_WAIT)
+            .expect_err("an acceptance of another command is not this deploy's");
+        assert!(err.contains("outcome is unknown"), "{err}");
+        assert!(err.contains(command.as_str()), "{err}");
+        assert_eq!(client.sent.len(), 1);
+    }
+
+    /// A deploy mints a fresh command unless it resumes one by its printed id;
+    /// a malformed or space-separated id is refused rather than replaced by a
+    /// fresh one, which would deploy again instead of resuming.
+    #[test]
+    fn deploy_command_id_mints_or_resumes_exactly() {
+        let fresh = deploy_command_id(&s(&["zeroship", "deploy", "app.zship"])).expect("minted");
+        let again = deploy_command_id(&s(&["zeroship", "deploy", "app.zship"])).expect("minted");
+        assert_ne!(fresh, again, "each invocation is a new deploy");
+
+        let flag = format!("--command-id={}", fresh.as_str());
+        let resumed = deploy_command_id(&s(&["zeroship", "deploy", "app.zship", &flag]))
+            .expect("a printed id resumes");
+        assert_eq!(resumed, fresh);
+
+        for args in [
+            s(&["zeroship", "deploy", "--command-id=dcm_not-an-id"]),
+            s(&["zeroship", "deploy", "--command-id="]),
+            s(&["zeroship", "deploy", "--command-id", fresh.as_str()]),
+            s(&[
+                "zeroship",
+                "deploy",
+                &format!("--command-id={}", AppId::mint().as_str()),
+            ]),
+        ] {
+            let err = deploy_command_id(&args).expect_err("refused");
+            assert!(err.contains("--command-id"), "{err}");
+        }
     }
 
     /// A typed app id is an IDENTITY: deploy addresses it and creates nothing.
@@ -1917,18 +2196,12 @@ mod tests {
                 201,
                 r#"{"id":"app_034klb07lrb9jgma6imvmx001","name":"app_034klb07lrb9jgma6imvmx000"}"#,
             )
-            .with_deploy(200, r#"{"deploy_hash":"sha256:typed"}"#);
+            .with_deploy(200, &accepted("sha256:typed"));
 
-        let outcome = deploy_archive(
-            &mut client,
-            "http://control.test",
-            &AppTarget::Id(app_id(id)),
-            "token",
-            b"zship",
-            &[],
-            true,
-        )
-        .expect("a typed app id deploys");
+        let target = AppTarget::Id(app_id(id));
+        let command = DeployCommandId::mint();
+        let outcome = deploy_archive(&mut client, &request(&target, &command, true), NO_WAIT)
+            .expect("a typed app id deploys");
 
         assert_eq!(
             client.calls,
@@ -1940,7 +2213,7 @@ mod tests {
             outcome.created_app, None,
             "addressing an app by its id must never create an app",
         );
-        assert_eq!(outcome.deploy_hash.as_deref(), Some("sha256:typed"));
+        assert_eq!(outcome.accepted.deploy_hash, "sha256:typed");
     }
 
     /// The refusal is WIRED, not merely defined.
