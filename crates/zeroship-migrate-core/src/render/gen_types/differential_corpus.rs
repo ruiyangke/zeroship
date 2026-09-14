@@ -119,20 +119,16 @@ pub(super) struct Stream {
 
 /// The recorded op corpus, which lives with the PRODUCT rather than with this crate.
 ///
-/// `crates/zeroship-migrate/tests/op_fixtures/` is 26 `<stem>.mig.js` inputs paired with
-/// `<stem>.golden.json` envelopes plus one `recorded.json`, and it has six other
-/// readers: four integration suites in that crate, one PostgreSQL live test, and
-/// `packages/zero-migrate/tests/recorded-corpus.test.ts`, which drives the `.mig.js`
-/// halves through the JS recorder and compares the drained envelopes. It is the
-/// product's corpus, not the engine's, and this module is its newest consumer rather
-/// than its owner.
+/// `crates/zeroship-migrate/tests/op_fixtures/` contains the resolved Rust
+/// `<stem>.golden.json` envelopes. The authoring modules and raw recorded envelopes
+/// live with `packages/zero-migrate/tests/fixtures/op-corpus`, whose package test
+/// drives the modules through the JS recorder. This module consumes the resolved
+/// Rust side of that cross-language contract.
 ///
 /// So the path reaches SIDEWAYS, out of `zeroship-migrate-core` and into the composing
 /// crate's test tree, and that is worth seeing rather than hiding behind a helper. It
-/// is a `#[cfg(test)]` DATA read: no Cargo edge, no `use`, nothing in the compiled
-/// engine. Moving the corpus down here instead would have repointed seven readers -
-/// including a hard-coded path in a published JS package's tests - to make one
-/// `#[cfg(test)]` path shorter.
+/// is a `#[cfg(test)]` data read with no Cargo edge and nothing in the compiled
+/// engine.
 fn fixtures_dir() -> std::path::PathBuf {
     std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()

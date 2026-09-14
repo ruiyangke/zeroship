@@ -970,7 +970,7 @@ Two checksum front doors share a `fold_common` tail (`migration.rs:500-542`): **
 
 ### 6.7 The golden corpus and the schema gate
 
-Two anti-drift artifacts pin the contract (mechanics in [§12](#12-testing--operating)): **`op-ir.schema.json`** — the JSON Schema of `MigrationIr`, emitted by `schemars::schema_for!`, gated against the on-disk file (regenerate with `cargo test -p zeroship-migrate --test ir_contract -- --ignored update_ir_envelope_schema`); and **the golden corpus** (`tests/op_fixtures/`, 21 `.mig.js`/`.golden.json` pairs) driving `op_round_trip.rs`'s three gates (golden byte-stability, JS↔Rust value-checksum round-trip, variant exhaustiveness pinned at 53).
+Two anti-drift artifacts pin the contract (mechanics in [§12](#12-testing--operating)): **`crates/zeroship-migrate/ir-envelope.schema.json`**, emitted from `MigrationIr` and checked by the Rust IR contract suite; and the cross-language golden corpus. Package-owned authoring modules and raw recorded envelopes live in `packages/zero-migrate/tests/fixtures/op-corpus/`. Policy-resolved Rust envelopes live in `crates/zeroship-migrate/tests/op_fixtures/`. The TypeScript suite records the former through the production package, and the Rust suite resolves that shared recording before comparing it with the latter.
 
 ### 6.8 How JS authoring maps to IR nodes
 
@@ -1703,25 +1703,21 @@ paths and commands are not current instructions. The engine is no longer a
 separate project: it is in-sourced as the `crates/zeroship-migrate*` crates and is
 developed in this workspace, with the current platform-runner commands in §12.10.
 
-### 12.1 The three-gate golden/round-trip model (`op_round_trip.rs`)
+### 12.1 The golden/round-trip model
 
-The load-bearing anti-drift mechanism was `op_round_trip.rs` because the IR wire shape is consumed by **two independent implementations** (the JS `op.*` builder and the Rust engine/loader) that must never drift. A corpus of paired fixtures drives it: `tests/op_fixtures/<name>.mig.js` (authored source) + `<name>.golden.json` (committed canonical IR). The corpus includes fixtures such as `ddl_create`, `ddl_alter`, `fluent_ddl`, `fluent_dml`, `dml_upsert`, `enums_domains`, `partition`, `pg_vendor`, `sequences_exclusion`, `views`, `in_list_scalars`, `edge_scalars`, `runtime_options`, and `p2a_facets`. Three gates:
+The IR wire shape is consumed by independent TypeScript and Rust implementations.
+The current corpus keeps the inputs with their owners: authored `.mig.js` modules
+and their raw `recorded.json` envelopes live under
+`packages/zero-migrate/tests/fixtures/op-corpus/`, while resolved
+`<stem>.golden.json` envelopes live under
+`crates/zeroship-migrate/tests/op_fixtures/`.
 
-- **Gate 1 — golden byte-stability** (`corpus_is_byte_stable_and_value_equal`, `:125-179`): each `.mig.js` is recorded through the REAL V8 recorder (`record_migration_to_json_unsandboxed`), run through `resolve_create_table_policy(ir, &PolicyProfile::confined())`, pretty-printed, and compared byte-for-byte against the golden.
-- **Gate 2 — JS↔Rust value-checksum round-trip** (`:169-177`): both the fresh IR and the golden are folded through the SAME `Checksum::of_ir(&CanonicalOpList(&ir.ops), &MigrationFlags::default(), &ir.owner_app, &[], &[], &ir.preconditions)` and asserted equal — the *authoritative* check, comparing typed **values**, invariant under JCS-formatting differences.
-- **Gate 3 — variant exhaustiveness** (`every_op_variant_has_a_fixture`, `:208-260`): reads `op-ir.schema.json`, extracts every `Op` discriminant, asserts the fixtures cover the whole set, and hard-codes the count: `assert_eq!(expected.len(), 53, "the closed Op set has 53 variants after the RLS quadruplet -> setRls reshape and attachPartition addition")` (`:235-236`). Adding an `Op` without a corpus fixture fails CI.
-
-In the former tree, the corpus regeneration test was `op_round_trip`. The
-standalone engine splits its job in two, each half running in the job that
-already has the toolchain it needs, joined through a committed
-`op_fixtures/recorded.json`: the JS half executes every `.mig.js` through the
-production recorder
-(`the recorded-corpus suite (DELETED with the vendored engine tree)`)
-and the Rust half resolves those recorded ops through the real policy resolver
-and compares against `<stem>.golden.json`
-(`crates/zeroship-migrate/tests/ir_contract/op_fixture_goldens.rs`).
-Run them from the standalone project's own workspace when changing that corpus;
-the removed appbase package cannot be selected with `cargo -p`.
+`packages/zero-migrate/tests/recorded-corpus.test.ts` imports every authored
+module through the production package recorder and compares the result with the
+raw envelope. `crates/zeroship-migrate/tests/ir_contract/op_fixture_goldens.rs`
+reads that same envelope, runs the real policy resolver, and compares the result
+with the Rust golden. The Rust schema tests separately require the fixture
+vocabulary to cover the closed operation set.
 
 ### 12.2 The IR-schema golden (`op_ir_schema.rs`)
 
