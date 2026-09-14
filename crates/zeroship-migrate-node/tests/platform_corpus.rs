@@ -148,22 +148,27 @@ fn platform_corpus_records_applies_and_reapplies_without_changes() {
 #[test]
 fn deployment_holds_are_platform_metadata_with_scoped_identity() {
     fixture::Platform::with_database(async |db| {
-        let keys = db
+        // The primary key is the row id (table_identity.rs); a holder acquires
+        // under the scoped unique key.
+        let unique_keys = db
             .query(
-                "SELECT a.attname FROM pg_constraint c \
-             CROSS JOIN LATERAL unnest(c.conkey) WITH ORDINALITY AS key(attnum, position) \
-             JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = key.attnum \
-             WHERE c.conrelid = 'zeroship.app_deploy_holds'::regclass AND c.contype = 'p' \
-             ORDER BY key.position",
+                "SELECT ARRAY(SELECT a.attname::text \
+                     FROM unnest(i.indkey::int2[]) WITH ORDINALITY AS key(attnum, position) \
+                     JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = key.attnum \
+                     ORDER BY key.position) \
+             FROM pg_index i \
+             WHERE i.indrelid = 'zeroship.app_deploy_holds'::regclass \
+             AND i.indisunique AND NOT i.indisprimary AND i.indpred IS NULL",
                 &[],
             )
             .await
             .unwrap();
         assert_eq!(
-            keys.iter()
-                .map(|row| row.get::<_, String>(0))
+            unique_keys
+                .iter()
+                .map(|row| row.get::<_, Vec<String>>(0))
                 .collect::<Vec<_>>(),
-            ["app_id", "deploy_id", "holder_id"]
+            [["app_id", "deploy_id", "holder_id"]]
         );
         let foreign_key = db
             .query_one(
