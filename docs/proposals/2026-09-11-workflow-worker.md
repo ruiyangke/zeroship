@@ -509,7 +509,8 @@ with this queue namespace; it is not a second authoritative placement store.
 | `workflow_manager.management` | Job-linked authorized command, original request provenance, per-run revision, provisional execution barrier and reported closed outcome. |
 | `workflow_manager.management_scopes` | Accepted and settled management revisions per app/run; independent of the creator's run existence. |
 | `workflow_manager.jobs` | Immutable job specification, checked operation/run/request projections, availability, current attempt, delivery fence and settlement digest/outcome. It also supplies submission and settlement deduplication. |
-| `workflow_manager.recovery_scopes` | Durable reconciliation responsibility, activation provenance and revision, next due time and retained pending job. |
+| `workflow_manager.recovery_scopes` | Trusted activation provenance and revision for durable maintenance responsibility. |
+| `workflow_manager.recovery_duties` | Independent app/kind deadlines and retained pending reconciliation or collection jobs, linked to their owning scope and queue. |
 | `workflow_manager.schedule_deployments` | Immutable allowlisted schedule descriptors and the calendar interpretation for a normal deployment. No business input. |
 | `workflow_manager.schedule_activations` | Stable activation job, deployment, app revision and activation instant. Job settlement determines dispatch readiness. |
 | `workflow_manager.schedule_disables` | Historical Control disable commands in the shared activation revision sequence. Exact replay cannot change a newer scope state. |
@@ -567,6 +568,8 @@ table has the `__zeroship_workflow_` prefix; none belongs in Control's schema.
 | `job_publications` | Immutable advance job specifications, generation/frontier/due-time identity and manager confirmation time. Pending records retain deployment dependencies and survive history removal. |
 | `job_receipts` | Immutable logical job specification and committed semantic outcome, retained independently of run history and delivery attempts. App-wide reconciliation records a selected page and its durable attempt offset; its run identity is absent. |
 | `reconciliation_scans` | App-owned scan revision, publication/hold phase, ordering cursor and captured upper boundary. It schedules no work and grants no ingress authority. |
+| `collection_scans` | App-owned collection revision, expiry cutoff, ordering cursor and captured upper payload identity. |
+| `collection_pages` | Immutable bounded payload identity plan and reserved item offset, scoped to its logical job receipt. |
 
 Publication intents now use dedicated journal records. The scoped unique index
 binds run, generation, frontier revision and due time; `id` remains the sole
@@ -1484,24 +1487,27 @@ Each obligation has a manager-owned deadline even when no job is visibly pending
 Healthy heartbeats cannot postpone it indefinitely because the manager cannot
 observe an unpublished customer commit. Bounded immediate publication retry is
 an optimization; periodic manager-issued reconciliation supplies correctness.
-The native `recovery::Recovery` ledger supplies the deadline and pending job.
-`ensure` registers a trusted activation without postponing existing work; a newer
-activation updates its recorded provenance. Reconciliation remains app-scoped
-and does not depend on retaining that activation's executable. `dispatch`
-serializes with queue operations under the app lock and commits the job identity
-with the next deadline. A pending job is returned unchanged across retries and
-replicas until it settles. A fresh `Waiting` reconciliation settlement advances
-the matching obligation's deadline to manager time without postponing an earlier
-deadline. A completed scan preserves the periodic deadline. Receipt replay and
-unrelated jobs cannot modify the current obligation. The pending-job foreign key
-prevents deleting the job that still carries this obligation.
+The native `recovery::Recovery` ledger supplies independent deadlines and pending
+jobs for reconciliation and collection. `ensure` registers a trusted activation
+and establishes both duties atomically. Repeated activation validates the complete
+retained pair without postponing either duty; a newer activation changes only
+provenance. Both duties remain app-scoped and require no retained executable.
+`dispatch` serializes with queue operations under the app lock and commits the
+chosen duty's job identity with its next deadline. A pending job is returned
+unchanged across retries and replicas until it settles. A fresh `Waiting`
+settlement advances only its matching duty's deadline to manager time without
+postponing an earlier deadline. A completed scan preserves the periodic deadline.
+Receipt replay and unrelated jobs cannot modify the current obligation. Scoped
+pending-job foreign keys prevent deleting a job that still carries a duty or
+substituting another app's job.
 
-`due` pages by app identity using manager database time and includes healthy
-owners. The scheduler resumes after the last returned app, then begins another
-sweep after an empty page; newly due work behind the cursor joins that sweep.
+`due` pages each duty kind by app identity using manager database time and includes
+healthy owners. The scheduler resumes after the last returned app, then begins
+another sweep after an empty page; newly due work behind the cursor joins that sweep.
 Job publication failure leaves the prior deadline and pending identity intact.
-These native operations do not yet establish the authenticated activation-to-
-ingress handshake, run a host scheduler or provision missing worker capacity.
+The server drives these duties through independently bounded lanes. These native
+operations do not yet establish the authenticated activation-to-ingress handshake
+or provision missing worker capacity.
 The ingress epoch and drain evidence remain required before enabling that path.
 
 A reconciliation job processes an app-scoped page without loading app code.
@@ -2163,9 +2169,9 @@ manager ORM queue and platform deployment ledger. Native coordinator placement
 and management now share the queue's ORM namespace and transaction handle.
 Deployment prerequisites belong to executable operations, with an optional native
 queue projection checked against the operation and immutable digest. Recovery
-keeps activation provenance without retaining its bundle; pending recovery jobs
-must decode as reconciliation. Closed management commands carry the management
-revision and resolved restart policy. The native current-deployment reader,
+keeps activation provenance without retaining its bundle; each pending duty job
+must decode as its recorded maintenance kind. Closed management commands carry
+the management revision and resolved restart policy. The native current-deployment reader,
 column-scoped platform grants and server readiness checks are composed into
 authoritative acceptance. Management request anchors, per-run ordering and
 provisional barriers share the queue transaction; barrier and command eligibility
@@ -2191,10 +2197,14 @@ lock waits, process restart and receipt replay after placement expiry. These
 checks do not establish a completed distributed workflow system.
 
 Native recovery contracts cover replica races, absence of workers, restart,
-activation changes, deadline persistence and atomic publication rollback. The
-canonical platform migration test also executes recovery and scheduling with the
-runtime role and checks table ownership and denial of worker, gateway and app
-access. Authenticated queue HTTP tests and the runtime's combined plugin and
+activation changes, deadline persistence and atomic publication rollback for each
+maintenance kind. Independent-duty tests verify mixed due pages, exact settlement
+effects, damaged pending identities and refusal of missing responsibility. The
+server process tests prove failed reconciliation cannot suppress collection,
+including restart and signed receipt replay without executable holds. Canonical
+platform migration tests execute these duties and scheduling with the runtime
+role and check table ownership, scoped constraints and denial of worker, gateway
+and app access. Authenticated queue HTTP tests and the runtime's combined plugin and
 lazy-bundle import regressions pass after the native ORM and module ownership
 merge. These checks do not establish the final production host composition or
 ambient worker-login isolation.
@@ -2445,8 +2455,8 @@ creator-schema access. The collector is the production caller of manifest
 deletion; it no longer delegates deletion authority to creator journal scans.
 
 The native manager driver now runs in the workflow server independently of
-worker registration and placement. Its calendar, recovery and unfinished-hold
-lanes each share an original deadline across their scans and candidate page.
+worker registration and placement. Its calendar, reconciliation, collection and
+unfinished-hold lanes each share an original deadline across their scans and candidate page.
 Each lane captures an upper storage identity and advances past an attempted
 candidate before external work, preserving progress through malformed metadata,
 timeouts and cancellation. Failed candidates retain their durable jobs or

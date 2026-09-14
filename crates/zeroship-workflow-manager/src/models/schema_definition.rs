@@ -94,13 +94,20 @@ zeroship_data_orm::orm::schema! {
             dispatch_cursor: BigInt,
         }
 
+        recovery_duties {
+            #[orm(primary_key)]
+            id: Text,
+            app_id: Text,
+            kind: Text,
+            next_due_at: BigInt,
+            pending_job_id: Nullable<Text>,
+        }
+
         recovery_scopes {
             #[orm(primary_key)]
             id: Text,
             deployment_id: Text,
             activation_revision: BigInt,
-            next_due_at: BigInt,
-            pending_job_id: Nullable<Text>,
         }
 
         schedule_activations {

@@ -25,7 +25,7 @@ use zeroship_workflow_calendar::{
     IntervalAnchor, ScheduleCatchUp, ScheduleOverlap, ScheduleTiming,
 };
 use zeroship_workflow_manager::{
-    recovery::{Options as RecoveryOptions, Recovery},
+    recovery::{DutyKind, Options as RecoveryOptions, Recovery},
     scheduling::{Options, Scheduler},
     Error, Queue,
 };
@@ -438,7 +438,11 @@ async fn activation_gate(fixture: &Fixture) {
         let id = make_due(fixture, &app, "gated").await;
         while scheduler.dispatch(&app, &id).await.unwrap().more {}
         let recovery = Recovery::new(queue.clone(), RecoveryOptions::default()).unwrap();
-        let recovery_job = recovery.dispatch(&app).await.unwrap().unwrap();
+        let recovery_job = recovery
+            .dispatch(&app, DutyKind::Reconcile)
+            .await
+            .unwrap()
+            .unwrap();
         let owner = assignment(&app);
         let delivery = claim(&queue, &owner).await;
         assert_eq!(delivery.job, activation_job);

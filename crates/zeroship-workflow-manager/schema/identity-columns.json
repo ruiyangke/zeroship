@@ -46,7 +46,11 @@
   ],
   "recovery_scopes": [
     "id",
-    "deployment_id",
+    "deployment_id"
+  ],
+  "recovery_duties": [
+    "id",
+    "app_id",
     "pending_job_id"
   ],
   "schedule_deployments": [

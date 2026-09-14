@@ -257,7 +257,7 @@
   {
     "file": "20260911000000_workflow_coordination.ts",
     "name": "workflow_coordination",
-    "opCount": 80
+    "opCount": 83
   },
   {
     "file": "20260911000100_project_data_keys.ts",

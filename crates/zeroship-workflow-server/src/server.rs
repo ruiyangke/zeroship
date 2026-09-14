@@ -5,12 +5,12 @@
 )]
 
 use crate::{
-    WorkflowHttpState,
     auth::{PostgresWorkerRegistry, WorkflowAuth},
     config::WorkflowSettings,
     coordinator::{Coordinator, Options},
+    WorkflowHttpState,
 };
-use futures::future::{Either, select};
+use futures::future::{select, Either};
 use ntex::web;
 use std::{
     future::Future, net::SocketAddr, num::NonZeroUsize, pin::Pin, rc::Rc, sync::Arc, time::Duration,
@@ -20,7 +20,7 @@ use zeroship_core::{
     app_id::AppId,
     service_assertion::ServiceAssertionVerifier,
     service_peers::{
-        CONTROL_SERVICE_NAME, ServiceAuth, ServiceKeyring, WORKFLOW_SERVICE_NAME, service_issuer,
+        service_issuer, ServiceAuth, ServiceKeyring, CONTROL_SERVICE_NAME, WORKFLOW_SERVICE_NAME,
     },
     workflow_coordination::FailureCode,
     workflow_deployments::{HoldGeneration, HoldReceipt, QueueHoldRequest},
@@ -28,10 +28,10 @@ use zeroship_core::{
 };
 use zeroship_workflow_client::{Options as ClientOptions, QueueDeploymentHolds, Transport};
 use zeroship_workflow_manager::{
-    Error as ManagerError,
     driver::{Driver, Options as DriverOptions, TickReport},
     policy::control::{self, ControlPolicies, ControlPolicyStore},
     retention::HoldClient,
+    Error as ManagerError,
 };
 
 type Error = Box<dyn std::error::Error>;
@@ -227,7 +227,7 @@ async fn connect_policies(
 ) -> Result<ControlPolicies, ManagerError> {
     use zeroship_core::schema_name::SchemaName;
     use zeroship_data_orm::{
-        ConnectOptions, binding::DbBinding, encryption::ProjectKeySource, orm::Database,
+        binding::DbBinding, encryption::ProjectKeySource, orm::Database, ConnectOptions,
     };
     compio::time::timeout(options.command_timeout, async {
         let database = Database::connect(
@@ -290,7 +290,8 @@ async fn drive(
 fn report_tick(report: TickReport) {
     for (lane, progress) in [
         ("scheduling", report.scheduling),
-        ("recovery", report.recovery),
+        ("reconciliation", report.reconciliation),
+        ("collection", report.collection),
         ("retention", report.retention),
     ] {
         if let Some(error) = progress.scan_error {

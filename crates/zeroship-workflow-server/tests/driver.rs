@@ -37,6 +37,9 @@ use zeroship_workflow_manager::{
     Options, Queue,
 };
 
+#[path = "driver/collection.rs"]
+mod collection;
+
 struct Seed {
     app: AppId,
     deployment: DeploymentId,
@@ -168,7 +171,7 @@ async fn overdue_calendars(platform: &platform::Platform, app: &AppId) -> (Sched
     platform
         .admin
         .execute(
-            "UPDATE workflow_manager.recovery_scopes SET next_due_at=0 WHERE id=$1",
+            "UPDATE workflow_manager.recovery_duties SET next_due_at=0 WHERE app_id=$1",
             &[&app.as_str()],
         )
         .await
@@ -307,22 +310,25 @@ async fn no_workers(platform: &platform::Platform) {
 
 async fn initial_progress(platform: &platform::Platform, seed: &Seed) {
     until(
-        "publish calendars and recovery and reconcile interrupted holds",
+        "publish calendars and maintenance and reconcile interrupted holds",
         async || {
             let row = platform
                 .admin
                 .query_one(
                     "SELECT EXISTS(SELECT 1 FROM workflow_manager.schedule_occurrences \
                      WHERE app_id=$1 AND schedule_id=$2), \
-                    pending_job_id FROM workflow_manager.recovery_scopes WHERE id=$1",
+                    (SELECT pending_job_id FROM workflow_manager.recovery_duties WHERE app_id=$1 AND kind='reconcile'), \
+                    (SELECT pending_job_id FROM workflow_manager.recovery_duties WHERE app_id=$1 AND kind='collect')",
                     &[&seed.app.as_str(), &seed.healthy.as_str()],
                 )
                 .await
                 .unwrap();
             let published: bool = row.get(0);
             let pending: Option<String> = row.get(1);
+            let collection: Option<String> = row.get(2);
             (published
                 && pending.is_some()
+                && collection.is_some()
                 && hold_state(platform, seed, &seed.acquiring).await == "held"
                 && hold_state(platform, seed, &seed.releasing).await == "released")
                 .then_some(())
@@ -337,12 +343,13 @@ struct Snapshot {
     jobs: Vec<String>,
     occurrence: String,
     pending: String,
+    collection: String,
     scheduled_at: i64,
 }
 
 async fn snapshot(platform: &platform::Platform, seed: &Seed) -> Snapshot {
     let stable = jobs(platform, &seed.app).await;
-    assert_eq!(stable.len(), 3);
+    assert_eq!(stable.len(), 4);
     let operations: Vec<JobOperation> = stable
         .iter()
         .map(|row| {
@@ -358,7 +365,9 @@ async fn snapshot(platform: &platform::Platform, seed: &Seed) -> Snapshot {
                     assert_eq!(deployment_id, &seed.deployment);
                     assert_eq!(row["deployment_id"], deployment_id.as_str());
                 }
-                JobOperation::Reconcile {} => assert!(row["deployment_id"].is_null()),
+                JobOperation::Reconcile {} | JobOperation::Collect {} => {
+                    assert!(row["deployment_id"].is_null());
+                }
                 other => panic!("unexpected manager job: {other:?}"),
             }
             operation
@@ -368,6 +377,9 @@ async fn snapshot(platform: &platform::Platform, seed: &Seed) -> Snapshot {
     assert!(operations
         .iter()
         .any(|operation| matches!(operation, JobOperation::Reconcile {})));
+    assert!(operations
+        .iter()
+        .any(|operation| matches!(operation, JobOperation::Collect {})));
     assert!(operations.iter().any(|operation| matches!(operation,
         JobOperation::Cron {schedule_id, ..} if schedule_id == &seed.healthy)));
     let occurrence = platform.admin.query_one(
@@ -381,17 +393,29 @@ async fn snapshot(platform: &platform::Platform, seed: &Seed) -> Snapshot {
     let pending: String = platform
         .admin
         .query_one(
-            "SELECT pending_job_id FROM workflow_manager.recovery_scopes WHERE id=$1",
+            "SELECT pending_job_id FROM workflow_manager.recovery_duties WHERE app_id=$1 AND kind='reconcile'",
             &[&seed.app.as_str()],
         )
         .await
         .unwrap()
         .get(0);
     assert_ne!(occurrence_job.as_str(), pending);
+    let collection: String = platform
+        .admin
+        .query_one(
+            "SELECT pending_job_id FROM workflow_manager.recovery_duties WHERE app_id=$1 AND kind='collect'",
+            &[&seed.app.as_str()],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert_ne!(collection, pending);
+    assert_ne!(collection, occurrence_job.as_str());
     Snapshot {
         jobs: stable,
         occurrence: occurrence_snapshot,
         pending,
+        collection,
         scheduled_at,
     }
 }
@@ -417,7 +441,7 @@ async fn replay_frontiers(platform: &platform::Platform, seed: &Seed, snapshot: 
     platform
         .admin
         .execute(
-            "UPDATE workflow_manager.recovery_scopes SET next_due_at=0 WHERE id=$1",
+            "UPDATE workflow_manager.recovery_duties SET next_due_at=0 WHERE app_id=$1",
             &[&seed.app.as_str()],
         )
         .await
@@ -464,13 +488,23 @@ async fn assert_replayed(platform: &platform::Platform, seed: &Seed, snapshot: &
     let replayed_pending: String = platform
         .admin
         .query_one(
-            "SELECT pending_job_id FROM workflow_manager.recovery_scopes WHERE id=$1",
+            "SELECT pending_job_id FROM workflow_manager.recovery_duties WHERE app_id=$1 AND kind='reconcile'",
             &[&seed.app.as_str()],
         )
         .await
         .unwrap()
         .get(0);
     assert_eq!(replayed_pending, snapshot.pending);
+    let replayed_collection: String = platform
+        .admin
+        .query_one(
+            "SELECT pending_job_id FROM workflow_manager.recovery_duties WHERE app_id=$1 AND kind='collect'",
+            &[&seed.app.as_str()],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(replayed_collection, snapshot.collection);
     let broken = platform
         .admin
         .query_one(

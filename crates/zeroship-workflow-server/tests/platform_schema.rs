@@ -126,6 +126,7 @@ async fn platform_role_can_coordinate_without_customer_or_journal_privileges() {
         "schedules",
         "schedule_occurrences",
         "recovery_scopes",
+        "recovery_duties",
     ] {
         fixture
             .admin
@@ -186,7 +187,7 @@ async fn manager_recovery_authority(fixture: &platform::Platform) {
     };
     use zeroship_data_orm::binding::DbBinding;
     use zeroship_workflow_manager::{
-        recovery::{Options as RecoveryOptions, Recovery},
+        recovery::{DutyKind, Options as RecoveryOptions, Recovery},
         Options as QueueOptions, Queue,
     };
 
@@ -209,15 +210,21 @@ async fn manager_recovery_authority(fixture: &platform::Platform) {
         .ensure(&app, &deployment, 1.try_into().unwrap())
         .await
         .unwrap();
-    assert_eq!(
-        recovery.due(None).await.unwrap(),
-        std::slice::from_ref(&app)
-    );
-    let job = recovery.dispatch(&app).await.unwrap().unwrap();
-    assert_eq!(job.app_id, app);
-    assert_eq!(job.deployment_id(), None);
-    assert_eq!(job.operation, JobOperation::Reconcile {});
-    assert_eq!(recovery.dispatch(&app).await.unwrap(), Some(job));
+    for (kind, operation) in [
+        (DutyKind::Reconcile, JobOperation::Reconcile {}),
+        (DutyKind::Collect, JobOperation::Collect {}),
+    ] {
+        assert_eq!(
+            recovery.due(kind, None).await.unwrap(),
+            std::slice::from_ref(&app)
+        );
+        let job = recovery.dispatch(&app, kind).await.unwrap().unwrap();
+        assert_eq!(job.app_id, app);
+        assert_eq!(job.deployment_id(), None);
+        assert_eq!(job.operation, operation);
+        assert_eq!(recovery.dispatch(&app, kind).await.unwrap(), Some(job));
+    }
+    recovery_duty_constraints(fixture, &recovery, &app).await;
     let retained = fixture
         .admin
         .query_one(
@@ -228,6 +235,84 @@ async fn manager_recovery_authority(fixture: &platform::Platform) {
         .unwrap()
         .get::<_, i64>(0);
     assert_eq!(retained, 0);
+}
+
+#[expect(
+    clippy::future_not_send,
+    reason = "native duties and their constraint oracles share the compio database runtime"
+)]
+async fn recovery_duty_constraints(
+    fixture: &platform::Platform,
+    recovery: &zeroship_workflow_manager::recovery::Recovery,
+    app: &zeroship_core::app_id::AppId,
+) {
+    use zeroship_core::{app_id::AppId, typed_id, workflow_jobs::DeploymentId};
+    use zeroship_workflow_manager::recovery::DutyKind;
+
+    let runtime = platform::connect(&fixture.runtime_url).await;
+    let duties = runtime
+        .query(
+            "SELECT id,kind,pending_job_id FROM workflow_manager.recovery_duties \
+             WHERE app_id=$1 ORDER BY kind",
+            &[&app.as_str()],
+        )
+        .await
+        .unwrap();
+    assert_eq!(duties.len(), 2);
+    assert_eq!(duties[0].get::<_, &str>("kind"), "collect");
+    assert_eq!(duties[1].get::<_, &str>("kind"), "reconcile");
+    for duty in &duties {
+        typed_id::parse_with_prefix(duty.get::<_, &str>("id"), "wrd").unwrap();
+        assert!(duty.get::<_, Option<&str>>("pending_job_id").is_some());
+    }
+    let id = typed_id::generate("wrd");
+    let duplicate = runtime
+        .execute(
+            "INSERT INTO workflow_manager.recovery_duties(id,app_id,kind,next_due_at) \
+             VALUES($1,$2,'collect',0)",
+            &[&id, &app.as_str()],
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(duplicate.as_db_error().unwrap().code().code(), "23505");
+    let missing_scope = runtime
+        .execute(
+            "INSERT INTO workflow_manager.recovery_duties(id,app_id,kind,next_due_at) \
+             VALUES($1,$2,'collect',0)",
+            &[&id, &AppId::mint().as_str()],
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(missing_scope.as_db_error().unwrap().code().code(), "23503");
+
+    let foreign = AppId::mint();
+    recovery
+        .ensure(&foreign, &DeploymentId::mint(), 1.try_into().unwrap())
+        .await
+        .unwrap();
+    let foreign_job = recovery
+        .dispatch(&foreign, DutyKind::Collect)
+        .await
+        .unwrap()
+        .unwrap();
+    let crossed = runtime
+        .execute(
+            "UPDATE workflow_manager.recovery_duties SET pending_job_id=$2 \
+             WHERE app_id=$1 AND kind='collect'",
+            &[&app.as_str(), &foreign_job.id.as_str()],
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(crossed.as_db_error().unwrap().code().code(), "23503");
+    let retained = recovery
+        .dispatch(app, DutyKind::Collect)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        retained.id.as_str(),
+        duties[0].get::<_, &str>("pending_job_id")
+    );
 }
 
 #[expect(
@@ -349,6 +434,7 @@ async fn manager_queue_authority(fixture: &platform::Platform, runtime: &compio_
             "management_scopes",
             "placement_receipts",
             "queue_scopes",
+            "recovery_duties",
             "recovery_scopes",
             "schedule_activations",
             "schedule_deployments",

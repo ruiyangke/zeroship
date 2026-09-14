@@ -1,10 +1,16 @@
-//! Durable reconciliation responsibility, independent of worker liveness.
+//! Durable reconciliation and collection duties, independent of worker liveness.
 #![expect(
     clippy::future_not_send,
     reason = "recovery shares the manager's owning compio runtime"
 )]
 
-use crate::{models::recovery_scopes, queue, Error, Queue};
+use crate::{
+    models::{recovery_duties, recovery_scopes},
+    queue, Error, Queue,
+};
+
+mod duties;
+use duties::Duty;
 use std::time::Duration;
 use zeroship_core::{
     app_id::AppId,
@@ -12,6 +18,30 @@ use zeroship_core::{
     workflow_jobs::{DeploymentId, JobId, JobOperation, JobOutcome, JobSpec},
 };
 use zeroship_data_orm::orm::{Database, FromRow, Insertable};
+
+/// Independent periodic maintenance responsibilities for a registered app.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DutyKind {
+    Reconcile,
+    Collect,
+}
+
+impl DutyKind {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Reconcile => "reconcile",
+            Self::Collect => "collect",
+        }
+    }
+
+    const fn operation(self) -> JobOperation {
+        match self {
+            Self::Reconcile => JobOperation::Reconcile {},
+            Self::Collect => JobOperation::Collect {},
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy)]
 pub struct Options {
@@ -44,8 +74,6 @@ pub struct Recovery {
 struct Stored {
     deployment_id: String,
     activation_revision: i64,
-    next_due_at: i64,
-    pending_job_id: Option<String>,
 }
 
 #[derive(FromRow)]
@@ -60,8 +88,6 @@ struct NewScope<'a> {
     id: &'a str,
     deployment_id: &'a str,
     activation_revision: i64,
-    next_due_at: i64,
-    pending_job_id: Option<&'a str>,
 }
 
 impl Recovery {
@@ -86,7 +112,7 @@ impl Recovery {
 
     /// Persist responsibility using a platform-authorized deployment activation.
     /// Repeated registration preserves the deadline. A newer activation changes
-    /// only activation provenance; pending reconciliation keeps its identity.
+    /// only activation provenance; pending duties keep their identities.
     ///
     /// # Errors
     /// Rejects stale or conflicting activations and unavailable platform storage.
@@ -118,53 +144,48 @@ impl Recovery {
     ///
     /// # Errors
     /// Reports unavailable or malformed platform storage.
-    pub async fn due(&self, after: Option<&AppId>) -> Result<Vec<AppId>, Error> {
+    pub async fn due(&self, kind: DutyKind, after: Option<&AppId>) -> Result<Vec<AppId>, Error> {
         self.queue
             .transact(|tx| async move {
-                let mut filter = recovery_scopes::next_due_at.lte(self.queue.clock.now().await?)?;
+                let mut filter = recovery_duties::kind
+                    .eq(kind.as_str())?
+                    .and(recovery_duties::next_due_at.lte(self.queue.clock.now().await?)?);
                 if let Some(after) = after {
-                    filter = filter.and(recovery_scopes::id.gt(after.as_str())?);
+                    filter = filter.and(recovery_duties::app_id.gt(after.as_str())?);
                 }
-                tx.entity::<recovery_scopes::Entity>()?
+                tx.entity::<recovery_duties::Entity>()?
                     .query()
                     .filter(filter)
-                    .order_by(recovery_scopes::id.asc())
+                    .order_by(recovery_duties::app_id.asc())
                     .limit(i64::from(self.page_size))?
-                    .all::<Scope>()
+                    .all::<Duty>()
                     .await?
                     .into_iter()
-                    .map(|row| AppId::parse(&row.id).map_err(|_| Error::Storage))
+                    .map(|row| {
+                        let app = AppId::parse(&row.app_id).map_err(|_| Error::Storage)?;
+                        row.validate(&app, kind)?;
+                        Ok(app)
+                    })
                     .collect()
             })
             .await
     }
 
-    /// Atomically publish due reconciliation and record its deadline and identity.
+    /// Atomically publish a due maintenance job and record its deadline and identity.
     /// An unsettled job is returned unchanged, including after manager restart or
     /// loss of all workers. Failed publication leaves responsibility due.
     ///
     /// # Errors
     /// Refuses an unregistered scope, exhausted time range and storage failures.
-    pub async fn dispatch(&self, app: &AppId) -> Result<Option<JobSpec>, Error> {
+    pub async fn dispatch(&self, app: &AppId, kind: DutyKind) -> Result<Option<JobSpec>, Error> {
         self.queue
             .transact(|tx| async move {
                 queue::lock_scope(&tx, app).await?;
-                let stored = load(&tx, app).await?.ok_or(Error::Denied)?;
-                if let Some(pending) = &stored.pending_job_id {
-                    let job = queue::load(&tx, app, pending)
-                        .await?
-                        .ok_or(Error::Storage)?;
-                    let spec = job.spec()?;
-                    if !matches!(spec.operation, JobOperation::Reconcile {}) {
-                        return Err(Error::Storage);
-                    }
-                    match job.state.as_str() {
-                        "ready" | "leased" => {
-                            return Ok(Some(spec));
-                        }
-                        "settled" => {}
-                        _ => return Err(Error::Storage),
-                    }
+                let provenance = load(&tx, app).await?.ok_or(Error::Denied)?;
+                validate_provenance(&provenance)?;
+                let stored = duties::load(&tx, app, kind).await?.ok_or(Error::Storage)?;
+                if let Some(pending) = stored.pending(&tx, app, kind).await? {
+                    return Ok(Some(pending));
                 }
                 let now = self.queue.clock.now().await?;
                 if stored.next_due_at > now {
@@ -174,17 +195,17 @@ impl Recovery {
                 let spec = JobSpec {
                     id: JobId::mint(),
                     app_id: app.clone(),
-                    operation: JobOperation::Reconcile {},
+                    operation: kind.operation(),
                     available_at: now.try_into().map_err(|_| Error::Storage)?,
                 };
                 self.queue.insert(&tx, &spec, now).await?;
                 let updated = tx
-                    .entity::<recovery_scopes::Entity>()?
+                    .entity::<recovery_duties::Entity>()?
                     .update_many(
-                        recovery_scopes::id.eq(app.as_str())?,
-                        recovery_scopes::next_due_at
+                        recovery_duties::id.eq(stored.id.as_str())?,
+                        recovery_duties::next_due_at
                             .set(next_due_at)?
-                            .and(recovery_scopes::pending_job_id.set(Some(spec.id.as_str()))?)?,
+                            .and(recovery_duties::pending_job_id.set(Some(spec.id.as_str()))?)?,
                     )
                     .await?;
                 if updated != 1 {
@@ -207,6 +228,7 @@ pub(crate) async fn ensure_in(
     let scopes = tx.entity::<recovery_scopes::Entity>()?;
     if let Some(stored) = load(tx, app).await? {
         let revision = validate_revision(&stored, deployment, activation_revision)?;
+        duties::validate_pair(tx, app).await?;
         if activation_revision > revision {
             let changed = scopes
                 .update_many(
@@ -225,17 +247,24 @@ pub(crate) async fn ensure_in(
             }
         }
     } else {
-        scopes
+        let created = scopes
             .insert::<_, Scope>(NewScope {
                 id: app.as_str(),
                 deployment_id: deployment.as_str(),
                 activation_revision: activation_revision.get(),
-                next_due_at: now,
-                pending_job_id: None,
             })
             .await?;
+        if created.id != app.as_str() {
+            return Err(Error::Storage);
+        }
+        duties::create_pair(tx, app, now).await?;
     }
     Ok(())
+}
+
+fn validate_provenance(stored: &Stored) -> Result<Revision, Error> {
+    DeploymentId::parse(&stored.deployment_id).map_err(|_| Error::Storage)?;
+    Revision::try_from(stored.activation_revision).map_err(|_| Error::Storage)
 }
 
 fn validate_revision(
@@ -243,8 +272,7 @@ fn validate_revision(
     deployment: &DeploymentId,
     activation_revision: Revision,
 ) -> Result<Revision, Error> {
-    DeploymentId::parse(&stored.deployment_id).map_err(|_| Error::Storage)?;
-    let revision = Revision::try_from(stored.activation_revision).map_err(|_| Error::Storage)?;
+    let revision = validate_provenance(stored)?;
     if activation_revision < revision
         || (activation_revision == revision && stored.deployment_id != deployment.as_str())
     {
@@ -271,18 +299,29 @@ pub(crate) async fn settled_page(
     outcome: JobOutcome,
     now: i64,
 ) -> Result<(), Error> {
-    if matches!(job.operation, JobOperation::Reconcile {})
-        && matches!(outcome, JobOutcome::Waiting {})
-    {
-        tx.entity::<recovery_scopes::Entity>()?
-            .update_many(
-                recovery_scopes::id
-                    .eq(job.app_id.as_str())?
-                    .and(recovery_scopes::pending_job_id.eq(Some(job.id.as_str()))?)
-                    .and(recovery_scopes::next_due_at.gt(now)?),
-                recovery_scopes::next_due_at.set(now)?,
-            )
-            .await?;
+    if !matches!(outcome, JobOutcome::Waiting {}) {
+        return Ok(());
+    }
+    let kind = match job.operation {
+        JobOperation::Reconcile {} => DutyKind::Reconcile,
+        JobOperation::Collect {} => DutyKind::Collect,
+        _ => return Ok(()),
+    };
+    let Some(duty) = duties::load(tx, &job.app_id, kind).await? else {
+        return Ok(());
+    };
+    if duty.pending_job_id.as_deref() != Some(job.id.as_str()) || duty.next_due_at <= now {
+        return Ok(());
+    }
+    let changed = tx
+        .entity::<recovery_duties::Entity>()?
+        .update_many(
+            recovery_duties::id.eq(duty.id.as_str())?,
+            recovery_duties::next_due_at.set(now)?,
+        )
+        .await?;
+    if changed != 1 {
+        return Err(Error::Storage);
     }
     Ok(())
 }

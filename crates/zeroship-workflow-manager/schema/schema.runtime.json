@@ -900,6 +900,88 @@
       },
       "indexes": []
     },
+    "recovery_duties": {
+      "fields": {
+        "id": {
+          "type": "string",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "id"
+          },
+          "primaryKey": true
+        },
+        "app_id": {
+          "type": "string",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "app_id"
+          }
+        },
+        "kind": {
+          "type": "string",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "kind"
+          }
+        },
+        "next_due_at": {
+          "type": "bigInt",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "next_due_at"
+          }
+        },
+        "pending_job_id": {
+          "type": "string",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "pending_job_id"
+          }
+        }
+      },
+      "options": {
+        "softDelete": false,
+        "versioning": false,
+        "strictness": "strict"
+      },
+      "indexes": [
+        {
+          "name": "recovery_duties_scope_key",
+          "fields": [
+            "app_id",
+            "kind"
+          ],
+          "unique": true
+        },
+        {
+          "name": "recovery_duties_due_idx",
+          "fields": [
+            "kind",
+            "next_due_at",
+            "app_id"
+          ]
+        }
+      ]
+    },
     "recovery_scopes": {
       "fields": {
         "id": {
@@ -935,27 +1017,6 @@
           "storage": {
             "valueColumn": "activation_revision"
           }
-        },
-        "next_due_at": {
-          "type": "bigInt",
-          "required": true,
-          "readable": true,
-          "filterable": true,
-          "sortable": true,
-          "projectable": true,
-          "storage": {
-            "valueColumn": "next_due_at"
-          }
-        },
-        "pending_job_id": {
-          "type": "string",
-          "readable": true,
-          "filterable": true,
-          "sortable": true,
-          "projectable": true,
-          "storage": {
-            "valueColumn": "pending_job_id"
-          }
         }
       },
       "options": {
@@ -963,15 +1024,7 @@
         "versioning": false,
         "strictness": "strict"
       },
-      "indexes": [
-        {
-          "name": "recovery_scopes_due_idx",
-          "fields": [
-            "next_due_at",
-            "id"
-          ]
-        }
-      ]
+      "indexes": []
     },
     "schedule_activations": {
       "fields": {

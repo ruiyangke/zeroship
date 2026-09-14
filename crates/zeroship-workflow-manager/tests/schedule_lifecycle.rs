@@ -15,8 +15,8 @@ mod support;
 mod native_schema;
 
 use native_schema::schema::{
-    deployment_holds, jobs, recovery_scopes, schedule_activations, schedule_disables,
-    schedule_occurrences, schedule_scopes, schedules,
+    deployment_holds, jobs, recovery_duties, recovery_scopes, schedule_activations,
+    schedule_disables, schedule_occurrences, schedule_scopes, schedules,
 };
 use std::{cell::RefCell, future::Future, pin::Pin, rc::Rc, time::Duration};
 use support::{Admin, Backend, Fixture};
@@ -35,7 +35,7 @@ use zeroship_workflow_calendar::{
 };
 use zeroship_workflow_manager::{
     driver::{Driver, Options as DriverOptions},
-    recovery::{Options as RecoveryOptions, Recovery},
+    recovery::{DutyKind, Options as RecoveryOptions, Recovery},
     retention::HoldClient,
     scheduling::{Options, Scheduler},
     Error, Queue,
@@ -109,8 +109,8 @@ row!(Scope, schedule_scopes, id:String, revision:i64, enabled:bool, activation_i
 row!(Disabled, schedule_disables, id:String, app_id:String, revision:i64, created_at:i64);
 row!(Occurrence, schedule_occurrences, id:String, app_id:String, schedule_id:String,
     revision:i64, scheduled_at:i64, run_id:String, job_id:String, activation_id:String);
-row!(RecoveryRow, recovery_scopes, id:String, deployment_id:String, activation_revision:i64,
-    next_due_at:i64, pending_job_id:Option<String>);
+row!(RecoveryRow, recovery_scopes, id:String, deployment_id:String, activation_revision:i64);
+row!(DutyRow, recovery_duties, id:String, app_id:String, kind:String, next_due_at:i64, pending_job_id:Option<String>);
 row!(Hold, deployment_holds, id:String, app_id:String, deployment_id:String, holder_id:String,
     deploy_hash:Option<String>, generation:i64, state:String);
 row!(Job, jobs, id:String, app_id:String, deployment_id:Option<String>, operation:String,
@@ -125,6 +125,7 @@ struct Snapshot {
     disables: Vec<Disabled>,
     occurrences: Vec<Occurrence>,
     recovery: Vec<RecoveryRow>,
+    duties: Vec<DutyRow>,
     holds: Vec<Hold>,
     jobs: Vec<Job>,
     activations: Vec<Activation>,
@@ -148,6 +149,7 @@ async fn snapshot(db: &Database) -> Snapshot {
         disables: rows!(schedule_disables, Disabled),
         occurrences: rows!(schedule_occurrences, Occurrence),
         recovery: rows!(recovery_scopes, RecoveryRow),
+        duties: rows!(recovery_duties, DutyRow),
         holds: rows!(deployment_holds, Hold),
         jobs: rows!(jobs, Job),
         activations: rows!(schedule_activations, Activation),
@@ -349,7 +351,11 @@ async fn restore(fixture: &Fixture) {
     assert_eq!(instants(&first.jobs), [1_250, 2_250]);
     assert!(first.more);
     let recovery = Recovery::new(queue.clone(), RecoveryOptions::default()).unwrap();
-    let recovery_job = recovery.dispatch(&app).await.unwrap().unwrap();
+    let recovery_job = recovery
+        .dispatch(&app, DutyKind::Reconcile)
+        .await
+        .unwrap()
+        .unwrap();
     let before = snapshot(&db).await;
     scheduler.disable(&disable(&app, 2)).await.unwrap();
     assert!(scheduler.due(None).await.unwrap().is_empty());
@@ -359,8 +365,13 @@ async fn restore(fixture: &Fixture) {
     assert_eq!(stopped.occurrences, before.occurrences);
     assert_eq!(stopped.holds, before.holds);
     assert_eq!(stopped.recovery, before.recovery);
+    assert_eq!(stopped.duties, before.duties);
     assert_eq!(
-        recovery.dispatch(&app).await.unwrap().unwrap(),
+        recovery
+            .dispatch(&app, DutyKind::Reconcile)
+            .await
+            .unwrap()
+            .unwrap(),
         recovery_job
     );
     assert_eq!(
@@ -390,7 +401,12 @@ async fn restore(fixture: &Fixture) {
     assert_eq!(resumed.calendars[0].activation_id, restored.id.as_str());
     assert_eq!(resumed.occurrences, before.occurrences);
     assert_eq!(
-        resumed.recovery[0].pending_job_id,
+        resumed
+            .duties
+            .iter()
+            .find(|duty| duty.kind == "reconcile")
+            .unwrap()
+            .pending_job_id,
         Some(recovery_job.id.as_str().into())
     );
     let second = reopened.dispatch(&app, &id).await.unwrap();

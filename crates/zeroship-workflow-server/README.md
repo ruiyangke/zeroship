@@ -15,18 +15,26 @@ database credentials. Each HTTP thread owns its bounded Control client.
 The [manager and job queue design](../../docs/proposals/2026-09-11-workflow-worker.md)
 defines manager-owned cron, durable timers and the metadata job queue. Native
 queue and placement operations share the manager's database and transaction
-handle. The server drives the native scheduling, recovery and retention loop on
-its own platform-bound queue. Normal deployment publication and the worker
-consumer still require cutover. Existing workers still discover due
+handle. The server drives native scheduling, reconciliation, collection and
+retention on its own platform-bound queue. Normal deployment publication and the
+worker consumer still require cutover. Existing workers still discover due
 customer work; that behavior does not define the target role split.
 
 The driver runs independently of HTTP threads and worker registration. Each pass
-visits bounded pages of due schedules, reconciliation obligations and unfinished
-deployment holds. A deadline shared by each lane's scans and candidate operations
-prevents a slow candidate from consuming the next lane's turn. Failed candidates
+visits bounded pages of due schedules, independent reconciliation and collection
+obligations, and unfinished deployment holds. A deadline shared by each lane's
+scans and candidate operations prevents a slow candidate from consuming the next
+lane's turn. Failed candidates
 remain durable and retry after a finite identity sweep; restarts preserve the
 queue's original occurrence and recovery identities. Shutdown stops new passes
 and joins the current bounded pass before releasing its clients.
+
+Collection duties publish code-free `Collect` jobs without a worker or deployment
+hold. They remain independent of failed reconciliation and retain their pending
+identity across process loss. A matching fresh `Waiting` settlement advances only
+that duty; exact receipt replay cannot accelerate a later page. `Completed`
+preserves periodic responsibility. Creator objects and collection cursors never
+enter the manager database.
 
 Control authorizes placement and queues typed pause, resume, cancellation or
 restart commands. Workers authenticate with their enrolled instance key, then
@@ -118,7 +126,7 @@ recovery instead of leaving a listener attached to a dead verifier connection.
 - `tests/http_policy.rs`: assignment-scoped policy, source failures and enrolled-key replacement during issuance.
 - `tests/control_policy.rs`: canonical Control migrations, source-role isolation, publication ordering and bounded caching.
 - `tests/http_schedules.rs`: Control-only publication, immutable replies and schedule replacement without workers.
-- `tests/driver.rs`: process-owned scheduling and retention recovery without workers.
+- `tests/driver.rs`: process-owned scheduling, collection and retention recovery without workers.
 - `tests/platform_schema.rs`: actual platform migrations and database authority.
 
 Run `cargo test -p zeroship-workflow-server` for the host contracts. Required
