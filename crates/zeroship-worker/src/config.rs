@@ -60,20 +60,30 @@ pub struct WorkerSettings {
     #[config(shared = CONTROL_KEY)]
     pub control_key: Secret<String>,
 
-    /// PKCS#8 PEM/DER FILE holding this process's own ed25519 service key.
+    /// JSON FILE holding this worker's deployment-unit ENROLLER credential: the
+    /// enroller's `wen_` id and its ed25519 PKCS#8 PEM private key, in one
+    /// document so the two cannot drift apart. The enroller is the one
+    /// credential that may enrol a worker instance.
     ///
-    /// A PATH, not a `Secret<String>`: the loader sniffs PEM against DER and
-    /// refuses a group- or world-readable file, and neither is possible once
-    /// the material has become an in-memory `String`.
+    /// It is spent on exactly one call - the boot-time enrolment, minted under
+    /// `svc/worker-enroller/<id>` - and every assertion after that is minted
+    /// under the instance key the process draws in memory. No worker holds a
+    /// `svc/worker` role key. Every worker of one unit mounts the same file, so
+    /// revoking the unit's enroller in Control retires all of them.
+    /// `crates/zeroship-core/src/service_peers.rs` (`load_worker_enroller`)
+    /// carries the shape and `docs/runbooks/worker-enrollers.md` the operator
+    /// procedure.
     ///
-    /// Empty (the default) REFUSES THE BOOT. A worker that came up without it
-    /// could neither mint an assertion nor verify a peer's, so it would bind
-    /// its port, pass a liveness probe and turn away every request that reached
-    /// it - a failure first visible to an end user. Absence never admits and no
-    /// longer defers: that is the difference between this and the shared
-    /// dispatch secret it replaced, whose empty value disabled the check.
-    #[config(name = "worker.service_key_file", default = PathBuf::new())]
-    pub service_key_file: Operational<PathBuf>,
+    /// A PATH, not a `Secret<String>`: the loader refuses a group- or
+    /// world-readable file, which is not possible once the material has become
+    /// an in-memory `String`.
+    ///
+    /// Empty (the default) REFUSES THE BOOT. A worker that cannot enrol has no
+    /// identity to verify dispatch or read an app's environment with, so it
+    /// would bind its port, pass a liveness probe and turn away every request
+    /// that reached it - a failure first visible to an end user.
+    #[config(name = "worker.enroller_file", default = PathBuf::new())]
+    pub enroller_file: Operational<PathBuf>,
 
     /// JWKS-shaped FILE holding the public key of every peer service.
     ///

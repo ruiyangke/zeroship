@@ -145,13 +145,14 @@ docker run --rm \
 
 The explicit paths are necessary because the CLI's repository-local defaults
 are `deploy/compose/secrets` and `deploy/compose/.env`. The command creates
-exactly eight files:
-
-`gateway-signing.pem` `auth-signing.pem` `broker-secret`
-`pairwise-salt` `refresh-hash-key` `refresh-idem-key`
+the private files listed in `docs/runbooks/docker-compose.md` ("Local secret
+provisioning") - among them this host's worker enroller credential,
+`worker-enroller.json` - plus the public `service-peers.json` and
+`worker-enrollers.json`. Adding a second worker host is
+`docs/runbooks/worker-enrollers.md`.
 
 It also appends the generated scalar values described below to `.env`. The
-directory is mode 0700 and the files are mode 0600 on Unix. Rerunning is safe:
+directory is mode 0700 and the private files are mode 0600 on Unix. Rerunning is safe:
 existing valid material is kept byte-for-byte, missing entries are created, and
 invalid or conflicting material causes an error instead of an implicit rotation.
 
