@@ -146,6 +146,7 @@ const fn worker_operation(operation: &JobOperation) -> Result<(), Error> {
     match operation {
         JobOperation::Advance { .. }
         | JobOperation::Fanout { .. }
+        | JobOperation::Propagate { .. }
         | JobOperation::Reconcile {}
         | JobOperation::Collect {} => Ok(()),
         JobOperation::Activate { .. }

@@ -9,7 +9,7 @@ use zeroship_core::{
     },
     workflow_jobs::{
         BroadcastId, Delivery, DeliveryLease, DeploymentId, JobId, JobOperation, JobOutcome,
-        JobSpec, ManagementCommand, Settlement, SettlementReceipt, SubmitJob,
+        JobSpec, ManagementCommand, PropagationId, Settlement, SettlementReceipt, SubmitJob,
     },
     workflow_schedules::ScheduleId,
 };
@@ -33,6 +33,7 @@ fn operations() -> Vec<(JobOperation, Value)> {
     let schedule = ScheduleId::mint();
     let deployment = DeploymentId::mint();
     let broadcast = BroadcastId::mint();
+    let propagation = PropagationId::mint();
     let mut operations = vec![
         (
             JobOperation::Activate {
@@ -68,6 +69,13 @@ fn operations() -> Vec<(JobOperation, Value)> {
                 revision: 1.try_into().unwrap(),
             },
             json!({"kind":"fanout", "broadcastId":broadcast, "revision":1}),
+        ),
+        (
+            JobOperation::Propagate {
+                propagation_id: propagation.clone(),
+                revision: 1.try_into().unwrap(),
+            },
+            json!({"kind":"propagate", "propagationId":propagation, "revision":1}),
         ),
         (JobOperation::Reconcile {}, json!({"kind":"reconcile"})),
         (JobOperation::Collect {}, json!({"kind":"collect"})),
@@ -718,6 +726,7 @@ fn workflow_operations_require_native_revisions_and_cron_identity() {
                     | JobOperation::Cron { .. }
                     | JobOperation::Management { .. }
                     | JobOperation::Fanout { .. }
+                    | JobOperation::Propagate { .. }
             )
         })
         .collect();
@@ -861,4 +870,64 @@ fn fanout_requires_broadcast_identity_and_rejects_customer_routing_state() {
         invalid[field] = json!("private");
         refuses::<JobOperation>(invalid);
     }
+}
+
+#[test]
+fn propagate_names_only_an_opaque_obligation_page() {
+    let obligation = PropagationId::mint();
+    let operation = JobOperation::Propagate {
+        propagation_id: obligation.clone(),
+        revision: 2.try_into().unwrap(),
+    };
+    let wire = round_trip(&operation);
+    assert_eq!(
+        wire,
+        json!({"kind":"propagate", "propagationId":obligation, "revision":2})
+    );
+    let job = JobSpec {
+        id: JobId::mint(),
+        app_id: AppId::mint(),
+        operation,
+        available_at: 0.try_into().unwrap(),
+    };
+    assert_eq!(job.deployment_id(), None);
+    for outcome in [JobOutcome::Completed {}, JobOutcome::Waiting {}] {
+        assert!(outcome.valid_for(&job.operation));
+    }
+    assert!(!JobOutcome::Management {
+        outcome: ManagementOutcome::NotFound {},
+    }
+    .valid_for(&job.operation));
+    for bad in [
+        Value::Null,
+        json!(1),
+        json!("wdp_"),
+        json!(BroadcastId::mint()),
+        json!(RunId::mint()),
+        json!(JobId::mint()),
+    ] {
+        let mut invalid = wire.clone();
+        invalid["propagationId"] = bad;
+        refuses::<JobOperation>(invalid);
+    }
+    for field in [
+        "kindOfObligation",
+        "cascade",
+        "notify",
+        "cursor",
+        "runId",
+        "generation",
+        "headId",
+        "parents",
+        "children",
+        "deploymentId",
+        "broadcastId",
+    ] {
+        let mut invalid = wire.clone();
+        invalid[field] = json!("private");
+        refuses::<JobOperation>(invalid);
+    }
+    let mut missing = wire;
+    missing.as_object_mut().unwrap().remove("propagationId");
+    refuses::<JobOperation>(missing);
 }

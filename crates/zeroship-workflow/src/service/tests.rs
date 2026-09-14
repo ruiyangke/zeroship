@@ -108,6 +108,7 @@ mod output_writes;
 mod payload_models;
 mod payloads;
 mod policy;
+mod propagation;
 pub(super) mod publication;
 mod reconciliation;
 mod requests;
@@ -200,6 +201,95 @@ async fn journal_update(
 
 fn storage_id() -> String {
     super::types::storage_id()
+}
+
+/// A live manager grant for any fixture job, delivered on attempt one.
+#[derive(Clone)]
+pub(super) struct JobGrant {
+    pub delivery: zeroship_core::workflow_jobs::Delivery,
+    pub expires: std::time::Instant,
+}
+impl JobGrant {
+    pub fn new(job: &zeroship_core::workflow_jobs::JobSpec) -> Self {
+        Self {
+            delivery: zeroship_core::workflow_jobs::Delivery {
+                job: job.clone(),
+                worker_id: zeroship_core::workflow_coordination::WorkerId::mint(),
+                assignment_revision: 1.try_into().unwrap(),
+                attempt: 1.try_into().unwrap(),
+                deadline: 0.try_into().unwrap(),
+            },
+            expires: std::time::Instant::now() + std::time::Duration::from_secs(30),
+        }
+    }
+    pub fn retry(&self) -> Self {
+        let mut retry = self.clone();
+        retry.delivery.attempt = (retry.delivery.attempt.get() + 1).try_into().unwrap();
+        retry.expires = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        retry
+    }
+}
+impl zeroship_core::workflow_jobs::JobLease for JobGrant {
+    fn delivery(&self) -> &zeroship_core::workflow_jobs::Delivery {
+        &self.delivery
+    }
+    fn remaining(&self) -> Option<std::time::Duration> {
+        self.expires
+            .checked_duration_since(std::time::Instant::now())
+            .filter(|remaining| !remaining.is_zero())
+    }
+}
+
+/// Committed propagation pages that have no receipt yet, in publication order.
+pub(super) async fn open_propagations(
+    scope: &super::AppWorkflows,
+) -> Vec<zeroship_core::workflow_jobs::JobSpec> {
+    use zeroship_core::workflow_jobs::JobOperation;
+    let mut after = None;
+    let mut open = Vec::new();
+    loop {
+        let page = scope.pending_jobs(after.as_ref(), 100).await.unwrap();
+        let Some(last) = page.last() else {
+            return open;
+        };
+        after = Some(last.id.clone());
+        for job in page {
+            if matches!(job.operation, JobOperation::Propagate { .. })
+                && scope.job_receipt(&job).await.unwrap().is_none()
+            {
+                open.push(job);
+            }
+        }
+    }
+}
+
+/// Deliver committed propagation pages and their successors the way the
+/// manager and consumer would, until none remain. Returns the committed pages.
+pub(super) async fn deliver_propagations_with(
+    scope: &super::AppWorkflows,
+    options: super::propagation::PropagationOptions,
+) -> Vec<super::delivery::JobReceipt> {
+    let mut receipts = Vec::new();
+    loop {
+        let open = open_propagations(scope).await;
+        if open.is_empty() {
+            return receipts;
+        }
+        for job in open {
+            receipts.push(
+                scope
+                    .propagation_job(&JobGrant::new(&job), options)
+                    .await
+                    .unwrap(),
+            );
+        }
+    }
+}
+
+pub(super) async fn deliver_propagations(
+    scope: &super::AppWorkflows,
+) -> Vec<super::delivery::JobReceipt> {
+    deliver_propagations_with(scope, super::propagation::PropagationOptions::default()).await
 }
 
 async fn sqlite_store(path: &Path) -> OrmStore {
@@ -1029,6 +1119,7 @@ async fn behavior_contract(store: Rc<OrmStore>) {
         )
         .await
         .unwrap();
+    assert_eq!(deliver_propagations(&scope).await.len(), 1);
     let resumed = service.poll(&worker).await.unwrap().unwrap();
     assert_eq!(resumed.invocation.run_id, parent.id);
     assert_eq!(
@@ -1179,6 +1270,8 @@ async fn review_contract(store: Rc<OrmStore>) {
         )
         .await
         .unwrap();
+    // The waiting parent is woken by the delivered notify page.
+    assert_eq!(deliver_propagations(&scope).await.len(), 1);
     let task = service.poll(&worker).await.unwrap().unwrap();
     service
         .complete(

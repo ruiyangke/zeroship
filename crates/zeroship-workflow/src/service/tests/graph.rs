@@ -223,18 +223,36 @@ async fn wake_contract(store: Rc<OrmStore>) {
     frontier::finish(&mut tx, &local, &run, RunState::Completed, None, None, now)
         .await
         .unwrap();
-    for (app_id, run_id, expected) in [
-        (&local, &current, Some(now)),
-        (&local, &last_page, Some(now)),
-        (&local, &old_generation, None),
-        (&local, &paused, None),
-        (&local, &unrelated, None),
-        (&foreign, &foreign_parent, None),
-    ] {
+    let parents = [
+        (&local, &current, true),
+        (&local, &last_page, true),
+        (&local, &old_generation, false),
+        (&local, &paused, false),
+        (&local, &unrelated, false),
+        (&foreign, &foreign_parent, false),
+    ];
+    // Completion records its notify obligation and wakes no parent inline.
+    for (app_id, run_id, _) in parents {
+        let run = app::lock_run(&mut tx, app_id, run_id).await.unwrap();
+        assert_eq!(run.optional_integer("due_at").unwrap(), None, "{run_id}");
+    }
+    tx.commit().await.unwrap();
+    let pages = deliver_propagations(&service.fixture_app(local.clone())).await;
+    assert!(pages.len() > 1);
+    let (last, earlier) = pages.split_last().unwrap();
+    assert_eq!(last.outcome, zeroship_core::workflow_jobs::JobOutcome::Completed {});
+    assert!(earlier
+        .iter()
+        .all(|page| page.outcome == zeroship_core::workflow_jobs::JobOutcome::Waiting {}));
+    assert!(deliver_propagations(&service.fixture_app(foreign.clone()))
+        .await
+        .is_empty());
+    let mut tx = service.begin().await.unwrap();
+    for (app_id, run_id, woken) in parents {
         let run = app::lock_run(&mut tx, app_id, run_id).await.unwrap();
         assert_eq!(
-            run.optional_integer("due_at").unwrap(),
-            expected,
+            run.optional_integer("due_at").unwrap().is_some(),
+            woken,
             "{run_id}"
         );
     }
@@ -309,7 +327,12 @@ async fn restart_contract(store: Rc<OrmStore>) {
     );
 }
 
-async fn seed_run(tx: &mut Transaction, app_id: &AppId, name: &str, key: Option<&str>) -> String {
+pub(super) async fn seed_run(
+    tx: &mut Transaction,
+    app_id: &AppId,
+    name: &str,
+    key: Option<&str>,
+) -> String {
     let id = typed_id::new_workflow_run_id();
     let deploy = app::active_deploy(tx, app_id).await.unwrap();
     let now = tx.now().await.unwrap();
@@ -330,7 +353,7 @@ async fn seed_run(tx: &mut Transaction, app_id: &AppId, name: &str, key: Option<
     id
 }
 
-async fn advance_generation(tx: &mut Transaction, app_id: &AppId, run: &str) {
+pub(super) async fn advance_generation(tx: &mut Transaction, app_id: &AppId, run: &str) {
     let source = crate::service::continuations::member(tx, app_id, run, 0)
         .await
         .unwrap();
@@ -365,15 +388,15 @@ fn child_checkpoint(workflow: &str, key: &str) -> StepCheckpoint {
         .unwrap()
 }
 
-struct Wait {
-    id: String,
-    run: String,
-    generation: i64,
-    ordinal: i64,
-    child: String,
+pub(super) struct Wait {
+    pub id: String,
+    pub run: String,
+    pub generation: i64,
+    pub ordinal: i64,
+    pub child: String,
 }
 
-async fn seed_waits(tx: &Transaction, app_id: &AppId, waits: &[Wait]) {
+pub(super) async fn seed_waits(tx: &Transaction, app_id: &AppId, waits: &[Wait]) {
     assert!(!waits.is_empty());
     let mut steps = Vec::new();
     for wait in waits {

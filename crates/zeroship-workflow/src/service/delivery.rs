@@ -223,7 +223,7 @@ impl Record {
                     && self.reconciliation.is_none()
                     && self.reconciliation_next.is_none()
             }
-            JobOperation::Collect {} | JobOperation::Fanout { .. } => {
+            JobOperation::Collect {} | JobOperation::Fanout { .. } | JobOperation::Propagate { .. } => {
                 self.run_id.is_none()
                     && self.reconciliation.is_none()
                     && self.reconciliation_next.is_none()
@@ -282,7 +282,7 @@ const fn valid_outcome(operation: &JobOperation, outcome: JobOutcome) -> bool {
             matches!(outcome, JobOutcome::Completed {} | JobOutcome::Waiting {})
         }
         JobOperation::Management { .. } => matches!(outcome, JobOutcome::Management { .. }),
-        JobOperation::Collect {} | JobOperation::Fanout { .. } => {
+        JobOperation::Collect {} | JobOperation::Fanout { .. } | JobOperation::Propagate { .. } => {
             matches!(outcome, JobOutcome::Completed {} | JobOutcome::Waiting {})
         }
     }
@@ -446,7 +446,8 @@ impl AppWorkflows {
             claim.validate_live()?;
             lease.check(self)?;
             task.remaining()?;
-            let control = ControlIntent::parse(&claim.run.text("control")?)?;
+            let control =
+                super::propagation::effective_control(&tx, &claim.app, &claim.run).await?;
             if !lease.policy.policy.admission || !lease.policy.policy.dispatch {
                 tx.commit().await?;
                 return Ok((
@@ -626,6 +627,12 @@ impl AppWorkflows {
         if matches!(job.operation, JobOperation::Fanout { .. }) {
             lock_app_state(&mut tx, &self.app).await?;
             let receipt = super::fanout::receipt(&tx, job).await?;
+            tx.commit().await?;
+            return Ok(receipt);
+        }
+        if matches!(job.operation, JobOperation::Propagate { .. }) {
+            lock_app_state(&mut tx, &self.app).await?;
+            let receipt = super::propagation::receipt(&tx, job).await?;
             tx.commit().await?;
             return Ok(receipt);
         }

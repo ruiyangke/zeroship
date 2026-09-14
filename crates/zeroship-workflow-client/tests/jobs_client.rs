@@ -25,7 +25,7 @@ use zeroship_core::{
     },
     workflow_jobs::{
         BroadcastId, Delivery, DeploymentId, JobId, JobOperation, JobOutcome, JobSpec,
-        ManagementCommand, Settlement, SettlementReceipt, SubmitJob,
+        ManagementCommand, PropagationId, Settlement, SettlementReceipt, SubmitJob,
     },
     workflow_schedules::ScheduleId,
 };
@@ -90,6 +90,16 @@ impl Fixture {
         let mut fixture = Self::new();
         fixture.spec.operation = JobOperation::Fanout {
             broadcast_id: BroadcastId::mint(),
+            revision: 1.try_into().unwrap(),
+        };
+        fixture.delivery.job = fixture.spec.clone();
+        fixture
+    }
+
+    fn propagation() -> Self {
+        let mut fixture = Self::new();
+        fixture.spec.operation = JobOperation::Propagate {
+            propagation_id: PropagationId::mint(),
             revision: 1.try_into().unwrap(),
         };
         fixture.delivery.job = fixture.spec.clone();
@@ -463,6 +473,10 @@ async fn incompatible_outcome_families_refuse_before_http() {
                 JobOperation::Collect {},
                 JobOperation::Fanout {
                     broadcast_id: BroadcastId::mint(),
+                    revision: 1.try_into().unwrap(),
+                },
+                JobOperation::Propagate {
+                    propagation_id: PropagationId::mint(),
                     revision: 1.try_into().unwrap(),
                 },
             ]
@@ -946,4 +960,21 @@ async fn fanout_replies_cannot_substitute_broadcast_or_revision() {
         }
     })
     .await;
+}
+
+#[compio::test]
+async fn propagation_publication_and_successors_preserve_remaining_authority() {
+    let fixture = Fixture::propagation();
+    let JobOperation::Propagate { propagation_id, .. } = &fixture.spec.operation else {
+        unreachable!()
+    };
+    let successor = JobSpec {
+        id: JobId::mint(),
+        operation: JobOperation::Propagate {
+            propagation_id: propagation_id.clone(),
+            revision: 2.try_into().unwrap(),
+        },
+        ..fixture.spec.clone()
+    };
+    exercise_job_methods(&fixture, vec![successor]).await;
 }

@@ -70,9 +70,9 @@ Lifecycle changes do not free an accepted request identity for reuse. Replaying
 a signal-token request returns the original token, whose expiration and
 revocation still apply. Receipt retirement requires explicit admission fences;
 the journal does not infer them from elapsed time.
-`service::publication` records immutable Advance and Fanout intents with creator
-transitions. Exact optional projections distinguish executable frontiers from
-code-free broadcast pages. `AppWorkflows::pending_jobs` and `publish_job` publish under a bound
+`service::publication` records immutable Advance, Fanout and Propagate intents
+with creator transitions. Exact optional projections distinguish executable
+frontiers from code-free broadcast and propagation pages. `AppWorkflows::pending_jobs` and `publish_job` publish under a bound
 app scope without holding a creator transaction across manager I/O. The entire
 returned specification must match before confirmation; retries preserve job
 identities, and pending intents retain deployment dependencies independently of
@@ -106,7 +106,7 @@ remain retryable. Historical activations keep their original input even after
 replacement or schedule removal. Receipt replay requires the exact occurrence
 linkage and performs no artifact I/O.
 `runner::delivery::DeliverySlot` routes activation, cron, management,
-reconciliation, collection and fanout jobs to bounded journal operations and advance jobs to the existing executor and
+reconciliation, collection, fanout and propagation jobs to bounded journal operations and advance jobs to the existing executor and
 payload pipeline. Its host supplies `JobTransport`;
 the authenticated worker client implements that metadata interface. The slot
 renews manager and creator authority together, retains interrupted execution
@@ -123,6 +123,19 @@ reconciliation publishes it. Signal delivery sequence determines consumption
 order; timestamps govern age and deadline eligibility. Direct signals and
 different topics merge by materialization order. Fanout performs no deployment
 lookup, storage access or creator execution.
+`service::propagation` carries cancellation cascades and parent notification.
+A settling generation that names cascading children, or a terminal head with
+waiting parents, records one obligation and its first Propagate intent instead
+of changing those runs inline. `AppWorkflows::propagation_job` applies one
+bounded page: cancellation intent and Advance intents for the next children, or
+wake-ups for the next idle waiting parents, committed with the obligation
+cursor, page record, job receipt and next page intent. A page never defers;
+exact historical pages replay after later pages advance. A notify page whose
+head was restarted completes as superseded without effects. An unfinished
+cascade obligation fences its source generation's cascading children:
+preparation, completion and renewal treat them as cancelled, so they cannot
+continue as new, and restarting one is a durable conflict until the obligation
+finishes.
 `runner::consumer::JobConsumer` claims manager jobs through that transport and
 shares bounded execution capacity across trusted `ConsumerScope` bindings. Each
 binding pairs an app handle with its own executor and creator storage. The host

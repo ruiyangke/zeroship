@@ -143,6 +143,7 @@ pub const fn operation_kind(
         JobOperation::Cron { .. } => "cron",
         JobOperation::Management { .. } => "management",
         JobOperation::Fanout { .. } => "fanout",
+        JobOperation::Propagate { .. } => "propagate",
         JobOperation::Reconcile {} => "reconcile",
         JobOperation::Collect {} => "collect",
     }

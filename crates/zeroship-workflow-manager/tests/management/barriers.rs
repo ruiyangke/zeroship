@@ -72,6 +72,37 @@ async fn prelimit_barriers(fixture: &Fixture) {
         .await
         .unwrap();
     assert!(host.queue.claim(&authority).await.unwrap().is_none());
+    // A propagation page executes nothing for this run, so the pending
+    // blocking commands cannot delay the cancellation it may be finishing.
+    let page = JobSpec {
+        operation: JobOperation::Propagate {
+            propagation_id: zeroship_core::workflow_jobs::PropagationId::mint(),
+            revision: 1.try_into().unwrap(),
+        },
+        ..ordinary(&app)
+    };
+    host.queue.submit(&page).await.unwrap();
+    let delivered = host
+        .queue
+        .claim(&authority)
+        .await
+        .unwrap()
+        .unwrap()
+        .delivery()
+        .clone();
+    assert_eq!(delivered.job, page);
+    host.queue
+        .settle(
+            &authority,
+            &Settlement {
+                delivery: delivered,
+                outcome: JobOutcome::Completed {},
+                successors: vec![],
+            },
+        )
+        .await
+        .unwrap();
+    assert!(host.queue.claim(&authority).await.unwrap().is_none());
     let ack = Settlement {
         delivery: first_delivery,
         outcome: JobOutcome::Management {

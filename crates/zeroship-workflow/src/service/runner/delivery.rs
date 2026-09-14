@@ -12,6 +12,7 @@ use crate::{
         delivery::{DeliveredTask, JobAcceptance, JobReceipt},
         fanout::FanoutOptions,
         policy::PolicyAuthority,
+        propagation::PropagationOptions,
         publication::JobPublisher,
         reconciliation::ReconciliationOptions,
         AppWorkflows, ControlIntent,
@@ -99,6 +100,7 @@ pub struct DeliveryOptions {
     pub reconciliation: ReconciliationOptions,
     pub collection: CollectionOptions,
     pub fanout: FanoutOptions,
+    pub propagation: PropagationOptions,
 }
 
 impl DeliveryOptions {
@@ -106,6 +108,7 @@ impl DeliveryOptions {
         self.reconciliation.validate()?;
         self.collection.validate()?;
         self.fanout.validate()?;
+        self.propagation.validate()?;
         if self.execution_timeout.is_zero()
             || self.operation_timeout.is_zero()
             || self.retry_delay.is_zero()
@@ -280,6 +283,17 @@ impl<T: JobTransport> DeliverySlot<T> {
                 Some(receipt) => self.acknowledge(receipt, &lease).await,
                 None => Ok(DeliveryOutcome::Deferred),
             };
+        }
+        if matches!(
+            lease.delivery().job.operation,
+            JobOperation::Propagate { .. }
+        ) {
+            let receipt = bounded(
+                self.options.execution_timeout,
+                app.propagation_job(&lease, self.options.propagation),
+            )
+            .await?;
+            return self.acknowledge(receipt, &lease).await;
         }
         let authority = app.capture_policy().authority().cloned();
         let accepted = app.accept_job(&lease).await?;

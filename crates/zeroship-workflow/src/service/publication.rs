@@ -20,7 +20,9 @@ use std::future::Future;
 use zeroship_core::{
     app_id::AppId,
     workflow_coordination::{AssignedScope, FailureCode, Revision, RunId},
-    workflow_jobs::{BroadcastId, DeploymentId, JobId, JobOperation, JobSpec, SubmitJob},
+    workflow_jobs::{
+        BroadcastId, DeploymentId, JobId, JobOperation, JobSpec, PropagationId, SubmitJob,
+    },
 };
 use zeroship_data_orm::{
     orm::{Entity, FindOptions, FromRow, Insertable, Operation, Output},
@@ -89,6 +91,8 @@ struct Intent {
     frontier_revision: Option<i64>,
     broadcast_id: Option<String>,
     broadcast_revision: Option<i64>,
+    propagation_id: Option<String>,
+    propagation_revision: Option<i64>,
     available_at: i64,
     specification: String,
     created_at: i64,
@@ -96,6 +100,19 @@ struct Intent {
 }
 
 impl Intent {
+    const fn frontier_absent(&self) -> bool {
+        self.deploy_id.is_none()
+            && self.run_id.is_none()
+            && self.generation.is_none()
+            && self.frontier_revision.is_none()
+    }
+    const fn broadcast_absent(&self) -> bool {
+        self.broadcast_id.is_none() && self.broadcast_revision.is_none()
+    }
+    const fn propagation_absent(&self) -> bool {
+        self.propagation_id.is_none() && self.propagation_revision.is_none()
+    }
+
     fn job(&self, app: &AppId) -> Result<JobSpec, WorkflowServiceError> {
         let job: JobSpec = decode(&self.specification)?;
         if job.app_id != *app
@@ -116,8 +133,8 @@ impl Intent {
                     && self.run_id.as_deref() == Some(run_id.as_str())
                     && self.generation == Some(i64::from(*generation))
                     && self.frontier_revision == Some(revision.get())
-                    && self.broadcast_id.is_none()
-                    && self.broadcast_revision.is_none()
+                    && self.broadcast_absent()
+                    && self.propagation_absent()
             }
             JobOperation::Fanout {
                 broadcast_id,
@@ -125,10 +142,17 @@ impl Intent {
             } => {
                 self.broadcast_id.as_deref() == Some(broadcast_id.as_str())
                     && self.broadcast_revision == Some(revision.get())
-                    && self.deploy_id.is_none()
-                    && self.run_id.is_none()
-                    && self.generation.is_none()
-                    && self.frontier_revision.is_none()
+                    && self.frontier_absent()
+                    && self.propagation_absent()
+            }
+            JobOperation::Propagate {
+                propagation_id,
+                revision,
+            } => {
+                self.propagation_id.as_deref() == Some(propagation_id.as_str())
+                    && self.propagation_revision == Some(revision.get())
+                    && self.frontier_absent()
+                    && self.broadcast_absent()
             }
             _ => false,
         };
@@ -148,6 +172,8 @@ impl Intent {
             frontier_revision: None,
             broadcast_id: None,
             broadcast_revision: None,
+            propagation_id: None,
+            propagation_revision: None,
             available_at: job.available_at.get(),
             specification: encode(job)?,
             created_at: now,
@@ -171,6 +197,13 @@ impl Intent {
             } => {
                 intent.broadcast_id = Some(broadcast_id.as_str().to_owned());
                 intent.broadcast_revision = Some(revision.get());
+            }
+            JobOperation::Propagate {
+                propagation_id,
+                revision,
+            } => {
+                intent.propagation_id = Some(propagation_id.as_str().to_owned());
+                intent.propagation_revision = Some(revision.get());
             }
             _ => return Err(invalid()),
         }
@@ -329,6 +362,17 @@ pub(super) async fn advance(
     run: &str,
     now: i64,
 ) -> Result<(), WorkflowServiceError> {
+    advance_job(tx, app, run, now).await.map(|_| ())
+}
+
+/// [`advance`] that also returns the recorded runnable intent, if any, so a
+/// delivered page can retain its exact successor specification.
+pub(super) async fn advance_job(
+    tx: &Transaction,
+    app: &AppId,
+    run: &str,
+    now: i64,
+) -> Result<Option<JobSpec>, WorkflowServiceError> {
     let changed = tx
         .database()
         .collection(runs::Entity::COLLECTION)?
@@ -343,7 +387,7 @@ pub(super) async fn advance(
             "workflow frontier revision exhausted".into(),
         ));
     }
-    record(tx, app, run, now).await
+    record_job(tx, app, run, now).await
 }
 
 /// Record the final runnable frontier in the same transaction as its cause.
@@ -490,6 +534,47 @@ pub(super) async fn fanout(
         .await?;
     let operation = JobOperation::Fanout {
         broadcast_id: broadcast.clone(),
+        revision,
+    };
+    if let Some(existing) = existing.first() {
+        let job = existing.job(app)?;
+        if job.operation != operation {
+            return Err(invalid());
+        }
+        return Ok(job);
+    }
+    let job = JobSpec {
+        id: JobId::mint(),
+        app_id: app.clone(),
+        operation,
+        available_at: now.try_into().map_err(|_| invalid())?,
+    };
+    insert(tx, &job, now).await?;
+    Ok(job)
+}
+
+/// Record one propagation page intent. The scoped unique projection returns the
+/// same immutable job when an equal page was already recorded.
+pub(super) async fn propagate(
+    tx: &Transaction,
+    app: &AppId,
+    propagation: &PropagationId,
+    revision: Revision,
+    now: i64,
+) -> Result<JobSpec, WorkflowServiceError> {
+    let existing = tx
+        .database()
+        .entity::<publications::Entity>()?
+        .find::<Intent>(
+            publications::app_id
+                .eq(app.as_str())?
+                .and(publications::propagation_id.eq(Some(propagation.as_str()))?)
+                .and(publications::propagation_revision.eq(Some(revision.get()))?),
+            one(),
+        )
+        .await?;
+    let operation = JobOperation::Propagate {
+        propagation_id: propagation.clone(),
         revision,
     };
     if let Some(existing) = existing.first() {
