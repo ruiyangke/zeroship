@@ -113,11 +113,16 @@ cargo xtask test auth
 
 Worker tests also own their PostgreSQL and Redis containers. Run
 `cargo xtask test worker` to build the migration host and test the package.
-
-The remaining shell suites still need their configured development backends:
+The billing suite does the same for control, migration, metering, and stream
+tests, including their PostgreSQL and Redpanda fixtures:
 
 ```bash
-tests/run_billing_suite.sh      # migrate + test zeroship-control and zeroship-migrate-server
+cargo xtask test billing
+```
+
+The remaining system suites use their configured development backends:
+
+```bash
 tests/sweep_test_databases.sh   # reclaim the test databases no branch can ask
                                 # for. Dry run unless --apply; never FORCE.
 ./tests/golden_path.sh          # build a creator app locally and deploy it

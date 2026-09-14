@@ -592,23 +592,6 @@ jobs:
           set -o pipefail
           cargo test -p zeroship-data-v8 --lib tests::sqlite::
           cargo test -p zeroship-data-orm
-      # The migration service's suite: the service's own targets, the two live-PG
-      # session proofs (`smoke_apply_pg`, `author_and_apply_pg`) and the
-      # `CompioPgSession` unit test. Without a database the PG proofs skip
-      # internally, so this stays a DB-free step; the live half runs in the billing
-      # gate, which exports PG_TEST_URL.
-      #
-      # THE PACKAGE IS NAMED WITH NO TARGET FILTER ON PURPOSE. That is what makes a
-      # test target that stops COMPILING a hard failure here rather than a silent
-      # absence - a `--test <name>` filter would only build the one named, and a
-      # sibling could rot unnoticed against engine API drift.
-      #
-      # NOT CHECKED ANYWHERE, and named here because its absence is otherwise
-      # invisible: the DB-free guard comparing db/migrations-ts against
-      # db/released_migrations.tsv. No CI job holds it.
-      - run: |
-          set -o pipefail
-          cargo test -p zeroship-migrate-server
       # compio-postgres' `tls` feature has never been compiled by any workflow,
       # let alone run: `tls` appeared ZERO times in .github/ until this step.
       # The default feature set is empty, so `cargo test --workspace` above
@@ -660,108 +643,23 @@ jobs:
       - name: Clippy across workspace targets and features
         run: cargo clippy --workspace --all-targets --all-features
 
-  # Required control-plane and migration-service database verification. The suite
-  # provisions a migrated PostgreSQL database and runs ordinary crate tests,
-  # including billing, deployment, identity, registry and workflow behavior.
-  # These targets require no opt-in feature.
-  #
+  # Required billing and migration verification. Rust fixtures own PostgreSQL
+  # and Redpanda, while xtask builds the migration host before running the crates.
   # The job name is kept because branch protection references it.
-  #
-  # Billing still reads the generated backend overlay through
-  # `tests/lib/test_config.sh`. Provisioning must write that file before the
-  # suite starts, even when the CI service container is already healthy.
-  # Auth uses owned Rust fixtures and does not need this overlay.
-  #
-  # `--check` is the arm that ADOPTS a server rather than starting one: it skips
-  # the `docker compose up` entirely and only probes the addresses it is given,
-  # then writes the overlay naming them. That is exactly the relationship a
-  # `services:` container needs - the runner owns the server's lifecycle, this
-  # step owns the file that names it. Without `--check` the script would try to
-  # bind compose's postgres to 5440, which the service container already holds.
-  #
-  # The PG_* values moved from the test step to job level so BOTH steps see
-  # them. They are the provisioner's documented INPUTS, and the step below has
-  # to have them or it would write the provisioner's own defaults instead.
-  #
-  # DO NOT READ `zs_test_config_assert_agrees` AS A GUARD IN THIS JOB. It
-  # compares the caller's PG_* against the overlay, and here one job-level `env`
-  # feeds both the step that writes the overlay and the step that checks it, so
-  # the two cannot disagree and the comparison is vacuous. What actually catches
-  # a `ports:` line drifting from PG_PORT is the provisioner's own probe: it
-  # waits 60s for a server on the address it was handed and then fails with
-  # "PostgreSQL never came up on localhost:<port>". Loud, but from a different
-  # mechanism than the one the harness advertises.
-  #
-  # The generated overlay must name an existing database even when the billing
-  # runner selects its own migrated database through PG_TEST_URL.
   billing-gate:
     runs-on: ubuntu-latest
-    services:
-      postgres:
-        image: postgres:17
-        env:
-          POSTGRES_USER: postgres
-          POSTGRES_PASSWORD: zeroship
-          POSTGRES_DB: zeroship
-        ports:
-          - 5440:5432
-        options: >-
-          --health-cmd "pg_isready -U postgres"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 20
-    env:
-      PG_HOST: localhost
-      PG_PORT: 5440
-      PG_USER: postgres
-      PG_PASS: zeroship
-      PG_DB: zeroship
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      # Same reason as the `rust` job: run_billing_suite.sh builds
-      # zeroship-control, which depends on zeroship-runtime, which
-      # `include_str!`s three gitignored SDK dist files a fresh checkout lacks.
       - uses: actions/setup-node@v4
         with:
           node-version: 22
       - uses: pnpm/action-setup@v4
       - run: pnpm install --frozen-lockfile
-      - run: pnpm --filter @zeroship/migrate build
       - run: pnpm build
-      - name: Install psql client
-        run: sudo apt-get update && sudo apt-get install -y postgresql-client
-      # Real Kafka-wire broker so run_billing_suite.sh exercises the real stream
-      # path (rewind/seek + the wired producer->recompute->spend e2e), not just
-      # the in-process memory transport. Launched as a step (not a `services:`
-      # entry) because it needs an explicit --advertise-kafka-addr that GitHub
-      # service containers cannot set. Mirrors the docker-compose `redpanda`.
-      - name: Start Redpanda
-        run: |
-          docker run -d --name redpanda -p 19092:19092 \
-            docker.redpanda.com/redpandadata/redpanda:latest \
-            redpanda start --overprovisioned --smp 1 --memory 512M --reserve-memory 0M \
-            --node-id 0 --check=false \
-            --kafka-addr external://0.0.0.0:19092 \
-            --advertise-kafka-addr external://127.0.0.1:19092 \
-            --set redpanda.auto_create_topics_enabled=true
-          for i in $(seq 1 40); do
-            if docker exec redpanda rpk cluster health --exit-when-healthy; then exit 0; fi
-            sleep 3
-          done
-          echo "redpanda failed to become healthy" >&2; docker logs redpanda; exit 1
-      # Write deploy/ops/zeroship.test.toml for the service containers above.
-      # Without this the next step exits 2 before it runs a single test; see the
-      # comment on this job. `--check` provisions nothing - the runner already
-      # started both servers - it probes them and writes the file that names
-      # them.
-      - name: Write the test overlay naming this job's service containers
-        run: bash tests/provision_test_backends.sh --check
-      - name: Run the live-database gate
-        run: tests/run_billing_suite.sh
-        env:
-          REDPANDA_BROKERS: 127.0.0.1:19092
+      - name: Run billing tests with owned services
+        run: cargo xtask test billing
 
   # Auth packages own their PostgreSQL, SMTP and HTTP fixtures.
   auth-gate:

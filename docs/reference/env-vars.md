@@ -649,8 +649,7 @@ worker - whose TOML overlay source was removed as a credential boundary - ended
 up with no interface at all for the billing stream. They are now four canonical
 `metering.*` identities in the generated table above, so the worker and the
 gateway each take `--metering-brokers`, `ZEROSHIP_METERING_BROKERS` and
-`[metering] brokers` (and the three siblings). `REDPANDA_BROKERS` survives only
-as a TEST-ONLY name, listed below, that gates the real-broker integration tests.
+`[metering] brokers` (and the three siblings).
 
 ---
 
@@ -752,7 +751,7 @@ why `tests/test_only_env_gate.sh` arm 2 now checks this section's claim against
 the tree rather than leaving it to a reader.
 
 CI also sets `PG_CONTAINER` `PG_HOST` `PG_PORT` `PG_USER` `PG_PASS`
-`POSTGRES_USER` `POSTGRES_PASSWORD` `REDPANDA_BROKERS` `ZS_FRESHNESS_STRICT`.
+`POSTGRES_USER` `POSTGRES_PASSWORD` `ZS_FRESHNESS_STRICT`.
 `PG_HOST`/`PG_PORT`/`PG_USER`/`PG_PASS` are INPUTS to
 `tests/provision_test_backends.sh`, which writes what they resolve to into the
 overlay. Mailer tests own their PostgreSQL and Mailpit containers through

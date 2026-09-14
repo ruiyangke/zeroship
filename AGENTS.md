@@ -182,8 +182,9 @@ crates/
 
 **Database verification is required.** Worker tests own PostgreSQL containers
 and run in ordinary `cargo test`. `cargo xtask test worker` builds the migration
-host and runs the package. Control and migration-service tests still use
-`tests/run_billing_suite.sh` to provision their databases and run the suites.
+host and runs the package. Control and migration-service tests own PostgreSQL,
+and their stream contracts own Redpanda. `cargo xtask test billing` builds the
+migration host and runs the control, migration, metering, and stream packages.
 Database verification must never be an opt-in feature.
 `zeroship-data-orm` and
 `zeroship-data-v8` include PostgreSQL tests in ordinary `cargo test`. Do not

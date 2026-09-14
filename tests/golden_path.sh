@@ -4339,10 +4339,8 @@ gp_close_step
 # while one too low only costs a single assertion of slack. The asymmetry decides
 # it. The next clean run has only to confirm 27, not re-derive it.
 #
-# 24 IS THEREFORE THE LOWER OF THE TWO LEGITIMATE CONFIGURATIONS, which is where
-# a floor has to sit - the same reasoning run_billing_suite.sh applies to its
-# REDPANDA_BROKERS measurement. CI runs the no-token arm, so CI sits exactly on
-# the floor.
+# The floor sits under the configuration that exercises fewer cases. CI runs
+# that same no-token arm.
 #
 # NO HEADROOM, deliberately, and this differs from the cargo-based gates. Their
 # totals are DISCOVERED (feature resolution, optional deps, host capabilities)
