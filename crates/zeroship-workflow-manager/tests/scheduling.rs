@@ -120,6 +120,11 @@ case!(
     postgres_disabling_schedules_retains_pending_occurrences,
     disabled_schedules
 );
+case!(
+    sqlite_selection_reports_the_current_activation_and_its_readiness,
+    postgres_selection_reports_the_current_activation_and_its_readiness,
+    selection
+);
 
 async fn host(fixture: &Fixture) -> (Scheduler, Queue) {
     let queue = Queue::connect(
@@ -1007,4 +1012,69 @@ async fn orphan_cron(fixture: &Fixture) {
     )
     .await;
     assert_eq!(claim(&queue, &owner).await.job, cron);
+}
+
+async fn selection(fixture: &Fixture) {
+    let (scheduler, queue) = host(fixture).await;
+    let app = AppId::mint();
+    assert_eq!(scheduler.selection(&app).await, Ok(None));
+    queue.register_scope(&app).await.unwrap();
+    assert_eq!(scheduler.selection(&app).await, Ok(None));
+
+    let first = registration(&app, vec![descriptor("first", ScheduleCatchUp::Skip)]);
+    let first_job = prepare_activate(&scheduler, &first, 3).await;
+    let selected = scheduler.selection(&app).await.unwrap().unwrap();
+    assert_eq!(selected.revision.get(), 3);
+    assert!(selected.enabled);
+    let activation = selected.activation.unwrap();
+    assert_eq!(activation.job, first_job);
+    assert_eq!(activation.deployment_id, first.deployment_id);
+    assert_eq!(activation.revision.get(), 3);
+    assert!(!activation.ready, "unsettled activation is not dispatch ready");
+
+    let owner = assignment(&app);
+    let delivery = claim(&queue, &owner).await;
+    assert_eq!(delivery.job, first_job);
+    settle(&queue, &owner, &delivery, JobOutcome::Completed {}).await;
+    assert!(
+        scheduler
+            .selection(&app)
+            .await
+            .unwrap()
+            .unwrap()
+            .activation
+            .unwrap()
+            .ready
+    );
+
+    let second = registration(&app, vec![]);
+    let second_job = prepare_activate(&scheduler, &second, 4).await;
+    let selected = scheduler.selection(&app).await.unwrap().unwrap();
+    assert_eq!(selected.revision.get(), 4);
+    let activation = selected.activation.unwrap();
+    assert_eq!(activation.job, second_job);
+    assert_eq!(activation.deployment_id, second.deployment_id);
+    assert!(!activation.ready);
+
+    scheduler
+        .disable(&zeroship_core::workflow_schedules::DisableSchedules {
+            app_id: app.clone(),
+            revision: 5.try_into().unwrap(),
+        })
+        .await
+        .unwrap();
+    let selected = scheduler.selection(&app).await.unwrap().unwrap();
+    assert_eq!(selected.revision.get(), 5);
+    assert!(!selected.enabled);
+    assert_eq!(selected.activation.unwrap().job, second_job);
+
+    // A selection that disagrees with its disable history is not reported.
+    patch(
+        fixture,
+        "schedule_scopes",
+        value!({"id":app.as_str()}),
+        value!({"enabled":true}),
+    )
+    .await;
+    assert_eq!(scheduler.selection(&app).await, Err(Error::Storage));
 }
