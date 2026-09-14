@@ -644,11 +644,14 @@ if [ -n "$EDGE_APP_ID" ]; then
     # --- 9.2: body exceeding MAX_COMPRESSED_BYTES (256 MiB) returns 413 ---
     # Cap is enforced PRE-decompression, so raw bytes (no zstd needed)
     # trigger it. /dev/zero is fine — the streaming helper counts bytes.
+    # The deploy command id is validated before the body is read, so the
+    # request carries one; a refused upload records no receipt under it.
     echo "  -- 9.2: body over 256 MiB cap"
     big_body=$(mktemp --suffix=.bin)
     dd if=/dev/zero of="$big_body" bs=1M count=257 status=none
     if http POST "http://localhost:$ZEROSHIP_CONTROL_PORT/api/apps/$EDGE_APP_ID/deploy" \
         -H "Authorization: Bearer $ADMIN_TOKEN" -H 'Content-Type: application/x-zship' \
+        -H 'Idempotency-Key: dcm_0000000002e4nenowz3qmamtd' \
         --data-binary "@$big_body" \
         && [ "$HTTP_STATUS" = "413" ] && printf '%s' "$HTTP_BODY" | grep -q "deploy too large"; then
         pass "9.2: oversized body rejected with 413"
