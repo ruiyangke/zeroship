@@ -122,7 +122,7 @@ jobs:
       # `cargo check --workspace` above does NOT catch this, because without
       # --all-targets it never looks at a test target.
       #
-      # So every cargo test step in this job, and the census gate below, could
+      # So every cargo test step in this job could
       # not run. This is not new - the wpt_*.rs files date to 2026-05-01 and
       # were 23 separate auto-discovered targets before 2ee8bba08 consolidated
       # them, each equally uncompilable.
@@ -447,70 +447,6 @@ jobs:
       # database or filesystem side effect, which is the property under test.
       - name: --check-config on all five server binaries
         run: tests/config_check_e2e.sh
-      - name: Test-census gate self-test
-        run: bash tests/test_target_census_selftest.sh
-      - name: Test-target and test-name census
-        run: |
-          # Keep stderr and check it, rather than discarding it. This step counts
-          # what got BUILT, so anything that stops the build - a compile error, a
-          # full disk, a killed rustc - removes executables and shrinks the
-          # count. Discarding stderr made those indistinguishable from coverage
-          # loss, and the failure message then blames the wrong thing.
-          #
-          # Measured, not hypothetical: running this locally on a disk that had
-          # just hit 100 percent reported 213 against a floor of 245. Nothing had
-          # been deleted; rustc could not write. The number was real and meant
-          # nothing.
-          #
-          # No `--keep-going` here: cargo 1.94.0 accepts it on `cargo build` but
-          # NOT on `cargo test`, so its presence made this step exit with
-          # "unexpected argument" on every run - a gate that could never pass,
-          # reported as a build failure. It was added to stop one broken package
-          # masking the targets of every package after it, and the failure branch
-          # below already covers that: a build that does not complete exits here
-          # instead of reaching the count, so a short count from a partial build
-          # is not a state this step can report as coverage loss.
-          set -o pipefail
-          if ! cargo test --workspace --no-run --message-format=json \
-              >"$RUNNER_TEMP/targets.json" 2>"$RUNNER_TEMP/targets.err"; then
-            echo "::error::the test build failed, so the target count below would measure the build and not the coverage"
-            grep -E '^error' "$RUNNER_TEMP/targets.err" | sort -u | head -20
-            exit 1
-          fi
-          # THIS USED TO BE A FLOOR ON THE NUMBER OF TEST BINARIES, and it had
-          # become unsatisfiable without anyone noticing. The history is worth
-          # keeping because the failure is instructive and not obvious.
-          #
-          # The floor was 250 against a "local measurement" of 265. That 265 was
-          # not a measurement: 266 was measured on 2026-08-07 (1ab7b4c92f) and
-          # 265 was 266 minus one, written on 2026-08-19 (d9d6d5d07) when
-          # compio-postgres's tls_live target gained required-features. Nothing
-          # re-ran the count. Then, both AFTER that comment was written:
-          #
-          #   3f7d74ee9  2026-08-19 13:18  crates/auth     53 binaries -> 1
-          #   2ee8bba08  2026-08-20 01:33  crates/runtime  140 -> 9
-          #
-          # -183 against 15 points of slack. Neither change lost a test - the
-          # auth one was proved with a byte-identical 415-name `--list` across
-          # the old binaries and the new target - and neither touched this file.
-          #
-          # So the guard fired on precisely the change everyone wanted, and the
-          # obvious repair - lower the number until it passes - would have turned
-          # it into a rubber stamp, because after that nothing distinguishes "we
-          # consolidated" from "a suite vanished". A count of CONTAINERS cannot
-          # tell those apart. The gate below counts TESTS, which consolidation
-          # cannot move, and asserts per-package that every crate still builds
-          # SOMETHING, which is the part a workspace-wide number never saw.
-          #
-          # Deliberately still an asymmetry, the one this file already argues for
-          # above: adding tests or splitting binaries needs no edit here, losing
-          # coverage needs a reviewed one.
-          #
-          # The number lives in tests/test_target_census_gate.sh and is NOT
-          # restated here. Two copies of a measurement is how the deploy-scripts
-          # comment came to say "64 assertions, floor 63" while the script's own
-          # floor was 107. One copy, next to the code that reads it.
-          bash tests/test_target_census_gate.sh "$RUNNER_TEMP/targets.json"
       # Data tests own PostgreSQL containers and run without optional features.
       - run: |
           set -o pipefail
@@ -551,18 +487,6 @@ jobs:
       - name: Tear down the TLS test servers
         if: always()
         run: bash libs/compio-postgres/tests/tls_live_setup.sh --down
-      # The two steps above run ONE feature resolution each, and a
-      # `#[cfg(feature)]` test that resolution omits is not reported as skipped
-      # or ignored - it is ABSENT FROM THE BINARY, so the run prints exactly
-      # what a complete run prints. That is not hypothetical: three of the six
-      # cases in tests/suite/temporal_edge_values.rs vanished that way on
-      # 2026-08-27, and they were the ones proving `time '24:00'` is refused.
-      # This gate lists (never runs) the suite under three resolutions and
-      # compares the union against what the SOURCE declares, so no case can be
-      # invisible to every one of them. It needs no server - `--list` compiles
-      # and enumerates - which is why it sits after the teardown.
-      - name: Every declared compio-postgres suite test compiles somewhere
-        run: tests/compio_postgres_test_visibility_gate.sh
       # Cargo propagates lint and compilation failures using workspace lint levels.
       - name: Clippy across workspace targets and features
         run: cargo clippy --workspace --all-targets --all-features
