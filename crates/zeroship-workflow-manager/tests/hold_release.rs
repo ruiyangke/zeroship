@@ -127,13 +127,13 @@ async fn activate(
     app: &AppId,
     deployment: &Published,
     revision: i64,
-    schedules: Vec<ScheduleDescriptor>,
+    calendar: Vec<ScheduleDescriptor>,
 ) -> JobSpec {
     scheduler
         .prepare(&RegisterSchedules {
             app_id: app.clone(),
             deployment_id: deployment.id.clone(),
-            schedules,
+            schedules: calendar,
         })
         .await
         .unwrap();
@@ -272,10 +272,7 @@ async fn calendar(fixture: &Fixture, app: &AppId) -> (String, String, Option<i64
     )
 }
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "one app moves through replacement, archive and restore"
-)]
+/// One app moves through replacement, archive and restore.
 async fn release_policy(fixture: &Fixture) {
     let catalog = Catalog::new(fixture).await;
     let queue = queue(fixture, catalog.client()).await;

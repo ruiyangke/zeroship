@@ -284,6 +284,10 @@ fn resume_after_process_death(configured_app: Option<&AppId>, native_dev: bool) 
 }
 
 /// The running host writes the same file; retry only its brief lock contention.
+#[expect(
+    clippy::future_not_send,
+    reason = "the reader owns the compio runtime it blocks on"
+)]
 async fn contended<T>(
     mut operation: impl AsyncFnMut() -> Result<T, zeroship_data_orm::error::DbError>,
 ) -> T {
@@ -347,7 +351,7 @@ impl Platform {
         }
     }
 
-    fn rows(&self, database: &Database, collection: &str, filter: Record) -> Vec<Record> {
+    fn rows(&self, database: &Database, collection: &str, filter: &Record) -> Vec<Record> {
         self.runtime.block_on(async {
             let output = contended(async || {
                 database
@@ -368,7 +372,7 @@ impl Platform {
         let mut activations = self.rows(
             &self.manager,
             "schedule_activations",
-            value!({"app_id":self.app.as_str()}),
+            &value!({"app_id":self.app.as_str()}),
         );
         activations.sort_by_key(|row| row["revision"].as_i64());
         activations
@@ -382,7 +386,7 @@ impl Platform {
         self.rows(
             &self.catalog,
             "app_deploy_holds",
-            value!({"app_id":self.app.as_str(),"deploy_id":deployment}),
+            &value!({"app_id":self.app.as_str(),"deploy_id":deployment}),
         )
         .iter()
         .map(|row| {
@@ -400,7 +404,7 @@ impl Platform {
         let intent = self.rows(
             &self.manager,
             "deployment_holds",
-            value!({"app_id":self.app.as_str(),"deployment_id":deployment}),
+            &value!({"app_id":self.app.as_str(),"deployment_id":deployment}),
         );
         let queue = HoldScope::for_queue(self.app.clone());
         let ledger: Vec<_> = self
