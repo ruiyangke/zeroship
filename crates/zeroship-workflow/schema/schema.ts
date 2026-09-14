@@ -111,6 +111,15 @@ export function workflowSchema(namespace) {
     created_at: integer(), completed_at: t.bigInt(),
   }, ["app_id", "id"], [appFk("job_receipts")]);
   index("job_receipts", "run", ["app_id", "run_id"]);
+  create("collection_pages", {
+    ...identity(), plan: text(), next_index: integer(),
+  }, ["app_id", "id"], [
+    appFk("collection_pages"),
+    fk("collection_page_receipt", ["app_id", "id"], "job_receipts", ["app_id", "id"]),
+  ]);
+  create("collection_scans", {
+    revision: integer(), after_id: t.text(), upper_id: t.text(), observed_at: t.bigInt(),
+  }, ["id"], [fk("collection_scan_app", ["id"], "app_state", ["app_id"])]);
   create("activations", {
     ...identity(), deploy_id: text(), revision: integer(),
   }, ["app_id", "revision"], [
@@ -234,6 +243,9 @@ export function workflowSchema(namespace) {
         job_publications: ["id", "app_id", "run_id", "deploy_id"],
         deployment_holds: ["deploy_id"],
         job_receipts: ["id", "app_id", "run_id"],
+        collection_pages: ["id", "app_id"],
+        collection_scans: ["id", "after_id", "upper_id"],
+        payloads: ["id", "app_id"],
         activations: ["id", "app_id", "deploy_id"],
         activation_scopes: ["id", "activation_id"],
         management_receipts: ["id", "app_id", "run_id", "request_id"],

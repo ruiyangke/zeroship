@@ -8,6 +8,7 @@
 use super::{CancelOnDrop, ExecutionGuard, TaskExecution, TaskExecutor};
 use crate::{
     service::{
+        collection::CollectionOptions,
         delivery::{DeliveredTask, JobAcceptance, JobReceipt},
         policy::PolicyAuthority,
         publication::JobPublisher,
@@ -95,11 +96,13 @@ pub struct DeliveryOptions {
     pub operation_timeout: Duration,
     pub retry_delay: Duration,
     pub reconciliation: ReconciliationOptions,
+    pub collection: CollectionOptions,
 }
 
 impl DeliveryOptions {
     pub(super) fn validate(self) -> Result<(), WorkflowServiceError> {
         self.reconciliation.validate()?;
+        self.collection.validate()?;
         if self.execution_timeout.is_zero()
             || self.operation_timeout.is_zero()
             || self.retry_delay.is_zero()
@@ -254,6 +257,14 @@ impl<T: JobTransport> DeliverySlot<T> {
         ) {
             let receipt =
                 bounded(self.options.execution_timeout, app.management_job(&lease)).await?;
+            return self.acknowledge(receipt, &lease).await;
+        }
+        if matches!(lease.delivery().job.operation, JobOperation::Collect {}) {
+            let receipt = bounded(
+                self.options.execution_timeout,
+                app.collect_job(&lease, self.options.collection),
+            )
+            .await?;
             return self.acknowledge(receipt, &lease).await;
         }
         let authority = app.capture_policy().authority().cloned();

@@ -1567,7 +1567,8 @@ does not permit platform SQL to inspect the journal or declare the app drained.
 
 ### Delivered payload collection
 
-This contract is being implemented across the manager, creator journal and server.
+The manager duties, creator handler and server driver implement this contract.
+The production worker and local CLI still require consumer composition.
 
 Collection starts with abandoned payload preparations and deletion tombstones.
 The manager retains a periodic Collect duty independently of reconciliation.
@@ -2147,6 +2148,14 @@ exact deployment retention and lost-acknowledgement coverage. Generated schemas
 match the migration DSL, and changed code has no Clippy diagnostics. The
 production host cutover remains separate from these native handlers.
 
+Creator collection verification covers fixed-cutoff paging, original policy and
+delivery deadlines, failed or malformed items, concurrent deletion confirmation,
+receipt rollback and exact replay without live storage. Native PostgreSQL and
+SQLite cases verify recovery when deletion succeeds but its reply or database
+confirmation fails. Referenced history stays intact and tombstones resweep late
+uploads. Delivery-slot and separate-database consumer tests verify collection
+without executable work; the shared payload regression suite also passes.
+
 Started restart validates the locked run against its current generation's
 deployment, then checks that deployment's registration and existing held journal
 retention. An inactive available deployment remains usable; source inconsistency
@@ -2176,7 +2185,7 @@ column-scoped platform grants and server readiness checks are composed into
 authoritative acceptance. Management request anchors, per-run ordering and
 provisional barriers share the queue transaction; barrier and command eligibility
 filters precede candidate limiting. Linked management settlement and creator
-management delivery are implemented; the collection handler remains pending.
+management delivery and bounded payload collection are implemented.
 
 Native management contracts exercise source changes during hold acquisition,
 competing acceptance, original-request replay after catalog changes, damaged
@@ -2469,9 +2478,11 @@ empty queue or expired worker as permission to release held code or retire an
 ingress responsibility. Explicit release still checks all manager dependencies
 under the app lock. Automatic held-deployment release policy, capacity activation,
 and ordinary worker/CLI consumer composition remain to integrate.
-The consumer accepts activation, cron, advance, reconciliation and management
-jobs; the queue claim is not filtered by operation. Collection delivery must
-land before switching a host that receives those jobs to this loop.
+The consumer accepts activation, cron, advance, reconciliation, management and
+collection jobs. Collection uses the assigned creator journal and object store
+without loading an executable, creating a task or publishing unrelated intents.
+The queue claim is not filtered by operation. Event fanout still needs its
+closed operation and delivered consumer before joining this protocol.
 The server injects an authenticated Control hold client into its native queue.
 Production deployment registration and activation publication still require
 host integration. The normal Control deployment transaction needs a durable
@@ -2526,7 +2537,7 @@ archive and retains the last valid deployment when current sources fail to build
 | Enrollment bootstrap and revocation | A revoked worker cannot regain equivalent authority by automatic enrollment. Finalize bootstrap trust, replacement authorization and registry freshness with auth ownership. |
 | Placement eligibility and capacity provider | Only platform-authorized app/zone combinations may be assigned. Select the trusted eligibility source and host adapter's durable request/progress contract. |
 | Archive acknowledgement | The direct Control source provides bounded convergence under original observation validity. Define any stronger execution-quiescence evidence separately from calendar acknowledgement or lease expiry. |
-| Complete job envelopes | Operation-specific deployment prerequisites, frozen manager restart targets and linked management outcomes are implemented. Complete collection, event/fanout and continuation cursors with their delivered consumers. |
+| Complete job envelopes | Operation-specific deployment prerequisites, frozen manager restart targets and linked management outcomes are implemented. Collection now has durable pages and receipts. Complete event/fanout and continuation cursors with their delivered consumers. |
 | Normal deployment publication | Bind activation revision issuance to a stable deploy command and immutable body. Artifact identity alone cannot distinguish a delayed retry from an intentional rollback. Compose mutable deployment side effects with command acceptance, connect archive/stage/restore to the durable handoff, and keep the calendar's activation origin explicit across delayed delivery. |
 | Scope retirement | Define ingress epoch closure and durable drain evidence. Registration expiry and empty polling cannot retire unpublished-work responsibility. |
 | Receipt retirement | Define admissibility fences and publication/settlement watermarks before deleting job deduplication state. Retain it until that proof exists. |
@@ -2548,9 +2559,9 @@ outside the queue cutover.
 - Connect normal deployment registration, activation and queue holds to manager
   scheduling through a durable Control publication intent; connect lifecycle
   commands to native disable/restore and remove the standalone scheduler host.
-- Finish creator collection job acceptance with durable pages and receipts before
-  enabling its deliveries. Delivered management and its lifecycle fences are
-  implemented and verified.
+- Add bounded topic fanout and dependency continuation delivery. Creator collection
+  pages, receipts and shared payload deletion fences are implemented, alongside
+  delivered management and its lifecycle fences.
 - Complete the ingress responsibility handshake before admitting new work through
   the production host; retain pending work through outage and restart.
 - Compose the bounded worker consumer, payload/retention jobs and trusted runtime

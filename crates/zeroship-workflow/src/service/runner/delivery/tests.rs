@@ -1,5 +1,6 @@
 use super::*;
 mod activation;
+mod collection;
 mod consumer;
 mod cron;
 mod management;
@@ -239,7 +240,7 @@ impl TaskExecution for Execution {
 }
 
 struct Fixture {
-    _directory: tempfile::TempDir,
+    directory: tempfile::TempDir,
     deployments: deployments::Deployments,
     service: WorkflowService,
     app: AppWorkflows,
@@ -306,7 +307,7 @@ impl Fixture {
             expires: Instant::now() + Duration::from_secs(20),
         };
         Self {
-            _directory: directory,
+            directory,
             deployments,
             service,
             app,
@@ -328,6 +329,7 @@ impl Fixture {
                 operation_timeout: Duration::from_secs(5),
                 retry_delay: Duration::from_millis(5),
                 reconciliation: ReconciliationOptions::default(),
+                collection: crate::service::collection::CollectionOptions::default(),
             },
         )
         .unwrap()
@@ -365,6 +367,7 @@ async fn unrepresentable_retry_delay_is_rejected_before_execution() {
             operation_timeout: Duration::from_secs(1),
             retry_delay: Duration::MAX,
             reconciliation: ReconciliationOptions::default(),
+            collection: crate::service::collection::CollectionOptions::default(),
         },
     );
     assert!(matches!(
@@ -372,35 +375,6 @@ async fn unrepresentable_retry_delay_is_rejected_before_execution() {
         Err(WorkflowServiceError::InvalidRequest(_))
     ));
     assert_eq!(fixture.probe.starts.get(), 0);
-}
-
-#[compio::test]
-async fn unsupported_collection_never_executes_or_settles() {
-    use zeroship_core::workflow_jobs::JobId;
-    let fixture = Fixture::new(AppPolicy::default()).await;
-    let operations = [JobOperation::Collect {}];
-    let mut slot = fixture.slot(Duration::from_secs(5));
-    for operation in operations {
-        let mut lease = fixture.lease.clone();
-        lease.delivery.job.id = JobId::mint();
-        lease.delivery.job.operation = operation;
-        let job = lease.delivery.job.clone();
-        assert!(matches!(
-            Box::pin(slot.run(&fixture.app, lease)).await,
-            Err(WorkflowServiceError::InvalidRequest(_))
-        ));
-        assert!(fixture.app.job_receipt(&job).await.unwrap().is_none());
-    }
-    assert_eq!(fixture.probe.starts.get(), 0);
-    assert_eq!(fixture.metadata.renewals.get(), 0);
-    assert!(fixture.metadata.requests.borrow().is_empty());
-    assert!(matches!(
-        Box::pin(slot.run(&fixture.app, fixture.lease.clone()))
-            .await
-            .unwrap(),
-        DeliveryOutcome::Settled { .. }
-    ));
-    assert_eq!(fixture.probe.starts.get(), 1);
 }
 
 #[compio::test]

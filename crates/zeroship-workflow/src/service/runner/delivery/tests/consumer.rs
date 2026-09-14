@@ -100,6 +100,7 @@ fn options(slots: usize) -> ConsumerOptions {
             operation_timeout: Duration::from_secs(1),
             retry_delay: Duration::from_millis(5),
             reconciliation: ReconciliationOptions::default(),
+            collection: crate::service::collection::CollectionOptions::default(),
         },
     }
 }
@@ -797,6 +798,71 @@ async fn native_manager_delivery_and_lost_ack_finish_through_separate_orm_databa
 }
 
 #[compio::test]
+async fn manager_collect_duty_settles_without_publishing_or_executing_creator_work() {
+    let mut fixture = Fixture::new(AppPolicy::default()).await;
+    super::collection::attach_storage(&mut fixture);
+    assert!(!super::collection::has_task(&fixture).await);
+    let manager = NativeManager::new(&fixture).await;
+    let recovery = zeroship_workflow_manager::recovery::Recovery::new(
+        manager.database.queue.clone(),
+        zeroship_workflow_manager::recovery::Options::default(),
+    )
+    .unwrap();
+    recovery
+        .ensure(
+            fixture.app.app_id(),
+            fixture.job.deployment_id().unwrap(),
+            1.try_into().unwrap(),
+        )
+        .await
+        .unwrap();
+    let collect = recovery
+        .dispatch(
+            fixture.app.app_id(),
+            zeroship_workflow_manager::recovery::DutyKind::Collect,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(collect.deployment_id().is_none());
+    let mut consumer =
+        JobConsumer::new(manager.clone(), manager.worker.clone(), options(1)).unwrap();
+    consumer
+        .bindings()
+        .replace(vec![scope(
+            &fixture,
+            manager.scope.assignment_revision.get(),
+        )])
+        .unwrap();
+    finished(consumer.run_until(async {
+        manager.completion.recv_async().await.unwrap();
+    }))
+    .await;
+    assert_eq!(fixture.probe.starts.get(), 0);
+    assert!(!super::collection::has_task(&fixture).await);
+    assert_eq!(
+        fixture
+            .app
+            .job_receipt(&collect)
+            .await
+            .unwrap()
+            .unwrap()
+            .outcome,
+        JobOutcome::Completed {}
+    );
+    assert_eq!(
+        fixture.app.pending_jobs(None, 1).await.unwrap(),
+        [fixture.job.clone()]
+    );
+    assert!(manager.claim(&manager.scope).await.unwrap().is_none());
+    let requests = manager.requests.borrow();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0], requests[1]);
+    assert_eq!(requests[0].delivery.job, collect);
+    assert!(requests[0].successors.is_empty());
+}
+
+#[compio::test]
 async fn manager_reconciliation_publishes_creator_work_before_the_consumer_executes_it() {
     let fixture = Fixture::new(AppPolicy::default()).await;
     let manager = NativeManager::new(&fixture).await;
@@ -814,7 +880,10 @@ async fn manager_reconciliation_publishes_creator_work_before_the_consumer_execu
         .await
         .unwrap();
     let reconciliation = recovery
-        .dispatch(fixture.app.app_id())
+        .dispatch(
+            fixture.app.app_id(),
+            zeroship_workflow_manager::recovery::DutyKind::Reconcile,
+        )
         .await
         .unwrap()
         .unwrap();

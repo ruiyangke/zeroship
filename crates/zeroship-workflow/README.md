@@ -103,8 +103,8 @@ Overlap skips retain a rejected receipt; capacity and unavailable prerequisites
 remain retryable. Historical activations keep their original input even after
 replacement or schedule removal. Receipt replay requires the exact occurrence
 linkage and performs no artifact I/O.
-`runner::delivery::DeliverySlot` routes activation, cron, management and
-reconciliation jobs to bounded journal operations and advance jobs to the existing executor and
+`runner::delivery::DeliverySlot` routes activation, cron, management,
+reconciliation and collection jobs to bounded journal operations and advance jobs to the existing executor and
 payload pipeline. Its host supplies `JobTransport`;
 the authenticated worker client implements that metadata interface. The slot
 renews manager and creator authority together, retains interrupted execution
@@ -320,6 +320,14 @@ streamed content and promotes references in the completion transaction.
 Replay generations, child results and continuation inputs retain explicit
 reference edges. Collection fences uploads and retries failed deletions;
 tombstones remain discoverable when an interrupted remote write arrives late.
+`AppWorkflows::collect_job` accepts the manager's independent collection duty.
+Each delivered page preserves a fixed observation cutoff and upper identity,
+reserves item progress before storage I/O, and retains an exact receipt. Failed
+items remain eligible for a later sweep without trapping the page's remaining
+items. Deletion confirms the original tombstone fence and cannot extend a newer
+collector's retention deadline. Collection keeps referenced payloads, lifecycle
+history, receipts and deployment holds; completing a sweep does not certify that
+the app has drained. Committed pages replay without live policy or storage.
 Payload contracts run against local storage and Testcontainers S3.
 App handles expose `read_step_output` for a completed
 named occurrence in the run's current generation. The service resolves that
@@ -331,6 +339,7 @@ Task hosts instead use `runner::TaskPayloadReader`: it captures the assignment's
 journal, resolves named occurrences in that snapshot and reads referenced
 objects through the live task lease. `WorkerTasks` implements the
 payload read/write contract alongside the local task protocol.
+Until local host composition uses the manager's delivery loop,
 `runner::WorkflowWorker` drives bounded task slots and expired
 payload collection on its host's compio thread. Background discovery selects
 only host-assigned apps before applying batch limits; customer journal rows
