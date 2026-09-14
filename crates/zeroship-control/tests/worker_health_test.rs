@@ -108,15 +108,38 @@ fn fresh_instance_id() -> String {
 /// with a derived address. The test writes this row directly rather than driving
 /// the enrolment endpoint, because what is under test is the monitor's treatment
 /// of a row, not how the row came to exist.
+///
+/// Option 1A froze `worker_instances.enroller_id` NOT NULL with a restrict FK
+/// to `zeroship.worker_enrollers`, so this helper seeds a fresh enroller row
+/// per instance rather than driving the enrolment endpoint for that too -
+/// what monitor behaviour this file tests does not depend on enroller identity
+/// at all.
 async fn insert_active_instance(pg: &compio_postgres::Client, id: &str, port: i32) {
     let ring_key = vec![7u8; 32];
     let public_key = vec![9u8; 32];
     let host: std::net::IpAddr = "127.0.0.1".parse().expect("loopback parses");
+    let enroller_id = format!(
+        "wen_{}",
+        &uuid::Uuid::new_v4().simple().to_string()[..25]
+    );
+    // Distinct per call (not a fixed literal): worker_enrollers.public_key is
+    // UNIQUE, and this helper may run more than once in a test.
+    let mut enroller_public_key = vec![0u8; 32];
+    let id_bytes = id.as_bytes();
+    let copy_len = id_bytes.len().min(32);
+    enroller_public_key[..copy_len].copy_from_slice(&id_bytes[..copy_len]);
+    pg.execute(
+        "INSERT INTO zeroship.worker_enrollers (id, public_key, execution_zone_id, status) \
+         VALUES ($1, $2, 'ezn_default000000000000000000', 'active')",
+        &[&enroller_id, &enroller_public_key],
+    )
+    .await
+    .expect("insert worker enroller");
     pg.execute(
         "INSERT INTO zeroship.worker_instances \
-         (id, ring_key, public_key, advertise_host, advertise_port, status) \
-         VALUES ($1, $2, $3, $4, $5, 'active')",
-        &[&id, &ring_key, &public_key, &host, &port],
+         (id, ring_key, public_key, advertise_host, advertise_port, status, enroller_id) \
+         VALUES ($1, $2, $3, $4, $5, 'active', $6)",
+        &[&id, &ring_key, &public_key, &host, &port, &enroller_id],
     )
     .await
     .expect("insert worker instance");
