@@ -237,10 +237,11 @@ pub const APP_PREFIX: &str = "app";
 /// Immutable normal app deployment identity.
 pub const DEPLOYMENT_PREFIX: &str = "dep";
 
-/// Normal deploy command identity. The client sends it as the deploy request's
-/// `Idempotency-Key`; retries reuse it and a new deploy, including a rollback to
-/// an earlier artifact, mints another. Minted only by
-/// [`crate::deploy_command::DeployCommandId::mint`].
+/// Normal deploy command identity.
+///
+/// The client sends it as the deploy request's `Idempotency-Key`; retries reuse
+/// it and a new deploy, including a rollback to an earlier artifact, mints
+/// another. Minted only by [`crate::deploy_command::DeployCommandId::mint`].
 pub const DEPLOY_COMMAND_PREFIX: &str = "dcm";
 
 /// Control's lifecycle publication intent: one row per app lifecycle revision,
@@ -248,6 +249,7 @@ pub const DEPLOY_COMMAND_PREFIX: &str = "dcm";
 pub const LIFECYCLE_INTENT_PREFIX: &str = "lci";
 
 /// Generate a new lifecycle intent ID: `lci_{base36(uuidv7)}`.
+#[must_use]
 pub fn new_lifecycle_intent_id() -> String {
     generate(LIFECYCLE_INTENT_PREFIX)
 }
