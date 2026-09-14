@@ -257,6 +257,23 @@ pub struct ControlSettings {
     #[config(name = "control.worker_enrolment_ports", default = String::new())]
     pub worker_enrolment_ports: Operational<String>,
 
+    /// JSON FILE naming every worker enroller this deployment provisions: one
+    /// id, execution-zone name and Ed25519 public key per deployment unit.
+    ///
+    /// Read once at startup and only ever ADDED from: an enroller Control has
+    /// not recorded is inserted active, a recorded one is left as it is - a
+    /// REVOKED one stays revoked however long its line stays in the file - and
+    /// a file that disagrees with any recorded enroller refuses the boot and
+    /// writes nothing. `crates/zeroship-control/src/worker_enrolment.rs`
+    /// (`import_enrollers`) carries the shape; `docs/runbooks/worker-enrollers.md`
+    /// carries the operator procedure, revocation included.
+    ///
+    /// Empty (the default) imports nothing. Every enrolment then refuses,
+    /// because no enroller resolves, unless the enrollers were recorded by an
+    /// earlier boot.
+    #[config(name = "control.worker_enrollers_file", default = PathBuf::new())]
+    pub worker_enrollers_file: Operational<PathBuf>,
+
     /// Retention horizon (months) for the append-only audit tables
     /// `zeroship.app_audit` + `zeroship.authz_decisions`. Rows older than this
     /// are swept by the in-process retention cron.

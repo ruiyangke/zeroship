@@ -24,8 +24,9 @@ pub mod workflow_runtime;
 #[allow(missing_debug_implementations)]
 pub struct WorkerConfig {
     /// Enrolled instance identity used to verify dispatch and authenticate
-    /// control-plane reads. Startup consumes the operator's role key during
-    /// enrolment before constructing this configuration.
+    /// control-plane reads. Startup spends the deployment unit's enroller key
+    /// on enrolment before constructing this configuration; no worker holds a
+    /// `svc/worker` role key.
     pub service_auth: Arc<zeroship_core::service_peers::ServiceAuth>,
     pub control_url: String,
     pub control_key: String,

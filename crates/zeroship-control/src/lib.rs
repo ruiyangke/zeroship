@@ -473,10 +473,10 @@ pub struct AppState {
     /// fixture built without keys cannot accidentally exercise an open door.
     ///
     /// It carries the ROLE keys and nothing else. An assertion whose issuer
-    /// names a worker INSTANCE is verified against a key resolved from
-    /// `zeroship.worker_instances` instead - see
-    /// `internal::check_service_auth` - because no peer document has ever
-    /// held one.
+    /// names an INSTANCE - a worker instance or a worker enroller - is verified
+    /// against a key resolved from `zeroship.worker_instances` or
+    /// `zeroship.worker_enrollers` instead, and the two worker roles are
+    /// refused at role arity outright - see `internal::verify_service_caller`.
     pub service_auth: Arc<zeroship_core::service_peers::ServiceAuth>,
     pub registry: Registry,
     pub env_store: EnvStore,

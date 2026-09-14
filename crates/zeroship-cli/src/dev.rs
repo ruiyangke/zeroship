@@ -57,8 +57,10 @@ const WEAK_LITERALS: &[&str] = &[
 ];
 
 pub(crate) fn cmd_dev(args: &[String]) -> Result<(), String> {
-    if args.get(2).map(String::as_str) != Some("init") {
-        return Err(dev_init_usage().to_string());
+    match args.get(2).map(String::as_str) {
+        Some("init") => {}
+        Some("enroller") => return cmd_dev_enroller(args),
+        _ => return Err(format!("{}\n{}", dev_init_usage(), dev_enroller_usage())),
     }
 
     let options = parse_init_options(args)?;
@@ -93,6 +95,117 @@ pub(crate) fn cmd_dev(args: &[String]) -> Result<(), String> {
 
 fn dev_init_usage() -> &'static str {
     "Usage: zeroship dev init [--secrets-dir=PATH] [--env-file=PATH]"
+}
+
+fn dev_enroller_usage() -> &'static str {
+    "Usage: zeroship dev enroller --credential=PATH --import-file=PATH [--zone=NAME]"
+}
+
+/// Provision ONE more worker deployment unit: mint its enroller, write the
+/// credential its workers mount, and add its public half to Control's import
+/// file.
+///
+/// `zeroship dev init` provisions the enroller of the host it runs on; this is
+/// how an operator adds a unit - another host or pool - to the same
+/// deployment. The credential is created, never replaced: a unit's key is
+/// never rotated in place, because Control refuses a changed key for a
+/// recorded id. The import file is extended, never rewritten: every entry
+/// already in it is kept exactly as it was.
+fn cmd_dev_enroller(args: &[String]) -> Result<(), String> {
+    let mut credential = None;
+    let mut import_file = None;
+    let mut zone = None;
+    // Both spellings `dev init` takes: `--name=value` and `--name value`.
+    let mut index = 3;
+    while index < args.len() {
+        let arg = &args[index];
+        let (name, inline_value) = arg
+            .split_once('=')
+            .map_or((arg.as_str(), None), |(name, value)| (name, Some(value)));
+        let slot = match name {
+            "--credential" => &mut credential,
+            "--import-file" => &mut import_file,
+            "--zone" => &mut zone,
+            "--help" => return Err(dev_enroller_usage().to_string()),
+            _ => return Err(format!("unknown argument {arg:?}. {}", dev_enroller_usage())),
+        };
+        if slot.is_some() {
+            return Err(format!("{name} was supplied more than once"));
+        }
+        let value = if let Some(value) = inline_value {
+            value.to_owned()
+        } else {
+            index += 1;
+            args.get(index)
+                .filter(|value| !value.starts_with("--"))
+                .cloned()
+                .ok_or_else(|| format!("{name} requires a value"))?
+        };
+        if value.is_empty() {
+            return Err(format!("{name} requires a non-empty value"));
+        }
+        *slot = Some(value);
+        index += 1;
+    }
+    let (Some(credential), Some(import_file)) = (credential, import_file) else {
+        return Err(dev_enroller_usage().to_string());
+    };
+    let zone = zone.unwrap_or_else(|| {
+        zeroship_core::worker_enrollers::DEFAULT_EXECUTION_ZONE.to_owned()
+    });
+    let enroller_id = provision_enroller(Path::new(&credential), Path::new(&import_file), &zone)?;
+    eprintln!("zeroship dev enroller: provisioned enroller {enroller_id} in zone {zone:?}");
+    eprintln!("  created {credential} (mount it into the unit's workers as ZEROSHIP_WORKER_ENROLLER_FILE)");
+    eprintln!("  added   {enroller_id} to {import_file} (restart Control to import it)");
+    Ok(())
+}
+
+/// Mint one enroller into `credential` and `import_file`, returning its id.
+///
+/// The credential is created FIRST and removed again if the import file
+/// cannot be written, so a failed run leaves neither a key Control will never
+/// learn of nor an import entry whose private half nobody holds.
+fn provision_enroller(credential: &Path, import_file: &Path, zone: &str) -> Result<String, String> {
+    reject_symlink(import_file, "worker enroller import file")?;
+    if std::fs::symlink_metadata(credential).is_ok() {
+        return Err(format!(
+            "{} already exists and was not replaced; a unit's enroller key is never rotated \
+             in place - provision a new enroller at a new path instead",
+            credential.display()
+        ));
+    }
+    let mut records = if import_file.exists() {
+        read_worker_enroller_import(import_file)?
+    } else {
+        Vec::new()
+    };
+    let bytes = generate_worker_enroller()?;
+    let (enroller_id, public_key) = parse_worker_enroller(&bytes)?;
+    if records
+        .iter()
+        .any(|record| record.id == enroller_id || record.public_key == public_key)
+    {
+        return Err("a freshly minted enroller collided with a recorded one; re-run".to_owned());
+    }
+    records.push(zeroship_core::worker_enrollers::EnrollerRecord {
+        id: enroller_id.clone(),
+        zone: zone.to_owned(),
+        public_key,
+    });
+    // Validate the document we are about to write with the reader's parser, so
+    // a zone name Control would refuse is refused here, before any file exists.
+    let document = zeroship_core::worker_enrollers::render_enroller_import(&records);
+    zeroship_core::worker_enrollers::parse_enroller_import(document.as_bytes())
+        .map_err(|error| format!("the extended import file would be refused: {error}"))?;
+    create_private_file(credential, &bytes)?;
+    if let Err(error) = std::fs::write(import_file, document) {
+        let _ = std::fs::remove_file(credential);
+        return Err(format!(
+            "write {}: {error}; the new credential was removed again",
+            import_file.display()
+        ));
+    }
+    Ok(enroller_id)
 }
 
 #[derive(Debug)]
@@ -186,12 +299,16 @@ fn init_dev_secrets(secrets_dir: &Path, env_file: &Path) -> Result<InitOutcome, 
         validate_existing_secret(&secrets_dir.join(name), name, *validate)?;
     }
 
-    // A service key file that parses is not thereby a service key: four paths
-    // holding ONE key is the shape that collapses four issuers onto one. It is
-    // a property OF THE SET, so no per-file validator above can see it. Refused
-    // here, in the same before-anything-is-created phase, because the run that
-    // would proceed publishes the collapsed document.
+    // A service key file that parses is not thereby a service key: several
+    // paths holding ONE key is the shape that collapses several identities
+    // onto one. It is a property OF THE SET, so no per-file validator above can
+    // see it. Refused here, in the same before-anything-is-created phase,
+    // because the run that would proceed publishes the collapsed document.
     reject_shared_service_keys(&existing_service_public_keys(secrets_dir)?)?;
+    // The enroller import file is judged against the enroller credential
+    // before anything is created, for the same reason: a run that would refuse
+    // it afterwards has already written everything else.
+    check_worker_enrollers(secrets_dir)?;
 
     let mut desired_env = existing_env.clone();
     for name in env_keys() {
@@ -213,6 +330,7 @@ fn init_dev_secrets(secrets_dir: &Path, env_file: &Path) -> Result<InitOutcome, 
     }
     ensure_pairwise_file(&pairwise_path, pairwise.as_bytes(), &mut outcome)?;
     write_service_peers(secrets_dir)?;
+    write_worker_enrollers(secrets_dir)?;
 
     let missing_env = env_keys()
         .filter(|name| !existing_env.contains_key(*name))
@@ -271,21 +389,27 @@ fn validate_migrate_dsn(bytes: &[u8]) -> Result<(), String> {
 /// The services that hold a per-service assertion key, and the file each one
 /// reads.
 ///
-/// Four keys and not one shared file, because the whole point of the mechanism
-/// is that a peer can VERIFY a service without being able to IMPERSONATE it.
-/// One key held by four processes would put every service's identity in every
-/// service's memory and turn the assertion back into a shared secret with more
-/// ceremony.
+/// Separate keys and not one shared file, because the whole point of the
+/// mechanism is that a peer can VERIFY a service without being able to
+/// IMPERSONATE it. One key held by several processes would put every service's
+/// identity in every service's memory and turn the assertion back into a shared
+/// secret with more ceremony.
+///
+/// THE WORKER IS NOT HERE, and that is the enrolment design rather than an
+/// omission. No worker holds a `svc/worker` role key: a worker enrols with its
+/// deployment unit's ENROLLER credential ([`WORKER_ENROLLER_FILE`]) and mints
+/// under an instance key it draws at boot, so the peer document publishes no
+/// worker key at all.
 ///
 /// THAT PARAGRAPH WAS A COMMENT AND NOTHING ELSE UNTIL 2026-09-07, and the
 /// difference was reachable with this very command. `ensure_secret_file` keeps
 /// whatever file it finds and `validate_signing_key` only asks whether it
-/// parses, so one key copied to all four paths - the shape a secret manager or
-/// a compose override produces when it maps one secret onto the four
-/// `ZEROSHIP_*_SERVICE_KEY_FILE` mounts - exited 0, printed "kept" four times
-/// and published that key under all four issuers. `reject_shared_service_keys`
-/// now refuses it, before anything is created and again before the document is
-/// written.
+/// parses, so one key copied to every path - the shape a secret manager or a
+/// compose override produces when it maps one secret onto every
+/// `ZEROSHIP_*_SERVICE_KEY_FILE` mount - exited 0, printed "kept" for each and
+/// published that key under every issuer. `reject_shared_service_keys` now
+/// refuses it, before anything is created and again before the document is
+/// written, and it judges the worker enroller key in the same set.
 ///
 /// Why refuse rather than warn: the run EMITS A CREDENTIAL DOCUMENT. Under a
 /// one-key document every issuer resolves to the same key, so a peer holding
@@ -296,16 +420,38 @@ fn validate_migrate_dsn(bytes: &[u8]) -> Result<(), String> {
 /// The names match `zeroship_core::service_peers`, and
 /// `tests/lib/runtime_secrets.sh` writes the same set under the same names for
 /// the end-to-end harnesses.
-const SERVICE_KEY_FILES: [(&str, &str); 4] = [
+const SERVICE_KEY_FILES: [(&str, &str); 3] = [
     ("svc-gateway.pem", "svc/gateway"),
-    ("svc-worker.pem", "svc/worker"),
     ("svc-control.pem", "svc/control"),
     ("svc-auth.pem", "svc/auth"),
 ];
 
+/// This host's worker ENROLLER credential: the `wen_` id and the Ed25519
+/// PKCS#8 PEM private key of the one deployment unit a single-host deployment
+/// is, in the document `ServiceKeyring::load_worker_enroller` reads. Every
+/// worker replica on the host mounts it - `--scale` replicas are one unit -
+/// and spends it on its boot-time enrolment and nothing else.
+///
+/// Private, like every key file here. Generated once and never rotated:
+/// re-keying a unit is provisioning a NEW enroller, because Control refuses a
+/// changed key for a recorded id (`docs/runbooks/worker-enrollers.md`).
+const WORKER_ENROLLER_FILE: &str = "worker-enroller.json";
+
+/// The enroller import document Control reads at startup
+/// (`control.worker_enrollers_file`), naming the PUBLIC half of this host's
+/// enroller in the deployment's default execution zone.
+///
+/// DERIVED from [`WORKER_ENROLLER_FILE`] and ADDITIVE: an entry an operator
+/// added for another deployment unit is kept, and this host's entry is added
+/// when it is missing. An entry that names this host's enroller id under a
+/// different key is refused rather than rewritten - the file and the
+/// credential disagreeing is an operator decision, not something to guess at.
+/// Not private: it holds public keys, exactly like [`SERVICE_PEERS_FILE`].
+const WORKER_ENROLLERS_FILE: &str = "worker-enrollers.json";
+
 /// The JWKS-shaped document naming every service's PUBLIC key.
 ///
-/// DERIVED from the four private keys above rather than generated, so it cannot
+/// DERIVED from the private keys above rather than generated, so it cannot
 /// drift from them: rotating a key and forgetting to republish it would leave
 /// every peer refusing that service, and the failure would look like a network
 /// problem. Written on every run for that reason - it is not a secret and it
@@ -331,9 +477,9 @@ fn secret_specs() -> [SecretSpec; 10] {
             validate_signing_key,
         ),
         (
-            SERVICE_KEY_FILES[3].0,
-            generate_signing_key,
-            validate_signing_key,
+            WORKER_ENROLLER_FILE,
+            generate_worker_enroller,
+            validate_worker_enroller,
         ),
         (
             "auth-signing.pem",
@@ -675,8 +821,12 @@ fn write_service_peers(secrets_dir: &Path) -> Result<(), String> {
     // the one `init_dev_secrets` runs. That one rules on the directory it
     // FOUND; this one rules on the bytes about to be published, so no future
     // caller of this function can emit a document with one key under two
-    // issuers by reaching it another way.
-    reject_shared_service_keys(&keys)?;
+    // issuers by reaching it another way. The enroller key is in the set it
+    // rules on even though it is never published here.
+    let enroller = secrets_dir.join(WORKER_ENROLLER_FILE);
+    let mut judged = keys.clone();
+    judged.push((enroller.clone(), read_worker_enroller(&enroller)?.1));
+    reject_shared_service_keys(&judged)?;
 
     let entries = SERVICE_KEY_FILES
         .iter()
@@ -727,6 +877,13 @@ fn existing_service_public_keys(secrets_dir: &Path) -> Result<Vec<(PathBuf, [u8;
             keys.push((path, public));
         }
     }
+    // The enroller key joins the set: an enroller key equal to a service key
+    // would let whoever holds the worker's credential present as that service.
+    let enroller = secrets_dir.join(WORKER_ENROLLER_FILE);
+    if enroller.exists() {
+        let (_, public) = read_worker_enroller(&enroller)?;
+        keys.push((enroller, public));
+    }
     Ok(keys)
 }
 
@@ -772,6 +929,141 @@ fn reject_shared_service_keys(keys: &[(PathBuf, [u8; 32])]) -> Result<(), String
          ZEROSHIP_*_SERVICE_KEY_FILE paths. Nothing was created or changed.",
         collisions.join("; ")
     ))
+}
+
+/// The worker enroller credential document, in the shape
+/// `zeroship_core::service_peers::ServiceKeyring::load_worker_enroller` reads.
+#[derive(serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+struct WorkerEnrollerCredential {
+    enroller_id: String,
+    private_key: String,
+}
+
+/// Mint a new enroller: a fresh `wen_` id and a fresh Ed25519 key, as one
+/// credential document.
+fn generate_worker_enroller() -> Result<Vec<u8>, String> {
+    let private_key = String::from_utf8(generate_signing_key()?)
+        .map_err(|error| format!("encode the enroller key: {error}"))?;
+    let credential = WorkerEnrollerCredential {
+        enroller_id: zeroship_core::typed_id::new_worker_enroller_id(),
+        private_key,
+    };
+    let mut text = serde_json::to_string_pretty(&credential)
+        .map_err(|error| format!("encode the enroller credential: {error}"))?;
+    text.push('\n');
+    Ok(text.into_bytes())
+}
+
+fn validate_worker_enroller(bytes: &[u8]) -> Result<(), String> {
+    parse_worker_enroller(bytes).map(|_| ())
+}
+
+/// The enroller id and the PUBLIC half of its key.
+fn parse_worker_enroller(bytes: &[u8]) -> Result<(String, [u8; 32]), String> {
+    let credential: WorkerEnrollerCredential = serde_json::from_slice(bytes)
+        .map_err(|error| format!("worker enroller credential: {error}"))?;
+    zeroship_core::service_peers::worker_enroller_issuer(&credential.enroller_id).map_err(|_| {
+        format!(
+            "enroller_id {:?} is not a worker enroller id",
+            credential.enroller_id
+        )
+    })?;
+    let signing = SigningKey::from_pkcs8_pem(&credential.private_key)
+        .map_err(|error| format!("private_key is not an Ed25519 PKCS#8 PEM key: {error}"))?;
+    Ok((credential.enroller_id, signing.verifying_key().to_bytes()))
+}
+
+fn read_worker_enroller(path: &Path) -> Result<(String, [u8; 32]), String> {
+    let bytes = std::fs::read(path).map_err(|error| format!("read {}: {error}", path.display()))?;
+    parse_worker_enroller(&bytes).map_err(|error| format!("{}: {error}", path.display()))
+}
+
+fn read_worker_enroller_import(
+    path: &Path,
+) -> Result<Vec<zeroship_core::worker_enrollers::EnrollerRecord>, String> {
+    let bytes = std::fs::read(path).map_err(|error| format!("read {}: {error}", path.display()))?;
+    zeroship_core::worker_enrollers::parse_enroller_import(&bytes).map_err(|error| {
+        format!(
+            "existing worker enroller import file {} is invalid and was not replaced: {error}",
+            path.display()
+        )
+    })
+}
+
+/// The import records with this host's enroller present, and whether they
+/// changed.
+///
+/// ADDITIVE: every other entry is kept as it is. This host's entry is appended
+/// when absent; when present it must name the credential's own key, and a
+/// record naming that key under ANOTHER id is refused too - Control would
+/// refuse either at its next boot, so this refuses it first and names the file.
+fn with_this_hosts_enroller(
+    mut records: Vec<zeroship_core::worker_enrollers::EnrollerRecord>,
+    enroller_id: &str,
+    public_key: [u8; 32],
+) -> Result<(Vec<zeroship_core::worker_enrollers::EnrollerRecord>, bool), String> {
+    if let Some(existing) = records.iter().find(|record| record.id == enroller_id) {
+        if existing.public_key != public_key {
+            return Err(format!(
+                "{WORKER_ENROLLERS_FILE} names enroller {enroller_id} under a different public key \
+                 than {WORKER_ENROLLER_FILE} holds; neither file was changed. A changed key is a \
+                 new enroller: see docs/runbooks/worker-enrollers.md"
+            ));
+        }
+        return Ok((records, false));
+    }
+    if let Some(existing) = records.iter().find(|record| record.public_key == public_key) {
+        return Err(format!(
+            "{WORKER_ENROLLERS_FILE} names the key in {WORKER_ENROLLER_FILE} under enroller {}, \
+             not {enroller_id}; neither file was changed",
+            existing.id
+        ));
+    }
+    records.push(zeroship_core::worker_enrollers::EnrollerRecord {
+        id: enroller_id.to_owned(),
+        zone: zeroship_core::worker_enrollers::DEFAULT_EXECUTION_ZONE.to_owned(),
+        public_key,
+    });
+    Ok((records, true))
+}
+
+/// Judge an existing import file against an existing credential BEFORE
+/// anything is created. A missing credential cannot conflict: the one this run
+/// generates is fresh.
+fn check_worker_enrollers(secrets_dir: &Path) -> Result<(), String> {
+    let import = secrets_dir.join(WORKER_ENROLLERS_FILE);
+    reject_symlink(&import, "worker enroller import file")?;
+    let credential = secrets_dir.join(WORKER_ENROLLER_FILE);
+    if !import.exists() || !credential.exists() {
+        return Ok(());
+    }
+    let (enroller_id, public_key) = read_worker_enroller(&credential)?;
+    with_this_hosts_enroller(read_worker_enroller_import(&import)?, &enroller_id, public_key)
+        .map(|_| ())
+}
+
+/// Write the import file Control reads, with this host's enroller in it.
+///
+/// Written only when it changes, so a re-run leaves an operator's file
+/// byte-for-byte alone.
+fn write_worker_enrollers(secrets_dir: &Path) -> Result<(), String> {
+    let (enroller_id, public_key) = read_worker_enroller(&secrets_dir.join(WORKER_ENROLLER_FILE))?;
+    let import = secrets_dir.join(WORKER_ENROLLERS_FILE);
+    let existing = if import.exists() {
+        read_worker_enroller_import(&import)?
+    } else {
+        Vec::new()
+    };
+    let (records, changed) = with_this_hosts_enroller(existing, &enroller_id, public_key)?;
+    if !changed {
+        return Ok(());
+    }
+    std::fs::write(
+        &import,
+        zeroship_core::worker_enrollers::render_enroller_import(&records),
+    )
+    .map_err(|error| format!("write {}: {error}", import.display()))
 }
 
 fn generate_signing_key() -> Result<Vec<u8>, String> {

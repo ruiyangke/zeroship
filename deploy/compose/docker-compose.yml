@@ -418,6 +418,13 @@ services:
       # longer exists.
       ZEROSHIP_CONTROL_WORKER_ENROLMENT_NETWORKS: *compose-subnet
       ZEROSHIP_CONTROL_WORKER_ENROLMENT_PORTS: *worker-port
+      # The worker enrollers this deployment provisions: the public half of
+      # each deployment unit's enroller key, with its id and execution zone.
+      # Imported at every boot and only ever ADDED from - a revoked enroller
+      # stays revoked however long its line stays in the file. `zeroship dev
+      # init` writes this host's entry; docs/runbooks/worker-enrollers.md
+      # covers adding a unit and revoking one.
+      ZEROSHIP_CONTROL_WORKER_ENROLLERS_FILE: /etc/zeroship/secrets/worker-enrollers.json
       # --- Console runtime env: NOTHING FORWARDS THESE ANY MORE --------------
       # These were read from THIS process env at install time by the console
       # seed, which wrote them onto the console app's env store. That seed was
@@ -457,6 +464,9 @@ services:
       # per-service assertion now, so control cannot answer them without both.
       - ${ZEROSHIP_SECRETS_DIR:-./secrets}/svc-control.pem:/etc/zeroship/secrets/svc-control.pem:ro
       - ${ZEROSHIP_SECRETS_DIR:-./secrets}/service-peers.json:/etc/zeroship/secrets/service-peers.json:ro
+      # The enroller import file. Public keys only, but mounted from the same
+      # directory so one provisioning step owns every file.
+      - ${ZEROSHIP_SECRETS_DIR:-./secrets}/worker-enrollers.json:/etc/zeroship/secrets/worker-enrollers.json:ro
       # mounted at the well-known path => auto-discovered, no --config needed
       - ../ops/zeroship.toml:/etc/zeroship/zeroship.toml:ro
     security_opt:
@@ -707,9 +717,9 @@ services:
     # Worker defaults to binding 127.0.0.1 for safety. In the Docker
     # network the gateway reaches the worker via the `worker` DNS name,
     # so we explicitly opt in to 0.0.0.0. What makes that safe is the
-    # service key material below: dispatch carries an ed25519 assertion the
-    # worker verifies under the peer document, and an unconfigured worker
-    # REFUSES every caller rather than admitting one.
+    # key material below: dispatch carries an ed25519 assertion the worker
+    # verifies under the peer document, and a worker that cannot enrol
+    # REFUSES to start rather than admitting a caller.
     # No secret is a flag; each arrives under its own canonical ZEROSHIP_ name
     # in the `environment:` block below. The worker logs in as the
     # constrained zeroship_worker role.
@@ -764,7 +774,11 @@ services:
         mode = "standalone"
         endpoint = "redis:6379"
       ZEROSHIP_CONTROL_KEY: ${ZEROSHIP_CONTROL_KEY:?run zeroship dev init}
-      ZEROSHIP_WORKER_SERVICE_KEY_FILE: /etc/zeroship/secrets/svc-worker.pem
+      # This host's worker ENROLLER credential. Every replica of this service
+      # is one deployment unit and mounts the same file: each spends it on its
+      # boot-time enrolment, then mints under an instance key it drew in
+      # memory. No worker holds a svc/worker role key.
+      ZEROSHIP_WORKER_ENROLLER_FILE: /etc/zeroship/secrets/worker-enroller.json
       ZEROSHIP_WORKER_SERVICE_PEERS_FILE: /etc/zeroship/secrets/service-peers.json
       ZEROSHIP_OBSERVABILITY_LOG_FILTER: info,zeroship_=debug
       ZEROSHIP_OBSERVABILITY_LOG_FORMAT: json
@@ -777,14 +791,20 @@ services:
       # pattern (mirrors how `bundles` is shared for deploy blobs). S3/R2
       # replaces this in prod behind the same Backend trait.
       - app-storage:/data/app-storage
-      # This worker's OWN assertion key and the public halves of its peers.
-      # Without both it refuses every dispatch and cannot read an app's
-      # environment from control - absence is a closed door, not an open one.
-      - ${ZEROSHIP_SECRETS_DIR:-./secrets}/svc-worker.pem:/etc/zeroship/secrets/svc-worker.pem:ro
+      # This host's enroller credential and the public halves of its peers.
+      # Without both it cannot enrol, so it refuses to start rather than
+      # serving - absence is a closed door, not an open one.
+      - ${ZEROSHIP_SECRETS_DIR:-./secrets}/worker-enroller.json:/etc/zeroship/secrets/worker-enroller.json:ro
       - ${ZEROSHIP_SECRETS_DIR:-./secrets}/cdc-cert.pem:/etc/zeroship/secrets/cdc-cert.pem:ro
       - ${ZEROSHIP_SECRETS_DIR:-./secrets}/service-peers.json:/etc/zeroship/secrets/service-peers.json:ro
     deploy:
       replicas: 3
+    # A stopped worker drains for up to `worker.shutdown_timeout` (its default:
+    # the command above does not set it) and then retires its own instance at
+    # control. Docker's own stop timeout is shorter than that default, and a
+    # worker killed mid-drain leaves its row `active`, so the grace period
+    # covers the drain and the retirement call.
+    stop_grace_period: 45s
     security_opt:
       - seccomp:unconfined
     depends_on:
