@@ -64,7 +64,7 @@ None of this is licence to measure less - measure more, and put the result in a 
 | **Build a creator app + deploy** (the primary creator flow) | `docs/build-and-deploy-golden-path.md` · `examples/starter/` (scaffold + `CLAUDE.md`) · `tests/golden_path.sh` · `crates/zeroship-cli/` (`zeroship deploy`) |
 | **Creator project config** (`zeroship.jsonc`: app, control, build shape, migration paths, environments) | `docs/reference/project-config.md`, `schema/project-v1.json`, `crates/zeroship-cli/src/project_config/`, `sdks/vite-plugin/src/project-config/` |
 | **zeroship deploy contract** (`default = { fetch?, rpc? }`, dispatcher, raw-JS deploys) | `docs/reference/zeroship-standard.md` · `crates/zeroship-runtime/src/core/runtime_startup.rs` · `crates/zeroship-runtime/src/rpc/dispatch.rs` |
-| **Framework-internal coordination** (startup, DB facade, dev entry loading) | `crates/zeroship-runtime/src/core/{runtime_startup,plugin_modules,dev_entry}.rs` · `sdks/db/src/install-schema.ts` · `sdks/vite-plugin/src/dev-bootstrap/` |
+| **Framework-internal coordination** (startup, DB facade, dev entry loading) | `crates/zeroship-runtime/src/core/{runtime_startup,plugin_modules,dev_entry}.rs` · `crates/zeroship-data-v8/js/` · `sdks/vite-plugin/src/dev-bootstrap/` |
 | **Billing / metering / Stripe Connect** | `docs/reference/billing-metering.md` · `crates/zeroship-control/src/metering/provider/` · `crates/zeroship-stream/` · `crates/zeroship-control/src/cron/{event_forwarder,spend_recompute,billing_reconcile}.rs` |
 | **WebSocket** (RFC 6455 implementation) | `docs/reference/websocket-design.md` · `crates/zeroship-runtime/src/` (search `WebSocket`) |
 | **Vite plugin / build pipeline** (synthetic entry is a thin normaliser; runtime owns dispatch) | `docs/reference/vite-plugin.md` · `docs/reference/vite-environment-api.md` · `sdks/vite-plugin/src/rpc-registry.ts` |
@@ -357,13 +357,14 @@ procedure lookup and invocation, stream framing and subscription transport. The
 Vite plugin emits procedure references for production and supplies ModuleRunner
 entry snapshots in development; it does not invoke handlers.
 
-The DB SDK internal entry owns `installSchema` and its collection, transaction, relation
-and live-query helpers. `DbPlugin` supplies that compiled adapter as
-`zeroship:db/internal` through `NativePlugin::javascript_modules`. Native
-preparation supplies the DB handle and validated descriptor before creator
-modules evaluate. The SDK's `defineMaskPolicy` records a declaration through
-`env.db.declareMaskPolicy`; the DB plugin installs and seals it during native
-finalization. Vite emits no installer import or call.
+`zeroship-data-v8` owns the host-only `installSchema` adapter and embeds its
+compiled host module as `zeroship:db/adapter`. Creator imports cannot resolve
+host modules. Native preparation supplies the DB
+handle and validated descriptor before creator modules evaluate. The published
+`@zeroship/db` package contains creator APIs and generated environment types;
+it has no framework subpath. The SDK's `defineMaskPolicy` records a declaration
+through `env.db.declareMaskPolicy`; the DB plugin installs and seals it during
+native finalization. Vite emits no installer import or call.
 
 ### When to add a native primitive vs. an npm package
 
@@ -452,8 +453,8 @@ range yourself with `tests/commit_msg_gate.sh --range origin/main..HEAD`.
 ## Development
 
 ```bash
-# Build the SDKs before Cargo. The DB adapter embeds
-# `sdks/db/dist/internal.js`; root `pnpm build` supplies that compiled source.
+# Build the JavaScript packages and host adapter before Cargo. The DB adapter embeds
+# `crates/zeroship-data-v8/dist/adapter.js`; root `pnpm build` supplies it.
 #
 # `sdks/vite-plugin` imports `zeroship-migrate-node`, a Rust N-API addon in
 # `crates/zeroship-migrate-node` whose outputs are untracked and which `pnpm install`

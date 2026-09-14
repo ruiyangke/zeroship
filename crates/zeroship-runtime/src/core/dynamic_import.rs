@@ -139,12 +139,24 @@ fn reject_typeerror<'s>(
 pub(crate) fn host_import_module_dynamically_callback<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     _host_defined_options: v8::Local<'s, v8::Data>,
-    _resource_name: v8::Local<'s, v8::Value>,
+    resource_name: v8::Local<'s, v8::Value>,
     specifier: v8::Local<'s, v8::String>,
     _import_attributes: v8::Local<'s, v8::FixedArray>,
 ) -> Option<v8::Local<'s, v8::Promise>> {
     let resolver = v8::PromiseResolver::new(scope)?;
     let spec = specifier.to_rust_string_lossy(scope);
+    let importer = resource_name.to_rust_string_lossy(scope);
+
+    if let Some(registry) = scope.get_slot::<SharedRegistry>().cloned() {
+        let registry = registry.borrow();
+        if registry.is_host_only(&spec) && !registry.is_host_only(&importer) {
+            return Some(reject_typeerror(
+                scope,
+                resolver,
+                &format!("Cannot find module '{spec}'"),
+            ));
+        }
+    }
 
     if registry_lookup(scope, &spec).is_some() {
         return import_registered(scope, resolver, specifier);

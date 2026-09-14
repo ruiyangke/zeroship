@@ -14,10 +14,7 @@ import {
   type DiscoveredProcedure,
   type DiscoveredSchedule,
 } from "./manifest.js";
-import {
-  zeroshipFrameworkResolverPlugin,
-  zeroshipModulePlugin,
-} from "./zeroship-module.js";
+import { zeroshipModulePlugin } from "./zeroship-module.js";
 import { genTypesFromMigrations } from "./gen-types/index.js";
 import {
   defaultProjectConfig,
@@ -504,7 +501,6 @@ export function buildPlugin(
         nodeCompatPlugin(),
         zeroshipModulePlugin(),
         transformPlugin(state),
-        zeroshipFrameworkResolverPlugin(),
         clientManifestPlugin({ root, distDir: relative(root, clientOutDir) }),
       ],
     });
@@ -539,9 +535,6 @@ export function buildPlugin(
         // more — the synthetic SSR entry discovers procedures at
         // module-init time from the user namespace's exports.
         transformPlugin(state),
-        // Framework-private SDK imports resolve through the Vite plugin's
-        // dependency tree rather than the creator's app root.
-        zeroshipFrameworkResolverPlugin(),
         // Synthetic SSR entry virtual module owner. The entry's body
         // is build-time-static and order-independent.
         rpcRegistryPlugin({

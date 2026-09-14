@@ -120,7 +120,7 @@ RUN pnpm install --frozen-lockfile
 # The root build compiles the native addon before the JavaScript packages.
 RUN pnpm build
 # Sanity: the database adapter embeds this facade during native compilation.
-RUN test -f sdks/db/dist/internal.js
+RUN test -f crates/zeroship-data-v8/dist/adapter.js
 
 # ---------------------------------------------------------------------------
 # Stage 2 - native (Rust) build of all seven binaries.

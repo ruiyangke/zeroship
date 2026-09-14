@@ -24,9 +24,9 @@ impl NativePlugin for DummyDbPlugin {
         "dummy-db"
     }
 
-    fn javascript_modules(&self) -> &'static [JavaScriptModule] {
+    fn host_javascript_modules(&self) -> &'static [JavaScriptModule] {
         &[JavaScriptModule {
-            specifier: "zeroship:db/internal",
+            specifier: "zeroship:db/test-adapter",
             source: r#"
 export function installSchema(env, descriptor, options) {
     if (env.__dummyNoop() !== undefined) throw new Error('installer received a different DB handle');
@@ -51,8 +51,12 @@ export function installSchema(env, descriptor, options) {
         let json = v8::String::new(scope, &descriptor.to_string()).unwrap();
         let descriptor = v8::json::parse(scope, json).unwrap();
         zeroship_runtime::modules::invoke_module_export(
-            scope, "zeroship:db/internal", "installSchema", &[namespace.into(), descriptor],
-        ).map(Some)
+            scope,
+            "zeroship:db/test-adapter",
+            "installSchema",
+            &[namespace.into(), descriptor],
+        )
+        .map(Some)
     }
 
     fn register(&self, r: &mut NativeRegistrar) {
@@ -459,7 +463,7 @@ fn init_script_does_not_fallback_to_default_schema_without_descriptor() {
     // **Migration-first cutover (P5 S3).** An app that ships no descriptor is
     // treated as schema-less by the runtime entry. Even if a stale
     // `default.schema` exists, the runtime host must not read it or import
-    // `zeroship:db/internal`.
+    // the schema adapter module.
     init_v8();
 
     let user_src = r#"

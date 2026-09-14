@@ -14,7 +14,7 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import { installSchemaForTest } from "./_install-helper.js";
-import { t } from "@zeroship/db";
+import { t } from "../src/index.js";
 import type { NativeDb } from "../src/native.js";
 
 type AnyRec = Record<string, unknown>;
@@ -83,7 +83,7 @@ describe("db.transaction — commit_failed_indeterminate", () => {
     assert.match(err.message, /commit failed/i);
     // The "cause chain" requirement: the commit error must be reachable
     // via `.cause` (the native orchestrator preserves it on the
-    // rejection; the bootstrap wrapper passes the rejection through
+    // rejection; the host facade passes the rejection through
     // verbatim).
     assert.equal(err.cause, commitErr, "cause must be the original commit rejection");
     assert.equal((err.cause as Error).message, "network drop after COMMIT");

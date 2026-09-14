@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { t } from "@zeroship/db";
+import { t } from "../src/index.js";
 import { installSchemaForTest } from "./_install-helper.js";
 
 function makeMockNative() {
