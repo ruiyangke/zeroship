@@ -238,15 +238,6 @@ pub enum ManagementOutcome {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct AcknowledgeManagement {
-    pub request_id: RequestId,
-    pub app_id: AppId,
-    pub assignment_revision: Revision,
-    pub outcome: ManagementOutcome,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ManagementReceipt {
     pub app_id: AppId,
     pub request_id: RequestId,

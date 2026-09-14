@@ -207,6 +207,12 @@ impl Queue {
     /// # Errors
     /// Refuses unknown apps, reused identities with different content and storage failures.
     pub async fn submit(&self, job: &JobSpec) -> Result<JobSpec, Error> {
+        if matches!(
+            job.operation,
+            zeroship_core::workflow_jobs::JobOperation::Management { .. }
+        ) {
+            return Err(Error::Invalid);
+        }
         self.encode(job)?;
         let budget = Budget::new(self.options.transaction_timeout);
         loop {
@@ -254,6 +260,12 @@ impl Queue {
     {
         if job.app_id != assignment.app_id {
             return Err(Error::Denied);
+        }
+        if matches!(
+            job.operation,
+            zeroship_core::workflow_jobs::JobOperation::Management { .. }
+        ) {
+            return Err(Error::Invalid);
         }
         self.encode(job)?;
         let budget = Budget::new(self.options.transaction_timeout);
@@ -326,7 +338,8 @@ impl Queue {
             budget.cap(sample, authority.expires_at.get())?;
             let now = sample.millis;
             let assignment_expires = local_deadline(sample, authority.expires_at.get())?;
-            let Some(id) = crate::scheduling::candidate(&tx, &assignment.app_id, now).await? else {
+            crate::management::validate_pending(&tx, &assignment.app_id).await?;
+            let Some(id) = Box::pin(crate::scheduling::candidate(&tx, &assignment.app_id, now)).await? else {
                 let observed = authorize(tx.clone()).await?;
                 let sample = self.clock.sample().await?;
                 let authority = current(assignment, observed, sample.millis)?;
@@ -338,6 +351,7 @@ impl Queue {
                 retention::require_held(&tx, &assignment.app_id, deployment).await?;
             }
             crate::scheduling::validate_delivery(&tx, &job).await?;
+            crate::management::validate_job(&tx, &job.spec()?, true).await?;
             let attempt = job.attempt.checked_add(1).filter(|value| *value > 0)
                 .ok_or(Error::Capacity)?;
             let sample = self.clock.sample().await?;
@@ -412,6 +426,7 @@ impl Queue {
                 .await?
                 .ok_or(Error::Conflict)?;
             matches_delivery(&job, delivery)?;
+            crate::management::validate_job(&tx, &delivery.job, true).await?;
             if let Some(deployment) = delivery.job.deployment_id() {
                 retention::require_held(&tx, &assignment.app_id, deployment).await?;
             }
@@ -526,22 +541,17 @@ impl Queue {
                             {
                                 return Err(Error::Conflict);
                             }
+                            crate::management::settle(&tx, &delivery.job, settlement.outcome, true)
+                                .await?;
                             if authorize_replay(tx.clone()).await? != delivery.worker_id {
                                 return Err(Error::Denied);
                             }
                             return Ok(Retention::Ready(receipt));
                         }
-                        if matches!(
-                            delivery.job.operation,
-                            zeroship_core::workflow_jobs::JobOperation::Management { .. }
-                        ) {
-                            // Management settlement must atomically link its command,
-                            // order and barrier before the queue can acknowledge it.
-                            return Err(Error::Unavailable);
-                        }
                         let observed = authorize(tx.clone()).await?;
                         let sample = self.clock.sample().await?;
                         cap_live_delivery(budget, assignment, observed, &job, sample)?;
+                        crate::management::validate_job(&tx, &delivery.job, true).await?;
                         if let Some(deployment) = delivery.job.deployment_id() {
                             retention::require_held(&tx, &assignment.app_id, deployment).await?;
                         }
@@ -559,6 +569,8 @@ impl Queue {
                         for successor in successors.values() {
                             self.insert(&tx, successor, sample.millis).await?;
                         }
+                        crate::management::settle(&tx, &delivery.job, settlement.outcome, false)
+                            .await?;
                         update(
                             &tx,
                             fence(delivery),
@@ -607,6 +619,12 @@ impl Queue {
         self.encode(settlement)?;
         let mut successors = BTreeMap::new();
         for successor in &settlement.successors {
+            if matches!(
+                successor.operation,
+                zeroship_core::workflow_jobs::JobOperation::Management { .. }
+            ) {
+                return Err(Error::Invalid);
+            }
             if successor.app_id != assignment.app_id {
                 return Err(Error::Denied);
             }
@@ -669,6 +687,8 @@ impl Queue {
         tx.collection(jobs::Entity::COLLECTION)?.insert(value!({
             "id":spec.id.as_str(),"app_id":spec.app_id.as_str(),"deployment_id":spec.deployment_id().map(DeploymentId::as_str),
             "operation":serde_json::to_string(&spec.operation).map_err(|_| Error::Invalid)?,
+            "management_request_id":models::management_request(&spec.operation),
+            "operation_kind":models::operation_kind(&spec.operation),"run_id":models::operation_run(&spec.operation),
             "spec_digest":digest,"available_at":spec.available_at.get(),"state":"ready", "attempt":0,
             "dispatch_order":dispatch_order,"created_at":now
         })).await?;
@@ -932,7 +952,7 @@ impl Budget {
     }
 }
 
-pub(crate) fn local_deadline(sample: Sample, deadline: i64) -> Result<Instant, Error> {
+pub fn local_deadline(sample: Sample, deadline: i64) -> Result<Instant, Error> {
     // The database sample is floored. Charge its resolution so the conversion
     // cannot retain the unobserved fraction of the final clock tick.
     let remaining = deadline

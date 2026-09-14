@@ -1227,7 +1227,7 @@ pub(crate) async fn candidate(
     let job = tx.entity::<jobs::Entity>()?.alias("j")?;
     let occurrence = tx.entity::<schedule_occurrences::Entity>()?.alias("o")?;
     let activation = tx.entity::<jobs::Entity>()?.alias("a")?;
-    Ok(tx
+    let query = tx
         .from(&job)
         .left_join(
             &occurrence,
@@ -1272,7 +1272,8 @@ pub(crate) async fn candidate(
                             ))?,
                         )),
                 ),
-        )
+        );
+    Ok(management_eligibility(tx, &job, query)?
         .order_by(job.column(jobs::dispatch_order).asc())
         .order_by(job.column(jobs::id).asc())
         .select(job.row::<Candidate>())?
@@ -1282,4 +1283,69 @@ pub(crate) async fn candidate(
         .into_iter()
         .next()
         .map(|row| row.id))
+}
+
+fn management_eligibility(
+    tx: &Database,
+    job: &zeroship_data_orm::orm::EntityAlias<crate::models::jobs::Entity>,
+    query: zeroship_data_orm::orm::ReadBuilder,
+) -> Result<zeroship_data_orm::orm::ReadBuilder, Error> {
+    use crate::models::{jobs, management};
+    let command = tx.entity::<management::Entity>()?.alias("command")?;
+    let earlier = tx
+        .entity::<management::Entity>()?
+        .alias("earlier_command")?;
+    let barrier = tx.entity::<management::Entity>()?.alias("barrier")?;
+    Ok(query
+        .left_join(
+            &command,
+            job.column(jobs::app_id)
+                .eq(command.column(management::app_id))?
+                .and(job.column(jobs::id).eq(command.column(management::id))?),
+        )?
+        .left_join(
+            &earlier,
+            command
+                .column(management::app_id)
+                .eq(earlier.column(management::app_id))?
+                .and(
+                    command
+                        .column(management::run_id)
+                        .eq(earlier.column(management::run_id))?,
+                )
+                .and(
+                    earlier
+                        .column(management::revision)
+                        .lt(command.column(management::revision))?,
+                )
+                .and(earlier.column(management::outcome).is_null()),
+        )?
+        .left_join(
+            &barrier,
+            job.column(jobs::app_id)
+                .eq(barrier.column(management::app_id))?
+                .and(
+                    job.column(jobs::run_id)
+                        .eq(barrier.column(management::run_id))?,
+                )
+                .and(barrier.column(management::blocks_execution).eq(true)?)
+                .and(barrier.column(management::outcome).is_null()),
+        )?
+        .filter(
+            job.column(jobs::operation_kind)
+                .eq("management")?
+                .negate()
+                .or(command
+                    .column(management::id)
+                    .is_null()
+                    .negate()
+                    .and(command.column(management::outcome).is_null())
+                    .and(earlier.column(management::id).is_null()))
+                .and(
+                    job.column(jobs::operation_kind)
+                        .eq("advance")?
+                        .negate()
+                        .or(barrier.column(management::id).is_null()),
+                ),
+        ))
 }

@@ -26,9 +26,19 @@ commit charges elapsed time against the originally observed assignment authority
 Worker publication cannot mint manager-owned activation, cron or management commands.
 Job outcomes use closed tagged objects. Management results cannot settle ordinary
 jobs, and generic completion cannot stand in for a management lifecycle result.
-Fresh management settlement remains unavailable until its authoritative command,
-order and barrier can commit with the queue receipt. Exact settled receipt replay
-continues to require matching identity, outcome and current worker enrollment.
+Control management acceptance persists the raw request, frozen job and run order
+in the same transaction. Latest selection observes the ordinary app pointer outside
+queue locks, then confirms the selected deployment's exact hold hash. Exact raw
+retries resolve from independent request indexes before any source or hold I/O.
+Transitions and Started restarts need no deployment selection or queue hold.
+Management deliveries follow accepted run revisions. Unsettled pause, cancel and
+restart commands suppress Advances for their run before candidate limiting;
+resumes and work for other runs continue through ordinary eligibility checks.
+Bounded native joins validate pending command, job and order records before claims.
+Settlement commits its closed command result and settled revision with the queue
+receipt and successors, releasing only that command's provisional barrier. Exact
+settled replay validates retained linkage and checks current enrollment after its
+metadata reads; it never changes newer barriers.
 
 The app's persistent dispatch cursor assigns tickets to new jobs and successful
 claims in their existing transactions. Due and dependency filters run before ticket
@@ -106,16 +116,17 @@ the journal hold API does not grant manager access.
 pointer through a native ORM join to the same app's catalog row. It selects only
 identity, hash and retention state; missing or unavailable targets refuse without
 falling back to activation history. The returned value is an observation, with no
-admission authority or deployment hold. Platform grants, host readiness and
-ordered management acceptance still need composition with this reader.
+admission authority or deployment hold. Ordered management acceptance receives this
+source explicitly; platform grants and readiness belong to the host.
 
 `retention::HoldClient` supplies the queue's Control capability. Activation,
 execution, cron and resolved Latest restart jobs require a confirmed deployment hold.
 Reconciliation, collection, lifecycle transitions and Started restart jobs do not
 depend on a queue deployment. Started restart prerequisites belong to creator
-storage; delivered management and collection handlers remain pending. The
-operation carries executable identity; decoding stored jobs verifies the nullable
-queue projection and immutable specification digest. The queue persists
+storage; creator delivery and collection handlers have their own implementation
+boundaries. The operation carries executable identity; decoding stored jobs verifies
+the kind, run, request and nullable deployment projections against its immutable
+specification digest. The queue persists
 acquire/release intents and generations; network requests run outside its database
 transactions. Release closes publication and checks pending jobs and schedule
 frontiers under the app lock. It validates bounded pages of unsettled job

@@ -180,7 +180,8 @@ impl ControlCoordinator {
         Ok(apps)
     }
 
-    /// Queue lifecycle metadata for the assigned customer worker.
+    /// Accept durable lifecycle metadata for delivery through the app's job queue.
+    /// An exact retry returns the original command receipt and frozen restart target.
     ///
     /// # Errors
     /// Refuses failed exchanges and receipts for another app or request.

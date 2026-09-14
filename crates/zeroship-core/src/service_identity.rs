@@ -528,16 +528,6 @@ pub mod endpoints {
         "POST",
         "/v1/wake-hints/publish",
     );
-    pub const WORKFLOW_MANAGEMENT_POLL: ServiceEndpoint = ServiceEndpoint::new(
-        "workflow",
-        "POST",
-        "/v1/management/poll",
-    );
-    pub const WORKFLOW_MANAGEMENT_ACK: ServiceEndpoint = ServiceEndpoint::new(
-        "workflow",
-        "POST",
-        "/v1/management/acknowledge",
-    );
     pub const WORKFLOW_POLICY_LEASE: ServiceEndpoint =
         ServiceEndpoint::new("workflow", "POST", "/v1/policy/lease");
     pub const WORKFLOW_JOB_SUBMIT: ServiceEndpoint =
@@ -661,8 +651,6 @@ pub fn service_allowlist() -> &'static [ServiceAuthorization] {
                     endpoints::WORKFLOW_RENEW,
                     endpoints::WORKFLOW_RELEASE,
                     endpoints::WORKFLOW_WAKE,
-                    endpoints::WORKFLOW_MANAGEMENT_POLL,
-                    endpoints::WORKFLOW_MANAGEMENT_ACK,
                     endpoints::WORKFLOW_POLICY_LEASE,
                     endpoints::WORKFLOW_JOB_SUBMIT,
                     endpoints::WORKFLOW_JOB_CLAIM,

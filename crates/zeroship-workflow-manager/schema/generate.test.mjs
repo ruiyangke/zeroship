@@ -16,6 +16,14 @@ test("compiles both manager backends with matching typed collection metadata", (
   assert.equal(collections.jobs.fields.id.primaryKey, true);
   assert.equal(collections.jobs.fields.deployment_id.required ?? false, false);
   assert.equal(collections.jobs.fields.worker_id.required ?? false, false);
+  assert.equal(collections.jobs.fields.operation_kind.required, true);
+  assert.equal(collections.jobs.fields.run_id.required ?? false, false);
+  assert.equal(collections.management.fields.revision.required, true);
+  assert.equal(collections.management.fields.blocks_execution.type, "boolean");
+  assert.equal(collections.management.fields.request_digest.required, true);
+  assert.equal(collections.management.fields.run_state, undefined);
+  assert(collections.management.indexes.some(index => index.unique && index.fields.join() === "app_id,run_id,revision"));
+  assert(collections.management_scopes.indexes.some(index => index.unique && index.fields.join() === "app_id,run_id"));
   assert.equal(collections.jobs.fields.attempt.type, "bigInt");
   assert.equal(collections.queue_scopes.fields.dispatch_cursor.type, "bigInt");
   assert.equal(collections.queue_scopes.fields.dispatch_cursor.required, true);
@@ -30,6 +38,8 @@ test("compiles both manager backends with matching typed collection metadata", (
     ["app_id", "deployment_id", "state"],
     ["app_id", "dispatch_order"],
     ["app_id", "state", "dispatch_order"],
+    ["app_id", "management_request_id"],
+    ["app_id", "operation_kind", "state", "id"],
   ]);
   assert(collections.jobs.indexes.some(index => index.unique && index.fields.join() === "app_id,dispatch_order"));
   for (const [name, duplicateIdentity] of [["queue_scopes", "app_id"], ["workers", "worker_id"]]) {

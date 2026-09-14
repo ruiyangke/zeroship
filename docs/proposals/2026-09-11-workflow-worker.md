@@ -506,8 +506,9 @@ with this queue namespace; it is not a second authoritative placement store.
 | `workflow_manager.workers` | Instance liveness, capacity, ready/draining state and serialization of worker-wide admission. |
 | `workflow_manager.assignments` | App/worker placement revision, expiry and release tombstone. Existing wake-hint fields belong to the coordinator protocol being replaced. |
 | `workflow_manager.placement_receipts` | Immutable assignment/release request identity and recorded result. |
-| `workflow_manager.management` | Authorized command metadata, request provenance and reported closed outcome. |
-| `workflow_manager.jobs` | Immutable job specification, availability, current attempt, delivery fence and settlement digest/outcome. It currently also supplies submission and settlement deduplication. |
+| `workflow_manager.management` | Job-linked authorized command, original request provenance, per-run revision, provisional execution barrier and reported closed outcome. |
+| `workflow_manager.management_scopes` | Accepted and settled management revisions per app/run; independent of the creator's run existence. |
+| `workflow_manager.jobs` | Immutable job specification, checked operation/run/request projections, availability, current attempt, delivery fence and settlement digest/outcome. It also supplies submission and settlement deduplication. |
 | `workflow_manager.recovery_scopes` | Durable reconciliation responsibility, activation provenance and revision, next due time and retained pending job. |
 | `workflow_manager.schedule_deployments` | Immutable allowlisted schedule descriptors and the calendar interpretation for a normal deployment. No business input. |
 | `workflow_manager.schedule_activations` | Stable activation job, deployment, app revision and activation instant. Job settlement determines dispatch readiness. |
@@ -522,8 +523,8 @@ with this queue namespace; it is not a second authoritative placement store.
 | `zeroship.workflow_rollout_config` | Operator dispatch/ingress switches and the finite source-validity bound. |
 | `zeroship.workflow_policy_ledger` | Durable per-app ordered policy publication. The manager locks and updates this row, without writing its app or plan inputs. An unpublished row grants nothing. |
 
-The scheduling target also requires scope ingress epochs,
-capacity demand and management delivery barriers. Their physical model is not
+The scheduling target also requires scope ingress epochs and
+capacity demand. Their physical model is not
 implemented by the current table list. Prefer extending the owning manager
 models over adding another store. Final table names and the shared protocol
 fields must be selected together; an in-memory map is not a substitute.
@@ -1276,16 +1277,16 @@ the creator independently rejects gaps and changed identities, and records durab
 refusals in that same ordering. Its attempt captures the delivery lease and policy
 before waiting for the app lock or performing I/O.
 
-The following native models are planned for delivered management. They replace
-the separate worker inbox with queue linkage; the existing inbox does not yet
-provide these guarantees. Every table keeps `id` as its sole primary key and uses
-unique indexes for scoped domain identities.
+The manager's native models now replace the separate worker inbox with queue
+linkage. The creator models below remain the delivered-handler target. Every
+table keeps `id` as its sole primary key and uses unique indexes for scoped
+domain identities.
 
-| Owner and model | Planned durable identity and fields |
+| Owner and model | Durable identity and fields |
 | --- | --- |
-| Manager `management` | Use the job identity as `id`, with scoped job linkage. Preserve the original request and actor separately from the resolved job command. Require run identity and management revision, unique app/request and app/run/revision, a derived `blocks_execution` field and the closed outcome. Remove the separate run-state and inbox-ACK fields when queue settlement owns acknowledgement. |
+| Manager `management` | Job identity as `id`, with scoped job linkage. Original request and actor remain separate from the resolved job command. Required run identity and management revision, unique app/request and app/run/revision, derived `blocks_execution` and closed outcome. Queue settlement owns acknowledgement; separate run-state and inbox-ACK fields are removed. |
 | Manager `management_scopes` | Opaque typed `id`, unique app/run identity, accepted revision and settled revision. It has no creator-run foreign key. |
-| Manager `jobs` | Add native operation-kind and optional run-identity projections for relational eligibility. Validate them against the immutable specification and digest. The linked command supplies management revision. |
+| Manager `jobs` | Native operation-kind, optional run identity and optional management request identity. Validate these projections against the immutable specification and digest. Unique app/management-request supplies an independent replay anchor; the linked command supplies management revision. |
 | Creator `management_receipts` | Link its job identity to the exact job receipt; retain app/request uniqueness and add required requested-run identity and management revision, unique app/run/revision. Preserve the resolved identity digest and closed outcome. Requested-run identity has no run foreign key, so `NotFound` needs no invented run. |
 | Creator `management_scopes` | Opaque typed `id`, unique app/requested-run identity and the last applied management revision. It survives run and history retention. |
 
@@ -1313,9 +1314,11 @@ excludes Advance jobs with a pending blocking command for that run. Activation,
 cron acceptance and required reconciliation remain eligible. Claim must also
 validate the relevant authoritative command/job linkage under the app lock:
 damaged native run or blocking projections must not hide a barrier from an
-otherwise valid Advance. Scan bounded pages of pending app commands without
-filtering on the projections being verified; a failed or exhausted validation
-cannot grant a delivery. Settlement records the exact command outcome and advances
+otherwise valid Advance. Join pending commands to their jobs and order records in
+bounded pages, then independently inspect pending jobs and open order ranges.
+Validate retained rows in memory without per-command database round trips or a
+scan of completed history. A failed or exhausted validation cannot grant a
+delivery. Settlement records the exact command outcome and advances
 the settled revision with the queue receipt, resolving only that command's barrier.
 
 Resume requires current authorized admission. Restart requires source-generation
@@ -1354,8 +1357,9 @@ Calendar activation history and activation timestamps cannot select the ordinary
 live deployment. This reader acquires no lock or hold and grants no admission
 authority. PostgreSQL and SQLite tests exercise app isolation, moving pointers,
 unavailable targets, malformed storage and refusal of source writes. Give the
-manager only the source columns required by this query, with readiness checks for
-those grants. This source needs no creator database or run metadata; the creator
+manager only the source columns required by this query. The canonical platform
+migration supplies those grants and server readiness probes them. This source
+needs no creator database or run metadata; the creator
 checks workflow membership when preparing the frozen target.
 
 Latest is observed during the acceptance attempt. It does not promise that the
@@ -1366,8 +1370,14 @@ then reacquire the lock and repeat receipt matching before atomically inserting
 the resolved command, job, order and barrier. Require the confirmed hold for that
 same target before accepting. Source or retention failure before acceptance is
 retryable; a committed receipt bypasses current-deployment lookup. Preserve raw
-request identity separately from effective restart normalization. Platform grants,
-host readiness and acceptance composition with the reader remain to be implemented.
+request identity separately from effective restart normalization. The manager
+acceptance path and server now compose this reader with queue retention. Command
+and job records independently anchor the original request identity: damaged
+lookup metadata must fail closed rather than admit a duplicate command.
+Status lookup first checks whether the app scope exists, then takes its lock
+before reading either request anchor. Separate unlocked reads could straddle
+atomic acceptance under PostgreSQL's default isolation and report valid metadata
+as corrupt. An unknown app still returns no receipt without creating a scope.
 
 For a started restart, "started" means the deployment of the source generation
 when that command applies, including a generation created by an earlier ordered
@@ -1413,16 +1423,17 @@ operations that actually require code.
 
 The representation is implemented across core, queue, creator readers and metadata
 transport. Settlement preflight checks the outcome family, and creator receipts
-also enforce the operation's supported result. Management and collection delivery
-remain explicitly unsupported in the creator consumer. Fresh management settlement
-is refused until it can atomically update the authoritative command, order and
-barrier; a typed lifecycle result alone does not establish that linkage. Carry the
-closed management outcome through the exact creator receipt and that transaction.
-Queue ordering and
-barrier filters need native scalar linkage fields before limiting candidates.
-The existing separate inbox has no production consumer and should disappear with this handler
-cohort; it does not implement the delivered protocol. The manager must never query
-the customer journal to fill a deployment gap.
+also enforce the operation's supported result. Manager settlement now validates
+the authoritative command/job/order linkage and commits its lifecycle outcome,
+settled revision and queue receipt together. Exact settled replay validates the
+retained linkage before its final enrollment check; it cannot clear a newer
+barrier. Public queue submission and successors cannot create management jobs.
+Only authorized manager acceptance creates those jobs. The separate inbox polling
+and acknowledgement wire routes, client methods and worker grants are removed.
+Creator management and collection delivery remain to be implemented. Their
+handlers must carry the closed outcome through the exact creator receipt and
+queue settlement. The manager must never query the customer journal to fill a
+deployment gap.
 
 ## Recovery responsibility and execution capacity
 
@@ -2051,8 +2062,9 @@ The local host currently composes that journal and runner.
 Creator management application can join a caller-owned transaction. Native
 PostgreSQL/SQLite tests exercise staged lifecycle changes, publication and
 management receipts across outer commit, abort and policy invalidation. This
-supplies the atomic application primitive; ordered management jobs, delivery
-receipts and manager settlement remain part of the pending protocol cutover.
+supplies the atomic application primitive. The manager now provides ordered
+management jobs and linked settlement; creator delivered receipts remain part
+of the pending protocol cutover.
 
 Started restart validates the locked run against its current generation's
 deployment, then checks that deployment's registration and existing held journal
@@ -2078,10 +2090,22 @@ Deployment prerequisites belong to executable operations, with an optional nativ
 queue projection checked against the operation and immutable digest. Recovery
 keeps activation provenance without retaining its bundle; pending recovery jobs
 must decode as reconciliation. Closed management commands carry the management
-revision and resolved restart policy. The native current-deployment reader is
-implemented; its platform grants and composition into authoritative acceptance,
-ordered delivery, lifecycle outcomes and management/collection handlers remain
-pending.
+revision and resolved restart policy. The native current-deployment reader,
+column-scoped platform grants and server readiness checks are composed into
+authoritative acceptance. Management request anchors, per-run ordering and
+provisional barriers share the queue transaction; barrier and command eligibility
+filters precede candidate limiting. Linked management settlement is implemented;
+creator management and collection handlers remain pending.
+
+Native management contracts exercise source changes during hold acquisition,
+competing acceptance, original-request replay after catalog changes, damaged
+request anchors and pending barriers, ordered settlement and enrollment changes.
+Backlog cases cross native page boundaries under the normal queue transaction
+deadline. PostgreSQL lock observations verify that status waits behind acceptance
+before reading the linked command and job; SQLite exercises the same receipt and
+unknown-scope behavior. These tests live in
+`crates/zeroship-workflow-manager/tests/management.rs` and its companion modules.
+
 Canonical parent primary keys eliminate the conflicting duplicate identities in
 concurrent first registration. Native PostgreSQL/SQLite coordinator and queue
 contracts, authenticated server processes, actual platform migration/grants and
@@ -2417,7 +2441,7 @@ archive and retains the last valid deployment when current sources fail to build
 | Enrollment bootstrap and revocation | A revoked worker cannot regain equivalent authority by automatic enrollment. Finalize bootstrap trust, replacement authorization and registry freshness with auth ownership. |
 | Placement eligibility and capacity provider | Only platform-authorized app/zone combinations may be assigned. Select the trusted eligibility source and host adapter's durable request/progress contract. |
 | Archive acknowledgement | The direct Control source provides bounded convergence under original observation validity. Define any stronger execution-quiescence evidence separately from calendar acknowledgement or lease expiry. |
-| Complete job envelopes | Operation-specific deployment prerequisites and resolved management command shapes are implemented. Complete authoritative latest-target selection, management outcomes, event/fanout and continuation cursors with their delivered consumers. |
+| Complete job envelopes | Operation-specific deployment prerequisites, frozen manager restart targets and linked management outcomes are implemented. Complete creator management delivery, collection, event/fanout and continuation cursors with their delivered consumers. |
 | Normal deployment publication | Bind activation revision issuance to a stable deploy command and immutable body. Artifact identity alone cannot distinguish a delayed retry from an intentional rollback. Compose mutable deployment side effects with command acceptance, connect archive/stage/restore to the durable handoff, and keep the calendar's activation origin explicit across delayed delivery. |
 | Scope retirement | Define ingress epoch closure and durable drain evidence. Registration expiry and empty polling cannot retire unpublished-work responsibility. |
 | Receipt retirement | Define admissibility fences and publication/settlement watermarks before deleting job deduplication state. Retain it until that proof exists. |

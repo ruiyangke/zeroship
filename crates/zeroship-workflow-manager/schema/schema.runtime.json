@@ -271,6 +271,37 @@
             "valueColumn": "operation"
           }
         },
+        "operation_kind": {
+          "type": "string",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "operation_kind"
+          }
+        },
+        "management_request_id": {
+          "type": "string",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "management_request_id"
+          }
+        },
+        "run_id": {
+          "type": "string",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "run_id"
+          }
+        },
         "spec_digest": {
           "type": "string",
           "required": true,
@@ -444,6 +475,23 @@
             "state",
             "dispatch_order"
           ]
+        },
+        {
+          "name": "jobs_management_request_key",
+          "fields": [
+            "app_id",
+            "management_request_id"
+          ],
+          "unique": true
+        },
+        {
+          "name": "jobs_operation_idx",
+          "fields": [
+            "app_id",
+            "operation_kind",
+            "state",
+            "id"
+          ]
         }
       ]
     },
@@ -494,6 +542,17 @@
             "valueColumn": "run_id"
           }
         },
+        "revision": {
+          "type": "bigInt",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "revision"
+          }
+        },
         "actor": {
           "type": "string",
           "required": true,
@@ -505,7 +564,7 @@
             "valueColumn": "actor"
           }
         },
-        "operation": {
+        "request": {
           "type": "string",
           "required": true,
           "readable": true,
@@ -513,37 +572,29 @@
           "sortable": true,
           "projectable": true,
           "storage": {
-            "valueColumn": "operation"
+            "valueColumn": "request"
           }
         },
-        "restart_name": {
+        "request_digest": {
           "type": "string",
+          "required": true,
           "readable": true,
           "filterable": true,
           "sortable": true,
           "projectable": true,
           "storage": {
-            "valueColumn": "restart_name"
+            "valueColumn": "request_digest"
           }
         },
-        "restart_occurrence": {
-          "type": "bigInt",
+        "blocks_execution": {
+          "type": "boolean",
+          "required": true,
           "readable": true,
           "filterable": true,
           "sortable": true,
           "projectable": true,
           "storage": {
-            "valueColumn": "restart_occurrence"
-          }
-        },
-        "restart_deploy": {
-          "type": "string",
-          "readable": true,
-          "filterable": true,
-          "sortable": true,
-          "projectable": true,
-          "storage": {
-            "valueColumn": "restart_deploy"
+            "valueColumn": "blocks_execution"
           }
         },
         "created_at": {
@@ -566,36 +617,6 @@
           "storage": {
             "valueColumn": "outcome"
           }
-        },
-        "run_state": {
-          "type": "string",
-          "readable": true,
-          "filterable": true,
-          "sortable": true,
-          "projectable": true,
-          "storage": {
-            "valueColumn": "run_state"
-          }
-        },
-        "ack_worker_id": {
-          "type": "string",
-          "readable": true,
-          "filterable": true,
-          "sortable": true,
-          "projectable": true,
-          "storage": {
-            "valueColumn": "ack_worker_id"
-          }
-        },
-        "ack_revision": {
-          "type": "bigInt",
-          "readable": true,
-          "filterable": true,
-          "sortable": true,
-          "projectable": true,
-          "storage": {
-            "valueColumn": "ack_revision"
-          }
         }
       },
       "options": {
@@ -613,13 +634,106 @@
           "unique": true
         },
         {
+          "name": "management_revision_key",
+          "fields": [
+            "app_id",
+            "run_id",
+            "revision"
+          ],
+          "unique": true
+        },
+        {
           "name": "management_pending_idx",
           "fields": [
             "app_id",
             "outcome",
-            "created_at",
-            "request_id"
+            "id"
           ]
+        },
+        {
+          "name": "management_barrier_idx",
+          "fields": [
+            "app_id",
+            "run_id",
+            "outcome",
+            "blocks_execution",
+            "revision"
+          ]
+        }
+      ]
+    },
+    "management_scopes": {
+      "fields": {
+        "id": {
+          "type": "string",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "id"
+          },
+          "primaryKey": true
+        },
+        "app_id": {
+          "type": "string",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "app_id"
+          }
+        },
+        "run_id": {
+          "type": "string",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "run_id"
+          }
+        },
+        "accepted_revision": {
+          "type": "bigInt",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "accepted_revision"
+          }
+        },
+        "settled_revision": {
+          "type": "bigInt",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "settled_revision"
+          }
+        }
+      },
+      "options": {
+        "softDelete": false,
+        "versioning": false,
+        "strictness": "strict"
+      },
+      "indexes": [
+        {
+          "name": "management_scopes_scope_key",
+          "fields": [
+            "app_id",
+            "run_id"
+          ],
+          "unique": true
         }
       ]
     },

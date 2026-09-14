@@ -31,15 +31,7 @@ CREATE INDEX IF NOT EXISTS "receipt_scope_idx" ON "workflow_manager"."placement_
 
 CREATE UNIQUE INDEX IF NOT EXISTS "placement_receipts_scope_key" ON "workflow_manager"."placement_receipts" ("app_id", "request_id");
 
-CREATE TABLE "workflow_manager"."management" ("id" text PRIMARY KEY NOT NULL, "app_id" text NOT NULL, "request_id" text NOT NULL, "run_id" text NOT NULL, "actor" text NOT NULL, "operation" text NOT NULL, "restart_name" text, "restart_occurrence" bigint, "restart_deploy" text, "created_at" bigint NOT NULL, "outcome" text, "run_state" text, "ack_worker_id" text, "ack_revision" bigint, CONSTRAINT "management_scope" FOREIGN KEY ("app_id") REFERENCES "workflow_manager"."queue_scopes" (id) ON DELETE RESTRICT);
-
-CREATE INDEX IF NOT EXISTS "management_scope_idx" ON "workflow_manager"."management" ("app_id");
-
-CREATE UNIQUE INDEX IF NOT EXISTS "management_scope_key" ON "workflow_manager"."management" ("app_id", "request_id");
-
-CREATE INDEX IF NOT EXISTS "management_pending_idx" ON "workflow_manager"."management" ("app_id", "outcome", "created_at", "request_id");
-
-CREATE TABLE "workflow_manager"."jobs" ("id" text PRIMARY KEY NOT NULL, "app_id" text NOT NULL, "deployment_id" text, "operation" text NOT NULL, "spec_digest" text NOT NULL, "available_at" bigint NOT NULL, "dispatch_order" bigint NOT NULL, "state" text NOT NULL, "attempt" bigint NOT NULL DEFAULT 0, "worker_id" text, "assignment_revision" bigint, "lease_deadline" bigint, "outcome" text, "settlement_digest" text, "created_at" bigint NOT NULL, CONSTRAINT "jobs_app_id_fkey" FOREIGN KEY ("app_id") REFERENCES "workflow_manager"."queue_scopes" (id) ON DELETE RESTRICT);
+CREATE TABLE "workflow_manager"."jobs" ("id" text PRIMARY KEY NOT NULL, "app_id" text NOT NULL, "deployment_id" text, "operation" text NOT NULL, "operation_kind" text NOT NULL, "management_request_id" text, "run_id" text, "spec_digest" text NOT NULL, "available_at" bigint NOT NULL, "dispatch_order" bigint NOT NULL, "state" text NOT NULL, "attempt" bigint NOT NULL DEFAULT 0, "worker_id" text, "assignment_revision" bigint, "lease_deadline" bigint, "outcome" text, "settlement_digest" text, "created_at" bigint NOT NULL, CONSTRAINT "jobs_app_id_fkey" FOREIGN KEY ("app_id") REFERENCES "workflow_manager"."queue_scopes" (id) ON DELETE RESTRICT);
 
 CREATE INDEX IF NOT EXISTS "jobs_app_id_fkey_idx" ON "workflow_manager"."jobs" ("app_id");
 
@@ -54,6 +46,30 @@ CREATE INDEX IF NOT EXISTS "jobs_deployment_idx" ON "workflow_manager"."jobs" ("
 CREATE UNIQUE INDEX IF NOT EXISTS "jobs_dispatch_key" ON "workflow_manager"."jobs" ("app_id", "dispatch_order");
 
 CREATE INDEX IF NOT EXISTS "jobs_dispatch_idx" ON "workflow_manager"."jobs" ("app_id", "state", "dispatch_order");
+
+CREATE UNIQUE INDEX IF NOT EXISTS "jobs_management_request_key" ON "workflow_manager"."jobs" ("app_id", "management_request_id");
+
+CREATE INDEX IF NOT EXISTS "jobs_operation_idx" ON "workflow_manager"."jobs" ("app_id", "operation_kind", "state", "id");
+
+CREATE TABLE "workflow_manager"."management_scopes" ("id" text PRIMARY KEY NOT NULL, "app_id" text NOT NULL, "run_id" text NOT NULL, "accepted_revision" bigint NOT NULL, "settled_revision" bigint NOT NULL, CONSTRAINT "management_order_app" FOREIGN KEY ("app_id") REFERENCES "workflow_manager"."queue_scopes" (id) ON DELETE RESTRICT);
+
+CREATE INDEX IF NOT EXISTS "management_order_app_idx" ON "workflow_manager"."management_scopes" ("app_id");
+
+CREATE UNIQUE INDEX IF NOT EXISTS "management_scopes_scope_key" ON "workflow_manager"."management_scopes" ("app_id", "run_id");
+
+CREATE TABLE "workflow_manager"."management" ("id" text PRIMARY KEY NOT NULL, "app_id" text NOT NULL, "request_id" text NOT NULL, "run_id" text NOT NULL, "revision" bigint NOT NULL, "actor" text NOT NULL, "request" text NOT NULL, "request_digest" text NOT NULL, "blocks_execution" boolean NOT NULL, "created_at" bigint NOT NULL, "outcome" text, CONSTRAINT "management_job" FOREIGN KEY ("app_id", "id") REFERENCES "workflow_manager"."jobs" ("app_id", id) ON DELETE RESTRICT, CONSTRAINT "management_order" FOREIGN KEY ("app_id", "run_id") REFERENCES "workflow_manager"."management_scopes" ("app_id", "run_id") ON DELETE RESTRICT);
+
+CREATE INDEX IF NOT EXISTS "management_job_idx" ON "workflow_manager"."management" ("app_id", "id");
+
+CREATE INDEX IF NOT EXISTS "management_order_idx" ON "workflow_manager"."management" ("app_id", "run_id");
+
+CREATE UNIQUE INDEX IF NOT EXISTS "management_scope_key" ON "workflow_manager"."management" ("app_id", "request_id");
+
+CREATE UNIQUE INDEX IF NOT EXISTS "management_revision_key" ON "workflow_manager"."management" ("app_id", "run_id", "revision");
+
+CREATE INDEX IF NOT EXISTS "management_pending_idx" ON "workflow_manager"."management" ("app_id", "outcome", "id");
+
+CREATE INDEX IF NOT EXISTS "management_barrier_idx" ON "workflow_manager"."management" ("app_id", "run_id", "outcome", "blocks_execution", "revision");
 
 CREATE TABLE "workflow_manager"."schedule_deployments" ("id" text PRIMARY KEY NOT NULL, "app_id" text NOT NULL, "definition" text NOT NULL, "interpretation" text NOT NULL, "created_at" bigint NOT NULL, CONSTRAINT "schedule_deployment_scope" FOREIGN KEY ("app_id") REFERENCES "workflow_manager"."queue_scopes" (id) ON DELETE RESTRICT);
 
@@ -125,9 +141,11 @@ ALTER TABLE "workflow_manager"."assignments" ALTER COLUMN "id" TYPE text COLLATE
 
 ALTER TABLE "workflow_manager"."placement_receipts" ALTER COLUMN "id" TYPE text COLLATE "C", ALTER COLUMN "app_id" TYPE text COLLATE "C", ALTER COLUMN "request_id" TYPE text COLLATE "C", ALTER COLUMN "worker_id" TYPE text COLLATE "C";
 
-ALTER TABLE "workflow_manager"."management" ALTER COLUMN "id" TYPE text COLLATE "C", ALTER COLUMN "app_id" TYPE text COLLATE "C", ALTER COLUMN "request_id" TYPE text COLLATE "C", ALTER COLUMN "run_id" TYPE text COLLATE "C", ALTER COLUMN "ack_worker_id" TYPE text COLLATE "C";
+ALTER TABLE "workflow_manager"."management" ALTER COLUMN "id" TYPE text COLLATE "C", ALTER COLUMN "app_id" TYPE text COLLATE "C", ALTER COLUMN "request_id" TYPE text COLLATE "C", ALTER COLUMN "run_id" TYPE text COLLATE "C";
 
-ALTER TABLE "workflow_manager"."jobs" ALTER COLUMN "id" TYPE text COLLATE "C", ALTER COLUMN "app_id" TYPE text COLLATE "C", ALTER COLUMN "deployment_id" TYPE text COLLATE "C", ALTER COLUMN "worker_id" TYPE text COLLATE "C";
+ALTER TABLE "workflow_manager"."management_scopes" ALTER COLUMN "id" TYPE text COLLATE "C", ALTER COLUMN "app_id" TYPE text COLLATE "C", ALTER COLUMN "run_id" TYPE text COLLATE "C";
+
+ALTER TABLE "workflow_manager"."jobs" ALTER COLUMN "id" TYPE text COLLATE "C", ALTER COLUMN "app_id" TYPE text COLLATE "C", ALTER COLUMN "deployment_id" TYPE text COLLATE "C", ALTER COLUMN "worker_id" TYPE text COLLATE "C", ALTER COLUMN "run_id" TYPE text COLLATE "C", ALTER COLUMN "management_request_id" TYPE text COLLATE "C";
 
 ALTER TABLE "workflow_manager"."recovery_scopes" ALTER COLUMN "id" TYPE text COLLATE "C", ALTER COLUMN "deployment_id" TYPE text COLLATE "C", ALTER COLUMN "pending_job_id" TYPE text COLLATE "C";
 
@@ -142,4 +160,4 @@ ALTER TABLE "workflow_manager"."schedule_scopes" ALTER COLUMN "id" TYPE text COL
 ALTER TABLE "workflow_manager"."schedules" ALTER COLUMN "id" TYPE text COLLATE "C", ALTER COLUMN "app_id" TYPE text COLLATE "C", ALTER COLUMN "name" TYPE text COLLATE "C", ALTER COLUMN "activation_id" TYPE text COLLATE "C";
 
 ALTER TABLE "workflow_manager"."schedule_occurrences" ALTER COLUMN "id" TYPE text COLLATE "C", ALTER COLUMN "app_id" TYPE text COLLATE "C", ALTER COLUMN "schedule_id" TYPE text COLLATE "C", ALTER COLUMN "run_id" TYPE text COLLATE "C", ALTER COLUMN "job_id" TYPE text COLLATE "C", ALTER COLUMN "activation_id" TYPE text COLLATE "C";
-INSERT INTO workflow_manager.schema_version (id, fingerprint) VALUES ('manager', '41e6b950e4da28b26b5c3b52492e75a164d058490434e89f43347876457592d9');
+INSERT INTO workflow_manager.schema_version (id, fingerprint) VALUES ('manager', '5352f85ddcba640c022f4a37a8ad9227acde0d6335146363cc41ebdff40b5cef');

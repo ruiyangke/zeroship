@@ -31,6 +31,9 @@ zeroship_data_orm::orm::schema! {
             app_id: Text,
             deployment_id: Nullable<Text>,
             operation: Text,
+            operation_kind: Text,
+            management_request_id: Nullable<Text>,
+            run_id: Nullable<Text>,
             spec_digest: Text,
             available_at: BigInt,
             dispatch_order: BigInt,
@@ -51,16 +54,22 @@ zeroship_data_orm::orm::schema! {
             app_id: Text,
             request_id: Text,
             run_id: Text,
+            revision: BigInt,
             actor: Text,
-            operation: Text,
-            restart_name: Nullable<Text>,
-            restart_occurrence: Nullable<BigInt>,
-            restart_deploy: Nullable<Text>,
+            request: Text,
+            request_digest: Text,
+            blocks_execution: Boolean,
             created_at: BigInt,
             outcome: Nullable<Text>,
-            run_state: Nullable<Text>,
-            ack_worker_id: Nullable<Text>,
-            ack_revision: Nullable<BigInt>,
+        }
+
+        management_scopes {
+            #[orm(primary_key)]
+            id: Text,
+            app_id: Text,
+            run_id: Text,
+            accepted_revision: BigInt,
+            settled_revision: BigInt,
         }
 
         placement_receipts {

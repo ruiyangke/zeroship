@@ -21,9 +21,8 @@ use std::time::Duration;
 use zeroship_core::{
     service_identity::endpoints,
     workflow_coordination::{
-        AcknowledgeManagement, AssignScope, AssignedScope, Failure, FailureCode, ManageRun,
-        ManagementStatus, PublishWakeHint, RegisterWorker, ReleaseScope, ScopePage,
-        VerifyAssignment, WorkerPage,
+        AssignScope, AssignedScope, Failure, FailureCode, ManageRun, ManagementStatus,
+        PublishWakeHint, RegisterWorker, ReleaseScope, ScopePage, VerifyAssignment, WorkerPage,
     },
 };
 
@@ -78,14 +77,6 @@ pub fn configure_with_limit(config: &mut web::ServiceConfig, limit: usize) {
         )
         .service(
             web::resource(endpoints::WORKFLOW_WAKE.path_template()).route(web::post().to(wake)),
-        )
-        .service(
-            web::resource(endpoints::WORKFLOW_MANAGEMENT_POLL.path_template())
-                .route(web::post().to(management_poll)),
-        )
-        .service(
-            web::resource(endpoints::WORKFLOW_MANAGEMENT_ACK.path_template())
-                .route(web::post().to(management_ack)),
         )
         .service(web::resource("/{path:.*}").route(web::route().to(not_found)));
 }
@@ -287,7 +278,7 @@ async fn manage(
             state
                 .service
                 .manager
-                .manage(&actor, &command)
+                .manage(&actor, &command, &state.service.latest)
                 .await
                 .map_err(Error::from)
         }
@@ -451,60 +442,6 @@ async fn wake(
                 .service
                 .manager
                 .publish_wake(actor.id(), &command)
-                .await
-                .map_err(Error::from)
-        }
-        .await,
-    )
-}
-
-async fn management_poll(
-    request: web::HttpRequest,
-    state: State<SharedState>,
-    body: web::types::Payload,
-) -> web::HttpResponse {
-    respond(
-        async {
-            let actor = compio::time::timeout(
-                Duration::from_secs(5),
-                state
-                    .auth
-                    .worker(authorization(&request), endpoints::WORKFLOW_MANAGEMENT_POLL),
-            )
-            .await
-            .map_err(|_| Error::Unavailable)??;
-            let command: AssignedScope = read_json(&request, body).await?;
-            state
-                .service
-                .manager
-                .pending_management(actor.id(), &command)
-                .await
-                .map_err(Error::from)
-        }
-        .await,
-    )
-}
-
-async fn management_ack(
-    request: web::HttpRequest,
-    state: State<SharedState>,
-    body: web::types::Payload,
-) -> web::HttpResponse {
-    respond(
-        async {
-            let actor = compio::time::timeout(
-                Duration::from_secs(5),
-                state
-                    .auth
-                    .worker(authorization(&request), endpoints::WORKFLOW_MANAGEMENT_ACK),
-            )
-            .await
-            .map_err(|_| Error::Unavailable)??;
-            let command: AcknowledgeManagement = read_json(&request, body).await?;
-            state
-                .service
-                .manager
-                .acknowledge_management(actor.id(), &command)
                 .await
                 .map_err(Error::from)
         }

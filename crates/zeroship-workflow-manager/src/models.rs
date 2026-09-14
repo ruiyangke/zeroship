@@ -7,7 +7,8 @@ use zeroship_data_orm::{orm::FromRow, schema::Schema};
 
 mod schema_definition;
 pub use schema::{
-    assignments, jobs, management, placement_receipts, queue_scopes, recovery_scopes, workers,
+    assignments, jobs, management, management_scopes, placement_receipts, queue_scopes,
+    recovery_scopes, workers,
 };
 pub use schema_definition::schema;
 
@@ -28,6 +29,9 @@ pub struct Job {
     pub app_id: String,
     pub deployment_id: Option<String>,
     pub operation: String,
+    pub operation_kind: String,
+    pub management_request_id: Option<String>,
+    pub run_id: Option<String>,
     pub spec_digest: String,
     pub available_at: i64,
     pub dispatch_order: i64,
@@ -48,7 +52,11 @@ impl Job {
             operation: serde_json::from_str(&self.operation).map_err(|_| Error::Storage)?,
             available_at: self.available_at.try_into().map_err(|_| Error::Storage)?,
         };
-        if self.deployment_id.as_deref() != spec.deployment_id().map(DeploymentId::as_str) {
+        if self.deployment_id.as_deref() != spec.deployment_id().map(DeploymentId::as_str)
+            || self.management_request_id.as_deref() != management_request(&spec.operation)
+            || self.operation_kind != operation_kind(&spec.operation)
+            || self.run_id.as_deref() != operation_run(&spec.operation)
+        {
             return Err(Error::Storage);
         }
         let encoded = serde_json::to_vec(&spec).map_err(|_| Error::Storage)?;
@@ -102,14 +110,58 @@ pub struct PlacementReceipt {
 #[derive(FromRow)]
 #[orm(entity = management)]
 pub struct Management {
+    pub id: String,
     pub app_id: String,
     pub request_id: String,
     pub run_id: String,
+    pub revision: i64,
     pub actor: String,
-    pub operation: String,
-    pub restart_name: Option<String>,
-    pub restart_occurrence: Option<i64>,
-    pub restart_deploy: Option<String>,
+    pub request: String,
+    pub request_digest: String,
+    pub blocks_execution: bool,
+    pub created_at: i64,
     pub outcome: Option<String>,
-    pub run_state: Option<String>,
+}
+
+#[derive(FromRow)]
+#[orm(entity = management_scopes)]
+pub struct ManagementScope {
+    pub id: String,
+    pub app_id: String,
+    pub run_id: String,
+    pub accepted_revision: i64,
+    pub settled_revision: i64,
+}
+
+pub const fn operation_kind(
+    operation: &zeroship_core::workflow_jobs::JobOperation,
+) -> &'static str {
+    use zeroship_core::workflow_jobs::JobOperation;
+    match operation {
+        JobOperation::Activate { .. } => "activate",
+        JobOperation::Advance { .. } => "advance",
+        JobOperation::Cron { .. } => "cron",
+        JobOperation::Management { .. } => "management",
+        JobOperation::Reconcile {} => "reconcile",
+        JobOperation::Collect {} => "collect",
+    }
+}
+
+pub fn operation_run(operation: &zeroship_core::workflow_jobs::JobOperation) -> Option<&str> {
+    use zeroship_core::workflow_jobs::JobOperation;
+    match operation {
+        JobOperation::Advance { run_id, .. }
+        | JobOperation::Cron { run_id, .. }
+        | JobOperation::Management { run_id, .. } => Some(run_id.as_str()),
+        _ => None,
+    }
+}
+
+pub fn management_request(operation: &zeroship_core::workflow_jobs::JobOperation) -> Option<&str> {
+    match operation {
+        zeroship_core::workflow_jobs::JobOperation::Management { request_id, .. } => {
+            Some(request_id.as_str())
+        }
+        _ => None,
+    }
 }

@@ -38,6 +38,10 @@ export default {
       sql: "GRANT SELECT (id,plan_id,workflows_enabled,archived_at) ON zeroship.apps TO zeroship_workflow; GRANT SELECT (id,workflows_allowed,archived,workflow_policy_json) ON zeroship.plans TO zeroship_workflow",
       reason: "workflow policy observations read only Control-owned contributors",
     });
+    raw({
+      sql: "GRANT SELECT (deploy_hash) ON zeroship.apps TO zeroship_workflow; GRANT SELECT (id,app_id,deploy_hash,retention_state) ON zeroship.app_deploys TO zeroship_workflow",
+      reason: "latest restart observes the current Control deployment without creator data or catalog write authority",
+    });
     grant({ privileges: ["select"], on: { kind: "table", schema: "zeroship", names: ["workflow_rollout_config"] }, to: ["zeroship_workflow"] });
     grant({ privileges: ["select", "insert", "update"], on: { kind: "table", schema: "zeroship", names: ["workflow_policy_ledger"] }, to: ["zeroship_workflow"] });
     grant({

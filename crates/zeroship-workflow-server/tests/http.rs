@@ -13,17 +13,18 @@ mod server_process;
 
 use compio::io::{AsyncRead, AsyncWriteExt};
 use ntex::{client::Client, http::StatusCode};
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use std::time::Duration;
 use zeroship_core::{
     app_id::AppId,
     service_assertion::{ServiceAssertionMinter, ServiceIssuer, ServiceSigningKey},
     service_identity::endpoints,
-    service_peers::{CONTROL_SERVICE_NAME, service_issuer},
+    service_peers::{service_issuer, CONTROL_SERVICE_NAME},
     workflow_coordination::{
-        AUDIENCE, Assignment, ManageRun, ManagementOperation, RequestId, RunId, RunOperation,
-        WorkerId,
+        Assignment, ManageRun, ManagementOperation, ManagementOutcome, RequestId, RunId,
+        RunOperation, WorkerId, AUDIENCE,
     },
+    workflow_jobs::{DeliveryLease, JobOperation, JobOutcome, ManagementCommand, Settlement},
 };
 
 fn assertion(issuer: &ServiceIssuer, key: &ServiceSigningKey) -> String {
@@ -43,8 +44,8 @@ async fn native_worker_client_uses_the_authenticated_coordinator_api() {
         service_assertion::{ServiceTrustBundle, TransportAssertionVerifier},
         service_peers::{ServiceAuth, ServiceKeyring},
         workflow_coordination::{
-            AcknowledgeManagement, AssignedScope, FailureCode, ManagementOutcome, PublishWakeHint,
-            RegisterWorker, ReleaseScope, ScopePage, WorkerState,
+            AssignedScope, FailureCode, PublishWakeHint, RegisterWorker, ReleaseScope, ScopePage,
+            WorkerState,
         },
     };
     use zeroship_workflow_client::{Error, Options, WorkerCoordinator};
@@ -99,13 +100,11 @@ async fn native_worker_client_uses_the_authenticated_coordinator_api() {
     client.register(&registration).await.unwrap();
     // Independent requests must mint fresh assertions despite sharing a signer.
     client.register(&registration).await.unwrap();
-    assert!(
-        client
-            .assignments(&ScopePage { after: None })
-            .await
-            .unwrap()
-            .is_empty()
-    );
+    assert!(client
+        .assignments(&ScopePage { after: None })
+        .await
+        .unwrap()
+        .is_empty());
 
     let mut apps = [AppId::mint(), AppId::mint()];
     apps.sort_by(|a, b| a.as_str().cmp(b.as_str()));
@@ -162,7 +161,7 @@ async fn native_worker_client_uses_the_authenticated_coordinator_api() {
     assert_eq!(restored.revision, scope.assignment_revision);
     assert_eq!(
         client
-            .pending_management(&AssignedScope {
+            .claim_job(&AssignedScope {
                 app_id: AppId::mint(),
                 assignment_revision: scope.assignment_revision
             })
@@ -188,32 +187,66 @@ async fn native_worker_client_uses_the_authenticated_coordinator_api() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(
-        client.pending_management(&scope).await.unwrap(),
-        vec![command.clone()]
-    );
     server.restart(&http).await;
+    let grant = client.claim_job(&scope).await.unwrap().unwrap();
     assert_eq!(
-        client.pending_management(&scope).await.unwrap(),
-        vec![command.clone()]
+        grant.delivery().job.operation,
+        JobOperation::Management {
+            request_id: command.request_id.clone(),
+            run_id: command.run_id.clone(),
+            revision: 1.try_into().unwrap(),
+            command: ManagementCommand::Transition {
+                operation: RunOperation::Cancel
+            },
+        }
     );
-    let ack = AcknowledgeManagement {
-        request_id: command.request_id,
-        app_id: scope.app_id.clone(),
-        assignment_revision: scope.assignment_revision,
-        outcome: ManagementOutcome::NotFound {},
+    assert!(client.claim_job(&scope).await.unwrap().is_none());
+    let settlement = Settlement {
+        delivery: grant.delivery().clone(),
+        outcome: JobOutcome::Management {
+            outcome: ManagementOutcome::NotFound {},
+        },
+        successors: vec![],
     };
-    let receipt = client.acknowledge_management(&ack).await.unwrap();
-    assert_eq!(client.acknowledge_management(&ack).await.unwrap(), receipt);
-    assert!(client.pending_management(&scope).await.unwrap().is_empty());
-    let changed = AcknowledgeManagement {
-        outcome: ManagementOutcome::Conflict {},
-        ..ack
+    let receipt = client.settle_job(&settlement).await.unwrap();
+    assert_eq!(client.settle_job(&settlement).await.unwrap(), receipt);
+    assert!(client.claim_job(&scope).await.unwrap().is_none());
+    let (status, receipt) = post(
+        &http,
+        &server.url,
+        endpoints::WORKFLOW_MANAGEMENT_STATUS.path_template(),
+        &assertion(&control, &control_key),
+        &json!({"appId":scope.app_id,"requestId":command.request_id}),
+    )
+    .await;
+    assert_eq!(
+        (status, receipt),
+        (
+            StatusCode::OK,
+            json!({"appId":scope.app_id,"requestId":command.request_id,"outcome":{"kind":"not_found"}})
+        )
+    );
+    let changed = Settlement {
+        outcome: JobOutcome::Management {
+            outcome: ManagementOutcome::Conflict {},
+        },
+        ..settlement
     };
     assert_eq!(
-        client.acknowledge_management(&changed).await.unwrap_err(),
+        client.settle_job(&changed).await.unwrap_err(),
         Error::Refused(FailureCode::Conflict)
     );
+
+    verify_latest_management(
+        &fixture,
+        &http,
+        &server,
+        &client,
+        &control,
+        &control_key,
+        &scope,
+    )
+    .await;
 
     let hint = PublishWakeHint {
         app_id: scope.app_id.clone(),
@@ -291,6 +324,97 @@ async fn native_worker_client_uses_the_authenticated_coordinator_api() {
         Error::Refused(FailureCode::Unauthenticated)
     );
 }
+async fn verify_latest_management(
+    fixture: &platform::Platform,
+    http: &Client,
+    server: &server_process::ServerProcess,
+    client: &zeroship_workflow_client::WorkerCoordinator,
+    control: &ServiceIssuer,
+    key: &ServiceSigningKey,
+    scope: &zeroship_core::workflow_coordination::AssignedScope,
+) {
+    use zeroship_core::{
+        workflow_coordination::{RestartDeploy, RestartOptions},
+        workflow_jobs::DeploymentId,
+    };
+    let deployment = DeploymentId::mint();
+    let hash = "a".repeat(64);
+    fixture.admin.execute(
+        "INSERT INTO zeroship.app_deploys(id,app_id,deploy_hash,manifest_json) VALUES($1,$2,$3,'{}')",
+        &[&deployment.as_str(), &scope.app_id.as_str(), &hash],
+    ).await.unwrap();
+    fixture
+        .admin
+        .execute(
+            "UPDATE zeroship.apps SET deploy_hash=$2 WHERE id=$1",
+            &[&scope.app_id.as_str(), &hash],
+        )
+        .await
+        .unwrap();
+    let command = ManageRun {
+        request_id: RequestId::mint(),
+        app_id: scope.app_id.clone(),
+        run_id: RunId::mint(),
+        command: ManagementOperation::Restart {
+            options: RestartOptions {
+                from: None,
+                deploy: Some(RestartDeploy::Latest),
+            },
+        },
+    };
+    let request = serde_json::to_value(&command).unwrap();
+    let accepted = post(
+        http,
+        &server.url,
+        endpoints::WORKFLOW_MANAGE.path_template(),
+        &assertion(control, key),
+        &request,
+    )
+    .await;
+    assert_eq!(accepted.0, StatusCode::OK);
+    fixture
+        .admin
+        .execute(
+            "UPDATE zeroship.apps SET deploy_hash=NULL WHERE id=$1",
+            &[&scope.app_id.as_str()],
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        post(
+            http,
+            &server.url,
+            endpoints::WORKFLOW_MANAGE.path_template(),
+            &assertion(control, key),
+            &request
+        )
+        .await,
+        accepted
+    );
+    let delivery = client.claim_job(scope).await.unwrap().unwrap();
+    assert_eq!(
+        delivery.delivery().job.operation,
+        JobOperation::Management {
+            request_id: command.request_id,
+            run_id: command.run_id,
+            revision: 1.try_into().unwrap(),
+            command: ManagementCommand::RestartLatest {
+                deployment_id: deployment
+            },
+        }
+    );
+    client
+        .settle_job(&Settlement {
+            delivery: delivery.delivery().clone(),
+            outcome: JobOutcome::Management {
+                outcome: ManagementOutcome::Denied {},
+            },
+            successors: vec![],
+        })
+        .await
+        .unwrap();
+}
+
 async fn verify_native_policy_source(
     fixture: &platform::Platform,
     client: &zeroship_workflow_client::WorkerCoordinator,
@@ -299,7 +423,7 @@ async fn verify_native_policy_source(
     use std::time::Instant;
     use zeroship_core::{schema_name::SchemaName, workflow_policy::AppPolicy};
     use zeroship_data_orm::{
-        ConnectOptions, binding::DbBinding, encryption::ProjectKeySource, orm::Database,
+        binding::DbBinding, encryption::ProjectKeySource, orm::Database, ConnectOptions,
     };
     use zeroship_workflow_manager::policy::control::{self, ControlPolicyStore, RolloutPolicy};
     assert!(matches!(
@@ -420,8 +544,8 @@ async fn replicas_authenticate_metadata_and_keep_customer_execution_off_the_prot
         endpoints::WORKFLOW_RENEW,
         endpoints::WORKFLOW_RELEASE,
         endpoints::WORKFLOW_WAKE,
-        endpoints::WORKFLOW_MANAGEMENT_POLL,
-        endpoints::WORKFLOW_MANAGEMENT_ACK,
+        endpoints::WORKFLOW_JOB_CLAIM,
+        endpoints::WORKFLOW_JOB_SETTLE,
     ] {
         rejects_before_body(first.address, endpoint.path_template()).await;
     }
@@ -612,7 +736,7 @@ async fn replicas_authenticate_metadata_and_keep_customer_execution_off_the_prot
         post(
             &client,
             &first.url,
-            endpoints::WORKFLOW_MANAGEMENT_POLL.path_template(),
+            endpoints::WORKFLOW_JOB_CLAIM.path_template(),
             &assertion(&worker_issuer, &worker_key),
             &foreign
         )
@@ -676,33 +800,46 @@ async fn replicas_authenticate_metadata_and_keep_customer_execution_off_the_prot
     let (status, pending) = post(
         &client,
         &first.url,
-        endpoints::WORKFLOW_MANAGEMENT_POLL.path_template(),
+        endpoints::WORKFLOW_JOB_CLAIM.path_template(),
         &assertion(&worker_issuer, &worker_key),
         &scope,
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(pending, json!([request]));
-    let ack = json!({"appId":app,"requestId":request.request_id,"assignmentRevision":assignment.revision,"outcome":{"kind":"applied","state":"paused"}});
-    let (status, receipt) = post(
-        &client,
-        &second.url,
-        endpoints::WORKFLOW_MANAGEMENT_ACK.path_template(),
-        &assertion(&worker_issuer, &worker_key),
-        &ack,
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK);
+    let lease: DeliveryLease = serde_json::from_value(pending).unwrap();
+    assert_eq!(
+        lease.delivery.job.operation,
+        JobOperation::Management {
+            request_id: request.request_id.clone(),
+            run_id: request.run_id.clone(),
+            revision: 1.try_into().unwrap(),
+            command: ManagementCommand::Transition {
+                operation: RunOperation::Pause
+            },
+        }
+    );
+    let settlement = serde_json::to_value(Settlement {
+        delivery: lease.delivery,
+        outcome: JobOutcome::Management {
+            outcome: ManagementOutcome::Applied {
+                state: zeroship_core::workflow_coordination::RunState::Paused,
+            },
+        },
+        successors: vec![],
+    })
+    .unwrap();
+    let mut generic = settlement.clone();
+    generic["outcome"] = json!({"kind":"completed"});
     assert_eq!(
         post(
             &client,
-            &first.url,
-            endpoints::WORKFLOW_MANAGE.path_template(),
-            &assertion(&control, &control_key),
-            &management
+            &second.url,
+            endpoints::WORKFLOW_JOB_SETTLE.path_template(),
+            &assertion(&worker_issuer, &worker_key),
+            &generic
         )
         .await,
-        (StatusCode::OK, receipt.clone())
+        (StatusCode::BAD_REQUEST, json!({"code":"invalid"}))
     );
     assert_eq!(
         post(
@@ -713,8 +850,63 @@ async fn replicas_authenticate_metadata_and_keep_customer_execution_off_the_prot
             &json!({"appId":app,"requestId":request.request_id})
         )
         .await,
+        (
+            StatusCode::OK,
+            json!({"appId":app,"requestId":request.request_id,"outcome":null})
+        )
+    );
+    let (status, receipt) = post(
+        &client,
+        &second.url,
+        endpoints::WORKFLOW_JOB_SETTLE.path_template(),
+        &assertion(&worker_issuer, &worker_key),
+        &settlement,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        post(
+            &client,
+            &first.url,
+            endpoints::WORKFLOW_JOB_SETTLE.path_template(),
+            &assertion(&worker_issuer, &worker_key),
+            &settlement
+        )
+        .await,
         (StatusCode::OK, receipt)
     );
+    let management_receipt = json!({"appId":app,"requestId":request.request_id,"outcome":{"kind":"applied","state":"paused"}});
+    assert_eq!(
+        post(
+            &client,
+            &first.url,
+            endpoints::WORKFLOW_MANAGE.path_template(),
+            &assertion(&control, &control_key),
+            &management
+        )
+        .await,
+        (StatusCode::OK, management_receipt.clone())
+    );
+    assert_eq!(
+        post(
+            &client,
+            &first.url,
+            endpoints::WORKFLOW_MANAGEMENT_STATUS.path_template(),
+            &assertion(&control, &control_key),
+            &json!({"appId":app,"requestId":request.request_id})
+        )
+        .await,
+        (StatusCode::OK, management_receipt)
+    );
+    for path in ["/v1/management/poll", "/v1/management/acknowledge"] {
+        let response = client
+            .post(format!("{}{path}", first.url))
+            .header("authorization", assertion(&worker_issuer, &worker_key))
+            .send_json(&scope)
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
     let hint =
         json!({"appId":app,"assignmentRevision":assignment.revision,"revision":1,"nextDueAt":null});
     assert_eq!(

@@ -17,11 +17,10 @@ pub use policy::LeasedPolicy;
 pub use queue_holds::QueueDeploymentHolds;
 pub use transport::Transport;
 
-use std::{collections::HashSet, sync::Arc, time::Duration};
+use std::{sync::Arc, time::Duration};
 use zeroship_core::workflow_coordination::{
-    AcknowledgeManagement, AssignedScope, Assignment, FailureCode, ManageRun, ManagementReceipt,
-    PublishWakeHint, RegisterWorker, RegisteredWorker, ReleaseScope, ScopePage, WakeHintReceipt,
-    WorkerId, AUDIENCE,
+    AssignedScope, Assignment, FailureCode, PublishWakeHint, RegisterWorker, RegisteredWorker,
+    ReleaseScope, ScopePage, WakeHintReceipt, WorkerId, AUDIENCE,
 };
 use zeroship_core::{
     service_assertion::ServiceIssuer,
@@ -201,48 +200,5 @@ impl WorkerCoordinator {
         self.transport
             .post(endpoints::WORKFLOW_RELEASE, request)
             .await
-    }
-
-    /// Delivery can repeat after restart or reassignment. Apply commands through
-    /// the customer's app-bound engine using their stable request identity.
-    ///
-    /// # Errors
-    /// Refuses failed exchanges, foreign app commands and repeated request identities.
-    pub async fn pending_management(
-        &self,
-        request: &AssignedScope,
-    ) -> Result<Vec<ManageRun>, Error> {
-        let commands: Vec<ManageRun> = self
-            .transport
-            .post(endpoints::WORKFLOW_MANAGEMENT_POLL, request)
-            .await?;
-        let mut seen = HashSet::new();
-        for command in &commands {
-            if command.app_id != request.app_id || !seen.insert(&command.request_id) {
-                return Err(Error::InvalidResponse);
-            }
-        }
-        Ok(commands)
-    }
-
-    /// Acknowledge only an outcome already persisted by the customer's engine.
-    ///
-    /// # Errors
-    /// Refuses failed exchanges, changed outcomes and foreign request receipts.
-    pub async fn acknowledge_management(
-        &self,
-        request: &AcknowledgeManagement,
-    ) -> Result<ManagementReceipt, Error> {
-        let receipt: ManagementReceipt = self
-            .transport
-            .post(endpoints::WORKFLOW_MANAGEMENT_ACK, request)
-            .await?;
-        if receipt.app_id != request.app_id
-            || receipt.request_id != request.request_id
-            || receipt.outcome != Some(request.outcome)
-        {
-            return Err(Error::InvalidResponse);
-        }
-        Ok(receipt)
     }
 }
