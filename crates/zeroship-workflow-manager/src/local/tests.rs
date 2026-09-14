@@ -38,7 +38,12 @@ fn combined_schema_contains_the_catalog_and_the_manager() {
     let catalog = objects(&catalog).unwrap();
     assert!(!catalog.is_empty());
     assert!(catalog.iter().all(|object| combined.contains(object)));
-    for table in ["app_deploys", "jobs", "schedule_activations", "recovery_duties"] {
+    for table in [
+        "app_deploys",
+        "jobs",
+        "schedule_activations",
+        "recovery_duties",
+    ] {
         assert!(
             combined.iter().any(|(name, _)| name == table),
             "combined schema lacks {table}"
@@ -74,7 +79,10 @@ async fn a_new_file_holds_the_catalog_and_manager_schema_and_reopens() {
             |row| row.get(0),
         )
         .unwrap();
-    assert_eq!(fingerprint, include_str!("../../schema/fingerprint.txt").trim());
+    assert_eq!(
+        fingerprint,
+        include_str!("../../schema/fingerprint.txt").trim()
+    );
     let app = AppId::mint();
     let (hash, encoded) = manifest();
     let deployment = platform
@@ -106,7 +114,10 @@ async fn a_new_file_holds_the_catalog_and_manager_schema_and_reopens() {
 async fn partial_or_changed_files_are_refused_without_rewriting_them() {
     let (hash, _) = manifest();
     for (label, schema) in [
-        ("deployment catalog only", deployments::SQLITE_SCHEMA.to_owned()),
+        (
+            "deployment catalog only",
+            deployments::SQLITE_SCHEMA.to_owned(),
+        ),
         (
             "manager only",
             include_str!("../../schema/sqlite.sql").to_owned(),

@@ -218,9 +218,7 @@ async fn postgres_collector_helpers_keep_the_lock_and_fence_in_one_transaction()
 #[compio::test]
 async fn registration_rejects_invalid_manifests_and_corrupt_existing_metadata() {
     let root = tempfile::tempdir().unwrap();
-    let catalog = local(&root.path().join("index.sqlite"))
-        .await
-        .unwrap();
+    let catalog = local(&root.path().join("index.sqlite")).await.unwrap();
     let app = AppId::mint();
     let (hash, encoded) = manifest();
     for (invalid_hash, invalid_manifest) in [
@@ -291,10 +289,7 @@ async fn local_catalog_rejects_incompatible_schema_without_rewriting_it() {
     let path = root.path().join("index.sqlite");
     let connection = rusqlite::Connection::open(&path).unwrap();
     connection.execute_batch("CREATE TABLE app_deploys (id TEXT PRIMARY KEY); INSERT INTO app_deploys VALUES ('keep')").unwrap();
-    assert!(matches!(
-        local(&path).await,
-        Err(Error::Unavailable(_))
-    ));
+    assert!(matches!(local(&path).await, Err(Error::Unavailable(_))));
     assert_eq!(
         connection
             .query_row("SELECT id FROM app_deploys", [], |row| row

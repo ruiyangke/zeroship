@@ -121,8 +121,11 @@ pub async fn open<C: Composition>(
     } = settings;
     let store = storage.open().await?;
     schema::initialize_local(&store).await?;
-    let (manager, thread) =
-        manager::spawn(deployment.platform().to_path_buf(), config.manager_options()).await?;
+    let (manager, thread) = manager::spawn(
+        deployment.platform().to_path_buf(),
+        config.manager_options(),
+    )
+    .await?;
     let policies = Arc::new(HostPolicies::default());
     let policy = policies.bind(app.clone())?;
     policy
@@ -173,8 +176,11 @@ pub async fn open<C: Composition>(
         limits,
     )?);
     let tasks = Rc::new(api.tasks(WorkerIdentity::new(manager.worker().as_str().to_owned())?));
-    let executor =
-        composition.executor(Rc::new(V8TaskExecutor::new(loader, tasks, config.payloads)?));
+    let executor = composition.executor(Rc::new(V8TaskExecutor::new(
+        loader,
+        tasks,
+        config.payloads,
+    )?));
     let consumer = JobConsumer::new(
         Rc::new(composition.transport(manager.transport(wake_sender.clone()))),
         manager.worker().clone(),
@@ -319,8 +325,8 @@ async fn place(
                 continue;
             }
         };
-        let installed = ConsumerScope::new(api.clone(), next.clone(), executor.clone())
-            .and_then(|binding| {
+        let installed =
+            ConsumerScope::new(api.clone(), next.clone(), executor.clone()).and_then(|binding| {
                 bindings.replace(vec![binding.clone()])?;
                 Ok(binding)
             });
@@ -332,7 +338,10 @@ async fn place(
                 };
             }
             Err(error) => {
-                tracing::warn!(code = error.code(), "workflow consumer binding not replaced");
+                tracing::warn!(
+                    code = error.code(),
+                    "workflow consumer binding not replaced"
+                );
             }
         }
     }

@@ -284,7 +284,6 @@ async fn signal(backend: &AppBackend, run: &str) {
     .await;
 }
 
-
 #[compio::test]
 async fn delivered_activation_selects_the_archive_and_runs_complete_through_the_manager() {
     let root = tempfile::tempdir().unwrap();
@@ -300,8 +299,14 @@ async fn delivered_activation_selects_the_archive_and_runs_complete_through_the_
         peers,
         Production,
     );
-    assert!(root.path().join(".zeroship/platform/metadata.sqlite").exists());
-    assert!(!root.path().join(".zeroship/deployments/index.sqlite").exists());
+    assert!(root
+        .path()
+        .join(".zeroship/platform/metadata.sqlite")
+        .exists());
+    assert!(!root
+        .path()
+        .join(".zeroship/deployments/index.sqlite")
+        .exists());
     assert!(!root.path().join(".zeroship/workflows.sqlite").exists());
     assert!(!root.path().join(".zeroship/app-id").exists());
 
@@ -346,14 +351,24 @@ async fn sleeping_run_resumes_from_queue_metadata_after_restart() {
     let root = tempfile::tempdir().unwrap();
     let bundle = publish(root.path(), "original", "3s");
     let app = AppId::mint();
-    let host = start(root.path(), &app, without_reconciliation(), Some(bundle.as_path()));
+    let host = start(
+        root.path(),
+        &app,
+        without_reconciliation(),
+        Some(bundle.as_path()),
+    );
     let run = start_run(&host.backend, "sleeping").await;
     state(&host.backend, &run, RunState::Sleeping).await;
     // The wake-up is manager metadata now; the journal has nothing to publish.
     published(&client(root.path(), &app).await).await;
     drop(host);
 
-    let host = start(root.path(), &app, without_reconciliation(), Some(bundle.as_path()));
+    let host = start(
+        root.path(),
+        &app,
+        without_reconciliation(),
+        Some(bundle.as_path()),
+    );
     assert_eq!(
         selection(root.path(), &app).await.unwrap().revision.get(),
         1,
@@ -372,7 +387,12 @@ async fn republished_bundle_activates_while_existing_runs_keep_their_pins() {
     let root = tempfile::tempdir().unwrap();
     let bundle = publish(root.path(), "original", "10ms");
     let app = zeroship_core::app_id::local_dev_app_id();
-    let host = start(root.path(), &app, LocalConfig::default(), Some(bundle.as_path()));
+    let host = start(
+        root.path(),
+        &app,
+        LocalConfig::default(),
+        Some(bundle.as_path()),
+    );
     let first = selection(root.path(), &app).await.unwrap();
     let old = start_run(&host.backend, "original").await;
     state(&host.backend, &old, RunState::Waiting).await;
@@ -380,7 +400,12 @@ async fn republished_bundle_activates_while_existing_runs_keep_their_pins() {
 
     // Hot reload republishes the archive and restarts the host.
     publish(root.path(), "replacement", "10ms");
-    let host = start(root.path(), &app, LocalConfig::default(), Some(bundle.as_path()));
+    let host = start(
+        root.path(),
+        &app,
+        LocalConfig::default(),
+        Some(bundle.as_path()),
+    );
     let second = selection(root.path(), &app).await.unwrap();
     assert_eq!(second.revision.get(), first.revision.get() + 1);
     assert_ne!(
@@ -494,7 +519,10 @@ impl JobTransport for LossyTransport {
         self.inner.submit(scope, job).await
     }
 
-    async fn heartbeat(&self, lease: &DeliveryGrant) -> Result<DeliveryGrant, WorkflowServiceError> {
+    async fn heartbeat(
+        &self,
+        lease: &DeliveryGrant,
+    ) -> Result<DeliveryGrant, WorkflowServiceError> {
         self.inner.heartbeat(lease).await
     }
 
@@ -600,7 +628,14 @@ async fn lost_acknowledgement_replays_the_committed_turn_without_executing_again
     // Each execution starts from a longer journal. A redelivered first turn
     // replays its receipt instead of executing the empty journal again.
     let starts = observed.starts.lock().unwrap().clone();
-    assert_eq!(starts.iter().filter(|replayed| **replayed == 0).count(), 1, "{starts:?}");
-    assert!(starts.windows(2).all(|pair| pair[0] < pair[1]), "{starts:?}");
+    assert_eq!(
+        starts.iter().filter(|replayed| **replayed == 0).count(),
+        1,
+        "{starts:?}"
+    );
+    assert!(
+        starts.windows(2).all(|pair| pair[0] < pair[1]),
+        "{starts:?}"
+    );
     drop(host);
 }

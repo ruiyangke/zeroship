@@ -1030,7 +1030,10 @@ async fn selection(fixture: &Fixture) {
     assert_eq!(activation.job, first_job);
     assert_eq!(activation.deployment_id, first.deployment_id);
     assert_eq!(activation.revision.get(), 3);
-    assert!(!activation.ready, "unsettled activation is not dispatch ready");
+    assert!(
+        !activation.ready,
+        "unsettled activation is not dispatch ready"
+    );
 
     let owner = assignment(&app);
     let delivery = claim(&queue, &owner).await;
