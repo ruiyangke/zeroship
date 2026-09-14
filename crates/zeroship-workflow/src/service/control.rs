@@ -141,7 +141,7 @@ impl AppWorkflows {
                     .await?
                     .accept()?;
                 captured.check()?;
-                let result = plan.apply(&mut tx, &self.app, run_id, now).await?;
+                let result = plan.apply().await?;
                 store_request(
                     &mut tx, &self.app, request, "restart", &digest, &result, now,
                 )
