@@ -808,7 +808,7 @@ async fn manager_reconciliation_publishes_creator_work_before_the_consumer_execu
     recovery
         .ensure(
             fixture.app.app_id(),
-            &fixture.job.deployment_id,
+            fixture.job.deployment_id().unwrap(),
             1.try_into().unwrap(),
         )
         .await
@@ -818,6 +818,7 @@ async fn manager_reconciliation_publishes_creator_work_before_the_consumer_execu
         .await
         .unwrap()
         .unwrap();
+    assert!(reconciliation.deployment_id().is_none());
     let mut consumer =
         JobConsumer::new(manager.clone(), manager.worker.clone(), options(1)).unwrap();
     consumer

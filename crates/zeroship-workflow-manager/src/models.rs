@@ -26,7 +26,7 @@ pub fn collections() -> Result<Schema, Error> {
 pub struct Job {
     pub id: String,
     pub app_id: String,
-    pub deployment_id: String,
+    pub deployment_id: Option<String>,
     pub operation: String,
     pub spec_digest: String,
     pub available_at: i64,
@@ -42,13 +42,20 @@ pub struct Job {
 
 impl Job {
     pub fn spec(&self) -> Result<JobSpec, Error> {
-        Ok(JobSpec {
+        let spec = JobSpec {
             id: JobId::parse(&self.id).map_err(|_| Error::Storage)?,
             app_id: AppId::parse(&self.app_id).map_err(|_| Error::Storage)?,
-            deployment_id: DeploymentId::parse(&self.deployment_id).map_err(|_| Error::Storage)?,
             operation: serde_json::from_str(&self.operation).map_err(|_| Error::Storage)?,
             available_at: self.available_at.try_into().map_err(|_| Error::Storage)?,
-        })
+        };
+        if self.deployment_id.as_deref() != spec.deployment_id().map(DeploymentId::as_str) {
+            return Err(Error::Storage);
+        }
+        let encoded = serde_json::to_vec(&spec).map_err(|_| Error::Storage)?;
+        if crate::queue::digest(&encoded) != self.spec_digest {
+            return Err(Error::Storage);
+        }
+        Ok(spec)
     }
 }
 

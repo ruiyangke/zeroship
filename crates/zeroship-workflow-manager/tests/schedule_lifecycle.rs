@@ -113,7 +113,7 @@ row!(RecoveryRow, recovery_scopes, id:String, deployment_id:String, activation_r
     next_due_at:i64, pending_job_id:Option<String>);
 row!(Hold, deployment_holds, id:String, app_id:String, deployment_id:String, holder_id:String,
     deploy_hash:Option<String>, generation:i64, state:String);
-row!(Job, jobs, id:String, app_id:String, deployment_id:String, operation:String,
+row!(Job, jobs, id:String, app_id:String, deployment_id:Option<String>, operation:String,
     state:String, attempt:i64);
 row!(Activation, schedule_activations, id:String, app_id:String, deployment_id:String,
     revision:i64, activated_at:i64);

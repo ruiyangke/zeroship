@@ -164,8 +164,8 @@ fn job(app: &AppId, available_at: i64) -> JobSpec {
     JobSpec {
         id: JobId::mint(),
         app_id: app.clone(),
-        deployment_id: DeploymentId::mint(),
         operation: JobOperation::Advance {
+            deployment_id: DeploymentId::mint(),
             run_id: RunId::mint(),
             generation: 0,
             revision: 1.try_into().unwrap(),
@@ -469,7 +469,9 @@ async fn invalid_state(fixture: &Fixture) {
         assert_eq!(snapshot(&database, &app).await, before);
     }
     let mut additional = job(&app, 0);
-    additional.deployment_id.clone_from(&spec.deployment_id);
+    if let JobOperation::Advance { deployment_id, .. } = &mut additional.operation {
+        deployment_id.clone_from(spec.deployment_id().unwrap());
+    }
     let exhausted = snapshot(&database, &app).await;
     assert_eq!(queue.submit(&additional).await, Err(Error::Capacity));
     assert_eq!(snapshot(&database, &app).await, exhausted);

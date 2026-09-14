@@ -21,7 +21,7 @@ use crate::{operations::StartOptions, validation, WorkflowServiceError};
 use zeroship_core::{
     app_id::AppId,
     workflow_coordination::{RequestId, Revision, RunId, UnixMillis},
-    workflow_jobs::{JobLease, JobOperation, JobOutcome, JobSpec},
+    workflow_jobs::{DeploymentId, JobLease, JobOperation, JobOutcome, JobSpec},
     workflow_schedules::ScheduleId,
 };
 use zeroship_data_orm::orm::{FindOptions, FromRow, Insertable};
@@ -70,6 +70,7 @@ struct NewReceipt {
 }
 
 struct Cron<'a> {
+    deployment_id: &'a DeploymentId,
     schedule_id: &'a ScheduleId,
     schedule_name: &'a str,
     request_id: &'a RequestId,
@@ -81,6 +82,7 @@ struct Cron<'a> {
 impl<'a> Cron<'a> {
     fn from_job(job: &'a JobSpec) -> Result<Self, WorkflowServiceError> {
         let JobOperation::Cron {
+            deployment_id,
             schedule_id,
             schedule_name,
             request_id,
@@ -95,6 +97,7 @@ impl<'a> Cron<'a> {
         };
         validation::workflow_name(schedule_name)?;
         Ok(Self {
+            deployment_id,
             schedule_id,
             schedule_name,
             request_id,
@@ -210,13 +213,13 @@ impl AppWorkflows {
                 }
                 let authority = captured?;
                 authority.check(self)?;
-                require_ready(&tx, job, cron.revision).await?;
+                require_ready(&tx, job, &cron).await?;
                 require_new(&tx, job, &cron).await?;
-                let previous = deploys::read(&tx, self.app_id(), job.deployment_id.as_str())
+                let previous = deploys::read(&tx, self.app_id(), cron.deployment_id.as_str())
                     .await?
                     .ok_or_else(unavailable)?;
                 let expected = previous.registration()?;
-                if expected.id != job.deployment_id.as_str() || expected.hash != previous.hash {
+                if expected.id != cron.deployment_id.as_str() || expected.hash != previous.hash {
                     return Err(invalid());
                 }
                 cron.declaration(&expected)?;
@@ -230,7 +233,7 @@ impl AppWorkflows {
                     .service
                     .acquire_deployment_hold_checked(
                         self.app_id(),
-                        job.deployment_id.as_str(),
+                        cron.deployment_id.as_str(),
                         Some(&expected.hash),
                         client.as_ref(),
                         &|| authority.check(self),
@@ -253,7 +256,7 @@ impl AppWorkflows {
                     return Ok(receipt);
                 }
                 authority.check(self)?;
-                require_ready(&tx, job, cron.revision).await?;
+                require_ready(&tx, job, &cron).await?;
                 require_new(&tx, job, &cron).await?;
                 if admission_generation(
                     &tx,
@@ -427,7 +430,7 @@ async fn require_new(
 async fn require_ready(
     tx: &Transaction,
     job: &JobSpec,
-    revision: Revision,
+    cron: &Cron<'_>,
 ) -> Result<(), WorkflowServiceError> {
     let readiness = tx
         .database()
@@ -435,7 +438,7 @@ async fn require_ready(
         .find::<Readiness>(
             activations::app_id
                 .eq(job.app_id.as_str())?
-                .and(activations::revision.eq(revision.get())?),
+                .and(activations::revision.eq(cron.revision.get())?),
             FindOptions {
                 limit: Some(1),
                 ..Default::default()
@@ -445,7 +448,7 @@ async fn require_ready(
         .into_iter()
         .next()
         .ok_or_else(unavailable)?;
-    if readiness.deploy_id != job.deployment_id.as_str() {
+    if readiness.deploy_id != cron.deployment_id.as_str() {
         return Err(conflict());
     }
     let record = tx
@@ -467,8 +470,11 @@ async fn require_ready(
     let activation: JobSpec = decode(&record.specification)?;
     if activation.app_id != job.app_id
         || activation.id.as_str() != readiness.id
-        || activation.deployment_id != job.deployment_id
-        || activation.operation != (JobOperation::Activate { revision })
+        || activation.operation
+            != (JobOperation::Activate {
+                deployment_id: cron.deployment_id.clone(),
+                revision: cron.revision,
+            })
     {
         return Err(invalid());
     }

@@ -29,7 +29,7 @@ zeroship_data_orm::orm::schema! {
             #[orm(primary_key)]
             id: Text,
             app_id: Text,
-            deployment_id: Text,
+            deployment_id: Nullable<Text>,
             operation: Text,
             spec_digest: Text,
             available_at: BigInt,

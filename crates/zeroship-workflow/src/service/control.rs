@@ -125,7 +125,7 @@ impl AppWorkflows {
         captured
             .run(async {
                 validate_run(run_id)?;
-                crate::lifecycle::restart_deploy_policy(&options)?;
+                options.effective_deploy()?;
                 let digest = digest(&(run_id, &options))?;
                 let mut tx = self.service.begin().await?;
                 lock_app_state(&mut tx, &self.app).await?;

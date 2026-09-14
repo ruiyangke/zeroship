@@ -36,8 +36,8 @@ impl Grant {
                 job: JobSpec {
                     id: JobId::mint(),
                     app_id: app.clone(),
-                    deployment_id: DeploymentId::parse(&deployment.id).unwrap(),
                     operation: JobOperation::Activate {
+                        deployment_id: DeploymentId::parse(&deployment.id).unwrap(),
                         revision: revision.try_into().unwrap(),
                     },
                     available_at: 0.try_into().unwrap(),
@@ -266,9 +266,13 @@ async fn conflicts(store: Rc<OrmStore>) {
     let history = snapshot(&service, "activations", &app).await;
     let selection = snapshot(&service, "activation_scopes", &app).await;
     let mut changed_job = grant.retry();
-    changed_job.delivery.job.deployment_id = DeploymentId::parse(&other.id).unwrap();
+    changed_job.delivery.job.operation = JobOperation::Activate {
+        deployment_id: DeploymentId::parse(&other.id).unwrap(),
+        revision: 1.try_into().unwrap(),
+    };
     let mut changed_revision = grant.retry();
     changed_revision.delivery.job.operation = JobOperation::Activate {
+        deployment_id: DeploymentId::parse(&first.id).unwrap(),
         revision: 2.try_into().unwrap(),
     };
     for conflicting in [

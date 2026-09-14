@@ -24,7 +24,9 @@ use std::{
 use zeroship_core::{
     app_id::AppId,
     workflow_coordination::{Assignment, VerifyAssignment, WorkerId},
-    workflow_jobs::{Delivery, DeliveryLease, JobLease, JobSpec, Settlement, SettlementReceipt},
+    workflow_jobs::{
+        Delivery, DeliveryLease, DeploymentId, JobLease, JobSpec, Settlement, SettlementReceipt,
+    },
 };
 use zeroship_data_orm::{
     binding::DbBinding,
@@ -211,10 +213,12 @@ impl Queue {
             let result = self
                 .transact_for(budget.clone(), |tx| async move {
                     lock_scope(&tx, &job.app_id).await?;
-                    if !self.existing(&tx, job).await?
-                        && !retention::prepared(&tx, &job.app_id, &job.deployment_id).await?
-                    {
-                        return Ok(Retention::Acquire(job.deployment_id.clone()));
+                    if !self.existing(&tx, job).await? {
+                        if let Some(deployment) = job.deployment_id() {
+                            if !retention::prepared(&tx, &job.app_id, deployment).await? {
+                                return Ok(Retention::Acquire(deployment.clone()));
+                            }
+                        }
                     }
                     self.insert(&tx, job, self.clock.now().await?).await?;
                     Ok(Retention::Ready(job.clone()))
@@ -264,10 +268,12 @@ impl Queue {
                         let sample = self.clock.sample().await?;
                         let authority = current(assignment, observed, sample.millis)?;
                         budget.cap(sample, authority.expires_at.get())?;
-                        if !self.existing(&tx, job).await?
-                            && !retention::prepared(&tx, &job.app_id, &job.deployment_id).await?
-                        {
-                            return Ok(Retention::Acquire(job.deployment_id.clone()));
+                        if !self.existing(&tx, job).await? {
+                            if let Some(deployment) = job.deployment_id() {
+                                if !retention::prepared(&tx, &job.app_id, deployment).await? {
+                                    return Ok(Retention::Acquire(deployment.clone()));
+                                }
+                            }
                         }
                         self.insert(&tx, job, sample.millis).await?;
                         let observed = authorize(tx.clone()).await?;
@@ -328,7 +334,9 @@ impl Queue {
                 return Ok(None);
             };
             let job = load(&tx, &assignment.app_id, &id).await?.ok_or(Error::Storage)?;
-            retention::require_held(&tx, &assignment.app_id, &job.spec()?.deployment_id).await?;
+            if let Some(deployment) = job.spec()?.deployment_id() {
+                retention::require_held(&tx, &assignment.app_id, deployment).await?;
+            }
             crate::scheduling::validate_delivery(&tx, &job).await?;
             let attempt = job.attempt.checked_add(1).filter(|value| *value > 0)
                 .ok_or(Error::Capacity)?;
@@ -404,7 +412,9 @@ impl Queue {
                 .await?
                 .ok_or(Error::Conflict)?;
             matches_delivery(&job, delivery)?;
-            retention::require_held(&tx, &assignment.app_id, &delivery.job.deployment_id).await?;
+            if let Some(deployment) = delivery.job.deployment_id() {
+                retention::require_held(&tx, &assignment.app_id, deployment).await?;
+            }
             let sample = self.clock.sample().await?;
             live(&job, sample.millis)?;
             budget.cap(
@@ -524,22 +534,18 @@ impl Queue {
                         let observed = authorize(tx.clone()).await?;
                         let sample = self.clock.sample().await?;
                         cap_live_delivery(budget, assignment, observed, &job, sample)?;
-                        retention::require_held(
-                            &tx,
-                            &assignment.app_id,
-                            &delivery.job.deployment_id,
-                        )
-                        .await?;
+                        if let Some(deployment) = delivery.job.deployment_id() {
+                            retention::require_held(&tx, &assignment.app_id, deployment).await?;
+                        }
                         for successor in successors.values() {
-                            if !self.existing(&tx, successor).await?
-                                && !retention::prepared(
-                                    &tx,
-                                    &assignment.app_id,
-                                    &successor.deployment_id,
-                                )
-                                .await?
-                            {
-                                return Ok(Retention::Acquire(successor.deployment_id.clone()));
+                            if !self.existing(&tx, successor).await? {
+                                if let Some(deployment) = successor.deployment_id() {
+                                    if !retention::prepared(&tx, &assignment.app_id, deployment)
+                                        .await?
+                                    {
+                                        return Ok(Retention::Acquire(deployment.clone()));
+                                    }
+                                }
                             }
                         }
                         for successor in successors.values() {
@@ -644,11 +650,13 @@ impl Queue {
         if self.existing(tx, spec).await? {
             return Ok(());
         }
-        retention::require_held(tx, &spec.app_id, &spec.deployment_id).await?;
+        if let Some(deployment) = spec.deployment_id() {
+            retention::require_held(tx, &spec.app_id, deployment).await?;
+        }
         let digest = digest(&self.encode(spec)?);
         let dispatch_order = next_dispatch_order(tx, &spec.app_id, None).await?;
         tx.collection(jobs::Entity::COLLECTION)?.insert(value!({
-            "id":spec.id.as_str(),"app_id":spec.app_id.as_str(),"deployment_id":spec.deployment_id.as_str(),
+            "id":spec.id.as_str(),"app_id":spec.app_id.as_str(),"deployment_id":spec.deployment_id().map(DeploymentId::as_str),
             "operation":serde_json::to_string(&spec.operation).map_err(|_| Error::Invalid)?,
             "spec_digest":digest,"available_at":spec.available_at.get(),"state":"ready", "attempt":0,
             "dispatch_order":dispatch_order,"created_at":now
@@ -665,7 +673,9 @@ impl Queue {
             match job.state.as_str() {
                 "settled" => {}
                 "ready" | "leased" => {
-                    retention::require_held(tx, &spec.app_id, &spec.deployment_id).await?;
+                    if let Some(deployment) = spec.deployment_id() {
+                        retention::require_held(tx, &spec.app_id, deployment).await?;
+                    }
                 }
                 _ => return Err(Error::Storage),
             }
@@ -884,7 +894,7 @@ fn fence(delivery: &Delivery) -> Value {
         "attempt":delivery.attempt.get()})
 }
 
-fn digest(bytes: &[u8]) -> String {
+pub fn digest(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
 
@@ -986,14 +996,13 @@ impl Write for Metadata {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use zeroship_core::workflow_jobs::{DeploymentId, JobId, JobOperation};
+    use zeroship_core::workflow_jobs::{JobId, JobOperation};
 
     fn delivery(deadline: i64) -> Delivery {
         Delivery {
             job: JobSpec {
                 id: JobId::mint(),
                 app_id: AppId::mint(),
-                deployment_id: DeploymentId::mint(),
                 operation: JobOperation::Reconcile {},
                 available_at: 0.try_into().unwrap(),
             },

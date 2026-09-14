@@ -18,7 +18,7 @@ use super::{
 use crate::WorkflowServiceError;
 use zeroship_core::{
     app_id::AppId,
-    workflow_jobs::{JobLease, JobOperation, JobOutcome, JobSpec},
+    workflow_jobs::{DeploymentId, JobLease, JobOperation, JobOutcome, JobSpec},
 };
 use zeroship_data_orm::{
     orm::{Entity, FindOptions, FromRow, Operation, Output},
@@ -54,7 +54,11 @@ impl AppWorkflows {
     ) -> Result<JobReceipt, WorkflowServiceError> {
         let job = &lease.delivery().job;
         delivery::check_scope(self.app_id(), job)?;
-        let JobOperation::Activate { revision } = job.operation else {
+        let JobOperation::Activate {
+            deployment_id,
+            revision,
+        } = &job.operation
+        else {
             return Err(WorkflowServiceError::InvalidRequest(
                 "expected workflow activation job".into(),
             ));
@@ -77,7 +81,7 @@ impl AppWorkflows {
                 }
                 let authority = authority?;
                 authority.check(self)?;
-                require_fresh(&tx, job, revision.get()).await?;
+                require_fresh(&tx, job, deployment_id, revision.get()).await?;
                 authority.check(self)?;
                 tx.commit().await?;
                 authority.check(self)?;
@@ -88,7 +92,7 @@ impl AppWorkflows {
                     .service
                     .acquire_deployment_hold_checked(
                         self.app_id(),
-                        job.deployment_id.as_str(),
+                        deployment_id.as_str(),
                         None,
                         client.as_ref(),
                         &|| authority.check(self),
@@ -97,10 +101,8 @@ impl AppWorkflows {
                 authority.check(self)?;
                 let executable = source.read(self.app_id(), &held.deploy_hash).await?;
                 authority.check(self)?;
-                let deploy = executable.registration(
-                    job.deployment_id.as_str().to_owned(),
-                    held.deploy_hash.clone(),
-                );
+                let deploy = executable
+                    .registration(deployment_id.as_str().to_owned(), held.deploy_hash.clone());
 
                 let mut tx = self.service.begin().await?;
                 lock_app_state(&mut tx, self.app_id()).await?;
@@ -110,7 +112,7 @@ impl AppWorkflows {
                 }
                 authority.check(self)?;
                 let policy = authority.policy();
-                require_fresh(&tx, job, revision.get()).await?;
+                require_fresh(&tx, job, deployment_id, revision.get()).await?;
                 if admission_generation(
                     &tx,
                     self.app_id(),
@@ -162,13 +164,17 @@ pub(super) async fn receipt(
     if receipt.outcome != JobOutcome::Completed {
         return Err(invalid());
     }
-    let JobOperation::Activate { revision } = job.operation else {
+    let JobOperation::Activate {
+        deployment_id,
+        revision,
+    } = &job.operation
+    else {
         return Err(invalid());
     };
     let readiness = activation(tx, &job.app_id, revision.get())
         .await?
         .ok_or_else(invalid)?;
-    if readiness.id != job.id.as_str() || readiness.deploy_id != job.deployment_id.as_str() {
+    if readiness.id != job.id.as_str() || readiness.deploy_id != deployment_id.as_str() {
         return Err(invalid());
     }
     Ok(Some(receipt))
@@ -199,10 +205,11 @@ async fn activation(
 async fn require_fresh(
     tx: &Transaction,
     job: &JobSpec,
+    deployment_id: &DeploymentId,
     revision: i64,
 ) -> Result<(), WorkflowServiceError> {
     if let Some(existing) = activation(tx, &job.app_id, revision).await? {
-        if existing.id != job.id.as_str() || existing.deploy_id != job.deployment_id.as_str() {
+        if existing.id != job.id.as_str() || existing.deploy_id != deployment_id.as_str() {
             return Err(conflict());
         }
         // Readiness and its completed receipt commit together.

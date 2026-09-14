@@ -347,11 +347,21 @@ async fn snapshot(platform: &platform::Platform, seed: &Seed) -> Snapshot {
         .iter()
         .map(|row| {
             let row: serde_json::Value = serde_json::from_str(row).unwrap();
-            assert_eq!(row["deployment_id"], seed.deployment.as_str());
             assert_eq!(row["state"], "ready");
             assert_eq!(row["attempt"], 0);
             assert!(row["worker_id"].is_null());
-            serde_json::from_str(row["operation"].as_str().unwrap()).unwrap()
+            let operation: JobOperation =
+                serde_json::from_str(row["operation"].as_str().unwrap()).unwrap();
+            match &operation {
+                JobOperation::Activate { deployment_id, .. }
+                | JobOperation::Cron { deployment_id, .. } => {
+                    assert_eq!(deployment_id, &seed.deployment);
+                    assert_eq!(row["deployment_id"], deployment_id.as_str());
+                }
+                JobOperation::Reconcile {} => assert!(row["deployment_id"].is_null()),
+                other => panic!("unexpected manager job: {other:?}"),
+            }
+            operation
         })
         .collect();
     assert!(operations.contains(&seed.activation.operation));

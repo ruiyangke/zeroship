@@ -14,7 +14,7 @@ test("compiles both manager backends with matching typed collection metadata", (
   const { collections } = JSON.parse(artifacts.find(artifact => artifact.name === "schema.runtime.json").content);
   assert.equal(collections.queue_scopes.fields.id.primaryKey, true);
   assert.equal(collections.jobs.fields.id.primaryKey, true);
-  assert.equal(collections.jobs.fields.deployment_id.required, true);
+  assert.equal(collections.jobs.fields.deployment_id.required ?? false, false);
   assert.equal(collections.jobs.fields.worker_id.required ?? false, false);
   assert.equal(collections.jobs.fields.attempt.type, "bigInt");
   assert.equal(collections.queue_scopes.fields.dispatch_cursor.type, "bigInt");

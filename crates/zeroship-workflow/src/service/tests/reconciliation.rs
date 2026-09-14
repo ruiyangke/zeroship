@@ -190,6 +190,7 @@ async fn pages(store: Rc<OrmStore>) {
         .remove(0);
     let publisher = Publisher::new(&app).await;
     let first = Grant::new(&jobs[0]);
+    assert!(first.delivery.job.deployment_id().is_none());
     let receipt = scoped
         .reconcile_job(&first, &publisher, options(1))
         .await

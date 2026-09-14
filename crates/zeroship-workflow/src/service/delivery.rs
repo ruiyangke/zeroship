@@ -210,7 +210,7 @@ impl Record {
                     && self.reconciliation.is_some()
                     && self.reconciliation_next.is_some()
             }
-            _ => false,
+            JobOperation::Management { .. } | JobOperation::Collect {} => false,
         };
         if !valid {
             return Err(invalid());
@@ -222,7 +222,7 @@ impl Record {
                     let valid = match outcome {
                         JobOutcome::Completed => self.run_id.as_deref() == Some(run_id.as_str()),
                         JobOutcome::Rejected => self.run_id.is_none(),
-                        _ => false,
+                        JobOutcome::Waiting => false,
                     };
                     if !valid {
                         return Err(invalid());
@@ -271,6 +271,7 @@ impl AppWorkflows {
     ) -> Result<JobAcceptance, WorkflowServiceError> {
         let job = &delivery.job;
         let JobOperation::Advance {
+            deployment_id,
             run_id,
             generation,
             revision,
@@ -306,10 +307,7 @@ impl AppWorkflows {
         let stale = match &run {
             None => true,
             Some(run) => {
-                run.integer("generation")? != i64::from(*generation)
-                    || run.integer("frontier_revision")? != revision.get()
-                    || run.text("deploy_id")? != job.deployment_id.as_str()
-                    || parse_state(&run.text("state")?)?.is_terminal()
+                !current_frontier(run, deployment_id.as_str(), *generation, revision.get())?
             }
         };
         if stale {
@@ -627,6 +625,18 @@ async fn reclaim(
     Ok(Some(run))
 }
 
+fn current_frontier(
+    run: &Row,
+    deployment: &str,
+    generation: u32,
+    revision: i64,
+) -> Result<bool, WorkflowServiceError> {
+    Ok(run.integer("generation")? == i64::from(generation)
+        && run.integer("frontier_revision")? == revision
+        && run.text("deploy_id")? == deployment
+        && !parse_state(&run.text("state")?)?.is_terminal())
+}
+
 fn authorize_task(
     claim: &tasks::TaskInspection,
     delivery: &Delivery,
@@ -635,6 +645,7 @@ fn authorize_task(
         run_id,
         generation,
         revision,
+        ..
     } = &delivery.job.operation
     else {
         return Err(conflict());

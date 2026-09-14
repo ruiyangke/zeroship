@@ -19,10 +19,13 @@ use zeroship_core::{
     },
     service_identity::{endpoints, verify_service_call, ServiceEndpoint},
     service_peers::{ServiceAuth, ServiceKeyring},
-    workflow_coordination::{AssignedScope, FailureCode, RequestId, RunId, WorkerId, AUDIENCE},
+    workflow_coordination::{
+        AssignedScope, FailureCode, RequestId, RestartTarget, RunId, RunOperation, WorkerId,
+        AUDIENCE,
+    },
     workflow_jobs::{
-        Delivery, DeploymentId, JobId, JobOperation, JobOutcome, JobSpec, Settlement,
-        SettlementReceipt, SubmitJob,
+        Delivery, DeploymentId, JobId, JobOperation, JobOutcome, JobSpec, ManagementCommand,
+        Settlement, SettlementReceipt, SubmitJob,
     },
     workflow_schedules::ScheduleId,
 };
@@ -59,8 +62,8 @@ impl Fixture {
         let spec = JobSpec {
             id: JobId::mint(),
             app_id: scope.app_id.clone(),
-            deployment_id: DeploymentId::mint(),
             operation: JobOperation::Advance {
+                deployment_id: DeploymentId::mint(),
                 run_id: RunId::mint(),
                 generation: 0,
                 revision: 1.try_into().unwrap(),
@@ -299,13 +302,28 @@ async fn job_methods_preserve_identity_and_use_remaining_authority() {
     .await;
 }
 
-#[compio::test]
-async fn manager_dispatched_jobs_can_be_claimed_and_settled() {
-    for operation in [
+fn manager_operations() -> Vec<JobOperation> {
+    let commands = [
+        ManagementCommand::Transition {
+            operation: RunOperation::Pause,
+        },
+        ManagementCommand::RestartStarted {
+            from: Some(RestartTarget {
+                name: "retained-step".into(),
+                occurrence: Some(1),
+            }),
+        },
+        ManagementCommand::RestartLatest {
+            deployment_id: DeploymentId::mint(),
+        },
+    ];
+    let mut operations = vec![
         JobOperation::Activate {
+            deployment_id: DeploymentId::mint(),
             revision: 1.try_into().unwrap(),
         },
         JobOperation::Cron {
+            deployment_id: DeploymentId::mint(),
             schedule_id: ScheduleId::mint(),
             schedule_name: "daily-report".into(),
             request_id: RequestId::mint(),
@@ -313,11 +331,23 @@ async fn manager_dispatched_jobs_can_be_claimed_and_settled() {
             revision: 1.try_into().unwrap(),
             scheduled_at: 0.try_into().unwrap(),
         },
-        JobOperation::Management {
-            request_id: RequestId::mint(),
-            run_id: RunId::mint(),
-        },
-    ] {
+    ];
+    operations.extend(
+        commands
+            .into_iter()
+            .map(|command| JobOperation::Management {
+                request_id: RequestId::mint(),
+                run_id: RunId::mint(),
+                revision: 1.try_into().unwrap(),
+                command,
+            }),
+    );
+    operations
+}
+
+#[compio::test]
+async fn manager_dispatched_jobs_can_be_claimed_and_settled() {
+    for operation in manager_operations() {
         let mut fixture = Fixture::new();
         fixture.spec.operation = operation;
         fixture.delivery.job = fixture.spec.clone();
@@ -348,7 +378,7 @@ async fn submission_and_settlement_receipts_cannot_substitute_metadata() {
     let fixture = Fixture::new();
     let submit = fixture.submission();
     let mut altered_job = json!(fixture.spec);
-    altered_job["deploymentId"] = json!(DeploymentId::mint());
+    altered_job["operation"]["deploymentId"] = json!(DeploymentId::mint());
     peer(
         &fixture,
         vec![Exchange::new(
@@ -414,6 +444,41 @@ async fn claim_rejects_foreign_and_malformed_lease_metadata() {
     let mut nested = valid.clone();
     nested["delivery"]["job"]["operation"]["history"] = json!(["private"]);
     cases.push(nested);
+    let mut missing_deployment = valid.clone();
+    missing_deployment["delivery"]["job"]["operation"]
+        .as_object_mut()
+        .unwrap()
+        .remove("deploymentId");
+    cases.push(missing_deployment);
+    let mut moved_deployment = valid.clone();
+    let deployment = moved_deployment["delivery"]["job"]["operation"]
+        .as_object_mut()
+        .unwrap()
+        .remove("deploymentId")
+        .unwrap();
+    moved_deployment["delivery"]["job"]["deploymentId"] = deployment;
+    cases.push(moved_deployment);
+    for operation in [
+        json!({"kind":"reconcile", "deploymentId":DeploymentId::mint()}),
+        json!({"kind":"collect", "deploymentId":DeploymentId::mint()}),
+        json!({"kind":"cron", "scheduleId":ScheduleId::mint(), "scheduleName":"daily-report",
+            "requestId":RequestId::mint(), "runId":RunId::mint(), "revision":1, "scheduledAt":0}),
+        json!({"kind":"management", "requestId":RequestId::mint(), "runId":RunId::mint(), "revision":1}),
+        json!({"kind":"management", "requestId":RequestId::mint(), "runId":RunId::mint(),
+            "command":{"kind":"transition","operation":"pause"}}),
+        json!({"kind":"management", "requestId":RequestId::mint(), "runId":RunId::mint(), "revision":1,
+            "command":{"kind":"restart_latest"}}),
+        json!({"kind":"management", "requestId":RequestId::mint(), "runId":RunId::mint(), "revision":1,
+            "command":{"kind":"transition","operation":"pause","input":"private"}}),
+        json!({"kind":"management", "requestId":RequestId::mint(), "runId":RunId::mint(), "revision":1,
+            "command":{"kind":"restart_started","deploymentId":DeploymentId::mint()}}),
+        json!({"kind":"management", "requestId":RequestId::mint(), "runId":RunId::mint(), "revision":1,
+            "command":{"kind":"restart_started","from":{"name":"step","input":"private"}}}),
+    ] {
+        let mut malformed = valid.clone();
+        malformed["delivery"]["job"]["operation"] = operation;
+        cases.push(malformed);
+    }
     for remaining in [json!(0), json!(-1), json!(u64::MAX)] {
         let mut altered = valid.clone();
         altered["remainingMs"] = remaining;
@@ -463,6 +528,10 @@ async fn heartbeat_preserves_the_full_immutable_delivery() {
         altered["delivery"]["job"][field] = value;
         cases.push(altered);
     }
+    let mut changed_deployment = valid.clone();
+    changed_deployment["delivery"]["job"]["operation"]["deploymentId"] =
+        json!(DeploymentId::mint());
+    cases.push(changed_deployment);
     for body in cases {
         peer(
             &fixture,
@@ -490,23 +559,7 @@ async fn forbidden_publication_is_rejected_without_http() {
         let mut foreign = fixture.submission();
         foreign.scope.app_id = AppId::mint();
         assert_eq!(client.submit_job(&foreign).await.unwrap_err(), denied);
-        for operation in [
-            JobOperation::Activate {
-                revision: 1.try_into().unwrap(),
-            },
-            JobOperation::Cron {
-                schedule_id: ScheduleId::mint(),
-                schedule_name: "daily-report".into(),
-                request_id: RequestId::mint(),
-                run_id: RunId::mint(),
-                revision: 1.try_into().unwrap(),
-                scheduled_at: 0.try_into().unwrap(),
-            },
-            JobOperation::Management {
-                request_id: RequestId::mint(),
-                run_id: RunId::mint(),
-            },
-        ] {
+        for operation in manager_operations() {
             let mut command = fixture.submission();
             command.job.operation = operation;
             assert_eq!(client.submit_job(&command).await.unwrap_err(), denied);

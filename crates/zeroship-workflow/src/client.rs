@@ -193,7 +193,7 @@ pub fn build_restart_request(
     run_id: &str,
     options: RestartOptions,
 ) -> Result<WorkflowHttpRequest, WorkflowServiceError> {
-    crate::lifecycle::restart_deploy_policy(&options)?;
+    options.effective_deploy()?;
     request(
         config,
         WorkflowHttpMethod::Post,

@@ -685,6 +685,11 @@ The current closed contract lives in
 `SubmitJob`, `JobSpec`, `JobOperation`, `Delivery`, `DeliveryLease`, `Settlement`
 and `SettlementReceipt`.
 It defines activation, advance, cron, management, reconciliation and collection operations.
+Executable operations carry their deployment prerequisite inside the operation;
+journal-only commands, reconciliation and collection carry none. Management names
+its lifecycle revision and a closed resolved command, including the immutable
+target for a latest restart. Shared restart validation derives the effective
+policy before that target is selected.
 `JobOutcome` contains `Completed`, `Waiting` and `Rejected`; successor jobs carry
 further availability. Activation names its platform revision; cron names the
 logical schedule identity and bundle declaration name alongside the occurrence's
@@ -1307,6 +1312,25 @@ partial restart is invalid. Derive these effective policies before constructing
 the delivery prerequisite; checking only an explicit deployment option would
 misclassify a default restart.
 
+The planned latest-deployment source uses native ORM over the platform catalog:
+join `zeroship.apps.deploy_hash` to the same app's available `app_deploys` row and
+return its typed deployment identity and validated hash. Calendar activation
+history and activation timestamps cannot select the ordinary live deployment.
+Give the manager only the source columns required by this query, with readiness
+checks for those grants. This source needs no creator database or run metadata;
+the creator checks workflow membership when preparing the frozen target.
+
+Latest is observed during the acceptance attempt. It does not promise that the
+app pointer remains unchanged at the later manager commit. Under the manager app
+lock, replay the exact original request before consulting the source. For a new
+request, keep its selected target through hold preparation outside queue locks,
+then reacquire the lock and repeat receipt matching before atomically inserting
+the resolved command, job, order and barrier. Require the confirmed hold for that
+same target before accepting. Source or retention failure before acceptance is
+retryable; a committed receipt bypasses current-deployment lookup. Preserve raw
+request identity separately from effective restart normalization. The source,
+grants and acceptance composition remain to be implemented.
+
 For a started restart, "started" means the deployment of the source generation
 when that command applies, including a generation created by an earlier ordered
 restart. It does not mean the original-ever generation or a target guessed at
@@ -1314,8 +1338,8 @@ Control submission. Existing generation retention protects the source while the
 command waits. Missing, releasing or mismatched retention is retryable
 infrastructure failure, with no permanent refusal and no substitution of active
 code. If preparation ever needs external I/O, persist the frozen source generation
-and target before releasing the lock. Latest restarts never re-resolve the current
-catalog on retry.
+and target before releasing the lock. Retries of accepted latest restarts never
+re-resolve the current catalog.
 
 Creator application now has the transaction-local `apply_management_authorized`
 helper in `crates/zeroship-workflow/src/service/management.rs`. Its caller owns the app
@@ -1338,16 +1362,21 @@ restart policy before resolving this command, while preserving exact acceptance
 request matching in the manager.
 
 Reconciliation and collection have no executable prerequisite. Reconciliation
-must also stop acquiring the desired deployment's queue hold and keeping that
-hold alive through its recovery scope. Recovery registration still validates
+does not acquire the desired deployment's queue hold or keep that hold alive
+through its recovery scope. Recovery registration still validates
 desired-activation provenance; it does not need executable retention to repair
-app journal publications. Queue persistence may project an optional deployment
-for native joins, but must validate it against the closed operation. Acquisition,
+app journal publications. Queue persistence projects an optional deployment
+and validates it against the closed operation and immutable specification digest.
+Release scans bounded pages of unsettled app jobs under the app lock and validates
+their specifications before ruling out dependencies; a damaged nullable projection
+cannot hide an executable job from reclamation. Acquisition,
 claim, renewal, settlement and successor insertion enforce retention only for
 operations that actually require code.
 
-This representation is still pending implementation. Carry the closed management
-outcome through the exact creator receipt and queue settlement. Queue ordering and
+The representation is implemented across core, queue, creator readers and metadata
+transport. Management and collection delivery remain explicitly unsupported in the
+creator consumer. Carry the closed management outcome through the exact creator
+receipt and queue settlement. Queue ordering and
 barrier filters need native scalar linkage fields before limiting candidates.
 The existing separate inbox has no production consumer and should disappear with this handler
 cohort; it does not implement the delivered protocol. The manager must never query
@@ -1993,6 +2022,13 @@ management delivery remain to be wired.
 The crate split includes the metadata client, closed job/delivery contracts,
 manager ORM queue and platform deployment ledger. Native coordinator placement
 and management now share the queue's ORM namespace and transaction handle.
+Deployment prerequisites belong to executable operations, with an optional native
+queue projection checked against the operation and immutable digest. Recovery
+keeps activation provenance without retaining its bundle; pending recovery jobs
+must decode as reconciliation. Closed management commands carry the management
+revision and resolved restart policy. Authoritative latest-target selection,
+ordered acceptance, lifecycle outcomes and delivered management/collection handlers
+remain pending.
 Canonical parent primary keys eliminate the conflicting duplicate identities in
 concurrent first registration. Native PostgreSQL/SQLite coordinator and queue
 contracts, authenticated server processes, actual platform migration/grants and
@@ -2240,9 +2276,10 @@ result. Paired native contracts cover historical input, conflicting identities,
 overlap through continuation, admission changes, retained code, expired authority
 and rollback of the run, publication and occurrence together.
 
-Queue retention is now required by the native queue, scheduler and recovery
-operations. The pending operation-specific envelope cutover removes recovery-only
-holds while preserving retention for operations that need code.
+Queue retention is required by executable queue and scheduler operations.
+Journal-only jobs and recovery responsibility need no deployment hold. Release
+validates unsettled job specifications through native ORM pages, so inconsistent
+deployment projections fail before any external release request.
 PostgreSQL and SQLite tests cover lost hold replies, stale generations,
 failed publication, schedule replacement, pending jobs after replacement and
 independent journal retention. They use a separate deployment catalog and ordinary
@@ -2327,7 +2364,7 @@ archive and retains the last valid deployment when current sources fail to build
 | Enrollment bootstrap and revocation | A revoked worker cannot regain equivalent authority by automatic enrollment. Finalize bootstrap trust, replacement authorization and registry freshness with auth ownership. |
 | Placement eligibility and capacity provider | Only platform-authorized app/zone combinations may be assigned. Select the trusted eligibility source and host adapter's durable request/progress contract. |
 | Archive acknowledgement | The direct Control source provides bounded convergence under original observation validity. Define any stronger execution-quiescence evidence separately from calendar acknowledgement or lease expiry. |
-| Complete job envelopes | Keep closed metadata. Finalize activation, event/fanout, continuation cursors, management lifecycle revisions and operation-specific deployment prerequisites before their consumers are wired. |
+| Complete job envelopes | Operation-specific deployment prerequisites and resolved management command shapes are implemented. Complete authoritative latest-target selection, management outcomes, event/fanout and continuation cursors with their delivered consumers. |
 | Normal deployment publication | Bind activation revision issuance to a stable deploy command and immutable body. Artifact identity alone cannot distinguish a delayed retry from an intentional rollback. Compose mutable deployment side effects with command acceptance, connect archive/stage/restore to the durable handoff, and keep the calendar's activation origin explicit across delayed delivery. |
 | Scope retirement | Define ingress epoch closure and durable drain evidence. Registration expiry and empty polling cannot retire unpublished-work responsibility. |
 | Receipt retirement | Define admissibility fences and publication/settlement watermarks before deleting job deduplication state. Retain it until that proof exists. |

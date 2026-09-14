@@ -161,11 +161,11 @@ impl CommandFields {
                 deploy: None,
             }),
             ManagementOperation::Restart { options } => {
-                if options.from.as_ref().is_some_and(|target| {
-                    target.name.is_empty()
-                        || target.name.len() > 256
-                        || target.occurrence.is_some_and(|n| n > i32::MAX as u32)
-                }) || (options.from.is_some() && options.deploy == Some(RestartDeploy::Latest))
+                options.effective_deploy().map_err(|_| Error::Invalid)?;
+                if options
+                    .from
+                    .as_ref()
+                    .is_some_and(|target| target.name.len() > 256)
                 {
                     return Err(Error::Invalid);
                 }

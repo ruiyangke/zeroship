@@ -39,7 +39,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS "management_scope_key" ON "management" ("app_i
 
 CREATE INDEX IF NOT EXISTS "management_pending_idx" ON "management" ("app_id", "outcome", "created_at", "request_id");
 
-CREATE TABLE "jobs" ("id" TEXT PRIMARY KEY NOT NULL, "app_id" TEXT NOT NULL, "deployment_id" TEXT NOT NULL, "operation" TEXT NOT NULL, "spec_digest" TEXT NOT NULL, "available_at" INTEGER NOT NULL, "dispatch_order" INTEGER NOT NULL, "state" TEXT NOT NULL, "attempt" INTEGER NOT NULL DEFAULT 0, "worker_id" TEXT, "assignment_revision" INTEGER, "lease_deadline" INTEGER, "outcome" TEXT, "settlement_digest" TEXT, "created_at" INTEGER NOT NULL, CONSTRAINT "jobs_app_id_fkey" FOREIGN KEY (app_id) REFERENCES queue_scopes(id) ON DELETE RESTRICT);
+CREATE TABLE "jobs" ("id" TEXT PRIMARY KEY NOT NULL, "app_id" TEXT NOT NULL, "deployment_id" TEXT, "operation" TEXT NOT NULL, "spec_digest" TEXT NOT NULL, "available_at" INTEGER NOT NULL, "dispatch_order" INTEGER NOT NULL, "state" TEXT NOT NULL, "attempt" INTEGER NOT NULL DEFAULT 0, "worker_id" TEXT, "assignment_revision" INTEGER, "lease_deadline" INTEGER, "outcome" TEXT, "settlement_digest" TEXT, "created_at" INTEGER NOT NULL, CONSTRAINT "jobs_app_id_fkey" FOREIGN KEY (app_id) REFERENCES queue_scopes(id) ON DELETE RESTRICT);
 
 CREATE INDEX IF NOT EXISTS "jobs_app_id_fkey_idx" ON "jobs" ("app_id");
 
@@ -114,4 +114,4 @@ CREATE INDEX IF NOT EXISTS "recovery_job_idx" ON "recovery_scopes" ("pending_job
 CREATE INDEX IF NOT EXISTS "recovery_scopes_due_idx" ON "recovery_scopes" ("next_due_at", "id");
 
 SELECT 1;
-INSERT INTO main.schema_version (id, fingerprint) VALUES ('manager', '0895c557b5d3ef9c718a55bb0677e83d06df62a80b727fe2a745f685c0d3438a');
+INSERT INTO main.schema_version (id, fingerprint) VALUES ('manager', '41e6b950e4da28b26b5c3b52492e75a164d058490434e89f43347876457592d9');

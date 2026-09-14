@@ -84,9 +84,9 @@ impl ControlCoordinator {
             .post(endpoints::WORKFLOW_SCHEDULE_ACTIVATE, request)
             .await?;
         if job.app_id != request.app_id
-            || job.deployment_id != request.deployment_id
             || job.operation
                 != (JobOperation::Activate {
+                    deployment_id: request.deployment_id.clone(),
                     revision: request.revision,
                 })
         {

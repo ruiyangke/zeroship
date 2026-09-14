@@ -23,8 +23,8 @@ async fn activation_lost_ack_and_redelivery_never_start_the_executor() {
     let deployment = fixture.deployments.deploy(fixture.app.app_id()).await;
     let mut lease = fixture.lease.clone();
     lease.delivery.job.id = JobId::mint();
-    lease.delivery.job.deployment_id = DeploymentId::parse(&deployment.id).unwrap();
     lease.delivery.job.operation = JobOperation::Activate {
+        deployment_id: DeploymentId::parse(&deployment.id).unwrap(),
         revision: Revision::try_from(1).unwrap(),
     };
     let job = lease.delivery.job.clone();

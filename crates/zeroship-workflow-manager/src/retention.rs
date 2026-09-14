@@ -7,8 +7,9 @@
 use crate::{
     deployments::{self, DeploymentHolds},
     models::{
-        jobs, recovery_scopes,
+        jobs,
         schema::{deployment_holds as holds, schedule_activations, schedules},
+        Job,
     },
     queue::{self, Budget},
     Error, Queue,
@@ -511,25 +512,36 @@ async fn require_unused(
     app: &AppId,
     deployment: &DeploymentId,
 ) -> Result<(), Error> {
-    let pending = tx
-        .entity::<jobs::Entity>()?
-        .exists(
-            jobs::app_id
-                .eq(app.as_str())?
-                .and(jobs::deployment_id.eq(deployment.as_str())?)
-                .and(jobs::state.ne("settled")?),
-        )
-        .await?;
-    let recovery = tx
-        .entity::<recovery_scopes::Entity>()?
-        .exists(
-            recovery_scopes::id
-                .eq(app.as_str())?
-                .and(recovery_scopes::deployment_id.eq(deployment.as_str())?),
-        )
-        .await?;
-    if pending || recovery {
-        return Err(Error::Conflict);
+    // Validate the operation before trusting its nullable lookup projection.
+    // A damaged projection must not hide an executable dependency from release.
+    let mut after = None::<String>;
+    loop {
+        let mut filter = jobs::app_id
+            .eq(app.as_str())?
+            .and(jobs::state.ne("settled")?);
+        if let Some(after) = &after {
+            filter = filter.and(jobs::id.gt(after.as_str())?);
+        }
+        let page = tx
+            .entity::<jobs::Entity>()?
+            .query()
+            .filter(filter)
+            .order_by(jobs::id.asc())
+            .limit(256)?
+            .all::<Job>()
+            .await?;
+        if page.is_empty() {
+            break;
+        }
+        for job in page {
+            if !matches!(job.state.as_str(), "ready" | "leased") {
+                return Err(Error::Storage);
+            }
+            if job.spec()?.deployment_id() == Some(deployment) {
+                return Err(Error::Conflict);
+            }
+            after = Some(job.id);
+        }
     }
     let schedule = tx.entity::<schedules::Entity>()?.alias("s")?;
     let activation = tx.entity::<schedule_activations::Entity>()?.alias("a")?;

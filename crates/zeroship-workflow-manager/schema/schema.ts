@@ -88,7 +88,7 @@ export function workflowManagerSchema(namespace) {
     columns: {
       id: text(),
       app_id: text(),
-      deployment_id: text(),
+      deployment_id: t.text(),
       operation: text(),
       spec_digest: text(),
       available_at: integer(),

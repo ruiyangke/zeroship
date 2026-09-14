@@ -380,7 +380,7 @@ async fn activations(fixture: &Fixture) {
         .jobs
         .remove(0);
     assert_ne!(new_job.id, old_kept.id);
-    assert_eq!(new_job.deployment_id, next.deployment_id);
+    assert_eq!(new_job.deployment_id(), Some(&next.deployment_id));
     let current = rows(fixture, "schedule_scopes", value!({"id":app.as_str()})).await;
     assert_eq!(
         scheduler.activate(&activation(&first, 1)).await.unwrap(),
@@ -419,7 +419,7 @@ async fn activations(fixture: &Fixture) {
             .position(|job| *job == delivery.job)
             .unwrap();
         remaining.remove(index);
-        assert_eq!(delivery.job.deployment_id, first.deployment_id);
+        assert_eq!(delivery.job.deployment_id(), Some(&first.deployment_id));
         settle(&queue, &owner, &delivery, JobOutcome::Completed).await;
     }
     assert!(remaining.is_empty());
@@ -750,7 +750,7 @@ async fn activation_rollback(fixture: &Fixture) {
         .activate(&activation(&replacement, 2))
         .await
         .unwrap();
-    assert_eq!(accepted.deployment_id, replacement.deployment_id);
+    assert_eq!(accepted.deployment_id(), Some(&replacement.deployment_id));
     assert_eq!(
         schedule(fixture, &app, "original").await["next_at"],
         value!(null)
@@ -884,7 +884,7 @@ async fn activation_job_identity(fixture: &Fixture) {
         "jobs",
         value!({"id":accepted.id.as_str()}),
         value!({
-            "deployment_id":accepted.deployment_id.as_str(),
+            "deployment_id":accepted.deployment_id().unwrap().as_str(),
         }),
     )
     .await;

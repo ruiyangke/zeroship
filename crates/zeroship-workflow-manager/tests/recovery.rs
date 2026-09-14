@@ -47,8 +47,8 @@ case!(
     durable_responsibility
 );
 case!(
-    sqlite_recovery_keeps_pending_pins_and_rejects_stale_activation,
-    postgres_recovery_keeps_pending_pins_and_rejects_stale_activation,
+    sqlite_recovery_keeps_pending_identity_and_rejects_stale_activation,
+    postgres_recovery_keeps_pending_identity_and_rejects_stale_activation,
     activation
 );
 case!(
@@ -283,7 +283,7 @@ async fn activation(fixture: &Fixture) {
         .unwrap()
         .delivery()
         .clone();
-    assert_eq!(delivery.job.deployment_id, first);
+    assert_eq!(delivery.job.deployment_id(), None);
     queue
         .settle(
             &owner,
@@ -299,7 +299,7 @@ async fn activation(fixture: &Fixture) {
     make_due(fixture, &app).await;
     let next = recovery.dispatch(&app).await.unwrap().unwrap();
     assert_ne!(next.id, original.id);
-    assert_eq!(next.deployment_id, second);
+    assert_eq!(next.deployment_id(), None);
     let foreign = AppId::mint();
     queue.register_scope(&foreign).await.unwrap();
     assert_eq!(recovery.dispatch(&foreign).await, Err(Error::Denied));
@@ -439,7 +439,7 @@ async fn completed_pages(fixture: &Fixture) {
     assert_eq!(reopened.due(None).await.unwrap(), vec![app.clone()]);
     let next = reopened.dispatch(&app).await.unwrap().unwrap();
     assert_ne!(next.id, first.id);
-    assert_eq!(next.deployment_id, deployment);
+    assert_eq!(next.deployment_id(), None);
     assert_eq!(next.operation, JobOperation::Reconcile {});
 }
 

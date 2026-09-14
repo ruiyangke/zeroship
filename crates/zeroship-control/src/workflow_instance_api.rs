@@ -2653,8 +2653,10 @@ async fn restart_run_inner(
     body: RestartOptions,
 ) -> Result<Value, WorkflowApiError> {
     let full_restart = body.from.is_none();
-    let deploy_pin =
-        zeroship_workflow::lifecycle::restart_deploy_policy(&body).map_err(restart_error)?;
+    let deploy_pin = body
+        .effective_deploy()
+        .map_err(WorkflowServiceError::from)
+        .map_err(restart_error)?;
 
     let mut conn = state.registry.conn().await?;
     let tx = conn

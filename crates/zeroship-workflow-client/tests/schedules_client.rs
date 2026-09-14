@@ -69,8 +69,8 @@ fn receipt(command: &ActivateSchedules) -> JobSpec {
     JobSpec {
         id: JobId::mint(),
         app_id: command.app_id.clone(),
-        deployment_id: command.deployment_id.clone(),
         operation: JobOperation::Activate {
+            deployment_id: command.deployment_id.clone(),
             revision: command.revision,
         },
         available_at: 0.try_into().unwrap(),
@@ -287,11 +287,22 @@ async fn activation_rejects_foreign_scope_revision_kind_and_open_receipts() {
         ("id", json!("not-a-job-id")),
         ("appId", json!(AppId::mint())),
         ("deploymentId", json!(DeploymentId::mint())),
-        ("operation", json!({"kind":"activate","revision":2})),
+        (
+            "operation",
+            json!({"kind":"activate","deploymentId":command.deployment_id,"revision":2}),
+        ),
+        (
+            "operation",
+            json!({"kind":"activate","deploymentId":DeploymentId::mint(),"revision":command.revision}),
+        ),
+        (
+            "operation",
+            json!({"kind":"activate","revision":command.revision}),
+        ),
         ("operation", json!({"kind":"reconcile"})),
         (
             "operation",
-            json!({"kind":"activate","revision":1,"input":null}),
+            json!({"kind":"activate","deploymentId":command.deployment_id,"revision":command.revision,"input":null}),
         ),
         ("history", json!([])),
     ] {
