@@ -1420,12 +1420,9 @@ async fn sqlite_backend_has_no_shadow_and_dry_run_is_explicitly_unsupported() {
 
     // The capability itself is absent — a deliberate absence, not a stub. It used to
     // be asserted here as `be.shadow().is_none()`. `shadow()` is no longer on
-    // `MigrationBackend`: all three backends answered `None`, so the seam asked every
-    // vendor to declare a harness none of them had. The harness is supplied to
-    // `dry_run` now, and the fact that none exists is asserted once for the whole
-    // workspace in `dialect_matrix::shadow_dry_run_has_no_implementor` rather than
-    // three times, once per backend — which is also stronger, because three `None`s
-    // could not have noticed a FOURTH backend that quietly had one.
+    // `MigrationBackend`: every backend answered `None`, so the seam asked each
+    // vendor to declare a harness it did not own. The harness is supplied directly
+    // to `dry_run` now.
     let _ = &be;
 
     let shadow_cfg = ShadowConfig {

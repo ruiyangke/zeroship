@@ -620,8 +620,6 @@ fn homogeneous_in_list_kind(elems: &[IrScalar]) -> Result<Option<InListScalarKin
 /// a `_pg`-suffixed one here. SQLite quotes decimals to match its lossless TEXT
 /// storage and MySQL emits strings as a UTF-8 hex literal, so this helper genuinely
 /// needs a vendor. It just needs the CALLER's, which the caller already is.
-///
-/// Pinned by `crates/zeroship-migrate/tests/dialect_matrix/dml_emitters_do_not_relookup_a_backend.rs`.
 pub fn render_in_list_elem_portable(
     elem: &IrScalar,
     backend: &dyn DmlRenderer,
