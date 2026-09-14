@@ -19,11 +19,12 @@ use crate::{
 pub(crate) struct Input {
     pub(crate) values: Value,
     pub(crate) expressions: indexmap::IndexMap<String, crate::orm::TimestampExpr>,
-    /// Whether the caller supplied timestamp expressions and no value patch.
-    /// [`Input::inspect`] decides it from the patch as supplied, before fields
-    /// the descriptor reassigns on write are removed, so a value patch that
-    /// removal empties is never treated as expression-only.
-    expression_only: bool,
+    /// Whether the value patch assigns a field. It starts from what the caller
+    /// supplied, where a patch made only of expressions carries an empty value
+    /// object. [`Input::inspect`] clears it when removing the fields the
+    /// descriptor reassigns on write empties the value patch; validation and
+    /// statement building then skip the value patch.
+    assigns_values: bool,
 }
 
 impl From<Value> for Input {
@@ -37,10 +38,12 @@ impl Input {
         values: Value,
         expressions: indexmap::IndexMap<String, crate::orm::TimestampExpr>,
     ) -> Self {
+        let assigns_values =
+            expressions.is_empty() || !values.as_object().is_some_and(indexmap::IndexMap::is_empty);
         Self {
             values,
             expressions,
-            expression_only: false,
+            assigns_values,
         }
     }
 
@@ -120,12 +123,7 @@ impl Input {
                 ));
             }
         }
-        self.expression_only = !self.expressions.is_empty()
-            && self
-                .values
-                .as_object()
-                .is_some_and(|values| values.is_empty());
-        if !self.expression_only {
+        if self.assigns_values {
             for assignment in crate::sql::update::assignments(&self.values)? {
                 if self.expressions.contains_key(assignment.field) {
                     return Err(DbError::validation(
@@ -135,35 +133,41 @@ impl Input {
                 }
             }
             super::write_pipeline::inspect_update(schema, &mut self.values)?;
+            self.assigns_values = assigns_a_field(&self.values);
         }
         self.expressions.retain(|field, _| {
             !assignments
                 .reassigned_on_write()
                 .any(|assigned| assigned == field)
         });
-        // Once fields the descriptor reassigns on write are removed, an
-        // expression-only patch must keep an expression and a value patch must
-        // keep a value. A patch emptied that way would otherwise write only the
-        // generated assignments.
-        if self.expression_only {
-            if self.expressions.is_empty() {
-                return Err(DbError::validation(
-                    "invalid_update",
-                    "update fields cannot be empty",
-                ));
-            }
-        } else {
-            crate::sql::update::assignments(&self.values)?;
+        // Removing the fields the descriptor reassigns on write can empty either
+        // part of the patch. A patch left with neither a value assignment nor an
+        // expression would write only the generated assignments.
+        if !self.assigns_values && self.expressions.is_empty() {
+            return Err(DbError::validation(
+                "invalid_update",
+                "update fields cannot be empty",
+            ));
         }
         Ok(())
     }
 
     pub(crate) fn validate_values(&self, schema: &FieldMap) -> Result<(), crate::error::DbError> {
-        if self.expression_only {
+        if !self.assigns_values {
             return Ok(());
         }
         super::update_validation::validate(schema, &self.values)
     }
+}
+
+/// Whether a normalized patch assigns a field. Normalization keeps literal
+/// values under `$set` and every other operator under its field name.
+fn assigns_a_field(patch: &Value) -> bool {
+    patch.as_object().is_some_and(|fields| {
+        fields.iter().any(|(name, operand)| {
+            name != "$set" || operand.as_object().is_some_and(|sets| !sets.is_empty())
+        })
+    })
 }
 
 pub(crate) struct ResultCheck {
@@ -318,11 +322,11 @@ pub(crate) fn resolve_assignments(
     resolved: &ResolvedTable,
     registration: &SqlRegistration,
 ) -> Result<Vec<Assignment>, QueryError> {
-    let values = if update.expression_only {
-        Vec::new()
-    } else {
+    let values = if update.assigns_values {
         crate::sql::update::into_assignments(update.values)
             .map_err(|error| invalid(error.to_string()))?
+    } else {
+        Vec::new()
     };
     let mut assignments = values
         .into_iter()
@@ -538,7 +542,7 @@ mod tests {
             (crate::value!({"revision":{"$inc":1}}), &[]),
             (crate::value!({}), &["touched"]),
             (crate::value!({"revision":5}), &["touched"]),
-            (crate::value!({"touched":0}), &["stamp"]),
+            (crate::value!({"touched":0}), &["touched"]),
         ] {
             let mut input = Input::new(values.clone(), expressions(supplied));
             let error = input.inspect(&fields).unwrap_err();
@@ -570,6 +574,45 @@ mod tests {
         stripped.validate_values(&fields).unwrap();
         assert_eq!(stripped.values, crate::value!({"$set":{"stamp":0}}));
         assert!(stripped.expressions.is_empty());
+    }
+
+    /// Removing reassigned fields keeps whatever else the caller assigns, as a
+    /// literal or as an expression, so an expression beside a removed value
+    /// still writes and only the expression reaches the statement.
+    #[test]
+    fn expressions_left_beside_removed_values_still_write() {
+        let fields = assigned_timestamp_fields();
+        let registration = SqlRegistration::sqlite();
+        let resolved = ResolvedTable::new(
+            &SchemaName::new("app").unwrap(),
+            "moments",
+            &fields,
+            &registration,
+        )
+        .unwrap();
+        for values in [
+            crate::value!({"touched":0}),
+            crate::value!({"revision":{"$inc":1}}),
+        ] {
+            let mut input = Input::new(values.clone(), expressions(&["stamp"]));
+            input.inspect(&fields).unwrap();
+            input.validate_values(&fields).unwrap();
+            let assignments = resolve_assignments(
+                input,
+                &WriteAssignments::default(),
+                &resolved,
+                &registration,
+            )
+            .unwrap();
+            assert_eq!(assignments.len(), 1, "{values:?}");
+            assert!(
+                matches!(
+                    assignments[0].value,
+                    Expression::DatabaseTimestamp { offset_millis: 0 }
+                ),
+                "{values:?}"
+            );
+        }
     }
 
     #[derive(Clone)]
