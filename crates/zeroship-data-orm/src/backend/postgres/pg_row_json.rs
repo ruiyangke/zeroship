@@ -11,6 +11,7 @@ use compio_postgres::{
 use crate::value::{Map, Value};
 
 #[cfg(test)]
+#[path = "pg_row_json/network_tests.rs"]
 mod network_tests;
 
 pub fn rows_to_values(rows: &[Row]) -> Result<Vec<Value>, DbError> {
