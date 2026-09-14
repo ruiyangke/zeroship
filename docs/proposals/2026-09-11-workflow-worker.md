@@ -1210,6 +1210,68 @@ semantic delivery. New subscriptions cannot retroactively join an already
 captured broadcast. Continuation jobs keep processing bounded; the queue needs
 closed event/cursor fields before this flow can replace existing local fanout.
 
+### Delivered topic fanout
+
+This contract is the next creator delivery implementation. Direct run signals
+already persist their body and runnable Advance intent in the creator transaction;
+they do not require another event job merely to repeat that acceptance.
+
+The closed code-free operation is `Fanout { broadcast_id, revision }`, where
+`broadcast_id` is a typed broadcast identity and `revision` identifies the
+broadcast's next bounded page. The manager sees no topic, subscription cutoff,
+recipient, signal body or database cursor. Its existing scoped submission,
+delivery, fairness and settlement protocol applies. Fanout neither acquires an
+executable hold nor creates a periodic maintenance duty.
+
+Under the creator app lock, a topic owns monotonically increasing accepted and
+completed broadcast sequences. Publishing stores the next sequence, the immutable
+subscription cutoff and the first stable publication intent together. The
+broadcast owns its current page revision and subscription cursor. App/topic
+sequence and app/broadcast/page revision have scoped uniqueness; every table
+retains its sole required `id` primary key.
+
+The publication journal retains a closed immutable JobSpec plus explicit,
+validated optional projections. Advance requires its deployment, run, generation
+and frontier projections and no broadcast fields. Fanout requires its broadcast
+and page revision and no executable projections. No other operation can be
+manufactured by this journal. Reconciliation recovers both through its existing
+bounded publication phase. Before releasing creator-held code, retention validates
+pending app publication specifications and projections; a damaged null projection
+cannot hide an Advance dependency.
+
+A delivered page captures original policy and delivery authority before journal
+I/O. Exact committed receipt replay is checked first. Fresh work requires the
+matching persisted publication and current page revision, and the broadcast must
+be the topic's next unfinished sequence. A later broadcast defers without creating
+a receipt, moving a cursor or acknowledging the job. Manager delivery expiry and
+fair dispatch retry it; an unavailable predecessor cannot be silently skipped.
+
+A bounded page selects only eligible subscriptions within the captured cutoff,
+verifies their current run generation and wait, and inserts each semantic delivery
+once. The creator transaction commits recipient signals, affected Advance intents,
+fanout cursor, immutable page receipt and the next Fanout publication together.
+The final page also advances the topic's completed sequence. Waiting denotes a
+durable successor page; Completed denotes finished expansion. Historical page
+receipts retain their exact job and publication linkage when current topic and
+broadcast progress has advanced. No customer transaction spans manager I/O.
+
+Signal consumption uses a required monotonically increasing delivery sequence
+allocated under the app lock whenever a direct or topic signal is first
+materialized. Replay retains that sequence. The topic predecessor rule makes
+same-topic materialization follow broadcast acceptance. Direct signals and
+different topics merge by materialization order; this is not a promise of a
+global acceptance order. Signal timestamps still govern age and deadline
+eligibility, never break ordering ties. Sequence exhaustion rolls back the
+enclosing transition.
+
+Native verification must cover reversed job delivery, page/reply replay,
+timestamp ties and regression, cutoff changes, stale generation/wait targeting,
+app isolation, original authority expiry across lock waits, atomic rollback of
+cursor/signals/publications/receipts, counter exhaustion, damaged projections and
+progress through separate manager and creator databases. Production ingress
+responsibility and trusted host composition remain prerequisites for deleting
+the old dispatch paths.
+
 ### Child workflows, continuation and compensation
 
 ```text
