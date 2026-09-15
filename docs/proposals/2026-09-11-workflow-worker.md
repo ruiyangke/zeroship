@@ -254,15 +254,22 @@ vouched for this worker" is a stored fact rather than an inference. The
 execution zone is recorded on the instance as well, because there is no longer a
 per-unit row to read it from.
 
-Revocation has two independent arms and neither is configuration. Removing a
-signer's key stops every future token minted under it; tokens already
-outstanding die at their own expiry, which is what a short `exp` buys and what a
-long one gives up. Retiring one instance is unchanged - the `status` filter on
-the instance key read is the whole of it - and a worker that exits gracefully
-retires itself once its server has drained. Observed liveness never writes
-enrollment status. Revoking a signer deliberately does NOT retire the instances
-it admitted: their keys were never the signer's to hold, so they are retired one
-at a time, and the recorded signer id is what makes that set enumerable.
+Revocation is not configuration, and a signer has TWO operator verbs that do not
+imply each other. ROTATE removes the signer's key: no further token can be
+minted under it, outstanding tokens die at their own expiry - which is what a
+short `exp` buys and what a long one gives up - and the fleet that signer
+admitted keeps running. That is the hygiene path, and it must not retire the
+fleet, because one signer covers many units and retiring a key should not take
+all of them down. PURGE removes the signer AND retires every instance it
+admitted, in one transaction: it is the incident path, for a key believed to
+have leaked, where an operator must not be retiring instances one at a time
+while an attacker's workers keep serving. The recorded signer id on the instance
+row is what makes that set enumerable. Rotate when the key is merely old; purge
+when you believe it leaked.
+
+Retiring one instance is unchanged - the `status` filter on the instance key
+read is the whole of it - and a worker that exits gracefully retires itself once
+its server has drained. Observed liveness never writes enrollment status.
 
 Every enrollment reader reads the authoritative row: Control on each internal
 request, the manager at ingress and again after lock waits and before commit,
@@ -326,8 +333,8 @@ verifies without holding a signing key. `zeroship dev init` provisions the
 signer credential and the import file; `zeroship join-token` mints from that
 credential; compose mounts the import file and the signer credential into
 Control and the minted-token volume into the workers; and
-`docs/runbooks/worker-join-signers.md` holds the operator procedure, signer
-revocation and instance retirement included. A gracefully stopped worker retires
+`docs/runbooks/worker-join-signers.md` holds the operator procedure with the two
+signer verbs side by side and instance retirement. A gracefully stopped worker retires
 its own instance through `CONTROL_WORKER_RETIRE`. The worker's version poll and
 the `env.workflows` HTTP backend still authenticate with the shared control key
 rather than a worker credential, so revoking a signer does not take that
