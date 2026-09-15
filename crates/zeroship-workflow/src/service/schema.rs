@@ -36,28 +36,21 @@ pub async fn initialize_local(store: &super::store::OrmStore) -> Result<(), Work
     initialize_sqlite(Path::new(file))
 }
 
-const POSTGRES_TEMPLATE: &str = include_str!("../../schema/postgres.sql");
-pub const SQLITE_SQL: &str = include_str!("../../schema/sqlite.sql");
+pub use zeroship_workflow_schema::SQLITE_SQL;
+
 /// Instantiate canonical DDL in the customer's resolved physical schema.
 /// The provisioning host supplies its own authorized migration connection.
+///
+/// The substitution itself lives in `zeroship-workflow-schema` beside the
+/// artifact it binds, so the installer and this engine cannot disagree about it.
 #[must_use]
 pub fn postgres_sql(schema: &super::store::SchemaName) -> String {
-    POSTGRES_TEMPLATE.replace(
-        "\"__zeroship_workflow_schema\"",
-        &zeroship_data_orm::sql::mapping::quote_ident(schema.as_str()),
-    )
+    zeroship_workflow_schema::postgres_sql(schema.as_str())
 }
 
-const FINGERPRINTS: &str = include_str!("../../schema/fingerprints.json");
-
 pub(crate) fn fingerprint(dialect: &str) -> Result<String, WorkflowServiceError> {
-    let fingerprints: std::collections::BTreeMap<String, String> =
-        serde_json::from_str(FINGERPRINTS).map_err(|_| {
-            WorkflowServiceError::Internal("invalid generated workflow schema fingerprint".into())
-        })?;
-    fingerprints
-        .get(dialect)
-        .cloned()
+    zeroship_workflow_schema::fingerprint(dialect)
+        .map(str::to_owned)
         .ok_or_else(|| WorkflowServiceError::Internal("unsupported workflow schema dialect".into()))
 }
 
@@ -95,12 +88,16 @@ pub fn initialize_sqlite(path: &Path) -> Result<(), WorkflowServiceError> {
     if populated {
         let actual: String = tx
             .query_row(
-                "SELECT fingerprint FROM __zeroship_workflow_schema_version WHERE id = 'workflow'",
+                &format!(
+                    "SELECT fingerprint FROM {table} WHERE id = '{row}'",
+                    table = zeroship_workflow_schema::STAMP_TABLE,
+                    row = zeroship_workflow_schema::STAMP_ROW_ID,
+                ),
                 [],
                 |row| row.get(0),
             )
             .map_err(|_| incompatible())?;
-        if actual != fingerprint("sqlite")? {
+        if actual != fingerprint(zeroship_workflow_schema::SQLITE)? {
             return Err(incompatible());
         }
     } else {

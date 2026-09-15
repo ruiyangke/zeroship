@@ -9,7 +9,7 @@ use crate::operations::{ConflictPolicy, SignalOptions, StartOptions};
 use crate::WorkflowServiceError;
 use compio_postgres::NoTls;
 use serde_json::json;
-use std::{path::Path, process::Command, rc::Rc, sync::Arc};
+use std::{path::Path, rc::Rc, sync::Arc};
 use testcontainers::{
     core::{IntoContainerPort, WaitFor},
     runners::SyncRunner,
@@ -541,22 +541,6 @@ async fn connect(url: &str) -> compio_postgres::Client {
     })
     .detach();
     client
-}
-
-#[test]
-fn generated_schema_matches_the_shared_migration_definition() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let output = Command::new("node")
-        .arg("crates/zeroship-workflow/schema/generate.mjs")
-        .arg("--check")
-        .current_dir(root)
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "schema compiler check failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
 }
 
 #[compio::test]
