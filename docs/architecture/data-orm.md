@@ -612,14 +612,36 @@ Native row decoding is fallible. Driver row adapters report `row_decode_failed`
 with column context when they reject a result; they never substitute SQL NULL
 for a decoding failure. PostgreSQL infinite dates and timestamps are
 refused because the native timestamp contract represents finite instants.
-Timestamp precision is reduced to the containing Unix millisecond, including
-instants before the epoch. Scalar timestamps accept integral Unix milliseconds
-or real ISO calendar timestamps; an omitted timezone means UTC. Their UTC date
-must fit the positive `YYYY-MM-DD` calendar. The shared temporal codec validates
-writes before protection transforms and rejects malformed storage with column
-context. PostgreSQL receives native timestamp binds; SQLite receives canonical
-UTC text. Neither path converts caller timestamps through floating-point SQL.
-Filters use the same binding codec, keeping the indexed column bare.
+An instant is carried as `Value::TimestampMicros`, Unix microseconds, and the
+typed Rust API carries it as `UtcInstant` (`from_unix_micros`,
+`from_unix_millis`, `unix_micros`, `floor_unix_millis`). A bare `i64` has no
+`Timestamp` codec: the unit of an integer is invisible at the call site, and a
+JSON or JavaScript number at the same position means milliseconds. Scalar
+timestamps also accept a real ISO calendar timestamp; an omitted timezone means
+UTC. Their UTC date must fit the positive `YYYY-MM-DD` calendar.
+
+How much of that instant a backend keeps is its registered
+`SqlSupport::timestamp_resolution`. PostgreSQL declares microseconds and stores
+every one of them: a value bound, returned by `RETURNING`, produced by a
+`min`/`max` aggregate or shifted by a `TimestampExpr` offset reads back as the
+instant the server holds, so re-binding it matches its own row by equality.
+SQLite declares milliseconds, and a finer value is refused with
+`ValidationFailed{timestamp_precision_unsupported}` before any statement runs
+rather than floored into a different instant. `TimestampExpr` offsets are whole
+microseconds; a duration with a finer part is refused where it is written.
+
+The shared temporal codec validates writes before protection transforms and
+rejects malformed storage with column context. PostgreSQL receives native
+timestamp binds; SQLite receives canonical UTC text. Neither path converts
+caller timestamps through floating-point SQL: a PostgreSQL clock offset is bound
+as exact decimal seconds, because the portable span in microseconds runs past
+the range where a double holds every integer. Filters use the same binding
+codec, keeping the indexed column bare.
+
+The V8 adapter keeps JavaScript's millisecond contract in both directions: an
+outbound instant floors toward negative infinity, and an inbound number is
+scaled. That floor is lossy by design, so a JavaScript caller that reads a
+PostgreSQL instant and filters by equality can still miss the row it read.
 
 Temporal fields inside declared objects, union variants, and primitive arrays
 follow the same logical contract. The shared codec normalizes them before
