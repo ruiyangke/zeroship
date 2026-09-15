@@ -34,7 +34,7 @@ async fn exercise_arithmetic_validation(db: &Database) {
         value!([2]),
         value!({"amount":2}),
         Value::Bytes(vec![2]),
-        Value::Timestamp(2),
+        Value::TimestampMicros(2),
         Value::Json("2".into()),
         Value::Decimal("private_not_a_number".into()),
     ] {
@@ -223,7 +223,7 @@ async fn exercise_patches_emptied_by_write_assignments(db: &Database) {
     let before = stored_rows(&accounts).await;
     assert_eq!(before[0]["version"].as_i64(), Some(1));
     assert!(!before[0]["updated_at"].is_null());
-    let stamp = Value::Timestamp(0);
+    let stamp = Value::TimestampMicros(0);
     let assigned_only = [
         value!({"version":99}),
         value!({"$set":{"version":99}}),

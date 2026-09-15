@@ -218,24 +218,6 @@ impl DecodeValue<Number> for Decimal {
     }
 }
 
-impl EncodeValue<Timestamp> for i64 {
-    fn encode_value(self) -> Result<Value, DbError> {
-        if crate::sql::temporal::is_timestamp_millis(self) {
-            Ok(Value::Timestamp(self))
-        } else {
-            Err(invalid("portable timestamp in Unix milliseconds"))
-        }
-    }
-}
-impl DecodeValue<Timestamp> for i64 {
-    fn decode_value(value: Value) -> Result<Self, DbError> {
-        value
-            .as_i64()
-            .filter(|value| crate::sql::temporal::is_timestamp_millis(*value))
-            .ok_or_else(|| invalid("portable timestamp in Unix milliseconds"))
-    }
-}
-
 impl<S, T: EncodeValue<S>> EncodeValue<Nullable<S>> for Option<T> {
     fn encode_value(self) -> Result<Value, DbError> {
         self.map(EncodeValue::encode_value)

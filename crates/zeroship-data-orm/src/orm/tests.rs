@@ -72,7 +72,7 @@ struct NewPost {
 #[orm(entity = posts)]
 struct Details {
     id: String,
-    created_at: i64,
+    created_at: UtcInstant,
     title: String,
     payload: Option<Vec<u8>>,
     counter: i64,
@@ -452,7 +452,7 @@ async fn exercise_native_models(db: &Database) {
         .unwrap();
     assert_eq!(row.title, "native");
     assert_eq!(row.payload, Some(vec![0, 255, 128]));
-    assert!(row.created_at > 0);
+    assert!(row.created_at.unix_micros() > 0);
     assert_eq!(row.counter, 7);
     assert_eq!(row.nickname.as_deref(), Some("anonymous"));
     assert_eq!(row.score, Some(1.25));

@@ -14,7 +14,7 @@ struct Document {
     version: i64,
     created_by: Option<String>,
     updated_by: Option<String>,
-    deleted_at: Option<i64>,
+    deleted_at: Option<UtcInstant>,
 }
 
 #[derive(Insertable)]

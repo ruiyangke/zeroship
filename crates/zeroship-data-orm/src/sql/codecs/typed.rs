@@ -11,7 +11,18 @@ fn invalid(field: &str, expected: &str) -> CodecError {
     )
 }
 
-fn scalar(kind: LogicalType, field: &str, value: &mut Value) -> Result<(), CodecError> {
+/// Normalise a temporal value for storage.
+///
+/// A column keeps its instant at full resolution; the backend's registered
+/// resolution decides what it can store. A value nested inside JSON becomes a
+/// number of whole milliseconds, because that is the unit JSON carries, and a
+/// finer one is refused rather than floored.
+fn scalar(
+    kind: LogicalType,
+    field: &str,
+    value: &mut Value,
+    nested: bool,
+) -> Result<(), CodecError> {
     if kind == LogicalType::CalendarDate {
         if value
             .as_str()
@@ -23,7 +34,7 @@ fn scalar(kind: LogicalType, field: &str, value: &mut Value) -> Result<(), Codec
             ));
         }
     } else {
-        let millis = crate::sql::temporal::timestamp_millis(value).ok_or_else(|| {
+        let micros = crate::sql::temporal::timestamp_micros(value).ok_or_else(|| {
             CodecError::validation(
                 "invalid_timestamp",
                 format!(
@@ -31,7 +42,17 @@ fn scalar(kind: LogicalType, field: &str, value: &mut Value) -> Result<(), Codec
                 ),
             )
         })?;
-        *value = Value::from(millis);
+        *value = if nested {
+            let millis = crate::sql::temporal::exact_timestamp_millis(micros).ok_or_else(|| {
+                CodecError::validation(
+                    "timestamp_precision_unsupported",
+                    format!("column '{field}' stores whole milliseconds inside JSON"),
+                )
+            })?;
+            Value::from(millis)
+        } else {
+            Value::TimestampMicros(micros)
+        };
     }
     Ok(())
 }
@@ -167,7 +188,7 @@ fn prepare_array_element(
     value: &mut Value,
 ) -> Result<(), CodecError> {
     if matches!(item, LogicalType::Timestamp | LogicalType::CalendarDate) {
-        return scalar(item, field, value);
+        return scalar(item, field, value, true);
     }
     let valid = match value {
         Value::Json(json) => serde_json::from_str::<&serde_json::value::RawValue>(json)
@@ -249,7 +270,7 @@ fn prepare_value_at(
         return Ok(());
     }
     if matches!(kind, LogicalType::Timestamp | LogicalType::CalendarDate) {
-        return scalar(kind, field, value);
+        return scalar(kind, field, value, depth > 0);
     }
     // JSON members have no column codec to enforce their primitive type.
     if depth > 0 {

@@ -23,9 +23,6 @@ help: the following other types implement trait `DecodeValue<S>`
   | |     BigInt, i64, i8, i16, i32, i64, u8, u16, u32, u64, isize, usize
   | | );
   | |_- in this macro invocation
-...
-  |   impl DecodeValue<Timestamp> for i64 {
-  |   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `i64` implements `DecodeValue<zeroship_data_orm::orm::sql_types::Timestamp>`
 note: required by a bound in `orm::read_builder::scalars::<impl SourceColumn<C>>::select`
  --> src/orm/read_builder/scalars.rs
   |

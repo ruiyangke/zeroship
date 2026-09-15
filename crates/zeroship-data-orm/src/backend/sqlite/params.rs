@@ -22,7 +22,20 @@ impl ToSql for Parameter<'_> {
                     rusqlite::Error::ToSqlConversionFailure("invalid database number".into())
                 })?))
             }
-            Value::Timestamp(v) => ToSqlOutput::Owned(SqliteValue::Integer(*v)),
+            // SQLite stores an instant as canonical fixed-width text, which is
+            // what the registration's codec produces before a value reaches
+            // here. A native timestamp that arrives unencoded is bound in the
+            // same form, and a sub-millisecond one is refused rather than
+            // silently bound as something the column cannot match.
+            Value::TimestampMicros(v) => ToSqlOutput::Owned(SqliteValue::Text(
+                crate::sql::temporal::exact_timestamp_millis(*v)
+                    .and_then(crate::sql::temporal::format_timestamp_millis)
+                    .ok_or_else(|| {
+                        rusqlite::Error::ToSqlConversionFailure(
+                            "SQLite stores whole milliseconds within the portable calendar".into(),
+                        )
+                    })?,
+            )),
             Value::Json(v) => {
                 serde_json::from_str::<&serde_json::value::RawValue>(v)
                     .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;

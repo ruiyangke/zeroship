@@ -20,11 +20,17 @@ pub enum QueryError {
     InvalidIdent(String),
     ReservedIdPrefix(String),
     ImmutableAssignedField(String),
+    TimestampPrecisionUnsupported(String),
 }
 
 impl From<crate::sql::compiler::CompileError> for QueryError {
     fn from(error: crate::sql::compiler::CompileError) -> Self {
-        Self::InvalidFilter(error.to_string())
+        match error {
+            crate::sql::compiler::CompileError::TimestampPrecisionUnsupported => {
+                Self::TimestampPrecisionUnsupported(error.to_string())
+            }
+            error => Self::InvalidFilter(error.to_string()),
+        }
     }
 }
 
@@ -38,6 +44,7 @@ impl std::fmt::Display for QueryError {
             Self::ImmutableAssignedField(message) => {
                 write!(f, "immutable assigned field: {message}")
             }
+            Self::TimestampPrecisionUnsupported(message) => write!(f, "{message}"),
         }
     }
 }

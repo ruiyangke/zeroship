@@ -219,9 +219,26 @@ impl SqlRegistration {
         self.codecs.storage_type(definition)
     }
 
+    /// Encode a native value for the registered backend's storage.
+    ///
+    /// The declared [`SqlSupport::timestamp_resolution`] is enforced here, on
+    /// the one path every written instant crosses, so a backend that stores
+    /// whole milliseconds refuses a finer value instead of flooring it away.
+    /// A value that is not a readable instant at all falls through to the
+    /// codec, which names it as invalid storage.
     pub fn encode(&self, storage: StorageType, value: Value) -> Result<Value, CompileError> {
         if storage == StorageType::Json {
             validate_json(&value)?;
+        }
+        if storage == StorageType::Timestamp
+            && self.effective.timestamp_resolution
+                == crate::sql::temporal::TimestampResolution::Millisecond
+        {
+            if let Some(micros) = crate::sql::temporal::timestamp_micros(&value) {
+                if crate::sql::temporal::exact_timestamp_millis(micros).is_none() {
+                    return Err(CompileError::TimestampPrecisionUnsupported);
+                }
+            }
         }
         let encoded = self.codecs.encode(storage, value)?;
         if storage == StorageType::Json {

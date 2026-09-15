@@ -131,27 +131,77 @@ mod tests {
         }
     }
 
+    /// Every microsecond survives the driver boundary, on both sides of the
+    /// Unix epoch and of PostgreSQL's own 2000-01-01 origin, and the value the
+    /// driver binds is the value the server stored.
+    ///
+    /// The server computes the expected count itself, so nothing here restates
+    /// what the conversion is supposed to produce.
     #[compio::test]
-    async fn timestamp_rounding_is_consistent_across_epochs() {
+    async fn pg_timestamptz_round_trips_microseconds_across_epochs() {
         let postgres = crate::tests::fixtures::postgres::Postgres::start();
         let pool = Pool::connect(&postgres.url(), 1).await.unwrap();
         let driver = PostgresDriver::new(Rc::new(pool));
         let session = driver.acquire(LeaseKind::Autocommit).await.unwrap();
         for timestamp in [
+            "0001-01-01 00:00:00+00",
             "1969-12-31 23:59:59.999999+00",
             "1970-01-01 00:00:00.000001+00",
             "1999-12-31 23:59:59.999999+00",
             "2000-01-01 00:00:00.000001+00",
+            "9999-12-31 23:59:59.999999+00",
         ] {
             let rows = session
-                .query("SELECT $1::timestamptz AS stamp, floor(extract(epoch FROM $1::timestamptz) * 1000)::bigint AS expected", &[timestamp.into()])
+                .query(
+                    "SELECT $1::timestamptz AS stamp, \
+                     (extract(epoch FROM $1::timestamptz) * 1000000)::bigint AS expected",
+                    &[timestamp.into()],
+                )
                 .await
                 .unwrap();
+            let oracle = rows[0]["expected"].as_i64().expect("oracle microseconds");
             assert_eq!(
-                rows[0]["stamp"].as_i64(),
-                rows[0]["expected"].as_i64(),
+                rows[0]["stamp"].as_timestamp_micros(),
+                Some(oracle),
                 "{timestamp}"
             );
+            // Binding the decoded value back reproduces the same instant, so
+            // the encoder is the decoder's inverse rather than a second guess.
+            let stamp = rows[0]["stamp"].clone();
+            let rebound = session
+                .query("SELECT $1::timestamptz = $2::timestamptz AS same", &[stamp, timestamp.into()])
+                .await
+                .unwrap();
+            assert_eq!(rebound[0]["same"], Value::Bool(true), "{timestamp}");
         }
+        // Rejection control: a value with no finite instant, and one past the
+        // range a native instant can name, are refused by column name rather
+        // than decoded into a neighbouring instant.
+        for expression in [
+            "'infinity'::timestamptz",
+            "'-infinity'::timestamptz",
+            "'294276-01-01 00:00:00+00'::timestamptz",
+        ] {
+            let sql = format!("SELECT {expression} AS refused");
+            let error = session.query(&sql, &[]).await.expect_err(&sql);
+            let DbError::Coded { code, message, .. } = &error else {
+                panic!("{sql}: {error:?}")
+            };
+            assert_eq!(code, "row_decode_failed", "{sql}");
+            assert!(message.contains("refused"), "{sql}: {message}");
+        }
+        // An instant PostgreSQL can hold but the portable calendar cannot
+        // decodes here and is refused by the temporal codec a column read goes
+        // through, which is what keeps a clock offset that leaves the calendar
+        // classified as the caller's invalid offset instead of a decode fault.
+        let rows = session
+            .query("SELECT '10000-01-01 00:00:00+00'::timestamptz AS beyond", &[])
+            .await
+            .unwrap();
+        assert!(rows[0]["beyond"].as_timestamp_micros().is_some());
+        assert_eq!(
+            crate::sql::temporal::timestamp_micros(&rows[0]["beyond"]),
+            None
+        );
     }
 }
