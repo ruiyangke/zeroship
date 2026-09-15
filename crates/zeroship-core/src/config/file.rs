@@ -123,6 +123,8 @@ pub struct FileConfig {
 pub struct ControlSection {
     /// Workflow coordinator origin used by Control's metadata client.
     pub workflow_coordinator_url: Option<String>,
+    /// Catalog sessions the Control process may hold at once.
+    pub catalog_max_connections: Option<usize>,
     /// `PostgreSQL` DSN for control-plane data. A DSN grammar admits userinfo,
     /// so it is secret-classed regardless of whether a given value carries a
     /// password.

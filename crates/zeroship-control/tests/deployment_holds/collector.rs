@@ -87,7 +87,7 @@ async fn redeploy_old(fixture: &Fixture, versions: &Versions) -> Result<Acceptan
     fixture
         .state
         .registry
-        .deploy(&super::deployment_commands::command(
+        .deploy(super::deployment_commands::command(
             &versions.app,
             &actor,
             deployment,

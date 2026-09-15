@@ -8,7 +8,8 @@ use zeroship_core::app_derivation;
 use zeroship_core::app_id::AppId;
 
 use crate::publication::{
-    catalog, Acceptance, AcceptanceResult, CatalogError, CommandBinding, DeployCommand,
+    catalog, Acceptance, AcceptanceResult, Catalog, CatalogError, CatalogOptions, CommandBinding,
+    DeployCommand,
 };
 use zeroship_core::types::{
     AppNetPolicy, AppNetPolicyLimits, AppRecord, AppRuntimeLimits, AppVersionInfo,
@@ -169,12 +170,15 @@ fn source_chain(err: &dyn std::error::Error) -> Option<String> {
 
 /// Application registry backed by PostgreSQL. Stores the DB URL and creates a
 /// fresh connection per query — suitable for the low-traffic control plane.
+/// Deploy, archive and restore run their catalog transactions on the bounded
+/// [`Catalog`] every clone shares.
 ///
-/// `Clone` is cheap (just a `String` copy) so `AppState` can hold a separate
-/// handle alongside the `EnvStore`'s internal one.
+/// `Clone` is cheap (a `String` copy and a catalog handle) so `AppState` can
+/// hold a separate handle alongside the `EnvStore`'s internal one.
 #[derive(Clone, Debug)]
 pub struct Registry {
     db_url: String,
+    catalog: Catalog,
 }
 
 /// Open a new compio-postgres connection and detach its driver task onto the
@@ -197,15 +201,34 @@ impl Registry {
     /// profile), applied out of band before the service boots (the `migrate`
     /// compose step / `deploy/ops/db-migrate.sh`).
     /// `Registry` never creates or alters tables.
+    ///
+    /// The shared catalog uses the default session bound; the production
+    /// binary passes its configured bound to [`Self::connect`].
     pub async fn new(db_url: &str) -> Result<Self, String> {
+        Self::connect(db_url, CatalogOptions::default()).await
+    }
+
+    /// Connect as [`Self::new`] does, opening the shared catalog with
+    /// `catalog`'s session bound.
+    pub async fn connect(db_url: &str, catalog: CatalogOptions) -> Result<Self, String> {
         // Fail fast if the database is unreachable; the schema must already
         // exist. Dropping `conn` sends Terminate and exits the driver task.
         let conn = open_conn(db_url).await.map_err(|e| e.to_string())?;
         drop(conn);
+        let catalog = Catalog::start(db_url, catalog)
+            .await
+            .map_err(|error| format!("control catalog: {error}"))?;
 
         Ok(Self {
             db_url: db_url.to_string(),
+            catalog,
         })
+    }
+
+    /// The process's shared catalog database.
+    #[must_use]
+    pub fn catalog(&self) -> &Catalog {
+        &self.catalog
     }
 
     /// Open a fresh connection. Crate-internal: stores + internal
@@ -518,20 +541,22 @@ impl Registry {
                 &[&app_derivation::lifecycle_lock_seed(id)],
             )
             .await?;
-        let database = catalog::connect(&self.db_url)
+        let app = id.clone();
+        let transition = self
+            .catalog
+            .run(move |database| async move {
+                let now = crate::publication::now_millis();
+                catalog::transact(&database, |tx| async move {
+                    if restore {
+                        catalog::restore(&tx, &app, now).await
+                    } else {
+                        catalog::archive(&tx, &app, now).await
+                    }
+                })
+                .await
+            })
             .await
-            .map_err(|error| RegistryError::Database(error.to_string()))?;
-        let now = crate::publication::now_millis();
-        let transition = catalog::transact(&database, |tx| async move {
-            if restore {
-                catalog::restore(&tx, id, now).await
-            } else {
-                catalog::archive(&tx, id, now).await
-            }
-        })
-        .await
-        .map_err(|error| catalog_registry_error(id, error))?;
-        drop(database);
+            .map_err(|error| catalog_registry_error(id, error))?;
         let record = match transition {
             Some(_) => guard_tx
                 .query(
@@ -572,13 +597,16 @@ impl Registry {
     ///
     /// # Errors
     /// Returns the catalog's refusals and database failures unchanged.
-    pub async fn deploy(&self, command: &DeployCommand) -> Result<Acceptance, CatalogError> {
-        let database = catalog::connect(&self.db_url).await?;
-        let now = crate::publication::now_millis();
-        catalog::transact(&database, |tx| async move {
-            catalog::accept(&tx, command, now).await
-        })
-        .await
+    pub async fn deploy(&self, command: DeployCommand) -> Result<Acceptance, CatalogError> {
+        self.catalog
+            .run(move |database| async move {
+                let now = crate::publication::now_millis();
+                catalog::transact(&database, |tx| async move {
+                    catalog::accept(&tx, &command, now).await
+                })
+                .await
+            })
+            .await
     }
 
     /// Answer an exact retry from its receipt before any blob is ingested.
@@ -590,11 +618,15 @@ impl Registry {
         &self,
         binding: &CommandBinding,
     ) -> Result<Option<AcceptanceResult>, CatalogError> {
-        let database = catalog::connect(&self.db_url).await?;
-        catalog::transact(&database, |tx| async move {
-            catalog::lookup(&tx, binding).await
-        })
-        .await
+        let binding = binding.clone();
+        self.catalog
+            .run(move |database| async move {
+                catalog::transact(&database, |tx| async move {
+                    catalog::lookup(&tx, &binding).await
+                })
+                .await
+            })
+            .await
     }
 
     /// Whether the app exists and has not been deleted.

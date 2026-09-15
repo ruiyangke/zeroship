@@ -15,6 +15,8 @@ mod queue_holds;
 mod collector;
 #[path = "deployment_holds/publication.rs"]
 mod publication;
+#[path = "deployment_holds/catalog.rs"]
+mod shared_catalog;
 
 use ntex::{
     client::Client,

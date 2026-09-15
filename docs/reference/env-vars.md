@@ -300,6 +300,7 @@ Every environment name below is `ZEROSHIP_<CANONICAL>` and every overlay path is
 | `control.audit_retention_months` | operational | `ZEROSHIP_CONTROL_AUDIT_RETENTION_MONTHS` | `control.audit_retention_months` | zeroship-control `--audit-retention-months` | `crate::cron::audit_retention::DEFAULT_RETENTION_MONTHS` |
 | `control.billing_forwarder_group_id` | operational | `ZEROSHIP_CONTROL_BILLING_FORWARDER_GROUP_ID` | `control.billing_forwarder_group_id` | zeroship-control `--billing-forwarder-group-id` | `crate::DEFAULT_BILLING_FORWARDER_GROUP_ID` |
 | `control.bind` | operational | `ZEROSHIP_CONTROL_BIND` | `control.bind` | zeroship-control `--bind` | `127.0.0.1` |
+| `control.catalog_max_connections` | operational | `ZEROSHIP_CONTROL_CATALOG_MAX_CONNECTIONS` | `control.catalog_max_connections` | zeroship-control `--catalog-max-connections` | `crate::publication::shared::DEFAULT_MAX_CONNECTIONS.get()` |
 | `control.database_url` | secret | `ZEROSHIP_CONTROL_DATABASE_URL` | `control.database_url` | zeroship-control `--database-url-file` | - |
 | `control.deploy_tmp_dir` | operational | `ZEROSHIP_CONTROL_DEPLOY_TMP_DIR` | `control.deploy_tmp_dir` | zeroship-control `--deploy-tmp-dir` | empty |
 | `control.disable_workflow_engine` | bootstrap control | - | - | zeroship-control `--disable-workflow-engine` | - |

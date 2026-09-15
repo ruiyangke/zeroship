@@ -81,8 +81,15 @@ pub enum Transition {
     Published(Revision),
 }
 
-/// Open a native ORM database on the Control catalog. Each operation owns its
-/// connection, so nothing outlives the request that opened it.
+/// The session name catalog connections announce, so `pg_stat_activity` tells
+/// them apart from Control's other connections. A name the database URL
+/// already sets, or already offers as a fallback, is left in place.
+pub const APPLICATION_NAME: &str = "zeroship-control-catalog";
+
+/// Open a native ORM database on the Control catalog holding one session. The
+/// database belongs to the calling compio thread, which admits one top-level
+/// transaction at a time, so a second session would never be in use;
+/// [`super::Catalog`] scales the process by opening one of these per thread.
 ///
 /// # Errors
 /// Reports invalid model declarations and unreachable storage.
@@ -94,12 +101,31 @@ pub async fn connect(url: &str) -> Result<Database, DbError> {
             SchemaName::new("zeroship")
                 .map_err(|_| DbError::config("invalid_catalog_schema", "invalid catalog schema"))?,
         ),
-        ConnectOptions::new(url.to_owned(), ProjectKeySource::unavailable())
+        ConnectOptions::new(named(url), ProjectKeySource::unavailable())
             .max_connections(NonZeroUsize::MIN)
             .connection_authority(),
         super::models::collections()?,
     )
     .await
+}
+
+/// `url` offering [`APPLICATION_NAME`] as its session name. Only a URL that
+/// parses and names no session of its own is extended, and the original text
+/// is kept so its encoding reaches the driver unchanged.
+fn named(url: &str) -> String {
+    const KEYS: [&str; 2] = ["application_name", "fallback_application_name"];
+    let Ok(parsed) = url::Url::parse(url) else {
+        return url.to_owned();
+    };
+    if parsed.fragment().is_some() || parsed.query_pairs().any(|(key, _)| KEYS.contains(&&*key)) {
+        return url.to_owned();
+    }
+    let separator = match parsed.query() {
+        None => "?",
+        Some("") => "",
+        Some(_) => "&",
+    };
+    format!("{url}{separator}fallback_application_name={APPLICATION_NAME}")
 }
 
 /// Run `body` in one transaction. A catalog refusal returned by the callback
@@ -717,5 +743,39 @@ const fn changed(count: i64) -> Result<(), CatalogError> {
         Err(CatalogError::Storage(
             "guarded catalog update did not apply",
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{named, APPLICATION_NAME};
+
+    #[test]
+    fn catalog_sessions_offer_their_name_without_displacing_a_configured_one() {
+        let offered = format!("fallback_application_name={APPLICATION_NAME}");
+        for (url, expected) in [
+            (
+                "postgres://control@db:5432/zeroship",
+                format!("postgres://control@db:5432/zeroship?{offered}"),
+            ),
+            (
+                "postgresql://control@db/zeroship?sslmode=require",
+                format!("postgresql://control@db/zeroship?sslmode=require&{offered}"),
+            ),
+            (
+                "postgres://control@db/zeroship?",
+                format!("postgres://control@db/zeroship?{offered}"),
+            ),
+        ] {
+            assert_eq!(named(url), expected, "{url}");
+        }
+        for configured in [
+            "postgres://control@db/zeroship?application_name=operator",
+            "postgres://control@db/zeroship?fallback_application_name=operator",
+            "postgres://control@db/zeroship?sslmode=require&application_name=operator",
+            "not a url",
+        ] {
+            assert_eq!(named(configured), configured);
+        }
     }
 }

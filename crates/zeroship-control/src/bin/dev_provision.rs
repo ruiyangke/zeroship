@@ -201,7 +201,7 @@ async fn run(cli: Cli) -> Result<zeroship_core::types::AppRecord, DevProvisionEr
         blobs_uploaded: success.blobs_uploaded,
         blobs_deduped: success.blobs_deduped,
     };
-    registry.deploy(&command).await.map_err(|e| match e {
+    registry.deploy(command).await.map_err(|e| match e {
         // The schema precondition, restated for a tool whose caller is a
         // shell script rather than the deploy CLI. Without the second
         // sentence this reads as a bug in the artifact.
