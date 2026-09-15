@@ -1517,8 +1517,8 @@ pub(crate) async fn bill_organization_with_parts<S: StripeApi>(
         .collect();
     let orphans: Vec<(AppId, i16)> = line_exists
         .union(&posted)
+        .filter(|k| !fresh_keys.contains(*k))
         .cloned()
-        .filter(|k| !fresh_keys.contains(k))
         .collect();
     for (orphan_app, orphan_seg) in &orphans {
         // 1. Remove the Stripe item. If the orphan has a confirmed provider-ref we

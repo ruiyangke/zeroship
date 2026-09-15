@@ -198,6 +198,40 @@ fn the_retired_platform_spelling_is_rejected_by_the_overlay() {
 }
 
 #[test]
+fn the_worker_enroller_import_file_resolves_from_every_tier() {
+    // The control for the three tiers below: with nothing supplying the file
+    // the report says so, so a report that always said `true` fails here.
+    const KEY: &str = "worker_enrollers_file_configured";
+    assert_eq!(field(&report(None, &[], &[]), KEY), "false");
+
+    // The overlay half needs `[control] worker_enrollers_file` to be a leaf
+    // the overlay schema accepts; an unknown key there refuses the boot.
+    let scratch = Scratch::new("worker_enrollers_file");
+    let overlay = scratch.write(
+        "control.toml",
+        "[control]\nworker_enrollers_file = \"/overlay/worker-enrollers.json\"\n",
+    );
+    assert_eq!(field(&report(Some(&overlay), &[], &[]), KEY), "true");
+
+    let from_env = report(
+        None,
+        &[(
+            "ZEROSHIP_CONTROL_WORKER_ENROLLERS_FILE",
+            "/env/worker-enrollers.json",
+        )],
+        &[],
+    );
+    assert_eq!(field(&from_env, KEY), "true");
+
+    let from_flag = report(
+        None,
+        &[],
+        &["--worker-enrollers-file", "/flag/worker-enrollers.json"],
+    );
+    assert_eq!(field(&from_flag, KEY), "true");
+}
+
+#[test]
 fn a_valid_overlay_provider_still_resolves() {
     // The one-variable partner to the refusal above: same key, same table,
     // only the VALUE differs. Without it, a resolver that rejected every

@@ -357,12 +357,12 @@ impl ServiceIssuer {
 
     /// Return the instance segment, when this identifier names one.
     ///
-    /// A DISTINGUISHER and not a boundary. Enrolment authenticates with the
-    /// shared ROLE key, so whoever holds that key can enrol as many instances
-    /// as they like and each is as genuine as the last; what this buys is
-    /// attribution, per-instance revocation and a countable event. Nothing here
-    /// narrows what an instance may do, and a caller must not treat a distinct
-    /// instance segment as evidence of a distinct holder.
+    /// A DISTINGUISHER and not a boundary. A worker enrols with the key of its
+    /// deployment unit, so whoever holds that key can enrol as many instances
+    /// of the unit as they like and each is as genuine as the last; what this
+    /// buys is attribution, per-instance retirement and a countable event.
+    /// Nothing here narrows what an instance may do, and a caller must not
+    /// treat a distinct instance segment as evidence of a distinct holder.
     #[must_use]
     pub fn instance(&self) -> Option<&str> {
         self.instance.as_deref()

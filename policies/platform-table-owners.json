@@ -118,6 +118,8 @@
   "organization_account_history": "zeroship_platform",
   "organization_fee_policy": "zeroship_platform",
   "worker_instances": "zeroship_platform",
+  "execution_zones": "zeroship_platform",
+  "worker_enrollers": "zeroship_platform",
   "schema_version": "zeroship_platform",
   "deploys": "zeroship_platform",
   "schedules": "zeroship_platform",
