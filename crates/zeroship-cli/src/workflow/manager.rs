@@ -23,9 +23,7 @@ use std::{
 };
 use zeroship_core::{
     app_id::AppId,
-    workflow_coordination::{
-        AssignedScope, RegisterWorker, Revision, WorkerId, WorkerState,
-    },
+    workflow_coordination::{AssignedScope, RegisterWorker, Revision, WorkerId, WorkerState},
     workflow_deployments::{HoldGeneration, HoldReceipt, HoldScope, HoldState},
     workflow_jobs::{Delivery, DeploymentId, JobSpec, Settlement, SettlementReceipt, SubmitJob},
     workflow_schedules::{ActivateSchedules, RegisterSchedules, ScheduleDescriptor},
@@ -40,7 +38,7 @@ use zeroship_workflow_manager::{
     coordinator::{Coordinator, Options as CoordinatorOptions, Placed},
     deployments,
     driver::{Driver, Options as DriverOptions},
-    eligibility::{LocalEligibility, ZoneId},
+    eligibility::{SoleWorker, ZoneId},
     lifecycle::Undeletable,
     local::LocalPlatform,
     recovery::{Options as RecoveryOptions, Recovery},
@@ -200,6 +198,9 @@ impl LocalManager {
             .map_err(manager_error)?;
         // The trusted in-process worker shares the host's single zone and
         // performs no enrollment, so the local catalog needs no Control rows.
+        // It is also the only live worker: a registration left ready by a
+        // process that died is a predecessor, not capacity this host has.
+        let worker = WorkerId::mint();
         let coordinator = Coordinator::new(
             queue.clone(),
             CoordinatorOptions {
@@ -207,7 +208,7 @@ impl LocalManager {
                 assignment_ttl: options.placement_ttl,
                 ..CoordinatorOptions::default()
             },
-            Rc::new(LocalEligibility::new(ZoneId::default_zone())),
+            Rc::new(SoleWorker::new(ZoneId::default_zone(), worker.clone())),
         )
         .map_err(manager_error)?;
         let scheduler =
@@ -218,7 +219,7 @@ impl LocalManager {
             coordinator,
             scheduler,
             recovery,
-            worker: WorkerId::mint(),
+            worker,
             options,
         })
     }
@@ -256,8 +257,9 @@ impl LocalManager {
     }
 
     /// Register this worker as ready and let the manager place the app on it.
-    /// This process is the app's only capacity, so selection can choose no
-    /// other worker; an app this process already owns keeps its placement
+    /// Selection can choose no other worker, because the only other
+    /// registration a local catalog can hold is a dead predecessor's and that
+    /// is not eligible; an app this process already owns keeps its placement
     /// rather than being given a second revision.
     async fn place_app(&self, app: &AppId) -> Result<AssignedScope, WorkflowServiceError> {
         self.register(WorkerState::Ready).await?;
@@ -271,9 +273,7 @@ impl LocalManager {
                 .into_iter()
                 .find(|assignment| assignment.app_id == *app)
                 .ok_or_else(|| manager_error(Error::Denied))?,
-            Placed::Unplaced(_) | Placed::Ineligible => {
-                return Err(manager_error(Error::Denied))
-            }
+            Placed::Unplaced(_) | Placed::Ineligible => return Err(manager_error(Error::Denied)),
         };
         Ok(AssignedScope {
             app_id: assignment.app_id,
