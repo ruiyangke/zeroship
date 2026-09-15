@@ -184,7 +184,7 @@ impl Deployments {
         } else {
             let mut document = value!({"id":declaration.id, "app_id":app.as_str(), "deploy_hash":hash,
                 "manifest_json":encoded, "activated_at":null, "retention_state":"available", "retention_lock":0});
-            document["created_at"] = Value::Timestamp(0);
+            document["created_at"] = Value::TimestampMicros(0);
             records.insert(document).await.unwrap();
         }
         self.source

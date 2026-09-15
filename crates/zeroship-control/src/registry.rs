@@ -616,7 +616,7 @@ impl Registry {
         let transition = self
             .catalog
             .run(move |database| async move {
-                let now = crate::publication::now_millis();
+                let now = crate::publication::now()?;
                 catalog::transact(&database, |tx| async move {
                     if restore {
                         catalog::restore(&tx, &app, now).await
@@ -671,7 +671,7 @@ impl Registry {
     pub async fn deploy(&self, command: DeployCommand) -> Result<Acceptance, CatalogError> {
         self.catalog
             .run(move |database| async move {
-                let now = crate::publication::now_millis();
+                let now = crate::publication::now()?;
                 catalog::transact(&database, |tx| async move {
                     catalog::accept(&tx, &command, now).await
                 })

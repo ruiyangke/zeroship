@@ -18,7 +18,7 @@ use zeroship_data_orm::{
     binding::DbBinding,
     encryption::ProjectKeySource,
     error::DbError,
-    orm::{Database, FromRow},
+    orm::{Database, FromRow, UtcInstant},
 };
 use zeroship_workflow_manager::deployments::{self, Error, models::app_deploys as deploys};
 
@@ -82,7 +82,7 @@ struct Deployment {
     id: String,
     deploy_hash: String,
     retention_state: String,
-    activated_at: Option<i64>,
+    activated_at: Option<UtcInstant>,
 }
 
 /// A bounded rotating catalog scan. Durable hold state supplies deletion
@@ -170,12 +170,14 @@ impl Collector {
         let cutoff = Utc::now()
             .timestamp_millis()
             .checked_sub(self.config.grace_window_ms)
-            .ok_or_else(|| Error::InvalidRequest("deployment grace is out of range".into()))?;
+            .ok_or(())
+            .and_then(|millis| UtcInstant::from_unix_millis(millis).map_err(|_| ()))
+            .map_err(|()| Error::InvalidRequest("deployment grace is out of range".into()))?;
         let mut filter = deploys::retention_state.ne("deleted")?.and(
             deploys::retention_state
                 .ne("available")?
                 .or(deploys::activated_at
-                    .ne(None::<i64>)?
+                    .ne(None::<UtcInstant>)?
                     .and(deploys::activated_at.lte(Some(cutoff))?)),
         );
         if let Some(after) = &self.after {
@@ -222,7 +224,11 @@ impl Collector {
         Ok(stats)
     }
 
-    async fn collect(&self, candidate: &Candidate, cutoff: i64) -> Result<Option<bool>, Error> {
+    async fn collect(
+        &self,
+        candidate: &Candidate,
+        cutoff: UtcInstant,
+    ) -> Result<Option<bool>, Error> {
         let app = AppId::parse(&candidate.app_id).map_err(|_| invalid_storage())?;
         let hash = transact(&self.database, async |tx| {
             // Match Registry's apps -> app_deploys lock order. The guarded no-op
@@ -311,7 +317,7 @@ impl Collector {
                         .filter(
                             deploys::app_id
                                 .eq(app.as_str())?
-                                .and(deploys::activated_at.ne(None::<i64>)?),
+                                .and(deploys::activated_at.ne(None::<UtcInstant>)?),
                         )
                         .order_by(deploys::activated_at.desc())
                         .order_by(deploys::created_at.desc())
