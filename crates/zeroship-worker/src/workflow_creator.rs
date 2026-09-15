@@ -36,11 +36,15 @@ use zeroship_workflow_v8::V8TaskExecutor;
 /// connection belongs in these resources. Contexts resolve fresh env, limits,
 /// network policy and native peers for each execution, without replacing the
 /// workflow backend or moving its physical schema.
+///
+/// `signal_authority` signs and verifies signal capabilities. Without one the
+/// app's capability issuance and ingestion refuse as unavailable; every other
+/// operation is unaffected.
 #[derive(Clone)]
 pub struct WorkflowResources {
     pub storage: HostStorage,
     pub deployments: AppDeployments,
-    pub signal_authority: Arc<SignalAuthority>,
+    pub signal_authority: Option<Arc<SignalAuthority>>,
     pub contexts: Rc<dyn WorkflowContextProvider>,
 }
 
@@ -130,22 +134,28 @@ impl<P: WorkflowResourceProvider> CreatorFactory for WorkflowCreatorFactory<P> {
                     source: resources.contexts,
                 });
                 contexts.resolve(&scope.app_id)?;
-                let service = WorkflowService::open(
+                let mut service = WorkflowService::open(
                     Rc::new(resources.storage.open().await?),
                     self.policies.clone(),
                 )
                 .await?
                 .with_payload_storage(resources.storage.objects)?
-                .with_deployments(resources.deployments)
-                .with_signal_authority(resources.signal_authority);
+                .with_deployments(resources.deployments);
+                if let Some(authority) = resources.signal_authority {
+                    service = service.with_signal_authority(authority);
+                }
                 let app = service.register_app(policy).await?.with_ingress(ingress);
                 let tasks = Rc::new(app.tasks(self.worker.clone()));
-                let loader = Rc::new(WorkerWorkflowRuntimeLoader::new(
-                    contexts,
-                    app.clone().into_backend(self.payloads.max_payload_bytes)?,
-                ));
+                // Workflow and request isolates share one client of this app's
+                // engine, bound to the generation being prepared.
+                let backend = app.clone().into_backend(self.payloads.max_payload_bytes)?;
+                let loader = Rc::new(WorkerWorkflowRuntimeLoader::new(contexts, backend.clone()));
                 let executor = Rc::new(V8TaskExecutor::new(loader, tasks, self.payloads)?);
-                Ok(CreatorRuntime { app, executor })
+                Ok(CreatorRuntime {
+                    app,
+                    executor,
+                    backend,
+                })
             })
             .await
     }

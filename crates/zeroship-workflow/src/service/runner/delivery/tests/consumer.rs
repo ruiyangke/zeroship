@@ -634,7 +634,7 @@ struct NativeManager {
 
 impl NativeManager {
     async fn new(fixture: &Fixture) -> Rc<Self> {
-        use zeroship_core::workflow_coordination::{AssignScope, RegisterWorker, WorkerState};
+        use zeroship_core::workflow_coordination::{RegisterWorker, WorkerState};
         let database = crate::service::tests::publication::Manager::new(fixture.app.app_id()).await;
         // The trusted in-process worker of a local host: one zone, no enrollment.
         let coordinator = zeroship_workflow_manager::coordinator::Coordinator::new(
@@ -656,15 +656,14 @@ impl NativeManager {
             )
             .await
             .unwrap();
-        let assignment = coordinator
-            .assign(&AssignScope {
-                request_id: RequestId::mint(),
-                app_id: fixture.app.app_id().clone(),
-                worker_id: worker.clone(),
-                expected_revision: None,
-            })
+        // The manager places the app; this worker is its only capacity.
+        let zeroship_workflow_manager::coordinator::Placed::Assigned(assignment) = coordinator
+            .place(fixture.app.app_id())
             .await
-            .unwrap();
+            .unwrap()
+        else {
+            panic!("the local host is the app's only eligible worker");
+        };
         let (settled, completion) = flume::bounded(1);
         Rc::new(Self {
             database,

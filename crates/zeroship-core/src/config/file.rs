@@ -288,6 +288,12 @@ pub struct WorkerSection {
     pub storage_url: Option<String>,
     /// Maximum persisted bytes for one workflow step output blob.
     pub max_step_blob_bytes: Option<u64>,
+    /// Workflow manager origin; absent runs no workflow host.
+    pub workflow_manager_url: Option<String>,
+    /// App placements advertised to the workflow manager.
+    pub workflow_capacity: Option<usize>,
+    /// Delivered workflow jobs executing at once.
+    pub workflow_slots: Option<usize>,
 }
 
 /// Migration-service operational values supplied by the overlay.
@@ -1287,6 +1293,32 @@ relay_smtp_tls = "starttls"
             source.to_string().contains("unknown field"),
             "the key must be rejected AS AN UNKNOWN FIELD: {source}"
         );
+    }
+
+    // The worker's workflow host settings are overlay leaves of the worker
+    // table, so the shared schema must accept them with their natural types.
+    #[test]
+    fn the_worker_table_accepts_its_workflow_host_settings() {
+        let file = TempFile::write(
+            "worker-workflow-host.toml",
+            "[worker]\nworkflow_manager_url = \"https://workflow.example\"\n\
+             workflow_capacity = 8\nworkflow_slots = 2\n",
+        );
+        let config = FileConfig::load(Some(&file.path)).expect("the workflow settings parse");
+        assert_eq!(
+            config.worker.workflow_manager_url.as_deref(),
+            Some("https://workflow.example")
+        );
+        assert_eq!(config.worker.workflow_capacity, Some(8));
+        assert_eq!(config.worker.workflow_slots, Some(2));
+
+        // The control: a misspelled leaf is still refused.
+        let misspelled = TempFile::write(
+            "worker-workflow-misspelled.toml",
+            "[worker]\nworkflow_manager = \"https://workflow.example\"\n",
+        );
+        let err = FileConfig::load(Some(&misspelled.path)).expect_err("unknown worker key");
+        assert!(matches!(err, ConfigError::Parse { .. }), "{err}");
     }
 
     // Split out from the case above because it asserts a REJECTION per key and a

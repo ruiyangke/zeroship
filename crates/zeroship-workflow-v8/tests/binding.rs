@@ -8,9 +8,8 @@ use zeroship_runtime::plugin::NativePlugin;
 use zeroship_runtime::{
     init_v8, EnvSnapshot, FetchOutcome, ModuleEntry, RequestCtx, Runtime, SettledFetch,
 };
+use zeroship_workflow::service::runner::ready::ReadyApps;
 use zeroship_workflow_v8::{is_excluded_workflow_property, WorkflowBinding};
-
-const TEST_CONTROL_KEY: &str = "test-control-key";
 
 fn modules(source: &str) -> Vec<ModuleEntry> {
     vec![ModuleEntry {
@@ -19,16 +18,17 @@ fn modules(source: &str) -> Vec<ModuleEntry> {
     }]
 }
 
-async fn run_workflow_app(control_url: String, app_id: AppId, source: &str) -> (u16, String) {
+async fn run_workflow_app(app_id: AppId, source: &str) -> (u16, String) {
     init_v8();
     let mut env_vars = HashMap::new();
     env_vars.insert("APP_ID".to_string(), app_id.as_str().to_owned());
     let plugin: Arc<dyn NativePlugin> =
-        Arc::new(WorkflowBinding::new(control_url, TEST_CONTROL_KEY));
+        Arc::new(WorkflowBinding::ready(ReadyApps::default()));
     let runtime = Runtime::builder()
         .modules(modules(source))
         .env_vars(env_vars)
         .plugins(vec![plugin])
+        .app_id(app_id)
         .build();
     runtime.start_pump();
 
@@ -112,7 +112,7 @@ async fn v8_binding_getter_exclusions_are_undefined() {
         };
     "#;
     let (status, body) =
-        run_workflow_app("http://127.0.0.1:9".to_string(), AppId::mint(), source).await;
+        run_workflow_app(AppId::mint(), source).await;
     assert_eq!(status, 200, "body: {body}");
     let value: Value = serde_json::from_str(&body).expect("body json");
     assert_eq!(value["thenIsUndefined"], true, "body: {body}");

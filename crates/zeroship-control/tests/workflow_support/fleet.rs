@@ -32,6 +32,9 @@ fn key(service: &str) -> ed25519_dalek::SigningKey {
         // credential and expect a refusal: no fleet process holds or trusts it.
         "worker" => 33,
         "enroller" => 34,
+        // The workflow manager is an ordinary peer: it holds a role key and
+        // verifies enrolled worker instances from the platform registry.
+        "workflow" => 35,
         _ => panic!("unknown fixture service"),
     };
     ed25519_dalek::SigningKey::from_bytes(&[seed; 32])
@@ -43,7 +46,7 @@ fn signing_key(service: &str) -> ServiceSigningKey {
 
 fn trust_bundle() -> ServiceTrustBundle {
     let mut peers = ServiceTrustBundle::new();
-    for name in ["control", "gateway", "worker"] {
+    for name in ["control", "gateway", "worker", "workflow"] {
         let key = signing_key(name);
         peers
             .trust_signing_key(
@@ -85,6 +88,8 @@ fn binaries() -> &'static BTreeMap<String, PathBuf> {
                 "zeroship-gateway",
                 "-p",
                 "zeroship-data-cdc-server",
+                "-p",
+                "zeroship-workflow-server",
             ])
             .current_dir(workflow_postgres::root())
             .output()
@@ -111,12 +116,33 @@ fn binaries() -> &'static BTreeMap<String, PathBuf> {
     })
 }
 
+/// Run one fixture statement on the fleet's platform database.
+async fn execute(url: &str, sql: &str) {
+    let (client, connection) = compio_postgres::connect(url, compio_postgres::NoTls)
+        .await
+        .expect("fleet database connection");
+    let driver = compio::runtime::spawn(connection.run());
+    client.batch_execute(sql).await.expect("fleet fixture DDL");
+    drop(client);
+    driver.await.expect("fleet database task").expect("driver");
+}
+
 pub fn port() -> u16 {
     TcpListener::bind("127.0.0.1:0")
         .unwrap()
         .local_addr()
         .unwrap()
         .port()
+}
+
+/// What this fleet runs beyond the always-present services.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct FleetOptions {
+    /// Let the worker accept unsigned Control advance calls.
+    pub unsigned_advance: bool,
+    /// Run a workflow manager, point Control's lifecycle publisher at it, and
+    /// give the worker a workflow host registered with it.
+    pub workflow_manager: bool,
 }
 
 #[derive(Debug)]
@@ -130,6 +156,8 @@ pub struct Fleet {
     pub control_url: String,
     pub gateway_url: String,
     pub worker_url: String,
+    /// Present only when [`FleetOptions::workflow_manager`] asked for one.
+    pub manager_url: Option<String>,
     pub app_id: AppId,
     pub deploy_id: String,
     pub blob_root: PathBuf,
@@ -141,16 +169,32 @@ impl Fleet {
     }
 
     pub fn with_advance(advance: bool) -> Self {
+        Self::with(FleetOptions {
+            unsigned_advance: advance,
+            ..FleetOptions::default()
+        })
+    }
+
+    /// A fleet whose worker runs a workflow host against a real manager.
+    pub fn with_workflow_manager() -> Self {
+        Self::with(FleetOptions {
+            unsigned_advance: false,
+            workflow_manager: true,
+        })
+    }
+
+    pub fn with(options: FleetOptions) -> Self {
         std::thread::spawn(move || {
             compio::runtime::Runtime::new()
                 .expect("fleet runtime")
-                .block_on(Self::launch(advance))
+                .block_on(Self::launch(options))
         })
         .join()
         .unwrap_or_else(|error| std::panic::resume_unwind(error))
     }
 
-    async fn launch(advance: bool) -> Self {
+    async fn launch(options: FleetOptions) -> Self {
+        let advance = options.unsigned_advance;
         let binaries = binaries();
         let database = Database::new();
         let work = tempfile::tempdir().expect("workflow fleet directory");
@@ -185,6 +229,9 @@ impl Fleet {
             control_url: format!("http://127.0.0.1:{}", port()),
             gateway_url: format!("http://127.0.0.1:{}", port()),
             worker_url: format!("http://127.0.0.1:{}", port()),
+            manager_url: options
+                .workflow_manager
+                .then(|| format!("http://127.0.0.1:{}", port())),
             app_id: AppId::mint(),
             deploy_id: String::new(),
         };
@@ -193,7 +240,7 @@ impl Fleet {
         // The worker is not a peer with a key of its own: it enrols with the
         // unit's enroller credential below and mints under an instance key it
         // draws at boot, so the document publishes no `svc/worker` key.
-        for name in ["control", "gateway"] {
+        for name in ["control", "gateway", "workflow"] {
             fleet.secret(
                 &format!("{name}.pem"),
                 key(name)
@@ -279,6 +326,59 @@ impl Fleet {
             .unwrap()
             .to_string();
         let blobs = fleet.blob_root.to_str().unwrap().to_owned();
+        // The manager owns no creator database: it reads the platform metadata
+        // under its own login and verifies enrolled instances from the same
+        // registry Control writes at enrolment.
+        if let Some(manager_url) = fleet.manager_url.clone() {
+            // The platform migration creates this login role without a
+            // password, so a fixture that authenticates by password has to
+            // supply one. Every other service role here carries a development
+            // password from the migration itself.
+            execute(
+                &fleet.database.url(),
+                "ALTER ROLE zeroship_workflow WITH PASSWORD 'zeroship_workflow'",
+            )
+            .await;
+            let listen = format!(
+                "127.0.0.1:{}",
+                url::Url::parse(&manager_url).unwrap().port().unwrap()
+            );
+            fleet.spawn(
+                "workflow",
+                &binaries["zeroship-workflow-server"],
+                &["--no-config".into(), "--listen".into(), listen],
+                &[
+                    (
+                        "ZEROSHIP_WORKFLOW_DATABASE_URL",
+                        fleet.role_url("zeroship_workflow"),
+                    ),
+                    ("ZEROSHIP_WORKFLOW_CONTROL_URL", fleet.control_url.clone()),
+                ],
+            );
+        }
+        let mut control_env = vec![
+            ("ZEROSHIP_CONTROL_DATABASE_URL", fleet.database.url()),
+            ("ZEROSHIP_CONTROL_MASTER_KEY", MASTER_KEY.into()),
+            ("ZEROSHIP_CONTROL_ALLOW_UNSUPPORTED_BILLING", "true".into()),
+            (
+                "ZEROSHIP_CONTROL_WORKER_ENROLMENT_NETWORKS",
+                "127.0.0.1/32".into(),
+            ),
+            (
+                "ZEROSHIP_CONTROL_WORKER_ENROLMENT_PORTS",
+                worker_port.clone(),
+            ),
+            (
+                "ZEROSHIP_CONTROL_WORKER_ENROLLERS_FILE",
+                fleet.path("enrollers.json"),
+            ),
+        ];
+        if let Some(manager_url) = fleet.manager_url.clone() {
+            control_env.push((
+                "ZEROSHIP_CONTROL_WORKFLOW_COORDINATOR_URL",
+                manager_url,
+            ));
+        }
         fleet.spawn(
             "control",
             &binaries["zeroship-control"],
@@ -294,25 +394,40 @@ impl Fleet {
                 fleet.worker_url.clone(),
                 "--disable-workflow-engine".into(),
             ],
-            &[
-                ("ZEROSHIP_CONTROL_DATABASE_URL", fleet.database.url()),
-                ("ZEROSHIP_CONTROL_MASTER_KEY", MASTER_KEY.into()),
-                ("ZEROSHIP_CONTROL_ALLOW_UNSUPPORTED_BILLING", "true".into()),
-                (
-                    "ZEROSHIP_CONTROL_WORKER_ENROLMENT_NETWORKS",
-                    "127.0.0.1/32".into(),
-                ),
-                (
-                    "ZEROSHIP_CONTROL_WORKER_ENROLMENT_PORTS",
-                    worker_port.clone(),
-                ),
-                (
-                    "ZEROSHIP_CONTROL_WORKER_ENROLLERS_FILE",
-                    fleet.path("enrollers.json"),
-                ),
-            ],
+            &control_env,
         );
         fleet.ready(fleet.control_url.clone()).await;
+        if let Some(manager_url) = fleet.manager_url.clone() {
+            fleet.ready(manager_url).await;
+        }
+        let mut worker_env = vec![
+            (
+                "ZEROSHIP_WORKER_DATABASE_URL",
+                fleet.role_url("zeroship_worker"),
+            ),
+            (
+                "ZEROSHIP_WORKER_CDC_RELAY_URL",
+                format!("wss://localhost:{relay_port}/internal/v1/cdc/subscribe"),
+            ),
+            (
+                "ZEROSHIP_WORKER_CDC_RELAY_CA_FILE",
+                fleet.path("relay-cert.pem"),
+            ),
+            ("ZEROSHIP_WORKER_ENROLLER_FILE", fleet.path("enroller.json")),
+        ];
+        if let Some(manager_url) = fleet.manager_url.clone() {
+            // A workflow host stages payloads in the app object store and keeps
+            // creator journals in the app database, so the worker needs both.
+            let payloads = fleet.work.path().join("objects");
+            fs::create_dir_all(&payloads).unwrap();
+            worker_env.push(("ZEROSHIP_WORKER_WORKFLOW_MANAGER_URL", manager_url));
+            worker_env.push(("ZEROSHIP_WORKER_WORKFLOW_CAPACITY", "8".into()));
+            worker_env.push(("ZEROSHIP_WORKER_WORKFLOW_SLOTS", "2".into()));
+            worker_env.push((
+                "ZEROSHIP_WORKER_STORAGE_URL",
+                payloads.to_str().unwrap().to_owned(),
+            ));
+        }
         fleet.spawn(
             "worker",
             &binaries["zeroship-worker"],
@@ -333,21 +448,7 @@ impl Fleet {
             .into_iter()
             .chain(advance.then(|| "--workflow-advance-unsigned".to_string()))
             .collect::<Vec<_>>(),
-            &[
-                (
-                    "ZEROSHIP_WORKER_DATABASE_URL",
-                    fleet.role_url("zeroship_worker"),
-                ),
-                (
-                    "ZEROSHIP_WORKER_CDC_RELAY_URL",
-                    format!("wss://localhost:{relay_port}/internal/v1/cdc/subscribe"),
-                ),
-                (
-                    "ZEROSHIP_WORKER_CDC_RELAY_CA_FILE",
-                    fleet.path("relay-cert.pem"),
-                ),
-                ("ZEROSHIP_WORKER_ENROLLER_FILE", fleet.path("enroller.json")),
-            ],
+            &worker_env,
         );
         fleet.ready(fleet.worker_url.clone()).await;
         fleet.spawn(
@@ -433,6 +534,17 @@ impl Fleet {
         zeroship_migrate_server::provisioning::provision_database(&pg, fleet.app_id.as_str())
             .await
             .unwrap();
+        if fleet.manager_url.is_some() {
+            // The creator journal is migration-path DDL: the worker's host
+            // never creates it. Installing it before the apply below leaves it
+            // inside the apply's schema-wide runtime-role grant, so the worker
+            // reaches it exactly as it reaches the creator's own tables.
+            let schema = zeroship_workflow::service::store::SchemaName::new(fleet.app_id.as_str())
+                .expect("the app's schema name");
+            pg.batch_execute(&zeroship_workflow::service::schema::postgres_sql(&schema))
+                .await
+                .expect("install the creator workflow journal");
+        }
         let request = serde_json::from_slice(
             &fs::read(schema_work.join("generated/migrations.ir.json")).unwrap(),
         )
@@ -483,7 +595,17 @@ impl Fleet {
         )
         .await
         .unwrap();
-        pg.batch_execute("UPDATE zeroship.plans SET workflows_allowed = true; INSERT INTO zeroship.workflow_rollout_config (id, dispatch_paused, ingress_disabled, source_validity_ms, updated_by) VALUES ('global', false, false, 30000, 'workflow-fixture') ON CONFLICT (id) DO UPDATE SET dispatch_paused = false, ingress_disabled = false").await.unwrap();
+        // A plan carries the workflow policy the manager grants an app's host
+        // under. Control's startup seeding leaves the column null, and a null
+        // one refuses every policy lease, so the fixture publishes the catalog
+        // default the way an operator does.
+        pg.execute(
+            "UPDATE zeroship.plans SET workflows_allowed = true, workflow_policy_json = $1",
+            &[&serde_json::to_value(zeroship_core::workflow_policy::AppPolicy::default()).unwrap()],
+        )
+        .await
+        .unwrap();
+        pg.batch_execute("INSERT INTO zeroship.workflow_rollout_config (id, dispatch_paused, ingress_disabled, source_validity_ms, updated_by) VALUES ('global', false, false, 30000, 'workflow-fixture') ON CONFLICT (id) DO UPDATE SET dispatch_paused = false, ingress_disabled = false").await.unwrap();
         fleet.deploy_id = pg.query_one("SELECT id FROM zeroship.app_deploys WHERE app_id = $1 ORDER BY activated_at DESC, created_at DESC, id DESC LIMIT 1", &[&fleet.app_id.as_str()]).await.unwrap().get(0);
         drop(pg);
         driver.await.unwrap().unwrap();
@@ -493,6 +615,9 @@ impl Fleet {
     fn path(&self, name: &str) -> String {
         self.work.path().join(name).to_str().unwrap().into()
     }
+
+    /// The app name every fleet provisions, and so the ingress subdomain.
+    pub const APP_NAME: &'static str = "workflow-fixture";
 
     fn secret(&self, name: &str, contents: &[u8]) {
         let path = self.work.path().join(name);

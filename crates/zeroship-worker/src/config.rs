@@ -197,6 +197,26 @@ pub struct WorkerSettings {
     #[config(name = "worker.max_step_blob_bytes", default = 67_108_864)]
     pub max_step_blob_bytes: Operational<u64>,
 
+    /// Origin of the workflow manager (`zeroship-workflow-server`) this
+    /// worker registers with and consumes delivered jobs from.
+    ///
+    /// Empty (the default) runs no workflow host: every app's `env.workflows`
+    /// call is refused as retryable, and nothing falls back to Control. When
+    /// set, the worker also requires `worker.database_url` for creator
+    /// journals and `worker.storage_url` for workflow payloads, and refuses
+    /// to start without them. Remote managers must use HTTPS; plain HTTP is
+    /// accepted only for literal loopback addresses.
+    #[config(name = "worker.workflow_manager_url", default = String::new())]
+    pub workflow_manager_url: Operational<String>,
+
+    /// App placements this worker advertises to the workflow manager.
+    #[config(name = "worker.workflow_capacity", default = 64)]
+    pub workflow_capacity: Operational<usize>,
+
+    /// Delivered workflow jobs this worker executes at once.
+    #[config(name = "worker.workflow_slots", default = 4)]
+    pub workflow_slots: Operational<usize>,
+
     /// Kafka-wire brokers for the usage-event stream, e.g. `redpanda:9092`.
     ///
     /// EMPTY DISABLES THE PRODUCER, and that is a supported deployment: every
