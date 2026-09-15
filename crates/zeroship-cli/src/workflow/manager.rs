@@ -24,7 +24,7 @@ use std::{
 use zeroship_core::{
     app_id::AppId,
     workflow_coordination::{
-        AssignScope, AssignedScope, RegisterWorker, RequestId, Revision, WorkerId, WorkerState,
+        AssignedScope, RegisterWorker, Revision, WorkerId, WorkerState,
     },
     workflow_deployments::{HoldGeneration, HoldReceipt, HoldScope, HoldState},
     workflow_jobs::{Delivery, DeploymentId, JobSpec, Settlement, SettlementReceipt, SubmitJob},
@@ -37,7 +37,7 @@ use zeroship_workflow::{
 };
 use zeroship_workflow_manager::{
     capacity::LocalCapacity,
-    coordinator::{Coordinator, Options as CoordinatorOptions},
+    coordinator::{Coordinator, Options as CoordinatorOptions, Placed},
     deployments,
     driver::{Driver, Options as DriverOptions},
     eligibility::{LocalEligibility, ZoneId},
@@ -255,22 +255,26 @@ impl LocalManager {
             .map_err(manager_error)
     }
 
-    async fn assign(
-        &self,
-        app: &AppId,
-        expected_revision: Option<Revision>,
-    ) -> Result<AssignedScope, WorkflowServiceError> {
+    /// Register this worker as ready and let the manager place the app on it.
+    /// This process is the app's only capacity, so selection can choose no
+    /// other worker; an app this process already owns keeps its placement
+    /// rather than being given a second revision.
+    async fn place_app(&self, app: &AppId) -> Result<AssignedScope, WorkflowServiceError> {
         self.register(WorkerState::Ready).await?;
-        let assignment = self
-            .coordinator
-            .assign(&AssignScope {
-                request_id: RequestId::mint(),
-                app_id: app.clone(),
-                worker_id: self.worker.clone(),
-                expected_revision,
-            })
-            .await
-            .map_err(manager_error)?;
+        let assignment = match self.coordinator.place(app).await.map_err(manager_error)? {
+            Placed::Assigned(assignment) => assignment,
+            Placed::Owned => self
+                .coordinator
+                .assignments(&self.worker, None)
+                .await
+                .map_err(manager_error)?
+                .into_iter()
+                .find(|assignment| assignment.app_id == *app)
+                .ok_or_else(|| manager_error(Error::Denied))?,
+            Placed::Unplaced(_) | Placed::Ineligible => {
+                return Err(manager_error(Error::Denied))
+            }
+        };
         Ok(AssignedScope {
             app_id: assignment.app_id,
             assignment_revision: assignment.revision,
@@ -400,7 +404,7 @@ impl ManagerClient {
     /// Refuses unavailable storage and conflicting placement records.
     pub async fn place(&self, app: &AppId) -> Result<AssignedScope, WorkflowServiceError> {
         let app = app.clone();
-        self.call(move |manager| async move { manager.assign(&app, None).await }.boxed_local())
+        self.call(move |manager| async move { manager.place_app(&app).await }.boxed_local())
             .await
     }
 
@@ -425,12 +429,7 @@ impl ManagerClient {
     ) -> Result<AssignedScope, WorkflowServiceError> {
         let previous = previous.clone();
         self.call(move |manager| {
-            async move {
-                manager
-                    .assign(&previous.app_id, Some(previous.assignment_revision))
-                    .await
-            }
-            .boxed_local()
+            async move { manager.place_app(&previous.app_id).await }.boxed_local()
         })
         .await
     }

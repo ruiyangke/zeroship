@@ -272,10 +272,10 @@ cutover work.
 Each app belongs to exactly one execution zone, named by Control in
 `zeroship.apps.execution_zone_id` when the app is created and frozen by trigger.
 An execution zone is an operator-declared set of deployment units that share
-creator-side connectivity. The column carries no default: Control resolves the
-zone the creator named, or the deployment's one declared zone when none is
-named, and refuses to create an app in a deployment that declares several
-without saying which. A worker's zone is the zone of the enroller Control
+creator-side connectivity. Control names it rather than letting a column
+default decide: it resolves the zone the creator asked for, or the
+deployment's one declared zone when none is named, and refuses to create an app
+in a deployment that declares several without saying which. A worker's zone is the zone of the enroller Control
 verified when it enrolled, also frozen. Registration carries no zone; the
 manager copies it from Control's rows and nothing a worker sends can change it.
 
