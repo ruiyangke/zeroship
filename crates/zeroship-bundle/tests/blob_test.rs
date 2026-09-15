@@ -8,7 +8,6 @@ use uuid::Uuid;
 use zeroship_bundle::blob::{
     sha256_hex, validate_hash_format, BlobError, BlobStore, LocalDiskBlobStore, PutOutcome,
 };
-use zeroship_bundle::WorkflowBlobStore;
 
 fn tmpdir() -> PathBuf {
     let base = std::env::temp_dir();
@@ -439,27 +438,3 @@ async fn local_disk_put_blob_stream_rejects_size_underflow() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
-#[compio::test]
-async fn local_workflow_blob_store_uses_separate_verified_namespace() {
-    let root = tmpdir();
-    let deploy = LocalDiskBlobStore::new(root.clone()).unwrap();
-    let workflow = zeroship_bundle::LocalWorkflowBlobStore::new(root.clone()).unwrap();
-
-    let data = b"workflow-output";
-    let hash = sha256_hex(data);
-    workflow.put_blob(&hash, data).await.unwrap();
-
-    let roundtrip = workflow.get_blob(&hash).await.unwrap();
-    assert_eq!(roundtrip.as_ref(), data);
-    assert!(!deploy.has_blob(&hash).await.unwrap());
-    assert!(root.join("wfblob").exists());
-    assert!(root.join("blobs").exists());
-
-    workflow.delete_blob(&hash).await.unwrap();
-    assert!(matches!(
-        workflow.get_blob(&hash).await.unwrap_err(),
-        BlobError::NotFound(_)
-    ));
-
-    let _ = std::fs::remove_dir_all(&root);
-}

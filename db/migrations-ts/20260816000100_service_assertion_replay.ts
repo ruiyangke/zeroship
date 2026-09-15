@@ -121,7 +121,7 @@ export default {
         schema: SCHEMA,
         names: ["service_assertion_replay"],
       },
-      to: ["zeroship_control", "zeroship_gateway", "zeroship_worker", "zeroship_auth"],
+      to: ["zeroship_control", "zeroship_gateway", "zeroship_auth"],
     });
 
     // Reaching the table needs USAGE on the schema holding it. No role carries
@@ -129,7 +129,7 @@ export default {
     grant({
       privileges: ["usage"],
       on: { kind: "schema", names: [SCHEMA] },
-      to: ["zeroship_control", "zeroship_gateway", "zeroship_worker", "zeroship_auth"],
+      to: ["zeroship_control", "zeroship_gateway", "zeroship_auth"],
     });
 
     // A newly created schema grants CREATE to nobody but its owner, so this is a
@@ -139,7 +139,7 @@ export default {
     revoke({
       privileges: ["create"],
       on: { kind: "schema", names: [SCHEMA] },
-      from: ["zeroship_control", "zeroship_gateway", "zeroship_worker", "zeroship_auth"],
+      from: ["zeroship_control", "zeroship_gateway", "zeroship_auth"],
     });
   },
 };

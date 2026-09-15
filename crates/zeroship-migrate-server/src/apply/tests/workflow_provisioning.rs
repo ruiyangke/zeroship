@@ -4,10 +4,7 @@
 )]
 
 use super::provision_runtime_app_role;
-use crate::provisioning::{
-    provision_database, provision_workflow_journal_schema, workflow_journal_schema_name,
-    WORKFLOW_OWNER_ROLE,
-};
+use crate::provisioning::provision_database;
 use compio_postgres::{error::SqlState, Client};
 use testcontainers::{
     core::{IntoContainerPort, WaitFor},
@@ -45,17 +42,15 @@ impl Fixture {
         );
         let admin = connect(&format!("postgres://postgres@{address}/postgres")).await;
         admin
-            .batch_execute(&format!(
-                "CREATE ROLE {WORKFLOW_OWNER_ROLE} NOLOGIN NOSUPERUSER NOCREATEDB \
-                    NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS;
-                 CREATE ROLE zeroship_worker LOGIN NOSUPERUSER NOCREATEDB \
+            .batch_execute(
+                "CREATE ROLE zeroship_worker LOGIN NOSUPERUSER NOCREATEDB \
                     NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS;
                  CREATE ROLE creator_migration_test LOGIN NOSUPERUSER NOCREATEDB \
                     NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS;
                  REVOKE ALL ON SCHEMA public FROM PUBLIC;
                  REVOKE ALL ON DATABASE postgres FROM PUBLIC;
-                 GRANT CONNECT ON DATABASE postgres TO zeroship_worker,creator_migration_test;"
-            ))
+                 GRANT CONNECT ON DATABASE postgres TO zeroship_worker,creator_migration_test;",
+            )
             .await
             .unwrap();
         Self {
@@ -82,27 +77,11 @@ async fn connect(url: &str) -> Client {
 }
 
 #[compio::test]
-async fn runtime_workflow_provisioning_preserves_creator_migration_authority() {
-    provisioning_order(false).await;
-}
-
-#[compio::test]
-async fn creator_provisioning_after_workflow_bootstrap_retains_migration_authority() {
-    provisioning_order(true).await;
-}
-
-async fn provisioning_order(workflow_first: bool) {
+async fn repeated_runtime_provisioning_preserves_creator_migration_authority() {
     let mut fixture = Fixture::new().await;
     let app = AppId::mint();
     let schema = SchemaName::new(&app_derivation::schema_name(&app)).unwrap();
-    assert_eq!(workflow_journal_schema_name(&app), schema.as_str());
     let role = migrator_role_name(schema.as_str()).unwrap();
-    if workflow_first {
-        provision_workflow_journal_schema(&fixture.admin, &app)
-            .await
-            .unwrap();
-        assert_owner(&fixture.admin, &schema, WORKFLOW_OWNER_ROLE).await;
-    }
     provision_database(&fixture.admin, schema.as_str())
         .await
         .unwrap();
@@ -126,10 +105,6 @@ async fn provisioning_order(workflow_first: bool) {
     for round in 0..3 {
         assert_owner(&fixture.admin, &schema, &role).await;
         provision_runtime_app_role(&fixture.admin, &app, &schema, &role)
-            .await
-            .unwrap();
-        assert_owner(&fixture.admin, &schema, &role).await;
-        provision_workflow_journal_schema(&fixture.admin, &app)
             .await
             .unwrap();
         assert_owner(&fixture.admin, &schema, &role).await;

@@ -217,18 +217,11 @@ async fn cleanup_app(conn: &Client, app_id: &AppId) {
     // before reaching it.
     let role = zeroship_migrate_postgres::role::migrator_role_name(&schema).unwrap();
     let q = |s: &str| format!("\"{}\"", s.replace('"', "\"\""));
-    // THE WORKFLOW JOURNAL SCHEMA WAS THE THIRD ONE, and it was leaking. A
-    // successful apply runs `runtime_dependents_sql`, which used to create
-    // `app_<uuid>` beside `<uuid>`; this teardown dropped only the latter two.
-    // It is now the app schema itself, so the journal drop is the third entry
-    // below and names the derivation rather than composing a prefix.
     let _ = conn
         .batch_execute(&format!(
             "DROP SCHEMA IF EXISTS {} CASCADE; \
-             DROP SCHEMA IF EXISTS {} CASCADE; \
              DROP SCHEMA IF EXISTS {} CASCADE;",
             q(&format!("{schema}_migrations")),
-            q(&zeroship_migrate_server::provisioning::workflow_journal_schema_name(app_id)),
             q(&schema),
         ))
         .await;
