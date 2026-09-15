@@ -743,7 +743,7 @@ services:
     # network the gateway reaches the worker via the `worker` DNS name,
     # so we explicitly opt in to 0.0.0.0. What makes that safe is the
     # key material below: dispatch carries an ed25519 assertion the worker
-    # verifies under the peer document, and a worker that cannot enrol
+    # verifies under the peer document, and a worker that cannot join
     # REFUSES to start rather than admitting a caller.
     # No secret is a flag; each arrives under its own canonical ZEROSHIP_ name
     # in the `environment:` block below. The worker logs in as the

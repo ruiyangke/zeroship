@@ -344,9 +344,9 @@ async fn build_fixture() -> Fixture {
             webhook_limiter: Arc::new(RateLimiter::new(Quota::per_minute(10_000, 100))),
             origin_scheme: zeroship_core::config::OriginScheme::Https,
             trust_proxy: false,
-            // DECLARED, not closed: the instance arms below enrol through the
+            // DECLARED, not closed: the instance arms below join through the
             // production writer, so this fixture has to be a control plane that
-            // can enrol at all.
+            // can join at all.
             worker_enrolment: EnrolmentEnvelope::parse(
                 ENROLMENT_NETWORKS,
                 ENROLMENT_PORTS,

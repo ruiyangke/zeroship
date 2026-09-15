@@ -186,7 +186,7 @@ pub struct ControlSection {
     pub supabase_jwt_issuer: Option<String>,
     /// Apex domain hosted creator apps serve under.
     pub app_base_domain: Option<String>,
-    /// Comma-separated CIDRs a worker instance may enrol from.
+    /// Comma-separated CIDRs a worker instance may join from.
     pub worker_enrolment_networks: Option<String>,
     /// Listening ports a worker instance may claim, as `<low>-<high>`.
     pub worker_enrolment_ports: Option<String>,

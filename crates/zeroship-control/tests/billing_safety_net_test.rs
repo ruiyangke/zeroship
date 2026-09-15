@@ -875,8 +875,8 @@ fn period_band_is_reserved_for_the_allocator() {
             }
             // THE MONTH MUST BE A MONTH, and without this the shape `dddd-dd`
             // matches any hyphenated pair of numbers in the crate. A port range
-            // in `src/worker_enrolment.rs` tripped it on 2026-09-07 and was
-            // reported as pinning a billing period in the reserved band. The
+            // in `src/worker_join.rs` tripped it and was reported as pinning a
+            // billing period in the reserved band. The
             // narrowing loses nothing the guard was built for: a quoted period
             // literal always carries a real month, and a chrono constructor is
             // caught by the marker scan above whatever its arguments are.
