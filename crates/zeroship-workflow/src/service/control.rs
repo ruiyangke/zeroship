@@ -184,7 +184,7 @@ impl AppWorkflows {
             captured,
         ))
         .await?;
-        let result = plan.apply().await?;
+        let result = Box::pin(plan.apply()).await?;
         store_request(
             &mut tx, &self.app, request, "restart", &digest, &result, now,
         )
