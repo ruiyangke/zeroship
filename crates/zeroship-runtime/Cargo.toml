@@ -38,10 +38,6 @@ reason = "Feature-gated V8 server used only by runtime benchmarks."
 name = "main"
 path = "tests/main.rs"
 
-[[test]]
-name = "workflow_dispatch"
-path = "tests/workflow_dispatch.rs"
-
 # The 23 `wpt_*.rs` modules. NOT in `main` because every one of them
 # `include_str!`s `tests/wpt/`, which is not tracked in git -
 # `tests/setup-wpt.sh` fetches it on demand. A checkout that has not run that
