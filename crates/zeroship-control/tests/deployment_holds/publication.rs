@@ -7,19 +7,21 @@
 //! same Control deployment ledger the collector reads.
 
 use super::*;
-use std::cell::RefCell;
+use std::{cell::RefCell, collections::BTreeSet, time::Instant};
 use zeroship_bundle::Manifest;
 use zeroship_control::{
     cron::deploy_retention::{Collector, DeployRetentionConfig},
     publication::{
-        catalog::{self, ACKNOWLEDGED, PENDING},
-        publisher::{Exchange, Publisher, PublisherConfig, ScheduleManager},
+        catalog::{self, ACKNOWLEDGED, APPLICATION_NAME, PENDING},
+        publisher::{
+            self, Exchange, Publisher, PublisherConfig, Retry, ScheduleManager, StartError,
+        },
         AcceptanceResult, CatalogError, Transition,
     },
 };
 use zeroship_core::{
-    workflow_coordination::Revision,
-    workflow_jobs::{DeploymentId, JobOperation, JobSpec},
+    workflow_coordination::{Revision, UnixMillis},
+    workflow_jobs::{DeploymentId, JobId, JobOperation, JobSpec},
     workflow_schedules::{ActivateSchedules, DisableSchedules, RegisterSchedules},
     UserId,
 };
@@ -854,4 +856,358 @@ async fn snapshot(fixture: &Fixture, app: &AppId) -> (Option<String>, i64, bool,
         row.get(4),
         row.get(5),
     )
+}
+
+/// A manager that refuses every exchange for one app and answers the others,
+/// recording each exchange. Its activation receipts replay per revision, as
+/// the real manager's do.
+#[derive(Default)]
+struct Flaky {
+    refused: RefCell<Option<AppId>>,
+    calls: RefCell<Vec<(AppId, &'static str)>>,
+    jobs: RefCell<Vec<JobSpec>>,
+}
+
+impl Flaky {
+    fn exchange(&self, app: &AppId, kind: &'static str) -> Result<(), CoordinationError> {
+        self.calls.borrow_mut().push((app.clone(), kind));
+        if self.refused.borrow().as_ref() == Some(app) {
+            Err(CoordinationError::Unavailable)
+        } else {
+            Ok(())
+        }
+    }
+
+    fn attempts(&self, app: &AppId) -> usize {
+        self.calls
+            .borrow()
+            .iter()
+            .filter(|(called, kind)| called == app && *kind == "register")
+            .count()
+    }
+}
+
+struct FlakyManager(Rc<Flaky>);
+
+impl ScheduleManager for FlakyManager {
+    fn register<'a>(&'a self, request: &'a RegisterSchedules) -> Exchange<'a, RegisterSchedules> {
+        Box::pin(async move {
+            self.0.exchange(&request.app_id, "register")?;
+            Ok(request.clone())
+        })
+    }
+    fn activate<'a>(&'a self, request: &'a ActivateSchedules) -> Exchange<'a, JobSpec> {
+        Box::pin(async move {
+            self.0.exchange(&request.app_id, "activate")?;
+            let operation = JobOperation::Activate {
+                deployment_id: request.deployment_id.clone(),
+                revision: request.revision,
+            };
+            let mut jobs = self.0.jobs.borrow_mut();
+            if let Some(job) = jobs
+                .iter()
+                .find(|job| job.app_id == request.app_id && job.operation == operation)
+            {
+                return Ok(job.clone());
+            }
+            let job = JobSpec {
+                id: JobId::mint(),
+                app_id: request.app_id.clone(),
+                operation,
+                available_at: UnixMillis::try_from(1).unwrap(),
+            };
+            jobs.push(job.clone());
+            Ok(job)
+        })
+    }
+    fn disable<'a>(&'a self, request: &'a DisableSchedules) -> Exchange<'a, DisableSchedules> {
+        Box::pin(async move {
+            self.0.exchange(&request.app_id, "disable")?;
+            Ok(request.clone())
+        })
+    }
+}
+
+/// The two apps of the backoff case and the manager answering them.
+struct Backoff<'a> {
+    fixture: &'a Fixture,
+    actor: UserId,
+    failing: AppId,
+    healthy: AppId,
+    flaky: Rc<Flaky>,
+    publisher: Publisher<FlakyManager>,
+    passes: usize,
+}
+
+/// What one pass must do with the failing app.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Expect {
+    /// Skip it: its retry is not due.
+    Waits,
+    /// Attempt it, and the manager refuses.
+    Fails,
+    /// Attempt it, and the manager answers.
+    Publishes,
+}
+
+impl Backoff<'_> {
+    /// Deploy the healthy app and run one pass as of `now`, requiring the
+    /// healthy deploy to be acknowledged in that pass and the failing app to
+    /// be treated as `expect` says.
+    async fn pass(&mut self, now: Instant, expect: Expect) {
+        self.passes += 1;
+        let label = format!("backoff-healthy-{}", self.passes);
+        let revision = accept(self.fixture, &self.healthy, &self.actor, labelled(&label))
+            .await
+            .lifecycle_revision
+            .expect("the healthy app is active")
+            .get();
+        let before = self.flaky.attempts(&self.failing);
+        let stats = self.publisher.tick_at(now).await.expect("publication pass");
+        let rows = intents(self.fixture, &self.healthy).await;
+        let published = rows.iter().find(|row| row.0 == revision).unwrap();
+        assert_eq!(published.3, ACKNOWLEDGED, "healthy revision {revision}");
+        let attempts = self.flaky.attempts(&self.failing) - before;
+        let observed = match (attempts, stats.failed, stats.waiting) {
+            (0, 0, 1) => Expect::Waits,
+            (1, 1, 0) => Expect::Fails,
+            (1, 0, 0) => Expect::Publishes,
+            _ => panic!("unexpected pass: {attempts} attempts, {stats:?}"),
+        };
+        assert_eq!(observed, expect, "{stats:?}");
+    }
+}
+
+/// A failing app is attempted only once its retry delay has passed, the delay
+/// doubles to its cap, and a success resets it, while a healthy app publishes
+/// on every pass throughout.
+#[ntex::test]
+async fn a_failing_app_backs_off_while_other_apps_publish_every_pass() {
+    let fixture = Fixture::new().await;
+    let actor = fixture.actor().await;
+    let failing = app(&fixture, "backoff-failing").await;
+    let healthy = app(&fixture, "backoff-healthy").await;
+    let flaky = Rc::new(Flaky::default());
+    *flaky.refused.borrow_mut() = Some(failing.clone());
+    let seconds = Duration::from_secs;
+    let config = PublisherConfig {
+        retry_initial: seconds(10),
+        retry_max: seconds(40),
+        ..PublisherConfig::default()
+    };
+    let publisher = Publisher::new(
+        catalog::connect(&fixture.control_url).await.unwrap(),
+        FlakyManager(flaky.clone()),
+        config,
+    )
+    .unwrap();
+    accept(&fixture, &failing, &actor, labelled("backoff-failing")).await;
+    let mut case = Backoff {
+        fixture: &fixture,
+        actor: actor.clone(),
+        failing: failing.clone(),
+        healthy: healthy.clone(),
+        flaky: flaky.clone(),
+        publisher,
+        passes: 0,
+    };
+
+    let start = Instant::now();
+    case.pass(start, Expect::Fails).await;
+    let mut due = start + seconds(10);
+    assert_eq!(
+        case.publisher.retry(&failing),
+        Some(Retry {
+            delay: seconds(10),
+            at: due
+        })
+    );
+    // Each later attempt falls due at this offset from the first, and its
+    // failure doubles the delay until the cap holds it.
+    for (offset, delay) in [(10, 20), (30, 40), (70, 40)] {
+        assert_eq!(due, start + seconds(offset));
+        case.pass(due - Duration::from_millis(1), Expect::Waits).await;
+        case.pass(due, Expect::Fails).await;
+        due += seconds(delay);
+        assert_eq!(
+            case.publisher.retry(&failing),
+            Some(Retry {
+                delay: seconds(delay),
+                at: due
+            })
+        );
+    }
+
+    // A success clears the retry; the next failure starts from the first delay.
+    *flaky.refused.borrow_mut() = None;
+    case.pass(due, Expect::Publishes).await;
+    assert_eq!(case.publisher.retry(&failing), None);
+    assert!(intents(&fixture, &failing)
+        .await
+        .iter()
+        .all(|row| row.3 == ACKNOWLEDGED));
+    *flaky.refused.borrow_mut() = Some(failing.clone());
+    accept(&fixture, &failing, &actor, labelled("backoff-failing-again")).await;
+    let later = due + Duration::from_millis(1);
+    case.pass(later, Expect::Fails).await;
+    assert_eq!(
+        case.publisher.retry(&failing),
+        Some(Retry {
+            delay: seconds(10),
+            at: later + seconds(10)
+        })
+    );
+    assert_eq!(
+        flaky.attempts(&healthy),
+        case.passes,
+        "the healthy app published on every pass"
+    );
+}
+
+/// The catalog sessions `pg_stat_activity` attributes to Control's catalog.
+async fn catalog_sessions(fixture: &Fixture) -> BTreeSet<i32> {
+    fixture
+        .platform
+        .admin
+        .query(
+            "SELECT pid FROM pg_stat_activity WHERE application_name = $1",
+            &[&APPLICATION_NAME],
+        )
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|row| row.get(0))
+        .collect()
+}
+
+/// The publisher keeps one catalog database for the life of the process. When
+/// its session is terminated, a later pass opens another and publishes again.
+#[ntex::test]
+async fn a_later_pass_publishes_after_the_catalog_session_is_terminated() {
+    let fixture = Fixture::new().await;
+    let manager = fixture.coordinator().await;
+    let actor = fixture.actor().await;
+    let app = app(&fixture, "publication-reconnect").await;
+    let shared = catalog_sessions(&fixture).await;
+    let mut publisher = manager_publisher(&fixture, &manager).await;
+    let own: Vec<i32> = catalog_sessions(&fixture)
+        .await
+        .difference(&shared)
+        .copied()
+        .collect();
+    assert_eq!(own.len(), 1, "the publisher's database holds one session");
+
+    accept(&fixture, &app, &actor, labelled("before-termination")).await;
+    assert_eq!(publish_all(&mut publisher).await, 1);
+
+    let terminated: bool = fixture
+        .platform
+        .admin
+        .query_one("SELECT pg_terminate_backend($1)", &[&own[0]])
+        .await
+        .unwrap()
+        .get(0);
+    assert!(terminated);
+    compio::time::timeout(Duration::from_secs(10), async {
+        while catalog_sessions(&fixture).await.contains(&own[0]) {
+            compio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the terminated session left pg_stat_activity");
+
+    let second = accept(&fixture, &app, &actor, labelled("after-termination")).await;
+    let revision = second.lifecycle_revision.unwrap().get();
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        // The pass that first meets the closed session may fail; a later one
+        // must publish.
+        let _ = publisher.tick().await;
+        let rows = intents(&fixture, &app).await;
+        if rows.iter().any(|row| row.0 == revision && row.3 == ACKNOWLEDGED) {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "no pass published after the session was terminated: {rows:?}"
+        );
+        compio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let replaced: Vec<i32> = catalog_sessions(&fixture)
+        .await
+        .difference(&shared)
+        .copied()
+        .collect();
+    assert_eq!(replaced.len(), 1);
+    assert_ne!(replaced[0], own[0], "a new session replaced the terminated one");
+}
+
+/// Publication refuses to start without Control's signer, with an unusable
+/// coordinator origin or with unusable bounds. A signed Control with a usable
+/// origin starts a publisher on the shared catalog that delivers deploys.
+#[ntex::test]
+async fn publication_starts_only_with_a_signer_and_a_usable_coordinator() {
+    let fixture = Fixture::new().await;
+    let manager = fixture.coordinator().await;
+    let catalog = fixture.state.registry.catalog();
+    let refusal = |auth: Arc<ServiceAuth>, url: String, config: PublisherConfig| async move {
+        publisher::start(catalog, auth, &url, config).await
+    };
+    assert!(matches!(
+        refusal(
+            Arc::new(ServiceAuth::unconfigured()),
+            origin(&manager),
+            PublisherConfig::default()
+        )
+        .await,
+        Err(StartError::Unsigned)
+    ));
+    assert!(matches!(
+        refusal(
+            fixture.state.service_auth.clone(),
+            "http://coordinator.internal:9093".into(),
+            PublisherConfig::default()
+        )
+        .await,
+        Err(StartError::Coordinator(CoordinationError::InvalidConfig))
+    ));
+    assert!(matches!(
+        refusal(
+            fixture.state.service_auth.clone(),
+            origin(&manager),
+            PublisherConfig {
+                retry_initial: Duration::ZERO,
+                ..PublisherConfig::default()
+            }
+        )
+        .await,
+        Err(StartError::Config(_))
+    ));
+
+    let actor = fixture.actor().await;
+    let app = app(&fixture, "publication-started").await;
+    let accepted = accept(&fixture, &app, &actor, labelled("started")).await;
+    assert_eq!(intents(&fixture, &app).await[0].3, PENDING);
+    publisher::start(
+        catalog,
+        fixture.state.service_auth.clone(),
+        &origin(&manager),
+        PublisherConfig {
+            interval: Duration::from_millis(50),
+            ..PublisherConfig::default()
+        },
+    )
+    .await
+    .expect("a signed Control with a usable coordinator publishes");
+    compio::time::timeout(Duration::from_secs(15), async {
+        while intents(&fixture, &app).await[0].3 != ACKNOWLEDGED {
+            compio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("the started publisher delivered the deploy");
+    assert_eq!(
+        selection(&fixture, &app).await.and_then(|s| s.2),
+        Some((accepted.deploy_id.as_str().to_owned(), 1))
+    );
 }

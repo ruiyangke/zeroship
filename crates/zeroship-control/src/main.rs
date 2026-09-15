@@ -152,14 +152,17 @@ const CONTROL_KEY_LABEL: &str = "ZEROSHIP_CONTROL_KEY / --control-key-file";
 /// internal edge is a control plane whose workers cannot load an app.
 ///
 /// The unconfigured case is refused inside `ServiceKeyring::load`, so this
-/// function has no empty-path branch to get wrong.
-fn build_service_auth(
+/// function has no empty-path branch to get wrong. It runs before the process
+/// touches the database: the same key signs lifecycle publication, so a
+/// Control without it could accept deploys it could never publish.
+fn load_service_keyring(
     key_file: &std::path::Path,
     peers_file: &std::path::Path,
-    control_pg: Arc<compio_postgres::Client>,
-) -> zeroship_core::service_peers::ServiceAuth {
-    use zeroship_core::service_assertion::ServiceAssertionVerifier;
-    use zeroship_core::service_peers::{ServiceAuth, ServiceKeyring};
+) -> (
+    zeroship_core::service_peers::ServiceKeyring,
+    zeroship_core::service_assertion::ServiceTrustBundle,
+) {
+    use zeroship_core::service_peers::ServiceKeyring;
 
     // The SAME statement of control's own name the instance path compares `aud`
     // against, so a second spelling cannot make one of them refuse callers the
@@ -167,6 +170,7 @@ fn build_service_auth(
     let issuer = match zeroship_control::internal::control_service_issuer() {
         Ok(issuer) => issuer,
         Err(error) => {
+            eprintln!("control: refusing to start: control service issuer is malformed: {error}");
             tracing::error!(%error, "control: refusing to start - control service issuer is malformed");
             std::process::exit(1);
         }
@@ -174,6 +178,10 @@ fn build_service_auth(
     let mut keyring = match ServiceKeyring::load(issuer, key_file, peers_file) {
         Ok(keyring) => keyring,
         Err(error) => {
+            eprintln!(
+                "control: refusing to start: service key material rejected ({error}); set \
+                 control.service_key_file and control.service_peers_file"
+            );
             tracing::error!(
                 %error,
                 "control: refusing to start - service key material rejected; set \
@@ -186,6 +194,18 @@ fn build_service_auth(
         tracing::error!("control: refusing to start - peer bundle already taken");
         std::process::exit(1);
     };
+    (keyring, bundle)
+}
+
+/// Assemble this control plane's service identity from its loaded keyring.
+fn build_service_auth(
+    keyring: zeroship_core::service_peers::ServiceKeyring,
+    bundle: zeroship_core::service_assertion::ServiceTrustBundle,
+    control_pg: Arc<compio_postgres::Client>,
+) -> zeroship_core::service_peers::ServiceAuth {
+    use zeroship_core::service_assertion::ServiceAssertionVerifier;
+    use zeroship_core::service_peers::ServiceAuth;
+
     // The FULL profile: control's guarded edges fire at app-load rate, so the
     // single-use claim's write against the shared table is proportional to app
     // loads. The store is the process's own long-lived client, which is the
@@ -458,6 +478,16 @@ fn main() -> std::io::Result<()> {
     let workers_str = settings.worker_urls.get().clone();
     let gateway_url = settings.gateway_url.get().trim_end_matches('/').to_string();
     let workflow_coordinator_url = settings.workflow_coordinator_url.get().to_owned();
+    // Lifecycle publication cannot run against an origin the manager client
+    // refuses, and a Control that accepts deploys it can never publish leaves
+    // them pending forever. A configuration check refuses it too.
+    if let Err(error) =
+        zeroship_control::publication::publisher::validate_coordinator(&workflow_coordinator_url)
+    {
+        eprintln!("control: refusing to start: {error}");
+        tracing::error!(%error, "control: refusing to start");
+        std::process::exit(2);
+    }
     let Some(catalog_max_connections) =
         std::num::NonZeroUsize::new(*settings.catalog_max_connections.get())
     else {
@@ -721,6 +751,11 @@ fn main() -> std::io::Result<()> {
     }
     let _ = std::fs::remove_file(&probe);
     tracing::info!(path = %deploy_tmp_dir.display(), "control: deploy_tmp_dir configured");
+
+    let (service_keyring, service_peers) = load_service_keyring(
+        settings.service_key_file.get(),
+        settings.service_peers_file.get(),
+    );
 
     ntex::rt::System::build()
         .name("zeroship-control")
@@ -1074,8 +1109,8 @@ fn main() -> std::io::Result<()> {
     tracing::info!(mailer = %mailer_kind, "control: mail transport selected");
 
     let service_auth = Arc::new(build_service_auth(
-        settings.service_key_file.get(),
-        settings.service_peers_file.get(),
+        service_keyring,
+        service_peers,
         Arc::clone(&control_pg),
     ));
 
@@ -1187,19 +1222,20 @@ fn main() -> std::io::Result<()> {
 
     // Deliver committed lifecycle intents - deploy activations, archive
     // disables and restore activations - to the workflow manager in per-app
-    // revision order. The deploy and archive handlers never call the manager.
+    // revision order, on the shared catalog. The deploy and archive handlers
+    // never call the manager, so a Control that cannot publish refuses to
+    // start rather than accept deploys whose schedules never reach it.
+    if let Err(error) = zeroship_control::publication::publisher::start(
+        state.registry.catalog(),
+        Arc::clone(&state.service_auth),
+        &workflow_coordinator_url,
+        zeroship_control::publication::publisher::PublisherConfig::default(),
+    )
+    .await
     {
-        let state = Arc::clone(&state);
-        let coordinator_url = workflow_coordinator_url.clone();
-        compio::runtime::spawn(async move {
-            zeroship_control::publication::publisher::run(
-                state,
-                coordinator_url,
-                zeroship_control::publication::publisher::DEFAULT_TICK,
-            )
-            .await;
-        })
-        .detach();
+        eprintln!("control: refusing to start: {error}");
+        tracing::error!(%error, "control: refusing to start");
+        std::process::exit(1);
     }
 
     let bind_addr = format!("{bind_host}:{port}");
