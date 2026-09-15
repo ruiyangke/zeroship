@@ -47,7 +47,7 @@ async fn postgres_management_status_serializes_with_atomic_acceptance() {
     )
     .await
     .unwrap();
-    let status_coordinator = Coordinator::new(status_queue, CoordinatorOptions::default()).unwrap();
+    let status_coordinator = support::coordinator(&status_queue, CoordinatorOptions::default());
     let app = AppId::mint();
     host.queue.register_scope(&app).await.unwrap();
     let request = command(&app, &RunId::mint(), RunOperation::Pause);

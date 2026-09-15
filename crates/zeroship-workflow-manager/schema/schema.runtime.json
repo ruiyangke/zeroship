@@ -70,24 +70,15 @@
             "valueColumn": "released"
           }
         },
-        "wake_revision": {
-          "type": "bigInt",
+        "refused": {
+          "type": "boolean",
+          "required": true,
           "readable": true,
           "filterable": true,
           "sortable": true,
           "projectable": true,
           "storage": {
-            "valueColumn": "wake_revision"
-          }
-        },
-        "next_due_at": {
-          "type": "bigInt",
-          "readable": true,
-          "filterable": true,
-          "sortable": true,
-          "projectable": true,
-          "storage": {
-            "valueColumn": "next_due_at"
+            "valueColumn": "refused"
           }
         }
       },
@@ -120,6 +111,286 @@
           ]
         }
       ]
+    },
+    "capacity_demands": {
+      "fields": {
+        "id": {
+          "type": "string",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "id"
+          },
+          "primaryKey": true
+        },
+        "execution_zone_id": {
+          "type": "string",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "execution_zone_id"
+          }
+        },
+        "recorded_at": {
+          "type": "bigInt",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "recorded_at"
+          }
+        }
+      },
+      "options": {
+        "softDelete": false,
+        "versioning": false,
+        "strictness": "strict"
+      },
+      "indexes": [
+        {
+          "name": "capacity_demands_zone_idx",
+          "fields": [
+            "execution_zone_id",
+            "id"
+          ]
+        }
+      ]
+    },
+    "capacity_intents": {
+      "fields": {
+        "id": {
+          "type": "string",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "id"
+          },
+          "primaryKey": true
+        },
+        "execution_zone_id": {
+          "type": "string",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "execution_zone_id"
+          }
+        },
+        "generation": {
+          "type": "bigInt",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "generation"
+          }
+        },
+        "state": {
+          "type": "string",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "state"
+          }
+        },
+        "refusal": {
+          "type": "string",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "refusal"
+          }
+        },
+        "attempt": {
+          "type": "bigInt",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "attempt"
+          }
+        },
+        "attempt_deadline": {
+          "type": "bigInt",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "attempt_deadline"
+          }
+        },
+        "retry_at": {
+          "type": "bigInt",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "retry_at"
+          }
+        }
+      },
+      "options": {
+        "softDelete": false,
+        "versioning": false,
+        "strictness": "strict"
+      },
+      "indexes": []
+    },
+    "capacity_targets": {
+      "fields": {
+        "id": {
+          "type": "string",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "id"
+          },
+          "primaryKey": true
+        },
+        "revision": {
+          "type": "bigInt",
+          "required": true,
+          "default": 0,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "revision"
+          }
+        },
+        "desired": {
+          "type": "bigInt",
+          "required": true,
+          "default": 0,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "desired"
+          }
+        },
+        "state": {
+          "type": "string",
+          "required": true,
+          "default": "steady",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "state"
+          }
+        },
+        "refusal": {
+          "type": "string",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "refusal"
+          }
+        },
+        "observed": {
+          "type": "bigInt",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "observed"
+          }
+        },
+        "attempt": {
+          "type": "bigInt",
+          "required": true,
+          "default": 0,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "attempt"
+          }
+        },
+        "attempt_deadline": {
+          "type": "bigInt",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "attempt_deadline"
+          }
+        },
+        "retry_at": {
+          "type": "bigInt",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "retry_at"
+          }
+        },
+        "below_since": {
+          "type": "bigInt",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "below_since"
+          }
+        },
+        "lock_version": {
+          "type": "bigInt",
+          "required": true,
+          "default": 0,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "lock_version"
+          }
+        }
+      },
+      "options": {
+        "softDelete": false,
+        "versioning": false,
+        "strictness": "strict"
+      },
+      "indexes": []
     },
     "deployment_holds": {
       "fields": {
@@ -815,14 +1086,14 @@
             "valueColumn": "expected_revision"
           }
         },
-        "wake_revision": {
-          "type": "bigInt",
+        "reason": {
+          "type": "string",
           "readable": true,
           "filterable": true,
           "sortable": true,
           "projectable": true,
           "storage": {
-            "valueColumn": "wake_revision"
+            "valueColumn": "reason"
           }
         },
         "result_revision": {
@@ -1756,6 +2027,16 @@
           "storage": {
             "valueColumn": "lock_version"
           }
+        },
+        "execution_zone_id": {
+          "type": "string",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "execution_zone_id"
+          }
         }
       },
       "options": {
@@ -1763,7 +2044,17 @@
         "versioning": false,
         "strictness": "strict"
       },
-      "indexes": []
+      "indexes": [
+        {
+          "name": "workers_zone_idx",
+          "fields": [
+            "execution_zone_id",
+            "state",
+            "expires_at",
+            "id"
+          ]
+        }
+      ]
     }
   }
 }

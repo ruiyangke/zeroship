@@ -11,9 +11,11 @@ CREATE UNIQUE INDEX IF NOT EXISTS "deployment_holds_scope_key" ON "workflow_mana
 
 CREATE INDEX IF NOT EXISTS "deployment_holds_pending_idx" ON "workflow_manager"."deployment_holds" ("state", "app_id", "deployment_id");
 
-CREATE TABLE "workflow_manager"."workers" ("id" text PRIMARY KEY NOT NULL, "capacity" bigint NOT NULL DEFAULT 1, "state" text NOT NULL DEFAULT 'ready', "expires_at" bigint NOT NULL DEFAULT 0, "lock_version" bigint NOT NULL DEFAULT 0);
+CREATE TABLE "workflow_manager"."workers" ("id" text PRIMARY KEY NOT NULL, "capacity" bigint NOT NULL DEFAULT 1, "state" text NOT NULL DEFAULT 'ready', "expires_at" bigint NOT NULL DEFAULT 0, "lock_version" bigint NOT NULL DEFAULT 0, "execution_zone_id" text);
 
-CREATE TABLE "workflow_manager"."assignments" ("id" text PRIMARY KEY NOT NULL, "app_id" text NOT NULL, "worker_id" text NOT NULL, "revision" bigint NOT NULL, "expires_at" bigint NOT NULL, "released" boolean NOT NULL, "wake_revision" bigint, "next_due_at" bigint, CONSTRAINT "assignment_scope" FOREIGN KEY ("app_id") REFERENCES "workflow_manager"."queue_scopes" (id) ON DELETE RESTRICT, CONSTRAINT "assignment_worker" FOREIGN KEY ("worker_id") REFERENCES "workflow_manager"."workers" (id) ON DELETE RESTRICT);
+CREATE INDEX IF NOT EXISTS "workers_zone_idx" ON "workflow_manager"."workers" ("execution_zone_id", "state", "expires_at", "id");
+
+CREATE TABLE "workflow_manager"."assignments" ("id" text PRIMARY KEY NOT NULL, "app_id" text NOT NULL, "worker_id" text NOT NULL, "revision" bigint NOT NULL, "expires_at" bigint NOT NULL, "released" boolean NOT NULL, "refused" boolean NOT NULL, CONSTRAINT "assignment_scope" FOREIGN KEY ("app_id") REFERENCES "workflow_manager"."queue_scopes" (id) ON DELETE RESTRICT, CONSTRAINT "assignment_worker" FOREIGN KEY ("worker_id") REFERENCES "workflow_manager"."workers" (id) ON DELETE RESTRICT);
 
 CREATE INDEX IF NOT EXISTS "assignment_scope_idx" ON "workflow_manager"."assignments" ("app_id");
 
@@ -25,7 +27,7 @@ CREATE INDEX IF NOT EXISTS "assignments_worker_idx" ON "workflow_manager"."assig
 
 CREATE INDEX IF NOT EXISTS "assignments_expiry_idx" ON "workflow_manager"."assignments" ("expires_at", "app_id");
 
-CREATE TABLE "workflow_manager"."placement_receipts" ("id" text PRIMARY KEY NOT NULL, "app_id" text NOT NULL, "request_id" text NOT NULL, "operation" text NOT NULL, "worker_id" text NOT NULL, "expected_revision" bigint, "wake_revision" bigint, "result_revision" bigint NOT NULL, "result_expires_at" bigint NOT NULL, CONSTRAINT "receipt_scope" FOREIGN KEY ("app_id") REFERENCES "workflow_manager"."queue_scopes" (id) ON DELETE RESTRICT);
+CREATE TABLE "workflow_manager"."placement_receipts" ("id" text PRIMARY KEY NOT NULL, "app_id" text NOT NULL, "request_id" text NOT NULL, "operation" text NOT NULL, "worker_id" text NOT NULL, "expected_revision" bigint, "reason" text, "result_revision" bigint NOT NULL, "result_expires_at" bigint NOT NULL, CONSTRAINT "receipt_scope" FOREIGN KEY ("app_id") REFERENCES "workflow_manager"."queue_scopes" (id) ON DELETE RESTRICT);
 
 CREATE INDEX IF NOT EXISTS "receipt_scope_idx" ON "workflow_manager"."placement_receipts" ("app_id");
 
@@ -137,13 +139,21 @@ CREATE UNIQUE INDEX IF NOT EXISTS "recovery_duties_scope_key" ON "workflow_manag
 
 CREATE INDEX IF NOT EXISTS "recovery_duties_due_idx" ON "workflow_manager"."recovery_duties" ("kind", "next_due_at", "app_id");
 
+CREATE TABLE "workflow_manager"."capacity_demands" ("id" text PRIMARY KEY NOT NULL, "execution_zone_id" text NOT NULL, "recorded_at" bigint NOT NULL, CONSTRAINT "capacity_demand_scope" FOREIGN KEY ("id") REFERENCES "workflow_manager"."queue_scopes" (id) ON DELETE RESTRICT);
+
+CREATE INDEX IF NOT EXISTS "capacity_demands_zone_idx" ON "workflow_manager"."capacity_demands" ("execution_zone_id", "id");
+
+CREATE TABLE "workflow_manager"."capacity_targets" ("id" text PRIMARY KEY NOT NULL, "revision" bigint NOT NULL DEFAULT 0, "desired" bigint NOT NULL DEFAULT 0, "state" text NOT NULL DEFAULT 'steady', "refusal" text, "observed" bigint, "attempt" bigint NOT NULL DEFAULT 0, "attempt_deadline" bigint, "retry_at" bigint, "below_since" bigint, "lock_version" bigint NOT NULL DEFAULT 0);
+
+CREATE TABLE "workflow_manager"."capacity_intents" ("id" text PRIMARY KEY NOT NULL, "execution_zone_id" text NOT NULL, "generation" bigint NOT NULL, "state" text NOT NULL, "refusal" text, "attempt" bigint NOT NULL, "attempt_deadline" bigint, "retry_at" bigint, CONSTRAINT "capacity_intent_scope" FOREIGN KEY ("id") REFERENCES "workflow_manager"."queue_scopes" (id) ON DELETE RESTRICT);
+
 ALTER TABLE "workflow_manager"."schema_version" ALTER COLUMN "id" TYPE text COLLATE "C";
 
 ALTER TABLE "workflow_manager"."queue_scopes" ALTER COLUMN "id" TYPE text COLLATE "C";
 
 ALTER TABLE "workflow_manager"."deployment_holds" ALTER COLUMN "id" TYPE text COLLATE "C", ALTER COLUMN "app_id" TYPE text COLLATE "C", ALTER COLUMN "deployment_id" TYPE text COLLATE "C", ALTER COLUMN "holder_id" TYPE text COLLATE "C";
 
-ALTER TABLE "workflow_manager"."workers" ALTER COLUMN "id" TYPE text COLLATE "C";
+ALTER TABLE "workflow_manager"."workers" ALTER COLUMN "id" TYPE text COLLATE "C", ALTER COLUMN "execution_zone_id" TYPE text COLLATE "C";
 
 ALTER TABLE "workflow_manager"."assignments" ALTER COLUMN "id" TYPE text COLLATE "C", ALTER COLUMN "app_id" TYPE text COLLATE "C", ALTER COLUMN "worker_id" TYPE text COLLATE "C";
 
@@ -159,6 +169,12 @@ ALTER TABLE "workflow_manager"."recovery_scopes" ALTER COLUMN "id" TYPE text COL
 
 ALTER TABLE "workflow_manager"."recovery_duties" ALTER COLUMN "id" TYPE text COLLATE "C", ALTER COLUMN "app_id" TYPE text COLLATE "C", ALTER COLUMN "pending_job_id" TYPE text COLLATE "C";
 
+ALTER TABLE "workflow_manager"."capacity_demands" ALTER COLUMN "id" TYPE text COLLATE "C", ALTER COLUMN "execution_zone_id" TYPE text COLLATE "C";
+
+ALTER TABLE "workflow_manager"."capacity_targets" ALTER COLUMN "id" TYPE text COLLATE "C";
+
+ALTER TABLE "workflow_manager"."capacity_intents" ALTER COLUMN "id" TYPE text COLLATE "C", ALTER COLUMN "execution_zone_id" TYPE text COLLATE "C";
+
 ALTER TABLE "workflow_manager"."schedule_deployments" ALTER COLUMN "id" TYPE text COLLATE "C", ALTER COLUMN "app_id" TYPE text COLLATE "C";
 
 ALTER TABLE "workflow_manager"."schedule_activations" ALTER COLUMN "id" TYPE text COLLATE "C", ALTER COLUMN "app_id" TYPE text COLLATE "C", ALTER COLUMN "deployment_id" TYPE text COLLATE "C";
@@ -170,4 +186,4 @@ ALTER TABLE "workflow_manager"."schedule_scopes" ALTER COLUMN "id" TYPE text COL
 ALTER TABLE "workflow_manager"."schedules" ALTER COLUMN "id" TYPE text COLLATE "C", ALTER COLUMN "app_id" TYPE text COLLATE "C", ALTER COLUMN "name" TYPE text COLLATE "C", ALTER COLUMN "activation_id" TYPE text COLLATE "C";
 
 ALTER TABLE "workflow_manager"."schedule_occurrences" ALTER COLUMN "id" TYPE text COLLATE "C", ALTER COLUMN "app_id" TYPE text COLLATE "C", ALTER COLUMN "schedule_id" TYPE text COLLATE "C", ALTER COLUMN "run_id" TYPE text COLLATE "C", ALTER COLUMN "job_id" TYPE text COLLATE "C", ALTER COLUMN "activation_id" TYPE text COLLATE "C";
-INSERT INTO workflow_manager.schema_version (id, fingerprint) VALUES ('manager', '03f9e9849e2baf0f971f5447b3498c67dcfeeee8bd259e82c0b0e9e8d1243862');
+INSERT INTO workflow_manager.schema_version (id, fingerprint) VALUES ('manager', '0024b7a3ff69265921a7b86406ca2ea8aae34630588b013b756c6bd46a65e1f9');

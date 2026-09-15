@@ -40,7 +40,7 @@ use zeroship_data_orm::{
 };
 use zeroship_workflow_manager::{
     coordinator::{self, Coordinator},
-    driver::{self, Driver},
+    driver,
     lifecycle::AppLifecycle,
     policy::{PolicyObservation, PolicySource},
     recovery::{self, Closing, DutyKind, Recovery, Responsibility, ScopeState},
@@ -151,7 +151,7 @@ async fn host(fixture: &Fixture) -> Host {
     )
     .await
     .unwrap();
-    let coordinator = Coordinator::new(queue.clone(), coordinator::Options::default()).unwrap();
+    let coordinator = support::coordinator(&queue, coordinator::Options::default());
     let app = AppId::mint();
     let worker = WorkerId::mint();
     coordinator
@@ -624,7 +624,7 @@ async fn driver_lane(fixture: &Fixture) {
     };
     // A driver whose deletion source is down visits no closing candidate.
     *deletions.unavailable.borrow_mut() = true;
-    let mut blind = Driver::new(unread.queue.clone(), driver_options, deletions.clone()).unwrap();
+    let mut blind = support::driver_for(&unread.queue, driver_options, deletions.clone());
     let report = blind.tick().await.closing;
     assert_eq!(report.scan_error, Some(Error::Unavailable));
     assert_eq!(report.visited, 0);
@@ -633,20 +633,19 @@ async fn driver_lane(fixture: &Fixture) {
     }
     *deletions.unavailable.borrow_mut() = false;
     // Under a longer idle window no scope is a candidate, deleted or not.
-    let mut patient = Driver::new(
-        idle.queue.clone(),
+    let mut patient = support::driver_for(
+        &idle.queue,
         driver::Options {
             recovery: options(HOUR, HOUR, HOUR, HOUR),
             ..driver::Options::default()
         },
         deletions.clone(),
-    )
-    .unwrap();
+    );
     let report = patient.tick().await.closing;
     assert_eq!((report.visited, report.scan_error), (0, None), "{report:?}");
     assert_eq!(deleted.state().await.state, ScopeState::Open);
 
-    let mut driver = Driver::new(idle.queue.clone(), driver_options, deletions).unwrap();
+    let mut driver = support::driver_for(&idle.queue, driver_options, deletions);
     let report = driver.tick().await.closing;
     assert!(report.failures.is_empty(), "{report:?}");
     assert_eq!(report.visited, report.completed);

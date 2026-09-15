@@ -9,7 +9,10 @@ mod management;
 mod placement;
 mod policy;
 
+pub use placement::Placed;
+
 use crate::{
+    eligibility::{EligibilitySource, ZoneId},
     models::{
         assignments, management as management_records, placement_receipts, queue_scopes, workers,
         Scope, Worker,
@@ -17,7 +20,7 @@ use crate::{
     queue::{lock_scope, register_scope_in, Budget},
     Error, Queue,
 };
-use std::time::Duration;
+use std::{rc::Rc, time::Duration};
 use zeroship_core::{
     app_id::AppId,
     workflow_coordination::{
@@ -71,10 +74,16 @@ impl Options {
 }
 
 /// Host-authenticated coordination over the same physical namespace as job delivery.
+///
+/// Placement eligibility comes from the injected [`EligibilitySource`]: the
+/// app's execution zone and deletion, and each instance's enroller zone and
+/// enrollment. Registration, placement, renewal and ownership read it under
+/// their locks; no worker request supplies a zone.
 #[derive(Debug, Clone)]
 pub struct Coordinator {
     queue: Queue,
     options: Options,
+    eligibility: Rc<dyn EligibilitySource>,
 }
 
 #[derive(Insertable)]
@@ -88,20 +97,44 @@ impl Coordinator {
     ///
     /// # Errors
     /// Rejects invalid policy and incompatible generated model metadata.
-    pub fn new(queue: Queue, options: Options) -> Result<Self, Error> {
+    pub fn new(
+        queue: Queue,
+        options: Options,
+        eligibility: Rc<dyn EligibilitySource>,
+    ) -> Result<Self, Error> {
         options.validate()?;
         queue.database.entity::<workers::Entity>()?;
         queue.database.entity::<assignments::Entity>()?;
         queue.database.entity::<placement_receipts::Entity>()?;
         queue.database.entity::<management_records::Entity>()?;
         queue.database.entity::<crate::models::management_scopes::Entity>()?;
-        Ok(Self { queue, options })
+        Ok(Self {
+            queue,
+            options,
+            eligibility,
+        })
+    }
+
+    /// The platform queue this coordinator places work from.
+    #[must_use]
+    pub const fn queue(&self) -> &Queue {
+        &self.queue
+    }
+
+    /// The trusted source of zone and enrollment facts.
+    #[must_use]
+    pub fn eligibility(&self) -> &dyn EligibilitySource {
+        self.eligibility.as_ref()
     }
 
     /// Soft liveness never revives an expired placement or a draining instance.
+    /// The registration records the zone of the enroller Control verified for
+    /// this instance, read after the worker row lock and again before commit;
+    /// an instance whose enrollment is no longer active cannot renew.
     ///
     /// # Errors
-    /// Rejects storage failures and attempts to make a draining instance ready.
+    /// Rejects storage failures, inactive or unknown enrollment and attempts to
+    /// make a draining instance ready.
     pub async fn register(
         &self,
         worker: &WorkerId,
@@ -126,6 +159,16 @@ impl Coordinator {
                 {
                     return Err(Error::Conflict);
                 }
+                let zone = self.enrolled_zone(worker).await?;
+                // An instance's zone is frozen with its enrollment; a change
+                // means the stored registration no longer describes it.
+                if previous
+                    .execution_zone_id
+                    .as_deref()
+                    .is_some_and(|stored| stored != zone.as_str())
+                {
+                    return Err(Error::Denied);
+                }
                 // Draining is terminal for this enrolled process. A delayed ready
                 // request cannot restore it, even after its heartbeat expires.
                 let expires = deadline(self.queue.clock.now().await?, self.options.worker_ttl)?;
@@ -135,14 +178,26 @@ impl Coordinator {
                         WorkerState::Ready => "ready",
                         WorkerState::Draining => "draining",
                     })?)?
-                    .and(workers::expires_at.set(expires)?)?;
+                    .and(workers::expires_at.set(expires)?)?
+                    .and(workers::execution_zone_id.set(Some(zone.as_str()))?)?;
                 let stored: Worker = workers
                     .update(workers::id.eq(worker.as_str())?, changes)
                     .await?
                     .ok_or(Error::Storage)?;
+                if self.enrolled_zone(worker).await? != zone {
+                    return Err(Error::Denied);
+                }
                 registered(&stored)
             })
             .await
+    }
+
+    /// The zone of an instance whose enrollment is active.
+    async fn enrolled_zone(&self, worker: &WorkerId) -> Result<ZoneId, Error> {
+        match self.eligibility.worker(worker).await? {
+            Some(facts) if facts.active => Ok(facts.zone),
+            _ => Err(Error::Denied),
+        }
     }
 
     /// # Errors
@@ -202,7 +257,7 @@ impl Coordinator {
                     for row in scopes {
                         cursor = Some(row.id.clone());
                         let app = AppId::parse(&row.id).map_err(|_| Error::Storage)?;
-                        if !self.has_owner(&tx, &app, None, false).await? {
+                        if !self.has_owner(&tx, &app, false).await? {
                             recovered.push(app);
                             if recovered.len() == self.options.batch_limit {
                                 return Ok(recovered);

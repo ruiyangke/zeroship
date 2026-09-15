@@ -7,7 +7,7 @@
 use crate::{
     auth::{PostgresWorkerRegistry, WorkflowAuth},
     config::WorkflowSettings,
-    coordinator::{Coordinator, Options},
+    coordinator::{connect_eligibility, Coordinator, Options},
     WorkflowHttpState,
 };
 use futures::future::{select, Either};
@@ -28,6 +28,7 @@ use zeroship_core::{
 };
 use zeroship_workflow_client::{Options as ClientOptions, QueueDeploymentHolds, Transport};
 use zeroship_workflow_manager::{
+    capacity::{Contract, StaticPool},
     driver::{Driver, Options as DriverOptions, TickReport},
     lifecycle::{self, ControlLifecycle},
     policy::control::{self, ControlPolicies, ControlPolicyStore},
@@ -166,11 +167,7 @@ pub async fn run(settings: WorkflowSettings, options: ServerOptions) -> Result<(
     let holds = ControlHolds::new(&control_url, outbound.clone(), options.coordinator)?;
     // Verify migration readiness before accepting connections. Each HTTP thread
     // constructs its own bounded pool and retention transport in the state factory.
-    let startup = Coordinator::connect(&url, options.coordinator, Rc::new(holds)).await?;
-    connect_policies(&url, options.coordinator, options.policy_cache_entries).await?;
-    let lifecycle = connect_lifecycle(&url, options.coordinator).await?;
-    let driver = Driver::new(startup.queue.clone(), options.driver, Rc::new(lifecycle))?;
-    drop(startup);
+    let driver = driver(&url, &options, holds).await?;
     compio::time::timeout(options.coordinator.command_timeout, replay.purge_expired()).await??;
     let auth = Arc::new(WorkflowAuth::new(
         verifier,
@@ -195,8 +192,10 @@ pub async fn run(settings: WorkflowSettings, options: ServerOptions) -> Result<(
             web::App::new()
                 .state_factory(async move || {
                     let holds = ControlHolds::new(&control_url, outbound, coordinator)?;
+                    let eligibility = Rc::new(connect_eligibility(&url, coordinator).await?);
                     Ok::<_, crate::coordinator::Error>(Rc::new(WorkflowHttpState {
-                        service: Coordinator::connect(&url, coordinator, Rc::new(holds)).await?,
+                        service: Coordinator::connect(&url, coordinator, Rc::new(holds), eligibility)
+                            .await?,
                         auth,
                         policy_source: Some(Rc::new(
                             connect_policies(&url, coordinator, policy_cache_entries).await?,
@@ -233,6 +232,30 @@ pub async fn run(settings: WorkflowSettings, options: ServerOptions) -> Result<(
     };
     let _ = maintenance.cancel().await;
     result
+}
+
+/// Verify migration readiness before accepting connections, then compose the
+/// maintenance driver. Each HTTP thread constructs its own bounded pool and
+/// retention transport in the state factory.
+async fn driver(url: &str, options: &ServerOptions, holds: ControlHolds) -> Result<Driver, Error> {
+    let startup = Coordinator::connect(
+        url,
+        options.coordinator,
+        Rc::new(holds),
+        Rc::new(connect_eligibility(url, options.coordinator).await?),
+    )
+    .await?;
+    connect_policies(url, options.coordinator, options.policy_cache_entries).await?;
+    let lifecycle = connect_lifecycle(url, options.coordinator).await?;
+    // A deployment that starts workers itself (compose replicas, a single
+    // host) is a static pool: the manager never starts processes and reports
+    // exhaustion durably. Adapters that start processes need an orchestrator.
+    Ok(Driver::new(
+        startup.manager.clone(),
+        options.driver,
+        Rc::new(lifecycle),
+        Contract::declarative(Rc::new(StaticPool)),
+    )?)
 }
 
 async fn connect_policies(

@@ -1,10 +1,12 @@
 //! Workflow scheduling and durable delivery using platform-bound ORM storage.
 #![cfg_attr(test, recursion_limit = "256")]
 
+pub mod capacity;
 mod clock;
 pub mod coordinator;
 pub mod deployments;
 pub mod driver;
+pub mod eligibility;
 mod error;
 pub mod lifecycle;
 pub mod local;

@@ -292,7 +292,7 @@ async fn host(fixture: &Fixture, options: Options) -> Host {
     )
     .await
     .unwrap();
-    let coordinator = Coordinator::new(queue, options).unwrap();
+    let coordinator = support::coordinator(&queue, options);
     let worker = WorkerId::mint();
     coordinator
         .register(

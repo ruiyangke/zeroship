@@ -282,8 +282,8 @@ async fn release_policy(fixture: &Fixture) {
     let catalog = Catalog::new(fixture).await;
     let queue = queue(fixture, catalog.client()).await;
     assert_eq!(
-        Driver::new(
-            queue.clone(),
+        support::try_driver(
+            &queue,
             Options {
                 hold_grace: QueueOptions::default().transaction_timeout,
                 ..options()
@@ -294,7 +294,7 @@ async fn release_policy(fixture: &Fixture) {
         Err(Error::Invalid),
         "a grace within an acquirer's budget can release a hold before its dependency commits"
     );
-    let mut driver = Driver::new(queue.clone(), options(), undeletable()).unwrap();
+    let mut driver = support::driver_for(&queue, options(), undeletable());
     let scheduler = Scheduler::new(queue.clone(), SchedulerOptions::default()).unwrap();
     let app = AppId::mint();
     let first = catalog.publish(&app, "first", &[daily()]).await;
@@ -426,7 +426,7 @@ impl HoldClient for RacingHolds {
 
 async fn racing_activation(fixture: &Fixture) {
     let catalog = Catalog::new(fixture).await;
-    let replica = Driver::new(queue(fixture, catalog.client()).await, options(), undeletable()).unwrap();
+    let replica = support::driver_for(&queue(fixture, catalog.client()).await, options(), undeletable());
     let racing = Rc::new(RacingHolds {
         inner: catalog.client(),
         replica: RefCell::new(Some(replica)),
@@ -435,7 +435,7 @@ async fn racing_activation(fixture: &Fixture) {
     });
     let queue = queue(fixture, racing.clone()).await;
     let scheduler = Scheduler::new(queue.clone(), SchedulerOptions::default()).unwrap();
-    let mut driver = Driver::new(queue.clone(), options(), undeletable()).unwrap();
+    let mut driver = support::driver_for(&queue, options(), undeletable());
     let app = AppId::mint();
     let first = catalog.publish(&app, "first", &[]).await;
     let second = catalog.publish(&app, "second", &[]).await;
@@ -591,7 +591,7 @@ async fn stale_candidates(fixture: &Fixture) {
         }
     };
     *hook.action.borrow_mut() = Some(Box::pin(action));
-    let mut driver = Driver::new(queue.clone(), options(), undeletable()).unwrap();
+    let mut driver = support::driver_for(&queue, options(), undeletable());
     completed(&driver.tick().await.retention, 4);
     assert!(hook.action.borrow().is_none(), "the page outlived the hook");
     assert_eq!(hold(fixture, &app, &first).await, released(1));
@@ -629,7 +629,7 @@ async fn unconfirmed_time(fixture: &Fixture) {
         value!({"held_at":null}),
     )
     .await;
-    let mut driver = Driver::new(queue.clone(), options(), undeletable()).unwrap();
+    let mut driver = support::driver_for(&queue, options(), undeletable());
     for _ in 0..2 {
         let report = driver.tick().await.retention;
         assert_eq!(report.visited, 1);

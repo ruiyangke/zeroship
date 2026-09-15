@@ -257,7 +257,7 @@
   {
     "file": "20260911000000_workflow_coordination.ts",
     "name": "workflow_coordination",
-    "opCount": 83
+    "opCount": 91
   },
   {
     "file": "20260911000100_project_data_keys.ts",
@@ -298,5 +298,10 @@
     "file": "20260914000500_worker_instances_enroller_binding.ts",
     "name": "worker_instances_enroller_binding",
     "opCount": 10
+  },
+  {
+    "file": "20260914000200_placement_eligibility.ts",
+    "name": "placement_eligibility",
+    "opCount": 9
   }
 ]

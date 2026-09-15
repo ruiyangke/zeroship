@@ -95,7 +95,7 @@ async fn host(fixture: &Fixture, options: Options) -> (Coordinator, Queue) {
     )
     .await
     .unwrap();
-    let coordinator = Coordinator::new(queue.clone(), options).unwrap();
+    let coordinator = support::coordinator(&queue, options);
     (coordinator, queue)
 }
 

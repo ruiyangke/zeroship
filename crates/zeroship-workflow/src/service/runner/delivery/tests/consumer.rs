@@ -636,9 +636,13 @@ impl NativeManager {
     async fn new(fixture: &Fixture) -> Rc<Self> {
         use zeroship_core::workflow_coordination::{AssignScope, RegisterWorker, WorkerState};
         let database = crate::service::tests::publication::Manager::new(fixture.app.app_id()).await;
+        // The trusted in-process worker of a local host: one zone, no enrollment.
         let coordinator = zeroship_workflow_manager::coordinator::Coordinator::new(
             database.queue.clone(),
             zeroship_workflow_manager::coordinator::Options::default(),
+            Rc::new(zeroship_workflow_manager::eligibility::LocalEligibility::new(
+                zeroship_workflow_manager::eligibility::ZoneId::default_zone(),
+            )),
         )
         .unwrap();
         let worker = fixture.lease.delivery.worker_id.clone();

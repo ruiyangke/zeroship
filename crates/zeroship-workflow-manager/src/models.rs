@@ -7,8 +7,9 @@ use zeroship_data_orm::{orm::FromRow, schema::Schema};
 
 mod schema_definition;
 pub use schema::{
-    assignments, jobs, management, management_scopes, placement_receipts, queue_scopes,
-    recovery_duties, recovery_scopes, workers,
+    assignments, capacity_demands, capacity_intents, capacity_targets, jobs, management,
+    management_scopes, placement_receipts, queue_scopes, recovery_duties, recovery_scopes,
+    workers,
 };
 pub use schema_definition::schema;
 
@@ -75,6 +76,7 @@ pub struct Worker {
     pub capacity: i64,
     pub state: String,
     pub expires_at: i64,
+    pub execution_zone_id: Option<String>,
 }
 
 #[derive(FromRow)]
@@ -93,8 +95,7 @@ pub struct Placement {
     pub revision: i64,
     pub expires_at: i64,
     pub released: bool,
-    pub wake_revision: Option<i64>,
-    pub next_due_at: Option<i64>,
+    pub refused: bool,
 }
 
 #[derive(FromRow)]
@@ -103,7 +104,7 @@ pub struct PlacementReceipt {
     pub operation: String,
     pub worker_id: String,
     pub expected_revision: Option<i64>,
-    pub wake_revision: Option<i64>,
+    pub reason: Option<String>,
     pub result_revision: i64,
     pub result_expires_at: i64,
 }

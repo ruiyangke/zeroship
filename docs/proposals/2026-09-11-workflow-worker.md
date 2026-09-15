@@ -325,6 +325,64 @@ still exist and are held to the same predicate. The worker does not yet release
 refused apps, request placement on ingress, or narrow Control's host app reads
 to its zone.
 
+### Placement eligibility and capacity provider
+
+Each app belongs to exactly one execution zone, recorded by Control in
+`zeroship.apps.execution_zone_id` when the app is created and frozen by trigger.
+An execution zone is an operator-declared set of deployment units that share
+creator-side connectivity. A worker's zone is the zone of the enroller Control
+verified when it enrolled, also frozen. Registration carries no zone; the
+manager copies it from Control's rows and nothing a worker sends can change it.
+
+The manager selects workers itself. It takes the app lock, then the worker
+lock, and admits a placement only when all of these hold: the app is not
+deleted, the zones match, the enrollment is active, the registration is ready
+and unexpired, and the worker has capacity. It reads these facts from
+Control-owned rows through column grants and an injected eligibility
+capability, after the lock waits and again before commit. A revocation that
+commits after the second read is caught by the next registration, renewal,
+ownership or delivery check, the same eventual admission fence enrollment has.
+Archived apps remain placeable for maintenance jobs; policy still refuses their
+admission, dispatch and ingress. Deleted apps are abandoned.
+
+A worker that cannot serve an assigned app releases it as refused, and the
+manager does not offer that app to that instance again. Release carries a
+closed reason and no wake hint, needs no responsible peer, and never discharges
+recovery responsibility.
+
+The driver's placement lanes key on claimable jobs; the recovery lanes turn due
+duties into jobs first, and a closing scope's Close job is a job. An app with
+claimable work and no ready eligible owner is placed on free eligible capacity
+first. Otherwise its demand is recorded durably in its zone. Each zone has one
+declarative capacity target in placement slots, its live placements plus its
+unplaced demand, so placing an app leaves the target unchanged. The target's
+revision advances only when that number changes, under the zone row's lock, and
+one request per revision is claimed in the same transaction. An injected
+provider applies the target outside every lock and replies with progress or a
+closed, durable, retryable refusal (`pool_exhausted`, `no_enroller`,
+`unavailable`). Replies apply only to the revision and attempt they answered. A
+lower target applies only after the idle hold-down. Provider failure keeps jobs,
+demand and targets pending.
+
+A provider holds only scale authority over worker units in one zone. It never
+receives creator credentials, secret-mount authority or queue messages. The
+local host injects an always-satisfied provider for its trusted in-process
+worker. Single-host deployments use a static pool that never starts processes
+and reports exhaustion durably.
+
+A native proof of concept on branch `poc/workflow-placement` passes this
+contract on PostgreSQL and SQLite, and against Control's migrated rows and
+grants. It compares the declarative target with per-app provisioning intents:
+racing replicas converge on one revision and one request under either
+contract, but a retried intent starts another worker unless the provider
+deduplicates it, and intents do not coalesce apps onto shared workers.
+
+**Implementation boundary:** providers that start processes wait for the
+production orchestrator. Control's assign, worker listing and recovery routes
+still exist and are held to the same predicate. The worker does not yet release
+refused apps, request placement on ingress, or narrow Control's host app reads
+to its zone.
+
 ## Policy bindings and authenticated leases
 
 **Native lifecycle, lease transport and Control source implemented; production
@@ -621,6 +679,7 @@ with this queue namespace; it is not a second authoritative placement store.
 | `workflow_manager.placement_receipts` | Immutable assignment/release request identity, release reason and recorded result. |
 | `workflow_manager.capacity_demands` | Apps with claimable work that free eligible capacity did not absorb, keyed by app and recorded with its zone. The committed input of every replica's target. |
 | `workflow_manager.capacity_targets` | One declarative target per execution zone in placement slots, with its revision, provider state, closed refusal, claimed attempt and pacing. |
+| `workflow_manager.capacity_intents` | The rejected per-app provisioning contract, kept only as the proof of concept's comparison. |
 | `workflow_manager.management` | Job-linked authorized command, original request provenance, per-run revision, provisional execution barrier and reported closed outcome. |
 | `workflow_manager.management_scopes` | Accepted and settled management revisions per app/run; independent of the creator's run existence. |
 | `workflow_manager.jobs` | Immutable job specification, checked operation/run/request projections, availability, current attempt, delivery fence and settlement digest/outcome. It also supplies submission and settlement deduplication. |
@@ -3343,6 +3402,7 @@ archive and retains the last valid deployment when current sources fail to build
 
 | Decision | Fixed requirement and remaining choice |
 | --- | --- |
+| Placement eligibility and capacity provider | Decided: Control's frozen app and enroller zones, read under the placement locks, and a declarative per-zone target applied by an injected provider. Providers that start processes remain, pending the production orchestrator. |
 | Archive acknowledgement | The direct Control source provides bounded convergence under original observation validity. Define any stronger execution-quiescence evidence separately from calendar acknowledgement or lease expiry. |
 | Complete job envelopes | Operation-specific deployment prerequisites, frozen manager restart targets and linked management outcomes are implemented. Collection, topic fanout and dependency propagation have durable pages, receipts and delivered consumers. |
 | Receipt retirement | Define admissibility fences and publication/settlement watermarks before deleting job deduplication state. Retain it until that proof exists. |

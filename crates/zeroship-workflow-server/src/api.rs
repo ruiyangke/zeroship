@@ -22,7 +22,7 @@ use zeroship_core::{
     service_identity::endpoints,
     workflow_coordination::{
         AssignScope, AssignedScope, Failure, FailureCode, ManageRun, ManagementStatus,
-        PublishWakeHint, RegisterWorker, ReleaseScope, ScopePage, VerifyAssignment, WorkerPage,
+        RegisterWorker, ReleaseScope, ScopePage, VerifyAssignment, WorkerPage,
     },
 };
 
@@ -74,9 +74,6 @@ pub fn configure_with_limit(config: &mut web::ServiceConfig, limit: usize) {
         .service(
             web::resource(endpoints::WORKFLOW_RELEASE.path_template())
                 .route(web::post().to(release)),
-        )
-        .service(
-            web::resource(endpoints::WORKFLOW_WAKE.path_template()).route(web::post().to(wake)),
         )
         .service(web::resource("/{path:.*}").route(web::route().to(not_found)));
 }
@@ -415,33 +412,6 @@ async fn release(
                 .service
                 .manager
                 .release(actor.id(), &command)
-                .await
-                .map_err(Error::from)
-        }
-        .await,
-    )
-}
-
-async fn wake(
-    request: web::HttpRequest,
-    state: State<SharedState>,
-    body: web::types::Payload,
-) -> web::HttpResponse {
-    respond(
-        async {
-            let actor = compio::time::timeout(
-                Duration::from_secs(5),
-                state
-                    .auth
-                    .worker(authorization(&request), endpoints::WORKFLOW_WAKE),
-            )
-            .await
-            .map_err(|_| Error::Unavailable)??;
-            let command: PublishWakeHint = read_json(&request, body).await?;
-            state
-                .service
-                .manager
-                .publish_wake(actor.id(), &command)
                 .await
                 .map_err(Error::from)
         }

@@ -211,7 +211,7 @@ async fn host_with(fixture: &Fixture, app: AppId) -> Host {
         },
     )
     .unwrap();
-    let coordinator = Coordinator::new(queue.clone(), coordinator::Options::default()).unwrap();
+    let coordinator = support::coordinator(&queue, coordinator::Options::default());
     let worker = WorkerId::mint();
     let scope = place(&coordinator, &app, &worker).await;
     recovery
@@ -1041,7 +1041,7 @@ fn replica_establishment(
             )
             .await
             .unwrap();
-            let coordinator = Coordinator::new(queue, coordinator::Options::default()).unwrap();
+            let coordinator = support::coordinator(&queue, coordinator::Options::default());
             let source = Source::new(&app, AppPolicy::default());
             let request = PolicyLeaseRequest {
                 scope,
