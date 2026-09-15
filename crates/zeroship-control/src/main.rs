@@ -1293,27 +1293,41 @@ fn main() -> std::io::Result<()> {
     }
 
     // The single-host join-token minter, if this deployment configured one.
-    // Election is inside the task: every candidate replica runs it and only the
-    // lease holder writes.
+    // Election is inside the rotation: every candidate replica asks for the
+    // lease and only the holder writes.
+    //
+    // THE FIRST ROTATION IS AWAITED HERE, BEFORE THE BIND, and it is fatal.
+    // Deployments order their workers after this process is HEALTHY, and a
+    // worker reads its token at boot with no retry, so a minter that started
+    // rotating concurrently with the bind would let the first worker read an
+    // empty volume and refuse its own boot. Being told to mint and not having
+    // minted is the same fault as the signer import above: it would leave this
+    // process looking configured while every worker failed to start.
     if let Some(minter) = join_minter {
-        match internal::control_service_issuer() {
-            Ok(audience) => {
-                let pg = Arc::clone(&state.control_pg);
-                tracing::info!(
-                    path = %minter.path.display(),
-                    zone = minter.zone.as_str(),
-                    "control: join token minter candidate started"
-                );
-                compio::runtime::spawn(async move {
-                    zeroship_control::join_minter::run(pg, minter, audience).await;
-                })
-                .detach();
-            }
+        let audience = match internal::control_service_issuer() {
+            Ok(audience) => audience,
             Err(error) => {
                 eprintln!("control: this control plane's own issuer is malformed: {error}");
                 std::process::exit(2);
             }
+        };
+        let pg = Arc::clone(&state.control_pg);
+        match zeroship_control::join_minter::rotate_once(&pg, &minter, &audience).await {
+            Ok(outcome) => tracing::info!(
+                path = %minter.path.display(),
+                zone = minter.zone.as_str(),
+                ?outcome,
+                "control: join token minter started"
+            ),
+            Err(message) => {
+                eprintln!("control: join token minter: {message}");
+                std::process::exit(2);
+            }
         }
+        compio::runtime::spawn(async move {
+            zeroship_control::join_minter::run(pg, minter, audience).await;
+        })
+        .detach();
     }
 
     let bind_addr = format!("{bind_host}:{port}");

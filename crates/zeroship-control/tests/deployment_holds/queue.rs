@@ -120,7 +120,7 @@ async fn queue_hold_http_authenticates_before_decoding_and_closes_scope() {
     let control_server = fixture.control("http://127.0.0.1:1/".into()).await;
     let origin = origin(&control_server);
     let http = Client::new().await;
-    let (worker, worker_auth) = fixture.enrolled_worker(&http, &origin).await;
+    let (worker, worker_auth) = fixture.joined_worker(&http, &origin).await;
     let workflow_instance = signer(
         ServiceIssuer::parse(&format!(
             "spiffe://zeroship.ai/svc/workflow/{}",

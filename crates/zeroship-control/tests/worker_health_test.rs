@@ -104,39 +104,41 @@ fn fresh_instance_id() -> String {
     zeroship_core::typed_id::generate(zeroship_core::typed_id::WORKER_INSTANCE_PREFIX)
 }
 
-/// Insert an enrolled instance exactly as enrolment would leave it: `active`,
-/// with a derived address. The test writes this row directly rather than driving
-/// the enrolment endpoint, because what is under test is the monitor's treatment
-/// of a row, not how the row came to exist.
+/// Insert a joined instance exactly as a join would leave it: `active`, with a
+/// derived address and a live lease. The test writes this row directly rather
+/// than driving the join endpoint, because what is under test is the monitor's
+/// treatment of a row, not how the row came to exist.
 ///
-/// `worker_instances.enroller_id` is NOT NULL with a restrict FK to
-/// `zeroship.worker_enrollers`, so this helper seeds a fresh enroller row per
-/// instance rather than driving the enrolment endpoint for that too - what
-/// monitor behaviour this file tests does not depend on enroller identity at
-/// all. Both public keys are distinct per call, because both columns are
-/// UNIQUE and this helper runs more than once in a test.
+/// `worker_instances.join_signer_id` is NOT NULL with a restrict FK to
+/// `zeroship.worker_join_signers`, so this helper seeds a fresh signer row per
+/// instance rather than driving the join endpoint for that too - what monitor
+/// behaviour this file tests does not depend on signer identity at all. Both
+/// public keys are distinct per call, because both columns are UNIQUE and this
+/// helper runs more than once in a test.
 async fn insert_active_instance(pg: &compio_postgres::Client, id: &str, port: i32) {
     let ring_key = vec![7u8; 32];
     let mut public_key = vec![9u8; 32];
     public_key[..id.len().min(32)].copy_from_slice(&id.as_bytes()[..id.len().min(32)]);
     let host: std::net::IpAddr = "127.0.0.1".parse().expect("loopback parses");
-    let enroller_id = zeroship_core::typed_id::new_worker_enroller_id();
-    let mut enroller_public_key = vec![0u8; 32];
+    let signer_id = zeroship_core::typed_id::new_join_signer_id();
+    let mut signer_public_key = vec![0u8; 32];
     let id_bytes = id.as_bytes();
     let copy_len = id_bytes.len().min(32);
-    enroller_public_key[..copy_len].copy_from_slice(&id_bytes[..copy_len]);
+    signer_public_key[..copy_len].copy_from_slice(&id_bytes[..copy_len]);
     pg.execute(
-        "INSERT INTO zeroship.worker_enrollers (id, public_key, execution_zone_id, status) \
-         VALUES ($1, $2, 'ezn_default000000000000000000', 'active')",
-        &[&enroller_id, &enroller_public_key],
+        "INSERT INTO zeroship.worker_join_signers (id, public_key, status) \
+         VALUES ($1, $2, 'active')",
+        &[&signer_id, &signer_public_key],
     )
     .await
-    .expect("insert worker enroller");
+    .expect("insert join signer");
     pg.execute(
         "INSERT INTO zeroship.worker_instances \
-         (id, ring_key, public_key, advertise_host, advertise_port, status, enroller_id) \
-         VALUES ($1, $2, $3, $4, $5, 'active', $6)",
-        &[&id, &ring_key, &public_key, &host, &port, &enroller_id],
+         (id, ring_key, public_key, advertise_host, advertise_port, status, \
+          join_signer_id, join_token_id, execution_zone_id, expires_at) \
+         VALUES ($1, $2, $3, $4, $5, 'active', $6, $7, \
+                 'ezn_default000000000000000000', now() + interval '1 hour')",
+        &[&id, &ring_key, &public_key, &host, &port, &signer_id, &id],
     )
     .await
     .expect("insert worker instance");
@@ -155,22 +157,22 @@ async fn status_of(pg: &compio_postgres::Client, id: &str) -> Option<String> {
     rows.first().map(|row| row.get(0))
 }
 
-/// Remove the instance and the enroller row its helper seeded for it.
+/// Remove the instance and the signer row its helper seeded for it.
 async fn delete_instance(pg: &compio_postgres::Client, id: &str) {
-    let enroller: Option<String> = pg
+    let signer: Option<String> = pg
         .query_opt(
-            "DELETE FROM zeroship.worker_instances WHERE id = $1 RETURNING enroller_id",
+            "DELETE FROM zeroship.worker_instances WHERE id = $1 RETURNING join_signer_id",
             &[&id],
         )
         .await
         .ok()
         .flatten()
         .map(|row| row.get(0));
-    if let Some(enroller) = enroller {
+    if let Some(signer) = signer {
         let _ = pg
             .execute(
-                "DELETE FROM zeroship.worker_enrollers WHERE id = $1",
-                &[&enroller],
+                "DELETE FROM zeroship.worker_join_signers WHERE id = $1",
+                &[&signer],
             )
             .await;
     }

@@ -173,11 +173,18 @@ pub async fn claim_minter_lease(pg: &compio_postgres::Client) -> Result<bool, St
     Ok(row.get(0))
 }
 
-/// Rotate forever, on [`ROTATION_INTERVAL`].
+/// Rotate forever, on [`ROTATION_INTERVAL`], SLEEPING FIRST.
 ///
-/// A rotation that fails is logged and retried on the next tick rather than
-/// ending the task: the previous token is still valid for the rest of its TTL,
-/// so a transient failure costs nothing as long as one succeeds inside the
+/// The first rotation is the CALLER's, awaited before this control plane binds
+/// its port: a deployment orders its workers after `control: service_healthy`,
+/// and a minter that started rotating concurrently with the bind would let a
+/// worker read a volume with no token in it yet and refuse its own boot. The
+/// ordering is then a property of the startup sequence rather than of how fast
+/// two tasks happen to run.
+///
+/// A rotation that fails here is logged and retried on the next tick rather
+/// than ending the task: the previous token is still valid for the rest of its
+/// TTL, so a transient failure costs nothing as long as one succeeds inside the
 /// margin.
 pub async fn run(
     pg: std::sync::Arc<compio_postgres::Client>,
@@ -185,6 +192,7 @@ pub async fn run(
     audience: zeroship_core::service_assertion::ServiceIssuer,
 ) {
     loop {
+        compio::time::sleep(ROTATION_INTERVAL).await;
         match rotate_once(&pg, &config, &audience).await {
             Ok(RotationOutcome::Rotated) => {
                 tracing::info!(
@@ -202,7 +210,6 @@ pub async fn run(
                 tracing::error!(%error, "control: join token rotation failed; the previous token stays valid until its expiry");
             }
         }
-        compio::time::sleep(ROTATION_INTERVAL).await;
     }
 }
 
