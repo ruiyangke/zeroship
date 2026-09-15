@@ -431,7 +431,7 @@ impl Fx {
 /// Both enforcement points that read the tables refuse, and the refusal names
 /// the money rather than something else that could also have refused.
 async fn assert_refused(fx: &Fx, owner: &UserId, organization: &str, owed_cents: i64) {
-    let report = preflight(&fx.pg, &owner, LocalInvoicing::Yes)
+    let report = preflight(&fx.pg, owner, LocalInvoicing::Yes)
         .await
         .expect("preflight");
     let blocker = report
@@ -444,7 +444,7 @@ async fn assert_refused(fx: &Fx, owner: &UserId, organization: &str, owed_cents:
         "the refusal has to quote what is actually owed"
     );
 
-    match fx.dissolve(&owner, organization).await {
+    match fx.dissolve(owner, organization).await {
         Err(OrganizationError::OrganizationOwesBilling(outstanding)) => {
             assert_eq!(outstanding.owed_cents(), owed_cents);
         }
@@ -461,7 +461,7 @@ async fn assert_refused(fx: &Fx, owner: &UserId, organization: &str, owed_cents:
 /// nothing" in the same breath. Both figures are checked here so neither can
 /// quietly become the other.
 async fn assert_unbilled_refused(fx: &Fx, owner: &UserId, organization: &str, unbilled_cents: i64) {
-    let report = preflight(&fx.pg, &owner, LocalInvoicing::Yes)
+    let report = preflight(&fx.pg, owner, LocalInvoicing::Yes)
         .await
         .expect("preflight");
     let blocker = report
@@ -483,7 +483,7 @@ async fn assert_unbilled_refused(fx: &Fx, owner: &UserId, organization: &str, un
         "the refusal has to quote what the unbilled period priced to"
     );
 
-    match fx.dissolve(&owner, organization).await {
+    match fx.dissolve(owner, organization).await {
         Err(OrganizationError::OrganizationOwesBilling(outstanding)) => {
             assert_eq!(outstanding.owed_cents(), 0);
             assert_eq!(outstanding.unbilled_cents(), unbilled_cents);
@@ -499,13 +499,13 @@ async fn assert_unbilled_refused(fx: &Fx, owner: &UserId, organization: &str, un
 /// succeed. What is asserted is which refusal comes out, which is the whole of
 /// what the money rule decides.
 async fn assert_money_clear(fx: &Fx, owner: &UserId, organization: &str) {
-    let blockers = fx.money_blockers(&owner).await;
+    let blockers = fx.money_blockers(owner).await;
     assert!(
         !blockers.iter().any(|id| id == organization),
         "{organization} owes nothing and must not be a money blocker: {blockers:?}"
     );
     if let Err(OrganizationError::OrganizationOwesBilling(outstanding)) =
-        fx.dissolve(&owner, organization).await
+        fx.dissolve(owner, organization).await
     {
         panic!("dissolve cited the money rule over a settled organization: {outstanding:?}");
     }
@@ -514,15 +514,15 @@ async fn assert_money_clear(fx: &Fx, owner: &UserId, organization: &str) {
 /// Neither point holds this organization back. `dissolve` is destructive, so it
 /// runs last and its success is the strongest form of "allowed" available.
 async fn assert_allowed(fx: &Fx, owner: &UserId, organization: &str) {
-    let blockers = fx.money_blockers(&owner).await;
+    let blockers = fx.money_blockers(owner).await;
     assert!(
         !blockers.iter().any(|id| id == organization),
         "{organization} is settled and must not be a money blocker: {blockers:?}"
     );
-    fx.dissolve(&owner, organization)
+    fx.dissolve(owner, organization)
         .await
         .expect("a settled organization closes");
-    let blockers = fx.money_blockers(&owner).await;
+    let blockers = fx.money_blockers(owner).await;
     assert!(
         !blockers.iter().any(|id| id == organization),
         "closing a settled organization must not create a debt: {blockers:?}"

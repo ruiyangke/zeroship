@@ -36,8 +36,10 @@ async fn seed_versions(fixture: &Fixture, label: &str) -> Versions {
         .await
         .unwrap();
     let current = typed_id::generate("dep");
-    let mut manifest = zeroship_bundle::Manifest::default();
-    manifest.asset_version = 1;
+    let mut manifest = zeroship_bundle::Manifest {
+        asset_version: 1,
+        ..Default::default()
+    };
     let current_hash =
         zeroship_bundle::deployment_manifest_hash(&serde_json::to_vec(&manifest).unwrap()).unwrap();
     manifest.deploy_hash = Some(current_hash.clone());
