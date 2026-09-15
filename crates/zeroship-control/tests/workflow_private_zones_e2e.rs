@@ -53,9 +53,52 @@ async fn ingress(fleet: &Fleet, path: &str) -> (u16, Value) {
     (status, value)
 }
 
+/// The gateway's own dispatch hop to the worker, without its route table.
+///
+/// Same path, same dispatch frame and same per-call peer credential the
+/// gateway mints; only the route lookup is absent, because the arm that uses
+/// this has deliberately removed the app from the route map.
+async fn dispatch(fleet: &Fleet, plan: &str, path: &str) -> (u16, Value) {
+    let frame = zeroship_core::dispatch_frame::encode_dispatch_frame(
+        "GET",
+        &format!("http://{}.zeroship.localhost{path}", Fleet::APP_NAME),
+        &[],
+        b"",
+    )
+    .expect("dispatch frame");
+    let response = cyper::Client::new()
+        .post(format!(
+            "{}/dispatch/{}",
+            fleet.worker_url,
+            fleet.app_id.as_str()
+        ))
+        .expect("worker dispatch request")
+        .header("x-app-id", fleet.app_id.as_str())
+        .expect("app id header")
+        .header("x-plan-id", plan)
+        .expect("plan header")
+        .header("x-request-id", uuid::Uuid::new_v4().to_string())
+        .expect("request id header")
+        .header(
+            "authorization",
+            crate::workflow_fleet::worker_dispatch_authorization(),
+        )
+        .expect("peer credential")
+        .body(frame)
+        .send()
+        .await
+        .expect("worker dispatch exchange");
+    let status = response.status().as_u16();
+    let body = response.bytes().await.expect("worker dispatch body");
+    let value: Value = serde_json::from_slice(&body)
+        .unwrap_or_else(|_| Value::String(String::from_utf8_lossy(&body).into_owned()));
+    LAST.with(|last| *last.borrow_mut() = Some((status, value.clone())));
+    (status, value)
+}
+
 thread_local! {
-    /// The most recent ingress answer, so a poll that never gets what it
-    /// waits for reports what it kept getting instead of only a deadline.
+    /// The most recent app answer, so a poll that never gets what it waits for
+    /// reports what it kept getting instead of only a deadline.
     static LAST: std::cell::RefCell<Option<(u16, Value)>> = const {
         std::cell::RefCell::new(None)
     };
@@ -221,31 +264,48 @@ async fn the_two_zones_run_a_workflow_without_reaching_each_other() {
         "a retained handle must answer while its generation is published: {body}",
     );
 
-    // Removing the app is what withdraws that generation. The manager's
-    // recovery lane reads `zeroship.apps.deleted_at` through
-    // `ControlLifecycle` and abandons an app it finds marked, the placement is
-    // released, and the worker retires the backend synchronously. The retained
-    // handle must go with it.
+    // REMOVING THE APP is what withdraws that generation. Control's archive and
+    // delete markers make the manager's lifecycle lane abandon the app; the
+    // placement is released, and the host's next assignment scan retires the
+    // entry - which withdraws the published backend and revokes its policy
+    // generation. A handle the app cloned earlier holds that retired
+    // generation and must refuse.
     //
-    // THE COLUMN IS DELIBERATELY THE SEAM, and this arm is about the manager
-    // and the worker rather than about Control's delete handler. The marker is
-    // the whole of what the manager reads - `lifecycle.rs` filters on
-    // `deleted_at IS NOT NULL` and nothing else - so writing it is writing the
-    // input under test. What this therefore does NOT cover: whether Control's
-    // own delete endpoint stamps that column, or what else it does around it.
-    // A handler that stopped stamping it would leave this green.
+    // THE TWO COLUMNS ARE DELIBERATELY THE SEAM, and this arm is about the
+    // manager and the worker rather than about Control's delete handler.
+    // `deleted_at IS NOT NULL` is the whole of what the manager reads
+    // (`zeroship-workflow-manager/src/lifecycle.rs`), and `archived_at` comes
+    // with it because the platform's own `apps_deleted_app_is_archived` check
+    // refuses a deleted app that is not archived - so writing both is writing
+    // the state Control produces. What this does NOT cover: whether Control's
+    // own delete endpoint writes them, or what else it does around them.
     let (platform, connection) = compio_postgres::connect(&fleet.database.url(), NoTls)
         .await
         .expect("open the platform database");
     let platform_driver = compio::runtime::spawn(connection.run());
-    platform
-        .execute(
-            "UPDATE zeroship.apps SET deleted_at = now() WHERE id = $1",
+    let plan: String = platform
+        .query_one(
+            "SELECT plan_id FROM zeroship.apps WHERE id = $1",
             &[&fleet.app_id.as_str()],
         )
         .await
-        .expect("mark the app deleted");
+        .expect("read the app's plan")
+        .get(0);
+    platform
+        .execute(
+            "UPDATE zeroship.apps SET archived_at = now(), deleted_at = now() WHERE id = $1",
+            &[&fleet.app_id.as_str()],
+        )
+        .await
+        .expect("mark the app archived and deleted");
 
+    // ASKED AT THE WORKER, not through the gateway, because an archived app
+    // leaves the route map and the gateway would answer for the missing route
+    // rather than for the handle. This is the gateway's own dispatch hop -
+    // the same path, the same dispatch frame, the same peer credential minted
+    // from the key the fleet's gateway process holds - with the route table
+    // taken out of the question.
+    //
     // The exact code, not merely some code: a retired generation is
     // `WorkflowServiceError::Unavailable` from `ReadyApps::current`, and a
     // refusal that changed to anything else - a policy denial, a fenced
@@ -255,7 +315,7 @@ async fn the_two_zones_run_a_workflow_without_reaching_each_other() {
         &mut fleet,
         "a retained handle outlived the app's retired generation",
         async |fleet| {
-            let (status, body) = ingress(fleet, "/__host/retained").await;
+            let (status, body) = dispatch(fleet, &plan, "/__host/retained").await;
             (status == 503).then(|| body["code"].as_str().unwrap_or_default().to_owned())
         },
     )

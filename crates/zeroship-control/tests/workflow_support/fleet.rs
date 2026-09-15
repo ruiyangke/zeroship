@@ -39,6 +39,23 @@ fn signing_key(service: &str) -> ServiceSigningKey {
     ServiceSigningKey::from_pkcs8_der(key(service).to_pkcs8_der().unwrap().as_bytes()).unwrap()
 }
 
+/// The credential a gateway mints for a worker dispatch, from the same key the
+/// fleet's gateway process holds. A test that has to reach the worker without
+/// the gateway's route table mints the identical assertion rather than a
+/// weaker stand-in.
+pub fn worker_dispatch_authorization() -> String {
+    use zeroship_core::service_assertion::ServiceTrustBundle;
+    use zeroship_core::service_peers::{service_issuer, ServiceKeyring};
+    let gateway = ServiceKeyring::from_parts(
+        service_issuer("svc/gateway").unwrap(),
+        signing_key("gateway"),
+        ServiceTrustBundle::new(),
+    )
+    .unwrap();
+    let worker = service_issuer(zeroship_core::service_peers::WORKER_SERVICE_NAME).unwrap();
+    format!("Bearer {}", gateway.mint_for(&worker).unwrap())
+}
+
 fn binaries() -> &'static BTreeMap<String, PathBuf> {
     static BINARIES: OnceLock<BTreeMap<String, PathBuf>> = OnceLock::new();
     BINARIES.get_or_init(|| {
