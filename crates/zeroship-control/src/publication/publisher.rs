@@ -611,7 +611,9 @@ mod tests {
                 ..usable
             },
             PublisherConfig {
-                retry_max: usable.retry_initial - Duration::from_millis(1),
+                retry_max: usable
+                    .retry_initial
+                    .saturating_sub(Duration::from_millis(1)),
                 ..usable
             },
             PublisherConfig {

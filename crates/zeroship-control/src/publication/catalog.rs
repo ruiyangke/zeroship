@@ -81,15 +81,19 @@ pub enum Transition {
     Published(Revision),
 }
 
-/// The session name catalog connections announce, so `pg_stat_activity` tells
-/// them apart from Control's other connections. A name the database URL
-/// already sets, or already offers as a fallback, is left in place.
+/// The session name catalog connections announce.
+///
+/// It tells them apart from Control's other connections in
+/// `pg_stat_activity`. A name the database URL already sets, or already
+/// offers as a fallback, is left in place.
 pub const APPLICATION_NAME: &str = "zeroship-control-catalog";
 
-/// Open a native ORM database on the Control catalog holding one session. The
-/// database belongs to the calling compio thread, which admits one top-level
-/// transaction at a time, so a second session would never be in use;
-/// [`super::Catalog`] scales the process by opening one of these per thread.
+/// Open a native ORM database on the Control catalog holding one session.
+///
+/// The database belongs to the calling compio thread, which admits one
+/// top-level transaction at a time, so a second session would never be in
+/// use; [`super::Catalog`] scales the process by opening one of these per
+/// thread.
 ///
 /// # Errors
 /// Reports invalid model declarations and unreachable storage.

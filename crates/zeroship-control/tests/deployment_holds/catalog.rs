@@ -7,6 +7,7 @@
 use super::*;
 use futures::future::join_all;
 use std::{cell::Cell, collections::BTreeSet, num::NonZeroUsize};
+use zeroship_core::workflow_coordination::Revision;
 use zeroship_control::publication::{
     catalog::APPLICATION_NAME, Acceptance, CatalogError, CatalogOptions,
 };
@@ -278,7 +279,11 @@ async fn concurrent_deploys_to_many_apps_share_the_session_bound() {
     for (app, outcome) in apps.iter().zip(outcomes) {
         match outcome {
             Ok(Acceptance::Accepted(result)) => {
-                assert_eq!(result.lifecycle_revision.map(|r| r.get()), Some(1), "{app:?}");
+                assert_eq!(
+                    result.lifecycle_revision.map(Revision::get),
+                    Some(1),
+                    "{app:?}"
+                );
             }
             other => panic!("deploy to {app:?} did not succeed: {other:?}"),
         }

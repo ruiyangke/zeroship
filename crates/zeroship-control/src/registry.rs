@@ -204,12 +204,18 @@ impl Registry {
     ///
     /// The shared catalog uses the default session bound; the production
     /// binary passes its configured bound to [`Self::connect`].
+    ///
+    /// # Errors
+    /// Reports an unreachable database and a catalog that cannot open.
     pub async fn new(db_url: &str) -> Result<Self, String> {
         Self::connect(db_url, CatalogOptions::default()).await
     }
 
     /// Connect as [`Self::new`] does, opening the shared catalog with
     /// `catalog`'s session bound.
+    ///
+    /// # Errors
+    /// Reports an unreachable database and a catalog that cannot open.
     pub async fn connect(db_url: &str, catalog: CatalogOptions) -> Result<Self, String> {
         // Fail fast if the database is unreachable; the schema must already
         // exist. Dropping `conn` sends Terminate and exits the driver task.
@@ -227,7 +233,7 @@ impl Registry {
 
     /// The process's shared catalog database.
     #[must_use]
-    pub fn catalog(&self) -> &Catalog {
+    pub const fn catalog(&self) -> &Catalog {
         &self.catalog
     }
 

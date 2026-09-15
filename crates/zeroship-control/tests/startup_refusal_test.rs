@@ -10,6 +10,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
+use ed25519_dalek::pkcs8::spki::der::pem::LineEnding;
 use ed25519_dalek::pkcs8::EncodePrivateKey;
 use zeroship_core::service_assertion::ServiceSigningKey;
 
@@ -52,7 +53,7 @@ impl Scratch {
         (
             self.secret(
                 "control.pem",
-                key.to_pkcs8_pem(Default::default()).unwrap().as_bytes(),
+                key.to_pkcs8_pem(LineEnding::LF).unwrap().as_bytes(),
             ),
             self.secret("peers.json", &serde_json::to_vec(&peers).unwrap()),
         )

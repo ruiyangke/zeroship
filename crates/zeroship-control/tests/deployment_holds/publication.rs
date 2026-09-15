@@ -1026,7 +1026,10 @@ async fn a_failing_app_backs_off_while_other_apps_publish_every_pass() {
     // failure doubles the delay until the cap holds it.
     for (offset, delay) in [(10, 20), (30, 40), (70, 40)] {
         assert_eq!(due, start + seconds(offset));
-        case.pass(due - Duration::from_millis(1), Expect::Waits).await;
+        let before_due = due
+            .checked_sub(Duration::from_millis(1))
+            .expect("a due instant later than the pass before it");
+        case.pass(before_due, Expect::Waits).await;
         case.pass(due, Expect::Fails).await;
         due += seconds(delay);
         assert_eq!(

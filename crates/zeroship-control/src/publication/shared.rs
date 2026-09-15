@@ -55,9 +55,11 @@ impl Default for CatalogOptions {
     }
 }
 
-/// Resolves once the catalog has stopped accepting operations. A background
-/// task started by [`Catalog::spawn`] returns when it does, so its thread can
-/// close its session while it still has a runtime to close it with.
+/// Resolves once the catalog has stopped accepting operations.
+///
+/// A background task started by [`Catalog::spawn`] returns when it does, so
+/// its thread can close its session while it still has a runtime to close it
+/// with.
 #[derive(Clone)]
 pub struct Closing(Shared<oneshot::Receiver<()>>);
 
@@ -196,7 +198,7 @@ impl Catalog {
             + 'static,
     {
         let (reply, answer) = oneshot::channel();
-        self.send(&self.workers[0], Work::Serve(Box::new(start), reply))?;
+        Self::send(&self.workers[0], Work::Serve(Box::new(start), reply))?;
         answer
             .await
             .map_err(|_| CatalogError::Storage("the control catalog did not start the task"))?
@@ -210,12 +212,12 @@ impl Catalog {
             .min_by_key(|worker| worker.queued.load(Ordering::Relaxed))
             .ok_or(CatalogError::Storage("the control catalog has no thread"))?;
         worker.queued.fetch_add(1, Ordering::Relaxed);
-        self.send(worker, work).inspect_err(|_| {
+        Self::send(worker, work).inspect_err(|_| {
             worker.queued.fetch_sub(1, Ordering::Relaxed);
         })
     }
 
-    fn send(&self, worker: &Worker, work: Work) -> Result<(), CatalogError> {
+    fn send(worker: &Worker, work: Work) -> Result<(), CatalogError> {
         worker
             .work
             .unbounded_send(work)
@@ -268,7 +270,7 @@ async fn serve(
     while let Some(work) = queue.next().await {
         match work {
             Work::Run(job) => {
-                report(compio::runtime::spawn(job(database.clone(), closing.clone())).await);
+                report(&compio::runtime::spawn(job(database.clone(), closing.clone())).await);
                 queued.fetch_sub(1, Ordering::Relaxed);
             }
             Work::Serve(start, reply) => match start(database.clone(), closing.clone()) {
@@ -285,11 +287,11 @@ async fn serve(
     drop(close);
     drop(database);
     for task in background {
-        report(task.await);
+        report(&task.await);
     }
 }
 
-fn report(finished: Result<(), Box<dyn std::any::Any + Send>>) {
+fn report(finished: &Result<(), Box<dyn std::any::Any + Send>>) {
     if finished.is_err() {
         tracing::error!("a control catalog operation panicked");
     }
