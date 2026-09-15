@@ -14,7 +14,13 @@ use futures::{
     future::{Either, LocalBoxFuture, Shared},
     FutureExt,
 };
-use std::{cell::RefCell, collections::HashMap, rc::Rc, sync::Arc, time::Duration};
+use std::{
+    cell::{Cell, RefCell},
+    collections::HashMap,
+    rc::Rc,
+    sync::Arc,
+    time::Duration,
+};
 use zeroship_bundle::LoadedWorker;
 use zeroship_core::{app_id::AppId, workflow_coordination::AssignedScope, workflow_jobs::JobSpec};
 use zeroship_runtime::{NativePlugin, RuntimeLimits};
@@ -27,8 +33,8 @@ use zeroship_workflow::{
         },
         schema,
         store::HostStorage,
-        AppBackend, AppPolicy, AppWorkflows, HostPolicies, PolicySnapshot, WorkerIdentity,
-        WorkflowService,
+        AppBackend, AppPolicy, AppWorkflows, HostPolicies, IngressEpochs, PolicyBinding,
+        PolicySnapshot, WorkerIdentity, WorkflowService,
     },
     WorkflowServiceError,
 };
@@ -89,6 +95,7 @@ pub struct Host<T: JobTransport> {
     thread: ManagerThread,
     consumer: JobConsumer<T>,
     executor: Rc<dyn TaskExecutor>,
+    ingress: Rc<LocalIngress>,
     placement: RefCell<Placement>,
     wake: flume::Receiver<()>,
     renew_every: Duration,
@@ -128,11 +135,12 @@ pub async fn open<C: Composition>(
     .await?;
     let policies = Arc::new(HostPolicies::default());
     let policy = policies.bind(app.clone())?;
+    let host_policy = AppPolicy::default();
     policy
         .begin_refresh()?
         .install(PolicySnapshot::configuration(
-            1.try_into().expect("initial host policy revision"),
-            AppPolicy::default(),
+            POLICY_REVISION.try_into().expect("host policy revision"),
+            host_policy.clone(),
         )?)?;
     let service = WorkflowService::open(Rc::new(store), policies)
         .await?
@@ -156,9 +164,22 @@ pub async fn open<C: Composition>(
     } else {
         manager.selected(&app).await?
     };
+    let ingress = Rc::new(LocalIngress {
+        manager: manager.clone(),
+        app: app.clone(),
+        binding: policy,
+        policy: host_policy,
+        exchanges: futures::lock::Mutex::new(()),
+        used: Cell::new(false),
+    });
     if let Some(activation) = &activation {
         manager.ensure_recovery(&app, activation).await?;
+        // Recovery responsibility and its ingress epoch commit before the
+        // host accepts a request; without an activation there is nothing to
+        // accept work for.
+        ingress.establish_epoch(None).await?;
     }
+    let api = api.with_ingress(ingress.clone());
     let (wake_sender, wake) = flume::bounded(1);
     let hint = wake_sender.clone();
     let backend = api
@@ -201,11 +222,90 @@ pub async fn open<C: Composition>(
             thread,
             consumer,
             executor,
+            ingress,
             placement: RefCell::new(Placement { scope, binding }),
             wake,
             renew_every: config.renew_interval(),
         },
     })
+}
+
+/// The only revision of the local host's configured policy.
+const POLICY_REVISION: i64 = 1;
+
+/// Establishes the app's ingress epoch through the local manager. The host is
+/// its app's platform authority, so its configured policy decides admission
+/// where a remote worker would present a policy lease, and the epoch is
+/// installed into that same configured snapshot.
+pub struct LocalIngress {
+    manager: ManagerClient,
+    app: AppId,
+    binding: PolicyBinding,
+    policy: AppPolicy,
+    /// One exchange at a time, so no establishment supersedes another's
+    /// refresh ticket while it waits on the manager.
+    exchanges: futures::lock::Mutex<()>,
+    /// Ingress accepted since the last report to the manager.
+    used: Cell<bool>,
+}
+
+impl LocalIngress {
+    /// Obtain and install an epoch above `after`, or any open epoch when it
+    /// names none. A newer epoch another acceptance already installed
+    /// satisfies the call without asking the manager.
+    ///
+    /// # Errors
+    /// Reports refused establishment, unavailable manager storage and a
+    /// retired policy binding.
+    async fn establish_epoch(
+        &self,
+        after: Option<zeroship_core::workflow_coordination::Revision>,
+    ) -> Result<(), WorkflowServiceError> {
+        let _exchange = self.exchanges.lock().await;
+        if self
+            .binding
+            .ingress_epoch()
+            .is_some_and(|held| after.is_none_or(|after| held > after))
+        {
+            return Ok(());
+        }
+        let ticket = self.binding.begin_refresh()?;
+        let epoch = self
+            .manager
+            .establish(&self.app, after, self.policy.admission)
+            .await?;
+        ticket.install(
+            PolicySnapshot::configuration(
+                POLICY_REVISION.try_into().expect("host policy revision"),
+                self.policy.clone(),
+            )?
+            .with_ingress_epoch(Some(epoch)),
+        )
+    }
+
+    /// Report ingress accepted since the previous report, so an app in use
+    /// does not close as idle. A failed report is repeated by the next one.
+    async fn report(&self) {
+        if self.used.replace(false) {
+            if let Err(error) = self.manager.note_ingress(&self.app).await {
+                self.used.set(true);
+                tracing::warn!(code = error.code(), "workflow ingress activity not reported");
+            }
+        }
+    }
+}
+
+impl IngressEpochs for LocalIngress {
+    fn establish(
+        &self,
+        after: Option<zeroship_core::workflow_coordination::Revision>,
+    ) -> LocalBoxFuture<'_, Result<(), WorkflowServiceError>> {
+        Box::pin(self.establish_epoch(after))
+    }
+
+    fn accepted(&self) {
+        self.used.set(true);
+    }
 }
 
 /// Wait until the creator has committed the delivered activation receipt.
@@ -249,6 +349,7 @@ impl<T: JobTransport> Host<T> {
             thread,
             mut consumer,
             executor,
+            ingress,
             placement,
             wake,
             renew_every,
@@ -261,6 +362,7 @@ impl<T: JobTransport> Host<T> {
                 &manager,
                 &api,
                 &executor,
+                &ingress,
                 &bindings,
                 &placement,
                 renew_every,
@@ -284,12 +386,18 @@ impl<T: JobTransport> Host<T> {
     }
 }
 
-/// Keep this worker registered and the app placed on it. A refused placement
-/// is replaced by the next revision; retired consumer bindings are rebuilt.
+/// Keep this worker registered and the app placed on it, and report ingress
+/// activity with each renewal. A refused placement is replaced by the next
+/// revision; retired consumer bindings are rebuilt.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the loop owns placement, activity reporting and consumer bindings together"
+)]
 async fn place(
     manager: &ManagerClient,
     api: &AppWorkflows,
     executor: &Rc<dyn TaskExecutor>,
+    ingress: &LocalIngress,
     bindings: &ConsumerBindings,
     placement: &RefCell<Placement>,
     every: Duration,
@@ -300,6 +408,9 @@ async fn place(
             .await
             .is_none()
         {
+            return;
+        }
+        if stopped(stop.clone(), ingress.report()).await.is_none() {
             return;
         }
         let (scope, retired) = {

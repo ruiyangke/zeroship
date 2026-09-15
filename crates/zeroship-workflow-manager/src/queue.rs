@@ -210,6 +210,7 @@ impl Queue {
         if matches!(
             job.operation,
             zeroship_core::workflow_jobs::JobOperation::Management { .. }
+                | zeroship_core::workflow_jobs::JobOperation::Close { .. }
         ) {
             return Err(Error::Invalid);
         }
@@ -264,6 +265,7 @@ impl Queue {
         if matches!(
             job.operation,
             zeroship_core::workflow_jobs::JobOperation::Management { .. }
+                | zeroship_core::workflow_jobs::JobOperation::Close { .. }
         ) {
             return Err(Error::Invalid);
         }
@@ -288,6 +290,7 @@ impl Queue {
                             }
                         }
                         self.insert(&tx, job, sample.millis).await?;
+                        Box::pin(crate::recovery::published_in(&tx, &job.app_id, sample.millis)).await?;
                         let observed = authorize(tx.clone()).await?;
                         let sample = self.clock.sample().await?;
                         let authority = current(assignment, observed, sample.millis)?;
@@ -371,6 +374,9 @@ impl Queue {
                     "assignment_revision":assignment.assignment_revision.get(),"lease_deadline":deadline,
                     "dispatch_order":dispatch_order})
             ).await?;
+            // Responsibility must exist before an intent-producing job executes.
+            // The reopen shares this claim's app lock and rolls back with it.
+            Box::pin(crate::recovery::claimed_in(&tx, &grant.delivery().job, now)).await?;
             let observed = authorize(tx.clone()).await?;
             let sample = self.clock.sample().await?;
             let authority = current(assignment, observed, sample.millis)?;
@@ -586,6 +592,13 @@ impl Queue {
                             sample.millis,
                         )
                         .await?;
+                        Box::pin(crate::recovery::settled_close(
+                            &tx,
+                            &delivery.job,
+                            settlement.outcome,
+                            sample.millis,
+                        ))
+                        .await?;
                         let observed = authorize(tx.clone()).await?;
                         let sample = self.clock.sample().await?;
                         cap_live_delivery(budget, assignment, observed, &job, sample)?;
@@ -622,6 +635,7 @@ impl Queue {
             if matches!(
                 successor.operation,
                 zeroship_core::workflow_jobs::JobOperation::Management { .. }
+                    | zeroship_core::workflow_jobs::JobOperation::Close { .. }
             ) {
                 return Err(Error::Invalid);
             }

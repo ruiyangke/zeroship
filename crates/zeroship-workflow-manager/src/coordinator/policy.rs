@@ -8,7 +8,7 @@ use std::{
     future::Future,
     time::{Duration, Instant},
 };
-use zeroship_core::workflow_coordination::{AssignedScope, WorkerId};
+use zeroship_core::{workflow_coordination::WorkerId, workflow_policy::PolicyLeaseRequest};
 
 impl Coordinator {
     /// Issue policy for an exact enrolled key under its existing app placement.
@@ -16,14 +16,21 @@ impl Coordinator {
     /// callback revalidates that same key, not another active instance key.
     /// Neither registration nor placement is renewed by requesting policy.
     ///
+    /// The lease carries the scope's ingress epoch while responsibility is open
+    /// or closing. An establishment request commits an open epoch above the
+    /// named one under the app lock, after the placement and enrollment checks,
+    /// before the grant is issued; a plain refresh never reopens responsibility.
+    ///
     /// # Errors
-    /// Refuses invalid placement, revoked enrollment, unavailable source authority
-    /// and operations whose original authority expires while awaiting I/O.
+    /// Refuses invalid placement, revoked enrollment, unavailable source authority,
+    /// establishment while policy disables admission, an establishment naming an
+    /// epoch the manager never issued, and operations whose original authority
+    /// expires while awaiting I/O.
     pub async fn policy_lease<'a, F, Fut>(
         &self,
         worker: &WorkerId,
         signing_key_id: &str,
-        scope: &AssignedScope,
+        request: &PolicyLeaseRequest,
         source: &'a dyn PolicySource,
         authorize: F,
     ) -> Result<PolicyGrant<'a>, Error>
@@ -33,6 +40,7 @@ impl Coordinator {
     {
         let started = Instant::now();
         let budget = self.budget();
+        let scope = &request.scope;
         if signing_key_id.is_empty() {
             return Err(Error::Invalid);
         }
@@ -75,7 +83,7 @@ impl Coordinator {
                 .min(placement_expires)
                 .min(source_deadline(source, &observation)?);
             budget.cap_at(original)?;
-            let mut expires_at = self
+            let (mut expires_at, ingress_epoch) = self
                 .queue
                 .transact_for(budget.clone(), |tx| {
                     let observation = &observation;
@@ -92,9 +100,20 @@ impl Coordinator {
                         if &authorize().await? != worker {
                             return Err(Error::Denied);
                         }
+                        // Responsibility commits with this transaction, before the
+                        // lease can reach the worker.
+                        let ingress_epoch = Box::pin(crate::recovery::lease_epoch_in(
+                            &tx,
+                            &scope.app_id,
+                            request.establish,
+                            request.ingress_used,
+                            observation.policy().admission,
+                            sample.millis,
+                        ))
+                        .await?;
                         expires_at = expires_at.min(source_deadline(source, observation)?);
                         budget.cap_at(expires_at)?;
-                        Ok(expires_at)
+                        Ok((expires_at, ingress_epoch))
                     }
                 })
                 .await?;
@@ -111,6 +130,7 @@ impl Coordinator {
                 worker.clone(),
                 signing_key_id.to_owned(),
                 scope,
+                ingress_epoch,
                 expires_at,
             ))
         })

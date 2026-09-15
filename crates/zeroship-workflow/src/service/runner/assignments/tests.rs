@@ -43,7 +43,7 @@ async fn complete_pagination_precedes_creator_preparation_and_publication() {
         last,
     ];
     for scope in &scopes {
-        exchanges.extend(fixture.refresh(scope));
+        exchanges.extend(fixture.establish(scope));
     }
     peer(&fixture, exchanges, async |client| {
         let (mut consumer, probe) = fixture.consumer(2);
@@ -81,7 +81,7 @@ async fn a_delayed_complete_scan_cannot_replace_a_newer_snapshot() {
     let (last, observed, release) = fixture.page(Some(&older.app_id), &[]).gated();
     let mut exchanges = vec![fixture.page(None, std::slice::from_ref(&older)), last];
     exchanges.extend(fixture.scan(std::slice::from_ref(&newer)));
-    exchanges.extend(fixture.refresh(&newer));
+    exchanges.extend(fixture.establish(&newer));
     peer(&fixture, exchanges, async |client| {
         let (mut consumer, probe) = fixture.consumer(1);
         let bindings = fixture.bindings(client, &consumer, 1);
@@ -110,7 +110,7 @@ async fn failed_or_oversized_scan_preserves_the_installed_binding_and_consumer()
         let mut replacement = [scope(), scope()];
         replacement.sort_by(|left, right| left.app_id.cmp(&right.app_id));
         let mut exchanges = fixture.scan(std::slice::from_ref(&original));
-        exchanges.extend(fixture.refresh(&original));
+        exchanges.extend(fixture.establish(&original));
         exchanges.push(fixture.page(None, &replacement[..1]));
         let next = fixture.page(Some(&replacement[0].app_id), &replacement[1..]);
         exchanges.push(if overflow { next } else { next.unavailable() });
@@ -147,7 +147,7 @@ async fn refresh_and_unchanged_scan_reuse_the_factory_runtime_and_policy_generat
     let fixture = Fixture::new();
     let scope = scope();
     let mut exchanges = fixture.scan(std::slice::from_ref(&scope));
-    exchanges.extend(fixture.refresh(&scope));
+    exchanges.extend(fixture.establish(&scope));
     exchanges.extend(fixture.refresh(&scope));
     exchanges.extend(fixture.scan(std::slice::from_ref(&scope)));
     exchanges.extend(fixture.refresh(&scope));
@@ -180,9 +180,9 @@ async fn replacement_retires_old_authority_before_waiting_for_the_new_creator() 
         ..original.clone()
     };
     let mut exchanges = fixture.scan(std::slice::from_ref(&original));
-    exchanges.extend(fixture.refresh(&original));
+    exchanges.extend(fixture.establish(&original));
     exchanges.extend(fixture.scan(std::slice::from_ref(&replacement)));
-    exchanges.extend(fixture.refresh(&replacement));
+    exchanges.extend(fixture.establish(&replacement));
     peer(&fixture, exchanges, async |client| {
         let (mut consumer, probe) = fixture.consumer(1);
         let bindings = fixture.bindings(client, &consumer, 1);
@@ -215,7 +215,7 @@ async fn close_cancels_creator_preparation_and_prevents_late_publication() {
     let scope = scope();
     let (observed, release) = fixture.factory.gate(&scope.app_id);
     let mut exchanges = fixture.scan(std::slice::from_ref(&scope));
-    exchanges.extend(fixture.refresh(&scope));
+    exchanges.extend(fixture.establish(&scope));
     peer(&fixture, exchanges, async |client| {
         let (mut consumer, probe) = fixture.consumer(1);
         let bindings = fixture.bindings(client, &consumer, 1);
@@ -249,7 +249,7 @@ async fn canceled_preparation_can_retry_without_borrowing_another_generation() {
     let scope = scope();
     let (observed, release) = fixture.factory.gate(&scope.app_id);
     let mut exchanges = fixture.scan(std::slice::from_ref(&scope));
-    exchanges.extend(fixture.refresh(&scope));
+    exchanges.extend(fixture.establish(&scope));
     exchanges.extend(fixture.refresh(&scope));
     peer(&fixture, exchanges, async |client| {
         let (mut consumer, probe) = fixture.consumer(1);
@@ -287,7 +287,7 @@ async fn factory_must_return_the_exact_app_and_policy_registry_generation() {
             scope.app_id.clone()
         });
         let mut exchanges = fixture.scan(std::slice::from_ref(&scope));
-        exchanges.extend(fixture.refresh(&scope));
+        exchanges.extend(fixture.establish(&scope));
         peer(&fixture, exchanges, async |client| {
             let (mut consumer, probe) = fixture.consumer(1);
             let bindings = fixture.bindings(client, &consumer, 1);
@@ -314,7 +314,7 @@ async fn complete_removal_retires_retained_handles_and_stops_claiming() {
     let fixture = Fixture::new();
     let scope = scope();
     let mut exchanges = fixture.scan(std::slice::from_ref(&scope));
-    exchanges.extend(fixture.refresh(&scope));
+    exchanges.extend(fixture.establish(&scope));
     exchanges.push(fixture.page(None, &[]));
     peer(&fixture, exchanges, async |client| {
         let (mut consumer, probe) = fixture.consumer(1);
@@ -341,7 +341,7 @@ async fn slow_creator_preparation_does_not_block_another_apps_disabled_policy_re
     let completed = fixture.factory.completed(&scopes[1].app_id);
     let mut exchanges = fixture.scan(&scopes);
     for scope in &scopes {
-        exchanges.extend(fixture.refresh(scope));
+        exchanges.extend(fixture.establish(scope));
     }
     let disabled = AppPolicy {
         admission: false,
@@ -381,4 +381,40 @@ async fn slow_creator_preparation_does_not_block_another_apps_disabled_policy_re
         assert_eq!(published, scopes);
     })
     .await;
+}
+
+/// A placement whose policy refuses establishment, as archive does, or whose
+/// app has no responsibility yet, still prepares under a plain lease so that
+/// delivered work such as the app's own closure can run.
+#[compio::test]
+async fn refused_establishment_prepares_the_app_under_a_plain_lease() {
+    for denied in [true, false] {
+        let fixture = Fixture::new();
+        let scope = scope();
+        let mut exchanges = fixture.scan(std::slice::from_ref(&scope));
+        let mut established = fixture.establish(&scope);
+        let refusal = established.pop().unwrap();
+        exchanges.extend(established);
+        exchanges.push(if denied {
+            refusal.denied()
+        } else {
+            refusal.conflict()
+        });
+        exchanges.push(fixture.policy(
+            &scope,
+            zeroship_core::workflow_policy::AppPolicy::default(),
+            1,
+            60_000,
+        ));
+        peer(&fixture, exchanges, async |client| {
+            let (mut consumer, probe) = fixture.consumer(1);
+            let bindings = fixture.bindings(client, &consumer, 1);
+            bindings.reconcile().await.unwrap();
+            let opened = fixture.factory.calls();
+            assert_eq!(opened.len(), 1);
+            opened[0].policy.authority().unwrap().check().unwrap();
+            assert_eq!(claims(&mut consumer, &probe).await, vec![scope.clone()]);
+        })
+        .await;
+    }
 }

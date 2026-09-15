@@ -46,7 +46,8 @@
   ],
   "recovery_scopes": [
     "id",
-    "deployment_id"
+    "deployment_id",
+    "close_job_id"
   ],
   "recovery_duties": [
     "id",

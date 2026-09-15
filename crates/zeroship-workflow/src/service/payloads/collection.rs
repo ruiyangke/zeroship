@@ -1,4 +1,10 @@
 //! Eligibility fencing shared by delivered collection and local maintenance.
+//!
+//! A payload leaves preparation through two deletions. The first records a
+//! `deleted` tombstone with a resweep deadline one staging window away, because
+//! an upload already dispatched by a dead writer may still arrive. The resweep
+//! after that window deletes the object once more and makes the tombstone
+//! `purged`, which is final: collection never selects it again.
 
 #![expect(
     clippy::future_not_send,
@@ -9,6 +15,15 @@ use super::{
     AppId, Transaction, WorkflowService, WorkflowServiceError, deadline, lock_app, models, payload,
     storage, storage_error, typed_id,
 };
+
+/// An eligible payload fenced in `deleting` before its external deletion.
+struct Fenced {
+    expires_at: i64,
+    retention: i64,
+    /// The fence found the tombstone of an earlier deletion; this deletion
+    /// is its resweep.
+    resweep: bool,
+}
 
 impl WorkflowService {
     pub(in crate::service) async fn collect_payload_checked(
@@ -22,9 +37,7 @@ impl WorkflowService {
         typed_id::parse_with_prefix(id, typed_id::WORKFLOW_PAYLOAD_PREFIX)
             .map_err(|_| invalid())?;
         let storage = storage(self)?;
-        let Some((expires_at, retention)) =
-            Box::pin(self.fence_payload(app, id, cutoff, check)).await?
-        else {
+        let Some(fenced) = Box::pin(self.fence_payload(app, id, cutoff, check)).await? else {
             return Ok(false);
         };
         check()?;
@@ -38,16 +51,27 @@ impl WorkflowService {
         check()?;
         let row = payload(&tx, app, id).await?;
         require_unreferenced(&tx, app, id).await?;
-        if row.expires_at > expires_at && matches!(row.state.as_str(), "deleting" | "deleted") {
+        if (matches!(row.state.as_str(), "deleting" | "deleted")
+            && row.expires_at > fenced.expires_at)
+            || row.state == "purged"
+        {
+            // Another attempt already advanced or finished this tombstone.
             check()?;
             tx.commit().await?;
             return Ok(false);
         }
-        if row.state != "deleting" || row.expires_at != expires_at {
+        if row.state != "deleting" || row.expires_at != fenced.expires_at {
             return Err(invalid());
         }
         let now = tx.now().await?;
-        let next = deadline(now.max(expires_at), retention)?;
+        let settled = if fenced.resweep {
+            models::payloads::state.set("purged")?
+        } else {
+            let next = deadline(now.max(fenced.expires_at), fenced.retention)?;
+            models::payloads::state
+                .set("deleted")?
+                .and(models::payloads::expires_at.set(next)?)?
+        };
         let changed = tx
             .database()
             .entity::<models::payloads::Entity>()?
@@ -56,10 +80,8 @@ impl WorkflowService {
                     .eq(app.as_str())?
                     .and(models::payloads::id.eq(id)?)
                     .and(models::payloads::state.eq("deleting")?)
-                    .and(models::payloads::expires_at.eq(expires_at)?),
-                models::payloads::state
-                    .set("deleted")?
-                    .and(models::payloads::expires_at.set(next)?)?,
+                    .and(models::payloads::expires_at.eq(fenced.expires_at)?),
+                settled,
             )
             .await?;
         changed_once(changed)?;
@@ -75,7 +97,7 @@ impl WorkflowService {
         id: &str,
         cutoff: i64,
         check: &impl Fn() -> Result<(), WorkflowServiceError>,
-    ) -> Result<Option<(i64, i64)>, WorkflowServiceError> {
+    ) -> Result<Option<Fenced>, WorkflowServiceError> {
         let mut tx = self.begin().await?;
         let policy = lock_app(&mut tx, app).await?;
         check()?;
@@ -111,7 +133,11 @@ impl WorkflowService {
         check()?;
         tx.commit().await?;
         check()?;
-        Ok(Some((row.expires_at, policy.payload_staging_retention_ms)))
+        Ok(Some(Fenced {
+            expires_at: row.expires_at,
+            retention: policy.payload_staging_retention_ms,
+            resweep: row.state == "deleted",
+        }))
     }
 }
 

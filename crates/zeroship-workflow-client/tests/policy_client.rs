@@ -20,13 +20,14 @@ use zeroship_core::{
     service_identity::{endpoints, verify_service_call},
     service_peers::{ServiceAuth, ServiceKeyring},
     workflow_coordination::{AssignedScope, FailureCode, Revision, WorkerId, AUDIENCE},
-    workflow_policy::{AppPolicy, PolicyLease},
+    workflow_policy::{AppPolicy, EstablishIngress, PolicyLease, PolicyLeaseRequest},
 };
 use zeroship_workflow_client::{Error, Options, WorkerCoordinator};
 
 struct Fixture {
     auth: Arc<ServiceAuth>,
     scope: AssignedScope,
+    request: PolicyLeaseRequest,
     worker: WorkerId,
     revision: Revision,
     policy: AppPolicy,
@@ -49,12 +50,18 @@ impl Fixture {
             .unwrap(),
             Arc::new(TransportAssertionVerifier::new(ServiceTrustBundle::new())),
         ));
+        let scope = AssignedScope {
+            app_id: AppId::mint(),
+            assignment_revision: 3.try_into().unwrap(),
+        };
         Self {
             auth,
-            scope: AssignedScope {
-                app_id: AppId::mint(),
-                assignment_revision: 3.try_into().unwrap(),
+            request: PolicyLeaseRequest {
+                scope: scope.clone(),
+                establish: None,
+                ingress_used: false,
             },
+            scope,
             worker,
             revision: 7.try_into().unwrap(),
             policy: AppPolicy {
@@ -73,6 +80,7 @@ impl Fixture {
             assignment_revision: self.scope.assignment_revision,
             policy_revision: self.revision,
             policy: self.policy.clone(),
+            ingress_epoch: Some(4.try_into().unwrap()),
             remaining_ms: remaining_ms.try_into().unwrap(),
         })
     }
@@ -124,7 +132,7 @@ fn peer<'a>(
                     observed.path,
                     endpoints::WORKFLOW_POLICY_LEASE.path_template()
                 );
-                assert_eq!(observed.body, json!(fixture.scope));
+                assert_eq!(observed.body, json!(fixture.request));
                 assert_ne!(previous.as_ref(), Some(&observed.authorization));
                 verify_service_call(
                     &verifier,
@@ -236,7 +244,7 @@ async fn leases_preserve_raw_policy_identity_and_original_deadline() {
         &fixture,
         vec![exchange, Exchange::new(fixture.reply(30_000))],
         async |client| {
-            let lease = client.policy_lease(&fixture.scope).await.unwrap();
+            let lease = client.policy_lease(&fixture.request).await.unwrap();
             let arrived = observed.await.unwrap();
             assert_eq!(lease.app_id(), &fixture.scope.app_id);
             assert_eq!(lease.worker_id(), &fixture.worker);
@@ -258,7 +266,7 @@ async fn leases_preserve_raw_policy_identity_and_original_deadline() {
             assert!(lease.remaining().unwrap() < Duration::from_secs(60));
             let cloned = lease.clone();
             assert_eq!(cloned.expires_at(), lease.expires_at());
-            let next = client.clone().policy_lease(&fixture.scope).await.unwrap();
+            let next = client.clone().policy_lease(&fixture.request).await.unwrap();
             assert_eq!(next.revision(), lease.revision());
             assert_eq!(next.policy(), lease.policy());
             assert!(next.remaining().unwrap() < Duration::from_secs(30));
@@ -290,13 +298,13 @@ async fn policy_lease_refuses_substituted_scope_and_signer() {
     peer(&fixture, exchanges, async |client| {
         for (field, _) in substitutions {
             assert_eq!(
-                client.policy_lease(&fixture.scope).await.unwrap_err(),
+                client.policy_lease(&fixture.request).await.unwrap_err(),
                 Error::InvalidResponse,
                 "substituted {field}"
             );
         }
         assert_eq!(
-            client.policy_lease(&fixture.scope).await.unwrap().policy(),
+            client.policy_lease(&fixture.request).await.unwrap().policy(),
             &fixture.policy
         );
     })
@@ -346,7 +354,7 @@ async fn policy_lease_rejects_open_incomplete_and_invalid_policy() {
         assert_ne!(rejected, 0);
         for _ in 0..rejected {
             assert_eq!(
-                client.policy_lease(&fixture.scope).await.unwrap_err(),
+                client.policy_lease(&fixture.request).await.unwrap_err(),
                 Error::InvalidResponse
             );
         }
@@ -376,7 +384,7 @@ async fn policy_lease_rejects_unrepresentable_or_missing_duration() {
     peer(&fixture, exchanges, async |client| {
         for _ in 0..=durations.len() {
             assert_eq!(
-                client.policy_lease(&fixture.scope).await.unwrap_err(),
+                client.policy_lease(&fixture.request).await.unwrap_err(),
                 Error::InvalidResponse
             );
         }
@@ -391,7 +399,7 @@ async fn a_delayed_policy_reply_cannot_restart_exhausted_authority() {
     exchange.delay = Duration::from_millis(100);
     peer(&fixture, vec![exchange], async |client| {
         assert_eq!(
-            client.policy_lease(&fixture.scope).await.unwrap_err(),
+            client.policy_lease(&fixture.request).await.unwrap_err(),
             Error::Timeout
         );
     })
@@ -410,11 +418,11 @@ async fn policy_lease_refuses_authority_beyond_its_raw_policy_ceiling() {
         ],
         async |client| {
             assert_eq!(
-                client.policy_lease(&fixture.scope).await.unwrap_err(),
+                client.policy_lease(&fixture.request).await.unwrap_err(),
                 Error::InvalidResponse
             );
             assert_eq!(
-                client.policy_lease(&fixture.scope).await.unwrap().policy(),
+                client.policy_lease(&fixture.request).await.unwrap().policy(),
                 &fixture.policy
             );
         },
@@ -429,7 +437,7 @@ async fn cloning_policy_never_renews_its_original_expiration() {
         &fixture,
         vec![Exchange::new(fixture.reply(500))],
         async |client| {
-            let lease = client.policy_lease(&fixture.scope).await.unwrap();
+            let lease = client.policy_lease(&fixture.request).await.unwrap();
             let copy = lease.clone();
             compio::time::sleep(lease.remaining().unwrap()).await;
             assert_eq!(lease.remaining(), Err(Error::Timeout));
@@ -447,9 +455,83 @@ async fn missing_source_authority_stays_unavailable_without_default_policy() {
     exchange.status = 503;
     peer(&fixture, vec![exchange], async |client| {
         assert_eq!(
-            client.policy_lease(&fixture.scope).await.unwrap_err(),
+            client.policy_lease(&fixture.request).await.unwrap_err(),
             Error::Refused(FailureCode::Unavailable)
         );
     })
+    .await;
+}
+
+#[compio::test]
+async fn establishment_replies_must_carry_an_epoch_above_the_named_one() {
+    let mut fixture = Fixture::new();
+    fixture.request.establish = Some(EstablishIngress {
+        after: Some(4.try_into().unwrap()),
+    });
+    fixture.request.ingress_used = true;
+    let mut unchanged = fixture.reply(60_000);
+    unchanged["ingressEpoch"] = json!(4);
+    let mut older = fixture.reply(60_000);
+    older["ingressEpoch"] = json!(3);
+    let mut retired = fixture.reply(60_000);
+    retired["ingressEpoch"] = Value::Null;
+    let mut advanced = fixture.reply(60_000);
+    advanced["ingressEpoch"] = json!(5);
+    let refused = [unchanged, older, retired];
+    let count = refused.len();
+    let mut exchanges: Vec<_> = refused.into_iter().map(Exchange::new).collect();
+    exchanges.push(Exchange::new(advanced));
+    peer(&fixture, exchanges, async |client| {
+        for _ in 0..count {
+            assert_eq!(
+                client.policy_lease(&fixture.request).await.unwrap_err(),
+                Error::InvalidResponse
+            );
+        }
+        let lease = client.policy_lease(&fixture.request).await.unwrap();
+        assert_eq!(lease.ingress_epoch(), Some(5.try_into().unwrap()));
+    })
+    .await;
+}
+
+/// Startup names no refused epoch: any open epoch satisfies it, none does not.
+#[compio::test]
+async fn startup_establishment_replies_must_carry_an_epoch() {
+    let mut fixture = Fixture::new();
+    fixture.request.establish = Some(EstablishIngress { after: None });
+    let mut retired = fixture.reply(60_000);
+    retired["ingressEpoch"] = Value::Null;
+    let mut first = fixture.reply(60_000);
+    first["ingressEpoch"] = json!(1);
+    peer(
+        &fixture,
+        vec![Exchange::new(retired), Exchange::new(first)],
+        async |client| {
+            assert_eq!(
+                client.policy_lease(&fixture.request).await.unwrap_err(),
+                Error::InvalidResponse
+            );
+            let lease = client.policy_lease(&fixture.request).await.unwrap();
+            assert_eq!(lease.ingress_epoch(), Some(1.try_into().unwrap()));
+        },
+    )
+    .await;
+}
+
+#[compio::test]
+async fn plain_refresh_reports_the_current_epoch_or_its_absence() {
+    let fixture = Fixture::new();
+    let mut retired = fixture.reply(60_000);
+    retired["ingressEpoch"] = Value::Null;
+    peer(
+        &fixture,
+        vec![Exchange::new(fixture.reply(60_000)), Exchange::new(retired)],
+        async |client| {
+            let open = client.policy_lease(&fixture.request).await.unwrap();
+            assert_eq!(open.ingress_epoch(), Some(4.try_into().unwrap()));
+            let closed = client.policy_lease(&fixture.request).await.unwrap();
+            assert_eq!(closed.ingress_epoch(), None);
+        },
+    )
     .await;
 }
