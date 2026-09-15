@@ -758,6 +758,7 @@ fn encode_literal(
     let mut value = match literal {
         crate::sql::Literal::Bool(value) => Value::Bool(*value),
         crate::sql::Literal::Int(value) => Value::from(*value),
+        crate::sql::Literal::TimestampMicros(value) => Value::TimestampMicros(*value),
         crate::sql::Literal::Float(value) => {
             Value::try_from(value.get()).map_err(|_| invalid("non-finite filter value"))?
         }

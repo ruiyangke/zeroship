@@ -8,23 +8,23 @@ fn fields() -> Value {
 #[compio::test]
 async fn timestamps_preserve_instants_through_postgres() {
     let owner = CollectionFixture::postgres("events", fields()).await;
-    exercise_timestamps(&owner.database).await;
+    exercise_timestamps(&owner.database, true).await;
     owner.close().await;
 }
 
 #[compio::test]
 async fn timestamps_preserve_instants_through_sqlite() {
     let owner = CollectionFixture::sqlite("events", fields()).await;
-    exercise_timestamps(&owner.database).await;
+    exercise_timestamps(&owner.database, false).await;
     owner.close().await;
 }
 
-async fn exercise_timestamps(db: &Database) {
+async fn exercise_timestamps(db: &Database, postgres: bool) {
     let events = db.collection("events").unwrap();
     for (text, millis) in [
         ("9999-12-31T23:59:50.001Z", 253_402_300_790_001_i64),
         ("0001-01-01", -62_135_596_800_000),
-        ("1969-12-31T23:59:59.999999Z", -1),
+        ("1969-12-31T23:59:59.999Z", -1),
         ("1970-01-01", 0),
         ("2000-01-01T02:00:00+02:00", 946_684_800_000),
         ("9999-12-31T23:59:59.999Z", 253_402_300_799_999),
@@ -131,6 +131,48 @@ async fn exercise_timestamps(db: &Database) {
         panic!("insert must return rows")
     };
     assert_eq!(rows[0]["instant"], Value::Null);
+
+    // A text form carrying microseconds is stored whole by the backend that
+    // has the resolution, and refused by the one that does not. Either way the
+    // caller never gets back a different instant than the one it wrote.
+    let fine = "1969-12-31T23:59:59.999999Z";
+    let written = events.insert(value!({"instant":fine})).await;
+    if postgres {
+        let Output::Rows { rows, .. } = written.unwrap() else {
+            panic!("insert must return rows")
+        };
+        assert_eq!(rows[0]["instant"].as_timestamp_micros(), Some(-1));
+        let Output::Rows { rows, .. } = events
+            .find(value!({"instant":fine}), value!({}))
+            .await
+            .unwrap()
+        else {
+            panic!("find must return rows")
+        };
+        assert_eq!(rows.len(), 1, "the stored instant matches its own text");
+    } else {
+        let error = written.unwrap_err();
+        assert!(
+            matches!(
+                error,
+                DbError::ValidationFailed {
+                    code: "timestamp_precision_unsupported",
+                    ..
+                }
+            ),
+            "{error:?}"
+        );
+        assert_eq!(
+            count(
+                events
+                    .count(value!({"instant":{"$ne":null}}), value!({}))
+                    .await
+                    .unwrap()
+            ),
+            before,
+            "a refused instant must write nothing"
+        );
+    }
 }
 
 async fn exercise_timestamp_extrema(postgres: bool) {

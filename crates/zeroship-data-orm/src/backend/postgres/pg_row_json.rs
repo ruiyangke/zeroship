@@ -91,11 +91,16 @@ fn decode_value(ty: &Type, bytes: &[u8]) -> Result<Value, String> {
             // on the Unix epoch is the whole conversion: nothing is rounded, so
             // a value read back equals the value stored and can be compared for
             // equality.
+            //
+            // The portable calendar is not enforced here. A clock expression
+            // whose offset leaves the calendar must reach the update's result
+            // check, which reports it as the caller's invalid offset on both
+            // backends; a column value outside the calendar is refused one
+            // layer up by the temporal codec, with the column named.
             micros
                 .checked_add(POSTGRES_EPOCH_UNIX_MICROS)
-                .filter(|micros| crate::sql::temporal::is_timestamp_micros(*micros))
                 .map(Value::TimestampMicros)
-                .ok_or_else(|| "timestamp is outside the portable calendar".into())
+                .ok_or_else(|| "timestamp exceeds the native instant range".into())
         }
         Type::DATE => {
             let days =

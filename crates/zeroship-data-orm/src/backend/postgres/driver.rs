@@ -174,13 +174,13 @@ mod tests {
                 .unwrap();
             assert_eq!(rebound[0]["same"], Value::Bool(true), "{timestamp}");
         }
-        // Rejection control: the values with no portable instant are refused
-        // by name rather than decoded into a neighbouring one.
+        // Rejection control: a value with no finite instant, and one past the
+        // range a native instant can name, are refused by column name rather
+        // than decoded into a neighbouring instant.
         for expression in [
             "'infinity'::timestamptz",
             "'-infinity'::timestamptz",
-            "'10000-01-01 00:00:00+00'::timestamptz",
-            "'0001-12-31 23:59:59.999999+00 BC'::timestamptz",
+            "'294276-01-01 00:00:00+00'::timestamptz",
         ] {
             let sql = format!("SELECT {expression} AS refused");
             let error = session.query(&sql, &[]).await.expect_err(&sql);
@@ -190,5 +190,18 @@ mod tests {
             assert_eq!(code, "row_decode_failed", "{sql}");
             assert!(message.contains("refused"), "{sql}: {message}");
         }
+        // An instant PostgreSQL can hold but the portable calendar cannot
+        // decodes here and is refused by the temporal codec a column read goes
+        // through, which is what keeps a clock offset that leaves the calendar
+        // classified as the caller's invalid offset instead of a decode fault.
+        let rows = session
+            .query("SELECT '10000-01-01 00:00:00+00'::timestamptz AS beyond", &[])
+            .await
+            .unwrap();
+        assert!(rows[0]["beyond"].as_timestamp_micros().is_some());
+        assert_eq!(
+            crate::sql::temporal::timestamp_micros(&rows[0]["beyond"]),
+            None
+        );
     }
 }
