@@ -237,6 +237,20 @@ fn wall_clock_micros() -> i64 {
         .unwrap_or(i64::MAX)
 }
 
+/// Whether `expires_at` is still within [`LEASE_SKEW`] of `now_micros`.
+///
+/// Both sides are microseconds, which is what the column carries and what
+/// [`UtcInstant`] hands back. A skew added in any other unit would move the
+/// edge by three orders of magnitude while every value involved still looked
+/// like a plausible epoch integer, so the unit is what the tests below bind.
+fn within_lease(expires_at: UtcInstant, now_micros: i64) -> bool {
+    i64::try_from(LEASE_SKEW.as_micros())
+        .ok()
+        .and_then(|skew| expires_at.unix_micros().checked_add(skew))
+        .unwrap_or(i64::MAX)
+        > now_micros
+}
+
 impl EligibilitySource for ControlEligibility {
     fn app<'a>(&'a self, app: &'a AppId) -> EligibilityFuture<'a, Option<AppFacts>> {
         Box::pin(async move {
@@ -275,13 +289,10 @@ impl EligibilitySource for ControlEligibility {
                 .await
                 .map_err(|_| Error::Unavailable)?;
             row.map(|row| {
-                let lease = i64::try_from(LEASE_SKEW.as_micros())
-                    .ok()
-                    .and_then(|skew| row.expires_at.unix_micros().checked_add(skew))
-                    .unwrap_or(i64::MAX);
                 Ok(WorkerFacts {
                     zone: ZoneId::parse(&row.execution_zone_id)?,
-                    active: row.status == "active" && lease > wall_clock_micros(),
+                    active: row.status == "active"
+                        && within_lease(row.expires_at, wall_clock_micros()),
                 })
             })
             .transpose()
@@ -370,5 +381,62 @@ impl EligibilitySource for SoleWorker {
                 active: *worker == self.worker,
             }))
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{LEASE_SKEW, within_lease};
+    use std::time::Duration;
+    use zeroship_data_orm::orm::UtcInstant;
+
+    /// The allowance is [`LEASE_SKEW`] of wall clock, and the lease the column
+    /// carries is microseconds. An allowance added in milliseconds would put
+    /// the edge a thousandth of the way out and let a lease that lapsed
+    /// seconds ago read as gone.
+    ///
+    /// This does not check that anything consults `within_lease`; the read
+    /// path is covered where a real instance row is placed.
+    #[test]
+    fn the_allowance_is_the_declared_skew_of_microseconds() {
+        let now = UtcInstant::from_unix_micros(1_789_279_200_000_000).unwrap();
+        let at = |offset: Duration, sign: i64| {
+            UtcInstant::from_unix_micros(
+                now.unix_micros() + sign * i64::try_from(offset.as_micros()).unwrap(),
+            )
+            .unwrap()
+        };
+        // Inside the allowance, including a lease that has already lapsed.
+        for lapsed in [Duration::from_secs(0), Duration::from_secs(29)] {
+            assert!(
+                within_lease(at(lapsed, -1), now.unix_micros()),
+                "{lapsed:?} past its lease is within the allowance"
+            );
+        }
+        assert!(within_lease(at(Duration::from_secs(3600), 1), now.unix_micros()));
+        // Rejection control: one microsecond past the allowance, and well past.
+        for lapsed in [
+            LEASE_SKEW,
+            LEASE_SKEW + Duration::from_micros(1),
+            Duration::from_secs(300),
+        ] {
+            assert!(
+                !within_lease(at(lapsed, -1), now.unix_micros()),
+                "{lapsed:?} past its lease is outside the allowance"
+            );
+        }
+        // A lease at the calendar edge saturates rather than wrapping into the
+        // past, and the epoch itself is long expired against a modern clock.
+        assert!(within_lease(
+            UtcInstant::from_unix_micros(
+                zeroship_data_orm::sql::temporal::MAX_TIMESTAMP_MICROS
+            )
+            .unwrap(),
+            now.unix_micros()
+        ));
+        assert!(!within_lease(
+            UtcInstant::from_unix_micros(0).unwrap(),
+            now.unix_micros()
+        ));
     }
 }
