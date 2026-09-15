@@ -46,6 +46,17 @@ impl Fixture {
         )
     }
 
+    /// Accept the release a host sends when it gives a placement up.
+    ///
+    /// The request carries a freshly minted request identity, so it is matched
+    /// by endpoint and recorded for the caller to assert on.
+    pub fn release(&self) -> Exchange {
+        Exchange {
+            recorded: true,
+            ..Exchange::new(endpoints::WORKFLOW_RELEASE, Value::Null, Value::Null)
+        }
+    }
+
     /// Accept one job submission and acknowledge exactly the submitted job.
     pub fn submission(&self) -> Exchange {
         Exchange {
@@ -291,6 +302,9 @@ pub(super) struct Exchange {
     gate: Option<Gate>,
     /// Match any request to the endpoint and reply with this request field.
     echo: Option<&'static str>,
+    /// Match any request to the endpoint, keep the declared response, and
+    /// record the body. For requests that carry a minted identity.
+    recorded: bool,
 }
 
 impl Exchange {
@@ -314,6 +328,7 @@ impl Exchange {
             status: 200,
             gate: None,
             echo: None,
+            recorded: false,
         }
     }
 
@@ -370,7 +385,9 @@ pub(super) fn peer<'a>(
                     .iter()
                     .position(|exchange| {
                         exchange.endpoint.path_template() == observed.path
-                            && (exchange.echo.is_some() || exchange.request == observed.body)
+                            && (exchange.echo.is_some()
+                                || exchange.recorded
+                                || exchange.request == observed.body)
                     })
                     .unwrap_or_else(|| {
                         panic!(
@@ -381,6 +398,8 @@ pub(super) fn peer<'a>(
                 let mut exchange = exchanges.remove(index).unwrap();
                 if let Some(field) = exchange.echo {
                     exchange.response = observed.body[field].clone();
+                }
+                if exchange.echo.is_some() || exchange.recorded {
                     fixture.submitted.borrow_mut().push(observed.body.clone());
                 }
                 verify_service_call(

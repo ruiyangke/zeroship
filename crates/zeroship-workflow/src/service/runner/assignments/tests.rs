@@ -303,6 +303,8 @@ async fn factory_must_return_the_exact_app_and_policy_registry_generation() {
         });
         let mut exchanges = fixture.scan(std::slice::from_ref(&scope));
         exchanges.extend(fixture.establish(&scope));
+        // A generation this process may not serve is given back as refused.
+        exchanges.push(fixture.release());
         peer(&fixture, exchanges, async |client| {
             let (mut consumer, probe) = fixture.consumer(1);
             let bindings = fixture.bindings(client, &consumer, 1);
@@ -310,8 +312,11 @@ async fn factory_must_return_the_exact_app_and_policy_registry_generation() {
                 bindings.reconcile().await,
                 Err(WorkflowServiceError::PermissionDenied)
             ));
+            assert_eq!(fixture.submitted.borrow()[0]["reason"], json!("refused"));
             let opening = fixture.factory.calls().remove(0);
-            opening.policy.authority().unwrap().check().unwrap();
+            // Giving the placement back revokes its generation, so the authority
+            // the factory was handed is no longer live.
+            assert!(opening.policy.authority().is_err());
             {
                 let runtime = opening.runtime.borrow();
                 let returned = &runtime.as_ref().unwrap().app;
