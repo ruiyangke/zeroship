@@ -305,6 +305,10 @@ Every environment name below is `ZEROSHIP_<CANONICAL>` and every overlay path is
 | `control.disable_workflow_engine` | bootstrap control | - | - | zeroship-control `--disable-workflow-engine` | - |
 | `control.gateway_url` | operational | `ZEROSHIP_CONTROL_GATEWAY_URL` | `control.gateway_url` | zeroship-control `--gateway-url` | `http://localhost` |
 | `control.invoicer_provider` | operational | `ZEROSHIP_CONTROL_INVOICER_PROVIDER` | `control.invoicer_provider` | zeroship-control `--invoicer-provider` | `lite` |
+| `control.join_signers_file` | operational | `ZEROSHIP_CONTROL_JOIN_SIGNERS_FILE` | `control.join_signers_file` | zeroship-control `--join-signers-file` | empty |
+| `control.join_token_file` | operational | `ZEROSHIP_CONTROL_JOIN_TOKEN_FILE` | `control.join_token_file` | zeroship-control `--join-token-file` | empty |
+| `control.join_token_signer_file` | operational | `ZEROSHIP_CONTROL_JOIN_TOKEN_SIGNER_FILE` | `control.join_token_signer_file` | zeroship-control `--join-token-signer-file` | empty |
+| `control.join_token_zone` | operational | `ZEROSHIP_CONTROL_JOIN_TOKEN_ZONE` | `control.join_token_zone` | zeroship-control `--join-token-zone` | `zeroship_core::worker_join::DEFAULT_EXECUTION_ZONE` |
 | `control.legacy_master_keys` | secret | `ZEROSHIP_CONTROL_LEGACY_MASTER_KEYS` | `control.legacy_master_keys` | zeroship-control `--legacy-master-keys-file` | - |
 | `control.mailer` | operational | `ZEROSHIP_CONTROL_MAILER` | `control.mailer` | zeroship-control `--mailer` | `stdout` |
 | `control.master_key` | secret | `ZEROSHIP_CONTROL_MASTER_KEY` | `control.master_key` | zeroship-control `--master-key-file` | - |
@@ -328,7 +332,6 @@ Every environment name below is `ZEROSHIP_<CANONICAL>` and every overlay path is
 | `control.supabase_jwks_url` | operational | `ZEROSHIP_CONTROL_SUPABASE_JWKS_URL` | `control.supabase_jwks_url` | zeroship-control `--supabase-jwks-url` | empty |
 | `control.supabase_jwt_issuer` | operational | `ZEROSHIP_CONTROL_SUPABASE_JWT_ISSUER` | `control.supabase_jwt_issuer` | zeroship-control `--supabase-jwt-issuer` | empty |
 | `control.tax_provider` | operational | `ZEROSHIP_CONTROL_TAX_PROVIDER` | `control.tax_provider` | zeroship-control `--tax-provider` | `native` |
-| `control.worker_enrollers_file` | operational | `ZEROSHIP_CONTROL_WORKER_ENROLLERS_FILE` | `control.worker_enrollers_file` | zeroship-control `--worker-enrollers-file` | empty |
 | `control.worker_enrolment_networks` | operational | `ZEROSHIP_CONTROL_WORKER_ENROLMENT_NETWORKS` | `control.worker_enrolment_networks` | zeroship-control `--worker-enrolment-networks` | empty |
 | `control.worker_enrolment_ports` | operational | `ZEROSHIP_CONTROL_WORKER_ENROLMENT_PORTS` | `control.worker_enrolment_ports` | zeroship-control `--worker-enrolment-ports` | empty |
 | `control.workflow_coordinator_url` | operational | `ZEROSHIP_CONTROL_WORKFLOW_COORDINATOR_URL` | `control.workflow_coordinator_url` | zeroship-control `--workflow-coordinator-url` | `http://127.0.0.1:9093` |
@@ -407,7 +410,7 @@ Every environment name below is `ZEROSHIP_<CANONICAL>` and every overlay path is
 | `worker.cdc_relay_ca_file` | operational | `ZEROSHIP_WORKER_CDC_RELAY_CA_FILE` | `worker.cdc_relay_ca_file` | zeroship-worker `--cdc-relay-ca-file` | empty |
 | `worker.cdc_relay_url` | operational | `ZEROSHIP_WORKER_CDC_RELAY_URL` | `worker.cdc_relay_url` | zeroship-worker `--cdc-relay-url` | empty |
 | `worker.database_url` | secret | `ZEROSHIP_WORKER_DATABASE_URL` | `worker.database_url` | zeroship-worker `--database-url-file` | - |
-| `worker.enroller_file` | operational | `ZEROSHIP_WORKER_ENROLLER_FILE` | `worker.enroller_file` | zeroship-worker `--enroller-file` | empty |
+| `worker.join_token_file` | operational | `ZEROSHIP_WORKER_JOIN_TOKEN_FILE` | `worker.join_token_file` | zeroship-worker `--join-token-file` | empty |
 | `worker.kv_config` | secret | `ZEROSHIP_WORKER_KV_CONFIG` | `worker.kv_config` | zeroship-worker `--kv-config-file` | - |
 | `worker.max_isolates` | operational | `ZEROSHIP_WORKER_MAX_ISOLATES` | `worker.max_isolates` | zeroship-worker `--max-isolates` | `200` |
 | `worker.max_pinned_isolates_per_app` | operational | `ZEROSHIP_WORKER_MAX_PINNED_ISOLATES_PER_APP` | `worker.max_pinned_isolates_per_app` | zeroship-worker `--max-pinned-isolates-per-app` | `4` |

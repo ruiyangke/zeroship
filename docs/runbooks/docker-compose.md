@@ -45,13 +45,16 @@ The secret directory contains these private files:
 
 `migrate-dsn` `gateway-signing.pem` `auth-signing.pem` `broker-secret`
 `pairwise-salt` `refresh-hash-key` `refresh-idem-key` `svc-gateway.pem`
-`svc-control.pem` `svc-auth.pem` `worker-enroller.json`
+`svc-control.pem` `svc-auth.pem` `join-signer.json`
 
 and these public ones: `service-peers.json`, the peer document derived from the
-service keys, and `worker-enrollers.json`, the enroller import file Control
-reads. `worker-enroller.json` is this host's worker enroller credential; every
-`worker` replica mounts it. There is no worker service key: see
-`docs/runbooks/worker-enrollers.md`.
+service keys, and `join-signers.json`, the join signer import file Control
+reads. `join-signer.json` is this deployment's operator join signer
+credential: `control` mints its own zone's join tokens from it and rotates the
+minted token into the `join-tokens` volume, which every `worker` replica
+mounts read-only and reads fresh at boot. No worker mounts the signer
+credential itself and no worker holds a service key: see
+`docs/runbooks/worker-join-signers.md`.
 
 The list comes from `secret_specs()` in `crates/zeroship-cli/src/dev.rs` plus
 `pairwise-salt`, which is written separately because its bytes must equal the
