@@ -686,12 +686,11 @@ pub fn new_provider_dead_letter_id() -> String {
 /// `svc/worker` role: it mints under `svc/worker/<wkr_id>` and is addressed as
 /// `svc/worker`.
 ///
-/// Enrolment authenticates with the key of the instance's deployment unit (a
-/// [`WORKER_ENROLLER_PREFIX`] row), which every worker of that unit holds, so a
-/// holder of it can enrol many instances in that unit. The id is therefore a
-/// DISTINGUISHER within a unit, not a boundary: what it buys is attribution,
-/// per-instance retirement, and a countable event. The boundary is the
-/// enroller, whose revocation retires every instance it enrolled.
+/// Joining authenticates with a JOIN TOKEN a trusted signer (a
+/// [`JOIN_SIGNER_PREFIX`] row) minted, plus a signature by the very keypair
+/// being registered, so a token alone admits nobody. The id is minted per
+/// process and the key never leaves memory, which is what makes per-instance
+/// retirement a real boundary here rather than only attribution.
 pub const WORKER_INSTANCE_PREFIX: &str = "wkr";
 
 /// Generate a new worker-instance ID: `wkr_{base36(uuidv7)}`. Minted by the
@@ -702,22 +701,23 @@ pub fn new_worker_instance_id() -> String {
     generate(WORKER_INSTANCE_PREFIX)
 }
 
-/// Worker-enroller typed-id prefix: one row in `zeroship.worker_enrollers` per
-/// deployment unit, a host or pool of workers in exactly one execution zone.
+/// Join-signer typed-id prefix: one row in `zeroship.worker_join_signers` per
+/// trusted signer, each permitted to mint join tokens for a declared set of
+/// execution zones.
 ///
-/// MINTED BY THE OPERATOR'S PROVISIONING STEP, never by Control or a worker.
-/// `zeroship dev init` mints one for its single host; an operator provisioning
-/// a unit by hand mints one beside the unit's keypair. Control learns the id,
-/// the public key and the zone from its import file at startup. An enroller
-/// mints under `svc/worker-enroller/<wen_id>`, and only that principal may
-/// enrol worker instances.
-pub const WORKER_ENROLLER_PREFIX: &str = "wen";
+/// MINTED BY THE OPERATOR'S PROVISIONING STEP, never by a worker. The signer's
+/// PRIVATE half stays with whoever decides a worker should exist; Control
+/// learns the id, the public half and the zones from its import file at
+/// startup. A signer mints under `svc/worker-join-signer/<wjs_id>`, and one
+/// signer covers as many deployment units as its zones do, so adding a unit is
+/// not a Control-side operation.
+pub const JOIN_SIGNER_PREFIX: &str = "wjs";
 
-/// Generate a new worker-enroller ID: `wen_{base36(uuidv7)}`. The
-/// `zeroship.worker_enrollers.id` column stores the full typed-id string under a
-/// `worker_enrollers_id_shape` CHECK.
-pub fn new_worker_enroller_id() -> String {
-    generate(WORKER_ENROLLER_PREFIX)
+/// Generate a new join-signer ID: `wjs_{base36(uuidv7)}`. The
+/// `zeroship.worker_join_signers.id` column stores the full typed-id string
+/// under a `worker_join_signers_id_shape` CHECK.
+pub fn new_join_signer_id() -> String {
+    generate(JOIN_SIGNER_PREFIX)
 }
 
 #[cfg(test)]
@@ -1067,19 +1067,19 @@ mod tests {
         assert_ne!(prefix, ORGANIZATION_BILLING_HISTORY_PREFIX);
     }
 
-    /// `wkr` and `wen` must collide with nothing, and the sweep is over the
+    /// `wkr` and `wjs` must collide with nothing, and the sweep is over the
     /// WHOLE registry rather than a family, because neither a worker instance
-    /// nor its enroller is a member of one: both are addressed by the control
+    /// nor the signer that admitted it is a member of one: both are addressed by the control
     /// plane and by nothing else. Each is also swept against the other.
     ///
     /// WHAT THIS DOES NOT CATCH: a prefix added to the module after this list
     /// was written is not in the list, so this test cannot see it. Adding a
     /// prefix means adding it here; the failure of that is silent.
     #[test]
-    fn worker_instance_and_enroller_prefixes_are_three_chars_and_disjoint() {
+    fn worker_instance_and_join_signer_prefixes_are_three_chars_and_disjoint() {
         for (prefix, minted) in [
             (WORKER_INSTANCE_PREFIX, new_worker_instance_id()),
-            (WORKER_ENROLLER_PREFIX, new_worker_enroller_id()),
+            (JOIN_SIGNER_PREFIX, new_join_signer_id()),
         ] {
             assert_eq!(prefix.len(), 3, "{prefix} must be 3 chars (R16-API2)");
             assert!(minted.starts_with(&format!("{prefix}_")), "got {minted}");
@@ -1088,7 +1088,7 @@ mod tests {
             assert_eq!(parsed, prefix);
         }
         // The control: the two are not one prefix spelled twice.
-        assert_ne!(WORKER_INSTANCE_PREFIX, WORKER_ENROLLER_PREFIX);
+        assert_ne!(WORKER_INSTANCE_PREFIX, JOIN_SIGNER_PREFIX);
 
         let registry = [
             ("deployments", DEPLOYMENT_PREFIX),
@@ -1130,7 +1130,7 @@ mod tests {
             ("provider_dead_letter", PROVIDER_DEAD_LETTER_PREFIX),
         ];
         for (owner, other) in registry {
-            for prefix in [WORKER_INSTANCE_PREFIX, WORKER_ENROLLER_PREFIX] {
+            for prefix in [WORKER_INSTANCE_PREFIX, JOIN_SIGNER_PREFIX] {
                 assert_ne!(
                     prefix, other,
                     "{prefix} must be disjoint from every registered prefix; {owner} already uses it"

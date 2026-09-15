@@ -81,21 +81,21 @@ async fn relay_process_authenticates_workers_and_streams_commits_without_worker_
     let publication = zeroship_core::replication_names::publication_name(&app).unwrap();
     let slot = publication.replacen("__zs_pub_", "__zs_relay_", 1);
     db.batch_execute(&format!("CREATE SCHEMA IF NOT EXISTS zeroship; CREATE TABLE IF NOT EXISTS zeroship.worker_instances (id text PRIMARY KEY, ring_key bytea NOT NULL, public_key bytea NOT NULL, advertise_host inet NOT NULL, advertise_port int NOT NULL, registered_at timestamptz NOT NULL DEFAULT now(), status text NOT NULL CHECK (status IN ('active', 'draining', 'gone'))); GRANT USAGE ON SCHEMA zeroship TO \"{relay_role}\"; GRANT SELECT (id, status, public_key) ON zeroship.worker_instances TO \"{relay_role}\"; CREATE SCHEMA \"{app}\"; CREATE TABLE \"{app}\".orders (id int PRIMARY KEY, secret text); GRANT USAGE ON SCHEMA \"{app}\" TO \"{worker_role}\"; GRANT SELECT, INSERT, UPDATE, DELETE ON \"{app}\".orders TO \"{worker_role}\"; CREATE PUBLICATION \"{publication}\" FOR TABLE \"{app}\".orders")).await.unwrap();
-    // A minimal stand-in for the real `zeroship.worker_enrollers` table
-    // (option 1A of the worker-enrollment-bootstrap design), just enough to
-    // model the two facts the CDC reader's cascade depends on: an enroller has
-    // a status, and an instance names the enroller that admitted it. The
-    // relay/worker roles get no grant on it - `auth::public_key` never reads
-    // it, only `zeroship.worker_instances.status`, exactly as the real
-    // migration's design states ("readers keep their single status='active'
-    // predicate and need no join and no new grants").
-    db.batch_execute("CREATE TABLE IF NOT EXISTS zeroship.worker_enrollers (id text PRIMARY KEY, status text NOT NULL CHECK (status IN ('active','revoked'))); ALTER TABLE zeroship.worker_instances ADD COLUMN IF NOT EXISTS enroller_id text REFERENCES zeroship.worker_enrollers(id)").await.unwrap();
-    let enroller_e = zeroship_core::typed_id::generate("wen");
-    let enroller_f = zeroship_core::typed_id::generate("wen");
-    for enroller in [&enroller_e, &enroller_f] {
+    // A minimal stand-in for the real `zeroship.worker_join_signers` table
+    // (`db/migrations-ts/20260914000400_execution_zones_and_join_signers.ts`),
+    // just enough to model the two facts the CDC reader's cascade depends on:
+    // a signer has a status, and an instance names the signer that admitted
+    // it. The relay/worker roles get no grant on it - `auth::public_key`
+    // never reads it, only `zeroship.worker_instances.status`, exactly as the
+    // real migration's design states ("readers keep their single
+    // status='active' predicate and need no join and no new grants").
+    db.batch_execute("CREATE TABLE IF NOT EXISTS zeroship.worker_join_signers (id text PRIMARY KEY, status text NOT NULL CHECK (status IN ('active','revoked'))); ALTER TABLE zeroship.worker_instances ADD COLUMN IF NOT EXISTS join_signer_id text REFERENCES zeroship.worker_join_signers(id)").await.unwrap();
+    let signer_e = zeroship_core::typed_id::new_join_signer_id();
+    let signer_f = zeroship_core::typed_id::new_join_signer_id();
+    for signer in [&signer_e, &signer_f] {
         db.execute(
-            "INSERT INTO zeroship.worker_enrollers (id, status) VALUES ($1, 'active')",
-            &[enroller],
+            "INSERT INTO zeroship.worker_join_signers (id, status) VALUES ($1, 'active')",
+            &[signer],
         )
         .await
         .unwrap();
@@ -104,16 +104,16 @@ async fn relay_process_authenticates_workers_and_streams_commits_without_worker_
     let second_id = zeroship_core::typed_id::generate("wkr");
     let first_key = ServiceSigningKey::generate();
     let second_key = ServiceSigningKey::generate();
-    // `first_id` enrols under E, `second_id` under F - the PoC's later arm
+    // `first_id` joined under E, `second_id` under F - the PoC's later arm
     // revokes E alone and requires only `first_id` to be affected.
-    for (id, key, enroller) in [
-        (&first_id, &first_key, &enroller_e),
-        (&second_id, &second_key, &enroller_f),
+    for (id, key, signer) in [
+        (&first_id, &first_key, &signer_e),
+        (&second_id, &second_key, &signer_f),
     ] {
         let public = key.verifying_key_bytes().to_vec();
         db.execute(
-            "INSERT INTO zeroship.worker_instances (id, ring_key, public_key, advertise_host, advertise_port, status, enroller_id) VALUES ($1, $2, $2, '127.0.0.1'::inet, 8080, 'active', $3)",
-            &[id, &public, enroller],
+            "INSERT INTO zeroship.worker_instances (id, ring_key, public_key, advertise_host, advertise_port, status, join_signer_id) VALUES ($1, $2, $2, '127.0.0.1'::inet, 8080, 'active', $3)",
+            &[id, &public, signer],
         )
         .await
         .unwrap();
@@ -310,17 +310,16 @@ async fn relay_process_authenticates_workers_and_streams_commits_without_worker_
         zeroship_data_orm::cdc::SubscriptionMessage::Resync
     ));
 
-    // Revoke enroller E as one transaction, exactly as
-    // `zeroship.revoke_worker_enroller` does in the real migration
-    // (db/migrations-ts/20260914000500_worker_instances_enroller_binding.ts):
-    // mark the enroller row revoked, then mark every active instance it
-    // admitted gone. Nothing here writes `first_id` by name - the cascade is
-    // scoped entirely through `enroller_id`, so this is the PoC's proof that
-    // an ENROLLER-level operation, not a per-instance one, is what reaches
-    // this reader.
+    // Purge signer E as one transaction, exactly as
+    // `zeroship.purge_worker_join_signer` does in the real migration
+    // (db/migrations-ts/20260914000500_worker_join_bindings.ts): mark the
+    // signer row revoked, then mark every active instance it admitted gone.
+    // Nothing here writes `first_id` by name - the cascade is scoped entirely
+    // through `join_signer_id`, so this is the PoC's proof that a SIGNER-level
+    // operation, not a per-instance one, is what reaches this reader.
     db.batch_execute(&format!(
-        "BEGIN; UPDATE zeroship.worker_enrollers SET status = 'revoked' WHERE id = '{enroller_e}'; \
-         UPDATE zeroship.worker_instances SET status = 'gone' WHERE enroller_id = '{enroller_e}' AND status = 'active'; \
+        "BEGIN; UPDATE zeroship.worker_join_signers SET status = 'revoked' WHERE id = '{signer_e}'; \
+         UPDATE zeroship.worker_instances SET status = 'gone' WHERE join_signer_id = '{signer_e}' AND status = 'active'; \
          COMMIT"
     ))
     .await
@@ -335,7 +334,7 @@ async fn relay_process_authenticates_workers_and_streams_commits_without_worker_
         ))
         .await
         .unwrap();
-    // THE PAIRED CONTROL: `second_id` enrolled under F, which the revoke above
+    // THE PAIRED CONTROL: `second_id` joined under F, which the purge above
     // never touched, is unaffected by E's revocation.
     assert_eq!(receive(&mut second).await.unwrap(), expected);
     native_handle.shutdown().await.unwrap();
@@ -371,8 +370,8 @@ async fn relay_process_authenticates_workers_and_streams_commits_without_worker_
     .await
     .unwrap();
     db.execute(
-        "DELETE FROM zeroship.worker_enrollers WHERE id = $1 OR id = $2",
-        &[&enroller_e, &enroller_f],
+        "DELETE FROM zeroship.worker_join_signers WHERE id = $1 OR id = $2",
+        &[&signer_e, &signer_f],
     )
     .await
     .unwrap();

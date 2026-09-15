@@ -243,7 +243,7 @@ pub struct ControlSettings {
     #[config(name = "control.app_base_domain", default = "zeroship.ai".to_owned())]
     pub app_base_domain: Operational<String>,
 
-    /// Comma-separated CIDRs a worker instance may enrol FROM.
+    /// Comma-separated CIDRs a worker instance may join FROM.
     ///
     /// Half of the enrolment envelope. Control derives a worker's advertised
     /// host from the observed peer address of the enrolment connection and
@@ -269,22 +269,55 @@ pub struct ControlSettings {
     #[config(name = "control.worker_enrolment_ports", default = String::new())]
     pub worker_enrolment_ports: Operational<String>,
 
-    /// JSON FILE naming every worker enroller this deployment provisions: one
-    /// id, execution-zone name and Ed25519 public key per deployment unit.
+    /// JSON FILE naming every JOIN SIGNER this deployment trusts: one id, the
+    /// execution zones it may mint for, and its Ed25519 PUBLIC key.
     ///
-    /// Read once at startup and only ever ADDED from: an enroller Control has
-    /// not recorded is inserted active, a recorded one is left as it is - a
-    /// REVOKED one stays revoked however long its line stays in the file - and
-    /// a file that disagrees with any recorded enroller refuses the boot and
-    /// writes nothing. `crates/zeroship-control/src/worker_enrolment.rs`
-    /// (`import_enrollers`) carries the shape; `docs/runbooks/worker-enrollers.md`
-    /// carries the operator procedure, revocation included.
+    /// Read once at startup and only ever ADDED from: a signer Control has not
+    /// recorded is inserted active, a recorded one is left as it is - a REVOKED
+    /// one stays revoked however long its line stays in the file - and a file
+    /// that disagrees with any recorded signer, in key OR in permitted zones,
+    /// refuses the boot and writes nothing.
+    /// `crates/zeroship-control/src/worker_join.rs` (`import_join_signers`)
+    /// carries the shape; `docs/runbooks/worker-join-signers.md` carries the
+    /// operator procedure and both revocation verbs.
     ///
-    /// Empty (the default) imports nothing. Every enrolment then refuses,
-    /// because no enroller resolves, unless the enrollers were recorded by an
-    /// earlier boot.
-    #[config(name = "control.worker_enrollers_file", default = PathBuf::new())]
-    pub worker_enrollers_file: Operational<PathBuf>,
+    /// Empty (the default) imports nothing. Every join then refuses, because no
+    /// signer resolves, unless the signers were recorded by an earlier boot.
+    #[config(name = "control.join_signers_file", default = PathBuf::new())]
+    pub join_signers_file: Operational<PathBuf>,
+
+    /// The signer CREDENTIAL this control plane mints join tokens with, on a
+    /// single-host deployment where nobody is present to mint by hand.
+    ///
+    /// Empty (the default) is the multi-host shape: Control verifies join
+    /// tokens without holding any key that can make one, and the operator mints
+    /// with `zeroship join-token` per provisioning. Setting it makes THIS
+    /// process a candidate minter - one replica is elected, see
+    /// `crate::join_minter`.
+    ///
+    /// A PATH, not a `Secret<String>`: the loader refuses a group- or
+    /// world-readable file, which is not possible once the material has become
+    /// an in-memory `String`. The signer's public half must also appear in
+    /// `control.join_signers_file`, or Control would refuse its own tokens.
+    #[config(name = "control.join_token_signer_file", default = PathBuf::new())]
+    pub join_token_signer_file: Operational<PathBuf>,
+
+    /// Where the minted join token is written for the worker containers to
+    /// read. Empty (the default) mints nothing.
+    ///
+    /// The file is a BEARER ARTIFACT valid for its TTL: whoever can read that
+    /// volume can join a worker in that zone. Rotation bounds the window and the
+    /// use cap bounds the blast radius; the trust boundary is the volume.
+    #[config(name = "control.join_token_file", default = PathBuf::new())]
+    pub join_token_file: Operational<PathBuf>,
+
+    /// The execution zone the minted token admits into. Defaults to the zone
+    /// every deployment declares.
+    #[config(
+        name = "control.join_token_zone",
+        default = zeroship_core::worker_join::DEFAULT_EXECUTION_ZONE.to_owned()
+    )]
+    pub join_token_zone: Operational<String>,
 
     /// Retention horizon (months) for the append-only audit tables
     /// `zeroship.app_audit` + `zeroship.authz_decisions`. Rows older than this

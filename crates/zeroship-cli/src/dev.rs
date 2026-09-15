@@ -59,8 +59,7 @@ const WEAK_LITERALS: &[&str] = &[
 pub(crate) fn cmd_dev(args: &[String]) -> Result<(), String> {
     match args.get(2).map(String::as_str) {
         Some("init") => {}
-        Some("enroller") => return cmd_dev_enroller(args),
-        _ => return Err(format!("{}\n{}", dev_init_usage(), dev_enroller_usage())),
+        _ => return Err(dev_init_usage().to_string()),
     }
 
     let options = parse_init_options(args)?;
@@ -95,117 +94,6 @@ pub(crate) fn cmd_dev(args: &[String]) -> Result<(), String> {
 
 fn dev_init_usage() -> &'static str {
     "Usage: zeroship dev init [--secrets-dir=PATH] [--env-file=PATH]"
-}
-
-fn dev_enroller_usage() -> &'static str {
-    "Usage: zeroship dev enroller --credential=PATH --import-file=PATH [--zone=NAME]"
-}
-
-/// Provision ONE more worker deployment unit: mint its enroller, write the
-/// credential its workers mount, and add its public half to Control's import
-/// file.
-///
-/// `zeroship dev init` provisions the enroller of the host it runs on; this is
-/// how an operator adds a unit - another host or pool - to the same
-/// deployment. The credential is created, never replaced: a unit's key is
-/// never rotated in place, because Control refuses a changed key for a
-/// recorded id. The import file is extended, never rewritten: every entry
-/// already in it is kept exactly as it was.
-fn cmd_dev_enroller(args: &[String]) -> Result<(), String> {
-    let mut credential = None;
-    let mut import_file = None;
-    let mut zone = None;
-    // Both spellings `dev init` takes: `--name=value` and `--name value`.
-    let mut index = 3;
-    while index < args.len() {
-        let arg = &args[index];
-        let (name, inline_value) = arg
-            .split_once('=')
-            .map_or((arg.as_str(), None), |(name, value)| (name, Some(value)));
-        let slot = match name {
-            "--credential" => &mut credential,
-            "--import-file" => &mut import_file,
-            "--zone" => &mut zone,
-            "--help" => return Err(dev_enroller_usage().to_string()),
-            _ => return Err(format!("unknown argument {arg:?}. {}", dev_enroller_usage())),
-        };
-        if slot.is_some() {
-            return Err(format!("{name} was supplied more than once"));
-        }
-        let value = if let Some(value) = inline_value {
-            value.to_owned()
-        } else {
-            index += 1;
-            args.get(index)
-                .filter(|value| !value.starts_with("--"))
-                .cloned()
-                .ok_or_else(|| format!("{name} requires a value"))?
-        };
-        if value.is_empty() {
-            return Err(format!("{name} requires a non-empty value"));
-        }
-        *slot = Some(value);
-        index += 1;
-    }
-    let (Some(credential), Some(import_file)) = (credential, import_file) else {
-        return Err(dev_enroller_usage().to_string());
-    };
-    let zone = zone.unwrap_or_else(|| {
-        zeroship_core::worker_enrollers::DEFAULT_EXECUTION_ZONE.to_owned()
-    });
-    let enroller_id = provision_enroller(Path::new(&credential), Path::new(&import_file), &zone)?;
-    eprintln!("zeroship dev enroller: provisioned enroller {enroller_id} in zone {zone:?}");
-    eprintln!("  created {credential} (mount it into the unit's workers as ZEROSHIP_WORKER_ENROLLER_FILE)");
-    eprintln!("  added   {enroller_id} to {import_file} (restart Control to import it)");
-    Ok(())
-}
-
-/// Mint one enroller into `credential` and `import_file`, returning its id.
-///
-/// The credential is created FIRST and removed again if the import file
-/// cannot be written, so a failed run leaves neither a key Control will never
-/// learn of nor an import entry whose private half nobody holds.
-fn provision_enroller(credential: &Path, import_file: &Path, zone: &str) -> Result<String, String> {
-    reject_symlink(import_file, "worker enroller import file")?;
-    if std::fs::symlink_metadata(credential).is_ok() {
-        return Err(format!(
-            "{} already exists and was not replaced; a unit's enroller key is never rotated \
-             in place - provision a new enroller at a new path instead",
-            credential.display()
-        ));
-    }
-    let mut records = if import_file.exists() {
-        read_worker_enroller_import(import_file)?
-    } else {
-        Vec::new()
-    };
-    let bytes = generate_worker_enroller()?;
-    let (enroller_id, public_key) = parse_worker_enroller(&bytes)?;
-    if records
-        .iter()
-        .any(|record| record.id == enroller_id || record.public_key == public_key)
-    {
-        return Err("a freshly minted enroller collided with a recorded one; re-run".to_owned());
-    }
-    records.push(zeroship_core::worker_enrollers::EnrollerRecord {
-        id: enroller_id.clone(),
-        zone: zone.to_owned(),
-        public_key,
-    });
-    // Validate the document we are about to write with the reader's parser, so
-    // a zone name Control would refuse is refused here, before any file exists.
-    let document = zeroship_core::worker_enrollers::render_enroller_import(&records);
-    zeroship_core::worker_enrollers::parse_enroller_import(document.as_bytes())
-        .map_err(|error| format!("the extended import file would be refused: {error}"))?;
-    create_private_file(credential, &bytes)?;
-    if let Err(error) = std::fs::write(import_file, document) {
-        let _ = std::fs::remove_file(credential);
-        return Err(format!(
-            "write {}: {error}; the new credential was removed again",
-            import_file.display()
-        ));
-    }
-    Ok(enroller_id)
 }
 
 #[derive(Debug)]
@@ -305,10 +193,10 @@ fn init_dev_secrets(secrets_dir: &Path, env_file: &Path) -> Result<InitOutcome, 
     // see it. Refused here, in the same before-anything-is-created phase,
     // because the run that would proceed publishes the collapsed document.
     reject_shared_service_keys(&existing_service_public_keys(secrets_dir)?)?;
-    // The enroller import file is judged against the enroller credential
+    // The trusted-signer import file is judged against the signer credential
     // before anything is created, for the same reason: a run that would refuse
     // it afterwards has already written everything else.
-    check_worker_enrollers(secrets_dir)?;
+    check_join_signers(secrets_dir)?;
 
     let mut desired_env = existing_env.clone();
     for name in env_keys() {
@@ -330,7 +218,7 @@ fn init_dev_secrets(secrets_dir: &Path, env_file: &Path) -> Result<InitOutcome, 
     }
     ensure_pairwise_file(&pairwise_path, pairwise.as_bytes(), &mut outcome)?;
     write_service_peers(secrets_dir)?;
-    write_worker_enrollers(secrets_dir)?;
+    write_join_signers(secrets_dir)?;
 
     let missing_env = env_keys()
         .filter(|name| !existing_env.contains_key(*name))
@@ -395,11 +283,10 @@ fn validate_migrate_dsn(bytes: &[u8]) -> Result<(), String> {
 /// identity in every service's memory and turn the assertion back into a shared
 /// secret with more ceremony.
 ///
-/// THE WORKER IS NOT HERE, and that is the enrolment design rather than an
-/// omission. No worker holds a `svc/worker` role key: a worker enrols with its
-/// deployment unit's ENROLLER credential ([`WORKER_ENROLLER_FILE`]) and mints
-/// under an instance key it draws at boot, so the peer document publishes no
-/// worker key at all.
+/// THE WORKER IS NOT HERE, and that is the join design rather than an
+/// omission. No worker holds a `svc/worker` role key: a worker joins with a
+/// TOKEN a trusted signer minted and mints under an instance key it draws in
+/// memory at boot, so the peer document publishes no worker key at all.
 ///
 /// THAT PARAGRAPH WAS A COMMENT AND NOTHING ELSE UNTIL 2026-09-07, and the
 /// difference was reachable with this very command. `ensure_secret_file` keeps
@@ -409,7 +296,7 @@ fn validate_migrate_dsn(bytes: &[u8]) -> Result<(), String> {
 /// `ZEROSHIP_*_SERVICE_KEY_FILE` mount - exited 0, printed "kept" for each and
 /// published that key under every issuer. `reject_shared_service_keys` now
 /// refuses it, before anything is created and again before the document is
-/// written, and it judges the worker enroller key in the same set.
+/// written, and it judges the join signer key in the same set.
 ///
 /// Why refuse rather than warn: the run EMITS A CREDENTIAL DOCUMENT. Under a
 /// one-key document every issuer resolves to the same key, so a peer holding
@@ -426,28 +313,32 @@ const SERVICE_KEY_FILES: [(&str, &str); 3] = [
     ("svc-auth.pem", "svc/auth"),
 ];
 
-/// This host's worker ENROLLER credential: the `wen_` id and the Ed25519
-/// PKCS#8 PEM private key of the one deployment unit a single-host deployment
-/// is, in the document `ServiceKeyring::load_worker_enroller` reads. Every
-/// worker replica on the host mounts it - `--scale` replicas are one unit -
-/// and spends it on its boot-time enrolment and nothing else.
+/// This deployment's OPERATOR SIGNER credential: the `wjs_` id and the Ed25519
+/// PKCS#8 PEM private key that mints join tokens, in the document
+/// `zeroship_core::service_peers::load_join_signer_credential` reads.
 ///
-/// Private, like every key file here. Generated once and never rotated:
-/// re-keying a unit is provisioning a NEW enroller, because Control refuses a
-/// changed key for a recorded id (`docs/runbooks/worker-enrollers.md`).
-const WORKER_ENROLLER_FILE: &str = "worker-enroller.json";
+/// NO WORKER MOUNTS THIS, and that is the whole point of the shape. A worker
+/// carries a TOKEN, never a signing key: the key belongs to whoever decides a
+/// worker should exist, which on a single host is the control plane
+/// (`control.join_token_signer_file`) and on a fleet is the operator running
+/// `zeroship join-token`.
+///
+/// Private, like every key file here. Generated once and never rotated in
+/// place: re-keying is provisioning a NEW signer, because Control refuses a
+/// changed key for a recorded id (`docs/runbooks/worker-join-signers.md`).
+const JOIN_SIGNER_FILE: &str = "join-signer.json";
 
-/// The enroller import document Control reads at startup
-/// (`control.worker_enrollers_file`), naming the PUBLIC half of this host's
-/// enroller in the deployment's default execution zone.
+/// The trusted-signer import document Control reads at startup
+/// (`control.join_signers_file`), naming the PUBLIC half of this deployment's
+/// signer and the execution zones it may mint for.
 ///
-/// DERIVED from [`WORKER_ENROLLER_FILE`] and ADDITIVE: an entry an operator
-/// added for another deployment unit is kept, and this host's entry is added
-/// when it is missing. An entry that names this host's enroller id under a
-/// different key is refused rather than rewritten - the file and the
+/// DERIVED from [`JOIN_SIGNER_FILE`] and ADDITIVE: an entry an operator added
+/// for another signer is kept, and this deployment's entry is added when it is
+/// missing. An entry that names this signer's id under a different key, or its
+/// key under another id, is refused rather than rewritten - the file and the
 /// credential disagreeing is an operator decision, not something to guess at.
 /// Not private: it holds public keys, exactly like [`SERVICE_PEERS_FILE`].
-const WORKER_ENROLLERS_FILE: &str = "worker-enrollers.json";
+const JOIN_SIGNERS_FILE: &str = "join-signers.json";
 
 /// The JWKS-shaped document naming every service's PUBLIC key.
 ///
@@ -476,11 +367,7 @@ fn secret_specs() -> [SecretSpec; 10] {
             generate_signing_key,
             validate_signing_key,
         ),
-        (
-            WORKER_ENROLLER_FILE,
-            generate_worker_enroller,
-            validate_worker_enroller,
-        ),
+        (JOIN_SIGNER_FILE, generate_join_signer, validate_join_signer),
         (
             "auth-signing.pem",
             generate_signing_key,
@@ -821,11 +708,11 @@ fn write_service_peers(secrets_dir: &Path) -> Result<(), String> {
     // the one `init_dev_secrets` runs. That one rules on the directory it
     // FOUND; this one rules on the bytes about to be published, so no future
     // caller of this function can emit a document with one key under two
-    // issuers by reaching it another way. The enroller key is in the set it
+    // issuers by reaching it another way. The join signer key is in the set it
     // rules on even though it is never published here.
-    let enroller = secrets_dir.join(WORKER_ENROLLER_FILE);
+    let signer = secrets_dir.join(JOIN_SIGNER_FILE);
     let mut judged = keys.clone();
-    judged.push((enroller.clone(), read_worker_enroller(&enroller)?.1));
+    judged.push((signer.clone(), read_join_signer(&signer)?.1));
     reject_shared_service_keys(&judged)?;
 
     let entries = SERVICE_KEY_FILES
@@ -877,12 +764,13 @@ fn existing_service_public_keys(secrets_dir: &Path) -> Result<Vec<(PathBuf, [u8;
             keys.push((path, public));
         }
     }
-    // The enroller key joins the set: an enroller key equal to a service key
-    // would let whoever holds the worker's credential present as that service.
-    let enroller = secrets_dir.join(WORKER_ENROLLER_FILE);
-    if enroller.exists() {
-        let (_, public) = read_worker_enroller(&enroller)?;
-        keys.push((enroller, public));
+    // The signer key joins the set: a signer key equal to a service key would
+    // let whoever holds it present as that service, and the signer key is the
+    // one that decides which processes become workers at all.
+    let signer = secrets_dir.join(JOIN_SIGNER_FILE);
+    if signer.exists() {
+        let (_, public) = read_join_signer(&signer)?;
+        keys.push((signer, public));
     }
     Ok(keys)
 }
@@ -931,98 +819,102 @@ fn reject_shared_service_keys(keys: &[(PathBuf, [u8; 32])]) -> Result<(), String
     ))
 }
 
-/// The worker enroller credential document, in the shape
-/// `zeroship_core::service_peers::ServiceKeyring::load_worker_enroller` reads.
-#[derive(serde::Deserialize, serde::Serialize)]
-#[serde(deny_unknown_fields)]
-struct WorkerEnrollerCredential {
-    enroller_id: String,
-    private_key: String,
-}
-
-/// Mint a new enroller: a fresh `wen_` id and a fresh Ed25519 key, as one
+/// Mint a new signer: a fresh `wjs_` id and a fresh Ed25519 key, as one
 /// credential document.
-fn generate_worker_enroller() -> Result<Vec<u8>, String> {
+///
+/// ONE document rather than a key file and a separate id setting, because the
+/// two are one credential: Control verifies a token against the key it recorded
+/// FOR THAT ID, so an id and a key that drifted apart would refuse every join
+/// while each half looked configured.
+fn generate_join_signer() -> Result<Vec<u8>, String> {
     let private_key = String::from_utf8(generate_signing_key()?)
-        .map_err(|error| format!("encode the enroller key: {error}"))?;
-    let credential = WorkerEnrollerCredential {
-        enroller_id: zeroship_core::typed_id::new_worker_enroller_id(),
-        private_key,
-    };
-    let mut text = serde_json::to_string_pretty(&credential)
-        .map_err(|error| format!("encode the enroller credential: {error}"))?;
-    text.push('\n');
-    Ok(text.into_bytes())
+        .map_err(|error| format!("encode the signer key: {error}"))?;
+    let document = zeroship_core::worker_join::render_join_signer_credential(
+        &zeroship_core::typed_id::new_join_signer_id(),
+        &private_key,
+    )?;
+    Ok(document.into_bytes())
 }
 
-fn validate_worker_enroller(bytes: &[u8]) -> Result<(), String> {
-    parse_worker_enroller(bytes).map(|_| ())
+fn validate_join_signer(bytes: &[u8]) -> Result<(), String> {
+    parse_join_signer(bytes).map(|_| ())
 }
 
-/// The enroller id and the PUBLIC half of its key.
-fn parse_worker_enroller(bytes: &[u8]) -> Result<(String, [u8; 32]), String> {
-    let credential: WorkerEnrollerCredential = serde_json::from_slice(bytes)
-        .map_err(|error| format!("worker enroller credential: {error}"))?;
-    zeroship_core::service_peers::worker_enroller_issuer(&credential.enroller_id).map_err(|_| {
-        format!(
-            "enroller_id {:?} is not a worker enroller id",
-            credential.enroller_id
-        )
-    })?;
-    let signing = SigningKey::from_pkcs8_pem(&credential.private_key)
-        .map_err(|error| format!("private_key is not an Ed25519 PKCS#8 PEM key: {error}"))?;
-    Ok((credential.enroller_id, signing.verifying_key().to_bytes()))
+/// The signer id and the PUBLIC half of its key.
+///
+/// The parse is `zeroship_core::worker_join::parse_join_signer_credential`, the
+/// one Control's minter reads the same file with, so a document this command
+/// writes and a document Control accepts are one definition rather than two
+/// that agree today.
+fn parse_join_signer(bytes: &[u8]) -> Result<(String, [u8; 32]), String> {
+    let (signer_id, key) = zeroship_core::worker_join::parse_join_signer_credential(bytes)
+        .map_err(|error| format!("join signer credential: {error}"))?;
+    Ok((signer_id, key.verifying_key_bytes()))
 }
 
-fn read_worker_enroller(path: &Path) -> Result<(String, [u8; 32]), String> {
+fn read_join_signer(path: &Path) -> Result<(String, [u8; 32]), String> {
     let bytes = std::fs::read(path).map_err(|error| format!("read {}: {error}", path.display()))?;
-    parse_worker_enroller(&bytes).map_err(|error| format!("{}: {error}", path.display()))
+    parse_join_signer(&bytes).map_err(|error| format!("{}: {error}", path.display()))
 }
 
-fn read_worker_enroller_import(
+fn read_join_signer_import(
     path: &Path,
-) -> Result<Vec<zeroship_core::worker_enrollers::EnrollerRecord>, String> {
+) -> Result<Vec<zeroship_core::worker_join::JoinSignerRecord>, String> {
     let bytes = std::fs::read(path).map_err(|error| format!("read {}: {error}", path.display()))?;
-    zeroship_core::worker_enrollers::parse_enroller_import(&bytes).map_err(|error| {
+    zeroship_core::worker_join::parse_join_signer_import(&bytes).map_err(|error| {
         format!(
-            "existing worker enroller import file {} is invalid and was not replaced: {error}",
+            "existing join signer import file {} is invalid and was not replaced: {error}",
             path.display()
         )
     })
 }
 
-/// The import records with this host's enroller present, and whether they
+/// The import records with this deployment's signer present, and whether they
 /// changed.
 ///
-/// ADDITIVE: every other entry is kept as it is. This host's entry is appended
-/// when absent; when present it must name the credential's own key, and a
-/// record naming that key under ANOTHER id is refused too - Control would
+/// ADDITIVE: every other entry is kept as it is. This deployment's entry is
+/// appended when absent; when present it must name the credential's own key,
+/// and a record naming that key under ANOTHER id is refused too - Control would
 /// refuse either at its next boot, so this refuses it first and names the file.
-fn with_this_hosts_enroller(
-    mut records: Vec<zeroship_core::worker_enrollers::EnrollerRecord>,
-    enroller_id: &str,
+///
+/// A recorded entry whose ZONES differ is refused for the same reason and it is
+/// not the same reason as the key: a signer's zones ARE its authority, so
+/// widening them is provisioning a new signer rather than editing a line.
+fn with_this_deployments_signer(
+    mut records: Vec<zeroship_core::worker_join::JoinSignerRecord>,
+    signer_id: &str,
     public_key: [u8; 32],
-) -> Result<(Vec<zeroship_core::worker_enrollers::EnrollerRecord>, bool), String> {
-    if let Some(existing) = records.iter().find(|record| record.id == enroller_id) {
+) -> Result<(Vec<zeroship_core::worker_join::JoinSignerRecord>, bool), String> {
+    let zones = vec![zeroship_core::worker_join::DEFAULT_EXECUTION_ZONE.to_owned()];
+    if let Some(existing) = records.iter().find(|record| record.id == signer_id) {
         if existing.public_key != public_key {
             return Err(format!(
-                "{WORKER_ENROLLERS_FILE} names enroller {enroller_id} under a different public key \
-                 than {WORKER_ENROLLER_FILE} holds; neither file was changed. A changed key is a \
-                 new enroller: see docs/runbooks/worker-enrollers.md"
+                "{JOIN_SIGNERS_FILE} names signer {signer_id} under a different public key than \
+                 {JOIN_SIGNER_FILE} holds; neither file was changed. A changed key is a new \
+                 signer: see docs/runbooks/worker-join-signers.md"
+            ));
+        }
+        if existing.zones != zones {
+            return Err(format!(
+                "{JOIN_SIGNERS_FILE} records signer {signer_id} for zones {}, not {}; neither \
+                 file was changed. A signer's zones are its authority, so widening them is a new \
+                 signer with a new id",
+                existing.zones.join(", "),
+                zones.join(", ")
             ));
         }
         return Ok((records, false));
     }
     if let Some(existing) = records.iter().find(|record| record.public_key == public_key) {
         return Err(format!(
-            "{WORKER_ENROLLERS_FILE} names the key in {WORKER_ENROLLER_FILE} under enroller {}, \
-             not {enroller_id}; neither file was changed",
+            "{JOIN_SIGNERS_FILE} names the key in {JOIN_SIGNER_FILE} under signer {}, not \
+             {signer_id}; neither file was changed",
             existing.id
         ));
     }
-    records.push(zeroship_core::worker_enrollers::EnrollerRecord {
-        id: enroller_id.to_owned(),
-        zone: zeroship_core::worker_enrollers::DEFAULT_EXECUTION_ZONE.to_owned(),
+    records.push(zeroship_core::worker_join::JoinSignerRecord {
+        id: signer_id.to_owned(),
+        zones,
         public_key,
     });
     Ok((records, true))
@@ -1031,37 +923,37 @@ fn with_this_hosts_enroller(
 /// Judge an existing import file against an existing credential BEFORE
 /// anything is created. A missing credential cannot conflict: the one this run
 /// generates is fresh.
-fn check_worker_enrollers(secrets_dir: &Path) -> Result<(), String> {
-    let import = secrets_dir.join(WORKER_ENROLLERS_FILE);
-    reject_symlink(&import, "worker enroller import file")?;
-    let credential = secrets_dir.join(WORKER_ENROLLER_FILE);
+fn check_join_signers(secrets_dir: &Path) -> Result<(), String> {
+    let import = secrets_dir.join(JOIN_SIGNERS_FILE);
+    reject_symlink(&import, "join signer import file")?;
+    let credential = secrets_dir.join(JOIN_SIGNER_FILE);
     if !import.exists() || !credential.exists() {
         return Ok(());
     }
-    let (enroller_id, public_key) = read_worker_enroller(&credential)?;
-    with_this_hosts_enroller(read_worker_enroller_import(&import)?, &enroller_id, public_key)
+    let (signer_id, public_key) = read_join_signer(&credential)?;
+    with_this_deployments_signer(read_join_signer_import(&import)?, &signer_id, public_key)
         .map(|_| ())
 }
 
-/// Write the import file Control reads, with this host's enroller in it.
+/// Write the import file Control reads, with this deployment's signer in it.
 ///
 /// Written only when it changes, so a re-run leaves an operator's file
 /// byte-for-byte alone.
-fn write_worker_enrollers(secrets_dir: &Path) -> Result<(), String> {
-    let (enroller_id, public_key) = read_worker_enroller(&secrets_dir.join(WORKER_ENROLLER_FILE))?;
-    let import = secrets_dir.join(WORKER_ENROLLERS_FILE);
+fn write_join_signers(secrets_dir: &Path) -> Result<(), String> {
+    let (signer_id, public_key) = read_join_signer(&secrets_dir.join(JOIN_SIGNER_FILE))?;
+    let import = secrets_dir.join(JOIN_SIGNERS_FILE);
     let existing = if import.exists() {
-        read_worker_enroller_import(&import)?
+        read_join_signer_import(&import)?
     } else {
         Vec::new()
     };
-    let (records, changed) = with_this_hosts_enroller(existing, &enroller_id, public_key)?;
+    let (records, changed) = with_this_deployments_signer(existing, &signer_id, public_key)?;
     if !changed {
         return Ok(());
     }
     std::fs::write(
         &import,
-        zeroship_core::worker_enrollers::render_enroller_import(&records),
+        zeroship_core::worker_join::render_join_signer_import(&records),
     )
     .map_err(|error| format!("write {}: {error}", import.display()))
 }
@@ -1368,5 +1260,160 @@ mod tests {
             "the control came out 0600 too, so this run's umask hides the \
              difference and the assertion above proves nothing"
         );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// zeroship join-token
+// ---------------------------------------------------------------------------
+
+fn join_token_usage() -> &'static str {
+    "Usage: zeroship join-token --credential=PATH [--zone=NAME] [--ttl=SECONDS] [--uses=N] \
+     [--confirm=KEY] [--audience=URI]"
+}
+
+/// The default lifetime of a minted token, in seconds.
+///
+/// MINUTES, not days, and that is the difference between this command and the
+/// token a single-host Control rotates into a shared volume. An operator running
+/// this is present: they mint, they provision, the workers join, and what is
+/// left over expires before anyone could carry it anywhere. A token that lives
+/// long enough to be convenient is a standing bearer credential wearing a
+/// short-lived name.
+const DEFAULT_JOIN_TOKEN_TTL_SECONDS: u64 = 600;
+
+/// The default use budget.
+///
+/// A scaled service shares ONE token and each worker consumes a use of its own,
+/// so this is "how many workers am I bringing up", not a fleet size. It is small
+/// because the cost of being wrong is one more `join-token` call.
+const DEFAULT_JOIN_TOKEN_USES: u32 = 4;
+
+/// Mint one join token from an operator-held signer credential and print it.
+///
+/// THE MULTI-HOST PATH. A single-host deployment has Control mint for its own
+/// zone, because nobody is present when a container restarts at three in the
+/// morning; a fleet provisions workers deliberately, so the token is minted
+/// deliberately too, per provisioning, and never mounted as a standing file.
+///
+/// Printed on STDOUT with nothing else, so `zeroship join-token ... > token` is
+/// the whole of the plumbing and every diagnostic stays on stderr.
+pub(crate) fn cmd_join_token(args: &[String]) -> Result<(), String> {
+    let mut credential = None;
+    let mut zone = None;
+    let mut ttl = None;
+    let mut uses = None;
+    let mut confirm = None;
+    let mut audience = None;
+    // Both spellings `dev init` takes: `--name=value` and `--name value`.
+    let mut index = 2;
+    while index < args.len() {
+        let arg = &args[index];
+        let (name, inline_value) = arg
+            .split_once('=')
+            .map_or((arg.as_str(), None), |(name, value)| (name, Some(value)));
+        let slot = match name {
+            "--credential" => &mut credential,
+            "--zone" => &mut zone,
+            "--ttl" => &mut ttl,
+            "--uses" => &mut uses,
+            "--confirm" => &mut confirm,
+            "--audience" => &mut audience,
+            "--help" => return Err(join_token_usage().to_string()),
+            _ => return Err(format!("unknown argument {arg:?}. {}", join_token_usage())),
+        };
+        if slot.is_some() {
+            return Err(format!("{name} was supplied more than once"));
+        }
+        let value = if let Some(value) = inline_value {
+            value.to_string()
+        } else {
+            index += 1;
+            args.get(index)
+                .filter(|value| !value.starts_with("--"))
+                .cloned()
+                .ok_or_else(|| format!("{name} requires a value"))?
+        };
+        if value.is_empty() {
+            return Err(format!("{name} requires a non-empty value"));
+        }
+        *slot = Some(value);
+        index += 1;
+    }
+    let Some(credential) = credential else {
+        return Err(join_token_usage().to_string());
+    };
+    let grant = zeroship_core::worker_join::JoinTokenGrant {
+        zone: zone
+            .unwrap_or_else(|| zeroship_core::worker_join::DEFAULT_EXECUTION_ZONE.to_owned()),
+        lifetime: std::time::Duration::from_secs(parse_number(
+            ttl.as_deref(),
+            "--ttl",
+            DEFAULT_JOIN_TOKEN_TTL_SECONDS,
+        )?),
+        uses: u32::try_from(parse_number(
+            uses.as_deref(),
+            "--uses",
+            u64::from(DEFAULT_JOIN_TOKEN_USES),
+        )?)
+        .map_err(|_| "--uses is too large".to_owned())?,
+        // The joining key, when the issuer knows it in advance. A token that
+        // names one admits that key and no other, which removes even the
+        // "workers the captor controls" a captured token otherwise buys.
+        confirm: match confirm.as_deref() {
+            None => None,
+            Some(encoded) => Some(parse_confirmation(encoded)?),
+        },
+    };
+    // The audience is the control plane the token will be presented to, and it
+    // is checked there: a token minted for another deployment's issuer is
+    // refused rather than admitted into this one.
+    let audience = match audience {
+        Some(uri) => zeroship_core::service_assertion::ServiceIssuer::parse(&uri)
+            .map_err(|error| format!("--audience {uri:?} is not a service issuer: {error}"))?,
+        None => zeroship_core::service_peers::service_issuer(
+            zeroship_core::service_peers::CONTROL_SERVICE_NAME,
+        )
+        .map_err(|error| format!("the control service issuer is malformed: {error}"))?,
+    };
+    let (signer_id, key) =
+        zeroship_core::service_peers::load_join_signer_credential(Path::new(&credential))
+            .map_err(|error| format!("join signer credential: {error}"))?;
+    let token = zeroship_core::worker_join::mint_join_token(&signer_id, &key, &audience, &grant)?;
+    eprintln!(
+        "zeroship join-token: signer {signer_id}, zone {:?}, {} uses, valid {}s{}",
+        grant.zone,
+        grant.uses,
+        grant.lifetime.as_secs(),
+        if grant.confirm.is_some() {
+            ", bound to one key"
+        } else {
+            ""
+        }
+    );
+    println!("{token}");
+    Ok(())
+}
+
+/// The raw Ed25519 public key `--confirm` names.
+///
+/// Base64url without padding, the spelling a worker posts its own key in, so an
+/// operator can copy it straight out of a provisioning step rather than
+/// re-encoding it.
+fn parse_confirmation(encoded: &str) -> Result<[u8; 32], String> {
+    let raw = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(encoded.trim())
+        .map_err(|error| format!("--confirm is not base64url: {error}"))?;
+    <[u8; 32]>::try_from(raw.as_slice())
+        .map_err(|_| "--confirm is not a raw ed25519 public key".to_owned())
+}
+
+/// One numeric option, or its default.
+fn parse_number(raw: Option<&str>, name: &str, default: u64) -> Result<u64, String> {
+    match raw {
+        None => Ok(default),
+        Some(text) => text
+            .parse()
+            .map_err(|error| format!("{name} {text:?} is not a number: {error}")),
     }
 }
