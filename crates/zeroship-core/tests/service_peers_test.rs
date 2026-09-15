@@ -23,7 +23,7 @@ use zeroship_core::service_identity::{
     TrustDomain,
 };
 use zeroship_core::service_peers::{
-    load_peer_bundle, load_signing_key, service_issuer, worker_enroller_issuer,
+    load_join_signer_credential, load_peer_bundle, load_signing_key, service_issuer,
     InstanceSigningKey, PeerKeyError, ServiceAuth, ServiceKeyring, AUTH_SERVICE_NAME,
     CONTROL_SERVICE_NAME, GATEWAY_SERVICE_NAME, WORKER_SERVICE_NAME,
 };
@@ -507,11 +507,11 @@ fn worker_instance_issuer() -> ServiceIssuer {
 /// over a hash ring and cannot know which instance it reached - so a worker that
 /// required its own minting name would refuse every caller.
 ///
-/// This is a DISTINGUISHER and not a boundary. Enrolment authenticates with the
-/// deployment unit's enroller key, so a holder of that key can enrol as many
-/// instances as it likes; what an instance name buys is attribution,
-/// per-instance retirement and a countable event. The boundary is revoking the
-/// enroller.
+/// The instance name is a BOUNDARY as well as a distinguisher: the private half
+/// behind it exists in one process's memory and nowhere else, so retiring one
+/// instance takes a capability away rather than only removing an attribution.
+/// What a JOIN TOKEN buys its holder is bounded separately - the uses it was
+/// minted with, until its expiry, in the one zone it names.
 #[compio::test]
 async fn a_service_requires_the_audience_it_is_addressed_by_not_the_one_it_mints_under() {
     let dir = tempfile::tempdir().expect("a scratch directory");
@@ -754,83 +754,97 @@ fn gateway_principal() -> ServicePrincipal {
 }
 
 // ---------------------------------------------------------------------------
-// The worker ENROLLER credential: the one key a worker loads from disk
+// The JOIN SIGNER credential: the key that decides a worker should exist
 // ---------------------------------------------------------------------------
+//
+// NO WORKER EVER READS THIS. It is held by whoever decides a worker should
+// exist - the operator running `zeroship join-token`, or a single-host control
+// plane acting as its own minter - which is the whole point of the shape: the
+// signing key is off the machine that runs creator code, and a worker carries a
+// token it cannot mint anything with.
 
-/// Write a worker enroller credential document at the given mode.
-fn write_enroller_credential(
+/// Write a join signer credential document at the given mode.
+fn write_signer_credential(
     dir: &std::path::Path,
     document: &serde_json::Value,
     mode: u32,
 ) -> std::path::PathBuf {
-    let path = dir.join("worker-enroller.json");
+    let path = dir.join("join-signer.json");
     fs::write(&path, serde_json::to_vec(document).expect("json")).expect("write the credential");
     fs::set_permissions(&path, fs::Permissions::from_mode(mode)).expect("set the mode");
     path
 }
 
 /// The credential document for a key file `write_key` produced.
-fn enroller_document(enroller_id: &str, key: &KeyFile) -> serde_json::Value {
+fn signer_document(signer_id: &str, key: &KeyFile) -> serde_json::Value {
     serde_json::json!({
-        "enroller_id": enroller_id,
+        "signer_id": signer_id,
         "private_key": fs::read_to_string(&key.path).expect("read the PEM"),
     })
 }
 
-/// The control for every refusal below: a well-formed credential loads, mints
-/// under `svc/worker-enroller/<id>`, and its signature verifies under the key
+/// The control for every refusal below: a well-formed credential loads, names
+/// its own `wjs_` id, and mints a join token that verifies under the public half
 /// Control would have recorded for that id.
-#[compio::test]
-async fn a_worker_enroller_credential_loads_and_mints_under_its_enroller_issuer() {
+///
+/// Verifying the minted token is what makes this an end-to-end statement rather
+/// than a parse: the loader, the minter and the verifier are three readings of
+/// one credential, and a loader that returned the wrong half of the pair would
+/// still parse.
+#[test]
+fn a_join_signer_credential_loads_and_mints_a_token_its_recorded_key_verifies() {
     let dir = tempfile::tempdir().expect("a scratch directory");
-    let gateway = write_key(dir.path(), "gateway.pem");
-    let key = write_key(dir.path(), "enroller.pem");
-    let peers = write_peers(dir.path(), &[entry(GATEWAY_SERVICE_NAME, &gateway.public)]);
-    let enroller_id = zeroship_core::typed_id::new_worker_enroller_id();
-    let credential =
-        write_enroller_credential(dir.path(), &enroller_document(&enroller_id, &key), 0o600);
+    let key = write_key(dir.path(), "join-signer.pem");
+    let signer_id = zeroship_core::typed_id::new_join_signer_id();
+    let credential = write_signer_credential(dir.path(), &signer_document(&signer_id, &key), 0o600);
 
-    let keyring = ServiceKeyring::load_worker_enroller(&credential, &peers)
-        .expect("a well-formed credential loads");
-    let issuer = worker_enroller_issuer(&enroller_id).expect("enroller issuer");
-    assert_eq!(keyring.issuer(), &issuer);
+    let (loaded_id, signing) =
+        load_join_signer_credential(&credential).expect("a well-formed credential loads");
+    assert_eq!(loaded_id, signer_id);
+    assert_eq!(signing.verifying_key_bytes(), key.public);
 
     let control = service_issuer(CONTROL_SERVICE_NAME).expect("control issuer");
-    let assertion = keyring.mint_for(&control).expect("the enroller mints");
-    let mut recorded = ServiceTrustBundle::new();
-    recorded
-        .trust(&issuer, thumbprint_key_id(&key.public), key.public)
-        .expect("trust the recorded key under the enroller issuer");
-    let verifier = ServiceAssertionVerifier::new(recorded, Arc::new(InMemoryReplayStore::new()));
-    verify_service_call(
-        &verifier,
-        Some(&format!("Bearer {assertion}")),
-        control.as_str(),
-        endpoints::CONTROL_WORKER_ENROL,
+    let token = zeroship_core::worker_join::mint_join_token(
+        &signer_id,
+        &signing,
+        &control,
+        &zeroship_core::worker_join::JoinTokenGrant {
+            zone: zeroship_core::worker_join::DEFAULT_EXECUTION_ZONE.to_owned(),
+            lifetime: std::time::Duration::from_secs(300),
+            uses: 2,
+            confirm: None,
+        },
     )
-    .await
-    .expect("the enroller's assertion verifies and holds the enrolment grant");
+    .expect("the loaded credential mints");
+    let verified = zeroship_core::worker_join::verify_join_token(
+        &token,
+        &key.public,
+        &control,
+        std::time::SystemTime::now(),
+    )
+    .expect("the recorded public half verifies what the private half minted");
+    assert_eq!(verified.signer_id, signer_id);
 }
 
 /// Each refusal differs from the loading control above in one thing.
 #[test]
-fn a_worker_enroller_credential_that_is_wrong_in_any_one_way_refuses_to_load() {
+fn a_join_signer_credential_that_is_wrong_in_any_one_way_refuses_to_load() {
     let dir = tempfile::tempdir().expect("a scratch directory");
-    let gateway = write_key(dir.path(), "gateway.pem");
-    let key = write_key(dir.path(), "enroller.pem");
-    let peers = write_peers(dir.path(), &[entry(GATEWAY_SERVICE_NAME, &gateway.public)]);
-    let enroller_id = zeroship_core::typed_id::new_worker_enroller_id();
-    let valid = enroller_document(&enroller_id, &key);
+    let key = write_key(dir.path(), "join-signer.pem");
+    let signer_id = zeroship_core::typed_id::new_join_signer_id();
+    let valid = signer_document(&signer_id, &key);
 
     // Unset.
     assert!(matches!(
-        ServiceKeyring::load_worker_enroller(std::path::Path::new(""), &peers),
+        load_join_signer_credential(std::path::Path::new("")),
         Err(PeerKeyError::NotConfigured { .. })
     ));
-    // Readable by the group.
-    let loose = write_enroller_credential(dir.path(), &valid, 0o640);
+    // Readable by the group. This is a SIGNING key: whoever reads it can admit
+    // workers in every zone the signer is trusted for, for as long as the key
+    // is recorded.
+    let loose = write_signer_credential(dir.path(), &valid, 0o640);
     assert!(matches!(
-        ServiceKeyring::load_worker_enroller(&loose, &peers),
+        load_join_signer_credential(&loose),
         Err(PeerKeyError::InsecurePermissions { .. })
     ));
     // Malformed in its members.
@@ -838,48 +852,45 @@ fn a_worker_enroller_credential_that_is_wrong_in_any_one_way_refuses_to_load() {
         (
             "an unknown member",
             serde_json::json!({
-                "enroller_id": enroller_id,
+                "signer_id": signer_id,
                 "private_key": valid["private_key"],
-                "zone": "default",
+                "zones": ["default"],
             }),
         ),
         (
             "a worker instance id",
             serde_json::json!({
-                "enroller_id": "wkr_0000000000000000000000001",
+                "signer_id": "wkr_0000000000000000000000001",
                 "private_key": valid["private_key"],
             }),
         ),
         (
             "a private key that is not PEM",
             serde_json::json!({
-                "enroller_id": enroller_id,
+                "signer_id": signer_id,
                 "private_key": URL_SAFE_NO_PAD.encode(key.public),
             }),
         ),
+        (
+            "a PUBLIC key in the private field",
+            serde_json::json!({
+                "signer_id": signer_id,
+                "private_key": "-----BEGIN PUBLIC KEY-----\nAAAA\n-----END PUBLIC KEY-----\n",
+            }),
+        ),
     ] {
-        let path = write_enroller_credential(dir.path(), &document, 0o600);
+        let path = write_signer_credential(dir.path(), &document, 0o600);
         assert!(
             matches!(
-                ServiceKeyring::load_worker_enroller(&path, &peers),
+                load_join_signer_credential(&path),
                 Err(PeerKeyError::Document { .. })
             ),
             "{label} must be refused as a malformed credential"
         );
     }
-    // The enroller's own key published under the GATEWAY's issuer: the pair
-    // refusal that stops this process's envelope signer stamping a `kid` its
-    // own verifier resolves.
-    let foreign = write_peers(
-        &dir.path().join("foreign"),
-        &[entry(GATEWAY_SERVICE_NAME, &key.public)],
-    );
-    let credential = write_enroller_credential(dir.path(), &valid, 0o600);
-    assert!(matches!(
-        ServiceKeyring::load_worker_enroller(&credential, &foreign),
-        Err(PeerKeyError::OwnKeyUnderForeignIssuer { .. })
-    ));
-    // The control, re-established after the last write: the same credential
-    // against the honest document loads.
-    assert!(ServiceKeyring::load_worker_enroller(&credential, &peers).is_ok());
+    // The control, re-established after the last write: the same document at
+    // the same mode loads, so the refusals above are each about their one
+    // variable rather than about a loader that refuses everything.
+    let credential = write_signer_credential(dir.path(), &valid, 0o600);
+    assert!(load_join_signer_credential(&credential).is_ok());
 }
