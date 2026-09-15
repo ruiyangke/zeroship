@@ -314,15 +314,25 @@ async fn a_fingerprint_mismatch_at_the_same_version_is_refused_as_corruption() {
     );
 }
 
-/// An upgrade that fails PART WAY leaves the stamp at the old version, because
-/// the steps and the stamp write are one transaction.
+/// An upgrade that fails PART WAY leaves the stamp at the old version AND undoes
+/// the versions that had already succeeded, because the whole upgrade and its
+/// stamp write are one transaction.
 ///
-/// The failure is deliberate and comes from the DATABASE, not the guard: the
-/// second statement of v2 is well-formed SQL naming the bound schema, so the
-/// guard admits it and PostgreSQL rejects it at execution. That is the shape a
-/// real broken upgrade has.
+/// # What makes this bind the transaction rather than the stamp ordering
+///
+/// The upgrade spans TWO versions: v2 succeeds, v3 fails. An applier that
+/// committed each version on its own would still leave the stamp at 1 - it never
+/// reaches the stamp write - so a test that only checked the stamp would pass
+/// against it. It is v2's column that separates the two: under one transaction it
+/// is gone, and under per-version commits it survives. Measured: replacing the
+/// single transaction with a commit per step leaves `extra` present here and
+/// changes nothing else in this file.
+///
+/// The failure is deliberate and comes from the DATABASE, not the guard: v3 is
+/// well-formed SQL naming the bound schema, so the guard admits it and PostgreSQL
+/// rejects it at execution. That is the shape a real broken upgrade has.
 #[compio::test]
-async fn an_upgrade_that_fails_part_way_leaves_the_old_stamp() {
+async fn an_upgrade_that_fails_part_way_rolls_back_the_versions_before_it() {
     let fixture = Fixture::start().await;
     let schema = schema_name("partial");
 
@@ -331,10 +341,11 @@ async fn an_upgrade_that_fails_part_way_leaves_the_old_stamp() {
         .expect("install v1");
 
     let mut broken = bundle(&schema, 2, FP2);
-    broken.versions[1].sql = format!(
-        "{}\nALTER TABLE \"{schema}\".\"__zeroship_probe_absent\" ADD COLUMN late text;",
-        version_two(&schema)
-    );
+    broken.version = 3;
+    broken.versions.push(SchemaBundleVersion {
+        version: 3,
+        sql: format!("ALTER TABLE \"{schema}\".\"__zeroship_probe_absent\" ADD COLUMN late text;"),
+    });
     let error = apply_schema_bundle(&fixture.dsn, &broken)
         .await
         .expect_err("a broken upgrade must fail");
@@ -347,7 +358,8 @@ async fn an_upgrade_that_fails_part_way_leaves_the_old_stamp() {
     );
     assert!(
         !fixture.column_exists(&schema, "extra").await,
-        "the first statement of the failed upgrade must have rolled back with it"
+        "version 2 succeeded and version 3 failed, so version 2 must have rolled back with it; \
+         a column that survives here means each version committed on its own"
     );
 }
 
