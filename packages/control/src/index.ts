@@ -189,6 +189,14 @@ export interface AppRecord {
 export interface CreateAppInput {
   name: string;
   plan_id?: string;
+  /**
+   * The NAME of the execution zone the app runs in, fixed at creation and
+   * never editable afterwards. Omit it in a deployment that declares one
+   * zone; a deployment that declares several refuses an app that does not
+   * name one, because moving an app between zones is a data migration of its
+   * creator storage rather than a metadata edit.
+   */
+  execution_zone?: string;
 }
 
 /** Control's acceptance of one deploy command. */
@@ -637,6 +645,9 @@ export class ControlClient {
         body: {
           name: input.name,
           plan_id: input.plan_id ?? "free",
+          ...(input.execution_zone === undefined
+            ? {}
+            : { execution_zone: input.execution_zone }),
         },
       }),
     archive: (id: AppId): Promise<AppRecord> =>

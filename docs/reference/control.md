@@ -234,6 +234,20 @@ role or a decision in a client and act on it: the entity cache that used to sit
 in front of this was deleted so that revoking a seat takes effect immediately
 with no invalidation signal to miss. Ask again.
 
+### An app's execution zone is chosen once
+
+`control.apps.create` takes an optional `execution_zone`, the NAME of an
+operator-declared execution zone: a set of worker deployment units that share
+creator-side connectivity. It is written when the app is created and frozen
+there, because moving an app between zones is a data migration of its creator
+storage rather than a metadata edit, and because the workflow manager places an
+app only on a worker of its own zone.
+
+Omit it in a deployment that declares one zone and the app lands in it. A
+deployment that declares several refuses a create that does not name one,
+rather than choosing: an app in the wrong zone is one that no worker of its
+creator's fleet will ever run.
+
 ### App archive lifecycle
 
 Archive is reversible, delete is terminal, and the order is enforced rather
