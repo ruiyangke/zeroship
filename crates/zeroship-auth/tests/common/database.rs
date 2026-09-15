@@ -127,6 +127,15 @@ impl Database {
         .is_ok()
     }
 
+    /// The auth role's URL under a session name that fixture probes and
+    /// triggers can match through `application_name`.
+    pub fn auth_url_named(&self, application_name: &str) -> url::Url {
+        let mut url = self.auth_url();
+        url.query_pairs_mut()
+            .append_pair("application_name", application_name);
+        url
+    }
+
     async fn connect_to(&self, url: &str) -> Client {
         let mut config: compio_postgres::Config = url.parse().expect("fixture database URL");
         config.connect_timeout(Duration::from_secs(15));
@@ -139,6 +148,27 @@ impl Database {
         ));
         client
     }
+}
+
+/// Poll server state until `holds` reports true, or report that it never did.
+///
+/// The bound stays inside the ORM's `DB_LOCK_TIMEOUT_MS`, so a repository
+/// statement the fixture parked on a lock is still waiting when the probe
+/// gives up and the case can release it before asserting.
+#[allow(
+    clippy::future_not_send,
+    reason = "fixture clients belong to this compio runtime"
+)]
+pub async fn eventually(mut holds: impl AsyncFnMut() -> bool) -> bool {
+    let bound =
+        Duration::from_millis(u64::from(zeroship_data_orm::budgets::DB_LOCK_TIMEOUT_MS) / 2);
+    compio::time::timeout(bound, async {
+        while !holds().await {
+            compio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .is_ok()
 }
 
 struct Seed {
