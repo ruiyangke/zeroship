@@ -14,7 +14,7 @@ use zeroship_core::{
     service_peers::{ServiceAuth, ServiceKeyring},
     workflow_coordination::{Assignment, AUDIENCE},
     workflow_jobs::{JobSpec, Settlement, SettlementReceipt},
-    workflow_policy::{AppPolicy, PolicyLease},
+    workflow_policy::{AppPolicy, EstablishIngress, PolicyLease, PolicyLeaseRequest},
 };
 use zeroship_data_orm::{
     binding::DbBinding, connection::ConnectionFactory, encryption::ProjectKeySource,
@@ -135,15 +135,35 @@ impl Fixture {
         )
     }
 
+    /// A renewal of a placement whose binding already holds an ingress epoch.
     pub fn refresh(&self, scope: &AssignedScope) -> Vec<Exchange> {
         vec![
-            Exchange::new(
-                endpoints::WORKFLOW_RENEW,
-                json!(scope),
-                json!(self.assignment(scope)),
-            ),
+            self.renewal(scope),
             self.policy(scope, AppPolicy::default(), 1, 60_000),
         ]
+    }
+
+    /// The first preparation of a placement establishes an ingress epoch
+    /// before the app can accept ingress.
+    pub fn establish(&self, scope: &AssignedScope) -> Vec<Exchange> {
+        vec![
+            self.renewal(scope),
+            self.lease(
+                scope,
+                Some(EstablishIngress { after: None }),
+                AppPolicy::default(),
+                1,
+                60_000,
+            ),
+        ]
+    }
+
+    fn renewal(&self, scope: &AssignedScope) -> Exchange {
+        Exchange::new(
+            endpoints::WORKFLOW_RENEW,
+            json!(scope),
+            json!(self.assignment(scope)),
+        )
     }
 
     pub fn policy(
@@ -153,9 +173,24 @@ impl Fixture {
         revision: i64,
         remaining: u64,
     ) -> Exchange {
+        self.lease(scope, None, policy, revision, remaining)
+    }
+
+    fn lease(
+        &self,
+        scope: &AssignedScope,
+        establish: Option<EstablishIngress>,
+        policy: AppPolicy,
+        revision: i64,
+        remaining: u64,
+    ) -> Exchange {
         Exchange::new(
             endpoints::WORKFLOW_POLICY_LEASE,
-            json!(scope),
+            json!(PolicyLeaseRequest {
+                scope: scope.clone(),
+                establish,
+                ingress_used: false,
+            }),
             json!(PolicyLease {
                 app_id: scope.app_id.clone(),
                 worker_id: self.worker.clone(),
@@ -163,6 +198,7 @@ impl Fixture {
                 assignment_revision: scope.assignment_revision,
                 policy_revision: revision.try_into().unwrap(),
                 policy,
+                ingress_epoch: Some(1.try_into().unwrap()),
                 remaining_ms: remaining.try_into().unwrap(),
             }),
         )
@@ -261,6 +297,12 @@ impl Exchange {
     pub fn conflict(mut self) -> Self {
         self.status = 409;
         self.response = json!({"code":"conflict"});
+        self
+    }
+
+    pub fn denied(mut self) -> Self {
+        self.status = 403;
+        self.response = json!({"code":"denied"});
         self
     }
 
@@ -515,6 +557,7 @@ impl CreatorFactory for Factory {
         &self,
         scope: &AssignedScope,
         policy: &PolicyBinding,
+        ingress: Rc<dyn IngressEpochs>,
     ) -> Result<CreatorRuntime, WorkflowServiceError> {
         let opening = Rc::new(Opening {
             scope: scope.clone(),
@@ -584,7 +627,7 @@ impl CreatorFactory for Factory {
             app.clone().into_backend(1024)?
         };
         let runtime = CreatorRuntime {
-            app,
+            app: app.with_ingress(ingress),
             executor: Rc::new(NoExecution),
             backend,
         };

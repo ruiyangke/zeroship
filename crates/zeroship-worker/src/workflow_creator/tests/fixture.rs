@@ -9,7 +9,8 @@ use zeroship_data_orm::{
 };
 use zeroship_runtime::{transport::net_policy::NetPolicy, EnvSnapshot, RuntimeLimits};
 use zeroship_storage::{LocalFs, StorageStore};
-use zeroship_workflow::service::{schema, DeployRegistration, PolicySnapshot};
+use zeroship_core::workflow_coordination::Revision;
+use zeroship_workflow::service::{schema, DeployRegistration, IngressEpochs, PolicySnapshot};
 
 #[derive(Clone)]
 pub(super) struct Provider(Rc<ProviderState>);
@@ -106,6 +107,34 @@ pub(super) struct Fixture {
     pub deployments: deployment_fixture::Deployments,
 }
 
+/// The placement's ingress establishment, as `AssignedPolicies` provides it:
+/// each request installs the manager's next epoch into the policy binding.
+pub(super) struct Epochs {
+    binding: PolicyBinding,
+    pub requested: RefCell<Vec<Option<Revision>>>,
+    pub accepted: Cell<usize>,
+}
+
+impl IngressEpochs for Epochs {
+    fn establish(
+        &self,
+        after: Option<Revision>,
+    ) -> futures::future::LocalBoxFuture<'_, Result<(), WorkflowServiceError>> {
+        self.requested.borrow_mut().push(after);
+        Box::pin(async move {
+            let next = after.map_or(1, |after| after.get() + 1);
+            self.binding.begin_refresh()?.install(
+                PolicySnapshot::configuration(1.try_into().unwrap(), AppPolicy::default())?
+                    .with_ingress_epoch(Some(next.try_into().unwrap())),
+            )
+        })
+    }
+
+    fn accepted(&self) {
+        self.accepted.set(self.accepted.get() + 1);
+    }
+}
+
 pub(super) fn install(policies: &Arc<HostPolicies>, app: AppId) -> PolicyBinding {
     let binding = policies.bind(app).unwrap();
     binding
@@ -187,6 +216,15 @@ impl Fixture {
             })),
             deployments,
         }
+    }
+
+    /// Ingress establishment for the fixture's placement and policy binding.
+    pub fn ingress(&self) -> Rc<Epochs> {
+        Rc::new(Epochs {
+            binding: self.policy.clone(),
+            requested: RefCell::new(Vec::new()),
+            accepted: Cell::new(0),
+        })
     }
 
     pub fn factory(&self) -> WorkflowCreatorFactory<Provider> {

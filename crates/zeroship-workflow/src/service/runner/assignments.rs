@@ -14,8 +14,8 @@ use super::{
 };
 use crate::{
     service::{
-        publication::AssignedPublisher, AppBackend, AppWorkflows, AssignedPolicies,
-        HostPolicies, PolicyBinding,
+        publication::AssignedPublisher, AppBackend, AppWorkflows, AssignedPolicies, HostPolicies,
+        IngressEpochs, PolicyBinding,
     },
     WorkflowServiceError,
 };
@@ -61,12 +61,16 @@ impl std::fmt::Debug for CreatorRuntime {
 /// Resolve only resources this process is independently authorized to access.
 /// Placement metadata supplies neither database credentials nor schema authority.
 pub trait CreatorFactory {
-    /// Use the supplied policy generation for the returned app. Opening must be
-    /// cancellation safe: dropping this future must stop or quarantine its I/O.
+    /// Use the supplied policy generation for the returned app, and attach
+    /// `ingress` to it with [`AppWorkflows::with_ingress`] before creating any
+    /// backend, so a fenced acceptance establishes a newer epoch through this
+    /// placement's policy lease. Opening must be cancellation safe: dropping
+    /// this future must stop or quarantine its I/O.
     fn open(
         &self,
         scope: &AssignedScope,
         policy: &PolicyBinding,
+        ingress: Rc<dyn IngressEpochs>,
     ) -> impl Future<Output = Result<CreatorRuntime, WorkflowServiceError>>;
 }
 
@@ -477,21 +481,35 @@ impl<F: CreatorFactory> AssignmentBindings<F> {
             .renew(entry.policies.scope())
             .await
             .map_err(transport_error)?;
-        entry.policies.refresh().await?;
-        let binding = entry.policies.binding();
-        let authority = binding.authority()?;
         let runtime = entry
             .ready
             .borrow()
             .as_ref()
             .map(|ready| ready.runtime.clone());
-        let runtime = match runtime {
-            Some(runtime) => runtime,
-            None => {
-                authority
-                    .run(self.factory.open(entry.policies.scope(), binding))
-                    .await?
+        if runtime.is_some() || entry.policies.binding().ingress_epoch().is_some() {
+            entry.policies.refresh().await?;
+        } else {
+            // Establish responsibility before the app can accept ingress. A
+            // policy that refuses establishment, as archive does, or an app
+            // not yet activated still serves delivered work, including its own
+            // closure, under a plain lease. Later refreshes never reopen it; a
+            // fenced acceptance establishes on demand.
+            match entry.policies.establish(None).await {
+                Err(WorkflowServiceError::PermissionDenied | WorkflowServiceError::Conflict(_)) => {
+                    entry.policies.refresh().await?;
+                }
+                established => established?,
             }
+        }
+        let binding = entry.policies.binding();
+        let authority = binding.authority()?;
+        let runtime = if let Some(runtime) = runtime {
+            runtime
+        } else {
+            let ingress: Rc<dyn IngressEpochs> = Rc::new(entry.policies.clone());
+            authority
+                .run(self.factory.open(entry.policies.scope(), binding, ingress))
+                .await?
         };
         if runtime.app.app_id() != binding.app_id()
             || !runtime.app.binding.same_binding(binding)

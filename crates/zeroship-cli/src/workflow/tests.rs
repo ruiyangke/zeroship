@@ -16,6 +16,7 @@ use zeroship_workflow::{
 };
 use zeroship_workflow_manager::{
     local::LocalPlatform,
+    recovery::{DutyKind, Options as RecoveryOptions, Recovery, Responsibility, ScopeState},
     scheduling::{Options as SchedulingOptions, Scheduler, Selection},
     DeliveryGrant, Options as QueueOptions,
 };
@@ -181,21 +182,44 @@ fn metered_database(
     (vec![service.plugin()], meter)
 }
 
-/// A second creator handle on the app database, outside the host.
+/// A second creator handle on the app database, outside the host. It holds
+/// the manager's current ingress epoch, as another host would once it had
+/// established that epoch.
 async fn client(root: &Path, app: &AppId) -> AppWorkflows {
+    let epoch = responsibility(root, app)
+        .await
+        .map(|current| current.ingress_epoch);
     retry(async || {
         let policies = Arc::new(HostPolicies::default());
         let binding = policies.bind(app.clone())?;
-        binding
-            .begin_refresh()?
-            .install(PolicySnapshot::configuration(
-                1.try_into().unwrap(),
-                AppPolicy::default(),
-            )?)?;
+        binding.begin_refresh()?.install(
+            PolicySnapshot::configuration(1.try_into().unwrap(), AppPolicy::default())?
+                .with_ingress_epoch(epoch),
+        )?;
         let service =
             WorkflowService::open(Rc::new(test_storage(root, app).open().await?), policies).await?;
         service.register_app(&binding).await
     })
+    .await
+}
+
+/// The app's recovery responsibility, read through a second binding to the
+/// platform file.
+async fn responsibility(root: &Path, app: &AppId) -> Option<Responsibility> {
+    Box::pin(retry(async || {
+        let platform = LocalPlatform::open(&root.join(".zeroship/platform/metadata.sqlite"))
+            .await
+            .map_err(manager::catalog_error)?;
+        let queue = platform
+            .queue(QueueOptions::default())
+            .await
+            .map_err(manager::manager_error)?;
+        Recovery::new(queue, RecoveryOptions::default())
+            .map_err(manager::manager_error)?
+            .responsibility(app)
+            .await
+            .map_err(manager::manager_error)
+    }))
     .await
 }
 
@@ -477,6 +501,226 @@ async fn reconciliation_publishes_work_committed_outside_the_host() {
     state(&host.backend, &run.id, RunState::Waiting).await;
     signal(&host.backend, &run.id).await;
     state(&host.backend, &run.id, RunState::Completed).await;
+}
+
+/// Startup establishes the app's ingress epoch before the host accepts work.
+/// Once the app idles, the manager's closing lane delivers Close and retires
+/// its responsibility; the next acceptance is fenced, the host establishes a
+/// newer epoch and retries it, and delivered work resumes. A restarted host
+/// reopens a retired scope before accepting requests.
+#[compio::test]
+async fn idle_responsibility_retires_and_the_next_acceptance_reopens_it() {
+    let root = tempfile::tempdir().unwrap();
+    let bundle = publish(root.path(), "original", "10ms");
+    let app = AppId::mint();
+    let config = LocalConfig {
+        manager: ManagerConfig {
+            driver_interval_ms: 50,
+            recovery_interval_ms: 3_600_000,
+            idle_close_ms: 200,
+            closing_timeout_ms: 10_000,
+            closing_backoff_ms: 100,
+            closing_backoff_max_ms: 400,
+            ..ManagerConfig::default()
+        },
+        ..LocalConfig::default()
+    };
+    let host = start(root.path(), &app, config.clone(), Some(bundle.as_path()));
+    let retired = until(async || {
+        responsibility(root.path(), &app)
+            .await
+            .filter(|current| current.state == ScopeState::Retired)
+    })
+    .await;
+    assert_eq!(
+        retired.ingress_epoch.get(),
+        1,
+        "startup established epoch one"
+    );
+    let run = start_run(&host.backend, "reopened").await;
+    let reopened = responsibility(root.path(), &app).await.unwrap();
+    assert!(
+        reopened.ingress_epoch.get() > retired.ingress_epoch.get(),
+        "the fenced start established a newer epoch: {reopened:?}"
+    );
+    state(&host.backend, &run, RunState::Waiting).await;
+    signal(&host.backend, &run).await;
+    assert_eq!(
+        state(&host.backend, &run, RunState::Completed).await.output,
+        Some(json!("original:original:lazy"))
+    );
+    let idle = until(async || {
+        responsibility(root.path(), &app)
+            .await
+            .filter(|current| current.state == ScopeState::Retired)
+    })
+    .await;
+    drop(host);
+
+    let _host = start(root.path(), &app, config, Some(bundle.as_path()));
+    let restarted = responsibility(root.path(), &app).await.unwrap();
+    assert!(
+        matches!(
+            restarted.state,
+            ScopeState::Open | ScopeState::Closing | ScopeState::Retired
+        ) && restarted.ingress_epoch.get() > idle.ingress_epoch.get(),
+        "startup reopened the retired scope at a newer epoch: {restarted:?}"
+    );
+}
+
+/// The app's recovery operations through a second binding to the platform
+/// file, as a manager replica would run them.
+async fn recovery(root: &Path) -> Result<Recovery, WorkflowServiceError> {
+    let platform = LocalPlatform::open(&root.join(".zeroship/platform/metadata.sqlite"))
+        .await
+        .map_err(manager::catalog_error)?;
+    let queue = platform
+        .queue(QueueOptions::default())
+        .await
+        .map_err(manager::manager_error)?;
+    Recovery::new(queue, RecoveryOptions::default()).map_err(manager::manager_error)
+}
+
+/// A host restarted while a closing attempt is in flight establishes a newer
+/// epoch before it accepts requests, which cancels the attempt. The stale
+/// Close fences only the cancelled epoch, so the host keeps accepting work at
+/// its own without establishing again.
+#[compio::test]
+async fn restart_cancels_an_in_flight_closing_attempt() {
+    let root = tempfile::tempdir().unwrap();
+    let bundle = publish(root.path(), "original", "10ms");
+    let app = AppId::mint();
+    let host = start(
+        root.path(),
+        &app,
+        without_reconciliation(),
+        Some(bundle.as_path()),
+    );
+    // Startup's maintenance duties are delivered and settled while the host
+    // runs; a pending one would refuse every closing attempt once it stops.
+    for kind in [DutyKind::Reconcile, DutyKind::Collect] {
+        Box::pin(until(async || {
+            let pending = retry(async || {
+                recovery(root.path())
+                    .await?
+                    .dispatch(&app, kind)
+                    .await
+                    .map_err(manager::manager_error)
+            })
+            .await;
+            pending.is_none().then_some(())
+        }))
+        .await;
+    }
+    drop(host);
+    let close = Box::pin(until(async || {
+        retry(async || {
+            recovery(root.path())
+                .await?
+                .begin_close(&app)
+                .await
+                .map_err(manager::manager_error)
+        })
+        .await
+    }))
+    .await;
+    let closing = responsibility(root.path(), &app).await.unwrap();
+    assert_eq!(closing.state, ScopeState::Closing);
+    assert_eq!(closing.ingress_epoch.get(), 1);
+
+    let host = start(
+        root.path(),
+        &app,
+        without_reconciliation(),
+        Some(bundle.as_path()),
+    );
+    let reopened = responsibility(root.path(), &app).await.unwrap();
+    assert_eq!(reopened.state, ScopeState::Open, "{reopened:?}");
+    assert_eq!(reopened.ingress_epoch.get(), 2);
+    assert!(reopened.close_job.is_none());
+    // The restarted host delivers the stale Close, which fences epoch one.
+    let creator = client(root.path(), &app).await;
+    until(async || match creator.job_receipt(&close).await {
+        Ok(receipt) => receipt,
+        Err(WorkflowServiceError::Unavailable(_)) => None,
+        Err(error) => panic!("{error:?}"),
+    })
+    .await;
+    let run = start_run(&host.backend, "after-cancelled-closing").await;
+    state(&host.backend, &run, RunState::Waiting).await;
+    let kept = responsibility(root.path(), &app).await.unwrap();
+    assert_eq!(kept.state, ScopeState::Open, "{kept:?}");
+    assert_eq!(kept.ingress_epoch.get(), 2);
+}
+
+/// The app's responsibility once its recorded activity stops advancing, so a
+/// later advance can only come from ingress the test drove.
+async fn quiescent(root: &Path, app: &AppId) -> Responsibility {
+    let mut previous = responsibility(root, app).await.unwrap();
+    until(async || {
+        compio::time::sleep(Duration::from_millis(500)).await;
+        let current = responsibility(root, app).await.unwrap();
+        let settled = current.active_at == previous.active_at;
+        previous = current;
+        settled.then(|| previous.clone())
+    })
+    .await
+}
+
+/// Ingress that commits no publication, such as a signal no wait expects,
+/// still counts as activity: the host reports it with its next renewal, which
+/// restarts the idle window of an app in use.
+#[compio::test]
+async fn reported_ingress_counts_as_activity() {
+    let root = tempfile::tempdir().unwrap();
+    let bundle = publish(root.path(), "original", "10ms");
+    let app = AppId::mint();
+    let config = LocalConfig {
+        manager: ManagerConfig {
+            driver_interval_ms: 50,
+            placement_ttl_ms: 300,
+            recovery_interval_ms: 3_600_000,
+            idle_close_ms: 3_600_000,
+            ..ManagerConfig::default()
+        },
+        ..LocalConfig::default()
+    };
+    let host = start(root.path(), &app, config, Some(bundle.as_path()));
+    let run = start_run(&host.backend, "in-use").await;
+    state(&host.backend, &run, RunState::Waiting).await;
+    let quiet = quiescent(root.path(), &app).await;
+    retry(async || {
+        host.backend
+            .signal(
+                run.clone(),
+                SignalOptions {
+                    signal_type: "nudge".into(),
+                    payload: json!(null),
+                },
+            )
+            .await
+    })
+    .await;
+    let reported = until(async || {
+        responsibility(root.path(), &app)
+            .await
+            .filter(|current| current.active_at > quiet.active_at)
+    })
+    .await;
+    assert_eq!(
+        (
+            reported.state,
+            reported.ingress_epoch,
+            reported.close_attempts
+        ),
+        (ScopeState::Open, quiet.ingress_epoch, 0),
+        "{reported:?}"
+    );
+    // The unexpected signal moved no wait, so nothing was published for it.
+    assert_eq!(
+        host.backend.status(run.clone()).await.unwrap().state,
+        RunState::Waiting
+    );
 }
 
 #[derive(Default)]

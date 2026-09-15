@@ -1,20 +1,31 @@
 //! Ordered policy refresh for a fixed enrolled worker and app assignment.
 
-use super::{HostPolicies, PolicyBinding, PolicyRefresh, PolicySnapshot};
+use super::{HostPolicies, IngressEpochs, PolicyBinding, PolicyRefresh, PolicySnapshot};
 use crate::WorkflowServiceError;
-use std::sync::Arc;
-use zeroship_core::workflow_coordination::AssignedScope;
+use futures::future::LocalBoxFuture;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
+use zeroship_core::{
+    workflow_coordination::{AssignedScope, FailureCode, Revision},
+    workflow_policy::{EstablishIngress, PolicyLeaseRequest},
+};
 use zeroship_workflow_client::{LeasedPolicy, WorkerCoordinator};
 
 /// A host-owned policy binding for the client's exact signer and app assignment.
 ///
 /// Clones retain the same generation. Construct a replacement when placement or
-/// signer changes; refreshing never retargets the existing binding.
+/// signer changes; refreshing never retargets the existing binding. Clones
+/// share one establishment at a time, so concurrent fenced acceptances ask the
+/// manager once.
 #[derive(Clone, Debug)]
 pub struct AssignedPolicies {
     binding: PolicyBinding,
     client: WorkerCoordinator,
     scope: AssignedScope,
+    ingress_used: Arc<AtomicBool>,
+    establishing: Arc<futures::lock::Mutex<()>>,
 }
 
 impl AssignedPolicies {
@@ -35,6 +46,8 @@ impl AssignedPolicies {
             binding,
             client,
             scope,
+            ingress_used: Arc::new(AtomicBool::new(false)),
+            establishing: Arc::new(futures::lock::Mutex::new(())),
         })
     }
 
@@ -61,12 +74,91 @@ impl AssignedPolicies {
         reason = "the metadata client stays on its owning compio runtime"
     )]
     pub async fn refresh(&self) -> Result<(), WorkflowServiceError> {
+        self.exchange(None).await
+    }
+
+    /// Obtain an open ingress epoch above `after`, the epoch the journal
+    /// refused, or any open epoch when it names none, as at startup. The
+    /// manager commits recovery responsibility before replying, so the
+    /// installed epoch covers every acceptance that captures it. A newer epoch
+    /// another exchange already installed satisfies the call without I/O.
+    /// A concurrent refresh can supersede this exchange's refresh ticket after
+    /// the manager committed the epoch; one more exchange then returns it.
+    ///
+    /// # Errors
+    /// As [`Self::refresh`]; the manager refuses establishment with
+    /// `PermissionDenied` while policy disables admission or placement is
+    /// revoked, and with `Conflict` before activation created responsibility.
+    #[expect(
+        clippy::future_not_send,
+        reason = "the metadata client stays on its owning compio runtime"
+    )]
+    pub async fn establish(&self, after: Option<Revision>) -> Result<(), WorkflowServiceError> {
+        let _establishing = self.establishing.lock().await;
+        let mut result = Ok(());
+        for _ in 0..2 {
+            if self.holds_above(after) {
+                return Ok(());
+            }
+            result = self.exchange(Some(EstablishIngress { after })).await;
+            if !matches!(result, Err(WorkflowServiceError::Unavailable(_))) {
+                return result;
+            }
+        }
+        if self.holds_above(after) {
+            return Ok(());
+        }
+        result
+    }
+
+    /// Whether the installed snapshot holds an epoch above `after`, or any
+    /// epoch when `after` names none.
+    fn holds_above(&self, after: Option<Revision>) -> bool {
+        self.binding
+            .ingress_epoch()
+            .is_some_and(|held| after.is_none_or(|after| held > after))
+    }
+
+    /// Report that this host accepted ingress since its previous exchange.
+    pub fn note_ingress(&self) {
+        self.ingress_used.store(true, Ordering::Relaxed);
+    }
+
+    #[expect(
+        clippy::future_not_send,
+        reason = "the metadata client stays on its owning compio runtime"
+    )]
+    async fn exchange(
+        &self,
+        establish: Option<EstablishIngress>,
+    ) -> Result<(), WorkflowServiceError> {
         let ticket = self.binding.begin_refresh()?;
-        let lease = self
-            .client
-            .policy_lease(&self.scope)
-            .await
-            .map_err(transport_error)?;
+        let ingress_used = self.ingress_used.swap(false, Ordering::Relaxed);
+        let request = PolicyLeaseRequest {
+            scope: self.scope.clone(),
+            establish,
+            ingress_used,
+        };
+        let lease = match self.client.policy_lease(&request).await {
+            Ok(lease) => lease,
+            Err(error) => {
+                // An unacknowledged report is repeated by the next exchange.
+                if ingress_used {
+                    self.ingress_used.store(true, Ordering::Relaxed);
+                }
+                return Err(match (establish, error) {
+                    (Some(_), zeroship_workflow_client::Error::Refused(FailureCode::Denied)) => {
+                        WorkflowServiceError::PermissionDenied
+                    }
+                    (Some(_), zeroship_workflow_client::Error::Refused(FailureCode::Conflict)) => {
+                        WorkflowServiceError::Conflict(
+                            "workflow ingress epoch cannot be established".into(),
+                        )
+                    }
+                    (_, error) => transport_error(error),
+                });
+            }
+        };
         self.install(ticket, &lease)
     }
 
@@ -84,11 +176,23 @@ impl AssignedPolicies {
             return Err(super::unavailable());
         }
         lease.remaining().map_err(transport_error)?;
-        ticket.install(PolicySnapshot::lease(
-            lease.revision(),
-            lease.policy().clone(),
-            lease.expires_at(),
-        )?)
+        ticket.install(
+            PolicySnapshot::lease(lease.revision(), lease.policy().clone(), lease.expires_at())?
+                .with_ingress_epoch(lease.ingress_epoch()),
+        )
+    }
+}
+
+impl IngressEpochs for AssignedPolicies {
+    fn establish(
+        &self,
+        after: Option<Revision>,
+    ) -> LocalBoxFuture<'_, Result<(), WorkflowServiceError>> {
+        Box::pin(Self::establish(self, after))
+    }
+
+    fn accepted(&self) {
+        self.note_ingress();
     }
 }
 

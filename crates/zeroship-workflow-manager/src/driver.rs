@@ -5,6 +5,7 @@
 )]
 
 use crate::{
+    lifecycle::AppLifecycle,
     models::{
         recovery_duties,
         schema::{deployment_holds, schedules},
@@ -15,7 +16,9 @@ use crate::{
     Error, Queue,
 };
 use std::{
+    collections::BTreeSet,
     future::Future,
+    rc::Rc,
     time::{Duration, Instant},
 };
 use zeroship_core::{app_id::AppId, workflow_jobs::DeploymentId, workflow_schedules::ScheduleId};
@@ -24,6 +27,7 @@ use zeroship_data_orm::orm::{sql_types::Text, Field, Filter, FilterableColumn, F
 #[derive(Clone, Copy, Debug)]
 pub struct Options {
     pub scheduling: scheduling::Options,
+    /// Duty cadence and the closing lane's idleness, timeout and backoff.
     pub recovery: recovery::Options,
     /// Maximum candidate records visited in each lane's turn.
     pub page_limit: u32,
@@ -65,14 +69,10 @@ impl Options {
             || self.scheduling.min_interval_ms <= 0
             || self.scheduling.page_size == 0
             || i64::from(self.scheduling.page_size) > zeroship_data_orm::sql::MAX_ROW_LIMIT
-            || self.recovery.interval.as_millis() == 0
-            || i64::try_from(self.recovery.interval.as_millis()).is_err()
-            || self.recovery.page_size == 0
-            || i64::from(self.recovery.page_size) > zeroship_data_orm::sql::MAX_ROW_LIMIT
         {
             return Err(Error::Invalid);
         }
-        Ok(())
+        self.recovery.validate()
     }
 }
 
@@ -101,6 +101,21 @@ pub struct TickReport {
     pub reconciliation: LaneReport,
     pub collection: LaneReport,
     pub retention: LaneReport,
+    pub closing: LaneReport,
+}
+
+impl TickReport {
+    /// Every lane's report with its name, in a stable order for host logging.
+    #[must_use]
+    pub fn lanes(self) -> [(&'static str, LaneReport); 5] {
+        [
+            ("scheduling", self.scheduling),
+            ("reconciliation", self.reconciliation),
+            ("collection", self.collection),
+            ("retention", self.retention),
+            ("closing", self.closing),
+        ]
+    }
 }
 
 /// A host calls `tick` and owns cadence, cancellation and shutdown.
@@ -109,13 +124,19 @@ pub struct TickReport {
 /// candidates advance within a captured identity range and retry on another sweep.
 /// Existing operation transactions own publication, retention and commit fences.
 /// No placement or worker is required to generate due jobs.
+///
+/// The closing lane visits closing attempts and open scopes that are archived
+/// or idle past their backoff. It abandons the responsibility of an app whose
+/// deletion `lifecycle` reports instead of closing it; a page whose deletion
+/// state cannot be read visits nothing.
 #[derive(Debug)]
 pub struct Driver {
     queue: Queue,
     scheduler: Scheduler,
     recovery: Recovery,
+    lifecycle: Rc<dyn AppLifecycle>,
     options: Options,
-    cursors: [Cursor; 4],
+    cursors: [Cursor; 5],
     next_lane: usize,
 }
 
@@ -127,10 +148,15 @@ struct Cursor {
 
 impl Driver {
     /// Construct every maintenance operation over the same platform queue.
+    /// `lifecycle` reports Control's terminal deletions to the closing lane.
     ///
     /// # Errors
     /// Rejects invalid maintenance options or incompatible native metadata.
-    pub fn new(queue: Queue, options: Options) -> Result<Self, Error> {
+    pub fn new(
+        queue: Queue,
+        options: Options,
+        lifecycle: Rc<dyn AppLifecycle>,
+    ) -> Result<Self, Error> {
         options.validate()?;
         queue.database.entity::<schedules::Entity>()?;
         queue.database.entity::<recovery_duties::Entity>()?;
@@ -141,6 +167,7 @@ impl Driver {
         Ok(Self {
             scheduler: Scheduler::new(queue.clone(), options.scheduling)?,
             recovery: Recovery::new(queue.clone(), options.recovery)?,
+            lifecycle,
             queue,
             options,
             cursors: Default::default(),
@@ -148,7 +175,8 @@ impl Driver {
         })
     }
 
-    /// Visit bounded calendar, recovery and transitional-hold pages independently.
+    /// Visit bounded calendar, recovery, transitional-hold and closing pages
+    /// independently.
     ///
     /// A lane's deadline covers its scans and candidate operations together.
     /// Failures never prevent another lane's turn. The retention lane resumes
@@ -166,7 +194,8 @@ impl Driver {
                 0 => report.scheduling = result,
                 1 => report.reconciliation = result,
                 2 => report.collection = result,
-                _ => report.retention = result,
+                3 => report.retention = result,
+                _ => report.closing = result,
             }
         }
         report
@@ -201,7 +230,7 @@ impl Driver {
                     .map(|row| Candidate::Recoverable(lane_kind(lane), row))
                     .collect()
             }),
-            _ => scan_holds(
+            3 => scan_holds(
                 &self.queue,
                 &mut self.cursors[lane],
                 deadline,
@@ -210,6 +239,7 @@ impl Driver {
             )
             .await
             .map(|rows| rows.into_iter().map(Candidate::Hold).collect()),
+            _ => self.closing_candidates(deadline).await,
         };
         let mut report = LaneReport::default();
         let page: Vec<Candidate> = match page {
@@ -270,8 +300,37 @@ impl Driver {
                     .maintain_deployment(&app, &deployment, self.options.hold_grace)
                     .await?;
             }
+            Candidate::Closing { id, deleted } => {
+                let app = AppId::parse(id).map_err(|_| Error::Storage)?;
+                if *deleted {
+                    self.recovery.abandon(&app).await?;
+                } else {
+                    self.recovery.closing_turn(&app).await?;
+                }
+            }
         }
         Ok(())
+    }
+
+    /// A page of closing candidates with Control's deletion state, read once
+    /// for the page under the lane deadline.
+    async fn closing_candidates(&mut self, deadline: Deadline) -> Result<Vec<Candidate>, Error> {
+        let ids = scan_closing(
+            &self.recovery,
+            &mut self.cursors[4],
+            deadline,
+            self.options.page_limit,
+        )
+        .await?;
+        let apps: Vec<AppId> = ids.iter().filter_map(|id| AppId::parse(id).ok()).collect();
+        let deleted: BTreeSet<AppId> = deadline.run(self.lifecycle.deleted(&apps)).await?;
+        Ok(ids
+            .into_iter()
+            .map(|id| Candidate::Closing {
+                deleted: AppId::parse(&id).is_ok_and(|app| deleted.contains(&app)),
+                id,
+            })
+            .collect())
     }
 }
 
@@ -337,6 +396,7 @@ enum Candidate {
     Scheduled(Scheduled),
     Recoverable(DutyKind, Recoverable),
     Hold(Hold),
+    Closing { id: String, deleted: bool },
 }
 impl Candidate {
     fn id(&self) -> &str {
@@ -344,6 +404,7 @@ impl Candidate {
             Self::Scheduled(row) => row.id(),
             Self::Recoverable(_, row) => row.id(),
             Self::Hold(row) => row.id(),
+            Self::Closing { id, .. } => id,
         }
     }
 }
@@ -386,6 +447,26 @@ async fn scan_schedules(
             )
             .await
         }))
+        .await
+}
+
+async fn scan_closing(
+    recovery: &Recovery,
+    cursor: &mut Cursor,
+    deadline: Deadline,
+    limit: u32,
+) -> Result<Vec<String>, Error> {
+    if cursor.upper.is_none() {
+        let upper = deadline
+            .run(recovery.closing_page(None, None, true, 1))
+            .await?;
+        cursor.upper = upper.into_iter().next();
+    }
+    let Some(upper) = cursor.upper.as_deref() else {
+        return Ok(Vec::new());
+    };
+    deadline
+        .run(recovery.closing_page(cursor.after.as_deref(), Some(upper), false, limit))
         .await
 }
 

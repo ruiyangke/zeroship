@@ -53,11 +53,15 @@ export function workflowSchema(namespace) {
   const index = (name, purpose, columns) => table(name, { schema: namespace }).index(owned(`${name}_${purpose}_idx`)).add({ on: columns });
 
   create("schema_version", { id: text(), fingerprint: text() }, ["id"]);
+  // closed_epoch is the highest manager ingress epoch a delivered Close fenced.
+  // Ingress acceptance requires its captured epoch to exceed it under this
+  // row's lock; it never moves backwards.
   create("app_state", {
     ...identity(), signal_epoch: integer().default(0),
     last_polled_at: integer().default(0),
     subscription_sequence: integer().default(0),
     signal_sequence: integer().default(0),
+    closed_epoch: integer().default(0),
   }, ["app_id"]);
   create("deploys", {
     ...identity(), id: text(), hash: text(), manifest: text(), created_at: integer(),

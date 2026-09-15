@@ -26,6 +26,23 @@ pub(super) const fn admit(policy: &AppPolicy) -> Result<(), WorkflowServiceError
     Ok(())
 }
 
+/// Establishes the manager's ingress epoch for one app's policy binding.
+///
+/// The creator journal refuses an acceptance whose captured epoch it closed.
+/// The host then obtains an open epoch above the refused one from the manager,
+/// which commits recovery responsibility before replying, and installs it into
+/// the app's binding before returning, so a retried acceptance captures it.
+pub trait IngressEpochs {
+    /// Obtain and install an epoch above `after`, or any open epoch when it
+    /// names none. Concurrent calls serialize, and a call that finds a newer
+    /// epoch already installed returns without another exchange.
+    fn establish(&self, after: Option<Revision>)
+        -> LocalBoxFuture<'_, Result<(), WorkflowServiceError>>;
+
+    /// Record an accepted ingress for the manager's idle closure trigger.
+    fn accepted(&self);
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Validity {
     Configuration,
@@ -34,10 +51,14 @@ enum Validity {
 
 /// Policy already authorized by the worker's configuration or metadata provider.
 /// Cloning a snapshot preserves its deadline; retrying delivery cannot refresh it.
+///
+/// The ingress epoch names the manager's recovery responsibility that covers
+/// acceptance under this snapshot. A snapshot without one cannot accept ingress.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PolicySnapshot {
     revision: Revision,
     policy: AppPolicy,
+    ingress_epoch: Option<Revision>,
     validity: Validity,
 }
 impl PolicySnapshot {
@@ -53,6 +74,7 @@ impl PolicySnapshot {
         Ok(Self {
             revision,
             policy,
+            ingress_epoch: None,
             validity: Validity::Configuration,
         })
     }
@@ -71,8 +93,22 @@ impl PolicySnapshot {
         Ok(Self {
             revision,
             policy,
+            ingress_epoch: None,
             validity: Validity::Until(valid_until),
         })
+    }
+
+    /// Attach the manager-issued ingress epoch delivered with this policy.
+    /// The epoch is independent of the source policy revision.
+    #[must_use]
+    pub const fn with_ingress_epoch(mut self, epoch: Option<Revision>) -> Self {
+        self.ingress_epoch = epoch;
+        self
+    }
+
+    #[must_use]
+    pub const fn ingress_epoch(&self) -> Option<Revision> {
+        self.ingress_epoch
     }
 
     fn effective(&self) -> AppPolicy {
@@ -361,6 +397,14 @@ impl PolicyBinding {
             .ok_or_else(unavailable)
     }
 
+    /// The ingress epoch of this generation's installed snapshot. Retired,
+    /// uninitialized and epoch-less bindings have none.
+    #[must_use]
+    pub fn ingress_epoch(&self) -> Option<Revision> {
+        let state = self.registry.state.read().ok()?;
+        self.current(&state).ok()?.snapshot.as_ref()?.ingress_epoch
+    }
+
     pub(crate) fn authority(&self) -> Result<PolicyAuthority, WorkflowServiceError> {
         let state = self.registry.state.read().map_err(|_| unavailable())?;
         let current = self.current(&state)?;
@@ -373,6 +417,7 @@ impl PolicyBinding {
             revision: snapshot.revision,
             deadline,
             policy: snapshot.policy.clone(),
+            ingress_epoch: snapshot.ingress_epoch,
         };
         drop(state);
         Ok(authority)
@@ -445,6 +490,8 @@ impl PolicyRefresh {
 
 /// A captured binding/epoch and original deadline. Newer refreshes may authorize
 /// new operations, but can never extend or resurrect this authority.
+/// `ingress_epoch` is the manager responsibility captured with the policy; the
+/// creator journal, not this capture, decides whether it is still open.
 #[derive(Clone)]
 pub struct PolicyAuthority {
     binding: PolicyBinding,
@@ -453,6 +500,7 @@ pub struct PolicyAuthority {
     cancelled: Shared<BoxFuture<'static, ()>>,
     pub(super) deadline: Option<Instant>,
     pub(super) policy: AppPolicy,
+    pub(super) ingress_epoch: Option<Revision>,
 }
 
 impl PolicyAuthority {
@@ -494,6 +542,7 @@ impl PolicyAuthority {
         Ok(PolicySnapshot {
             revision: self.revision,
             policy: self.policy.clone(),
+            ingress_epoch: self.ingress_epoch,
             validity: self
                 .deadline
                 .map_or(Validity::Configuration, Validity::Until),
