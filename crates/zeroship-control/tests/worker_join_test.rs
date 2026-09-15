@@ -233,12 +233,6 @@ struct Joiner {
 }
 
 impl Joiner {
-    fn new(fill: u8) -> Self {
-        Self {
-            key: ed25519_dalek::SigningKey::from_bytes(&[fill; 32]),
-        }
-    }
-
     fn random() -> Self {
         let mut seed = [0_u8; 32];
         rand::rngs::OsRng.fill_bytes(&mut seed);
@@ -451,11 +445,22 @@ async fn forget(pg: &compio_postgres::Client, instance_id: &str) {
     .expect("probe row removed");
 }
 
-async fn count_instances(pg: &compio_postgres::Client) -> i64 {
-    pg.query_one("SELECT count(*) FROM zeroship.worker_instances", &[])
-        .await
-        .expect("count worker instances")
-        .get(0)
+/// How many instances name `signer_id`.
+///
+/// PER SIGNER, NEVER TABLE-WIDE. `live_db.rs` shares one database and sibling
+/// modules join and forget rows throughout, so a table-wide count taken before
+/// a refusal and again after it measures their traffic as well as this test's -
+/// and the arm then fails, or passes, on somebody else's cleanup. Every signer
+/// here is minted per test, so counting under one is counting exactly what this
+/// arm could have written.
+async fn instances_of(pg: &compio_postgres::Client, signer_id: &str) -> i64 {
+    pg.query_one(
+        "SELECT count(*) FROM zeroship.worker_instances WHERE join_signer_id = $1",
+        &[&signer_id],
+    )
+    .await
+    .expect("count this signer's worker instances")
+    .get(0)
 }
 
 async fn instance_status(pg: &compio_postgres::Client, instance_id: &str) -> Option<String> {
@@ -619,7 +624,7 @@ async fn a_refused_join_writes_no_row() {
     let pg = &fixture.state.control_pg;
     let signer = seed_default_signer(pg).await;
     let token = signer.token(DEFAULT_EXECUTION_ZONE, 8);
-    let before = count_instances(pg).await;
+    let before = instances_of(pg, &signer.id).await;
 
     // Two refusals, each one variable away from the control above: the peer and
     // the claimed port.
@@ -649,7 +654,7 @@ async fn a_refused_join_writes_no_row() {
     );
 
     assert_eq!(
-        count_instances(pg).await,
+        instances_of(pg, &signer.id).await,
         before,
         "a refused join must leave the registry untouched"
     );
@@ -666,7 +671,7 @@ async fn an_undeclared_envelope_refuses_every_join() {
     let pg = &fixture.state.control_pg;
     let signer = seed_default_signer(pg).await;
     let token = signer.token(DEFAULT_EXECUTION_ZONE, 1);
-    let before = count_instances(pg).await;
+    let before = instances_of(pg, &signer.id).await;
 
     let joiner = Joiner::random();
     let response = join(
@@ -678,7 +683,7 @@ async fn an_undeclared_envelope_refuses_every_join() {
     .await;
     assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(body_json(response).await["reason"], "envelope_unset");
-    assert_eq!(count_instances(pg).await, before);
+    assert_eq!(instances_of(pg, &signer.id).await, before);
 
     forget_signer(pg, &signer.id).await;
     drop(fixture);
@@ -697,7 +702,6 @@ async fn a_token_control_cannot_trust_is_refused_and_writes_no_row() {
     let fixture = build_fixture(declared_envelope()).await;
     let pg = &fixture.state.control_pg;
     let signer = seed_default_signer(pg).await;
-    let before = count_instances(pg).await;
 
     // A second declared zone, so a token can name a zone this signer may not
     // mint for. Zones are declared by migrations, never by Control.
@@ -813,7 +817,7 @@ async fn a_token_control_cannot_trust_is_refused_and_writes_no_row() {
     let admitted_body = body_json(admitted).await;
     let instance_id = admitted_body["instance_id"].as_str().unwrap_or_default().to_owned();
 
-    let after = count_instances(pg).await;
+    let written = instances_of(pg, &signer.id).await + instances_of(pg, &rotated.id).await;
     if !instance_id.is_empty() {
         forget(pg, &instance_id).await;
     }
@@ -831,11 +835,7 @@ async fn a_token_control_cannot_trust_is_refused_and_writes_no_row() {
         assert_eq!(body["reason"], *reason, "{label}");
     }
     assert_eq!(admitted_status, StatusCode::CREATED, "{admitted_body}");
-    assert_eq!(
-        after,
-        before + 1,
-        "only the control may have written a row"
-    );
+    assert_eq!(written, 1, "only the control may have written a row");
 
     drop(fixture);
     common::drain_pg().await;
@@ -854,10 +854,9 @@ async fn a_join_not_signed_by_the_presented_key_is_refused() {
     let pg = &fixture.state.control_pg;
     let signer = seed_default_signer(pg).await;
     let token = signer.token(DEFAULT_EXECUTION_ZONE, 16);
-    let before = count_instances(pg).await;
 
-    let holder = Joiner::new(0x41);
-    let captor = Joiner::new(0x42);
+    let holder = Joiner::random();
+    let captor = Joiner::random();
 
     // The captor presents the HOLDER's public key with a proof made by its own
     // key. Without the proof check this would register a key the captor does
@@ -896,7 +895,7 @@ async fn a_join_not_signed_by_the_presented_key_is_refused() {
         uses: 4,
         confirm: Some(holder.public()),
     });
-    let wrong_key = Joiner::new(0x43);
+    let wrong_key = Joiner::random();
     let mismatched = join(
         &fixture.state,
         peer(IN_ENVELOPE_PEER),
@@ -924,7 +923,7 @@ async fn a_join_not_signed_by_the_presented_key_is_refused() {
         .unwrap_or_default()
         .to_owned();
 
-    let after = count_instances(pg).await;
+    let written = instances_of(pg, &signer.id).await;
     if !instance_id.is_empty() {
         forget(pg, &instance_id).await;
     }
@@ -947,7 +946,7 @@ async fn a_join_not_signed_by_the_presented_key_is_refused() {
         thumbprint_key_id(&holder.public()),
         "the confirmed thumbprint is the joining key's own"
     );
-    assert_eq!(after, before + 1, "only the confirmed key wrote a row");
+    assert_eq!(written, 1, "only the confirmed key wrote a row");
 
     drop(fixture);
     common::drain_pg().await;
@@ -1395,7 +1394,6 @@ async fn a_real_loopback_connection_is_refused_as_outside_the_envelope() {
     let pg = &fixture.state.control_pg;
     let signer = seed_default_signer(pg).await;
     let token = signer.token(DEFAULT_EXECUTION_ZONE, 1);
-    let before = count_instances(pg).await;
 
     let state = Arc::clone(&fixture.state);
     let server = test::server(move || {
@@ -1422,7 +1420,7 @@ async fn a_real_loopback_connection_is_refused_as_outside_the_envelope() {
         body["reason"], "peer_outside_envelope",
         "a real connection must be judged on its observed peer, not on a default"
     );
-    assert_eq!(count_instances(pg).await, before);
+    assert_eq!(instances_of(pg, &signer.id).await, 0);
 
     forget_signer(pg, &signer.id).await;
     drop(server);
@@ -1439,7 +1437,6 @@ async fn a_malformed_body_is_refused_before_any_derivation() {
     let pg = &fixture.state.control_pg;
     let signer = seed_default_signer(pg).await;
     let token = signer.token(DEFAULT_EXECUTION_ZONE, 1);
-    let before = count_instances(pg).await;
 
     let joiner = Joiner::random();
     let short_key = WorkerJoinRequest {
@@ -1457,7 +1454,7 @@ async fn a_malformed_body_is_refused_before_any_derivation() {
         let response = join(&fixture.state, peer(IN_ENVELOPE_PEER), &token, request).await;
         assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{label}");
     }
-    assert_eq!(count_instances(pg).await, before);
+    assert_eq!(instances_of(pg, &signer.id).await, 0);
 
     forget_signer(pg, &signer.id).await;
     drop(fixture);
@@ -1727,45 +1724,62 @@ async fn wait_until_blocked_on(
     .is_ok()
 }
 
-/// A join transaction holds the signer row lock while a concurrent rotation
+/// A join transaction holds the signer row lock while a concurrent PURGE
 /// waits, OBSERVED rather than assumed from a sleep, and after both commit no
-/// active instance of the rotated signer exists.
+/// active instance of the purged signer exists.
+///
+/// PURGE IS THE VERB THIS INVARIANT BELONGS TO, and the distinction is the
+/// whole point of having two. Rotate deliberately leaves the fleet running, so
+/// "no active instance survives" is false of it by design and
+/// [`rotate_leaves_the_fleet_running_and_purge_retires_it`] says so. Purge is
+/// the incident path, and an ordering that let one instance slip through it
+/// would leave an attacker's worker serving under a key the operator believes
+/// they have destroyed.
 ///
 /// The hold is built the same way
 /// `organizations/concurrency.rs::concurrent_owner_departures_preserve_the_last_owner`
 /// builds one: a raw connection opens an explicit transaction and takes
 /// `SELECT ... FOR UPDATE` on the signer row BEFORE either real operation
 /// starts, so both `zeroship.join_worker_instance` (which locks the same row)
-/// and `zeroship.rotate_worker_join_signer` (whose own first UPDATE locks it
+/// and `zeroship.purge_worker_join_signer` (whose own first UPDATE locks it
 /// too) queue behind ONE known backend. Once BOTH are observed waiting, the
 /// blocker releases and PostgreSQL's row-lock queue decides which of the two
-/// real operations goes first - the invariant this arm checks holds under
-/// EITHER order.
+/// real operations goes first. Both orders are admissible and the two of them
+/// are exhaustive: either the join committed first and the purge's second
+/// statement retires what it finds, or the purge committed first and the join's
+/// guarded lock finds no active signer and refuses.
 #[ntex::test]
-async fn rotating_a_signer_while_a_join_holds_its_lock_leaves_no_active_instance() {
-    let outcome = run_the_join_rotate_race().await;
+async fn purging_a_signer_while_a_join_holds_its_lock_leaves_no_active_instance() {
+    let outcome = run_the_join_purge_race().await;
     assert!(
         outcome.both_observed_blocked,
-        "both the join and the rotation must be seen waiting on the fixture's \
+        "both the join and the purge must be seen waiting on the fixture's \
          row lock, or this arm is exercising a sleep instead of a lock"
     );
     assert!(
-        !outcome.active_instance_of_rotated_signer_survived,
-        "no ordering of join and rotation may leave an active instance of a \
-         rotated signer"
+        !outcome.active_instance_of_purged_signer_survived,
+        "no ordering of join and purge may leave an active instance of a \
+         purged signer"
+    );
+    assert_eq!(
+        outcome.join_committed, outcome.instance_row_exists,
+        "a join that reported success must have left a row and one that \
+         refused must have left none; anything else is a torn outcome"
     );
 }
 
 struct RaceOutcome {
     both_observed_blocked: bool,
-    active_instance_of_rotated_signer_survived: bool,
+    active_instance_of_purged_signer_survived: bool,
+    join_committed: bool,
+    instance_row_exists: bool,
 }
 
-/// Drive the race in [`rotating_a_signer_while_a_join_holds_its_lock_leaves_no_active_instance`]
+/// Drive the race in [`purging_a_signer_while_a_join_holds_its_lock_leaves_no_active_instance`]
 /// against whatever `zeroship.join_worker_instance` /
-/// `zeroship.rotate_worker_join_signer` definitions are CURRENTLY LIVE in the
+/// `zeroship.purge_worker_join_signer` definitions are CURRENTLY LIVE in the
 /// target database.
-async fn run_the_join_rotate_race() -> RaceOutcome {
+async fn run_the_join_purge_race() -> RaceOutcome {
     let db_url = common::require_control_db();
     let (pg_client, pg_conn) = compio_postgres::connect(&db_url, compio_postgres::NoTls)
         .await
@@ -1821,13 +1835,13 @@ async fn run_the_join_rotate_race() -> RaceOutcome {
     let public_key_ref = &public_key;
     let host_ref = &host;
 
-    let (queued, (_join_ok, instance_id), ()) = compio::time::timeout(
+    let (queued, (join_ok, instance_id), ()) = compio::time::timeout(
         Duration::from_secs(30),
         Box::pin(async move {
             futures::join!(
                 async move {
                     // Two waiters: the join's guarded lock UPDATE and the
-                    // rotation's own first UPDATE, both against the same row.
+                    // purge's own first UPDATE, both against the same row.
                     let both = wait_until_blocked_on(pg_client_ref, blocker_pid, 2).await;
                     blocker_tx.commit().await.expect("release the blocker lock");
                     both
@@ -1857,21 +1871,21 @@ async fn run_the_join_rotate_race() -> RaceOutcome {
                     (row.is_ok(), instance_id)
                 },
                 async move {
-                    let (rotator, rotator_conn) =
+                    let (purger, purger_conn) =
                         compio_postgres::connect(db_url_ref, compio_postgres::NoTls)
                             .await
-                            .expect("rotator connect");
-                    let rotator_driver =
-                        compio::runtime::spawn(async move { rotator_conn.run().await });
-                    rotator
+                            .expect("purger connect");
+                    let purger_driver =
+                        compio::runtime::spawn(async move { purger_conn.run().await });
+                    purger
                         .execute(
-                            "SELECT zeroship.rotate_worker_join_signer($1)",
+                            "SELECT zeroship.purge_worker_join_signer($1)",
                             &[signer_id_ref],
                         )
                         .await
-                        .expect("rotate_worker_join_signer runs");
-                    drop(rotator);
-                    let _ = compio::time::timeout(Duration::from_secs(10), rotator_driver).await;
+                        .expect("purge_worker_join_signer runs");
+                    drop(purger);
+                    let _ = compio::time::timeout(Duration::from_secs(10), purger_driver).await;
                 }
             )
         }),
@@ -1887,6 +1901,14 @@ async fn run_the_join_rotate_race() -> RaceOutcome {
         )
         .await
         .expect("count active instances of the signer")
+        .get(0);
+    let rows: i64 = pg_client
+        .query_one(
+            "SELECT count(*) FROM zeroship.worker_instances WHERE join_signer_id = $1",
+            &[&signer.id],
+        )
+        .await
+        .expect("count every instance of the signer")
         .get(0);
 
     // Best-effort cleanup; the assertions in the caller do not depend on it.
@@ -1918,6 +1940,225 @@ async fn run_the_join_rotate_race() -> RaceOutcome {
 
     RaceOutcome {
         both_observed_blocked: queued,
-        active_instance_of_rotated_signer_survived: survived > 0,
+        active_instance_of_purged_signer_survived: survived > 0,
+        join_committed: join_ok,
+        instance_row_exists: rows > 0,
     }
+}
+
+// ---------------------------------------------------------------------------
+// The distributed rules, measured across TWO Control replicas
+// ---------------------------------------------------------------------------
+//
+// Every arm above drives one `AppState` and therefore one PostgreSQL
+// connection, which serializes its own statements: a race staged on it is a
+// race the CLIENT resolved, not the database. Two fixtures are two connections
+// and two replicas, which is the shape a real deployment has and the only shape
+// in which "guarded write, never a read followed by a write" is falsifiable.
+
+/// A TOKEN'S USES ARE EXACT HOWEVER MANY REPLICAS SEE IT AT ONCE.
+///
+/// Consuming a use is a guarded write rather than a read followed by a write,
+/// so one use admits exactly one worker even when two replicas present two
+/// different keys against it simultaneously. A read-then-write would let both
+/// read "unused" and both admit.
+#[ntex::test]
+async fn two_replicas_racing_one_use_admit_exactly_one_worker() {
+    let left = build_fixture(declared_envelope()).await;
+    let right = build_fixture(declared_envelope()).await;
+    let signer = seed_default_signer(&left.state.control_pg).await;
+    let token = signer.token(DEFAULT_EXECUTION_ZONE, 1);
+
+    let first = Joiner::random();
+    let second = Joiner::random();
+    let (a, b) = futures::join!(
+        join(
+            &left.state,
+            peer(IN_ENVELOPE_PEER),
+            &token,
+            first.request(&token, ADVERTISED_PORT),
+        ),
+        join(
+            &right.state,
+            peer(IN_ENVELOPE_PEER),
+            &token,
+            second.request(&token, ADVERTISED_PORT),
+        )
+    );
+    let (a_status, b_status) = (a.status(), b.status());
+    let (a_body, b_body) = (body_json(a).await, body_json(b).await);
+
+    let mut admitted = Vec::new();
+    for body in [&a_body, &b_body] {
+        if let Some(id) = body["instance_id"].as_str() {
+            admitted.push(id.to_owned());
+        }
+    }
+    for id in &admitted {
+        forget(&left.state.control_pg, id).await;
+    }
+    forget_signer(&left.state.control_pg, &signer.id).await;
+
+    assert_eq!(
+        admitted.len(),
+        1,
+        "one use must admit exactly one worker: {a_status} {a_body} / {b_status} {b_body}"
+    );
+    let refused = if a_status == StatusCode::CREATED { &b_body } else { &a_body };
+    assert_eq!(refused["reason"], "token_exhausted", "{refused}");
+
+    drop(left);
+    drop(right);
+    common::drain_pg().await;
+}
+
+/// A LOST-REPLY RETRY THAT LANDS ON A DIFFERENT REPLICA CONVERGES ON ONE ROW.
+///
+/// The instance public key is UNIQUE, so two replicas admitting the same key at
+/// once mint one identity rather than two. Without that constraint one process
+/// would hold two instance rows, each independently retirable and neither
+/// retiring the other - so revoking the worker would stop half of it.
+///
+/// The retry also costs no second use, which is what makes a single-use token
+/// survive a dropped response.
+#[ntex::test]
+async fn two_replicas_racing_one_key_converge_on_one_instance() {
+    let left = build_fixture(declared_envelope()).await;
+    let right = build_fixture(declared_envelope()).await;
+    let pg = &left.state.control_pg;
+    let signer = seed_default_signer(pg).await;
+    let token = signer.token(DEFAULT_EXECUTION_ZONE, 2);
+    let joiner = Joiner::random();
+
+    let (a, b) = futures::join!(
+        join(
+            &left.state,
+            peer(IN_ENVELOPE_PEER),
+            &token,
+            joiner.request(&token, ADVERTISED_PORT),
+        ),
+        join(
+            &right.state,
+            peer(IN_ENVELOPE_PEER),
+            &token,
+            joiner.request(&token, ADVERTISED_PORT),
+        )
+    );
+    let (a_status, b_status) = (a.status(), b.status());
+    let (a_body, b_body) = (body_json(a).await, body_json(b).await);
+
+    let rows: i64 = pg
+        .query_one(
+            "SELECT count(*) FROM zeroship.worker_instances WHERE public_key = $1",
+            &[&joiner.public().as_slice()],
+        )
+        .await
+        .expect("count rows for the joining key")
+        .get(0);
+    // A SECOND worker on the remaining use, so "the retry cost no use" is
+    // measured rather than assumed.
+    let sibling = Joiner::random();
+    let second = join(
+        &left.state,
+        peer(IN_ENVELOPE_PEER),
+        &token,
+        sibling.request(&token, ADVERTISED_PORT),
+    )
+    .await;
+    let second_status = second.status();
+    let second_body = body_json(second).await;
+
+    for body in [&a_body, &b_body, &second_body] {
+        if let Some(id) = body["instance_id"].as_str() {
+            forget(pg, id).await;
+        }
+    }
+    forget_signer(pg, &signer.id).await;
+
+    assert_eq!(a_status, StatusCode::CREATED, "{a_body}");
+    assert_eq!(b_status, StatusCode::CREATED, "{b_body}");
+    assert_eq!(
+        a_body["instance_id"], b_body["instance_id"],
+        "two replicas admitting one key must converge on one instance id"
+    );
+    assert_eq!(rows, 1, "one process must hold exactly one instance row");
+    assert_eq!(
+        second_status,
+        StatusCode::CREATED,
+        "the retry must not have spent the second use: {second_body}"
+    );
+
+    drop(left);
+    drop(right);
+    common::drain_pg().await;
+}
+
+/// THE MINTER IS A LEASED ROLE, AND ONLY THE HOLDER WRITES.
+///
+/// Deployments run several Control replicas against one database, and two of
+/// them rotating the same volume would write over each other. Without the lease
+/// both replicas would answer "I am the minter" and both would write.
+///
+/// The lease ends with the SESSION, so a holder that dies drops it: that half
+/// is measured by closing the holder's connection and requiring the next asker
+/// to succeed, which is what makes a dead minter recoverable without anyone
+/// acting.
+#[compio::test]
+async fn only_one_control_replica_holds_the_join_token_minter_lease() {
+    use zeroship_control::join_minter::claim_minter_lease;
+
+    let url = common::require_control_db();
+    let open = || async {
+        let (client, connection) = compio_postgres::connect(&url, compio_postgres::NoTls)
+            .await
+            .expect("replica connect");
+        let driver = compio::runtime::spawn(async move { connection.run().await });
+        (client, driver)
+    };
+
+    let (holder, holder_driver) = open().await;
+    let (standby, standby_driver) = open().await;
+
+    let held = claim_minter_lease(&holder).await;
+    let refused = claim_minter_lease(&standby).await;
+    // The holder re-asking gets the lease again: the lock is re-entrant within
+    // a session, which is how a replica notices on every tick that it is still
+    // the minter without any bookkeeping of its own.
+    let held_again = claim_minter_lease(&holder).await;
+
+    // The holder dies. Its session ends, the lock goes with it, and the next
+    // tick elects the standby.
+    drop(holder);
+    let _ = compio::time::timeout(Duration::from_secs(10), holder_driver).await;
+    let succeeded = compio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            match claim_minter_lease(&standby).await {
+                Ok(true) => return true,
+                Ok(false) => compio::time::sleep(Duration::from_millis(50)).await,
+                Err(_) => return false,
+            }
+        }
+    })
+    .await
+    .unwrap_or(false);
+
+    let _ = standby
+        .execute("SELECT pg_advisory_unlock_all()", &[])
+        .await;
+    drop(standby);
+    let _ = compio::time::timeout(Duration::from_secs(10), standby_driver).await;
+
+    assert_eq!(held, Ok(true), "the first asker becomes the minter");
+    assert_eq!(
+        refused,
+        Ok(false),
+        "a second replica must stand by rather than write the same file"
+    );
+    assert_eq!(held_again, Ok(true), "the holder re-asking is still the minter");
+    assert!(
+        succeeded,
+        "a minter that dies must drop its lease with its session"
+    );
+
+    common::drain_pg().await;
 }
