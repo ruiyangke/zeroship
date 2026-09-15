@@ -555,7 +555,7 @@ impl Runtime {
 
     /// Durable-workflow replay dispatch. Invokes the `dispatch` export of the
     /// host-only [`WORKFLOW_DISPATCH_MODULE`] against the creator entry's own
-    /// namespace and returns the JSON StepResult object it produced.
+    /// namespace and returns the JSON `StepResult` object it produced.
     pub fn call_workflow_dispatch(
         &self,
         envelope_json: &str,
@@ -921,7 +921,7 @@ enum PendingOrigin {
     /// A native procedure call is waiting for its loader or handler promise.
     Rpc,
     /// Promise came from the host workflow bridge — resolved value is the
-    /// StepResult object its `dispatch` export returns.
+    /// `StepResult` object its `dispatch` export returns.
     Workflow,
 }
 
