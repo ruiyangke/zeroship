@@ -95,6 +95,11 @@ impl ServerOptions {
         let driver = DriverOptions {
             page_limit: coordinator.batch_limit.try_into()?,
             lane_timeout: Duration::from_millis(*settings.driver_lane_timeout_ms.get()),
+            // Queue transactions run under the command timeout; a hold outlives
+            // twice that budget before the retention lane may release it.
+            hold_grace: DriverOptions::default()
+                .hold_grace
+                .max(coordinator.command_timeout.saturating_mul(2)),
             ..DriverOptions::default()
         };
         driver.validate()?;
