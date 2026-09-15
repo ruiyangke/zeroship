@@ -578,7 +578,7 @@ pub async fn verify_redeem(
     let same_device = cookie_nonce.as_deref() == Some(redeemed.csrf_nonce.as_str());
 
     // 3. Find-or-create the user.
-    let user_id = match find_or_create_magic_user(db.as_ref(), &orm, &redeemed.email).await {
+    let user_id = match find_or_create_magic_user(&orm, &redeemed.email).await {
         Ok(id) => id,
         Err(e) => {
             tracing::error!(error = %e, "magic_link find-or-create failed");
@@ -597,7 +597,7 @@ pub async fn verify_redeem(
     // password-guessing could never recover via magic-link. Best-effort; the
     // gate below still enforces hard `disabled_at`. Must precede the gate so the
     // cleared `locked_until` is what the gate reads.
-    if let Err(e) = users::reset_login_failures(db.as_ref(), &user_id).await {
+    if let Err(e) = users::reset_login_failures(&orm, &user_id).await {
         tracing::warn!(error = %e, user_id = user_id.as_str(), "magic clear lockout failed");
     }
     if let Err(e) = eligibility::check_user_eligible(db.as_ref(), &user_id).await {
@@ -747,7 +747,7 @@ async fn same_device_finish(
         }
     };
 
-    if let Err(e) = users::touch_last_login(db, user_id).await {
+    if let Err(e) = users::touch_last_login(orm, user_id).await {
         tracing::warn!(error = %e, user_id = user_id.as_str(), "magic touch_last_login failed");
     }
 
@@ -831,6 +831,7 @@ async fn magic_challenge(
 pub(crate) async fn finish_after_second_factor(
     _cfg: &AuthConfig,
     db: &compio_postgres::Client,
+    orm: &Database,
     user: &users::UserRow,
     return_to: &str,
     req: &HttpRequest,
@@ -863,7 +864,7 @@ pub(crate) async fn finish_after_second_factor(
         }
     };
 
-    if let Err(e) = users::touch_last_login(db, &user.id).await {
+    if let Err(e) = users::touch_last_login(orm, &user.id).await {
         tracing::warn!(error = %e, user_id = user.id.as_str(), "magic touch_last_login failed");
     }
 
@@ -1115,7 +1116,7 @@ pub async fn complete(
 
     // 5. Find-or-create the user (must succeed — the redeem path
     //    already found-or-created, so this is effectively a lookup).
-    let user_id = match find_or_create_magic_user(db.as_ref(), &orm, &completion.email).await {
+    let user_id = match find_or_create_magic_user(&orm, &completion.email).await {
         Ok(id) => id,
         Err(e) => {
             tracing::error!(error = %e, "magic complete find-or-create failed");
@@ -1136,7 +1137,7 @@ pub async fn complete(
     // strong owner-present evidence, so clear any soft password-guessing lockout
     // before the eligibility gate. Best-effort; the gate still enforces hard
     // `disabled_at`.
-    if let Err(e) = users::reset_login_failures(db.as_ref(), &user_id).await {
+    if let Err(e) = users::reset_login_failures(&orm, &user_id).await {
         tracing::warn!(error = %e, user_id = user_id.as_str(), "magic complete clear lockout failed");
     }
     if let Err(e) = eligibility::check_user_eligible(db.as_ref(), &user_id).await {
@@ -1247,7 +1248,7 @@ pub async fn complete(
         }
     };
 
-    if let Err(e) = users::touch_last_login(db.as_ref(), &user_id).await {
+    if let Err(e) = users::touch_last_login(&orm, &user_id).await {
         tracing::warn!(error = %e, user_id = user_id.as_str(), "magic touch_last_login failed");
     }
 
@@ -1315,36 +1316,17 @@ fn render_error_page_with_status(message: PublicErrorMessage, status: StatusCode
     clippy::future_not_send,
     reason = "the native database belongs to this compio runtime"
 )]
-async fn find_or_create_magic_user(
-    db: &compio_postgres::Client,
-    orm: &Database,
-    email: &str,
-) -> Result<UserId> {
+async fn find_or_create_magic_user(orm: &Database, email: &str) -> Result<UserId> {
     email_validation::validate_email(email)
         .map_err(|_| AuthError::Internal("invalid email".into()))?;
-
-    if let Some(user) = users::find_by_email(orm, email).await? {
-        if user.email_verified_at.is_none() {
-            // Magic-link click counts as email verification — make
-            // sure the row reflects that (no-op if already verified).
-            db.execute(
-                "UPDATE zeroship.users SET email_verified_at = NOW() \
-                 WHERE id = $1 AND email_verified_at IS NULL",
-                &[&user.id.as_str()],
-            )
-            .await
-            .map_err(|e| AuthError::Db(format!("set email_verified_at: {e}")))?;
+    let user = match users::find_by_email(orm, email).await? {
+        Some(user) => user,
+        None => {
+            let name = email.split('@').next().unwrap_or("user");
+            users::create(orm, email, name, None).await?
         }
-        return Ok(user.id);
-    }
-    let name = email.split('@').next().unwrap_or("user");
-    let user = users::create(orm, email, name, None).await?;
-    db.execute(
-        "UPDATE zeroship.users SET email_verified_at = NOW() WHERE id = $1",
-        &[&user.id.as_str()],
-    )
-    .await
-    .map_err(|e| AuthError::Db(format!("set email_verified_at: {e}")))?;
+    };
+    users::mark_email_verified(orm, &user.id).await?;
     Ok(user.id)
 }
 

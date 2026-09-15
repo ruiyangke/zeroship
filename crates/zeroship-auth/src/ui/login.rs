@@ -242,6 +242,7 @@ async fn post_native(
     finish_login_native(
         cfg,
         db,
+        orm,
         &verified.id,
         verified.credential_version,
         &return_to,
@@ -290,6 +291,7 @@ pub(crate) fn render_challenge(cfg: &AuthConfig, stash: &TotpChallenge) -> HttpR
 #[allow(clippy::future_not_send, clippy::too_many_arguments)]
 async fn finish_login(
     db: &compio_postgres::Client,
+    orm: &Database,
     user_id: &UserId,
     credential_version: i64,
     amr: &[&str],
@@ -315,7 +317,7 @@ async fn finish_login(
         }
     };
 
-    if let Err(e) = users::touch_last_login(db, user_id).await {
+    if let Err(e) = users::touch_last_login(orm, user_id).await {
         tracing::warn!(error = %e, user_id = user_id.as_str(), "touch_last_login failed");
     }
 
@@ -326,13 +328,14 @@ async fn finish_login(
 async fn finish_login_native(
     _cfg: &AuthConfig,
     db: &compio_postgres::Client,
+    orm: &Database,
     user_id: &UserId,
     credential_version: i64,
     return_to: &str,
     amr: &[&str],
     clear_challenge_cookie: Option<()>,
 ) -> HttpResponse {
-    let Some(session) = finish_login(db, user_id, credential_version, amr).await else {
+    let Some(session) = finish_login(db, orm, user_id, credential_version, amr).await else {
         return render_error(PublicErrorMessage::ContactSupport);
     };
 
@@ -532,6 +535,7 @@ pub async fn post_2fa(
             finish_login_native(
                 cfg.as_ref(),
                 db.as_ref(),
+                &orm,
                 &user.id,
                 user.credential_version,
                 &return_to,
@@ -544,6 +548,7 @@ pub async fn post_2fa(
             crate::ui::magic::finish_after_second_factor(
                 cfg.as_ref(),
                 db.as_ref(),
+                &orm,
                 &user,
                 &return_to,
                 &req,
@@ -558,6 +563,7 @@ pub async fn post_2fa(
             crate::ui::link::finish_after_second_factor(
                 cfg.as_ref(),
                 db.as_ref(),
+                &orm,
                 &user,
                 provider,
                 subject,

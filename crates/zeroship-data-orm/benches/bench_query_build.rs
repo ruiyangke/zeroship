@@ -108,7 +108,7 @@ fn read_statement(workload: ReadWorkload) -> Statement {
             alias: ident(field, IdentRole::Alias),
         })
         .collect();
-    Statement::Select(
+    Statement::select(
         SelectStatement::new(SelectParts {
             predicate: read_predicate(workload, &table),
             table,

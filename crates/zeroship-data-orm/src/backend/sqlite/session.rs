@@ -1293,10 +1293,41 @@ struct Actor {
 }
 
 const BOOT_PRAGMAS: &str = "\
-    PRAGMA journal_mode = WAL; \
     PRAGMA synchronous = NORMAL; \
-    PRAGMA busy_timeout = 5000; \
     PRAGMA foreign_keys = ON;";
+
+/// How long a statement waits for another connection's lock before reporting
+/// lock contention: the budget PostgreSQL sessions use for `lock_timeout`.
+fn lock_wait() -> std::time::Duration {
+    std::time::Duration::from_millis(u64::from(crate::budgets::DB_LOCK_TIMEOUT_MS))
+}
+
+/// Pause between attempts to switch a file another connection holds to WAL.
+const WAL_SWITCH_RETRY: std::time::Duration = std::time::Duration::from_millis(10);
+
+/// Put the database in WAL mode, waiting out another connection's lock within
+/// the lock budget.
+///
+/// The connection's busy handler covers a holder that only reads. A holder
+/// with a write transaction open is refused at once instead: the switch reads
+/// the file before it writes, and SQLite does not invoke the busy handler for a
+/// read transaction's upgrade. So the switch itself is retried until the budget
+/// is spent, then reported as lock contention. A file already in WAL mode needs
+/// no lock and switches on the first attempt.
+fn enter_wal(conn: &Connection) -> Result<(), DbError> {
+    let deadline = std::time::Instant::now() + lock_wait();
+    loop {
+        let error = match conn.execute_batch("PRAGMA journal_mode = WAL;") {
+            Ok(()) => return Ok(()),
+            Err(error) => from_sqlite(error),
+        };
+        let contended = matches!(error, DbError::LockContention { .. });
+        if !contended || std::time::Instant::now() >= deadline {
+            return Err(error);
+        }
+        std::thread::sleep(WAL_SWITCH_RETRY);
+    }
+}
 
 fn open_lane_connection(
     db_path: &Path,
@@ -1310,8 +1341,14 @@ fn open_lane_connection(
 > {
     register_sqlite_vec_once();
     let conn = Connection::open(db_path).map_err(from_sqlite)?;
+    // The platform's budget, chosen here rather than left at whatever the
+    // driver opens with, and set before the first statement that takes a lock -
+    // the WAL switch below included.
+    conn.busy_timeout(lock_wait()).map_err(from_sqlite)?;
     super::json::register(&conn).map_err(from_sqlite)?;
     super::decimal::register(&conn).map_err(from_sqlite)?;
+    super::temporal::register(&conn).map_err(from_sqlite)?;
+    enter_wal(&conn)?;
     conn.execute_batch(BOOT_PRAGMAS).map_err(from_sqlite)?;
     let dispatcher = match packet_tx {
         Some(tx) => Some(crate::backend::sqlite::cdc::install(&conn, tx.clone())?),

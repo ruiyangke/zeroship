@@ -12,6 +12,21 @@ use zeroship_data_orm::{
 
 zeroship_data_orm::orm::schema! {
     pub models {
+        signing_keys {
+            #[orm(primary_key, assign(on = insert, by = identity))]
+            id: BigInt,
+            #[orm(unique)]
+            kid: Text,
+            alg: Text,
+            public_jwk: Json,
+            status: Text,
+            #[orm(assign(on = insert, by = now))]
+            created_at: Timestamp,
+            activated_at: Nullable<Timestamp>,
+            retiring_at: Nullable<Timestamp>,
+            retired_at: Nullable<Timestamp>,
+            max_issued_expires_at: Nullable<Timestamp>,
+        }
         users {
             #[orm(primary_key)]
             id: Text,

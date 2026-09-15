@@ -12,6 +12,11 @@ pub fn is_timestamp_millis(value: i64) -> bool {
     (MIN_TIMESTAMP_MILLIS..=MAX_TIMESTAMP_MILLIS).contains(&value)
 }
 
+pub(crate) fn is_timestamp_offset_millis(value: i64) -> bool {
+    let span = MAX_TIMESTAMP_MILLIS - MIN_TIMESTAMP_MILLIS;
+    (-span..=span).contains(&value)
+}
+
 /// Decode a native timestamp, integral Unix milliseconds, or an ISO timestamp.
 pub fn timestamp_millis(value: &crate::value::Value) -> Option<i64> {
     match value {

@@ -8,10 +8,14 @@
 //!
 //! Capture and bind are separate because hosts observe async context
 //! synchronously, while opening a connection can yield. The route also carries
-//! the physical schema and immutable SQL registration used by query preparation.
+//! the physical schema and immutable SQL registration used by query preparation,
+//! and the usage sink its host attached to the binding.
+
+use std::sync::Arc;
 
 use crate::backend::BackendHandle;
 use crate::binding::DbBinding;
+use crate::metrics::UsageSink;
 use crate::sql::SchemaName;
 use crate::sql::registration::SqlRegistration;
 use crate::transaction::scope::TransactionScope;
@@ -22,7 +26,7 @@ use crate::transaction::scope::TransactionScope;
 pub struct CapturedRoute {
     app_id: String,
     /// Physical schema used for SQL qualification and PostgreSQL role selection.
-    /// App identity remains the transaction-lane and metering key.
+    /// App identity remains the transaction-lane key.
     schema: SchemaName,
     /// `true` iff this dispatch is lexically-and-asynchronously inside a
     /// `db.transaction(fn)` callback **for this same app**.
@@ -31,6 +35,8 @@ pub struct CapturedRoute {
     /// Compiler, codecs, and effective support captured before backend acquisition.
     registration: SqlRegistration,
     connection: CapturedConnection,
+    /// Where this dispatch reports its usage; `None` reports nothing.
+    usage: Option<Arc<dyn UsageSink>>,
 }
 
 #[derive(Debug)]
@@ -46,7 +52,7 @@ enum CapturedConnection {
 #[derive(Clone, Debug)]
 pub struct TxRoute {
     app_id: String,
-    meter: Option<zeroship_metering::MeterHandle>,
+    usage: Option<Arc<dyn UsageSink>>,
     schema: SchemaName,
     in_tx: bool,
     scope: Option<TransactionScope>,
@@ -71,12 +77,17 @@ fn validate_binding_target(
 impl CapturedRoute {
     /// Freeze the host's observed async scope for this dispatch. A scope for
     /// another app does not confer access to this app's transaction.
+    ///
+    /// `usage` is the sink the host attached to this binding. Every capture
+    /// site states it, so a host cannot meter one entry point and forget
+    /// another; `None` reports nothing and never refuses the dispatch.
     pub fn capture(
         current_scope: Option<&TransactionScope>,
         app_id: &str,
         schema: SchemaName,
         registration: SqlRegistration,
         connection: crate::connection::ConnectionIdentity,
+        usage: Option<Arc<dyn UsageSink>>,
     ) -> Self {
         // SEC-1 compares TENANT against TENANT. The schema rides along; it is
         // never the admission key, because two apps sharing one database would
@@ -92,6 +103,7 @@ impl CapturedRoute {
             scope,
             registration,
             connection: CapturedConnection::Bound(connection),
+            usage,
         }
     }
 
@@ -100,7 +112,7 @@ impl CapturedRoute {
         &self.schema
     }
 
-    /// App identity used for transaction lanes and metering.
+    /// App identity used for transaction lanes.
     pub fn app_id(&self) -> &str {
         &self.app_id
     }
@@ -144,9 +156,8 @@ impl CapturedRoute {
             #[cfg(test)]
             CapturedConnection::Unbound => backend.connection_identity(),
         };
-        let meter = crate::metrics::bind(&self.app_id)?;
         Ok(TxRoute {
-            meter,
+            usage: self.usage,
             app_id: self.app_id,
             schema: self.schema,
             in_tx: self.in_tx,
@@ -168,6 +179,7 @@ impl CapturedRoute {
             scope: None,
             registration,
             connection: CapturedConnection::Unbound,
+            usage: None,
         }
     }
 
@@ -182,7 +194,15 @@ impl CapturedRoute {
             scope: TransactionScope::current(app_id).ok(),
             registration,
             connection: CapturedConnection::Unbound,
+            usage: None,
         }
+    }
+
+    /// Test-only: report this route's usage to `sink`.
+    #[cfg(test)]
+    pub(crate) fn with_usage_for_tests(mut self, sink: Arc<dyn UsageSink>) -> Self {
+        self.usage = Some(sink);
+        self
     }
 }
 
@@ -194,8 +214,9 @@ impl TxRoute {
         validate_binding_target(&self.app_id, &self.schema, binding)
     }
 
-    pub(crate) fn meter(&self) -> Option<&zeroship_metering::MeterHandle> {
-        self.meter.as_ref()
+    /// The sink this dispatch reports successful work to, if its host attached one.
+    pub(crate) fn usage(&self) -> Option<&dyn UsageSink> {
+        self.usage.as_deref()
     }
 
     /// Validate the captured callback before admitting work to its lane.
@@ -204,7 +225,7 @@ impl TxRoute {
     }
 
     /// The TENANT this dispatch runs for: the transaction-lane key, the SQLite
-    /// ATTACH alias, the metering subject, the CDC stamp.
+    /// ATTACH alias, the CDC stamp.
     ///
     /// NOT the schema. Use [`Self::schema`] to qualify a table or to derive the
     /// PostgreSQL runtime role.

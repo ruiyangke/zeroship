@@ -50,7 +50,6 @@ impl ClientKind {
 
 struct Fixture {
     server: AuthServer,
-    db: Client,
     issuer: Arc<Issuer>,
     client_id: String,
     app_id: zeroship_core::AppId,
@@ -105,7 +104,6 @@ impl Fixture {
 
         Self {
             server,
-            db,
             issuer,
             client_id,
             app_id,
@@ -151,7 +149,7 @@ async fn brokered_code_exchange_with_derived_secret_yields_global_sub_id_token_a
         let token = exchange_code(&fx, &code, REDIRECT_URI, &verifier, Some(&secret))
             .await
             .expect("token response");
-        let jwks = jwks_document(&fx.db).await.expect("jwks");
+        let jwks = jwks_document(&fx.server.orm).await.expect("jwks");
         let id = verify_with_jwks::<IdTokenClaims>(
             &jwks,
             &token.id_token,
@@ -206,7 +204,7 @@ async fn non_brokered_client_unchanged_pairwise_and_no_secret_required() {
         let token = exchange_code(&fx, &code, REDIRECT_URI, &verifier, None)
             .await
             .expect("non-brokered token response");
-        let jwks = jwks_document(&fx.db).await.expect("jwks");
+        let jwks = jwks_document(&fx.server.orm).await.expect("jwks");
         let id = verify_with_jwks::<IdTokenClaims>(
             &jwks,
             &token.id_token,

@@ -138,6 +138,15 @@ pub(crate) fn from_sqlite(e: rusqlite::Error) -> DbError {
             }
         }
 
+        // A database timestamp expression left the portable calendar. The
+        // PostgreSQL backend reaches the same refusal through the update's
+        // result check, so both report one validation error.
+        rusqlite::Error::SqliteFailure(ffi_err, _)
+            if ffi_err.extended_code == super::temporal::OUTSIDE_CALENDAR =>
+        {
+            DbError::timestamp_expression_outside_calendar()
+        }
+
         // QueryReturnedNoRows is the rusqlite equivalent of the PG
         // empty-RETURNING case. PG's `classify` doesn't have a peer
         // — empty-RETURNING surfaces via `first_row_or_internal` —

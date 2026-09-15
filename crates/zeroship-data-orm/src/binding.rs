@@ -9,7 +9,7 @@
 //! # Two identities, carried separately
 //!
 //! `app_id` is the TENANT: the transaction-lane key, the broker routing key,
-//! the metering subject, the CDC event stamp, the encryption salt. [`schema`]
+//! the CDC event stamp, the encryption salt. [`schema`]
 //! is the PHYSICAL DATABASE SCHEMA: what query building qualifies tables with,
 //! what DDL creates, and what the per-app PostgreSQL role is derived from.
 //!

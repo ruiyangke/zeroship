@@ -198,19 +198,22 @@ fn refuse_and_strip(
 ) -> Result<(), DbError> {
     for name in immutable {
         if obj.contains_key(name) {
-            let where_ = under.map_or_else(String::new, |op| format!(" under `{op}`"));
-            return Err(
-                crate::sql::mapping::QueryError::ImmutableAssignedField(format!(
-                    "UPDATE patch attempted to overwrite immutable assigned field `{name}`{where_}"
-                ))
-                .into(),
-            );
+            return Err(immutable_assigned_field(name, under));
         }
     }
     for name in reassigned {
         obj.shift_remove(name);
     }
     Ok(())
+}
+
+/// Refuse an update that would replace a field its descriptor assigns once.
+pub(crate) fn immutable_assigned_field(name: &str, under: Option<&str>) -> DbError {
+    let where_ = under.map_or_else(String::new, |op| format!(" under `{op}`"));
+    crate::sql::mapping::QueryError::ImmutableAssignedField(format!(
+        "UPDATE patch attempted to overwrite immutable assigned field `{name}`{where_}"
+    ))
+    .into()
 }
 
 /// Resolve a direct equality guard on the declared concurrency field; reject nested guards.

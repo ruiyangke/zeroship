@@ -1,9 +1,9 @@
 //! Resolved physical statements. Application policy is applied before this boundary.
 
 use super::{
+    Ident, IdentRole, SchemaName,
     compiler::CompileError,
     predicate::{CompareOp, MembershipOp, PatternOp},
-    Ident, IdentRole, SchemaName,
 };
 use crate::value::Value;
 use std::{
@@ -23,11 +23,40 @@ pub enum StorageType {
     Json,
     Vector,
     GeoPoint,
+    /// A one-dimensional array in the database's own array type.
+    Array(ArrayElement),
+}
+
+/// Element type of a native database array.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ArrayElement {
+    Text,
+}
+
+impl ArrayElement {
+    /// Storage of a single element, such as an array mutation operand.
+    #[must_use]
+    pub const fn storage(self) -> StorageType {
+        match self {
+            Self::Text => StorageType::Text,
+        }
+    }
 }
 
 impl StorageType {
     pub fn exact_decimal(precision: u64, scale: u64) -> Result<Self, CompileError> {
         DecimalStorage::new(precision, scale).map(Self::ExactDecimal)
+    }
+
+    /// Storage of an array mutation operand: an element for native arrays, a
+    /// JSON value for JSON documents.
+    #[must_use]
+    pub const fn array_operand(self) -> Option<Self> {
+        match self {
+            Self::Json => Some(Self::Json),
+            Self::Array(element) => Some(element.storage()),
+            _ => None,
+        }
     }
 
     fn accepts(self, value: &Value) -> bool {
@@ -52,6 +81,10 @@ impl StorageType {
             Self::Json => matches!(value, Value::Json(_) | Value::Array(_) | Value::Object(_)),
             Self::Vector => matches!(value, Value::Array(_) | Value::Bytes(_)),
             Self::GeoPoint => matches!(value, Value::Object(_) | Value::Bytes(_)),
+            Self::Array(element) => matches!(
+                value,
+                Value::Array(values) if values.iter().all(|value| element.storage().accepts(value))
+            ),
         }
     }
 
@@ -258,6 +291,9 @@ pub enum Expression {
         operand: Value,
     },
     CurrentTimestamp,
+    DatabaseTimestamp {
+        offset_millis: i64,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -471,11 +507,19 @@ pub struct SelectParts {
     pub lock: RowLock,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+/// Row locking requested by a select.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub enum RowLock {
     #[default]
     None,
-    Update,
+    /// Probe of the rows a protected write is about to change. Backends
+    /// without row locks render no locking clause, because their single
+    /// writer already serializes the write.
+    WriteTargets,
+    /// An exclusive lock the caller requires. An empty list locks the rows of
+    /// every source; otherwise only the named source aliases are locked.
+    /// Backends without row locks refuse the statement.
+    Required { of: Vec<Ident> },
 }
 
 #[derive(Debug)]
@@ -513,7 +557,11 @@ impl SelectStatement {
     }
 
     pub fn validate(&self) -> Result<(), CompileError> {
-        validate_select(&self.0)
+        validate_select(&self.0)?;
+        if self.1.is_some() && self.0.lock != RowLock::None {
+            return Err(invalid("row locking cannot be combined with a summary"));
+        }
+        Ok(())
     }
 }
 
@@ -783,13 +831,27 @@ impl Upsert {
 
 #[derive(Debug)]
 pub enum Statement {
-    Select(SelectStatement),
+    Select(Box<SelectStatement>),
     VectorSearch(VectorSearchStatement),
     SpatialNear(SpatialNearStatement),
     Insert(Insert),
     Upsert(Upsert),
     Update(Update),
     Delete(Delete),
+    /// Coordination rather than data: an advisory lock request.
+    AdvisoryLock(super::coordination::AdvisoryLock),
+    /// Coordination rather than data: a transaction-local setting.
+    SetTransactionSetting(super::coordination::SetTransactionSetting),
+}
+
+impl Statement {
+    /// A select statement. Selects carry the grammar's largest payload, so the
+    /// variant holds it behind a pointer and every other statement stays cheap
+    /// to move.
+    #[must_use]
+    pub fn select(statement: SelectStatement) -> Self {
+        Self::Select(Box::new(statement))
+    }
 }
 
 fn validate_vector_search(parts: &VectorSearchParts) -> Result<(), CompileError> {
@@ -926,11 +988,55 @@ fn validate_select(parts: &SelectParts) -> Result<(), CompileError> {
             validate_grouped_operand(&order.expression, &parts.group_by)?;
         }
     }
-    if parts.lock == RowLock::Update && (grouped || parts.distinct) {
+    if parts.lock != RowLock::None && (grouped || parts.distinct) {
         return Err(invalid("row locking requires an ungrouped select"));
+    }
+    if let RowLock::Required { of } = &parts.lock {
+        validate_locked_sources(parts, of)?;
     }
     if parts.limit.is_some_and(|value| value < 0) || parts.offset.is_some_and(|value| value < 0) {
         return Err(invalid("select pagination cannot be negative"));
+    }
+    Ok(())
+}
+
+/// Lock targets must name distinct sources that always produce a row.
+fn validate_locked_sources(parts: &SelectParts, of: &[Ident]) -> Result<(), CompileError> {
+    let nullable = |alias: &Ident| {
+        parts.joins.iter().any(|join| {
+            join.kind == super::JoinKind::Left && join.table.alias() == Some(alias)
+        })
+    };
+    if of.is_empty() {
+        if parts
+            .joins
+            .iter()
+            .any(|join| join.kind == super::JoinKind::Left)
+        {
+            return Err(invalid(
+                "an unqualified row lock cannot include the nullable side of a left join",
+            ));
+        }
+        return Ok(());
+    }
+    let mut targets = HashSet::new();
+    for alias in of {
+        let registered = parts.table.alias() == Some(alias)
+            || parts
+                .joins
+                .iter()
+                .any(|join| join.table.alias() == Some(alias));
+        if !registered {
+            return Err(invalid("row lock target is not a select source"));
+        }
+        if nullable(alias) {
+            return Err(invalid(
+                "row lock target is the nullable side of a left join",
+            ));
+        }
+        if !targets.insert(alias.as_str()) {
+            return Err(invalid("duplicate row lock target"));
+        }
     }
     Ok(())
 }
@@ -1087,10 +1193,11 @@ fn validate_upsert(parts: &UpsertParts) -> Result<(), CompileError> {
                 Expression::Arithmetic { .. } | Expression::ArrayMutation { .. } => {
                     return Err(invalid("upsert assignments cannot use update operators"));
                 }
-                Expression::CurrentTimestamp => {
+                Expression::CurrentTimestamp | Expression::DatabaseTimestamp { .. } => {
                     if storage != StorageType::Timestamp {
                         return Err(invalid("current timestamp requires timestamp storage"));
                     }
+                    validate_timestamp_expression(&assignment.value)?;
                 }
             }
         }
@@ -1161,7 +1268,11 @@ fn validate_update_expression(
             "bound value does not match its physical storage type",
         )),
         Expression::Bind(_) | Expression::Null => Ok(()),
-        Expression::CurrentTimestamp if storage == StorageType::Timestamp => Ok(()),
+        Expression::CurrentTimestamp | Expression::DatabaseTimestamp { .. }
+            if storage == StorageType::Timestamp =>
+        {
+            validate_timestamp_expression(expression)
+        }
         Expression::Increment { column, .. } => {
             table.check_column(column)?;
             if column.index != assigned.index || storage != StorageType::Integer {
@@ -1185,11 +1296,12 @@ fn validate_update_expression(
         } => {
             table.check_column(column)?;
             if column.index != assigned.index
-                || storage != StorageType::Json
-                || !StorageType::Json.accepts(operand)
+                || !storage
+                    .array_operand()
+                    .is_some_and(|element| element.accepts(operand))
             {
                 return Err(invalid(
-                    "array mutation requires its assigned JSON column and encoded operand",
+                    "array mutation requires its assigned array column and an encoded element",
                 ));
             }
             Ok(())
@@ -1197,10 +1309,19 @@ fn validate_update_expression(
         Expression::Default | Expression::Current(_) | Expression::Incoming(_) => {
             Err(invalid("expression is not valid in an ordinary update"))
         }
-        Expression::CurrentTimestamp => {
+        Expression::CurrentTimestamp | Expression::DatabaseTimestamp { .. } => {
             Err(invalid("current timestamp requires timestamp storage"))
         }
     }
+}
+
+fn validate_timestamp_expression(expression: &Expression) -> Result<(), CompileError> {
+    if let Expression::DatabaseTimestamp { offset_millis } = expression {
+        if !super::temporal::is_timestamp_offset_millis(*offset_millis) {
+            return Err(invalid("timestamp offset is outside the portable calendar"));
+        }
+    }
+    Ok(())
 }
 
 fn validate_predicate(table: &Table, predicate: &ResolvedPredicate) -> Result<(), CompileError> {
@@ -1413,6 +1534,7 @@ impl std::fmt::Debug for Expression {
                 .field("operator", operator)
                 .finish_non_exhaustive(),
             Self::CurrentTimestamp => f.write_str("CurrentTimestamp"),
+            Self::DatabaseTimestamp { .. } => f.write_str("DatabaseTimestamp"),
         }
     }
 }

@@ -105,7 +105,7 @@ async fn userinfo_returns_scope_gated_claims_for_valid_token() {
     Database::run(async |database| {
         let fx = Fixture::boot(database).await;
         let token = issue_token(&fx, "openid email profile").await;
-        let jwks = jwks_document(&fx.db).await.expect("jwks");
+        let jwks = jwks_document(&fx.server.orm).await.expect("jwks");
         let id = verify_with_jwks::<IdTokenClaims>(
             &jwks,
             &token.id_token,
@@ -154,7 +154,7 @@ async fn userinfo_omits_identity_claims_without_scopes() {
     Database::run(async |database| {
         let fx = Fixture::boot(database).await;
         let token = issue_token(&fx, "openid").await;
-        let jwks = jwks_document(&fx.db).await.expect("jwks");
+        let jwks = jwks_document(&fx.server.orm).await.expect("jwks");
         let id = verify_with_jwks::<IdTokenClaims>(
             &jwks,
             &token.id_token,

@@ -6,6 +6,7 @@ mod connections;
 mod encryption;
 mod fixtures;
 mod locking;
+mod main_schema;
 mod masking;
 mod search;
 mod snapshots;

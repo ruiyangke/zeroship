@@ -185,13 +185,22 @@ async fn changed_password_invalidates_the_challenge_without_spending_its_backup_
         let device = Authenticator::confirmed(&server, &user.id).await;
         let mut stale = Challenge::password(&server, &user, PASSWORD).await;
         let new_password = "new second factor fixture password phrase";
-        users::update_password_hash(
-            server.pg.as_ref(),
-            &user.id,
-            &password::hash(new_password).unwrap(),
-        )
-        .await
-        .unwrap();
+        use zeroship_auth::store::native::models::users as model;
+        server
+            .orm
+            .entity::<model::Entity>()
+            .unwrap()
+            .update::<_, users::UserRow>(
+                model::id.eq(user.id.as_str()).unwrap(),
+                model::password_hash
+                    .set(Some(password::hash(new_password).unwrap()))
+                    .unwrap()
+                    .and(model::credential_version.increment(1_i64).unwrap())
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+            .unwrap();
         assert_refused(
             stale.submit(&server, &device.backups[0]).await,
             "session expired, sign in again",

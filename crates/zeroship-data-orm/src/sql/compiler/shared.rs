@@ -1,11 +1,11 @@
 use super::{CompileError, CompiledQuery, SqlWriter};
 use crate::sql::{
-    statement::{
-        ArithmeticOperator, ArrayOperator, Column, Delete, Expression, Insert, MutationScope,
-        ResolvedOperand, ResolvedPredicate, ResolvedPredicateValue, SelectStatement, Statement,
-        StorageType, Table, Update, Upsert, VectorSearchStatement,
-    },
     CompareOp, MembershipOp, PatternOp,
+    statement::{
+        ArithmeticOperator, ArrayElement, ArrayOperator, Column, Delete, Expression, Insert,
+        MutationScope, ResolvedOperand, ResolvedPredicate, ResolvedPredicateValue, SelectStatement,
+        Statement, StorageType, Table, Update, Upsert, VectorSearchStatement,
+    },
 };
 use crate::value::Value;
 
@@ -22,6 +22,12 @@ pub struct SqlSupport {
     pub insert_generated_identity: bool,
     pub identity_allocation: bool,
     pub default_expression: bool,
+    /// Caller-required exclusive row locks on selected rows.
+    pub row_locks: bool,
+    /// Advisory locks coordinated by the database server.
+    pub advisory_locks: bool,
+    /// Custom settings scoped to a transaction.
+    pub transaction_settings: bool,
     pub max_bind_parameters: usize,
 }
 
@@ -38,6 +44,9 @@ pub struct Requirements {
     pub insert_generated_identity: bool,
     pub identity_allocation: bool,
     pub default_expression: bool,
+    pub row_locks: bool,
+    pub advisory_locks: bool,
+    pub transaction_settings: bool,
     pub bind_parameters: usize,
 }
 
@@ -55,6 +64,10 @@ impl Requirements {
                         })
                         || !parts.group_by.is_empty()
                         || predicate_has_aggregate(&parts.having),
+                    row_locks: matches!(
+                        parts.lock,
+                        crate::sql::statement::RowLock::Required { .. }
+                    ),
                     bind_parameters: parts
                         .joins
                         .iter()
@@ -127,9 +140,10 @@ impl Requirements {
                     insert_generated_identity: parts.insert_generated_identity,
                     identity_allocation: false,
                     default_expression: values.clone().any(|v| matches!(v, Expression::Default)),
-                    bind_parameters: values
-                        .filter(|v| matches!(v, Expression::Bind(_) | Expression::Increment { .. }))
-                        .count()
+                    row_locks: false,
+                    advisory_locks: false,
+                    transaction_settings: false,
+                    bind_parameters: values.map(expression_binds).sum::<usize>()
                         + usize::from(parts.condition.is_some()),
                 }
             }
@@ -154,6 +168,16 @@ impl Requirements {
                     ..Self::default()
                 }
             }
+            Statement::AdvisoryLock(lock) => Self {
+                advisory_locks: true,
+                bind_parameters: lock.key().bind_parameters(),
+                ..Self::default()
+            },
+            Statement::SetTransactionSetting(_) => Self {
+                transaction_settings: true,
+                bind_parameters: 2,
+                ..Self::default()
+            },
         }
     }
 }
@@ -187,6 +211,7 @@ fn expression_binds(expression: &Expression) -> usize {
             | Expression::Increment { .. }
             | Expression::Arithmetic { .. }
             | Expression::ArrayMutation { .. }
+            | Expression::DatabaseTimestamp { .. }
     ))
 }
 
@@ -266,11 +291,18 @@ pub enum IdentityReadPlan {
 #[derive(Clone, Copy)]
 pub(crate) struct Syntax {
     pub(crate) current_timestamp: &'static str,
+    pub(crate) database_timestamp: fn(&mut SqlWriter, i64) -> Result<(), CompileError>,
     pub(crate) generated_identity_override: Option<&'static str>,
     pub(crate) timestamp_cast: &'static str,
     pub(crate) vector_cast: &'static str,
     pub(crate) numeric_cast: &'static str,
-    pub(crate) first_row_lock: &'static str,
+    /// Cast for a bound native text array; `None` when the dialect has no array type.
+    pub(crate) text_array_cast: Option<&'static str>,
+    /// Locking clause for write-target probes and first-row mutation scopes.
+    /// Empty when the backend's single writer serializes writes.
+    pub(crate) write_target_lock: &'static str,
+    /// Exclusive row-lock clause, or `None` when the backend has no row locks.
+    pub(crate) required_row_lock: Option<&'static str>,
     pub(crate) insensitive_like: &'static str,
     pub(crate) insensitive_like_suffix: &'static str,
     pub(crate) average_suffix: &'static str,
@@ -362,6 +394,24 @@ pub(crate) fn check(
             effective.default_expression,
             implemented.default_expression,
             "default expressions",
+        ),
+        (
+            required.row_locks,
+            effective.row_locks,
+            implemented.row_locks,
+            "row locks",
+        ),
+        (
+            required.advisory_locks,
+            effective.advisory_locks,
+            implemented.advisory_locks,
+            "advisory locks",
+        ),
+        (
+            required.transaction_settings,
+            effective.transaction_settings,
+            implemented.transaction_settings,
+            "transaction settings",
         ),
     ] {
         if available && !implementation {
@@ -666,8 +716,21 @@ pub(crate) fn compile_select(
         writer.sql.push_str(" OFFSET ");
         writer.write_param(Value::from(offset))?;
     }
-    if parts.lock == crate::sql::statement::RowLock::Update {
-        writer.sql.push_str(syntax.first_row_lock);
+    match &parts.lock {
+        crate::sql::statement::RowLock::None => {}
+        crate::sql::statement::RowLock::WriteTargets => {
+            writer.sql.push_str(syntax.write_target_lock);
+        }
+        crate::sql::statement::RowLock::Required { of } => {
+            let clause = syntax
+                .required_row_lock
+                .ok_or(CompileError::Unsupported("row locks"))?;
+            writer.sql.push_str(clause);
+            for (index, alias) in of.iter().enumerate() {
+                writer.sql.push_str(if index == 0 { " OF " } else { ", " });
+                writer.identifier(alias.as_str());
+            }
+        }
     }
     match summary {
         Some(SelectSummary::Count) => writer.sql.push_str(") AS \"summary\""),
@@ -713,7 +776,7 @@ fn write_mutation_predicate(
             writer.sql.push_str(" ORDER BY ");
             writer.identifier(target.name().as_str());
             writer.sql.push_str(" LIMIT 1");
-            writer.sql.push_str(syntax.first_row_lock);
+            writer.sql.push_str(syntax.write_target_lock);
             writer.sql.push(')');
         }
     }
@@ -1101,13 +1164,17 @@ fn write_bind(
     storage: StorageType,
     value: Value,
 ) -> Result<(), CompileError> {
+    let cast = match storage {
+        StorageType::Timestamp => syntax.timestamp_cast,
+        StorageType::Vector => syntax.vector_cast,
+        StorageType::ExactDecimal(_) => syntax.numeric_cast,
+        StorageType::Array(ArrayElement::Text) => syntax
+            .text_array_cast
+            .ok_or(CompileError::Unsupported("native array storage"))?,
+        _ => "",
+    };
     writer.write_param(value)?;
-    match storage {
-        StorageType::Timestamp => writer.sql.push_str(syntax.timestamp_cast),
-        StorageType::Vector => writer.sql.push_str(syntax.vector_cast),
-        StorageType::ExactDecimal(_) => writer.sql.push_str(syntax.numeric_cast),
-        _ => {}
-    }
+    writer.sql.push_str(cast);
     Ok(())
 }
 
@@ -1149,6 +1216,9 @@ fn write_expression(
             ));
         }
         Expression::CurrentTimestamp => writer.sql.push_str(syntax.current_timestamp),
+        Expression::DatabaseTimestamp { offset_millis } => {
+            (syntax.database_timestamp)(writer, offset_millis)?;
+        }
     }
     Ok(())
 }

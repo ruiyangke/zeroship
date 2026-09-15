@@ -219,7 +219,7 @@ fn registered_writes_obey_column_scoped_read_grants() {
                 COLLECTION,
                 &schema,
                 value!({"id":"person_seed"}).into(),
-                value!({"nickname":"updated"}),
+                value!({"nickname":"updated"}).into(),
                 &WriteAssignments::default(),
                 &registration,
             )
