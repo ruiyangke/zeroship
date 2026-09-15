@@ -252,6 +252,7 @@ async fn make_app(registry: &Registry, plan_id: &str, owner: &UserId) -> AppId {
             plan_id,
             owner,
             None,
+            None,
         )
         .await
         .expect("create app")

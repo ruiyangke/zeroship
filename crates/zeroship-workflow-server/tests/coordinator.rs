@@ -333,10 +333,15 @@ async fn release_needs_neither_a_wake_hint_nor_a_responsible_peer() {
     let next = place(&a, &app).await;
     assert_ne!(next.worker_id, refused);
 
+    // An instance that holds no placement of an app cannot claim its work,
+    // however live its own registration is.
     let foreign = place(&a, &AppId::mint()).await;
+    let outsider = register_worker(&a, 1).await;
     assert_eq!(
         a.manager
-            .claim_job(&refused, &assigned(&foreign), || async { Ok(refused.clone()) })
+            .claim_job(&outsider, &assigned(&foreign), || async {
+                Ok(outsider.clone())
+            })
             .await
             .unwrap_err(),
         Error::Denied

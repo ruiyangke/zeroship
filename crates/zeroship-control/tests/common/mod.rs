@@ -22,6 +22,9 @@ use zeroship_core::auth_provider::{AuthProvider, PlatformConfig, PlatformProvide
 use zeroship_core::{AppId, UserId};
 
 pub const PLATFORM_ISSUER: &str = "https://auth.zeroship.test/oauth2";
+/// The single execution zone these migrations seed
+/// (`db/migrations-ts/20260914000450_execution_zones_default_zone.ts`).
+pub const DEFAULT_EXECUTION_ZONE_ID: &str = "ezn_default000000000000000000";
 const PLATFORM_KID: &str = "platform-control-test-kid";
 const PLATFORM_KEY_SEED: u8 = 47;
 
@@ -412,13 +415,56 @@ pub async fn seed_app_in_organization(
 ) -> AppId {
     let project_id = unowned_project_in(pg, organization_id).await;
     let app_id = AppId::mint();
+    // The zone is named, not defaulted: the column carries no default, the
+    // way Control names one when it creates an app.
     pg.execute(
-        "INSERT INTO zeroship.apps (id, name, plan_id, project_id, organization_id) \
-             VALUES ($1, $2, $3, $4, $5)",
-        &[&app_id.as_str(), &name, &plan_id, &project_id, &organization_id],
+        "INSERT INTO zeroship.apps \
+             (id, name, plan_id, project_id, organization_id, execution_zone_id) \
+             VALUES ($1, $2, $3, $4, $5, $6)",
+        &[
+            &app_id.as_str(),
+            &name,
+            &plan_id,
+            &project_id,
+            &organization_id,
+            &DEFAULT_EXECUTION_ZONE_ID,
+        ],
     )
     .await
     .expect("seed fixture app");
+    app_id
+}
+
+/// A fixture app in a named execution zone.
+///
+/// An app's zone is frozen by trigger once written, so it can only be chosen
+/// at creation: a test that needs an app outside the deployment's default zone
+/// has to say so here rather than update the row afterwards.
+#[allow(dead_code)]
+pub async fn seed_app_in_zone(
+    pg: &compio_postgres::Client,
+    name: &str,
+    plan_id: &str,
+    execution_zone_id: &str,
+) -> AppId {
+    let organization_id = seed_organization(pg).await;
+    let project_id = unowned_project_in(pg, &organization_id).await;
+    let app_id = AppId::mint();
+    pg.execute(
+        "INSERT INTO zeroship.apps \
+             (id, name, plan_id, project_id, organization_id, execution_zone_id) \
+             VALUES ($1, $2, $3, $4, $5, $6)",
+        &[
+            &app_id.as_str(),
+            &name,
+            &plan_id,
+            &project_id,
+            &organization_id,
+            &execution_zone_id,
+        ],
+    )
+    .await
+    .expect("seed fixture app in a named zone");
     app_id
 }
 

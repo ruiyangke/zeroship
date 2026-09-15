@@ -151,6 +151,7 @@ async fn app_logs_route_proxies_worker_lines() {
             &zeroship_control::plan_catalog::free_plan_id(),
             &pat.user_id,
             None,
+            None,
         )
         .await
         .expect("create app")

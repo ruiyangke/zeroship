@@ -117,10 +117,11 @@ fn service_auth_refusal(error: &AuthError) -> web::HttpResponse {
 /// Verify the caller of an endpoint whose handler acts on the caller's OWN
 /// row, and return the instance segment of the issuer it verified as.
 ///
-/// The same guard as [`check_service_auth`], specialised to the two endpoints
+/// The same guard as [`check_service_auth`], specialised to the endpoints
 /// whose handlers need to know WHICH row called: `/internal/workers/enrol`
-/// locks and references the calling enroller, and `/internal/workers/retire`
-/// retires the calling worker instance. A [`ServiceIdentity`] deliberately
+/// locks and references the calling enroller, `/internal/workers/retire`
+/// retires the calling worker instance, and the host app reads narrow
+/// themselves to the calling instance's execution zone. A [`ServiceIdentity`] deliberately
 /// carries only the caller's ROLE (`identity_from` in
 /// `zeroship-core::service_assertion` builds it from `issuer.principal()`
 /// alone, never the instance segment - the allowlist it feeds is written
@@ -132,9 +133,9 @@ fn service_auth_refusal(error: &AuthError) -> web::HttpResponse {
 /// cryptographically proven.
 ///
 /// Which ROLE that row belongs to is settled by the endpoint's grant: only
-/// `svc/worker-enroller` holds `CONTROL_WORKER_ENROL` and only `svc/worker`
-/// holds `CONTROL_WORKER_RETIRE`, so a verified caller of either is an
-/// instance of the one role the handler expects.
+/// `svc/worker-enroller` holds `CONTROL_WORKER_ENROL`, and `svc/worker` alone
+/// holds `CONTROL_WORKER_RETIRE` and the three host app reads, so a verified
+/// caller of any of them is an instance of the one role the handler expects.
 async fn verified_instance_caller(
     req: &web::HttpRequest,
     state: &AppState,
@@ -166,6 +167,64 @@ async fn verified_instance_caller(
                 "control-internal: instance-scoped auth rejected"
             );
             Err(service_auth_refusal(&error))
+        }
+    }
+}
+
+/// Verify a host app read and narrow it to the calling instance's zone.
+///
+/// The three host reads (`CONTROL_APP`, `CONTROL_APP_ENV`,
+/// `CONTROL_APP_DATA_KEY`) are held by `svc/worker` alone, which authenticates
+/// at instance arity, so every caller names a row Control enrolled. The app
+/// and the instance each belong to one frozen execution zone, and a worker
+/// serves only its own: an app's environment is its decrypted secrets and its
+/// project data key is a decryption capability, so reaching either from
+/// another zone is exactly what zones exist to prevent.
+///
+/// Refusing with `403` rather than `404` keeps a misconfigured deployment
+/// diagnosable: the caller is authenticated and its zone is an operator fact,
+/// so nothing is learned from the distinction that the operator does not
+/// already hold.
+///
+/// It takes the path segment rather than a parsed [`AppId`] so the credential
+/// is still checked before anything is read from the request path: an
+/// unauthenticated caller is refused whatever it named.
+async fn zone_scoped_app_read(
+    req: &web::HttpRequest,
+    state: &AppState,
+    endpoint: ServiceEndpoint,
+    app_id: &str,
+    malformed: impl FnOnce() -> web::HttpResponse,
+) -> Result<AppId, web::HttpResponse> {
+    let instance = verified_instance_caller(req, state, endpoint).await?;
+    let Ok(app) = AppId::parse(app_id) else {
+        return Err(malformed());
+    };
+    match crate::worker_enrolment::instance_serves_app(
+        state.control_pg.as_ref(),
+        &instance,
+        app.as_str(),
+    )
+    .await
+    {
+        Ok(true) => Ok(app),
+        Ok(false) => {
+            tracing::warn!(
+                path = endpoint.path_template(),
+                app_id = %app.as_str(),
+                "control-internal: host app read outside the caller's execution zone"
+            );
+            Err(web::HttpResponse::Forbidden()
+                .json(&serde_json::json!({"error":"app is outside this worker's execution zone"})))
+        }
+        Err(error) => {
+            tracing::error!(
+                path = endpoint.path_template(),
+                %error,
+                "control-internal: execution zone lookup failed"
+            );
+            Err(web::HttpResponse::ServiceUnavailable()
+                .json(&serde_json::json!({"error":"service unavailable"})))
         }
     }
 }
@@ -452,11 +511,13 @@ pub async fn get_app_env(
     // user principal. It presents its own ed25519 assertion under the full
     // profile; a shared bearer no longer opens this door, which matters most
     // here because the response body is the app's DECRYPTED environment.
-    if let Some(resp) = check_service_auth(&req, &state, endpoints::CONTROL_APP_ENV).await {
-        return resp;
-    }
-    let Ok(id) = AppId::parse(&app_id) else {
-        return web::HttpResponse::BadRequest().json(&serde_json::json!({"error": "bad app_id"}));
+    let id = match zone_scoped_app_read(&req, &state, endpoints::CONTROL_APP_ENV, &app_id, || {
+        web::HttpResponse::BadRequest().json(&serde_json::json!({"error": "bad app_id"}))
+    })
+    .await
+    {
+        Ok(id) => id,
+        Err(response) => return response,
     };
     match state.env_store.merged_env_for_worker(&id).await {
         Ok(value) => web::HttpResponse::Ok().json(&value),
@@ -478,12 +539,17 @@ pub async fn get_app_data_key(
     state: State<Arc<AppState>>,
     app_id: Path<String>,
 ) -> web::HttpResponse {
-    if let Some(response) = check_service_auth(&req, &state, endpoints::CONTROL_APP_DATA_KEY).await
+    let id = match zone_scoped_app_read(
+        &req,
+        &state,
+        endpoints::CONTROL_APP_DATA_KEY,
+        &app_id,
+        || web::HttpResponse::BadRequest().json(&serde_json::json!({"error":"bad app_id"})),
+    )
+    .await
     {
-        return response;
-    }
-    let Ok(id) = AppId::parse(&app_id) else {
-        return web::HttpResponse::BadRequest().json(&serde_json::json!({"error":"bad app_id"}));
+        Ok(id) => id,
+        Err(response) => return response,
     };
     match crate::project_keys::for_app(&state.registry, state.env_store.cipher(), &id).await {
         Ok(key) => web::HttpResponse::Ok()
@@ -585,15 +651,13 @@ pub async fn get_app_version(
 ) -> web::HttpResponse {
     // Same rate as the env read - once per app load, plus a refetch on a
     // version change - so the same full profile.
-    if let Some(resp) = check_service_auth(&req, &state, endpoints::CONTROL_APP).await {
-        return resp;
-    }
-    let uid = match AppId::parse(&app_id) {
-        Ok(u) => u,
-        Err(_) => {
-            return web::HttpResponse::BadRequest()
-                .json(&serde_json::json!({"error":"invalid app id"}))
-        }
+    let uid = match zone_scoped_app_read(&req, &state, endpoints::CONTROL_APP, &app_id, || {
+        web::HttpResponse::BadRequest().json(&serde_json::json!({"error":"invalid app id"}))
+    })
+    .await
+    {
+        Ok(id) => id,
+        Err(response) => return response,
     };
     match state.registry.get_versions().await {
         Ok(versions) => match versions.get(&uid) {

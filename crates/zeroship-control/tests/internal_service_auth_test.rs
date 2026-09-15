@@ -1185,3 +1185,86 @@ async fn revoking_an_enroller_refuses_its_instances_env_reads_and_its_new_enrolm
     forget_enroller(pg, &enroller_f).await;
     fixture.release().await;
 }
+
+/// A worker serves one execution zone, so Control narrows its host app reads
+/// to that zone.
+///
+/// The refusal and the acceptance differ in exactly one variable: the same
+/// enrolled instance, the same route and the same process, against two apps
+/// that differ only in the zone they were created in. An app's environment is
+/// its decrypted secrets and its project data key is a decryption capability,
+/// so a read that crossed zones would hand both to a fleet that must never
+/// reach them.
+#[ntex::test]
+async fn host_app_reads_are_narrowed_to_the_callers_execution_zone() {
+    let fixture = build_fixture().await;
+    let service = internal_app!(Arc::clone(&fixture.state));
+    let pg = &fixture.state.control_pg;
+    let away_zone = "ezn_awayzone0000000000000000";
+    pg.execute(
+        "INSERT INTO zeroship.execution_zones(id, name, status) \
+         VALUES ($1, 'away', 'active') ON CONFLICT (id) DO NOTHING",
+        &[&away_zone],
+    )
+    .await
+    .expect("declare a second execution zone");
+    let plan = zeroship_control::plan_catalog::free_plan_id();
+    let home = common::seed_app_in_zone(
+        pg,
+        &format!("zone-home-{}", &Uuid::new_v4().simple().to_string()[..10]),
+        &plan,
+        common::DEFAULT_EXECUTION_ZONE_ID,
+    )
+    .await;
+    let away = common::seed_app_in_zone(
+        pg,
+        &format!("zone-away-{}", &Uuid::new_v4().simple().to_string()[..10]),
+        &plan,
+        away_zone,
+    )
+    .await;
+
+    // THE REFUSAL: the away app is in a zone this instance's enroller does not
+    // declare, so neither its environment nor its data key is answered.
+    for path in [
+        format!("/internal/apps/{}/env", away.as_str()),
+        format!("/internal/apps/{}", away.as_str()),
+    ] {
+        let refused = test::call_service(
+            &service,
+            test::TestRequest::get()
+                .uri(&path)
+                .header("authorization", fixture.worker_header())
+                .to_request(),
+        )
+        .await;
+        assert_eq!(
+            refused.status(),
+            StatusCode::FORBIDDEN,
+            "{path} must refuse an app outside the caller's execution zone"
+        );
+    }
+
+    // THE CONTROL: the same instance, the same routes, an app in its own zone.
+    // The handler answers for itself, so the 403 above is the zone check's
+    // verdict rather than anything about this caller or these routes.
+    for path in [
+        format!("/internal/apps/{}/env", home.as_str()),
+        format!("/internal/apps/{}", home.as_str()),
+    ] {
+        let admitted = test::call_service(
+            &service,
+            test::TestRequest::get()
+                .uri(&path)
+                .header("authorization", fixture.worker_header())
+                .to_request(),
+        )
+        .await;
+        assert_ne!(
+            admitted.status(),
+            StatusCode::FORBIDDEN,
+            "{path} must admit an app in the caller's own execution zone"
+        );
+    }
+    fixture.release().await;
+}

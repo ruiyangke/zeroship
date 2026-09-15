@@ -245,6 +245,7 @@ async fn creator_cannot_self_assign_non_assignable_plan_operator_can() {
             &start.id,
             &owner,
             None,
+            None,
         )
         .await
         .expect("create app");
@@ -418,6 +419,7 @@ async fn assigning_an_archived_plan_is_refused_and_not_reported_as_a_missing_app
             &format!("setplan-arch-{}", Uuid::new_v4().simple()),
             &start.id,
             &owner,
+            None,
             None,
         )
         .await

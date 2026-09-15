@@ -440,7 +440,7 @@ async fn registry_refuses_a_reserved_name_directly() {
     let err = fx
         .state
         .registry
-        .create_app("api", &plan, &creator.user_id, None)
+        .create_app("api", &plan, &creator.user_id, None, None)
         .await
         .expect_err("the registry itself must refuse a reserved name");
     assert!(
@@ -454,7 +454,7 @@ async fn registry_refuses_a_reserved_name_directly() {
     let record = fx
         .state
         .registry
-        .create_app(&ordinary, &plan, &creator.user_id, None)
+        .create_app(&ordinary, &plan, &creator.user_id, None, None)
         .await
         .expect("an unreserved name is created by the same call");
 

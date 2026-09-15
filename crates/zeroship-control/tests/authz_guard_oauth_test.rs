@@ -269,6 +269,7 @@ async fn create_app_owned_by(fx: &mut Fixture, label: &str, owner_id: &UserId) -
             &zeroship_control::plan_catalog::free_plan_id(),
             owner_id,
             None,
+            None,
         )
         .await
         .expect("create app");
@@ -1244,6 +1245,7 @@ async fn creator_self_service_creates_and_lists_only_own_apps() {
             &format!("otherapp-{}", Uuid::new_v4().simple()),
             &zeroship_control::plan_catalog::free_plan_id(),
             &other_owner,
+            None,
             None,
         )
         .await

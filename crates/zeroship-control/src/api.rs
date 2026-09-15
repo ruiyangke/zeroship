@@ -50,6 +50,15 @@ pub struct CreateAppBody {
     /// creator who has outgrown that names a project explicitly.
     #[serde(default)]
     pub project_id: Option<String>,
+    /// The NAME of the execution zone the app runs in, fixed at creation.
+    ///
+    /// OPTIONAL, and the absence is the single-zone path: a deployment that
+    /// declares one zone puts the app in it. A deployment that declares
+    /// several refuses rather than choose, because the zone is frozen with
+    /// the app and moving it afterwards is a data migration of its creator
+    /// storage rather than a metadata edit.
+    #[serde(default)]
+    pub execution_zone: Option<String>,
 }
 
 /// Default plan for a `create_app` with no explicit `plan_id`: the built-in
@@ -497,6 +506,7 @@ pub async fn create_app(
             &body.plan_id,
             &authz.principal_id,
             Some(project_id.as_str()),
+            body.execution_zone.as_deref(),
         )
         .await
     {

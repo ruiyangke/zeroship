@@ -389,6 +389,7 @@ async fn reaper_leaves_owned_app_untouched() {
             &zeroship_control::plan_catalog::free_plan_id(),
             &owner,
             None,
+            None,
         )
         .await
         .expect("create_app")

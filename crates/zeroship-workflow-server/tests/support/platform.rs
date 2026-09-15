@@ -10,6 +10,10 @@ use testcontainers::{
     Container, GenericImage, ImageExt,
 };
 
+/// The single execution zone these migrations seed
+/// (`db/migrations-ts/20260914000450_execution_zones_default_zone.ts`).
+pub const DEFAULT_ZONE_ID: &str = "ezn_default000000000000000000";
+
 pub struct Platform {
     _postgres: Container<GenericImage>,
     pub admin: compio_postgres::Client,
@@ -140,27 +144,17 @@ impl Platform {
             )
             .await
             .unwrap();
-        // Without a zone the insert names none, as a single-zone Control does,
-        // and the column default places the app in the seeded zone.
-        let inserted = match zone {
-            Some(zone) => {
-                self.admin
-                    .execute(
-                        "INSERT INTO zeroship.apps(id,name,plan_id,project_id,organization_id,execution_zone_id) \
-                         VALUES($1,$2,$3,$4,$5,$6)",
-                        &[&app.as_str(), &name, &plan, &project.as_str(), &organization.as_str(), &zone],
-                    )
-                    .await
-            }
-            None => {
-                self.admin
-                    .execute(
-                        "INSERT INTO zeroship.apps(id,name,plan_id,project_id,organization_id) VALUES($1,$2,$3,$4,$5)",
-                        &[&app.as_str(), &name, &plan, &project.as_str(), &organization.as_str()],
-                    )
-                    .await
-            }
-        };
+        // The zone is always named: the column carries no default, so Control
+        // resolves the deployment's one zone when a caller names none.
+        let zone = zone.unwrap_or(DEFAULT_ZONE_ID);
+        let inserted = self
+            .admin
+            .execute(
+                "INSERT INTO zeroship.apps(id,name,plan_id,project_id,organization_id,execution_zone_id) \
+                 VALUES($1,$2,$3,$4,$5,$6)",
+                &[&app.as_str(), &name, &plan, &project.as_str(), &organization.as_str(), &zone],
+            )
+            .await;
         assert_eq!(inserted.unwrap(), 1);
         plan
     }

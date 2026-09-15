@@ -252,6 +252,60 @@ impl Registry {
         }
     }
 
+    /// The execution zone an app is created in, named rather than defaulted.
+    ///
+    /// A zone is an operator-declared set of worker deployment units that
+    /// share creator-side connectivity, and an app's zone is frozen once
+    /// written, so this choice is permanent. `requested` is a zone NAME, the
+    /// same identifier the operator uses when declaring a deployment unit;
+    /// zone ids are minted by migrations and nothing outside the platform
+    /// should have to know them.
+    ///
+    /// With no name, a deployment that declares exactly one active zone gets
+    /// it. A deployment with more than one refuses instead of choosing: an app
+    /// in the wrong zone is one no worker of its creator's fleet will ever
+    /// place, and unpicking that means migrating its creator storage.
+    async fn resolve_execution_zone<C: compio_postgres::GenericClient + Sync>(
+        conn: &C,
+        requested: Option<&str>,
+    ) -> Result<String, RegistryError> {
+        if let Some(name) = requested {
+            let rows = conn
+                .query(
+                    "SELECT id FROM zeroship.execution_zones WHERE name = $1 AND status = 'active'",
+                    &[&name],
+                )
+                .await?;
+            return rows.first().map(|row| row.get(0)).ok_or_else(|| {
+                RegistryError::InvalidInput(format!(
+                    "unknown execution zone '{name}' (this deployment declares no active zone \
+                     by that name)"
+                ))
+            });
+        }
+        let rows = conn
+            .query(
+                "SELECT id, name FROM zeroship.execution_zones WHERE status = 'active' \
+                 ORDER BY name LIMIT 2",
+                &[],
+            )
+            .await?;
+        match rows.len() {
+            1 => Ok(rows[0].get(0)),
+            0 => Err(RegistryError::InvalidInput(
+                "this deployment declares no active execution zone, so it can host no app".into(),
+            )),
+            _ => {
+                let names: Vec<String> = rows.iter().map(|row| row.get(1)).collect();
+                Err(RegistryError::InvalidInput(format!(
+                    "this deployment declares more than one execution zone ({}), so an app must \
+                     name the one it belongs to",
+                    names.join(", ")
+                )))
+            }
+        }
+    }
+
     // -- App CRUD -----------------------------------------------------------
 
     /// Create a new application inside `project_id`. Returns the created
@@ -298,6 +352,7 @@ impl Registry {
         plan_id: &str,
         owner_id: &UserId,
         project_id: Option<&str>,
+        execution_zone: Option<&str>,
     ) -> Result<AppRecord, RegistryError> {
         validate_app_name(name)?;
 
@@ -330,6 +385,14 @@ impl Registry {
         // typed error and an archived-plan check the FK can't).
         Self::validate_plan(&tx, plan_id).await?;
 
+        // The app's execution zone is written here and frozen by trigger, so
+        // this resolution is the only chance to get it right. A caller that
+        // names a zone gets that zone or a refusal; a caller that names none
+        // gets the deployment's one declared zone, and a deployment with more
+        // than one has to say which rather than have an app land somewhere its
+        // creator's workers cannot reach.
+        let zone = Self::resolve_execution_zone(&tx, execution_zone).await?;
+
         // `zeroship.apps.id` carries no database default: a SQL-side generator
         // would be a second minter beside `AppId::mint`, and one producer per
         // identifier is what makes a derived name (schema, role, publication,
@@ -343,8 +406,9 @@ impl Registry {
                     // `(project_id, organization_id) -> projects(id,
                     // organization_id)` checks is true by construction rather
                     // than by a second lookup that could disagree.
-                    "INSERT INTO zeroship.apps (id, name, plan_id, project_id, organization_id) \
-                     SELECT $1, $2, $3, p.id, p.organization_id \
+                    "INSERT INTO zeroship.apps \
+                     (id, name, plan_id, project_id, organization_id, execution_zone_id) \
+                     SELECT $1, $2, $3, p.id, p.organization_id, $6 \
                        FROM zeroship.projects p \
                        LEFT JOIN zeroship.organization_members m \
                               ON m.organization_id = p.organization_id AND m.user_id = $5 \
@@ -371,6 +435,7 @@ impl Registry {
                     &plan_id,
                     &project_id,
                     &owner_id.as_str(),
+                    &zone.as_str(),
                 ],
             )
             .await?;

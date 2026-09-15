@@ -153,7 +153,7 @@ async fn run(cli: Cli) -> Result<zeroship_core::types::AppRecord, DevProvisionEr
     // would not be the rows production reads.
     let plan_id = free_plan_id();
     let app = match registry
-        .create_app(&cli.name, &plan_id, &owner_id, None)
+        .create_app(&cli.name, &plan_id, &owner_id, None, None)
         .await
     {
         Ok(app) => app,

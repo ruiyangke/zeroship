@@ -94,6 +94,7 @@ async fn provision_asserts_native_db_scopes_routes_and_redirect_sync() {
             &zeroship_control::plan_catalog::free_plan_id(),
             &owner_id,
             None,
+            None,
         )
         .await
         .expect("create app");
@@ -375,6 +376,7 @@ async fn appstate_origin_scheme_provisions_urls_then_archive_preserves_oauth_row
             &app_name,
             &zeroship_control::plan_catalog::free_plan_id(),
             &owner_id,
+            None,
             None,
         )
         .await
