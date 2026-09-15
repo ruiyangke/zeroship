@@ -426,6 +426,11 @@ Every environment name below is `ZEROSHIP_<CANONICAL>` and every overlay path is
 | --- | --- | --- | --- | --- | --- |
 | `workflow.assignment_ttl_ms` | operational | `ZEROSHIP_WORKFLOW_ASSIGNMENT_TTL_MS` | `workflow.assignment_ttl_ms` | zeroship-workflow-server `--assignment-ttl-ms` | `30000` |
 | `workflow.batch_limit` | operational | `ZEROSHIP_WORKFLOW_BATCH_LIMIT` | `workflow.batch_limit` | zeroship-workflow-server `--batch-limit` | `128` |
+| `workflow.capacity_hold_down_ms` | operational | `ZEROSHIP_WORKFLOW_CAPACITY_HOLD_DOWN_MS` | `workflow.capacity_hold_down_ms` | zeroship-workflow-server `--capacity-hold-down-ms` | `300000` |
+| `workflow.capacity_max_slots` | operational | `ZEROSHIP_WORKFLOW_CAPACITY_MAX_SLOTS` | `workflow.capacity_max_slots` | zeroship-workflow-server `--capacity-max-slots` | `1024` |
+| `workflow.capacity_min_slots` | operational | `ZEROSHIP_WORKFLOW_CAPACITY_MIN_SLOTS` | `workflow.capacity_min_slots` | zeroship-workflow-server `--capacity-min-slots` | `0` |
+| `workflow.capacity_request_timeout_ms` | operational | `ZEROSHIP_WORKFLOW_CAPACITY_REQUEST_TIMEOUT_MS` | `workflow.capacity_request_timeout_ms` | zeroship-workflow-server `--capacity-request-timeout-ms` | `10000` |
+| `workflow.capacity_retry_interval_ms` | operational | `ZEROSHIP_WORKFLOW_CAPACITY_RETRY_INTERVAL_MS` | `workflow.capacity_retry_interval_ms` | zeroship-workflow-server `--capacity-retry-interval-ms` | `30000` |
 | `workflow.closing_backoff_max_ms` | operational | `ZEROSHIP_WORKFLOW_CLOSING_BACKOFF_MAX_MS` | `workflow.closing_backoff_max_ms` | zeroship-workflow-server `--closing-backoff-max-ms` | `3600000` |
 | `workflow.closing_backoff_ms` | operational | `ZEROSHIP_WORKFLOW_CLOSING_BACKOFF_MS` | `workflow.closing_backoff_ms` | zeroship-workflow-server `--closing-backoff-ms` | `60000` |
 | `workflow.closing_idle_ms` | operational | `ZEROSHIP_WORKFLOW_CLOSING_IDLE_MS` | `workflow.closing_idle_ms` | zeroship-workflow-server `--closing-idle-ms` | `900000` |
