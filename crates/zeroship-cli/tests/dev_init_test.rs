@@ -973,6 +973,82 @@ fn join_token_refuses_a_zone_control_would_refuse() {
     assert!(!output.stdout.is_empty());
 }
 
+/// `--confirm` binds the token to ONE joining key, and Control's verifier reads
+/// the thumbprint back out.
+///
+/// A token minted for a key the issuer already knows admits that key and no
+/// other, which removes even the "workers the captor controls" an unbound
+/// captured token buys.
+#[test]
+fn join_token_binds_the_token_to_a_confirmed_key() {
+    let temp = tempfile::tempdir().expect("create temp directory");
+    let secrets_dir = temp.path().join("secrets");
+    let env_file = temp.path().join("dev.env");
+    assert_success(&run_dev_init(&secrets_dir, &env_file), "zeroship dev init");
+    let recorded = zeroship_core::worker_join::parse_join_signer_import(
+        &std::fs::read(secrets_dir.join("join-signers.json")).expect("read the import file"),
+    )
+    .expect("parses");
+    let signer = recorded.first().expect("dev init recorded a signer");
+    let credential = secrets_dir.join("join-signer.json").display().to_string();
+
+    let joining = SigningKey::from_bytes(&[23_u8; 32]).verifying_key().to_bytes();
+    let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(joining);
+    let output = run_join_token(&[
+        &format!("--credential={credential}"),
+        &format!("--confirm={encoded}"),
+    ]);
+    assert_success(&output, "zeroship join-token --confirm");
+    let token = String::from_utf8(output.stdout).expect("a UTF-8 token");
+    let verified = zeroship_core::worker_join::verify_join_token(
+        token.trim(),
+        &signer.public_key,
+        &zeroship_core::service_peers::service_issuer(
+            zeroship_core::service_peers::CONTROL_SERVICE_NAME,
+        )
+        .expect("control issuer"),
+        std::time::SystemTime::now(),
+    )
+    .expect("the confirmed token verifies");
+    assert_eq!(
+        verified.confirmation.as_deref(),
+        Some(zeroship_core::service_assertion::thumbprint_key_id(&joining).as_str()),
+        "the confirmation must name the key the operator bound it to"
+    );
+
+    // THE CONTROL, one variable apart: without `--confirm` the token carries no
+    // confirmation at all, so the assertion above is the flag rather than a
+    // claim every token happens to have.
+    let output = run_join_token(&[&format!("--credential={credential}")]);
+    assert_success(&output, "zeroship join-token");
+    let token = String::from_utf8(output.stdout).expect("a UTF-8 token");
+    let verified = zeroship_core::worker_join::verify_join_token(
+        token.trim(),
+        &signer.public_key,
+        &zeroship_core::service_peers::service_issuer(
+            zeroship_core::service_peers::CONTROL_SERVICE_NAME,
+        )
+        .expect("control issuer"),
+        std::time::SystemTime::now(),
+    )
+    .expect("the unbound token verifies");
+    assert_eq!(verified.confirmation, None);
+
+    // A confirmation that is not a key is refused at the mint rather than
+    // written into a token nothing can satisfy.
+    for bad in ["not base64!!", "c2hvcnQ"] {
+        assert!(
+            !run_join_token(&[
+                &format!("--credential={credential}"),
+                &format!("--confirm={bad}"),
+            ])
+            .status
+            .success(),
+            "{bad:?} must not become a confirmation"
+        );
+    }
+}
+
 /// A missing credential refuses rather than minting under a key it drew.
 #[test]
 fn join_token_refuses_without_a_credential() {
