@@ -2475,8 +2475,12 @@ the published one, so a retired generation cannot withdraw its replacement.
 Removal closes admission synchronously; previously cloned handles retain their
 retired generation. An unknown or unready app receives a retryable refusal. It
 cannot acquire an ambient policy binding or fall back to the old Control
-workflow backend, and the worker's isolate kernel no longer holds the Control
-origin or shared control key that backend needed. Preparation takes the
+workflow backend, which no request isolate can reach any more. The
+Control-driven advance path keeps it, because a workflow it replays reads its
+own run - a step output staged as a blob, above all - through `env.workflows`,
+and Control is the engine holding that run; the two isolate kinds therefore
+take different plugin sets, and the shared control key lives only in the replay
+one. Slice 6 deletes that path and the key with it. Preparation takes the
 placement's policy lease at a single point ahead of that publication, and that
 point is the one place
 [ingress epoch](#ingress-epochs-and-scope-retirement) establishment attaches
@@ -3365,8 +3369,9 @@ is the merge order.
    backend to request isolates only after assignment preparation passes its
    final authority checks, and retires it synchronously on removal; an unknown
    or unready app receives a retryable refusal. `WorkflowBinding` uses that
-   ready registry instead of the old Control backend, and the worker's isolate
-   kernel no longer carries the Control origin or the shared control key. The
+   ready registry instead of the old Control backend, which no request isolate
+   can reach any more; only the advance path's replay isolates still hold the
+   Control origin and the shared control key, until slice 6 removes them. The
    worker enrolls and registers as
    [enrollment](#enrollment-bootstrap-and-revocation) describes. Releasing an
    app this worker cannot serve belongs to the next slice, with the placement
