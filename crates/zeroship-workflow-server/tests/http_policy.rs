@@ -153,7 +153,7 @@ impl Fixture {
             .unwrap(),
             key: ServiceSigningKey::generate(),
         };
-        platform.admin.execute("INSERT INTO zeroship.worker_instances(id,ring_key,public_key,advertise_host,advertise_port,status,enroller_id) VALUES($1,$2,$3,'127.0.0.1',8080,'active',$4)", &[&worker.as_str(), &vec![1_u8], &signer.key.verifying_key_bytes().to_vec(), &platform.default_enroller_id]).await.unwrap();
+        platform.admin.execute("INSERT INTO zeroship.worker_instances(id,ring_key,public_key,advertise_host,advertise_port,status,join_signer_id,join_token_id,execution_zone_id,expires_at) VALUES($1,$2,$3,'127.0.0.1',8080,'active',$4,'tok_testfixturedefault','ezn_default000000000000000000',now() + interval '1 hour')", &[&worker.as_str(), &vec![1_u8], &signer.key.verifying_key_bytes().to_vec(), &platform.default_join_signer_id]).await.unwrap();
         let service =
             Coordinator::connect(&platform.runtime_url, Options::default(), holds::client())
                 .await
@@ -237,9 +237,9 @@ impl Fixture {
             .set_json(&plain(&self.scope))
     }
     async fn replace_key(&self, public: [u8; 32]) {
-        // Enrollment freezes keys; model an administrator replacing the enrolled
+        // Joining freezes keys; model an administrator replacing the joined
         // row without bypassing its production immutability trigger.
-        assert_eq!(self.platform.admin.execute("WITH previous AS (DELETE FROM zeroship.worker_instances WHERE id=$1 RETURNING id,ring_key,advertise_host,advertise_port,registered_at,enroller_id) INSERT INTO zeroship.worker_instances(id,ring_key,public_key,advertise_host,advertise_port,registered_at,status,enroller_id) SELECT id,ring_key,$2,advertise_host,advertise_port,registered_at,'active',enroller_id FROM previous", &[&self.worker.as_str(), &public.to_vec()]).await.unwrap(), 1);
+        assert_eq!(self.platform.admin.execute("WITH previous AS (DELETE FROM zeroship.worker_instances WHERE id=$1 RETURNING id,ring_key,advertise_host,advertise_port,registered_at,join_signer_id,join_token_id,execution_zone_id,expires_at) INSERT INTO zeroship.worker_instances(id,ring_key,public_key,advertise_host,advertise_port,registered_at,status,join_signer_id,join_token_id,execution_zone_id,expires_at) SELECT id,ring_key,$2,advertise_host,advertise_port,registered_at,'active',join_signer_id,join_token_id,execution_zone_id,expires_at FROM previous", &[&self.worker.as_str(), &public.to_vec()]).await.unwrap(), 1);
     }
 }
 
