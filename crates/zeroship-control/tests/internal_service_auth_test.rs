@@ -1327,7 +1327,11 @@ async fn host_app_reads_are_narrowed_to_the_callers_execution_zone() {
     let fixture = build_fixture().await;
     let service = internal_app!(Arc::clone(&fixture.state));
     let pg = &fixture.state.control_pg;
-    let away_zone = "ezn_awayzone0000000000000000";
+    // `execution_zones_id_shape` demands exactly 25 base36 characters after
+    // the prefix, the width the typed-id encoder emits. Every other zone
+    // literal in the tree is a copy of the seeded default, so this one - the
+    // only hand-authored second zone - is the only place a miscount can hide.
+    let away_zone = "ezn_awayzone00000000000000000";
     pg.execute(
         "INSERT INTO zeroship.execution_zones(id, name, status) \
          VALUES ($1, 'away', 'active') ON CONFLICT (id) DO NOTHING",
@@ -1335,6 +1339,10 @@ async fn host_app_reads_are_narrowed_to_the_callers_execution_zone() {
     )
     .await
     .expect("declare a second execution zone");
+    // `free_plan_id` names a catalog row rather than creating one, and
+    // `apps.plan_id` is a RESTRICT foreign key, so the seed below fails unless
+    // something has already stocked the catalog in this database.
+    common::ensure_builtin_plans(&fixture.state.registry).await;
     let plan = zeroship_control::plan_catalog::free_plan_id();
     let home = common::seed_app_in_zone(
         pg,
