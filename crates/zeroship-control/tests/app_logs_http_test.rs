@@ -140,6 +140,9 @@ async fn app_logs_route_proxies_worker_lines() {
     // no app row and no membership, which reached the worker proxy only because
     // the caller held the deleted universal-allow platform role.
     let pat = common::authz_fixture::seeded_principal(&fixture.state).await;
+    // `create_app` validates its plan against the catalog, which this database
+    // only has once something seeds it.
+    common::ensure_builtin_plans(&fixture.state.registry).await;
     let app_id = fixture
         .state
         .registry

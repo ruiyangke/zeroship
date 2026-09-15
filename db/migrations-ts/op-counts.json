@@ -283,5 +283,20 @@
     "file": "20260914000300_workflow_app_deletion.ts",
     "name": "workflow_app_deletion",
     "opCount": 1
+  },
+  {
+    "file": "20260914000400_execution_zones_and_worker_enrollers.ts",
+    "name": "execution_zones_and_worker_enrollers",
+    "opCount": 14
+  },
+  {
+    "file": "20260914000450_execution_zones_default_zone.ts",
+    "name": "execution_zones_default_zone",
+    "opCount": 1
+  },
+  {
+    "file": "20260914000500_worker_instances_enroller_binding.ts",
+    "name": "worker_instances_enroller_binding",
+    "opCount": 10
   }
 ]

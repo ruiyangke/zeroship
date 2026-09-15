@@ -53,5 +53,6 @@ mod stream_forwarder_recompute_test;
 mod stripe_reconcile_test;
 mod stripe_store;
 mod stripe_webhook_test;
+mod worker_enroller_import_test;
 mod worker_enrolment_test;
 mod worker_health_test;
