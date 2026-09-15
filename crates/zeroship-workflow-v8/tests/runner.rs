@@ -994,9 +994,9 @@ struct Manager {
 impl Manager {
     async fn new(fixture: &Fixture) -> Rc<Self> {
         use zeroship_core::workflow_coordination::{
-            AssignScope, AssignedScope, RegisterWorker, RequestId, WorkerId, WorkerState,
+            AssignedScope, RegisterWorker, WorkerId, WorkerState,
         };
-        use zeroship_workflow_manager::coordinator::{Coordinator, Options};
+        use zeroship_workflow_manager::coordinator::{Coordinator, Options, Placed};
         let queue = fixture
             .deployments
             .platform
@@ -1022,15 +1022,10 @@ impl Manager {
             )
             .await
             .unwrap();
-        let assignment = coordinator
-            .assign(&AssignScope {
-                request_id: RequestId::mint(),
-                app_id: fixture.app.app_id().clone(),
-                worker_id: worker.clone(),
-                expected_revision: None,
-            })
-            .await
-            .unwrap();
+        let Placed::Assigned(assignment) = coordinator.place(fixture.app.app_id()).await.unwrap()
+        else {
+            panic!("the one registered worker is eligible and idle");
+        };
         Rc::new(Self {
             coordinator,
             worker,
