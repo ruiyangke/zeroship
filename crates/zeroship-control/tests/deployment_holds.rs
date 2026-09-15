@@ -54,7 +54,7 @@ use zeroship_core::{
     service_identity::{ServiceEndpoint, endpoints, verify_service_call},
     service_peers::{
         CONTROL_SERVICE_NAME, ServiceAuth, ServiceKeyring, WORKER_SERVICE_NAME,
-        WORKFLOW_SERVICE_NAME, service_issuer,
+        WORKFLOW_SERVICE_NAME, service_issuer, worker_enroller_issuer,
     },
     typed_id,
     workflow_coordination::{
@@ -95,6 +95,13 @@ fn origin(server: &test::TestServer) -> String {
 struct Fixture {
     platform: platform::Platform,
     state: Arc<AppState>,
+    /// The deployment unit's enroller: the only credential that may enrol a
+    /// worker instance, recorded in `zeroship.worker_enrollers` as the
+    /// operator's import would leave it.
+    enroller: Arc<ServiceAuth>,
+    /// A bare `svc/worker` ROLE key that Control's peer bundle still trusts:
+    /// the stale shared credential no process holds any more. Every endpoint
+    /// here must refuse it at role arity.
     worker_role: Arc<ServiceAuth>,
     workflow_role: Arc<ServiceAuth>,
     control_url: String,
@@ -194,9 +201,23 @@ impl Fixture {
         zeroship_control::plan_catalog::seed_plans(&state.registry)
             .await
             .unwrap();
+        let enroller_key = ServiceSigningKey::generate();
+        let enroller_id = typed_id::new_worker_enroller_id();
+        let inserted = platform
+            .admin
+            .execute(
+                "INSERT INTO zeroship.worker_enrollers (id, public_key, execution_zone_id, status) \
+                 VALUES ($1, $2, 'ezn_default000000000000000000', 'active')",
+                &[&enroller_id, &enroller_key.verifying_key_bytes().to_vec()],
+            )
+            .await
+            .unwrap();
+        assert_eq!(inserted, 1);
+        let enroller = signer(worker_enroller_issuer(&enroller_id).unwrap(), enroller_key);
         Self {
             platform,
             state,
+            enroller,
             worker_role,
             workflow_role,
             control_url,
@@ -367,7 +388,7 @@ impl Fixture {
         control_url: &str,
     ) -> (WorkerId, Arc<ServiceAuth>) {
         let key = ServiceSigningKey::generate();
-        let token = control_header(&self.worker_role);
+        let token = control_header(&self.enroller);
         let (status, response) = post(
             http,
             control_url,

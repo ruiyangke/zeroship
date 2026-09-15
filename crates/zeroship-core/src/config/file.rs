@@ -192,6 +192,9 @@ pub struct ControlSection {
     pub worker_enrolment_networks: Option<String>,
     /// Listening ports a worker instance may claim, as `<low>-<high>`.
     pub worker_enrolment_ports: Option<String>,
+    /// Worker enroller import FILE: the public key, id and zone of every
+    /// deployment unit's enroller, imported at startup.
+    pub worker_enrollers_file: Option<std::path::PathBuf>,
     /// Audit retention horizon in months.
     pub audit_retention_months: Option<u32>,
     /// Audit retention cron tick in seconds.
@@ -263,9 +266,10 @@ pub struct WorkerSection {
     pub cdc_relay_ca_file: Option<std::path::PathBuf>,
     /// TOML configuration for the app-runtime KV deployment. May carry credentials.
     pub kv_config: Option<String>,
-    /// This worker's OWN ed25519 assertion key FILE. See
-    /// `AuthSection::service_key_file` for why the pair lives here.
-    pub service_key_file: Option<std::path::PathBuf>,
+    /// This worker's deployment-unit enroller credential FILE. A worker holds
+    /// no assertion key of its own on disk: it enrols with this credential
+    /// and mints under an instance key it draws at boot.
+    pub enroller_file: Option<std::path::PathBuf>,
     /// See `AuthSection::service_key_file`.
     pub service_peers_file: Option<std::path::PathBuf>,
     /// HTTP listen port.
@@ -749,7 +753,7 @@ impl FileConfig {
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use super::{ConfigError, FileConfig};
@@ -1241,6 +1245,42 @@ relay_smtp_tls = "starttls"
         let err = FileConfig::load(Some(&control.path))
             .expect_err("a bootstrap control has no overlay tier");
         assert!(matches!(err, ConfigError::Parse { .. }));
+    }
+
+    // Control's enroller import file and the worker's enroller credential are
+    // overlay leaves their resolvers walk, so the schema must accept both. A
+    // worker reads no assertion key file of its own, so that key in the worker
+    // table is refused rather than accepted and ignored.
+    #[test]
+    fn the_enroller_files_parse_and_the_worker_table_has_no_service_key_file() {
+        let file = TempFile::write(
+            "enroller-files.toml",
+            "[control]\nworker_enrollers_file = \"/etc/zeroship/secrets/worker-enrollers.json\"\n\
+             [worker]\nenroller_file = \"/etc/zeroship/secrets/worker-enroller.json\"\n",
+        );
+        let config = FileConfig::load(Some(&file.path)).expect("the enroller files parse");
+        assert_eq!(
+            config.control.worker_enrollers_file.as_deref(),
+            Some(Path::new("/etc/zeroship/secrets/worker-enrollers.json"))
+        );
+        assert_eq!(
+            config.worker.enroller_file.as_deref(),
+            Some(Path::new("/etc/zeroship/secrets/worker-enroller.json"))
+        );
+
+        let key_file = TempFile::write(
+            "worker-service-key-file.toml",
+            "[worker]\nservice_key_file = \"/etc/zeroship/secrets/worker.pem\"\n",
+        );
+        let err = FileConfig::load(Some(&key_file.path))
+            .expect_err("the worker table has no service key file");
+        let ConfigError::Parse { source, .. } = &err else {
+            panic!("expected a parse error, got {err}");
+        };
+        assert!(
+            source.to_string().contains("unknown field"),
+            "the key must be rejected AS AN UNKNOWN FIELD: {source}"
+        );
     }
 
     // Split out from the case above because it asserts a REJECTION per key and a

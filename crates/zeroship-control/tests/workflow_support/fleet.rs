@@ -28,7 +28,10 @@ fn key(service: &str) -> ed25519_dalek::SigningKey {
     let seed = match service {
         "control" => 31,
         "gateway" => 32,
+        // A `svc/worker` ROLE key exists only for arms that present the stale
+        // credential and expect a refusal: no fleet process holds or trusts it.
         "worker" => 33,
+        "enroller" => 34,
         _ => panic!("unknown fixture service"),
     };
     ed25519_dalek::SigningKey::from_bytes(&[seed; 32])
@@ -187,7 +190,10 @@ impl Fleet {
         };
         fs::create_dir_all(&fleet.blob_root).unwrap();
         let mut peer_keys = vec![];
-        for name in ["control", "gateway", "worker"] {
+        // The worker is not a peer with a key of its own: it enrols with the
+        // unit's enroller credential below and mints under an instance key it
+        // draws at boot, so the document publishes no `svc/worker` key.
+        for name in ["control", "gateway"] {
             fleet.secret(
                 &format!("{name}.pem"),
                 key(name)
@@ -200,6 +206,26 @@ impl Fleet {
         fleet.secret(
             "peers.json",
             &serde_json::to_vec(&json!({"keys":peer_keys})).unwrap(),
+        );
+        // The fleet's one deployment unit: the worker's enroller credential
+        // and Control's import file naming its public half.
+        let enroller_id = zeroship_core::typed_id::new_worker_enroller_id();
+        fleet.secret(
+            "enroller.json",
+            &serde_json::to_vec(&json!({
+                "enroller_id": enroller_id,
+                "private_key": key("enroller").to_pkcs8_pem(Default::default()).unwrap().as_str(),
+            }))
+            .unwrap(),
+        );
+        fleet.secret(
+            "enrollers.json",
+            &serde_json::to_vec(&json!({"enrollers": [{
+                "id": enroller_id,
+                "zone": "default",
+                "public_key": signing_key("enroller").public_jwk_x(),
+            }]}))
+            .unwrap(),
         );
         fleet.secret("broker", b"workflow-fixture-broker-secret-for-gateway");
         let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
@@ -280,6 +306,10 @@ impl Fleet {
                     "ZEROSHIP_CONTROL_WORKER_ENROLMENT_PORTS",
                     worker_port.clone(),
                 ),
+                (
+                    "ZEROSHIP_CONTROL_WORKER_ENROLLERS_FILE",
+                    fleet.path("enrollers.json"),
+                ),
             ],
         );
         fleet.ready(fleet.control_url.clone()).await;
@@ -316,6 +346,7 @@ impl Fleet {
                     "ZEROSHIP_WORKER_CDC_RELAY_CA_FILE",
                     fleet.path("relay-cert.pem"),
                 ),
+                ("ZEROSHIP_WORKER_ENROLLER_FILE", fleet.path("enroller.json")),
             ],
         );
         fleet.ready(fleet.worker_url.clone()).await;
@@ -514,17 +545,52 @@ impl Fleet {
             .env("ZEROSHIP_AUTH_PLATFORM_ISSUER", &self.issuer_url)
             .env("ZEROSHIP_OBSERVABILITY_LOG_FORMAT", "json");
         if name != "relay" {
+            // The worker's own key is its enroller credential, set by its
+            // spawn; every other service holds a role key of its own.
+            if name != "worker" {
+                cmd.env(
+                    format!("ZEROSHIP_{}_SERVICE_KEY_FILE", name.to_uppercase()),
+                    self.path(&format!("{name}.pem")),
+                );
+            }
             cmd.env(
-                format!("ZEROSHIP_{}_SERVICE_KEY_FILE", name.to_uppercase()),
-                self.path(&format!("{name}.pem")),
-            )
-            .env(
                 format!("ZEROSHIP_{}_SERVICE_PEERS_FILE", name.to_uppercase()),
                 self.path("peers.json"),
             );
         }
         self.children
             .push((name.into(), cmd.spawn().expect("start workflow service")));
+    }
+
+    /// Stop one service the way an orchestrator does - SIGTERM, then wait for
+    /// it to exit on its own - and return how it exited.
+    ///
+    /// `Drop` uses SIGKILL, which is the crash path; this is the graceful one,
+    /// and a service that has not exited within the deadline is a failure
+    /// rather than something to escalate past.
+    pub fn terminate(&mut self, name: &str) -> std::process::ExitStatus {
+        let (_, child) = self
+            .children
+            .iter_mut()
+            .find(|(child_name, _)| child_name == name)
+            .unwrap_or_else(|| panic!("no fleet service named {name}"));
+        let signalled = Command::new("kill")
+            .args(["-TERM", &child.id().to_string()])
+            .status()
+            .expect("run kill -TERM");
+        assert!(signalled.success(), "kill -TERM {name} failed: {signalled}");
+        let deadline = Instant::now() + Duration::from_secs(60);
+        loop {
+            if let Some(status) = child.try_wait().expect("poll the terminating service") {
+                return status;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "{name} did not exit after SIGTERM; see {}",
+                self.logs.display()
+            );
+            std::thread::sleep(Duration::from_millis(100));
+        }
     }
 
     pub fn assert_alive(&mut self) {
