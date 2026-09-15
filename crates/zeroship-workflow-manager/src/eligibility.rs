@@ -53,7 +53,7 @@ impl ZoneId {
     }
 
     /// The zone a single-zone deployment seeds
-    /// (`db/migrations-ts/20260914000050_execution_zones_default_zone.ts`).
+    /// (`db/migrations-ts/20260914000450_execution_zones_default_zone.ts`).
     /// The local host composes its in-process worker into it.
     #[must_use]
     pub fn default_zone() -> Self {

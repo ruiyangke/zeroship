@@ -5,12 +5,12 @@
 )]
 
 use crate::{
-    capacity::{self, Capacity, Contract, IntentState},
+    capacity::{self, Capacity, CapacityProvider},
     coordinator::Coordinator,
     eligibility::ZoneId,
     lifecycle::AppLifecycle,
     models::{
-        capacity_demands, capacity_intents, capacity_targets, jobs, recovery_duties,
+        capacity_demands, capacity_targets, jobs, recovery_duties,
         schema::{deployment_holds, schedules},
     },
     recovery::{self, DutyKind, Recovery},
@@ -172,7 +172,7 @@ struct Cursor {
 impl Driver {
     /// Construct every maintenance operation over the coordinator's platform
     /// queue. The coordinator carries the eligibility source placement reads;
-    /// the contract names the injected capacity provider. `lifecycle` reports
+    /// `provider` applies each zone's capacity target. `lifecycle` reports
     /// Control's terminal deletions to the closing lane.
     ///
     /// # Errors
@@ -181,7 +181,7 @@ impl Driver {
         coordinator: Coordinator,
         options: Options,
         lifecycle: Rc<dyn AppLifecycle>,
-        contract: Contract,
+        provider: Rc<dyn CapacityProvider>,
     ) -> Result<Self, Error> {
         options.validate()?;
         let queue = coordinator.queue().clone();
@@ -195,7 +195,7 @@ impl Driver {
             scheduler: Scheduler::new(queue.clone(), options.scheduling)?,
             recovery: Recovery::new(queue.clone(), options.recovery)?,
             lifecycle,
-            capacity: Capacity::new(coordinator, contract, options.capacity)?,
+            capacity: Capacity::new(coordinator, provider, options.capacity)?,
             queue,
             options,
             cursors: Default::default(),
@@ -335,7 +335,6 @@ impl Driver {
         lane: usize,
         deadline: Deadline,
     ) -> Result<(Vec<Candidate>, usize), Error> {
-        let declarative = matches!(self.capacity.contract(), Contract::Declarative(_));
         let limit = self.options.page_limit;
         let cursor = &mut self.cursors[lane];
         match lane {
@@ -361,7 +360,7 @@ impl Driver {
                 }
                 (apps, fetched)
             }),
-            6 if declarative => scan::<_, Demanded>(
+            6 => scan::<_, Demanded>(
                 &self.queue,
                 cursor,
                 deadline,
@@ -371,17 +370,7 @@ impl Driver {
             )
             .await
             .map(|rows| whole(rows.into_iter().map(|row| Candidate::Visit(row.id)).collect())),
-            6 => scan::<_, Intended>(
-                &self.queue,
-                cursor,
-                deadline,
-                limit,
-                capacity_intents::id,
-                |_| Ok(capacity_intents::state.ne(IntentState::Settled.as_str())?),
-            )
-            .await
-            .map(|rows| whole(rows.into_iter().map(|row| Candidate::Visit(row.id)).collect())),
-            _ if declarative => scan::<_, Targeted>(
+            _ => scan::<_, Targeted>(
                 &self.queue,
                 cursor,
                 deadline,
@@ -391,20 +380,6 @@ impl Driver {
             )
             .await
             .map(|rows| whole(rows.into_iter().map(|row| Candidate::Zone(row.id)).collect())),
-            _ => scan::<_, Intended>(
-                &self.queue,
-                cursor,
-                deadline,
-                limit,
-                capacity_intents::id,
-                |_| {
-                    Ok(capacity_intents::state
-                        .ne(IntentState::Settled.as_str())?
-                        .and(capacity_intents::state.ne(IntentState::Provisioned.as_str())?))
-                },
-            )
-            .await
-            .map(|rows| whole(rows.into_iter().map(|row| Candidate::Intent(row.id)).collect())),
         }
     }
 
@@ -441,10 +416,6 @@ impl Driver {
             }
             Candidate::Zone(zone) => {
                 self.capacity.reconcile(&ZoneId::parse(zone)?).await?;
-            }
-            Candidate::Intent(app) => {
-                let app = AppId::parse(app).map_err(|_| Error::Storage)?;
-                self.capacity.request(&app).await?;
             }
         }
         Ok(())
@@ -553,17 +524,6 @@ impl ScanRow for Demanded {
 }
 
 #[derive(FromRow)]
-#[orm(entity = capacity_intents)]
-struct Intended {
-    id: String,
-}
-impl ScanRow for Intended {
-    fn id(&self) -> &str {
-        &self.id
-    }
-}
-
-#[derive(FromRow)]
 #[orm(entity = capacity_targets)]
 struct Targeted {
     id: String,
@@ -583,8 +543,6 @@ enum Candidate {
     Visit(String),
     /// An execution zone whose capacity target to reconcile.
     Zone(String),
-    /// An app whose comparison-contract intent to request.
-    Intent(String),
 }
 impl Candidate {
     fn id(&self) -> &str {
@@ -593,7 +551,7 @@ impl Candidate {
             Self::Recoverable(_, row) => row.id(),
             Self::Hold(row) => row.id(),
             Self::Closing { id, .. } => id,
-            Self::Visit(id) | Self::Zone(id) | Self::Intent(id) => id,
+            Self::Visit(id) | Self::Zone(id) => id,
         }
     }
 }

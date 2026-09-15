@@ -19,7 +19,7 @@ export default {
   schema() {
     // ---- apps.execution_zone_id ---------------------------------------------
     // The default names the deployment's single seeded zone
-    // (20260914000050_execution_zones_default_zone.ts). A single-zone
+    // (20260914000450_execution_zones_default_zone.ts). A single-zone
     // deployment has exactly one choice, so an app created without naming a
     // zone lands in it. A deployment with more than one zone must name the
     // zone when it creates the app; the frozen trigger below then keeps it.
@@ -39,7 +39,7 @@ export default {
     });
 
     // ---- worker_enrollers.execution_zone_id ---------------------------------
-    // 20260914000000_execution_zones_and_worker_enrollers.ts left this column
+    // 20260914000400_execution_zones_and_worker_enrollers.ts left this column
     // as unenforced intent because a same-file foreign key to the freshly
     // collated execution_zones.id is refused. That collation now exists, so
     // the reference is enforced here.

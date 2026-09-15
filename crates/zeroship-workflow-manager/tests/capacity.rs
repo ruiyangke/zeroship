@@ -1,5 +1,4 @@
-//! The capacity contracts head to head: a declarative per-zone target against
-//! per-app provisioning intents, on one eligibility predicate.
+//! The declarative per-zone capacity target, on one eligibility predicate.
 #![recursion_limit = "256"]
 #![allow(
     clippy::future_not_send,
@@ -8,14 +7,13 @@
 
 #[allow(dead_code, reason = "shared fixtures expose other manager contracts")]
 mod support;
-#[allow(dead_code, reason = "shared placement fixtures serve two contract suites")]
+#[allow(dead_code, reason = "shared placement fixtures serve the placement suite too")]
 #[path = "support/placement.rs"]
 mod placement_support;
 
 use futures::{channel::oneshot, future::ready};
 use placement_support::{
-    blocked_manager, options, revision, Counted, Facts, Host, Pool, Starter, Starts, Step, LONG,
-    SOON,
+    blocked_manager, options, revision, Counted, Facts, Host, Pool, Starter, Step, LONG,
 };
 use std::{rc::Rc, time::Duration};
 use support::{Admin, Backend, Fixture};
@@ -30,7 +28,7 @@ use zeroship_data_orm::{
 };
 use zeroship_workflow_manager::{
     capacity::{
-        self, Capacity, Contract, Exchange, IntentState, Refusal, StaticPool, TargetState, Visit,
+        self, Capacity, CapacityProvider, Exchange, Refusal, StaticPool, TargetState, Visit,
     },
     eligibility::ZoneId,
     recovery::Recovery,
@@ -80,32 +78,18 @@ case!(
     stale_target
 );
 case!(
-    sqlite_a_stale_reply_cannot_overwrite_a_newer_intent,
-    postgres_a_stale_reply_cannot_overwrite_a_newer_intent,
-    stale_intent
-);
-case!(
     sqlite_targets_demand_and_jobs_survive_provider_failure_and_restart,
     postgres_targets_demand_and_jobs_survive_provider_failure_and_restart,
     restart_target
 );
 case!(
-    sqlite_intents_and_jobs_survive_provider_failure_and_restart,
-    postgres_intents_and_jobs_survive_provider_failure_and_restart,
-    restart_intent
-);
-case!(
     sqlite_racing_replicas_start_no_more_workers_than_unabsorbable_placements,
     postgres_racing_replicas_start_no_more_workers_than_unabsorbable_placements,
-    head_to_head
+    coalesced_starts
 );
 
-fn declarative(pool: &Rc<Pool>) -> Contract {
-    Contract::declarative(pool.clone())
-}
-
-fn capacity(host: &Host, contract: Contract, retry: Duration) -> Capacity {
-    Capacity::new(host.coordinator.clone(), contract, options(retry).capacity).unwrap()
+fn capacity(host: &Host, provider: Rc<dyn CapacityProvider>, retry: Duration) -> Capacity {
+    Capacity::new(host.coordinator.clone(), provider, options(retry).capacity).unwrap()
 }
 
 async fn target(capacity: &Capacity, zone: &ZoneId) -> capacity::Target {
@@ -170,12 +154,12 @@ async fn scale_from_zero(fixture: &Fixture) {
             .await
             .unwrap();
         let pool = Pool::new(Starter::new(host.clone(), 4));
-        let contract = if started {
-            declarative(&pool)
+        let provider: Rc<dyn CapacityProvider> = if started {
+            pool.clone()
         } else {
-            Contract::declarative(Rc::new(StaticPool))
+            Rc::new(StaticPool)
         };
-        let mut driver = host.driver(LONG, contract);
+        let mut driver = host.driver(LONG, provider);
         let first = driver.tick().await;
         for lane in [&first.reconciliation, &first.placement, &first.capacity] {
             assert!(lane.failures.is_empty() && lane.scan_error.is_none(), "{first:?}");
@@ -241,8 +225,8 @@ async fn exhaustion(fixture: &Fixture) {
     let app = AppId::mint();
     a.due(&app, &zone).await;
     let pool = Counted::new(StaticPool);
-    let mut first = a.driver(LONG, Contract::declarative(pool.clone()));
-    let mut second = b.driver(LONG, Contract::declarative(pool.clone()));
+    let mut first = a.driver(LONG, pool.clone());
+    let mut second = b.driver(LONG, pool.clone());
     first.tick().await;
     assert_eq!(pool.calls(), 1);
     let refused = target(first.capacity(), &zone).await;
@@ -290,8 +274,8 @@ async fn convergence(fixture: &Fixture) {
     }
     let pool = Pool::new(Starter::new(a.clone(), 2));
     let (left, right) = (
-        capacity(&a, declarative(&pool), LONG),
-        capacity(&b, declarative(&pool), LONG),
+        capacity(&a, pool.clone(), LONG),
+        capacity(&b, pool.clone(), LONG),
     );
     for app in &apps {
         assert_eq!(left.visit(app).await.unwrap(), Visit::Unplaced(zone.clone()));
@@ -312,8 +296,8 @@ async fn convergence(fixture: &Fixture) {
     assert_eq!(pool.calls(), 1);
     assert_eq!(pool.starts(), 3);
 
-    let mut first = a.driver(LONG, declarative(&pool));
-    let mut second = b.driver(LONG, declarative(&pool));
+    let mut first = a.driver(LONG, pool.clone());
+    let mut second = b.driver(LONG, pool.clone());
     for _ in 0..3 {
         futures::join!(first.tick(), second.tick());
     }
@@ -344,7 +328,7 @@ async fn bounded_pages(fixture: &Fixture) {
             ..options(LONG)
         },
         std::rc::Rc::new(zeroship_workflow_manager::lifecycle::Undeletable),
-        Contract::declarative(pool.clone()),
+        pool.clone(),
     )
     .unwrap();
     let mut desired = Vec::new();
@@ -390,7 +374,7 @@ async fn shrink(fixture: &Fixture, idle_hold_down: Duration) -> capacity::Target
     let pool = Pool::new(Starter::new(a.clone(), 1));
     let lane = Capacity::new(
         a.coordinator.clone(),
-        declarative(&pool),
+        pool.clone(),
         capacity::Options {
             idle_hold_down,
             ..options(LONG).capacity
@@ -450,8 +434,8 @@ async fn stale_target(fixture: &Fixture) {
         release: released,
     });
     let (left, right) = (
-        capacity(&a, declarative(&pool), LONG),
-        capacity(&b, declarative(&pool), LONG),
+        capacity(&a, pool.clone(), LONG),
+        capacity(&b, pool.clone(), LONG),
     );
     assert_eq!(
         left.visit(&first_app).await.unwrap(),
@@ -481,51 +465,6 @@ async fn stale_target(fixture: &Fixture) {
     assert_eq!(target(&left, &zone).await, newer);
 }
 
-/// The comparison contract fences the same way, by generation.
-async fn stale_intent(fixture: &Fixture) {
-    let (a, b) = replicas(fixture).await;
-    let zone = ZoneId::mint();
-    let app = AppId::mint();
-    a.due(&app, &zone).await;
-    let starts = Starts::new(Starter::new(a.clone(), 1), true);
-    let (entered, arrived) = oneshot::channel();
-    let (release, released) = oneshot::channel();
-    starts.script.borrow_mut().push_back(Step::Gate {
-        entered,
-        release: released,
-    });
-    let (left, right) = (
-        capacity(&a, Contract::intents(starts.clone()), LONG),
-        capacity(&b, Contract::intents(starts.clone()), LONG),
-    );
-    assert_eq!(left.visit(&app).await.unwrap(), Visit::Unplaced(zone.clone()));
-    let delayed = left.request(&app);
-    let newer = async {
-        arrived.await.unwrap();
-        // The app is placed, settling generation one, then needs an owner again.
-        let worker = b.worker(&zone, 1).await;
-        assert!(matches!(right.visit(&app).await.unwrap(), Visit::Placed(_)));
-        assert_eq!(
-            right.intent(&app).await.unwrap().unwrap().state,
-            IntentState::Settled
-        );
-        b.facts.revoke(&worker);
-        assert_eq!(right.visit(&app).await.unwrap(), Visit::Unplaced(zone.clone()));
-        assert_eq!(right.request(&app).await.unwrap(), Exchange::Applied);
-        let newer = right.intent(&app).await.unwrap().unwrap();
-        assert_eq!(
-            (newer.generation, newer.state),
-            (2, IntentState::Provisioned)
-        );
-        release
-            .send(Step::Refuse(Refusal::PoolExhausted))
-            .unwrap();
-        newer
-    };
-    let (stale, newer) = futures::join!(delayed, newer);
-    assert_eq!(stale.unwrap(), Exchange::Stale);
-    assert_eq!(left.intent(&app).await.unwrap().unwrap(), newer);
-}
 
 /// A failed provider leaves a durable, retryable refusal. The target, the
 /// demand and the job survive a manager restart, and the restarted manager
@@ -539,14 +478,14 @@ async fn restart_target(fixture: &Fixture) {
         host.due(&app, &zone).await;
         let pool = Pool::new(Starter::new(host.clone(), 2));
         pool.script.borrow_mut().push_back(Step::Fail);
-        let mut driver = host.driver(LONG, declarative(&pool));
+        let mut driver = host.driver(LONG, pool.clone());
         driver.tick().await;
         assert_eq!(pool.calls(), 1);
         assert_eq!(pool.starts(), 0);
     }
     let host = Host::new(fixture, facts).await;
     let pool = Pool::new(Starter::new(host.clone(), 2));
-    let mut driver = host.driver(LONG, declarative(&pool));
+    let mut driver = host.driver(LONG, pool.clone());
     let failed = target(driver.capacity(), &zone).await;
     assert_eq!(
         (failed.revision, failed.state, failed.refusal),
@@ -566,92 +505,28 @@ async fn restart_target(fixture: &Fixture) {
     assert_eq!(target(driver.capacity(), &zone).await.state, TargetState::Steady);
 }
 
-/// The comparison contract's intent, demand and job survive the same way.
-async fn restart_intent(fixture: &Fixture) {
-    let facts = Rc::new(Facts::default());
-    let zone = ZoneId::mint();
-    let app = AppId::mint();
-    {
-        let host = Host::new(fixture, facts.clone()).await;
-        host.due(&app, &zone).await;
-        let starts = Starts::new(Starter::new(host.clone(), 1), true);
-        starts.script.borrow_mut().push_back(Step::Fail);
-        let mut driver = host.driver(LONG, Contract::intents(starts.clone()));
-        driver.tick().await;
-        assert_eq!(starts.calls(), 1);
-        assert_eq!(starts.starts(), 0);
-    }
-    let host = Host::new(fixture, facts).await;
-    let starts = Starts::new(Starter::new(host.clone(), 1), true);
-    let mut driver = host.driver(SOON, Contract::intents(starts.clone()));
-    let failed = driver.capacity().intent(&app).await.unwrap().unwrap();
-    assert_eq!(
-        (failed.generation, failed.state, failed.refusal),
-        (1, IntentState::Refused, Some(Refusal::Unavailable))
-    );
-    let job = rows(fixture, "jobs", value!({"app_id":app.as_str()})).await;
-    assert_eq!(job[0]["state"].as_str(), Some("ready"));
-    // The previous manager set a long retry; make it due for this one.
-    retry_intent_now(fixture, &app).await;
-    driver.tick().await;
-    assert_eq!(starts.calls(), 1);
-    driver.tick().await;
-    let worker = starts.started.borrow()[0].2.clone();
-    assert_eq!(host.placed(&worker).await, vec![app.clone()]);
-    assert_eq!(
-        driver.capacity().intent(&app).await.unwrap().unwrap().state,
-        IntentState::Settled
-    );
-}
-
 const OWNERLESS: usize = 5;
 const SLOTS: u32 = 2;
 
-/// What one contract's race cost: workers started and provider requests.
+/// What one race cost: workers started and provider requests.
 #[derive(Debug, PartialEq, Eq)]
 struct Cost {
     starts: usize,
     calls: usize,
 }
 
-/// Five owner-less apps, no capacity, two racing replicas, and a provider
-/// whose first reply is lost after it acted. The retry happens before the
-/// started workers register, as it does while real workers boot.
+/// Owner-less apps, no capacity, two racing replicas, and a provider whose
+/// first reply is lost after it acted. The retry happens before the started
+/// workers register, as it does while real workers boot.
 ///
-/// A declarative target never starts more workers than the unabsorbable
-/// placements need, and a lost reply's retry starts nothing. Per-app intents
-/// start one worker per app, and without provider-side deduplication the
-/// retried intent starts another: more starts than unabsorbable placements.
-async fn head_to_head(fixture: &Fixture) {
+/// The target is a value, not an instruction: it starts no more workers than
+/// the unabsorbable placements need at the zone's slots per worker, and the
+/// lost reply's retry starts nothing more.
+async fn coalesced_starts(fixture: &Fixture) {
     let declarative = Box::pin(race_target(fixture)).await;
-    let deduplicated = Box::pin(race_intents(fixture, true)).await;
-    let blind = Box::pin(race_intents(fixture, false)).await;
-    eprintln!(
-        "capacity head to head: {OWNERLESS} owner-less apps, {SLOTS} slots per worker; \
-         target {declarative:?}; intents with dedupe {deduplicated:?}; \
-         intents without dedupe {blind:?}"
-    );
     let workers = OWNERLESS.div_ceil(usize::try_from(SLOTS).unwrap());
     assert_eq!(declarative, Cost { starts: workers, calls: 2 });
-    assert!(declarative.starts <= OWNERLESS);
-    assert_eq!(
-        deduplicated,
-        Cost {
-            starts: OWNERLESS,
-            calls: OWNERLESS + 1
-        }
-    );
-    assert_eq!(
-        blind,
-        Cost {
-            starts: OWNERLESS + 1,
-            calls: OWNERLESS + 1
-        }
-    );
-    assert!(
-        blind.starts > OWNERLESS,
-        "per-app intents need provider-side deduplication"
-    );
+    assert!(declarative.starts < OWNERLESS);
 }
 
 async fn race_target(fixture: &Fixture) -> Cost {
@@ -664,8 +539,8 @@ async fn race_target(fixture: &Fixture) -> Cost {
     let pool = Pool::new(Starter::new(a.clone(), SLOTS));
     pool.script.borrow_mut().push_back(Step::Lose);
     let (left, right) = (
-        capacity(&a, declarative(&pool), LONG),
-        capacity(&b, declarative(&pool), LONG),
+        capacity(&a, pool.clone(), LONG),
+        capacity(&b, pool.clone(), LONG),
     );
     for app in &apps {
         left.visit(app).await.unwrap();
@@ -680,72 +555,20 @@ async fn race_target(fixture: &Fixture) -> Cost {
             (Exchange::Applied, Exchange::Idle) | (Exchange::Idle, Exchange::Applied)
         ));
     }
-    settle(&a, &b, declarative(&pool), &apps).await;
+    settle(&a, &b, pool.clone(), &apps).await;
     Cost {
         starts: pool.starts(),
         calls: pool.calls(),
     }
 }
 
-async fn race_intents(fixture: &Fixture, dedupe: bool) -> Cost {
-    let (a, b) = replicas(fixture).await;
-    let zone = ZoneId::mint();
-    let apps: Vec<AppId> = (0..OWNERLESS).map(|_| AppId::mint()).collect();
-    for app in &apps {
-        a.due(app, &zone).await;
-    }
-    let starts = Starts::new(Starter::new(a.clone(), SLOTS), dedupe);
-    starts.script.borrow_mut().push_back(Step::Lose);
-    let (left, right) = (
-        capacity(&a, Contract::intents(starts.clone()), LONG),
-        capacity(&b, Contract::intents(starts.clone()), LONG),
-    );
-    for app in &apps {
-        left.visit(app).await.unwrap();
-    }
-    for round in 0..2 {
-        if round > 0 {
-            for app in &apps {
-                retry_intent_now(fixture, app).await;
-            }
-        }
-        for app in &apps {
-            let (x, y) = futures::join!(left.request(app), right.request(app));
-            assert!(matches!(
-                (x.unwrap(), y.unwrap()),
-                (Exchange::Applied | Exchange::Idle, Exchange::Idle)
-                    | (Exchange::Idle, Exchange::Applied)
-            ));
-        }
-    }
-    settle(&a, &b, Contract::intents(starts.clone()), &apps).await;
-    Cost {
-        starts: starts.starts(),
-        calls: starts.calls(),
-    }
-}
 
 /// Make an intent's paced retry due without waiting out its interval.
-async fn retry_intent_now(fixture: &Fixture, app: &AppId) {
-    let updated = fixture
-        .database()
-        .await
-        .collection("capacity_intents")
-        .unwrap()
-        .execute(Operation::Update {
-            filter: value!({"id":app.as_str()}),
-            patch: value!({"retry_at":0}),
-            many: true,
-        })
-        .await
-        .unwrap();
-    assert!(matches!(updated, Output::Count(1)), "{updated:?}");
-}
 
 /// Both replicas tick until every app is owned.
-async fn settle(a: &Host, b: &Host, contract: Contract, apps: &[AppId]) {
-    let mut first = a.driver(LONG, contract.clone());
-    let mut second = b.driver(LONG, contract);
+async fn settle(a: &Host, b: &Host, provider: Rc<dyn CapacityProvider>, apps: &[AppId]) {
+    let mut first = a.driver(LONG, provider.clone());
+    let mut second = b.driver(LONG, provider);
     for _ in 0..3 {
         futures::join!(first.tick(), second.tick());
     }
@@ -770,8 +593,8 @@ async fn postgres_replicas_waiting_on_the_zone_lock_send_one_request() {
     }
     let pool = Pool::new(Starter::new(a.clone(), 2));
     let (left, right) = (
-        capacity(&a, declarative(&pool), LONG),
-        capacity(&b, declarative(&pool), LONG),
+        capacity(&a, pool.clone(), LONG),
+        capacity(&b, pool.clone(), LONG),
     );
     for app in &apps {
         left.visit(app).await.unwrap();

@@ -447,7 +447,6 @@ async fn manager_queue_authority(fixture: &platform::Platform, runtime: &compio_
         [
             "assignments",
             "capacity_demands",
-            "capacity_intents",
             "capacity_targets",
             "deployment_holds",
             "jobs",

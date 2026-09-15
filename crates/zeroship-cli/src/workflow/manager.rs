@@ -36,7 +36,7 @@ use zeroship_workflow::{
     WorkflowServiceError,
 };
 use zeroship_workflow_manager::{
-    capacity::{Contract, LocalCapacity},
+    capacity::LocalCapacity,
     coordinator::{Coordinator, Options as CoordinatorOptions},
     deployments,
     driver::{Driver, Options as DriverOptions},
@@ -236,7 +236,7 @@ impl LocalManager {
                 ..DriverOptions::default()
             },
             Rc::new(Undeletable),
-            Contract::declarative(Rc::new(LocalCapacity)),
+            Rc::new(LocalCapacity),
         )
         .map_err(manager_error)
     }

@@ -15,10 +15,6 @@
 //! harmless because the target is a value, not an instruction. A lower target
 //! applies only after the zone's demand stayed below it for the idle
 //! hold-down. Provider failure keeps the demand, the jobs and the target.
-//!
-//! The intents contract is the comparison: one imperative provisioning intent
-//! per owner-less app, fenced by a generation. Its provider must deduplicate
-//! by intent identity, because a retried request is another instruction.
 #![expect(
     clippy::future_not_send,
     reason = "capacity operations share the queue's owning compio runtime"
@@ -27,10 +23,7 @@
 use crate::{
     coordinator::{Coordinator, Placed},
     eligibility::ZoneId,
-    models::{
-        assignments, capacity_demands as demands, capacity_intents as intents,
-        capacity_targets as targets, workers,
-    },
+    models::{assignments, capacity_demands as demands, capacity_targets as targets, workers},
     queue::lock_scope,
     scheduling, Error,
 };
@@ -49,23 +42,33 @@ use zeroship_data_orm::orm::{
     count_rows, ConflictTarget, Database, FromRow, Insertable, Patch,
 };
 
-/// Capacity pacing. The hold-down and retry values are operator settings.
+/// The zone bounds and pacing an operator configures. Every zone of one
+/// deployment shares them: a zone is a connectivity set, not a tenant.
 #[derive(Clone, Copy, Debug)]
 pub struct Options {
+    /// Fewest placement slots a zone's target may name, so an operator can
+    /// keep capacity warm. Zero lets an idle zone fall to nothing.
+    pub min_slots: i64,
+    /// Most placement slots a zone's target may name. Demand beyond the
+    /// ceiling stays recorded and unplaced instead of raising the target, so a
+    /// runaway app cannot scale a zone without bound.
+    pub max_slots: i64,
     /// A lower target applies only after the zone's computed demand stayed
     /// below the current target for this long.
     pub idle_hold_down: Duration,
     /// Bound on one provider request. An unanswered request is recorded as an
     /// `unavailable` refusal, and another replica may retry after this bound.
     pub request_timeout: Duration,
-    /// Pause after any reply before the same target or intent is requested
-    /// again while its demand remains unplaced.
+    /// Pause after any reply before the same target is requested again while
+    /// its demand remains unplaced.
     pub retry_interval: Duration,
 }
 
 impl Default for Options {
     fn default() -> Self {
         Self {
+            min_slots: 0,
+            max_slots: 1024,
             idle_hold_down: Duration::from_secs(300),
             request_timeout: Duration::from_secs(10),
             retry_interval: Duration::from_secs(30),
@@ -75,11 +78,15 @@ impl Default for Options {
 
 impl Options {
     /// # Errors
-    /// Rejects empty or unrepresentable durations.
+    /// Rejects empty or unrepresentable durations and an empty or inverted
+    /// slot range.
     pub fn validate(&self) -> Result<(), Error> {
         millis(self.idle_hold_down)?;
         millis(self.request_timeout)?;
         millis(self.retry_interval)?;
+        if self.min_slots < 0 || self.max_slots < 1 || self.min_slots > self.max_slots {
+            return Err(Error::Invalid);
+        }
         if Instant::now().checked_add(self.request_timeout).is_none() {
             return Err(Error::Invalid);
         }
@@ -193,50 +200,6 @@ impl CapacityProvider for StaticPool {
     }
 }
 
-/// The comparison contract's request: start capacity for one owner-less app.
-/// The intent's identity is the app and its generation.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ProvisionRequest {
-    pub app: AppId,
-    pub zone: ZoneId,
-    pub generation: Revision,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ProvisionReply {
-    Provisioned,
-    Refused(Refusal),
-}
-
-pub type ProvisionFuture<'a> = Pin<Box<dyn Future<Output = Result<ProvisionReply, Error>> + 'a>>;
-
-/// Imperative per-app provisioning. Each request is an instruction, so the
-/// provider must deduplicate by intent identity to avoid duplicate starts.
-pub trait ProvisioningProvider: Debug {
-    fn provision<'a>(&'a self, request: &'a ProvisionRequest) -> ProvisionFuture<'a>;
-}
-
-/// Which capacity contract a manager runs.
-#[derive(Clone, Debug)]
-pub enum Contract {
-    /// One declarative, revisioned target per execution zone.
-    Declarative(Rc<dyn CapacityProvider>),
-    /// One imperative provisioning intent per owner-less app.
-    Intents(Rc<dyn ProvisioningProvider>),
-}
-
-impl Contract {
-    #[must_use]
-    pub fn declarative(provider: Rc<dyn CapacityProvider>) -> Self {
-        Self::Declarative(provider)
-    }
-
-    #[must_use]
-    pub fn intents(provider: Rc<dyn ProvisioningProvider>) -> Self {
-        Self::Intents(provider)
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TargetState {
     /// The provider accepted the current revision.
@@ -278,50 +241,6 @@ pub struct Target {
     pub refusal: Option<Refusal>,
     pub observed: Option<i64>,
     /// Provider requests claimed so far, across every revision.
-    pub attempt: i64,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum IntentState {
-    Acquiring,
-    Requested,
-    Provisioned,
-    Refused,
-    Settled,
-}
-
-impl IntentState {
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Acquiring => "acquiring",
-            Self::Requested => "requested",
-            Self::Provisioned => "provisioned",
-            Self::Refused => "refused",
-            Self::Settled => "settled",
-        }
-    }
-
-    fn parse(value: &str) -> Result<Self, Error> {
-        match value {
-            "acquiring" => Ok(Self::Acquiring),
-            "requested" => Ok(Self::Requested),
-            "provisioned" => Ok(Self::Provisioned),
-            "refused" => Ok(Self::Refused),
-            "settled" => Ok(Self::Settled),
-            _ => Err(Error::Storage),
-        }
-    }
-}
-
-/// An app's durable provisioning intent under the comparison contract.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Intent {
-    pub app: AppId,
-    pub zone: ZoneId,
-    pub generation: i64,
-    pub state: IntentState,
-    pub refusal: Option<Refusal>,
     pub attempt: i64,
 }
 
@@ -436,65 +355,29 @@ struct ZoneIdentity<'a> {
     id: &'a str,
 }
 
-#[derive(FromRow, Clone)]
-#[orm(entity = intents)]
-struct IntentRow {
-    id: String,
-    execution_zone_id: String,
-    generation: i64,
-    state: String,
-    refusal: Option<String>,
-    attempt: i64,
-    attempt_deadline: Option<i64>,
-    retry_at: Option<i64>,
-}
-
-impl IntentRow {
-    fn view(&self) -> Result<Intent, Error> {
-        if self.generation <= 0 || self.attempt < 0 {
-            return Err(Error::Storage);
-        }
-        Ok(Intent {
-            app: AppId::parse(&self.id).map_err(|_| Error::Storage)?,
-            zone: ZoneId::parse(&self.execution_zone_id)?,
-            generation: self.generation,
-            state: IntentState::parse(&self.state)?,
-            refusal: self.refusal.as_deref().map(Refusal::parse).transpose()?,
-            attempt: self.attempt,
-        })
-    }
-}
-
-#[derive(Insertable)]
-#[orm(entity = intents)]
-struct NewIntent<'a> {
-    id: &'a str,
-    execution_zone_id: &'a str,
-    generation: i64,
-    state: &'a str,
-    attempt: i64,
-}
-
 /// Placement demand and capacity requests over one platform queue.
 #[derive(Debug, Clone)]
 pub struct Capacity {
     coordinator: Coordinator,
-    contract: Contract,
+    provider: Rc<dyn CapacityProvider>,
     options: Options,
 }
 
 impl Capacity {
     /// # Errors
     /// Rejects invalid options and incompatible generated model metadata.
-    pub fn new(coordinator: Coordinator, contract: Contract, options: Options) -> Result<Self, Error> {
+    pub fn new(
+        coordinator: Coordinator,
+        provider: Rc<dyn CapacityProvider>,
+        options: Options,
+    ) -> Result<Self, Error> {
         options.validate()?;
         let database = &coordinator.queue().database;
         database.entity::<demands::Entity>()?;
         database.entity::<targets::Entity>()?;
-        database.entity::<intents::Entity>()?;
         Ok(Self {
             coordinator,
-            contract,
+            provider,
             options,
         })
     }
@@ -502,11 +385,6 @@ impl Capacity {
     #[must_use]
     pub const fn coordinator(&self) -> &Coordinator {
         &self.coordinator
-    }
-
-    #[must_use]
-    pub const fn contract(&self) -> &Contract {
-        &self.contract
     }
 
     /// Give an app an owner when it has claimable work. Place it on free
@@ -553,63 +431,28 @@ impl Capacity {
                     return Ok(Visit::Owned);
                 }
                 let now = queue.clock.now().await?;
-                match &self.contract {
-                    Contract::Declarative(_) => {
-                        match demand(&tx, app).await? {
-                            Some(row) if row.execution_zone_id != zone.as_str() => {
-                                return Err(Error::Storage)
-                            }
-                            Some(_) => {}
-                            None => {
-                                tx.entity::<demands::Entity>()?
-                                    .insert::<_, DemandRow>(NewDemand {
-                                        id: app.as_str(),
-                                        execution_zone_id: zone.as_str(),
-                                        recorded_at: now,
-                                    })
-                                    .await?;
-                            }
-                        }
-                        let _: TargetRow = tx
-                            .entity::<targets::Entity>()?
-                            .upsert(
-                                ZoneIdentity { id: zone.as_str() },
-                                ConflictTarget::new(targets::id),
-                            )
+                match demand(&tx, app).await? {
+                    Some(row) if row.execution_zone_id != zone.as_str() => {
+                        return Err(Error::Storage)
+                    }
+                    Some(_) => {}
+                    None => {
+                        tx.entity::<demands::Entity>()?
+                            .insert::<_, DemandRow>(NewDemand {
+                                id: app.as_str(),
+                                execution_zone_id: zone.as_str(),
+                                recorded_at: now,
+                            })
                             .await?;
                     }
-                    Contract::Intents(_) => match intent(&tx, app).await? {
-                        None => {
-                            tx.entity::<intents::Entity>()?
-                                .insert::<_, IntentRow>(NewIntent {
-                                    id: app.as_str(),
-                                    execution_zone_id: zone.as_str(),
-                                    generation: 1,
-                                    state: IntentState::Acquiring.as_str(),
-                                    attempt: 0,
-                                })
-                                .await?;
-                        }
-                        Some(row) if row.execution_zone_id != zone.as_str() => {
-                            return Err(Error::Storage)
-                        }
-                        Some(row) if row.state == IntentState::Settled.as_str() => {
-                            let next = row.generation.checked_add(1).ok_or(Error::Capacity)?;
-                            guarded_intent(
-                                &tx,
-                                &row,
-                                intents::generation
-                                    .set(next)?
-                                    .and(intents::state.set(IntentState::Acquiring.as_str())?)?
-                                    .and(intents::refusal.set(None::<&str>)?)?
-                                    .and(intents::attempt_deadline.set(None::<i64>)?)?
-                                    .and(intents::retry_at.set(None::<i64>)?)?,
-                            )
-                            .await?;
-                        }
-                        Some(_) => {}
-                    },
                 }
+                let _: TargetRow = tx
+                    .entity::<targets::Entity>()?
+                    .upsert(
+                        ZoneIdentity { id: zone.as_str() },
+                        ConflictTarget::new(targets::id),
+                    )
+                    .await?;
                 Ok(Visit::Unplaced(zone.clone()))
             })
             .await
@@ -620,8 +463,8 @@ impl Capacity {
         let queue = self.coordinator.queue();
         queue
             .transact(|tx| async move {
-                // Demand and intents reference the app's queue scope, so an
-                // app without one has nothing to clear.
+                // Demand references the app's queue scope, so an app without
+                // one has nothing to clear.
                 match lock_scope(&tx, app).await {
                     Ok(()) => Box::pin(self.clear_in(&tx, app)).await,
                     Err(Error::Denied) => Ok(()),
@@ -632,27 +475,9 @@ impl Capacity {
     }
 
     async fn clear_in(&self, tx: &Database, app: &AppId) -> Result<(), Error> {
-        match &self.contract {
-            Contract::Declarative(_) => {
-                tx.entity::<demands::Entity>()?
-                    .delete_many(demands::id.eq(app.as_str())?)
-                    .await?;
-            }
-            Contract::Intents(_) => {
-                if let Some(row) = intent(tx, app).await? {
-                    if row.state != IntentState::Settled.as_str() {
-                        guarded_intent(
-                            tx,
-                            &row,
-                            intents::state
-                                .set(IntentState::Settled.as_str())?
-                                .and(intents::attempt_deadline.set(None::<i64>)?)?,
-                        )
-                        .await?;
-                    }
-                }
-            }
-        }
+        tx.entity::<demands::Entity>()?
+            .delete_many(demands::id.eq(app.as_str())?)
+            .await?;
         Ok(())
     }
 
@@ -662,11 +487,8 @@ impl Capacity {
     /// revision and attempt it answered.
     ///
     /// # Errors
-    /// Refuses the comparison contract and reports unavailable storage.
+    /// Reports unavailable storage.
     pub async fn reconcile(&self, zone: &ZoneId) -> Result<Exchange, Error> {
-        let Contract::Declarative(provider) = &self.contract else {
-            return Err(Error::Invalid);
-        };
         let Some(claim) = Box::pin(self.claim_target(zone)).await? else {
             return Ok(Exchange::Idle);
         };
@@ -679,7 +501,7 @@ impl Capacity {
         // A failed or unanswered provider leaves a durable, retryable refusal.
         let reply = match compio::time::timeout(
             self.options.request_timeout,
-            provider.ensure(&request),
+            self.provider.ensure(&request),
         )
         .await
         {
@@ -708,10 +530,14 @@ impl Capacity {
                     .entity::<demands::Entity>()?
                     .count(demands::execution_zone_id.eq(zone.as_str())?)
                     .await?;
+                // The operator's zone bounds clamp the computed slots: a
+                // ceiling leaves demand beyond it recorded and unplaced, and a
+                // floor keeps capacity warm in an idle zone.
                 let computed = occupied(&tx, zone, now)
                     .await?
                     .checked_add(unplaced)
-                    .ok_or(Error::Capacity)?;
+                    .ok_or(Error::Capacity)?
+                    .clamp(self.options.min_slots, self.options.max_slots);
                 let mut next = stored.clone();
                 if computed > stored.desired || (computed > 0 && stored.revision == 0) {
                     next.advance(computed)?;
@@ -799,86 +625,6 @@ impl Capacity {
             .await
     }
 
-    /// Request provisioning for one app's intent under the comparison
-    /// contract. The reply applies only to the generation and attempt it
-    /// answered.
-    ///
-    /// # Errors
-    /// Refuses the declarative contract and reports unavailable storage.
-    pub async fn request(&self, app: &AppId) -> Result<Exchange, Error> {
-        let Contract::Intents(provider) = &self.contract else {
-            return Err(Error::Invalid);
-        };
-        let queue = self.coordinator.queue();
-        let timeout = millis(self.options.request_timeout)?;
-        let claim = queue
-            .transact(|tx| async move {
-                // Lock before reading: every write transaction here starts with
-                // its lock, so embedded storage never upgrades a read snapshot.
-                lock_scope(&tx, app).await?;
-                let Some(stored) = intent(&tx, app).await? else {
-                    return Ok(None);
-                };
-                let view = stored.view()?;
-                let now = queue.clock.now().await?;
-                let due = stored.attempt_deadline.is_none_or(|deadline| deadline <= now)
-                    && match view.state {
-                        IntentState::Acquiring | IntentState::Requested => true,
-                        IntentState::Refused => stored.retry_at.is_none_or(|at| at <= now),
-                        IntentState::Provisioned | IntentState::Settled => false,
-                    };
-                if !due {
-                    return Ok(None);
-                }
-                let attempt = stored.attempt.checked_add(1).ok_or(Error::Capacity)?;
-                guarded_intent(
-                    &tx,
-                    &stored,
-                    intents::attempt
-                        .set(attempt)?
-                        .and(intents::attempt_deadline.set(Some(now.checked_add(timeout).ok_or(Error::Capacity)?))?)?
-                        .and(intents::state.set(IntentState::Requested.as_str())?)?,
-                )
-                .await?;
-                Ok(Some((view.zone, stored.generation, attempt)))
-            })
-            .await?;
-        let Some((zone, generation, attempt)) = claim else {
-            return Ok(Exchange::Idle);
-        };
-        let request = ProvisionRequest {
-            app: app.clone(),
-            zone,
-            generation: Revision::try_from(generation).map_err(|_| Error::Storage)?,
-        };
-        let reply = match compio::time::timeout(self.options.request_timeout, provider.provision(&request)).await {
-            Ok(Ok(reply)) => reply,
-            Ok(Err(_)) | Err(_) => ProvisionReply::Refused(Refusal::Unavailable),
-        };
-        let retry = millis(self.options.retry_interval)?;
-        queue
-            .transact(|tx| async move {
-                lock_scope(&tx, app).await?;
-                let stored = intent(&tx, app).await?.ok_or(Error::Storage)?;
-                if stored.generation != generation || stored.attempt != attempt {
-                    return Ok(Exchange::Stale);
-                }
-                let now = queue.clock.now().await?;
-                let patch = match reply {
-                    ProvisionReply::Provisioned => intents::state
-                        .set(IntentState::Provisioned.as_str())?
-                        .and(intents::refusal.set(None::<&str>)?)?,
-                    ProvisionReply::Refused(refusal) => intents::state
-                        .set(IntentState::Refused.as_str())?
-                        .and(intents::refusal.set(Some(refusal.as_str()))?)?
-                        .and(intents::retry_at.set(Some(now.checked_add(retry).ok_or(Error::Capacity)?))?)?,
-                };
-                guarded_intent(&tx, &stored, patch.and(intents::attempt_deadline.set(None::<i64>)?)?)
-                    .await?;
-                Ok(Exchange::Applied)
-            })
-            .await
-    }
 
     /// Read a zone's durable target.
     ///
@@ -912,17 +658,6 @@ impl Capacity {
             })
             .await
     }
-
-    /// Read an app's durable provisioning intent.
-    ///
-    /// # Errors
-    /// Reports unavailable or malformed platform storage.
-    pub async fn intent(&self, app: &AppId) -> Result<Option<Intent>, Error> {
-        self.coordinator
-            .queue()
-            .transact(|tx| async move { intent(&tx, app).await?.map(|row| row.view()).transpose() })
-            .await
-    }
 }
 
 async fn demand(tx: &Database, app: &AppId) -> Result<Option<DemandRow>, Error> {
@@ -940,15 +675,6 @@ async fn target(tx: &Database, zone: &ZoneId) -> Result<Option<TargetRow>, Error
         .query()
         .filter(targets::id.eq(zone.as_str())?)
         .first::<TargetRow>()
-        .await?)
-}
-
-async fn intent(tx: &Database, app: &AppId) -> Result<Option<IntentRow>, Error> {
-    Ok(tx
-        .entity::<intents::Entity>()?
-        .query()
-        .filter(intents::id.eq(app.as_str())?)
-        .first::<IntentRow>()
         .await?)
 }
 
@@ -981,27 +707,6 @@ async fn guarded_target(
                 .eq(stored.id.as_str())?
                 .and(targets::revision.eq(stored.revision)?)
                 .and(targets::attempt.eq(stored.attempt)?),
-            patch,
-        )
-        .await?;
-    if changed != 1 {
-        return Err(Error::Storage);
-    }
-    Ok(())
-}
-
-async fn guarded_intent(
-    tx: &Database,
-    stored: &IntentRow,
-    patch: Patch<intents::Entity>,
-) -> Result<(), Error> {
-    let changed = tx
-        .entity::<intents::Entity>()?
-        .update_many(
-            intents::id
-                .eq(stored.id.as_str())?
-                .and(intents::generation.eq(stored.generation)?)
-                .and(intents::attempt.eq(stored.attempt)?),
             patch,
         )
         .await?;

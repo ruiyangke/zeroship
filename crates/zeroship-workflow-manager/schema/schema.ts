@@ -16,7 +16,6 @@ export const managerIdentityColumns = {
   recovery_duties: ["id", "app_id", "pending_job_id"],
   capacity_demands: ["id", "execution_zone_id"],
   capacity_targets: ["id"],
-  capacity_intents: ["id", "execution_zone_id"],
   schedule_deployments: ["id", "app_id"],
   schedule_activations: ["id", "app_id", "deployment_id"],
   schedule_disables: ["id", "app_id"],
@@ -223,13 +222,6 @@ export function workflowManagerSchema(namespace) {
     attempt: integer().default(0), attempt_deadline: t.bigInt(), retry_at: t.bigInt(),
     below_since: t.bigInt(), lock_version: integer().default(0),
   }, ["id"]);
-  // The comparison contract: one imperative provisioning intent per
-  // owner-less app. Its id is the app; a generation fences replies and
-  // advances when a settled intent is needed again.
-  create("capacity_intents", {
-    execution_zone_id: text(), generation: integer(), state: text(),
-    refusal: t.text(), attempt: integer(), attempt_deadline: t.bigInt(), retry_at: t.bigInt(),
-  }, ["id"], [fk("capacity_intent_scope", ["id"], "queue_scopes", ["id"])]);
 
   // ColumnDef does not yet expose the engine's portable bytewise collation
   // facet. Keep this PostgreSQL-specific DDL in the migration recorder, where

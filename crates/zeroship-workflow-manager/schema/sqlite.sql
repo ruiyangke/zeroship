@@ -145,7 +145,5 @@ CREATE INDEX IF NOT EXISTS "capacity_demands_zone_idx" ON "capacity_demands" ("e
 
 CREATE TABLE "capacity_targets" ("id" TEXT PRIMARY KEY NOT NULL, "revision" INTEGER NOT NULL DEFAULT 0, "desired" INTEGER NOT NULL DEFAULT 0, "state" TEXT NOT NULL DEFAULT 'steady', "refusal" TEXT, "observed" INTEGER, "attempt" INTEGER NOT NULL DEFAULT 0, "attempt_deadline" INTEGER, "retry_at" INTEGER, "below_since" INTEGER, "lock_version" INTEGER NOT NULL DEFAULT 0);
 
-CREATE TABLE "capacity_intents" ("id" TEXT PRIMARY KEY NOT NULL, "execution_zone_id" TEXT NOT NULL, "generation" INTEGER NOT NULL, "state" TEXT NOT NULL, "refusal" TEXT, "attempt" INTEGER NOT NULL, "attempt_deadline" INTEGER, "retry_at" INTEGER, CONSTRAINT "capacity_intent_scope" FOREIGN KEY (id) REFERENCES queue_scopes(id) ON DELETE RESTRICT);
-
 SELECT 1;
-INSERT INTO main.schema_version (id, fingerprint) VALUES ('manager', '0024b7a3ff69265921a7b86406ca2ea8aae34630588b013b756c6bd46a65e1f9');
+INSERT INTO main.schema_version (id, fingerprint) VALUES ('manager', 'bd1d7558038f419fad5e865d610fb6dcb17023929ea388c627668de96ca0ff22');

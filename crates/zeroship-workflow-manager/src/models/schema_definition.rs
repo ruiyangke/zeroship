@@ -20,18 +20,6 @@ zeroship_data_orm::orm::schema! {
             recorded_at: BigInt,
         }
 
-        capacity_intents {
-            #[orm(primary_key)]
-            id: Text,
-            execution_zone_id: Text,
-            generation: BigInt,
-            state: Text,
-            refusal: Nullable<Text>,
-            attempt: BigInt,
-            attempt_deadline: Nullable<BigInt>,
-            retry_at: Nullable<BigInt>,
-        }
-
         capacity_targets {
             #[orm(primary_key)]
             id: Text,

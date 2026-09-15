@@ -166,6 +166,58 @@ fn hold_release_grace_outlasts_the_queue_transaction_budget() {
 }
 
 #[test]
+fn capacity_bounds_and_pacing_come_from_configuration_and_reject_an_empty_range() {
+    let valid = serde_json::json!({"workflow":{
+        "database_url":"postgres://unused@127.0.0.1:1/unreachable",
+        "service_peers_file":"unread-peers", "service_key_file":"unread-key",
+        "control_url":"https://control.example.test",
+        "capacity_min_slots":2,
+        "capacity_max_slots":9,
+        "capacity_hold_down_ms":7000,
+        "capacity_request_timeout_ms":1500,
+        "capacity_retry_interval_ms":2500,
+    }});
+    let resolve = |input: &serde_json::Value| {
+        let overlay = toml::from_str(&toml::to_string(input).unwrap()).unwrap();
+        let settings = WorkflowSettings::resolve_config(
+            WorkflowSettingsSources::try_parse_from(["zeroship-workflow-server", "--no-config"])
+                .unwrap(),
+            Some(&overlay),
+        )
+        .unwrap();
+        ServerOptions::resolve(&settings)
+    };
+    let capacity = resolve(&valid).unwrap().driver.capacity;
+    assert_eq!((capacity.min_slots, capacity.max_slots), (2, 9));
+    assert_eq!(
+        capacity.idle_hold_down,
+        std::time::Duration::from_millis(7000)
+    );
+    assert_eq!(
+        capacity.request_timeout,
+        std::time::Duration::from_millis(1500)
+    );
+    assert_eq!(
+        capacity.retry_interval,
+        std::time::Duration::from_millis(2500)
+    );
+    // A floor above the ceiling names no reachable target, and a zero pacing
+    // value would request without pause.
+    for (field, value) in [
+        ("capacity_min_slots", serde_json::json!(10)),
+        ("capacity_max_slots", serde_json::json!(0)),
+        ("capacity_min_slots", serde_json::json!(-1)),
+        ("capacity_hold_down_ms", serde_json::json!(0)),
+        ("capacity_request_timeout_ms", serde_json::json!(0)),
+        ("capacity_retry_interval_ms", serde_json::json!(0)),
+    ] {
+        let mut invalid = valid.clone();
+        invalid["workflow"][field] = value.clone();
+        assert!(resolve(&invalid).is_err(), "accepted {field}={value}");
+    }
+}
+
+#[test]
 fn retention_configuration_requires_a_signer_and_unambiguous_control_origin() {
     let valid = serde_json::json!({"workflow":{
         "database_url":"postgres://unused@127.0.0.1:1/unreachable",
