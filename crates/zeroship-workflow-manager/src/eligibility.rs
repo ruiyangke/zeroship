@@ -34,7 +34,7 @@ use std::{
 };
 use zeroship_core::{app_id::AppId, typed_id, workflow_coordination::WorkerId};
 use zeroship_data_orm::{
-    orm::{Database, FromRow},
+    orm::{Database, FromRow, UtcInstant},
     schema::Schema,
 };
 
@@ -148,7 +148,7 @@ pub fn collections() -> Result<Schema, Error> {
 #[orm(entity = apps)]
 struct AppRow {
     execution_zone_id: String,
-    deleted_at: Option<i64>,
+    deleted_at: Option<UtcInstant>,
 }
 
 /// Production facts: Control's own rows over the platform binding, under the
@@ -202,7 +202,7 @@ struct InstanceRow {
     status: String,
     execution_zone_id: String,
     /// The instance's Control lease. See [`LEASE_SKEW`].
-    expires_at: i64,
+    expires_at: UtcInstant,
 }
 
 /// How far past an instance's lease this process still treats it as live.
@@ -224,14 +224,16 @@ struct InstanceRow {
 /// answer would thread a database clock through this seam and buy no authority.
 const LEASE_SKEW: Duration = Duration::from_secs(30);
 
-/// This process's wall clock, in the milliseconds the lease is stored in.
+/// This process's wall clock, in the microseconds a timestamp column decodes
+/// into. The lease is a `timestamp` in Control's schema, so the comparison is
+/// against [`UtcInstant::unix_micros`] and never a bare epoch integer.
 ///
 /// Before the epoch is not a time any lease carries, so it reads as expired.
-fn wall_clock_millis() -> i64 {
+fn wall_clock_micros() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .ok()
-        .and_then(|since| i64::try_from(since.as_millis()).ok())
+        .and_then(|since| i64::try_from(since.as_micros()).ok())
         .unwrap_or(i64::MAX)
 }
 
@@ -273,13 +275,13 @@ impl EligibilitySource for ControlEligibility {
                 .await
                 .map_err(|_| Error::Unavailable)?;
             row.map(|row| {
-                let lease = i64::try_from(LEASE_SKEW.as_millis())
+                let lease = i64::try_from(LEASE_SKEW.as_micros())
                     .ok()
-                    .and_then(|skew| row.expires_at.checked_add(skew))
+                    .and_then(|skew| row.expires_at.unix_micros().checked_add(skew))
                     .unwrap_or(i64::MAX);
                 Ok(WorkerFacts {
                     zone: ZoneId::parse(&row.execution_zone_id)?,
-                    active: row.status == "active" && lease > wall_clock_millis(),
+                    active: row.status == "active" && lease > wall_clock_micros(),
                 })
             })
             .transpose()

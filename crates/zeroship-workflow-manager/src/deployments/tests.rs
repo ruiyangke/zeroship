@@ -36,7 +36,7 @@ async fn seed(db: &Database, app: &AppId, hash: &str) -> String {
         "manifest_json":"{}", "activated_at":null,
         "retention_state":"available", "retention_lock":0
     });
-    document["created_at"] = Value::Timestamp(0);
+    document["created_at"] = Value::TimestampMicros(0);
     db.collection(deploys::Entity::COLLECTION)
         .unwrap()
         .insert(document)
