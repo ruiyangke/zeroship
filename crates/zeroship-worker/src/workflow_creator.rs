@@ -21,8 +21,8 @@ use zeroship_workflow::{
             TaskPayloadLimits,
         },
         store::HostStorage,
-        AppDeployments, HostPolicies, PolicyBinding, SignalAuthority, WorkerIdentity,
-        WorkflowService,
+        AppDeployments, HostPolicies, IngressEpochs, PolicyBinding, SignalAuthority,
+        WorkerIdentity, WorkflowService,
     },
     WorkflowServiceError,
 };
@@ -117,6 +117,7 @@ impl<P: WorkflowResourceProvider> CreatorFactory for WorkflowCreatorFactory<P> {
         &self,
         scope: &AssignedScope,
         policy: &PolicyBinding,
+        ingress: Rc<dyn IngressEpochs>,
     ) -> Result<CreatorRuntime, WorkflowServiceError> {
         if policy.app_id() != &scope.app_id {
             return Err(WorkflowServiceError::PermissionDenied);
@@ -143,7 +144,7 @@ impl<P: WorkflowResourceProvider> CreatorFactory for WorkflowCreatorFactory<P> {
                 if let Some(authority) = resources.signal_authority {
                     service = service.with_signal_authority(authority);
                 }
-                let app = service.register_app(policy).await?;
+                let app = service.register_app(policy).await?.with_ingress(ingress);
                 let tasks = Rc::new(app.tasks(self.worker.clone()));
                 // Workflow and request isolates share one client of this app's
                 // engine, bound to the generation being prepared.

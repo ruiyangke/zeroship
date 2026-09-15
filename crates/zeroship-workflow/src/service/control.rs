@@ -4,8 +4,12 @@
 )]
 
 use super::{
-    app::{lock_app_state, lock_run, parse_state, request_result, store_request, validate_run},
+    app::{
+        lock_app_state, lock_run, parse_state, request_result, require_open_epoch, store_request,
+        validate_run,
+    },
     models,
+    policy::CapturedPolicy,
     store::Transaction,
     types::digest,
     AppPolicy, AppWorkflows, RequestId,
@@ -63,94 +67,131 @@ impl<T> Preparation<T> {
 
 impl AppWorkflows {
     /// Change lifecycle intent, retaining the response for app request retries.
+    /// A transition may wake its run through a publication intent, so it is
+    /// fenced by the ingress epoch once lifecycle and admission checks pass.
     ///
     /// # Errors
     /// Rejects unknown runs, invalid transitions and reused request identities;
-    /// reports admission and journal failures.
+    /// reports admission, a closed ingress epoch and journal failures.
     pub async fn transition(
         &self,
         request: &RequestId,
         run_id: &str,
         operation: RunOperation,
     ) -> Result<TransitionedRun, WorkflowServiceError> {
-        let captured = self.capture_policy();
-        captured
-            .run(async {
-                validate_run(run_id)?;
-                let digest = digest(&(run_id, operation))?;
-                let mut tx = self.service.begin().await?;
-                lock_app_state(&mut tx, &self.app).await?;
-                let now = tx.now().await?;
-                if let Some(receipt) =
-                    request_result(&tx, &self.app, request, "transition", &digest).await?
-                {
-                    return Ok(receipt);
-                }
-                captured.recheck()?;
-                let policy = &captured.authority()?.policy;
-                let plan = prepare_transition(&mut tx, &self.app, run_id, operation, policy, now)
-                    .await?
-                    .accept()?;
-                captured.check()?;
-                let result = plan.apply(&tx, &self.app, run_id).await?;
-                store_request(
-                    &mut tx,
-                    &self.app,
-                    request,
-                    "transition",
-                    &digest,
-                    &result,
-                    now,
-                )
-                .await?;
-                captured.check()?;
-                tx.commit().await?;
-                Ok(result)
+        self.accept(|scope| {
+            Box::pin(async move {
+                let captured = scope.capture_policy();
+                captured
+                    .run(scope.transition_captured(request, run_id, operation, &captured))
+                    .await
             })
-            .await
+        })
+        .await
+    }
+
+    async fn transition_captured(
+        &self,
+        request: &RequestId,
+        run_id: &str,
+        operation: RunOperation,
+        captured: &CapturedPolicy,
+    ) -> Result<TransitionedRun, WorkflowServiceError> {
+        validate_run(run_id)?;
+        let digest = digest(&(run_id, operation))?;
+        let mut tx = self.service.begin().await?;
+        lock_app_state(&mut tx, &self.app).await?;
+        let now = tx.now().await?;
+        if let Some(receipt) =
+            request_result(&tx, &self.app, request, "transition", &digest).await?
+        {
+            return Ok(receipt);
+        }
+        captured.recheck()?;
+        let policy = &captured.authority()?.policy;
+        let plan = prepare_transition(&mut tx, &self.app, run_id, operation, policy, now)
+            .await?
+            .accept()?;
+        captured.check()?;
+        require_open_epoch(&tx, &self.app, captured).await?;
+        let result = plan.apply(&tx, &self.app, run_id).await?;
+        store_request(
+            &mut tx,
+            &self.app,
+            request,
+            "transition",
+            &digest,
+            &result,
+            now,
+        )
+        .await?;
+        captured.check()?;
+        tx.commit().await?;
+        Ok(result)
     }
 
     /// Restart from a replay boundary while preserving retained step effects.
+    /// The restarted generation commits a publication intent, so restart is
+    /// fenced by the ingress epoch once lifecycle and admission checks pass.
     ///
     /// # Errors
     /// Rejects unsafe restart boundaries, live execution and reused request
-    /// identities; reports admission, deployment and journal failures.
+    /// identities; reports admission, a closed ingress epoch, deployment and
+    /// journal failures.
     pub async fn restart(
         &self,
         request: &RequestId,
         run_id: &str,
         options: RestartOptions,
     ) -> Result<RestartedRun, WorkflowServiceError> {
-        let captured = self.capture_policy();
-        captured
-            .run(async {
-                validate_run(run_id)?;
-                options.effective_deploy()?;
-                let digest = digest(&(run_id, &options))?;
-                let mut tx = self.service.begin().await?;
-                lock_app_state(&mut tx, &self.app).await?;
-                let now = tx.now().await?;
-                if let Some(receipt) =
-                    request_result(&tx, &self.app, request, "restart", &digest).await?
-                {
-                    return Ok(receipt);
-                }
-                captured.recheck()?;
-                let policy = &captured.authority()?.policy;
-                let plan = restart::prepare(&mut tx, &self.app, run_id, &options, policy, now)
-                    .await?
-                    .accept()?;
-                captured.check()?;
-                let result = plan.apply().await?;
-                store_request(
-                    &mut tx, &self.app, request, "restart", &digest, &result, now,
-                )
-                .await?;
-                captured.check()?;
-                tx.commit().await?;
-                Ok(result)
+        self.accept(|scope| {
+            let options = options.clone();
+            Box::pin(async move {
+                let captured = scope.capture_policy();
+                captured
+                    .run(scope.restart_captured(request, run_id, &options, &captured))
+                    .await
             })
-            .await
+        })
+        .await
+    }
+
+    async fn restart_captured(
+        &self,
+        request: &RequestId,
+        run_id: &str,
+        options: &RestartOptions,
+        captured: &CapturedPolicy,
+    ) -> Result<RestartedRun, WorkflowServiceError> {
+        validate_run(run_id)?;
+        options.effective_deploy()?;
+        let digest = digest(&(run_id, options))?;
+        let mut tx = self.service.begin().await?;
+        lock_app_state(&mut tx, &self.app).await?;
+        let now = tx.now().await?;
+        if let Some(receipt) = request_result(&tx, &self.app, request, "restart", &digest).await? {
+            return Ok(receipt);
+        }
+        captured.recheck()?;
+        let policy = &captured.authority()?.policy;
+        let plan = restart::prepare(&mut tx, &self.app, run_id, options, policy, now)
+            .await?
+            .accept()?;
+        captured.check()?;
+        Box::pin(require_open_epoch(
+            plan.transaction(),
+            &self.app,
+            captured,
+        ))
+        .await?;
+        let result = Box::pin(plan.apply()).await?;
+        store_request(
+            &mut tx, &self.app, request, "restart", &digest, &result, now,
+        )
+        .await?;
+        captured.check()?;
+        tx.commit().await?;
+        Ok(result)
     }
 }
 

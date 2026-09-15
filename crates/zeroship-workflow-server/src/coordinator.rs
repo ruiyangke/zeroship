@@ -271,9 +271,9 @@ impl Coordinator {
              SELECT id,revision,activation_id,enabled FROM workflow_manager.schedule_scopes LIMIT 0;
              SELECT id,app_id,name,activation_id,revision,definition,next_at,anchor_at,catch_up_until,catch_up_remaining FROM workflow_manager.schedules LIMIT 0;
              SELECT id,app_id,schedule_id,revision,scheduled_at,run_id,job_id,activation_id FROM workflow_manager.schedule_occurrences LIMIT 0;
-             SELECT id,deployment_id,activation_revision FROM workflow_manager.recovery_scopes LIMIT 0;
+             SELECT id,deployment_id,activation_revision,ingress_epoch,state,closing_watermark,close_job_id,active_at,close_after,close_attempts FROM workflow_manager.recovery_scopes LIMIT 0;
              SELECT id,app_id,kind,next_due_at,pending_job_id FROM workflow_manager.recovery_duties LIMIT 0;
-             SELECT id,deploy_hash FROM zeroship.apps LIMIT 0;
+             SELECT id,deploy_hash,deleted_at FROM zeroship.apps LIMIT 0;
              SELECT id,app_id,deploy_hash,retention_state FROM zeroship.app_deploys LIMIT 0;"
         ).await?;
         Ok(())

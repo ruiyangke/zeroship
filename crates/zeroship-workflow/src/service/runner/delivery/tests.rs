@@ -276,7 +276,9 @@ impl Fixture {
         service
             .fixture_register(
                 &app_id,
-                PolicySnapshot::configuration(Revision::try_from(1).unwrap(), policy).unwrap(),
+                PolicySnapshot::configuration(Revision::try_from(1).unwrap(), policy)
+                    .unwrap()
+                    .with_ingress_epoch(Some(crate::service::tests::open_epoch())),
             )
             .await
             .unwrap();

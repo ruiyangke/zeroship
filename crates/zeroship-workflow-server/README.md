@@ -146,8 +146,13 @@ public key. The Control origin requires HTTPS except for literal loopback HTTP
 addresses. The host needs no customer connection or payload location.
 `workflow.driver_interval_ms` controls the delay after a completed pass;
 `workflow.driver_lane_timeout_ms` bounds each lane. `workflow.batch_limit` also
-bounds the candidate page. These settings control the manager host and add no
-workflow-specific creator CLI setup.
+bounds the candidate page. The closing lane begins closing an app's recovery
+responsibility after `workflow.closing_idle_ms` without activity, or once
+Control archived the app; `workflow.closing_timeout_ms` bounds an attempt, and
+`workflow.closing_backoff_ms` doubles up to `workflow.closing_backoff_max_ms`
+between attempts that did not retire. The lane abandons an app Control deleted
+instead, reading only the deletion marker. These settings control the manager
+host and add no workflow-specific creator CLI setup.
 `zeroship-workflow-server --config zeroship.toml --check-config`
 validates settings without connecting to dependencies. `/healthz` reports process
 liveness; `/readyz` verifies metadata and worker-registry access.

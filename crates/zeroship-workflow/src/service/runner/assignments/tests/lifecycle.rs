@@ -36,7 +36,7 @@ async fn cancelled_host_retires_in_progress_creator_authority_before_explicit_dr
     let (opened, release) = fixture.factory.gate(&scope.app_id);
     let mut exchanges = vec![fixture.registration(WorkerState::Ready, 1)];
     exchanges.extend(fixture.scan(std::slice::from_ref(&scope)));
-    exchanges.extend(fixture.refresh(&scope));
+    exchanges.extend(fixture.establish(&scope));
     exchanges.push(fixture.registration(WorkerState::Draining, 1));
     peer(&fixture, exchanges, async |client| {
         let mut host = WorkerHost::new(
@@ -83,7 +83,7 @@ async fn fatal_registration_retires_ready_creator_before_drain_network_wait() {
         fixture.registration(WorkerState::Draining, 1).gated();
     let mut exchanges = vec![fixture.registration(WorkerState::Ready, 1)];
     exchanges.extend(fixture.scan(std::slice::from_ref(&scope)));
-    exchanges.extend(fixture.refresh(&scope));
+    exchanges.extend(fixture.establish(&scope));
     exchanges.extend([refusal, draining]);
     peer(&fixture, exchanges, async |client| {
         let mut options = options();

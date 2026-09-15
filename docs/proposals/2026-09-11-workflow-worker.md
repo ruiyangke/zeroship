@@ -624,7 +624,7 @@ with this queue namespace; it is not a second authoritative placement store.
 | `workflow_manager.management` | Job-linked authorized command, original request provenance, per-run revision, provisional execution barrier and reported closed outcome. |
 | `workflow_manager.management_scopes` | Accepted and settled management revisions per app/run; independent of the creator's run existence. |
 | `workflow_manager.jobs` | Immutable job specification, checked operation/run/request projections, availability, current attempt, delivery fence and settlement digest/outcome. It also supplies submission and settlement deduplication. |
-| `workflow_manager.recovery_scopes` | Trusted activation provenance and revision for durable maintenance responsibility. |
+| `workflow_manager.recovery_scopes` | Trusted activation provenance and revision for durable maintenance responsibility, its ingress epoch and state, the current closing attempt's watermark and Close job, its latest activity and closing pacing. The row outlives retirement and abandonment as the epoch's tombstone. |
 | `workflow_manager.recovery_duties` | Independent app/kind deadlines and retained pending reconciliation or collection jobs, linked to their owning scope and queue. |
 | `workflow_manager.schedule_deployments` | Immutable allowlisted schedule descriptors and the calendar interpretation for a normal deployment. No business input. |
 | `workflow_manager.schedule_activations` | Stable activation job, deployment, app revision and activation instant. Job settlement determines dispatch readiness. |
@@ -662,7 +662,7 @@ table has the `__zeroship_workflow_` prefix; none belongs in Control's schema.
 | Table suffix | Customer-owned content and target treatment |
 | --- | --- |
 | `schema_version` | Creator journal schema fingerprint, installed by creator-side provisioning. |
-| `app_state` | App serialization and journal counters. Trusted admission policy remains outside customer SQL. |
+| `app_state` | App serialization, journal counters and the highest ingress epoch a delivered Close fenced. Trusted admission policy remains outside customer SQL. |
 | `deploys` | Locally accepted immutable app deployment and availability state. |
 | `deployment_holds` | Customer dependency intent and observed hold generation; not the platform hold ledger. |
 | `activations` | Immutable readiness per manager activation job, app revision and deployment; committed with the logical job receipt. |
@@ -1989,9 +1989,9 @@ another sweep after an empty page; newly due work behind the cursor joins that s
 Job publication failure leaves the prior deadline and pending identity intact.
 The server drives these duties through independently bounded lanes, and its
 placement lanes give every app with a claimable duty job an eligible owner or
-record its capacity demand. These native operations do not yet establish the
-authenticated activation-to-ingress handshake. The ingress epoch and drain
-evidence remain required before enabling that path.
+record its capacity demand. Ingress epochs tie this responsibility to creator
+acceptance, and the closing lane retires it once an app idles or is archived;
+see [ingress epochs and scope retirement](#ingress-epochs-and-scope-retirement).
 
 A reconciliation job processes an app-scoped page without loading app code.
 The persisted scan alternates between publication intents and deployment-hold
@@ -2031,59 +2031,111 @@ native metadata turn does not renew itself or run an independent timer.
 ### Ingress epochs and scope retirement
 
 A scope's recovery responsibility carries a monotonic ingress epoch and a state:
-open, closing or retired. Activation opens it. A worker obtains the epoch with
-its policy lease, bound to its exact key and placement; a plain refresh never
-reopens responsibility. Asking for an epoch greater than one the worker holds
-reopens a retired scope or advances a closing one, recreating reconciliation
-and collection duties under the app lock after enrollment, placement and
-admission checks and before the lease is issued. Establishment follows the
-admission policy; archive masks admission, so an archived app cannot be
-reopened by ingress. An epoch the manager never issued is a conflict.
+open, closing, retired or abandoned. Activation opens it. A worker obtains the
+epoch with its policy lease, bound to its exact key and placement; a plain
+refresh never reopens responsibility. An establishment request names the epoch
+the creator journal refused, or none when the host holds no epoch and the
+journal closed none, as at startup. The manager returns an open epoch above the
+named one, reopening a retired scope or advancing a closing one, and recreates
+reconciliation and collection duties under the app lock after enrollment,
+placement and admission checks and before the lease is issued. Establishment
+follows the admission policy; archive masks admission, so an archived app
+cannot be reopened by ingress. An epoch the manager never issued is a conflict.
+
+Hosts establish an epoch before they accept ingress. The local host does so
+after registering its startup activation's responsibility and before it
+announces readiness, through `Recovery::establish`, because it is its app's
+platform authority and holds no policy lease. A worker's `AssignmentBindings`
+establishes on the first preparation of a placement and falls back to a plain
+lease when policy refuses establishment or the app has no responsibility yet, so
+an archived app still serves delivered work such as its own closure; later
+refreshes only renew. Both hosts attach their establishment to the app
+(`AppWorkflows::with_ingress` with `IngressEpochs`; the worker's
+`CreatorFactory` receives the placement's `AssignedPolicies`). An acceptance the
+journal refuses for a closed epoch establishes an epoch above the refused one
+and retries once under the same request identity, capturing the binding's newly
+installed authority rather than the authority the request isolate captured.
+Concurrent establishments serialize, and one that finds a newer epoch already
+installed does not ask again. Hosts report accepted ingress as activity: a
+worker through its next lease exchange, the local host with each placement
+renewal.
 
 Every creator ingress acceptance captures the epoch with its policy and, under
 the app state lock before commit, requires it to exceed the journal's closed
-epoch. The fence runs after the authority and admission checks, so an expired
-lease or disabled admission reports its own refusal; a missing or closed epoch
-is a retryable refusal that leads the host to establish a newer epoch.
+epoch: start, direct signal, broadcast, signal ingestion to a run or a topic,
+the pause, resume and cancel transitions, and restart. The fence runs after the
+authority, admission and lifecycle checks, so an expired lease or disabled
+admission reports its own refusal; a missing or closed epoch is a retryable
+refusal. Issuing and revoking signal capabilities commit no run, publication
+intent, payload or hold, so they are not fenced; redeeming a capability is.
+Delivered jobs are not fenced by the epoch. Their claims and publications meet
+the manager's watermark and re-arm below, and payload uploads run under a task
+claim that the drain predicates count.
 
-The manager closes an archived or idle scope only when no job for the app is
-leased, no maintenance job is pending and no earlier Close is unsettled. It
-records the app's dispatch cursor as the closing watermark, suspends the
-scope's periodic duties for the attempt, and delivers a manager-origin Close job
-for the current epoch; an attempt that does not settle in time returns the
-scope to open. Under the same app state lock the worker raises the closed epoch
-and evaluates the drain predicates in one transaction: no unconfirmed
-publication intent, no hold in transition, no payload in preparation or
-deletion, no live task claim, and no deletion tombstone still inside its sweep
-window. Settlement retires the scope only when it is still closing at that
-epoch, the result is drained and no job was published or claimed above the
-watermark. Claims during closing do not cancel the attempt; the watermark
-refuses its retirement at settlement.
+The manager driver's closing lane visits attempts in progress and open scopes
+past their backoff that are idle or whose calendar Control disabled, as archive
+does. A scope is idle after `recovery::Options::idle_after` without activity:
+its epoch's opening, reported ingress, a worker publication or an
+intent-producing claim; maintenance and closure never count. The manager begins
+closing only when no job for the app is leased, no maintenance job is pending
+and no earlier Close is unsettled. It records the app's dispatch cursor as the
+closing watermark, suspends the scope's periodic duties for the attempt, and
+delivers a manager-origin Close job for the current epoch. An attempt whose
+Close has not settled within `closing_timeout` returns the scope to open. Each
+attempt defers the next until its timeout plus `closing_backoff` have passed,
+the backoff doubling per consecutive attempt up to `closing_backoff_max`; live
+work that refuses an attempt defers the next by the backoff alone, and
+reopening resets the pacing. The server maps the `workflow.closing_*` settings
+and the local host its `[manager]` settings into these options.
+
+Under the same app state lock the worker raises the closed epoch and evaluates
+the drain predicates in one transaction: no unconfirmed publication intent, no
+hold in transition, no payload in preparation or deletion, no live task claim,
+and no deletion tombstone still owed its final resweep. Settlement retires the
+scope only when it is still closing at that epoch, the result is drained and no
+job was published or claimed above the watermark. Claims during closing do not
+cancel the attempt; the watermark refuses its retirement at settlement.
 
 Claiming an intent-producing job or a worker publication reopens a retired scope
 before execution. Workers cannot publish Reconcile, Collect or Close, and Close
 is never a settlement successor. Registration expiry, release, empty polling,
 healthy heartbeats, completed scans and calendar or policy acknowledgements
-never retire responsibility. Deletion retires responsibility by abandonment,
-keyed on Control's terminal deletion. A creator snapshot restore must reopen
+never retire responsibility. A creator snapshot restore must reopen
 responsibility for the restored apps.
 
-A native proof of concept on branch `poc/workflow-retirement` passes this
-protocol on PostgreSQL and SQLite: a still-valid lease is fenced after Close,
-both orders of a racing acceptance and Close refuse retirement, a job claimed
-or published after closing began keeps the scope open (removing the watermark
-check lets these cases retire with an unconfirmed intent), each re-arm path
-reopens exactly once across retries and racing replicas, lost acknowledgements
-and redelivery converge to one retirement, archived apps drain, and duties that
-fall due during closing wait for the attempt.
+Deletion abandons responsibility instead of closing it. For each candidate page
+the closing lane reads Control's terminal deletion marker through the manager's
+column grant on `zeroship.apps`, and abandons each deleted candidate: its duties
+are deleted, a closing attempt is cancelled and the scope row stays as the
+epoch's tombstone. Nothing reopens an abandoned scope; establishment and
+activation are refused, and claims and publications leave it abandoned. A page
+whose deletion state cannot be read visits nothing. The local host has no
+Control catalog, so its app is never abandoned; idleness still retires it.
 
-**Remaining before production:** the local host and worker establish an epoch
-at startup and after a fenced refusal; the fence covers broadcast, signal
-ingestion, transitions and restart; the manager driver gains the closing lane
-with its timeout and backoff; deletion abandons responsibility; and payload
-tombstones become final after one sweep window, because collection currently
-re-sweeps them indefinitely and an app that ever deleted a payload could not
-retire.
+Native PostgreSQL and SQLite contracts cover this protocol. Manager contracts
+fence a still-valid lease after Close, refuse retirement in both orders of a
+racing acceptance and Close, keep a scope open when a job is claimed or
+published above the watermark, reopen exactly once across retries and racing
+replicas, converge lost acknowledgements and redelivery on one retirement,
+drain archived apps, and hold duties that fall due during closing. The closing
+lane's contracts cover the idle and archive triggers, expiry, the doubling
+backoff and its reset, deferral by live work, abandonment that nothing reopens,
+and a driver pass that closes an idle scope while abandoning a deleted one; the
+server repeats abandonment over the canonical platform schema and its column
+grant. Creator contracts refuse each fenced path under a closed epoch and admit
+it under the next, and pin one establishment and one retry per acceptance,
+including through a request isolate's backend. The local host retires an idle
+app through a delivered Close, and its next start is fenced, establishes a newer
+epoch and completes. An app that deleted a payload retires once the tombstone's
+resweep made it final.
+
+**Remaining before production:** the production worker executable must compose
+`AssignmentBindings` and the creator factory, which carry this establishment,
+and publish the request isolates' backend from them (slice four). Control does
+not yet publish deletion as a lifecycle intent, so the lane learns of a deletion
+only for the candidates it visits: a deleted app whose scope had already retired
+is abandoned only after a re-arm reopens it and the next pass visits it. Snapshot
+restore still needs its reopening contract.
 
 The capacity provider takes a zone's declarative target and returns progress or
 a durable, retryable refusal, as
@@ -2142,10 +2194,12 @@ the original authority and matching deletion observation, and records a
 `deleted` tombstone with the policy's resweep deadline. Concurrent cleanup may
 observe that another attempt already advanced the tombstone and leave it alone.
 
-An uncertain or failed delete preserves the fence. Retained tombstones are
-periodically deleted again because an upload already dispatched by a dead
-writer may arrive after an earlier deletion. Collection never treats an absent
-object as permission to revive its payload record.
+An uncertain or failed delete preserves the fence. A tombstone is deleted once
+more after its window, because an upload already dispatched by a dead writer may
+arrive after the first deletion. That resweep marks the payload `purged`, which
+is final: collection never selects it again and closure evidence no longer
+counts it, so an app that deleted payloads can retire. Collection never treats
+an absent object as permission to revive its payload record.
 
 Malformed records and failed or timed-out items remain eligible for another
 sweep. Their reserved offset lets redelivery continue to the page suffix.
@@ -2597,10 +2651,10 @@ fallbacks.
 | Manager host | `WorkflowSettings` supplies listener, service peers, platform DB binding, body/page bounds and worker/assignment policy. `workflow.database_url` is a platform credential. |
 | Native coordinator | `coordinator::Options::{worker_ttl, assignment_ttl, batch_limit, max_pending_management}` bounds placement and command behavior. |
 | Native queue | `Options::{max_connections, lease, transaction_timeout, max_successors, max_metadata_bytes}` bounds storage concurrency, delivery and metadata transactions. |
-| Native manager driver | `driver::Options::{page_limit, lane_timeout, hold_grace, scheduling, recovery}` bounds each calendar, recovery and retention lane; `hold_grace` is the minimum age before the [queue hold release policy](#queue-hold-release-policy) may release a hold. The server maps `workflow.batch_limit` to the candidate page, owns cadence through `workflow.driver_interval_ms` and derives the grace from `workflow.database_command_timeout_ms` so that it exceeds that budget; `workflow.driver_lane_timeout_ms` bounds each lane's complete turn. |
+| Native manager driver | `driver::Options::{page_limit, lane_timeout, hold_grace, scheduling, recovery}` bounds each calendar, recovery, retention and closing lane; `hold_grace` is the minimum age before the [queue hold release policy](#queue-hold-release-policy) may release a hold, and `recovery::Options::{idle_after, closing_timeout, closing_backoff, closing_backoff_max}` pace closing. The server maps `workflow.batch_limit` to the candidate page, owns cadence through `workflow.driver_interval_ms` and derives the grace from `workflow.database_command_timeout_ms` so that it exceeds that budget; `workflow.driver_lane_timeout_ms` bounds each lane's complete turn, and the `workflow.closing_*` settings map to the closing bounds. |
 | Metadata client | Client `Options::{timeout, max_request_bytes, max_response_bytes}` bounds the complete exchange. Each call uses the host signer. |
 | Customer host | Normal creator DB/storage, trusted app identity and policy snapshot. `ConsumerOptions` bounds slots, assigned scopes, claim polling and backoff; `DeliveryOptions` bounds execution and finalization. Worker maintenance scheduling settings disappear with their loops. |
-| Local CLI host | `--workflow-config` TOML: `[consumer]` maps to `ConsumerOptions` and `DeliveryOptions`; `[manager]` maps to the queue lease, the local worker's registration and placement lifetime, driver cadence and lane bound, the hold release grace (`hold_grace_ms`, which must exceed the queue transaction timeout) and the recovery interval; `[payloads]` maps to `TaskPayloadLimits`. Unknown keys, including database or bundle settings, are refused. |
+| Local CLI host | `--workflow-config` TOML: `[consumer]` maps to `ConsumerOptions` and `DeliveryOptions`; `[manager]` maps to the queue lease, the local worker's registration and placement lifetime, driver cadence and lane bound, the hold release grace (`hold_grace_ms`, which must exceed the queue transaction timeout), the recovery interval, and closing idleness, timeout and backoff; `[payloads]` maps to `TaskPayloadLimits`. Unknown keys, including database or bundle settings, are refused. |
 | Scheduling/recovery host policy | Explicit misfire, overlap, reconciliation and capacity/backpressure bounds. New setting names are finalized with those modules, not invented CLI switches. |
 
 Policy snapshots are host-owned and revisioned. Expired remote metadata does not
@@ -2639,13 +2693,16 @@ archive ingests it into the retained store, records the normal deployment in the
 catalog, prepares its schedule descriptors, which carry no creator input, and
 activates it at the next revision unless it is already the enabled selection.
 The creator applies that Activation as a delivered job; the CLI establishes
-recovery responsibility for the selected activation and accepts requests only
-after the creator has committed the activation receipt. Serving a plain script
+recovery responsibility for the selected activation, establishes and installs
+its ingress epoch, and accepts requests only after the creator has committed the
+activation receipt. A request the journal later fences establishes a newer
+epoch through the local manager and is retried once. Serving a plain script
 keeps the existing selection. Direct creator activation is not used.
 
 The host renews its registration and placement on an interval derived from the
-placement lifetime (`LocalConfig::renew_interval`) and places the app again
-under the next revision when the manager refuses the old one. The HTTP and
+placement lifetime (`LocalConfig::renew_interval`), reports the ingress it
+accepted since the previous renewal, and places the app again under the next
+revision when the manager refuses the old one. The HTTP and
 workflow isolates share one app backend whose commit hint wakes a publication
 pass after every start, signal, transition or restart; the transport wakes it
 after every settled delivery, and startup wakes it once for intents a previous
@@ -2866,7 +2923,9 @@ metadata alone. A republished archive activates at the next revision while
 existing runs finish on their pinned code, including after a restart without an
 archive. Reconciliation publishes an intent committed outside the host, and an
 acknowledgement lost before the manager replays the committed turn without
-executing it again. `crates/zeroship-cli/tests/workflow_local.rs` repeats restart
+executing it again. An idle app retires through a delivered Close; its next
+start is fenced, establishes a newer epoch and completes, and a restarted host
+reopens the retired scope. `crates/zeroship-cli/tests/workflow_local.rs` repeats restart
 after process death through the real `zeroship serve` binary, and
 `zeroship-workflow-manager` tests the combined platform bootstrap and its
 refusal of partial or changed files.
@@ -2884,9 +2943,10 @@ Creator collection verification covers fixed-cutoff paging, original policy and
 delivery deadlines, failed or malformed items, concurrent deletion confirmation,
 receipt rollback and exact replay without live storage. Native PostgreSQL and
 SQLite cases verify recovery when deletion succeeds but its reply or database
-confirmation fails. Referenced history stays intact and tombstones resweep late
-uploads. Delivery-slot and separate-database consumer tests verify collection
-without executable work; the shared payload regression suite also passes.
+confirmation fails. Referenced history stays intact, and a tombstone resweeps
+late uploads once and then becomes final. Delivery-slot and separate-database
+consumer tests verify collection without executable work; the shared payload
+regression suite also passes.
 
 Started restart validates the locked run against its current generation's
 deployment, then checks that deployment's registration and existing held journal
@@ -3196,8 +3256,9 @@ creator-schema access. The collector is the production caller of manifest
 deletion; it no longer delegates deletion authority to creator journal scans.
 
 The native manager driver now runs in the workflow server independently of
-worker registration and placement. Its calendar, reconciliation, collection and
-retention lanes each share an original deadline across their scans and candidate page.
+worker registration and placement. Its calendar, reconciliation, collection,
+retention and closing lanes each share an original deadline across their scans
+and candidate page.
 Each lane captures an upper storage identity and advances past an attempted
 candidate before external work, preserving progress through malformed metadata,
 timeouts and cancellation. Failed candidates retain their durable jobs or
@@ -3210,11 +3271,13 @@ the [queue hold release policy](#queue-hold-release-policy) in the workflow
 server and the local CLI host. It never takes an empty queue or an expired
 worker as permission to release held code or retire an ingress responsibility:
 every release checks all manager dependencies under the app lock, after the
-hold outlived its grace. Capacity activation and production worker consumer
+hold outlived its grace, and only a delivered Close with drained evidence
+retires a responsibility. Capacity activation and production worker consumer
 composition remain to integrate.
 The consumer accepts activation, cron, advance, reconciliation, management,
-collection, fanout and propagation jobs. Collection uses the assigned creator journal and object store
-without loading an executable, creating a task or publishing unrelated intents.
+collection, fanout, propagation and closure jobs. Collection uses the assigned
+creator journal and object store without loading an executable, creating a task
+or publishing unrelated intents.
 Fanout uses the assigned creator journal without an executable or object store;
 its bounded page commits recipient signals, affected frontiers and the successor
 intent together. The former creator broadcast scanner has been removed. The queue
@@ -3380,10 +3443,13 @@ is the merge order.
    `env.workflows` binding contracts that refuse an unready or foreign app, and
    the fleet process contract that starts a run through ordinary app ingress and
    sees it complete through manager delivery.
-5. **Ingress responsibility and capacity.** The ingress epoch gates start and
-   signal acceptance, as
+5. **Ingress responsibility and capacity.** The ingress epoch gates every
+   creator acceptance, hosts establish it at startup and after a fenced
+   refusal, and the closing lane retires idle or archived responsibility and
+   abandons deleted apps, as
    [ingress epochs and scope retirement](#ingress-epochs-and-scope-retirement)
-   describes. A zone capacity provider that starts ordinary workers applies each
+   describes; the local host runs it end to end and the worker library carries
+   it for slice four. A zone capacity provider that starts ordinary workers applies each
    zone's declarative target, as
    [placement eligibility and capacity](#placement-eligibility-and-capacity-provider)
    describes, so due work with no eligible owner gets one.
