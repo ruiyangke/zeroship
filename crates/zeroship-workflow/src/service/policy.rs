@@ -348,12 +348,25 @@ impl PolicyBinding {
     /// Rejects retired bindings and unavailable or exhausted ticket state.
     pub fn begin_refresh(&self) -> Result<PolicyRefresh, WorkflowServiceError> {
         let mut state = self.registry.state.write().map_err(|_| unavailable())?;
-        let current = state
+        // Each step reports ITSELF. Folded into one `ok_or_else`, an app with no
+        // entry, a binding superseded by a newer generation and an entry holding
+        // no installed policy all answered "workflow host policy unavailable",
+        // and a host that kept failing to refresh gave an operator no way to
+        // tell which of the three it was - or that they are different problems.
+        let entry = state
             .entries
             .get_mut(&self.app)
-            .filter(|entry| entry.generation == self.generation)
-            .and_then(|entry| entry.current.as_mut())
-            .ok_or_else(unavailable)?;
+            .ok_or_else(|| WorkflowServiceError::Unavailable(
+                "workflow host policy has no entry for this app".into(),
+            ))?;
+        if entry.generation != self.generation {
+            return Err(WorkflowServiceError::Unavailable(
+                "workflow host policy binding superseded by a newer generation".into(),
+            ));
+        }
+        let current = entry.current.as_mut().ok_or_else(|| {
+            WorkflowServiceError::Unavailable("workflow host policy is not installed".into())
+        })?;
         let ticket = current
             .ticket_sequence
             .checked_add(1)
