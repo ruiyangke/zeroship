@@ -147,10 +147,15 @@ async fn collection_obeys_independent_holds_without_creator_schema_access() {
         .platform
         .admin
         .batch_execute(&format!(
+            // The fourth statement used to revoke Control's access to
+            // `zeroship.workflow_runs`, the platform-side journal table. That
+            // table was deleted with the legacy path, so the statement failed
+            // with `undefined_table` and took the test with it. Nothing is lost
+            // by dropping it: Control cannot read a table that no longer
+            // exists, which is a stronger guarantee than a revoked grant.
             "CREATE SCHEMA \"{journal_schema}\"; \
          CREATE TABLE \"{journal_schema}\".__zeroship_workflow_runs(id text PRIMARY KEY); \
-         REVOKE ALL ON SCHEMA \"{journal_schema}\" FROM PUBLIC, zeroship_control; \
-         REVOKE ALL ON zeroship.workflow_runs FROM zeroship_control;"
+         REVOKE ALL ON SCHEMA \"{journal_schema}\" FROM PUBLIC, zeroship_control;"
         ))
         .await
         .unwrap();

@@ -457,20 +457,23 @@ mod tests {
         // Does not cover: whether those scripts were updated. That is a grep
         // over tests/, not something a clap Command can answer.
         let command = ControlSettingsSources::command();
-        for (id, long, env) in [
-            (
-                "allow_unsupported_billing",
-                "allow-unsupported-billing",
-                Some("ZEROSHIP_CONTROL_ALLOW_UNSUPPORTED_BILLING"),
-            ),
-        ] {
+        // One assertion per setting rather than a table: the legacy settings
+        // this used to iterate were retired with the workflow engine, and a
+        // `for` over a single-element array is both a clippy error and a
+        // misleading shape. Adding a setting adds a line here.
+        let assert_flag = |id: &str, long: &str, env: Option<&str>| {
             let arg = command
                 .get_arguments()
                 .find(|arg| arg.get_id() == id)
                 .unwrap_or_else(|| panic!("no argument {id}"));
             assert_eq!(arg.get_long(), Some(long));
             assert_eq!(arg.get_env().and_then(std::ffi::OsStr::to_str), env);
-        }
+        };
+        assert_flag(
+            "allow_unsupported_billing",
+            "allow-unsupported-billing",
+            Some("ZEROSHIP_CONTROL_ALLOW_UNSUPPORTED_BILLING"),
+        );
     }
 
     #[test]

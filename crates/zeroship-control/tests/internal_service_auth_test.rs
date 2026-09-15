@@ -1395,5 +1395,22 @@ async fn host_app_reads_are_narrowed_to_the_callers_execution_zone() {
             "{path} must admit an app in the caller's own execution zone"
         );
     }
+
+    // REMOVE THE SECOND ZONE. Control requires an app to name its zone once a
+    // deployment declares more than one, so a leaked `away` row makes every
+    // later `create_app` that does not name one fail - measured as 22 failures
+    // across ten unrelated suites, from billing to reserved names. The apps go
+    // first: `apps.execution_zone_id` references the zone.
+    for app in [&home, &away] {
+        pg.execute("DELETE FROM zeroship.apps WHERE id = $1", &[&app.as_str()])
+            .await
+            .expect("remove the fixture app");
+    }
+    pg.execute(
+        "DELETE FROM zeroship.execution_zones WHERE id = $1",
+        &[&away_zone],
+    )
+    .await
+    .expect("remove the second execution zone");
     fixture.release().await;
 }

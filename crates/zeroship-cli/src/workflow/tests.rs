@@ -380,7 +380,20 @@ async fn delivered_activation_selects_the_archive_and_runs_complete_through_the_
     );
     // The workflow thread ran metered app isolates, yet delivery kept working:
     // platform metadata never runs under the app's thread-local meter.
-    assert!(meter.tracked_app_count() > 0);
+    //
+    // This used to assert `meter.tracked_app_count() > 0`. That counted the
+    // JOURNAL's own writes, which reached the meter only because usage was
+    // attributed per process rather than per binding. Attribution is now
+    // per binding (`zeroship-data-v8`'s `sink_for`), so workflow bookkeeping is
+    // correctly NOT charged to the app, and this fixture's workflow - a single
+    // `step.run` with no `env.db` call - legitimately meters nothing.
+    //
+    // What that assertion is NOT evidence of, and never was: that a metered
+    // isolate still delivers. Binding it would need the fixture app to make a
+    // real `env.db` call, which needs a table and a migration in the bundle.
+    // Left unbound deliberately rather than kept as a line that passes for a
+    // reason unrelated to its comment.
+    assert_eq!(meter.tracked_app_count(), 0, "the journal is not app usage");
     drop(host);
 }
 
