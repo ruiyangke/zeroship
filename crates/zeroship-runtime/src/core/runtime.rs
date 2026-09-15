@@ -4283,9 +4283,11 @@ fn workflow_rejection_to_error(
 /// Replay one dispatch through the host-only workflow bridge.
 ///
 /// The bridge is a plugin-registered host module, so it is outside the
-/// creator's module graph; `invoke_module_export` instantiates and evaluates it
-/// on the first dispatch in an isolate. `creator` is the creator entry's own
-/// namespace, which the bridge reads workflow classes from.
+/// creator's module graph and nothing in that graph instantiates it.
+/// `invoke_module_export` links and evaluates it before invoking, so a dispatch
+/// cannot run against an uninstantiated module even if it is the first one this
+/// isolate serves. `creator` is the creator entry's own namespace, which the
+/// bridge reads workflow classes from.
 fn call_workflow_inner<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     creator: v8::Local<'s, v8::Value>,

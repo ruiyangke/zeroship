@@ -200,8 +200,8 @@ pub(crate) fn registered_module(
 ) -> Option<v8::Global<v8::Module>> {
     let specifier = &entry?.specifier;
     let registry = scope.get_slot::<SharedRegistry>().cloned()?;
-    let module = registry.borrow().get(specifier).cloned();
-    module
+    let registry = registry.borrow();
+    registry.get(specifier).cloned()
 }
 
 /// Prepare a dynamic dependency and return its canonical registry name.
