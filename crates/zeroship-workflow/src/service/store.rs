@@ -127,7 +127,8 @@ impl OrmStore {
         // Resolve lazy SQLite attachments before reserving the journal writer.
         compio::time::timeout(
             Duration::from_secs(5),
-            self.clock.prepare_for_app(self.binding.app_id()),
+            self.clock
+                .prepare_for_app(self.binding.app_id(), self.binding.schema()),
         )
         .await
         .map_err(|_| {
