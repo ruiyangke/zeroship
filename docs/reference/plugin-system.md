@@ -44,6 +44,13 @@ module as `zeroship:db/adapter`. Its source and compiled artifact live under
 `crates/zeroship-data-v8`; the runtime core loads the registered module graph.
 The module is not an `@zeroship/db` package export.
 
+The [workflow binding](../../crates/zeroship-workflow-v8/src/lib.rs) supplies the
+durable-replay interpreter the same way, under the specifier the runtime names as
+`WORKFLOW_DISPATCH_MODULE`. `Runtime::call_workflow_dispatch` invokes its
+`dispatch` export with the creator entry's module namespace, so a runtime that
+registers no workflow binding cannot replay a workflow, and nothing about replay
+is injected into the creator's module graph.
+
 ## Startup lifecycle
 
 The runtime binds the validated descriptor and compiles the module graph before
