@@ -263,8 +263,11 @@ async fn exercise(postgres: bool) {
             .and(moments::happened.set(epoch).unwrap())
             .is_err()
     );
-    let span = Duration::from_micros(
-        (crate::sql::temporal::MAX_TIMESTAMP_MICROS - crate::sql::temporal::MIN_TIMESTAMP_MICROS)
+    // The widest offset both backends can render: a whole number of
+    // milliseconds, so SQLite's millisecond resolution refuses it for leaving
+    // the calendar rather than for its precision.
+    let span = Duration::from_millis(
+        (crate::sql::temporal::MAX_TIMESTAMP_MILLIS - crate::sql::temporal::MIN_TIMESTAMP_MILLIS)
             as u64,
     );
     for expression in [

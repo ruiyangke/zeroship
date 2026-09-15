@@ -12,6 +12,10 @@ pub use serde_json::Number;
 pub type Map<K, V> = IndexMap<K, V>;
 pub type Record = Map<String, Value>;
 
+/// The newtype-struct name [`Value::TimestampMicros`] serializes under, so the
+/// native serde adapter can restore the variant rather than a bare integer.
+pub(crate) const TIMESTAMP_MICROS_TOKEN: &str = "$zsTimestampMicros";
+
 #[derive(Clone, Debug, Default, PartialEq)]
 pub enum Value {
     #[default]
@@ -291,7 +295,13 @@ impl Serialize for Value {
             Self::Number(v) => v.serialize(serializer),
             Self::String(v) | Self::Decimal(v) => serializer.serialize_str(v),
             Self::Bytes(v) => serializer.serialize_bytes(v),
-            Self::TimestampMicros(v) => serializer.serialize_i64(*v),
+            // A newtype struct is transparent to an ordinary format, so JSON
+            // still sees the integer. The native encoder recognises the name
+            // and rebuilds the timestamp, which is what keeps `to_value` from
+            // handing a microsecond count back as a count of milliseconds.
+            Self::TimestampMicros(v) => {
+                serializer.serialize_newtype_struct(TIMESTAMP_MICROS_TOKEN, v)
+            }
             Self::Json(v) => {
                 let json: Value = serde_json::from_str(v).map_err(::serde::ser::Error::custom)?;
                 json.serialize(serializer)
