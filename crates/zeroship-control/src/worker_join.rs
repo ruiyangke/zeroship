@@ -262,7 +262,7 @@ pub struct EnrolmentEnvelope {
 impl EnrolmentEnvelope {
     /// The envelope that admits nothing. What an undeclared deployment gets.
     #[must_use]
-    pub fn closed() -> Self {
+    pub const fn closed() -> Self {
         Self {
             networks: Vec::new(),
             ports: None,
@@ -343,7 +343,7 @@ impl EnrolmentEnvelope {
 
     /// Whether the operator declared an envelope at all.
     #[must_use]
-    pub fn is_declared(&self) -> bool {
+    pub const fn is_declared(&self) -> bool {
         !self.networks.is_empty() && self.ports.is_some()
     }
 
@@ -491,9 +491,8 @@ pub async fn join(
     // 1. The signer. Resolved from the id the UNVERIFIED token claims, which
     //    selects a key and grants nothing: the signature below still has to
     //    hold under it.
-    let signer_id = match zeroship_core::worker_join::unverified_join_signer_id(token) {
-        Some(id) => id,
-        None => return join_refused(JoinTokenRefusal::SignerMalformed.as_str()),
+    let Some(signer_id) = zeroship_core::worker_join::unverified_join_signer_id(token) else {
+        return join_refused(JoinTokenRefusal::SignerMalformed.as_str());
     };
     let signer = match trusted_join_signer(&state.control_pg, &signer_id).await {
         Ok(Some(signer)) => signer,
@@ -1341,8 +1340,8 @@ mod tests {
         EnrolmentEnvelope::parse("10.7.0.0/16", "8080-8090", false).expect("declaration parses")
     }
 
-    fn peer(text: &str) -> Option<SocketAddr> {
-        Some(text.parse().expect("peer socket parses"))
+    fn peer(text: &str) -> SocketAddr {
+        text.parse().expect("peer socket parses")
     }
 
     /// THE CONTROL. Without it every refusal below passes against an envelope
@@ -1351,7 +1350,7 @@ mod tests {
     #[test]
     fn an_in_envelope_peer_on_a_permitted_port_is_admitted() {
         assert_eq!(
-            envelope().derive_address(peer("10.7.3.9:51314"), 8080),
+            envelope().derive_address(Some(peer("10.7.3.9:51314")), 8080),
             Ok("10.7.3.9:8080".parse().expect("expected socket"))
         );
     }
@@ -1363,7 +1362,7 @@ mod tests {
         // split, and reading the port off the socket would advertise a port
         // nothing is bound to.
         let derived = envelope()
-            .derive_address(peer("10.7.3.9:51314"), 8085)
+            .derive_address(Some(peer("10.7.3.9:51314")), 8085)
             .expect("admitted");
         assert_eq!(derived.port(), 8085);
         assert_eq!(derived.ip(), "10.7.3.9".parse::<IpAddr>().expect("host"));
@@ -1372,7 +1371,7 @@ mod tests {
     #[test]
     fn a_peer_outside_the_envelope_is_refused() {
         assert_eq!(
-            envelope().derive_address(peer("203.0.113.9:51314"), 8080),
+            envelope().derive_address(Some(peer("203.0.113.9:51314")), 8080),
             Err(EnrolmentRefusal::PeerOutsideEnvelope)
         );
     }
@@ -1381,7 +1380,7 @@ mod tests {
     fn a_loopback_peer_is_refused_when_the_envelope_does_not_declare_it() {
         for text in ["127.0.0.1:51314", "[::1]:51314", "[::ffff:127.0.0.1]:51314"] {
             assert_eq!(
-                envelope().derive_address(peer(text), 8080),
+                envelope().derive_address(Some(peer(text)), 8080),
                 Err(EnrolmentRefusal::PeerOutsideEnvelope),
                 "{text} is outside 10.7.0.0/16 and must be refused"
             );
@@ -1405,7 +1404,7 @@ mod tests {
             EnrolmentEnvelope::parse("127.0.0.0/8", "8080-8090", false).expect("declaration parses");
         for text in ["127.0.0.1:51314", "[::ffff:127.0.0.1]:51314"] {
             let derived = single_host
-                .derive_address(peer(text), 8085)
+                .derive_address(Some(peer(text)), 8085)
                 .unwrap_or_else(|refusal| panic!("{text} must be admitted, got {refusal:?}"));
             assert_eq!(derived.ip(), "127.0.0.1".parse::<IpAddr>().expect("host"));
             assert_eq!(derived.port(), 8085);
@@ -1428,14 +1427,14 @@ mod tests {
         let containing =
             EnrolmentEnvelope::parse("0.0.0.0/8", "8080-8090", false).expect("declaration parses");
         assert_eq!(
-            containing.derive_address(peer("0.0.0.0:51314"), 8080),
+            containing.derive_address(Some(peer("0.0.0.0:51314")), 8080),
             Err(EnrolmentRefusal::PeerIsUnspecified)
         );
         // The paired control: a NON-unspecified address in that same network is
         // admitted, so the refusal above is about the address and not about the
         // declaration being rejected somewhere upstream.
         assert!(
-            containing.derive_address(peer("0.1.2.3:51314"), 8080).is_ok(),
+            containing.derive_address(Some(peer("0.1.2.3:51314")), 8080).is_ok(),
             "0.1.2.3 is inside 0.0.0.0/8 and is a real address"
         );
     }
@@ -1447,7 +1446,7 @@ mod tests {
         // be the v4 spelling, or the `inet` column and every URL built from it
         // carry a mapped form of an address the operator declared in v4.
         let derived = envelope()
-            .derive_address(peer("[::ffff:10.7.3.9]:51314"), 8080)
+            .derive_address(Some(peer("[::ffff:10.7.3.9]:51314")), 8080)
             .expect("admitted");
         assert_eq!(derived.ip(), "10.7.3.9".parse::<IpAddr>().expect("host"));
     }
@@ -1456,7 +1455,7 @@ mod tests {
     fn a_port_outside_the_range_is_refused_at_both_ends() {
         for port in [8079, 8091] {
             assert_eq!(
-                envelope().derive_address(peer("10.7.3.9:51314"), port),
+                envelope().derive_address(Some(peer("10.7.3.9:51314")), port),
                 Err(EnrolmentRefusal::PortOutsideEnvelope),
                 "port {port} must be refused"
             );
@@ -1465,7 +1464,7 @@ mod tests {
         // the bound and not an off-by-one that refuses everything.
         for port in [8080, 8090] {
             assert!(
-                envelope().derive_address(peer("10.7.3.9:51314"), port).is_ok(),
+                envelope().derive_address(Some(peer("10.7.3.9:51314")), port).is_ok(),
                 "port {port} is inside the declared range"
             );
         }
@@ -1475,7 +1474,7 @@ mod tests {
     fn an_undeclared_envelope_refuses_rather_than_defaulting_open() {
         let peer = peer("10.7.3.9:51314");
         assert_eq!(
-            EnrolmentEnvelope::closed().derive_address(peer, 8080),
+            EnrolmentEnvelope::closed().derive_address(Some(peer), 8080),
             Err(EnrolmentRefusal::EnvelopeUnset)
         );
         // Half a declaration is not a declaration: either half missing refuses.
@@ -1483,7 +1482,7 @@ mod tests {
             let envelope =
                 EnrolmentEnvelope::parse(networks, ports, false).expect("halves parse");
             assert_eq!(
-                envelope.derive_address(peer, 8080),
+                envelope.derive_address(Some(peer), 8080),
                 Err(EnrolmentRefusal::EnvelopeUnset),
                 "networks={networks:?} ports={ports:?} must refuse"
             );
@@ -1500,7 +1499,7 @@ mod tests {
         let envelope =
             EnrolmentEnvelope::parse("10.7.0.0/16", "8080-8090", true).expect("parses");
         assert_eq!(
-            envelope.derive_address(peer("10.7.3.9:51314"), 8080),
+            envelope.derive_address(Some(peer("10.7.3.9:51314")), 8080),
             Err(EnrolmentRefusal::ProxyFronted)
         );
     }
@@ -1542,13 +1541,13 @@ mod tests {
             EnrolmentEnvelope::parse(" 10.7.0.1/16 , fd00::5/64 ", "8080", false)
                 .expect("parses");
         assert!(envelope
-            .derive_address(peer("10.7.99.4:1"), 8080)
+            .derive_address(Some(peer("10.7.99.4:1")), 8080)
             .is_ok());
         assert!(envelope
-            .derive_address(peer("[fd00::9]:1"), 8080)
+            .derive_address(Some(peer("[fd00::9]:1")), 8080)
             .is_ok());
         assert_eq!(
-            envelope.derive_address(peer("[fd01::9]:1"), 8080),
+            envelope.derive_address(Some(peer("[fd01::9]:1")), 8080),
             Err(EnrolmentRefusal::PeerOutsideEnvelope)
         );
     }
