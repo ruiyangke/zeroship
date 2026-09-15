@@ -22,6 +22,7 @@ mod generated_identity;
 mod identity;
 mod identity_contract;
 mod identity_visibility;
+mod independent_transactions;
 mod insert_many;
 mod internal_tables;
 mod joins;
