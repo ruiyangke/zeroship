@@ -1,4 +1,4 @@
-use crate::{metrics, protection, tx_lanes};
+use crate::{protection, tx_lanes};
 
 pub(crate) fn native_fields(fields: crate::value::Value) -> crate::schema::FieldMap {
     crate::schema::CollectionSchema::from_fields(&fields)
@@ -36,7 +36,6 @@ pub(crate) fn reset_engine() {
     tx_lanes::reset_for_tests();
     protection::mask_policy::reset_for_tests();
     protection::protection_floor::reset_for_tests();
-    metrics::reset_for_tests();
     zeroship_data_orm::schema_cache::reset_for_tests();
 }
 

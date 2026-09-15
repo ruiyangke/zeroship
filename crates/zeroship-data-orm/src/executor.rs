@@ -19,7 +19,9 @@ pub trait ScopedExecutor: Any + Debug {
     fn pool_counts(&self) -> Option<(usize, usize, usize)> {
         None
     }
-    async fn prepare_for_app(&self, app_id: &str) -> Result<(), DbError>;
+    /// Make the binding's database addressable before a path that bypasses
+    /// [`Self::query`] and [`Self::exec`] reaches it.
+    async fn prepare_for_app(&self, app_id: &str, schema: &SchemaName) -> Result<(), DbError>;
     /// Execute with the binding's authority, outside an explicit transaction.
     async fn query(
         &self,

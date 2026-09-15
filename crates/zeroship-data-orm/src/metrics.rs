@@ -1,11 +1,11 @@
-//! Record database usage through the host-supplied meter.
+//! Report database usage to the sink a host attaches to a binding.
 //!
-//! ORM operation boundaries emit metrics after successful work, including search
-//! and unmask operations. Driver implementations do not determine billing policy.
-//! Metric names are shared with the pricing catalog and must change with it.
-
-use std::cell::RefCell;
-use std::sync::Arc;
+//! ORM operation boundaries report work after it succeeds, including search
+//! and unmask operations. The ORM decides which operations count and names
+//! their metrics; the host decides whom the usage is attributed to and where it
+//! is recorded. A binding without a sink reports nothing. Driver
+//! implementations do not report usage. Metric names are shared with the host's
+//! pricing catalog and must change with it.
 
 /// One read operation: a query, a count, a search, a single-cell unmask fetch.
 /// Counts OPERATIONS, not rows.
@@ -20,54 +20,24 @@ pub const DB_WRITES: &str = "db_writes";
 /// usage the pricing catalog cannot price.
 pub const DB_ROWS_WRITTEN: &str = "db_rows_written";
 
-/// Record successful work through the handle validated before execution.
-pub(crate) fn emit_db_metric(
-    handle: Option<&zeroship_metering::MeterHandle>,
-    metric: &str,
-    n: u64,
-) {
-    if n != 0 {
-        if let Some(handle) = handle {
-            handle.record(metric, n);
+/// Receives the usage the ORM measures for one binding.
+///
+/// A host attaches a sink with [`crate::Database::with_usage_sink`], or passes
+/// one to [`crate::tx_route::CapturedRoute::capture`] when it captures routes
+/// itself. The ORM calls [`Self::record`] only after an operation succeeds and
+/// never with a zero amount. It does not interpret the binding's identity on
+/// the sink's behalf, so attribution and its validation belong to the host that
+/// builds the sink.
+pub trait UsageSink: std::fmt::Debug + Send + Sync {
+    /// Add `amount` of `metric` to this sink's subject.
+    fn record(&self, metric: &str, amount: u64);
+}
+
+/// Report successful work to the route's sink, if its host attached one.
+pub(crate) fn emit_db_metric(sink: Option<&dyn UsageSink>, metric: &str, amount: u64) {
+    if amount != 0 {
+        if let Some(sink) = sink {
+            sink.record(metric, amount);
         }
     }
-}
-
-thread_local! {
-    // Hosts stamp the process meter before binding routes on this thread.
-    static METER: RefCell<Option<Arc<zeroship_metering::Meter>>> = const { RefCell::new(None) };
-}
-
-/// Stamp the process-wide meter (called from `DbPlugin::register`).
-///
-/// Idempotent overwrite: registration may fire more than once per worker
-/// thread, and every plugin on a thread shares one meter.
-pub fn stamp(meter: Option<Arc<zeroship_metering::Meter>>) {
-    METER.with_borrow_mut(|slot| *slot = meter);
-}
-
-/// Validate attribution before admitting a metered database operation.
-pub(crate) fn bind(
-    app_id: &str,
-) -> Result<Option<zeroship_metering::MeterHandle>, crate::error::DbError> {
-    METER.with_borrow(|meter| {
-        meter
-            .as_ref()
-            .map(|meter| {
-                let app_id = zeroship_core::AppId::parse(app_id).map_err(|error| {
-                    crate::error::DbError::config("invalid_meter_app_id", error.to_string())
-                })?;
-                Ok(zeroship_metering::MeterHandle::new(
-                    Arc::clone(meter),
-                    app_id,
-                ))
-            })
-            .transpose()
-    })
-}
-
-/// Drop this thread's meter.
-#[cfg(test)]
-pub fn reset_for_tests() {
-    stamp(None);
 }

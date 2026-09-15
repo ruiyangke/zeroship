@@ -200,7 +200,13 @@ async fn sqlite_conflict_conditions_compare_json_structurally() {
     )
     .await
     .unwrap();
-    let driver = backend.connection_driver("comparison").await.unwrap();
+    let driver = backend
+        .connection_driver(
+            "comparison",
+            &crate::sql::SchemaName::new("comparison").unwrap(),
+        )
+        .await
+        .unwrap();
     let session = driver.acquire(LeaseKind::Autocommit).await.unwrap();
     exercise_json_condition(&SqliteCompiler, &*session, "comparison", "TEXT").await;
 }

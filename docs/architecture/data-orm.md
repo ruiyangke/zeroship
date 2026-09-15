@@ -198,6 +198,25 @@ a separate local connection, so an older pending open cannot overwrite the new
 binding. Reinstalling the same identity preserves the existing connection.
 Connection identity and factory internals are opaque in Debug output.
 
+### Usage reporting
+
+The ORM measures database usage at its operation boundaries and reports it,
+after an operation succeeds, to the `metrics::UsageSink` attached to the
+binding. `metrics` names the reported quantities (`DB_READS`, `DB_WRITES`,
+`DB_ROWS_WRITTEN`). The sink decides attribution: the ORM derives none from the
+binding and depends on no metering implementation.
+
+- A Rust host attaches a sink with `Database::with_usage_sink`. Transactions
+  the database opens report to the same sink.
+- A host that captures routes itself passes the sink to
+  `CapturedRoute::capture`. The V8 adapter does so for every creator dispatch:
+  it wraps `DbServiceConfig::meter` in a `MeterHandle` for the binding's app,
+  and refuses a metered binding whose app id is not an app id with
+  `invalid_meter_app_id`.
+- A binding without a sink reports nothing and is never refused on
+  attribution, so a platform binding served on a creator isolate's thread is
+  neither billed to that app nor refused.
+
 SQLite opens or creates a filesystem database, for example
 `sqlite:.zeroship/dev.sqlite`. Memory selectors, empty paths, and SQLite URI
 options are rejected. Tests provide explicit temporary files; the ORM owns no
@@ -418,8 +437,11 @@ counts, and handles settlement, cancellation, cleanup, and discard.
 
 `executor::ScopedExecutor` resolves the app's physical SQL namespace and applies its authority
 on the connection that executes its statements. PostgreSQL uses a transaction
-with local role and timeout settings. SQLite attaches the database and selects
-its transaction lane before exposing a physical connection source.
+with local role and timeout settings. SQLite attaches the app's database file
+and selects its transaction lane before exposing a physical connection source.
+A SQLite binding on schema `main` addresses the file the backend opened: it
+attaches no `zs-<app>.sqlite`, and its catalog, protection floor and statements
+all read that file.
 
 `backend::Backend` is the host registration contract above the driver:
 

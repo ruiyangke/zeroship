@@ -14,7 +14,7 @@ impl ScopedExecutor for PostgresBackend {
     fn pool_counts(&self) -> Option<(usize, usize, usize)> {
         self.connection_driver().pool_counts()
     }
-    async fn prepare_for_app(&self, _app_id: &str) -> Result<(), DbError> {
+    async fn prepare_for_app(&self, _app_id: &str, _schema: &SchemaName) -> Result<(), DbError> {
         Ok(())
     }
     async fn query(
