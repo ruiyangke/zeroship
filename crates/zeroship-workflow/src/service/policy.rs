@@ -445,7 +445,7 @@ impl PolicyRefresh {
     /// # Errors
     /// Rejects stale/consumed tickets, retired bindings, conflicting policy values
     /// or modes, and unavailable state.
-    pub fn install(self, snapshot: PolicySnapshot) -> Result<(), WorkflowServiceError> {
+    pub fn install(self, mut snapshot: PolicySnapshot) -> Result<(), WorkflowServiceError> {
         let mut state = self
             .binding
             .registry
@@ -476,6 +476,36 @@ impl PolicyRefresh {
                 return Err(conflict());
             }
             let revision_changed = previous.revision != snapshot.revision;
+            // THE DEADLINE IS MONOTONIC WITHIN ONE REVISION.
+            //
+            // The absolute deadline is reconstructed on every renewal as
+            // (the instant BEFORE the request) + (the remaining the manager
+            // measured while building its reply). The anchor therefore sits one
+            // round trip earlier than the measurement, so each renewal of an
+            // UNCHANGED lease lands slightly earlier than the one before it -
+            // and a strict `new < old` read that as the manager shortening the
+            // lease, retired the epoch, and cancelled every delivery in flight.
+            // Measured on the probe example: 137 retirements in one run, every
+            // one of them this, none of them a revision change.
+            //
+            // Taking the later of the two is SAFE, not merely convenient: each
+            // estimate is `started + remaining` where `remaining` was measured
+            // after `started`, so every estimate UNDER-states the true expiry,
+            // and the maximum of under-estimates is still an under-estimate.
+            //
+            // It assumes the manager does not shorten a lease while keeping its
+            // revision. A genuine shortening is a change of authority and must
+            // arrive as a new revision or a refusal; if it ever arrives as a
+            // quietly smaller remaining, this clamp would ignore it.
+            if !revision_changed {
+                if let (Validity::Until(old), Validity::Until(new)) =
+                    (&previous.validity, &snapshot.validity)
+                {
+                    if new < old {
+                        snapshot.validity = Validity::Until(*old);
+                    }
+                }
+            }
             let deadline_regressed = matches!((&previous.validity, &snapshot.validity),
                 (Validity::Until(old), Validity::Until(new)) if new < old);
             // SAY WHY, because the consequence is severe and invisible from the
