@@ -246,31 +246,6 @@ fn platform_jwks_body() -> String {
     .to_string()
 }
 
-/// Give a test-seeded app the workflow journal schema a deployed app has.
-///
-/// A test seeds an app by INSERTing a row into `zeroship.apps`. Production gets
-/// an app that way only as the first half of a deploy: the second half is the
-/// migration apply, and that is what creates the app's `app_<uuid>` journal
-/// schema and hands it to the narrow `zeroship_workflow_owner` role. So a
-/// seeded app has no journal schema, and `PgStore::provision` - which
-/// deliberately holds no CREATE and creates no schema of its own (2a44ea8ef,
-/// pinned by `worker_provisioning_uses_a_precreated_narrow_owner_role`) - fails
-/// with `schema "app_<uuid>" does not exist` until this runs.
-///
-/// Calls the migration service's own provisioning function rather than issuing
-/// a CREATE SCHEMA here. A hand-rolled one in test code would make the same
-/// tests pass over a schema owned by whoever the test connected as, which is a
-/// privilege shape production never has - the tests would then be green about a
-/// journal nothing in production could have created.
-///
-/// Call it AFTER inserting the app row and BEFORE `PgStore::provision`.
-#[allow(dead_code)]
-pub async fn provision_app_workflow_schema(pg: &compio_postgres::Client, app_id: &AppId) {
-    zeroship_migrate_server::provisioning::provision_workflow_journal_schema(pg, app_id)
-        .await
-        .expect("provision app workflow journal schema");
-}
-
 /// Idempotently seed the built-in plan tiers (free/pro/unlimited) into the test
 /// DB's plan catalog so `create_app`/`set_plan` (which validate `plan_id`
 /// against `zeroship.plans`) accept the built-in ids. A no-op on a

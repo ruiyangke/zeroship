@@ -4,12 +4,6 @@
 //! registry + env store + handler types. The `zeroship-control` binary
 //! (`src/main.rs`) is a thin wrapper around these modules.
 
-// `cron::workflow_engine::register_run_timer_in_tx` is a long async fn whose
-// generated future nests deeply enough that computing its layout exceeds
-// rustc's default query depth: on rustc 1.94.0 this crate does not compile at
-// all without the raise, and the error names this crate and this function.
-// `tests/workflow_engine_test.rs` has carried the same line for the same
-// reason; the LIBRARY needs it too.
 #![recursion_limit = "256"]
 
 pub mod account_status;
@@ -63,10 +57,7 @@ pub mod void_reissue;
 pub mod join_minter;
 pub mod worker_join;
 pub mod worker_health;
-pub mod workflow_instance_api;
 pub mod deployment_hold_api;
-pub(crate) mod workflow_limits;
-pub(crate) mod workflow_rollout;
 
 #[cfg(test)]
 mod test_database;
@@ -76,7 +67,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use zeroize::Zeroizing;
-use zeroship_bundle::{BlobStore, WorkflowBlobStore};
+use zeroship_bundle::BlobStore;
 use zeroship_stream::{StreamConfig, StreamError, StreamRegistry, StreamTransport};
 
 pub use env_store::EnvStore;
@@ -487,10 +478,6 @@ pub struct AppState {
     /// keyspace so unarchive can restore the retained live deploy without a
     /// second upload. Database and blob teardown are separate lifecycles.
     pub blob_store: Arc<dyn BlobStore>,
-    /// Content-addressed workflow output store. This is intentionally separate
-    /// from deploy bundle blobs so workflow-output GC can never delete deploy
-    /// artifacts.
-    pub workflow_blob_store: Arc<dyn WorkflowBlobStore>,
     pub control_key: SecretString,
     pub master_key: SecretString,
     /// Stripe webhook signing secret. An empty value makes every webhook fail
@@ -503,10 +490,6 @@ pub struct AppState {
     /// `https://api.stripe.com`; the integration tests override it to point the
     /// REAL `cyper` client at a localhost mock-Stripe server.
     pub stripe_base_url: String,
-    /// Gateway internal base URL used by the workflow engine to dispatch
-    /// claimed runs through the spend/account-gated edge before they reach a
-    /// worker replay host.
-    pub gateway_url: String,
     /// Worker HTTP base URLs used for admin log fan-out.
     pub worker_urls: Vec<String>,
     /// Per-IP rate limiter for mutating admin endpoints. Burst 30,

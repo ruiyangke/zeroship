@@ -6,7 +6,7 @@ use std::net::TcpListener;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::{Arc, OnceLock};
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use crate::workflow_postgres::{self, Database};
@@ -14,10 +14,8 @@ use ed25519_dalek::pkcs8::EncodePrivateKey;
 use serde_json::{json, Value};
 use testcontainers::{core::WaitFor, runners::SyncRunner, Container, GenericImage, ImageExt};
 use uuid::Uuid;
-use zeroship_core::service_assertion::{
-    ServiceSigningKey, ServiceTrustBundle, TransportAssertionVerifier,
-};
-use zeroship_core::service_peers::{service_issuer, ServiceAuth, ServiceKeyring};
+use zeroship_core::service_assertion::ServiceSigningKey;
+use zeroship_core::service_peers::service_issuer;
 use zeroship_core::AppId;
 use zeroship_core::UserId;
 
@@ -28,9 +26,6 @@ fn key(service: &str) -> ed25519_dalek::SigningKey {
     let seed = match service {
         "control" => 31,
         "gateway" => 32,
-        // A `svc/worker` ROLE key exists only for arms that present the stale
-        // credential and expect a refusal: no fleet process holds or trusts it.
-        "worker" => 33,
         "join-signer" => 34,
         // The workflow manager is an ordinary peer: it holds a role key and
         // verifies joined worker instances from the platform registry.
@@ -42,33 +37,6 @@ fn key(service: &str) -> ed25519_dalek::SigningKey {
 
 fn signing_key(service: &str) -> ServiceSigningKey {
     ServiceSigningKey::from_pkcs8_der(key(service).to_pkcs8_der().unwrap().as_bytes()).unwrap()
-}
-
-fn trust_bundle() -> ServiceTrustBundle {
-    let mut peers = ServiceTrustBundle::new();
-    for name in ["control", "gateway", "worker", "workflow"] {
-        let key = signing_key(name);
-        peers
-            .trust_signing_key(
-                &service_issuer(&format!("svc/{name}")).unwrap(),
-                key.key_id(),
-                &key,
-            )
-            .unwrap();
-    }
-    peers
-}
-
-pub fn service_auth(service: &str) -> Arc<ServiceAuth> {
-    Arc::new(ServiceAuth::new(
-        ServiceKeyring::from_parts(
-            service_issuer(&format!("svc/{service}")).unwrap(),
-            signing_key(service),
-            trust_bundle(),
-        )
-        .unwrap(),
-        Arc::new(TransportAssertionVerifier::new(trust_bundle())),
-    ))
 }
 
 fn binaries() -> &'static BTreeMap<String, PathBuf> {
@@ -138,8 +106,6 @@ pub fn port() -> u16 {
 /// What this fleet runs beyond the always-present services.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct FleetOptions {
-    /// Let the worker accept unsigned Control advance calls.
-    pub unsigned_advance: bool,
     /// Run a workflow manager, point Control's lifecycle publisher at it, and
     /// give the worker a workflow host registered with it.
     pub workflow_manager: bool,
@@ -164,21 +130,15 @@ pub struct Fleet {
 }
 
 impl Fleet {
+    /// A fleet with no workflow manager: nothing places an app, so no host
+    /// serves the workflow namespace.
     pub fn start() -> Self {
-        Self::with_advance(true)
-    }
-
-    pub fn with_advance(advance: bool) -> Self {
-        Self::with(FleetOptions {
-            unsigned_advance: advance,
-            ..FleetOptions::default()
-        })
+        Self::with(FleetOptions::default())
     }
 
     /// A fleet whose worker runs a workflow host against a real manager.
     pub fn with_workflow_manager() -> Self {
         Self::with(FleetOptions {
-            unsigned_advance: false,
             workflow_manager: true,
         })
     }
@@ -194,7 +154,6 @@ impl Fleet {
     }
 
     async fn launch(options: FleetOptions) -> Self {
-        let advance = options.unsigned_advance;
         let binaries = binaries();
         let database = Database::new();
         let work = tempfile::tempdir().expect("workflow fleet directory");
@@ -397,9 +356,6 @@ impl Fleet {
                 control_port,
                 "--blob-store".into(),
                 blobs.clone(),
-                "--gateway-url".into(),
-                fleet.gateway_url.clone(),
-                "--worker-urls".into(),
                 fleet.worker_url.clone(),
                 "--disable-workflow-engine".into(),
             ],
@@ -454,12 +410,7 @@ impl Fleet {
                 blobs.clone(),
                 "--poll-interval".into(),
                 "1".into(),
-                "--max-step-blob-bytes".into(),
-                "2097152".into(),
-            ]
-            .into_iter()
-            .chain(advance.then(|| "--workflow-advance-unsigned".to_string()))
-            .collect::<Vec<_>>(),
+            ],
             &worker_env,
         );
         fleet.ready(fleet.worker_url.clone()).await;
