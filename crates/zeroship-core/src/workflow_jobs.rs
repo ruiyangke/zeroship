@@ -60,6 +60,13 @@ pub enum JobOperation {
         propagation_id: PropagationId,
         revision: Revision,
     },
+    /// Ask the creator engine to give back the journal hold on a deployment the
+    /// app no longer selects. Only a manager publishes it; a worker cannot. The
+    /// named deployment is the release target, never an executable prerequisite,
+    /// so this operation stays deliverable without a queue hold.
+    ReleaseHold {
+        deployment_id: DeploymentId,
+    },
     // Empty struct variants reject extra fields on internally tagged messages.
     Reconcile {},
     Collect {},
@@ -118,8 +125,21 @@ impl JobSpec {
             }
             | JobOperation::Fanout { .. }
             | JobOperation::Propagate { .. }
+            | JobOperation::ReleaseHold { .. }
             | JobOperation::Reconcile {}
             | JobOperation::Collect {} => None,
+        }
+    }
+
+    /// The deployment a release operation targets. It is never a prerequisite,
+    /// so `deployment_id` keeps returning `None` for it: a release is published
+    /// after the queue holder gave the deployment back, when no hold remains to
+    /// confirm.
+    #[must_use]
+    pub const fn released_deployment(&self) -> Option<&DeploymentId> {
+        match &self.operation {
+            JobOperation::ReleaseHold { deployment_id } => Some(deployment_id),
+            _ => None,
         }
     }
 }
@@ -172,6 +192,9 @@ pub trait JobLease {
 /// asserts that affected runs stopped. For reconciliation and collection, `Waiting`
 /// requests another scan page or phase and `Completed` closes that scan cycle.
 /// Neither classification asserts that the manager queue or app intents drained.
+/// For a hold release, `Completed` reports that the journal holder gave the
+/// deployment back and `Waiting` that the journal still depends on it, so a
+/// later release may succeed. A release is never forced.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum JobOutcome {

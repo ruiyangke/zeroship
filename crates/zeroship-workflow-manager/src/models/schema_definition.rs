@@ -24,6 +24,10 @@ zeroship_data_orm::orm::schema! {
             generation: BigInt,
             state: Text,
             held_at: Nullable<BigInt>,
+            #[orm(default = "pending")]
+            journal_state: Text,
+            journal_job_id: Nullable<Text>,
+            journal_published_at: Nullable<BigInt>,
         }
 
         jobs {

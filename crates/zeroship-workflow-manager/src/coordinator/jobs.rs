@@ -149,8 +149,11 @@ const fn worker_operation(operation: &JobOperation) -> Result<(), Error> {
         | JobOperation::Propagate { .. }
         | JobOperation::Reconcile {}
         | JobOperation::Collect {} => Ok(()),
+        // Retention decisions belong to the manager. A worker that could publish
+        // a release would be asking itself to give code back.
         JobOperation::Activate { .. }
         | JobOperation::Cron { .. }
+        | JobOperation::ReleaseHold { .. }
         | JobOperation::Management { .. } => Err(Error::Denied),
     }
 }

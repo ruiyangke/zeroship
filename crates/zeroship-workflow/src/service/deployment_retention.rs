@@ -223,9 +223,25 @@ impl WorkflowService {
         deployment: &str,
         client: &dyn DeploymentHoldClient,
     ) -> Result<HoldReceipt, WorkflowServiceError> {
+        self.release_deployment_hold_checked(app, deployment, client, &|| Ok(()))
+            .await
+    }
+
+    /// A delivered release job holds this authority for the whole operation.
+    /// Losing it leaves the durable intent where it stands: closed admission
+    /// waits for its acknowledgement, and nothing is released without one.
+    pub(super) async fn release_deployment_hold_checked(
+        &self,
+        app: &AppId,
+        deployment: &str,
+        client: &dyn DeploymentHoldClient,
+        check: &impl Fn() -> Result<(), WorkflowServiceError>,
+    ) -> Result<HoldReceipt, WorkflowServiceError> {
         validate_scope(app, deployment, client.scope())?;
+        check()?;
         let mut tx = self.begin().await?;
         lock_app(&mut tx, app).await?;
+        check()?;
         let intent = read_intent(&tx, app, deployment)
             .await?
             .ok_or_else(missing)?;
@@ -250,6 +266,7 @@ impl WorkflowService {
                 ))
             }
         }
+        check()?;
         tx.commit().await?;
         self.reconcile_deployment_hold_checked(
             app,
@@ -257,7 +274,7 @@ impl WorkflowService {
             None,
             Some((generation, HoldState::Released)),
             client,
-            &|| Ok(()),
+            check,
         )
         .await
     }

@@ -265,6 +265,17 @@ impl<T: JobTransport> DeliverySlot<T> {
                 bounded(self.options.execution_timeout, app.management_job(&lease)).await?;
             return self.acknowledge(receipt, &lease).await;
         }
+        if matches!(
+            lease.delivery().job.operation,
+            JobOperation::ReleaseHold { .. }
+        ) {
+            let receipt = bounded(
+                self.options.execution_timeout,
+                app.release_hold_job(&lease),
+            )
+            .await?;
+            return self.acknowledge(receipt, &lease).await;
+        }
         if matches!(lease.delivery().job.operation, JobOperation::Collect {}) {
             let receipt = bounded(
                 self.options.execution_timeout,

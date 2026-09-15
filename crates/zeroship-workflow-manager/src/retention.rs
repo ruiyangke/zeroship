@@ -19,7 +19,7 @@ use zeroship_core::{
     app_id::AppId,
     typed_id,
     workflow_deployments::{HoldGeneration, HoldReceipt, HoldScope, HoldState},
-    workflow_jobs::DeploymentId,
+    workflow_jobs::{DeploymentId, JobId, JobOperation, JobOutcome, JobSpec},
 };
 use zeroship_data_orm::orm::{Database, Filter, FromRow, Insertable};
 
@@ -62,7 +62,16 @@ struct NewIntent<'a> {
     deploy_hash: Option<&'a str>,
     generation: i64,
     state: &'a str,
+    journal_state: &'a str,
 }
+
+/// The manager's view of the journal holder's duty for one deployment. It never
+/// holds journal retention itself: a released queue hold only makes the journal
+/// holder's dependency the last one, and the release job asks the creator engine
+/// to check its own journal and give the deployment back.
+const JOURNAL_PENDING: &str = "pending";
+const JOURNAL_RELEASING: &str = "releasing";
+const JOURNAL_RELEASED: &str = "released";
 
 /// A fresh publication may prepare a hold; an accepted dependency must already
 /// have one. Releasing state closes admission until its acknowledgement settles.
@@ -137,6 +146,9 @@ struct Intent {
     generation: i64,
     state: String,
     held_at: Option<i64>,
+    journal_state: String,
+    journal_job_id: Option<String>,
+    journal_published_at: Option<i64>,
 }
 impl Intent {
     fn validate(&self, scope: &HoldScope) -> Result<HoldGeneration, Error> {
@@ -152,7 +164,25 @@ impl Intent {
         {
             return Err(Error::Storage);
         }
+        self.validate_journal()?;
         self.generation.try_into().map_err(|_| Error::Storage)
+    }
+
+    /// A release job identity is recorded only while one is in flight, so a
+    /// settled reply cannot be attributed to a duty that was reset or finished.
+    fn validate_journal(&self) -> Result<(), Error> {
+        if !matches!(
+            self.journal_state.as_str(),
+            JOURNAL_PENDING | JOURNAL_RELEASING | JOURNAL_RELEASED
+        ) || (self.journal_state == JOURNAL_RELEASING) != self.journal_job_id.is_some()
+            || self.journal_published_at.is_some_and(|at| at < 0)
+        {
+            return Err(Error::Storage);
+        }
+        if let Some(job) = &self.journal_job_id {
+            JobId::parse(job).map_err(|_| Error::Storage)?;
+        }
+        Ok(())
     }
     fn receipt(
         &self,
@@ -230,6 +260,10 @@ impl Queue {
                         "acquiring" => generation,
                         "released" => {
                             let next = generation.next().map_err(|_| Error::Capacity)?;
+                            // Reacquisition tombstones the journal duty: the
+                            // creator engine will take a fresh journal hold for
+                            // this deployment, so a release already in flight
+                            // must not report the new one released.
                             if tx
                                 .entity::<holds::Entity>()?
                                 .update_many(
@@ -238,7 +272,10 @@ impl Queue {
                                         .and(holds::state.eq("released")?),
                                     holds::generation
                                         .set(next.get())?
-                                        .and(holds::state.set("acquiring")?)?,
+                                        .and(holds::state.set("acquiring")?)?
+                                        .and(holds::journal_state.set(JOURNAL_PENDING)?)?
+                                        .and(holds::journal_job_id.set(None::<&str>)?)?
+                                        .and(holds::journal_published_at.set(None::<i64>)?)?,
                                 )
                                 .await?
                                 != 1
@@ -260,6 +297,7 @@ impl Queue {
                             deploy_hash: None,
                             generation: generation.get(),
                             state: "acquiring",
+                            journal_state: JOURNAL_PENDING,
                         })
                         .await?;
                     generation
@@ -341,6 +379,11 @@ impl Queue {
     /// deployment is released once the app's enabled calendar no longer selects
     /// it, its hold is older than `grace` and nothing depends on it. A hold in
     /// use stays held for a later turn; the policy never forces release.
+    ///
+    /// A released queue hold leaves the journal holder. The same turn carries
+    /// that deployment's journal release duty: it publishes one release job for
+    /// the creator engine under the same conditions, and applies the settled
+    /// reply of an earlier one. Neither holder class can release the other.
     pub(crate) async fn maintain_deployment(
         &self,
         app: &AppId,
@@ -359,23 +402,18 @@ impl Queue {
                     let generation = intent.validate(scope)?;
                     match intent.state.as_str() {
                         "acquiring" | "releasing" => return Ok(Maintenance::Resume),
-                        "released" => return Ok(Maintenance::Settled),
+                        "released" => {
+                            self.maintain_journal(&tx, app, deployment, &intent, grace)
+                                .await?;
+                            return Ok(Maintenance::Settled);
+                        }
                         "held" => {}
                         _ => return Err(Error::Storage),
                     }
                     // The candidate page may predate a reacquisition or a new
                     // selection, so both are decided again under the app lock.
-                    let held_at = intent.held_at.ok_or(Error::Storage)?;
-                    if held_at > self.clock.now().await?.saturating_sub(grace)
-                        || scheduling::selected_deployment_in(&tx, app).await?.as_deref()
-                            == Some(deployment.as_str())
-                    {
+                    if !self.unused_deployment(&tx, app, deployment, intent.held_at, grace).await? {
                         return Ok(Maintenance::Settled);
-                    }
-                    match require_unused(&tx, app, deployment).await {
-                        Ok(()) => {}
-                        Err(Error::Conflict) => return Ok(Maintenance::Settled),
-                        Err(error) => return Err(error),
                     }
                     if tx
                         .entity::<holds::Entity>()?
@@ -402,6 +440,158 @@ impl Queue {
         self.reconcile_for(app, deployment, transition, budget)
             .await
             .map(drop)
+    }
+
+    /// Whether this deployment is old enough and free enough to give back. The
+    /// caller holds the app lock, so a reacquisition, a fresh selection or a new
+    /// job published after the candidate page was read is seen here. A hold
+    /// confirmed no later than `grace` ago is left alone: its acquirer confirmed
+    /// it outside the queue transaction and commits its dependency within the
+    /// transaction budget, which `Driver::new` requires the grace to exceed.
+    /// A held row without a confirmation time is damage, not an idle deployment.
+    async fn unused_deployment(
+        &self,
+        tx: &Database,
+        app: &AppId,
+        deployment: &DeploymentId,
+        held_at: Option<i64>,
+        grace: i64,
+    ) -> Result<bool, Error> {
+        let held_at = held_at.ok_or(Error::Storage)?;
+        if held_at > self.clock.now().await?.saturating_sub(grace)
+            || scheduling::selected_deployment_in(tx, app).await?.as_deref()
+                == Some(deployment.as_str())
+        {
+            return Ok(false);
+        }
+        match require_unused(tx, app, deployment).await {
+            Ok(()) => Ok(true),
+            Err(Error::Conflict) => Ok(false),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// One journal release turn for a deployment whose queue hold is released.
+    /// The caller holds the app lock. Workers cannot reach this: publication is
+    /// the manager's, and the creator engine only answers the delivered job.
+    async fn maintain_journal(
+        &self,
+        tx: &Database,
+        app: &AppId,
+        deployment: &DeploymentId,
+        intent: &Intent,
+        grace: i64,
+    ) -> Result<(), Error> {
+        match intent.journal_state.as_str() {
+            JOURNAL_RELEASED => Ok(()),
+            JOURNAL_RELEASING => {
+                let pending = intent.journal_job_id.as_deref().ok_or(Error::Storage)?;
+                let Some(settled) = self.settled_release(tx, app, deployment, pending).await?
+                else {
+                    return Ok(());
+                };
+                self.finish_journal(tx, app, deployment, pending, settled)
+                    .await
+            }
+            JOURNAL_PENDING => {
+                let now = self.clock.now().await?;
+                if intent
+                    .journal_published_at
+                    .is_some_and(|at| at > now.saturating_sub(grace))
+                    || !self
+                        .unused_deployment(tx, app, deployment, intent.held_at, grace)
+                        .await?
+                {
+                    return Ok(());
+                }
+                let spec = JobSpec {
+                    id: JobId::mint(),
+                    app_id: app.clone(),
+                    operation: JobOperation::ReleaseHold {
+                        deployment_id: deployment.clone(),
+                    },
+                    available_at: now.try_into().map_err(|_| Error::Storage)?,
+                };
+                self.insert(tx, &spec, now).await?;
+                changed_once(
+                    tx.entity::<holds::Entity>()?
+                        .update_many(
+                            identity(app, deployment)?
+                                .and(holds::journal_state.eq(JOURNAL_PENDING)?)
+                                .and(holds::journal_job_id.eq(None::<&str>)?),
+                            holds::journal_state
+                                .set(JOURNAL_RELEASING)?
+                                .and(holds::journal_job_id.set(Some(spec.id.as_str()))?)?
+                                .and(holds::journal_published_at.set(Some(now))?)?,
+                        )
+                        .await?,
+                )
+            }
+            _ => Err(Error::Storage),
+        }
+    }
+
+    /// The settled outcome of a published release, or `None` while it is live.
+    /// A reply that does not name this app's release of this deployment is
+    /// damage: the duty records the job it published and nothing else.
+    async fn settled_release(
+        &self,
+        tx: &Database,
+        app: &AppId,
+        deployment: &DeploymentId,
+        pending: &str,
+    ) -> Result<Option<JobOutcome>, Error> {
+        let job = queue::load(tx, app, pending).await?.ok_or(Error::Storage)?;
+        let spec = job.spec()?;
+        if spec.app_id != *app
+            || spec.id.as_str() != pending
+            || spec.released_deployment() != Some(deployment)
+        {
+            return Err(Error::Storage);
+        }
+        match job.state.as_str() {
+            "ready" | "leased" => Ok(None),
+            "settled" => {
+                let outcome: JobOutcome =
+                    serde_json::from_str(job.outcome.as_deref().ok_or(Error::Storage)?)
+                        .map_err(|_| Error::Storage)?;
+                if !outcome.valid_for(&spec.operation) {
+                    return Err(Error::Storage);
+                }
+                Ok(Some(outcome))
+            }
+            _ => Err(Error::Storage),
+        }
+    }
+
+    /// Record a settled release. Only `Completed` discharges the duty; a refusal
+    /// returns it to pending, and its publication time holds the next attempt
+    /// off for another grace. Release is never forced.
+    async fn finish_journal(
+        &self,
+        tx: &Database,
+        app: &AppId,
+        deployment: &DeploymentId,
+        pending: &str,
+        outcome: JobOutcome,
+    ) -> Result<(), Error> {
+        let resolved = match outcome {
+            JobOutcome::Completed {} => JOURNAL_RELEASED,
+            JobOutcome::Waiting {} | JobOutcome::Rejected {} => JOURNAL_PENDING,
+            JobOutcome::Management { .. } => return Err(Error::Storage),
+        };
+        changed_once(
+            tx.entity::<holds::Entity>()?
+                .update_many(
+                    identity(app, deployment)?
+                        .and(holds::journal_state.eq(JOURNAL_RELEASING)?)
+                        .and(holds::journal_job_id.eq(Some(pending))?),
+                    holds::journal_state
+                        .set(resolved)?
+                        .and(holds::journal_job_id.set(None::<&str>)?)?,
+                )
+                .await?,
+        )
     }
 
     /// Recover a durable intent after loss of the manager or its Control response.
@@ -545,11 +735,13 @@ struct Dependency {
 }
 
 /// The retention lane's candidates in hold identity order: unfinished intents,
-/// and holds confirmed no later than `cutoff` that the app's enabled calendar
-/// does not select and no unsettled job projects. Selection and use are joined
-/// before the limit, so retained holds take no page slot; an unconfirmed hold
-/// time is surfaced as damage. `Queue::maintain_deployment` decides each
-/// candidate again under its app lock.
+/// unfinished journal release duties, and holds confirmed no later than `cutoff`
+/// that the app's enabled calendar does not select and no unsettled job projects.
+/// A released queue hold whose journal duty is still open is a candidate on the
+/// same terms, with its latest release publication aged by the same `cutoff`.
+/// Selection and use are joined before the limit, so retained holds take no page
+/// slot; an unconfirmed hold time is surfaced as damage.
+/// `Queue::maintain_deployment` decides each candidate again under its app lock.
 pub(crate) async fn maintenance_in<R: FromRow<holds::Entity>>(
     tx: &Database,
     cutoff: i64,
@@ -562,6 +754,14 @@ pub(crate) async fn maintenance_in<R: FromRow<holds::Entity>>(
     let scope = tx.entity::<schedule_scopes::Entity>()?.alias("scope")?;
     let selected = tx.entity::<schedule_activations::Entity>()?.alias("selected")?;
     let job = tx.entity::<jobs::Entity>()?.alias("job")?;
+    let aged = hold
+        .column(holds::held_at)
+        .is_null()
+        .or(hold.column(holds::held_at).lte(Some(cutoff))?);
+    let idle = selected
+        .column(schedule_activations::id)
+        .is_null()
+        .and(job.column(jobs::id).is_null());
     let mut filter = hold
         .column(holds::state)
         .eq("acquiring")?
@@ -569,13 +769,26 @@ pub(crate) async fn maintenance_in<R: FromRow<holds::Entity>>(
         .or(hold
             .column(holds::state)
             .eq("held")?
+            .and(aged.clone())
+            .and(idle.clone()))
+        // A settled release reply is applied whatever the deployment's age.
+        .or(hold
+            .column(holds::state)
+            .eq("released")?
+            .and(hold.column(holds::journal_state).eq(JOURNAL_RELEASING)?))
+        .or(hold
+            .column(holds::state)
+            .eq("released")?
+            .and(hold.column(holds::journal_state).eq(JOURNAL_PENDING)?)
             .and(
-                hold.column(holds::held_at)
+                hold.column(holds::journal_published_at)
                     .is_null()
-                    .or(hold.column(holds::held_at).lte(Some(cutoff))?),
+                    .or(hold
+                        .column(holds::journal_published_at)
+                        .lte(Some(cutoff))?),
             )
-            .and(selected.column(schedule_activations::id).is_null())
-            .and(job.column(jobs::id).is_null()));
+            .and(aged)
+            .and(idle));
     if let Some(after) = after {
         filter = filter.and(hold.column(holds::id).gt(after)?);
     }
@@ -607,14 +820,20 @@ pub(crate) async fn maintenance_in<R: FromRow<holds::Entity>>(
                         .eq(hold.column(holds::deployment_id))?,
                 ),
         )?
-        // Only a held row joins its jobs, so no candidate repeats per job.
+        // Only a held or released row joins its jobs, so no candidate repeats
+        // per job. A released hold has no unsettled job projecting it: release
+        // required that, and reacquisition leaves the released state.
         .left_join(
             &job,
             job.column(jobs::app_id)
                 .eq(hold.column(holds::app_id))?
                 .and(job.column(jobs::deployment_id).eq(hold.column(holds::deployment_id))?)
                 .and(job.column(jobs::state).ne("settled")?)
-                .and(hold.column(holds::state).eq("held")?),
+                .and(
+                    hold.column(holds::state)
+                        .eq("held")?
+                        .or(hold.column(holds::state).eq("released")?),
+                ),
         )?
         .filter(filter)
         .order_by(if descending {
@@ -658,6 +877,13 @@ fn identity(app: &AppId, deployment: &DeploymentId) -> Result<Filter<holds::Enti
     Ok(holds::app_id
         .eq(app.as_str())?
         .and(holds::deployment_id.eq(deployment.as_str())?))
+}
+fn changed_once(changed: i64) -> Result<(), Error> {
+    if changed == 1 {
+        Ok(())
+    } else {
+        Err(Error::Storage)
+    }
 }
 fn matches_transition(state: &str, desired: HoldState) -> bool {
     match desired {
