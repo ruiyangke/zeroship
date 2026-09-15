@@ -151,6 +151,18 @@ applies migrations: `zeroship migrate` applies them through the migration
 service, and a deploy whose runtime descriptor differs from the app's newest
 applied migration is refused with 409 `schema_not_applied`.
 
+Deploy, archive and restore run their catalog transactions on the catalog the
+whole process shares (`publication::Catalog`) instead of opening a connection
+each. An ORM database belongs to the compio thread that opened it, and that
+thread admits one top-level transaction per binding at a time, so the catalog
+is `control.catalog_max_connections` threads holding one session each: the
+bound is both the sessions the process holds and the catalog transactions that
+run at once, and operations beyond it wait for a free thread. Each operation
+keeps its own lock order and single transaction, and a caller that stops
+waiting cancels its transaction as before. Catalog sessions announce
+themselves as `zeroship-control-catalog` in `pg_stat_activity` unless the
+database URL names a session already.
+
 The workflow manager learns of an accepted deployment asynchronously.
 `publication::publisher` pages pending lifecycle intents, delivers each app's
 intents in revision order through the manager's signed schedule routes, and

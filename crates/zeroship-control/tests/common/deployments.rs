@@ -66,6 +66,6 @@ pub async fn deploy(
     manifest: Manifest,
 ) -> Result<Acceptance, CatalogError> {
     registry
-        .deploy(&command(app, actor, verified(manifest)))
+        .deploy(command(app, actor, verified(manifest)))
         .await
 }

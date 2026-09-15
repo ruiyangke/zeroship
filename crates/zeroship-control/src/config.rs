@@ -81,9 +81,21 @@ pub struct ControlSettings {
     #[config(name = "control.gateway_url", default = "http://localhost".to_owned())]
     pub gateway_url: Operational<String>,
 
-    /// Workflow coordinator used to verify app placement and queue management.
+    /// Workflow coordinator used to verify app placement and queue management,
+    /// and to publish app lifecycle intents. An origin the manager client
+    /// would refuse refuses the boot.
     #[config(name = "control.workflow_coordinator_url", default = "http://127.0.0.1:9093".to_owned())]
     pub workflow_coordinator_url: Operational<String>,
+
+    /// Catalog sessions the whole process may hold at once, each on a thread
+    /// of its own, and so also the catalog transactions that run at once.
+    /// Deploy, archive and restore share them with the lifecycle publisher and
+    /// wait for a free one beyond the bound. Must be positive.
+    #[config(
+        name = "control.catalog_max_connections",
+        default = crate::publication::shared::DEFAULT_MAX_CONNECTIONS.get()
+    )]
+    pub catalog_max_connections: Operational<usize>,
 
     /// Provider used as the usage meter.
     #[config(name = "control.meter_provider", default = "lite".to_owned())]

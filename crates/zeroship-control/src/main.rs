@@ -458,6 +458,12 @@ fn main() -> std::io::Result<()> {
     let workers_str = settings.worker_urls.get().clone();
     let gateway_url = settings.gateway_url.get().trim_end_matches('/').to_string();
     let workflow_coordinator_url = settings.workflow_coordinator_url.get().to_owned();
+    let Some(catalog_max_connections) =
+        std::num::NonZeroUsize::new(*settings.catalog_max_connections.get())
+    else {
+        eprintln!("control: refusing to start: control.catalog_max_connections must be positive");
+        std::process::exit(2);
+    };
     let stripe_webhook_secret = settings.stripe_webhook_secret.expose_str().to_owned();
     let stripe_secret_key = settings.stripe_secret_key.expose_str().to_owned();
     let stripe_base_url = settings.stripe_base_url.get().clone();
@@ -664,6 +670,10 @@ fn main() -> std::io::Result<()> {
         report.field("gateway_url", CheckValue::Plain(gateway_url.clone()));
         report.field("workflow_coordinator_url", CheckValue::Plain(workflow_coordinator_url.clone()));
         report.field(
+            "catalog_max_connections",
+            CheckValue::Count(catalog_max_connections.get()),
+        );
+        report.field(
             "service_credentials",
             CheckValue::Plain(credentials.summary().to_string()),
         );
@@ -716,9 +726,14 @@ fn main() -> std::io::Result<()> {
         .name("zeroship-control")
         .build(ntex::rt::DefaultRuntime)
         .block_on(async move {
-    let registry = Registry::new(&db_url)
-        .await
-        .expect("failed to connect to database");
+    let registry = Registry::connect(
+        &db_url,
+        zeroship_control::publication::CatalogOptions {
+            max_connections: catalog_max_connections,
+        },
+    )
+    .await
+    .expect("failed to connect to database");
 
     // The content-addressed `BlobStore` is the ONLY deploy-artifact store.
     // `.zship` deploys land in `{prefix}/blobs/` + `{prefix}/manifests/`;

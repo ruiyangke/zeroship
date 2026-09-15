@@ -2,10 +2,12 @@
 //! revisions and the intents Control delivers to the workflow manager.
 //!
 //! [`catalog`] commits each app lifecycle change together with its intent in
-//! one ORM transaction on the Control database. [`publisher`] later delivers
-//! pending intents in per-app revision order and records only the exact receipt
-//! the manager returned. The deployment collector treats a pending activation
-//! as a dependency of its bundle.
+//! one ORM transaction on the Control database. [`shared`] runs those
+//! transactions for every request on the process's bounded set of catalog
+//! threads, each holding one session. [`publisher`] later
+//! delivers pending intents in per-app revision order and records only the
+//! exact receipt the manager returned. The deployment collector treats a
+//! pending activation as a dependency of its bundle.
 
 #![expect(
     clippy::future_not_send,
@@ -16,8 +18,10 @@ pub mod catalog;
 pub mod command;
 pub mod models;
 pub mod publisher;
+pub mod shared;
 
 pub use catalog::{CatalogError, Transition};
+pub use shared::{Catalog, CatalogOptions, Closing};
 pub use command::{
     normalize_content_type, Acceptance, AcceptanceResult, CommandBinding, DeployCommand,
     DeploymentRejected, VerifiedDeployment, DEPLOY_OPERATION, ZSHIP_CONTENT_TYPE,

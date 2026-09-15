@@ -2042,7 +2042,7 @@ async fn redeploy(
     .expect("sealed redeploy manifest verifies");
     fx.state
         .registry
-        .deploy(&common::deployments::command(
+        .deploy(common::deployments::command(
             &fx.app_id, &owner, deployment,
         ))
         .await
