@@ -164,12 +164,21 @@ themselves as `zeroship-control-catalog` in `pg_stat_activity` unless the
 database URL names a session already.
 
 The workflow manager learns of an accepted deployment asynchronously.
-`publication::publisher` pages pending lifecycle intents, delivers each app's
-intents in revision order through the manager's signed schedule routes, and
-records only the manager's exact receipt in a fresh transaction. Archive and
-restore commit disable and activation intents through the same catalog, and the
-deployment collector keeps a pending activation's bundle until the manager's
-queue hold takes over.
+`publication::publisher` runs on the shared catalog, pages pending lifecycle
+intents, delivers each app's intents in revision order through the manager's
+signed schedule routes, and records only the manager's exact receipt in a
+fresh transaction. An app whose attempt fails waits out a retry delay that
+doubles to a cap and resets after a success, while other apps keep publishing.
+Archive and restore commit disable and activation intents through the same
+catalog, and the deployment collector keeps a pending activation's bundle
+until the manager's queue hold takes over.
+
+Control refuses to start when publication could not run: without its service
+key, or with a `control.workflow_coordinator_url` the manager client refuses.
+The origin is checked with the rest of the configuration, so `--check-config`
+refuses it too. The service key is loaded before the process touches the
+database. Tests that need no publisher build `AppState` directly and never
+start one.
 
 The blob-store ingest path is current. The older raw bundle upload path is gone.
 

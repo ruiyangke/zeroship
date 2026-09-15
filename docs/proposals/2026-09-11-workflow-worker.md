@@ -1324,7 +1324,12 @@ redeploy of the active deployment is an intentional activation.
 **Publisher.** A Control driver reads a bounded page of pending intents in
 `(app, revision)` order. It publishes each app's lowest pending revision and
 continues with that app's next revision only after confirming the previous one;
-the app's first failure ends its turn. Activation registers the deployment's
+the app's first failure ends its turn and defers its next attempt by a retry
+delay that doubles with each consecutive failure up to a cap and resets after
+a success. The driver shares Control's bounded catalog threads with the
+deploy, archive and restore transactions, and Control refuses to start when
+it could not publish: without its service signer or with an unusable
+coordinator origin. Activation registers the deployment's
 projection, which the manager keeps immutable per deployment, then activates
 the revision; disable disables the revision. Calls use the exact-Control signed
 register, activate and disable routes, outside any database transaction and
