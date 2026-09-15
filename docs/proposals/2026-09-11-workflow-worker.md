@@ -177,7 +177,7 @@ operation identity.
 
 The manager admits placement only within platform-authorized app and execution
 zone eligibility. Spare capacity is not authority to serve any app. Eligibility
-comes from Control's app and enroller zones, as
+comes from Control's app and worker-instance zones, as
 [placement eligibility and capacity](#placement-eligibility-and-capacity-provider)
 describes; workers cannot nominate database locations or broaden eligibility by
 registration.
@@ -209,24 +209,60 @@ unpublished creator intent.
 
 ### Enrollment bootstrap and revocation
 
-A worker enrolls with the credential of its deployment unit, called an
-enroller: an operator-provisioned key that Control records with exactly one
-execution zone. Only the enroller principal may call enrollment; an enrolled
-instance key cannot enroll, and no process holds a shared worker role signing
-key. Enrollment locks the active enroller row, inserts an instance bound to that
-enroller, and is idempotent on the instance public key. A changed key is always
-a new instance identity, and registration, leases and receipts keep comparing
-the exact key that verified each request.
+A worker joins with a SIGNED JOIN TOKEN it was handed, not with a standing
+credential of its own. The trust anchor is a set of JOIN SIGNERS Control records
+in advance: an issuer id, an Ed25519 public key, and the execution zones that
+signer may mint for. One signer covers many deployment units, so adding a unit
+stops being a Control-side operation, and the signing key sits with whoever
+decides a worker should exist rather than on the machine that runs creator code.
 
-Revocation is an explicit operator database operation. Revoking an enroller
-marks it revoked and marks every instance it enrolled `gone` in one transaction
-that serializes with enrollments in flight, so a revoked unit cannot restore
-authority by enrolling a fresh identity; a replacement unit needs a newly
-provisioned enroller. Retiring a single instance is attribution and hygiene,
-not a boundary against a process that still holds its unit's key, so
-revocation for cause targets the enroller. A worker that exits gracefully
-retires its own instance after its server drains; observed liveness never
-writes enrollment status.
+Control learns signers from its own configuration, on the discipline the
+operator import already had: it inserts signers it has not recorded, never
+reactivates a revoked one, and refuses the whole file, writing nothing, when any
+entry disagrees with what is recorded - a recorded id under another key, a
+recorded key under another id, or a different zone set. A signer's zones are its
+authority, so widening them is provisioning a new signer, not editing a line.
+
+A JOIN TOKEN is a JWT the signer mints. `iss` names the signer, `aud` is the
+control plane, `exp` bounds it, `jti` identifies it, `zone` names the execution
+zone it admits into, `uses` says how many workers it may admit, and `cnf` carries
+the joining key's thumbprint when the issuer knows that key in advance. A scaled
+service shares one token and each use is consumed separately.
+
+A worker generates its instance keypair in memory at boot and posts the token,
+the public half and its listening port, with the request itself signed by that
+new key. Control checks, in this order: the token's signature under the trusted
+signer key; the audience; expiry under the existing skew bounds; that `zone` is
+one that signer may mint for; one use of that `jti`, consumed atomically, where a
+token with uses remaining is not spent and an exhausted one is refused; the
+request's self-signature, which binds the presented public key and must equal
+`cnf` when `cnf` is present; and the advertise address, derived from the observed
+peer and held to the operator's enrolment envelope. Then it mints the instance
+identity exactly as before, idempotent on the instance public key, so a
+lost-reply retry returns the row the first attempt committed. The zone is the
+token's claim and never a field of the request, and there is no such field to
+add.
+
+Proof of possession is what bounds a captured token. Presenting one without the
+matching private key proves nothing, so a captor can admit workers it controls
+and nothing else: up to the uses that remain, until the expiry, in one zone.
+`cnf` removes even that, because a token minted for a known key admits only that
+key.
+
+The instance row records which signer and which token id admitted it, so "who
+vouched for this worker" is a stored fact rather than an inference. The
+execution zone is recorded on the instance as well, because there is no longer a
+per-unit row to read it from.
+
+Revocation has two independent arms and neither is configuration. Removing a
+signer's key stops every future token minted under it; tokens already
+outstanding die at their own expiry, which is what a short `exp` buys and what a
+long one gives up. Retiring one instance is unchanged - the `status` filter on
+the instance key read is the whole of it - and a worker that exits gracefully
+retires itself once its server has drained. Observed liveness never writes
+enrollment status. Revoking a signer deliberately does NOT retire the instances
+it admitted: their keys were never the signer's to hold, so they are retired one
+at a time, and the recorded signer id is what makes that set enumerable.
 
 Every enrollment reader reads the authoritative row: Control on each internal
 request, the manager at ingress and again after lock waits and before commit,
@@ -236,44 +272,80 @@ deadlines while creator fences stay authoritative. An unavailable registry is a
 retryable infrastructure failure. Local development composes a trusted
 in-process worker and performs no enrollment.
 
-This contract suits long-lived worker replicas that mount their unit key. If
-production replicas churn under an orchestrator, the key moves into a
-creator-zone host agent that issues single-use enrollment grants; the Control
-records and revocation cascade stay the same. A native proof of concept on
-branch `poc/workflow-enrollment` passes the contract against a migrated
-PostgreSQL database: instance keys are refused at enrollment, revoking an
-enroller cascades to Control, the manager and the CDC relay while a sibling
-unit stays active, the revocation serializes with a concurrent enrollment on
-the enroller row lock, and a lost-reply retry returns the same instance.
+**Where the signer key lives, and who mints.** `zeroship dev init` provisions the
+OPERATOR SIGNER and nothing worker-side: it generates the keypair, leaves the
+private half where the operator runs the CLI, and records the public half and
+its permitted zones in Control's trusted-signer configuration. There is no
+worker-side credential to write, and no long-lived bearer file anywhere - a
+standing token mounted into every worker would be the shape this change exists
+to remove, wearing a different name.
 
-**Implementation boundary:** a worker loads only its deployment unit's enroller
-credential (`worker.enroller_file`, the enroller id and key in one document)
-and spends it on enrolment; no process holds a `svc/worker` role key, the peer
-document publishes none, and Control refuses a `svc/worker` or
-`svc/worker-enroller` assertion minted at role arity. Control imports
-enrollers at startup from `control.worker_enrollers_file`: it inserts unknown
-enrollers, never reactivates a revoked one, and refuses a file that conflicts
-with a recorded enroller without writing. `zeroship dev init` provisions the
-host's enroller and the import file, `zeroship dev enroller` adds a
-deployment unit, compose mounts both, and `docs/runbooks/worker-enrollers.md`
-holds the operator procedure, revocation included. A gracefully stopped worker
-retires its own instance through `CONTROL_WORKER_RETIRE`. The worker's
-version poll and the `env.workflows` HTTP backend still authenticate with the
-shared control key rather than a worker credential, so revoking a unit does
-not take that credential from a process that already holds it. The poll is on
-the POLLED tier that `docs/proposals/2026-09-05-app-metadata-distribution.md`
-replaces, and the backend goes with the workflow-server cutover. Production
-startup registration, consumer wiring, zone eligibility (including the foreign
-key from `worker_enrollers.execution_zone_id`) and capacity activation remain
-cutover work.
+A single-host deployment (compose, `deploy-remote.sh`) makes CONTROL THE MINTER
+for its own zone. Control mints a short-lived, zone-scoped, use-capped token at
+startup and again before that token expires, and writes it to a path the worker
+containers share, owner-only. A worker reads the CURRENT token at boot, so a
+container restarted days after provisioning gets a token minted minutes ago
+rather than one minted at install time.
+
+Three quantities hold that together and they are related, not independent. The
+rotation interval is how often Control replaces the file. The TTL is how long a
+token stays valid. The boot margin is the longest a worker may take between
+reading the file and presenting what it read. TTL must exceed the rotation
+interval by at least the boot margin, or a worker that reads the file an instant
+before rotation presents an expired token. Because a JWT already minted stays
+valid until its own `exp`, rotation overlaps by construction: the token a worker
+read before the file changed is still live for at least `TTL - rotation
+interval`, which is why that difference is the quantity the boot margin has to
+fit inside. The file is replaced atomically, so no worker ever reads half a
+token.
+
+**What the shared file is, stated plainly.** It is a bearer artifact: whoever can
+read that volume can join a worker in that zone, for the TTL, up to the uses that
+remain. Rotation bounds the window and the use cap bounds the blast radius, but
+the trust boundary is "whatever can read the volume", which is not the same
+boundary as "the worker". The stronger anchor for a single host is for Control
+to read the peer's credentials off a Unix domain socket and mint nothing at all,
+which removes the artifact rather than shortening its life. That is the named
+follow-up. This change does not do it.
+
+`zeroship join-token --zone --ttl --uses` stays for multi-host deployments,
+signed by the operator's own signer, defaulting to minutes, and minted per
+provisioning rather than mounted as a standing file.
+
+**Implementation boundary:** a worker reads a join token
+(`worker.join_token_file`) at boot and holds nothing else on disk - no signing
+key, no `svc/worker` role key, and the peer document publishes none. Control
+refuses a `svc/worker` assertion minted at role arity. Control imports signers at
+startup from `control.join_signers_file` on the discipline above, and verifies
+the join token itself rather than routing it through the service-assertion
+allowlist: a join token carries its own `typ`, so it can neither be presented as
+a service assertion nor accept one in its place. Control's minter is configured
+separately (`control.join_token_signer_file`, `control.join_token_file`,
+`control.join_token_zone`) and is inert when unset, so a multi-host Control
+verifies without holding a signing key. `zeroship dev init` provisions the
+signer credential and the import file; `zeroship join-token` mints from that
+credential; compose mounts the import file and the signer credential into
+Control and the minted-token volume into the workers; and
+`docs/runbooks/worker-join-signers.md` holds the operator procedure, signer
+revocation and instance retirement included. A gracefully stopped worker retires
+its own instance through `CONTROL_WORKER_RETIRE`. The worker's version poll and
+the `env.workflows` HTTP backend still authenticate with the shared control key
+rather than a worker credential, so revoking a signer does not take that
+credential from a process that already holds it. The poll is on the POLLED tier
+that `docs/proposals/2026-09-05-app-metadata-distribution.md` replaces, and the
+backend goes with the workflow-server cutover. Production startup registration,
+consumer wiring, zone eligibility (including the foreign key from
+`worker_instances.execution_zone_id`) and capacity activation remain cutover
+work.
 
 ### Placement eligibility and capacity provider
 
 Each app belongs to exactly one execution zone, recorded by Control in
 `zeroship.apps.execution_zone_id` when the app is created and frozen by trigger.
 An execution zone is an operator-declared set of deployment units that share
-creator-side connectivity. A worker's zone is the zone of the enroller Control
-verified when it enrolled, also frozen. Registration carries no zone; the
+creator-side connectivity. A worker's zone is the `zone` claim of the join token
+Control verified when it joined, recorded on the instance and frozen there.
+Registration carries no zone; the
 manager copies it from Control's rows and nothing a worker sends can change it.
 
 The manager selects workers itself. It takes the app lock, then the worker
@@ -301,7 +373,7 @@ unplaced demand, so placing an app leaves the target unchanged. The target's
 revision advances only when that number changes, under the zone row's lock, and
 one request per revision is claimed in the same transaction. An injected
 provider applies the target outside every lock and replies with progress or a
-closed, durable, retryable refusal (`pool_exhausted`, `no_enroller`,
+closed, durable, retryable refusal (`pool_exhausted`, `no_signer`,
 `unavailable`). Replies apply only to the revision and attempt they answered. A
 lower target applies only after the idle hold-down. Provider failure keeps jobs,
 demand and targets pending.
@@ -616,7 +688,7 @@ with this queue namespace; it is not a second authoritative placement store.
 | --- | --- |
 | `workflow_manager.schema_version` | Generated schema fingerprint. Runtime roles read it; provisioning owns changes. |
 | `workflow_manager.queue_scopes` | Registered apps and the shared app lock for queue and coordinator operations. |
-| `workflow_manager.workers` | Instance liveness, capacity, ready/draining state, the enroller zone registration copied from Control, and serialization of worker-wide admission. |
+| `workflow_manager.workers` | Instance liveness, capacity, ready/draining state, the execution zone registration copied from Control, and serialization of worker-wide admission. |
 | `workflow_manager.assignments` | App/worker placement revision, expiry, release tombstone and refusal tombstone. A refused pair is never offered again during that instance's life. |
 | `workflow_manager.placement_receipts` | Immutable assignment/release request identity, release reason and recorded result. |
 | `workflow_manager.capacity_demands` | Apps with claimable work that free eligible capacity did not absorb, keyed by app and recorded with its zone. The committed input of every replica's target. |
@@ -632,8 +704,8 @@ with this queue namespace; it is not a second authoritative placement store.
 | `workflow_manager.schedule_scopes` | App lifecycle revision, calendar-enabled state and optional selected activation; historical receipts remain independently replayable. |
 | `workflow_manager.schedules` | Logical schedule identity across deployments, active descriptor and persisted due/catch-up frontier. |
 | `workflow_manager.schedule_occurrences` | Stable occurrence request, run and job identities bound to a schedule revision, instant and activation prerequisite. |
-| `zeroship.worker_instances` | Control-owned enrollment, public key and revocation state; distinct from workflow registration. The manager also reads each instance's enroller. |
-| `zeroship.execution_zones`, `zeroship.worker_enrollers` | Control-owned zones and deployment-unit enrollers. The manager reads an enroller's frozen zone and its status. |
+| `zeroship.worker_instances` | Control-owned enrollment, public key, frozen execution zone, admitting signer and token id, and revocation state; distinct from workflow registration. |
+| `zeroship.execution_zones`, `zeroship.worker_join_signers` | Control-owned zones and the trusted signers that may mint join tokens for them. The manager reads an instance's frozen zone and its status. |
 | `zeroship.app_deploys` | Control-owned immutable deployment metadata and reclamation state. |
 | `zeroship.app_deploy_holds` | Control-owned app/deployment/holder generation and retention state. |
 | `zeroship.apps`, `zeroship.plans` | Control-owned lifecycle, entitlement and complete workflow policy inputs, and each app's frozen execution zone. The manager receives column-scoped read access. |
