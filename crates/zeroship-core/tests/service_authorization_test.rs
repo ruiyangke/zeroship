@@ -41,6 +41,8 @@ const CATALOG: &[ServiceEndpoint] = &[
     endpoints::CONTROL_ERASURE_PREFLIGHT,
     endpoints::WORKER_DISPATCH,
     endpoints::WORKER_APP_LOGS,
+    endpoints::MIGRATE_SCHEMA_BUNDLE,
+    endpoints::WORKFLOW_JOURNAL_ENSURE,
 ];
 
 /// The principals the table grants to, which must each own exactly one row.
@@ -304,6 +306,9 @@ fn measured_allowlist_is_encoded_and_enforced_row_by_row() {
             endpoints::WORKFLOW_SCHEDULE_ACTIVATE,
             endpoints::WORKFLOW_SCHEDULE_DISABLE,
             endpoints::WORKER_APP_LOGS,
+            // Control learns an app registered; the MANAGER holds the journal
+            // artifacts, so Control asks rather than provisioning itself.
+            endpoints::WORKFLOW_JOURNAL_ENSURE,
         ],
         all,
     );
@@ -321,6 +326,10 @@ fn measured_allowlist_is_encoded_and_enforced_row_by_row() {
         &[
             endpoints::CONTROL_QUEUE_DEPLOYMENT_HOLD_ACQUIRE,
             endpoints::CONTROL_QUEUE_DEPLOYMENT_HOLD_RELEASE,
+            // The manager is the ONE principal that may install a platform
+            // schema in a creator database, because it is the one that owns the
+            // artifacts.
+            endpoints::MIGRATE_SCHEMA_BUNDLE,
         ],
         all,
     );
@@ -356,6 +365,9 @@ fn measured_allowlist_is_encoded_and_enforced_row_by_row() {
             endpoints::CONTROL_WORKER_RETIRE,
             // The same shape for extending its own lease.
             endpoints::CONTROL_WORKER_RENEW,
+            // A host that REFUSED a journal reports it. The worker holds no DDL
+            // authority of its own: it names a schema and asks.
+            endpoints::WORKFLOW_JOURNAL_ENSURE,
         ],
         all,
     );
