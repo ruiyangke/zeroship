@@ -53,12 +53,20 @@ impl NativePlugin for Markers {
     }
 }
 
+/// Synchronous work that outlasts any machine it runs on.
+///
+/// The loop spins on the clock rather than a fixed iteration count: these tests
+/// assert that the watchdog interrupts this loop, and a count fast enough to
+/// finish on a quiet machine proves nothing. `escaped` is therefore reachable
+/// only if no watchdog ever fired. The control case passes a short bound the
+/// deadline is meant to allow, so the same function proves both directions.
 const BURN: &str = r"
     import { env } from 'zeroship';
-    function burn() {
+    function burn(ms = 60000) {
         env.probe.mark('entered');
+        const until = Date.now() + ms;
         let n = 0;
-        for (let i = 0; i < 300000000; i++) n = (n + 1) % 2147483647;
+        while (Date.now() < until) n = (n + 1) % 2147483647;
         env.probe.mark('escaped');
         return n;
     }
@@ -662,6 +670,16 @@ async fn inline_output_limit_commits_a_terminal_workflow_failure() {
     fixture.assert_disposed().await;
 }
 
+/// How long a deadline test gives the host before its watchdog must fire.
+///
+/// The bound races ISOLATE STARTUP, not the burn loop: if it expires before the
+/// loop is entered, the run still times out but `entered` is never marked and
+/// the assertion below reports a watchdog failure that did not happen. Measured
+/// startup here is milliseconds; this leaves orders of magnitude of headroom so
+/// a loaded machine cannot turn a passing guarantee into a red test.
+const DEADLINE: Duration = Duration::from_secs(3);
+const DEADLINE_MS: i64 = 3_000;
+
 async fn assert_deadline_interrupts(source: &str, timeout: Duration, policy: AppPolicy) {
     // Disable the CPU timer: only the host's monotonic deadline may interrupt.
     let fixture = Fixture::with_limits(&format!("{BURN}\n{source}"), None, policy).await;
@@ -695,7 +713,7 @@ async fn deadline_interrupts_module_initialization_without_an_async_yield() {
             const n = burn();
             export class Example { run() { return n; } }
         ",
-        Duration::from_millis(50),
+        DEADLINE,
         AppPolicy::default(),
     )
     .await;
@@ -711,7 +729,7 @@ async fn deadline_interrupts_synchronous_workflow_code_without_a_cpu_timer() {
                 }
             }
         ",
-        Duration::from_millis(50),
+        DEADLINE,
         AppPolicy::default(),
     )
     .await;
@@ -729,7 +747,7 @@ async fn deadline_interrupts_a_synchronous_timer_callback() {
                 }
             }
         ",
-        Duration::from_millis(50),
+        DEADLINE,
         AppPolicy::default(),
     )
     .await;
@@ -747,7 +765,7 @@ async fn confirmed_lease_bounds_synchronous_execution_before_its_timeout() {
         ",
         Duration::from_secs(10),
         AppPolicy {
-            lease_ms: 100,
+            lease_ms: DEADLINE_MS,
             ..AppPolicy::default()
         },
     )
@@ -768,7 +786,9 @@ async fn advance_until_suspended(runner: &mut RunnerSlot) -> CompletionReceipt {
 
 #[compio::test]
 async fn control_bounded_loop_completes_when_the_deadline_allows_it() {
-    let source = format!("{BURN}\nexport class Example {{ run() {{ return burn(); }} }}");
+    // The control of the deadline cases above: the same loop, bounded well
+    // inside the deadline, must run to completion and mark `escaped`.
+    let source = format!("{BURN}\nexport class Example {{ run() {{ return burn(50); }} }}");
     let fixture = Fixture::with_limits(&source, None, AppPolicy::default()).await;
     fixture
         .app
