@@ -358,6 +358,12 @@ export class HostIngressWorkflow {
   }
 }
 
+// A handle the app CLONED out of `env.workflows` during one request and kept
+// across the next. The host retires a backend by withdrawing its generation,
+// and a handle taken before that must not outlive it; keeping it in module
+// scope is how a request isolate proves whether it did.
+let retainedHandle = null;
+
 export default {
   // Ordinary app ingress. `/__host/start/<Workflow>` and
   // `/__host/status/<Workflow>/<run>` exercise `env.workflows` from a request
@@ -365,6 +371,26 @@ export default {
   // app - and nothing else.
   async fetch(request, env) {
     const path = new URL(request.url).pathname;
+    const retain = path.match(/^\/__host\/retain\/([A-Za-z]+)\/([A-Za-z0-9_]+)$/);
+    if (retain) {
+      try {
+        retainedHandle = env.workflows[retain[1]].get(retain[2]);
+        return Response.json({ retained: true });
+      } catch (error) {
+        return Response.json({ code: error.code, message: error.message }, { status: 503 });
+      }
+    }
+    if (path === "/__host/retained") {
+      if (!retainedHandle) {
+        return Response.json({ code: "no_retained_handle" }, { status: 409 });
+      }
+      try {
+        const state = await retainedHandle.status();
+        return Response.json({ state: state.state });
+      } catch (error) {
+        return Response.json({ code: error.code, message: error.message }, { status: 503 });
+      }
+    }
     const start = path.match(/^\/__host\/start\/([A-Za-z]+)$/);
     if (start) {
       try {

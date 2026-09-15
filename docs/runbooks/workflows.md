@@ -120,9 +120,9 @@ UPDATE zeroship.workflow_rollout_config
  WHERE id = 'global';
 ```
 
-Effect: the gateway forwards the public signal route to control and returns the
-control 503 response. The control terminus rejects before token verification or
-journal writes. App-credentialed `run.signal` remains available.
+Effect: the manager refuses to grant an ingress capability and the worker host
+refuses ingestion for every app, before token verification or any journal write.
+App-credentialed `run.signal` remains available.
 
 ## Drain
 
