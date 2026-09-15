@@ -247,10 +247,16 @@ async fn read_stamp(
         )
         .await?;
     let Some(row) = rows.first() else {
-        // The table exists but carries no row for this bundle. Treat it as not
-        // installed rather than as damage: another bundle may own the table, and
-        // the install path's own DDL is written to tolerate what is already
-        // there.
+        // The table exists but carries no row for THIS bundle, so it is not
+        // installed and the whole series runs.
+        //
+        // For a bundle whose own first version creates its stamp table - which
+        // is the shape every bundle has today - this is unreachable: the table
+        // and its row are written in one transaction, so one cannot outlive the
+        // other. It becomes reachable only if two bundles share a stamp table,
+        // and then the second one's install DDL has to tolerate what the first
+        // already created. Nothing here enforces that; it is a property of a
+        // bundle that chooses to share.
         return Ok(None);
     };
     let version: i64 = row.try_get("version")?;
