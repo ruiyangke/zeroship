@@ -661,8 +661,9 @@ pub fn service_allowlist() -> &'static [ServiceAuthorization] {
                     endpoints::CDC_SUBSCRIBE,
                     // Host app reads are role-scoped: an authenticated worker
                     // may request any app's version, environment, and project
-                    // data key. Instance enrolment provides attribution and
-                    // revocation; it does not establish app assignment.
+                    // data key. The instance identity provides attribution,
+                    // revocation and expiry; it does not establish app
+                    // assignment.
                     endpoints::CONTROL_APP,
                     endpoints::CONTROL_APP_ENV,
                     endpoints::CONTROL_APP_DATA_KEY,
