@@ -90,6 +90,10 @@ impl Backend for RecordingBackend {
     fn publishes_committed_changes(&self) -> bool {
         self.0.publishes_committed_changes()
     }
+
+    fn admits_concurrent_transactions(&self) -> bool {
+        self.0.admits_concurrent_transactions()
+    }
 }
 #[async_trait(?Send)]
 impl ScopedExecutor for RecordingBackend {
@@ -121,6 +125,9 @@ impl ScopedExecutor for RecordingBackend {
     ) -> Result<u64, DbError> {
         record(sql, params);
         self.0.exec(app_id, schema, sql, params).await
+    }
+    async fn check_connection(&self) -> Result<(), DbError> {
+        self.0.check_connection().await
     }
     async fn open_tx_session(
         &self,

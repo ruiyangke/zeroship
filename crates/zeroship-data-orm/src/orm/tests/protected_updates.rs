@@ -116,7 +116,7 @@ async fn exercise_protected_updates(db: &Database) {
                 value!({"$set":{"random":11,"second_secret":21,"masked":31},"plain":{"$inc":2}}),
             )
             .await?;
-        Ok(())
+        Ok::<_, DbError>(())
     })
     .await
     .unwrap();

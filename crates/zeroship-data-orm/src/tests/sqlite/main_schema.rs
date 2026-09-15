@@ -100,7 +100,7 @@ async fn write_notes(database: &Database) -> Result<Vec<Value>, DbError> {
             tx.collection("notes")?
                 .insert(value!({"id":"n2", "title":"second"}))
                 .await?;
-            Ok(())
+            Ok::<_, DbError>(())
         })
         .await?;
     let Output::Rows { rows, .. } = notes

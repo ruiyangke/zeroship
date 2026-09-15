@@ -50,19 +50,77 @@ impl AwaitTxClaim {
 }
 
 impl std::future::Future for AwaitTxClaim {
-    type Output = ();
+    type Output = Result<(), DbError>;
 
     fn poll(
         self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<()> {
+    ) -> std::task::Poll<Result<(), DbError>> {
         if crate::tx_lanes::with_mut(|l| l.try_claim_tx(&self.app_id)) {
-            return std::task::Poll::Ready(());
+            return std::task::Poll::Ready(Ok(()));
         }
-        // Lost. Park and re-check on the next release; `release_tx_claim`
-        // wakes every waiter, so a spurious wake just re-runs this poll.
+        // The claim is held by the callback this poll is running inside, so
+        // nothing can release it before this future resolves. Parking is a
+        // deadlock the database cannot see - the transaction holding the lane
+        // is idle and healthy - and only a caller-side timeout ends it.
+        if crate::tx_lanes::with(|l| l.callback_is_polling(&self.app_id)) {
+            return std::task::Poll::Ready(Err(nested_top_level_transaction()));
+        }
+        // Lost to another task. Park and re-check on the next release;
+        // `release_tx_claim` wakes every waiter, so a spurious wake just
+        // re-runs this poll.
         crate::tx_lanes::with_mut(|l| l.push_tx_waiter(&self.app_id, cx.waker().clone()));
         std::task::Poll::Pending
+    }
+}
+
+/// A handle opened a top-level transaction from inside a callback that already
+/// holds its lane.
+fn nested_top_level_transaction() -> DbError {
+    DbError::validation_hinted(
+        "nested_top_level_transaction",
+        "db: this handle opened a top-level transaction inside a callback holding the same \
+         transaction lane",
+        "Nest through the handle the callback was given, or open the concurrent transaction on \
+         Database::independent().",
+    )
+}
+
+/// Mark this app's lane while `body` is polled.
+///
+/// See [`crate::tx_lanes::TxLane`]'s `callback_polls`: the marker is what turns
+/// a re-entrant top-level `transaction()` from an invisible self-deadlock into
+/// a typed refusal.
+pub(crate) fn in_callback<F: std::future::Future>(app_id: &str, body: F) -> InCallback<F> {
+    InCallback {
+        app_id: app_id.to_owned(),
+        body: Box::pin(body),
+    }
+}
+
+pub(crate) struct InCallback<F> {
+    app_id: String,
+    body: std::pin::Pin<Box<F>>,
+}
+
+/// Lowers the marker even when the callback unwinds.
+struct CallbackMark<'a>(&'a str);
+impl Drop for CallbackMark<'_> {
+    fn drop(&mut self) {
+        crate::tx_lanes::with_mut(|l| l.exit_callback(self.0));
+    }
+}
+
+impl<F: std::future::Future> std::future::Future for InCallback<F> {
+    type Output = F::Output;
+    fn poll(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<F::Output> {
+        let this = self.get_mut();
+        crate::tx_lanes::with_mut(|l| l.enter_callback(&this.app_id));
+        let _mark = CallbackMark(&this.app_id);
+        this.body.as_mut().poll(cx)
     }
 }
 
@@ -79,9 +137,13 @@ pub struct TxAdmission {
 
 impl TxAdmission {
     /// Wait for the claim, then arm.
-    pub async fn acquire(app_id: String) -> Self {
-        AwaitTxClaim::new(app_id.clone()).await;
-        Self::current(app_id)
+    ///
+    /// # Errors
+    /// `nested_top_level_transaction` when the claim is held by the callback
+    /// this call is running inside, which no amount of waiting can release.
+    pub async fn acquire(app_id: String) -> Result<Self, DbError> {
+        AwaitTxClaim::new(app_id.clone()).await?;
+        Ok(Self::current(app_id))
     }
 
     fn current(app_id: String) -> Self {
@@ -172,7 +234,7 @@ impl AtomicWriteFrame {
         let admission = if nested {
             Some(TxAdmission::current(app_id.clone()))
         } else {
-            Some(TxAdmission::acquire(app_id.clone()).await)
+            Some(TxAdmission::acquire(app_id.clone()).await?)
         };
 
         let backend = route.backend().clone();
@@ -207,15 +269,21 @@ impl AtomicWriteFrame {
     /// On rollback, the original row error remains the creator-visible error;
     /// a savepoint settle failure wins because the enclosing transaction state
     /// is then no longer trustworthy.
-    pub async fn finish<T>(mut self, body: Result<T, DbError>) -> Result<T, DbError> {
+    ///
+    /// The body's error type is the caller's, so a domain refusal that must
+    /// roll back travels out of the frame as itself rather than through a side
+    /// channel. Every failure the frame itself reports is converted into that
+    /// type, which is what `E: From<DbError>` buys.
+    pub async fn finish<T, E>(mut self, body: Result<T, E>) -> Result<T, E>
+    where
+        E: From<DbError>,
+    {
         if self.admission.as_ref().is_some_and(|admission| {
             !admission.owner.with(|| {
-                crate::tx_lanes::with(|l| {
-                    admission.completion.is_current_in(l, &admission.app_id)
-                })
+                crate::tx_lanes::with(|l| admission.completion.is_current_in(l, &admission.app_id))
             })
         }) {
-            return Err(scope::expired());
+            return Err(E::from(scope::expired()));
         }
         let success = body.is_ok();
         // The reducer owns the admission release from here: every path it takes
@@ -235,9 +303,9 @@ impl AtomicWriteFrame {
             (Ok(value), SettleOutcome::Ok) => Ok(value),
             (Err(error), SettleOutcome::Ok) => Err(error),
             (_, SettleOutcome::CommitIndeterminate(error)) => {
-                Err(commit_failed_indeterminate(error))
+                Err(E::from(commit_failed_indeterminate(error)))
             }
-            (_, SettleOutcome::SettleErr(error)) => Err(error),
+            (_, SettleOutcome::SettleErr(error)) => Err(E::from(error)),
         }
     }
 }
@@ -1102,7 +1170,9 @@ mod tests {
             .await
             .expect("supervised cleanup must release the transaction lane")
             .expect("begin after cleanup");
-            next.finish(Ok(())).await.expect("settle replacement");
+            next.finish(Ok::<_, DbError>(()))
+                .await
+                .expect("settle replacement");
             assert!(!crate::tx_lanes::with(|l| {
                 l.has_tx_for("app_sqlite") || l.tx_claimed_by("app_sqlite")
             }));

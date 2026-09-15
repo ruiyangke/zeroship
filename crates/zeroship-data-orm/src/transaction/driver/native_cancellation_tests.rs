@@ -1,5 +1,6 @@
 use crate::{
-    binding::DbBinding, encryption::ProjectKeySource, orm::Database, value, ConnectOptions,
+    binding::DbBinding, encryption::ProjectKeySource, error::DbError, orm::Database, value,
+    ConnectOptions,
 };
 use futures::{
     future::{select, Either},
@@ -57,7 +58,7 @@ async fn dropping_native_transaction_interrupts_postgres_before_releasing_admiss
             records
                 .insert(value!({"id":"barrier", "title":"blocked"}))
                 .await?;
-            Ok(())
+            Ok::<_, DbError>(())
         })
         .boxed_local();
     let blocked = async {
@@ -116,7 +117,7 @@ async fn dropping_native_transaction_interrupts_postgres_before_releasing_admiss
             tx.collection("records")?
                 .insert(value!({"id":"restart", "title":"committed"}))
                 .await?;
-            Ok(())
+            Ok::<_, DbError>(())
         }),
     )
     .await

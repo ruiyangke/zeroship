@@ -42,6 +42,20 @@ impl ScopedExecutor for PostgresBackend {
         )
         .await
     }
+    async fn check_connection(&self) -> Result<(), DbError> {
+        // A pooled lease and a protocol Sync: no table, no authority setup and
+        // no transaction lane, so an open transaction on this app's lane does
+        // not delay the answer. The wait is the pool's acquire timeout.
+        let client = self
+            .pool()
+            .acquire()
+            .await
+            .map_err(|error| super::pg_error::classify(&error))?;
+        client
+            .check_connection()
+            .await
+            .map_err(|error| super::pg_error::classify(&error))
+    }
     async fn open_tx_session(
         &self,
         _app_id: &str,

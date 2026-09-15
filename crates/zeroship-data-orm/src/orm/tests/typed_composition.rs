@@ -98,7 +98,7 @@ async fn typed_predicates_and_ordering_retain_their_transaction() {
     let (predicate, order) = db
         .transaction(|tx| async move {
             let p = tx.entity::<posts::Entity>()?.alias("p")?;
-            Ok((
+            Ok::<_, DbError>((
                 p.column(posts::title).eq("ready")?,
                 p.column(posts::title).asc(),
             ))
@@ -136,7 +136,7 @@ async fn typed_predicates_and_ordering_retain_their_transaction() {
     let deferred = db
         .transaction(|tx| async move {
             let inside = tx.entity::<posts::Entity>()?.alias("p")?;
-            Ok(db
+            Ok::<_, DbError>(db
                 .from(&p)
                 .filter(inside.column(posts::title).eq("ready")?)
                 .select(count_rows())?

@@ -32,7 +32,7 @@ async fn exercise(database: &Database) {
                 .collection(COLLECTION)?
                 .insert(value!({"id":"parent", "peer_id":"child", "label":"parent"}))
                 .await?;
-            Ok(())
+            Ok::<_, DbError>(())
         })
         .await
         .unwrap();
