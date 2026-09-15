@@ -519,10 +519,10 @@ pub async fn start(
         .map_err(StartError::Catalog)
 }
 
+/// The manager client publication would use. Building one is the signer
+/// check: the client refuses a missing signer and a signer that is not
+/// Control's, which are the two ways the schedule routes are unreachable.
 fn manager(url: &str, auth: Arc<ServiceAuth>) -> Result<ControlCoordinator, StartError> {
-    if auth.signing_identity().is_none() {
-        return Err(StartError::Unsigned);
-    }
     ControlCoordinator::new(url, auth, Options::default()).map_err(|error| match error {
         ManagerError::Unauthenticated => StartError::Unsigned,
         other => StartError::Coordinator(other),
