@@ -23,7 +23,7 @@ use zeroship_data_orm::{
     binding::DbBinding,
     encryption::ProjectKeySource,
     error::DbError,
-    orm::{Database, FromRow, Insertable},
+    orm::{Database, FromRow, Insertable, UtcInstant},
     ConnectOptions,
 };
 use zeroship_workflow_manager::deployments::models::app_deploys as deploys;
@@ -178,7 +178,7 @@ struct AppRow {
     deploy_hash: Option<String>,
     manifest_json: Option<String>,
     lifecycle_revision: i64,
-    archived_at: Option<i64>,
+    archived_at: Option<UtcInstant>,
 }
 
 #[derive(FromRow)]
@@ -214,7 +214,7 @@ struct NewReceipt<'a> {
     deploy_hash: &'a str,
     lifecycle_revision: Option<i64>,
     result: &'a str,
-    created_at: i64,
+    created_at: UtcInstant,
 }
 
 #[derive(FromRow)]
@@ -237,8 +237,8 @@ struct NewDeployment<'a> {
     app_id: &'a str,
     deploy_hash: &'a str,
     manifest_json: &'a str,
-    created_at: i64,
-    activated_at: Option<i64>,
+    created_at: UtcInstant,
+    activated_at: Option<UtcInstant>,
 }
 
 #[derive(Insertable)]
@@ -251,7 +251,7 @@ struct NewIntent<'a> {
     deploy_id: Option<&'a str>,
     registration: Option<&'a str>,
     state: &'a str,
-    created_at: i64,
+    created_at: UtcInstant,
 }
 
 #[derive(FromRow)]
@@ -297,7 +297,7 @@ impl ReceiptRow {
 pub async fn accept(
     tx: &Database,
     command: &DeployCommand,
-    now: i64,
+    now: UtcInstant,
 ) -> Result<Acceptance, CatalogError> {
     let binding = &command.binding;
     let app = &binding.app;
@@ -417,7 +417,7 @@ pub async fn lookup(
 pub async fn archive(
     tx: &Database,
     app: &AppId,
-    now: i64,
+    now: UtcInstant,
 ) -> Result<Option<Transition>, CatalogError> {
     let Some(state) = lock_live_app(tx, app).await? else {
         return Ok(None);
@@ -451,7 +451,7 @@ pub async fn archive(
 pub async fn restore(
     tx: &Database,
     app: &AppId,
-    now: i64,
+    now: UtcInstant,
 ) -> Result<Option<Transition>, CatalogError> {
     let Some(state) = lock_live_app(tx, app).await? else {
         return Ok(None);
@@ -495,7 +495,7 @@ pub async fn restore(
                     .eq(app.as_str())?
                     .and(apps::archived_at.is_not_null()),
                 apps::archived_at
-                    .set(None::<i64>)?
+                    .set(None::<UtcInstant>)?
                     .and(apps::updated_at.set(now)?)?,
             )
             .await?,
@@ -652,7 +652,7 @@ async fn acquire_deployment(
     tx: &Database,
     app: &AppId,
     deployment: &VerifiedDeployment,
-    now: i64,
+    now: UtcInstant,
 ) -> Result<DeploymentId, CatalogError> {
     if let Some(existing) = existing_deployment(tx, app, deployment.hash()).await? {
         changed(
@@ -717,7 +717,7 @@ async fn insert_intent(
     revision: Revision,
     action: &'static str,
     activation: Option<(&DeploymentId, &str)>,
-    now: i64,
+    now: UtcInstant,
 ) -> Result<(), CatalogError> {
     let id = zeroship_core::typed_id::new_lifecycle_intent_id();
     let inserted = tx
