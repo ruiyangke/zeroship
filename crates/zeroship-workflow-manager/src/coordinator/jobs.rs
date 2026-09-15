@@ -150,8 +150,11 @@ const fn worker_operation(operation: &JobOperation) -> Result<(), Error> {
         JobOperation::Advance { .. } | JobOperation::Fanout { .. } | JobOperation::Propagate { .. } => {
             Ok(())
         }
+        // A worker that could publish a release would be asking itself to give
+        // code back, so retention stays the manager's decision.
         JobOperation::Activate { .. }
         | JobOperation::Cron { .. }
+        | JobOperation::ReleaseHold { .. }
         | JobOperation::Management { .. }
         | JobOperation::Close { .. }
         | JobOperation::Reconcile {}

@@ -114,11 +114,15 @@ or nonces returned by JavaScript do not select the mutation target.
 Workflows belong to the app's normal `.zship` deployment. Runs pin that app
 deployment and load its code and runtime descriptor through the app bundle
 loader. Activation acquires a durable deployment hold before selecting code;
-replay verifies the held app manifest and its referenced blobs. Local development
-uses the same app build and retains normal deployment metadata beside the
-artifacts. The [worker design](../proposals/2026-09-11-workflow-worker.md) describes
-the remaining production retention cutover, which keeps platform bundle
-collection independent of customer SQL.
+replay verifies the held app manifest and its referenced blobs. Republishing
+supersedes that deployment, and both its holders give it back once nothing needs
+it: the manager releases the queue hold, then asks the engine to release the
+journal hold, which it refuses while any run or retained generation still names
+the deployment. Local development uses the same app build and retains normal
+deployment metadata beside the artifacts. The
+[worker design](../proposals/2026-09-11-workflow-worker.md) describes the
+remaining production retention cutover, which keeps platform bundle collection
+independent of customer SQL.
 
 The CLI runs workflows through the same native manager and delivered jobs as a
 deployment, independently of HTTP requests. `zeroship serve dist/app.zship`

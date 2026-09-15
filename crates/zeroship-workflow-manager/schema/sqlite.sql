@@ -3,13 +3,15 @@ CREATE TABLE "schema_version" ("id" TEXT PRIMARY KEY NOT NULL, "fingerprint" TEX
 
 CREATE TABLE "queue_scopes" ("id" TEXT PRIMARY KEY NOT NULL, "lock_version" INTEGER NOT NULL DEFAULT 0, "dispatch_cursor" INTEGER NOT NULL DEFAULT 0);
 
-CREATE TABLE "deployment_holds" ("id" TEXT PRIMARY KEY NOT NULL, "app_id" TEXT NOT NULL, "deployment_id" TEXT NOT NULL, "holder_id" TEXT NOT NULL, "deploy_hash" TEXT, "generation" INTEGER NOT NULL, "state" TEXT NOT NULL, "held_at" INTEGER, CONSTRAINT "deployment_hold_scope" FOREIGN KEY (app_id) REFERENCES queue_scopes(id) ON DELETE RESTRICT);
+CREATE TABLE "deployment_holds" ("id" TEXT PRIMARY KEY NOT NULL, "app_id" TEXT NOT NULL, "deployment_id" TEXT NOT NULL, "holder_id" TEXT NOT NULL, "deploy_hash" TEXT, "generation" INTEGER NOT NULL, "state" TEXT NOT NULL, "held_at" INTEGER, "journal_state" TEXT NOT NULL DEFAULT 'pending', "journal_job_id" TEXT, "journal_published_at" INTEGER, CONSTRAINT "deployment_hold_scope" FOREIGN KEY (app_id) REFERENCES queue_scopes(id) ON DELETE RESTRICT);
 
 CREATE INDEX IF NOT EXISTS "deployment_hold_scope_idx" ON "deployment_holds" ("app_id");
 
 CREATE UNIQUE INDEX IF NOT EXISTS "deployment_holds_scope_key" ON "deployment_holds" ("app_id", "deployment_id");
 
 CREATE INDEX IF NOT EXISTS "deployment_holds_pending_idx" ON "deployment_holds" ("state", "app_id", "deployment_id");
+
+CREATE INDEX IF NOT EXISTS "deployment_holds_journal_idx" ON "deployment_holds" ("journal_state", "state", "app_id", "deployment_id");
 
 CREATE TABLE "workers" ("id" TEXT PRIMARY KEY NOT NULL, "capacity" INTEGER NOT NULL DEFAULT 1, "state" TEXT NOT NULL DEFAULT 'ready', "expires_at" INTEGER NOT NULL DEFAULT 0, "lock_version" INTEGER NOT NULL DEFAULT 0, "execution_zone_id" TEXT);
 
@@ -146,4 +148,4 @@ CREATE INDEX IF NOT EXISTS "capacity_demands_zone_idx" ON "capacity_demands" ("e
 CREATE TABLE "capacity_targets" ("id" TEXT PRIMARY KEY NOT NULL, "revision" INTEGER NOT NULL DEFAULT 0, "desired" INTEGER NOT NULL DEFAULT 0, "state" TEXT NOT NULL DEFAULT 'steady', "refusal" TEXT, "observed" INTEGER, "attempt" INTEGER NOT NULL DEFAULT 0, "attempt_deadline" INTEGER, "retry_at" INTEGER, "below_since" INTEGER, "lock_version" INTEGER NOT NULL DEFAULT 0);
 
 SELECT 1;
-INSERT INTO main.schema_version (id, fingerprint) VALUES ('manager', 'bd1d7558038f419fad5e865d610fb6dcb17023929ea388c627668de96ca0ff22');
+INSERT INTO main.schema_version (id, fingerprint) VALUES ('manager', 'ce953c04a8df02ce2792a2c5d6062beed648780e4bd29d3696fe0c1085a2e464');

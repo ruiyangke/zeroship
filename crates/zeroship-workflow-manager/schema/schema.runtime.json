@@ -384,6 +384,38 @@
           "storage": {
             "valueColumn": "held_at"
           }
+        },
+        "journal_state": {
+          "type": "string",
+          "required": true,
+          "default": "pending",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "journal_state"
+          }
+        },
+        "journal_job_id": {
+          "type": "string",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "journal_job_id"
+          }
+        },
+        "journal_published_at": {
+          "type": "bigInt",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "journal_published_at"
+          }
         }
       },
       "options": {
@@ -403,6 +435,15 @@
         {
           "name": "deployment_holds_pending_idx",
           "fields": [
+            "state",
+            "app_id",
+            "deployment_id"
+          ]
+        },
+        {
+          "name": "deployment_holds_journal_idx",
+          "fields": [
+            "journal_state",
             "state",
             "app_id",
             "deployment_id"
