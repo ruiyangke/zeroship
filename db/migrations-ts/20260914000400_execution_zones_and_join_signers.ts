@@ -6,11 +6,11 @@ import { grant, now, raw, t, table } from "@zeroship/migrate";
 // plane minting for its own zone -- and whose public half Control records here,
 // in advance, along with the execution zones that signer may mint for.
 //
-// This replaced a per-deployment-unit ENROLLER whose private half was mounted
-// on every worker of the unit. That put the signing key on the machine that
-// runs creator code, made possession of the Control-side import file enough to
-// enrol, and made adding a unit a Control-side operation. One signer covers as
-// many units as its zones do, and nothing a worker holds can mint.
+// The signing key therefore never reaches a worker: what a worker holds is a
+// short-lived, use-capped TOKEN it cannot mint anything with. The document
+// recorded here carries PUBLIC keys only, so possession of it admits nobody.
+// One signer covers as many deployment units as its zones do, so bringing up
+// another unit is not a Control-side operation at all.
 //
 // See crates/zeroship-control/src/worker_join.rs for the verification and the
 // import, crates/zeroship-core/src/worker_join.rs for the token and the

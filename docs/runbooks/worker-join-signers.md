@@ -161,7 +161,7 @@ written once by `zeroship dev init`. A deployment that genuinely needs a
 second signer - a second, independently rotatable trust anchor for the same
 zone - runs `zeroship dev init` for that signer on its own, then merges the
 resulting entry from its `join-signers.json` into this deployment's import
-file: the import format is a JSON array of entries and the import itself is
+file: the document holds one `signers` array and the import itself is
 additive, so adding one more entry and restarting Control inserts only what is
 new.
 

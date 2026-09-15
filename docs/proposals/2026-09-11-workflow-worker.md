@@ -392,10 +392,10 @@ the `env.workflows` HTTP backend still authenticate with the shared control key
 rather than a worker credential, so revoking a signer does not take that
 credential from a process that already holds it. The poll is on the POLLED tier
 that `docs/proposals/2026-09-05-app-metadata-distribution.md` replaces, and the
-backend goes with the workflow-server cutover. Production startup registration,
-consumer wiring, zone eligibility (including the foreign key from
-`worker_instances.execution_zone_id`) and capacity activation remain cutover
-work.
+backend goes with the workflow-server cutover. The instance's zone is recorded
+and foreign-keyed to `zeroship.execution_zones`; what reads it - production
+startup registration, consumer wiring, the manager's zone matching and capacity
+activation - remains cutover work.
 
 ### Placement eligibility and capacity provider
 

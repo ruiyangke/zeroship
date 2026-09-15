@@ -2,25 +2,21 @@ import { createFunction, grant, now, raw, t, table } from "@zeroship/migrate";
 
 // ONE ROW IS ONE LIVE WORKER PROCESS. Control writes this table; the worker
 // never touches it and holds no privilege on it. The worker generates an
-// Ed25519 instance keypair AT BOOT, IN MEMORY, NEVER ON DISK, and enrols the
-// public half over HTTP authenticated by the `svc/worker` role key it already
-// holds. An instance is a CHILD of that role: it mints under
-// `svc/worker/<wkr_id>` and is addressed as `svc/worker`.
+// Ed25519 instance keypair AT BOOT, IN MEMORY, NEVER ON DISK, and presents the
+// public half with a JOIN TOKEN a trusted signer minted, plus a signature over
+// the request made by that very key. An instance is a CHILD of the worker role:
+// it mints under `svc/worker/<wkr_id>` and is addressed as `svc/worker`.
 //
-// WHAT THIS BUYS, STATED HONESTLY SO NOTHING HERE OVERSELLS IT. Enrolment
-// authenticates with the SHARED role key, so a holder of that key can enrol
-// many instances. Per-instance identity is a DISTINGUISHER against a role-key
-// holder, NOT a boundary. What it buys is attribution, per-instance revocation,
-// a countable event, and it is what makes a per-app placement fence writable at
-// all. No comment in this file, and no doc citing it, may say it is a boundary.
+// WHAT THIS BUYS, STATED SO NOTHING HERE OVERSELLS IT. The instance private
+// half exists in one process's memory and nowhere else, so retiring one row
+// takes a capability away rather than only removing an attribution. A captured
+// join token admits workers the captor controls and nothing more, because the
+// possession proof binds the key being registered. What bounds a token is its
+// own budget: the uses it was minted with, until its expiry, in the one zone it
+// names.
 //
-// THIS LIST SAID "a countable and RATE-LIMITABLE event" UNTIL 2026-09-08, AND
-// NOTHING RATE-LIMITS ENROLMENT. There is no budget, quota or duplicate check on
-// the endpoint, so a role-key holder may enrol without bound. The word was
-// written in the same breath as the careful refusal to call this a boundary,
-// which is how an unearned claim gets in: beside a true one, in a list of
-// benefits, where it reads as delivered rather than merely possible. Enrolment
-// IS a discrete event that COULD be limited; nothing does it. Say "could" in a
+// NOTHING RATE-LIMITS JOINING beyond that budget, and the budget is the whole
+// of it: a signer that mints generously mints generously. Say "could" in a
 // design and "does" only where something does.
 //
 // THE RING KEY IS CONTROL'S, AND THE REGISTRANT CONTRIBUTES NOTHING TO IT.
@@ -31,7 +27,7 @@ import { createFunction, grant, now, raw, t, table } from "@zeroship/migrate";
 // bytes from its own CSPRNG, and they are frozen for the row's life by the
 // trigger below.
 //
-// THE ADDRESS IS DERIVED FROM THE ENROLMENT CONNECTION, AND THE WORKER SUPPLIES
+// THE ADDRESS IS DERIVED FROM THE JOIN CONNECTION, AND THE WORKER SUPPLIES
 // ONLY ITS LISTENING PORT. Control takes the host from the observed peer
 // address, validates the pair against an operator-declared envelope of permitted
 // CIDRs and ports held in CONTROL'S OWN config, and refuses anything outside it,
@@ -45,7 +41,7 @@ import { createFunction, grant, now, raw, t, table } from "@zeroship/migrate";
 // crates/zeroship-gateway/src/router/dispatch.rs strips a named header set and
 // COOKIE IS NOT IN IT, and `forward_dispatch` posts the full request -- body,
 // cookies, and the gateway-signed user envelope -- to whatever address the ring
-// returns. A registrant-supplied address would therefore let a role-key holder
+// returns. A registrant-supplied address would therefore let a token holder
 // INTERCEPT AND IMPERSONATE END-USER SESSIONS under the app's own origin, which
 // is worse than the exposure the registry exists to reduce. Derivation is also
 // what makes the design deployable: a per-process address setting has no
