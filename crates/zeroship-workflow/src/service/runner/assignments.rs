@@ -36,7 +36,7 @@ use std::{
 use zeroship_core::{
     app_id::AppId,
     workflow_coordination::{
-        AssignedScope, Assignment, ReleaseReason, ReleaseScope, RequestId, ScopePage,
+        AssignedScope, Assignment, FailureCode, ReleaseReason, ReleaseScope, RequestId, ScopePage,
     },
 };
 use zeroship_workflow_client::WorkerCoordinator;
@@ -450,10 +450,21 @@ impl<F: CreatorFactory> AssignmentBindings<F> {
             .iter()
             .map(|entry| self.refresh_entry(entry))
             .collect();
+        // Prefer a SUBSTANTIVE refusal over the contention answer. Entries
+        // refresh concurrently, and a caller arriving while one is already
+        // running reports it unavailable by design (see above) - so taking
+        // whichever error finished first could report that benign answer and
+        // discard a real refusal from another entry. A revoked placement then
+        // reads in the log as nothing worse than a busy refresh.
         let mut result = Ok(());
         while let Some(refreshed) = pending.next().await {
-            if result.is_ok() {
-                result = refreshed;
+            let Err(error) = refreshed else { continue };
+            let supersedes = match &result {
+                Ok(()) => true,
+                Err(held) => is_refresh_contention(held) && !is_refresh_contention(&error),
+            };
+            if supersedes {
+                result = Err(error);
             }
         }
         result
@@ -463,7 +474,7 @@ impl<F: CreatorFactory> AssignmentBindings<F> {
         self.current(entry)?;
         if entry.busy.replace(true) {
             return Err(WorkflowServiceError::Unavailable(
-                "workflow assignment refresh already in progress".into(),
+                REFRESH_IN_PROGRESS.into(),
             ));
         }
         let _busy = Busy(&entry.busy);
@@ -617,10 +628,51 @@ fn retired() -> WorkflowServiceError {
     WorkflowServiceError::Unavailable("workflow assignment binding retired or superseded".into())
 }
 
+/// The contention answer a caller gets while another refresh holds the entry.
+///
+/// Named once, because [`Assignments::refresh`] has to recognise it in order to
+/// stop it superseding a real refusal, and a literal repeated at both ends
+/// would let the two drift apart silently.
+const REFRESH_IN_PROGRESS: &str = "workflow assignment refresh already in progress";
+
+/// Whether this failure is the contention answer rather than a refusal.
+fn is_refresh_contention(error: &WorkflowServiceError) -> bool {
+    matches!(error, WorkflowServiceError::Unavailable(message) if message == REFRESH_IN_PROGRESS)
+}
+
+/// Carry a coordinator answer without flattening a refusal into an outage.
+///
+/// Same reasoning as the policy lease's mapping: a refusal is durable and wants
+/// an operator, an outage is transient and wants a retry, and reporting both as
+/// `workflow_unavailable` left a worker whose assignment was refused logging
+/// the same line as one that could not reach the manager. `refuse` above
+/// already keys off `PermissionDenied`, which this function could never
+/// produce.
 fn transport_error(error: zeroship_workflow_client::Error) -> WorkflowServiceError {
+    use zeroship_workflow_client::Error as Wire;
     match error {
-        zeroship_workflow_client::Error::Timeout => WorkflowServiceError::Timeout,
-        _ => WorkflowServiceError::Unavailable("workflow assignment metadata unavailable".into()),
+        Wire::Timeout => WorkflowServiceError::Timeout,
+        Wire::Unauthenticated | Wire::Refused(FailureCode::Unauthenticated) => {
+            WorkflowServiceError::Unauthenticated
+        }
+        Wire::Refused(FailureCode::Denied) => WorkflowServiceError::PermissionDenied,
+        Wire::Refused(FailureCode::Conflict) => WorkflowServiceError::Conflict(
+            "workflow assignment conflicts with the manager's record".into(),
+        ),
+        Wire::Refused(FailureCode::Capacity) => WorkflowServiceError::ResourceExhausted(
+            "workflow assignment refused for capacity".into(),
+        ),
+        Wire::Refused(FailureCode::Invalid) | Wire::Refused(FailureCode::RequestTooLarge) => {
+            WorkflowServiceError::InvalidRequest("workflow assignment request refused".into())
+        }
+        Wire::Refused(FailureCode::Unavailable)
+        | Wire::Unavailable
+        | Wire::InvalidConfig
+        | Wire::InvalidResponse
+        | Wire::RequestTooLarge
+        | Wire::ResponseTooLarge => {
+            WorkflowServiceError::Unavailable("workflow assignment metadata unavailable".into())
+        }
     }
 }
 
