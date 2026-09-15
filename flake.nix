@@ -40,6 +40,13 @@
             # it compiles the SQLite 3.51.x amalgamation into our binary.
             # Keep the CLI in the shell only for `sqlite3 <file>` debugging.
             sqlite
+            # `pg_dump` and `pg_restore` for the data suite's snapshot tests.
+            # `xtask test data` refuses to run unless both are on PATH at the
+            # same major version as the fixture server in
+            # tests/fixtures/postgres/Dockerfile; without them the suite stops
+            # at its preflight instead of reporting on the code. Bump this
+            # attribute with that Dockerfile's tag.
+            postgresql_16
             # libclang + clang are needed by rusqlite's `preupdate_hook`
             # Cargo feature, which uses `bindgen` to generate Rust
             # bindings against the bundled SQLite headers (see
