@@ -9,9 +9,7 @@ use zeroship_core::service_identity::{
 /// Every operation the catalog names, in one place for the table-wide guards.
 const CATALOG: &[ServiceEndpoint] = &[
     endpoints::GATEWAY_BACKCHANNEL_LOGOUT,
-    endpoints::GATEWAY_WORKFLOW_ADVANCE,
     endpoints::CONTROL_ROUTES,
-    endpoints::CONTROL_WORKFLOW_SIGNAL_INGRESS,
     endpoints::CONTROL_VERSIONS,
     endpoints::CONTROL_DEPLOYMENT_HOLD_ACQUIRE,
     endpoints::CONTROL_DEPLOYMENT_HOLD_RELEASE,
@@ -42,7 +40,6 @@ const CATALOG: &[ServiceEndpoint] = &[
     endpoints::CONTROL_SPEND_RECONCILE,
     endpoints::CONTROL_ERASURE_PREFLIGHT,
     endpoints::WORKER_DISPATCH,
-    endpoints::WORKER_WORKFLOW_ADVANCE,
     endpoints::WORKER_APP_LOGS,
 ];
 
@@ -216,22 +213,10 @@ fn endpoint_catalog_records_exact_measured_operations() {
             "/oidc/backchannel-logout",
         ),
         (
-            endpoints::GATEWAY_WORKFLOW_ADVANCE,
-            "gateway",
-            "POST",
-            "/__zeroship/internal/workflow-advance",
-        ),
-        (
             endpoints::CONTROL_ROUTES,
             "control",
             "GET",
             "/internal/routes",
-        ),
-        (
-            endpoints::CONTROL_WORKFLOW_SIGNAL_INGRESS,
-            "control",
-            "POST",
-            "/internal/workflows/signals/ingress",
         ),
         (
             endpoints::CONTROL_VERSIONS,
@@ -294,12 +279,6 @@ fn endpoint_catalog_records_exact_measured_operations() {
             "/dispatch/{app_id}",
         ),
         (
-            endpoints::WORKER_WORKFLOW_ADVANCE,
-            "worker",
-            "POST",
-            "/workflow-advance-unsigned/{app_id}",
-        ),
-        (
             endpoints::WORKER_APP_LOGS,
             "worker",
             "GET",
@@ -318,7 +297,6 @@ fn measured_allowlist_is_encoded_and_enforced_row_by_row() {
     assert_allowlist_row(
         "svc/control",
         &[
-            endpoints::GATEWAY_WORKFLOW_ADVANCE,
             endpoints::WORKFLOW_VERIFY_ASSIGNMENT,
             endpoints::WORKFLOW_MANAGE,
             endpoints::WORKFLOW_MANAGEMENT_STATUS,
@@ -350,9 +328,7 @@ fn measured_allowlist_is_encoded_and_enforced_row_by_row() {
         "svc/gateway",
         &[
             endpoints::CONTROL_ROUTES,
-            endpoints::CONTROL_WORKFLOW_SIGNAL_INGRESS,
             endpoints::WORKER_DISPATCH,
-            endpoints::WORKER_WORKFLOW_ADVANCE,
         ],
         all,
     );
@@ -432,13 +408,10 @@ fn authorization_keys_on_individual_compound_identity() {
     let unknown = identity("zeroship.ai", "svc/unknown");
     let wrong_domain = identity("attacker.example", "svc/control");
 
-    assert!(authorize(&control, endpoints::GATEWAY_WORKFLOW_ADVANCE));
-    assert!(!authorize(&auth, endpoints::GATEWAY_WORKFLOW_ADVANCE));
-    assert!(!authorize(&unknown, endpoints::GATEWAY_WORKFLOW_ADVANCE));
-    assert!(!authorize(
-        &wrong_domain,
-        endpoints::GATEWAY_WORKFLOW_ADVANCE
-    ));
+    assert!(authorize(&control, endpoints::WORKFLOW_MANAGE));
+    assert!(!authorize(&auth, endpoints::WORKFLOW_MANAGE));
+    assert!(!authorize(&unknown, endpoints::WORKFLOW_MANAGE));
+    assert!(!authorize(&wrong_domain, endpoints::WORKFLOW_MANAGE));
 }
 
 #[test]

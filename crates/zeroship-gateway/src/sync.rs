@@ -252,16 +252,6 @@ impl RouteCache {
         routes.get(app_id).map(|r| (app_id.clone(), r.clone()))
     }
 
-    /// Resolve a route by app id.
-    ///
-    /// The key is an [`AppId`], carried end to end from the control plane's
-    /// `RouteMap` (`HashMap<AppId, RouteEntry>`) through this table, so a
-    /// lookup that misses is an unknown app, not a rendering disagreement.
-    pub fn lookup_by_app_id(&self, app_id: &AppId) -> Option<Arc<CompiledRoute>> {
-        let routes = self.routes.read().unwrap();
-        routes.get(app_id).cloned()
-    }
-
     /// Resolve a route by its per-app OAuth `client_id` (= `oac_<base36>`).
     ///
     /// For per-app back-channel logout, the inbound

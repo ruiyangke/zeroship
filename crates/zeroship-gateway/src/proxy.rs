@@ -252,43 +252,6 @@ pub async fn forward_dispatch(
     result
 }
 
-/// Forward a durable-workflow StepRequest JSON body to the worker replay host.
-///
-/// `authorization` is the gateway's own peer credential for this hop, minted
-/// per call by the caller. This is the OUTBOUND leg of the internal advance
-/// edge, and it takes the same transport-only profile as every other
-/// gateway-to-worker call - the inbound leg's full profile stops at the
-/// handler, so the store write does not follow the request onto the ring.
-pub async fn forward_workflow_advance(
-    ring: &HashRing,
-    app_id: &AppId,
-    plan_id: &str,
-    request_id: &Uuid,
-    body: &[u8],
-    authorization: Option<&str>,
-) -> Result<HttpResponse, String> {
-    if ring.num_workers() == 0 {
-        return Err("no workers configured".into());
-    }
-
-    let (idx, worker_url) = ring.select(app_id);
-    ring.acquire(idx);
-    let path = format!("/workflow-advance-unsigned/{}", app_id.as_str());
-    let result = forward_to_worker_path(
-        worker_url,
-        &path,
-        app_id,
-        plan_id,
-        request_id,
-        body,
-        None,
-        authorization,
-    )
-    .await;
-    ring.release(idx);
-    result
-}
-
 /// Timeout for connecting and reading from workers.
 const WORKER_TIMEOUT: Duration = Duration::from_secs(30);
 
