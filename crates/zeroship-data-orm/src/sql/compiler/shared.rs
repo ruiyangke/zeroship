@@ -28,6 +28,9 @@ pub struct SqlSupport {
     pub advisory_locks: bool,
     /// Custom settings scoped to a transaction.
     pub transaction_settings: bool,
+    /// The resolution this backend stores an instant at. A value or offset
+    /// finer than the declared resolution is refused, never floored.
+    pub timestamp_resolution: crate::sql::temporal::TimestampResolution,
     pub max_bind_parameters: usize,
 }
 
@@ -291,6 +294,8 @@ pub enum IdentityReadPlan {
 #[derive(Clone, Copy)]
 pub(crate) struct Syntax {
     pub(crate) current_timestamp: &'static str,
+    /// Renders the database clock shifted by a signed microsecond offset. A
+    /// millisecond-resolution backend refuses an offset it cannot render.
     pub(crate) database_timestamp: fn(&mut SqlWriter, i64) -> Result<(), CompileError>,
     pub(crate) generated_identity_override: Option<&'static str>,
     pub(crate) timestamp_cast: &'static str,
@@ -1216,8 +1221,8 @@ fn write_expression(
             ));
         }
         Expression::CurrentTimestamp => writer.sql.push_str(syntax.current_timestamp),
-        Expression::DatabaseTimestamp { offset_millis } => {
-            (syntax.database_timestamp)(writer, offset_millis)?;
+        Expression::DatabaseTimestamp { offset_micros } => {
+            (syntax.database_timestamp)(writer, offset_micros)?;
         }
     }
     Ok(())

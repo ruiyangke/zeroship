@@ -227,7 +227,7 @@ impl Literal {
             )?),
             Value::String(value) | Value::Decimal(value) => Self::text(value)?,
             Value::Bytes(value) => Self::Bytes(value),
-            Value::Timestamp(value) => Self::Int(value),
+            Value::TimestampMicros(value) => Self::Int(value),
             Value::Json(value) => {
                 serde_json::from_str::<serde_json::Value>(&value)
                     .map_err(|_| LiteralError::InvalidJson)?;

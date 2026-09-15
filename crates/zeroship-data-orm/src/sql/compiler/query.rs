@@ -24,7 +24,7 @@ impl ParameterType {
             Value::Number(_) => Self::Number,
             Value::String(_) => Self::Text,
             Value::Bytes(_) => Self::Bytes,
-            Value::Timestamp(_) => Self::Timestamp,
+            Value::TimestampMicros(_) => Self::Timestamp,
             Value::Decimal(_) => Self::Decimal,
             Value::Json(_) => Self::Json,
             Value::Array(_) => Self::Array,

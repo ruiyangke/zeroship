@@ -29,7 +29,11 @@ async fn exercise_timestamps(db: &Database) {
         ("2000-01-01T02:00:00+02:00", 946_684_800_000),
         ("9999-12-31T23:59:59.999Z", 253_402_300_799_999),
     ] {
-        let encoded = <i64 as EncodeValue<sql_types::Timestamp>>::encode_value(millis).unwrap();
+        let micros = millis * 1_000;
+        let encoded = <UtcInstant as EncodeValue<sql_types::Timestamp>>::encode_value(
+            UtcInstant::from_unix_millis(millis).unwrap(),
+        )
+        .unwrap();
         let Output::Rows { rows, .. } = db
             .transaction(|tx| async move {
                 tx.collection("events")?
@@ -41,7 +45,7 @@ async fn exercise_timestamps(db: &Database) {
         else {
             panic!("insert must return rows")
         };
-        assert_eq!(rows[0]["instant"].as_i64(), Some(millis), "{text}");
+        assert_eq!(rows[0]["instant"].as_timestamp_micros(), Some(micros), "{text}");
         let id = rows[0]["id"].clone();
         for input in [value!(millis), value!(text)] {
             let Output::Rows { rows, .. } = events
@@ -55,7 +59,7 @@ async fn exercise_timestamps(db: &Database) {
                 panic!("upsert must return rows")
             };
             assert_eq!(rows[0]["id"], id, "equivalent instants must conflict");
-            assert_eq!(rows[0]["instant"].as_i64(), Some(millis));
+            assert_eq!(rows[0]["instant"].as_timestamp_micros(), Some(micros));
             let Output::Rows { rows, .. } = events
                 .update(
                     value!({"id":id.clone()}),
@@ -66,7 +70,7 @@ async fn exercise_timestamps(db: &Database) {
             else {
                 panic!("update must return rows")
             };
-            assert_eq!(rows[0]["instant"].as_i64(), Some(millis));
+            assert_eq!(rows[0]["instant"].as_timestamp_micros(), Some(micros));
             for filter in [
                 value!({"instant":input.clone()}),
                 value!({"instant":{"$in":[input.clone()]}}),
@@ -80,7 +84,7 @@ async fn exercise_timestamps(db: &Database) {
                     panic!("find must return rows")
                 };
                 assert_eq!(rows.len(), 1, "{input}");
-                assert_eq!(rows[0]["instant"].as_i64(), Some(millis));
+                assert_eq!(rows[0]["instant"].as_timestamp_micros(), Some(micros));
             }
         }
     }
@@ -162,11 +166,11 @@ async fn exercise_timestamp_extrema(postgres: bool) {
     assert_eq!(rows.len(), 1);
     assert!(matches!(
         rows[0]["earliest"],
-        Value::Timestamp(1_767_225_600_000)
+        Value::TimestampMicros(1_767_225_600_000_000)
     ));
     assert!(matches!(
         rows[0]["latest"],
-        Value::Timestamp(1_767_398_400_000)
+        Value::TimestampMicros(1_767_398_400_000_000)
     ));
 
     let Output::Rows { rows, .. } = events
@@ -186,6 +190,61 @@ async fn exercise_timestamp_extrema(postgres: bool) {
 #[compio::test]
 async fn postgres_timestamp_extrema_are_native_timestamps() {
     exercise_timestamp_extrema(true).await;
+}
+
+/// A maximum over instants keeps its microseconds, which is what a revocation
+/// marker ceiled to whole seconds depends on.
+///
+/// A revocation reader compares `ceil(max(revoked_after))` against a token's
+/// whole-second `iat`. If the maximum were floored to the containing
+/// millisecond, a marker a fraction past second S would ceil back to S and a
+/// token issued at S would be accepted: a revoked token would keep working.
+#[compio::test]
+async fn max_aggregate_preserves_microseconds() {
+    let owner = CollectionFixture::postgres("events", fields()).await;
+    let events = owner.database.collection("events").unwrap();
+    // A whole second, well inside the calendar, plus a fraction.
+    let second_micros = 1_767_225_600_000_000_i64;
+    let issued_at_seconds = second_micros / 1_000_000;
+    // Ceil a microsecond count to whole seconds, the shape a revocation reader
+    // applies to the aggregate before comparing it with a token's `iat`.
+    let ceil_seconds = |micros: i64| micros.div_euclid(1_000_000) + i64::from(micros % 1_000_000 != 0);
+    for (fraction, revoked) in [(0_i64, false), (1, true), (999, true), (1_000, true)] {
+        events
+            .insert(value!({"instant": Value::TimestampMicros(second_micros + fraction)}))
+            .await
+            .unwrap();
+        let Output::Rows { rows, .. } = events
+            .execute(Operation::Aggregate {
+                pipeline: value!([{"$group":{"latest":{"$max":"instant"}}}]),
+                options: value!({}),
+            })
+            .await
+            .unwrap()
+        else {
+            panic!("aggregate must return rows")
+        };
+        let latest = rows[0]["latest"]
+            .as_timestamp_micros()
+            .expect("the maximum is an instant");
+        assert_eq!(latest, second_micros + fraction, "fraction {fraction}");
+        // The control is the first row: with no fraction the marker ceils back
+        // to S and a token issued at S is NOT revoked. Every later row carries
+        // a fraction and must revoke it.
+        assert_eq!(
+            ceil_seconds(latest) > issued_at_seconds,
+            revoked,
+            "fraction {fraction}"
+        );
+        events
+            .execute(Operation::Delete {
+                filter: value!({}),
+                many: true,
+            })
+            .await
+            .unwrap();
+    }
+    owner.close().await;
 }
 
 #[compio::test]
@@ -224,6 +283,6 @@ async fn timestamps_reject_corrupt_sqlite_storage_without_exposing_it() {
     let Output::Rows { rows, .. } = events.find(value!({}), value!({})).await.unwrap() else {
         panic!("find must return rows")
     };
-    assert_eq!(rows[0]["instant"].as_i64(), Some(0));
+    assert_eq!(rows[0]["instant"].as_timestamp_micros(), Some(0));
     owner.close().await;
 }

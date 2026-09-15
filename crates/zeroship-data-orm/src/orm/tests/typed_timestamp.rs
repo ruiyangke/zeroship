@@ -24,17 +24,17 @@ use clocks::moments;
 #[derive(Debug, FromRow)]
 #[orm(entity = moments)]
 struct Moment {
-    happened: i64,
-    deadline: Option<i64>,
-    touched: i64,
+    happened: UtcInstant,
+    deadline: Option<UtcInstant>,
+    touched: UtcInstant,
 }
 
 #[derive(Insertable)]
 #[orm(entity = moments)]
 struct NewMoment<'a> {
     id: &'a str,
-    happened: i64,
-    deadline: Option<i64>,
+    happened: UtcInstant,
+    deadline: Option<UtcInstant>,
 }
 
 async fn fixture(postgres: bool) -> CollectionFixture {
@@ -91,16 +91,16 @@ async fn committed_offsets_shift_the_database_clock(
     table: &EntityCollection<moments::Entity>,
     postgres: bool,
 ) {
-    let clock_read_gap_millis = if postgres { 100 } else { 0 };
-    for (offset_millis, expression) in [
+    let clock_read_gap_micros = if postgres { 100_000 } else { 0 };
+    for (offset_micros, expression) in [
         (
-            -1_500,
+            -1_500_000,
             TimestampExpr::database_now()
                 .minus(Duration::from_millis(1_500))
                 .unwrap(),
         ),
         (
-            5,
+            5_000,
             TimestampExpr::database_now()
                 .plus(Duration::from_millis(5))
                 .unwrap(),
@@ -120,10 +120,14 @@ async fn committed_offsets_shift_the_database_clock(
         .unwrap()
         .expect("the row exists");
         let stored = table.query().first::<Moment>().await.unwrap().unwrap();
-        let applied = stored.deadline.expect("the offset was committed") - stored.happened;
+        let applied = stored
+            .deadline
+            .expect("the offset was committed")
+            .unix_micros()
+            - stored.happened.unix_micros();
         assert!(
-            (applied - offset_millis).abs() <= clock_read_gap_millis,
-            "an offset of {offset_millis} ms was stored {applied} ms from the database clock"
+            (applied - offset_micros).abs() <= clock_read_gap_micros,
+            "an offset of {offset_micros} us was stored {applied} us from the database clock"
         );
     }
 }
@@ -134,7 +138,7 @@ async fn committed_offsets_shift_the_database_clock(
 async fn reassigned_values_leave_caller_expressions(table: &EntityCollection<moments::Entity>) {
     let reassigned = || {
         Patch::<moments::Entity>::from_assignments(
-            [("touched".to_owned(), Value::Timestamp(0))].into(),
+            [("touched".to_owned(), Value::TimestampMicros(0))].into(),
         )
     };
     let before = table.query().first::<Moment>().await.unwrap().unwrap();
@@ -177,7 +181,8 @@ async fn reassigned_values_leave_caller_expressions(table: &EntityCollection<mom
     .expect("the row exists");
     assert!(written.deadline < before.deadline, "the expression wrote");
     assert_ne!(
-        written.touched, 0,
+        written.touched.unix_micros(),
+        0,
         "the generator replaced the removed value"
     );
 }
@@ -185,10 +190,11 @@ async fn reassigned_values_leave_caller_expressions(table: &EntityCollection<mom
 async fn exercise(postgres: bool) {
     let owner = fixture(postgres).await;
     let table = owner.database.entity::<moments::Entity>().unwrap();
+    let epoch = UtcInstant::from_unix_micros(0).unwrap();
     table
         .insert::<_, Moment>(NewMoment {
             id: "row",
-            happened: 0,
+            happened: epoch,
             deadline: None,
         })
         .await
@@ -220,8 +226,9 @@ async fn exercise(postgres: bool) {
                 next.happened > first.happened,
                 "database clock must advance within the transaction"
             );
-            assert!(next.deadline.unwrap() > next.happened + 59_000);
-            assert!(next.deadline.unwrap() < next.happened + 61_000);
+            let deadline = next.deadline.unwrap().unix_micros();
+            assert!(deadline > next.happened.unix_micros() + 59_000_000);
+            assert!(deadline < next.happened.unix_micros() + 61_000_000);
             if postgres {
                 assert_eq!(
                     first.touched, next.touched,
@@ -253,11 +260,11 @@ async fn exercise(postgres: bool) {
         moments::happened
             .set_expression(TimestampExpr::database_now())
             .unwrap()
-            .and(moments::happened.set(0_i64).unwrap())
+            .and(moments::happened.set(epoch).unwrap())
             .is_err()
     );
-    let span = Duration::from_millis(
-        (crate::sql::temporal::MAX_TIMESTAMP_MILLIS - crate::sql::temporal::MIN_TIMESTAMP_MILLIS)
+    let span = Duration::from_micros(
+        (crate::sql::temporal::MAX_TIMESTAMP_MICROS - crate::sql::temporal::MIN_TIMESTAMP_MICROS)
             as u64,
     );
     for expression in [
@@ -305,7 +312,10 @@ async fn exercise(postgres: bool) {
                 );
             }
             table
-                .update::<_, Moment>(moments::id.eq("row")?, moments::happened.set(7_i64)?)
+                .update::<_, Moment>(
+                    moments::id.eq("row")?,
+                    moments::happened.set(UtcInstant::from_unix_millis(7)?)?,
+                )
                 .await?;
             Ok(())
         })
@@ -319,7 +329,7 @@ async fn exercise(postgres: bool) {
             .unwrap()
             .unwrap()
             .happened,
-        7
+        UtcInstant::from_unix_millis(7).unwrap()
     );
     Box::pin(committed_offsets_shift_the_database_clock(&table, postgres)).await;
     Box::pin(reassigned_values_leave_caller_expressions(&table)).await;
@@ -327,7 +337,7 @@ async fn exercise(postgres: bool) {
         .map(|index| format!("extra_{index}")).collect::<Vec<_>>();
     for batch in ids.chunks(crate::budgets::MAX_INSERT_MANY_BATCH) {
         table.insert_many::<_, Moment>(batch.iter().map(|id| NewMoment {
-            id, happened: 0, deadline: None,
+            id, happened: epoch, deadline: None,
         })).await.unwrap();
     }
     let error = table.update_many(Filter::all(), moments::deadline.set_expression(TimestampExpr::database_now()).unwrap()).await.unwrap_err();
@@ -346,28 +356,174 @@ async fn typed_timestamp_postgres() {
     Box::pin(exercise(true)).await;
 }
 
+/// Offsets are whole microseconds. A finer duration has no exact rendering on
+/// any backend, so it is refused where it is written rather than rounded.
 #[test]
 fn typed_timestamp_rejects_unrepresentable_offsets() {
-    assert!(
-        TimestampExpr::database_now()
-            .plus(Duration::from_nanos(1))
-            .is_err()
-    );
-    assert!(
-        TimestampExpr::database_now()
-            .minus(Duration::from_nanos(1))
-            .is_err()
-    );
+    for nanos in [1_u64, 999, 1_001] {
+        assert!(
+            TimestampExpr::database_now()
+                .plus(Duration::from_nanos(nanos))
+                .is_err(),
+            "{nanos}"
+        );
+        assert!(
+            TimestampExpr::database_now()
+                .minus(Duration::from_nanos(nanos))
+                .is_err(),
+            "{nanos}"
+        );
+    }
     assert!(TimestampExpr::database_now().plus(Duration::MAX).is_err());
     assert!(TimestampExpr::database_now().minus(Duration::MAX).is_err());
-    assert_eq!(
-        TimestampExpr::database_now()
-            .plus(Duration::from_millis(1))
-            .unwrap()
-            .minus(Duration::from_millis(1))
+    // Control: a whole microsecond is accepted and cancels exactly, which is
+    // the resolution the offset now carries.
+    for duration in [Duration::from_micros(1), Duration::from_millis(1)] {
+        assert_eq!(
+            TimestampExpr::database_now()
+                .plus(duration)
+                .unwrap()
+                .minus(duration)
+                .unwrap(),
+            TimestampExpr::database_now()
+        );
+    }
+}
+
+/// A value read back out of PostgreSQL matches its own row by equality.
+///
+/// This is the shape a reservation token depends on: a write returns the stored
+/// instant, and a later statement re-binds that instant to find the same row.
+/// Any rounding at the driver boundary breaks it silently.
+#[compio::test]
+async fn read_back_value_matches_its_row_by_equality() {
+    let owner = fixture(true).await;
+    let table = owner.database.entity::<moments::Entity>().unwrap();
+    table
+        .insert::<_, Moment>(NewMoment {
+            id: "row",
+            happened: UtcInstant::from_unix_micros(0).unwrap(),
+            deadline: None,
+        })
+        .await
+        .unwrap();
+    let reserved = Box::pin(table.update::<_, Moment>(
+        moments::id.eq("row").unwrap(),
+        moments::happened
+            .set_expression(TimestampExpr::database_now())
             .unwrap(),
-        TimestampExpr::database_now()
+    ))
+    .await
+    .unwrap()
+    .expect("the row exists")
+    .happened;
+    // The database clock carries a fraction, so a millisecond-floored value
+    // would be a different instant than the one stored.
+    assert_ne!(
+        reserved.unix_micros() % 1_000,
+        0,
+        "the database clock must supply a sub-millisecond fraction for this case to bind"
     );
+    assert_eq!(
+        table
+            .query()
+            .filter(moments::happened.eq(reserved).unwrap())
+            .count()
+            .await
+            .unwrap(),
+        1
+    );
+    // Control: one microsecond away matches nothing, so the equality above is
+    // the stored instant and not a coarse match.
+    let skewed = UtcInstant::from_unix_micros(reserved.unix_micros() + 1).unwrap();
+    assert_eq!(
+        table
+            .query()
+            .filter(moments::happened.eq(skewed).unwrap())
+            .count()
+            .await
+            .unwrap(),
+        0
+    );
+    owner.close().await;
+}
+
+/// SQLite stores whole milliseconds. A finer value is refused with a typed
+/// code before any statement runs, and nothing is written.
+#[compio::test]
+async fn sqlite_refuses_sub_millisecond_values() {
+    let owner = fixture(false).await;
+    let table = owner.database.entity::<moments::Entity>().unwrap();
+    let assert_refused = |result: Result<Option<Moment>, DbError>| {
+        let error = result.unwrap_err();
+        assert!(
+            matches!(
+                error,
+                DbError::ValidationFailed {
+                    code: "timestamp_precision_unsupported",
+                    ..
+                }
+            ),
+            "{error:?}"
+        );
+    };
+    for micros in [1_001_i64, -1, 999] {
+        let fine = UtcInstant::from_unix_micros(micros).unwrap();
+        assert_refused(
+            table
+                .insert::<_, Moment>(NewMoment {
+                    id: "fine",
+                    happened: fine,
+                    deadline: None,
+                })
+                .await
+                .map(Some),
+        );
+        assert_eq!(
+            table.query().count().await.unwrap(),
+            0,
+            "a refused write must leave the table empty"
+        );
+    }
+    // Control: whole milliseconds round-trip exactly, on both sides of the
+    // epoch, so the refusal is about the fraction and not about writing at all.
+    for millis in [-1_i64, 0, 1_001] {
+        let coarse = UtcInstant::from_unix_millis(millis).unwrap();
+        let written = table
+            .insert::<_, Moment>(NewMoment {
+                id: &format!("coarse_{millis}"),
+                happened: coarse,
+                deadline: Some(coarse),
+            })
+            .await
+            .unwrap();
+        assert_eq!(written.happened, coarse);
+        assert_eq!(written.deadline, Some(coarse));
+    }
+    // A sub-millisecond offset on the database clock is refused the same way.
+    let error = Box::pin(table.update_many(
+        Filter::all(),
+        moments::deadline
+            .set_expression(
+                TimestampExpr::database_now()
+                    .plus(Duration::from_micros(1))
+                    .unwrap(),
+            )
+            .unwrap(),
+    ))
+    .await
+    .unwrap_err();
+    assert!(
+        matches!(
+            error,
+            DbError::ValidationFailed {
+                code: "timestamp_precision_unsupported",
+                ..
+            }
+        ),
+        "{error:?}"
+    );
+    owner.close().await;
 }
 
 schema! {

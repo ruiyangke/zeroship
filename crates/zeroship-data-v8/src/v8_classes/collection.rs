@@ -456,7 +456,7 @@ impl Collection {
                     Value::Object(_) => "object".to_string(),
                     Value::Array(_) => unreachable!(),
                     Value::Bytes(_) => "bytes".into(),
-                    Value::Timestamp(_) => "timestamp".into(),
+                    Value::TimestampMicros(_) => "timestamp".into(),
                     Value::Decimal(_) => "decimal".into(),
                     Value::Json(_) => "JSON".into(),
                 };

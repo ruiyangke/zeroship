@@ -23,12 +23,21 @@ fn scalar(kind: LogicalType, field: &str, value: &mut Value) -> Result<(), Codec
             ));
         }
     } else {
-        let millis = crate::sql::temporal::timestamp_millis(value).ok_or_else(|| {
+        // A temporal field nested inside JSON keeps the millisecond form on
+        // both backends: JSON numbers are the boundary's unit. A finer value is
+        // refused rather than floored, as a scalar column would be.
+        let micros = crate::sql::temporal::timestamp_micros(value).ok_or_else(|| {
             CodecError::validation(
                 "invalid_timestamp",
                 format!(
                     "column '{field}' requires a portable timestamp or integral Unix milliseconds"
                 ),
+            )
+        })?;
+        let millis = crate::sql::temporal::exact_timestamp_millis(micros).ok_or_else(|| {
+            CodecError::validation(
+                "timestamp_precision_unsupported",
+                format!("column '{field}' stores whole milliseconds inside JSON"),
             )
         })?;
         *value = Value::from(millis);

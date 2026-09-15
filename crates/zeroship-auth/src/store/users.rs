@@ -7,7 +7,7 @@
 
 use compio_postgres::{Client, GenericClient};
 use zeroship_core::UserId;
-use zeroship_data_orm::orm::{Database, DbError, TimestampExpr};
+use zeroship_data_orm::orm::{Database, DbError, TimestampExpr, UtcInstant};
 
 use super::native::models::users as model;
 
@@ -31,15 +31,15 @@ pub struct UserRow {
     #[orm(decode_with = super::native::user_id)]
     pub id: UserId,
     pub email: String,
-    #[orm(decode_with = super::native::optional_timestamp)]
+    #[orm(decode_with = super::native::optional_instant)]
     pub email_verified_at: Option<chrono::DateTime<chrono::Utc>>,
     pub name: String,
     pub avatar_url: Option<String>,
     pub password_hash: Option<String>,
     pub credential_version: i64,
-    #[orm(decode_with = super::native::optional_timestamp)]
+    #[orm(decode_with = super::native::optional_instant)]
     pub locked_until: Option<chrono::DateTime<chrono::Utc>>,
-    #[orm(decode_with = super::native::optional_timestamp)]
+    #[orm(decode_with = super::native::optional_instant)]
     pub disabled_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
@@ -190,7 +190,7 @@ pub async fn reset_login_failures(db: &Database, id: &UserId) -> Result<()> {
             ),
             model::failed_login_count
                 .set(0_i32)?
-                .and(model::locked_until.set(None::<i64>)?)?,
+                .and(model::locked_until.set(None::<UtcInstant>)?)?,
         )
         .await?;
     Ok(())

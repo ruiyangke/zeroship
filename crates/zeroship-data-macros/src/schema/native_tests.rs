@@ -535,7 +535,7 @@ fn native_literals_preserve_numbers_bytes_and_nested_values() {
         "b\"bytes\"",
         "[1, null, {nested: true}]",
         "decimal(\"9007199254740993.01\")",
-        "timestamp(123)",
+        "timestamp_micros(123)",
     ];
     let orm = syn::parse_quote!(::zeroship_data_orm::orm);
     for source in cases {
@@ -557,7 +557,8 @@ fn native_literals_preserve_numbers_bytes_and_nested_values() {
         "18446744073709551616",
         "-9223372036854775809",
         "{same: 1, same: 2}",
-        "timestamp(1.5)",
+        "timestamp_micros(1.5)",
+        "timestamp(123)",
         "unknown()",
         "1e999",
     ] {
