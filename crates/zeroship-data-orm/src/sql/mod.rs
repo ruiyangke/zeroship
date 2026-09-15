@@ -35,6 +35,8 @@ pub mod catalog;
 /// Descriptor validation and physical storage mapping.
 pub mod mapping;
 pub mod compiler;
+/// Advisory locks and transaction-local settings.
+pub mod coordination;
 pub(crate) mod decimal;
 pub mod descriptors;
 pub mod lifecycle;

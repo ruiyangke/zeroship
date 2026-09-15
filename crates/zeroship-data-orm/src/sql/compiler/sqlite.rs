@@ -22,6 +22,9 @@ const SUPPORT: SqlSupport = SqlSupport {
     insert_generated_identity: true,
     identity_allocation: true,
     default_expression: false,
+    row_locks: false,
+    advisory_locks: false,
+    transaction_settings: false,
     max_bind_parameters: super::SQLITE_BIND_LIMIT,
 };
 
@@ -33,7 +36,8 @@ const SYNTAX: super::shared::Syntax = super::shared::Syntax {
     vector_cast: "",
     numeric_cast: "",
     text_array_cast: None,
-    first_row_lock: "",
+    write_target_lock: "",
+    required_row_lock: None,
     insensitive_like: "LIKE",
     insensitive_like_suffix: " COLLATE NOCASE",
     average_suffix: "",
@@ -198,7 +202,7 @@ impl SqlCompiler for SqliteCompiler {
         )?;
         match statement {
             Statement::Select(statement) => {
-                super::shared::compile_select(SYNTAX, effective, statement)
+                super::shared::compile_select(SYNTAX, effective, *statement)
             }
             Statement::VectorSearch(statement) => {
                 super::shared::compile_vector_search(SYNTAX, effective, statement)
@@ -215,6 +219,11 @@ impl SqlCompiler for SqliteCompiler {
             }
             Statement::Delete(statement) => {
                 super::shared::compile_delete(SYNTAX, effective, statement)
+            }
+            // A file-local engine has no server-wide locks and no settings.
+            Statement::AdvisoryLock(_) => Err(CompileError::Unsupported("advisory locks")),
+            Statement::SetTransactionSetting(_) => {
+                Err(CompileError::Unsupported("transaction settings"))
             }
         }
     }
