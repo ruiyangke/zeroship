@@ -60,6 +60,7 @@ async fn app_audit_is_append_only_but_retention_sweep_deletes_old() {
             &zeroship_control::plan_catalog::free_plan_id(),
             &owner_id,
             None,
+            None,
         )
         .await
         .expect("create_app")

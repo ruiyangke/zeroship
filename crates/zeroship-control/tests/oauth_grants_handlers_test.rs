@@ -1306,6 +1306,7 @@ async fn app_archive_returns_200_with_retained_record() {
             &zeroship_control::plan_catalog::free_plan_id(),
             &caller.user_id,
             None,
+            None,
         )
         .await
         .expect("create app");

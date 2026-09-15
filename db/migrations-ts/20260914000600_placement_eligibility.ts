@@ -18,14 +18,20 @@ export default {
   name: "placement_eligibility",
   schema() {
     // ---- apps.execution_zone_id ---------------------------------------------
-    // The default names the deployment's single seeded zone
-    // (20260914000450_execution_zones_default_zone.ts). A single-zone
-    // deployment has exactly one choice, so an app created without naming a
-    // zone lands in it. A deployment with more than one zone must name the
-    // zone when it creates the app; the frozen trigger below then keeps it.
+    // Control names the zone when it creates an app: it resolves the caller's
+    // zone, or the deployment's one declared zone when the caller names none,
+    // and refuses to create an app it cannot place. The column therefore
+    // carries NO default. It is added with one because ADD COLUMN NOT NULL
+    // needs a value for the rows already there, and the default is dropped in
+    // the same migration so nothing after this can land an app in a zone by
+    // omission. The frozen trigger below then keeps whatever Control wrote.
     table("apps", { schema: "zeroship" })
       .column("execution_zone_id")
       .add({ type: t.text().notNull().default("ezn_default000000000000000000") });
+    raw({
+      sql: 'ALTER TABLE "zeroship"."apps" ALTER COLUMN "execution_zone_id" DROP DEFAULT',
+      reason: "an app's execution zone is named by its creator, never defaulted",
+    });
     table("apps", { schema: "zeroship" })
       .foreignKey("apps_execution_zone_fk")
       .add({

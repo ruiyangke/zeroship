@@ -664,6 +664,42 @@ pub(crate) async fn active_instance_public_key(
     Ok(<[u8; PUBLIC_KEY_LENGTH]>::try_from(stored).ok())
 }
 
+/// Whether the worker instance that signed a host app read serves that app.
+///
+/// An app belongs to exactly one execution zone and a worker instance to
+/// exactly one, both recorded by Control and frozen by trigger. A worker runs
+/// only its own zone's apps, so a host read naming an app in another zone is
+/// refused rather than answered: authentication proves which instance called,
+/// and this decides which apps that instance may see. It refuses an instance
+/// or enroller that is no longer active for the same reason placement does.
+///
+/// The instance's zone is the zone of the enroller it joined through. When
+/// join tokens replace enrollers the zone is recorded on the instance row and
+/// only this query changes; every caller keeps asking the same question.
+///
+/// # Errors
+///
+/// Returns the driver's error when the registry cannot be read. A caller must
+/// refuse on that rather than admit the read.
+pub(crate) async fn instance_serves_app(
+    pg: &compio_postgres::Client,
+    instance_id: &str,
+    app_id: &str,
+) -> Result<bool, compio_postgres::Error> {
+    let rows = pg
+        .query(
+            "SELECT 1 FROM zeroship.worker_instances instance \
+               JOIN zeroship.worker_enrollers enroller ON enroller.id = instance.enroller_id \
+               JOIN zeroship.apps app \
+                 ON app.execution_zone_id = enroller.execution_zone_id \
+              WHERE instance.id = $1 AND instance.status = $3 \
+                AND enroller.status = $3 AND app.id = $2",
+            &[&instance_id, &app_id, &ENROLLED_STATUS],
+        )
+        .await?;
+    Ok(!rows.is_empty())
+}
+
 /// The verification key an ACTIVE enroller's assertions are checked under, or
 /// nothing.
 ///
