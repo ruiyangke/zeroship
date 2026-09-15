@@ -49,8 +49,8 @@
 #               instance keypair in memory at boot - never on disk, never
 #               before a live exchange with Control - so there is no on-disk
 #               worker key this fixture could republish under the gateway's
-#               issuer the way a persistent enroller key once could. The
-#               remaining launch here is the one that DOES still apply to the
+#               issuer at all. The remaining launch here is the one that
+#               DOES apply to the
 #               worker: control and auth sharing ONE key that belongs to
 #               NEITHER launched binary. The assertion verifier resolves its
 #               key from the issuer parsed OUT OF the presented assertion, so
@@ -220,12 +220,12 @@ rm -f "$PEERS_ABSENT"
 # Each is `$PEERS` with ONE member's `x` changed and nothing else, so the arm
 # below and the `configured` control differ in exactly one variable.
 #
-# There is no WORKER variant here. That arm existed while the worker held a
-# persistent enroller key on disk: republishing it under the gateway's issuer
-# let the worker mint an identity envelope its own verifier then accepted. A
-# worker now holds no persistent key at all - it draws its instance keypair in
-# memory only after a live exchange with Control, which this gate never
-# starts - so there is no on-disk worker key a fixture could republish, and
+# There is no WORKER variant here, and the absence is structural. The attack
+# it would stage is republishing the worker's own key under the gateway's
+# issuer, which would let the worker mint an identity envelope its own verifier
+# accepts. A worker holds no persistent key at all - it draws its instance
+# keypair in memory only after a live exchange with Control, which this gate
+# never starts - so there is no on-disk worker key a fixture could republish, and
 # the attack surface that arm proved closed is closed by construction.
 #
 # The same shape on the gateway: its own key also published as the worker's, so
@@ -399,12 +399,10 @@ stopped_at_the_fence "$TMP/wk_no_gateway.log" "$WORKER_NEXT" "the worker without
 # this reaches the same WORKER_PEERS_REFUSAL sentence as the missing/malformed
 # arms above.
 #
-# ONLY ONE WORKER VARIANT REMAINS. The old second variant published the
-# worker's own persistent enroller key under the gateway's issuer; that key no
-# longer exists (see the fixture-generation comment above), so the only
-# forged document left that says anything about the WORKER is the
-# third-party one: control and auth sharing a key that belongs to neither
-# launched binary.
+# ONE WORKER VARIANT, because a worker has no persistent key to republish (see
+# the fixture-generation comment above). The only forged document that says
+# anything about the WORKER is therefore the third-party one: control and auth
+# sharing a key that belongs to neither launched binary.
 forged_worker() {
   local log="$1" peers="$2" label="$3"
   local status

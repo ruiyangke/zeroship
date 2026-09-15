@@ -357,12 +357,12 @@ impl ServiceIssuer {
 
     /// Return the instance segment, when this identifier names one.
     ///
-    /// A DISTINGUISHER and not a boundary. A worker enrols with the key of its
-    /// deployment unit, so whoever holds that key can enrol as many instances
-    /// of the unit as they like and each is as genuine as the last; what this
-    /// buys is attribution, per-instance retirement and a countable event.
-    /// Nothing here narrows what an instance may do, and a caller must not
-    /// treat a distinct instance segment as evidence of a distinct holder.
+    /// A BOUNDARY as well as a distinguisher, for the one role that uses it: a
+    /// worker's instance private half exists in that process's memory and
+    /// nowhere else, so retiring one instance takes a capability away. What the
+    /// segment does NOT establish is what the holder may do - that is the
+    /// allowlist's job - so a caller must not read a distinct segment as a
+    /// distinct authorization.
     #[must_use]
     pub fn instance(&self) -> Option<&str> {
         self.instance.as_deref()

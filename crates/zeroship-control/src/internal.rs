@@ -176,10 +176,8 @@ async fn verified_instance_caller(
 /// - A ROLE identifier is verified against the operator's peer document. That
 ///   file is the only source of role keys and stays so.
 /// - An identifier naming an INSTANCE of a role is verified against the key
-///   control itself recorded - at enrolment for a worker instance, from the
-///   operator's import file for an enroller - because no peer document carries
-///   one: a worker draws its instance keypair in memory at boot, and an
-///   enroller's key is registered with a status the file cannot express.
+///   control itself recorded at JOIN, because no peer document carries one: a
+///   worker draws its instance keypair in memory at boot.
 ///
 /// `ServiceTrustBundle::keys_for` is an exact-string lookup, so the second kind
 /// resolves nothing in the first source - which is why control cannot simply
@@ -308,8 +306,7 @@ async fn resolve_instance_public_key(
     }
 }
 
-/// Verify an assertion minted by an enrolled worker INSTANCE, or by an
-/// enroller minting under an instance identifier of its own role.
+/// Verify an assertion minted by a joined worker INSTANCE.
 ///
 /// The bundle handed to verification carries exactly one key under exactly one
 /// issuer: the caller's key, under the identifier it presented. That
@@ -323,9 +320,9 @@ async fn resolve_instance_public_key(
 /// reviewed:
 ///
 /// - The key is published under the INSTANCE issuer and never under the role.
-///   Publishing it under `svc/worker` (or `svc/worker-enroller`) would let one
-///   instance's key verify an assertion attributed to the role itself, which
-///   is the collapse the issuer/instance split exists to prevent.
+///   Publishing it under `svc/worker` would let one instance's key verify an
+///   assertion attributed to the role itself, which is the collapse the
+///   issuer/instance split exists to prevent.
 /// - An instance row cannot introduce or replace a ROLE key. The row
 ///   contributes 32 bytes and no name; the identifier those bytes are filed
 ///   under is the caller's, and `ServiceIssuer::parse` admits an instance
@@ -335,10 +332,10 @@ async fn resolve_instance_public_key(
 ///   never row to issuer, so the row's `id` never becomes a name here at all.)
 ///
 /// There is NO fallback to the role's key when the lookup comes back empty. An
-/// instance or enroller control has not recorded, or has revoked, holds
-/// nothing here - and a fallback would also make a key an operator could file
-/// in the peer document authenticate, which is a credential carrying no status
-/// and so one nothing can revoke.
+/// instance control has not recorded, has retired, or whose lease has lapsed
+/// holds nothing here - and a fallback would also make a key an operator could
+/// file in the peer document authenticate, which is a credential carrying
+/// neither status nor lease and so one nothing can stop.
 ///
 /// Nothing is cached. The proposal leaves caching open until a measurement asks
 /// for it, and records that any cache needs an invalidation story for a revoked

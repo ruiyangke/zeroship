@@ -474,10 +474,9 @@ pub struct AppState {
     /// fixture built without keys cannot accidentally exercise an open door.
     ///
     /// It carries the ROLE keys and nothing else. An assertion whose issuer
-    /// names an INSTANCE - a worker instance or a worker enroller - is verified
-    /// against a key resolved from `zeroship.worker_instances` or
-    /// `zeroship.worker_enrollers` instead, and the two worker roles are
-    /// refused at role arity outright - see `internal::verify_service_caller`.
+    /// names an INSTANCE is verified against a key resolved from
+    /// `zeroship.worker_instances` instead, and the worker role is refused at
+    /// role arity outright - see `internal::verify_service_caller`.
     pub service_auth: Arc<zeroship_core::service_peers::ServiceAuth>,
     pub registry: Registry,
     pub env_store: EnvStore,
@@ -524,7 +523,7 @@ pub struct AppState {
     /// XFF; otherwise an attacker with direct network reach can spoof
     /// audit log IPs and rate-limit buckets.
     pub trust_proxy: bool,
-    /// Where a worker instance may enrol FROM, and on what port it may claim to
+    /// Where a worker instance may join FROM, and on what port it may claim to
     /// be listening. Operator-declared, held here because nothing on the wire
     /// may widen it; see [`worker_join::EnrolmentEnvelope`] for why an
     /// undeclared envelope refuses instead of defaulting open.

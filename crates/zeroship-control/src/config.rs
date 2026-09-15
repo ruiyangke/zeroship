@@ -231,7 +231,7 @@ pub struct ControlSettings {
     #[config(name = "control.app_base_domain", default = "zeroship.ai".to_owned())]
     pub app_base_domain: Operational<String>,
 
-    /// Comma-separated CIDRs a worker instance may enrol FROM.
+    /// Comma-separated CIDRs a worker instance may join FROM.
     ///
     /// Half of the enrolment envelope. Control derives a worker's advertised
     /// host from the observed peer address of the enrolment connection and

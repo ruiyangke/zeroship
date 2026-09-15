@@ -185,8 +185,9 @@ pub fn mint_ring_key() -> [u8; RING_KEY_BYTES] {
 /// is "this caller may not enrol from there".
 ///
 /// The reason travels to the caller. That leaks nothing a probe could not
-/// already learn from success-versus-failure, and the caller here has already
-/// proved it holds an active enroller's key before any of these are reachable.
+/// already learn from success-versus-failure, and by the time any of these are
+/// reachable the caller has already presented a token a trusted signer minted
+/// and proved possession of the key it is registering.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum EnrolmentRefusal {
     /// No envelope was declared. ABSENCE REFUSES; it does not default open.
@@ -374,9 +375,9 @@ impl EnrolmentEnvelope {
     /// Admitting a declared loopback costs nothing the derivation was protecting.
     /// The address is still OBSERVED rather than claimed, so a registrant cannot
     /// choose it; ring position is minted by control and never derived from the
-    /// address, so there is nothing to grind toward; and a same-host caller
-    /// already reads the unit's enroller key file, so it gains no reach it
-    /// lacked.
+    /// address, so there is nothing to grind toward; and a same-host caller can
+    /// already read whatever join token the deployment put on that host, so it
+    /// gains no reach it lacked.
     /// The collapse case - every peer looking identical because a proxy sits in
     /// front - is a DIFFERENT arm, `ProxyFronted`, which stays unconditional and
     /// stays first.
@@ -1022,9 +1023,9 @@ async fn renew_instance(
 ///
 /// Answers 204 whether or not this call was the one that moved the row: the
 /// only way the update finds nothing to change is that the row stopped being
-/// live between verification and now - revoked with its enroller, or retired
-/// by a racing call from the same process - and in either case the instance
-/// is exactly as retired as the caller asked.
+/// live between verification and now - retired by a purge of the signer that
+/// admitted it, or by a racing call from the same process - and in either case
+/// the instance is exactly as retired as the caller asked.
 pub async fn retire(state: &AppState, instance_id: &str) -> web::HttpResponse {
     match retire_instance(&state.control_pg, instance_id).await {
         Ok(moved) => {
