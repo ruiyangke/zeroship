@@ -91,6 +91,41 @@ impl WorkflowService {
     }
 }
 
+/// Confirms every publication exactly as submitted, so the creator outbox drains
+/// without a manager. An unconfirmed publication retains its deployment on its
+/// own, which would hide whether the journal's own dependencies were checked.
+struct Confirming(AppId);
+impl super::publication::JobPublisher for Confirming {
+    fn app_id(&self) -> &AppId {
+        &self.0
+    }
+    async fn submit(
+        &self,
+        job: &zeroship_core::workflow_jobs::JobSpec,
+    ) -> Result<zeroship_core::workflow_jobs::JobSpec, WorkflowServiceError> {
+        Ok(job.clone())
+    }
+}
+
+/// Empties an app's outbox, so a retention decision rests on what the journal
+/// itself retains rather than on a publication nobody confirmed.
+#[expect(
+    clippy::future_not_send,
+    reason = "fixture bindings own compio-local journals"
+)]
+pub(super) async fn drain(scope: &super::AppWorkflows) {
+    let publisher = Confirming(scope.app_id().clone());
+    loop {
+        let pending = scope.pending_jobs(None, 64).await.unwrap();
+        if pending.is_empty() {
+            return;
+        }
+        for job in &pending {
+            scope.publish_job(&job.id, &publisher).await.unwrap();
+        }
+    }
+}
+
 mod activation;
 mod background_scope;
 mod closure;
