@@ -115,6 +115,41 @@ async fn factory_verifies_missing_journal_without_provisioning_it() {
     assert!(runtime.app.pending_jobs(None, 1).await.unwrap().is_empty());
 }
 
+/// A host with a repair client ASKS when it refuses a journal, and reports the
+/// original refusal when the manager cannot be reached.
+///
+/// Both halves matter. Without the first, a refused journal is terminal again.
+/// Without the second, the operator sees "coordinator unavailable" for a database
+/// whose journal is simply out of date, which points at the wrong system.
+#[compio::test]
+async fn a_refused_journal_is_reported_by_its_own_error_when_repair_cannot_be_reached() {
+    let fixture = Fixture::new().await;
+    // The control: the SAME fixture, differing only in whether a repair client is
+    // attached. Comparing the two errors is what pins "the journal's refusal
+    // survives the repair attempt" without depending on how it renders.
+    let without = fixture
+        .factory()
+        .open(&fixture.scope, &fixture.policy, fixture.ingress())
+        .await
+        .expect_err("a missing journal must refuse");
+    let with = fixture
+        .factory_with_unreachable_repair()
+        .open(&fixture.scope, &fixture.policy, fixture.ingress())
+        .await
+        .expect_err("an unreachable manager must not turn the refusal into a success");
+    assert_eq!(
+        format!("{with:?}"),
+        format!("{without:?}"),
+        "an unreachable manager must not replace the journal's refusal with a transport \
+         error; that would point an operator at the wrong system"
+    );
+    let store = fixture.provider.resources().storage.open().await.unwrap();
+    assert!(
+        store.verify().await.is_err(),
+        "an unreachable manager must not have installed anything"
+    );
+}
+
 #[compio::test]
 async fn policy_replacement_cancels_pending_resource_resolution_without_storage_io() {
     let fixture = Fixture::new().await;
