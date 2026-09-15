@@ -35,7 +35,9 @@ async fn postgres_nested_temporal_values_follow_the_descriptor() {
 
 async fn exercise(db: &Database) {
     let events = db.collection("events").unwrap();
-    let iso = "1969-12-31T23:59:59.999999Z";
+    // A temporal value nested inside JSON is stored as whole milliseconds, so
+    // the canonical text carries three fractional digits.
+    let iso = "1969-12-31T23:59:59.999Z";
     let document = value!({
         "key":"created", "instants":[iso,0], "days":["0001-01-01","2000-02-29"],
         "profile":{"instant":iso,"schedule":{"instant":iso},"payload":{"instant":iso}},
@@ -154,6 +156,44 @@ async fn exercise(db: &Database) {
         panic!("update must return rows")
     };
     assert_eq!(rows[0]["event"]["instant"].as_str(), Some(iso));
+    Box::pin(nested_temporal_values_refuse_a_sub_millisecond_instant(
+        &events,
+    ))
+    .await;
+}
+
+/// JSON carries numbers of milliseconds, so a nested instant with a finer part
+/// is refused rather than floored into a different instant. Nothing is written.
+async fn nested_temporal_values_refuse_a_sub_millisecond_instant(events: &Collection) {
+    let before = count(events.count(value!({}), value!({})).await.unwrap());
+    let fine = "1969-12-31T23:59:59.999999Z";
+    for document in [
+        value!({"key":"fine_array","instants":[fine]}),
+        value!({"key":"fine_object","instants":[0],"profile":{"instant":fine}}),
+        value!({"key":"fine_variant","instants":[0],"event":{"kind":"dated","instant":fine}}),
+    ] {
+        let error = events.insert(document).await.unwrap_err();
+        assert!(
+            matches!(
+                error,
+                DbError::ValidationFailed {
+                    code: "timestamp_precision_unsupported",
+                    ..
+                }
+            ),
+            "{error:?}"
+        );
+    }
+    assert_eq!(
+        count(events.count(value!({}), value!({})).await.unwrap()),
+        before,
+        "a refused nested instant must write nothing"
+    );
+    // Control: the same instant at whole-millisecond resolution is accepted.
+    events
+        .insert(value!({"key":"coarse","instants":["1969-12-31T23:59:59.999Z"]}))
+        .await
+        .unwrap();
 }
 
 fn check(row: &Value, document: &Value) {

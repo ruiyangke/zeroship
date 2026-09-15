@@ -582,6 +582,15 @@ impl DbError {
         }
     }
 
+    /// A database timestamp expression produced an instant outside the portable
+    /// calendar. Every backend reports that outcome with this error.
+    pub(crate) fn timestamp_expression_outside_calendar() -> Self {
+        Self::validation(
+            "invalid_timestamp_expression",
+            "database timestamp expression is outside the portable calendar",
+        )
+    }
+
     /// Convenience: catch-all internal error.
     pub fn internal(message: impl Into<String>) -> Self {
         DbError::Internal {
@@ -733,6 +742,10 @@ impl From<crate::sql::mapping::QueryError> for DbError {
             QueryError::ImmutableAssignedField(m) => (
                 "immutable_assigned_field", m,
                 Some("This field is assigned by its descriptor and cannot be changed through UPDATE.".into()),
+            ),
+            QueryError::TimestampPrecisionUnsupported(m) => (
+                "timestamp_precision_unsupported", m,
+                Some("Round the instant to a whole millisecond before writing it to this database.".into()),
             ),
         };
         DbError::ValidationFailed {

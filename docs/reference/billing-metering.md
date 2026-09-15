@@ -44,7 +44,10 @@ Trusted producers feed the process-wide `Meter` in `crates/metering`:
   `kv_writes`, `storage_ops`, and storage byte counters.
 
 `MeterHandle` binds the process meter to the server-injected app id. Native
-primitives receive a handle for their app and cannot meter another app.
+primitives receive a handle for their app and cannot meter another app. The ORM
+behind `env.db` has no meter of its own: the V8 adapter hands each creator
+dispatch a usage sink wrapping that app's handle, and ORM work for any other
+binding reports nothing.
 
 `Meter::drain` emits one `UsageEvent` per drained `(app_id, metric)` window. The
 stable JSON contract lives in `crates/zeroship-core/src/usage_event.rs`:

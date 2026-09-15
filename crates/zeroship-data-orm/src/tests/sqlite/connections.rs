@@ -50,8 +50,110 @@ fn pragma_busy_timeout_set() {
             let (backend, _dir) = fresh_backend(host);
             let timeout = pragma_value(&backend, "busy_timeout").await;
             assert_eq!(
-                timeout, "5000",
-                "boot PRAGMA should have set busy_timeout = 5000"
+                timeout,
+                crate::budgets::DB_LOCK_TIMEOUT_MS.to_string(),
+                "every connection waits on a lock for the lock budget"
+            );
+        });
+    })
+}
+
+/// A transaction another host keeps open on a rollback-journal file, blocking
+/// the switch to WAL: a schema read, or a bootstrap's write transaction.
+///
+/// The holder seeds the file first. An empty database is read without holding
+/// the shared lock, so a read hold on one would contend with nothing.
+fn hold_lock(file: &std::path::Path, transaction: &str) -> rusqlite::Connection {
+    let holder = rusqlite::Connection::open(file).expect("open the holder");
+    holder
+        .execute_batch("CREATE TABLE held (x INTEGER); INSERT INTO held VALUES (1);")
+        .expect("seed the holder's file");
+    holder
+        .execute_batch(transaction)
+        .expect("take the holder's lock");
+    holder
+}
+
+const READ_HOLD: &str = "BEGIN; SELECT count(*) FROM held;";
+const WRITE_HOLD: &str = "BEGIN IMMEDIATE; INSERT INTO held VALUES (2);";
+
+async fn open_file(
+    file: &std::path::Path,
+) -> Result<zeroship_data_orm::backend::BackendHandle, crate::error::DbError> {
+    crate::ConnectOptions::new(
+        format!("sqlite:{}", file.display()),
+        crate::encryption::ProjectKeySource::unavailable(),
+    )
+    .connect()
+    .await
+}
+
+/// Opening a file whose holder releases it shortly succeeds once the lock is
+/// free, instead of refusing at once.
+async fn open_waits_for_a_short_hold(transaction: &str) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let file = dir.path().join("contended.sqlite");
+    let holder = hold_lock(&file, transaction);
+    let hold = std::time::Duration::from_millis(300);
+    let started = std::time::Instant::now();
+    let release = std::thread::spawn(move || {
+        std::thread::sleep(hold);
+        holder.execute_batch("COMMIT").expect("release the lock");
+    });
+
+    let opened = open_file(&file).await;
+    let elapsed = started.elapsed();
+    release.join().expect("holder thread");
+    let backend = opened.expect("the open must outlast a short hold");
+    assert!(
+        elapsed >= hold,
+        "the open cannot finish before the holder releases; took {elapsed:?}"
+    );
+    let backend = backend
+        .get::<SqliteBackend>()
+        .expect("a SQLite URL opens the SQLite backend");
+    assert_eq!(pragma_value(backend, "journal_mode").await, "wal");
+}
+
+/// The hold SQLite's busy handler already covers: the switch waits for a
+/// reader on its own. The one-variable control for the arm below.
+#[test]
+fn opening_a_file_another_host_reads_waits_for_the_reader() {
+    Host::test(|host| host.run(open_waits_for_a_short_hold(READ_HOLD)))
+}
+
+/// The hold the busy handler does NOT cover: the switch reads before it
+/// writes, and SQLite refuses a read transaction's upgrade at once rather
+/// than invoking the handler, so the switch is retried instead.
+#[test]
+fn opening_a_file_another_host_writes_waits_for_the_writer() {
+    Host::test(|host| host.run(open_waits_for_a_short_hold(WRITE_HOLD)))
+}
+
+/// The control for the arms above: a hold that outlasts the lock budget is
+/// refused with the typed contention error once the budget is spent, not
+/// waited on indefinitely.
+#[test]
+fn opening_a_file_locked_past_the_lock_budget_is_refused() {
+    Host::test(|host| {
+        host.run(async {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let file = dir.path().join("contended.sqlite");
+            let holder = hold_lock(&file, WRITE_HOLD);
+            let budget =
+                std::time::Duration::from_millis(u64::from(crate::budgets::DB_LOCK_TIMEOUT_MS));
+            let started = std::time::Instant::now();
+
+            let refused = open_file(&file).await;
+            let elapsed = started.elapsed();
+            drop(holder);
+            assert!(
+                matches!(refused, Err(crate::error::DbError::LockContention { .. })),
+                "a hold past the budget must be refused as lock contention: {refused:?}"
+            );
+            assert!(
+                elapsed >= budget,
+                "the refusal must come after waiting out the budget; took {elapsed:?}"
             );
         });
     })

@@ -1,0 +1,39 @@
+warning: unused import: `zeroship_data_orm::orm::*`
+ --> tests/ui/wrong_native_array_operand.rs:1:5
+  |
+1 | use zeroship_data_orm::orm::*;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+error[E0277]: the trait bound `Vec<&str>: EncodeValue<zeroship_data_orm::orm::sql_types::Text>` is not satisfied
+ --> tests/ui/wrong_native_array_operand.rs:4:49
+  |
+4 | fn main() { let _ = schema::grants::scopes.push(vec!["nested"]); }
+  |                                            ---- ^^^^^^^^^^^^^^ the trait `EncodeValue<zeroship_data_orm::orm::sql_types::Text>` is not implemented for `Vec<&str>`
+  |                                            |
+  |                                            required by a bound introduced by this call
+  |
+help: the following other types implement trait `EncodeValue<S>`
+ --> src/orm/codecs.rs
+  |
+  | impl EncodeValue<Bytes> for Vec<u8> {
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `Vec<u8>` implements `EncodeValue<zeroship_data_orm::orm::sql_types::Bytes>`
+...
+  | impl<S, T: EncodeValue<S>> EncodeValue<Array<S>> for Vec<T> {
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `Vec<T>` implements `EncodeValue<zeroship_data_orm::orm::sql_types::Array<S>>`
+...
+  |         impl EncodeValue<Vector> for Vec<$rust> {
+  |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  |         |
+  |         `Vec<f32>` implements `EncodeValue<zeroship_data_orm::orm::sql_types::Vector>`
+  |         `Vec<f64>` implements `EncodeValue<zeroship_data_orm::orm::sql_types::Vector>`
+...
+  | vector_codec!(f32, f64);
+  | ----------------------- in this macro invocation
+note: required by a bound in `orm::model::patch::<impl zeroship_data_orm::orm::Field<C>>::push`
+ --> src/orm/model/patch.rs
+  |
+  |     pub fn push<T: EncodeValue<C::ItemSqlType>>(
+  |                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `orm::model::patch::<impl Field<C>>::push`
+  = note: this error originates in the macro `vector_codec` (in Nightly builds, run with -Z macro-backtrace for more info)

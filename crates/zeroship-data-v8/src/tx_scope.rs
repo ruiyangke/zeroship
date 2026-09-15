@@ -123,21 +123,27 @@ pub(crate) fn cdc_relay() -> Option<zeroship_data_orm::cdc::relay::RelayConfig> 
 ///
 /// **It takes the binding, not an app id, because the route carries BOTH
 /// identities.** The tenant decides the transaction frame, the lane key, the
-/// SQLite ATTACH alias and the metering subject; the schema decides how tables
-/// are qualified and which PostgreSQL role the session narrows to. The binding
-/// is the one place both were resolved together.
+/// SQLite ATTACH alias and the app the usage sink attributes to; the schema
+/// decides how tables are qualified and which PostgreSQL role the session
+/// narrows to. The binding is the one place both were resolved together.
+///
+/// Every creator dispatch reaches the ORM through here, so this is where the
+/// service's meter becomes the route's usage sink. A metered binding whose app
+/// id cannot be attributed is refused with `invalid_meter_app_id`.
 pub(crate) fn capture_route(
     scope: &mut v8::PinScope<'_, '_>,
     binding: &zeroship_data_orm::binding::DbBinding,
 ) -> Result<crate::tx_route::CapturedRoute, DbError> {
     let connection = crate::context::with(|context| context.connection_identity())
         .ok_or_else(|| DbError::config("not_configured", "db: no connection is installed"))?;
+    let usage = crate::usage::sink_for(binding)?;
     Ok(crate::tx_route::CapturedRoute::capture(
         current_tx_scope(scope).as_ref(),
         binding.app_id(),
         binding.schema().clone(),
         configured_sql_registration(),
         connection,
+        usage,
     ))
 }
 

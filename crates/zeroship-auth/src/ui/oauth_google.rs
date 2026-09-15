@@ -323,7 +323,7 @@ pub async fn callback(
     // the eligibility gate — otherwise a victim locked by password-guessing
     // could never recover via OAuth. Best-effort; the gate still enforces hard
     // `disabled_at`.
-    if let Err(e) = users::reset_login_failures(db.as_ref(), &user_id).await {
+    if let Err(e) = users::reset_login_failures(&orm, &user_id).await {
         tracing::warn!(error = %e, user_id = user_id.as_str(), "google clear lockout failed");
     }
     if let Err(e) = eligibility::check_user_eligible(db.as_ref(), &user_id).await {
@@ -347,7 +347,7 @@ pub async fn callback(
     }
 
     // Best-effort: bump last_login_at on the user row.
-    if let Err(e) = users::touch_last_login(db.as_ref(), &user_id).await {
+    if let Err(e) = users::touch_last_login(&orm, &user_id).await {
         tracing::warn!(error = %e, user_id = user_id.as_str(), "touch_last_login failed");
     }
 

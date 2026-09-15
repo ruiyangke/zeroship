@@ -200,6 +200,9 @@ impl QueryVector {
 pub enum Literal {
     Bool(bool),
     Int(i64),
+    /// Unix microseconds. Distinct from `Int` because a bare integer at a
+    /// temporal position is read as milliseconds by every storage codec.
+    TimestampMicros(i64),
     Float(Finite),
     Text(String),
     /// Encoded JSON, distinct from an ordinary text parameter.
@@ -227,7 +230,7 @@ impl Literal {
             )?),
             Value::String(value) | Value::Decimal(value) => Self::text(value)?,
             Value::Bytes(value) => Self::Bytes(value),
-            Value::Timestamp(value) => Self::Int(value),
+            Value::TimestampMicros(value) => Self::TimestampMicros(value),
             Value::Json(value) => {
                 serde_json::from_str::<serde_json::Value>(&value)
                     .map_err(|_| LiteralError::InvalidJson)?;
@@ -283,6 +286,7 @@ impl Literal {
         match self {
             Self::Bool(_) => "bool",
             Self::Int(_) => "int",
+            Self::TimestampMicros(_) => "timestamp",
             Self::Float(_) => "float",
             Self::Text(_) => "text",
             Self::Json(_) => "json",

@@ -239,6 +239,39 @@ async fn typed_relations_sqlite() {
 }
 
 #[compio::test]
+async fn locking_reads_refuse_relation_loading() {
+    let owner = fixture(false).await;
+    seed(&owner.database).await;
+    owner
+        .database
+        .transaction(|tx| async move {
+            let posts = tx.entity::<posts::Entity>()?;
+            let refused = posts
+                .query()
+                .for_update()?
+                .with_related(posts::relations::author)
+                .all::<Post, Author>()
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(&refused, DbError::ValidationFailed { code, .. } if *code == "invalid_read"),
+                "{refused:?}"
+            );
+            // Control: the same relation load without a lock reads in the same transaction.
+            let loaded = posts
+                .query()
+                .with_related(posts::relations::author)
+                .all::<Post, Author>()
+                .await?;
+            assert_eq!(loaded.len(), 3);
+            Ok::<_, DbError>(())
+        })
+        .await
+        .unwrap();
+    owner.close().await;
+}
+
+#[compio::test]
 async fn typed_relations_postgres() {
     exercise(true).await;
 }
@@ -334,7 +367,7 @@ async fn scope_and_schema(postgres: bool) {
                 .query()
                 .with_related(posts::relations::author)
                 .all::<Post, Author>();
-            Ok((
+            Ok::<_, DbError>((
                 posts.query().with_related(posts::relations::author),
                 prepared,
             ))

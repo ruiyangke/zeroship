@@ -329,7 +329,9 @@ async fn dropped_native_admission_stays_owned_until_cleanup_acknowledges_rollbac
     crate::OrmContext::new()
         .scope(async {
             let app = "dropped_native_admission";
-            let admission = super::super::TxAdmission::acquire(app.into()).await;
+            let admission = super::super::TxAdmission::acquire(app.into())
+                .await
+                .expect("the fixture claims a free lane");
             let fixture = admitted_on_claim(app);
             drop(admission);
             assert_eq!(
@@ -346,7 +348,8 @@ async fn dropped_native_admission_stays_owned_until_cleanup_acknowledges_rollbac
             fixture.cleanup.send(CleanupAck::RolledBack).unwrap();
             let next = compio::time::timeout(Duration::from_secs(1), next)
                 .await
-                .expect("a settled cleanup must release admission");
+                .expect("a settled cleanup must release admission")
+                .expect("a released lane is claimed, not refused");
             assert!(!fixture.wire.discarded.get());
             drop(next);
         })
@@ -358,7 +361,9 @@ async fn dropped_retired_native_admission_cannot_cancel_a_replacement() {
     crate::OrmContext::new()
         .scope(async {
             let app = "retired_native_admission";
-            let old_admission = super::super::TxAdmission::acquire(app.into()).await;
+            let old_admission = super::super::TxAdmission::acquire(app.into())
+                .await
+                .expect("the fixture claims a free lane");
             let old = admitted_on_claim(app);
             old.cleanup.send(CleanupAck::RolledBack).unwrap();
             assert!(matches!(
@@ -389,7 +394,9 @@ async fn startup_cancellation_without_an_installed_session_is_indeterminate() {
     crate::OrmContext::new()
         .scope(async {
             let app = "cancel_native_startup";
-            let admission = super::super::TxAdmission::acquire(app.into()).await;
+            let admission = super::super::TxAdmission::acquire(app.into())
+                .await
+                .expect("the fixture claims a free lane");
             admit_in_preparing(app);
             let opening = apply(
                 app,

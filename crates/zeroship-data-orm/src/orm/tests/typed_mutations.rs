@@ -14,7 +14,7 @@ struct Document {
     version: i64,
     created_by: Option<String>,
     updated_by: Option<String>,
-    deleted_at: Option<i64>,
+    deleted_at: Option<UtcInstant>,
 }
 
 #[derive(Insertable)]
@@ -384,7 +384,7 @@ async fn exercise_mutations(db: &Database) {
     }
     let prepared = db
         .transaction(|tx| async move {
-            Ok(tx
+            Ok::<_, DbError>(tx
                 .entity::<documents::Entity>()?
                 .update_many(Filter::all(), documents::label.set("expired")?))
         })

@@ -59,7 +59,7 @@ async fn callback_recovers_soft_lock(provider: Provider) {
             .assert_session(&initial.complete(&fixture).await, &initial, &["oauth"])
             .await;
         for _ in 0..users::lockout::THRESHOLD {
-            users::record_login_failure(&fixture.server.pg, &id)
+            users::record_login_failure(&fixture.server.orm, &id)
                 .await
                 .unwrap();
         }

@@ -41,7 +41,7 @@ async fn dropping_nested_callback_cancels_parent(postgres: bool) {
                         .await?;
                     started.send(()).unwrap();
                     std::future::pending::<()>().await;
-                    Ok(())
+                    Ok::<_, DbError>(())
                 })
                 .boxed_local();
             match select(ready, nested).await {
@@ -51,7 +51,7 @@ async fn dropping_nested_callback_cancels_parent(postgres: bool) {
                 }
                 Either::Right((result, _)) => panic!("child ended before cancellation: {result:?}"),
             }
-            Ok(())
+            Ok::<_, DbError>(())
         })
         .await;
     assert!(
@@ -67,7 +67,7 @@ async fn dropping_nested_callback_cancels_parent(postgres: bool) {
                     .await?,
                 Output::Count(0)
             ));
-            Ok(())
+            Ok::<_, DbError>(())
         })
         .await
         .unwrap();
@@ -102,7 +102,7 @@ async fn retired_callback_cannot_settle_replacement(postgres: bool) {
                 .await?;
             old_ready.send(()).unwrap();
             old_wait.await.unwrap();
-            Ok(())
+            Ok::<_, DbError>(())
         })
         .boxed_local();
     let old = match select(old_started, old).await {
@@ -132,7 +132,7 @@ async fn retired_callback_cannot_settle_replacement(postgres: bool) {
             tx.collection("records")?
                 .insert(value!({"id":"after", "label":"commit"}))
                 .await?;
-            Ok(())
+            Ok::<_, DbError>(())
         })
         .boxed_local();
     let replacement = match select(new_started, replacement).await {
@@ -211,7 +211,7 @@ async fn postgres_explicit_isolation_reaches_the_transaction_session() {
                 assert_eq!(isolation(&tx).await, level.ansi_name().to_lowercase());
                 tx.transaction(|nested| async move {
                     assert_eq!(isolation(&nested).await, level.ansi_name().to_lowercase());
-                    Ok(())
+                    Ok::<_, DbError>(())
                 })
                 .await
             })
@@ -222,7 +222,7 @@ async fn postgres_explicit_isolation_reaches_the_transaction_session() {
         .database
         .transaction(|tx| async move {
             assert_eq!(isolation(&tx).await, "read committed");
-            Ok(())
+            Ok::<_, DbError>(())
         })
         .await
         .unwrap();
@@ -260,7 +260,7 @@ async fn postgres_requested_isolation_controls_statement_snapshots() {
                     .update(value!({"id":"record"}), value!({"label":"changed"}))
                     .await?;
                 assert_eq!(label(&tx).await, expected);
-                Ok(())
+                Ok::<_, DbError>(())
             })
             .await
             .unwrap();
@@ -298,7 +298,7 @@ async fn sqlite_rejects_unavailable_isolation_before_invoking_callback() {
         assert!(!called.get());
         fixture
             .database
-            .transaction(|_| async { Ok(()) })
+            .transaction(|_| async { Ok::<_, DbError>(()) })
             .await
             .unwrap();
     }
@@ -338,7 +338,7 @@ async fn nested_callbacks_and_rollback(fixture: CollectionFixture) {
                     .collection("records")?
                     .insert(value!({"id":"inner", "label":"kept"}))
                     .await?;
-                Ok(())
+                Ok::<_, DbError>(())
             })
             .await?;
             let error = tx
@@ -361,7 +361,7 @@ async fn nested_callbacks_and_rollback(fixture: CollectionFixture) {
                     ..
                 }
             ));
-            Ok(tx)
+            Ok::<_, DbError>(tx)
         })
         .await
         .unwrap();

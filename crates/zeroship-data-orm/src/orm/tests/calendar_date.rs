@@ -86,7 +86,7 @@ async fn exercise_calendar_dates(db: &Database) {
                     panic!("update must return rows")
                 };
                 assert_eq!(rows[0]["birthday"], value!(date));
-                Ok(id)
+                Ok::<_, DbError>(id)
             })
             .await
             .unwrap();

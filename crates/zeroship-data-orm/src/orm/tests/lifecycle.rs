@@ -29,7 +29,7 @@ async fn lifecycle(mut fixture: CollectionFixture) {
     assert_eq!(inserted["revision"], value!(1));
     assert_eq!(inserted["author"], value!("usr_author"));
     assert_eq!(inserted["editor"], value!("usr_author"));
-    assert!(inserted["born"].as_i64().unwrap() > 0);
+    assert!(inserted["born"].as_timestamp_micros().unwrap() > 0);
     assert_eq!(inserted["removed"], Value::Null);
     for (old, _) in names {
         assert!(inserted.get(old).is_none(), "{old}: {inserted}");
@@ -80,7 +80,7 @@ async fn lifecycle(mut fixture: CollectionFixture) {
     assert_eq!(upserted["revision"], value!(4));
 
     let deleted = row(entries.delete(value!({"id":key.clone()})).await.unwrap());
-    assert!(deleted["removed"].as_i64().unwrap() > 0);
+    assert!(deleted["removed"].as_timestamp_micros().unwrap() > 0);
     assert_eq!(deleted["revision"], value!(5));
     let Output::Rows { rows, .. } = entries.find(value!({}), value!({})).await.unwrap() else {
         panic!("rows")

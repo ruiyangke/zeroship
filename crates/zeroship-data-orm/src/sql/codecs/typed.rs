@@ -11,7 +11,18 @@ fn invalid(field: &str, expected: &str) -> CodecError {
     )
 }
 
-fn scalar(kind: LogicalType, field: &str, value: &mut Value) -> Result<(), CodecError> {
+/// Normalise a temporal value for storage.
+///
+/// A column keeps its instant at full resolution; the backend's registered
+/// resolution decides what it can store. A value nested inside JSON becomes a
+/// number of whole milliseconds, because that is the unit JSON carries, and a
+/// finer one is refused rather than floored.
+fn scalar(
+    kind: LogicalType,
+    field: &str,
+    value: &mut Value,
+    nested: bool,
+) -> Result<(), CodecError> {
     if kind == LogicalType::CalendarDate {
         if value
             .as_str()
@@ -23,7 +34,7 @@ fn scalar(kind: LogicalType, field: &str, value: &mut Value) -> Result<(), Codec
             ));
         }
     } else {
-        let millis = crate::sql::temporal::timestamp_millis(value).ok_or_else(|| {
+        let micros = crate::sql::temporal::timestamp_micros(value).ok_or_else(|| {
             CodecError::validation(
                 "invalid_timestamp",
                 format!(
@@ -31,7 +42,17 @@ fn scalar(kind: LogicalType, field: &str, value: &mut Value) -> Result<(), Codec
                 ),
             )
         })?;
-        *value = Value::from(millis);
+        *value = if nested {
+            let millis = crate::sql::temporal::exact_timestamp_millis(micros).ok_or_else(|| {
+                CodecError::validation(
+                    "timestamp_precision_unsupported",
+                    format!("column '{field}' stores whole milliseconds inside JSON"),
+                )
+            })?;
+            Value::from(millis)
+        } else {
+            Value::TimestampMicros(micros)
+        };
     }
     Ok(())
 }
@@ -136,13 +157,38 @@ fn validate_encoded_array(field: &str, item: LogicalType, json: &str) -> Result<
     Ok(())
 }
 
+/// Native text arrays hold strings only: SQL NULL elements have no ORM text
+/// value, and PostgreSQL text cannot contain NUL. Both backends refuse the same
+/// inputs.
+fn native_text_element(field: &str, value: &Value) -> Result<(), CodecError> {
+    match value {
+        Value::String(text) if !text.contains('\0') => Ok(()),
+        Value::String(_) => Err(CodecError::validation(
+            "invalid_array_element",
+            format!("column '{field}' requires string array elements without NUL characters"),
+        )),
+        _ => Err(invalid_element(field, LogicalType::Text)),
+    }
+}
+
+fn native_text_array(field: &str, value: &mut Value) -> Result<(), CodecError> {
+    if let Value::Json(json) = value {
+        *value = serde_json::from_str(json).map_err(|_| invalid(field, "valid typed JSON"))?;
+    }
+    let values = value.as_array().ok_or_else(|| invalid(field, "an array"))?;
+    for value in values {
+        native_text_element(field, value)?;
+    }
+    Ok(())
+}
+
 fn prepare_array_element(
     field: &str,
     item: LogicalType,
     value: &mut Value,
 ) -> Result<(), CodecError> {
     if matches!(item, LogicalType::Timestamp | LogicalType::CalendarDate) {
-        return scalar(item, field, value);
+        return scalar(item, field, value, true);
     }
     let valid = match value {
         Value::Json(json) => serde_json::from_str::<&serde_json::value::RawValue>(json)
@@ -204,6 +250,9 @@ fn prepare_value_at(
     if value.is_null() {
         return Ok(());
     }
+    if definition.has_native_array_storage() {
+        return native_text_array(field, value);
+    }
     let kind = definition.logical_type;
     if crate::sql::descriptors::is_exact_decimal(definition) {
         let input = match value {
@@ -221,7 +270,7 @@ fn prepare_value_at(
         return Ok(());
     }
     if matches!(kind, LogicalType::Timestamp | LogicalType::CalendarDate) {
-        return scalar(kind, field, value);
+        return scalar(kind, field, value, depth > 0);
     }
     // JSON members have no column codec to enforce their primitive type.
     if depth > 0 {
@@ -338,6 +387,9 @@ pub fn prepare_array_operand(
 ) -> Result<(), CodecError> {
     if definition.logical_type != LogicalType::Array {
         return Ok(());
+    }
+    if definition.has_native_array_storage() {
+        return native_text_element(field, value);
     }
     prepare_array_element(field, array_item(field, definition)?, value)
 }

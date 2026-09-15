@@ -8125,7 +8125,6 @@ dependencies = [
  "zeroship-core",
  "zeroship-data-cdc-wire",
  "zeroship-data-macros",
- "zeroship-metering",
  "zeroship-migrate",
  "zeroship-migrate-backend",
  "zeroship-migrate-core",

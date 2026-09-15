@@ -1,11 +1,19 @@
 //! SQL compiler contracts and native execution output.
 
 #[cfg(test)]
+mod array_tests;
+#[cfg(test)]
 mod comparison_tests;
+#[cfg(test)]
+mod coordination_tests;
+#[cfg(test)]
+mod lock_tests;
 mod postgres;
 mod query;
 mod shared;
 mod sqlite;
+#[cfg(test)]
+mod timestamp_tests;
 mod writer;
 pub use postgres::PostgresCompiler;
 pub use query::{CompiledQuery, ParameterType};
@@ -31,6 +39,10 @@ pub enum CompileError {
     BindLimitExceeded { limit: usize },
     InvalidStatement(String),
     Unsupported(&'static str),
+    /// A value or offset carries a sub-millisecond part the registered backend
+    /// cannot store. It is refused rather than floored: a caller that reads an
+    /// instant back and compares it for equality must get the value it wrote.
+    TimestampPrecisionUnsupported,
 }
 
 impl std::fmt::Display for CompileError {
@@ -41,6 +53,9 @@ impl std::fmt::Display for CompileError {
             Self::BindLimitExceeded { limit } => {
                 write!(f, "statement exceeds the backend bind limit of {limit}")
             }
+            Self::TimestampPrecisionUnsupported => f.write_str(
+                "this database stores whole milliseconds; a sub-millisecond timestamp is refused",
+            ),
         }
     }
 }

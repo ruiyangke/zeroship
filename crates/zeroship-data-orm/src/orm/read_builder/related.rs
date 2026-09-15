@@ -69,6 +69,9 @@ impl<E: Entity, R: Relation<Source = E>> RelatedQuery<E, R> {
         self,
     ) -> impl Future<Output = Result<Vec<(P, Option<T>)>, DbError>> + use<E, R, P, T> {
         let work = self.query.into_builder().and_then(|mut builder| {
+            if builder.query.lock != read::ReadLock::None {
+                return Err(read::invalid("row locks cannot load relations"));
+            }
             let database = builder.database;
             database.context.with(|| {
                 database.check_scope()?;
@@ -109,6 +112,7 @@ impl<E: Entity, R: Relation<Source = E>> RelatedQuery<E, R> {
                 let parent = read::PreparedRead::new(
                     &database.binding,
                     route.sql_registration(),
+                    route.in_tx(),
                     builder.query,
                 )?;
                 Ok((

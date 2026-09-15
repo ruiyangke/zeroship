@@ -252,8 +252,7 @@ pub async fn is_live(db: &Client, raw_token: &str) -> Result<bool> {
 /// cookies via `?mint=1` as long as the `app_session_anchors` row is live. So
 /// this statement, in the SAME transaction as the password change:
 ///
-///   1. bumps `users.credential_version` (mirrors `users::update_password_hash`
-///      — defense in depth for the IdP-session credential-version gate);
+///   1. bumps `users.credential_version` for the IdP-session credential gate;
 ///   2. writes a `(client_id, sub)` family marker for every family the user
 ///      holds, from the UNION of two sources: `app_user_identities` (the
 ///      `pairwise_sub` an app-session cookie carries, persisted by the

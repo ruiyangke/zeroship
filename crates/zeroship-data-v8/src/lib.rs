@@ -22,7 +22,7 @@ use zeroship_data_orm::error::DbError;
 use zeroship_data_orm::cdc::broker;
 #[cfg(test)]
 use zeroship_data_orm::sql::mapping;
-use zeroship_data_orm::{backend, descriptor, metrics, transaction, tx_route};
+use zeroship_data_orm::{backend, descriptor, transaction, tx_route};
 
 pub(crate) mod context;
 pub mod op_error;
@@ -30,6 +30,7 @@ mod read_capture;
 mod startup_policy;
 #[cfg(test)]
 mod tests;
+mod usage;
 #[cfg(test)]
 extern crate self as zeroship_data_v8;
 pub(crate) mod v8_bridge;
@@ -166,8 +167,8 @@ impl NativePlugin for DbPlugin {
             context.set_supplied_project_keys(Some(self.project_keys.clone()));
             context.install_connection(self.connection.clone());
             context.set_cdc_relay(self.cdc_relay.clone());
+            context.set_meter(self.meter.clone());
         });
-        metrics::stamp(self.meter.clone());
     }
 }
 

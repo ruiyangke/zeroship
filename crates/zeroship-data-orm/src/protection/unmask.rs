@@ -262,11 +262,17 @@ pub fn check_unmask_authorization(
 /// an unrouted one is handed the value the V8 dispatcher already opened. What
 /// is left here is the half that is genuinely about unmask - the per-app
 /// preparation - and it stays because these paths bypass `exec`.
-async fn prepare_unmask_backend(backend: &BackendHandle, app_id: &str) -> Result<(), DbError> {
-    // Asked, not downcast. What "ready for this app" means is the backend's
-    // business - SQLite must attach the app file, PostgreSQL needs nothing -
-    // and this path only needs it to have happened.
-    backend.prepare_for_app(app_id).await
+async fn prepare_unmask_backend(
+    backend: &BackendHandle,
+    binding: &DbBinding,
+) -> Result<(), DbError> {
+    // Asked, not downcast. What "ready for this binding" means is the
+    // backend's business - SQLite attaches the app file unless the binding
+    // addresses `main`, PostgreSQL needs nothing - and this path only needs it
+    // to have happened.
+    backend
+        .prepare_for_app(binding.app_id(), binding.schema())
+        .await
 }
 
 // ---------------------------------------------------------------------------
@@ -283,7 +289,7 @@ pub async fn dispatch_unmask(
     route.validate_binding(binding)?;
     let app_id = binding.app_id();
     // SCHEMA: the audit table is reached through it on PostgreSQL. `app_id`
-    // above stays the TENANT - metering subject, SQLite ATTACH alias, key salt.
+    // above stays the TENANT - SQLite ATTACH alias, key salt.
     let db_schema = binding.schema();
     let backend = route.backend();
     // Step 0 — the descriptor entry. Resolved once for the whole dispatch: the
@@ -307,7 +313,7 @@ pub async fn dispatch_unmask(
             ),
         })?;
     args.column = mask_meta.canonical_column.clone();
-    prepare_unmask_backend(backend, app_id).await?;
+    prepare_unmask_backend(backend, binding).await?;
 
     // Authorize against the immutable declaration for this app and deploy.
     let allowed = check_unmask_authorization(binding, &args.actor, &mask_meta.classification)?;
@@ -326,7 +332,7 @@ pub async fn dispatch_unmask(
         .await?;
         // The REFUSED unmask still wrote an audit row, and that row cost a
         // statement. Metering counts work performed, not permission granted.
-        meter_audit_write(route.meter());
+        meter_audit_write(route.usage());
         return Err(DbError::Coded {
             code: "unmask_not_permitted".into(),
             message: format!(
@@ -351,7 +357,7 @@ pub async fn dispatch_unmask(
     // Both arms ran exactly one SELECT and both `?`, so reaching here means it
     // succeeded. Neither goes through `exec::run_sql`, so neither was billed
     // before 2026-09-01.
-    crate::metrics::emit_db_metric(route.meter(), crate::metrics::DB_READS, 1);
+    crate::metrics::emit_db_metric(route.usage(), crate::metrics::DB_READS, 1);
 
     // Step 4 — audit the granted unmask. We do this AFTER the plaintext
     // is in hand so a SELECT failure / decrypt failure doesn't leave a
@@ -366,7 +372,7 @@ pub async fn dispatch_unmask(
         "granted",
     )
     .await?;
-    meter_audit_write(route.meter());
+    meter_audit_write(route.usage());
 
     Ok(UnmaskFieldResult { plaintext })
 }
@@ -377,9 +383,9 @@ pub async fn dispatch_unmask(
 /// through `exec::exec_mutation`, so none was billed before 2026-09-01. Call
 /// this only after the write's `?` has succeeded - metering is a success-arm
 /// signal, and an audit row that failed to land must not be charged for.
-fn meter_audit_write(meter: Option<&zeroship_metering::MeterHandle>) {
-    crate::metrics::emit_db_metric(meter, crate::metrics::DB_WRITES, 1);
-    crate::metrics::emit_db_metric(meter, crate::metrics::DB_ROWS_WRITTEN, 1);
+fn meter_audit_write(usage: Option<&dyn crate::metrics::UsageSink>) {
+    crate::metrics::emit_db_metric(usage, crate::metrics::DB_WRITES, 1);
+    crate::metrics::emit_db_metric(usage, crate::metrics::DB_ROWS_WRITTEN, 1);
 }
 
 // ---------------------------------------------------------------------------
@@ -500,7 +506,7 @@ async fn write_audit_unmask_row(
     // role the INSERT runs under is derived from.
     db_schema: &crate::sql::SchemaName,
     // TENANT: the SQLite ATTACH alias the same table is reached through on the
-    // dev tier, and the metering subject.
+    // dev tier.
     app_id: &str,
     args: &UnmaskFieldArgs,
     classification: &str,
@@ -644,7 +650,7 @@ pub async fn dispatch_bulk_unmask(
     }
     let app_id = binding.app_id();
     // SCHEMA: the audit table is reached through it on PostgreSQL. `app_id`
-    // above stays the TENANT - metering subject, SQLite ATTACH alias, key salt.
+    // above stays the TENANT - SQLite ATTACH alias, key salt.
     let db_schema = binding.schema();
     let backend = route.backend();
 
@@ -710,7 +716,7 @@ pub async fn dispatch_bulk_unmask(
     // the isolate always has a URL, and the dev tier opens SQLite lazily - and
     // the alternative is handing the engine an `Option` it would have to
     // unwrap at a statement.
-    prepare_unmask_backend(backend, app_id).await?;
+    prepare_unmask_backend(backend, binding).await?;
     let mut unauthorized: Vec<(String, String)> = Vec::new(); // (row_pk, column)
     for (row_pk, columns) in &normalized_items {
         for (_, canonical_column) in columns {
@@ -736,7 +742,7 @@ pub async fn dispatch_bulk_unmask(
             Some(&unauthorized),
         )
         .await?;
-        meter_audit_write(route.meter());
+        meter_audit_write(route.usage());
         return Err(DbError::Coded {
             code: "bulk_unmask_partial_unauthorized".into(),
             message: format!(
@@ -782,7 +788,7 @@ pub async fn dispatch_bulk_unmask(
             // One SELECT per (row, column) pair. The bulk call writes a single
             // audit row for the whole request, but it reads once per cell, and
             // the read cost is what this counts.
-            crate::metrics::emit_db_metric(route.meter(), crate::metrics::DB_READS, 1);
+            crate::metrics::emit_db_metric(route.usage(), crate::metrics::DB_READS, 1);
             row_map.insert(requested_col.clone(), plaintext);
         }
     }
@@ -798,7 +804,7 @@ pub async fn dispatch_bulk_unmask(
         None,
     )
     .await?;
-    meter_audit_write(route.meter());
+    meter_audit_write(route.usage());
 
     Ok(out)
 }
@@ -900,7 +906,7 @@ async fn write_audit_bulk_row(
 /// denied path writes one `denied` audit row covering the whole
 /// query.
 ///
-/// Uses the query route's backend and metering identity. Denied attempts
+/// Uses the query route's backend and usage sink. Denied attempts
 /// write their audit record through an independent connection.
 pub async fn authorize_query_hint(
     route: &crate::tx_route::TxRoute,
@@ -921,7 +927,7 @@ pub async fn authorize_query_hint(
     let app_id = binding.app_id();
     let backend = route.backend();
     // SCHEMA: the audit table is reached through it on PostgreSQL. `app_id`
-    // above stays the TENANT - metering subject, SQLite ATTACH alias, key salt.
+    // above stays the TENANT - SQLite ATTACH alias, key salt.
     let db_schema = binding.schema();
 
     let schema = crate::descriptor::collection_schema(binding, collection)?;
@@ -942,7 +948,7 @@ pub async fn authorize_query_hint(
         classifications.push(mask_meta.classification);
     }
 
-    prepare_unmask_backend(backend, app_id).await?;
+    prepare_unmask_backend(backend, binding).await?;
     let mut unauthorized: Vec<String> = Vec::new();
     for (column, classification) in unmask_columns.iter().zip(&classifications) {
         if !check_unmask_authorization(binding, actor, classification)? {
@@ -965,7 +971,7 @@ pub async fn authorize_query_hint(
             Some(&unauthorized),
         )
         .await?;
-        meter_audit_write(route.meter());
+        meter_audit_write(route.usage());
         return Err(DbError::Coded {
             code: "unmask_not_permitted".into(),
             message: format!(
@@ -990,7 +996,7 @@ pub async fn authorize_query_hint(
 /// Single row per query (NOT per row), so the audit-log volume scales
 /// with query count not row count.
 ///
-/// Uses the query route's backend and metering identity. The audit write still
+/// Uses the query route's backend and usage sink. The audit write still
 /// opens an independent connection so transaction rollback cannot erase it.
 pub async fn audit_query_hint_granted(
     route: &crate::tx_route::TxRoute,
@@ -1010,12 +1016,12 @@ pub async fn audit_query_hint_granted(
     let app_id = binding.app_id();
     let backend = route.backend();
     // SCHEMA: the audit table is reached through it on PostgreSQL. `app_id`
-    // above stays the TENANT - metering subject, SQLite ATTACH alias, key salt.
+    // above stays the TENANT - SQLite ATTACH alias, key salt.
     let db_schema = binding.schema();
     // Re-resolve classifications for the audit row. Cheap — the descriptor
     // lookup is a HashMap read.
     let schema = crate::descriptor::collection_schema(binding, collection)?;
-    prepare_unmask_backend(backend, app_id).await?;
+    prepare_unmask_backend(backend, binding).await?;
     let mut classifications: Vec<String> = Vec::with_capacity(unmask_columns.len());
     for col in unmask_columns {
         let cls = lookup_mask_meta(&schema, col)
@@ -1037,7 +1043,7 @@ pub async fn audit_query_hint_granted(
         None,
     )
     .await?;
-    meter_audit_write(route.meter());
+    meter_audit_write(route.usage());
     Ok(())
 }
 
@@ -1055,9 +1061,8 @@ pub async fn dispatch_unmask_for_query(
     if unmask_columns.is_empty() {
         return Ok(());
     }
-    let app_id = binding.app_id();
     let schema = crate::descriptor::collection_schema(binding, collection)?;
-    prepare_unmask_backend(route.backend(), app_id).await?;
+    prepare_unmask_backend(route.backend(), binding).await?;
     for row in rows.iter_mut() {
         let Some(row_pk) = row.get("id").map(|v| match v {
             Value::String(s) => s.clone(),
@@ -1127,7 +1132,7 @@ pub async fn dispatch_unmask_for_query(
             // One SELECT per (row, column) pair. The bulk call writes a single
             // audit row for the whole request, but it reads once per cell, and
             // the read cost is what this counts.
-            crate::metrics::emit_db_metric(route.meter(), crate::metrics::DB_READS, 1);
+            crate::metrics::emit_db_metric(route.usage(), crate::metrics::DB_READS, 1);
             if let Some(obj) = row.as_object_mut() {
                 // Under the DECLARED name, because that is the key the row
                 // already carries: the SELECT projects descriptor keys, so

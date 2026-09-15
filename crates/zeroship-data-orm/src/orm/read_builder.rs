@@ -239,6 +239,16 @@ impl ReadOrigin {
     }
 }
 
+/// Row locks belong to a live transaction handle. A root handle stays a
+/// pooled receiver even inside another handle's callback.
+fn require_lock_receiver(database: &Database) -> Result<(), DbError> {
+    database.check_scope()?;
+    if database.scope.is_none() {
+        return Err(super::transaction_required("row locks"));
+    }
+    Ok(())
+}
+
 pub(super) fn validate_bound_schema(
     database: &Database,
     collection: &str,
@@ -378,6 +388,65 @@ impl<P> ReadBuilder<P> {
         }
         self.query.order_by.push(key.key);
         self
+    }
+    /// Lock every row this read returns, exclusively, until its transaction
+    /// settles. A competing lock waits within the transaction's lock timeout.
+    ///
+    /// # Errors
+    /// `transaction_required` unless the builder came from a transaction
+    /// handle, or `invalid_read` after [`Self::for_update_of`]. Execution
+    /// refuses grouped, aggregate, summary and left-joined locking reads with
+    /// `invalid_read`, and backends without row locks with
+    /// `unsupported_backend_feature`.
+    pub fn for_update(mut self) -> Result<Self, DbError> {
+        require_lock_receiver(&self.database)?;
+        if matches!(&self.query.lock, read::ReadLock::Update { of } if !of.is_empty()) {
+            return Err(read::invalid(
+                "a read locks either every source or the named sources",
+            ));
+        }
+        self.query.lock = read::ReadLock::Update { of: Vec::new() };
+        Ok(self)
+    }
+    /// Lock only the rows of `source`, a source already joined into this read.
+    /// Repeat to lock several sources. The other sources' rows stay unlocked
+    /// and need no update privilege.
+    ///
+    /// # Errors
+    /// `transaction_required` unless the builder came from a transaction
+    /// handle; `invalid_read` for a source from another database handle, a
+    /// source that is not part of this read, a repeated source, or after
+    /// [`Self::for_update`]. Execution refuses the nullable side of a left join.
+    pub fn for_update_of<E: Entity>(mut self, source: &EntityAlias<E>) -> Result<Self, DbError> {
+        require_lock_receiver(&self.database)?;
+        if !Rc::ptr_eq(&self.database.identity, &source.database.identity) {
+            return Err(read::invalid(
+                "read sources must belong to the same database handle",
+            ));
+        }
+        source.database.check_scope()?;
+        if !self.sources().iter().any(|registered| {
+            registered.alias == source.source.alias
+                && registered.collection == source.source.collection
+        }) {
+            return Err(read::invalid(
+                "a row lock target must be a registered read source",
+            ));
+        }
+        let alias = source.source.alias.clone();
+        match &mut self.query.lock {
+            read::ReadLock::None => self.query.lock = read::ReadLock::Update { of: vec![alias] },
+            read::ReadLock::Update { of } if of.is_empty() => {
+                return Err(read::invalid(
+                    "a read locks either every source or the named sources",
+                ));
+            }
+            read::ReadLock::Update { of } if of.contains(&alias) => {
+                return Err(read::invalid("duplicate row lock target"));
+            }
+            read::ReadLock::Update { of } => of.push(alias),
+        }
+        Ok(self)
     }
     pub fn limit(mut self, limit: i64) -> Result<Self, DbError> {
         self.query.limit = RowLimit::new(limit).map_err(|e| read::invalid(e.to_string()))?;

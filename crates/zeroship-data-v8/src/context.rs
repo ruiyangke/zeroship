@@ -3,7 +3,9 @@
 //! Isolates on a worker thread share the configured ORM connection. Database
 //! opening, pooling and concurrent initialization belong to `LocalConnection`.
 //! Transaction lanes, descriptors, protection and CDC state belong to the ORM;
-//! request and deployment identity are captured by the V8 wrappers.
+//! request and deployment identity are captured by the V8 wrappers. The
+//! service's meter lives here and reaches the ORM only as the usage sink each
+//! creator dispatch captures, never as ambient state other bindings could see.
 
 #[cfg(test)]
 use zeroship_data_orm::backend::BackendHandle;
@@ -19,10 +21,18 @@ pub(crate) struct ThreadDbContext {
     connection: Option<LocalConnection>,
     cdc_relay: Option<zeroship_data_orm::cdc::relay::RelayConfig>,
     supplied_project_keys: Option<Arc<SuppliedProjectKeys>>,
+    meter: Option<Arc<zeroship_metering::Meter>>,
 }
 impl ThreadDbContext {
     pub(crate) fn new() -> Self {
         Self::default()
+    }
+    /// The process meter creator dispatches on this thread record into.
+    pub(crate) fn meter(&self) -> Option<Arc<zeroship_metering::Meter>> {
+        self.meter.clone()
+    }
+    pub(crate) fn set_meter(&mut self, meter: Option<Arc<zeroship_metering::Meter>>) {
+        self.meter = meter;
     }
     pub(crate) fn connection(&self) -> Option<LocalConnection> {
         self.connection.clone()

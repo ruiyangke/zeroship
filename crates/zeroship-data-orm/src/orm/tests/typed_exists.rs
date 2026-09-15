@@ -76,7 +76,7 @@ async fn exercise(db: &Database) {
                 .await?;
             let entity = tx.entity::<readings::Entity>()?;
             assert!(entity.exists(readings::title.eq("in-transaction")?).await?);
-            Ok(entity.query())
+            Ok::<_, DbError>(entity.query())
         })
         .await
         .unwrap();
