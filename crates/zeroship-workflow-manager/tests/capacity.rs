@@ -13,7 +13,8 @@ mod placement_support;
 
 use futures::{channel::oneshot, future::ready};
 use placement_support::{
-    blocked_manager, options, revision, Counted, Facts, Host, Pool, Starter, Step, LONG,
+    blocked_manager, options, revision, Counted, Facts, Host, Pool, Recorder, Starter, Step,
+    LONG,
 };
 use std::{rc::Rc, time::Duration};
 use support::{Admin, Backend, Fixture};
@@ -622,4 +623,93 @@ async fn postgres_replicas_waiting_on_the_zone_lock_send_one_request() {
     assert_eq!((converged.revision, converged.desired), (1, 3));
     assert_eq!(pool.calls(), 1);
     assert_eq!(pool.starts(), 2);
+}
+
+case!(
+    sqlite_a_falling_target_drains_before_a_worker_becomes_removable,
+    postgres_a_falling_target_drains_before_a_worker_becomes_removable,
+    scale_down
+);
+
+/// Scale-down is a drain, not a removal.
+///
+/// Two instances hold one app each and then advertise more slots than they
+/// use, so the zone's registered capacity is over its target. The manager
+/// drains the instance it picks while that instance still holds its app: it
+/// takes no further placement, keeps what it has, and is not offered to the
+/// provider. Nothing is due, because there is nothing for a provider to do.
+///
+/// The control is the same zone one release later. The drained instance now
+/// holds nothing, which is itself what makes a request due, and it is the only
+/// instance the provider may take away.
+async fn scale_down(fixture: &Fixture) {
+    let host = Host::new(fixture, Rc::new(Facts::default())).await;
+    let zone = ZoneId::mint();
+    let apps: Vec<AppId> = (0..2).map(|_| AppId::mint()).collect();
+    for app in &apps {
+        host.due(app, &zone).await;
+    }
+    let recorder = Recorder::new();
+    let lane = capacity(&host, recorder.clone(), LONG);
+    // With no capacity yet, the two apps are the zone's demand and its target.
+    for app in &apps {
+        assert!(matches!(lane.visit(app).await.unwrap(), Visit::Unplaced(_)));
+    }
+    assert_eq!(lane.reconcile(&zone).await.unwrap(), Exchange::Applied);
+    assert_eq!(recorder.last().desired_slots, 2);
+    assert!(recorder.last().removable.is_empty());
+
+    // One slot each, so the two apps land on two instances. Both then
+    // advertise four slots for the one app each holds.
+    let workers = [host.worker(&zone, 1).await, host.worker(&zone, 1).await];
+    for app in &apps {
+        assert!(matches!(lane.visit(app).await.unwrap(), Visit::Placed(_)));
+    }
+    for worker in &workers {
+        host.coordinator
+            .register(worker, &placement_support::ready(4))
+            .await
+            .unwrap();
+    }
+    retry_now(fixture, &zone).await;
+    assert_eq!(
+        lane.reconcile(&zone).await.unwrap(),
+        Exchange::Idle,
+        "a drained instance that still holds a placement is nothing to ask a provider for"
+    );
+    let ready: Vec<_> = host
+        .coordinator
+        .ready_workers(None)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|worker| worker.worker_id)
+        .collect();
+    assert_eq!(ready.len(), 1, "the excess instance drained");
+    let kept = ready[0].clone();
+    let drained = workers
+        .iter()
+        .find(|worker| **worker != kept)
+        .expect("the drained instance")
+        .clone();
+    let held = host.placed(&drained).await;
+    assert_eq!(held.len(), 1, "draining keeps the placements it holds");
+
+    // THE CONTROL, one release apart.
+    let assignment = host.coordinator.assignments(&drained, None).await.unwrap()[0].clone();
+    host.coordinator
+        .release(
+            &drained,
+            &ReleaseScope {
+                request_id: RequestId::mint(),
+                app_id: held[0].clone(),
+                assignment_revision: assignment.revision,
+                reason: ReleaseReason::Relinquished,
+            },
+        )
+        .await
+        .unwrap();
+    retry_now(fixture, &zone).await;
+    assert_eq!(lane.reconcile(&zone).await.unwrap(), Exchange::Applied);
+    assert_eq!(recorder.last().removable, vec![drained]);
 }

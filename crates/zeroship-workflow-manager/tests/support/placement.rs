@@ -359,6 +359,35 @@ impl CapacityProvider for Pool {
     }
 }
 
+/// A provider that only records. It starts nothing and removes nothing, so a
+/// contract can read exactly what the manager asked for.
+#[derive(Debug, Default)]
+pub struct Recorder {
+    pub calls: RefCell<Vec<CapacityRequest>>,
+}
+
+impl Recorder {
+    pub fn new() -> Rc<Self> {
+        Rc::new(Self::default())
+    }
+
+    /// The request of the most recent exchange.
+    pub fn last(&self) -> CapacityRequest {
+        self.calls.borrow().last().cloned().expect("a request")
+    }
+}
+
+impl CapacityProvider for Recorder {
+    fn ensure<'a>(&'a self, request: &'a CapacityRequest) -> CapacityFuture<'a> {
+        Box::pin(async move {
+            self.calls.borrow_mut().push(request.clone());
+            Ok(CapacityReply::Progress {
+                ready_slots: request.ready_slots,
+            })
+        })
+    }
+}
+
 /// Wait until `waiters` manager sessions queue behind a lock the
 /// administrator holds. Polls from inside the administrator's transaction.
 pub async fn blocked_manager(admin: &compio_postgres::Client, waiters: i64) {
