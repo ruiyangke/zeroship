@@ -25,8 +25,8 @@ use zeroship_core::{
 };
 use zeroship_workflow_manager::{
     capacity::StaticPool,
-    coordinator::Placed,
-    eligibility::ZoneId,
+    coordinator::{self, Coordinator, Placed},
+    eligibility::{SoleWorker, ZoneId},
     Error,
 };
 
@@ -78,6 +78,70 @@ case!(
     postgres_archived_apps_stay_placeable_while_deleted_apps_are_abandoned,
     lifecycle
 );
+case!(
+    sqlite_a_restarted_sole_worker_host_takes_its_app_back_from_its_predecessor,
+    postgres_a_restarted_sole_worker_host_takes_its_app_back_from_its_predecessor,
+    sole_worker_restart
+);
+
+/// A host whose capacity is one process outlives none of its registrations:
+/// the catalog survives the process, so a predecessor that died without
+/// draining is still stored ready and still holds the app. `SoleWorker` calls
+/// only the worker this process minted live, so the app is taken back rather
+/// than read as already having a ready eligible owner. The assertion that the
+/// predecessor is still a ready registration is what keeps this from passing
+/// for the uninteresting reason that its heartbeat lapsed.
+async fn sole_worker_restart(fixture: &Fixture) {
+    let host = Host::new(fixture, Rc::new(Facts::default())).await;
+    let zone = ZoneId::mint();
+    let app = AppId::mint();
+    host.queue.register_scope(&app).await.unwrap();
+
+    let dead = WorkerId::mint();
+    let before = coordinator_for(&host, &zone, &dead);
+    before
+        .register(&dead, &placement_support::ready(1))
+        .await
+        .unwrap();
+    let first = before.place(&app).await;
+    assert!(
+        matches!(first, Ok(Placed::Assigned(ref assignment)) if assignment.worker_id == dead),
+        "{first:?}"
+    );
+
+    // The process dies. Its registration and its placement both outlive it.
+    let live = WorkerId::mint();
+    let after = coordinator_for(&host, &zone, &live);
+    after
+        .register(&live, &placement_support::ready(1))
+        .await
+        .unwrap();
+    let ready: Vec<WorkerId> = after
+        .ready_workers(None)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|worker| worker.worker_id)
+        .collect();
+    assert!(ready.contains(&dead) && ready.contains(&live), "{ready:?}");
+
+    let placed = after.place(&app).await;
+    assert!(
+        matches!(placed, Ok(Placed::Assigned(ref assignment)) if assignment.worker_id == live),
+        "{placed:?}"
+    );
+    assert!(after.owned(&app).await.unwrap());
+}
+
+/// A coordinator over the fixture's queue whose one live worker is `worker`.
+fn coordinator_for(host: &Host, zone: &ZoneId, worker: &WorkerId) -> Coordinator {
+    Coordinator::new(
+        host.queue.clone(),
+        coordinator::Options::default(),
+        Rc::new(SoleWorker::new(zone.clone(), worker.clone())),
+    )
+    .unwrap()
+}
 
 /// Spare capacity in another zone is not authority. The control differs only
 /// in the worker's zone: a worker enrolled in the app's zone is placed.
