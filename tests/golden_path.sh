@@ -795,44 +795,6 @@ tamper_allowed=$(docker exec "$PG_CONTAINER" psql -U "$PG_USER" -d "$PG_DB" -tAc
   && pass "app_audit stays append-only: DELETE refused without the retention GUC, accepted with it" \
   || fail "audit tamper guard not discriminating (refused=$tamper_refused allowed=$tamper_allowed, both must be 1): the append-only trigger no longer gates on zeroship.audit_retention (#324)"
 
-# Platform tables must come from migrations, not from a service doing DDL.
-#
-# The workflow scheduler store was created at runtime by
-# crates/zeroship-workflow-scheduler/src/store.rs provision_sql(), which control called on
-# every tick. Its first statement is `CREATE SCHEMA IF NOT EXISTS`, and Postgres
-# checks database-level CREATE BEFORE the existence short-circuit, so it fails
-# under any least-privilege role even when the schema is already there. MEASURED
-# against the live deployment before 20260811000100_workflow_scheduler_store.ts:
-# CREATE privilege false, schema absent, 56 tick ERRORs in 60 seconds, every one
-# SQLSTATE 42501.
-#
-# The tables sit in `zeroship`, not a schema of their own: the platform migration
-# charter admits exactly ["public", "zeroship"], and a first draft creating a
-# `workflow_scheduler` schema was refused at lower time with CROSS_SCHEMA.
-#
-# Asserted BEFORE any service starts, on purpose. Run after control boots and it
-# would pass for the wrong reason -- this harness hands control a privileged DSN,
-# so the old runtime DDL succeeds here and hides a defect that only appears under
-# a restricted role.
-#
-# The columns are checked, not just the table names, because the migration and
-# the Rust provision_sql() are two spellings of the same objects and can drift;
-# store.rs reads these columns by name.
-#
-# WHAT THIS DOES NOT CATCH: it says nothing about whether workflows RUN. Empty
-# tables with the right columns satisfy it. It also does not check the indexes.
-sched_cols=$(docker exec "$PG_CONTAINER" psql -U "$PG_USER" -d "$PG_DB" -tAc \
-  "select count(*) from information_schema.columns where table_schema='zeroship' and ((table_name='workflow_scheduler_timers' and column_name in ('run_id','app_id','wake_at','generation','registered_at')) or (table_name='workflow_scheduler_inflight' and column_name in ('run_id','app_id','deadline','dispatch_generation','dispatched_at')))" 2>/dev/null | tr -d '[:space:]')
-[ "$sched_cols" = "10" ] \
-  && pass "workflow scheduler store built by migrations (10/10 columns)" \
-  || fail "workflow scheduler store missing after migrate: $sched_cols of 10 columns - control cannot CREATE SCHEMA under its own role, so env.workflows is dead (#320)"
-
-sched_dml=$(docker exec "$PG_CONTAINER" psql -U "$PG_USER" -d "$PG_DB" -tAc \
-  "select count(*) from pg_class c join pg_namespace n on n.oid=c.relnamespace cross join (values ('SELECT'),('INSERT'),('UPDATE'),('DELETE')) p(v) where n.nspname='zeroship' and c.relname in ('workflow_scheduler_timers','workflow_scheduler_inflight') and has_table_privilege('zeroship_control',c.oid,p.v)" 2>/dev/null | tr -d '[:space:]')
-[ "$sched_dml" = "8" ] \
-  && pass "zeroship_control holds the scheduler store DML (8/8)" \
-  || fail "zeroship_control lacks scheduler store privileges: $sched_dml of 8 - the tick would fail even with the tables present (#320)"
-
 # The service roles must NOT be able to do DDL. This is the property #319, #320
 # and #321 all live in, and the one a future privilege error is most likely to be
 # "fixed" by relaxing.
@@ -4630,10 +4592,15 @@ gp_close_step
 # seeing the other (128 and 139 respectively); neither figure is right once both
 # land, and taking either would have silently lowered the floor.
 #
+# 141 -> 139, the workflow-scheduler cutover. The two scheduler-store arms
+# (its column census and Control's DML on it) asserted a platform table the
+# manager replaced; the store, its migration and its reader are deleted, so
+# the two outcomes are removed rather than relaxed.
+#
 # BOTH ARE COUNTED DELTAS, NOT MEASUREMENTS. No full four-service run has been
 # made since either change. Replace this with a real measured pair after the next
 # complete run - and do not adjust the assertions to whatever that run prints.
-GOLDEN_MIN_PASSED=$((141 - GP_ARM_PASS_DELTA))
+GOLDEN_MIN_PASSED=$((139 - GP_ARM_PASS_DELTA))
 
 # Guard 2: every DECLARED step must have run and asserted something. See the
 # reasoning beside GP_EXPECTED_STEPS at the top of this file.

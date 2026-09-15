@@ -664,7 +664,7 @@ fi
 
 CONTROL_ADMITTED_RESOURCES="$(
   rg -U --pcre2 -o \
-    'web::resource\s*\(\s*(?:"/[^"\\]*"|device_grant::PROTECTED_RESOURCE_METADATA_PATH|WORKFLOW_ADVANCE_PATH)(?=\s*\))' \
+    'web::resource\s*\(\s*(?:"/[^"\\]*"|device_grant::PROTECTED_RESOURCE_METADATA_PATH)(?=\s*\))' \
     "$CONTROL_SRC" 2>/dev/null \
     | wc -l
 )"
@@ -673,7 +673,7 @@ if [ "$CONTROL_ADMITTED_RESOURCES" = "$N_CONTROL_RESOURCES" ]; then
 else
   fail "only $CONTROL_ADMITTED_RESOURCES of $N_CONTROL_RESOURCES control resources use an auditable full path:"
   rg -n -U --pcre2 \
-    'web::resource\s*\(\s*(?!(?:"/[^"\\]*"|device_grant::PROTECTED_RESOURCE_METADATA_PATH|WORKFLOW_ADVANCE_PATH)(?=\s*\)))[^\n)]*' \
+    'web::resource\s*\(\s*(?!(?:"/[^"\\]*"|device_grant::PROTECTED_RESOURCE_METADATA_PATH)(?=\s*\)))[^\n)]*' \
     "$CONTROL_SRC" 2>/dev/null \
     | sed 's/^/    /'
 fi
@@ -683,11 +683,6 @@ grep -Fqx \
   "$ROOT/crates/zeroship-core/src/device_grant.rs" \
   && pass "the allowed device-grant route constant is pinned outside /v1" \
   || fail "the allowed device-grant route constant changed; audit it before admitting the new path"
-grep -Fqx \
-  'pub const WORKFLOW_ADVANCE_PATH: &str = "/__zeroship/internal/workflow-advance";' \
-  "$ROOT/crates/zeroship-workflow-scheduler/src/lib.rs" \
-  && pass "the allowed workflow route constant is pinned outside /v1" \
-  || fail "the allowed workflow route constant changed; audit it before admitting the new path"
 
 CONTROL_V1_ROUTES="$(
   rg -n -U --pcre2 \

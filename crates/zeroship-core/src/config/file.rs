@@ -96,9 +96,6 @@ pub struct FileConfig {
     /// Platform-schema migrate one-shot settings.
     #[serde(default)]
     pub platform_migrate: PlatformMigrateSection,
-    /// Standalone workflow-scheduler settings.
-    #[serde(default)]
-    pub workflow_scheduler: SchedulerSection,
     /// Workflow authority settings.
     #[serde(default)]
     pub workflow: WorkflowSection,
@@ -113,11 +110,10 @@ pub struct FileConfig {
 /// `[control]` table and still rejects a typo inside it; the values come from
 /// the generated declarations walking the same canonical paths.
 ///
-/// The two `BootstrapControl` fields on that declaration -
-/// `disable_workflow_engine` and `allow_unsupported_billing` - are deliberately
-/// ABSENT. A bootstrap control has no overlay tier, so a key here would be
-/// accepted by the parser and then ignored by the resolver, which is worse than
-/// being rejected.
+/// The `BootstrapControl` field on that declaration -
+/// `allow_unsupported_billing` - is deliberately ABSENT. A bootstrap control
+/// has no overlay tier, so a key here would be accepted by the parser and then
+/// ignored by the resolver, which is worse than being rejected.
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct ControlSection {
@@ -260,8 +256,6 @@ pub struct GatewaySection {
 
 /// Worker operational values supplied by the overlay. See [`ControlSection`].
 ///
-/// `workflow_advance_unsigned` is deliberately absent for the same reason the
-/// control safety controls are: it is a `BootstrapControl` with no overlay tier.
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct WorkerSection {
@@ -347,38 +341,6 @@ pub struct PlatformMigrateSection {
     pub cluster_lock_database: Option<String>,
 }
 
-/// Workflow-scheduler operational values supplied by the overlay.
-///
-/// Like [`ObsSection`], this exists so `deny_unknown_fields` still ACCEPTS a
-/// `[workflow_scheduler]` table and still rejects a typo inside it. The values
-/// each binary uses come from the generated declarations, which walk the same
-/// overlay by canonical path, so the key spellings here and there are the same
-/// by construction.
-#[derive(Debug, Clone, Deserialize, Default)]
-#[serde(deny_unknown_fields)]
-pub struct SchedulerSection {
-    /// `PostgreSQL` DSN for the scheduler timer and inflight tables.
-    pub database_url: Option<String>,
-    /// Schema holding the scheduler timer and inflight tables.
-    pub schema: Option<String>,
-    /// Gateway internal base URL the dispatch seam posts to.
-    pub gateway_url: Option<String>,
-    /// Control-plane apply endpoint the scheduler acknowledges through.
-    pub control_apply_url: Option<String>,
-    /// Timer-wheel tick interval in seconds.
-    pub tick_secs: Option<u64>,
-    /// Interval in seconds between inflight-lease reaper sweeps.
-    pub reaper_interval_secs: Option<u64>,
-    /// Horizon in milliseconds within which a timer is loaded into the wheel.
-    pub near_horizon_ms: Option<i64>,
-    /// Maximum timers held in the in-memory wheel.
-    pub max_loaded_timers: Option<i64>,
-    /// Maximum due timers claimed per tick.
-    pub max_due_per_tick: Option<usize>,
-    /// Inflight-lease time-to-live in milliseconds.
-    pub inflight_ttl_ms: Option<i64>,
-}
-
 /// Workflow coordinator metadata values supplied by the shared overlay.
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
@@ -433,7 +395,7 @@ pub struct WorkflowSection {
 
 /// CDC relay values supplied by the overlay.
 ///
-/// Like [`SchedulerSection`], this exists so `deny_unknown_fields` still ACCEPTS
+/// Like [`ObsSection`], this exists so `deny_unknown_fields` still ACCEPTS
 /// a `[data_cdc_server]` table and still rejects a typo inside it. The value the
 /// binary uses comes from its generated declaration, which walks the same
 /// overlay by canonical path.
@@ -1213,9 +1175,6 @@ port = 9091
 mutation_rate_limit_burst = 2
 mutation_rate_limit_per_minute = 3
 
-[workflow_scheduler]
-tick_secs = 1
-
 [data_cdc_server]
 database_url = "postgres://relay@db/zeroship"
 
@@ -1236,7 +1195,6 @@ relay_smtp_tls = "starttls"
             config.migrate_server.mutation_rate_limit_per_minute,
             Some(3)
         );
-        assert_eq!(config.workflow_scheduler.tick_secs, Some(1));
         assert_eq!(
             config.data_cdc_server.database_url.as_deref(),
             Some("postgres://relay@db/zeroship")
@@ -1261,7 +1219,7 @@ relay_smtp_tls = "starttls"
         // section exists to prevent.
         let control = TempFile::write(
             "per-binary-bootstrap.toml",
-            "[worker]\nworkflow_advance_unsigned = true\n",
+            "[control]\nallow_unsupported_billing = true\n",
         );
         let err = FileConfig::load(Some(&control.path))
             .expect_err("a bootstrap control has no overlay tier");
