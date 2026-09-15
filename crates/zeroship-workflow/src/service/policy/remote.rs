@@ -196,10 +196,42 @@ impl IngressEpochs for AssignedPolicies {
     }
 }
 
+/// Carry a coordinator answer to the caller WITHOUT flattening a refusal into
+/// an outage.
+///
+/// A refusal and an outage demand opposite responses: the first is durable and
+/// wants an operator, the second is transient and wants a retry. Mapping every
+/// non-timeout answer to `Unavailable` made them indistinguishable, and because
+/// the consumer logs only `code()`, it also erased the reason before anything
+/// could read it - a worker refused its lease reported `workflow_unavailable`
+/// and nothing else. `establish` above already documents that callers see
+/// `PermissionDenied` while policy disables admission or placement is revoked,
+/// so the flattening also failed the contract stated one screen up.
 fn transport_error(error: zeroship_workflow_client::Error) -> WorkflowServiceError {
+    use zeroship_workflow_client::Error as Wire;
     match error {
-        zeroship_workflow_client::Error::Timeout => WorkflowServiceError::Timeout,
-        _ => WorkflowServiceError::Unavailable("workflow policy lease unavailable".into()),
+        Wire::Timeout => WorkflowServiceError::Timeout,
+        Wire::Unauthenticated | Wire::Refused(FailureCode::Unauthenticated) => {
+            WorkflowServiceError::Unauthenticated
+        }
+        Wire::Refused(FailureCode::Denied) => WorkflowServiceError::PermissionDenied,
+        Wire::Refused(FailureCode::Conflict) => {
+            WorkflowServiceError::Conflict("workflow policy lease conflicts with the manager".into())
+        }
+        Wire::Refused(FailureCode::Capacity) => WorkflowServiceError::ResourceExhausted(
+            "workflow policy lease refused for capacity".into(),
+        ),
+        Wire::Refused(FailureCode::Invalid) | Wire::Refused(FailureCode::RequestTooLarge) => {
+            WorkflowServiceError::InvalidRequest("workflow policy lease request refused".into())
+        }
+        Wire::Refused(FailureCode::Unavailable)
+        | Wire::Unavailable
+        | Wire::InvalidConfig
+        | Wire::InvalidResponse
+        | Wire::RequestTooLarge
+        | Wire::ResponseTooLarge => {
+            WorkflowServiceError::Unavailable("workflow policy lease unavailable".into())
+        }
     }
 }
 

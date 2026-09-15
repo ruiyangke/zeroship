@@ -434,8 +434,20 @@ async fn run_slot<T: JobTransport>(
     }
 }
 
+/// Record a consumption failure and back off.
+///
+/// The REASON is logged beside the code, not just the code. Several distinct
+/// refusals share `workflow_unavailable` - a refused lease, a concurrent
+/// assignment refresh, and a genuine coordinator outage among them - so a line
+/// carrying only the code cannot tell an operator which of them stopped this
+/// worker from consuming, and a worker that has stopped consuming looks from
+/// outside like runs that simply never start.
 fn failed(scope: &Scope, options: ConsumerOptions, error: &WorkflowServiceError) {
-    tracing::warn!(code = error.code(), "workflow job consumption failed");
+    tracing::warn!(
+        code = error.code(),
+        reason = %error,
+        "workflow job consumption failed"
+    );
     scope.delay(options.error_backoff);
 }
 
