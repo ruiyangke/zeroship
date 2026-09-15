@@ -301,12 +301,9 @@ async fn transaction_lifetime(store: &OrmStore) {
     .unwrap();
     let escaped = tx.database().clone();
     tx.commit().await.unwrap();
-    assert!(escaped
-        .collection("__zeroship_workflow_app_state")
-        .unwrap()
-        .find(json!({}).into(), json!({}).into())
-        .await
-        .is_err());
+    // A handle that outlived its transaction is refused at the collection it
+    // would read through, so no read is reachable from it at all.
+    assert!(escaped.collection("__zeroship_workflow_app_state").is_err());
     let tx = store.begin().await.unwrap();
     assert_eq!(
         journal_count(&tx, "app_state", json!({"app_id":"committed"})).await,
