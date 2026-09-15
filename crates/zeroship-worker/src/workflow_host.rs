@@ -286,6 +286,10 @@ async fn run(
     )
     .map_err(|error| format!("workflow manager client: {error}"))?;
     let worker = client.worker_id().clone();
+    // The SAME enrolled client the host coordinates through. A refused journal is
+    // reported under the worker instance identity that found it, so the manager
+    // can attribute the repair.
+    let repair = Rc::new(client.clone());
     let policies = Arc::new(HostPolicies::default());
     let provider = ProductionResources::open(resources)?;
     let factory = WorkflowCreatorFactory::new(
@@ -294,7 +298,8 @@ async fn run(
         &worker,
         TaskPayloadLimits::default(),
     )
-    .map_err(|error| format!("workflow creator factory: {error}"))?;
+    .map_err(|error| format!("workflow creator factory: {error}"))?
+    .with_journal_repair(repair);
     let mut host = WorkerHost::new(client, policies, factory, ready, config.host_options())
         .map_err(|error| format!("workflow host: {error}"))?;
     tracing::info!(

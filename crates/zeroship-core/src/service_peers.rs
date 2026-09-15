@@ -166,6 +166,11 @@ pub const WORKER_JOIN_SIGNER_SERVICE_NAME: &str = "svc/worker-join-signer";
 pub const CONTROL_SERVICE_NAME: &str = "svc/control";
 /// The hierarchical name of the workflow manager's service identity.
 pub const WORKFLOW_SERVICE_NAME: &str = "svc/workflow";
+/// The hierarchical name of the migration service's identity.
+///
+/// It holds no endpoint grant of its own: the migration service is a
+/// DESTINATION, never a caller. The name exists so a caller can address it.
+pub const MIGRATE_SERVICE_NAME: &str = "svc/migrate-server";
 /// The hierarchical name of the auth service's identity.
 pub const AUTH_SERVICE_NAME: &str = "svc/auth";
 
@@ -795,10 +800,7 @@ impl ServiceAuth {
 
     /// Build a capability from a loaded keyring and the verifier for its tier.
     #[must_use]
-    pub fn new(
-        keyring: ServiceKeyring,
-        verifier: Arc<dyn IdentityVerifier + Send + Sync>,
-    ) -> Self {
+    pub fn new(keyring: ServiceKeyring, verifier: Arc<dyn IdentityVerifier + Send + Sync>) -> Self {
         Self {
             keyring: Some(keyring),
             verifier: Some(verifier),
@@ -862,7 +864,9 @@ impl ServiceAuth {
     /// [`ServiceAuth::authorization_for`], for the same reason.
     #[must_use]
     pub fn user_envelope_signer(&self) -> Option<&UserEnvelopeSigner> {
-        self.keyring.as_ref().map(ServiceKeyring::user_envelope_signer)
+        self.keyring
+            .as_ref()
+            .map(ServiceKeyring::user_envelope_signer)
     }
 
     /// The verifier for inbound `ZeroShip-User` identity envelopes, or `None`

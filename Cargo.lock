@@ -8497,6 +8497,7 @@ dependencies = [
  "zeroship-migrate-policy",
  "zeroship-migrate-postgres",
  "zeroship-runtime",
+ "zeroship-workflow-schema",
 ]
 
 [[package]]
@@ -8696,6 +8697,7 @@ dependencies = [
  "zeroship-workflow-calendar",
  "zeroship-workflow-client",
  "zeroship-workflow-manager",
+ "zeroship-workflow-schema",
 ]
 
 [[package]]
@@ -8747,6 +8749,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "zeroship-workflow-schema"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+]
+
+[[package]]
 name = "zeroship-workflow-server"
 version = "0.1.0"
 dependencies = [
@@ -8767,6 +8776,7 @@ dependencies = [
  "zeroship-data-orm",
  "zeroship-workflow-client",
  "zeroship-workflow-manager",
+ "zeroship-workflow-schema",
 ]
 
 [[package]]

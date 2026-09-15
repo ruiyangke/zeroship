@@ -34,7 +34,7 @@ impl Fixture {
             ))
             .with_env_var("POSTGRES_HOST_AUTH_METHOD", "trust")
             .start()
-            .expect("workflow provisioning requires Testcontainers PostgreSQL");
+            .expect("runtime role provisioning requires Testcontainers PostgreSQL");
         let address = format!(
             "{}:{}",
             postgres.get_host().unwrap(),
@@ -146,7 +146,7 @@ async fn migrate_table(fixture: &mut Fixture, schema: &SchemaName, role: &str, t
             "CREATE TABLE \"{schema}\".\"{table}\"(id text PRIMARY KEY, content text NOT NULL)"
         ))
         .await
-        .expect("workflow provisioning must preserve creator migration CREATE authority");
+        .expect("runtime role provisioning must preserve creator migration CREATE authority");
     transaction.commit().await.unwrap();
 }
 

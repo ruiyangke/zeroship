@@ -151,6 +151,35 @@ impl WorkflowAuth {
             .map(|_| issuer)
             .map_err(|error| auth_error(&error))
     }
+    /// Verify a caller of an endpoint TWO kinds of identity may reach.
+    ///
+    /// The journal-ensure endpoint is granted to Control, which signs under a
+    /// role key published in the peer bundle, and to a worker, which signs under
+    /// an enrolled INSTANCE key held in the registry. The presented issuer
+    /// selects the verifier, so this is a dispatch rather than a fallback: a
+    /// caller claiming `svc/worker` is verified against the registry and nothing
+    /// else, and one claiming any other principal never reaches it.
+    ///
+    /// # Errors
+    /// Rejects unauthenticated or unauthorized assertions and unavailable stores.
+    pub async fn journal_caller(
+        &self,
+        header: Option<&str>,
+        endpoint: ServiceEndpoint,
+    ) -> Result<String, Error> {
+        let issuer = presented_issuer(header).ok_or(Error::Unauthenticated)?;
+        let worker_role = service_issuer(WORKER_SERVICE_NAME).map_err(|_| Error::Unavailable)?;
+        if issuer.principal() == worker_role.principal() {
+            return self
+                .worker(header, endpoint)
+                .await
+                .map(|worker| worker.id().as_str().to_owned());
+        }
+        self.peer(header, endpoint)
+            .await
+            .map(|issuer| issuer.as_str().to_owned())
+    }
+
     /// # Errors
     /// Rejects inactive or mismatched identities, invalid assertions and unavailable stores.
     pub async fn worker(

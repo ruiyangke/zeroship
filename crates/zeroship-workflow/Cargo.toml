@@ -13,6 +13,7 @@ flume = { workspace = true }
 zeroship-core = { workspace = true }
 zeroship-workflow-calendar = { workspace = true }
 zeroship-workflow-client = { workspace = true }
+zeroship-workflow-schema = { workspace = true }
 zeroship-bundle = { workspace = true }
 zeroship-data-orm = { workspace = true }
 zeroship-storage = { workspace = true }

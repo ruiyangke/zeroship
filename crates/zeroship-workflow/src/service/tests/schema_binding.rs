@@ -140,6 +140,78 @@ async fn conflicting_journal_metadata_cannot_replace_the_app_descriptor() {
     assert!(database.collection("__zeroship_workflow_requests").is_err());
 }
 
+/// Re-initializing a journal already at the current version must be a no-op,
+/// because it runs on every local start. The rows are the property that matters:
+/// a re-install that recreated the tables would silently empty them.
+#[test]
+fn reinitializing_a_current_journal_preserves_its_rows() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("zs-workflow.sqlite");
+    schema::initialize_sqlite(&path).unwrap();
+    let connection = rusqlite::Connection::open(&path).unwrap();
+    connection
+        .execute(
+            "INSERT INTO __zeroship_workflow_app_state (id, app_id) VALUES ('row', 'app')",
+            [],
+        )
+        .unwrap();
+    schema::initialize_sqlite(&path).unwrap();
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT app_id FROM __zeroship_workflow_app_state WHERE id='row'",
+                [],
+                |row| row.get::<_, String>(0)
+            )
+            .unwrap(),
+        "app"
+    );
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT version FROM __zeroship_workflow_schema_version WHERE id='workflow'",
+                [],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+        i64::from(zeroship_workflow_schema::VERSION)
+    );
+}
+
+/// A journal a NEWER platform installed must never be written over by an older
+/// series. The refusal is distinct from the corrupted-journal one because the
+/// remedy is the opposite: upgrade the process, do not repair the database.
+#[test]
+fn a_journal_ahead_of_this_build_is_refused_without_being_touched() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("zs-workflow.sqlite");
+    schema::initialize_sqlite(&path).unwrap();
+    let connection = rusqlite::Connection::open(&path).unwrap();
+    let ahead = i64::from(zeroship_workflow_schema::VERSION) + 1;
+    connection
+        .execute(
+            "UPDATE __zeroship_workflow_schema_version SET version = ?1",
+            [ahead],
+        )
+        .unwrap();
+    let error = schema::initialize_sqlite(&path).expect_err("a newer journal must be refused");
+    assert!(
+        format!("{error}").contains("ahead of this build"),
+        "the refusal must name the direction: {error}"
+    );
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT version FROM __zeroship_workflow_schema_version WHERE id='workflow'",
+                [],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+        ahead,
+        "the refused journal's stamp must be left alone"
+    );
+}
+
 #[test]
 fn partial_workflow_schema_is_refused_in_a_shared_database() {
     let directory = tempfile::tempdir().unwrap();
@@ -157,39 +229,21 @@ fn partial_workflow_schema_is_refused_in_a_shared_database() {
     );
 }
 
+/// The engine binds the journal's schema through the ONE substitution in
+/// `zeroship-workflow-schema`, which cannot depend on the ORM. This is what
+/// holds that leaf's quoting rule to the ORM's: they must produce the same
+/// bytes, or a schema name carrying a quote would bind differently in the
+/// installer and in the host that reads it.
 #[test]
-fn schema_binding_preserves_literals_and_includes_compiler_generated_names() {
-    let output = Command::new("node")
-        .args(["--input-type=module", "--eval"])
-        .arg(r#"
-import assert from 'node:assert/strict';
-import { bindOwnedNames } from './schema/names.mjs';
-const identifiers = new Set(['journal']);
-const columns = new Set(['id', 'body']);
-const sql = `CREATE TABLE "journal" (id TEXT, body TEXT DEFAULT 'journal '' "journal" CREATE INDEX "literal"', CONSTRAINT "journal_pkey" PRIMARY KEY (id, body), FOREIGN KEY (id) REFERENCES journal(id));
-CREATE INDEX IF NOT EXISTS "journal_id_idx" ON "journal" (id);`;
-const bound = bindOwnedNames(sql, { identifiers, columns });
-assert.ok(bound.includes(`DEFAULT 'journal '' "journal" CREATE INDEX "literal"'`));
-assert.ok(bound.includes('REFERENCES "__zeroship_workflow_journal"(id)'));
-assert.ok(bound.includes('CONSTRAINT "__zeroship_workflow_journal_pkey"'));
-assert.ok(bound.includes('INDEX IF NOT EXISTS "__zeroship_workflow_journal_id_idx"'));
-assert.ok(bound.includes('ON "__zeroship_workflow_journal" (id)'));
-for (const name of ['journal', 'journal_pkey', 'journal_id_idx']) {
-    assert.throws(() => bindOwnedNames(sql, { identifiers, columns: new Set([name]) }), /collides with a column/);
-}
-assert.throws(() => bindOwnedNames(sql, { identifiers: new Set(['omitted']), columns }), /omitted owned identifier/);
-assert.throws(() => bindOwnedNames('', { identifiers: new Set(), columns }), /no owned identifiers/);
-assert.throws(() => bindOwnedNames('', { identifiers: new Set(['a'.repeat(64)]), columns }), /PostgreSQL limit/);
-assert.throws(() => bindOwnedNames('', { identifiers: new Set(['untrusted"']), columns }), /invalid workflow owned name/);
-"#)
-        .current_dir(env!("CARGO_MANIFEST_DIR"))
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+fn the_leaf_substitution_agrees_with_the_orm_quoting_rule() {
+    for name in ["customer", "a\"b", "a\"; DROP SCHEMA public; --"] {
+        let bound = zeroship_workflow_schema::postgres_sql(name);
+        let through_orm = zeroship_workflow_schema::POSTGRES_TEMPLATE.replace(
+            zeroship_workflow_schema::SCHEMA_PLACEHOLDER,
+            &zeroship_data_orm::sql::mapping::quote_ident(name),
+        );
+        assert_eq!(bound, through_orm, "substitution diverged for {name:?}");
+    }
 }
 
 #[test]
