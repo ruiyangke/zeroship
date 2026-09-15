@@ -170,7 +170,7 @@ const fn is_issuer_char(c: char) -> bool {
 }
 
 /// Characters admitted in a `jti`.
-const fn is_jti_char(c: char) -> bool {
+pub(crate) const fn is_jti_char(c: char) -> bool {
     c.is_ascii_alphanumeric() || matches!(c, '-' | '_')
 }
 
@@ -451,7 +451,7 @@ impl ServiceSigningKey {
         self.inner.sign(message).to_bytes()
     }
 
-    fn encoding_key(&self) -> Result<EncodingKey, AssertionError> {
+    pub(crate) fn encoding_key(&self) -> Result<EncodingKey, AssertionError> {
         use ed25519_dalek::pkcs8::EncodePrivateKey as _;
         let der = self
             .inner
