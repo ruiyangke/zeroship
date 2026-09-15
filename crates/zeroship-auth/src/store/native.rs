@@ -5,7 +5,7 @@ use zeroship_core::UserId;
 use zeroship_data_orm::{
     binding::DbBinding,
     encryption::ProjectKeySource,
-    orm::{Database, DbError},
+    orm::{Database, DbError, UtcInstant},
     sql::SchemaName,
     ConnectOptions,
 };
@@ -84,11 +84,45 @@ pub(crate) fn user_id_text(value: UserId) -> Result<String, DbError> {
     Ok(value.into_string())
 }
 
-pub(crate) fn optional_timestamp(value: Option<i64>) -> Result<Option<DateTime<Utc>>, DbError> {
-    value
-        .map(|value| {
-            DateTime::from_timestamp_millis(value)
-                .ok_or_else(|| DbError::validation("invalid_timestamp", "invalid stored timestamp"))
-        })
-        .transpose()
+/// Auth owns its own chrono conversion; the ORM carries the instant untyped by
+/// any auth concept, at the microsecond resolution PostgreSQL stores.
+pub(crate) fn instant(value: UtcInstant) -> Result<DateTime<Utc>, DbError> {
+    DateTime::from_timestamp_micros(value.unix_micros())
+        .ok_or_else(|| DbError::validation("invalid_timestamp", "invalid stored timestamp"))
+}
+
+pub(crate) fn optional_instant(
+    value: Option<UtcInstant>,
+) -> Result<Option<DateTime<Utc>>, DbError> {
+    value.map(instant).transpose()
+}
+
+/// The inverse, for a value auth binds back into a predicate or an assignment.
+pub(crate) fn instant_value(value: DateTime<Utc>) -> Result<UtcInstant, DbError> {
+    UtcInstant::from_unix_micros(value.timestamp_micros())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A microsecond survives the conversion in both directions, which is what
+    /// a reservation token compared for equality depends on.
+    #[test]
+    fn instant_conversions_keep_every_microsecond() {
+        for micros in [-1_i64, 0, 1, 1_000_001, -1_000_001] {
+            let stored = UtcInstant::from_unix_micros(micros).unwrap();
+            let converted = instant(stored).unwrap();
+            assert_eq!(converted.timestamp_micros(), micros, "{micros}");
+            assert_eq!(instant_value(converted).unwrap(), stored, "{micros}");
+            assert_eq!(optional_instant(Some(stored)).unwrap(), Some(converted));
+        }
+        assert_eq!(optional_instant(None).unwrap(), None);
+        // Rejection control: an instant outside the portable calendar has no
+        // conversion in either direction.
+        assert!(
+            instant_value(DateTime::from_timestamp_micros(-62_135_596_800_000_001).unwrap())
+                .is_err()
+        );
+    }
 }

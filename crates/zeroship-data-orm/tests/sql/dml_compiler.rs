@@ -972,7 +972,7 @@ fn insert_rejects_foreign_columns_and_invalid_row_shapes() {
 #[test]
 fn integer_storage_rejects_values_outside_the_portable_database_range() {
     let table = table();
-    for value in [Value::from(u64::MAX), Value::Timestamp(1)] {
+    for value in [Value::from(u64::MAX), Value::TimestampMicros(1)] {
         let mut input = insert_parts(&table);
         input.rows[0][1] = Expression::Bind(value);
         assert_eq!(

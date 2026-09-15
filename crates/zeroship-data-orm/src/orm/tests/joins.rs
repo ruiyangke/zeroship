@@ -131,7 +131,7 @@ pub(super) async fn exercise(db: &Database) {
     };
     assert_eq!(rows[0]["average"].as_f64(), Some(7.0));
     assert_eq!(rows[0]["total"], value!(7));
-    assert!(matches!(rows[0]["earliest"], Value::Timestamp(_)));
+    assert!(matches!(rows[0]["earliest"], Value::TimestampMicros(_)));
 
     let tx_result = db
         .transaction(|tx| async move {

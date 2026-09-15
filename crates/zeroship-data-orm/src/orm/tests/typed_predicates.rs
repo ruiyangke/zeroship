@@ -98,7 +98,7 @@ async fn exercise(db: &Database) {
         record
             .as_object_mut()
             .unwrap()
-            .insert("moment".into(), Value::Timestamp(rank * 1000));
+            .insert("moment".into(), Value::TimestampMicros(rank * 1_000_000));
         collection.insert(record).await.unwrap();
     }
     let entity = db.entity::<rows::Entity>().unwrap();
@@ -161,7 +161,7 @@ async fn exercise(db: &Database) {
                 .unwrap(),
             vec!["b"],
         ),
-        (rows::moment.gte(2000_i64).unwrap(), vec!["b", "c"]),
+        (rows::moment.gte(UtcInstant::from_unix_micros(2_000_000).unwrap()).unwrap(), vec!["b", "c"]),
         (!rows::rank.eq(2).unwrap(), vec!["a", "c"]),
         (
             rows::rank
@@ -236,7 +236,7 @@ async fn exercise(db: &Database) {
             vec!["b"],
         ),
         (
-            source.column(rows::moment).gte(2000_i64).unwrap(),
+            source.column(rows::moment).gte(UtcInstant::from_unix_micros(2_000_000).unwrap()).unwrap(),
             vec!["b", "c"],
         ),
         (

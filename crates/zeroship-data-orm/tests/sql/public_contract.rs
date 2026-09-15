@@ -106,7 +106,7 @@ fn compiled_output_exposes_types_and_transfers_owned_buffers() {
         "SELECT $1, $2, $3".into(),
         vec![
             Value::Bytes(bytes),
-            Value::Timestamp(0),
+            Value::TimestampMicros(0),
             Value::Json("\"text\"".into()),
         ],
     );

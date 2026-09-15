@@ -248,7 +248,7 @@ impl<'de> de::Deserializer<'de> for Value {
                 visitor.visit_f64(v.as_f64().ok_or_else(|| Error("invalid number".into()))?)
             }
             Value::String(v) | Value::Decimal(v) => visitor.visit_string(v),
-            Value::Timestamp(v) => visitor.visit_i64(v),
+            Value::TimestampMicros(v) => visitor.visit_i64(v),
             Value::Bytes(v) => visitor.visit_byte_buf(v),
             Value::Json(v) => serde_json::from_str::<Value>(&v)
                 .map_err(|e| Error(e.to_string()))?

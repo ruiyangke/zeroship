@@ -159,7 +159,7 @@ fn defaults_share_the_logical_value_contract_across_frontends() {
     amount.scale = Some(2);
     amount.default = Some(zeroship_data_orm::value::Value::Decimal("12.50".into()));
     let mut occurred = ColumnSchema::new(LogicalType::Timestamp);
-    occurred.default = Some(zeroship_data_orm::value::Value::Timestamp(0));
+    occurred.default = Some(zeroship_data_orm::value::Value::TimestampMicros(0));
     let native = CollectionSchema::new([("amount".into(), amount), ("occurred".into(), occurred)]);
     let artifact = value!({
         "amount":{"type":"number", "required":true, "precision":18, "scale":2, "default":"12.5"},
@@ -305,7 +305,7 @@ fn scalar_defaults_preserve_native_bytes_and_temporal_values() {
     let (_, fields) = bytes.collections().next().unwrap();
     assert_eq!(fields["value"].default, Some(Value::Bytes(vec![0, 255])));
 
-    schema_with_default(LogicalType::Timestamp, true, Value::Timestamp(0))
+    schema_with_default(LogicalType::Timestamp, true, Value::TimestampMicros(0))
         .validate()
         .unwrap();
     schema_with_default(LogicalType::CalendarDate, true, value!("2026-09-13"))
