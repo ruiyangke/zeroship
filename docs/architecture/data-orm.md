@@ -695,6 +695,28 @@ isolation and rejects the other levels. Nested callbacks inherit their parent's
 isolation; passing an explicit level to a savepoint is refused. The callback is
 not invoked when its options are refused, and the parent remains usable.
 
+The callback owns its error type. `transaction` and `transaction_with_options`
+are generic over it with `E: From<DbError>`, so a host refusal that must roll
+back travels out of the transaction as itself rather than through a side
+channel: `Err(refusal)` rolls back and returns the refusal, `Ok(Err(refusal))`
+commits the work that preceded it. Settlement failures reach the caller through
+the same conversion, and a commit whose outcome the protocol could not
+establish still arrives as `commit_failed_indeterminate`. Nothing else fixes
+`E`, so a callback that only ever fails with `DbError` says so at one of its
+`Ok` arms.
+
+```rust,ignore
+enum Refusal { Rejected, Database(DbError) }
+impl From<DbError> for Refusal { fn from(e: DbError) -> Self { Self::Database(e) } }
+
+let outcome: Result<Result<(), Refusal>, Refusal> = db
+    .transaction(|tx| async move {
+        record_attempt(&tx).await?;          // DbError becomes Refusal
+        Ok(Err(Refusal::Rejected))           // committed: the attempt is kept
+    })
+    .await;
+```
+
 ```text
 ordinary operation                 explicit transaction
        |                                   |
@@ -729,6 +751,36 @@ The session reports actual settlement as committed, rolled back, or
 indeterminate. The transaction reducer decides the response and whether to
 publish queued effects. An uncertain result never proves commit. Nested
 callbacks use savepoints, and escaped callback handles expire.
+
+### Concurrent lanes and re-entrant transactions
+
+Top-level transactions serialize through one lane per app, and the lane set
+belongs to the context. A second top-level transaction on the same handle waits
+for the first; `Database::independent()` returns a handle over the same binding,
+backend, installed schema, mask policy, protection floors and usage sink whose
+lanes are its own, so its transaction is admitted while the original's is open.
+Concurrency is then bounded by the backend's connection pool: a fork whose BEGIN
+cannot get a connection fails with the pool's acquire timeout. Forks are
+distinct handles, so a read source built on one is refused by the other, and a
+backend that reserves one transaction connection per app refuses `independent()`
+with `unsupported_backend_feature` rather than serializing invisibly. Committed
+effects still reach the process broker, because the queue a fork drains on
+commit is its lane's and the sink is not.
+
+A root handle that opens a top-level transaction from inside a callback holding
+that app's lane is refused with `nested_top_level_transaction`. Waiting there
+cannot succeed - the claim is held by the poll that is asking for it - and the
+database sees nothing wrong, so the wait used to end only at a caller's timeout.
+Nesting through the handle the callback was given still opens a savepoint, and a
+fork still opens a concurrent transaction; only the re-entrant root handle is
+refused. Locks are not covered by any of this: a fork awaited from inside
+another transaction's callback can still block on rows that transaction holds,
+and the lock timeout is what ends that.
+
+`Database::check_connection()` confirms the backend is reachable in one round
+trip on an autocommit lease. It claims no lane, installs no session authority
+and reads no table, so it answers while the handle's own transaction is open,
+and its wait is the backend's connection wait.
 
 Dropping a native callback starts supervised cancellation and retains admission
 until cleanup settles or withdraws the session. Abandoning a nested callback
@@ -872,6 +924,15 @@ protection floors, and transaction lanes. A standalone `Database::from_schema`
 or `Database::connect` creates its own context. Cloning a `Database` shares its
 context; `Database::new` requires an explicit context when composing a handle
 from installed metadata.
+
+The context splits those owners in two. Descriptors, policies and floors are
+held jointly by a context and every context forked from it, so
+`Database::independent()` cannot resolve a different schema, install a second
+mask policy, or execute under a weaker protection floor than the handle it came
+from. Transaction lanes are the fork's alone, which is what makes admission
+independent. Building a second `Database::from_schema` over the same backend
+gets independent lanes too, but also a second copy of all three shared owners,
+which is why it is not the way to run concurrent transactions.
 
 The V8 host shares a context across dispatches on its worker thread. Metadata
 and policy keys include the complete app/deployment/schema binding. Preparing
