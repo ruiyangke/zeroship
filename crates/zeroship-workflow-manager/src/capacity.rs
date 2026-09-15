@@ -15,6 +15,11 @@
 //! harmless because the target is a value, not an instruction. A lower target
 //! applies only after the zone's demand stayed below it for the idle
 //! hold-down. Provider failure keeps the demand, the jobs and the target.
+//!
+//! Scale-down is a drain. A lower target never authorises removing a worker:
+//! the manager drains the excess registrations, which stops them being offered
+//! placements while they keep what they hold, and a request names an instance
+//! as removable only once it holds no live placement.
 #![expect(
     clippy::future_not_send,
     reason = "capacity operations share the queue's owning compio runtime"
@@ -23,7 +28,9 @@
 use crate::{
     coordinator::{Coordinator, Placed},
     eligibility::ZoneId,
-    models::{assignments, capacity_demands as demands, capacity_targets as targets, workers},
+    models::{
+        assignments, capacity_demands as demands, capacity_targets as targets, workers, Worker,
+    },
     queue::lock_scope,
     scheduling, Error,
 };
@@ -36,7 +43,7 @@ use std::{
 };
 use zeroship_core::{
     app_id::AppId,
-    workflow_coordination::{Assignment, Revision},
+    workflow_coordination::{Assignment, Revision, WorkerId},
 };
 use zeroship_data_orm::orm::{
     count_rows, ConflictTarget, Database, FromRow, Insertable, Patch,
@@ -135,12 +142,19 @@ impl Refusal {
 /// A zone's declarative target. `ready_slots` is the manager's own observation
 /// of ready registered capacity in the zone, for providers that cannot start
 /// processes.
+///
+/// `removable` names the instances a provider may take away now. A falling
+/// target does not license removing any worker: the manager drains the excess
+/// first, which stops them being offered placements, and an instance appears
+/// here only once it holds no live placement. A provider that removes an
+/// instance not named here destroys work the manager still believes is running.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CapacityRequest {
     pub zone: ZoneId,
     pub revision: Revision,
     pub desired_slots: u64,
     pub ready_slots: u64,
+    pub removable: Vec<WorkerId>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -263,6 +277,9 @@ struct Claim {
     attempt: i64,
     desired: i64,
     ready: i64,
+    /// Drained registrations holding no live placement, read under the zone
+    /// lock in the same transaction that drained them.
+    removable: Vec<String>,
 }
 
 /// What one provider exchange did.
@@ -497,6 +514,11 @@ impl Capacity {
             revision: Revision::try_from(claim.revision).map_err(|_| Error::Storage)?,
             desired_slots: u64::try_from(claim.desired).map_err(|_| Error::Storage)?,
             ready_slots: u64::try_from(claim.ready).map_err(|_| Error::Storage)?,
+            removable: claim
+                .removable
+                .iter()
+                .map(|id| WorkerId::parse(id).map_err(|_| Error::Storage))
+                .collect::<Result<_, _>>()?,
         };
         // A failed or unanswered provider leaves a durable, retryable refusal.
         let reply = match compio::time::timeout(
@@ -552,17 +574,25 @@ impl Capacity {
                 } else {
                     next.below_since = None;
                 }
+                // Bring the zone down to the target by draining, never by
+                // removing: a drained registration takes no new placement and
+                // keeps the ones it holds until it finishes or releases them.
+                let removable = Box::pin(drain_to_target(&tx, zone, now, next.desired)).await?;
                 // One claimed request at a time. A new revision is sent at once;
                 // a refused one, or an accepted one whose demand is still
                 // unplaced, is retried after its pacing interval.
                 let paced = next.retry_at.is_none_or(|at| at <= now);
+                // A drained instance that has emptied is work for the provider
+                // even when the target itself is settled, so it makes a paced
+                // request due: nothing else would ever tell the provider it may
+                // take that instance away.
                 let due = next.revision > 0
                     && next.attempt_deadline.is_none_or(|deadline| deadline <= now)
-                    && match TargetState::parse(&next.state)? {
+                    && (match TargetState::parse(&next.state)? {
                         TargetState::Requesting => true,
                         TargetState::Refused => paced,
                         TargetState::Steady => unplaced > 0 && paced,
-                    };
+                    } || (!removable.is_empty() && paced));
                 let claim = if due {
                     next.attempt = next.attempt.checked_add(1).ok_or(Error::Capacity)?;
                     next.attempt_deadline =
@@ -572,6 +602,7 @@ impl Capacity {
                         attempt: next.attempt,
                         desired: next.desired,
                         ready: ready_slots(&tx, zone, now).await?,
+                        removable,
                     })
                 } else {
                     None
@@ -744,6 +775,106 @@ async fn occupied(tx: &Database, zone: &ZoneId, now: i64) -> Result<i64, Error> 
         .copied()
         .filter(|count| *count >= 0)
         .ok_or(Error::Storage)
+}
+
+/// Bring a zone's ready capacity down to its target by draining, and report
+/// the drained registrations a provider may now remove.
+///
+/// Draining is the whole scale-down protocol. A drained registration is not a
+/// placement candidate (`Coordinator::candidates` reads only `ready`) and is
+/// not a ready owner, so the placement lane moves its apps elsewhere as they
+/// fall due; the placements it still holds stay valid until the worker
+/// finishes or releases them. Only then does the instance appear in
+/// `CapacityRequest::removable`, so a provider that honours that list never
+/// takes away a worker with live work.
+///
+/// The least loaded instances drain first, so the fewest placements have to
+/// move. Draining is terminal for an enrolled process
+/// (`Coordinator::register` refuses a ready request from a drained instance),
+/// which is why a rising target starts new capacity rather than reviving this.
+/// Every write here takes the instance's own row lock, the same lock admission
+/// takes, so a placement and a drain of one instance serialize.
+async fn drain_to_target(
+    tx: &Database,
+    zone: &ZoneId,
+    now: i64,
+    desired: i64,
+) -> Result<Vec<String>, Error> {
+    let mut ready = Vec::new();
+    for row in registrations(tx, zone, now, "ready").await? {
+        let live = live_placements(tx, &row.id, now).await?;
+        ready.push((live, row.id, row.capacity));
+    }
+    // Least loaded first; the instance identity breaks ties so replicas that
+    // reach this at once drain the same instances.
+    ready.sort_unstable();
+    let mut slots: i64 = ready
+        .iter()
+        .try_fold(0_i64, |total, (_, _, capacity)| total.checked_add(*capacity))
+        .ok_or(Error::Capacity)?;
+    for (_, id, capacity) in &ready {
+        // An instance drains only when what remains still covers the target.
+        // Registered slots are lumpy, so "over target" is not on its own a
+        // reason to give any particular instance up: doing that shrinks a zone
+        // below the capacity its own demand computed.
+        let remaining = slots.saturating_sub(*capacity);
+        if remaining < desired {
+            continue;
+        }
+        let changed = tx
+            .entity::<workers::Entity>()?
+            .update_many(
+                workers::id.eq(id.as_str())?.and(workers::state.eq("ready")?),
+                workers::state.set("draining")?,
+            )
+            .await?;
+        if changed != 1 {
+            return Err(Error::Storage);
+        }
+        slots = remaining;
+    }
+    let mut removable = Vec::new();
+    for row in registrations(tx, zone, now, "draining").await? {
+        if live_placements(tx, &row.id, now).await? == 0 {
+            removable.push(row.id);
+        }
+    }
+    Ok(removable)
+}
+
+/// Unexpired registrations of one zone in one state, in identity order.
+async fn registrations(
+    tx: &Database,
+    zone: &ZoneId,
+    now: i64,
+    state: &str,
+) -> Result<Vec<Worker>, Error> {
+    Ok(tx
+        .entity::<workers::Entity>()?
+        .query()
+        .filter(
+            workers::execution_zone_id
+                .eq(Some(zone.as_str()))?
+                .and(workers::state.eq(state)?)
+                .and(workers::expires_at.gt(now)?),
+        )
+        .order_by(workers::id.asc())
+        .limit(zeroship_data_orm::sql::MAX_ROW_LIMIT)?
+        .all::<Worker>()
+        .await?)
+}
+
+/// Live placements one registration still holds.
+async fn live_placements(tx: &Database, worker: &str, now: i64) -> Result<i64, Error> {
+    Ok(tx
+        .entity::<assignments::Entity>()?
+        .count(
+            assignments::worker_id
+                .eq(worker)?
+                .and(assignments::released.eq(false)?)
+                .and(assignments::expires_at.gt(now)?),
+        )
+        .await?)
 }
 
 /// Ready registered capacity in the zone, in placement slots.
