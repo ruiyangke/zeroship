@@ -139,7 +139,7 @@ async fn build_fixture_with_provider(
         webhook_limiter: Arc::new(RateLimiter::new(Quota::per_minute(10_000, 100))),
         origin_scheme: zeroship_core::config::OriginScheme::Https,
         trust_proxy: false,
-        worker_enrolment: zeroship_control::worker_enrolment::EnrolmentEnvelope::closed(),
+        worker_enrolment: zeroship_control::worker_join::EnrolmentEnvelope::closed(),
         deploy_tmp_dir: deploy_tmp_dir.clone(),
         control_pg,
         app_base_domain: "zeroship.localhost".to_string(),
@@ -875,8 +875,8 @@ fn period_band_is_reserved_for_the_allocator() {
             }
             // THE MONTH MUST BE A MONTH, and without this the shape `dddd-dd`
             // matches any hyphenated pair of numbers in the crate. A port range
-            // in `src/worker_enrolment.rs` tripped it on 2026-09-07 and was
-            // reported as pinning a billing period in the reserved band. The
+            // in `src/worker_join.rs` tripped it and was reported as pinning a
+            // billing period in the reserved band. The
             // narrowing loses nothing the guard was built for: a quoted period
             // literal always carries a real month, and a chrono constructor is
             // caught by the marker scan above whatever its arguments are.

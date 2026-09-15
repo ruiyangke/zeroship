@@ -106,6 +106,54 @@ fn split_legacy_master_keys(
         .unwrap_or_default()
 }
 
+/// Load the single-host join-token minter's configuration, or say there is
+/// none.
+///
+/// BOTH PATHS OR NEITHER. A credential with nowhere to write is a key held for
+/// no reason, and a destination with no credential is a volume nothing will
+/// ever fill - each on its own is a half-configured deployment that looks
+/// configured, which is the shape every other fence in this binary refuses.
+///
+/// # Errors
+///
+/// Returns a message when exactly one of the two paths is set, when the zone
+/// name is empty, or when the credential cannot be read, is insecurely
+/// permissioned, or does not hold a signer key.
+fn load_join_minter(
+    settings: &ControlSettings,
+) -> Result<Option<zeroship_control::join_minter::MinterConfig>, String> {
+    let credential = settings.join_token_signer_file.get();
+    let destination = settings.join_token_file.get();
+    match (
+        credential.as_os_str().is_empty(),
+        destination.as_os_str().is_empty(),
+    ) {
+        (true, true) => return Ok(None),
+        (false, false) => {}
+        _ => {
+            return Err(
+                "control.join_token_signer_file and control.join_token_file must be set \
+                 together: a signer key with nowhere to write mints for nobody, and a \
+                 destination with no key is never filled"
+                    .to_owned(),
+            )
+        }
+    }
+    let zone = settings.join_token_zone.get().trim().to_owned();
+    if zone.is_empty() {
+        return Err("control.join_token_zone is empty; a join token names one zone".to_owned());
+    }
+    let (signer_id, key) =
+        zeroship_core::service_peers::load_join_signer_credential(credential)
+            .map_err(|error| format!("join token minter credential: {error}"))?;
+    Ok(Some(zeroship_control::join_minter::MinterConfig {
+        signer_id,
+        key,
+        zone,
+        path: destination.clone(),
+    }))
+}
+
 /// How the native-mode boot guard names the platform issuer input.
 ///
 /// A `const` rather than a literal at the guard so the diagnostic test below
@@ -413,7 +461,7 @@ fn main() -> std::io::Result<()> {
     // folded in because behind a trusted proxy the observed peer is the proxy,
     // and the derivation this envelope guards would place every worker at one
     // address; the envelope refuses outright instead.
-    let worker_enrolment = match zeroship_control::worker_enrolment::EnrolmentEnvelope::parse(
+    let worker_enrolment = match zeroship_control::worker_join::EnrolmentEnvelope::parse(
         settings.worker_enrolment_networks.get(),
         settings.worker_enrolment_ports.get(),
         trust_proxy,
@@ -671,11 +719,21 @@ fn main() -> std::io::Result<()> {
             "worker_enrolment_declared",
             CheckValue::Flag(worker_enrolment.is_declared()),
         );
-        // Presence only: the file is read, and its enrollers imported, at
-        // boot, which a dry run does not reach.
+        // Presence only: the file is read, and its signers imported, at boot,
+        // which a dry run does not reach.
         report.field(
-            "worker_enrollers_file_configured",
-            CheckValue::Flag(!settings.worker_enrollers_file.get().as_os_str().is_empty()),
+            "join_signers_file_configured",
+            CheckValue::Flag(!settings.join_signers_file.get().as_os_str().is_empty()),
+        );
+        // Whether THIS replica is configured to mint. It reports the
+        // configuration, not the election: which replica holds the lease is a
+        // runtime fact a dry run cannot know.
+        report.field(
+            "join_token_minter_configured",
+            CheckValue::Flag(
+                !settings.join_token_signer_file.get().as_os_str().is_empty()
+                    && !settings.join_token_file.get().as_os_str().is_empty(),
+            ),
         );
         report.field("origin_scheme", CheckValue::Plain(origin_scheme.to_string()));
         report.field("blob_store", CheckValue::Plain(blob_store_root.clone()));
@@ -889,13 +947,15 @@ fn main() -> std::io::Result<()> {
         }
     }
 
-    // The worker enrollers this deployment provisions, from the operator's
-    // import file. FATAL on refusal for the reason the OAuth reconcile above
-    // is: nobody is watching, and a skipped import is every worker refused at
-    // enrolment while this process looks configured.
-    match zeroship_control::worker_enrolment::import_enrollers(
+    // The join signers this deployment trusts, from the operator's import
+    // file. FATAL on refusal for the reason the OAuth reconcile above is:
+    // nobody is watching, and a skipped import is every worker refused at join
+    // while this process looks configured. A CONTRADICTING file refuses only
+    // this replica, so a rolling deploy fails replicas one at a time with a
+    // message naming the entries rather than leaving a fleet half-converted.
+    match zeroship_control::worker_join::import_join_signers(
         &registry,
-        settings.worker_enrollers_file.get(),
+        settings.join_signers_file.get(),
     )
     .await
     {
@@ -903,17 +963,30 @@ fn main() -> std::io::Result<()> {
             inserted = report.inserted,
             unchanged = report.unchanged,
             revoked = report.revoked,
-            "control: worker enrollers imported from config"
+            "control: join signers imported from config"
         ),
         Ok(None) => tracing::info!(
-            "control: no worker enroller file configured; only enrollers recorded by an \
-             earlier boot can enrol workers"
+            "control: no join signer file configured; only signers recorded by an earlier \
+             boot can admit workers"
         ),
         Err(message) => {
             eprintln!("control: {message}");
             std::process::exit(2);
         }
     }
+
+    // The single-host join-token minter. Configured on a deployment where
+    // nobody is present to mint by hand; one replica is elected and the rest
+    // stand by. Refusing the boot on a broken credential is the same call as
+    // the import above: a Control that was told to mint and cannot would leave
+    // every worker without a token while looking configured.
+    let join_minter = match load_join_minter(&settings) {
+        Ok(config) => config,
+        Err(message) => {
+            eprintln!("control: {message}");
+            std::process::exit(2);
+        }
+    };
 
     // Console seed (R5): make the console deployable + served as a platform-owned
     // regular app. In-process + idempotent + trusted; NEVER an HTTP route.
@@ -1270,6 +1343,44 @@ fn main() -> std::io::Result<()> {
         std::process::exit(1);
     }
 
+    // The single-host join-token minter, if this deployment configured one.
+    // Election is inside the rotation: every candidate replica asks for the
+    // lease and only the holder writes.
+    //
+    // THE FIRST ROTATION IS AWAITED HERE, BEFORE THE BIND, and it is fatal.
+    // Deployments order their workers after this process is HEALTHY, and a
+    // worker reads its token at boot with no retry, so a minter that started
+    // rotating concurrently with the bind would let the first worker read an
+    // empty volume and refuse its own boot. Being told to mint and not having
+    // minted is the same fault as the signer import above: it would leave this
+    // process looking configured while every worker failed to start.
+    if let Some(minter) = join_minter {
+        let audience = match internal::control_service_issuer() {
+            Ok(audience) => audience,
+            Err(error) => {
+                eprintln!("control: this control plane's own issuer is malformed: {error}");
+                std::process::exit(2);
+            }
+        };
+        let pg = Arc::clone(&state.control_pg);
+        match zeroship_control::join_minter::rotate_once(&pg, &minter, &audience).await {
+            Ok(outcome) => tracing::info!(
+                path = %minter.path.display(),
+                zone = minter.zone.as_str(),
+                ?outcome,
+                "control: join token minter started"
+            ),
+            Err(message) => {
+                eprintln!("control: join token minter: {message}");
+                std::process::exit(2);
+            }
+        }
+        compio::runtime::spawn(async move {
+            zeroship_control::join_minter::run(pg, minter, audience).await;
+        })
+        .detach();
+    }
+
     let bind_addr = format!("{bind_host}:{port}");
     tracing::info!(bind = %bind_addr, "zeroship-control listening");
 
@@ -1466,12 +1577,16 @@ fn main() -> std::io::Result<()> {
                     .route(web::get().to(internal::get_routes)),
             )
             .service(
-                web::resource("/internal/workers/enrol")
-                    .route(web::post().to(internal::enrol_worker_instance)),
+                web::resource("/internal/workers/join")
+                    .route(web::post().to(internal::join_worker_instance)),
             )
             .service(
                 web::resource("/internal/workers/retire")
                     .route(web::post().to(internal::retire_worker_instance)),
+            )
+            .service(
+                web::resource("/internal/workers/renew")
+                    .route(web::post().to(internal::renew_worker_instance)),
             )
             // The erasure seam: the auth service asks, before it opens the
             // grace window and again before the reaper deletes, whether this

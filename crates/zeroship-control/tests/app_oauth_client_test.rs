@@ -330,7 +330,7 @@ async fn build_state(db_url: &str, app_base_domain: &str) -> Arc<AppState> {
         // Public OAuth URLs follow deployment topology.
         origin_scheme: OriginScheme::Https,
         trust_proxy: false,
-        worker_enrolment: zeroship_control::worker_enrolment::EnrolmentEnvelope::closed(),
+        worker_enrolment: zeroship_control::worker_join::EnrolmentEnvelope::closed(),
         deploy_tmp_dir: blob_root.clone(),
         control_pg,
         app_base_domain: app_base_domain.to_string(),

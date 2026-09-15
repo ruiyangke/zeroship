@@ -24,10 +24,10 @@ pub mod workflow_runtime;
 /// Resolved process resources supplied to the worker's services.
 #[allow(missing_debug_implementations)]
 pub struct WorkerConfig {
-    /// Enrolled instance identity used to verify dispatch and authenticate
-    /// control-plane reads. Startup spends the deployment unit's enroller key
-    /// on enrolment before constructing this configuration; no worker holds a
-    /// `svc/worker` role key.
+    /// Joined instance identity used to verify dispatch and authenticate
+    /// control-plane reads. Startup joins with a trusted signer's join token
+    /// before constructing this configuration, drawing the instance keypair
+    /// in memory; no worker holds a `svc/worker` role key.
     pub service_auth: Arc<zeroship_core::service_peers::ServiceAuth>,
     pub control_url: String,
     pub control_key: String,
