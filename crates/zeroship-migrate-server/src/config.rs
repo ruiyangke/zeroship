@@ -97,6 +97,15 @@ pub struct MigrateServerSettings {
     #[config(shared = AUTH_PLATFORM_JWKS_URL, default = String::new())]
     pub auth_platform_jwks_url: Operational<String>,
 
+    /// Issuer-bound peer verification keys for inbound platform-service calls.
+    ///
+    /// The migration service is a DESTINATION, never a caller, so it needs the
+    /// peer bundle and no signing key of its own. Leaving this empty disables the
+    /// schema-bundle endpoint - loudly, with a 503 naming this setting, rather
+    /// than by accepting an unverified caller.
+    #[config(name = "migrate_server.service_peers_file", default = PathBuf::new())]
+    pub service_peers_file: Operational<PathBuf>,
+
     // Secrets last within the table, by convention. Each generates ONE
     // `--<name>-file` path flag and no value flag, so none of them can reach a
     // process argument list.

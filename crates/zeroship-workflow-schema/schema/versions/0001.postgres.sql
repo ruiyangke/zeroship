@@ -266,4 +266,3 @@ ALTER TABLE "__zeroship_workflow_schema"."__zeroship_workflow_occurrences" ALTER
 ALTER TABLE "__zeroship_workflow_schema"."__zeroship_workflow_reconciliation_scans" ALTER COLUMN "id" TYPE text COLLATE "C", ALTER COLUMN "after_id" TYPE text COLLATE "C", ALTER COLUMN "upper_id" TYPE text COLLATE "C";
 
 ALTER TABLE "__zeroship_workflow_schema"."__zeroship_workflow_tasks" ALTER COLUMN "job_id" TYPE text COLLATE "C";
-INSERT INTO "__zeroship_workflow_schema".__zeroship_workflow_schema_version (id, version, fingerprint) VALUES ('workflow', 1, 'fcee647f1a5642374c7d9259e58c7630f62b65d92edda7ba2142dd404b82d38f');

@@ -309,6 +309,7 @@ zeroship_data_orm::orm::schema! {
         __zeroship_workflow_schema_version {
             #[orm(primary_key)]
             id: Text,
+            version: BigInt,
             fingerprint: Text,
         }
 

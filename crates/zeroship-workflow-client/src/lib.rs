@@ -9,12 +9,14 @@ mod control;
 mod jobs;
 mod policy;
 mod queue_holds;
+mod schema_bundles;
 mod transport;
 
 pub use control::ControlCoordinator;
 pub use jobs::LeasedJob;
 pub use policy::LeasedPolicy;
 pub use queue_holds::QueueDeploymentHolds;
+pub use schema_bundles::{SchemaBundles, MAX_BUNDLE_BYTES};
 pub use transport::Transport;
 
 use std::{sync::Arc, time::Duration};
@@ -23,6 +25,7 @@ use zeroship_core::workflow_coordination::{
     ScopePage, WorkerId, AUDIENCE,
 };
 use zeroship_core::{
+    schema_bundle::{EnsureJournal, SchemaBundleOutcome},
     service_assertion::ServiceIssuer,
     service_identity::endpoints,
     service_peers::{service_issuer, ServiceAuth, WORKER_SERVICE_NAME},
@@ -115,6 +118,34 @@ impl WorkerCoordinator {
     #[must_use]
     pub fn signing_key_id(&self) -> &str {
         &self.signing_key_id
+    }
+
+    /// Report that this host REFUSED the journal it found, and wait for the
+    /// manager to bring it to the version this build expects.
+    ///
+    /// A worker holds no DDL authority of its own - privilege follows the
+    /// process - so all it can do is name the schema and ask. Before this, a
+    /// refused journal was terminal: nothing in the system could move it
+    /// forward, and the host simply stopped.
+    ///
+    /// Idempotent at the far end, so a host may call it on every refusal.
+    ///
+    /// # Errors
+    /// Refuses failed exchanges and an outcome describing another schema.
+    pub async fn ensure_journal(&self, schema: &str) -> Result<SchemaBundleOutcome, Error> {
+        let outcome: SchemaBundleOutcome = self
+            .transport
+            .post(
+                endpoints::WORKFLOW_JOURNAL_ENSURE,
+                &EnsureJournal {
+                    schema: schema.to_owned(),
+                },
+            )
+            .await?;
+        if outcome.schema != schema {
+            return Err(Error::InvalidResponse);
+        }
+        Ok(outcome)
     }
 
     /// # Errors

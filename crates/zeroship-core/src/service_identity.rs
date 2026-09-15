@@ -514,6 +514,21 @@ pub mod endpoints {
         ServiceEndpoint::new("worker", "POST", "/dispatch/{app_id}");
     pub const WORKER_APP_LOGS: ServiceEndpoint =
         ServiceEndpoint::new("worker", "GET", "/logs/{app_id}");
+    /// Install or upgrade a platform-owned schema inside a creator database.
+    ///
+    /// Addressed by SCHEMA, carried in the body, because a creator database
+    /// holds many apps and the schema is not derivable from an app id. The
+    /// migration service authorizes this on the service identity alone - there
+    /// is no creator principal in a platform provisioning call.
+    pub const MIGRATE_SCHEMA_BUNDLE: ServiceEndpoint =
+        ServiceEndpoint::new("migrate-server", "POST", "/v1/schema-bundles/apply");
+    /// Ensure an app's workflow journal is at the current version.
+    ///
+    /// Two callers, one capability: Control when an app registers, and a worker
+    /// whose host REFUSED the journal it found. The second is what turns a
+    /// refusal into a repair rather than a dead end.
+    pub const WORKFLOW_JOURNAL_ENSURE: ServiceEndpoint =
+        ServiceEndpoint::new("workflow", "POST", "/v1/journal/ensure");
 }
 
 /// One individual principal and its machine-identity endpoint grants.
@@ -568,6 +583,10 @@ pub fn service_allowlist() -> &'static [ServiceAuthorization] {
                     endpoints::WORKFLOW_SCHEDULE_ACTIVATE,
                     endpoints::WORKFLOW_SCHEDULE_DISABLE,
                     endpoints::WORKER_APP_LOGS,
+                    // Control learns an app registered, so Control is what asks
+                    // the manager to bring that app's journal up to date. The
+                    // manager, not Control, holds the journal artifacts.
+                    endpoints::WORKFLOW_JOURNAL_ENSURE,
                 ],
             ),
             ServiceAuthorization::new(
@@ -592,6 +611,11 @@ pub fn service_allowlist() -> &'static [ServiceAuthorization] {
                 &[
                     endpoints::CONTROL_QUEUE_DEPLOYMENT_HOLD_ACQUIRE,
                     endpoints::CONTROL_QUEUE_DEPLOYMENT_HOLD_RELEASE,
+                    // The manager owns WHEN a journal must exist, so it is the
+                    // one principal that may send a schema bundle. Routing this
+                    // through Control would move the workflow artifacts into
+                    // Control, which is the leak the bundle path removes.
+                    endpoints::MIGRATE_SCHEMA_BUNDLE,
                 ],
             ),
             ServiceAuthorization::new(
@@ -637,6 +661,11 @@ pub fn service_allowlist() -> &'static [ServiceAuthorization] {
                     // demanding a fresh token to renew would defeat a
                     // use-capped one.
                     endpoints::CONTROL_WORKER_RENEW,
+                    // A host that REFUSES the journal it found reports it, and
+                    // the manager repairs. The worker holds no DDL authority of
+                    // its own - privilege follows the process - so all it can do
+                    // is name the schema and ask.
+                    endpoints::WORKFLOW_JOURNAL_ENSURE,
                     // JOINING IS NOT AN ENDPOINT IN THIS TABLE. A joining
                     // process has no service identity yet: it presents a join
                     // token a trusted signer minted, verified by

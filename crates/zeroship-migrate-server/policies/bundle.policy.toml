@@ -1,0 +1,61 @@
+# The zeroship BUNDLE ceiling - the operator ceiling a PLATFORM-owned schema
+# bundle is composed against.
+#
+# It is neither of the other two ceilings, and the differences are the reason it
+# exists:
+#
+#   confined.policy.toml is a CREATOR ceiling. It carries the mandatory
+#   system-shape inject, which would add the platform's system columns to a
+#   platform schema's own tables. A bundle's shape is authored, not injected.
+#
+#   platform.policy.toml is the ceiling for `db/migrations-ts`, and it spells out
+#   the platform's OWN schemas (`zeroship`, `public`, `service_authn`,
+#   `workflow_manager`). A bundle installs into a creator database, whose schema
+#   is not known until the request arrives.
+#
+# So this charter is authored at `scope = "all"` and BOUND to the request's exact
+# schema before composition (`bind_bundle_charter_to_schema`). Every schema-scoped
+# grant below is bound; a grant this binder does not know how to confine is
+# refused rather than passed through at `scope = "all"`, which is the same
+# fail-closed rule the confined binder applies.
+
+policy_version = 1
+
+# Creation and movement inside the bound schema. A bundle's first version creates
+# its tables; a later version may rename them.
+[[grant]]
+key = "schema.create_table"
+value = true
+scope = "all"
+
+[[grant]]
+key = "schema.rename"
+value = true
+scope = "all"
+
+# A bundle's DDL names its own schema explicitly rather than relying on the
+# default, so it needs the qualified-reference grant for that ONE schema. The
+# rendered-DDL guard still refuses a statement naming any other, which is what
+# keeps the grant from being a reach.
+[[grant]]
+key = "schema.cross_schema"
+value = true
+scope = "all"
+
+# A platform schema may need a statement the portable op vocabulary cannot yet
+# express - a column collation, for instance. The guard's deny-list still runs
+# over the text, so this is a grant to be UNPORTABLE, not a grant to be
+# unchecked.
+[[grant]]
+key = "sql.raw"
+value = true
+scope = "all"
+
+# An upgrade may legitimately drop a column of the schema it owns. The guard
+# FLAGS destructive statements rather than denying them, so the service compares
+# that flag against this knob itself before executing anything; a bundle may
+# tighten it to `warn` or `forbid` in its declared policy.
+[[grant]]
+key = "safety.destructive_ops"
+value = "allow"
+scope = "all"

@@ -186,20 +186,32 @@ builds the example and platform binaries before starting its services.
 
 ## Journal provisioning
 
-Before starting deployed workflows, provision their app journal through the
-migration service:
+Nothing you run provisions a journal. It happens on its own, and the reason is
+worth knowing when you are reading a log.
 
-```http
-POST /v1/apps/{app_id}/workflows/provision
-Authorization: Bearer <creator-access-token>
-```
+The journal is a platform-owned schema inside your creator database. The
+migration service installs it, but it does not know what a workflow is: it
+receives a **schema bundle** - an ordered series of versions, the policy the
+bundle runs under, and where its stamp lives - and installs or upgrades the
+schema the bundle names. The workflow manager holds the journal's artifacts and
+sends that bundle.
 
-The caller needs deployment permission for that app. The operation is
-idempotent and creates no creator database tables. Applying creator migrations
-also provisions the journal schema, so apps already using that path need no
-additional request. The control origin routes this endpoint to the migration
-service; control and workers only create journal tables inside the provisioned
-schema. Local workflows create their SQLite journal automatically.
+Two things trigger it, and both are idempotent:
+
+- **A host that refuses a journal.** A worker verifies the journal against the
+  fingerprint it was built with. If it finds an older one, or none, it asks the
+  manager to provision and retries once. This is why a schema change rolls out
+  without a migration step on your side.
+- **Registration.** When an app registers, its journal is brought to the current
+  version.
+
+The stamp is one row per creator database, not per app, so an upgrade moves every
+app in that database at once and does so in a single transaction: an upgrade that
+fails part way leaves the journal at the version that is actually installed. A
+journal a NEWER platform installed is never downgraded.
+
+Local workflows create their SQLite journal automatically, from the same ordered
+series.
 
 ## Model
 

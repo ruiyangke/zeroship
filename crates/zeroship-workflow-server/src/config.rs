@@ -2,8 +2,8 @@
 
 use std::path::{Path, PathBuf};
 use zeroship_core::config::{
-    BootstrapControl, CheckFormat, CommandControl, ObservabilityControls, Operational,
-    OverlaySelector, Secret, zeroship_config,
+    zeroship_config, BootstrapControl, CheckFormat, CommandControl, ObservabilityControls,
+    Operational, OverlaySelector, Secret,
 };
 use zeroship_core::observability::LogFormat;
 
@@ -42,6 +42,12 @@ pub struct WorkflowSettings {
     /// Control origin used for deployment queue retention.
     #[config(name = "workflow.control_url", default = String::new())]
     pub control_url: Operational<String>,
+    /// Migration-service origin used to install and upgrade app journals.
+    ///
+    /// Empty disables the journal endpoint, loudly: Control and workers are told
+    /// the manager cannot provision rather than being answered as though it had.
+    #[config(name = "workflow.migrate_url", default = String::new())]
+    pub migrate_url: Operational<String>,
     /// HTTP worker threads.
     #[config(name = "workflow.http_threads", default = 2)]
     pub http_threads: Operational<usize>,

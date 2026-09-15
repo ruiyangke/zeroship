@@ -221,6 +221,7 @@ impl Fixture {
             service,
             auth,
             policy_source: configured.then(|| source.clone() as Rc<dyn PolicySource>),
+            journal: None,
         });
         Self {
             platform,
