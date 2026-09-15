@@ -173,8 +173,11 @@ impl WorkerCoordinator {
 /// closure and maintenance jobs are manager-origin.
 const fn worker_publication(job: &JobSpec) -> Result<(), Error> {
     match job.operation {
+        // Retention decisions are the manager's; a worker never asks for a
+        // deployment to be given back.
         JobOperation::Activate { .. }
         | JobOperation::Cron { .. }
+        | JobOperation::ReleaseHold { .. }
         | JobOperation::Management { .. }
         | JobOperation::Close { .. }
         | JobOperation::Reconcile {}

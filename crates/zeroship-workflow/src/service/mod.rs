@@ -19,6 +19,7 @@ mod deploys;
 pub mod fanout;
 pub use deployments::AppDeployments;
 mod frontier;
+mod hold_release;
 mod ingress;
 pub use ingress::{IngressReceipt, RevokedSignals, SignalAuthority, SignalTokenRequest};
 mod journal;

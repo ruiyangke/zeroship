@@ -42,8 +42,8 @@ impl Worker {
         let meter = kernel.meter.clone();
         let config = Arc::new(crate::WorkerConfig {
             service_auth: service_auth(),
-            control_url: kernel.control_url.clone(),
-            control_key: kernel.control_key.clone(),
+            control_url: "http://127.0.0.1:1".into(),
+            control_key: String::new(),
             db_url: kernel
                 .db_service
                 .as_ref()
@@ -137,8 +137,7 @@ pub struct Response {
 
 pub fn empty_kernel(meter: Arc<zeroship_metering::Meter>) -> KernelConfig {
     KernelConfig {
-        control_url: "http://127.0.0.1:1".into(),
-        control_key: String::new(),
+        workflows: Default::default(),
         db_service: None,
         kv_store: None,
         storage_backend: None,

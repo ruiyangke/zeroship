@@ -60,6 +60,13 @@ pub enum JobOperation {
         propagation_id: PropagationId,
         revision: Revision,
     },
+    /// Ask the creator engine to give back the journal hold on a deployment the
+    /// app no longer selects. Only a manager publishes it; a worker cannot. The
+    /// named deployment is the release target, never an executable prerequisite,
+    /// so this operation stays deliverable without a queue hold.
+    ReleaseHold {
+        deployment_id: DeploymentId,
+    },
     /// Manager-origin closure of one ingress epoch. The creator raises its
     /// closed epoch and reports closed drain evidence in the same transaction.
     /// Workers can neither publish it nor name it as a successor.
@@ -124,15 +131,29 @@ impl JobSpec {
             }
             | JobOperation::Fanout { .. }
             | JobOperation::Propagate { .. }
+            | JobOperation::ReleaseHold { .. }
             | JobOperation::Close { .. }
             | JobOperation::Reconcile {}
             | JobOperation::Collect {} => None,
         }
     }
 
+    /// The deployment a release operation targets. It is never a prerequisite,
+    /// so `deployment_id` keeps returning `None` for it: a release is published
+    /// after the queue holder gave the deployment back, when no hold remains to
+    /// confirm.
+    #[must_use]
+    pub const fn released_deployment(&self) -> Option<&DeploymentId> {
+        match &self.operation {
+            JobOperation::ReleaseHold { deployment_id } => Some(deployment_id),
+            _ => None,
+        }
+    }
+
     /// Whether executing this job can commit new creator intents. Reconciliation
-    /// and collection only publish or delete existing records, and closure only
-    /// reports evidence, so none of them can re-establish recovery responsibility.
+    /// and collection only publish or delete existing records, closure only
+    /// reports evidence, and a release only gives a deployment back, so none of
+    /// them can re-establish recovery responsibility.
     #[must_use]
     pub const fn produces_intents(&self) -> bool {
         match self.operation {
@@ -142,9 +163,10 @@ impl JobSpec {
             | JobOperation::Management { .. }
             | JobOperation::Fanout { .. }
             | JobOperation::Propagate { .. } => true,
-            JobOperation::Close { .. } | JobOperation::Reconcile {} | JobOperation::Collect {} => {
-                false
-            }
+            JobOperation::ReleaseHold { .. }
+            | JobOperation::Close { .. }
+            | JobOperation::Reconcile {}
+            | JobOperation::Collect {} => false,
         }
     }
 }
@@ -197,6 +219,9 @@ pub trait JobLease {
 /// asserts that affected runs stopped. For reconciliation and collection, `Waiting`
 /// requests another scan page or phase and `Completed` closes that scan cycle.
 /// Neither classification asserts that the manager queue or app intents drained.
+/// For a hold release, `Completed` reports that the journal holder gave the
+/// deployment back and `Waiting` that the journal still depends on it, so a
+/// later release may succeed. A release is never forced.
 /// Only `Closed` reports drain evidence, and only for the closure job's epoch.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]

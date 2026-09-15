@@ -135,6 +135,18 @@ async fn seed(platform: &platform::Platform) -> Seed {
             .unwrap(),
         1
     );
+    // Only the unselected deployment still owes a journal release here. The
+    // creator engine already gave the others' journal holds back, so the queue
+    // lane this test follows is the only reason any of them changes.
+    platform
+        .admin
+        .execute(
+            "UPDATE workflow_manager.deployment_holds SET journal_state='released' \
+             WHERE app_id=$1 AND deployment_id <> $2",
+            &[&app.as_str(), &unselected.as_str()],
+        )
+        .await
+        .unwrap();
     Seed {
         app,
         deployment,
@@ -226,6 +238,23 @@ async fn hold_state(
         .admin
         .query_one(
             "SELECT state FROM workflow_manager.deployment_holds WHERE app_id=$1 AND deployment_id=$2",
+            &[&seed.app.as_str(), &deployment.as_str()],
+        )
+        .await
+        .unwrap()
+        .get(0)
+}
+
+async fn journal_state(
+    platform: &platform::Platform,
+    seed: &Seed,
+    deployment: &DeploymentId,
+) -> String {
+    platform
+        .admin
+        .query_one(
+            "SELECT journal_state FROM workflow_manager.deployment_holds \
+             WHERE app_id=$1 AND deployment_id=$2",
             &[&seed.app.as_str(), &deployment.as_str()],
         )
         .await
@@ -348,7 +377,10 @@ async fn initial_progress(platform: &platform::Platform, seed: &Seed) {
                 && collection.is_some()
                 && hold_state(platform, seed, &seed.acquiring).await == "held"
                 && hold_state(platform, seed, &seed.releasing).await == "released"
-                && hold_state(platform, seed, &seed.unselected).await == "released")
+                && hold_state(platform, seed, &seed.unselected).await == "released"
+                // Giving the queue hold back leaves the journal one, which the
+                // lane asks the creator engine for through a durable job.
+                && journal_state(platform, seed, &seed.unselected).await == "releasing")
                 .then_some(())
         },
     )
@@ -368,7 +400,7 @@ struct Snapshot {
 
 async fn snapshot(platform: &platform::Platform, seed: &Seed) -> Snapshot {
     let stable = jobs(platform, &seed.app).await;
-    assert_eq!(stable.len(), 4);
+    assert_eq!(stable.len(), 5);
     let operations: Vec<JobOperation> = stable
         .iter()
         .map(|row| {
@@ -384,6 +416,12 @@ async fn snapshot(platform: &platform::Platform, seed: &Seed) -> Snapshot {
                     assert_eq!(deployment_id, &seed.deployment);
                     assert_eq!(row["deployment_id"], deployment_id.as_str());
                 }
+                // A release names its deployment but reports none: no hold is
+                // left to confirm, which is the whole point of releasing it.
+                JobOperation::ReleaseHold { deployment_id } => {
+                    assert_eq!(deployment_id, &seed.unselected);
+                    assert!(row["deployment_id"].is_null());
+                }
                 JobOperation::Reconcile {} | JobOperation::Collect {} => {
                     assert!(row["deployment_id"].is_null());
                 }
@@ -393,6 +431,8 @@ async fn snapshot(platform: &platform::Platform, seed: &Seed) -> Snapshot {
         })
         .collect();
     assert!(operations.contains(&seed.activation.operation));
+    assert!(operations.iter().any(|operation| matches!(operation,
+        JobOperation::ReleaseHold { deployment_id } if deployment_id == &seed.unselected)));
     assert!(operations
         .iter()
         .any(|operation| matches!(operation, JobOperation::Reconcile {})));
