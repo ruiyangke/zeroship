@@ -85,22 +85,37 @@ async fn until<T>(
     }
 }
 
-/// Whether `relation` resolves on the connection `url` opens.
+/// Whether `relation` resolves on the connection `url` opens, optionally after
+/// narrowing to `role` the way the runtime does.
 ///
-/// `to_regclass` answers for the CONNECTION, which is the whole point: it is
-/// null both when the relation is absent and when the login cannot see it, and
-/// either is a refusal. Each call site pairs it with a control that must
-/// resolve, so a connection that resolves nothing cannot pass as a fence.
-async fn resolves(url: &str, relation: &str) -> bool {
+/// `to_regclass` answers for the CONNECTION, which is the whole point. It
+/// returns null when the relation is absent and RAISES `42501` when the schema
+/// exists but the caller may not enter it; both are refusals, so both answer
+/// false here. Each call site pairs the probe with a control that must resolve,
+/// so a connection that resolves nothing cannot pass as a fence.
+///
+/// `role` exists because `zeroship_worker` holds nothing ambiently: it reaches
+/// an app's objects only under `SET ROLE <app role>`, which is the fence the
+/// boot posture gate keeps non-inheriting.
+async fn resolves(url: &str, role: Option<&str>, relation: &str) -> bool {
     let (client, connection) = compio_postgres::connect(url, NoTls)
         .await
         .unwrap_or_else(|error| panic!("open {url} to probe {relation}: {error}"));
     let driver = compio::runtime::spawn(connection.run());
-    let found: bool = client
+    if let Some(role) = role {
+        client
+            .batch_execute(&format!("SET ROLE \"{role}\""))
+            .await
+            .unwrap_or_else(|error| panic!("narrow to {role}: {error}"));
+    }
+    let probe = client
         .query_one("SELECT to_regclass($1) IS NOT NULL", &[&relation])
-        .await
-        .expect("probe a relation")
-        .get(0);
+        .await;
+    let found = match probe {
+        Ok(row) => row.get(0),
+        Err(error) if error.code() == Some(&compio_postgres::error::SqlState::INSUFFICIENT_PRIVILEGE) => false,
+        Err(error) => panic!("probe {relation}: {error}"),
+    };
     drop(client);
     driver.await.expect("probe task").expect("probe driver");
     found
@@ -115,25 +130,28 @@ async fn the_two_zones_run_a_workflow_without_reaching_each_other() {
     // catalog and does not resolve the app's journal.
     let control_url = fleet.database.url();
     assert!(
-        resolves(&control_url, "zeroship.apps").await,
+        resolves(&control_url, None, "zeroship.apps").await,
         "the control-plane connection must resolve its own catalog, or the \
          refusal below is a dead connection rather than a boundary",
     );
     assert!(
-        !resolves(&control_url, &journal).await,
+        !resolves(&control_url, None, &journal).await,
         "Control reached a creator journal: {journal}",
     );
 
-    // ZONE ARM 2, with its control. The worker's own login resolves its app's
-    // journal and does not resolve the platform catalog.
+    // ZONE ARM 2, with its control. Under its app role the worker's login
+    // resolves that app's journal; on the same connection it does not resolve
+    // the platform catalog.
     let worker_url = fleet.creator_role_url("zeroship_worker");
+    let app_role = zeroship_core::app_derivation::role_name(&fleet.app_id)
+        .expect("the app's runtime role name");
     assert!(
-        resolves(&worker_url, &journal).await,
-        "the worker's login must resolve the journal it owns, or the refusal \
-         below is a broken login rather than a boundary",
+        resolves(&worker_url, Some(&app_role), &journal).await,
+        "the worker's login must resolve the journal it owns under {app_role}, \
+         or the refusal below is a broken login rather than a boundary",
     );
     assert!(
-        !resolves(&worker_url, "zeroship.apps").await,
+        !resolves(&worker_url, Some(&app_role), "zeroship.apps").await,
         "the worker reached a platform table",
     );
 
