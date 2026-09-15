@@ -49,6 +49,7 @@ struct Seed {
     acquiring: DeploymentId,
     releasing: DeploymentId,
     held: DeploymentId,
+    unselected: DeploymentId,
 }
 
 async fn seed(platform: &platform::Platform) -> Seed {
@@ -103,7 +104,8 @@ async fn seed(platform: &platform::Platform) -> Seed {
     let acquiring = DeploymentId::mint();
     let releasing = DeploymentId::mint();
     let held = DeploymentId::mint();
-    for deployment in [&acquiring, &releasing, &held] {
+    let unselected = DeploymentId::mint();
+    for deployment in [&acquiring, &releasing, &held, &unselected] {
         queue.ensure_deployment(&app, deployment).await.unwrap();
     }
     // Simulate a manager crash before acknowledgement persistence. Only the
@@ -119,6 +121,20 @@ async fn seed(platform: &platform::Platform) -> Seed {
         .await
         .unwrap();
     set_hold(platform, &app, &releasing, "releasing").await;
+    // A hold confirmed long ago for a deployment the app never selected and no
+    // job uses: the retention lane releases it through the real Control client.
+    assert_eq!(
+        platform
+            .admin
+            .execute(
+                "UPDATE workflow_manager.deployment_holds SET held_at=0 \
+                 WHERE app_id=$1 AND deployment_id=$2 AND state='held'",
+                &[&app.as_str(), &unselected.as_str()],
+            )
+            .await
+            .unwrap(),
+        1
+    );
     Seed {
         app,
         deployment,
@@ -128,6 +144,7 @@ async fn seed(platform: &platform::Platform) -> Seed {
         acquiring,
         releasing,
         held,
+        unselected,
     }
 }
 
@@ -330,11 +347,13 @@ async fn initial_progress(platform: &platform::Platform, seed: &Seed) {
                 && pending.is_some()
                 && collection.is_some()
                 && hold_state(platform, seed, &seed.acquiring).await == "held"
-                && hold_state(platform, seed, &seed.releasing).await == "released")
+                && hold_state(platform, seed, &seed.releasing).await == "released"
+                && hold_state(platform, seed, &seed.unselected).await == "released")
                 .then_some(())
         },
     )
     .await;
+    // The unselected hold confirmed moments ago is still within its grace.
     assert_eq!(hold_state(platform, seed, &seed.held).await, "held");
     assert_eq!(hold_state(platform, seed, &seed.deployment).await, "held");
 }

@@ -1223,9 +1223,12 @@ scheduling. Disabled scopes are excluded before due-page limits, and calendar
 publication rechecks the scope inside its transaction.
 
 Disable preserves calendar cursors, interval anchors, frozen catch-up state,
-accepted occurrences, recovery responsibility and deployment holds. Restoring
-the same immutable deployment creates fresh activation readiness while retaining
-its calendar progress. Restoring a different staged deployment uses normal
+accepted occurrences and recovery responsibility. A frozen frontier publishes
+nothing, so it retains no code: once the disabled deployment's accepted jobs
+settle, the [queue hold release policy](#queue-hold-release-policy) releases its
+queue hold. Restoring the same immutable deployment publishes a fresh activation,
+which acquires the queue hold again before its transaction resumes the retained
+calendar progress. Restoring a different staged deployment uses normal
 schedule replacement. Historical jobs continue to depend on their original
 activation, rather than the new readiness receipt.
 
@@ -1368,7 +1371,11 @@ dependency of its deployment, checked under the app lock beside the current and
 staged pointers, the newest deployment and both holder classes. The manager
 acquires its queue hold before committing activation, so the hold exists before
 Control acknowledges; acknowledgement is the same row update that removes the
-intent dependency. Disable adds no executable dependency.
+intent dependency. Disable adds no executable dependency. Once a later
+activation or a disable leaves the deployment unselected and its jobs settle,
+the manager's [queue hold release policy](#queue-hold-release-policy) releases
+the queue hold, and the collector may reclaim the deployment when no other
+holder or pointer retains it.
 
 **Clients.** `zeroship deploy` mints one command id per invocation or resumes
 one named by `--command-id`, reads the artifact once, retries transport
@@ -2207,10 +2214,12 @@ The manager records acquiring, held, releasing and released intents in its own
 database. A fresh publication confirms the hold before committing an executable
 dependency. External hold requests run outside the queue transaction; publication
 revalidates its authority and hold under the app lock within the original request
-budget. Release closes admission under that lock and checks unsettled jobs,
-schedule frontiers and recovery responsibility. Completed receipts remain useful
-for exact retries without retaining executable code. Generation tombstones fence
-late replies after release and reacquisition.
+budget. Release closes admission under that lock and checks unsettled jobs and
+the frontiers of an enabled calendar; recovery provenance retains no code. The
+manager decides when to release through its
+[queue hold release policy](#queue-hold-release-policy). Completed receipts remain
+useful for exact retries without retaining executable code. Generation tombstones
+fence late replies after release and reacquisition.
 
 The Control reclamation loop in
 [`deploy_retention.rs`](../../crates/zeroship-control/src/cron/deploy_retention.rs)
@@ -2246,6 +2255,67 @@ A lost acquire reply causes an idempotent retry before admission. A lost release
 reply retains intent until reconciliation; it must not turn into a new release
 generation. Reclamation never reads customer journals, and placement expiry or
 worker death never proves that code is unreferenced.
+
+#### Queue hold release policy
+
+The manager releases its own queue holds; nothing else does. `driver::Driver`
+runs the policy in its retention lane, so the workflow server and the local CLI
+host, which share the driver, both release superseded deployments. A queue hold
+is released when all of these are true under the app lock:
+
+- The app's enabled calendar does not select the deployment. A later activation
+  superseded it, or archive disabled the calendar. A disabled calendar's frozen
+  frontiers publish nothing and retain no code; restore publishes a fresh
+  activation, which acquires a new hold before its transaction resumes them.
+- `require_unused` finds no unsettled job for the deployment and no frontier of
+  an enabled calendar on it. A refusal because the deployment is in use is not
+  an error: the hold stays held and a later pass retries. Release is never forced.
+- The hold has been held for at least `driver::Options::hold_grace`.
+
+The grace protects acquirers. Activation, publication, settlement successors and
+resolved Latest restarts confirm a hold with Control outside the queue
+transaction, then commit their dependency under the app lock within the same
+request budget, which the queue's `transaction_timeout` bounds. The manager's hold
+row records `held_at`, the manager clock at its latest transition to held, and the
+policy leaves a younger hold alone. `Driver::new` refuses a grace that does not
+exceed the queue's transaction timeout, so no pass releases a hold between its
+confirmation and the commit that uses it, and an activation racing the pass
+commits. An acquirer that meets a release already in flight is refused
+retryably and acquires the next generation once the release settles. The
+workflow server derives its grace in `ServerOptions::resolve` so that it always
+exceeds `workflow.database_command_timeout_ms`; the local host reads `hold_grace_ms` from
+the `[manager]` table of its workflow configuration.
+
+The lane pages candidates in hold identity order under a captured upper bound.
+It joins the app's enabled selection and the unsettled jobs' deployment
+projection before the limit, so selected and in-use holds take no page slot, and
+it includes unfinished intents. `Queue::maintain_deployment` decides each
+candidate again under the app lock: an unfinished intent resumes, and a held one
+is released only if the grace, the selection and `require_unused` still permit
+it, so a stale page cannot release a hold that was reacquired or selected after
+the page was read. A held row without a recorded time is reported as damaged
+and stays held.
+
+Releasing the queue holder leaves the journal holder untouched. The Control
+collector reclaims a deployment only once both holder classes are released and
+no current, staged or pending pointer needs it; the local host's catalog applies
+the same holder-aware fence.
+
+**Remaining before superseded code is actually reclaimed:** creator activation
+acquires a journal hold on its deployment, and no creator job releases journal
+holds yet. `WorkflowService::release_deployment_hold` performs a checked release,
+but nothing schedules it, so every activated deployment keeps its journal hold
+and the collector still cannot reclaim it. The journal release job described
+above must land for reclamation to follow republication in practice.
+
+The manager's `tests/hold_release.rs` contracts run on PostgreSQL and SQLite:
+replacement, archive and restore through holder-aware reclamation, an activation
+reacquiring its hold while another replica's lane passes, stale candidate pages,
+and a hold without a recorded time. The CLI's `workflow_local` contract completes
+a run on one bundle, republishes, and observes the superseded deployment's queue
+hold released, in the manager and in the ledger, once every job pinned to it has
+settled. The server's driver contract releases an aged, unselected hold through
+its Control client.
 
 ## Payloads, effects and collection
 
@@ -2523,10 +2593,10 @@ fallbacks.
 | Manager host | `WorkflowSettings` supplies listener, service peers, platform DB binding, body/page bounds and worker/assignment policy. `workflow.database_url` is a platform credential. |
 | Native coordinator | `coordinator::Options::{worker_ttl, assignment_ttl, batch_limit, max_pending_management}` bounds placement and command behavior. |
 | Native queue | `Options::{max_connections, lease, transaction_timeout, max_successors, max_metadata_bytes}` bounds storage concurrency, delivery and metadata transactions. |
-| Native manager driver | `driver::Options::{page_limit, lane_timeout, scheduling, recovery}` bounds each calendar, recovery and unfinished-hold lane. The server maps `workflow.batch_limit` to the candidate page and owns cadence through `workflow.driver_interval_ms`; `workflow.driver_lane_timeout_ms` bounds each lane's complete turn. |
+| Native manager driver | `driver::Options::{page_limit, lane_timeout, hold_grace, scheduling, recovery}` bounds each calendar, recovery and retention lane; `hold_grace` is the minimum age before the [queue hold release policy](#queue-hold-release-policy) may release a hold. The server maps `workflow.batch_limit` to the candidate page, owns cadence through `workflow.driver_interval_ms` and derives the grace from `workflow.database_command_timeout_ms` so that it exceeds that budget; `workflow.driver_lane_timeout_ms` bounds each lane's complete turn. |
 | Metadata client | Client `Options::{timeout, max_request_bytes, max_response_bytes}` bounds the complete exchange. Each call uses the host signer. |
 | Customer host | Normal creator DB/storage, trusted app identity and policy snapshot. `ConsumerOptions` bounds slots, assigned scopes, claim polling and backoff; `DeliveryOptions` bounds execution and finalization. Worker maintenance scheduling settings disappear with their loops. |
-| Local CLI host | `--workflow-config` TOML: `[consumer]` maps to `ConsumerOptions` and `DeliveryOptions`; `[manager]` maps to the queue lease, the local worker's registration and placement lifetime, driver cadence and lane bound, and the recovery interval; `[payloads]` maps to `TaskPayloadLimits`. Unknown keys, including database or bundle settings, are refused. |
+| Local CLI host | `--workflow-config` TOML: `[consumer]` maps to `ConsumerOptions` and `DeliveryOptions`; `[manager]` maps to the queue lease, the local worker's registration and placement lifetime, driver cadence and lane bound, the hold release grace (`hold_grace_ms`, which must exceed the queue transaction timeout) and the recovery interval; `[payloads]` maps to `TaskPayloadLimits`. Unknown keys, including database or bundle settings, are refused. |
 | Scheduling/recovery host policy | Explicit misfire, overlap, reconciliation and capacity/backpressure bounds. New setting names are finalized with those modules, not invented CLI switches. |
 
 Policy snapshots are host-owned and revisioned. Expired remote metadata does not
@@ -3123,7 +3193,7 @@ deletion; it no longer delegates deletion authority to creator journal scans.
 
 The native manager driver now runs in the workflow server independently of
 worker registration and placement. Its calendar, reconciliation, collection and
-unfinished-hold lanes each share an original deadline across their scans and candidate page.
+retention lanes each share an original deadline across their scans and candidate page.
 Each lane captures an upper storage identity and advances past an attempted
 candidate before external work, preserving progress through malformed metadata,
 timeouts and cancellation. Failed candidates retain their durable jobs or
@@ -3131,11 +3201,13 @@ intents and retry after the finite sweep wraps. New rows and work becoming due
 behind the cursor join a subsequent sweep. The host delays between completed
 passes and joins its current bounded pass during shutdown.
 
-The driver resumes acquiring/releasing queue holds. It does not interpret an
-empty queue or expired worker as permission to release held code or retire an
-ingress responsibility. Explicit release still checks all manager dependencies
-under the app lock. Automatic held-deployment release policy, capacity activation
-and production worker consumer composition remain to integrate.
+The retention lane resumes acquiring and releasing queue hold intents and runs
+the [queue hold release policy](#queue-hold-release-policy) in the workflow
+server and the local CLI host. It never takes an empty queue or an expired
+worker as permission to release held code or retire an ingress responsibility:
+every release checks all manager dependencies under the app lock, after the
+hold outlived its grace. Capacity activation and production worker consumer
+composition remain to integrate.
 The consumer accepts activation, cron, advance, reconciliation, management,
 collection, fanout and propagation jobs. Collection uses the assigned creator journal and object store
 without loading an executable, creating a task or publishing unrelated intents.

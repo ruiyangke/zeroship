@@ -199,6 +199,16 @@
           "storage": {
             "valueColumn": "state"
           }
+        },
+        "held_at": {
+          "type": "bigInt",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "held_at"
+          }
         }
       },
       "options": {

@@ -117,6 +117,37 @@ fn config_check_validates_toml_and_flags_without_opening_dependencies() {
 }
 
 #[test]
+fn hold_release_grace_outlasts_the_queue_transaction_budget() {
+    let resolve = |command_timeout_ms: u64| {
+        let overlay = toml::from_str(
+            &toml::to_string(&serde_json::json!({"workflow":{
+                "database_url":"postgres://unused@127.0.0.1:1/unreachable",
+                "service_peers_file":"unread-peers", "service_key_file":"unread-key",
+                "control_url":"https://control.example.test",
+                "database_command_timeout_ms":command_timeout_ms,
+            }}))
+            .unwrap(),
+        )
+        .unwrap();
+        let settings = WorkflowSettings::resolve_config(
+            WorkflowSettingsSources::try_parse_from(["zeroship-workflow-server", "--no-config"])
+                .unwrap(),
+            Some(&overlay),
+        )
+        .unwrap();
+        ServerOptions::resolve(&settings).unwrap()
+    };
+    let short = resolve(1_000);
+    let long = resolve(3_600_000);
+    // The command timeout bounds each queue transaction, including the commit
+    // of a dependency whose hold was confirmed outside it.
+    for options in [&short, &long] {
+        assert!(options.driver.hold_grace > options.coordinator.command_timeout);
+    }
+    assert!(long.driver.hold_grace > short.driver.hold_grace);
+}
+
+#[test]
 fn retention_configuration_requires_a_signer_and_unambiguous_control_origin() {
     let valid = serde_json::json!({"workflow":{
         "database_url":"postgres://unused@127.0.0.1:1/unreachable",

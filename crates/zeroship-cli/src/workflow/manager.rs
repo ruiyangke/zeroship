@@ -53,6 +53,7 @@ pub struct ManagerOptions {
     pub lease: Duration,
     pub placement_ttl: Duration,
     pub recovery_interval: Duration,
+    pub hold_grace: Duration,
     pub lane_timeout: Duration,
     pub driver_interval: Duration,
 }
@@ -226,6 +227,7 @@ impl LocalManager {
             DriverOptions {
                 recovery: recovery_options(self.options),
                 lane_timeout: self.options.lane_timeout,
+                hold_grace: self.options.hold_grace,
                 ..DriverOptions::default()
             },
         )
