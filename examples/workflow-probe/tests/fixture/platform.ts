@@ -119,7 +119,7 @@ export class Platform {
     console.info("Workflow fixture: build platform binaries and workflow");
     const artifacts = await processes.run("cargo", process.env.CARGO ?? "cargo", [
       "build", "--message-format=json", "--locked", "--bins",
-      ...["zeroship-cli", "zeroship-worker", "zeroship-control", "zeroship-gateway", "zeroship-data-cdc-server", "zeroship-migrate-server"].flatMap((name) => ["-p", name]),
+      ...["zeroship-cli", "zeroship-worker", "zeroship-control", "zeroship-gateway", "zeroship-data-cdc-server", "zeroship-migrate-server", "zeroship-workflow-server"].flatMap((name) => ["-p", name]),
     ], root, process.env);
     const binaries = new Map<string, string>();
     for (const line of artifacts.split("\n")) {
@@ -169,7 +169,7 @@ export class Platform {
 
     const keys: Record<string, string> = {};
     const peerKeys = [];
-    for (const service of ["control", "gateway"]) {
+    for (const service of ["control", "gateway", "workflow"]) {
       const { publicKey, privateKey } = generateKeyPairSync("ed25519");
       peerKeys.push({ ...publicKey.export({ format: "jwk" }), iss: `spiffe://zeroship.ai/svc/${service}` });
       keys[service] = await this.secret(`${service}.pem`, privateKey.export({ format: "pem", type: "pkcs8" }).toString());
@@ -195,11 +195,14 @@ export class Platform {
     const cert = await this.secret("relay-cert.pem", certificate.cert);
     const key = await this.secret("relay-key.pem", certificate.private);
     const blobs = join(work, "blobs");
+    const payloads = join(work, "objects");
+    await mkdir(payloads, { recursive: true });
     const control = await this.port();
     const worker = await this.port();
     const gateway = await this.port();
     const relay = await this.port();
     const migrationServer = await this.port();
+    const manager = await this.port();
     const service = async (name: string, executable: string, port: typeof relay, args: string[], env: NodeJS.ProcessEnv) => {
       await port.release();
       return processes.start(name, binary(executable), args, work, { ...shared, ...env });
@@ -215,18 +218,39 @@ export class Platform {
       socket.once("error", () => done(false));
       socket.setTimeout(1000, () => done(false));
     }));
-    await service("control", "zeroship-control", control, ["--no-config", "--port", `${control.number}`, "--blob-store", blobs, "--gateway-url", gateway.url, "--worker-urls", worker.url], {
+    await service("control", "zeroship-control", control, ["--no-config", "--port", `${control.number}`, "--blob-store", blobs, "--gateway-url", gateway.url, "--worker-urls", worker.url, "--disable-workflow-engine"], {
       ZEROSHIP_CONTROL_DATABASE_URL: dsn, ZEROSHIP_CONTROL_MASTER_KEY: masterKey,
       ZEROSHIP_CONTROL_ALLOW_UNSUPPORTED_BILLING: "true", ZEROSHIP_CONTROL_WORKER_ENROLMENT_NETWORKS: "127.0.0.1/32",
       ZEROSHIP_CONTROL_WORKER_ENROLMENT_PORTS: `${worker.number}`,
       ZEROSHIP_CONTROL_SERVICE_KEY_FILE: keys.control, ZEROSHIP_CONTROL_SERVICE_PEERS_FILE: peers,
       ZEROSHIP_CONTROL_WORKER_ENROLLERS_FILE: enrollers,
+      ZEROSHIP_CONTROL_WORKFLOW_COORDINATOR_URL: manager.url,
     });
     await this.waitFor("control", () => this.httpReady(`${control.url}/readyz`));
+
+    // The workflow manager owns placement: a deployed app reaches env.workflows
+    // only once the manager's placement lane has given it an owner, so the
+    // deployed tier needs one. It holds no creator database - it reads the
+    // platform metadata under its own login, which the migration creates
+    // without a password.
+    const managerRole = await postgres.exec(["psql", "-U", "postgres", "-d", "workflow_fixture", "-v", "ON_ERROR_STOP=1", "-c",
+      "ALTER ROLE zeroship_workflow WITH PASSWORD 'zeroship_workflow'"]);
+    assert.equal(managerRole.exitCode, 0, `Give the manager role a fixture password: ${managerRole.output}`);
+    await service("workflow", "zeroship-workflow-server", manager, ["--no-config", "--listen", `127.0.0.1:${manager.number}`], {
+      ZEROSHIP_WORKFLOW_DATABASE_URL: `postgres://zeroship_workflow:zeroship_workflow@${authority}`,
+      ZEROSHIP_WORKFLOW_CONTROL_URL: control.url,
+      ZEROSHIP_WORKFLOW_SERVICE_KEY_FILE: keys.workflow, ZEROSHIP_WORKFLOW_SERVICE_PEERS_FILE: peers,
+    });
+    await this.waitFor("workflow manager", () => this.httpReady(`${manager.url}/readyz`));
     await service("worker", "zeroship-worker", worker, ["--port", `${worker.number}`, "--threads", "1", "--control-url", control.url, "--blob-store", blobs, "--poll-interval", "1", "--workflow-advance-unsigned", "--kv-config-file", kv], {
       ZEROSHIP_WORKER_DATABASE_URL: `postgres://zeroship_worker:zeroship_worker@${authority}`,
       ZEROSHIP_WORKER_ENROLLER_FILE: enroller, ZEROSHIP_WORKER_SERVICE_PEERS_FILE: peers,
       ZEROSHIP_WORKER_CDC_RELAY_URL: `wss://localhost:${relay.number}/internal/v1/cdc/subscribe`, ZEROSHIP_WORKER_CDC_RELAY_CA_FILE: cert,
+      // A workflow host keeps creator journals in the app database and stages
+      // payloads in the app object store, so the worker needs both.
+      ZEROSHIP_WORKER_WORKFLOW_MANAGER_URL: manager.url,
+      ZEROSHIP_WORKER_WORKFLOW_CAPACITY: "8", ZEROSHIP_WORKER_WORKFLOW_SLOTS: "2",
+      ZEROSHIP_WORKER_STORAGE_URL: payloads,
     });
     await this.waitFor("worker", () => this.httpReady(`${worker.url}/readyz`));
     await service("gateway", "zeroship-gate", gateway, ["--no-config", "--port", `${gateway.number}`, "--control-url", control.url, "--worker-urls", worker.url, "--blob-store", blobs, "--poll-interval", "1", "--broker-secret-file", broker], {
