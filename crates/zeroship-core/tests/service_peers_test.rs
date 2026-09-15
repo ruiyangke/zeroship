@@ -485,12 +485,12 @@ fn from_parts_is_not_a_way_around_the_own_key_refusal() {
     assert!(message.contains(gateway.as_str()), "{message}");
 }
 
-/// The identifier a worker instance mints under, once it has enrolled.
+/// The identifier a worker instance mints under, once it has joined.
 ///
-/// A `wkr_` typed id is base36 over a UUIDv7, and the literal here is one shaped
-/// like the ones `worker_enrolment` returns. It is written out rather than
-/// generated so the multi-segment path this whole separation rests on is visible
-/// in the test that depends on it.
+/// A `wkr_` typed id is base36 over a `UUIDv7`, and the literal here is one shaped
+/// like the ones `zeroship_core::typed_id::new_worker_instance_id` returns. It
+/// is written out rather than generated so the multi-segment path this whole
+/// separation rests on is visible in the test that depends on it.
 fn worker_instance_issuer() -> ServiceIssuer {
     ServiceIssuer::parse(&format!(
         "spiffe://zeroship.ai/{WORKER_SERVICE_NAME}/wkr_0000000000000000000000001"
@@ -708,10 +708,7 @@ fn an_instance_keyring_refuses_a_key_the_peer_document_already_publishes() {
     let elsewhere = InstanceSigningKey::generate();
     let elsewhere_public = *elsewhere.public_key();
     let foreign = elsewhere
-        .into_keyring(
-            instance.clone(),
-            bundle_publishing(&gateway, &elsewhere_public),
-        )
+        .into_keyring(instance, bundle_publishing(&gateway, &elsewhere_public))
         .expect_err("a boot-generated key published under any issuer at all must be refused");
     match &foreign {
         PeerKeyError::InstanceKeyAlreadyPublished {

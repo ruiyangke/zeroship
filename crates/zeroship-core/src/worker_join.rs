@@ -102,6 +102,15 @@ pub const INSTANCE_LEASE_TTL: Duration = Duration::from_secs(600);
 /// leaves at least one whole spare attempt after a failure.
 pub const INSTANCE_RENEWALS_PER_LEASE: u32 = 3;
 
+/// One attempt is not a schedule: a worker whose single renewal fails has no
+/// second chance before its identity lapses. Checked at COMPILE time, because
+/// the claim is about two constants and a build is the only place a claim about
+/// constants can be checked without ever being skipped.
+const _: () = assert!(
+    INSTANCE_RENEWALS_PER_LEASE >= 2,
+    "a lease must leave room for a failed renewal to be retried"
+);
+
 /// How often a joined worker renews its instance identity.
 ///
 /// [`INSTANCE_LEASE_TTL`] divided by [`INSTANCE_RENEWALS_PER_LEASE`]. The margin
@@ -503,17 +512,17 @@ pub fn mint_join_token_at(
     }
     let issuer = crate::service_peers::join_signer_issuer(signer_id)
         .map_err(|_| format!("{signer_id:?} is not a join signer id"))?;
-    let issued = unix_seconds(now).ok_or_else(|| "clock out of range".to_owned())?;
+    let issued_at = unix_seconds(now).ok_or_else(|| "clock out of range".to_owned())?;
     let lifetime =
         i64::try_from(grant.lifetime.as_secs()).map_err(|_| "lifetime out of range".to_owned())?;
     let claims = JoinTokenClaims {
         iss: issuer.as_str().to_owned(),
         sub: issuer.as_str().to_owned(),
         aud: audience.as_str().to_owned(),
-        exp: issued
+        exp: issued_at
             .checked_add(lifetime)
             .ok_or_else(|| "expiry out of range".to_owned())?,
-        iat: issued,
+        iat: issued_at,
         jti: new_token_id(),
         zone: grant.zone.clone(),
         uses: grant.uses,
@@ -815,20 +824,24 @@ mod tests {
 
     /// Each refusal changes one thing about an otherwise valid entry. The
     /// control is the unchanged entry, which parses.
+    /// An import document around whatever entries a case supplies.
+    fn document(entries: &serde_json::Value) -> Vec<u8> {
+        serde_json::to_vec(&serde_json::json!({ "signers": entries })).expect("json")
+    }
+
+    /// One entry, with every field a case might want to spoil.
+    fn entry(id: &str, zones: &serde_json::Value, key: &str) -> serde_json::Value {
+        serde_json::json!({"id": id, "zones": zones, "public_key": key})
+    }
+
     #[test]
     fn an_import_that_is_wrong_in_any_one_way_is_refused() {
         let valid = record();
         let key = URL_SAFE_NO_PAD.encode(valid.public_key);
-        let document = |entries: serde_json::Value| {
-            serde_json::to_vec(&serde_json::json!({ "signers": entries })).expect("json")
-        };
-        let entry = |id: &str, zones: serde_json::Value, key: &str| {
-            serde_json::json!({"id": id, "zones": zones, "public_key": key})
-        };
         let zones = serde_json::json!([DEFAULT_EXECUTION_ZONE]);
-        assert!(parse_join_signer_import(&document(serde_json::json!([entry(
+        assert!(parse_join_signer_import(&document(&serde_json::json!([entry(
             &valid.id,
-            zones.clone(),
+            &zones,
             &key
         )])))
         .is_ok());
@@ -836,68 +849,68 @@ mod tests {
         let other_id = crate::typed_id::new_join_signer_id();
         for (label, bytes) in [
             ("not JSON", b"not json".to_vec()),
-            ("no signers", document(serde_json::json!([]))),
+            ("no signers", document(&serde_json::json!([]))),
             (
                 "an unknown member",
-                document(serde_json::json!([{
+                document(&serde_json::json!([{
                     "id": valid.id, "zones": zones, "public_key": key, "status": "active"
                 }])),
             ),
             (
                 "a worker instance id",
-                document(serde_json::json!([entry(
+                document(&serde_json::json!([entry(
                     "wkr_0000000000000000000000001",
-                    zones.clone(),
+                    &zones,
                     &key
                 )])),
             ),
             (
                 "no zones",
-                document(serde_json::json!([entry(
+                document(&serde_json::json!([entry(
                     &valid.id,
-                    serde_json::json!([]),
+                    &serde_json::json!([]),
                     &key
                 )])),
             ),
             (
                 "an empty zone",
-                document(serde_json::json!([entry(
+                document(&serde_json::json!([entry(
                     &valid.id,
-                    serde_json::json!([""]),
+                    &serde_json::json!([""]),
                     &key
                 )])),
             ),
             (
                 "a padded zone",
-                document(serde_json::json!([entry(
+                document(&serde_json::json!([entry(
                     &valid.id,
-                    serde_json::json!([" default"]),
+                    &serde_json::json!([" default"]),
                     &key
                 )])),
             ),
             (
                 "a short key",
-                document(serde_json::json!([entry(
+                document(&serde_json::json!([entry(
                     &valid.id,
-                    zones.clone(),
+                    &zones,
                     &URL_SAFE_NO_PAD.encode([7_u8; 31])
                 )])),
             ),
             (
                 "a small-order key",
-                document(serde_json::json!([entry(
+                document(&serde_json::json!([entry(
                     &valid.id,
-                    zones.clone(),
+                    &zones,
                     &URL_SAFE_NO_PAD.encode([0_u8; 32])
                 )])),
             ),
             (
                 "one id twice",
-                document(serde_json::json!([
-                    entry(&valid.id, zones.clone(), &key),
+                document(&serde_json::json!([
+                    entry(&valid.id, &zones, &key),
                     entry(
                         &valid.id,
-                        zones.clone(),
+                        &zones,
                         &URL_SAFE_NO_PAD.encode(
                             ed25519_dalek::SigningKey::from_bytes(&[5_u8; 32])
                                 .verifying_key()
@@ -908,9 +921,9 @@ mod tests {
             ),
             (
                 "one key twice",
-                document(serde_json::json!([
-                    entry(&valid.id, zones.clone(), &key),
-                    entry(&other_id, zones.clone(), &key),
+                document(&serde_json::json!([
+                    entry(&valid.id, &zones, &key),
+                    entry(&other_id, &zones, &key),
                 ])),
             ),
         ] {
@@ -1230,14 +1243,16 @@ mod tests {
     fn several_renewal_attempts_fit_inside_one_lease() {
         let interval = instance_renewal_interval();
         assert!(!interval.is_zero());
-        assert!(INSTANCE_RENEWALS_PER_LEASE >= 2, "one attempt has no retry");
         assert!(
             interval * INSTANCE_RENEWALS_PER_LEASE <= INSTANCE_LEASE_TTL,
             "the derived schedule must not outrun the lease it is derived from"
         );
         // The margin a failed attempt is retried inside is the whole lease
         // minus the first interval, which is at least one more interval.
-        assert!(INSTANCE_LEASE_TTL - interval >= interval);
+        let margin = INSTANCE_LEASE_TTL
+            .checked_sub(interval)
+            .expect("the lease outlasts one renewal interval");
+        assert!(margin >= interval);
     }
 
     /// The unverified signer read admits exactly what it should select a key
