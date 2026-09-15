@@ -15,8 +15,7 @@ cron, timers and durable job delivery to the workflow server. Workers consume
 jobs and keep execution history and payloads in creator storage. Native manager
 scheduling and creator Cron acceptance exist; production and local host
 composition remain incomplete. The creator calendar loop has been removed,
-so the current CLI task loop does not generate scheduled jobs. The provisioning instructions
-below still apply today.
+so the current CLI task loop does not generate scheduled jobs.
 
 ## Workflow class exports
 
