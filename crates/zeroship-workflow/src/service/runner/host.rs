@@ -259,8 +259,12 @@ async fn periodic(
 ) {
     loop {
         if let Err(error) = operation().await {
+            // The code alone cannot tell a manager outage from a retired
+            // binding or an unreachable creator resource: every one of them is
+            // unavailable. The message names which refusal this was.
             tracing::warn!(
                 code = error.code(),
+                %error,
                 "workflow worker binding refresh failed"
             );
         }
