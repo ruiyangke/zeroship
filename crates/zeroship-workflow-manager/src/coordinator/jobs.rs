@@ -142,16 +142,20 @@ fn delivery_selector(worker: &WorkerId, delivery: &Delivery) -> Result<VerifyAss
     })
 }
 
+/// Workers publish only creator intents. Activation, calendar, management,
+/// closure and maintenance jobs are manager-origin, so a worker can neither
+/// forge closure evidence nor postpone closing with self-published duties.
 const fn worker_operation(operation: &JobOperation) -> Result<(), Error> {
     match operation {
-        JobOperation::Advance { .. }
-        | JobOperation::Fanout { .. }
-        | JobOperation::Propagate { .. }
-        | JobOperation::Reconcile {}
-        | JobOperation::Collect {} => Ok(()),
+        JobOperation::Advance { .. } | JobOperation::Fanout { .. } | JobOperation::Propagate { .. } => {
+            Ok(())
+        }
         JobOperation::Activate { .. }
         | JobOperation::Cron { .. }
-        | JobOperation::Management { .. } => Err(Error::Denied),
+        | JobOperation::Management { .. }
+        | JobOperation::Close { .. }
+        | JobOperation::Reconcile {}
+        | JobOperation::Collect {} => Err(Error::Denied),
     }
 }
 

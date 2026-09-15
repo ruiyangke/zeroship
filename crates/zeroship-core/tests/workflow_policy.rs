@@ -149,3 +149,121 @@ fn fixed_integer_fields_reject_wire_overflow_and_coercion() {
         assert!(decode_with("admission", invalid).is_err());
     }
 }
+
+#[test]
+fn lease_requests_are_closed_and_name_an_optional_prior_epoch() {
+    use zeroship_core::{
+        app_id::AppId,
+        workflow_coordination::AssignedScope,
+        workflow_policy::{EstablishIngress, PolicyLeaseRequest},
+    };
+    let scope = AssignedScope {
+        app_id: AppId::mint(),
+        assignment_revision: 2.try_into().unwrap(),
+    };
+    let plain = PolicyLeaseRequest {
+        scope: scope.clone(),
+        establish: None,
+        ingress_used: false,
+    };
+    let wire = serde_json::to_value(&plain).unwrap();
+    assert_eq!(
+        wire,
+        json!({"scope":{"appId":scope.app_id,"assignmentRevision":2},
+            "establish":null,"ingressUsed":false})
+    );
+    assert_eq!(
+        serde_json::from_value::<PolicyLeaseRequest>(wire).unwrap(),
+        plain
+    );
+    // Startup names no refused epoch; the manager returns or opens one.
+    let startup = PolicyLeaseRequest {
+        establish: Some(EstablishIngress { after: None }),
+        ..plain.clone()
+    };
+    let started = serde_json::to_value(&startup).unwrap();
+    assert_eq!(started["establish"], json!({"after":null}));
+    assert_eq!(
+        serde_json::from_value::<PolicyLeaseRequest>(started).unwrap(),
+        startup
+    );
+    let establish = PolicyLeaseRequest {
+        establish: Some(EstablishIngress {
+            after: Some(5.try_into().unwrap()),
+        }),
+        ingress_used: true,
+        ..plain
+    };
+    let established = serde_json::to_value(&establish).unwrap();
+    assert_eq!(established["establish"], json!({"after":5}));
+    assert_eq!(
+        serde_json::from_value::<PolicyLeaseRequest>(established.clone()).unwrap(),
+        establish
+    );
+    for bad in [json!(0), json!(-1), json!(1.5), json!("1")] {
+        let mut invalid = established.clone();
+        invalid["establish"]["after"] = bad;
+        assert!(serde_json::from_value::<PolicyLeaseRequest>(invalid).is_err());
+    }
+    for bad in [json!(5), json!(true), json!({"after":5,"epoch":6})] {
+        let mut invalid = established.clone();
+        invalid["establish"] = bad;
+        assert!(serde_json::from_value::<PolicyLeaseRequest>(invalid).is_err());
+    }
+    for bad in [Value::Null, json!(0), json!("true")] {
+        let mut invalid = established.clone();
+        invalid["ingressUsed"] = bad;
+        assert!(serde_json::from_value::<PolicyLeaseRequest>(invalid).is_err());
+    }
+    let mut missing = established.clone();
+    missing.as_object_mut().unwrap().remove("ingressUsed");
+    assert!(serde_json::from_value::<PolicyLeaseRequest>(missing).is_err());
+    for (path, field) in [("", "epoch"), ("", "expiresAt"), ("/scope", "workerId")] {
+        let mut invalid = established.clone();
+        invalid
+            .pointer_mut(path)
+            .unwrap()
+            .as_object_mut()
+            .unwrap()
+            .insert(field.into(), json!(1));
+        assert!(serde_json::from_value::<PolicyLeaseRequest>(invalid).is_err());
+    }
+}
+
+#[test]
+fn leases_carry_an_optional_positive_ingress_epoch() {
+    use zeroship_core::{
+        app_id::AppId, workflow_coordination::WorkerId, workflow_policy::PolicyLease,
+    };
+    let lease = PolicyLease {
+        app_id: AppId::mint(),
+        worker_id: WorkerId::mint(),
+        signing_key_id: "thumbprint".into(),
+        assignment_revision: 1.try_into().unwrap(),
+        policy_revision: 1.try_into().unwrap(),
+        policy: AppPolicy::default(),
+        ingress_epoch: Some(3.try_into().unwrap()),
+        remaining_ms: std::num::NonZeroU64::new(10).unwrap(),
+    };
+    let wire = serde_json::to_value(&lease).unwrap();
+    assert_eq!(wire["ingressEpoch"], json!(3));
+    assert_eq!(serde_json::from_value::<PolicyLease>(wire.clone()).unwrap(), lease);
+    let retired = PolicyLease {
+        ingress_epoch: None,
+        ..lease
+    };
+    let retired_wire = serde_json::to_value(&retired).unwrap();
+    assert_eq!(retired_wire["ingressEpoch"], Value::Null);
+    assert_eq!(
+        serde_json::from_value::<PolicyLease>(retired_wire).unwrap(),
+        retired
+    );
+    for bad in [json!(0), json!(-1), json!("3"), json!(1.5)] {
+        let mut invalid = wire.clone();
+        invalid["ingressEpoch"] = bad;
+        assert!(serde_json::from_value::<PolicyLease>(invalid).is_err());
+    }
+    let mut extra = wire;
+    extra["closedEpoch"] = json!(2);
+    assert!(serde_json::from_value::<PolicyLease>(extra).is_err());
+}
