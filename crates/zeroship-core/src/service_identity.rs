@@ -472,23 +472,8 @@ pub mod endpoints {
         "GET",
         "/internal/principals/{principal_id}/erasure-preflight",
     );
-    pub const WORKFLOW_WORKERS: ServiceEndpoint = ServiceEndpoint::new(
-        "workflow",
-        "POST",
-        "/v1/workers/list",
-    );
-    pub const WORKFLOW_ASSIGN: ServiceEndpoint = ServiceEndpoint::new(
-        "workflow",
-        "POST",
-        "/v1/assignments/assign",
-    );
     pub const WORKFLOW_VERIFY_ASSIGNMENT: ServiceEndpoint =
         ServiceEndpoint::new("workflow", "POST", "/v1/assignments/verify");
-    pub const WORKFLOW_RECOVERY: ServiceEndpoint = ServiceEndpoint::new(
-        "workflow",
-        "POST",
-        "/v1/assignments/recovery",
-    );
     pub const WORKFLOW_MANAGE: ServiceEndpoint = ServiceEndpoint::new(
         "workflow",
         "POST",
@@ -592,10 +577,7 @@ pub fn service_allowlist() -> &'static [ServiceAuthorization] {
                 principal("svc/control"),
                 &[
                     endpoints::GATEWAY_WORKFLOW_ADVANCE,
-                    endpoints::WORKFLOW_WORKERS,
-                    endpoints::WORKFLOW_ASSIGN,
                     endpoints::WORKFLOW_VERIFY_ASSIGNMENT,
-                    endpoints::WORKFLOW_RECOVERY,
                     endpoints::WORKFLOW_MANAGE,
                     endpoints::WORKFLOW_MANAGEMENT_STATUS,
                     endpoints::WORKFLOW_SCHEDULE_REGISTER,

@@ -78,10 +78,7 @@ async fn terminal_draining(fixture: &Fixture) {
     let database = fixture.database().await;
     let worker = WorkerId::mint();
     register(&left, &worker, 2).await;
-    let assignment = left
-        .assign(&placement(&AppId::mint(), &worker))
-        .await
-        .unwrap();
+    let assignment = place(&left, &AppId::mint()).await;
     let assignment_filter = value!({"worker_id":worker.as_str()});
     let assigned = row(&database, "assignments", assignment_filter.clone()).await;
     let filter = value!({"id":worker.as_str()});
@@ -101,10 +98,11 @@ async fn terminal_draining(fixture: &Fixture) {
         left.assignments(&worker, None).await.unwrap(),
         vec![assignment]
     );
-    assert_eq!(
-        left.assign(&placement(&AppId::mint(), &worker)).await,
-        Err(Error::Denied)
-    );
+    // A draining registration is no longer a placement candidate.
+    assert!(matches!(
+        left.place(&AppId::mint()).await.unwrap(),
+        Placed::Unplaced(_)
+    ));
 
     let repeated = left.register(&worker, &request).await.unwrap();
     assert_eq!(repeated.worker_id, worker);
@@ -158,10 +156,7 @@ async fn concurrent_draining(fixture: &Fixture) {
                 .await
                 .unwrap();
             if state == WorkerState::Ready {
-                hosts[0]
-                    .assign(&placement(&AppId::mint(), &worker))
-                    .await
-                    .unwrap();
+                place(&hosts[0], &AppId::mint()).await;
             }
             update(
                 &database,

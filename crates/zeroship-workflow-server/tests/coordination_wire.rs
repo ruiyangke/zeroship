@@ -4,10 +4,10 @@ use std::fmt::Debug;
 use zeroship_core::{
     app_id::AppId,
     workflow_coordination::{
-        AssignScope, AssignedScope, Assignment, Failure, ManageRun, ManagementOperation,
+        AssignedScope, Assignment, Failure, ManageRun, ManagementOperation,
         ManagementOutcome, ManagementReceipt, ManagementStatus, RegisterWorker, RegisteredWorker,
         ReleaseScope, RequestId, Revision, RunId, ScopePage, UnixMillis, VerifyAssignment,
-        WorkerId, WorkerPage,
+        WorkerId,
     },
 };
 
@@ -43,16 +43,12 @@ fn registry_and_placement_contracts_reject_customer_data() {
     let app = AppId::mint();
     let worker = WorkerId::mint();
     let request = RequestId::mint();
-    rejects_customer_fields::<WorkerPage>(&json!({"after":null}));
     rejects_customer_fields::<ScopePage>(&json!({"after":app}));
     rejects_customer_fields::<ManagementStatus>(&json!({"appId":app,"requestId":request}));
     rejects_customer_fields::<Failure>(&json!({"code":"denied"}));
     rejects_customer_fields::<RegisterWorker>(&json!({"capacity":4,"state":"ready"}));
     rejects_customer_fields::<RegisteredWorker>(&json!({
         "workerId":worker,"capacity":4,"state":"ready","expiresAt":1000
-    }));
-    rejects_customer_fields::<AssignScope>(&json!({
-        "requestId":request,"appId":app,"workerId":worker,"expectedRevision":null
     }));
     rejects_customer_fields::<Assignment>(&json!({
         "appId":app,"workerId":worker,"revision":1,"expiresAt":1000

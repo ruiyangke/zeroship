@@ -112,17 +112,9 @@ async fn native_worker_client_uses_the_authenticated_coordinator_api() {
         fixture.seed_app(app).await;
     }
     for app in &apps {
-        let (status, _) = post(
-            &http,
-            &server.url,
-            endpoints::WORKFLOW_ASSIGN.path_template(),
-            &assertion(&control, &control_key),
-            &json!({
-                "requestId":RequestId::mint(),"appId":app,"workerId":worker,"expectedRevision":null
-            }),
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK);
+        fixture
+            .seed_placement(app, &worker, Duration::from_secs(30))
+            .await;
     }
     let assignments = client
         .assignments(&ScopePage { after: None })
@@ -300,10 +292,9 @@ async fn native_worker_client_uses_the_authenticated_coordinator_api() {
     ));
     let backup_client = WorkerCoordinator::new(&server.url, auth, Options::default()).unwrap();
     backup_client.register(&registration).await.unwrap();
-    let (status,_) = post(&http,&server.url,endpoints::WORKFLOW_ASSIGN.path_template(),&assertion(&control,&control_key),&json!({
-        "requestId":RequestId::mint(),"appId":scope.app_id,"workerId":backup,"expectedRevision":null
-    })).await;
-    assert_eq!(status, StatusCode::OK);
+    fixture
+        .seed_placement(&scope.app_id, &backup, Duration::from_secs(30))
+        .await;
     client
         .register(&RegisterWorker {
             state: WorkerState::Draining,
@@ -537,10 +528,7 @@ async fn replicas_authenticate_metadata_and_keep_customer_execution_off_the_prot
     )
     .await;
     for endpoint in [
-        endpoints::WORKFLOW_WORKERS,
-        endpoints::WORKFLOW_ASSIGN,
         endpoints::WORKFLOW_VERIFY_ASSIGNMENT,
-        endpoints::WORKFLOW_RECOVERY,
         endpoints::WORKFLOW_MANAGE,
         endpoints::WORKFLOW_MANAGEMENT_STATUS,
         endpoints::WORKFLOW_REGISTER,
@@ -626,41 +614,9 @@ async fn replicas_authenticate_metadata_and_keep_customer_execution_off_the_prot
 
     let app = AppId::mint();
     fixture.seed_app(&app).await;
-    let assign = json!({"requestId":RequestId::mint(),"appId":app,"workerId":worker,"expectedRevision":null});
-    let path = endpoints::WORKFLOW_ASSIGN.path_template();
-    assert_eq!(
-        post(
-            &client,
-            &first.url,
-            path,
-            &assertion(&worker_issuer, &worker_key),
-            &assign
-        )
-        .await
-        .0,
-        StatusCode::UNAUTHORIZED
-    );
-    let (status, value) = post(
-        &client,
-        &first.url,
-        path,
-        &assertion(&control, &control_key),
-        &assign,
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK);
-    let assignment: Assignment = serde_json::from_value(value.clone()).unwrap();
-    assert_eq!(
-        post(
-            &client,
-            &second.url,
-            path,
-            &assertion(&control, &control_key),
-            &assign
-        )
-        .await,
-        (StatusCode::OK, value)
-    );
+    let assignment = fixture
+        .seed_placement(&app, &worker, Duration::from_secs(30))
+        .await;
     let verification =
         json!({"appId":app,"workerId":worker,"assignmentRevision":assignment.revision});
     let verify = endpoints::WORKFLOW_VERIFY_ASSIGNMENT.path_template();

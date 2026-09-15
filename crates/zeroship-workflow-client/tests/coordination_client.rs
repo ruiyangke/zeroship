@@ -16,9 +16,9 @@ use zeroship_core::{
     service_identity::{endpoints, verify_identity, PeerCredentials, ServiceEndpoint},
     service_peers::{ServiceAuth, ServiceKeyring},
     workflow_coordination::{
-        AssignScope, AssignedScope, FailureCode, ManageRun, ManagementOperation, ManagementStatus,
-        RegisterWorker, RequestId, RunId, RunOperation, ScopePage,
-        VerifyAssignment, WorkerId, WorkerPage, WorkerState, AUDIENCE,
+        AssignedScope, FailureCode, ManageRun, ManagementOperation, ManagementStatus,
+        RegisterWorker, RequestId, RunId, RunOperation, ScopePage, VerifyAssignment, WorkerId,
+        WorkerState, AUDIENCE,
     },
 };
 use zeroship_workflow_client::{ControlCoordinator, Error, Options, WorkerCoordinator};
@@ -580,174 +580,15 @@ async fn control_configuration_requires_the_control_principal_and_secure_origin(
     .unwrap();
     assert_eq!(
         client
-            .ready_workers(&WorkerPage { after: None })
+            .verify_assignment(&VerifyAssignment {
+                app_id: AppId::mint(),
+                worker_id: WorkerId::mint(),
+                assignment_revision: 1.try_into().unwrap(),
+            })
             .await
             .unwrap_err(),
         Error::RequestTooLarge
     );
-}
-
-#[compio::test]
-async fn control_worker_pages_require_ready_workers_in_cursor_order() {
-    let mut workers = [WorkerId::mint(), WorkerId::mint()];
-    workers.sort_by(|a, b| a.as_str().cmp(b.as_str()));
-    let first = json!({"workerId":workers[0],"capacity":3,"state":"ready","expiresAt":1});
-    let second = json!({"workerId":workers[1],"capacity":3,"state":"ready","expiresAt":1});
-    let request = WorkerPage { after: None };
-    for page in [json!([]), json!([first, second])] {
-        control_reply(
-            response(200, &page),
-            endpoints::WORKFLOW_WORKERS,
-            &request,
-            async |client| {
-                let workers = client.ready_workers(&request).await.unwrap();
-                assert_eq!(serde_json::to_value(workers).unwrap(), page);
-            },
-        )
-        .await;
-    }
-    for page in [
-        json!([second, first]),
-        json!([first, first]),
-        json!([{"workerId":workers[0],"capacity":3,"state":"draining","expiresAt":1}]),
-        json!([{"workerId":workers[0],"capacity":3,"state":"ready","expiresAt":1,"databaseUrl":"customer-secret"}]),
-    ] {
-        control_reply(
-            response(200, &page),
-            endpoints::WORKFLOW_WORKERS,
-            &request,
-            async |client| {
-                assert_eq!(
-                    client.ready_workers(&request).await.unwrap_err(),
-                    Error::InvalidResponse
-                );
-            },
-        )
-        .await;
-    }
-    let request = WorkerPage {
-        after: Some(workers[0].clone()),
-    };
-    for (page, accepted) in [(json!([first]), false), (json!([second]), true)] {
-        control_reply(
-            response(200, &page),
-            endpoints::WORKFLOW_WORKERS,
-            &request,
-            async |client| {
-                let result = client.ready_workers(&request).await;
-                if accepted {
-                    assert_eq!(result.unwrap()[0].worker_id, workers[1]);
-                } else {
-                    assert_eq!(result.unwrap_err(), Error::InvalidResponse);
-                }
-            },
-        )
-        .await;
-    }
-}
-
-#[compio::test]
-async fn control_recovery_pages_require_distinct_apps_after_the_cursor() {
-    let mut apps = [AppId::mint(), AppId::mint()];
-    apps.sort_by(|a, b| a.as_str().cmp(b.as_str()));
-    let request = ScopePage { after: None };
-    for (page, accepted) in [
-        (json!([]), true),
-        (json!(apps), true),
-        (json!([apps[1], apps[0]]), false),
-        (json!([apps[0], apps[0]]), false),
-        (json!(["customer-secret"]), false),
-    ] {
-        control_reply(
-            response(200, &page),
-            endpoints::WORKFLOW_RECOVERY,
-            &request,
-            async |client| {
-                let result = client.recovery_scopes(&request).await;
-                if accepted {
-                    assert_eq!(serde_json::to_value(result.unwrap()).unwrap(), page);
-                } else {
-                    assert_eq!(result.unwrap_err(), Error::InvalidResponse);
-                }
-            },
-        )
-        .await;
-    }
-    let request = ScopePage {
-        after: Some(apps[0].clone()),
-    };
-    for (page, accepted) in [(json!([apps[0]]), false), (json!([apps[1]]), true)] {
-        control_reply(
-            response(200, &page),
-            endpoints::WORKFLOW_RECOVERY,
-            &request,
-            async |client| {
-                let result = client.recovery_scopes(&request).await;
-                if accepted {
-                    assert_eq!(result.unwrap(), vec![apps[1].clone()]);
-                } else {
-                    assert_eq!(result.unwrap_err(), Error::InvalidResponse);
-                }
-            },
-        )
-        .await;
-    }
-}
-
-#[compio::test]
-async fn control_assignment_receipts_preserve_scope_and_expected_revision() {
-    let mut request = AssignScope {
-        request_id: RequestId::mint(),
-        app_id: AppId::mint(),
-        worker_id: WorkerId::mint(),
-        expected_revision: None,
-    };
-    for expected in [None, Some(7.try_into().unwrap())] {
-        request.expected_revision = expected;
-        let next = expected.map_or(1, |value| value.get() + 1);
-        let valid = json!({"appId":request.app_id,"workerId":request.worker_id,"revision":next,"expiresAt":1});
-        control_reply(
-            response(200, &valid),
-            endpoints::WORKFLOW_ASSIGN,
-            &request,
-            async |client| {
-                assert_eq!(
-                    serde_json::to_value(client.assign(&request).await.unwrap()).unwrap(),
-                    valid
-                );
-            },
-        )
-        .await;
-        for (field, changed) in [
-            ("appId", json!(AppId::mint())),
-            ("workerId", json!(WorkerId::mint())),
-            ("revision", json!(next + 1)),
-            ("expiresAt", json!(-1)),
-            ("payload", json!({"secret":"customer-data"})),
-        ] {
-            let mut invalid = valid.clone();
-            invalid[field] = changed;
-            control_reply(
-                response(200, &invalid),
-                endpoints::WORKFLOW_ASSIGN,
-                &request,
-                async |client| {
-                    assert_eq!(
-                        client.assign(&request).await.unwrap_err(),
-                        Error::InvalidResponse
-                    );
-                },
-            )
-            .await;
-        }
-    }
-    request.expected_revision = Some(i64::MAX.try_into().unwrap());
-    control_reply(
-        response(200, &json!({"appId":request.app_id,"workerId":request.worker_id,"revision":1,"expiresAt":1})),
-        endpoints::WORKFLOW_ASSIGN,
-        &request,
-        async |client| { assert_eq!(client.assign(&request).await.unwrap_err(), Error::InvalidResponse); },
-    ).await;
 }
 
 #[compio::test]
@@ -941,17 +782,27 @@ async fn native_clients_mint_fresh_full_assertions_for_the_workflow_audience() {
             .then(|| WorkerCoordinator::new(&url, auth.clone(), Options::default()).unwrap());
         let control =
             is_control.then(|| ControlCoordinator::new(&url, auth, Options::default()).unwrap());
-        let endpoint = if is_control {
-            endpoints::WORKFLOW_WORKERS
+        let (app, placed) = (AppId::mint(), WorkerId::mint());
+        let (endpoint, body, reply) = if is_control {
+            (
+                endpoints::WORKFLOW_VERIFY_ASSIGNMENT,
+                json!({"appId":app,"workerId":placed,"assignmentRevision":1}),
+                json!({"appId":app,"workerId":placed,"revision":1,"expiresAt":1}),
+            )
         } else {
-            endpoints::WORKFLOW_ASSIGNMENTS
+            (
+                endpoints::WORKFLOW_ASSIGNMENTS,
+                json!({"after":null}),
+                json!([]),
+            )
         };
+        let encoded = serde_json::to_vec(&reply).unwrap();
         let server = async {
             let mut prior = None;
             for _ in 0..2 {
                 let (mut stream, _) = listener.accept().await.unwrap();
                 let request = read_request(&mut stream).await;
-                request.assert_operation(endpoint, &json!({"after":null}));
+                request.assert_operation(endpoint, &body);
                 let assertion = request.bearer().unwrap();
                 assert!(
                     prior.as_deref() != Some(assertion),
@@ -968,7 +819,13 @@ async fn native_clients_mint_fresh_full_assertions_for_the_workflow_audience() {
                     "full assertions must reject replay"
                 );
                 prior = Some(assertion.to_owned());
-                stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: 2\r\n\r\n[]".to_vec()).await.0.unwrap();
+                let mut response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: {}\r\n\r\n",
+                    encoded.len()
+                )
+                .into_bytes();
+                response.extend_from_slice(&encoded);
+                stream.write_all(response).await.0.unwrap();
             }
         };
         let calls = async {
@@ -980,13 +837,17 @@ async fn native_clients_mint_fresh_full_assertions_for_the_workflow_audience() {
                         .unwrap()
                         .is_empty());
                 } else {
-                    assert!(control
+                    let assignment = control
                         .as_ref()
                         .unwrap()
-                        .ready_workers(&WorkerPage { after: None })
+                        .verify_assignment(&VerifyAssignment {
+                            app_id: app.clone(),
+                            worker_id: placed.clone(),
+                            assignment_revision: 1.try_into().unwrap(),
+                        })
                         .await
-                        .unwrap()
-                        .is_empty());
+                        .unwrap();
+                    assert_eq!(assignment.worker_id, placed);
                 }
             }
         };

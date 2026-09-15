@@ -23,7 +23,7 @@ use support::{Admin, Backend, Fixture};
 use zeroship_core::{
     app_id::AppId,
     workflow_coordination::{
-        AssignScope, AssignedScope, RegisterWorker, RequestId, Revision, WorkerId, WorkerState,
+        AssignedScope, RegisterWorker, Revision, WorkerId, WorkerState,
     },
     workflow_jobs::{
         BroadcastId, DeploymentId, JobId, JobOperation, JobOutcome, JobSpec, Settlement,
@@ -36,7 +36,7 @@ use zeroship_data_orm::{
     value, Value,
 };
 use zeroship_workflow_manager::{
-    coordinator::{self, Coordinator},
+    coordinator::{self, Coordinator, Placed},
     policy::{PolicyObservation, PolicySource},
     recovery::{self, DutyKind, Recovery, Responsibility, ScopeState},
     DeliveryGrant, Error, Queue,
@@ -212,8 +212,7 @@ async fn host_with(fixture: &Fixture, app: AppId) -> Host {
     )
     .unwrap();
     let coordinator = support::coordinator(&queue, coordinator::Options::default());
-    let worker = WorkerId::mint();
-    let scope = place(&coordinator, &app, &worker).await;
+    let (worker, scope) = place(&coordinator, &app).await;
     recovery
         .ensure(&app, &DeploymentId::mint(), revision(1))
         .await
@@ -228,10 +227,12 @@ async fn host_with(fixture: &Fixture, app: AppId) -> Host {
     }
 }
 
-async fn place(coordinator: &Coordinator, app: &AppId, worker: &WorkerId) -> AssignedScope {
+/// Register an instance and let the manager place the app; the placement
+/// names the instance selection chose, which need not be the new one.
+async fn place(coordinator: &Coordinator, app: &AppId) -> (WorkerId, AssignedScope) {
     coordinator
         .register(
-            worker,
+            &WorkerId::mint(),
             &RegisterWorker {
                 capacity: NonZeroU32::new(4).unwrap(),
                 state: WorkerState::Ready,
@@ -239,19 +240,16 @@ async fn place(coordinator: &Coordinator, app: &AppId, worker: &WorkerId) -> Ass
         )
         .await
         .unwrap();
-    let assignment = coordinator
-        .assign(&AssignScope {
-            request_id: RequestId::mint(),
-            app_id: app.clone(),
-            worker_id: worker.clone(),
-            expected_revision: None,
-        })
-        .await
-        .unwrap();
-    AssignedScope {
-        app_id: assignment.app_id,
-        assignment_revision: assignment.revision,
-    }
+    let Placed::Assigned(assignment) = coordinator.place(app).await.unwrap() else {
+        panic!("the app has an eligible worker");
+    };
+    (
+        assignment.worker_id,
+        AssignedScope {
+            app_id: assignment.app_id,
+            assignment_revision: assignment.revision,
+        },
+    )
 }
 
 impl Host {
@@ -794,8 +792,6 @@ async fn preconditions(fixture: &Fixture) {
 /// a lost settlement reply all converge on one retirement.
 async fn lost_replies(fixture: &Fixture) {
     let host = host(fixture).await;
-    let other = WorkerId::mint();
-    let other_scope = place(&host.coordinator, &host.app, &other).await;
     let close = host.recovery.begin_close(&host.app).await.unwrap().unwrap();
     let crashed = host.claim().await.unwrap();
     assert_eq!(crashed.delivery().job, close);
@@ -808,6 +804,20 @@ async fn lost_replies(fixture: &Fixture) {
         value!({"lease_deadline":0}),
     )
     .await;
+    // The crashed instance stops taking placements, so the manager gives the
+    // app an owner that can take the redelivery over.
+    host.coordinator
+        .register(
+            &host.worker,
+            &RegisterWorker {
+                capacity: NonZeroU32::new(4).unwrap(),
+                state: WorkerState::Draining,
+            },
+        )
+        .await
+        .unwrap();
+    let (other, other_scope) = place(&host.coordinator, &host.app).await;
+    assert_ne!(other, host.worker);
     let redelivered = host.claim_as(&other, &other_scope).await.unwrap();
     assert_eq!(redelivered.delivery().job, close);
     assert_eq!(redelivered.delivery().attempt.get(), 2);

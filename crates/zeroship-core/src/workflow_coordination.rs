@@ -38,12 +38,6 @@ pub struct Failure {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct WorkerPage {
-    pub after: Option<WorkerId>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ScopePage {
     pub after: Option<AppId>,
 }
@@ -129,17 +123,6 @@ pub struct RegisteredWorker {
     pub capacity: NonZeroU32,
     pub state: WorkerState,
     pub expires_at: UnixMillis,
-}
-
-/// Control authorizes placement; workers cannot nominate their own app scope.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct AssignScope {
-    pub request_id: RequestId,
-    pub app_id: AppId,
-    pub worker_id: WorkerId,
-    /// Absence asserts that this app/worker placement has never existed.
-    pub expected_revision: Option<Revision>,
 }
 
 /// Placement authority is independent of a customer journal's run/task lease.

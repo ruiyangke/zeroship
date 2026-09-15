@@ -82,6 +82,7 @@ pub struct Worker {
 #[derive(FromRow)]
 #[orm(entity = queue_scopes)]
 pub struct Scope {
+    #[allow(dead_code, reason = "the id completes the scope row projection")]
     pub id: String,
     pub dispatch_cursor: i64,
 }
@@ -105,8 +106,6 @@ pub struct PlacementReceipt {
     pub worker_id: String,
     pub expected_revision: Option<i64>,
     pub reason: Option<String>,
-    pub result_revision: i64,
-    pub result_expires_at: i64,
 }
 
 #[derive(FromRow)]

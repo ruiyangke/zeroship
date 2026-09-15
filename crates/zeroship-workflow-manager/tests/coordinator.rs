@@ -22,9 +22,9 @@ use zeroship_core::{
     app_id::AppId,
     service_peers::{service_issuer, CONTROL_SERVICE_NAME, WORKER_SERVICE_NAME},
     workflow_coordination::{
-        AssignScope, AssignedScope, Assignment, ManageRun, ManagementOperation, ManagementOutcome,
-        RegisterWorker, RegisteredWorker, RequestId, RunId, RunOperation, RunState, WorkerId,
-        WorkerState,
+        AssignedScope, Assignment, ManageRun, ManagementOperation, ManagementOutcome,
+        RegisterWorker, RegisteredWorker, ReleaseReason, ReleaseScope, RequestId, RunId,
+        RunOperation, RunState, WorkerId, WorkerState,
     },
     workflow_jobs::{
         BroadcastId, DeploymentId, JobId, JobOperation, JobOutcome, JobSpec, PropagationId,
@@ -37,7 +37,7 @@ use zeroship_data_orm::{
     value, Value,
 };
 use zeroship_workflow_manager::{
-    coordinator::{Coordinator, Options},
+    coordinator::{Coordinator, Options, Placed},
     Error, Options as QueueOptions, Queue,
 };
 
@@ -60,11 +60,6 @@ macro_rules! case {
 #[path = "coordinator/draining.rs"]
 mod draining;
 
-case!(
-    sqlite_recovery_pages_skip_owned_scopes_without_losing_work,
-    postgres_recovery_pages_skip_owned_scopes_without_losing_work,
-    recovery_pages
-);
 case!(
     sqlite_competing_app_assignments_respect_worker_capacity,
     postgres_competing_app_assignments_respect_worker_capacity,
@@ -111,13 +106,29 @@ async fn register(coordinator: &Coordinator, worker: &WorkerId, capacity: u32) {
     assert!(registered.expires_at.get() > 0);
 }
 
-fn placement(app: &AppId, worker: &WorkerId) -> AssignScope {
-    AssignScope {
-        request_id: RequestId::mint(),
-        app_id: app.clone(),
-        worker_id: worker.clone(),
-        expected_revision: None,
+/// The manager selects the zone's one eligible worker for the app.
+async fn place(coordinator: &Coordinator, app: &AppId) -> Assignment {
+    match coordinator.place(app).await.unwrap() {
+        Placed::Assigned(assignment) => assignment,
+        other => panic!("expected a placement: {other:?}"),
     }
+}
+
+/// A worker gives up its placement, so the next visit places the app again
+/// under the next revision.
+async fn relinquish(coordinator: &Coordinator, assignment: &Assignment) {
+    coordinator
+        .release(
+            &assignment.worker_id,
+            &ReleaseScope {
+                request_id: RequestId::mint(),
+                app_id: assignment.app_id.clone(),
+                assignment_revision: assignment.revision,
+                reason: ReleaseReason::Relinquished,
+            },
+        )
+        .await
+        .unwrap();
 }
 
 fn scope(assignment: &Assignment) -> AssignedScope {
@@ -171,64 +182,29 @@ async fn update(database: &Database, table: &str, filter: Value, patch: Value) {
     assert!(matches!(output, Output::Count(1)), "{output:?}");
 }
 
-async fn recovery_pages(fixture: &Fixture) {
-    let (coordinator, queue) = host(
-        fixture,
-        Options {
-            batch_limit: 1,
-            ..Options::default()
-        },
-    )
-    .await;
-    let worker = WorkerId::mint();
-    register(&coordinator, &worker, 3).await;
-    let mut apps: Vec<_> = (0..5).map(|_| AppId::mint()).collect();
-    apps.sort_by(|left, right| left.as_str().cmp(right.as_str()));
-    for app in &apps {
-        queue.register_scope(app).await.unwrap();
-    }
-    for index in [0, 1, 3] {
-        coordinator
-            .assign(&placement(&apps[index], &worker))
-            .await
-            .unwrap();
-    }
-    // Filtering a source page after its limit would incorrectly stop here.
-    assert_eq!(
-        coordinator.recovery_scopes(None).await.unwrap(),
-        vec![apps[2].clone()]
-    );
-    assert_eq!(
-        coordinator.recovery_scopes(Some(&apps[2])).await.unwrap(),
-        vec![apps[4].clone()]
-    );
-    assert!(coordinator
-        .recovery_scopes(Some(&apps[4]))
-        .await
-        .unwrap()
-        .is_empty());
-    let placements = coordinator.assignments(&worker, None).await.unwrap();
-    assert_eq!(placements.len(), 1);
-    assert_eq!(placements[0].app_id, apps[0]);
-}
-
+/// Two replicas place two apps on one single-slot worker at once. The worker
+/// row serializes capacity, so exactly one placement is admitted and the other
+/// app is left unplaced for the capacity lane.
 async fn competing_assignments(fixture: &Fixture) {
     let (left, queue) = host(fixture, Options::default()).await;
     let (right, _) = host(fixture, Options::default()).await;
     let worker = WorkerId::mint();
     register(&left, &worker, 1).await;
-    let first = placement(&AppId::mint(), &worker);
-    let second = placement(&AppId::mint(), &worker);
-    queue.register_scope(&first.app_id).await.unwrap();
-    queue.register_scope(&second.app_id).await.unwrap();
-    let (first_result, second_result) = futures::join!(left.assign(&first), right.assign(&second));
-    let (accepted, rejected, assignment) = match (first_result, second_result) {
-        (Ok(assignment), Err(Error::Capacity)) => (&first, &second, assignment),
-        (Err(Error::Capacity), Ok(assignment)) => (&second, &first, assignment),
-        results => panic!("competing placements must obey capacity: {results:?}"),
-    };
-    assert_eq!(right.assign(accepted).await.unwrap(), assignment);
-    assert_eq!(left.assign(rejected).await, Err(Error::Capacity));
+    let (first, second) = (AppId::mint(), AppId::mint());
+    queue.register_scope(&first).await.unwrap();
+    queue.register_scope(&second).await.unwrap();
+    let (first_result, second_result) = futures::join!(left.place(&first), right.place(&second));
+    let (accepted, rejected, assignment) =
+        match (first_result.unwrap(), second_result.unwrap()) {
+            (Placed::Assigned(assignment), Placed::Unplaced(_)) => (&first, &second, assignment),
+            (Placed::Unplaced(_), Placed::Assigned(assignment)) => (&second, &first, assignment),
+            results => panic!("competing placements must obey capacity: {results:?}"),
+        };
+    assert_eq!(right.place(accepted).await.unwrap(), Placed::Owned);
+    assert!(matches!(
+        left.place(rejected).await.unwrap(),
+        Placed::Unplaced(_)
+    ));
     assert_eq!(
         left.assignments(&worker, None).await.unwrap(),
         vec![assignment.clone()]
@@ -259,10 +235,7 @@ async fn concurrent_worker_registration(fixture: &Fixture) {
         let initial = row(&database, "workers", worker_filter.clone()).await;
         assert_eq!(initial["id"], value!(worker.as_str()));
         assert_eq!(initial["lock_version"], value!(0));
-        let assignment = hosts[0]
-            .assign(&placement(&AppId::mint(), &worker))
-            .await
-            .unwrap();
+        let assignment = place(&hosts[0], &AppId::mint()).await;
         let assignment_filter = value!({"app_id":assignment.app_id.as_str()});
         let before = row(&database, "assignments", assignment_filter.clone()).await;
         update(
@@ -286,10 +259,10 @@ async fn concurrent_worker_registration(fixture: &Fixture) {
             hosts[1].assignments(&worker, None).await.unwrap(),
             vec![assignment]
         );
-        assert_eq!(
-            hosts[2].assign(&placement(&AppId::mint(), &worker)).await,
-            Err(Error::Capacity)
-        );
+        assert!(matches!(
+            hosts[2].place(&AppId::mint()).await.unwrap(),
+            Placed::Unplaced(_)
+        ));
     }
 }
 
@@ -374,11 +347,8 @@ async fn management_receipts(fixture: &Fixture) {
     register(&coordinator, &worker, 2).await;
     let app = AppId::mint();
     let foreign = AppId::mint();
-    let assignment = coordinator.assign(&placement(&app, &worker)).await.unwrap();
-    let other = coordinator
-        .assign(&placement(&foreign, &worker))
-        .await
-        .unwrap();
+    let assignment = place(&coordinator, &app).await;
+    let other = place(&coordinator, &foreign).await;
     let actor = service_issuer(CONTROL_SERVICE_NAME).unwrap();
     let request = command(&app);
     accept_management_receipt(&coordinator, &source, &request).await;
@@ -561,8 +531,7 @@ async fn claim_authority(fixture: &Fixture) {
     let worker = WorkerId::mint();
     register(&coordinator, &worker, 1).await;
     let app = AppId::mint();
-    let request = placement(&app, &worker);
-    let original = coordinator.assign(&request).await.unwrap();
+    let original = place(&coordinator, &app).await;
     let spec = JobSpec {
         id: JobId::mint(),
         app_id: app.clone(),
@@ -590,14 +559,10 @@ async fn claim_authority(fixture: &Fixture) {
         Err(Error::Denied)
     ));
     assert_ready(&database, &spec).await;
-    let replacement = coordinator
-        .assign(&AssignScope {
-            request_id: RequestId::mint(),
-            expected_revision: Some(original.revision),
-            ..request.clone()
-        })
-        .await
-        .unwrap();
+    // The worker gives the placement up; the next visit places the app again
+    // under a higher revision, which retires the original authority.
+    relinquish(&coordinator, &original).await;
+    let replacement = place(&coordinator, &app).await;
     assert!(replacement.revision > original.revision);
     assert!(matches!(
         coordinator
@@ -654,14 +619,8 @@ async fn claim_authority(fixture: &Fixture) {
         Err(Error::Denied)
     ));
     assert_ready(&database, &spec).await;
-    let current = coordinator
-        .assign(&AssignScope {
-            request_id: RequestId::mint(),
-            expected_revision: Some(replacement.revision),
-            ..request
-        })
-        .await
-        .unwrap();
+    relinquish(&coordinator, &replacement).await;
+    let current = place(&coordinator, &app).await;
     update(
         &database,
         "workers",
@@ -784,10 +743,7 @@ async fn worker_publication(fixture: &Fixture) {
     let (coordinator, queue) = host(fixture, Options::default()).await;
     let worker = WorkerId::mint();
     register(&coordinator, &worker, 1).await;
-    let assigned = coordinator
-        .assign(&placement(&AppId::mint(), &worker))
-        .await
-        .unwrap();
+    let assigned = place(&coordinator, &AppId::mint()).await;
     let database = fixture.database().await;
     for operation in manager_operations() {
         let mut spec = job(&assigned.app_id);
@@ -901,10 +857,7 @@ async fn delivery_enrollment(fixture: &Fixture) {
     let (coordinator, _) = host(fixture, Options::default()).await;
     let worker = WorkerId::mint();
     register(&coordinator, &worker, 1).await;
-    let assigned = coordinator
-        .assign(&placement(&AppId::mint(), &worker))
-        .await
-        .unwrap();
+    let assigned = place(&coordinator, &AppId::mint()).await;
     let database = fixture.database().await;
     let spec = job(&assigned.app_id);
     let request = publication(&assigned, spec.clone());
@@ -1027,15 +980,21 @@ async fn delivery_enrollment(fixture: &Fixture) {
     );
     let replacement_worker = WorkerId::mint();
     register(&coordinator, &replacement_worker, 1).await;
+    // The first instance gives the app up and drains, so only the replacement
+    // remains an eligible candidate.
+    relinquish(&coordinator, &assigned).await;
     coordinator
-        .assign(&AssignScope {
-            request_id: RequestId::mint(),
-            app_id: assigned.app_id.clone(),
-            worker_id: replacement_worker.clone(),
-            expected_revision: None,
-        })
+        .register(
+            &worker,
+            &RegisterWorker {
+                capacity: NonZeroU32::new(1).unwrap(),
+                state: WorkerState::Draining,
+            },
+        )
         .await
         .unwrap();
+    let replacement = place(&coordinator, &assigned.app_id).await;
+    assert_eq!(replacement.worker_id, replacement_worker);
     update(
         &database,
         "workers",
@@ -1092,10 +1051,7 @@ async fn postgres_job_enrollment_is_checked_after_waiting_for_scope_lock() {
     let (coordinator, _) = host(&fixture, Options::default()).await;
     let worker = WorkerId::mint();
     register(&coordinator, &worker, 1).await;
-    let assigned = coordinator
-        .assign(&placement(&AppId::mint(), &worker))
-        .await
-        .unwrap();
+    let assigned = place(&coordinator, &AppId::mint()).await;
     let request = publication(&assigned, job(&assigned.app_id));
     let Admin::Postgres(admin) = &fixture.admin else {
         unreachable!()
@@ -1202,10 +1158,7 @@ async fn journal_pages(
     let (coordinator, _) = host(fixture, Options::default()).await;
     let worker = WorkerId::mint();
     register(&coordinator, &worker, 1).await;
-    let assigned = coordinator
-        .assign(&placement(&AppId::mint(), &worker))
-        .await
-        .unwrap();
+    let assigned = place(&coordinator, &AppId::mint()).await;
     let spec = JobSpec {
         operation: first,
         ..job(&assigned.app_id)

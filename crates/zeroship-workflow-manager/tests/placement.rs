@@ -20,7 +20,7 @@ use support::{Admin, Backend, Fixture};
 use zeroship_core::{
     app_id::AppId,
     workflow_coordination::{
-        AssignScope, AssignedScope, ReleaseReason, ReleaseScope, RequestId, Revision, WorkerId,
+        AssignedScope, ReleaseReason, ReleaseScope, RequestId, WorkerId,
     },
 };
 use zeroship_workflow_manager::{
@@ -79,21 +79,6 @@ case!(
     lifecycle
 );
 
-fn nominate(app: &AppId, worker: &WorkerId) -> AssignScope {
-    renominate(app, worker, None)
-}
-
-/// A nomination that names the pair's current revision, so only the
-/// eligibility predicate can refuse it.
-fn renominate(app: &AppId, worker: &WorkerId, current: Option<Revision>) -> AssignScope {
-    AssignScope {
-        request_id: RequestId::mint(),
-        app_id: app.clone(),
-        worker_id: worker.clone(),
-        expected_revision: current,
-    }
-}
-
 /// Spare capacity in another zone is not authority. The control differs only
 /// in the worker's zone: a worker enrolled in the app's zone is placed.
 async fn other_zone(fixture: &Fixture) {
@@ -112,11 +97,6 @@ async fn other_zone(fixture: &Fixture) {
         vec![app.clone()]
     );
     assert!(driver.capacity().demands(&away).await.unwrap().is_empty());
-    // A trusted host's nomination is held to the same predicate.
-    assert_eq!(
-        host.coordinator.assign(&nominate(&app, &far)).await,
-        Err(Error::Denied)
-    );
 
     let near = host.worker(&home, 8).await;
     let report = driver.tick().await;
@@ -158,12 +138,11 @@ async fn revoked(fixture: &Fixture) {
             .await,
         Err(Error::Denied)
     );
-    assert_eq!(
-        host.coordinator
-            .assign(&renominate(&app, &first, Some(scope.assignment_revision)))
-            .await,
-        Err(Error::Denied)
-    );
+    // The revoked instance is no longer an admissible candidate either.
+    assert!(matches!(
+        host.coordinator.place(&app).await.unwrap(),
+        Placed::Unplaced(_)
+    ));
     // No eligible worker remains: the app becomes demand, not a placement.
     driver.tick().await;
     assert_eq!(
@@ -268,12 +247,11 @@ async fn refused(fixture: &Fixture) {
                 driver.capacity().demands(&zone).await.unwrap(),
                 vec![app.clone()]
             );
-            assert_eq!(
-                host.coordinator
-                    .assign(&renominate(&app, &worker, Some(assignment.revision)))
-                    .await,
-                Err(Error::Denied)
-            );
+            // The refusal tombstone keeps this pair out of selection.
+            assert!(matches!(
+                host.coordinator.place(&app).await.unwrap(),
+                Placed::Unplaced(_)
+            ));
             // A different instance is offered the app.
             let other = host.worker(&zone, 4).await;
             driver.tick().await;
@@ -370,10 +348,6 @@ async fn lifecycle(fixture: &Fixture) {
     assert_eq!(
         host.coordinator.place(&deleted).await,
         Ok(Placed::Ineligible)
-    );
-    assert_eq!(
-        host.coordinator.assign(&nominate(&deleted, &worker)).await,
-        Err(Error::Denied)
     );
     assert!(!host.coordinator.owned(&deleted).await.unwrap());
 }

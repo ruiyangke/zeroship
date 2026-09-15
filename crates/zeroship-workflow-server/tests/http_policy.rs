@@ -38,12 +38,13 @@ use zeroship_core::{
     service_identity::endpoints,
     service_peers::{service_issuer, WORKER_SERVICE_NAME},
     workflow_coordination::{
-        AssignScope, AssignedScope, Failure, FailureCode, RegisterWorker, RequestId, WorkerId,
+        AssignedScope, Failure, FailureCode, RegisterWorker, WorkerId,
         WorkerState, AUDIENCE,
     },
     workflow_policy::{AppPolicy, EstablishIngress, PolicyLease, PolicyLeaseRequest},
 };
 use zeroship_workflow_manager::{
+    coordinator::Placed,
     policy::{PolicyObservation, PolicySource},
     Error as NativeError,
 };
@@ -181,16 +182,9 @@ impl Fixture {
             .unwrap();
         let app = AppId::mint();
         platform.seed_app(&app).await;
-        let assignment = service
-            .manager
-            .assign(&AssignScope {
-                request_id: RequestId::mint(),
-                app_id: app.clone(),
-                worker_id: worker.clone(),
-                expected_revision: None,
-            })
-            .await
-            .unwrap();
+        let Placed::Assigned(assignment) = service.manager.place(&app).await.unwrap() else {
+            panic!("the app has one eligible worker");
+        };
         let expires = Instant::now() + Duration::from_secs(60);
         let source = Rc::new(Source {
             observations: [
