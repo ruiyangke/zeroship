@@ -463,10 +463,10 @@ pub mod endpoints {
         ServiceEndpoint::new("control", "POST", "/internal/billing/reconcile");
     pub const CONTROL_SPEND_RECONCILE: ServiceEndpoint =
         ServiceEndpoint::new("control", "POST", "/internal/spend/reconcile");
-    pub const CONTROL_WORKER_ENROL: ServiceEndpoint =
-        ServiceEndpoint::new("control", "POST", "/internal/workers/enrol");
     pub const CONTROL_WORKER_RETIRE: ServiceEndpoint =
         ServiceEndpoint::new("control", "POST", "/internal/workers/retire");
+    pub const CONTROL_WORKER_RENEW: ServiceEndpoint =
+        ServiceEndpoint::new("control", "POST", "/internal/workers/renew");
     pub const CONTROL_ERASURE_PREFLIGHT: ServiceEndpoint = ServiceEndpoint::new(
         "control",
         "GET",
@@ -586,7 +586,7 @@ impl ServiceAuthorization {
 /// Return the measured service-to-service machine-identity table.
 #[must_use]
 pub fn service_allowlist() -> &'static [ServiceAuthorization] {
-    static ALLOWLIST: OnceLock<[ServiceAuthorization; 7]> = OnceLock::new();
+    static ALLOWLIST: OnceLock<[ServiceAuthorization; 6]> = OnceLock::new();
 
     ALLOWLIST.get_or_init(|| {
         let principal = |name| {
@@ -670,34 +670,25 @@ pub fn service_allowlist() -> &'static [ServiceAuthorization] {
                     // gone. The endpoint takes no instance selector: Control
                     // retires exactly the instance whose key verified the call.
                     endpoints::CONTROL_WORKER_RETIRE,
-                    // CONTROL_WORKER_ENROL IS NOT HERE. It belongs to
-                    // `svc/worker-enroller` below, and no process holds a bare
-                    // `svc/worker` role signing key: Control refuses a
-                    // role-arity `svc/worker` assertion outright
+                    // A joined worker extends its own instance lease. Also
+                    // selector-free, for the same reason: Control renews the
+                    // instance whose key verified the call, so no worker can
+                    // hold another's identity open. Renewal takes NO join
+                    // token - the possession proof was given at join, and
+                    // demanding a fresh token to renew would defeat a
+                    // use-capped one.
+                    endpoints::CONTROL_WORKER_RENEW,
+                    // JOINING IS NOT AN ENDPOINT IN THIS TABLE. A joining
+                    // process has no service identity yet: it presents a join
+                    // token a trusted signer minted, verified by
+                    // `crates/zeroship-control/src/worker_join.rs` against
+                    // Control's own signer registry, under its own `typ`. No
+                    // process holds a bare `svc/worker` role signing key
+                    // either - Control refuses a role-arity `svc/worker`
+                    // assertion outright
                     // (`crates/zeroship-control/src/internal.rs`,
-                    // `verify_service_caller`), so every grant in this row is
-                    // reachable only by an enrolled, active INSTANCE.
-                ],
-            ),
-            ServiceAuthorization::new(
-                principal("svc/worker-enroller"),
-                &[
-                    // The sole grant this principal holds. An enroller is a
-                    // deployment unit's bootstrap credential, one Ed25519
-                    // keypair per host or pool, and every caller mints under
-                    // an INSTANCE identifier of this role naming the enroller
-                    // row Control resolves and locks
-                    // (`crates/zeroship-control/src/worker_enrolment.rs`).
-                    //
-                    // Enrolling authenticates with a KEY SHARED BY THE UNIT,
-                    // so a holder of it can enrol many instances in that unit
-                    // and zone. That is a boundary around the unit, not within
-                    // it: revocation for cause targets the whole enroller, and
-                    // the unit's healthy peers need a newly provisioned one.
-                    // Revoking an enroller retires every instance it enrolled
-                    // in one operator transaction, and no fresh identity can
-                    // restore that authority.
-                    endpoints::CONTROL_WORKER_ENROL,
+                    // `verify_service_caller`) - so every grant in this row is
+                    // reachable only by a joined, live INSTANCE.
                 ],
             ),
         ]
