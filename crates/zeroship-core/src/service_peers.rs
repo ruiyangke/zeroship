@@ -619,14 +619,15 @@ mod instance_key {
     /// [`InstanceSigningKey::into_keyring`] consumes it, and is the one thing
     /// that can.
     ///
-    /// # Per-instance identity is a DISTINGUISHER, not a boundary
+    /// # Per-instance identity is a BOUNDARY here, not only a distinguisher
     ///
-    /// A process minting under a name of its own is attributable, individually
-    /// retirable, and countable. It is not contained: enrolment authenticates
-    /// with the key of the instance's deployment unit, its enroller, so whoever
-    /// holds that key can enrol as many instances in the unit as they like and
-    /// each one is as genuine as the last. Nothing here narrows what an
-    /// instance may do; revoking the enroller is what bounds the unit.
+    /// The private half exists in one process's memory and nowhere else, so
+    /// retiring one instance takes a capability away rather than only removing
+    /// an attribution. What a JOIN TOKEN buys its holder is bounded separately
+    /// and differently: the uses it was minted with, until its expiry, in the
+    /// one zone it names - and a captured token admits only workers whose keys
+    /// the captor holds, because `crate::worker_join::verify_join_proof` is
+    /// what Control registers a key on.
     pub struct InstanceSigningKey {
         key: ServiceSigningKey,
         /// Kept beside the key rather than re-derived, so the bytes the check
