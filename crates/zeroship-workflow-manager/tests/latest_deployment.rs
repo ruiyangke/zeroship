@@ -13,11 +13,10 @@ use zeroship_core::{app_id::AppId, schema_name::SchemaName, workflow_jobs::Deplo
 use zeroship_data_orm::{
     binding::DbBinding,
     encryption::ProjectKeySource,
-    orm::{Database, Operation, Output},
+    orm::{Database, FromRow, Operation, Output, UtcInstant},
     schema::Schema,
     value, ConnectOptions, Value,
 };
-use zeroship_data_orm::orm::{FromRow, UtcInstant};
 use zeroship_workflow_manager::{
     deployments::{
         self,
@@ -486,7 +485,9 @@ async fn activation_instant_round_trip(fixture: LatestFixture) {
             .activated_at
     };
     assert_eq!(
-        read(&activated.deployment_id).await.map(UtcInstant::unix_micros),
+        read(&activated.deployment_id)
+            .await
+            .map(UtcInstant::unix_micros),
         Some(ACTIVATED_MICROS),
     );
     // Control, differing only in whether the column was ever set.

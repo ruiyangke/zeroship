@@ -373,8 +373,8 @@ impl<M: ScheduleManager> Publisher<M> {
             }
             _ => return Err(PublishError::InvalidIntent("action")),
         };
-        let now = super::now()
-            .map_err(|error| PublishError::Catalog(CatalogError::Database(error)))?;
+        let now =
+            super::now().map_err(|error| PublishError::Catalog(CatalogError::Database(error)))?;
         catalog::transact(&self.database, |tx| async move {
             confirm(&tx, intent, &receipt, now).await
         })

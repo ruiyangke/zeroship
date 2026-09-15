@@ -413,7 +413,10 @@ mod tests {
                 "{lapsed:?} past its lease is within the allowance"
             );
         }
-        assert!(within_lease(at(Duration::from_secs(3600), 1), now.unix_micros()));
+        assert!(within_lease(
+            at(Duration::from_secs(3600), 1),
+            now.unix_micros()
+        ));
         // Rejection control: one microsecond past the allowance, and well past.
         for lapsed in [
             LEASE_SKEW,
@@ -428,10 +431,8 @@ mod tests {
         // A lease at the calendar edge saturates rather than wrapping into the
         // past, and the epoch itself is long expired against a modern clock.
         assert!(within_lease(
-            UtcInstant::from_unix_micros(
-                zeroship_data_orm::sql::temporal::MAX_TIMESTAMP_MICROS
-            )
-            .unwrap(),
+            UtcInstant::from_unix_micros(zeroship_data_orm::sql::temporal::MAX_TIMESTAMP_MICROS)
+                .unwrap(),
             now.unix_micros()
         ));
         assert!(!within_lease(
