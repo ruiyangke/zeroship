@@ -214,9 +214,9 @@ async fn post<T: Serialize>(
 
 async fn enroll(platform: &platform::Platform, http: &Client, url: &str, worker: &Worker) {
     platform.admin.execute(
-        "INSERT INTO zeroship.worker_instances(id,ring_key,public_key,advertise_host,advertise_port,status,enroller_id) \
-         VALUES($1,$2,$3,'127.0.0.1',8080,'active',$4)",
-        &[&worker.id.as_str(), &vec![1_u8], &worker.key.verifying_key_bytes().to_vec(), &platform.default_enroller_id],
+        "INSERT INTO zeroship.worker_instances(id,ring_key,public_key,advertise_host,advertise_port,status,join_signer_id,join_token_id,execution_zone_id,expires_at) \
+         VALUES($1,$2,$3,'127.0.0.1',8080,'active',$4,'tok_testfixturedefault','ezn_default000000000000000000',now() + interval '1 hour')",
+        &[&worker.id.as_str(), &vec![1_u8], &worker.key.verifying_key_bytes().to_vec(), &platform.default_join_signer_id],
     ).await.unwrap();
     let (status, body) = post(
         http,
@@ -701,40 +701,49 @@ async fn enrollment_revocation_and_key_replacement_fence_blocked_queue_operation
     }
 }
 
-/// Success criterion 3 (the manager half) of the option-1A worker-enrollment
-/// `PoC`: revoking enroller E's row - `SELECT zeroship.revoke_worker_enroller(E)`,
-/// the same explicit operator database operation
-/// `db/migrations-ts/20260914000500_worker_instances_enroller_binding.ts`
-/// defines - cascades to `WorkflowAuth::worker`
+/// Success criterion 3 (the manager half) of the worker-join `PoC`: purging
+/// signer E's row - `SELECT zeroship.purge_worker_join_signer(E)`, the same
+/// explicit operator database operation
+/// `db/migrations-ts/20260914000500_worker_join_bindings.ts` defines -
+/// cascades to `WorkflowAuth::worker`
 /// (crates/zeroship-workflow-server/src/auth.rs) refusing E's instance, while
-/// a DIFFERENT enroller F's instance is unaffected.
+/// a DIFFERENT signer F's instance is unaffected.
 ///
-/// `WorkflowAuth::worker` and `PostgresWorkerRegistry::active_key` are
-/// UNCHANGED by option 1A: they already read
-/// `zeroship.worker_instances.status = 'active'`, and revocation writes
-/// exactly that column for every instance the enroller admitted - see the
-/// module header of `crates/zeroship-control/src/worker_enrolment.rs`. This
+/// `WorkflowAuth::worker` and `PostgresWorkerRegistry::active_key` read
+/// `zeroship.worker_instances.status = 'active'`, and the purge writes
+/// exactly that column for every instance the signer admitted - see the
+/// module header of `crates/zeroship-control/src/worker_join.rs`. This
 /// test is what binds that claim for the manager reader specifically, the way
 /// [`enrollment_revocation_and_key_replacement_fence_blocked_queue_operations`]
 /// already binds it for a direct instance-status transition.
 #[ntex::test]
-async fn revoking_an_enroller_denies_its_worker_while_a_sibling_enroller_stays_active() {
+async fn revoking_a_join_signer_denies_its_worker_while_a_sibling_signer_stays_active() {
     let fixture = Fixture::new().await;
 
-    // A second enroller F, and a second worker enrolled under it, assigned to
-    // its own app - independent of the fixture's default enroller and worker.
-    // Reuse WorkerId's own base36 body under the enroller prefix - this crate
-    // has no direct dependency on a UUID generator, and the typed-id shape
+    // A second signer F, and a second worker joined under it, assigned to its
+    // own app - independent of the fixture's default signer and worker. Reuse
+    // WorkerId's own base36 body under the join signer prefix - this crate has
+    // no direct dependency on a UUID generator, and the typed-id shape
     // constraints only care about the body's alphabet and width, not which
     // entity minted it.
-    let enroller_f = format!("wen_{}", &WorkerId::mint().as_str()[4..]);
+    let signer_f = format!("wjs_{}", &WorkerId::mint().as_str()[4..]);
     fixture
         .platform
         .admin
         .execute(
-            "INSERT INTO zeroship.worker_enrollers (id, public_key, execution_zone_id, status) \
-             VALUES ($1, $2, 'ezn_default000000000000000000', 'active')",
-            &[&enroller_f, &vec![5_u8; 32]],
+            "INSERT INTO zeroship.worker_join_signers (id, public_key, status) \
+             VALUES ($1, $2, 'active')",
+            &[&signer_f, &vec![5_u8; 32]],
+        )
+        .await
+        .unwrap();
+    fixture
+        .platform
+        .admin
+        .execute(
+            "INSERT INTO zeroship.worker_join_signer_zones (signer_id, execution_zone_id) \
+             VALUES ($1, 'ezn_default000000000000000000')",
+            &[&signer_f],
         )
         .await
         .unwrap();
@@ -743,13 +752,13 @@ async fn revoking_an_enroller_denies_its_worker_while_a_sibling_enroller_stays_a
         .platform
         .admin
         .execute(
-            "INSERT INTO zeroship.worker_instances(id,ring_key,public_key,advertise_host,advertise_port,status,enroller_id) \
-             VALUES($1,$2,$3,'127.0.0.1',8081,'active',$4)",
+            "INSERT INTO zeroship.worker_instances(id,ring_key,public_key,advertise_host,advertise_port,status,join_signer_id,join_token_id,execution_zone_id,expires_at) \
+             VALUES($1,$2,$3,'127.0.0.1',8081,'active',$4,'tok_testfixturesignerf','ezn_default000000000000000000',now() + interval '1 hour')",
             &[
                 &worker_g.id.as_str(),
                 &vec![2_u8],
                 &worker_g.key.verifying_key_bytes().to_vec(),
-                &enroller_f,
+                &signer_f,
             ],
         )
         .await
@@ -826,13 +835,13 @@ async fn revoking_an_enroller_denies_its_worker_while_a_sibling_enroller_stays_a
     .await;
     assert_eq!(claim_g_before_status, StatusCode::OK);
 
-    // Revoke ONLY the fixture's default enroller.
+    // Purge ONLY the fixture's default signer.
     fixture
         .platform
         .admin
         .execute(
-            "SELECT zeroship.revoke_worker_enroller($1)",
-            &[&fixture.platform.default_enroller_id],
+            "SELECT zeroship.purge_worker_join_signer($1)",
+            &[&fixture.platform.default_join_signer_id],
         )
         .await
         .unwrap();
@@ -853,7 +862,7 @@ async fn revoking_an_enroller_denies_its_worker_while_a_sibling_enroller_stays_a
     assert_eq!(
         submit_e_after_status,
         StatusCode::UNAUTHORIZED,
-        "a revoked enroller's worker must lose manager access"
+        "a revoked signer's worker must lose manager access"
     );
 
     let job_g_2 = JobSpec {
@@ -881,7 +890,7 @@ async fn revoking_an_enroller_denies_its_worker_while_a_sibling_enroller_stays_a
     assert_eq!(
         submit_g_after_status,
         StatusCode::OK,
-        "an untouched enroller's worker must be unaffected by a sibling's revocation: {body}"
+        "an untouched signer's worker must be unaffected by a sibling's revocation: {body}"
     );
 }
 
@@ -1142,14 +1151,14 @@ async fn change_enrollment(fixture: &Fixture, replace_key: bool) {
 }
 
 async fn replace_enrollment(fixture: &Fixture, public_key: [u8; 32]) {
-    // Normal enrollment freezes keys. Model an out-of-band administrator row
+    // Normal joining freezes keys. Model an out-of-band administrator row
     // replacement without disabling the production immutability trigger.
     assert_eq!(
         fixture.platform.admin.execute(
             "WITH previous AS (DELETE FROM zeroship.worker_instances WHERE id=$1 \
-             RETURNING id,ring_key,advertise_host,advertise_port,registered_at,enroller_id) \
-             INSERT INTO zeroship.worker_instances(id,ring_key,public_key,advertise_host,advertise_port,registered_at,status,enroller_id) \
-             SELECT id,ring_key,$2,advertise_host,advertise_port,registered_at,'active',enroller_id FROM previous",
+             RETURNING id,ring_key,advertise_host,advertise_port,registered_at,join_signer_id,join_token_id,execution_zone_id,expires_at) \
+             INSERT INTO zeroship.worker_instances(id,ring_key,public_key,advertise_host,advertise_port,registered_at,status,join_signer_id,join_token_id,execution_zone_id,expires_at) \
+             SELECT id,ring_key,$2,advertise_host,advertise_port,registered_at,'active',join_signer_id,join_token_id,execution_zone_id,expires_at FROM previous",
             &[&fixture.worker.id.as_str(), &public_key.to_vec()],
         ).await.unwrap(),
         1

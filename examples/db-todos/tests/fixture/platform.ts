@@ -177,12 +177,22 @@ export class Platform {
       keys[service] = await this.secret(`${service}.pem`, privateKey.export({ format: "pem", type: "pkcs8" }).toString());
     }
     const peers = await this.secret("peers.json", JSON.stringify({ keys: peerKeys }));
-    // The worker holds no service key: it enrols with its deployment unit's
-    // enroller. The operator tool mints the credential the worker mounts and
-    // the import file Control reads at startup.
-    const enroller = join(work, "worker-enroller.json");
-    const enrollers = join(work, "worker-enrollers.json");
-    await processes.run("enroller", binary("zeroship"), ["dev", "enroller", `--credential=${enroller}`, `--import-file=${enrollers}`], work);
+    // The worker holds no service key: it joins with a token a trusted signer
+    // minted. Control mints for its own zone here, exactly as a single-host
+    // deployment configures it, so this fixture writes the signer's
+    // credential and the import document Control reads at startup, and hands
+    // the worker the path Control mints the token into.
+    const { publicKey: signerPublicKey, privateKey: signerPrivateKey } = generateKeyPairSync("ed25519");
+    const signerId = "wjs_dbtodosfixturesigner00000";
+    const signerPublicKeyX = (signerPublicKey.export({ format: "jwk" }).x) as string;
+    const joinSigner = await this.secret("join-signer.json", JSON.stringify({
+      signer_id: signerId,
+      private_key: signerPrivateKey.export({ format: "pem", type: "pkcs8" }).toString(),
+    }));
+    const joinSigners = await this.secret("join-signers.json", JSON.stringify({
+      signers: [{ id: signerId, zones: ["default"], public_key: signerPublicKeyX }],
+    }));
+    const joinToken = join(work, "join-token");
     const masterKey = randomBytes(32).toString("hex");
     const broker = await this.secret("broker", masterKey);
     const shared = {
@@ -223,7 +233,10 @@ export class Platform {
       ZEROSHIP_CONTROL_ALLOW_UNSUPPORTED_BILLING: "true", ZEROSHIP_CONTROL_WORKER_ENROLMENT_NETWORKS: "127.0.0.1/32",
       ZEROSHIP_CONTROL_WORKER_ENROLMENT_PORTS: `${worker.number}`,
       ZEROSHIP_CONTROL_SERVICE_KEY_FILE: keys.control, ZEROSHIP_CONTROL_SERVICE_PEERS_FILE: peers,
-      ZEROSHIP_CONTROL_WORKER_ENROLLERS_FILE: enrollers,
+      ZEROSHIP_CONTROL_JOIN_SIGNERS_FILE: joinSigners,
+      ZEROSHIP_CONTROL_JOIN_TOKEN_SIGNER_FILE: joinSigner,
+      ZEROSHIP_CONTROL_JOIN_TOKEN_FILE: joinToken,
+      ZEROSHIP_CONTROL_JOIN_TOKEN_ZONE: "default",
     });
     await this.waitFor("control", () => this.httpReady(`${control.url}/readyz`));
     await service("migrate-server", "zeroship-migrate-server", migrationServer, [
@@ -235,7 +248,7 @@ export class Platform {
     await this.waitFor("migrate-server", () => this.httpReady(`${migrationServer.url}/readyz`));
     await service("worker", "zeroship-worker", worker, ["--port", `${worker.number}`, "--threads", "1", "--control-url", control.url, "--blob-store", blobs, "--poll-interval", "1"], {
       ZEROSHIP_WORKER_DATABASE_URL: `postgres://zeroship_worker:zeroship_worker@${authority}`,
-      ZEROSHIP_WORKER_ENROLLER_FILE: enroller, ZEROSHIP_WORKER_SERVICE_PEERS_FILE: peers,
+      ZEROSHIP_WORKER_JOIN_TOKEN_FILE: joinToken, ZEROSHIP_WORKER_SERVICE_PEERS_FILE: peers,
       ZEROSHIP_WORKER_CDC_RELAY_URL: `wss://localhost:${relay.number}/internal/v1/cdc/subscribe`, ZEROSHIP_WORKER_CDC_RELAY_CA_FILE: cert,
     });
     await this.waitFor("worker", () => this.httpReady(`${worker.url}/readyz`));

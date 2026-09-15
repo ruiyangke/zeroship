@@ -15,18 +15,18 @@ pub struct Platform {
     pub admin: compio_postgres::Client,
     pub runtime_url: String,
     pub work: tempfile::TempDir,
-    /// An `active` `zeroship.worker_enrollers` row this fixture seeds once, so
-    /// every test that enrols a worker instance directly (option 1A froze
-    /// `worker_instances.enroller_id` NOT NULL with a restrict FK to this
-    /// table) has a satisfying value to reference without minting its own
-    /// enroller per call site. Tests exercising enroller-level behaviour
-    /// itself (revocation, a second enroller) seed their own rows instead.
+    /// An `active` `zeroship.worker_join_signers` row this fixture seeds once,
+    /// so every test that joins a worker instance directly (`worker_instances.
+    /// join_signer_id` is NOT NULL with a restrict FK to this table) has a
+    /// satisfying value to reference without minting its own signer per call
+    /// site. Tests exercising signer-level behaviour itself (revocation, a
+    /// second signer) seed their own rows instead.
     #[allow(
         dead_code,
-        reason = "Control's deployment-hold suite includes this file and enrols through an \
-                  enroller whose private key it holds, so it never reads this row"
+        reason = "Control's deployment-hold suite includes this file and joins through a \
+                  signer whose private key it holds, so it never reads this row"
     )]
-    pub default_enroller_id: String,
+    pub default_join_signer_id: String,
 }
 impl Platform {
     pub async fn new() -> Self {
@@ -72,12 +72,20 @@ impl Platform {
             String::from_utf8_lossy(&result.stderr)
         );
         let admin = connect(&url).await;
-        let default_enroller_id = "wen_testfixturedefault0000000".to_string();
+        let default_join_signer_id = "wjs_testfixturedefault0000000".to_string();
         admin
             .execute(
-                "INSERT INTO zeroship.worker_enrollers (id, public_key, execution_zone_id, status) \
-                 VALUES ($1, $2, 'ezn_default000000000000000000', 'active')",
-                &[&default_enroller_id, &vec![7_u8; 32]],
+                "INSERT INTO zeroship.worker_join_signers (id, public_key, status) \
+                 VALUES ($1, $2, 'active')",
+                &[&default_join_signer_id, &vec![7_u8; 32]],
+            )
+            .await
+            .unwrap();
+        admin
+            .execute(
+                "INSERT INTO zeroship.worker_join_signer_zones (signer_id, execution_zone_id) \
+                 VALUES ($1, 'ezn_default000000000000000000')",
+                &[&default_join_signer_id],
             )
             .await
             .unwrap();
@@ -86,7 +94,7 @@ impl Platform {
             admin,
             runtime_url: format!("postgres://zeroship_workflow@{address}/postgres"),
             work,
-            default_enroller_id,
+            default_join_signer_id,
         }
     }
 }
