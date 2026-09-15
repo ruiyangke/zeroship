@@ -5,7 +5,7 @@ import { dialect, raw, table, t } from "../../../packages/zero-migrate/dist/inde
 export const managerIdentityColumns = {
   schema_version: ["id"],
   queue_scopes: ["id"],
-  deployment_holds: ["id", "app_id", "deployment_id", "holder_id"],
+  deployment_holds: ["id", "app_id", "deployment_id", "holder_id", "journal_job_id"],
   workers: ["id", "execution_zone_id"],
   assignments: ["id", "app_id", "worker_id"],
   placement_receipts: ["id", "app_id", "request_id", "worker_id"],
@@ -55,13 +55,23 @@ export function workflowManagerSchema(namespace) {
   // held_at is the manager time of the latest transition to held. The release
   // policy leaves a hold alone until it is older than the queue transaction
   // budget, so an acquirer that confirmed it outside its transaction commits first.
+  //
+  // The journal_* columns are this deployment's journal release duty, not a
+  // second hold: the manager never holds journal retention, it only asks the
+  // creator engine for it back. journal_job_id names the release job in flight,
+  // and journal_published_at is the manager time of the latest release
+  // publication, so a refused release waits out another grace before the lane
+  // asks again. The jobs table is declared below this one, so that reference is
+  // checked by lookup rather than by a foreign key.
   create("deployment_holds", {
     app_id: text(), deployment_id: text(), holder_id: text(),
     deploy_hash: t.text(), generation: integer(), state: text(), held_at: t.bigInt(),
+    journal_state: text().default("pending"), journal_job_id: t.text(), journal_published_at: t.bigInt(),
   }, ["app_id", "deployment_id"], [
     fk("deployment_hold_scope", ["app_id"], "queue_scopes", ["id"]),
   ]);
   index("deployment_holds", "pending", ["state", "app_id", "deployment_id"]);
+  index("deployment_holds", "journal", ["journal_state", "state", "app_id", "deployment_id"]);
   create("workers", {
     // Identity-only upserts lock existing registrations without resetting their
     // state. A new row remains ineligible until registration sets its liveness.

@@ -218,7 +218,8 @@ impl Record {
             | JobOperation::Collect {}
             | JobOperation::Close { .. }
             | JobOperation::Fanout { .. }
-            | JobOperation::Propagate { .. } => {
+            | JobOperation::Propagate { .. }
+            | JobOperation::ReleaseHold { .. } => {
                 self.run_id.is_none()
                     && self.reconciliation.is_none()
                     && self.reconciliation_next.is_none()
@@ -280,7 +281,12 @@ const fn valid_outcome(operation: &JobOperation, outcome: JobOutcome) -> bool {
         }
         JobOperation::Management { .. } => matches!(outcome, JobOutcome::Management { .. }),
         JobOperation::Close { .. } => matches!(outcome, JobOutcome::Closed { .. }),
-        JobOperation::Collect {} | JobOperation::Fanout { .. } | JobOperation::Propagate { .. } => {
+        JobOperation::Collect {}
+        | JobOperation::Fanout { .. }
+        | JobOperation::Propagate { .. }
+        // A refused release is Waiting, never Rejected: the deployment is still
+        // needed, and the journal holder keeps it until a later job succeeds.
+        | JobOperation::ReleaseHold { .. } => {
             matches!(outcome, JobOutcome::Completed {} | JobOutcome::Waiting {})
         }
     }

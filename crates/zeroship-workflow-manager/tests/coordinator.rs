@@ -709,11 +709,16 @@ fn publication(assignment: &Assignment, job: JobSpec) -> SubmitJob {
     }
 }
 
-fn manager_operations() -> [JobOperation; 3] {
+fn manager_operations() -> [JobOperation; 4] {
     [
         JobOperation::Activate {
             deployment_id: DeploymentId::mint(),
             revision: 1.try_into().unwrap(),
+        },
+        // Retention is the manager's decision; a worker cannot ask itself to
+        // give a deployment back.
+        JobOperation::ReleaseHold {
+            deployment_id: DeploymentId::mint(),
         },
         JobOperation::Cron {
             deployment_id: DeploymentId::mint(),

@@ -107,7 +107,12 @@ job needs it. A hold becomes eligible only after `Options::hold_grace`, which
 `Driver::new` requires to exceed the queue's transaction timeout: an acquirer
 confirms its hold outside its transaction, so it commits within that budget
 before any pass may release the hold. Each candidate is decided again under the
-app lock; a hold still in use stays held for a later pass.
+app lock; a hold still in use stays held for a later pass. The same lane carries
+that deployment's journal release duty once its queue hold is released: on the
+same terms it publishes one `ReleaseHold` job asking the creator engine to check
+its own journal and give the deployment back, and applies that job's settled
+reply. A refusal returns the duty to pending until another grace has passed, and
+reacquiring the queue hold clears a duty already in flight.
 
 `recovery::Recovery` retains activation provenance in `recovery_scopes` and
 independent Reconcile and Collect responsibilities in `recovery_duties`. Trusted
