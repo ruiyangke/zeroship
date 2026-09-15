@@ -299,7 +299,10 @@ admission, dispatch and ingress. Deleted apps are abandoned.
 A worker that cannot serve an assigned app releases it as refused, and the
 manager does not offer that app to that instance again. Release carries a
 closed reason and no wake hint, needs no responsible peer, and never discharges
-recovery responsibility.
+recovery responsibility. Refusal is for the one failure a retry cannot change:
+the host's preparation is not permitted for that app, so preparing it again on
+this instance would fail the same way forever. Unavailable storage, a timeout
+and an internal fault keep the placement and retry.
 
 The manager owns placement outright. The endpoints Control used to drive it -
 nominated assignment, worker listing and the recovery-scope scan - are gone,
@@ -346,13 +349,20 @@ provider deduplicates it, and intents do not coalesce apps onto shared workers.
 The declarative target is a value rather than an instruction, so a lost reply's
 retry starts nothing.
 
+A workflow-only app - one that runs workflows and applies no creator
+migration - is provisioned with the same creator database objects the apply
+path would have given it: its schema and migrator role, the journal schema and
+its tables, and the per-app runtime role its host opens that database under.
+Before this, the journal reached PostgreSQL only through a creator migration's
+fold, so such an app had a placement it could not serve.
+
 **Implementation boundary:** providers that start processes wait for the
-production orchestrator; the local provider and the static pool ship. The
-worker does not yet release an app it cannot serve as refused, or ask for
-placement when it is handed an app it does not hold - both belong on the
-production worker host. The manager's half of each is in place: a refused
-release tombstones the pair for the life of that instance, and an unowned app
-with claimable work is placed by the lane.
+production orchestrator; the local provider and the static pool ship. A worker
+that is handed a request for an app it does not hold still refuses it
+retryably rather than asking for placement: the manager places an app that has
+claimable work, and wanting to serve one is not yet work it can see. Closing
+that needs an operation for "this app is wanted here", which is a contract this
+document has not settled.
 
 ## Policy bindings and authenticated leases
 
@@ -3542,8 +3552,12 @@ is the merge order.
    and applied through an injected provider, and scale-down drains before
    anything becomes removable, as
    [placement eligibility and capacity](#placement-eligibility-and-capacity-provider)
-   describes, so due work with no eligible owner gets one. A provider that
-   starts real processes waits for the production orchestrator.
+   describes, so due work with no eligible owner gets one. The host gives back
+   a placement it is not permitted to serve, and a workflow-only app is
+   provisioned with the creator database objects its host opens. Both example
+   fleets run a manager and pass on their deployed tier, which is the proof
+   this slice exists to deliver. A provider that starts real processes waits
+   for the production orchestrator.
 6. **Atomic legacy removal and private-zone proof.** One change deletes worker
    claim, provisioning and advance paths, Control and gateway advancement,
    Control's creator-journal access, the cross-zone grants and posture checks,
