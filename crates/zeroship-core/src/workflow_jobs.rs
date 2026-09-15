@@ -67,6 +67,12 @@ pub enum JobOperation {
     ReleaseHold {
         deployment_id: DeploymentId,
     },
+    /// Manager-origin closure of one ingress epoch. The creator raises its
+    /// closed epoch and reports closed drain evidence in the same transaction.
+    /// Workers can neither publish it nor name it as a successor.
+    Close {
+        epoch: Revision,
+    },
     // Empty struct variants reject extra fields on internally tagged messages.
     Reconcile {},
     Collect {},
@@ -126,6 +132,7 @@ impl JobSpec {
             | JobOperation::Fanout { .. }
             | JobOperation::Propagate { .. }
             | JobOperation::ReleaseHold { .. }
+            | JobOperation::Close { .. }
             | JobOperation::Reconcile {}
             | JobOperation::Collect {} => None,
         }
@@ -140,6 +147,26 @@ impl JobSpec {
         match &self.operation {
             JobOperation::ReleaseHold { deployment_id } => Some(deployment_id),
             _ => None,
+        }
+    }
+
+    /// Whether executing this job can commit new creator intents. Reconciliation
+    /// and collection only publish or delete existing records, closure only
+    /// reports evidence, and a release only gives a deployment back, so none of
+    /// them can re-establish recovery responsibility.
+    #[must_use]
+    pub const fn produces_intents(&self) -> bool {
+        match self.operation {
+            JobOperation::Activate { .. }
+            | JobOperation::Advance { .. }
+            | JobOperation::Cron { .. }
+            | JobOperation::Management { .. }
+            | JobOperation::Fanout { .. }
+            | JobOperation::Propagate { .. } => true,
+            JobOperation::ReleaseHold { .. }
+            | JobOperation::Close { .. }
+            | JobOperation::Reconcile {}
+            | JobOperation::Collect {} => false,
         }
     }
 }
@@ -195,6 +222,7 @@ pub trait JobLease {
 /// For a hold release, `Completed` reports that the journal holder gave the
 /// deployment back and `Waiting` that the journal still depends on it, so a
 /// later release may succeed. A release is never forced.
+/// Only `Closed` reports drain evidence, and only for the closure job's epoch.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum JobOutcome {
@@ -202,6 +230,9 @@ pub enum JobOutcome {
     Waiting {},
     Rejected {},
     Management { outcome: ManagementOutcome },
+    /// The creator fenced the job's epoch; `drained` reports whether its closed
+    /// drain predicates held in that same transaction.
+    Closed { drained: bool },
 }
 
 impl JobOutcome {
@@ -210,8 +241,10 @@ impl JobOutcome {
     #[must_use]
     pub const fn valid_for(&self, operation: &JobOperation) -> bool {
         match (self, operation) {
-            (Self::Management { .. }, JobOperation::Management { .. }) => true,
-            (Self::Management { .. }, _) | (_, JobOperation::Management { .. }) => false,
+            (Self::Management { .. }, JobOperation::Management { .. })
+            | (Self::Closed { .. }, JobOperation::Close { .. }) => true,
+            (Self::Management { .. } | Self::Closed { .. }, _)
+            | (_, JobOperation::Management { .. } | JobOperation::Close { .. }) => false,
             (Self::Completed {} | Self::Waiting {} | Self::Rejected {}, _) => true,
         }
     }

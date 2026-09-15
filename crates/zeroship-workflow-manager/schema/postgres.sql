@@ -125,7 +125,9 @@ CREATE UNIQUE INDEX IF NOT EXISTS "schedule_occurrences_scope_key" ON "workflow_
 
 CREATE UNIQUE INDEX IF NOT EXISTS "schedule_occurrences_job_key" ON "workflow_manager"."schedule_occurrences" ("app_id", "job_id");
 
-CREATE TABLE "workflow_manager"."recovery_scopes" ("id" text PRIMARY KEY NOT NULL, "deployment_id" text NOT NULL, "activation_revision" bigint NOT NULL, CONSTRAINT "recovery_scope" FOREIGN KEY ("id") REFERENCES "workflow_manager"."queue_scopes" (id) ON DELETE RESTRICT);
+CREATE TABLE "workflow_manager"."recovery_scopes" ("id" text PRIMARY KEY NOT NULL, "deployment_id" text NOT NULL, "activation_revision" bigint NOT NULL, "ingress_epoch" bigint NOT NULL, "state" text NOT NULL, "closing_watermark" bigint, "close_job_id" text, "active_at" bigint NOT NULL, "close_after" bigint, "close_attempts" bigint NOT NULL DEFAULT 0, CONSTRAINT "recovery_close_job" FOREIGN KEY ("id", "close_job_id") REFERENCES "workflow_manager"."jobs" ("app_id", id) ON DELETE RESTRICT, CONSTRAINT "recovery_scope" FOREIGN KEY ("id") REFERENCES "workflow_manager"."queue_scopes" (id) ON DELETE RESTRICT);
+
+CREATE INDEX IF NOT EXISTS "recovery_close_job_idx" ON "workflow_manager"."recovery_scopes" ("id", "close_job_id");
 
 CREATE TABLE "workflow_manager"."recovery_duties" ("id" text PRIMARY KEY NOT NULL, "app_id" text NOT NULL, "kind" text NOT NULL, "next_due_at" bigint NOT NULL, "pending_job_id" text, CONSTRAINT "recovery_duty_job" FOREIGN KEY ("app_id", "pending_job_id") REFERENCES "workflow_manager"."jobs" ("app_id", id) ON DELETE RESTRICT, CONSTRAINT "recovery_duty_scope" FOREIGN KEY ("app_id") REFERENCES "workflow_manager"."recovery_scopes" (id) ON DELETE RESTRICT);
 
@@ -155,7 +157,7 @@ ALTER TABLE "workflow_manager"."management_scopes" ALTER COLUMN "id" TYPE text C
 
 ALTER TABLE "workflow_manager"."jobs" ALTER COLUMN "id" TYPE text COLLATE "C", ALTER COLUMN "app_id" TYPE text COLLATE "C", ALTER COLUMN "deployment_id" TYPE text COLLATE "C", ALTER COLUMN "worker_id" TYPE text COLLATE "C", ALTER COLUMN "run_id" TYPE text COLLATE "C", ALTER COLUMN "management_request_id" TYPE text COLLATE "C";
 
-ALTER TABLE "workflow_manager"."recovery_scopes" ALTER COLUMN "id" TYPE text COLLATE "C", ALTER COLUMN "deployment_id" TYPE text COLLATE "C";
+ALTER TABLE "workflow_manager"."recovery_scopes" ALTER COLUMN "id" TYPE text COLLATE "C", ALTER COLUMN "deployment_id" TYPE text COLLATE "C", ALTER COLUMN "close_job_id" TYPE text COLLATE "C";
 
 ALTER TABLE "workflow_manager"."recovery_duties" ALTER COLUMN "id" TYPE text COLLATE "C", ALTER COLUMN "app_id" TYPE text COLLATE "C", ALTER COLUMN "pending_job_id" TYPE text COLLATE "C";
 
@@ -170,4 +172,4 @@ ALTER TABLE "workflow_manager"."schedule_scopes" ALTER COLUMN "id" TYPE text COL
 ALTER TABLE "workflow_manager"."schedules" ALTER COLUMN "id" TYPE text COLLATE "C", ALTER COLUMN "app_id" TYPE text COLLATE "C", ALTER COLUMN "name" TYPE text COLLATE "C", ALTER COLUMN "activation_id" TYPE text COLLATE "C";
 
 ALTER TABLE "workflow_manager"."schedule_occurrences" ALTER COLUMN "id" TYPE text COLLATE "C", ALTER COLUMN "app_id" TYPE text COLLATE "C", ALTER COLUMN "schedule_id" TYPE text COLLATE "C", ALTER COLUMN "run_id" TYPE text COLLATE "C", ALTER COLUMN "job_id" TYPE text COLLATE "C", ALTER COLUMN "activation_id" TYPE text COLLATE "C";
-INSERT INTO workflow_manager.schema_version (id, fingerprint) VALUES ('manager', 'a3384ff6a734019f490e57412cd4347d2bf6e9dc24e214e309870e8598b38319');
+INSERT INTO workflow_manager.schema_version (id, fingerprint) VALUES ('manager', '66f644f59b7654559e65250e163d9552221f1e3735145064ad69ae817b85aa5b');

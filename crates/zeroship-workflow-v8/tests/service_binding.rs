@@ -47,7 +47,8 @@ impl Fixture {
                 .unwrap()
                 .install(
                     PolicySnapshot::configuration(1.try_into().unwrap(), AppPolicy::default())
-                        .unwrap(),
+                        .unwrap()
+                        .with_ingress_epoch(Some(1.try_into().unwrap())),
                 )
                 .unwrap();
             let app = service.register_app(binding).await.unwrap();

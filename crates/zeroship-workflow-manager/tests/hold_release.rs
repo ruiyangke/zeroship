@@ -40,6 +40,7 @@ use zeroship_workflow_calendar::{
     IntervalAnchor, ScheduleCatchUp, ScheduleOverlap, ScheduleTiming,
 };
 use zeroship_workflow_manager::{
+    lifecycle::{AppLifecycle, Undeletable},
     driver::{Driver, LaneReport, Options},
     recovery::Options as RecoveryOptions,
     retention::{HoldClient, HoldFuture},
@@ -95,6 +96,10 @@ case!(
 
 /// The default grace, far beyond each contract's duration: a hold is old only
 /// once a contract ages it explicitly.
+fn undeletable() -> Rc<dyn AppLifecycle> {
+    Rc::new(Undeletable)
+}
+
 fn options() -> Options {
     Options {
         recovery: RecoveryOptions {
@@ -381,12 +386,13 @@ async fn release_policy(fixture: &Fixture) {
                 hold_grace: QueueOptions::default().transaction_timeout,
                 ..options()
             },
+            undeletable(),
         )
         .map(drop),
         Err(Error::Invalid),
         "a grace within an acquirer's budget can release a hold before its dependency commits"
     );
-    let mut driver = Driver::new(queue.clone(), options()).unwrap();
+    let mut driver = Driver::new(queue.clone(), options(), undeletable()).unwrap();
     let scheduler = Scheduler::new(queue.clone(), SchedulerOptions::default()).unwrap();
     let app = AppId::mint();
     let first = catalog.publish(&app, "first", &[daily()]).await;
@@ -531,7 +537,7 @@ impl HoldClient for RacingHolds {
 
 async fn racing_activation(fixture: &Fixture) {
     let catalog = Catalog::new(fixture).await;
-    let replica = Driver::new(queue(fixture, catalog.client()).await, options()).unwrap();
+    let replica = Driver::new(queue(fixture, catalog.client()).await, options(), undeletable()).unwrap();
     let racing = Rc::new(RacingHolds {
         inner: catalog.client(),
         replica: RefCell::new(Some(replica)),
@@ -540,7 +546,7 @@ async fn racing_activation(fixture: &Fixture) {
     });
     let queue = queue(fixture, racing.clone()).await;
     let scheduler = Scheduler::new(queue.clone(), SchedulerOptions::default()).unwrap();
-    let mut driver = Driver::new(queue.clone(), options()).unwrap();
+    let mut driver = Driver::new(queue.clone(), options(), undeletable()).unwrap();
     let app = AppId::mint();
     let first = catalog.publish(&app, "first", &[]).await;
     let second = catalog.publish(&app, "second", &[]).await;
@@ -696,7 +702,7 @@ async fn stale_candidates(fixture: &Fixture) {
         }
     };
     *hook.action.borrow_mut() = Some(Box::pin(action));
-    let mut driver = Driver::new(queue.clone(), options()).unwrap();
+    let mut driver = Driver::new(queue.clone(), options(), undeletable()).unwrap();
     completed(&driver.tick().await.retention, 4);
     assert!(hook.action.borrow().is_none(), "the page outlived the hook");
     assert_eq!(hold(fixture, &app, &first).await, released(1));
@@ -742,7 +748,7 @@ async fn unconfirmed_time(fixture: &Fixture) {
         value!({"held_at":null}),
     )
     .await;
-    let mut driver = Driver::new(queue.clone(), options()).unwrap();
+    let mut driver = Driver::new(queue.clone(), options(), undeletable()).unwrap();
     for _ in 0..2 {
         let report = driver.tick().await.retention;
         assert_eq!(report.visited, 1);
@@ -760,7 +766,7 @@ async fn unconfirmed_time(fixture: &Fixture) {
 async fn journal_release_policy(fixture: &Fixture) {
     let catalog = Catalog::new(fixture).await;
     let queue = queue(fixture, catalog.client()).await;
-    let mut driver = Driver::new(queue.clone(), options()).unwrap();
+    let mut driver = Driver::new(queue.clone(), options(), undeletable()).unwrap();
     let scheduler = Scheduler::new(queue.clone(), SchedulerOptions::default()).unwrap();
     let app = AppId::mint();
     let first = catalog.publish(&app, "first", &[daily()]).await;
@@ -844,7 +850,7 @@ async fn journal_release_policy(fixture: &Fixture) {
 async fn journal_release_tombstone(fixture: &Fixture) {
     let catalog = Catalog::new(fixture).await;
     let queue = queue(fixture, catalog.client()).await;
-    let mut driver = Driver::new(queue.clone(), options()).unwrap();
+    let mut driver = Driver::new(queue.clone(), options(), undeletable()).unwrap();
     let scheduler = Scheduler::new(queue.clone(), SchedulerOptions::default()).unwrap();
     let app = AppId::mint();
     let first = catalog.publish(&app, "first", &[daily()]).await;

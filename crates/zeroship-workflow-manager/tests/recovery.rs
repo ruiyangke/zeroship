@@ -111,6 +111,7 @@ async fn host(fixture: &Fixture) -> (Recovery, Queue) {
             Options {
                 interval: Duration::from_secs(60),
                 page_size: 2,
+                ..Options::default()
             },
         )
         .unwrap(),

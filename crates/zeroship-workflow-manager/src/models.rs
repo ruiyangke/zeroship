@@ -42,6 +42,7 @@ pub struct Job {
     pub lease_deadline: Option<i64>,
     pub outcome: Option<String>,
     pub settlement_digest: Option<String>,
+    pub created_at: i64,
 }
 
 impl Job {
@@ -145,6 +146,7 @@ pub const fn operation_kind(
         JobOperation::Fanout { .. } => "fanout",
         JobOperation::Propagate { .. } => "propagate",
         JobOperation::ReleaseHold { .. } => "release_hold",
+        JobOperation::Close { .. } => "close",
         JobOperation::Reconcile {} => "reconcile",
         JobOperation::Collect {} => "collect",
     }
