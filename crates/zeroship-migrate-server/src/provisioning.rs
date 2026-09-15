@@ -323,6 +323,52 @@ pub async fn provision_workflow_journal_schema(
     .await
 }
 
+/// Provision everything a workflow-only app's runtime needs in its creator
+/// database: the app schema and its migrator role, the journal schema, and the
+/// per-app RUNTIME role the app opens that database under.
+///
+/// An app with creator migrations gets the runtime role from the apply path,
+/// which provisions it around every apply. An app that only runs workflows
+/// never applies one, and its workflow host still opens the creator journal as
+/// the per-app role, so without this it has a journal it cannot read.
+///
+/// Every step is idempotent, so a repeated provision changes nothing.
+///
+/// # Errors
+/// Reports schema, migrator-role and runtime-role provisioning failures.
+pub async fn provision_workflow_app(
+    admin: &Client,
+    app_id: &AppId,
+) -> Result<(), ProvisionWorkflowAppError> {
+    let schema = app_derivation::schema_name(app_id);
+    provision_database(admin, &schema).await?;
+    provision_workflow_journal_schema(admin, app_id).await?;
+    let (_, migrator) = migrator_executor_config(&schema)?;
+    let bound = zeroship_core::schema_name::SchemaName::new(&schema)
+        .map_err(|_| ProvisionRoleError::BadRoleName(schema.clone()))?;
+    crate::apply::provision_runtime_app_role(admin, app_id, &bound, &migrator)
+        .await
+        .map_err(|error| ProvisionWorkflowAppError::RuntimeRole(error.to_string()))?;
+    Ok(())
+}
+
+/// Error provisioning a workflow-only app's creator database.
+#[derive(Debug, thiserror::Error)]
+pub enum ProvisionWorkflowAppError {
+    /// The app schema or its migrator role could not be provisioned.
+    #[error(transparent)]
+    Database(#[from] ProvisionDatabaseError),
+    /// The journal schema DDL failed.
+    #[error("workflow journal schema: {0}")]
+    Journal(#[from] compio_postgres::Error),
+    /// The migrator role name could not be derived.
+    #[error(transparent)]
+    Role(#[from] ProvisionRoleError),
+    /// The per-app runtime role could not be provisioned.
+    #[error("runtime app role: {0}")]
+    RuntimeRole(String),
+}
+
 /// The unqualified name of the per-app unmask audit table.
 ///
 /// The PostgreSQL and SQLite creators and the ORM writer are kept in sync by
