@@ -94,7 +94,13 @@ mod tests {
         )
         .await
         .unwrap();
-        let driver = backend.connection_driver("app_owned_driver").await.unwrap();
+        let driver = backend
+            .connection_driver(
+                "app_owned_driver",
+                &crate::sql::SchemaName::new("app_owned_driver").unwrap(),
+            )
+            .await
+            .unwrap();
         drop(backend);
         assert!(database_path.exists(), "the driver still owns the database");
         let session = driver.acquire(LeaseKind::Transaction).await.unwrap();
@@ -134,7 +140,10 @@ mod tests {
         .await
         .unwrap();
         let source = reopened
-            .connection_driver("app_owned_driver")
+            .connection_driver(
+                "app_owned_driver",
+                &crate::sql::SchemaName::new("app_owned_driver").unwrap(),
+            )
             .await
             .unwrap();
         let session = source.acquire(LeaseKind::Autocommit).await.unwrap();
@@ -154,7 +163,13 @@ mod tests {
             crate::encryption::ProjectKeySource::unavailable(),
         )
         .unwrap();
-        let driver = backend.connection_driver("app_driver").await.unwrap();
+        let driver = backend
+            .connection_driver(
+                "app_driver",
+                &crate::sql::SchemaName::new("app_driver").unwrap(),
+            )
+            .await
+            .unwrap();
         crate::driver::tests::native_commands(driver, "BLOB").await;
     }
 
@@ -169,7 +184,13 @@ mod tests {
             crate::encryption::ProjectKeySource::unavailable(),
         )
         .unwrap();
-        let driver = backend.connection_driver("app_decode").await.unwrap();
+        let driver = backend
+            .connection_driver(
+                "app_decode",
+                &crate::sql::SchemaName::new("app_decode").unwrap(),
+            )
+            .await
+            .unwrap();
         let session = driver.acquire(LeaseKind::Autocommit).await.unwrap();
         for sql in [
             "SELECT 1e999 AS invalid_result",

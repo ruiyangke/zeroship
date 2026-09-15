@@ -257,26 +257,11 @@ pub async fn resolve_or_link(
 
     let user = users::create(orm, profile.email, name, None).await?;
 
-    // Mark email_verified_at only when this provider is trusted for this
-    // email. Raw provider `email_verified` is not enough.
     if profile.provider_trusted_for_email {
-        db.execute(
-            "UPDATE zeroship.users SET email_verified_at = NOW() WHERE id = $1",
-            &[&user.id.as_str()],
-        )
-        .await
-        .map_err(|e| AuthError::Db(format!("set email_verified_at: {e}")))?;
+        users::mark_email_verified(orm, &user.id).await?;
     }
-
-    // Carry the avatar through on first contact. Subsequent logins won't
-    // overwrite a user-set avatar (we deliberately don't UPDATE here later).
     if let Some(avatar) = profile.avatar_url {
-        db.execute(
-            "UPDATE zeroship.users SET avatar_url = $1 WHERE id = $2 AND avatar_url IS NULL",
-            &[&avatar, &user.id.as_str()],
-        )
-        .await
-        .map_err(|e| AuthError::Db(format!("set avatar_url: {e}")))?;
+        users::set_avatar_if_missing(orm, &user.id, avatar).await?;
     }
 
     identities::link(

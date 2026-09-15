@@ -11,21 +11,21 @@ use async_trait::async_trait;
 
 #[async_trait(?Send)]
 impl ScopedExecutor for SqliteBackend {
-    fn namespace<'a>(&self, app_id: &'a str, _schema: &'a SchemaName) -> &'a str {
-        app_id
+    fn namespace<'a>(&self, app_id: &'a str, schema: &'a SchemaName) -> &'a str {
+        Self::database_alias(app_id, schema)
     }
 
-    async fn prepare_for_app(&self, app_id: &str) -> Result<(), DbError> {
-        self.attach_app_file(app_id).await
+    async fn prepare_for_app(&self, app_id: &str, schema: &SchemaName) -> Result<(), DbError> {
+        self.attach_binding(app_id, schema).await
     }
     async fn query(
         &self,
         app_id: &str,
-        _schema: &SchemaName,
+        schema: &SchemaName,
         sql: &str,
         params: &[Value],
     ) -> Result<Vec<Value>, DbError> {
-        self.connection_driver(app_id)
+        self.connection_driver(app_id, schema)
             .await?
             .acquire(LeaseKind::Autocommit)
             .await?
@@ -35,21 +35,27 @@ impl ScopedExecutor for SqliteBackend {
     async fn exec(
         &self,
         app_id: &str,
-        _schema: &SchemaName,
+        schema: &SchemaName,
         sql: &str,
         params: &[Value],
     ) -> Result<u64, DbError> {
-        self.connection_driver(app_id)
+        self.connection_driver(app_id, schema)
             .await?
             .acquire(LeaseKind::Autocommit)
             .await?
             .exec(sql, params)
             .await
     }
+    async fn check_connection(&self) -> Result<(), DbError> {
+        // One round trip to the actor on the autocommit connection. It does not
+        // reserve a lane, so an app's open transaction does not delay it.
+        self.autocommit_client().query("SELECT 1", &[]).await?;
+        Ok(())
+    }
     async fn open_tx_session(
         &self,
         app_id: &str,
-        _schema: &SchemaName,
+        schema: &SchemaName,
         begin: BeginIntent,
     ) -> Result<Session, OpenSessionError> {
         if let BeginIntent::Isolation(level) = begin {
@@ -65,7 +71,7 @@ impl ScopedExecutor for SqliteBackend {
             }
         }
         let session = self
-            .connection_driver(app_id)
+            .connection_driver(app_id, schema)
             .await?
             .acquire(LeaseKind::Transaction)
             .await?;
@@ -74,12 +80,13 @@ impl ScopedExecutor for SqliteBackend {
     }
 }
 impl SqliteBackend {
-    /// Resolve and attach the app database before exposing a physical source.
+    /// Make the binding's database addressable before exposing a physical source.
     pub async fn connection_driver(
         &self,
         app_id: &str,
+        schema: &SchemaName,
     ) -> Result<super::driver::SqliteDriver, DbError> {
-        self.attach_app_file(app_id).await?;
+        self.attach_binding(app_id, schema).await?;
         Ok(super::driver::SqliteDriver::new(
             self.session.clone(),
             app_id.to_owned(),

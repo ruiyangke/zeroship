@@ -16,9 +16,9 @@ struct Counter {
     quantity: i64,
     ratio: f64,
     optional: Option<i64>,
-    tags: Value,
-    moments: Value,
-    dates: Value,
+    tags: Vec<String>,
+    moments: Vec<UtcInstant>,
+    dates: Vec<String>,
     document: Value,
     version: i64,
 }
@@ -29,9 +29,9 @@ struct NewCounter {
     quantity: i64,
     ratio: f64,
     optional: Option<i64>,
-    tags: Value,
-    moments: Value,
-    dates: Value,
+    tags: Vec<&'static str>,
+    moments: Vec<UtcInstant>,
+    dates: Vec<&'static str>,
     document: Value,
 }
 #[derive(Changeset)]
@@ -81,9 +81,9 @@ async fn exercise(postgres: bool) {
                 quantity: 10,
                 ratio: 2.0,
                 optional: None,
-                tags: value!(["first"]),
-                moments: value!([]),
-                dates: value!([]),
+                tags: vec!["first"],
+                moments: vec![],
+                dates: vec![],
                 document: value!({}),
             })
             .await
@@ -98,7 +98,7 @@ async fn exercise(postgres: bool) {
         .unwrap()
         .and(counters::tags.push("second").unwrap())
         .unwrap()
-        .and(counters::moments.push(0_i64).unwrap())
+        .and(counters::moments.push(UtcInstant::from_unix_millis(0).unwrap()).unwrap())
         .unwrap()
         .and(counters::dates.push("2026-09-13").unwrap())
         .unwrap()
@@ -114,9 +114,9 @@ async fn exercise(postgres: bool) {
     assert_eq!(updated.quantity, 13);
     assert_eq!(updated.ratio, 5.0);
     assert_eq!(updated.optional, None);
-    assert_eq!(updated.tags, value!(["first", "second"]));
-    assert_eq!(updated.moments, value!([0]));
-    assert_eq!(updated.dates, value!(["2026-09-13"]));
+    assert_eq!(updated.tags, ["first", "second"]);
+    assert_eq!(updated.moments, [UtcInstant::from_unix_millis(0).unwrap()]);
+    assert_eq!(updated.dates, ["2026-09-13"]);
     assert_eq!(updated.document, value!({"$inc":17}));
     assert_eq!(updated.version, 2);
     let updated = table
@@ -132,7 +132,7 @@ async fn exercise(postgres: bool) {
         .unwrap()
         .unwrap();
     assert_eq!(updated.quantity, 9);
-    assert_eq!(updated.tags, value!(["first", "second"]));
+    assert_eq!(updated.tags, ["first", "second"]);
     let updated = table
         .update::<_, Counter>(
             counters::id.eq("a").unwrap(),
@@ -141,7 +141,7 @@ async fn exercise(postgres: bool) {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(updated.tags, value!(["second"]));
+    assert_eq!(updated.tags, ["second"]);
     assert!(counters::quantity
         .increment(1_i64)
         .unwrap()
@@ -196,9 +196,9 @@ async fn count_comparisons(postgres: bool) {
                 quantity: 10,
                 ratio: 2.0,
                 optional: None,
-                tags: value!(["same"]),
-                moments: value!([0]),
-                dates: value!(["2026-09-14"]),
+                tags: vec!["same"],
+                moments: vec![UtcInstant::from_unix_millis(0).unwrap()],
+                dates: vec!["2026-09-14"],
                 document: value!({}),
             })
             .await

@@ -20,12 +20,20 @@ pub struct BackendHandle(
     Rc<()>,
     Arc<crate::sql::registration::SqlRegistration>,
     crate::connection::ConnectionIdentity,
+    /// Custom setting namespaces the host declared for this connection.
+    Rc<[&'static str]>,
 );
 impl BackendHandle {
     pub fn new<B: Backend>(backend: Rc<B>) -> Self {
         let registration = backend.sql_registration();
         let identity = crate::connection::ConnectionIdentity::for_backend(registration.identity());
-        Self(backend, Rc::new(()), Arc::new(registration), identity)
+        Self(
+            backend,
+            Rc::new(()),
+            Arc::new(registration),
+            identity,
+            Rc::from([]),
+        )
     }
     pub fn with_sql<B: Backend>(
         backend: Rc<B>,
@@ -38,7 +46,25 @@ impl BackendHandle {
             ));
         }
         let identity = crate::connection::ConnectionIdentity::for_backend(registration.identity());
-        Ok(Self(backend, Rc::new(()), Arc::new(registration), identity))
+        Ok(Self(
+            backend,
+            Rc::new(()),
+            Arc::new(registration),
+            identity,
+            Rc::from([]),
+        ))
+    }
+    /// Record the custom setting namespaces the host declared. Only a
+    /// declared namespace can be set on this connection's transactions.
+    pub(crate) fn declare_transaction_setting_namespaces(
+        mut self,
+        namespaces: Rc<[&'static str]>,
+    ) -> Self {
+        self.4 = namespaces;
+        self
+    }
+    pub(crate) fn declares_transaction_setting_namespace(&self, namespace: &str) -> bool {
+        self.4.contains(&namespace)
     }
     pub fn sql_registration(&self) -> &crate::sql::registration::SqlRegistration {
         &self.2
@@ -296,7 +322,9 @@ mod routed_read_tests {
                 }
             });
 
-            let admission = crate::transaction::TxAdmission::acquire(app.to_owned()).await;
+            let admission = crate::transaction::TxAdmission::acquire(app.to_owned())
+                .await
+                .expect("the fixture claims a free lane");
             crate::transaction::exec_begin_or_savepoint(false, None, app,
                 crate::sql::SchemaName::new(app).unwrap(), handle.clone()).await.unwrap();
             admission.handed_to_reducer();

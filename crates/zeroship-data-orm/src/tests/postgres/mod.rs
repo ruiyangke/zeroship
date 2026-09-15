@@ -4,6 +4,7 @@ mod column_grants;
 mod connections;
 mod encryption;
 mod fixtures;
+mod network_values;
 mod protection;
 mod provisioning;
 mod roles;

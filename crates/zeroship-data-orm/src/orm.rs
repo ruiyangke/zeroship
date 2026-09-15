@@ -6,12 +6,15 @@
 
 use crate::schema::{FieldMap, Schema};
 pub use crate::value::Value;
-use std::{cell::Cell, future::Future, marker::PhantomData, rc::Rc};
+use std::{cell::Cell, future::Future, marker::PhantomData, rc::Rc, sync::Arc};
 use zeroship_data_orm::binding::DbBinding;
 use zeroship_data_orm::cdc::ChangeOp;
 pub use zeroship_data_orm::error::DbError;
 
-use crate::{backend::BackendHandle, crud, sql::compiler::CompiledQuery, tx_route::CapturedRoute};
+use crate::{
+    backend::BackendHandle, crud, metrics::UsageSink, sql::compiler::CompiledQuery,
+    tx_route::CapturedRoute,
+};
 
 /// A database connection bound to an app deployment.
 #[derive(Clone, Debug)]
@@ -21,6 +24,7 @@ pub struct Database {
     binding: DbBinding,
     backend: BackendHandle,
     actor_id: Option<String>,
+    usage: Option<Arc<dyn UsageSink>>,
     scope: Option<Rc<Cell<bool>>>,
     transaction_scope: Option<crate::transaction::scope::TransactionScope>,
 }
@@ -44,7 +48,8 @@ impl Database {
         Self::from_schema(binding, options.connect().await?, schema)
     }
 
-    /// Bind an installed schema to a backend.
+    /// Bind an installed schema to a backend. The database reports no usage
+    /// until a host attaches a sink with [`Self::with_usage_sink`].
     pub fn new(context: crate::OrmContext, binding: DbBinding, backend: BackendHandle) -> Self {
         Self {
             identity: Rc::new(()),
@@ -52,6 +57,7 @@ impl Database {
             binding,
             backend,
             actor_id: None,
+            usage: None,
             scope: None,
             transaction_scope: None,
         }
@@ -75,6 +81,69 @@ impl Database {
         &self.context
     }
 
+    /// A handle on the same binding, backend, installed schema, mask policy,
+    /// protection floors and usage sink, with a transaction lane of its own.
+    ///
+    /// Top-level transactions serialize through one lane per app, so a second
+    /// transaction opened on this handle - or on a clone of it - waits for the
+    /// first to settle. A fork admits its own, so a host that wants several
+    /// transactions in flight at once takes one fork per concurrent unit of
+    /// work. Concurrency is then bounded by the backend's connection pool: a
+    /// fork whose transaction cannot get a connection fails with the pool's
+    /// acquire timeout rather than running unbounded.
+    ///
+    /// Forks are separate handles, not clones: a read source built on one is
+    /// refused by the other, which is what keeps a transaction's aliases from
+    /// executing on a lane that is not its own.
+    ///
+    /// Locks are not forgiving here. A fork awaited from inside another
+    /// transaction's callback can still block on rows that transaction holds,
+    /// and only the lock timeout ends that.
+    ///
+    /// # Errors
+    /// `unsupported_backend_feature` on a backend that reserves one
+    /// transaction connection per app, where a second lane could only
+    /// serialize invisibly or refuse at BEGIN; `transaction_scope_expired` on a
+    /// settled transaction handle.
+    pub fn independent(&self) -> Result<Self, DbError> {
+        self.check_scope()?;
+        if !self.backend.admits_concurrent_transactions() {
+            return Err(unsupported_backend_feature("independent transaction lanes"));
+        }
+        Ok(Self {
+            identity: Rc::new(()),
+            context: self.context.fork_lanes(),
+            binding: self.binding.clone(),
+            backend: self.backend.clone(),
+            actor_id: self.actor_id.clone(),
+            usage: self.usage.clone(),
+            scope: None,
+            transaction_scope: None,
+        })
+    }
+
+    /// Confirm the backend is reachable, in one round trip on an autocommit
+    /// lease.
+    ///
+    /// It takes no transaction lane, installs no session authority and reads no
+    /// table, so it answers while this handle's transaction is open. The wait
+    /// is the backend's connection wait: on a pool, the acquire timeout.
+    ///
+    /// # Errors
+    /// The backend's connection failure, or `transaction_scope_expired` on a
+    /// settled transaction handle.
+    #[expect(
+        clippy::future_not_send,
+        reason = "the probe runs on this thread's compio session"
+    )]
+    pub async fn check_connection(&self) -> Result<(), DbError> {
+        self.check_scope()?;
+        let backend = self.backend.clone();
+        self.context
+            .scope(async move { backend.check_connection().await })
+            .await
+    }
+
     /// Install the app's immutable startup policy in this database context.
     pub fn install_mask_policy(&self, policy: Value) -> Result<(), DbError> {
         self.context
@@ -88,8 +157,18 @@ impl Database {
         self
     }
 
+    /// Report this binding's usage to `sink`, including work done in the
+    /// transactions it opens. The sink carries the host's attribution; the ORM
+    /// derives none from the binding.
+    #[must_use]
+    pub fn with_usage_sink(mut self, sink: Arc<dyn UsageSink>) -> Self {
+        self.usage = Some(sink);
+        self
+    }
+
     pub fn collection(&self, name: &str) -> Result<Collection, DbError> {
         self.context.with(|| {
+            self.check_scope()?;
             crate::sql::mapping::validate_collection(name)?;
             crate::descriptor::collection_schema(&self.binding, name)?;
             Ok(Collection {
@@ -141,6 +220,7 @@ impl Database {
             self.binding.schema().clone(),
             self.backend.sql_registration().clone(),
             self.backend.connection_identity(),
+            self.usage.clone(),
         )
     }
 }
@@ -160,6 +240,24 @@ fn check_scope(scope: Option<&Rc<Cell<bool>>>) -> Result<(), DbError> {
         ));
     }
     Ok(())
+}
+
+/// A feature that only runs inside a transaction was requested on a handle
+/// that was not passed to a transaction callback.
+pub(crate) fn transaction_required(feature: &str) -> DbError {
+    DbError::validation_hinted(
+        "transaction_required",
+        format!("{feature} require a transaction handle"),
+        "Use the database handle passed to a transaction callback.",
+    )
+}
+
+/// The handle's backend cannot provide a requested feature.
+pub(crate) fn unsupported_backend_feature(feature: &str) -> DbError {
+    DbError::validation(
+        "unsupported_backend_feature",
+        format!("the configured database backend does not support {feature}"),
+    )
 }
 
 /// An ORM collection. Schema resolution and protection apply to every method.
@@ -205,7 +303,7 @@ impl Collection {
     fn update_model(
         &self,
         filter: model::ModelPredicate,
-        patch: Value,
+        patch: crud::update::Input,
         many: bool,
     ) -> impl Future<Output = Result<Output, DbError>> + use<> {
         let db = &self.database;
@@ -384,6 +482,12 @@ fn decode_rows<E: Entity, R: FromRow<E>>(output: Output) -> Result<Vec<R>, DbErr
         .collect()
 }
 mod codecs;
+mod postgres;
+pub use postgres::{AdvisoryKey, Postgres, SessionLease, TransactionSetting};
+mod instant;
+pub use instant::UtcInstant;
+mod timestamp;
+pub use timestamp::TimestampExpr;
 mod model;
 mod mutations;
 mod relations;
@@ -488,7 +592,7 @@ enum Plan {
     InsertMany(Value),
     Update {
         filter: crud::predicate::Input,
-        patch: Value,
+        patch: crud::update::Input,
         many: bool,
     },
     Mutation {
@@ -553,6 +657,7 @@ impl PreparedOperation {
                 Plan::Read(Box::new(read::PreparedRead::new(
                     &binding,
                     route.sql_registration(),
+                    route.in_tx(),
                     *query,
                 )?))
             }
@@ -582,7 +687,7 @@ impl PreparedOperation {
                 many,
             } => Plan::Update {
                 filter: filter.into(),
-                patch,
+                patch: patch.into(),
                 many,
             },
             Operation::Delete { filter, many } => Plan::Mutation {
@@ -669,7 +774,7 @@ impl PreparedOperation {
         route: CapturedRoute,
         actor_id: Option<String>,
         filter: model::ModelPredicate,
-        patch: Value,
+        patch: crud::update::Input,
         many: bool,
     ) -> Result<Self, DbError> {
         validate_target(&binding, collection, &route)?;

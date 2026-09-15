@@ -11,10 +11,13 @@ pgvector and PostGIS, with a dynamically assigned host port. SQLite tests use
 explicit temporary files. Startup failure fails the test; no external database
 URL or test overlay is needed.
 
-Install [cargo-nextest](https://nexte.st/docs/installation/pre-built-binaries/),
-make Docker available, and put `pg_dump` and `pg_restore` clients matching the
-fixture server major version on PATH. The task rejects a version mismatch before
-building the suite. The fixture server is declared in `tests/fixtures/postgres/Dockerfile`.
+Install [cargo-nextest](https://nexte.st/docs/installation/pre-built-binaries/)
+and make Docker available. `pg_dump` and `pg_restore` clients matching the
+fixture server major version must be on PATH; the development shell supplies
+them, so this applies to a shell built another way. The task rejects a version
+mismatch before building the suite. The fixture server is declared in
+`tests/fixtures/postgres/Dockerfile`, and the shell's client attribute in
+`flake.nix` is bumped with it.
 Build the workspace SDKs with `pnpm install --frozen-lockfile` and `pnpm build`
 before compiling the V8 runtime.
 

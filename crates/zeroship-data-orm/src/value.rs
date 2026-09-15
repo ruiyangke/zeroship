@@ -12,6 +12,10 @@ pub use serde_json::Number;
 pub type Map<K, V> = IndexMap<K, V>;
 pub type Record = Map<String, Value>;
 
+/// The newtype-struct name [`Value::TimestampMicros`] serializes under, so the
+/// native serde adapter can restore the variant rather than a bare integer.
+pub(crate) const TIMESTAMP_MICROS_TOKEN: &str = "$zsTimestampMicros";
+
 #[derive(Clone, Debug, Default, PartialEq)]
 pub enum Value {
     #[default]
@@ -20,8 +24,8 @@ pub enum Value {
     Number(Number),
     String(String),
     Bytes(Vec<u8>),
-    /// Unix milliseconds. The descriptor selects the database timestamp type.
-    Timestamp(i64),
+    /// Unix microseconds. The descriptor selects the database timestamp type.
+    TimestampMicros(i64),
     /// Exact decimal spelling; never routed through a floating point value.
     Decimal(String),
     /// Encoded JSON storage value. This tag distinguishes JSON strings from SQL text.
@@ -73,11 +77,22 @@ impl Value {
             None
         }
     }
+    /// The integer a number carries. A timestamp is deliberately excluded: its
+    /// unit is microseconds, and reading it through the numeric accessor is how
+    /// a millisecond caller silently gains a factor of a thousand.
     pub fn as_i64(&self) -> Option<i64> {
-        match self {
-            Self::Number(v) => v.as_i64(),
-            Self::Timestamp(v) => Some(*v),
-            _ => None,
+        if let Self::Number(v) = self {
+            v.as_i64()
+        } else {
+            None
+        }
+    }
+    /// Unix microseconds when this value is a timestamp.
+    pub fn as_timestamp_micros(&self) -> Option<i64> {
+        if let Self::TimestampMicros(v) = self {
+            Some(*v)
+        } else {
+            None
         }
     }
     pub fn as_u64(&self) -> Option<u64> {
@@ -280,7 +295,13 @@ impl Serialize for Value {
             Self::Number(v) => v.serialize(serializer),
             Self::String(v) | Self::Decimal(v) => serializer.serialize_str(v),
             Self::Bytes(v) => serializer.serialize_bytes(v),
-            Self::Timestamp(v) => serializer.serialize_i64(*v),
+            // A newtype struct is transparent to an ordinary format, so JSON
+            // still sees the integer. The native encoder recognises the name
+            // and rebuilds the timestamp, which is what keeps `to_value` from
+            // handing a microsecond count back as a count of milliseconds.
+            Self::TimestampMicros(v) => {
+                serializer.serialize_newtype_struct(TIMESTAMP_MICROS_TOKEN, v)
+            }
             Self::Json(v) => {
                 let json: Value = serde_json::from_str(v).map_err(::serde::ser::Error::custom)?;
                 json.serialize(serializer)

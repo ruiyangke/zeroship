@@ -3,7 +3,9 @@ use super::{
     SqlSupport, SqlWriter,
 };
 use crate::{
-    sql::statement::{ArrayOperator, Column, IdentityRequest, Statement},
+    sql::statement::{
+        ArrayElement, ArrayOperator, Column, IdentityRequest, Statement, StorageType,
+    },
     value::Value,
 };
 
@@ -22,16 +24,23 @@ const SUPPORT: SqlSupport = SqlSupport {
     insert_generated_identity: true,
     identity_allocation: true,
     default_expression: true,
+    row_locks: true,
+    advisory_locks: true,
+    transaction_settings: true,
+    timestamp_resolution: crate::sql::temporal::TimestampResolution::Microsecond,
     max_bind_parameters: super::POSTGRES_BIND_LIMIT,
 };
 
 const SYNTAX: super::shared::Syntax = super::shared::Syntax {
     current_timestamp: "NOW()",
+    database_timestamp: write_database_timestamp,
     generated_identity_override: Some(" OVERRIDING SYSTEM VALUE"),
     timestamp_cast: "::timestamptz",
     vector_cast: "::vector",
     numeric_cast: "::numeric",
-    first_row_lock: " FOR UPDATE",
+    text_array_cast: Some("::text[]"),
+    write_target_lock: " FOR UPDATE",
+    required_row_lock: Some(" FOR UPDATE"),
     insensitive_like: "ILIKE",
     insensitive_like_suffix: "",
     average_suffix: "::double precision",
@@ -41,6 +50,51 @@ const SYNTAX: super::shared::Syntax = super::shared::Syntax {
     vector_distance: write_vector_distance,
     array_mutation: write_array_mutation,
 };
+
+// The last instant before the portable calendar, one microsecond before
+// `MIN_TIMESTAMP_MICROS`, independent of the session time zone.
+const BEFORE_PORTABLE_CALENDAR: &str = "'0001-12-31 23:59:59.999999+00 BC'::timestamptz";
+
+// The database clock shifted by an exact microsecond interval.
+//
+// The offset is rendered as exact decimal seconds and never through a floating
+// point value: the portable span in microseconds exceeds the range where a
+// double holds every integer.
+//
+// PostgreSQL raises for an instant before its own calendar begins, and the
+// largest negative offset reaches past it. A negative offset therefore first
+// raises the clock to at least `BEFORE_PORTABLE_CALENDAR` minus the offset. A
+// sum inside the portable calendar is unchanged; any other sum stays inside
+// PostgreSQL's range but outside the portable calendar, so the update's result
+// check refuses it. A positive offset from a clock inside the portable calendar
+// stays far inside PostgreSQL's range.
+fn write_database_timestamp(
+    writer: &mut SqlWriter,
+    offset_micros: i64,
+) -> Result<(), CompileError> {
+    let seconds = offset_micros / 1_000_000;
+    let fraction = (offset_micros % 1_000_000).unsigned_abs();
+    let sign = if offset_micros < 0 && seconds == 0 {
+        "-"
+    } else {
+        ""
+    };
+    let offset = writer.bind(Value::from(format!(
+        "{sign}{seconds}.{fraction:06} seconds"
+    )))?;
+    if offset_micros < 0 {
+        writer.sql.push_str("(GREATEST(clock_timestamp(), ");
+        writer.sql.push_str(BEFORE_PORTABLE_CALENDAR);
+        writer.sql.push_str(" - ");
+        writer.write_bound(offset);
+        writer.sql.push_str("::interval) + ");
+    } else {
+        writer.sql.push_str("(clock_timestamp() + ");
+    }
+    writer.write_bound(offset);
+    writer.sql.push_str("::interval)");
+    Ok(())
+}
 
 fn write_vector_distance(
     writer: &mut SqlWriter,
@@ -108,7 +162,146 @@ fn write_column(writer: &mut SqlWriter, column: &Column) {
     writer.identifier(column.name().as_str());
 }
 
+/// Render an advisory lock request. The database hashes and folds case, so a
+/// caller spelling the same form in SQL contends on the identical lock.
+fn compile_advisory_lock(
+    lock: crate::sql::coordination::AdvisoryLock,
+    effective: &SqlSupport,
+) -> Result<CompiledQuery, CompileError> {
+    use crate::sql::coordination::{AdvisoryKey, AdvisoryLockAction, AdvisoryLockScope};
+    lock.validate()?;
+    let mut writer = SqlWriter::new(effective.max_bind_parameters);
+    writer.sql.push_str(match (lock.scope(), lock.action()) {
+        (AdvisoryLockScope::Transaction, AdvisoryLockAction::Wait) => {
+            "SELECT pg_advisory_xact_lock("
+        }
+        (AdvisoryLockScope::Transaction, AdvisoryLockAction::Try) => {
+            "SELECT pg_try_advisory_xact_lock("
+        }
+        (AdvisoryLockScope::Session, AdvisoryLockAction::Wait) => "SELECT pg_advisory_lock(",
+        (AdvisoryLockScope::Session, AdvisoryLockAction::Try) => "SELECT pg_try_advisory_lock(",
+        (AdvisoryLockScope::Session, AdvisoryLockAction::Release) => "SELECT pg_advisory_unlock(",
+        (AdvisoryLockScope::Transaction, AdvisoryLockAction::Release) => {
+            return Err(CompileError::InvalidStatement(
+                "transaction advisory locks are released when the transaction settles".into(),
+            ));
+        }
+    });
+    match lock.key() {
+        AdvisoryKey::Single(key) => {
+            writer.write_param(Value::from(*key))?;
+            writer.sql.push_str("::int8");
+        }
+        AdvisoryKey::Pair(high, low) => {
+            writer.write_param(Value::from(i64::from(*high)))?;
+            writer.sql.push_str("::int4, ");
+            writer.write_param(Value::from(i64::from(*low)))?;
+            writer.sql.push_str("::int4");
+        }
+        AdvisoryKey::HashedPair { namespace, text } => {
+            writer.write_param(Value::from(i64::from(*namespace)))?;
+            writer.sql.push_str("::int4, hashtext(");
+            writer.write_param(Value::from(text.as_str()))?;
+            writer.sql.push_str("::text)");
+        }
+        AdvisoryKey::Hashed(text) => {
+            writer.sql.push_str("hashtext(");
+            writer.write_param(Value::from(text.as_str()))?;
+            writer.sql.push_str("::text)::int8");
+        }
+        AdvisoryKey::HashedLowercase(text) => {
+            writer.sql.push_str("hashtext(lower(");
+            writer.write_param(Value::from(text.as_str()))?;
+            writer.sql.push_str("::text))::int8");
+        }
+    }
+    writer.sql.push(')');
+    match lock.action() {
+        AdvisoryLockAction::Wait => {}
+        AdvisoryLockAction::Try => {
+            writer.sql.push_str(" AS ");
+            writer.identifier(crate::sql::coordination::ADVISORY_ACQUIRED);
+        }
+        AdvisoryLockAction::Release => {
+            writer.sql.push_str(" AS ");
+            writer.identifier(crate::sql::coordination::ADVISORY_RELEASED);
+        }
+    }
+    Ok(writer.finish())
+}
+
+/// Render a transaction-local setting. Name and value are both bound.
+fn compile_transaction_setting(
+    setting: crate::sql::coordination::SetTransactionSetting,
+    effective: &SqlSupport,
+) -> Result<CompiledQuery, CompileError> {
+    setting.validate()?;
+    let (name, value) = setting.into_parts();
+    let mut writer = SqlWriter::new(effective.max_bind_parameters);
+    writer.sql.push_str("SELECT set_config(");
+    writer.write_param(Value::from(name.as_str()))?;
+    writer.sql.push_str("::text, ");
+    writer.write_param(Value::from(value))?;
+    writer.sql.push_str("::text, true)");
+    Ok(writer.finish())
+}
+
 fn write_array_mutation(
+    writer: &mut SqlWriter,
+    column: &Column,
+    operator: ArrayOperator,
+    operand: super::ParameterSlot,
+) -> Result<(), CompileError> {
+    match column.storage() {
+        StorageType::Json => write_json_array_mutation(writer, column, operator, operand),
+        StorageType::Array(ArrayElement::Text) => {
+            write_native_array_mutation(writer, column, "::text", operator, operand);
+            Ok(())
+        }
+        _ => Err(CompileError::InvalidStatement(
+            "array mutation requires array storage".into(),
+        )),
+    }
+}
+
+/// Native arrays keep order and duplicates. `array_remove` drops every equal
+/// element; `array_position` compares with `IS NOT DISTINCT FROM`, so an
+/// element is appended only when no equal element exists. A NULL array stays
+/// NULL.
+fn write_native_array_mutation(
+    writer: &mut SqlWriter,
+    column: &Column,
+    element_cast: &str,
+    operator: ArrayOperator,
+    operand: super::ParameterSlot,
+) {
+    let element = |writer: &mut SqlWriter| {
+        writer.write_bound(operand);
+        writer.sql.push_str(element_cast);
+    };
+    writer.sql.push_str("CASE WHEN ");
+    write_column(writer, column);
+    writer.sql.push_str(" IS NULL THEN ");
+    write_column(writer, column);
+    if operator == ArrayOperator::AddToSet {
+        writer.sql.push_str(" WHEN array_position(");
+        write_column(writer, column);
+        writer.sql.push_str(", ");
+        element(writer);
+        writer.sql.push_str(") IS NOT NULL THEN ");
+        write_column(writer, column);
+    }
+    writer.sql.push_str(match operator {
+        ArrayOperator::Push | ArrayOperator::AddToSet => " ELSE array_append(",
+        ArrayOperator::Pull => " ELSE array_remove(",
+    });
+    write_column(writer, column);
+    writer.sql.push_str(", ");
+    element(writer);
+    writer.sql.push_str(") END");
+}
+
+fn write_json_array_mutation(
     writer: &mut SqlWriter,
     column: &Column,
     operator: ArrayOperator,
@@ -186,7 +379,7 @@ impl SqlCompiler for PostgresCompiler {
         )?;
         match statement {
             Statement::Select(statement) => {
-                super::shared::compile_select(SYNTAX, effective, statement)
+                super::shared::compile_select(SYNTAX, effective, *statement)
             }
             Statement::VectorSearch(statement) => {
                 super::shared::compile_vector_search(SYNTAX, effective, statement)
@@ -203,6 +396,10 @@ impl SqlCompiler for PostgresCompiler {
             }
             Statement::Delete(statement) => {
                 super::shared::compile_delete(SYNTAX, effective, statement)
+            }
+            Statement::AdvisoryLock(statement) => compile_advisory_lock(statement, effective),
+            Statement::SetTransactionSetting(statement) => {
+                compile_transaction_setting(statement, effective)
             }
         }
     }

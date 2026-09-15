@@ -90,7 +90,7 @@ fn read_predicate(workload: ReadWorkload, table: &Table) -> ResolvedPredicate {
                     table,
                     "created_at",
                     CompareOp::Gte,
-                    Value::Timestamp(1_767_225_600_000),
+                    Value::TimestampMicros(1_767_225_600_000_000),
                 ),
             ]),
             comparison(table, "score", CompareOp::Gte, Value::from(50)),
@@ -108,7 +108,7 @@ fn read_statement(workload: ReadWorkload) -> Statement {
             alias: ident(field, IdentRole::Alias),
         })
         .collect();
-    Statement::Select(
+    Statement::select(
         SelectStatement::new(SelectParts {
             predicate: read_predicate(workload, &table),
             table,
@@ -154,8 +154,8 @@ fn insert_statement() -> Statement {
         Expression::Bind(Value::from("alice@example.com")),
         Expression::Bind(Value::from("Alice Example")),
         Expression::Bind(Value::from("admin")),
-        Expression::Bind(Value::Timestamp(1_769_040_000_000)),
-        Expression::Bind(Value::Timestamp(1_769_040_000_000)),
+        Expression::Bind(Value::TimestampMicros(1_769_040_000_000_000)),
+        Expression::Bind(Value::TimestampMicros(1_769_040_000_000_000)),
     ]];
     Statement::Insert(
         Insert::new(InsertParts {

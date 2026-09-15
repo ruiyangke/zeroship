@@ -106,10 +106,20 @@ impl ser::Serializer for Encoder {
     }
     fn serialize_newtype_struct<T: Serialize + ?Sized>(
         self,
-        _: &'static str,
+        name: &'static str,
         v: &T,
     ) -> Result<Value, Error> {
-        to_value(v)
+        let value = to_value(v)?;
+        if name == super::TIMESTAMP_MICROS_TOKEN {
+            // Restoring the variant is what makes `to_value(&Value)` an
+            // identity. Without it a microsecond count comes back as a plain
+            // number, which every storage codec reads as milliseconds.
+            let micros = value
+                .as_i64()
+                .ok_or_else(|| Error("timestamp requires an integer".into()))?;
+            return Ok(Value::TimestampMicros(micros));
+        }
+        Ok(value)
     }
     fn serialize_newtype_variant<T: Serialize + ?Sized>(
         self,
@@ -248,7 +258,7 @@ impl<'de> de::Deserializer<'de> for Value {
                 visitor.visit_f64(v.as_f64().ok_or_else(|| Error("invalid number".into()))?)
             }
             Value::String(v) | Value::Decimal(v) => visitor.visit_string(v),
-            Value::Timestamp(v) => visitor.visit_i64(v),
+            Value::TimestampMicros(v) => visitor.visit_i64(v),
             Value::Bytes(v) => visitor.visit_byte_buf(v),
             Value::Json(v) => serde_json::from_str::<Value>(&v)
                 .map_err(|e| Error(e.to_string()))?
@@ -290,4 +300,27 @@ impl<'de> de::Deserializer<'de> for Value {
         }
     }
     ::serde::forward_to_deserialize_any! { bool i8 i16 i32 i64 u8 u16 u32 u64 f32 f64 char str string bytes byte_buf unit unit_struct tuple tuple_struct map struct identifier ignored_any }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The native adapter round-trips a timestamp as a timestamp. An ordinary
+    /// format sees the integer, so JSON output is unchanged.
+    #[test]
+    fn native_encoding_keeps_a_timestamp_out_of_the_number_domain() {
+        for micros in [-1_i64, 0, 1, 253_402_300_799_999_999] {
+            let value = Value::TimestampMicros(micros);
+            assert_eq!(to_value(&value).unwrap(), value, "{micros}");
+            assert_eq!(
+                to_value(&crate::value!({ "at": value.clone() })).unwrap(),
+                Value::Object([("at".into(), value.clone())].into())
+            );
+            assert_eq!(serde_json::to_string(&value).unwrap(), micros.to_string());
+        }
+        // Control: a plain number stays a number, so the restored variant comes
+        // from the tag and not from the integer's shape.
+        assert_eq!(to_value(&Value::from(5_i64)).unwrap(), Value::from(5_i64));
+    }
 }

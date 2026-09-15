@@ -11,7 +11,15 @@ use compio_postgres::{
 use crate::value::{Map, Value};
 
 #[cfg(test)]
+#[path = "pg_row_json/array_tests.rs"]
+mod array_tests;
+#[cfg(test)]
+#[path = "pg_row_json/network_tests.rs"]
 mod network_tests;
+
+/// `PostgreSQL` counts binary timestamps from 2000-01-01, the Unix epoch plus
+/// this many microseconds.
+pub(crate) const POSTGRES_EPOCH_UNIX_MICROS: i64 = 946_684_800_000_000;
 
 pub fn rows_to_values(rows: &[Row]) -> Result<Vec<Value>, DbError> {
     rows.iter().map(row_to_value).collect()
@@ -49,6 +57,9 @@ fn decode_value(ty: &Type, bytes: &[u8]) -> Result<Value, String> {
                 .map(Value::from)
                 .map_err(|_| "invalid enum text".into());
         }
+        Kind::Array(member) if <String as FromSql>::accepts(member) => {
+            return decode_text_array(member, bytes);
+        }
         _ => {}
     }
     match *ty {
@@ -76,8 +87,20 @@ fn decode_value(ty: &Type, bytes: &[u8]) -> Result<Value, String> {
             if matches!(micros, i64::MIN | i64::MAX) {
                 return Err("infinite timestamps are unsupported".into());
             }
-            // Floor to the containing millisecond on both sides of the epoch.
-            Ok(Value::Timestamp(micros.div_euclid(1000) + 946_684_800_000))
+            // The wire value counts microseconds from 2000-01-01. Rebasing it
+            // on the Unix epoch is the whole conversion: nothing is rounded, so
+            // a value read back equals the value stored and can be compared for
+            // equality.
+            //
+            // The portable calendar is not enforced here. A clock expression
+            // whose offset leaves the calendar must reach the update's result
+            // check, which reports it as the caller's invalid offset on both
+            // backends; a column value outside the calendar is refused one
+            // layer up by the temporal codec, with the column named.
+            micros
+                .checked_add(POSTGRES_EPOCH_UNIX_MICROS)
+                .map(Value::TimestampMicros)
+                .ok_or_else(|| "timestamp exceeds the native instant range".into())
         }
         Type::DATE => {
             let days =
@@ -105,6 +128,76 @@ fn decode_value(ty: &Type, bytes: &[u8]) -> Result<Value, String> {
         _ if <String as FromSql>::accepts(ty) => from_sql::<String>(ty, bytes).map(Value::from),
         _ => Err(format!("unsupported PostgreSQL type '{}'", ty.name())),
     }
+}
+
+struct Reader<'a>(&'a [u8]);
+
+impl<'a> Reader<'a> {
+    fn word(&mut self) -> Result<[u8; 4], String> {
+        let (word, rest) = self
+            .0
+            .split_first_chunk::<4>()
+            .ok_or("truncated array binary value")?;
+        self.0 = rest;
+        Ok(*word)
+    }
+
+    fn take(&mut self, length: usize) -> Result<&'a [u8], String> {
+        if length > self.0.len() {
+            return Err("truncated array binary value".into());
+        }
+        let (taken, rest) = self.0.split_at(length);
+        self.0 = rest;
+        Ok(taken)
+    }
+}
+
+/// PostgreSQL's binary array layout, accepted only for the shapes a text array
+/// column stores: no dimension when empty, otherwise one dimension with the
+/// default lower bound. Other dimensions and bounds change array equality, so
+/// they are refused rather than flattened. A NULL element stays `Value::Null`.
+fn decode_text_array(member: &Type, bytes: &[u8]) -> Result<Value, String> {
+    let mut reader = Reader(bytes);
+    let dimensions = i32::from_be_bytes(reader.word()?);
+    let has_nulls = match i32::from_be_bytes(reader.word()?) {
+        0 => false,
+        1 => true,
+        _ => return Err("invalid array flags".into()),
+    };
+    if u32::from_be_bytes(reader.word()?) != member.oid() {
+        return Err("array element type does not match the column".into());
+    }
+    let length = match dimensions {
+        0 => 0,
+        1 => {
+            let length = i32::from_be_bytes(reader.word()?);
+            if i32::from_be_bytes(reader.word()?) != 1 {
+                return Err("arrays with a non-default lower bound are unsupported".into());
+            }
+            usize::try_from(length)
+                .ok()
+                .filter(|length| *length > 0)
+                .ok_or("invalid array length")?
+        }
+        _ => return Err("only one-dimensional arrays are supported".into()),
+    };
+    let mut values = Vec::with_capacity(length.min(reader.0.len() / 4));
+    for _ in 0..length {
+        let size = i32::from_be_bytes(reader.word()?);
+        if size == -1 {
+            if !has_nulls {
+                return Err("array null element without a null flag".into());
+            }
+            values.push(Value::Null);
+            continue;
+        }
+        let size = usize::try_from(size).map_err(|_| "invalid array element length")?;
+        values.push(from_sql::<String>(member, reader.take(size)?).map(Value::from)?);
+    }
+    if !reader.0.is_empty() {
+        return Err("trailing bytes after array elements".into());
+    }
+    Ok(Value::Array(values))
 }
 
 fn decode_network(ty: &Type, bytes: &[u8]) -> Result<Value, String> {

@@ -243,7 +243,7 @@ pub(super) async fn assert_login_rejected(response: cyper::Response) {
 
 pub(super) async fn soft_lock(server: &AuthServer, user_id: &UserId) {
     for _ in 0..users::lockout::THRESHOLD {
-        users::record_login_failure(&server.pg, user_id)
+        users::record_login_failure(&server.orm, user_id)
             .await
             .unwrap();
     }

@@ -7,6 +7,7 @@ posts_schema!(pub test_schema);
 use crate::schema::{CollectionSchema, ColumnSchema, LogicalType, Schema};
 use test_schema::posts;
 
+mod advisory_locks;
 mod aggregate_protection;
 mod bulk;
 mod calendar_date;
@@ -21,20 +22,24 @@ mod generated_identity;
 mod identity;
 mod identity_contract;
 mod identity_visibility;
+mod independent_transactions;
 mod insert_many;
 mod internal_tables;
 mod joins;
 mod json;
 mod lifecycle;
+mod native_arrays;
 mod nested_temporal;
 mod nested_values;
 mod protected_projections;
 mod protected_updates;
 mod relations;
 mod schema_updates;
+mod session_leases;
 mod sql_registration;
 mod timestamp;
 mod transaction_options;
+mod transaction_settings;
 mod typed_arrays;
 mod typed_composition;
 mod typed_exists;
@@ -42,11 +47,13 @@ mod typed_mutations;
 mod typed_predicates;
 mod typed_reads;
 mod typed_relations;
+mod typed_row_locks;
 mod typed_schema_lifetime;
 mod typed_updates;
 mod update_operators;
 mod update_validation;
 mod upsert_contract;
+mod usage;
 
 #[derive(Debug, FromRow)]
 #[orm(entity = posts)]
@@ -65,7 +72,7 @@ struct NewPost {
 #[orm(entity = posts)]
 struct Details {
     id: String,
-    created_at: i64,
+    created_at: UtcInstant,
     title: String,
     payload: Option<Vec<u8>>,
     counter: i64,
@@ -180,7 +187,7 @@ async fn sqlite_search_values_round_trip_through_the_rust_orm() {
             };
             assert_eq!(rows[0]["embedding"], document["embedding"]);
             assert_eq!(rows[0]["location"], document["location"]);
-            Ok(rows[0]["id"].clone())
+            Ok::<_, DbError>(rows[0]["id"].clone())
         })
         .await
         .unwrap();
@@ -445,7 +452,7 @@ async fn exercise_native_models(db: &Database) {
         .unwrap();
     assert_eq!(row.title, "native");
     assert_eq!(row.payload, Some(vec![0, 255, 128]));
-    assert!(row.created_at > 0);
+    assert!(row.created_at.unix_micros() > 0);
     assert_eq!(row.counter, 7);
     assert_eq!(row.nickname.as_deref(), Some("anonymous"));
     assert_eq!(row.score, Some(1.25));
@@ -810,7 +817,7 @@ async fn transactions_commit_rollback_and_expire_escaped_collections() {
         .transaction(|tx| async move {
             let posts = tx.collection("posts")?;
             posts.insert(value!({"title":"committed"})).await?;
-            Ok(posts)
+            Ok::<_, DbError>(posts)
         })
         .await
         .unwrap();
@@ -866,7 +873,7 @@ async fn nested_callback_failure_rolls_back_its_savepoint() {
             ),
             1
         );
-        Ok(())
+        Ok::<_, DbError>(())
     })
     .await
     .unwrap();
@@ -890,7 +897,7 @@ async fn caught_statement_failure_cannot_commit_a_poisoned_transaction() {
             let posts = tx.collection("posts")?;
             posts.insert(value!({"title":"duplicate"})).await?;
             assert!(posts.insert(value!({"title":"duplicate"})).await.is_err());
-            Ok(())
+            Ok::<_, DbError>(())
         })
         .await;
     assert!(
@@ -964,8 +971,12 @@ struct RegisteredBackend {
 }
 #[async_trait::async_trait(?Send)]
 impl crate::executor::ScopedExecutor for RegisteredBackend {
-    async fn prepare_for_app(&self, app_id: &str) -> Result<(), DbError> {
-        self.inner.prepare_for_app(app_id).await
+    async fn prepare_for_app(
+        &self,
+        app_id: &str,
+        schema: &crate::sql::SchemaName,
+    ) -> Result<(), DbError> {
+        self.inner.prepare_for_app(app_id, schema).await
     }
     async fn query(
         &self,
@@ -985,6 +996,9 @@ impl crate::executor::ScopedExecutor for RegisteredBackend {
         params: &[Value],
     ) -> Result<u64, DbError> {
         self.inner.exec(app_id, schema, sql, params).await
+    }
+    async fn check_connection(&self) -> Result<(), DbError> {
+        self.inner.check_connection().await
     }
     async fn open_tx_session(
         &self,
@@ -1038,6 +1052,10 @@ impl crate::backend::Backend for RegisteredBackend {
     fn publishes_committed_changes(&self) -> bool {
         self.inner.publishes_committed_changes()
     }
+
+    fn admits_concurrent_transactions(&self) -> bool {
+        self.inner.admits_concurrent_transactions()
+    }
 }
 
 async fn exercise_registered_backend(mut db: Database) {
@@ -1077,7 +1095,7 @@ async fn exercise_registered_backend(mut db: Database) {
                 })
                 .await;
             assert!(nested.is_err());
-            Ok(row.id)
+            Ok::<_, DbError>(row.id)
         })
         .await
         .unwrap();
@@ -1141,7 +1159,7 @@ async fn changing_backend_registration_refuses_an_open_transaction() {
                     title: "wrong backend".into(),
                 })
                 .await?;
-            Ok(())
+            Ok::<_, DbError>(())
         })
         .await;
     assert!(result.is_err());
@@ -1204,7 +1222,7 @@ async fn independent_databases_keep_schema_policy_and_transactions_isolated() {
                             title: "committed".into(),
                         })
                         .await?;
-                    Ok(())
+                    Ok::<_, DbError>(())
                 })
                 .await?;
             Err(DbError::internal("roll back the first database"))
@@ -1248,7 +1266,7 @@ async fn cancelled_transaction_cleans_up_its_own_context() {
             .await?;
         ready_tx.send_async(()).await.unwrap();
         std::future::pending::<()>().await;
-        Ok(())
+        Ok::<_, DbError>(())
     }));
     std::future::poll_fn(|cx| {
         assert!(cancelled.as_mut().poll(cx).is_pending());
@@ -1277,7 +1295,7 @@ async fn cancelled_transaction_cleans_up_its_own_context() {
                 .find::<Post>(Filter::all(), Default::default())
                 .await?
                 .is_empty());
-            Ok(())
+            Ok::<_, DbError>(())
         }),
     )
     .await
@@ -1298,3 +1316,5 @@ async fn cancelled_transaction_cleans_up_its_own_context() {
 mod typed_read_terminals;
 
 mod typed_mutation_expressions;
+mod typed_native_arrays;
+mod typed_timestamp;

@@ -7,38 +7,79 @@ const UNIX_EPOCH_DAY: i32 = OffsetDateTime::UNIX_EPOCH.date().to_julian_day();
 pub const MIN_TIMESTAMP_MILLIS: i64 = -62_135_596_800_000;
 pub const MAX_TIMESTAMP_MILLIS: i64 = 253_402_300_799_999;
 
+/// The same calendar span, at the resolution `PostgreSQL` stores.
+pub const MIN_TIMESTAMP_MICROS: i64 = MIN_TIMESTAMP_MILLIS * 1_000;
+pub const MAX_TIMESTAMP_MICROS: i64 = MAX_TIMESTAMP_MILLIS * 1_000 + 999;
+
+/// The resolution a backend stores a timestamp at. `PostgreSQL` keeps
+/// microseconds; `SQLite`'s canonical fixed-width text keeps milliseconds and
+/// refuses a finer value rather than flooring it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TimestampResolution {
+    Microsecond,
+    Millisecond,
+}
+
 /// Instants whose UTC date fits the portable positive `YYYY-MM-DD` calendar.
 pub fn is_timestamp_millis(value: i64) -> bool {
     (MIN_TIMESTAMP_MILLIS..=MAX_TIMESTAMP_MILLIS).contains(&value)
 }
 
-/// Decode a native timestamp, integral Unix milliseconds, or an ISO timestamp.
-pub fn timestamp_millis(value: &crate::value::Value) -> Option<i64> {
+/// The microsecond peer of [`is_timestamp_millis`].
+pub fn is_timestamp_micros(value: i64) -> bool {
+    (MIN_TIMESTAMP_MICROS..=MAX_TIMESTAMP_MICROS).contains(&value)
+}
+
+pub(crate) fn is_timestamp_offset_micros(value: i64) -> bool {
+    let span = MAX_TIMESTAMP_MICROS - MIN_TIMESTAMP_MICROS;
+    (-span..=span).contains(&value)
+}
+
+/// The whole milliseconds `micros` names, or `None` when it carries a
+/// sub-millisecond part. A millisecond-resolution backend refuses rather than
+/// floors, so the caller keeps the value it wrote.
+pub fn exact_timestamp_millis(micros: i64) -> Option<i64> {
+    (micros % 1_000 == 0).then_some(micros / 1_000)
+}
+
+/// Decode a native timestamp, an ISO timestamp, or a JSON number.
+///
+/// A number is Unix **milliseconds**: that is the JavaScript and JSON storage
+/// contract. A [`Value::TimestampMicros`](crate::value::Value::TimestampMicros)
+/// is already microseconds.
+pub fn timestamp_micros(value: &crate::value::Value) -> Option<i64> {
     match value {
-        crate::value::Value::String(text) => parse_timestamp_millis(text),
-        _ => value
-            .as_i64()
-            .filter(|value| is_timestamp_millis(*value))
-            .or_else(|| {
-                // Floating-point inputs can still represent integral milliseconds.
-                // The portable domain is exactly representable by both number types.
-                let number = value.as_f64()?;
-                (number.fract() == 0.0
-                    && number >= MIN_TIMESTAMP_MILLIS as f64
-                    && number <= MAX_TIMESTAMP_MILLIS as f64)
-                    .then_some(number as i64)
-            }),
+        crate::value::Value::String(text) => parse_timestamp_micros(text),
+        crate::value::Value::TimestampMicros(micros) => {
+            is_timestamp_micros(*micros).then_some(*micros)
+        }
+        _ => millis_from_number(value)?.checked_mul(1_000),
     }
 }
 
+fn millis_from_number(value: &crate::value::Value) -> Option<i64> {
+    value
+        .as_i64()
+        .filter(|value| is_timestamp_millis(*value))
+        .or_else(|| {
+            // Floating-point inputs can still represent integral milliseconds.
+            // The portable domain is exactly representable by both number types.
+            let number = value.as_f64()?;
+            (number.fract() == 0.0
+                && number >= MIN_TIMESTAMP_MILLIS as f64
+                && number <= MAX_TIMESTAMP_MILLIS as f64)
+                .then_some(number as i64)
+        })
+}
+
 /// Parse a real calendar date and optional time. An omitted zone means UTC.
-/// Fractional seconds are floored to the containing millisecond, including
+/// Fractional seconds are floored to the containing microsecond, including
 /// instants before the Unix epoch.
-pub fn parse_timestamp_millis(value: &str) -> Option<i64> {
+pub fn parse_timestamp_micros(value: &str) -> Option<i64> {
     let bytes = value.as_bytes();
     let days = i64::from(parse_calendar_date(value.get(..10)?)?);
     if bytes.len() == 10 {
-        return Some(days * 86_400_000);
+        return Some(days * 86_400_000_000);
     }
     if bytes.len() < 19
         || !matches!(bytes[10], b'T' | b' ')
@@ -54,13 +95,13 @@ pub fn parse_timestamp_millis(value: &str) -> Option<i64> {
         return None;
     }
     let mut index = 19;
-    let mut millis = 0;
+    let mut micros = 0;
     if bytes.get(index) == Some(&b'.') {
         index += 1;
         let start = index;
-        let mut scale = 100;
+        let mut scale = 100_000;
         while let Some(digit) = bytes.get(index).filter(|digit| digit.is_ascii_digit()) {
-            millis += i64::from(digit - b'0') * scale;
+            micros += i64::from(digit - b'0') * scale;
             scale /= 10;
             index += 1;
         }
@@ -85,9 +126,16 @@ pub fn parse_timestamp_millis(value: &str) -> Option<i64> {
         }
         _ => return None,
     };
-    let result = days * 86_400_000 + i64::from(hour * 3600 + minute * 60 + second) * 1000 + millis
-        - offset * 60_000;
-    is_timestamp_millis(result).then_some(result)
+    let result = days * 86_400_000_000
+        + i64::from(hour * 3600 + minute * 60 + second) * 1_000_000
+        + micros
+        - offset * 60_000_000;
+    is_timestamp_micros(result).then_some(result)
+}
+
+/// Parse an ISO timestamp, flooring to the containing millisecond.
+pub fn parse_timestamp_millis(value: &str) -> Option<i64> {
+    parse_timestamp_micros(value).map(|micros| micros.div_euclid(1_000))
 }
 
 /// Canonical UTC storage text; lexical order matches instant order.
@@ -167,6 +215,84 @@ mod tests {
             format_timestamp_millis(-1).as_deref(),
             Some("1969-12-31T23:59:59.999Z")
         );
+    }
+
+    /// The fraction survives to the microsecond on both sides of the epoch, and
+    /// the millisecond reading of the same text is its floor.
+    #[test]
+    fn timestamp_text_keeps_every_microsecond_of_its_fraction() {
+        for (text, micros) in [
+            ("0001-01-01", MIN_TIMESTAMP_MICROS),
+            ("9999-12-31T23:59:59.999999Z", MAX_TIMESTAMP_MICROS),
+            ("1969-12-31T23:59:59.999999Z", -1),
+            ("1970-01-01T00:00:00.000001Z", 1),
+            ("1999-12-31T23:59:59.999999Z", 946_684_799_999_999),
+            ("2000-01-01T00:00:00.000001Z", 946_684_800_000_001),
+            ("1970-01-01T00:00:00.1z", 100_000),
+        ] {
+            assert_eq!(parse_timestamp_micros(text), Some(micros), "{text}");
+            assert_eq!(
+                parse_timestamp_millis(text),
+                Some(micros.div_euclid(1_000)),
+                "{text}"
+            );
+        }
+        // Digits beyond the microsecond are floored rather than refused, which
+        // keeps a nanosecond-bearing text readable on both sides of the epoch.
+        assert_eq!(
+            parse_timestamp_micros("1969-12-31T23:59:59.999999999Z"),
+            Some(-1)
+        );
+        // Rejection control: one microsecond past either end of the portable
+        // calendar is refused, and so is a text form outside it.
+        for micros in [
+            i64::MIN,
+            MIN_TIMESTAMP_MICROS - 1,
+            MAX_TIMESTAMP_MICROS + 1,
+            i64::MAX,
+        ] {
+            assert!(!is_timestamp_micros(micros), "{micros}");
+        }
+        for text in ["0000-12-31T23:59:59.999999Z", "10000-01-01T00:00:00.000Z"] {
+            assert_eq!(parse_timestamp_micros(text), None, "{text}");
+        }
+    }
+
+    /// A millisecond-resolution backend asks for whole milliseconds and is told
+    /// when the value has none.
+    #[test]
+    fn exact_millisecond_conversion_refuses_a_sub_millisecond_part() {
+        for (micros, millis) in [(0, 0), (1_000, 1), (-1_000, -1), (-2_000, -2)] {
+            assert_eq!(exact_timestamp_millis(micros), Some(millis));
+        }
+        for micros in [1, -1, 999, 1_001, -1_001] {
+            assert_eq!(exact_timestamp_millis(micros), None, "{micros}");
+        }
+    }
+
+    /// A JSON or JavaScript number is milliseconds; a native timestamp is
+    /// already microseconds. Reading both through one function is what keeps a
+    /// factor of a thousand out of the storage codecs.
+    #[test]
+    fn numbers_are_milliseconds_and_native_timestamps_are_microseconds() {
+        use crate::value::Value;
+        assert_eq!(timestamp_micros(&Value::from(5)), Some(5_000));
+        assert_eq!(timestamp_micros(&Value::from(-1)), Some(-1_000));
+        assert_eq!(timestamp_micros(&Value::TimestampMicros(5)), Some(5));
+        assert_eq!(
+            timestamp_micros(&Value::String("1970-01-01T00:00:00.000001Z".into())),
+            Some(1)
+        );
+        // Rejection control: values with no portable instant.
+        for value in [
+            Value::Bool(true),
+            Value::Null,
+            Value::String("private_not_a_timestamp".into()),
+            Value::TimestampMicros(MAX_TIMESTAMP_MICROS + 1),
+            Value::from(MAX_TIMESTAMP_MILLIS + 1),
+        ] {
+            assert_eq!(timestamp_micros(&value), None, "{value:?}");
+        }
     }
 
     #[test]

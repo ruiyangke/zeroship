@@ -226,6 +226,14 @@ pub fn normalise_filter(filter: &Value, schema: &FieldMap) -> Option<Predicate> 
             return None;
         }
         let mask_kind = mask_kind_for_column(schema, key);
+        if is_timestamp_column(schema, key) {
+            // The WAL tuple carries an instant as the backend's own text, and
+            // an ORM filter carries it as a number of milliseconds or as
+            // microseconds. Neither compares with that text, so narrowing on a
+            // timestamp column would silently drop every event for the rows the
+            // subscription actually read. Widen instead.
+            return None;
+        }
         match value {
             // Bare scalar: { col: scalar } → Eq.
             Value::String(_) | Value::Number(_) | Value::Bool(_) => {
@@ -270,11 +278,18 @@ pub fn normalise_filter(filter: &Value, schema: &FieldMap) -> Option<Predicate> 
             Value::Json(_)
             | Value::Array(_)
             | Value::Bytes(_)
-            | Value::Timestamp(_)
+            | Value::TimestampMicros(_)
             | Value::Decimal(_) => return None,
         }
     }
     Some(Predicate::All(conjuncts))
+}
+
+/// Whether the collection declares `column` as an instant.
+fn is_timestamp_column(schema: &FieldMap, column: &str) -> bool {
+    schema.get(column).is_some_and(|definition| {
+        definition.logical_type == crate::schema::LogicalType::Timestamp
+    })
 }
 
 /// The mask kind declared for `column`, or `None` when it is unmasked or opted
@@ -373,6 +388,45 @@ mod tests {
             assert!(!predicate.matches(&row(&[("ssn", "***-**-4321")])));
             assert!(normalise_filter(&value!({"ssn": {"$gt": "123-45-6789"}}), &schema).is_none());
         }
+    }
+
+    /// A declared instant column widens to coarse invalidation. The WAL tuple
+    /// carries the backend's own timestamp text; the filter carries a number of
+    /// milliseconds or a microsecond value, and comparing those as text matches
+    /// nothing, which would stop the subscription firing with no error. Coarse
+    /// over-delivers instead.
+    #[test]
+    fn a_timestamp_column_widens_instead_of_comparing_against_the_row_text() {
+        use crate::schema::CollectionSchema;
+        let schema = CollectionSchema::from_fields(&value!({
+            "userId": {"type":"number"},
+            "createdAt": {"type":"timestamp"}
+        }))
+        .unwrap()
+        .into_fields();
+        // The stored instant carries a microsecond fraction, so neither its
+        // millisecond nor its microsecond reading is the row's text.
+        let event = row(&[("userId", "42"), ("createdAt", "2026-05-07 01:02:03.004123+00")]);
+        for filter in [
+            value!({"createdAt": 1_778_115_723_004_i64}),
+            value!({"createdAt": {"$eq": 1_778_115_723_004_i64}}),
+            value!({"createdAt": {"$gte": 1_778_115_723_004_i64}}),
+            value!({"userId": 42, "createdAt": 1_778_115_723_004_i64}),
+        ] {
+            let entry = ReadSetEntry {
+                collection: "events".into(),
+                predicate: normalise_filter(&filter, &schema),
+            };
+            assert!(entry.predicate.is_none(), "{filter}");
+            assert!(entry.matches(&event), "{filter}");
+        }
+        // Control: the same filter shape on the ordinary column still narrows,
+        // so widening is the timestamp column's own consequence and not a
+        // collapse of the whole normaliser.
+        let narrow = normalise_filter(&value!({"userId": 42}), &schema)
+            .expect("an ordinary column still narrows");
+        assert!(narrow.matches(&event));
+        assert!(!narrow.matches(&row(&[("userId", "43")])));
     }
 
     #[test]

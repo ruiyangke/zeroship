@@ -165,8 +165,14 @@ fn normalize_row_on_read(
 
         match def.logical_type {
             LogicalType::Boolean => normalize_boolean_value(value)?,
-            LogicalType::Json | LogicalType::Object | LogicalType::Array | LogicalType::Union => {
-                prepare_value(key, &schema[key], value).map_err(|_| CodecError::Decode {
+            LogicalType::Array => {
+                prepare_value(key, def, value).map_err(|_| CodecError::Decode {
+                    column: key.clone(),
+                    reason: "invalid array storage",
+                })?;
+            }
+            LogicalType::Json | LogicalType::Object | LogicalType::Union => {
+                prepare_value(key, def, value).map_err(|_| CodecError::Decode {
                     column: key.clone(),
                     reason: "invalid typed JSON storage",
                 })?;
@@ -320,12 +326,12 @@ fn normalize_timestamp_value(field: &str, value: &mut Value) -> Result<(), Codec
     if value.is_null() {
         return Ok(());
     }
-    let millis =
-        crate::sql::temporal::timestamp_millis(value).ok_or_else(|| CodecError::Decode {
+    let micros =
+        crate::sql::temporal::timestamp_micros(value).ok_or_else(|| CodecError::Decode {
             column: field.to_string(),
             reason: "invalid timestamp storage",
         })?;
-    *value = Value::Timestamp(millis);
+    *value = Value::TimestampMicros(micros);
     Ok(())
 }
 
@@ -395,7 +401,7 @@ mod tests {
         assert_eq!(row["active"], Value::Bool(true));
         assert_eq!(row["prefs"], crate::value!({"theme":"dark"}));
         assert_eq!(row["avatar"], Value::Bytes(vec![104, 105]));
-        assert_eq!(row["published_at"], Value::Timestamp(1_778_115_723_004));
+        assert_eq!(row["published_at"], Value::TimestampMicros(1_778_115_723_004_000));
     }
     #[test]
     fn normalize_row_on_read_skips_encrypted_columns() {
@@ -470,7 +476,7 @@ mod tests {
         .unwrap();
         assert_eq!(rows[0]["created_at"], crate::value!("ordinary text"));
         assert_eq!(rows[0]["updated_at"], crate::value!(9));
-        assert_eq!(rows[0]["occurred_at"], Value::Timestamp(1_778_115_723_004));
+        assert_eq!(rows[0]["occurred_at"], Value::TimestampMicros(1_778_115_723_004_000));
         let registration = crate::sql::registration::SqlRegistration::postgres();
         let storage = registration.storage_type(&schema["created_at"]).unwrap();
         assert_eq!(storage, crate::sql::statement::StorageType::Text);
@@ -542,15 +548,23 @@ mod timestamp_tests {
                 crate::sql::registration::SqlRegistration::postgres(),
                 crate::sql::registration::SqlRegistration::sqlite(),
             ] {
-                for value in [
-                    value!(-1),
-                    value!(-1.0),
-                    Value::Timestamp(-1),
-                    value!("1969-12-31T23:59:59.999999Z"),
+                // A JSON number is milliseconds; native and text storage carry
+                // microseconds. Reading them side by side pins which unit each
+                // storage form means.
+                for (value, micros) in [
+                    (value!(-1), -1_000),
+                    (value!(-1.0), -1_000),
+                    (Value::TimestampMicros(-1), -1),
+                    (value!("1969-12-31T23:59:59.999999Z"), -1),
+                    (value!("1969-12-31T23:59:59.999Z"), -1_000),
                 ] {
-                    let mut rows = [value!({"instant":value})];
+                    let mut rows = [value!({"instant":value.clone()})];
                     decode_rows(&registration, &schema, &mut rows).unwrap();
-                    assert_eq!(rows[0]["instant"], Value::Timestamp(-1));
+                    assert_eq!(
+                        rows[0]["instant"],
+                        Value::TimestampMicros(micros),
+                        "{value:?}"
+                    );
                 }
                 for value in [
                     value!("private_invalid_instant"),
@@ -558,7 +572,7 @@ mod timestamp_tests {
                     value!(0.5),
                     value!(true),
                     value!({"secret":"private_invalid_instant"}),
-                    Value::Timestamp(i64::MAX),
+                    Value::TimestampMicros(i64::MAX),
                 ] {
                     let mut rows = [value!({"instant":value})];
                     let error = decode_rows(&registration, &schema, &mut rows).unwrap_err();

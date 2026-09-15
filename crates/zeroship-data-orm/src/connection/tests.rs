@@ -74,6 +74,7 @@ async fn direct_backend_handles_have_stable_distinct_connection_identities() {
         crate::sql::SchemaName::new("app_direct_backend_route").unwrap(),
         first.sql_registration().clone(),
         first.connection_identity(),
+        None,
     );
     assert!(matches!(
         captured.bind(second),
@@ -162,6 +163,7 @@ async fn a_captured_route_refuses_a_replacement_connection_with_the_same_sql_bun
         crate::sql::SchemaName::new("app_route_connection").unwrap(),
         first.sql_registration().clone(),
         first.identity(),
+        None,
     );
     let replacement = second
         .connect(ProjectKeySource::unavailable())

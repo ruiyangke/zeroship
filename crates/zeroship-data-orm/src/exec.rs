@@ -125,7 +125,7 @@ pub async fn exec_query(route: &TxRoute, bq: CompiledQuery) -> Result<Vec<Value>
     let param_refs = &bq.params;
     let rows = run_sql(route, &bq.sql, param_refs).await?;
     // Success arm only: one read op. Unforgeable (emitted by the primitive).
-    emit_db_metric(route.meter(), DB_READS, 1);
+    emit_db_metric(route.usage(), DB_READS, 1);
     Ok(rows)
 }
 
@@ -138,7 +138,7 @@ pub async fn exec_query(route: &TxRoute, bq: CompiledQuery) -> Result<Vec<Value>
 pub async fn exec_count(route: &TxRoute, bq: CompiledQuery) -> Result<i64, DbError> {
     let param_refs = &bq.params;
     let rows = run_sql(route, &bq.sql, param_refs).await?;
-    emit_db_metric(route.meter(), DB_READS, 1);
+    emit_db_metric(route.usage(), DB_READS, 1);
     let count = rows
         .first()
         .and_then(|row| row.get("count"))
@@ -160,8 +160,8 @@ pub async fn exec_mutation(route: &TxRoute, bq: CompiledQuery) -> Result<Vec<Val
     let param_refs = &bq.params;
     let rows = run_sql(route, &bq.sql, param_refs).await?;
     // Success arm only: one write op + the affected/RETURNING row count.
-    emit_db_metric(route.meter(), DB_WRITES, 1);
-    emit_db_metric(route.meter(), DB_ROWS_WRITTEN, rows.len() as u64);
+    emit_db_metric(route.usage(), DB_WRITES, 1);
+    emit_db_metric(route.usage(), DB_ROWS_WRITTEN, rows.len() as u64);
     Ok(rows)
 }
 
@@ -184,15 +184,24 @@ pub async fn exec_mutation_with_emit(
 ) -> Result<Vec<Value>, DbError> {
     crate::descriptor::collection_schema(binding, collection)?;
     let rows = exec_mutation(route, bq).await?;
+    emit_mutation_rows(&rows, route, collection, op);
+    Ok(rows)
+}
+
+pub(crate) fn emit_mutation_rows(
+    rows: &[Value],
+    route: &TxRoute,
+    collection: &str,
+    op: zeroship_data_orm::cdc::ChangeOp,
+) {
     emit_for_rows(
-        &rows,
+        rows,
         route.app_id(),
         route.in_tx(),
         backend_publishes_committed_changes(route.backend()),
         collection,
         op,
     );
-    Ok(rows)
 }
 
 /// Execute a count-only mutation and queue a collection invalidation on success.
@@ -203,9 +212,19 @@ pub async fn exec_mutation_count_with_emit(
     op: zeroship_data_orm::cdc::ChangeOp,
 ) -> Result<u64, DbError> {
     let affected = run_statement(route, &bq.sql, &bq.params).await?;
+    emit_db_metric(route.usage(), DB_WRITES, 1);
+    emit_db_metric(route.usage(), DB_ROWS_WRITTEN, affected);
+    emit_mutation_count(route, collection, op, affected);
+    Ok(affected)
+}
+
+pub(crate) fn emit_mutation_count(
+    route: &TxRoute,
+    collection: &str,
+    op: zeroship_data_orm::cdc::ChangeOp,
+    affected: u64,
+) {
     let app_id = route.app_id();
-    emit_db_metric(route.meter(), DB_WRITES, 1);
-    emit_db_metric(route.meter(), DB_ROWS_WRITTEN, affected);
     if affected != 0
         && !backend_publishes_committed_changes(route.backend())
         && !crate::cdc::broker::is_app_suppressed(app_id)
@@ -221,7 +240,6 @@ pub async fn exec_mutation_count_with_emit(
             std::collections::HashMap::new(),
         );
     }
-    Ok(affected)
 }
 
 /// Does the backend publish committed changes on its own?
@@ -938,7 +956,9 @@ mod tests {
             // engine cannot name it any more.
             let handle = BackendHandle::new(Rc::clone(&backend));
 
-            let admission = crate::transaction::TxAdmission::acquire("app_exec".to_owned()).await;
+            let admission = crate::transaction::TxAdmission::acquire("app_exec".to_owned())
+                .await
+                .expect("the fixture claims a free lane");
             crate::transaction::exec_begin_or_savepoint(
                 false,
                 None,
@@ -1015,16 +1035,54 @@ mod tests {
     }
 
     // -------------------------------------------------------------------
-    // Metering-as-infrastructure — the exec boundary emits a
-    // raw usage metric in the SUCCESS arm, scoped to app_id, and emits
-    // NOTHING on a failed op. Faithful: drives the REAL `exec_query` /
-    // `exec_mutation` / `exec_count` path against a live SqliteBackend with
-    // a `Meter` stamped into the per-isolate context (the same slot
-    // `DbPlugin::register` populates in production).
+    // Usage reporting - the exec boundary reports each successful operation
+    // to the sink its route carries and reports NOTHING for a failed op or
+    // for a route without a sink. Drives the real `exec_query` /
+    // `exec_mutation` / `exec_count` path against a live SqliteBackend.
     // -------------------------------------------------------------------
 
+    /// Collects what the ORM reports, in order.
+    #[derive(Debug, Default)]
+    struct RecordingSink(std::sync::Mutex<Vec<(String, u64)>>);
+
+    impl crate::metrics::UsageSink for RecordingSink {
+        fn record(&self, metric: &str, amount: u64) {
+            self.0
+                .lock()
+                .expect("recording sink")
+                .push((metric.to_owned(), amount));
+        }
+    }
+
+    impl RecordingSink {
+        fn records(&self) -> Vec<(String, u64)> {
+            self.0.lock().expect("recording sink").clone()
+        }
+
+        fn totals(&self) -> std::collections::BTreeMap<String, u64> {
+            let mut totals = std::collections::BTreeMap::new();
+            for (metric, amount) in self.records() {
+                *totals.entry(metric).or_default() += amount;
+            }
+            totals
+        }
+    }
+
+    fn metered_route(
+        app_id: &str,
+        backend: BackendHandle,
+        sink: &std::sync::Arc<RecordingSink>,
+    ) -> TxRoute {
+        crate::tx_route::CapturedRoute::pool_for_tests(app_id, backend.sql_registration().clone())
+            .with_usage_for_tests(std::sync::Arc::clone(sink) as _)
+            .bind(backend)
+            .expect("test route registration matches backend")
+    }
+
+    /// Each route reports to its own sink, and a route without one reports
+    /// nothing whatever its app id is.
     #[test]
-    fn metered_routes_validate_identity_before_execution() {
+    fn usage_reaches_only_the_sink_its_route_carries() {
         use std::sync::Arc;
 
         run(async {
@@ -1036,44 +1094,45 @@ mod tests {
                 )
                 .unwrap(),
             ));
-            let meter = Arc::new(zeroship_metering::Meter::new());
-            crate::metrics::stamp(Some(Arc::clone(&meter)));
-            struct ResetMeter;
-            impl Drop for ResetMeter {
-                fn drop(&mut self) {
-                    crate::metrics::stamp(None);
-                }
-            }
-            let _reset = ResetMeter;
+            let select = || CompiledQuery {
+                sql: "SELECT 1 AS one".to_owned(),
+                params: Vec::new(),
+            };
+            let first = Arc::new(RecordingSink::default());
+            let second = Arc::new(RecordingSink::default());
 
-            for invalid in ["platform", zeroship_core::UserId::mint().as_str()] {
-                let result = crate::tx_route::CapturedRoute::pool_for_tests(
-                    invalid,
-                    backend.sql_registration().clone(),
-                )
-                .bind(backend.clone());
-                let error = result.expect_err("invalid attribution must refuse the route");
-                assert!(matches!(error, DbError::Configuration { code: "invalid_meter_app_id", .. }));
-            }
+            exec_query(
+                &metered_route("app_usage_first", backend.clone(), &first),
+                select(),
+            )
+            .await
+            .expect("metered read");
+            exec_query(
+                &metered_route("app_usage_second", backend.clone(), &second),
+                select(),
+            )
+            .await
+            .expect("second metered read");
+            assert_eq!(first.records(), vec![(DB_READS.to_owned(), 1)]);
+            assert_eq!(second.records(), vec![(DB_READS.to_owned(), 1)]);
 
-            let app = zeroship_core::AppId::mint();
-            let route = ambient_route_for_tests(app.as_str(), backend.clone());
-            crate::metrics::stamp(None);
-            emit_db_metric(route.meter(), DB_READS, 1);
-            assert_eq!(meter.drain()[0].subject.app.as_ref(), Some(&app));
-
+            // Not an app id, and no sink: the route binds and serves the read.
             let unmetered = ambient_route_for_tests("platform", backend);
-            assert!(unmetered.meter().is_none());
+            assert!(unmetered.usage().is_none());
+            exec_query(&unmetered, select())
+                .await
+                .expect("a route without a sink is never refused on attribution");
+            assert_eq!(first.records(), vec![(DB_READS.to_owned(), 1)]);
+            assert_eq!(second.records(), vec![(DB_READS.to_owned(), 1)]);
         });
     }
 
     #[test]
-    fn metering_db_exec_emits_reads_writes_rows_and_skips_failures() {
+    fn usage_counts_reads_writes_rows_and_skips_failures() {
         use std::sync::Arc;
-        reset_world("app_metering_db_exec_emits_reads_writes_rows_and_skips_failures");
+        let app_id = "app_usage_counts";
+        reset_world(app_id);
         run(async {
-            let identity = zeroship_core::AppId::mint();
-            let app_id = identity.as_str();
             let dir = tempfile::tempdir().expect("tempdir");
             let backend = Rc::new(
                 crate::backend_selection::new_sqlite_backend(
@@ -1099,18 +1158,12 @@ mod tests {
                 .await
                 .expect("CREATE TABLE notes");
 
-            // Stamp a real Meter into this thread's metric slot - exactly what
-            // `DbPlugin::register` does in production. The slot is
-            // `crate::metrics`' own thread-local, not the adapter's context;
-            // the two used to be written in one closure, which is the only
-            // reason this line ever looked like an adapter read.
-            let meter = Arc::new(zeroship_metering::Meter::new());
+            let sink = Arc::new(RecordingSink::default());
             let handle = BackendHandle::new(Rc::clone(&backend));
-            crate::metrics::stamp(Some(Arc::clone(&meter)));
 
-            // 1 mutation returning 1 row → db_writes +1, db_rows_written +1.
+            // 1 mutation returning 1 row -> db_writes +1, db_rows_written +1.
             exec_mutation(
-                &ambient_route_for_tests(app_id, handle.clone()),
+                &metered_route(app_id, handle.clone(), &sink),
                 CompiledQuery {
                     sql: format!(
                         r#"INSERT INTO "{app_id}"."notes" (id, title) VALUES (1, 'a') RETURNING *"#
@@ -1121,9 +1174,9 @@ mod tests {
             .await
             .expect("insert");
 
-            // 1 query (read) → db_reads +1.
+            // 1 query (read) -> db_reads +1.
             exec_query(
-                &ambient_route_for_tests(app_id, handle.clone()),
+                &metered_route(app_id, handle.clone(), &sink),
                 CompiledQuery {
                     sql: format!(r#"SELECT title FROM "{app_id}"."notes" WHERE id = 1"#),
                     params: vec![],
@@ -1132,9 +1185,9 @@ mod tests {
             .await
             .expect("select");
 
-            // 1 count (read) → db_reads +1.
+            // 1 count (read) -> db_reads +1.
             exec_count(
-                &ambient_route_for_tests(app_id, handle.clone()),
+                &metered_route(app_id, handle.clone(), &sink),
                 CompiledQuery {
                     sql: format!(r#"SELECT COUNT(*) AS count FROM "{app_id}"."notes""#),
                     params: vec![],
@@ -1143,9 +1196,9 @@ mod tests {
             .await
             .expect("count");
 
-            // A FAILED op (bad SQL) must emit NOTHING.
+            // A FAILED op (bad SQL) must report NOTHING.
             let bad = exec_query(
-                &ambient_route_for_tests(app_id, handle.clone()),
+                &metered_route(app_id, handle.clone(), &sink),
                 CompiledQuery {
                     sql: format!(r#"SELECT nope FROM "{app_id}"."no_such_table""#),
                     params: vec![],
@@ -1162,7 +1215,7 @@ mod tests {
                         ),
                         params: vec![],
                     },
-                    &ambient_route_for_tests(app_id, handle.clone()),
+                    &metered_route(app_id, handle.clone(), &sink),
                     "notes",
                     ChangeOp::Update,
                 )
@@ -1175,45 +1228,30 @@ mod tests {
                     sql: format!(r#"DELETE FROM "{app_id}"."missing""#),
                     params: vec![],
                 },
-                &ambient_route_for_tests(app_id, handle.clone()),
+                &metered_route(app_id, handle.clone(), &sink),
                 "missing",
                 ChangeOp::Delete,
             )
             .await
             .is_err());
 
-            let events = meter.drain();
-            let id = zeroship_core::app_id::AppId::parse(app_id).unwrap();
             assert_eq!(
-                usage_value(&events, &id, "db_writes"),
-                Some(3),
-                "successful mutation statements are metered: {events:?}"
+                sink.totals(),
+                std::collections::BTreeMap::from([
+                    (DB_READS.to_owned(), 2),
+                    (DB_ROWS_WRITTEN.to_owned(), 2),
+                    (DB_WRITES.to_owned(), 3),
+                ]),
+                "one query + one count read, three successful mutation statements, and \
+                 their returned or affected rows; the failed statements report nothing"
             );
-            assert_eq!(
-                usage_value(&events, &id, "db_rows_written"),
-                Some(2),
-                "returned and affected rows are metered: {events:?}"
+            assert!(
+                sink.records().iter().all(|(_, amount)| *amount != 0),
+                "an update matching no row reports no rows: {:?}",
+                sink.records()
             );
-            assert_eq!(
-                usage_value(&events, &id, "db_reads"),
-                Some(2),
-                "one query + one count = 2 db_reads (the FAILED query did NOT bill); got {events:?}"
-            );
-
-            crate::metrics::stamp(None);
         });
-        reset_world("app_metering_db_exec_emits_reads_writes_rows_and_skips_failures");
-    }
-
-    fn usage_value(
-        events: &[zeroship_core::usage_event::UsageEvent],
-        app_id: &zeroship_core::app_id::AppId,
-        meter: &str,
-    ) -> Option<u64> {
-        events
-            .iter()
-            .find(|event| event.subject.app.as_ref() == Some(app_id) && event.meter == meter)
-            .map(|event| event.value)
+        reset_world(app_id);
     }
 
     // -------------------------------------------------------------------
@@ -1344,8 +1382,9 @@ mod tests {
             // engine cannot name it any more.
             let handle = BackendHandle::new(Rc::clone(&backend));
 
-            let admission =
-                crate::transaction::TxAdmission::acquire("app_exec_cancel".to_owned()).await;
+            let admission = crate::transaction::TxAdmission::acquire("app_exec_cancel".to_owned())
+                .await
+                .expect("the fixture claims a free lane");
             crate::transaction::exec_begin_or_savepoint(
                 false,
                 None,

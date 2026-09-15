@@ -75,15 +75,20 @@ pub fn encode<'s>(
                         v8::Number::new(scope, value.as_f64().ok_or_else(allocation_error)?).into()
                     }
                 }
-                Value::Timestamp(value) => {
-                    if !zeroship_data_orm::sql::temporal::is_timestamp_millis(value) {
+                // JavaScript keeps its millisecond contract. A microsecond
+                // value floors toward negative infinity, so the result stays
+                // chronological before the epoch as well as after it. The
+                // remainder is lost here by design: a JavaScript caller that
+                // filters a PostgreSQL instant by equality still misses.
+                Value::TimestampMicros(value) => {
+                    if !zeroship_data_orm::sql::temporal::is_timestamp_micros(value) {
                         return Err(OpError::error("invalid timestamp value"));
                     }
                     #[expect(
                         clippy::cast_precision_loss,
                         reason = "Portable timestamps fit JavaScript's exact integer range"
                     )]
-                    let millis = value as f64;
+                    let millis = value.div_euclid(1_000) as f64;
                     v8::Number::new(scope, millis).into()
                 }
                 Value::String(value) | Value::Decimal(value) => v8::String::new(scope, &value)
@@ -127,24 +132,63 @@ mod tests {
 
     #[test]
     fn timestamp_results_preserve_the_portable_domain() {
-        use zeroship_data_orm::sql::temporal::{MAX_TIMESTAMP_MILLIS, MIN_TIMESTAMP_MILLIS};
+        use zeroship_data_orm::sql::temporal::{MAX_TIMESTAMP_MICROS, MIN_TIMESTAMP_MICROS};
         zeroship_runtime::init_v8();
         let mut isolate = v8::Isolate::new(v8::CreateParams::default());
         v8::scope!(let handles, &mut isolate);
         let context = v8::Context::new(handles, Default::default());
         let scope = &mut v8::ContextScope::new(handles, context);
-        for millis in [MIN_TIMESTAMP_MILLIS, -1, 0, MAX_TIMESTAMP_MILLIS] {
-            let result = encode(scope, Value::Timestamp(millis)).unwrap();
-            assert_eq!(result.to_rust_string_lossy(scope), millis.to_string());
+        for micros in [MIN_TIMESTAMP_MICROS, -1_000, 0, MAX_TIMESTAMP_MICROS] {
+            let result = encode(scope, Value::TimestampMicros(micros)).unwrap();
+            assert_eq!(
+                result.to_rust_string_lossy(scope),
+                micros.div_euclid(1_000).to_string()
+            );
         }
-        for millis in [
+        for micros in [
             i64::MIN,
-            MIN_TIMESTAMP_MILLIS - 1,
-            MAX_TIMESTAMP_MILLIS + 1,
+            MIN_TIMESTAMP_MICROS - 1,
+            MAX_TIMESTAMP_MICROS + 1,
             i64::MAX,
         ] {
-            let error = encode(scope, Value::Timestamp(millis)).unwrap_err();
+            let error = encode(scope, Value::TimestampMicros(micros)).unwrap_err();
             assert_eq!(error.message, "invalid timestamp value");
+        }
+    }
+
+    /// The JavaScript boundary is milliseconds in both directions. Outbound it
+    /// floors toward negative infinity; inbound a JavaScript number is scaled
+    /// by a thousand on its way into a timestamp column.
+    #[test]
+    fn v8_timestamp_boundary_floors_toward_negative_infinity() {
+        use zeroship_data_orm::sql::temporal::timestamp_micros;
+        zeroship_runtime::init_v8();
+        let mut isolate = v8::Isolate::new(v8::CreateParams::default());
+        v8::scope!(let handles, &mut isolate);
+        let context = v8::Context::new(handles, Default::default());
+        let scope = &mut v8::ContextScope::new(handles, context);
+        for (micros, millis) in [
+            (-1_i64, -1_i64),
+            (-1_000, -1),
+            (-1_001, -2),
+            (1_999, 1),
+            (1, 0),
+        ] {
+            let result = encode(scope, Value::TimestampMicros(micros)).unwrap();
+            assert_eq!(
+                result.to_rust_string_lossy(scope),
+                millis.to_string(),
+                "{micros}"
+            );
+        }
+        assert_eq!(timestamp_micros(&Value::from(5)), Some(5_000));
+        assert_eq!(timestamp_micros(&Value::from(-1)), Some(-1_000));
+        // Control: an exact millisecond multiple crosses unchanged in both
+        // directions, so the floor is visible only on the sub-millisecond part.
+        for millis in [-2_i64, -1, 0, 1, 2] {
+            let result = encode(scope, Value::TimestampMicros(millis * 1_000)).unwrap();
+            assert_eq!(result.to_rust_string_lossy(scope), millis.to_string());
+            assert_eq!(timestamp_micros(&Value::from(millis)), Some(millis * 1_000));
         }
     }
 

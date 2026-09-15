@@ -29,9 +29,6 @@ help: the following other types implement trait `EncodeValue<S>`
   | |     BigInt, i64, i8, i16, i32, i64, u8, u16, u32, u64, isize, usize
   | | );
   | |_- in this macro invocation
-...
-  |   impl EncodeValue<Timestamp> for i64 {
-  |   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `i64` implements `EncodeValue<zeroship_data_orm::orm::sql_types::Timestamp>`
 note: required by a bound in `zeroship_data_orm::orm::Field::<C>::in_values`
  --> src/orm/model.rs
   |
