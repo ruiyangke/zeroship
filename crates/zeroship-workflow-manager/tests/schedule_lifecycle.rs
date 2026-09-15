@@ -491,6 +491,7 @@ async fn eligibility(fixture: &Fixture) {
             page_limit: 1,
             ..DriverOptions::default()
         },
+        std::rc::Rc::new(zeroship_workflow_manager::lifecycle::Undeletable),
     )
     .unwrap();
     let report = driver.tick().await;

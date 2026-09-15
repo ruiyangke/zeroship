@@ -15,6 +15,10 @@ pub enum WorkflowServiceError {
     PayloadTooLarge,
     Unavailable(String),
     Timeout,
+    /// Ingress acceptance needs an open manager epoch above the carried one.
+    /// Retry after establishing it; `None` means no epoch was held and the
+    /// journal has closed none. It is never a durable customer refusal.
+    IngressFenced(Option<zeroship_core::workflow_coordination::Revision>),
     Internal(String),
 }
 
@@ -31,6 +35,7 @@ impl WorkflowServiceError {
             Self::PayloadTooLarge => "workflow_payload_too_large",
             Self::Unavailable(_) => "workflow_unavailable",
             Self::Timeout => "workflow_timeout",
+            Self::IngressFenced(_) => "workflow_ingress_fenced",
             Self::Internal(_) => "workflow_internal_error",
         }
     }
@@ -49,6 +54,9 @@ impl std::fmt::Display for WorkflowServiceError {
             Self::PermissionDenied => f.write_str("workflow operation is not permitted"),
             Self::PayloadTooLarge => f.write_str("workflow payload exceeds the configured limit"),
             Self::Timeout => f.write_str("workflow operation timed out"),
+            Self::IngressFenced(_) => {
+                f.write_str("workflow ingress requires a newer recovery epoch")
+            }
         }
     }
 }

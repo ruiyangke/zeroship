@@ -142,19 +142,23 @@ fn delivery_selector(worker: &WorkerId, delivery: &Delivery) -> Result<VerifyAss
     })
 }
 
+/// Workers publish only creator intents. Activation, calendar, management,
+/// closure and maintenance jobs are manager-origin, so a worker can neither
+/// forge closure evidence nor postpone closing with self-published duties.
 const fn worker_operation(operation: &JobOperation) -> Result<(), Error> {
     match operation {
-        JobOperation::Advance { .. }
-        | JobOperation::Fanout { .. }
-        | JobOperation::Propagate { .. }
-        | JobOperation::Reconcile {}
-        | JobOperation::Collect {} => Ok(()),
-        // Retention decisions belong to the manager. A worker that could publish
-        // a release would be asking itself to give code back.
+        JobOperation::Advance { .. } | JobOperation::Fanout { .. } | JobOperation::Propagate { .. } => {
+            Ok(())
+        }
+        // A worker that could publish a release would be asking itself to give
+        // code back, so retention stays the manager's decision.
         JobOperation::Activate { .. }
         | JobOperation::Cron { .. }
         | JobOperation::ReleaseHold { .. }
-        | JobOperation::Management { .. } => Err(Error::Denied),
+        | JobOperation::Management { .. }
+        | JobOperation::Close { .. }
+        | JobOperation::Reconcile {}
+        | JobOperation::Collect {} => Err(Error::Denied),
     }
 }
 

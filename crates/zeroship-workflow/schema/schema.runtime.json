@@ -189,6 +189,18 @@
           "storage": {
             "valueColumn": "signal_sequence"
           }
+        },
+        "closed_epoch": {
+          "type": "bigInt",
+          "required": true,
+          "default": 0,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "closed_epoch"
+          }
         }
       },
       "options": {

@@ -32,6 +32,7 @@ pub struct WorkflowService {
     pub(crate) deployments: Option<super::AppDeployments>,
     pub(crate) signal_authority: Option<Arc<super::SignalAuthority>>,
     pub(crate) payload_storage: Option<zeroship_storage::Storage>,
+    ingress: Option<Rc<dyn super::IngressEpochs>>,
 }
 impl std::fmt::Debug for WorkflowService {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -66,6 +67,7 @@ impl WorkflowService {
             deployments: None,
             signal_authority: None,
             payload_storage: None,
+            ingress: None,
         })
     }
     #[must_use]
@@ -226,16 +228,60 @@ impl AppWorkflows {
         &self.app
     }
 
+    /// Establish ingress epochs through the host's policy binding for this app.
+    /// A fenced acceptance then obtains a newer epoch and retries once.
+    #[must_use]
+    pub fn with_ingress(mut self, epochs: Rc<dyn super::IngressEpochs>) -> Self {
+        self.service.ingress = Some(epochs);
+        self
+    }
+
+    /// Run one creator ingress acceptance. When the journal refuses it because
+    /// it closed the captured ingress epoch, establish a newer epoch through
+    /// the host and retry once, capturing the binding's newly installed
+    /// authority under the same request identity. The refused attempt
+    /// committed nothing.
+    #[expect(
+        clippy::future_not_send,
+        reason = "acceptance retries on the creator transaction's owning thread"
+    )]
+    pub(super) async fn accept<'a, T>(
+        &'a self,
+        attempt: impl Fn(Self) -> futures::future::LocalBoxFuture<'a, Result<T, WorkflowServiceError>>,
+    ) -> Result<T, WorkflowServiceError> {
+        let result = match (attempt(self.clone()).await, &self.service.ingress) {
+            (Err(WorkflowServiceError::IngressFenced(after)), Some(epochs)) => {
+                epochs.establish(after).await?;
+                let mut fresh = self.clone();
+                fresh.service.operation_policy = None;
+                attempt(fresh).await
+            }
+            (result, _) => result,
+        };
+        if result.is_ok() {
+            if let Some(epochs) = &self.service.ingress {
+                epochs.accepted();
+            }
+        }
+        result
+    }
+
     pub async fn start(
         &self,
         request_id: &RequestId,
         name: &str,
         options: StartOptions,
     ) -> Result<StartedRun, WorkflowServiceError> {
-        let captured = self.capture_policy();
-        captured
-            .run(self.start_captured(request_id, name, options, &captured))
-            .await
+        self.accept(|scope| {
+            let options = options.clone();
+            Box::pin(async move {
+                let captured = scope.capture_policy();
+                captured
+                    .run(scope.start_captured(request_id, name, options, &captured))
+                    .await
+            })
+        })
+        .await
     }
 
     async fn start_captured(
@@ -258,6 +304,7 @@ impl AppWorkflows {
         let policy = &captured.authority()?.policy;
         admit(policy)?;
         captured.check()?;
+        require_open_epoch(&tx, &self.app, captured).await?;
         if encode(&options.input)?.len() > policy.max_input_bytes {
             return Err(WorkflowServiceError::PayloadTooLarge);
         }
@@ -353,37 +400,54 @@ impl AppWorkflows {
         run_id: &str,
         options: SignalOptions,
     ) -> Result<DeliveredSignal, WorkflowServiceError> {
-        let captured = self.capture_policy();
-        captured
-            .run(async {
-                validate_run(run_id)?;
-                validation::signal_type(&options.signal_type)?;
-                let digest = digest(&(run_id, &options))?;
-                let mut tx = self.service.begin().await?;
-                lock_app_state(&mut tx, &self.app).await?;
-                let now = tx.now().await?;
-                if let Some(receipt) =
-                    request_result(&tx, &self.app, request_id, "signal", &digest).await?
-                {
-                    return Ok(receipt);
-                }
-                captured.check()?;
-                let policy = &captured.authority()?.policy;
-                if encode(&options.payload)?.len() > policy.max_input_bytes {
-                    return Err(WorkflowServiceError::PayloadTooLarge);
-                }
-                let result =
-                    super::signals::deliver(&mut tx, &self.app, run_id, &options, "app", now)
-                        .await?;
-                store_request(
-                    &mut tx, &self.app, request_id, "signal", &digest, &result, now,
-                )
-                .await?;
-                captured.check()?;
-                tx.commit().await?;
-                Ok(result)
+        self.accept(|scope| {
+            let options = options.clone();
+            Box::pin(async move {
+                let captured = scope.capture_policy();
+                captured
+                    .run(scope.signal_captured(request_id, run_id, &options, &captured))
+                    .await
             })
-            .await
+        })
+        .await
+    }
+
+    #[expect(
+        clippy::future_not_send,
+        reason = "signal acceptance stays on the creator transaction's owning thread"
+    )]
+    async fn signal_captured(
+        &self,
+        request_id: &RequestId,
+        run_id: &str,
+        options: &SignalOptions,
+        captured: &CapturedPolicy,
+    ) -> Result<DeliveredSignal, WorkflowServiceError> {
+        validate_run(run_id)?;
+        validation::signal_type(&options.signal_type)?;
+        let digest = digest(&(run_id, options))?;
+        let mut tx = self.service.begin().await?;
+        lock_app_state(&mut tx, &self.app).await?;
+        let now = tx.now().await?;
+        if let Some(receipt) = request_result(&tx, &self.app, request_id, "signal", &digest).await?
+        {
+            return Ok(receipt);
+        }
+        captured.check()?;
+        require_open_epoch(&tx, &self.app, captured).await?;
+        let policy = &captured.authority()?.policy;
+        if encode(&options.payload)?.len() > policy.max_input_bytes {
+            return Err(WorkflowServiceError::PayloadTooLarge);
+        }
+        let result =
+            super::signals::deliver(&mut tx, &self.app, run_id, options, "app", now).await?;
+        store_request(
+            &mut tx, &self.app, request_id, "signal", &digest, &result, now,
+        )
+        .await?;
+        captured.check()?;
+        tx.commit().await?;
+        Ok(result)
     }
 }
 
@@ -510,6 +574,63 @@ pub(super) async fn lock_app_state(
         return Err(not_found("workflow app"));
     }
     Ok(())
+}
+
+/// The journal's highest fenced ingress epoch. Read it under the app state lock.
+#[expect(
+    clippy::future_not_send,
+    reason = "journal reads use the creator transaction thread"
+)]
+pub(super) async fn closed_epoch(
+    tx: &Transaction,
+    app: &AppId,
+) -> Result<i64, WorkflowServiceError> {
+    let row = tx
+        .database()
+        .entity::<models::app_state::Entity>()?
+        .find::<models::ClosedEpoch>(
+            models::app_state::app_id.eq(app.as_str())?,
+            FindOptions {
+                limit: Some(1),
+                ..Default::default()
+            },
+        )
+        .await?
+        .into_iter()
+        .next()
+        .ok_or_else(|| not_found("workflow app"))?;
+    if row.closed_epoch < 0 {
+        return Err(WorkflowServiceError::Internal(
+            "invalid workflow closed epoch".into(),
+        ));
+    }
+    Ok(row.closed_epoch)
+}
+
+/// Ingress acceptance fence. The caller holds [`lock_app_state`], which a
+/// delivered Close also takes before raising the closed epoch, so acceptance and
+/// closure serialize in both orders. Acceptance needs the epoch captured with
+/// its policy and that epoch must still be open in this journal.
+#[expect(
+    clippy::future_not_send,
+    reason = "the fence reads the creator transaction on its owning thread"
+)]
+pub(super) async fn require_open_epoch(
+    tx: &Transaction,
+    app: &AppId,
+    captured: &CapturedPolicy,
+) -> Result<(), WorkflowServiceError> {
+    let closed = closed_epoch(tx, app).await?;
+    let held = captured.authority()?.ingress_epoch;
+    if held.is_some_and(|epoch| epoch.get() > closed) {
+        return Ok(());
+    }
+    // Name the epoch the host must exceed: the one it holds, or the journal's
+    // closed epoch when that is newer or when it holds none.
+    let refused = held.map_or(closed, |epoch| epoch.get().max(closed));
+    Err(WorkflowServiceError::IngressFenced(
+        zeroship_core::workflow_coordination::Revision::try_from(refused).ok(),
+    ))
 }
 
 pub(crate) async fn lock_run(

@@ -169,6 +169,8 @@ impl WorkerCoordinator {
     }
 }
 
+/// Workers publish only creator intents. Activation, calendar, management,
+/// closure and maintenance jobs are manager-origin.
 const fn worker_publication(job: &JobSpec) -> Result<(), Error> {
     match job.operation {
         // Retention decisions are the manager's; a worker never asks for a
@@ -176,12 +178,13 @@ const fn worker_publication(job: &JobSpec) -> Result<(), Error> {
         JobOperation::Activate { .. }
         | JobOperation::Cron { .. }
         | JobOperation::ReleaseHold { .. }
-        | JobOperation::Management { .. } => Err(denied()),
+        | JobOperation::Management { .. }
+        | JobOperation::Close { .. }
+        | JobOperation::Reconcile {}
+        | JobOperation::Collect {} => Err(denied()),
         JobOperation::Advance { .. }
         | JobOperation::Fanout { .. }
-        | JobOperation::Propagate { .. }
-        | JobOperation::Reconcile {}
-        | JobOperation::Collect {} => Ok(()),
+        | JobOperation::Propagate { .. } => Ok(()),
     }
 }
 

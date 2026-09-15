@@ -583,7 +583,9 @@ impl Queue {
         let resolved = match outcome {
             JobOutcome::Completed {} => JOURNAL_RELEASED,
             JobOutcome::Waiting {} | JobOutcome::Rejected {} => JOURNAL_PENDING,
-            JobOutcome::Management { .. } => return Err(Error::Storage),
+            JobOutcome::Management { .. } | JobOutcome::Closed { .. } => {
+                return Err(Error::Storage)
+            }
         };
         changed_once(
             tx.entity::<holds::Entity>()?

@@ -16,6 +16,7 @@ mod authority;
 pub(in crate::service::tests) mod fixture;
 mod pages;
 mod references;
+mod retirement;
 mod rollback;
 use fixture::*;
 
@@ -86,6 +87,21 @@ paired!(
     sqlite_collect_tombstone_resweeps_late_upload_without_reopening_promotion,
     postgres_collect_tombstone_resweeps_late_upload_without_reopening_promotion,
     references::late_upload
+);
+paired!(
+    sqlite_collect_racing_resweeps_leave_one_final_tombstone,
+    postgres_collect_racing_resweeps_leave_one_final_tombstone,
+    retirement::concurrent_resweep
+);
+paired!(
+    sqlite_collect_final_tombstone_leaves_the_payload_quota,
+    postgres_collect_final_tombstone_leaves_the_payload_quota,
+    retirement::quota
+);
+paired!(
+    sqlite_collect_final_tombstone_lets_the_app_retire,
+    postgres_collect_final_tombstone_lets_the_app_retire,
+    retirement::retirement
 );
 paired!(
     sqlite_collect_lost_delete_reply_recovers_in_later_duty,
