@@ -418,10 +418,34 @@ impl Platform {
             ledger[0].1.clone(),
         )
     }
+
+    /// The manager's journal release duty for `deployment`.
+    fn journal_duty(&self, deployment: &str) -> String {
+        let intent = self.rows(
+            &self.manager,
+            "deployment_holds",
+            &value!({"app_id":self.app.as_str(),"deployment_id":deployment}),
+        );
+        assert_eq!(intent.len(), 1);
+        intent[0]["journal_state"].as_str().unwrap().to_owned()
+    }
+
+    /// Whether the collector's fence commits for `deployment`, which it does
+    /// only once every holder class gave the deployment back. A committed fence
+    /// is what authorizes deleting the manifest, so this is not a probe.
+    fn reclaim(&self, deployment: &str) -> Result<String, deployments::Error> {
+        self.runtime.block_on(async {
+            deployments::fence_reclamation(&self.catalog, &self.app, deployment).await
+        })
+    }
 }
 
 #[test]
-fn republished_bundle_releases_the_superseded_queue_hold() {
+#[expect(
+    clippy::too_many_lines,
+    reason = "one host lifetime carries both holder classes to reclamation"
+)]
+fn republished_bundle_releases_both_deployment_holders() {
     let root = tempfile::tempdir().unwrap();
     // The signal wait's timeout job outlives the signal, so a short timeout
     // lets every job pinned to the original deployment settle within the test.
@@ -468,15 +492,56 @@ fn republished_bundle_releases_the_superseded_queue_hold() {
         std::thread::sleep(Duration::from_millis(50));
     }
     assert_eq!(platform.queue_hold(&replacement), held);
-    // The queue no longer retains the superseded code; only the creator
-    // journal's own holder can, under its separate release contract.
+    // The journal holder answers its own release job, and refuses: the run's
+    // retained generation still needs the original deployment's code.
     let journal = HoldScope::for_app(local_dev_app_id());
-    for (holder, state) in platform.holders(&original) {
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while platform.journal_duty(&original) == "pending" {
         assert!(
-            state == "released" || holder == journal.holder(),
-            "{holder} still holds the superseded deployment"
+            Instant::now() < deadline,
+            "no journal release was asked for: {}",
+            std::fs::read_to_string(host.log.path()).unwrap()
         );
+        std::thread::sleep(Duration::from_millis(50));
     }
+    assert_eq!(
+        platform
+            .holders(&original)
+            .into_iter()
+            .find(|(holder, _)| *holder == journal.holder())
+            .map(|(_, state)| state),
+        Some("held".into())
+    );
+    assert!(matches!(
+        platform.reclaim(&original),
+        Err(deployments::Error::Conflict(_))
+    ));
+    drop(host);
+
+    // A third bundle supersedes the replacement, which no run ever used. Both
+    // holder classes give it back, and the collector's fence then commits.
+    compile(root.path(), "final", "2s");
+    let host = Host::launch(root.path(), None, false, Some(&config));
+    let deadline = Instant::now() + Duration::from_secs(90);
+    while platform
+        .holders(&replacement)
+        .iter()
+        .any(|(_, state)| state != "released")
+    {
+        assert!(
+            Instant::now() < deadline,
+            "the replacement stayed held: {}",
+            std::fs::read_to_string(host.log.path()).unwrap()
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert_eq!(platform.queue_hold(&replacement), released);
+    assert_eq!(platform.journal_duty(&replacement), "released");
+    assert!(platform.reclaim(&replacement).is_ok());
+    assert!(matches!(
+        platform.reclaim(&original),
+        Err(deployments::Error::Conflict(_))
+    ));
     drop(host);
 }
 
