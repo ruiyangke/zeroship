@@ -218,12 +218,8 @@ impl Record {
                     && self.reconciliation.is_some()
                     && self.reconciliation_next.is_some()
             }
-            JobOperation::Management { .. } => {
-                self.run_id.is_none()
-                    && self.reconciliation.is_none()
-                    && self.reconciliation_next.is_none()
-            }
-            JobOperation::Collect {}
+            JobOperation::Management { .. }
+            | JobOperation::Collect {}
             | JobOperation::Close { .. }
             | JobOperation::Fanout { .. }
             | JobOperation::Propagate { .. } => {

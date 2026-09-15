@@ -85,16 +85,16 @@ pub struct WorkflowSettings {
     #[config(name = "workflow.driver_lane_timeout_ms", default = 10000)]
     pub driver_lane_timeout_ms: Operational<u64>,
     /// Inactivity after which an app's recovery responsibility may close.
-    #[config(name = "workflow.closing_idle_ms", default = 900000)]
+    #[config(name = "workflow.closing_idle_ms", default = 900_000)]
     pub closing_idle_ms: Operational<u64>,
     /// Bound on a closing attempt's delivery before responsibility reopens.
-    #[config(name = "workflow.closing_timeout_ms", default = 300000)]
+    #[config(name = "workflow.closing_timeout_ms", default = 300_000)]
     pub closing_timeout_ms: Operational<u64>,
     /// Delay before retrying a closing attempt that did not retire; it doubles per attempt.
     #[config(name = "workflow.closing_backoff_ms", default = 60000)]
     pub closing_backoff_ms: Operational<u64>,
     /// Ceiling of the doubling closing backoff.
-    #[config(name = "workflow.closing_backoff_max_ms", default = 3600000)]
+    #[config(name = "workflow.closing_backoff_max_ms", default = 3_600_000)]
     pub closing_backoff_max_ms: Operational<u64>,
     /// Platform coordination metadata login; no customer database credentials.
     #[config(name = "workflow.database_url")]

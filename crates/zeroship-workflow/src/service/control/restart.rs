@@ -386,7 +386,7 @@ async fn require_journal_hold(
 impl RestartPlan<'_> {
     /// The app-locked transaction the plan applies in, for checks that must
     /// run under the same lock before application.
-    pub(in crate::service) fn transaction(&self) -> &Transaction {
+    pub(in crate::service) const fn transaction(&self) -> &Transaction {
         self.context.tx
     }
 

@@ -62,6 +62,10 @@ impl AppWorkflows {
         .await
     }
 
+    #[expect(
+        clippy::future_not_send,
+        reason = "broadcast acceptance stays on the creator transaction's owning thread"
+    )]
     async fn broadcast_captured(
         &self,
         request: &RequestId,

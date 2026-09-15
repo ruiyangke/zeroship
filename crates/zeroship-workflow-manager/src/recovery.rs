@@ -56,10 +56,12 @@ impl DutyKind {
     }
 }
 
-/// Where a scope's responsibility stands. Only an open scope dispatches its
-/// periodic duties. A retired scope has none until an establishment, an
-/// intent-producing claim, a worker publication or an activation reopens it.
-/// An abandoned scope belongs to an app Control deleted and never reopens.
+/// Where a scope's responsibility stands.
+///
+/// Only an open scope dispatches its periodic duties. A retired scope has none
+/// until an establishment, an intent-producing claim, a worker publication or
+/// an activation reopens it. An abandoned scope belongs to an app Control
+/// deleted and never reopens.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScopeState {
     Open,
@@ -554,7 +556,7 @@ impl Recovery {
                     return Ok(false);
                 }
                 let now = self.queue.clock.now().await?;
-                self.expire_in(&tx, app, &current, now).await
+                Box::pin(self.expire_in(&tx, app, &current, now)).await
             })
             .await
     }
@@ -578,7 +580,7 @@ impl Recovery {
                 match current.state {
                     ScopeState::Retired | ScopeState::Abandoned => Ok(Closing::Inactive),
                     ScopeState::Closing => {
-                        if self.expire_in(&tx, app, &current, now).await? {
+                        if Box::pin(self.expire_in(&tx, app, &current, now)).await? {
                             Ok(Closing::Expired)
                         } else {
                             Ok(Closing::Pending(

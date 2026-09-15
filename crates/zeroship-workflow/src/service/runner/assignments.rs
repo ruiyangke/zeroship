@@ -402,14 +402,13 @@ impl<F: CreatorFactory> AssignmentBindings<F> {
         }
         let binding = entry.policies.binding();
         let authority = binding.authority()?;
-        let runtime = match runtime {
-            Some(runtime) => runtime,
-            None => {
-                let ingress: Rc<dyn IngressEpochs> = Rc::new(entry.policies.clone());
-                authority
-                    .run(self.factory.open(entry.policies.scope(), binding, ingress))
-                    .await?
-            }
+        let runtime = if let Some(runtime) = runtime {
+            runtime
+        } else {
+            let ingress: Rc<dyn IngressEpochs> = Rc::new(entry.policies.clone());
+            authority
+                .run(self.factory.open(entry.policies.scope(), binding, ingress))
+                .await?
         };
         if runtime.app.app_id() != binding.app_id() || !runtime.app.binding.same_binding(binding) {
             return Err(WorkflowServiceError::PermissionDenied);
