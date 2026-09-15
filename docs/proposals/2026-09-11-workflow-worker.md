@@ -2751,13 +2751,10 @@ identity, and `ReadyApps::retire` withdraws a generation only while it is still
 the published one, so a retired generation cannot withdraw its replacement.
 Removal closes admission synchronously; previously cloned handles retain their
 retired generation. An unknown or unready app receives a retryable refusal. It
-cannot acquire an ambient policy binding or fall back to the old Control
-workflow backend, which no request isolate can reach any more. The
-Control-driven advance path keeps it, because a workflow it replays reads its
-own run - a step output staged as a blob, above all - through `env.workflows`,
-and Control is the engine holding that run; the two isolate kinds therefore
-take different plugin sets, and the shared control key lives only in the replay
-one. Slice 6 deletes that path and the key with it. Preparation takes the
+cannot acquire an ambient policy binding, and there is no Control workflow
+backend left to fall back to: slice 6 deleted the replay path, its plugin set
+and the shared control key it ran under, so the worker builds ONE plugin set
+and every isolate resolves the ready registry. Preparation takes the
 placement's policy lease at a single point ahead of that publication, and that
 point is the one place
 [ingress epoch](#ingress-epochs-and-scope-retirement) establishment attaches
@@ -2820,15 +2817,14 @@ deployment catalog and manager schemas together and refuses any other stored DDL
 including a deployment-only catalog. This adds no deployable service or
 workflow-only database or bundle switch.
 
-The production cutover changes creator request bindings and consumer startup
-together with removal of the old claim/provision/advance path. Worker database
-posture currently requires Control catalog reads and workflow-owner membership;
-those checks and their canonical grants must disappear with their callers.
-Control must likewise lose creator-journal access, and the Control/Gateway
-advance transport must disappear. The decisive process contract uses isolated
-creator and Control databases, ordinary app ingress, manager delivery, revocation
-of retained request handles and joined shutdown. Native library availability
-alone does not prove this boundary.
+The production cutover landed. Worker database posture no longer asks for
+Control catalog reads or workflow-owner membership: it refuses a login that can
+reach the platform schema at all, and the grants those checks stood on are
+gone with their callers. Control holds no creator-journal access and the
+Control/Gateway advance transport is deleted. The decisive process contract
+uses isolated creator and Control databases, ordinary app ingress, manager
+delivery, revocation of retained request handles and joined shutdown. Native
+library availability alone does not prove this boundary.
 
 ### Service operation inventory
 
@@ -3702,13 +3698,20 @@ is the merge order.
    fleets run a manager and pass on their deployed tier, which is the proof
    this slice exists to deliver. A provider that starts real processes waits
    for the production orchestrator.
-6. **Atomic legacy removal and private-zone proof.** One change deletes worker
-   claim, provisioning and advance paths, Control and gateway advancement,
-   Control's creator-journal access, the cross-zone grants and posture checks,
-   and the runtime workflow bridge entry once no executor uses it. The decisive
-   process contract runs separate creator and Control PostgreSQL containers,
-   ordinary app ingress, manager delivery, revocation of retained handles and
-   joined shutdown, and both examples' deployed tier run through it.
+6. **Atomic legacy removal and private-zone proof (implemented).** One change
+   deleted the worker's claim, provisioning and advance paths, Control's
+   workflow advancement and the gateway's advance and signal-ingress edges,
+   Control's creator-journal access and its scheduler store, the cross-zone
+   grants, and the worker's platform-catalog reach. The runtime workflow
+   bridge entry STAYS: `zeroship-workflow-v8`'s task executor is a live second
+   caller of `Runtime::call_workflow_dispatch`, so the condition that would have
+   retired it is not met. The worker's boot posture now refuses a login that can
+   reach the platform schema at all, which is the privilege half of the zone
+   split. Proof: the fleet runs a platform PostgreSQL and a creator PostgreSQL,
+   and the process contract starts a run through ordinary app ingress, sees the
+   manager deliver it back, finds the completed run only in the creator server,
+   watches a retained request handle be revoked with the app, and joins the
+   worker's shutdown.
 
 Integrate shared ORM changes from their owner rather than introducing
 workflow-specific replacements. Report the production cutover complete only

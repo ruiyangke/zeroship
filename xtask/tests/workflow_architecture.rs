@@ -38,7 +38,6 @@ fn workflow_process_dependencies_follow_crate_ownership() {
         "zeroship-workflow-calendar",
         "zeroship-workflow-client",
         "zeroship-workflow-manager",
-        "zeroship-workflow-scheduler",
         "zeroship-workflow-server",
         "zeroship-worker",
     ] {

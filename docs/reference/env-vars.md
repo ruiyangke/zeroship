@@ -212,12 +212,12 @@ Every environment name below is `ZEROSHIP_<CANONICAL>` and every overlay path is
 | Canonical | Class | Environment | Overlay path | Flag by binary | Default |
 | --- | --- | --- | --- | --- | --- |
 | `blob_store` | operational | `ZEROSHIP_BLOB_STORE` | `blob_store` | zeroship-control `--blob-store`<br>zeroship-gate `--blob-store`<br>zeroship-worker `--blob-store` | `./bundles` |
-| `check_config` | command control | - | - | zeroship-auth `--check-config`<br>zeroship-control `--check-config`<br>zeroship-data-cdc-server `--check-config`<br>zeroship-gate `--check-config`<br>zeroship-migrate-server `--check-config`<br>zeroship-worker `--check-config`<br>zeroship-workflow-scheduler `--check-config`<br>zeroship-workflow-server `--check-config` | - |
-| `check_config_format` | command control | - | - | zeroship-auth `--check-config-format`<br>zeroship-control `--check-config-format`<br>zeroship-data-cdc-server `--check-config-format`<br>zeroship-gate `--check-config-format`<br>zeroship-migrate-server `--check-config-format`<br>zeroship-worker `--check-config-format`<br>zeroship-workflow-scheduler `--check-config-format`<br>zeroship-workflow-server `--check-config-format` | `CheckFormat::Text` |
-| `config` | bootstrap control | `ZEROSHIP_CONFIG` | - | zeroship-auth `--config`<br>zeroship-control `--config`<br>zeroship-data-cdc-server `--config`<br>zeroship-gate `--config`<br>zeroship-migrate-server `--config`<br>zeroship-workflow-scheduler `--config`<br>zeroship-workflow-server `--config` | - |
+| `check_config` | command control | - | - | zeroship-auth `--check-config`<br>zeroship-control `--check-config`<br>zeroship-data-cdc-server `--check-config`<br>zeroship-gate `--check-config`<br>zeroship-migrate-server `--check-config`<br>zeroship-worker `--check-config`<br>zeroship-workflow-server `--check-config` | - |
+| `check_config_format` | command control | - | - | zeroship-auth `--check-config-format`<br>zeroship-control `--check-config-format`<br>zeroship-data-cdc-server `--check-config-format`<br>zeroship-gate `--check-config-format`<br>zeroship-migrate-server `--check-config-format`<br>zeroship-worker `--check-config-format`<br>zeroship-workflow-server `--check-config-format` | `CheckFormat::Text` |
+| `config` | bootstrap control | `ZEROSHIP_CONFIG` | - | zeroship-auth `--config`<br>zeroship-control `--config`<br>zeroship-data-cdc-server `--config`<br>zeroship-gate `--config`<br>zeroship-migrate-server `--config`<br>zeroship-workflow-server `--config` | - |
 | `control_key` | secret | `ZEROSHIP_CONTROL_KEY` | `control_key` | zeroship-control `--control-key-file`<br>zeroship-gate `--control-key-file`<br>zeroship-migrate-server `--control-key-file`<br>zeroship-worker `--control-key-file` | - |
 | `control_url` | operational | `ZEROSHIP_CONTROL_URL` | `control_url` | zeroship-auth `--control-url`<br>zeroship-gate `--control-url`<br>zeroship-worker `--control-url` | `http://localhost:9090` |
-| `no_config` | bootstrap control | `ZEROSHIP_NO_CONFIG` | - | zeroship-auth `--no-config`<br>zeroship-control `--no-config`<br>zeroship-data-cdc-server `--no-config`<br>zeroship-gate `--no-config`<br>zeroship-migrate-server `--no-config`<br>zeroship-workflow-scheduler `--no-config`<br>zeroship-workflow-server `--no-config` | - |
+| `no_config` | bootstrap control | `ZEROSHIP_NO_CONFIG` | - | zeroship-auth `--no-config`<br>zeroship-control `--no-config`<br>zeroship-data-cdc-server `--no-config`<br>zeroship-gate `--no-config`<br>zeroship-migrate-server `--no-config`<br>zeroship-workflow-server `--no-config` | - |
 | `oauth_audience` | operational | `ZEROSHIP_OAUTH_AUDIENCE` | `oauth_audience` | zeroship-auth `--oauth-audience`<br>zeroship-control `--oauth-audience`<br>zeroship-migrate-server `--oauth-audience` | `control.zeroship.ai` |
 | `origin_scheme` | operational | `ZEROSHIP_ORIGIN_SCHEME` | `origin_scheme` | zeroship-control `--origin-scheme`<br>zeroship-gate `--origin-scheme` | `OriginScheme::Https` |
 | `pairwise_salt` | secret | `ZEROSHIP_PAIRWISE_SALT` | `pairwise_salt` | zeroship-control `--pairwise-salt-file`<br>zeroship-gate `--pairwise-salt-file` | - |
@@ -303,8 +303,6 @@ Every environment name below is `ZEROSHIP_<CANONICAL>` and every overlay path is
 | `control.catalog_max_connections` | operational | `ZEROSHIP_CONTROL_CATALOG_MAX_CONNECTIONS` | `control.catalog_max_connections` | zeroship-control `--catalog-max-connections` | `crate::publication::shared::DEFAULT_MAX_CONNECTIONS.get()` |
 | `control.database_url` | secret | `ZEROSHIP_CONTROL_DATABASE_URL` | `control.database_url` | zeroship-control `--database-url-file` | - |
 | `control.deploy_tmp_dir` | operational | `ZEROSHIP_CONTROL_DEPLOY_TMP_DIR` | `control.deploy_tmp_dir` | zeroship-control `--deploy-tmp-dir` | empty |
-| `control.disable_workflow_engine` | bootstrap control | - | - | zeroship-control `--disable-workflow-engine` | - |
-| `control.gateway_url` | operational | `ZEROSHIP_CONTROL_GATEWAY_URL` | `control.gateway_url` | zeroship-control `--gateway-url` | `http://localhost` |
 | `control.invoicer_provider` | operational | `ZEROSHIP_CONTROL_INVOICER_PROVIDER` | `control.invoicer_provider` | zeroship-control `--invoicer-provider` | `lite` |
 | `control.join_signers_file` | operational | `ZEROSHIP_CONTROL_JOIN_SIGNERS_FILE` | `control.join_signers_file` | zeroship-control `--join-signers-file` | empty |
 | `control.join_token_file` | operational | `ZEROSHIP_CONTROL_JOIN_TOKEN_FILE` | `control.join_token_file` | zeroship-control `--join-token-file` | empty |
@@ -400,8 +398,8 @@ Every environment name below is `ZEROSHIP_<CANONICAL>` and every overlay path is
 
 | Canonical | Class | Environment | Overlay path | Flag by binary | Default |
 | --- | --- | --- | --- | --- | --- |
-| `observability.log_filter` | operational | `ZEROSHIP_OBSERVABILITY_LOG_FILTER` | `observability.log_filter` | zeroship-auth `--observability-log-filter`<br>zeroship-control `--observability-log-filter`<br>zeroship-data-cdc-server `--observability-log-filter`<br>zeroship-gate `--observability-log-filter`<br>zeroship-migrate-server `--observability-log-filter`<br>zeroship-worker `--observability-log-filter`<br>zeroship-workflow-scheduler `--observability-log-filter`<br>zeroship-workflow-server `--observability-log-filter` | `DEFAULT_LOG_FILTER` |
-| `observability.log_format` | operational | `ZEROSHIP_OBSERVABILITY_LOG_FORMAT` | `observability.log_format` | zeroship-auth `--observability-log-format`<br>zeroship-control `--observability-log-format`<br>zeroship-data-cdc-server `--observability-log-format`<br>zeroship-gate `--observability-log-format`<br>zeroship-migrate-server `--observability-log-format`<br>zeroship-worker `--observability-log-format`<br>zeroship-workflow-scheduler `--observability-log-format`<br>zeroship-workflow-server `--observability-log-format` | `LogFormat::Auto` |
+| `observability.log_filter` | operational | `ZEROSHIP_OBSERVABILITY_LOG_FILTER` | `observability.log_filter` | zeroship-auth `--observability-log-filter`<br>zeroship-control `--observability-log-filter`<br>zeroship-data-cdc-server `--observability-log-filter`<br>zeroship-gate `--observability-log-filter`<br>zeroship-migrate-server `--observability-log-filter`<br>zeroship-worker `--observability-log-filter`<br>zeroship-workflow-server `--observability-log-filter` | `DEFAULT_LOG_FILTER` |
+| `observability.log_format` | operational | `ZEROSHIP_OBSERVABILITY_LOG_FORMAT` | `observability.log_format` | zeroship-auth `--observability-log-format`<br>zeroship-control `--observability-log-format`<br>zeroship-data-cdc-server `--observability-log-format`<br>zeroship-gate `--observability-log-format`<br>zeroship-migrate-server `--observability-log-format`<br>zeroship-worker `--observability-log-format`<br>zeroship-workflow-server `--observability-log-format` | `LogFormat::Auto` |
 
 ### worker
 
@@ -414,15 +412,12 @@ Every environment name below is `ZEROSHIP_<CANONICAL>` and every overlay path is
 | `worker.join_token_file` | operational | `ZEROSHIP_WORKER_JOIN_TOKEN_FILE` | `worker.join_token_file` | zeroship-worker `--join-token-file` | empty |
 | `worker.kv_config` | secret | `ZEROSHIP_WORKER_KV_CONFIG` | `worker.kv_config` | zeroship-worker `--kv-config-file` | - |
 | `worker.max_isolates` | operational | `ZEROSHIP_WORKER_MAX_ISOLATES` | `worker.max_isolates` | zeroship-worker `--max-isolates` | `200` |
-| `worker.max_pinned_isolates_per_app` | operational | `ZEROSHIP_WORKER_MAX_PINNED_ISOLATES_PER_APP` | `worker.max_pinned_isolates_per_app` | zeroship-worker `--max-pinned-isolates-per-app` | `4` |
-| `worker.max_step_blob_bytes` | operational | `ZEROSHIP_WORKER_MAX_STEP_BLOB_BYTES` | `worker.max_step_blob_bytes` | zeroship-worker `--max-step-blob-bytes` | `67_108_864` |
 | `worker.port` | operational | `ZEROSHIP_WORKER_PORT` | `worker.port` | zeroship-worker `--port` | `8080` |
 | `worker.service_peers_file` | operational | `ZEROSHIP_WORKER_SERVICE_PEERS_FILE` | `worker.service_peers_file` | zeroship-worker `--service-peers-file` | empty |
 | `worker.shutdown_timeout` | operational | `ZEROSHIP_WORKER_SHUTDOWN_TIMEOUT` | `worker.shutdown_timeout` | zeroship-worker `--shutdown-timeout` | `30` |
 | `worker.socket` | operational | `ZEROSHIP_WORKER_SOCKET` | `worker.socket` | zeroship-worker `--socket` | empty |
 | `worker.storage_url` | operational | `ZEROSHIP_WORKER_STORAGE_URL` | `worker.storage_url` | zeroship-worker `--storage-url` | empty |
 | `worker.threads` | operational | `ZEROSHIP_WORKER_THREADS` | `worker.threads` | zeroship-worker `--threads` | `default_worker_threads()` |
-| `worker.workflow_advance_unsigned` | bootstrap control | - | - | zeroship-worker `--workflow-advance-unsigned` | - |
 | `worker.workflow_capacity` | operational | `ZEROSHIP_WORKER_WORKFLOW_CAPACITY` | `worker.workflow_capacity` | zeroship-worker `--workflow-capacity` | `64` |
 | `worker.workflow_manager_url` | operational | `ZEROSHIP_WORKER_WORKFLOW_MANAGER_URL` | `worker.workflow_manager_url` | zeroship-worker `--workflow-manager-url` | empty |
 | `worker.workflow_slots` | operational | `ZEROSHIP_WORKER_WORKFLOW_SLOTS` | `worker.workflow_slots` | zeroship-worker `--workflow-slots` | `4` |
@@ -433,15 +428,15 @@ Every environment name below is `ZEROSHIP_<CANONICAL>` and every overlay path is
 | --- | --- | --- | --- | --- | --- |
 | `workflow.assignment_ttl_ms` | operational | `ZEROSHIP_WORKFLOW_ASSIGNMENT_TTL_MS` | `workflow.assignment_ttl_ms` | zeroship-workflow-server `--assignment-ttl-ms` | `30000` |
 | `workflow.batch_limit` | operational | `ZEROSHIP_WORKFLOW_BATCH_LIMIT` | `workflow.batch_limit` | zeroship-workflow-server `--batch-limit` | `128` |
-| `workflow.capacity_hold_down_ms` | operational | `ZEROSHIP_WORKFLOW_CAPACITY_HOLD_DOWN_MS` | `workflow.capacity_hold_down_ms` | zeroship-workflow-server `--capacity-hold-down-ms` | `300000` |
+| `workflow.capacity_hold_down_ms` | operational | `ZEROSHIP_WORKFLOW_CAPACITY_HOLD_DOWN_MS` | `workflow.capacity_hold_down_ms` | zeroship-workflow-server `--capacity-hold-down-ms` | `300_000` |
 | `workflow.capacity_max_slots` | operational | `ZEROSHIP_WORKFLOW_CAPACITY_MAX_SLOTS` | `workflow.capacity_max_slots` | zeroship-workflow-server `--capacity-max-slots` | `1024` |
 | `workflow.capacity_min_slots` | operational | `ZEROSHIP_WORKFLOW_CAPACITY_MIN_SLOTS` | `workflow.capacity_min_slots` | zeroship-workflow-server `--capacity-min-slots` | `0` |
 | `workflow.capacity_request_timeout_ms` | operational | `ZEROSHIP_WORKFLOW_CAPACITY_REQUEST_TIMEOUT_MS` | `workflow.capacity_request_timeout_ms` | zeroship-workflow-server `--capacity-request-timeout-ms` | `10000` |
 | `workflow.capacity_retry_interval_ms` | operational | `ZEROSHIP_WORKFLOW_CAPACITY_RETRY_INTERVAL_MS` | `workflow.capacity_retry_interval_ms` | zeroship-workflow-server `--capacity-retry-interval-ms` | `30000` |
-| `workflow.closing_backoff_max_ms` | operational | `ZEROSHIP_WORKFLOW_CLOSING_BACKOFF_MAX_MS` | `workflow.closing_backoff_max_ms` | zeroship-workflow-server `--closing-backoff-max-ms` | `3600000` |
+| `workflow.closing_backoff_max_ms` | operational | `ZEROSHIP_WORKFLOW_CLOSING_BACKOFF_MAX_MS` | `workflow.closing_backoff_max_ms` | zeroship-workflow-server `--closing-backoff-max-ms` | `3_600_000` |
 | `workflow.closing_backoff_ms` | operational | `ZEROSHIP_WORKFLOW_CLOSING_BACKOFF_MS` | `workflow.closing_backoff_ms` | zeroship-workflow-server `--closing-backoff-ms` | `60000` |
-| `workflow.closing_idle_ms` | operational | `ZEROSHIP_WORKFLOW_CLOSING_IDLE_MS` | `workflow.closing_idle_ms` | zeroship-workflow-server `--closing-idle-ms` | `900000` |
-| `workflow.closing_timeout_ms` | operational | `ZEROSHIP_WORKFLOW_CLOSING_TIMEOUT_MS` | `workflow.closing_timeout_ms` | zeroship-workflow-server `--closing-timeout-ms` | `300000` |
+| `workflow.closing_idle_ms` | operational | `ZEROSHIP_WORKFLOW_CLOSING_IDLE_MS` | `workflow.closing_idle_ms` | zeroship-workflow-server `--closing-idle-ms` | `900_000` |
+| `workflow.closing_timeout_ms` | operational | `ZEROSHIP_WORKFLOW_CLOSING_TIMEOUT_MS` | `workflow.closing_timeout_ms` | zeroship-workflow-server `--closing-timeout-ms` | `300_000` |
 | `workflow.control_url` | operational | `ZEROSHIP_WORKFLOW_CONTROL_URL` | `workflow.control_url` | zeroship-workflow-server `--control-url` | empty |
 | `workflow.database_acquire_timeout_ms` | operational | `ZEROSHIP_WORKFLOW_DATABASE_ACQUIRE_TIMEOUT_MS` | `workflow.database_acquire_timeout_ms` | zeroship-workflow-server `--database-acquire-timeout-ms` | `5000` |
 | `workflow.database_command_timeout_ms` | operational | `ZEROSHIP_WORKFLOW_DATABASE_COMMAND_TIMEOUT_MS` | `workflow.database_command_timeout_ms` | zeroship-workflow-server `--database-command-timeout-ms` | `10000` |
@@ -459,21 +454,6 @@ Every environment name below is `ZEROSHIP_<CANONICAL>` and every overlay path is
 | `workflow.service_key_file` | operational | `ZEROSHIP_WORKFLOW_SERVICE_KEY_FILE` | `workflow.service_key_file` | zeroship-workflow-server `--service-key-file` | empty |
 | `workflow.service_peers_file` | operational | `ZEROSHIP_WORKFLOW_SERVICE_PEERS_FILE` | `workflow.service_peers_file` | zeroship-workflow-server `--service-peers-file` | empty |
 | `workflow.worker_ttl_ms` | operational | `ZEROSHIP_WORKFLOW_WORKER_TTL_MS` | `workflow.worker_ttl_ms` | zeroship-workflow-server `--worker-ttl-ms` | `30000` |
-
-### workflow-scheduler
-
-| Canonical | Class | Environment | Overlay path | Flag by binary | Default |
-| --- | --- | --- | --- | --- | --- |
-| `workflow_scheduler.control_apply_url` | operational | `ZEROSHIP_WORKFLOW_SCHEDULER_CONTROL_APPLY_URL` | `workflow_scheduler.control_apply_url` | zeroship-workflow-scheduler `--control-apply-url` | empty |
-| `workflow_scheduler.database_url` | secret | `ZEROSHIP_WORKFLOW_SCHEDULER_DATABASE_URL` | `workflow_scheduler.database_url` | zeroship-workflow-scheduler `--database-url-file` | - |
-| `workflow_scheduler.gateway_url` | operational | `ZEROSHIP_WORKFLOW_SCHEDULER_GATEWAY_URL` | `workflow_scheduler.gateway_url` | zeroship-workflow-scheduler `--gateway-url` | empty |
-| `workflow_scheduler.inflight_ttl_ms` | operational | `ZEROSHIP_WORKFLOW_SCHEDULER_INFLIGHT_TTL_MS` | `workflow_scheduler.inflight_ttl_ms` | zeroship-workflow-scheduler `--inflight-ttl-ms` | `120_000` |
-| `workflow_scheduler.max_due_per_tick` | operational | `ZEROSHIP_WORKFLOW_SCHEDULER_MAX_DUE_PER_TICK` | `workflow_scheduler.max_due_per_tick` | zeroship-workflow-scheduler `--max-due-per-tick` | `64` |
-| `workflow_scheduler.max_loaded_timers` | operational | `ZEROSHIP_WORKFLOW_SCHEDULER_MAX_LOADED_TIMERS` | `workflow_scheduler.max_loaded_timers` | zeroship-workflow-scheduler `--max-loaded-timers` | `1_024` |
-| `workflow_scheduler.near_horizon_ms` | operational | `ZEROSHIP_WORKFLOW_SCHEDULER_NEAR_HORIZON_MS` | `workflow_scheduler.near_horizon_ms` | zeroship-workflow-scheduler `--near-horizon-ms` | `60_000` |
-| `workflow_scheduler.reaper_interval_secs` | operational | `ZEROSHIP_WORKFLOW_SCHEDULER_REAPER_INTERVAL_SECS` | `workflow_scheduler.reaper_interval_secs` | zeroship-workflow-scheduler `--reaper-interval-secs` | `30` |
-| `workflow_scheduler.schema` | operational | `ZEROSHIP_WORKFLOW_SCHEDULER_SCHEMA` | `workflow_scheduler.schema` | zeroship-workflow-scheduler `--schema` | `DEFAULT_SCHEDULER_SCHEMA` |
-| `workflow_scheduler.tick_secs` | operational | `ZEROSHIP_WORKFLOW_SCHEDULER_TICK_SECS` | `workflow_scheduler.tick_secs` | zeroship-workflow-scheduler `--tick-secs` | `DEFAULT_TICK_SECS` |
 
 <!-- END GENERATED CONFIGURATION CONTRACT -->
 

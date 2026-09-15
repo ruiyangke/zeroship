@@ -264,7 +264,7 @@ export class Platform {
       socket.once("error", () => done(false));
       socket.setTimeout(1000, () => done(false));
     }));
-    await service("control", "zeroship-control", control, ["--config", config, "--meter-provider", "lite", "--invoicer-provider", "lite", "--allow-unsupported-billing", "--spend-recompute-interval", "2", "--stripe-base-url", "http://127.0.0.1:1", "--port", `${control.number}`, "--blob-store", blobs, "--gateway-url", gateway.url, "--worker-urls", worker.url], {
+    await service("control", "zeroship-control", control, ["--config", config, "--meter-provider", "lite", "--invoicer-provider", "lite", "--allow-unsupported-billing", "--spend-recompute-interval", "2", "--stripe-base-url", "http://127.0.0.1:1", "--port", `${control.number}`, "--blob-store", blobs, "--worker-urls", worker.url], {
       ZEROSHIP_CONTROL_STRIPE_SECRET_KEY: "sk_test_unused", ZEROSHIP_CONTROL_DATABASE_URL: dsn, ZEROSHIP_CONTROL_MASTER_KEY: masterKey,
       ZEROSHIP_CONTROL_ALLOW_UNSUPPORTED_BILLING: "true", ZEROSHIP_CONTROL_WORKER_ENROLMENT_NETWORKS: "127.0.0.1/32",
       ZEROSHIP_CONTROL_WORKER_ENROLMENT_PORTS: `${worker.number}`,

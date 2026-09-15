@@ -9,13 +9,7 @@ fn narrow_posture() -> DatabasePosture {
         create_db: false,
         replication: false,
         bypass_rls: false,
-        workflow_owner_member: true,
-        creates_in_system_schema: false,
-        system_table_writes: false,
-        system_column_writes: false,
-        system_sequence_writes: false,
-        unexpected_system_reads: false,
-        required_system_reads: true,
+        reaches_platform_schema: false,
         inheriting_memberships: 0,
         inheriting_membership_example: None,
     }
@@ -43,16 +37,22 @@ async fn worker_boot_accepts_the_migrated_role_without_replication() {
     .await;
 }
 
+/// The worker connects to the CREATOR database. A login that can resolve the
+/// platform schema at all is pointed at Control's database, which is the zone
+/// split this gate exists to hold.
 #[test]
-fn rejects_any_effective_write_to_the_platform_schema() {
+fn refuses_a_login_that_can_reach_the_platform_schema() {
     let mut posture = narrow_posture();
-    posture.system_table_writes = true;
+    posture.reaches_platform_schema = true;
 
-    let error = validate(&posture).expect_err("system write privilege must be refused");
+    let error = validate(&posture).expect_err("platform reach must be refused");
     assert!(
-        error.contains("write privilege"),
+        error.contains("platform schema"),
         "unexpected error: {error}"
     );
+
+    posture.reaches_platform_schema = false;
+    validate(&posture).expect("a creator-database login is the accepted posture");
 }
 
 #[test]

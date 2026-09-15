@@ -38,7 +38,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use zeroship_authn::service_replay::SharedClientReplayStore;
-use zeroship_bundle::{BlobStore, LocalDiskBlobStore, LocalWorkflowBlobStore, WorkflowBlobStore};
+use zeroship_bundle::{BlobStore, LocalDiskBlobStore};
 use zeroship_control::{
     AppState, EnvStore, Quota, RateLimiter, Registry, SecretString, StripeStore,
     deployment_hold_api::{self, DeploymentHoldApi},
@@ -150,21 +150,17 @@ impl Fixture {
         let blob_root = platform.work.path().join("blobs");
         let blob_store: Arc<dyn BlobStore> =
             Arc::new(LocalDiskBlobStore::new(blob_root.clone()).unwrap());
-        let workflow_blob_store: Arc<dyn WorkflowBlobStore> =
-            Arc::new(LocalWorkflowBlobStore::new(blob_root).unwrap());
         let state = Arc::new(AppState {
             service_auth,
             env_store: EnvStore::new(registry.clone(), "deployment-hold-test-master-key").unwrap(),
             stripe_store: StripeStore::new(registry.clone()),
             registry,
             blob_store,
-            workflow_blob_store,
             control_key: SecretString::new("deployment-hold-test-control-key".into()),
             master_key: SecretString::new("deployment-hold-test-master-key".into()),
             stripe_webhook_secret: SecretString::new(String::new()),
             stripe_secret_key: SecretString::new(String::new()),
             stripe_base_url: "https://api.stripe.com".into(),
-            gateway_url: "http://127.0.0.1:1".into(),
             worker_urls: Vec::new(),
             admin_limiter: Arc::new(RateLimiter::new(Quota::per_minute(100, 10))),
             webhook_limiter: Arc::new(RateLimiter::new(Quota::per_minute(100, 10))),

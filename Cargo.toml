@@ -250,7 +250,6 @@ zeroship-runtime = { path = "crates/zeroship-runtime" }
 zeroship-runtime-macros = { path = "crates/zeroship-runtime-macros" }
 zeroship-config-macros = { path = "crates/zeroship-config-macros" }
 zeroship-config-contract = { path = "crates/zeroship-config-contract" }
-zeroship-workflow-scheduler = { path = "crates/zeroship-workflow-scheduler" }
 zeroship-workflow-server = { path = "crates/zeroship-workflow-server" }
 # The five server libraries, listed here so the non-shipped
 # `zeroship-config-contract` checker can LINK their generated registries rather

@@ -251,8 +251,8 @@ jobs:
         run: cargo xtask test repository
       # deploy/compose/docker-compose.yml HAS NO AUTOMATED CHECK as of
       # 2026-08-21. Four steps stood here - named volumes on stateful services,
-      # 0.0.0.0 published only by the edge, secret strength, and the unsigned
-      # workflow-advance flag below - and were deleted with the
+      # 0.0.0.0 published only by the edge, secret strength, and a worker flag
+      # that no longer exists - and were deleted with the
       # crates/zeroship-gatekit gates behind them, as a complexity-budget
       # decision about that crate rather than a finding that the checks were
       # wrong. The properties they held are unguarded; each had caught a real

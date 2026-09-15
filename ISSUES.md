@@ -150,7 +150,8 @@ The bundle path (`put_blob_stream`) keeps the gate-drain loop: its source is a s
 overlap; it adopts only the warm-session `complete_multipart_on`.
 
 ### ISS-73 · `zeroship-worker` is in no gate suite, and 7 of its tests have been red
-**Status:** open · **Effort:** S (the fix) · **Tier:** T2 (test infra + workflow dispatch coverage) ·
+**Status:** the seven tests are DELETED with the Control-driven advance path they exercised; the
+gate half below is still open · **Effort:** S (the gate) · **Tier:** T2 (test infra) ·
 Surfaced 2026-08-20 while verifying `feat/egress-rules-control`, outside the four checks that branch
 was asked for
 

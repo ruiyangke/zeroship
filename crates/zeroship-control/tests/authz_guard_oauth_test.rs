@@ -171,10 +171,6 @@ async fn fixture_with_auth_provider(
     let stripe_store = StripeStore::new(registry.clone());
     let blob_store: Arc<dyn BlobStore> =
         Arc::new(LocalDiskBlobStore::new(blob_root.clone()).expect("blob store"));
-    let workflow_blob_store: Arc<dyn zeroship_bundle::WorkflowBlobStore> = Arc::new(
-        zeroship_bundle::LocalWorkflowBlobStore::new(blob_root.clone())
-            .expect("workflow blob store"),
-    );
 
     let state = Arc::new(AppState {
         service_auth: std::sync::Arc::new(zeroship_core::service_peers::ServiceAuth::unconfigured()),
@@ -182,13 +178,11 @@ async fn fixture_with_auth_provider(
         env_store,
         stripe_store,
         blob_store,
-        workflow_blob_store,
         control_key: SecretString::new("test-control-key".to_string()),
         master_key: SecretString::new(TEST_MASTER_KEY.to_string()),
         stripe_webhook_secret: SecretString::new(String::new()),
         stripe_secret_key: SecretString::new(String::new()),
         stripe_base_url: "https://api.stripe.com".to_string(),
-        gateway_url: "http://127.0.0.1:9".to_string(),
         worker_urls: Vec::new(),
         admin_limiter: Arc::new(RateLimiter::new(Quota::per_minute(10_000, 100))),
         webhook_limiter: Arc::new(RateLimiter::new(Quota::per_minute(10_000, 100))),

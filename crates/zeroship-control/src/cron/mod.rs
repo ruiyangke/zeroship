@@ -24,46 +24,10 @@ pub mod orphaned_app_reaper;
 pub mod spend_recompute;
 pub mod spend_reconcile;
 pub mod stripe_reconcile;
-pub mod workflow_blob_gc;
-pub mod workflow_engine;
-pub mod workflow_retention;
-pub mod workflow_signal_fanout;
 
 use std::sync::Arc;
 
 use crate::AppState;
-
-#[derive(Debug, Clone, Copy)]
-pub struct SpawnOptions {
-    pub workflow_scan: bool,
-    pub workflow_reaper: bool,
-    pub workflow_sweeps: bool,
-    pub scheduler_authoritative: bool,
-}
-
-impl Default for SpawnOptions {
-    fn default() -> Self {
-        Self {
-            workflow_scan: true,
-            workflow_reaper: true,
-            workflow_sweeps: true,
-            scheduler_authoritative: false,
-        }
-    }
-}
-
-impl SpawnOptions {
-    fn assert_workflow_timer_liveness(self) {
-        assert!(
-            !(self.scheduler_authoritative && self.workflow_scan),
-            "durable workflow startup refused: control workflow scan cannot run while the scheduler tier is authoritative"
-        );
-        assert!(
-            !self.workflow_sweeps || self.scheduler_authoritative || self.workflow_scan,
-            "durable workflow startup refused: workflow sweeps can create wakes only when a workflow timer authority is enabled"
-        );
-    }
-}
 
 /// Spawn every control-plane cron task onto the compio runtime.
 ///
@@ -76,24 +40,6 @@ pub fn spawn_all(
     retention_check_secs: u64,
     spend_recompute_interval_secs: u64,
 ) {
-    spawn_all_with_options(
-        state,
-        retention_months,
-        retention_check_secs,
-        spend_recompute_interval_secs,
-        SpawnOptions::default(),
-    );
-}
-
-pub fn spawn_all_with_options(
-    state: Arc<AppState>,
-    retention_months: u32,
-    retention_check_secs: u64,
-    spend_recompute_interval_secs: u64,
-    options: SpawnOptions,
-) {
-    options.assert_workflow_timer_liveness();
-
     // Audit-retention sweep — needs only the registry (cheap clone of the
     // db-url handle inside `AppState`).
     let registry = Arc::new(state.registry.clone());
@@ -116,80 +62,7 @@ pub fn spawn_all_with_options(
         );
     }
 
-    // Control-hosted timer authority. The scheduler store owns timer state,
-    // while this loop claims due rows and performs dispatch/ack handling until
-    // that dispatch loop moves into the standalone scheduler process. Keep the
-    // guard so startup still rejects two timer authorities in one process.
-    if options.workflow_scan {
-        let workflow_state = Arc::clone(&state);
-        compio::runtime::spawn(async move {
-            workflow_engine::run(workflow_state, workflow_engine::DEFAULT_TICK_SECS).await;
-        })
-        .detach();
-    }
-
-    // Lost-ack recovery reads only workflow_scheduler.inflight, then goes
-    // through the normal dispatch/apply/register path for the claimed run. The
-    // journal reconcile inside this loop is a DR backstop for scheduler-store
-    // loss; routine wake liveness must come from each producer's register path.
-    if options.workflow_reaper {
-        let workflow_reaper_state = Arc::clone(&state);
-        compio::runtime::spawn(async move {
-            workflow_engine::run_inflight_reaper(
-                workflow_reaper_state,
-                workflow_engine::DEFAULT_TICK_SECS,
-            )
-            .await;
-        })
-        .detach();
-    }
-
-    // Durable-workflow control sweeps remain in control. They create or wake
-    // runs, then register scheduler timers instead of scanning workflow_runs.
-    if options.workflow_sweeps {
-        let signal_fanout_state = Arc::clone(&state);
-        compio::runtime::spawn(async move {
-            workflow_signal_fanout::run(
-                signal_fanout_state,
-                workflow_signal_fanout::DEFAULT_TICK_SECS,
-            )
-            .await;
-        })
-        .detach();
-
-        let blob_ref_gc_state = Arc::clone(&state);
-        compio::runtime::spawn(async move {
-            workflow_blob_gc::run_ref_sweep(
-                blob_ref_gc_state,
-                workflow_blob_gc::DEFAULT_REF_SWEEP_TICK_SECS,
-            )
-            .await;
-        })
-        .detach();
-
-        let blob_orphan_gc_state = Arc::clone(&state);
-        compio::runtime::spawn(async move {
-            workflow_blob_gc::run_orphan_sweep(
-                blob_orphan_gc_state,
-                workflow_blob_gc::DEFAULT_ORPHAN_SWEEP_TICK_SECS,
-            )
-            .await;
-        })
-        .detach();
-
-        let workflow_retention_state = Arc::clone(&state);
-        compio::runtime::spawn(async move {
-            workflow_retention::run(
-                workflow_retention_state,
-                workflow_retention::DEFAULT_TICK_SECS,
-            )
-            .await;
-        })
-        .detach();
-    }
-
-    // Normal deployment retention is platform catalog work, independent of the
-    // legacy workflow journal sweeps and their timer authority.
+    // Normal deployment retention is platform catalog work.
     let deploy_retention_state = Arc::clone(&state);
     compio::runtime::spawn(async move {
         deploy_retention::run(deploy_retention_state, deploy_retention::DEFAULT_TICK_SECS).await;
@@ -362,7 +235,7 @@ fn billing_reconcile_safety_net_needed(
 #[cfg(test)]
 mod tests {
     use super::{
-        provider_aware_cron_tasks, should_spawn_billing_reconcile_safety_net, SpawnOptions,
+        provider_aware_cron_tasks, should_spawn_billing_reconcile_safety_net,
     };
     use std::sync::Arc;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -370,25 +243,6 @@ mod tests {
         BillingStack, Capabilities, CorrectionCapability, MeteringProvider,
     };
     use zeroship_stream::{adapters, StreamConfig, StreamOffset, StreamRegistry};
-
-    #[test]
-    fn default_keeps_workflow_timer_authority_in_control() {
-        let options = SpawnOptions::default();
-        assert!(options.workflow_scan, "control must fire due workflow timers");
-        assert!(
-            options.workflow_reaper,
-            "lost workflow acks still need recovery"
-        );
-        assert!(
-            options.workflow_sweeps,
-            "workflow signals and journal collection still need sweeps"
-        );
-        assert!(
-            !options.scheduler_authoritative,
-            "the standalone scheduler cannot be authoritative before it owns dispatch/ack handling"
-        );
-        options.assert_workflow_timer_liveness();
-    }
 
     #[test]
     fn stripe_uses_stream_forwarder_not_metering_export_or_billing_reconcile() {

@@ -23,13 +23,12 @@ use zeroship_core::config::{
     CredentialPosture, CredentialVerdict, SubsystemCredential,
 };
 use zeroship_bundle::{
-    build_blob_store, build_workflow_blob_store, BlobStore, StoreUrl, WorkflowBlobStore,
+    build_blob_store, BlobStore, StoreUrl,
 };
 use zeroship_control::config::{ControlSettings, ControlSettingsSources};
 use zeroship_control::{
     api, device_handlers, env_handlers, erasure, health,
     internal, oauth_grants_handlers, plan_catalog, stripe_handlers,
-    workflow_instance_api,
     AppState, EnvStore, Quota, RateLimiter, Registry, StripeStore,
 };
 
@@ -524,7 +523,6 @@ fn main() -> std::io::Result<()> {
     let control_key = settings.control_key.expose_str().to_owned();
     let master_key = settings.master_key.expose_str().to_owned();
     let workers_str = settings.worker_urls.get().clone();
-    let gateway_url = settings.gateway_url.get().trim_end_matches('/').to_string();
     let workflow_coordinator_url = settings.workflow_coordinator_url.get().to_owned();
     // Lifecycle publication cannot run against an origin the manager client
     // refuses, and a Control that accepts deploys it can never publish leaves
@@ -761,7 +759,6 @@ fn main() -> std::io::Result<()> {
             CheckValue::Secret(settings.pairwise_salt.is_configured()),
         );
         report.field("workers_count", CheckValue::Count(workers_count));
-        report.field("gateway_url", CheckValue::Plain(gateway_url.clone()));
         report.field("workflow_coordinator_url", CheckValue::Plain(workflow_coordinator_url.clone()));
         report.field(
             "catalog_max_connections",
@@ -849,9 +846,6 @@ fn main() -> std::io::Result<()> {
     });
     let blob_store: Arc<dyn BlobStore> = build_blob_store(&store_url, s3_runtime.as_ref())
         .expect("failed to initialise blob store");
-    let workflow_blob_store: Arc<dyn WorkflowBlobStore> =
-        build_workflow_blob_store(&store_url, s3_runtime.as_ref())
-            .expect("failed to initialise workflow blob store");
 
     if !legacy_keys.is_empty() {
         tracing::info!(
@@ -1225,13 +1219,11 @@ fn main() -> std::io::Result<()> {
         env_store,
         stripe_store,
         blob_store,
-        workflow_blob_store,
         control_key: zeroship_control::SecretString::new(control_key),
         master_key: zeroship_control::SecretString::new(master_key),
         stripe_webhook_secret: zeroship_control::SecretString::new(stripe_webhook_secret),
         stripe_secret_key: zeroship_control::SecretString::new(stripe_secret_key),
         stripe_base_url,
-        gateway_url,
         worker_urls: workers_str
             .split(',')
             .map(str::trim)
@@ -1276,17 +1268,11 @@ fn main() -> std::io::Result<()> {
     //     platform console.
     // Both hold an `Arc<AppState>` clone (cheap) and open fresh per-tick
     // connections.
-    zeroship_control::cron::spawn_all_with_options(
+    zeroship_control::cron::spawn_all(
         Arc::clone(&state),
         audit_retention_months,
         audit_retention_check_secs,
         spend_recompute_interval,
-        zeroship_control::cron::SpawnOptions {
-            workflow_scan: !*settings.disable_workflow_engine.get(),
-            workflow_reaper: !*settings.disable_workflow_engine.get(),
-            workflow_sweeps: !*settings.disable_workflow_engine.get(),
-            scheduler_authoritative: false,
-        },
     );
     tracing::info!(
         retention_months = audit_retention_months,
@@ -1592,7 +1578,6 @@ fn main() -> std::io::Result<()> {
             // grace window and again before the reaper deletes, whether this
             // human is the last owner of anything.
             .configure(erasure::configure)
-            .configure(workflow_instance_api::configure)
             .configure(zeroship_control::deployment_hold_api::configure)
             .service(
                 web::resource("/internal/billing/reconcile")

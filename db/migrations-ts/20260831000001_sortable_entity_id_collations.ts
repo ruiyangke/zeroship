@@ -103,22 +103,7 @@ const typedIdColumnsByTable: Readonly<Record<string, readonly string[]>> = {
 
   // Workflow identities and immutable deployment references.
   app_deploy_holds: ["app_id", "deploy_id", "holder_id"],
-  workflow_broadcasts: ["app_id", "id", "deploy_id"],
   workflow_policy_ledger: ["id"],
-  workflow_runs: ["app_id", "id", "dispatch_nonce", "parent_run_id", "deploy_id"],
-  workflow_schedules: ["app_id", "id", "deploy_id"],
-  workflow_scheduler_inflight: ["app_id", "run_id"],
-  workflow_scheduler_timers: ["app_id", "run_id"],
-  workflow_signal_keys: ["app_id", "id", "kid"],
-  workflow_signals: ["id", "run_id", "broadcast_id"],
-  workflow_steps: [
-    "run_id",
-    "consumed_signal_id",
-    "child_run_id",
-    "batch_id",
-    "compensation_batch_id",
-  ],
-  workflow_subscriptions: ["app_id", "id", "run_id"],
 
   // Sandbox typed-id world. Partition children inherit the sandbox_events
   // column collations from the partitioned parent.

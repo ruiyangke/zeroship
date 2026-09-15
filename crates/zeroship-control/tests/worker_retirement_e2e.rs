@@ -28,7 +28,7 @@ async fn database(url: &str) -> compio_postgres::Client {
 /// nothing at all, fails one of the two.
 #[compio::test]
 async fn a_worker_stopped_gracefully_retires_its_own_instance() {
-    let mut fleet = Fleet::with_advance(false);
+    let mut fleet = Fleet::start();
     let pg = database(&fleet.database.url()).await;
     let instances: Vec<(String, String, String)> = pg
         .query(
