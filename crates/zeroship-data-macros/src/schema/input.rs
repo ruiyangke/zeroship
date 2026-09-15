@@ -119,6 +119,14 @@ pub enum Property {
         classification: String,
     },
     VectorMetric(Ident),
+    ArrayStorage(ArrayStorage),
+}
+
+/// Physical storage declared for an array column: `"json"` or `"native"`.
+#[derive(Clone, Copy, Debug)]
+pub struct ArrayStorage {
+    pub native: bool,
+    pub span: proc_macro2::Span,
 }
 impl Column {
     pub fn flag(&self, name: &str, fallback: bool) -> bool {
@@ -157,6 +165,60 @@ impl Column {
             .iter()
             .any(|p| matches!(p, Property::Mask { kind, .. } if kind != "none"))
     }
+    pub fn array_storage(&self) -> Option<ArrayStorage> {
+        self.properties.iter().find_map(|p| match p {
+            Property::ArrayStorage(storage) => Some(*storage),
+            _ => None,
+        })
+    }
+    pub fn native_array(&self) -> bool {
+        self.array_storage().is_some_and(|storage| storage.native)
+    }
+}
+
+/// Native array storage is a physical column type: it applies to top-level
+/// unprotected text arrays only, and JSON members stay JSON.
+fn validate_array_storage(columns: &[Column], nested: bool) -> syn::Result<()> {
+    for column in columns {
+        if let Some(storage) = column.array_storage() {
+            if nested {
+                return Err(syn::Error::new(
+                    storage.span,
+                    "array_storage applies only to top-level columns",
+                ));
+            }
+            if column.kind != Kind::Array {
+                return Err(syn::Error::new(
+                    storage.span,
+                    "array_storage requires an Array column",
+                ));
+            }
+            if column.native_array() && column.items != Some(Kind::Text) {
+                return Err(syn::Error::new(
+                    storage.span,
+                    "native array storage supports Array<Text> only",
+                ));
+            }
+            if column.native_array() && (column.flag("encrypted", false) || column.masked()) {
+                return Err(syn::Error::new(
+                    storage.span,
+                    "native array storage cannot be encrypted or masked",
+                ));
+            }
+        }
+        for property in &column.properties {
+            match property {
+                Property::Shape(columns) => validate_array_storage(columns, true)?,
+                Property::Variants(variants) => {
+                    for columns in variants {
+                        validate_array_storage(columns, true)?;
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    Ok(())
 }
 pub fn spelling(name: &Ident) -> String {
     name.to_string().trim_start_matches("r#").to_owned()
@@ -322,6 +384,19 @@ fn parse_attributes(attributes: Vec<Attribute>) -> syn::Result<Vec<Property>> {
                     }
                     Property::VectorMetric(value)
                 }
+                "array_storage" => {
+                    let value: LitStr = meta.value()?.parse()?;
+                    if !matches!(value.value().as_str(), "json" | "native") {
+                        return Err(syn::Error::new(
+                            value.span(),
+                            "expected \"json\" or \"native\"",
+                        ));
+                    }
+                    Property::ArrayStorage(ArrayStorage {
+                        native: value.value() == "native",
+                        span: value.span(),
+                    })
+                }
                 "references" => {
                     let content;
                     parenthesized!(content in meta.input);
@@ -447,6 +522,7 @@ impl Input {
                     "duplicate collection name",
                 ));
             }
+            validate_array_storage(&collection.columns, false)?;
             let mut names = HashSet::new();
             for column in &collection.columns {
                 names.insert(spelling(&column.name));

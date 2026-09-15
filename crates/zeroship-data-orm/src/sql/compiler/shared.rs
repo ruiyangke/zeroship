@@ -2,9 +2,9 @@ use super::{CompileError, CompiledQuery, SqlWriter};
 use crate::sql::{
     CompareOp, MembershipOp, PatternOp,
     statement::{
-        ArithmeticOperator, ArrayOperator, Column, Delete, Expression, Insert, MutationScope,
-        ResolvedOperand, ResolvedPredicate, ResolvedPredicateValue, SelectStatement, Statement,
-        StorageType, Table, Update, Upsert, VectorSearchStatement,
+        ArithmeticOperator, ArrayElement, ArrayOperator, Column, Delete, Expression, Insert,
+        MutationScope, ResolvedOperand, ResolvedPredicate, ResolvedPredicateValue, SelectStatement,
+        Statement, StorageType, Table, Update, Upsert, VectorSearchStatement,
     },
 };
 use crate::value::Value;
@@ -270,6 +270,8 @@ pub(crate) struct Syntax {
     pub(crate) timestamp_cast: &'static str,
     pub(crate) vector_cast: &'static str,
     pub(crate) numeric_cast: &'static str,
+    /// Cast for a bound native text array; `None` when the dialect has no array type.
+    pub(crate) text_array_cast: Option<&'static str>,
     pub(crate) first_row_lock: &'static str,
     pub(crate) insensitive_like: &'static str,
     pub(crate) insensitive_like_suffix: &'static str,
@@ -1101,13 +1103,17 @@ fn write_bind(
     storage: StorageType,
     value: Value,
 ) -> Result<(), CompileError> {
+    let cast = match storage {
+        StorageType::Timestamp => syntax.timestamp_cast,
+        StorageType::Vector => syntax.vector_cast,
+        StorageType::ExactDecimal(_) => syntax.numeric_cast,
+        StorageType::Array(ArrayElement::Text) => syntax
+            .text_array_cast
+            .ok_or(CompileError::Unsupported("native array storage"))?,
+        _ => "",
+    };
     writer.write_param(value)?;
-    match storage {
-        StorageType::Timestamp => writer.sql.push_str(syntax.timestamp_cast),
-        StorageType::Vector => writer.sql.push_str(syntax.vector_cast),
-        StorageType::ExactDecimal(_) => writer.sql.push_str(syntax.numeric_cast),
-        _ => {}
-    }
+    writer.sql.push_str(cast);
     Ok(())
 }
 

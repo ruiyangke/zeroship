@@ -3,7 +3,9 @@ use super::{
     SqlSupport, SqlWriter,
 };
 use crate::{
-    sql::statement::{ArrayOperator, Column, IdentityRequest, Statement},
+    sql::statement::{
+        ArrayElement, ArrayOperator, Column, IdentityRequest, Statement, StorageType,
+    },
     value::Value,
 };
 
@@ -32,6 +34,7 @@ const SYNTAX: super::shared::Syntax = super::shared::Syntax {
     timestamp_cast: "::timestamptz",
     vector_cast: "::vector",
     numeric_cast: "::numeric",
+    text_array_cast: Some("::text[]"),
     first_row_lock: " FOR UPDATE",
     insensitive_like: "ILIKE",
     insensitive_like_suffix: "",
@@ -151,6 +154,61 @@ fn write_column(writer: &mut SqlWriter, column: &Column) {
 }
 
 fn write_array_mutation(
+    writer: &mut SqlWriter,
+    column: &Column,
+    operator: ArrayOperator,
+    operand: super::ParameterSlot,
+) -> Result<(), CompileError> {
+    match column.storage() {
+        StorageType::Json => write_json_array_mutation(writer, column, operator, operand),
+        StorageType::Array(ArrayElement::Text) => {
+            write_native_array_mutation(writer, column, "::text", operator, operand);
+            Ok(())
+        }
+        _ => Err(CompileError::InvalidStatement(
+            "array mutation requires array storage".into(),
+        )),
+    }
+}
+
+/// Native arrays keep order and duplicates. `array_remove` drops every equal
+/// element; `array_position` compares with `IS NOT DISTINCT FROM`, so an
+/// element is appended only when no equal element exists. A NULL array stays
+/// NULL.
+fn write_native_array_mutation(
+    writer: &mut SqlWriter,
+    column: &Column,
+    element_cast: &str,
+    operator: ArrayOperator,
+    operand: super::ParameterSlot,
+) {
+    let element = |writer: &mut SqlWriter| {
+        writer.write_bound(operand);
+        writer.sql.push_str(element_cast);
+    };
+    writer.sql.push_str("CASE WHEN ");
+    write_column(writer, column);
+    writer.sql.push_str(" IS NULL THEN ");
+    write_column(writer, column);
+    if operator == ArrayOperator::AddToSet {
+        writer.sql.push_str(" WHEN array_position(");
+        write_column(writer, column);
+        writer.sql.push_str(", ");
+        element(writer);
+        writer.sql.push_str(") IS NOT NULL THEN ");
+        write_column(writer, column);
+    }
+    writer.sql.push_str(match operator {
+        ArrayOperator::Push | ArrayOperator::AddToSet => " ELSE array_append(",
+        ArrayOperator::Pull => " ELSE array_remove(",
+    });
+    write_column(writer, column);
+    writer.sql.push_str(", ");
+    element(writer);
+    writer.sql.push_str(") END");
+}
+
+fn write_json_array_mutation(
     writer: &mut SqlWriter,
     column: &Column,
     operator: ArrayOperator,

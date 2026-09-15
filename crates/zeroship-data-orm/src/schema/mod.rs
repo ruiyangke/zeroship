@@ -6,6 +6,8 @@ pub use crate::value::Number;
 use crate::{error::DbError, value::Value};
 pub use zeroship_migrate_policy::{Assignment, AssignmentEvent, AssignmentGenerator};
 
+#[cfg(test)]
+mod array_storage_tests;
 mod decode;
 mod validate;
 
@@ -72,6 +74,17 @@ pub enum VectorMetric {
     InnerProduct,
 }
 
+/// Physical representation of an array column.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ArrayStorage {
+    /// The array is a JSON document.
+    #[default]
+    Json,
+    /// The database's own array type. PostgreSQL stores `text[]`; SQLite, which
+    /// has no array type, stores the same logical array as JSON text.
+    Native,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct StorageMapping {
     pub value_column: Option<String>,
@@ -79,6 +92,7 @@ pub struct StorageMapping {
     pub raw_filterable: bool,
     pub raw_sortable: bool,
     pub raw_projectable: bool,
+    pub array: ArrayStorage,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -200,6 +214,11 @@ impl ColumnSchema {
 
     pub fn is_masked(&self) -> bool {
         self.mask.as_ref().is_some_and(|mask| mask.kind != "none")
+    }
+
+    /// Whether this array column uses the database's own array type.
+    pub fn has_native_array_storage(&self) -> bool {
+        self.logical_type == LogicalType::Array && self.storage.array == ArrayStorage::Native
     }
 
     fn normalize_defaults(&mut self) {
