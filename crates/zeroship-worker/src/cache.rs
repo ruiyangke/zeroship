@@ -13,6 +13,7 @@ use zeroship_runtime::plugin::NativePlugin;
 use zeroship_runtime::runtime::{Runtime, RuntimeLimits};
 use zeroship_runtime::{EnvSnapshot, ModuleEntry, NetPolicy};
 use zeroship_storage::StorageBackendConfig;
+use zeroship_workflow::service::runner::ready::ReadyApps;
 
 #[cfg(test)]
 pub(crate) mod fixture;
@@ -95,11 +96,10 @@ thread_local! {
     /// or `S3` (S3/R2/MinIO — inherently shared). When `None`, the `storage`
     /// namespace is absent.
     static STORAGE_BACKEND: RefCell<Option<StorageBackendConfig>> = const { RefCell::new(None) };
-    /// Control-plane endpoint and raw control key used only to derive
-    /// app-scoped workflow tokens in `WorkflowBinding::build_instance`.
-    /// The raw key stays in Rust process memory and is never exposed to V8.
-    static CONTROL_URL: RefCell<Option<String>> = const { RefCell::new(None) };
-    static CONTROL_KEY: RefCell<Option<String>> = const { RefCell::new(None) };
+    /// The app backends the process's workflow host has made ready. Every
+    /// isolate's `env.workflows` resolves its own app here on each call, so an
+    /// unknown or unready app is refused and nothing reaches Control.
+    static WORKFLOWS: RefCell<Option<ReadyApps>> = const { RefCell::new(None) };
     /// The PROCESS-WIDE usage meter, cloned into every ntex worker thread's
     /// thread-local on `init_cache`. Metering is INFRASTRUCTURE: there is no
     /// creator-facing `env.meter` namespace. Instead `create_plugins` binds
@@ -120,8 +120,9 @@ thread_local! {
 /// The real multi-node stack SHOULD set all of them so deployed apps get
 /// the complete `env.{db,kv,storage,auth}` kernel.
 pub struct KernelConfig {
-    pub control_url: String,
-    pub control_key: String,
+    /// Ready app backends published by the process's workflow host. With no
+    /// host the registry stays empty and every `env.workflows` call is refused.
+    pub workflows: ReadyApps,
     /// The ONE process-wide `env.db` service, built in `main` before any
     /// worker thread exists. `None` when no database is configured, in which
     /// case the `db` namespace is simply absent.
@@ -138,7 +139,6 @@ pub struct KernelConfig {
 impl std::fmt::Debug for KernelConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("KernelConfig")
-            .field("control_key", &"[REDACTED]")
             .field("db_configured", &self.db_service.is_some())
             .field("kv_configured", &self.kv_store.is_some())
             .field("storage_configured", &self.storage_backend.is_some())
@@ -165,14 +165,29 @@ pub fn init_cache(max_size: usize, max_pinned_isolates_per_app: usize, kernel: K
     if let Some(backend) = kernel.storage_backend {
         STORAGE_BACKEND.with(|s| *s.borrow_mut() = Some(backend));
     }
-    CONTROL_URL.with(|u| *u.borrow_mut() = Some(kernel.control_url));
-    CONTROL_KEY.with(|k| *k.borrow_mut() = Some(kernel.control_key));
+    WORKFLOWS.with(|w| *w.borrow_mut() = Some(kernel.workflows));
     METER.with(|m| *m.borrow_mut() = Some(kernel.meter));
     // Every input `plugin_set` builds from was just replaced, so any cached
     // prototype set is now stale. Clearing here rather than trusting
     // "init_cache runs once" keeps the cache correct under repeated
     // installation instead of correct-by-convention.
     PLUGIN_SET.with(|p| *p.borrow_mut() = None);
+    WORKFLOW_PLUGIN_SET.with(|p| *p.borrow_mut() = None);
+}
+
+/// Install the Control credentials the deploy-pinned workflow isolates of the
+/// Control-driven advance path run under.
+///
+/// Only [`IsolateKind::PinnedWorkflow`] reads these: a workflow replayed over
+/// `/workflow-advance-unsigned/{app_id}` reaches its own run through
+/// `env.workflows`, and Control is the only engine that path has. Request
+/// isolates never see them; they resolve the host's ready registry, which is
+/// why a shared control key cannot be reached from creator request code.
+///
+/// Call once per HTTP thread, beside [`init_cache`].
+pub fn init_advance_workflow_control(control_url: String, control_key: String) {
+    ADVANCE_CONTROL.with(|c| *c.borrow_mut() = Some((control_url, control_key)));
+    WORKFLOW_PLUGIN_SET.with(|p| *p.borrow_mut() = None);
 }
 
 pub fn db_url() -> Option<String> {
@@ -212,17 +227,40 @@ thread_local! {
     /// wrong backend.
     static PLUGIN_SET: RefCell<Option<Vec<Arc<dyn NativePlugin>>>> =
         const { RefCell::new(None) };
+    /// As [`PLUGIN_SET`], for deploy-pinned workflow isolates. It differs in
+    /// exactly one plugin: `env.workflows`.
+    static WORKFLOW_PLUGIN_SET: RefCell<Option<Vec<Arc<dyn NativePlugin>>>> =
+        const { RefCell::new(None) };
+    /// Control origin and key for the advance path's workflow isolates, from
+    /// [`init_advance_workflow_control`].
+    static ADVANCE_CONTROL: RefCell<Option<(String, String)>> = const { RefCell::new(None) };
+}
+
+/// Which isolate a plugin set is being built for.
+///
+/// The two differ only in the `env.workflows` backend: a request isolate
+/// reaches the workflow host's ready registry, and a replayed workflow reaches
+/// the engine that dispatched it, which on the Control-driven advance path is
+/// Control.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IsolateKind {
+    Request,
+    PinnedWorkflow,
 }
 
 /// The thread's plugin set, minting it on first use.
 ///
 /// Returns clones of the same `Arc`s on every call, so two runtimes built on
 /// one thread share plugin instances rather than each holding their own.
-fn plugin_set() -> Vec<Arc<dyn NativePlugin>> {
-    PLUGIN_SET.with(|p| {
+fn plugin_set(kind: IsolateKind) -> Vec<Arc<dyn NativePlugin>> {
+    let cache = match kind {
+        IsolateKind::Request => &PLUGIN_SET,
+        IsolateKind::PinnedWorkflow => &WORKFLOW_PLUGIN_SET,
+    };
+    cache.with(|p| {
         let mut slot = p.borrow_mut();
         if slot.is_none() {
-            *slot = Some(create_plugins());
+            *slot = Some(create_plugins(kind));
         }
         slot.as_ref().expect("just populated").clone()
     })
@@ -250,7 +288,7 @@ fn plugin_set() -> Vec<Arc<dyn NativePlugin>> {
 ///   (S3/R2/MinIO) is the prod backend behind the same `Backend` trait and is
 ///   inherently shared across nodes. An object written on node A is readable
 ///   on node B in both cases.
-fn create_plugins() -> Vec<Arc<dyn NativePlugin>> {
+fn create_plugins(kind: IsolateKind) -> Vec<Arc<dyn NativePlugin>> {
     let mut plugins: Vec<Arc<dyn NativePlugin>> = Vec::new();
     // The process-wide meter, if configured. Metering is infrastructure:
     // rather than a creator-facing `env.meter` namespace, the meter is
@@ -286,12 +324,21 @@ fn create_plugins() -> Vec<Arc<dyn NativePlugin>> {
             }
         }
     }
-    if let Some(control_url) = CONTROL_URL.with(|u| u.borrow().clone()) {
-        let control_key = CONTROL_KEY.with(|k| k.borrow().clone()).unwrap_or_default();
-        plugins.push(Arc::new(zeroship_workflow_v8::WorkflowBinding::new(
-            control_url,
-            control_key,
-        )));
+    match kind {
+        IsolateKind::Request => {
+            if let Some(apps) = WORKFLOWS.with(|w| w.borrow().clone()) {
+                plugins.push(Arc::new(zeroship_workflow_v8::WorkflowBinding::ready(apps)));
+            }
+        }
+        // A replayed workflow reads its own run - step outputs staged as blobs,
+        // above all - through `env.workflows`, and on this path the engine
+        // holding that run is Control. The key stays in Rust memory and is
+        // never reachable from a request isolate.
+        IsolateKind::PinnedWorkflow => {
+            if let Some((url, key)) = ADVANCE_CONTROL.with(|c| c.borrow().clone()) {
+                plugins.push(Arc::new(zeroship_workflow_v8::WorkflowBinding::new(url, key)));
+            }
+        }
     }
     plugins.push(Arc::new(zeroship_runtime::auth::AuthPlugin));
     plugins
@@ -481,6 +528,7 @@ fn app_visible_env_vars(app_id: &str, deploy_hash: Option<&str>) -> HashMap<Stri
     env_vars
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn build_runtime(
     app_id: &AppId,
     modules: Vec<ModuleEntry>,
@@ -489,8 +537,9 @@ async fn build_runtime(
     deploy_hash: Option<&str>,
     runtime_descriptor: Option<&str>,
     env: &EnvSnapshot,
+    kind: IsolateKind,
 ) -> Result<Runtime, String> {
-    let plugins = plugin_set();
+    let plugins = plugin_set(kind);
     let meter = METER.with(|m| m.borrow().clone());
     let env_vars = app_visible_env_vars(app_id.as_str(), deploy_hash);
 
@@ -555,6 +604,7 @@ pub async fn load_app(
         deploy_hash,
         runtime_descriptor,
         env,
+        IsolateKind::Request,
     ).await?;
     let policy = Rc::new(CompiledManifest::compile(manifest));
 
@@ -637,6 +687,7 @@ pub async fn load_pinned_workflow_app(
         Some(deploy_hash),
         runtime_descriptor,
         env,
+        IsolateKind::PinnedWorkflow,
     ).await?;
     let policy = Rc::new(CompiledManifest::compile(manifest));
 
@@ -1062,15 +1113,15 @@ mod tests {
     /// carry the `auth` namespace so `env.auth.getUser()` resolves for
     /// production end-user apps. The faithful e2e drives `env.auth`
     /// through this very vector — assert it's present here so a future
-    /// edit that drops `AuthPlugin` from `create_plugins()` fails loudly,
+    /// edit that drops `AuthPlugin` from `create_plugins` fails loudly,
     /// not just under `zeroship serve` (the CLI vector). `AuthPlugin` is
     /// stateless, so it is pushed even when no DB URL is configured.
     #[test]
     fn create_plugins_registers_auth_namespace() {
-        let plugins = create_plugins();
+        let plugins = create_plugins(IsolateKind::Request);
         assert!(
             plugins.iter().any(|p| p.namespace() == "auth"),
-            "worker create_plugins() must include the auth namespace; got: {:?}",
+            "worker create_plugins must include the auth namespace; got: {:?}",
             plugins.iter().map(|p| p.namespace()).collect::<Vec<_>>()
         );
     }
@@ -1093,15 +1144,14 @@ mod tests {
                 4,
                 4,
                 KernelConfig {
-                    control_url: "http://127.0.0.1:1".to_string(),
-                    control_key: "test-control-key".to_string(),
+                    workflows: ReadyApps::default(),
                     db_service: Some(service),
                     kv_store: None,
                     storage_backend: None,
                     meter: Arc::new(zeroship_metering::Meter::new()),
                 },
             );
-            let plugins = plugin_set();
+            let plugins = plugin_set(IsolateKind::Request);
             assert!(
                 plugins.iter().any(|p| p.namespace() == "db"),
                 "the arm must rule on a plugin set that actually contains db; got {:?}",
@@ -1134,6 +1184,7 @@ mod tests {
                         Some("deploy_build_runtime_guard"),
                         None,
                         &EnvSnapshot::empty(),
+                        IsolateKind::Request,
                     ).await
                     .expect("the guard needs a runtime that actually built");
                     // The DSN is unreachable, so a build that DID connect would
@@ -1189,7 +1240,7 @@ mod tests {
     #[test]
     fn db_plugin_prototype_is_one_object_across_worker_threads() {
         fn db_plugin() -> Arc<dyn NativePlugin> {
-            let set = plugin_set();
+            let set = plugin_set(IsolateKind::Request);
             assert!(!set.is_empty(), "the kernel must register some namespaces");
             set.iter()
                 .find(|p| p.namespace() == "db")
@@ -1198,8 +1249,7 @@ mod tests {
         }
         let service = fixture::database_service("postgres://localhost/zs_unused_shared");
         let kernel = |service: Arc<zeroship_data_v8::service::DbService>| KernelConfig {
-            control_url: "http://127.0.0.1:1".to_string(),
-            control_key: "test-control-key".to_string(),
+            workflows: ReadyApps::default(),
             db_service: Some(service),
             kv_store: None,
             storage_backend: None,
@@ -1236,7 +1286,7 @@ mod tests {
     /// SC-5: two runtimes built on one OS thread must SHARE plugin
     /// instances, not each mint their own.
     ///
-    /// `build_runtime` used to call `create_plugins()` on every build, so a
+    /// `build_runtime` used to call `create_plugins` on every build, so a
     /// current isolate and a deploy-pinned isolate on the same thread each
     /// constructed their own `DbPlugin` - and would each resolve their own
     /// backend and their own caches once the service lands. The design's arm
@@ -1255,8 +1305,7 @@ mod tests {
     fn plugin_set_is_shared_per_thread_and_invalidated_by_init_cache() {
         std::thread::spawn(|| {
             let kernel = || KernelConfig {
-                control_url: "http://127.0.0.1:1".to_string(),
-                control_key: "test-control-key".to_string(),
+                workflows: ReadyApps::default(),
                 db_service: Some(fixture::database_service("postgres://localhost/zs_unused")),
                 kv_store: None,
                 storage_backend: None,
@@ -1264,8 +1313,8 @@ mod tests {
             };
 
             init_cache(4, 4, kernel());
-            let a = plugin_set();
-            let b = plugin_set();
+            let a = plugin_set(IsolateKind::Request);
+            let b = plugin_set(IsolateKind::Request);
             assert_eq!(a.len(), b.len(), "the set must be stable across calls");
             assert!(!a.is_empty(), "the kernel must register some namespaces");
             for (x, y) in a.iter().zip(b.iter()) {
@@ -1279,7 +1328,7 @@ mod tests {
 
             // Re-installing the kernel must drop the cached prototypes.
             init_cache(4, 4, kernel());
-            let c = plugin_set();
+            let c = plugin_set(IsolateKind::Request);
             assert_eq!(c.len(), a.len());
             assert!(
                 a.iter().zip(c.iter()).all(|(x, y)| !Arc::ptr_eq(x, y)),
@@ -1289,6 +1338,59 @@ mod tests {
         })
         .join()
         .expect("plugin-sharing guard thread panicked");
+    }
+
+    /// A replayed workflow reads its own run - a step output staged as a blob,
+    /// above all - through `env.workflows`, and the engine holding that run is
+    /// the one that dispatched it. On the Control-driven advance path that is
+    /// Control, never the workflow host's ready registry, which is empty for
+    /// an app no manager placed here. Binding the replay isolate to the
+    /// registry instead fails the app's own read with a retryable refusal it
+    /// can never outlive.
+    ///
+    /// The two sets are told apart by their inputs rather than by a namespace
+    /// name they share: the request set follows `init_cache`, and the replay
+    /// set follows `init_advance_workflow_control` and nothing else.
+    #[test]
+    fn a_replayed_workflow_follows_control_while_requests_follow_the_ready_registry() {
+        std::thread::spawn(|| {
+            init_cache(
+                4,
+                4,
+                KernelConfig {
+                    workflows: ReadyApps::default(),
+                    db_service: None,
+                    kv_store: None,
+                    storage_backend: None,
+                    meter: Arc::new(zeroship_metering::Meter::new()),
+                },
+            );
+            let workflows = |kind| {
+                plugin_set(kind)
+                    .iter()
+                    .any(|plugin| plugin.namespace() == "workflows")
+            };
+            assert!(
+                workflows(IsolateKind::Request),
+                "the kernel's ready registry is the request path's backend"
+            );
+            assert!(
+                !workflows(IsolateKind::PinnedWorkflow),
+                "a replay isolate must not borrow the request path's registry"
+            );
+
+            init_advance_workflow_control("http://127.0.0.1:1".into(), "advance-key".into());
+            assert!(
+                workflows(IsolateKind::PinnedWorkflow),
+                "the advance path's Control engine is the replay isolate's backend"
+            );
+            assert!(
+                workflows(IsolateKind::Request),
+                "installing the replay backend must not disturb the request set"
+            );
+        })
+        .join()
+        .expect("advance-backend guard thread panicked");
     }
 
     /// Re-installing a kernel with no database must turn the `db` namespace
@@ -1307,8 +1409,7 @@ mod tests {
     fn re_installing_the_kernel_without_a_database_clears_the_db_namespace() {
         std::thread::spawn(|| {
             let with_db = || KernelConfig {
-                control_url: "http://127.0.0.1:1".to_string(),
-                control_key: "test-control-key".to_string(),
+                workflows: ReadyApps::default(),
                 db_service: Some(fixture::database_service("postgres://localhost/zs_unused_sticky")),
                 kv_store: None,
                 storage_backend: None,
@@ -1317,7 +1418,7 @@ mod tests {
 
             init_cache(4, 4, with_db());
             assert!(
-                plugin_set().iter().any(|p| p.namespace() == "db"),
+                plugin_set(IsolateKind::Request).iter().any(|p| p.namespace() == "db"),
                 "the fixture must start from a kernel that HAS the db namespace",
             );
             assert!(db_url().is_some(), "the fixture must start from a bound db");
@@ -1331,10 +1432,10 @@ mod tests {
                 },
             );
             assert!(
-                !plugin_set().iter().any(|p| p.namespace() == "db"),
+                !plugin_set(IsolateKind::Request).iter().any(|p| p.namespace() == "db"),
                 "a kernel installed with no database must not keep serving env.db \
                  against the previous one; got {:?}",
-                plugin_set()
+                plugin_set(IsolateKind::Request)
                     .iter()
                     .map(|p| p.namespace())
                     .collect::<Vec<_>>(),
@@ -1350,13 +1451,13 @@ mod tests {
 
     /// Phase-2 structural guard (no external services): when the kernel
     /// config carries a DB URL, a KV URL, and a storage root, the SAME
-    /// `create_plugins()` a deployed app boots against installs all four
+    /// `create_plugins` a deployed app boots against installs all four
     /// `env.{db,kv,storage,auth}` namespaces. This is the always-runnable
     /// complement to the redis-gated faithful dispatch test in
     /// `handler.rs` — it asserts the plugin VECTOR, the latter asserts the
     /// JS namespaces resolve + round-trip end-to-end.
     ///
-    /// Pre-Phase-2 this FAILS: `create_plugins()` ignored kv/storage
+    /// Pre-Phase-2 this FAILS: `create_plugins` ignored kv/storage
     /// entirely, so `kv` and `storage` were never in the vector. Runs on a
     /// fresh thread so the kernel thread-locals don't leak into other
     /// tests sharing this thread.
@@ -1367,8 +1468,7 @@ mod tests {
                 4,
                 4,
                 KernelConfig {
-                    control_url: "http://127.0.0.1:1".to_string(),
-                    control_key: "test-control-key".to_string(),
+                    workflows: ReadyApps::default(),
                     db_service: Some(fixture::database_service("postgres://localhost/zs_unused")),
                     kv_store: Some(
                         zeroship_kv::KvStore::open(&zeroship_kv::KvConfig::Redis {
@@ -1382,7 +1482,7 @@ mod tests {
                     meter: Arc::new(zeroship_metering::Meter::new()),
                 },
             );
-            let plugins = create_plugins();
+            let plugins = create_plugins(IsolateKind::Request);
             let namespaces: Vec<String> =
                 plugins.iter().map(|p| p.namespace().to_string()).collect();
             // Metering is infrastructure now: there is NO `meter` namespace.
@@ -1391,7 +1491,7 @@ mod tests {
             for expected in ["db", "kv", "storage", "workflows", "auth"] {
                 assert!(
                     namespaces.iter().any(|n| n == expected),
-                    "create_plugins() must register the '{expected}' namespace when configured; got: {namespaces:?}"
+                    "create_plugins must register the '{expected}' namespace when configured; got: {namespaces:?}"
                 );
             }
             assert!(
@@ -1407,8 +1507,7 @@ mod tests {
     fn replacing_kernel_without_kv_removes_its_cached_binding() {
         std::thread::spawn(|| {
             let kernel = |kv_store| KernelConfig {
-                control_url: "http://127.0.0.1:1".to_string(),
-                control_key: String::new(),
+                workflows: ReadyApps::default(),
                 db_service: None,
                 kv_store,
                 storage_backend: None,
@@ -1421,16 +1520,16 @@ mod tests {
             })
             .unwrap();
             init_cache(4, 4, kernel(Some(store)));
-            assert!(plugin_set().iter().any(|plugin| plugin.namespace() == "kv"));
+            assert!(plugin_set(IsolateKind::Request).iter().any(|plugin| plugin.namespace() == "kv"));
             init_cache(4, 4, kernel(None));
-            assert!(!plugin_set().iter().any(|plugin| plugin.namespace() == "kv"));
+            assert!(!plugin_set(IsolateKind::Request).iter().any(|plugin| plugin.namespace() == "kv"));
         })
         .join()
         .unwrap();
     }
 
     /// Degrade-don't-panic: with no kv/storage configured (only db), the
-    /// kv + storage namespaces are simply absent — `create_plugins()`
+    /// kv + storage namespaces are simply absent — `create_plugins`
     /// never panics. Mirrors the long-standing DB behaviour. Fresh thread
     /// keeps the empty kernel thread-locals isolated.
     #[test]
@@ -1440,8 +1539,7 @@ mod tests {
                 4,
                 4,
                 KernelConfig {
-                    control_url: "http://127.0.0.1:1".to_string(),
-                    control_key: String::new(),
+                    workflows: ReadyApps::default(),
                     db_service: None,
                     kv_store: None,
                     storage_backend: None,
@@ -1452,7 +1550,7 @@ mod tests {
                     meter: Arc::new(zeroship_metering::Meter::new()),
                 },
             );
-            let plugins = create_plugins();
+            let plugins = create_plugins(IsolateKind::Request);
             let namespaces: Vec<String> =
                 plugins.iter().map(|p| p.namespace().to_string()).collect();
             let has = |n: &str| namespaces.iter().any(|x| x == n);
@@ -1708,8 +1806,7 @@ mod tests {
                     4,
                     4,
                     KernelConfig {
-                        control_url: "http://127.0.0.1:1".to_string(),
-                        control_key: String::new(),
+                        workflows: ReadyApps::default(),
                         db_service: None,
                         kv_store: None,
                         storage_backend: None,
@@ -1772,8 +1869,7 @@ mod tests {
                 zeroship_runtime::init::init_v8();
                 let app_id = AppId::mint();
                 init_cache(4, 4, KernelConfig {
-                    control_url: "http://127.0.0.1:1".into(),
-                    control_key: String::new(),
+                    workflows: ReadyApps::default(),
                     db_service: None,
                     kv_store: None,
                     storage_backend: None,
@@ -1833,8 +1929,7 @@ mod tests {
                     4,
                     4,
                     KernelConfig {
-                        control_url: "http://127.0.0.1:1".to_string(),
-                        control_key: String::new(),
+                        workflows: ReadyApps::default(),
                         db_service: None,
                         kv_store: None,
                         storage_backend: None,
@@ -1899,8 +1994,7 @@ mod tests {
             use futures::FutureExt;
             compio::runtime::Runtime::new().unwrap().block_on(async {
                 init_cache(4, 4, KernelConfig {
-                    control_url: "http://127.0.0.1:1".into(),
-                    control_key: String::new(),
+                    workflows: ReadyApps::default(),
                     db_service: None,
                     kv_store: None,
                     storage_backend: None,
@@ -1949,8 +2043,7 @@ mod tests {
                     4,
                     4,
                     KernelConfig {
-                        control_url: "http://127.0.0.1:1".to_string(),
-                        control_key: String::new(),
+                        workflows: ReadyApps::default(),
                         db_service: None,
                         kv_store: None,
                         storage_backend: None,
@@ -2001,8 +2094,7 @@ mod tests {
                     4,
                     4,
                     KernelConfig {
-                        control_url: "http://127.0.0.1:1".to_string(),
-                        control_key: String::new(),
+                        workflows: ReadyApps::default(),
                         db_service: None,
                         kv_store: None,
                         storage_backend: None,

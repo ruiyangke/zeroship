@@ -17,6 +17,7 @@
     }
   },
   "workflows": [
+    "HostIngressWorkflow",
     "KeystoneWorkflow",
     "SignalWorkflow",
     "TopicSignalWorkflow",

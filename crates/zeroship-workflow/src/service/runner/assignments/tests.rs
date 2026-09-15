@@ -15,6 +15,7 @@ use zeroship_core::workflow_coordination::WorkerId;
 
 mod fixture;
 mod lifecycle;
+mod ready;
 use fixture::{claims, peer, Fixture};
 
 fn scope() -> AssignedScope {
@@ -29,6 +30,20 @@ fn unavailable<T>(result: Result<T, WorkflowServiceError>) {
         result.err(),
         Some(WorkflowServiceError::Unavailable(_))
     ));
+}
+
+/// The registry's own retryable refusal, distinct from a retired generation.
+fn not_ready<T: std::fmt::Debug>(result: Result<T, WorkflowServiceError>) {
+    match result {
+        Err(WorkflowServiceError::Unavailable(message)) => {
+            assert!(message.contains("not ready"), "{message}");
+        }
+        other => panic!("expected the not-ready refusal, got {other:?}"),
+    }
+}
+
+fn run_id() -> String {
+    zeroship_core::typed_id::generate(zeroship_core::typed_id::WORKFLOW_RUN_PREFIX)
 }
 
 #[compio::test]

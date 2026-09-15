@@ -71,6 +71,11 @@ impl AppBackend {
         &self.app
     }
 
+    /// The policy generation every call through this backend is bound to.
+    pub(crate) const fn binding(&self) -> &PolicyBinding {
+        &self.binding
+    }
+
     /// Signal the host after every start, signal, transition and restart,
     /// including failed calls whose commit outcome may be uncertain. Clones
     /// share the hint; reads never trigger it.

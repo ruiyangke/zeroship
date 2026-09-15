@@ -2578,35 +2578,79 @@ Use main's shared ORM API and coordinate its changes with the ORM owner.
 ### Executable host composition
 
 `WorkerHost`, `AssignmentBindings`, `JobConsumer` and `WorkflowCreatorFactory`
-provide native composition seams; the worker executable does not yet construct
-them. The production host owns its enrolled identity, configured capacity and
-assignment registry on a dedicated compio thread. HTTP runtime threads call fixed
-`AppBackend` senders published by that owner. Starting independent hosts under
-the same enrolled identity in every HTTP thread would duplicate capacity and let
-their policy generations retire each other.
+are the native composition seams, and `zeroship-worker`'s `workflow_host` module
+constructs them. The production host owns its enrolled identity, configured
+capacity and assignment registry on a dedicated compio thread. HTTP runtime
+threads call fixed `AppBackend` senders published by that owner, resolved
+through the process-wide `ReadyApps` registry the worker's isolate kernel
+carries. Starting independent hosts under the same enrolled identity in every
+HTTP thread would duplicate capacity and let their policy generations retire
+each other, so a worker starts exactly one. Its manager origin and capacity
+arrive through the configuration contract, as the enrollment settings do; with
+no manager origin no host runs and the registry stays empty.
 
-Publish a ready backend only after assignment preparation's final current-entry
-and original-authority checks. Successful resource construction alone is not
-readiness: its association may retire before installation. Installation and
-removal carry the immutable app and binding identity. Removal closes admission
-synchronously; previously cloned handles retain their retired generation. An
-unknown or unready app receives a retryable refusal. It cannot acquire an ambient
-policy binding or fall back to the old Control workflow backend.
+`AssignmentBindings` publishes a ready backend only after assignment
+preparation's final current-entry and original-authority checks. Successful
+resource construction alone is not readiness: its association may retire before
+installation. Installation and removal carry the immutable app and binding
+identity, and `ReadyApps::retire` withdraws a generation only while it is still
+the published one, so a retired generation cannot withdraw its replacement.
+Removal closes admission synchronously; previously cloned handles retain their
+retired generation. An unknown or unready app receives a retryable refusal. It
+cannot acquire an ambient policy binding or fall back to the old Control
+workflow backend, which no request isolate can reach any more. The
+Control-driven advance path keeps it, because a workflow it replays reads its
+own run - a step output staged as a blob, above all - through `env.workflows`,
+and Control is the engine holding that run; the two isolate kinds therefore
+take different plugin sets, and the shared control key lives only in the replay
+one. Slice 6 deletes that path and the key with it. Preparation takes the
+placement's policy lease at a single point ahead of that publication, and that
+point is the one place
+[ingress epoch](#ingress-epochs-and-scope-retirement) establishment attaches
+to.
 
 The creator-resource provider supplies the exact `ConnectionFactory`,
 `ProjectKeySource`, `DbBinding`, object store, deployment capability and signal
-authority independently of manager metadata. Assignment scope cannot select
-credentials or a schema. Context refresh may supply environment and runtime
-limits under explicit freshness, while the workflow backend remains fixed.
-Production journal provisioning belongs to the migration path; the worker does
-not run local schema initialization. Signal authority provisioning and rotation
-and resource eligibility remain explicit host contracts.
+authority independently of manager metadata. In the worker these are the
+process's own: the `env.db` service's connection and project keys, the `env.storage`
+object store, and the app metadata Control serves this enrolled instance.
+Assignment scope cannot select credentials or a schema. Context refresh may
+supply environment and runtime limits under explicit freshness, while the
+workflow backend remains fixed. Production journal provisioning belongs to the
+migration path; the worker does not run local schema initialization. Signal
+authority is optional to the resources, and an app without one refuses
+capability issuance and ingestion rather than running unsigned; its provisioning
+and rotation, and resource eligibility, remain explicit host contracts.
 
-Construct the authenticated manager client from the enrolled instance signer,
+The authenticated manager client is built from the enrolled instance signer, the
 validated manager origin and bounded transport options. A scope-only retention
-adapter must accept an `AssignedScope` and its fixed signer; it must not fabricate
-a complete `Assignment` or expiry to satisfy a constructor. Control revalidates
-the actual assignment when authorizing each hold operation.
+adapter accepts an `AssignedScope` and its fixed signer; `RemoteDeploymentHolds`
+takes exactly that and checks the signer is an enrolled instance, rather than
+fabricating a complete `Assignment` or expiry to satisfy a constructor. Control
+revalidates the actual assignment when authorizing each hold operation.
+
+Shutdown is joined and ordered. SIGTERM drains HTTP first, so no request can
+resolve a published backend; then the host closes its bindings, which withdraws
+every backend and revokes its policy generation, reports draining to the manager
+while delivered executions join, and its thread is joined; only then does the
+instance retire, because the host's final manager exchange is signed with the
+instance key. A host that stops on its own stops the request server with it and
+exits non-zero, so the orchestrator replaces a process that can no longer serve
+the durable work it accepted.
+
+A consequence to close with placement: a deployed app reaches `env.workflows`
+only once a manager has placed it on the worker serving the request, and nothing
+places an app on its own yet. The manager's assign route is a Control-authorized
+peer call, so today a placement exists only where something acts as Control and
+makes it - which the fleet process contract does and the example fleets, which
+run no manager at all, do not. Both workflow examples therefore serve
+`workflow_unavailable` on their deployed tier while their local tier, whose CLI
+host places its own app, is unaffected. The fix belongs to
+[placement](#placement-eligibility-and-capacity-provider): a driver that places
+an app with workflows enabled on a ready worker gives the examples their deployed
+tier back without a second placement path. Assigning from the fixtures would mean
+minting platform service assertions outside the one implementation that mints
+them, which is the property `service_peers` exists to hold.
 
 The local host uses the same `JobConsumer` with a CLI-owned native `JobTransport`
 over the manager coordinator's real delivery grants. The manager, its Driver and
@@ -3466,15 +3510,25 @@ is the merge order.
    conflict, concurrent duplicates, rollback and refusal; its publication
    contracts against the signed manager routes; and the CLI and SDK command
    contracts.
-4. **Worker executable.** The production worker runs `WorkerHost` on a
-   dedicated thread with a trusted creator-resource provider, the enrolled
-   instance signer and joined shutdown. `WorkerHost` publishes an app's backend
-   to request isolates only after assignment preparation passes its final
-   authority checks, and retires it synchronously on removal; an unknown or
-   unready app receives a retryable refusal. `WorkflowBinding` uses that ready
-   registry instead of the old Control backend. The worker enrolls and
-   registers as [enrollment](#enrollment-bootstrap-and-revocation) describes,
-   and releases an app it cannot serve as refused.
+4. **Worker executable (implemented).** The production worker runs `WorkerHost`
+   on a dedicated compio thread with a trusted creator-resource provider, the
+   enrolled instance signer and joined shutdown. `WorkerHost` publishes an app's
+   backend to request isolates only after assignment preparation passes its
+   final authority checks, and retires it synchronously on removal; an unknown
+   or unready app receives a retryable refusal. `WorkflowBinding` uses that
+   ready registry instead of the old Control backend, which no request isolate
+   can reach any more; only the advance path's replay isolates still hold the
+   Control origin and the shared control key, until slice 6 removes them. The
+   worker enrolls and registers as
+   [enrollment](#enrollment-bootstrap-and-revocation) describes. Releasing an
+   app this worker cannot serve belongs to the next slice, with the placement
+   provider that would re-place it. Proof: the worker's host configuration and
+   ready-registry contracts, the assignment host's publication contracts, the
+   `env.workflows` binding contracts that refuse an unready or foreign app, and
+   the fleet process contract that starts a run through ordinary app ingress and
+   sees it complete through manager delivery. The example fleets run no manager,
+   so their deployed tier refuses `env.workflows` until placement lands; see
+   [executable host composition](#executable-host-composition).
 5. **Ingress responsibility and capacity.** The ingress epoch gates every
    creator acceptance, hosts establish it at startup and after a fenced
    refusal, and the closing lane retires idle or archived responsibility and

@@ -1,6 +1,6 @@
 use super::*;
 use std::future::ready;
-use zeroship_core::workflow_coordination::{AssignScope, AssignedScope, RegisterWorker, WorkerState};
+use zeroship_core::workflow_coordination::{AssignedScope, RegisterWorker, WorkerState};
 use zeroship_workflow_manager::{
     coordinator::{self, Coordinator},
     recovery::{self, DutyKind, Recovery, ScopeState},
@@ -31,7 +31,14 @@ impl Manager {
     async fn new(app: &AppId) -> Self {
         let database = crate::service::tests::publication::Manager::new(app).await;
         let coordinator =
-            Coordinator::new(database.queue.clone(), coordinator::Options::default()).unwrap();
+            Coordinator::new(
+                database.queue.clone(),
+                coordinator::Options::default(),
+                std::rc::Rc::new(zeroship_workflow_manager::eligibility::LocalEligibility::new(
+                    zeroship_workflow_manager::eligibility::ZoneId::default_zone(),
+                )),
+            )
+            .unwrap();
         // Duties fall due at once, so each Collect below is delivered on demand.
         let recovery = Recovery::new(
             database.queue.clone(),
@@ -52,15 +59,12 @@ impl Manager {
             )
             .await
             .unwrap();
-        let assignment = coordinator
-            .assign(&AssignScope {
-                request_id: RequestId::mint(),
-                app_id: app.clone(),
-                worker_id: worker.clone(),
-                expected_revision: None,
-            })
-            .await
-            .unwrap();
+        // The manager places the app; this worker is its only capacity.
+        let zeroship_workflow_manager::coordinator::Placed::Assigned(assignment) =
+            coordinator.place(app).await.unwrap()
+        else {
+            panic!("the local host is the app's only eligible worker");
+        };
         recovery
             .ensure(
                 app,
