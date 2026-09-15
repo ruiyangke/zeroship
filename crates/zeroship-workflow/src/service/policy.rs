@@ -475,9 +475,24 @@ impl PolicyRefresh {
             {
                 return Err(conflict());
             }
-            previous.revision != snapshot.revision
-                || matches!((&previous.validity, &snapshot.validity),
-                (Validity::Until(old), Validity::Until(new)) if new < old)
+            let revision_changed = previous.revision != snapshot.revision;
+            let deadline_regressed = matches!((&previous.validity, &snapshot.validity),
+                (Validity::Until(old), Validity::Until(new)) if new < old);
+            // SAY WHY, because the consequence is severe and invisible from the
+            // outside: retiring an epoch cancels every operation bound to it, so
+            // a delivery in flight is aborted and its run goes back to the
+            // queue. A renewal that merely extends the same policy must trip
+            // NEITHER of these; if one of them fires on a routine refresh, that
+            // is a defect in what the manager issued, and this line is what
+            // tells an operator which half to look at.
+            if revision_changed || deadline_regressed {
+                tracing::info!(
+                    revision_changed,
+                    deadline_regressed,
+                    "workflow host policy epoch retired, cancelling operations bound to it"
+                );
+            }
+            revision_changed || deadline_regressed
         } else {
             false
         };
