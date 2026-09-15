@@ -46,17 +46,6 @@ pub struct ControlSettings {
     #[config(shared = OBSERVABILITY_LOG_FORMAT, default = LogFormat::Auto)]
     pub log_format: Operational<LogFormat>,
 
-    /// Test harness only: do not spawn durable-workflow background work.
-    /// The e2e harness drives the scheduler path explicitly from its test
-    /// process while this control process serves sync/deploy state.
-    ///
-    /// `env = false` keeps the pre-conversion supply set: a harness passes an
-    /// argument deliberately, whereas an exported variable disables the engine
-    /// for every control process that inherits it.
-    #[arg(hide = true)]
-    #[config(name = "control.disable_workflow_engine", env = false)]
-    pub disable_workflow_engine: BootstrapControl<bool>,
-
     /// Permit an evaluation-grade billing provider such as `lite` in production.
     #[config(name = "control.allow_unsupported_billing")]
     pub allow_unsupported_billing: BootstrapControl<bool>,
@@ -76,10 +65,6 @@ pub struct ControlSettings {
     /// Comma-separated worker base URLs.
     #[config(shared = WORKER_URLS, default = "http://localhost:8080".to_owned())]
     pub worker_urls: Operational<String>,
-
-    /// Gateway internal base URL used by the workflow engine dispatch seam.
-    #[config(name = "control.gateway_url", default = "http://localhost".to_owned())]
-    pub gateway_url: Operational<String>,
 
     /// Workflow coordinator used to verify app placement and queue management,
     /// and to publish app lifecycle intents. An origin the manager client
@@ -464,22 +449,15 @@ mod tests {
     use super::{ControlSettings, ControlSettingsSources, DEFAULT_LOG_FILTER};
 
     #[test]
-    fn the_two_safety_controls_keep_their_flag_spellings_and_gain_an_env() {
-        // `--disable-workflow-engine` and `--allow-unsupported-billing` are
-        // driven by e2e scripts and compose; the canonical `control.` prefix is
-        // stripped by the binary scope, so the flag an operator types is
-        // unchanged while the environment name becomes reserved-prefixed.
+    fn the_billing_safety_control_keeps_its_flag_spelling_and_gains_an_env() {
+        // `--allow-unsupported-billing` is driven by e2e scripts and compose;
+        // the canonical `control.` prefix is stripped by the binary scope, so
+        // the flag an operator types is unchanged while the environment name
+        // becomes reserved-prefixed.
         // Does not cover: whether those scripts were updated. That is a grep
         // over tests/, not something a clap Command can answer.
         let command = ControlSettingsSources::command();
         for (id, long, env) in [
-            (
-                "disable_workflow_engine",
-                "disable-workflow-engine",
-                // `env = false`: the hidden harness switch keeps its flag-only
-                // supply set, so no inherited variable can disable the engine.
-                None,
-            ),
             (
                 "allow_unsupported_billing",
                 "allow-unsupported-billing",
@@ -552,7 +530,6 @@ mod tests {
 
         assert_eq!(resolved.log_filter.get(), DEFAULT_LOG_FILTER);
         assert_eq!(resolved.check_config_format.get(), &CheckFormat::Text);
-        assert!(!*resolved.disable_workflow_engine.get());
         assert!(!*resolved.allow_unsupported_billing.get());
     }
 }

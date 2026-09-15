@@ -30,13 +30,6 @@ enum WorkflowBackendFactory {
     Ready {
         apps: ReadyApps,
     },
-    /// Control's workflow API, reached with an app-scoped token derived from
-    /// the shared control key. Only the Control-driven advance path's replay
-    /// isolates use it; slice 6 of the workflow worker proposal deletes both.
-    Control {
-        control_url: String,
-        control_key: String,
-    },
 }
 
 #[derive(Clone, Debug)]
@@ -65,17 +58,6 @@ impl WorkflowBinding {
         }
     }
 
-    /// Bind each isolate to Control's workflow API under a token derived for
-    /// its own app. The raw key stays in the host and never reaches V8.
-    #[must_use]
-    pub fn new(control_url: impl Into<String>, control_key: impl Into<String>) -> Self {
-        Self {
-            backend: WorkflowBackendFactory::Control {
-                control_url: control_url.into(),
-                control_key: control_key.into(),
-            },
-        }
-    }
 }
 
 impl NativePlugin for WorkflowBinding {
@@ -117,20 +99,6 @@ impl NativePlugin for WorkflowBinding {
             // app; creator-visible environment values cannot.
             WorkflowBackendFactory::Ready { apps } => {
                 apps.backend(zeroship_runtime::plugin::runtime_app_identity(scope)?)
-            }
-            WorkflowBackendFactory::Control {
-                control_url,
-                control_key,
-            } => {
-                let app = zeroship_runtime::plugin::runtime_app_identity(scope)?;
-                let token = zeroship_workflow::app_scoped_token(control_key, app.as_str());
-                Arc::new(zeroship_workflow::backend::HttpWorkflowBackend::new(
-                    zeroship_workflow::WorkflowClientConfig::new(
-                        control_url.clone(),
-                        app.as_str().to_owned(),
-                        token,
-                    ),
-                ))
             }
         };
         mint_workflows(scope, backend)
