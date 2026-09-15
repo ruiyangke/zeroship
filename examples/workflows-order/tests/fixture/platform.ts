@@ -286,13 +286,29 @@ export class Platform {
     for (let attempt = 0; attempt < 2; attempt++) {
       await this.httpReady(provisionUrl, { method: "POST", headers: { authorization: "Bearer " + bearer } });
     }
-    // Workflow rollout and plan capabilities are operator-owned.
+    // Workflow rollout and plan capabilities are operator-owned. A plan carries
+    // the policy the manager grants an app's host under, and Control's startup
+    // seeding leaves that column null, which refuses every policy lease. This is
+    // the catalog default an operator publishes: the complete raw value of
+    // zeroship_core::workflow_policy::AppPolicy::default(), which refuses
+    // unknown and missing fields, so a change to that type fails here rather
+    // than drifting.
+    const policy = JSON.stringify({
+      admission: true, dispatch: true, ingress: true,
+      maxLiveRuns: 10000, maxChildDepth: 16, maxRunning: 16,
+      maxInputBytes: 1048576, maxFrontier: 256, maxJournalBytes: 16777216,
+      maxPayloadBytes: 67108864, maxPayloadObjects: 100000,
+      maxPayloadStorageBytes: 1073741824, payloadStagingRetentionMs: 86400000,
+      maxCompensationAttempts: 8, compensationRetryMs: 1000,
+      maxSchedules: 64, maxScheduleBackfill: 32, minScheduleIntervalMs: 1000,
+      maxSignalTokenLifetimeSeconds: 86400, leaseMs: 60000,
+    });
     const plan = await postgres.exec(["psql", "-U", "postgres", "-d", "workflow_fixture", "-v", "ON_ERROR_STOP=1", "-qtAc",
       "UPDATE zeroship.apps SET workflows_enabled = true, plan_id = (SELECT id FROM zeroship.plans WHERE name = 'unlimited' AND NOT archived) WHERE id = '" + id + "' RETURNING id"]);
     assert.equal(plan.exitCode, 0, plan.output);
     assert.equal(plan.output.trim(), id, "Operator must enable the workflow test plan");
     const rollout = await postgres.exec(["psql", "-U", "postgres", "-d", "workflow_fixture", "-v", "ON_ERROR_STOP=1", "-c",
-      "UPDATE zeroship.plans SET workflows_allowed = true; INSERT INTO zeroship.workflow_rollout_config (id, dispatch_paused, ingress_disabled, source_validity_ms, updated_by) VALUES ('global', false, false, 30000, 'workflow-fixture') ON CONFLICT (id) DO UPDATE SET dispatch_paused = false, ingress_disabled = false, source_validity_ms = EXCLUDED.source_validity_ms"]);
+      `UPDATE zeroship.plans SET workflows_allowed = true, workflow_policy_json = '${policy}'; INSERT INTO zeroship.workflow_rollout_config (id, dispatch_paused, ingress_disabled, source_validity_ms, updated_by) VALUES ('global', false, false, 30000, 'workflow-fixture') ON CONFLICT (id) DO UPDATE SET dispatch_paused = false, ingress_disabled = false, source_validity_ms = EXCLUDED.source_validity_ms`]);
     assert.equal(rollout.exitCode, 0, rollout.output);
     await processes.run("deploy", binary("zeroship"), ["deploy", bundle, `--app=${id}`, `--control=${control.url}`, `--token=${bearer}`], work, { HOME: work });
 
