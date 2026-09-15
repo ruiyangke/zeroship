@@ -26,10 +26,10 @@
 #      same request - with the network half of the envelope cleared and NOTHING
 #      ELSE CHANGED - refuses it with `envelope_unset` and writes no row.
 #   C  the REAL `zeroship-worker` binary the stack booted enrolled ITSELF, and
-#      the row it produced carries the derived address and a public key that is
-#      NOT the operator's `svc/worker` role key. A and B drive the endpoint as
-#      the worker would; C is the only arm that rules on the worker's own boot
-#      path, and it is what the harness header used to say was out of scope.
+#      the row it produced carries the derived address, a public key that is
+#      NOT its unit's on-disk enroller key, and that enroller's id. A and B
+#      drive the endpoint as the worker would, minting under the unit's
+#      enroller; C is the only arm that rules on the worker's own boot path.
 #   D  a real worker pointed at the UNDECLARED control plane REFUSES TO START -
 #      it exits non-zero and never serves - against a control differing in the
 #      `--control-url` and nothing else, which boots and enrols.
@@ -111,7 +111,7 @@ stack_up || exit 2
 # did while it was booting, and arm A inserts a row with the same address a few
 # lines below, so the snapshot has to be taken here or the two become
 # indistinguishable.
-BOOT_ROWS="$(psql_q "select id || '|' || host(advertise_host) || '|' || advertise_port || '|' || status || '|' || encode(public_key, 'base64') from zeroship.worker_instances order by registered_at")"
+BOOT_ROWS="$(psql_q "select id || '|' || host(advertise_host) || '|' || advertise_port || '|' || status || '|' || encode(public_key, 'base64') || '|' || enroller_id from zeroship.worker_instances order by registered_at")"
 BOOT_ROW_COUNT="$(printf '%s' "$BOOT_ROWS" | grep -c '|' )"
 
 # ---------------------------------------------------------------------------
@@ -120,23 +120,26 @@ BOOT_ROW_COUNT="$(printf '%s' "$BOOT_ROWS" | grep -c '|' )"
 echo ""
 echo "=== C: the zeroship-worker binary the stack booted enrolled itself ==="
 
-# The operator's `svc/worker` ROLE key, which is the one thing on disk. The
+# The unit's ENROLLER key, which is the one key on disk, split out of its
+# credential document into a PEM the assertion helper below can sign with. The
 # instance key is drawn at boot from the CSPRNG and never written anywhere, so
-# the row must NOT carry this value. Without this comparison the arm is
-# satisfied by a worker that enrolled the key it already held - which is the
-# shape `ServiceKeyring::from_parts` refuses for a different reason and which
-# would make every instance's signature verifiable as the role's.
-ROLE_PUB_B64="$(openssl pkey -in "$ZEROSHIP_WORKER_SERVICE_KEY_FILE" -pubout -outform DER 2>/dev/null \
+# the row must NOT carry the enroller's value. Without this comparison the arm
+# is satisfied by a worker that enrolled the key it already held - which would
+# make every instance of the unit one instance.
+ENROLLER_ID="$(node -e 'process.stdout.write(JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")).enroller_id)' "$ZEROSHIP_WORKER_ENROLLER_FILE")"
+node -e 'require("fs").writeFileSync(process.argv[2], JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")).private_key, { mode: 0o600 })' \
+  "$ZEROSHIP_WORKER_ENROLLER_FILE" "$WORK/enroller.pem"
+ROLE_PUB_B64="$(openssl pkey -in "$WORK/enroller.pem" -pubout -outform DER 2>/dev/null \
                  | tail -c 32 | openssl base64 -A)"
 C_ROW="$(printf '%s\n' "$BOOT_ROWS" | grep "|$ZEROSHIP_WORKER_PORT|" | head -1)"
 C_ID="$(printf '%s' "$C_ROW" | cut -d'|' -f1)"
 note "C rows at boot=$BOOT_ROW_COUNT row=${C_ROW:-<none>}"
-note "C role public key (must NOT be the row's)=$ROLE_PUB_B64"
+note "C enroller $ENROLLER_ID public key (must NOT be the row's)=$ROLE_PUB_B64"
 
 c_facts=0
 c_ruled() { c_facts=$((c_facts + 1)); }
 
-c_ruled; printf '%s' "$C_ID" | grep -Eq '^wkr_[0-9A-Za-z]{22}$' \
+c_ruled; printf '%s' "$C_ID" | grep -Eq '^wkr_[0-9a-z]{25}$' \
   && pass "C the worker enrolled itself at boot (id $C_ID)" \
   || fail "C no worker_instances row for the stack's worker on :$ZEROSHIP_WORKER_PORT"
 c_ruled; [ "$(printf '%s' "$C_ROW" | cut -d'|' -f2)" = "127.0.0.1" ] \
@@ -147,8 +150,11 @@ c_ruled; [ "$(printf '%s' "$C_ROW" | cut -d'|' -f4)" = "active" ] \
   || fail "C status is '$(printf '%s' "$C_ROW" | cut -d'|' -f4)', expected active"
 C_ROW_PUB="$(printf '%s' "$C_ROW" | cut -d'|' -f5)"
 c_ruled; [ -n "$C_ROW_PUB" ] && [ -n "$ROLE_PUB_B64" ] && [ "$C_ROW_PUB" != "$ROLE_PUB_B64" ] \
-  && pass "C the enrolled key is NOT the on-disk role key, so it was drawn at boot" \
-  || fail "C enrolled key '${C_ROW_PUB:-<none>}' vs role key '${ROLE_PUB_B64:-<none>}'"
+  && pass "C the enrolled key is NOT the on-disk enroller key, so it was drawn at boot" \
+  || fail "C enrolled key '${C_ROW_PUB:-<none>}' vs enroller key '${ROLE_PUB_B64:-<none>}'"
+c_ruled; [ -n "$ENROLLER_ID" ] && [ "$(printf '%s' "$C_ROW" | cut -d'|' -f6)" = "$ENROLLER_ID" ] \
+  && pass "C the row is bound to the unit's enroller $ENROLLER_ID" \
+  || fail "C enroller_id is '$(printf '%s' "$C_ROW" | cut -d'|' -f6)', expected '${ENROLLER_ID:-<none>}'"
 # The worker has to LEARN its instance id, not merely cause a row: everything
 # it mints afterwards is signed under `svc/worker/<that id>`. Its own log is
 # where that shows, and grepping it also proves the row came from THIS process
@@ -161,9 +167,9 @@ c_ruled; [ -n "$C_ID" ] && grep -q "$C_ID" "$WORK/worker.log" 2>/dev/null \
   && pass "C the worker's own log names the instance id it now mints under" \
   || fail "C $WORK/worker.log never names an instance id (row id '${C_ID:-<none>}')"
 
-# Floor 3 of the 5 above: a collapse of the enumeration - the row shape
-# changing, the log line going away - cannot read as clean, and dropping one
-# assertion stays a decision rather than a break.
+# Floor 3 of the assertions above: a collapse of the enumeration - the row
+# shape changing, the log line going away - cannot read as clean, and dropping
+# one assertion stays a decision rather than a break.
 gate_arm worker_enrolled_at_boot "$c_facts" 3 || true
 
 # `:-` so that DELETING the declaration from tests/lib/e2e_stack.sh - the
@@ -188,12 +194,13 @@ INSTANCE_PUB="$(openssl base64 -A -in "$WORK/instance.pub.raw" | tr '+/' '-_' | 
 printf '{"port":%s,"public_key":"%s"}' "$ZEROSHIP_WORKER_PORT" "$INSTANCE_PUB" \
   > "$WORK/enrol.json"
 
-# `svc/worker` is the role that holds CONTROL_WORKER_ENROL, and control is
-# addressed as `svc/control`. A fresh assertion per call: `jti` is single use.
+# Only an enroller holds CONTROL_WORKER_ENROL, and it mints under an instance
+# identifier of its role naming its own row; control is addressed as
+# `svc/control`. A fresh assertion per call: `jti` is single use.
 enrol_post() {
   local url="$1" out="$2" assertion
-  assertion="$(e2e_mint_service_assertion "$ZEROSHIP_WORKER_SERVICE_KEY_FILE" \
-                 svc/worker svc/control)" || return 1
+  assertion="$(e2e_mint_service_assertion "$WORK/enroller.pem" \
+                 "svc/worker-enroller/$ENROLLER_ID" svc/control)" || return 1
   curl -s -o "$out" -w '%{http_code}' -X POST \
     -H "authorization: Bearer $assertion" \
     -H 'content-type: application/json' \
@@ -244,7 +251,7 @@ ruled; [ "$WORKER_READY" = "200" ] \
 ruled; [ "$A_CODE" = "201" ] \
   && pass "A enrolment ADMITTED (HTTP 201)" \
   || fail "A enrolment refused (HTTP $A_CODE): $A_BODY"
-ruled; printf '%s' "$A_ID" | grep -Eq '^wkr_[0-9A-Za-z]{22}$' \
+ruled; printf '%s' "$A_ID" | grep -Eq '^wkr_[0-9a-z]{25}$' \
   && pass "A control minted a typed instance id ($A_ID)" \
   || fail "A instance id is not a wkr_ typed id: '${A_ID:-<none>}'"
 ruled; [ "${A_ROW%%|*}" = "127.0.0.1" ] \

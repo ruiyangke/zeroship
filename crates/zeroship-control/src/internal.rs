@@ -6,13 +6,15 @@ use ntex::web;
 use ntex::web::types::{Path, State};
 use zeroship_core::app_id::AppId;
 use zeroship_core::service_assertion::{
-    thumbprint_key_id, AssertionError, ReplayStore, ServiceAssertionVerifier, ServiceIssuer,
-    ServiceTrustBundle,
+    presented_issuer, thumbprint_key_id, AssertionError, ReplayStore, ServiceAssertionVerifier,
+    ServiceIssuer, ServiceTrustBundle,
 };
 use zeroship_core::service_identity::{
     endpoints, verify_service_call, AuthError, ServiceEndpoint, ServiceIdentity,
 };
-use zeroship_core::service_peers::{service_issuer, CONTROL_SERVICE_NAME};
+use zeroship_core::service_peers::{
+    service_issuer, CONTROL_SERVICE_NAME, WORKER_ENROLLER_SERVICE_NAME, WORKER_SERVICE_NAME,
+};
 
 use crate::AppState;
 
@@ -94,15 +96,76 @@ pub(crate) async fn check_service_auth(
                 %error,
                 "control-internal: service auth rejected"
             );
-            // A store outage refuses every caller at once and is an operator's
-            // problem, so it answers 503 rather than 401 - a caller told
-            // "unauthorized" would rotate a credential that is fine.
-            Some(if matches!(error, AuthError::StoreUnavailable) {
-                web::HttpResponse::ServiceUnavailable()
-                    .json(&serde_json::json!({"error":"service unavailable"}))
-            } else {
+            Some(service_auth_refusal(&error))
+        }
+    }
+}
+
+/// The one response an [`AuthError`] maps to, shared by every internal guard.
+///
+/// A store outage refuses every caller at once and is an operator's problem,
+/// so it answers 503 rather than 401 - a caller told "unauthorized" would
+/// rotate a credential that is fine.
+fn service_auth_refusal(error: &AuthError) -> web::HttpResponse {
+    if matches!(error, AuthError::StoreUnavailable) {
+        web::HttpResponse::ServiceUnavailable().json(&serde_json::json!({"error":"service unavailable"}))
+    } else {
+        web::HttpResponse::Unauthorized().json(&serde_json::json!({"error":"unauthorized"}))
+    }
+}
+
+/// Verify the caller of an endpoint whose handler acts on the caller's OWN
+/// row, and return the instance segment of the issuer it verified as.
+///
+/// The same guard as [`check_service_auth`], specialised to the two endpoints
+/// whose handlers need to know WHICH row called: `/internal/workers/enrol`
+/// locks and references the calling enroller, and `/internal/workers/retire`
+/// retires the calling worker instance. A [`ServiceIdentity`] deliberately
+/// carries only the caller's ROLE (`identity_from` in
+/// `zeroship-core::service_assertion` builds it from `issuer.principal()`
+/// alone, never the instance segment - the allowlist it feeds is written
+/// against roles), so the id is not read from it. It is instead re-read from
+/// the header's issuer string, which by this point is not merely CLAIMED:
+/// [`verify_service_caller`] has already verified the assertion's signature
+/// against a trust bundle that trusts exactly this issuer identifier and no
+/// other, so the instance segment it carries names the row that was actually
+/// cryptographically proven.
+///
+/// Which ROLE that row belongs to is settled by the endpoint's grant: only
+/// `svc/worker-enroller` holds `CONTROL_WORKER_ENROL` and only `svc/worker`
+/// holds `CONTROL_WORKER_RETIRE`, so a verified caller of either is an
+/// instance of the one role the handler expects.
+async fn verified_instance_caller(
+    req: &web::HttpRequest,
+    state: &AppState,
+    endpoint: ServiceEndpoint,
+) -> Result<String, web::HttpResponse> {
+    let header = req
+        .headers()
+        .get("authorization")
+        .and_then(|value| value.to_str().ok());
+    match verify_service_caller(state, header, endpoint).await {
+        Ok(_identity) => presented_issuer(header)
+            .and_then(|issuer| issuer.instance().map(str::to_owned))
+            .ok_or_else(|| {
+                // Unreachable in practice: both roles that hold these grants
+                // authenticate at INSTANCE arity only - `verify_service_caller`
+                // refuses their role arity before any verifier runs. If this
+                // ever fires, refuse rather than act on no attributable row.
+                tracing::error!(
+                    path = endpoint.path_template(),
+                    "control-internal: an instance-scoped call verified with no instance segment"
+                );
                 web::HttpResponse::Unauthorized().json(&serde_json::json!({"error":"unauthorized"}))
-            })
+            }),
+        Err(error) => {
+            tracing::warn!(
+                method = %req.method(),
+                path = %req.path(),
+                %error,
+                "control-internal: instance-scoped auth rejected"
+            );
+            Err(service_auth_refusal(&error))
         }
     }
 }
@@ -114,13 +177,26 @@ pub(crate) async fn check_service_auth(
 /// - A ROLE identifier is verified against the operator's peer document. That
 ///   file is the only source of role keys and stays so.
 /// - An identifier naming an INSTANCE of a role is verified against the key
-///   control itself recorded at enrolment, because no peer document has ever
-///   carried one: a worker draws its instance keypair in memory at boot and
-///   only the public half ever leaves the process.
+///   control itself recorded - at enrolment for a worker instance, from the
+///   operator's import file for an enroller - because no peer document carries
+///   one: a worker draws its instance keypair in memory at boot, and an
+///   enroller's key is registered with a status the file cannot express.
 ///
 /// `ServiceTrustBundle::keys_for` is an exact-string lookup, so the second kind
 /// resolves nothing in the first source - which is why control cannot simply
 /// hand every caller to the boot-time verifier and is why this branch exists.
+///
+/// # The two worker roles have NO role arity
+///
+/// `svc/worker` and `svc/worker-enroller` authenticate as INSTANCES and in no
+/// other way, and a role-arity assertion naming either is refused here before
+/// any verifier runs. No process holds a role signing key for them, and the
+/// operator's peer document no longer publishes one - but that is a fact about
+/// the files a deployment was given, and a document that still carried an old
+/// `svc/worker` key would otherwise let whoever held its private half read any
+/// app's environment with no enrolment, no status and nothing a revocation
+/// reaches. Refusing the arity makes the rule a property of this verifier
+/// rather than of every deployment's key hygiene.
 ///
 /// The resolution happens HERE, before any verification, and hands verification
 /// a bundle. It is deliberately NOT a resolver seam a verifier calls back into:
@@ -135,8 +211,36 @@ pub(crate) async fn verify_service_caller(
 ) -> Result<ServiceIdentity, AuthError> {
     match presented_instance_issuer(authorization) {
         Some(issuer) => verify_worker_instance(state, authorization, &issuer, endpoint).await,
-        None => state.service_auth.verify(authorization, endpoint).await,
+        None => {
+            if let Some(issuer) = presented_issuer(authorization) {
+                if names_an_instance_only_role(&issuer)? {
+                    tracing::warn!(
+                        issuer = issuer.as_str(),
+                        "control-internal: refusing a role-arity assertion for a role that \
+                         authenticates only as an enrolled instance"
+                    );
+                    return Err(AuthError::CredentialRejected);
+                }
+            }
+            state.service_auth.verify(authorization, endpoint).await
+        }
     }
+}
+
+/// Whether `issuer` names one of the two roles that authenticate only at
+/// instance arity: `svc/worker` (enrolled worker instances) and
+/// `svc/worker-enroller` (Control-recorded deployment units).
+fn names_an_instance_only_role(issuer: &ServiceIssuer) -> Result<bool, AuthError> {
+    for name in [WORKER_SERVICE_NAME, WORKER_ENROLLER_SERVICE_NAME] {
+        let role = service_issuer(name).map_err(|error| {
+            tracing::error!(%error, name, "control-internal: a worker role issuer is malformed");
+            AuthError::CredentialRejected
+        })?;
+        if issuer.principal() == role.principal() {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// The issuer an unverified assertion CLAIMS, when that issuer names an
@@ -157,10 +261,76 @@ fn presented_instance_issuer(authorization: Option<&str>) -> Option<ServiceIssue
         .filter(|issuer| issuer.instance().is_some())
 }
 
-/// Verify an assertion minted by an enrolled worker INSTANCE.
+/// Route an instance-arity issuer to the registry that owns its ROLE, and
+/// resolve the active key it names there.
+///
+/// This is the role dispatch option 1A adds: `svc/worker/<wkr>` resolves from
+/// `zeroship.worker_instances`, exactly as before, and
+/// `svc/worker-enroller/<wen>` resolves from `zeroship.worker_enrollers`. Both
+/// readers apply the SAME `status = 'active'` predicate their own table
+/// already used, so revoking either a worker instance or an enroller keeps
+/// working through one column and no join.
+///
+/// An instance identifier naming any OTHER role resolves nowhere and is
+/// refused: today only these two roles ever mint an instance identifier, and a
+/// third one appearing here would be a role this dispatch does not yet know
+/// how to verify, not a caller to trust by default.
+async fn resolve_instance_public_key(
+    state: &AppState,
+    issuer: &ServiceIssuer,
+    instance: &str,
+) -> Result<[u8; 32], AuthError> {
+    let worker_role = service_issuer(WORKER_SERVICE_NAME).map_err(|error| {
+        tracing::error!(%error, "control-internal: the worker role issuer is malformed");
+        AuthError::CredentialRejected
+    })?;
+    let enroller_role = service_issuer(WORKER_ENROLLER_SERVICE_NAME).map_err(|error| {
+        tracing::error!(%error, "control-internal: the worker-enroller role issuer is malformed");
+        AuthError::CredentialRejected
+    })?;
+
+    let lookup = if issuer.principal() == worker_role.principal() {
+        crate::worker_enrolment::active_instance_public_key(state.control_pg.as_ref(), instance)
+            .await
+    } else if issuer.principal() == enroller_role.principal() {
+        crate::worker_enrolment::active_enroller_public_key(state.control_pg.as_ref(), instance)
+            .await
+    } else {
+        tracing::warn!(
+            issuer = issuer.as_str(),
+            "control-internal: instance-arity issuer names a role with no registry to resolve from"
+        );
+        return Err(AuthError::CredentialRejected);
+    };
+
+    match lookup {
+        Ok(Some(public)) => Ok(public),
+        Ok(None) => {
+            tracing::warn!(
+                issuer = issuer.as_str(),
+                "control-internal: no ACTIVE row is registered under this issuer"
+            );
+            Err(AuthError::CredentialRejected)
+        }
+        Err(error) => {
+            // The registry is a store this verification must consult, so an
+            // unreachable one refuses WITHOUT judging - the same shape as the
+            // replay store, and it answers 503 upstream rather than 401.
+            tracing::error!(
+                %error,
+                issuer = issuer.as_str(),
+                "control-internal: the enrolment registry could not be read"
+            );
+            Err(AuthError::StoreUnavailable)
+        }
+    }
+}
+
+/// Verify an assertion minted by an enrolled worker INSTANCE, or by an
+/// enroller minting under an instance identifier of its own role.
 ///
 /// The bundle handed to verification carries exactly one key under exactly one
-/// issuer: this instance's key, under the identifier the caller presented. That
+/// issuer: the caller's key, under the identifier it presented. That
 /// is the design's "a bundle carrying that one extra key" - for an INSTANCE
 /// identifier the operator document's entries are unreachable either way,
 /// because `keys_for` matches the full identifier and a role's entry is a
@@ -171,9 +341,9 @@ fn presented_instance_issuer(authorization: Option<&str>) -> Option<ServiceIssue
 /// reviewed:
 ///
 /// - The key is published under the INSTANCE issuer and never under the role.
-///   Publishing it under `svc/worker` would let one instance's key verify an
-///   assertion attributed to the role itself, which is the collapse the
-///   issuer/instance split exists to prevent.
+///   Publishing it under `svc/worker` (or `svc/worker-enroller`) would let one
+///   instance's key verify an assertion attributed to the role itself, which
+///   is the collapse the issuer/instance split exists to prevent.
 /// - An instance row cannot introduce or replace a ROLE key. The row
 ///   contributes 32 bytes and no name; the identifier those bytes are filed
 ///   under is the caller's, and `ServiceIssuer::parse` admits an instance
@@ -183,10 +353,10 @@ fn presented_instance_issuer(authorization: Option<&str>) -> Option<ServiceIssue
 ///   never row to issuer, so the row's `id` never becomes a name here at all.)
 ///
 /// There is NO fallback to the role's key when the lookup comes back empty. An
-/// instance control has not enrolled, or has revoked, holds nothing here - and
-/// a fallback would also make an instance key an operator could file in the
-/// peer document authenticate, which is a credential carrying no status and so
-/// one nothing can revoke.
+/// instance or enroller control has not recorded, or has revoked, holds
+/// nothing here - and a fallback would also make a key an operator could file
+/// in the peer document authenticate, which is a credential carrying no status
+/// and so one nothing can revoke.
 ///
 /// Nothing is cached. The proposal leaves caching open until a measurement asks
 /// for it, and records that any cache needs an invalidation story for a revoked
@@ -199,32 +369,7 @@ async fn verify_worker_instance(
 ) -> Result<ServiceIdentity, AuthError> {
     // Total: this function is reached only for an issuer that names one.
     let instance = issuer.instance().ok_or(AuthError::CredentialRejected)?;
-    let public = match crate::worker_enrolment::active_instance_public_key(
-        state.control_pg.as_ref(),
-        instance,
-    )
-    .await
-    {
-        Ok(Some(public)) => public,
-        Ok(None) => {
-            tracing::warn!(
-                issuer = issuer.as_str(),
-                "control-internal: no ACTIVE worker instance is registered under this issuer"
-            );
-            return Err(AuthError::CredentialRejected);
-        }
-        Err(error) => {
-            // The registry is a store this verification must consult, so an
-            // unreachable one refuses WITHOUT judging - the same shape as the
-            // replay store, and it answers 503 upstream rather than 401.
-            tracing::error!(
-                %error,
-                issuer = issuer.as_str(),
-                "control-internal: the worker instance registry could not be read"
-            );
-            return Err(AuthError::StoreUnavailable);
-        }
-    };
+    let public = resolve_instance_public_key(state, issuer, instance).await?;
 
     let audience = control_service_issuer().map_err(|error| {
         tracing::error!(%error, "control-internal: this control plane's own issuer is malformed");
@@ -359,7 +504,12 @@ pub async fn get_app_data_key(
 ///
 /// Guarded by the same full assertion profile as the privileged reads above,
 /// and at a lower rate still: a worker enrols once per boot. The endpoint
-/// grant is `CONTROL_WORKER_ENROL`, held by `svc/worker` alone.
+/// grant is `CONTROL_WORKER_ENROL`, held by `svc/worker-enroller` alone - an
+/// active WORKER instance cannot reach this endpoint under any assertion it
+/// can mint, because `svc/worker` carries no such grant and has no role arity
+/// to present. [`verified_instance_caller`] both verifies the caller and hands
+/// back the enroller id it verified as, which `worker_enrolment::enrol` locks
+/// and records on the new instance.
 ///
 /// The caller supplies its listening PORT and its instance PUBLIC KEY. It
 /// supplies no host, and this handler offers no way to. The one thing this
@@ -379,10 +529,40 @@ pub async fn enrol_worker_instance(
     state: State<Arc<AppState>>,
     body: web::types::Json<crate::worker_enrolment::WorkerEnrolmentRequest>,
 ) -> web::HttpResponse {
-    if let Some(resp) = check_service_auth(&req, &state, endpoints::CONTROL_WORKER_ENROL).await {
-        return resp;
-    }
-    crate::worker_enrolment::enrol(&state, req.peer_addr(), body.into_inner()).await
+    let enroller_id =
+        match verified_instance_caller(&req, &state, endpoints::CONTROL_WORKER_ENROL).await {
+            Ok(id) => id,
+            Err(resp) => return resp,
+        };
+    crate::worker_enrolment::enrol(&state, req.peer_addr(), &enroller_id, body.into_inner()).await
+}
+
+/// POST /internal/workers/retire - a worker declares its OWN instance gone.
+///
+/// A worker calls this once, after a graceful shutdown has drained it, so the
+/// instance key it is about to discard stops authenticating immediately rather
+/// than lingering as an `active` row with no process behind it. The call
+/// carries no body and no selector: the instance retired is the one whose key
+/// verified the request, so no caller can retire another instance.
+///
+/// This is a DECLARATION by the instance's own holder, not an observation,
+/// which is why it may write `status` where the liveness monitor in
+/// `crate::worker_health` must not: nothing here follows a probe. A worker
+/// that crashes never calls it, and its row stays `active` exactly as before.
+///
+/// A repeated call cannot succeed twice: once the row is `gone`, the same key
+/// no longer authenticates, so a retry after a lost reply is refused at the
+/// guard and the instance stays retired.
+pub async fn retire_worker_instance(
+    req: web::HttpRequest,
+    state: State<Arc<AppState>>,
+) -> web::HttpResponse {
+    let instance_id =
+        match verified_instance_caller(&req, &state, endpoints::CONTROL_WORKER_RETIRE).await {
+            Ok(id) => id,
+            Err(resp) => return resp,
+        };
+    crate::worker_enrolment::retire(&state, &instance_id).await
 }
 
 pub async fn get_versions(req: web::HttpRequest, state: State<Arc<AppState>>) -> web::HttpResponse {
