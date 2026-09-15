@@ -5,9 +5,9 @@ use zeroship_core::{
     app_id::AppId,
     workflow_coordination::{
         AssignScope, AssignedScope, Assignment, Failure, ManageRun, ManagementOperation,
-        ManagementOutcome, ManagementReceipt, ManagementStatus, PublishWakeHint, RegisterWorker,
-        RegisteredWorker, ReleaseScope, RequestId, Revision, RunId, ScopePage, UnixMillis,
-        VerifyAssignment, WakeHintReceipt, WorkerId, WorkerPage,
+        ManagementOutcome, ManagementReceipt, ManagementStatus, RegisterWorker, RegisteredWorker,
+        ReleaseScope, RequestId, Revision, RunId, ScopePage, UnixMillis, VerifyAssignment,
+        WorkerId, WorkerPage,
     },
 };
 
@@ -78,22 +78,28 @@ fn registry_and_placement_contracts_reject_customer_data() {
     rejects_customer_fields::<AssignedScope>(&json!({
         "appId":app,"assignmentRevision":1
     }));
-    rejects_customer_fields::<ReleaseScope>(&json!({
-        "requestId":request,"appId":app,"assignmentRevision":1,"wakeRevision":2
-    }));
+    for reason in ["relinquished", "refused"] {
+        rejects_customer_fields::<ReleaseScope>(&json!({
+            "requestId":request,"appId":app,"assignmentRevision":1,"reason":reason
+        }));
+    }
+    for reason in [json!(null), json!("drained"), json!(2)] {
+        assert!(
+            serde_json::from_value::<ReleaseScope>(json!({
+                "requestId":request,"appId":app,"assignmentRevision":1,"reason":reason
+            }))
+            .is_err(),
+            "release names one closed reason"
+        );
+    }
     assert!(
         serde_json::from_value::<ReleaseScope>(json!({
-            "requestId":request,"appId":app,"assignmentRevision":1
+            "requestId":request,"appId":app,"assignmentRevision":1,"reason":"refused",
+            "wakeRevision":2
         }))
         .is_err(),
-        "release must identify the acknowledged wake hint"
+        "release carries no wake hint"
     );
-    rejects_customer_fields::<PublishWakeHint>(&json!({
-        "appId":app,"assignmentRevision":1,"revision":2,"nextDueAt":1000
-    }));
-    rejects_customer_fields::<WakeHintReceipt>(&json!({
-        "appId":app,"assignmentRevision":1,"revision":2
-    }));
     for field in ["workerId", "appId"] {
         let mut attempted = json!({"capacity":4,"state":"ready"});
         attempted[field] = json!(worker);

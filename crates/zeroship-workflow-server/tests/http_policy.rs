@@ -49,7 +49,7 @@ use zeroship_workflow_manager::{
 };
 use zeroship_workflow_server::{
     auth::{PostgresWorkerRegistry, WorkflowAuth},
-    coordinator::{Coordinator, Options},
+    coordinator::{connect_eligibility, Coordinator, Options},
     SharedState, WorkflowHttpState,
 };
 
@@ -154,10 +154,20 @@ impl Fixture {
             key: ServiceSigningKey::generate(),
         };
         platform.admin.execute("INSERT INTO zeroship.worker_instances(id,ring_key,public_key,advertise_host,advertise_port,status,enroller_id) VALUES($1,$2,$3,'127.0.0.1',8080,'active',$4)", &[&worker.as_str(), &vec![1_u8], &signer.key.verifying_key_bytes().to_vec(), &platform.default_enroller_id]).await.unwrap();
-        let service =
-            Coordinator::connect(&platform.runtime_url, Options::default(), holds::client())
+        // Production eligibility: Control's own rows under the manager's grants.
+        let eligibility = Rc::new(
+            connect_eligibility(&platform.runtime_url, Options::default())
                 .await
-                .unwrap();
+                .unwrap(),
+        );
+        let service = Coordinator::connect(
+            &platform.runtime_url,
+            Options::default(),
+            holds::client(),
+            eligibility,
+        )
+        .await
+        .unwrap();
         service
             .manager
             .register(
@@ -170,6 +180,7 @@ impl Fixture {
             .await
             .unwrap();
         let app = AppId::mint();
+        platform.seed_app(&app).await;
         let assignment = service
             .manager
             .assign(&AssignScope {

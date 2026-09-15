@@ -10,6 +10,8 @@ mod holds;
 #[allow(dead_code, reason = "the platform fixture also supports process tests")]
 #[path = "support/platform.rs"]
 mod platform;
+#[path = "support/zone.rs"]
+mod zone;
 
 use std::{collections::BTreeSet, rc::Rc, time::Duration};
 use zeroship_core::{
@@ -20,6 +22,8 @@ use zeroship_data_orm::{
     binding::DbBinding, encryption::ProjectKeySource, orm::Database, ConnectOptions,
 };
 use zeroship_workflow_manager::{
+    capacity::{Contract, LocalCapacity},
+    coordinator::{Coordinator, Options as CoordinatorOptions},
     driver::{Driver, Options as DriverOptions},
     lifecycle::{self, AppLifecycle, ControlLifecycle},
     recovery::{Options as RecoveryOptions, Recovery, ScopeState},
@@ -197,12 +201,13 @@ async fn the_driver_abandons_deleted_apps_over_the_canonical_schema() {
     delete(&platform, &gone).await;
     compio::time::sleep(Duration::from_millis(5)).await;
     let mut driver = Driver::new(
-        queue,
+        Coordinator::new(queue, CoordinatorOptions::default(), zone::trusted()).unwrap(),
         DriverOptions {
             recovery,
             ..DriverOptions::default()
         },
         Rc::new(connect_lifecycle(&platform.runtime_url).await),
+        Contract::declarative(Rc::new(LocalCapacity)),
     )
     .unwrap();
     let report = driver.tick().await.closing;

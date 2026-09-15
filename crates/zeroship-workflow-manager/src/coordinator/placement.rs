@@ -1,20 +1,54 @@
+//! Placement admits an app onto a worker only within Control's zone and
+//! enrollment eligibility. Spare capacity is never authority.
+//!
+//! Every admission takes the app lock, then the worker lock, then reads the
+//! eligibility facts, and reads them again before commit. It admits only when
+//! the app is not deleted, the app's zone equals the worker's enroller zone,
+//! the instance is active, the registration is ready and unexpired, and the
+//! worker has spare capacity. Archived apps stay placeable so maintenance jobs
+//! can drain them; policy still refuses their admission, dispatch and ingress.
+
 use super::{count, deadline, one, revision, rows, timestamp, update, Coordinator, Error};
 use crate::{
     clock::Sample,
+    eligibility::ZoneId,
     models::{assignments, placement_receipts, workers, Placement, PlacementReceipt, Worker},
 };
 use zeroship_core::{
     app_id::AppId,
     typed_id,
     workflow_coordination::{
-        AssignScope, AssignedScope, Assignment, PublishWakeHint, ReleaseScope, RequestId, Revision,
-        UnixMillis, VerifyAssignment, WakeHintReceipt, WorkerId,
+        AssignScope, AssignedScope, Assignment, ReleaseReason, ReleaseScope, RequestId, Revision,
+        VerifyAssignment, WorkerId,
     },
 };
 use zeroship_data_orm::{
     orm::{Database, Entity},
     value,
 };
+
+/// What manager-selected placement found for an app.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Placed {
+    /// The app was placed on a selected eligible worker.
+    Assigned(Assignment),
+    /// A ready, eligible worker already owns the app.
+    Owned,
+    /// No eligible worker with spare capacity admitted the app.
+    Unplaced(ZoneId),
+    /// Control has no live app to place: it is unknown or deleted.
+    Ineligible,
+}
+
+/// Who chose the worker a placement names.
+#[derive(Clone, Copy)]
+enum Admission<'a> {
+    /// A trusted host nominated the worker and asserts the prior revision.
+    Nominated(&'a AssignScope),
+    /// The manager selected the worker. It places only an app that has no
+    /// ready eligible owner when it holds the app lock.
+    Selected,
+}
 
 impl Coordinator {
     /// Verify placement without extending its lifetime.
@@ -56,60 +90,212 @@ impl Coordinator {
         assignment(&row, Some(expires))
     }
 
-    /// Trusted platform placement preserves receipt identities and revision tombstones.
+    /// Place an app on a worker a trusted host nominated, under the complete
+    /// eligibility predicate. Receipt identities and revision tombstones make
+    /// retries exact.
     ///
     /// # Errors
-    /// Rejects conflicting requests, unavailable workers and exhausted capacity.
+    /// Rejects conflicting requests, ineligible pairs, unavailable workers and
+    /// exhausted capacity.
     pub async fn assign(&self, request: &AssignScope) -> Result<Assignment, Error> {
-        let budget = self.budget();
-        self.queue.transact_for(budget.clone(), |tx| async move {
-            self.scope(&tx, &request.app_id, true).await?;
-            let expected = request.expected_revision.map(Revision::get);
-            if let Some(receipt) = receipt(&tx, &request.app_id, &request.request_id).await? {
-                if receipt.operation != "assign" || receipt.worker_id != request.worker_id.as_str()
-                    || receipt.expected_revision != expected {
-                    return Err(Error::Conflict);
+        self.admit(
+            &request.app_id,
+            &request.worker_id,
+            Admission::Nominated(request),
+        )
+        .await?
+        .ok_or(Error::Storage)
+    }
+
+    /// Manager-selected placement. The manager chooses among ready workers
+    /// registered in the app's zone and admits the first that passes the
+    /// eligibility predicate. A refused pair is never offered again.
+    ///
+    /// # Errors
+    /// Reports unavailable eligibility or platform storage.
+    pub async fn place(&self, app: &AppId) -> Result<Placed, Error> {
+        let facts = match self.eligibility.app(app).await? {
+            Some(facts) if !facts.deleted => facts,
+            _ => return Ok(Placed::Ineligible),
+        };
+        let mut after = None;
+        loop {
+            let page = self.candidates(app, &facts.zone, after.as_ref()).await?;
+            let Some(last) = page.last().cloned() else {
+                return Ok(Placed::Unplaced(facts.zone));
+            };
+            for worker in &page {
+                match self.admit(app, worker, Admission::Selected).await {
+                    Ok(Some(assignment)) => return Ok(Placed::Assigned(assignment)),
+                    Ok(None) => return Ok(Placed::Owned),
+                    // The facts, the registration or the capacity changed
+                    // after selection; the next candidate is still eligible.
+                    Err(Error::Denied | Error::Capacity | Error::Conflict) => {}
+                    Err(error) => return Err(error),
                 }
-                return Ok(Assignment { app_id: request.app_id.clone(), worker_id: request.worker_id.clone(),
-                    revision: revision(receipt.result_revision)?, expires_at: timestamp(receipt.result_expires_at)? });
             }
+            after = Some(last);
+        }
+    }
+
+    /// Whether a ready worker whose enrollment and zone still match owns the app.
+    ///
+    /// # Errors
+    /// Reports unavailable eligibility or platform storage.
+    pub async fn owned(&self, app: &AppId) -> Result<bool, Error> {
+        self.queue
+            .transact(|tx| async move { self.has_owner(&tx, app, true).await })
+            .await
+    }
+
+    /// Ready registrations in one zone, excluding workers that refused the app.
+    async fn candidates(
+        &self,
+        app: &AppId,
+        zone: &ZoneId,
+        after: Option<&WorkerId>,
+    ) -> Result<Vec<WorkerId>, Error> {
+        self.queue
+            .transact(|tx| async move {
+                let now = self.queue.clock.now().await?;
+                let worker = tx.entity::<workers::Entity>()?.alias("worker")?;
+                let refusal = tx.entity::<assignments::Entity>()?.alias("refusal")?;
+                let mut filter = worker
+                    .column(workers::execution_zone_id)
+                    .eq(Some(zone.as_str()))?
+                    .and(worker.column(workers::state).eq("ready")?)
+                    .and(worker.column(workers::expires_at).gt(now)?)
+                    .and(refusal.column(assignments::id).is_null());
+                if let Some(after) = after {
+                    filter = filter.and(worker.column(workers::id).gt(after.as_str())?);
+                }
+                tx.from(&worker)
+                    .left_join(
+                        &refusal,
+                        refusal
+                            .column(assignments::worker_id)
+                            .eq(worker.column(workers::id))?
+                            .and(refusal.column(assignments::app_id).eq(app.as_str())?)
+                            .and(refusal.column(assignments::refused).eq(true)?),
+                    )?
+                    .filter(filter)
+                    .order_by(worker.column(workers::id).asc())
+                    .select(worker.column(workers::id).select::<String>())?
+                    .limit(i64::try_from(self.options.batch_limit).map_err(|_| Error::Invalid)?)?
+                    .all()
+                    .await?
+                    .into_iter()
+                    .map(|id| WorkerId::parse(&id).map_err(|_| Error::Storage))
+                    .collect()
+            })
+            .await
+    }
+
+    async fn admit(
+        &self,
+        app: &AppId,
+        worker: &WorkerId,
+        admission: Admission<'_>,
+    ) -> Result<Option<Assignment>, Error> {
+        let budget = self.budget();
+        let request_id = match admission {
+            Admission::Nominated(request) => request.request_id.clone(),
+            Admission::Selected => RequestId::mint(),
+        };
+        self.queue.transact_for(budget.clone(), |tx| {
+            let request_id = &request_id;
+            let budget = &budget;
+            async move {
+            self.scope(&tx, app, true).await?;
+            let expected = match admission {
+                Admission::Nominated(request) => {
+                    let expected = request.expected_revision.map(Revision::get);
+                    if let Some(receipt) = receipt(&tx, app, request_id).await? {
+                        if receipt.operation != "assign" || receipt.worker_id != worker.as_str()
+                            || receipt.expected_revision != expected {
+                            return Err(Error::Conflict);
+                        }
+                        return Ok(Some(Assignment { app_id: app.clone(), worker_id: worker.clone(),
+                            revision: revision(receipt.result_revision)?, expires_at: timestamp(receipt.result_expires_at)? }));
+                    }
+                    Some(expected)
+                }
+                Admission::Selected => {
+                    if self.has_owner(&tx, app, true).await? { return Ok(None); }
+                    None
+                }
+            };
             // Scope before worker: the worker row serializes capacity across apps.
-            let worker = lock_worker(&tx, &request.worker_id).await?;
-            let previous = placement(&tx, &request.app_id, &request.worker_id).await?;
-            if previous.as_ref().map(|row| row.revision) != expected { return Err(Error::Conflict); }
+            let registration = lock_worker(&tx, worker).await?;
+            let previous = placement(&tx, app, worker).await?;
+            if let Some(expected) = expected {
+                if previous.as_ref().map(|row| row.revision) != expected { return Err(Error::Conflict); }
+            }
+            if previous.as_ref().is_some_and(|row| row.refused) { return Err(Error::Denied); }
+            // Read the facts in force after every lock wait, not at selection.
+            self.eligible(app, worker, &registration).await?;
             let sample = self.queue.clock.sample().await?;
-            if worker.state != "ready" || worker.expires_at <= sample.millis { return Err(Error::Denied); }
-            budget.cap(sample, worker.expires_at)?;
+            if registration.state != "ready" || registration.expires_at <= sample.millis { return Err(Error::Denied); }
+            budget.cap(sample, registration.expires_at)?;
             let occupied = count::<assignments::Entity>(&tx,
-                assignments::worker_id.eq(request.worker_id.as_str())?
-                    .and(assignments::app_id.ne(request.app_id.as_str())?)
+                assignments::worker_id.eq(worker.as_str())?
+                    .and(assignments::app_id.ne(app.as_str())?)
                     .and(assignments::released.eq(false)?)
                     .and(assignments::expires_at.gt(sample.millis)?),
             ).await?;
-            if occupied >= worker.capacity { return Err(Error::Capacity); }
-            let rev = expected.unwrap_or(0).checked_add(1).ok_or(Error::Conflict)?;
+            if occupied >= registration.capacity { return Err(Error::Capacity); }
+            let prior = previous.as_ref().map(|row| row.revision);
+            let rev = prior.unwrap_or(0).checked_add(1).ok_or(Error::Conflict)?;
             let expires = deadline(sample.millis, self.options.assignment_ttl)?;
             if let Some(previous) = previous {
-                update::<assignments::Entity>(&tx, value!({"id":previous.id,"app_id":request.app_id.as_str(),"worker_id":request.worker_id.as_str(),"revision":previous.revision}),
-                    value!({"revision":rev,"expires_at":expires,"released":false,"wake_revision":null,"next_due_at":null})).await?;
+                update::<assignments::Entity>(&tx, value!({"id":previous.id,"app_id":app.as_str(),"worker_id":worker.as_str(),"revision":previous.revision}),
+                    value!({"revision":rev,"expires_at":expires,"released":false})).await?;
             } else {
                 tx.collection(assignments::Entity::COLLECTION)?.insert(value!({
-                    "id":typed_id::generate("wca"),"app_id":request.app_id.as_str(),"worker_id":request.worker_id.as_str(),
-                    "revision":rev,"expires_at":expires,"released":false
+                    "id":typed_id::generate("wca"),"app_id":app.as_str(),"worker_id":worker.as_str(),
+                    "revision":rev,"expires_at":expires,"released":false,"refused":false
                 })).await?;
             }
             tx.collection(placement_receipts::Entity::COLLECTION)?.insert(value!({
-                "id":typed_id::generate("wcp"),"app_id":request.app_id.as_str(),"request_id":request.request_id.as_str(),
-                "operation":"assign","worker_id":request.worker_id.as_str(),"expected_revision":expected,
+                "id":typed_id::generate("wcp"),"app_id":app.as_str(),"request_id":request_id.as_str(),
+                "operation":"assign","worker_id":worker.as_str(),"expected_revision":prior,
                 "result_revision":rev,"result_expires_at":expires
             })).await?;
-            budget.cap(self.queue.clock.sample().await?, worker.expires_at.min(expires))?;
-            Ok(Assignment { app_id:request.app_id.clone(), worker_id:request.worker_id.clone(), revision:revision(rev)?, expires_at:timestamp(expires)? })
-        }).await
+            // Again before commit: a revocation committed between the two reads
+            // refuses this placement. One committed after this read is caught by
+            // the next renewal, ownership or delivery check.
+            self.eligible(app, worker, &registration).await?;
+            budget.cap(self.queue.clock.sample().await?, registration.expires_at.min(expires))?;
+            Ok(Some(Assignment { app_id:app.clone(), worker_id:worker.clone(), revision:revision(rev)?, expires_at:timestamp(expires)? }))
+        }}).await
     }
 
+    /// The placement predicate's Control facts: a live app, an active instance,
+    /// equal zones, and a registration recorded under that same zone.
+    async fn eligible(
+        &self,
+        app: &AppId,
+        worker: &WorkerId,
+        registration: &Worker,
+    ) -> Result<ZoneId, Error> {
+        let facts = self.eligibility.app(app).await?.ok_or(Error::Denied)?;
+        if facts.deleted {
+            return Err(Error::Denied);
+        }
+        let zone = self.enrolled_zone(worker).await?;
+        if zone != facts.zone || registration.execution_zone_id.as_deref() != Some(zone.as_str()) {
+            return Err(Error::Denied);
+        }
+        Ok(zone)
+    }
+
+    /// Renewal rechecks the eligibility predicate under its locks, so an
+    /// instance whose enrollment was revoked, or an app that was deleted,
+    /// cannot extend its placement.
+    ///
     /// # Errors
-    /// Rejects foreign, stale or expired placement authority and storage failures.
+    /// Rejects foreign, stale, expired or ineligible placement authority and
+    /// storage failures.
     pub async fn renew(
         &self,
         worker: &WorkerId,
@@ -120,8 +306,11 @@ impl Coordinator {
             self.scope(&tx, &request.app_id, false).await?;
             let (_, sample, authority_expires) = self.bound(&tx, worker, &request.app_id, request.assignment_revision).await?;
             budget.cap(sample, authority_expires)?;
+            let registration = one::<workers::Entity, Worker>(&tx, workers::id.eq(worker.as_str())?).await?.ok_or(Error::Denied)?;
+            self.eligible(&request.app_id, worker, &registration).await?;
             let expires = deadline(sample.millis, self.options.assignment_ttl)?;
             update::<assignments::Entity>(&tx, value!({"app_id":request.app_id.as_str(),"worker_id":worker.as_str(),"revision":request.assignment_revision.get(),"released":false}), value!({"expires_at":expires})).await?;
+            self.eligible(&request.app_id, worker, &registration).await?;
             budget.cap(self.queue.clock.sample().await?, authority_expires)?;
             Ok(Assignment { app_id:request.app_id.clone(), worker_id:worker.clone(), revision:request.assignment_revision, expires_at:timestamp(expires)? })
         }).await
@@ -166,54 +355,37 @@ impl Coordinator {
             .await
     }
 
-    /// # Errors
-    /// Rejects expired assignments and changed or stale wake revisions.
-    pub async fn publish_wake(
-        &self,
-        worker: &WorkerId,
-        request: &PublishWakeHint,
-    ) -> Result<WakeHintReceipt, Error> {
-        let budget = self.budget();
-        self.queue.transact_for(budget.clone(), |tx| async move {
-            self.scope(&tx, &request.app_id, false).await?;
-            let (row, sample, expires) = self.bound(&tx, worker, &request.app_id, request.assignment_revision).await?;
-            budget.cap(sample, expires)?;
-            let rev = request.revision.get();
-            let due = request.next_due_at.map(UnixMillis::get);
-            if row.wake_revision.is_some_and(|old| old > rev)
-                || (row.wake_revision == Some(rev) && row.next_due_at != due) { return Err(Error::Conflict); }
-            update::<assignments::Entity>(&tx, value!({"id":row.id,"app_id":request.app_id.as_str(),"revision":request.assignment_revision.get()}), value!({"wake_revision":rev,"next_due_at":due})).await?;
-            budget.cap(self.queue.clock.sample().await?, expires)?;
-            Ok(WakeHintReceipt { app_id:request.app_id.clone(),assignment_revision:request.assignment_revision,revision:request.revision })
-        }).await
-    }
-
-    /// Preserve a responsible peer until manager-owned recovery dispatch replaces wake hints.
+    /// A worker gives up one of its own placements. Release needs no peer
+    /// owner and no hint: recovery responsibility stays with the manager and
+    /// the placement lane places the app again while it has due work. A
+    /// `refused` release tombstones the app and instance pair, so the manager
+    /// never offers it again; a restarted process is a new instance.
     ///
     /// # Errors
-    /// Rejects stale authority, conflicting receipts and absence of a responsible peer.
+    /// Rejects foreign or stale placements and conflicting receipts.
     pub async fn release(&self, worker: &WorkerId, request: &ReleaseScope) -> Result<(), Error> {
         let budget = self.budget();
-        self.queue.transact_for(budget.clone(), |tx| async move {
+        let reason = release_reason(request.reason);
+        self.queue.transact_for(budget, |tx| async move {
             self.scope(&tx, &request.app_id, false).await?;
             let expected = request.assignment_revision.get();
-            let wake = request.wake_revision.get();
             if let Some(receipt) = receipt(&tx, &request.app_id, &request.request_id).await? {
                 if receipt.operation != "release" || receipt.worker_id != worker.as_str()
-                    || receipt.expected_revision != Some(expected) || receipt.wake_revision != Some(wake) { return Err(Error::Conflict); }
+                    || receipt.expected_revision != Some(expected) || receipt.reason.as_deref() != Some(reason) { return Err(Error::Conflict); }
                 return Ok(());
             }
-            let (row, sample, expires) = self.bound(&tx, worker, &request.app_id, request.assignment_revision).await?;
-            budget.cap(sample, expires)?;
-            if row.wake_revision != Some(wake) { return Err(Error::Conflict); }
-            if !self.has_owner(&tx, &request.app_id, Some(worker), true).await? { return Err(Error::Conflict); }
-            update::<assignments::Entity>(&tx, value!({"id":row.id,"app_id":request.app_id.as_str(),"revision":expected,"released":false}), value!({"released":true})).await?;
+            lock_worker(&tx, worker).await?;
+            let row = placement(&tx, &request.app_id, worker).await?.ok_or(Error::Denied)?;
+            if row.revision != expected { return Err(Error::Denied); }
+            if row.released { return Err(Error::Conflict); }
+            let sample = self.queue.clock.sample().await?;
+            update::<assignments::Entity>(&tx, value!({"id":row.id,"app_id":request.app_id.as_str(),"revision":expected,"released":false}),
+                value!({"released":true,"refused":request.reason == ReleaseReason::Refused})).await?;
             tx.collection(placement_receipts::Entity::COLLECTION)?.insert(value!({
                 "id":typed_id::generate("wcp"),"app_id":request.app_id.as_str(),"request_id":request.request_id.as_str(),
-                "operation":"release","worker_id":worker.as_str(),"expected_revision":expected,"wake_revision":wake,
+                "operation":"release","worker_id":worker.as_str(),"expected_revision":expected,"reason":reason,
                 "result_revision":expected,"result_expires_at":sample.millis
             })).await?;
-            budget.cap(self.queue.clock.sample().await?, expires)?;
             Ok(())
         }).await
     }
@@ -236,13 +408,18 @@ impl Coordinator {
         Ok((row, sample, expires))
     }
 
-    pub(super) async fn has_owner(
+    /// A live placement on a live worker whose enrollment is active and whose
+    /// enroller zone is the app's zone. A deleted or unknown app has no owner.
+    pub(crate) async fn has_owner(
         &self,
         tx: &Database,
         app: &AppId,
-        exclude: Option<&WorkerId>,
         ready: bool,
     ) -> Result<bool, Error> {
+        let facts = match self.eligibility.app(app).await? {
+            Some(facts) if !facts.deleted => facts,
+            _ => return Ok(false),
+        };
         let mut cursor = None;
         loop {
             let now = self.queue.clock.now().await?;
@@ -265,23 +442,34 @@ impl Coordinator {
             }
             for row in placements {
                 cursor = Some(row.worker_id.clone());
-                if exclude.is_some_and(|worker| worker.as_str() == row.worker_id) {
-                    continue;
-                }
-                if let Some(worker) =
+                let Some(worker) =
                     one::<workers::Entity, Worker>(tx, workers::id.eq(row.worker_id.as_str())?)
                         .await?
+                else {
+                    continue;
+                };
+                let now = self.queue.clock.now().await?;
+                if worker.expires_at <= now
+                    || row.expires_at <= now
+                    || (ready && worker.state != "ready")
+                    || worker.execution_zone_id.as_deref() != Some(facts.zone.as_str())
                 {
-                    let now = self.queue.clock.now().await?;
-                    if worker.expires_at > now
-                        && row.expires_at > now
-                        && (!ready || worker.state == "ready")
-                    {
-                        return Ok(true);
-                    }
+                    continue;
+                }
+                let id = WorkerId::parse(&worker.id).map_err(|_| Error::Storage)?;
+                if matches!(self.eligibility.worker(&id).await?, Some(current) if current.active && current.zone == facts.zone)
+                {
+                    return Ok(true);
                 }
             }
         }
+    }
+}
+
+const fn release_reason(reason: ReleaseReason) -> &'static str {
+    match reason {
+        ReleaseReason::Relinquished => "relinquished",
+        ReleaseReason::Refused => "refused",
     }
 }
 

@@ -14,11 +14,34 @@ use zeroship_data_orm::{
 use zeroship_workflow_manager::{
     coordinator::{Coordinator as NativeCoordinator, Options as NativeOptions},
     deployments::latest::{self, LatestDeploymentSource},
+    eligibility::{self, ControlEligibility, EligibilitySource},
     retention::HoldClient,
     Options as QueueOptions, Queue,
 };
 
 pub const SCHEMA_SQL: &str = include_str!("../../zeroship-workflow-manager/schema/postgres.sql");
+/// Manager tables the runtime role must read and write, and nothing more.
+const MANAGER_TABLES: &[&str] = &[
+    "workers",
+    "queue_scopes",
+    "deployment_holds",
+    "jobs",
+    "assignments",
+    "placement_receipts",
+    "management",
+    "management_scopes",
+    "schedule_deployments",
+    "schedule_activations",
+    "schedule_disables",
+    "schedule_scopes",
+    "schedules",
+    "schedule_occurrences",
+    "recovery_scopes",
+    "recovery_duties",
+    "capacity_demands",
+    "capacity_targets",
+    "capacity_intents",
+];
 const FINGERPRINT: &str = include_str!("../../zeroship-workflow-manager/schema/fingerprint.txt");
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -105,12 +128,16 @@ pub struct Coordinator {
     pub latest: LatestDeploymentSource,
 }
 impl Coordinator {
+    /// Placement reads zone and enrollment facts through `eligibility`; the
+    /// production host passes [`connect_eligibility`] over the same database.
+    ///
     /// # Errors
     /// Rejects invalid options, connection failures and incompatible metadata schemas.
     pub async fn connect(
         url: &str,
         options: Options,
         holds: Rc<dyn HoldClient>,
+        eligibility: Rc<dyn EligibilitySource>,
     ) -> Result<Self, Error> {
         options.validate()?;
         let mut config = PoolConfig::default();
@@ -149,6 +176,7 @@ impl Coordinator {
                 batch_limit: options.batch_limit,
                 max_pending_management: options.max_pending_management,
             },
+            eligibility,
         )?;
         let latest = compio::time::timeout(options.acquire_timeout, async {
             let database = Database::connect(
@@ -211,24 +239,7 @@ impl Coordinator {
         if get::<bool>(&permissions[0], "privileged")? {
             return Err(Error::Unavailable);
         }
-        for table in [
-            "workers",
-            "queue_scopes",
-            "deployment_holds",
-            "jobs",
-            "assignments",
-            "placement_receipts",
-            "management",
-            "management_scopes",
-            "schedule_deployments",
-            "schedule_activations",
-            "schedule_disables",
-            "schedule_scopes",
-            "schedules",
-            "schedule_occurrences",
-            "recovery_scopes",
-            "recovery_duties",
-        ] {
+        for table in MANAGER_TABLES {
             let name = format!("workflow_manager.{table}");
             let rows = self
                 .pool
@@ -257,12 +268,12 @@ impl Coordinator {
             return Err(Error::Unavailable);
         }
         self.pool.batch_execute(
-            "SELECT id,capacity,state,expires_at,lock_version FROM workflow_manager.workers LIMIT 0;
+            "SELECT id,capacity,state,expires_at,lock_version,execution_zone_id FROM workflow_manager.workers LIMIT 0;
              SELECT id,lock_version,dispatch_cursor FROM workflow_manager.queue_scopes LIMIT 0;
              SELECT id,app_id,deployment_id,holder_id,deploy_hash,generation,state,held_at FROM workflow_manager.deployment_holds LIMIT 0;
              SELECT id,app_id,deployment_id,operation,operation_kind,run_id,management_request_id,spec_digest,available_at,dispatch_order,state,attempt,worker_id,assignment_revision,lease_deadline,outcome,settlement_digest,created_at FROM workflow_manager.jobs LIMIT 0;
-             SELECT app_id,worker_id,revision,expires_at,released,wake_revision,next_due_at FROM workflow_manager.assignments LIMIT 0;
-             SELECT app_id,request_id,operation,worker_id,expected_revision,wake_revision,result_revision,result_expires_at FROM workflow_manager.placement_receipts LIMIT 0;
+             SELECT app_id,worker_id,revision,expires_at,released,refused FROM workflow_manager.assignments LIMIT 0;
+             SELECT app_id,request_id,operation,worker_id,expected_revision,reason,result_revision,result_expires_at FROM workflow_manager.placement_receipts LIMIT 0;
              SELECT id,app_id,request_id,run_id,revision,actor,request,request_digest,blocks_execution,created_at,outcome FROM workflow_manager.management LIMIT 0;
              SELECT id,app_id,run_id,accepted_revision,settled_revision FROM workflow_manager.management_scopes LIMIT 0;
              SELECT id,app_id,definition,interpretation,created_at FROM workflow_manager.schedule_deployments LIMIT 0;
@@ -273,11 +284,45 @@ impl Coordinator {
              SELECT id,app_id,schedule_id,revision,scheduled_at,run_id,job_id,activation_id FROM workflow_manager.schedule_occurrences LIMIT 0;
              SELECT id,deployment_id,activation_revision,ingress_epoch,state,closing_watermark,close_job_id,active_at,close_after,close_attempts FROM workflow_manager.recovery_scopes LIMIT 0;
              SELECT id,app_id,kind,next_due_at,pending_job_id FROM workflow_manager.recovery_duties LIMIT 0;
+             SELECT id,execution_zone_id,recorded_at FROM workflow_manager.capacity_demands LIMIT 0;
+             SELECT id,revision,desired,state,refusal,observed,attempt,attempt_deadline,retry_at,below_since,lock_version FROM workflow_manager.capacity_targets LIMIT 0;
+             SELECT id,execution_zone_id,generation,state,refusal,attempt,attempt_deadline,retry_at FROM workflow_manager.capacity_intents LIMIT 0;
              SELECT id,deploy_hash,deleted_at FROM zeroship.apps LIMIT 0;
              SELECT id,app_id,deploy_hash,retention_state FROM zeroship.app_deploys LIMIT 0;"
         ).await?;
         Ok(())
     }
+}
+
+/// Bind Control's zone and enrollment rows for placement and verify the
+/// manager role's column grants on them.
+///
+/// # Errors
+/// Returns `Unavailable` for an unreachable database or missing grants.
+pub async fn connect_eligibility(url: &str, options: Options) -> Result<ControlEligibility, Error> {
+    options.validate()?;
+    compio::time::timeout(options.acquire_timeout, async {
+        let database = Database::connect(
+            DbBinding::new(
+                "platform",
+                "workflow-eligibility",
+                SchemaName::new("zeroship").map_err(|_| Error::Invalid)?,
+            ),
+            ConnectOptions::new(url, ProjectKeySource::unavailable())
+                .max_connections(
+                    std::num::NonZeroUsize::new(options.connections).ok_or(Error::Invalid)?,
+                )
+                .connection_authority(),
+            eligibility::collections().map_err(Error::from)?,
+        )
+        .await
+        .map_err(|_| Error::Unavailable)?;
+        let source = ControlEligibility::new(database).map_err(Error::from)?;
+        source.ready().await.map_err(Error::from)?;
+        Ok(source)
+    })
+    .await
+    .map_err(|_| Error::Unavailable)?
 }
 
 fn duration_ms(value: Duration) -> Result<i64, Error> {

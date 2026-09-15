@@ -148,7 +148,7 @@ impl Host {
         )
         .await
         .unwrap();
-        let coordinator = Coordinator::new(queue.clone(), CoordinatorOptions::default()).unwrap();
+        let coordinator = support::coordinator(&queue, CoordinatorOptions::default());
         Self {
             source,
             holds,

@@ -19,8 +19,8 @@ pub use transport::Transport;
 
 use std::{sync::Arc, time::Duration};
 use zeroship_core::workflow_coordination::{
-    AssignedScope, Assignment, FailureCode, PublishWakeHint, RegisterWorker, RegisteredWorker,
-    ReleaseScope, ScopePage, WakeHintReceipt, WorkerId, AUDIENCE,
+    AssignedScope, Assignment, FailureCode, RegisterWorker, RegisteredWorker, ReleaseScope,
+    ScopePage, WorkerId, AUDIENCE,
 };
 use zeroship_core::{
     service_assertion::ServiceIssuer,
@@ -173,29 +173,12 @@ impl WorkerCoordinator {
         Ok(assignment)
     }
 
-    /// Publish only after persisting the hint in the customer's journal.
+    /// Give up one of this worker's placements. Release never discharges the
+    /// manager's recovery responsibility; a `refused` release tells the manager
+    /// never to offer the app to this worker instance again.
     ///
     /// # Errors
-    /// Refuses failed exchanges and acknowledgements for another hint or assignment.
-    pub async fn publish_wake(&self, request: &PublishWakeHint) -> Result<WakeHintReceipt, Error> {
-        let receipt: WakeHintReceipt = self
-            .transport
-            .post(endpoints::WORKFLOW_WAKE, request)
-            .await?;
-        if receipt.app_id != request.app_id
-            || receipt.assignment_revision != request.assignment_revision
-            || receipt.revision != request.revision
-        {
-            return Err(Error::InvalidResponse);
-        }
-        Ok(receipt)
-    }
-
-    /// Release after quiescing local scheduling and confirming its final wake hint.
-    /// The coordinator also requires a ready peer assigned to the same app.
-    ///
-    /// # Errors
-    /// Refuses failed exchanges, stale assignments and unconfirmed wake hints.
+    /// Refuses failed exchanges and stale or foreign placements.
     pub async fn release(&self, request: &ReleaseScope) -> Result<(), Error> {
         self.transport
             .post(endpoints::WORKFLOW_RELEASE, request)

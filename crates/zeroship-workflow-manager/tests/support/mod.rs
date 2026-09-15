@@ -18,7 +18,60 @@ use zeroship_core::{
 use zeroship_data_orm::{
     binding::DbBinding, encryption::ProjectKeySource, orm::Database, ConnectOptions,
 };
-use zeroship_workflow_manager::{retention::HoldClient, Error};
+use zeroship_workflow_manager::{
+    capacity::{Contract, LocalCapacity},
+    coordinator::{self, Coordinator},
+    driver::{self, Driver},
+    eligibility::{EligibilitySource, LocalEligibility, ZoneId},
+    lifecycle::{AppLifecycle, Undeletable},
+    retention::HoldClient,
+    Error, Queue,
+};
+
+/// Trusted single-zone facts for contracts that do not exercise eligibility:
+/// every app and worker is in the seeded zone and active.
+#[allow(dead_code, reason = "placement contracts compose their own facts")]
+pub fn local_eligibility() -> Rc<dyn EligibilitySource> {
+    Rc::new(LocalEligibility::new(ZoneId::default_zone()))
+}
+
+/// A coordinator over `queue` under trusted single-zone facts.
+#[allow(dead_code, reason = "queue-only contracts construct no coordinator")]
+pub fn coordinator(queue: &Queue, options: coordinator::Options) -> Coordinator {
+    Coordinator::new(queue.clone(), options, local_eligibility()).unwrap()
+}
+
+/// A driver whose placement lane runs under trusted single-zone facts and the
+/// local host's always-satisfied capacity. No app is ever deleted.
+#[allow(dead_code, reason = "only maintenance contracts run a driver")]
+pub fn local_driver(queue: &Queue, options: driver::Options) -> Driver {
+    driver_for(queue, options, Rc::new(Undeletable))
+}
+
+/// The same driver under a caller's deletion source, for the closing lane.
+#[allow(dead_code, reason = "only closing contracts report deletions")]
+pub fn driver_for(
+    queue: &Queue,
+    options: driver::Options,
+    lifecycle: Rc<dyn AppLifecycle>,
+) -> Driver {
+    try_driver(queue, options, lifecycle).unwrap()
+}
+
+/// The same construction, reporting its option validation instead of panicking.
+#[allow(dead_code, reason = "only option contracts assert a refusal")]
+pub fn try_driver(
+    queue: &Queue,
+    options: driver::Options,
+    lifecycle: Rc<dyn AppLifecycle>,
+) -> Result<Driver, Error> {
+    Driver::new(
+        coordinator(queue, coordinator::Options::default()),
+        options,
+        lifecycle,
+        Contract::declarative(Rc::new(LocalCapacity)),
+    )
+}
 
 /// Queue state-machine tests use invented deployment identities. Retention
 /// safety tests instead compose the real catalog and published app artifacts.
