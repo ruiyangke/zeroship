@@ -35,9 +35,8 @@ fn invalid_dispatch_envelope_returns_a_journal_outcome() {
 #[test]
 fn cpu_termination_returns_a_journal_outcome() {
     use std::time::Duration;
-    use zeroship_runtime::{init_v8, ModuleEntry, Runtime};
-    init_v8();
-    let runtime = Runtime::builder()
+    use zeroship_runtime::ModuleEntry;
+    let runtime = super::workflow_builder()
         .modules(vec![ModuleEntry {
             specifier: "index.js".into(),
             source: r"

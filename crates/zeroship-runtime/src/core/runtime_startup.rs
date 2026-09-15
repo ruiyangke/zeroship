@@ -56,14 +56,17 @@ impl RuntimeInner {
                 self.fail_startup(self.termination_message().into());
             } else {
                 self.startup = match prepared {
-                    Ok(prepared) => StartupState::Evaluating {
-                        started,
-                        descriptor: prepared.descriptor,
-                        phase: EvaluationPhase::Adapters {
-                            entry: prepared.entry,
-                            promises: prepared.promises,
-                        },
-                    },
+                    Ok(prepared) => {
+                        self.creator_entry = prepared.creator_entry;
+                        StartupState::Evaluating {
+                            started,
+                            descriptor: prepared.descriptor,
+                            phase: EvaluationPhase::Adapters {
+                                entry: prepared.entry,
+                                promises: prepared.promises,
+                            },
+                        }
+                    }
                     Err(error) => StartupState::Failed(error),
                 };
             }
@@ -272,7 +275,7 @@ impl RuntimeInner {
         self.startup = StartupState::Failed(error);
         self.application = None;
         self.dev_entry_loader = None;
-        self.workflow_fn = None;
+        self.creator_namespace = None;
     }
 
     fn advance_dev_entry(&mut self) {
@@ -343,26 +346,26 @@ impl RuntimeInner {
         v8::scope!(let handle_scope, &mut self.isolate);
         let context = v8::Local::new(handle_scope, &self.context);
         let scope = &mut v8::ContextScope::new(handle_scope, context);
-        let (application, workflow) =
+        let (application, creator_namespace) =
             with_context_preserving_ambient(scope, &InvocationContext::default(), |scope| {
                 let ns = v8::Local::new(scope, namespace).to_object(scope)
                     .ok_or("invalid module namespace")?;
                 let default = crate::core::application_entry::read_field(scope, ns, "default")?;
                 let application = crate::core::application_entry::ApplicationEntry::capture(scope, default, None)?;
-                let workflow = if default.is_null_or_undefined() { None } else {
-                    let object = default.to_object(scope).ok_or("invalid module default export")?;
-                    let value = crate::core::application_entry::read_field(scope, object, "workflow")?;
-                    v8::Local::<v8::Function>::try_from(value).ok()
-                        .map(|function| v8::Global::new(scope, function))
-                };
+                // The host entry imported this module; reading its namespace
+                // here publishes the instance request dispatch already holds.
+                let creator_namespace = self.creator_entry.as_ref().map(|module| {
+                    let module = v8::Local::new(scope, module);
+                    v8::Global::new(scope, module.get_module_namespace())
+                });
                 for plugin in &self.plugins {
                     let namespace = crate::plugin::runtime_plugin_namespace(scope, plugin.namespace())?;
                     plugin.finalize_runtime(scope, namespace, descriptor)?;
                 }
-                Ok::<_, String>((application, workflow))
+                Ok::<_, String>((application, creator_namespace))
             })?;
         self.application = Some(std::rc::Rc::new(application));
-        self.workflow_fn = workflow;
+        self.creator_namespace = creator_namespace;
         Ok(())
     }
 

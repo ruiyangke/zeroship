@@ -190,6 +190,20 @@ pub(crate) fn compile_modules(
     Ok(entry)
 }
 
+/// Look up a module the compiled graph already holds, by entry specifier.
+///
+/// Callers use this to reach a module the registry owns instead of compiling
+/// or evaluating a second copy of it under another specifier.
+pub(crate) fn registered_module(
+    scope: &mut v8::PinScope,
+    entry: Option<&ModuleEntry>,
+) -> Option<v8::Global<v8::Module>> {
+    let specifier = &entry?.specifier;
+    let registry = scope.get_slot::<SharedRegistry>().cloned()?;
+    let module = registry.borrow().get(specifier).cloned();
+    module
+}
+
 /// Prepare a dynamic dependency and return its canonical registry name.
 /// Evaluation is deferred until the importing module leaves its sync frame.
 pub(crate) fn dynamic_module(

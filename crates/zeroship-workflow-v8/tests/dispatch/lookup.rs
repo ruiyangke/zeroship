@@ -1,6 +1,6 @@
 use serde_json::{json, Value};
 
-use super::{build_runtime, dispatch_workflow};
+use super::{build_runtime, build_runtime_with, dispatch_workflow};
 
 fn invoke(source: &str, workflow: &str, journal: &Value) -> Value {
     let runtime = build_runtime(source);
@@ -33,19 +33,16 @@ fn frozen_minified_child_uses_its_export_binding() {
 
 #[test]
 fn synthetic_entry_forwards_workflows_as_named_module_exports() {
-    zeroship_runtime::init_v8();
-    let runtime = zeroship_runtime::Runtime::builder()
-        .modules(vec![
-            zeroship_runtime::ModuleEntry {
-                specifier: "index.js".into(),
-                source: "export * from './app.js'; export default { rpc: {} };".into(),
-            },
-            zeroship_runtime::ModuleEntry {
-                specifier: "app.js".into(),
-                source: FROZEN_CHILD.into(),
-            },
-        ])
-        .build();
+    let runtime = build_runtime_with(vec![
+        zeroship_runtime::ModuleEntry {
+            specifier: "index.js".into(),
+            source: "export * from './app.js'; export default { rpc: {} };".into(),
+        },
+        zeroship_runtime::ModuleEntry {
+            specifier: "app.js".into(),
+            source: FROZEN_CHILD.into(),
+        },
+    ]);
     let result = dispatch_workflow(
         &runtime,
         &json!({
@@ -74,23 +71,20 @@ fn frozen_minified_child_replays_the_export_named_journal() {
 
 #[test]
 fn synthetic_entry_preserves_explicit_workflow_dictionary_data() {
-    zeroship_runtime::init_v8();
-    let runtime = zeroship_runtime::Runtime::builder()
-        .modules(vec![
-            zeroship_runtime::ModuleEntry {
-                specifier: "index.js".into(),
-                source: "import * as user from './app.js'; export * from './app.js'; export default { rpc: {}, workflows: user.default.workflows };".into(),
-            },
-            zeroship_runtime::ModuleEntry {
-                specifier: "app.js".into(),
-                source: r"
-                    const x = Object.freeze(class x { run() {} });
-                    class Parent { run(_trigger, step) { return step.call(x, null); } }
-                    export default { workflows: { Parent, Child: x } };
-                ".into(),
-            },
-        ])
-        .build();
+    let runtime = build_runtime_with(vec![
+        zeroship_runtime::ModuleEntry {
+            specifier: "index.js".into(),
+            source: "import * as user from './app.js'; export * from './app.js'; export default { rpc: {}, workflows: user.default.workflows };".into(),
+        },
+        zeroship_runtime::ModuleEntry {
+            specifier: "app.js".into(),
+            source: r"
+                const x = Object.freeze(class x { run() {} });
+                class Parent { run(_trigger, step) { return step.call(x, null); } }
+                export default { workflows: { Parent, Child: x } };
+            ".into(),
+        },
+    ]);
     let result = dispatch_workflow(
         &runtime,
         &json!({
