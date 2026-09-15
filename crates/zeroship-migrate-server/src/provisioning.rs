@@ -259,22 +259,6 @@ pub async fn provision_migrator(
     Ok(())
 }
 
-/// The creator workflow journal's PostgreSQL DDL, generated into
-/// `crates/zeroship-workflow/schema/postgres.sql` and carrying the fingerprint
-/// a host verifies before it will use the journal.
-///
-/// Included rather than called, so this service keeps no dependency on the
-/// creator engine. `crates/zeroship-workflow/src/service/schema.rs`
-/// (`postgres_sql`) performs the same substitution for the hosts that read it,
-/// and both read the one generated artifact, so a regenerated schema moves
-/// them together.
-const WORKFLOW_JOURNAL_TEMPLATE: &str = include_str!("../../zeroship-workflow/schema/postgres.sql");
-
-/// The journal DDL bound to one app's schema.
-fn workflow_journal_tables_sql(app_schema: &str) -> String {
-    WORKFLOW_JOURNAL_TEMPLATE.replace("\"__zeroship_workflow_schema\"", &quote_ident(app_schema))
-}
-
 /// Whether an app's journal is already installed, so provisioning leaves an
 /// existing one, and the rows in it, alone.
 async fn journal_installed(
@@ -283,9 +267,8 @@ async fn journal_installed(
 ) -> Result<bool, compio_postgres::Error> {
     let rows = admin
         .query(
-            "SELECT 1 FROM pg_tables WHERE schemaname = $1 \
-               AND tablename = '__zeroship_workflow_schema_version'",
-            &[&app_schema],
+            "SELECT 1 FROM pg_tables WHERE schemaname = $1 AND tablename = $2",
+            &[&app_schema, &zeroship_workflow_schema::STAMP_TABLE],
         )
         .await?;
     Ok(!rows.is_empty())
@@ -312,7 +295,7 @@ pub async fn provision_workflow_app(
     provision_database(admin, &schema).await?;
     // Before the runtime role, whose grants cover every table in the schema.
     if !journal_installed(admin, &schema).await? {
-        exec_retry(admin, &workflow_journal_tables_sql(&schema)).await?;
+        exec_retry(admin, &zeroship_workflow_schema::postgres_sql(&schema)).await?;
     }
     let (_, migrator) = migrator_executor_config(&schema)?;
     let bound = zeroship_core::schema_name::SchemaName::new(&schema)

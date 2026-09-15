@@ -3,7 +3,7 @@ use std::process::Command;
 
 pub fn run() -> Result<()> {
     for schema in [
-        "crates/zeroship-workflow/schema",
+        "crates/zeroship-workflow-schema/schema",
         "crates/zeroship-workflow-manager/schema",
         "crates/zeroship-workflow-manager/schema/deployments",
     ] {

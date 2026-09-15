@@ -63,7 +63,7 @@ outputs.push({ path: new URL("./schema.runtime.json", import.meta.url), content:
 // Finish compiling every dialect before changing any generated artifact.
 for (const { path, content } of outputs) {
   if (check) {
-    if (await readFile(path, "utf8") !== content) throw new Error(`stale workflow schema ${path.pathname}; run node crates/zeroship-workflow/schema/generate.mjs`);
+    if (await readFile(path, "utf8") !== content) throw new Error(`stale workflow schema ${path.pathname}; run node crates/zeroship-workflow-schema/schema/generate.mjs`);
   } else {
     await writeFile(path, content);
   }

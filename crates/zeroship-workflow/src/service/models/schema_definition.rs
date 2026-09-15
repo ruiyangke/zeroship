@@ -430,7 +430,7 @@ mod tests {
     #[test]
     fn native_schema_matches_migration_metadata() {
         let artifact: Value =
-            serde_json::from_str(include_str!("../../../schema/schema.runtime.json")).unwrap();
+            serde_json::from_str(zeroship_workflow_schema::RUNTIME_DESCRIPTOR_JSON).unwrap();
         let expected = Schema::from_runtime_descriptor(&artifact).unwrap();
         let native = journal::schema();
         expected.validate().unwrap();

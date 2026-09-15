@@ -137,7 +137,7 @@ fn rows(output: Output) -> Vec<Value> {
 
 async fn assert_metadata(store: &OrmStore) {
     let descriptor: Value =
-        serde_json::from_str(include_str!("../../../schema/schema.runtime.json")).unwrap();
+        serde_json::from_str(zeroship_workflow_schema::RUNTIME_DESCRIPTOR_JSON).unwrap();
     let collections = descriptor["collections"].as_object().unwrap();
     assert!(!collections.is_empty());
     let namespace = store
