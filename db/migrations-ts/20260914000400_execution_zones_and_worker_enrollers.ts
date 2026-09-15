@@ -14,10 +14,11 @@ import { grant, now, raw, t, table } from "@zeroship/migrate";
 // the endpoint grant.
 //
 // THIS TABLE IS SHARED WITH DECISION 2 (placement eligibility and capacity),
-// which is NOT built yet. An execution zone is an operator-declared set of
+// which builds on it in 20260914000600_placement_eligibility.ts. An execution
+// zone is an operator-declared set of
 // worker deployment units that share creator-side connectivity; decision 2
 // adds `apps.execution_zone_id` against this same table so placement can match
-// an app's zone to an enroller's zone. A single-VPS deployment has exactly one
+// an app's zone to an enroller's zone, and Control names it at creation. A single-VPS deployment has exactly one
 // zone, seeded below. Decision 1 needs the column on `worker_enrollers` to
 // exist now (the enroller table is decision 1's own surface), so the zones
 // table it depends on is created here rather than deferred to decision 2's own
@@ -80,8 +81,9 @@ export default {
         // fix on that column runs, and the lowering refuses the pair -- the
         // exact constraint `20260906000200_apps_project_ownership_key.ts`
         // documents and works around by splitting across files. Decision 2
-        // owns turning this into a real foreign key when it lands; until
-        // then the column is intent, enforced by nothing but the writer.
+        // turns this into a real foreign key in
+        // 20260914000600_placement_eligibility.ts, once this file's collation
+        // fix on the referenced column has run.
         execution_zone_id: t.text().notNull(),
         // `active` | `revoked`. Revoked is terminal: there is no way back to
         // `active` for a given id, only a newly provisioned enroller.
