@@ -247,6 +247,8 @@ export class Platform {
       ZEROSHIP_WORKFLOW_DATABASE_URL: `postgres://zeroship_workflow:zeroship_workflow@${authority}`,
       ZEROSHIP_WORKFLOW_CONTROL_URL: control.url,
       ZEROSHIP_WORKFLOW_SERVICE_KEY_FILE: keys.workflow, ZEROSHIP_WORKFLOW_SERVICE_PEERS_FILE: peers,
+      // The manager sends the journal bundle here when a host reports a refusal.
+      ZEROSHIP_WORKFLOW_MIGRATE_URL: migrationServer.url,
     });
     await this.waitFor("workflow manager", () => this.httpReady(`${manager.url}/readyz`));
     await service("worker", "zeroship-worker", worker, ["--port", `${worker.number}`, "--threads", "1", "--control-url", control.url, "--blob-store", blobs, "--poll-interval", "1"], {
@@ -271,6 +273,9 @@ export class Platform {
     ], {
       ZEROSHIP_MIGRATE_SERVER_DATABASE_URL: dsn, ZEROSHIP_MIGRATE_SERVER_PROVISION_DATABASE_URL: dsn,
       ZEROSHIP_MIGRATE_SERVER_POLICY_SEAL_KEY: randomBytes(32).toString("hex"),
+      // Without a peer bundle the schema-bundle endpoint verifies nobody and
+      // refuses every caller, so no journal would ever be installed.
+      ZEROSHIP_MIGRATE_SERVER_SERVICE_PEERS_FILE: peers,
     });
     await this.waitFor("migrate-server", () => this.httpReady(migrationServer.url + "/readyz"));
 
@@ -283,22 +288,14 @@ export class Platform {
     const { id } = await created.json();
     assert.equal(typeof id, "string", "Created app must have an id");
     parseTypedId(id, "app");
-    const provisionUrl = migrationServer.url + "/v1/apps/" + id + "/workflows/provision";
-    const anonymous = await fetch(provisionUrl, { method: "POST" });
-    assert.equal(anonymous.status, 401, "Provisioning requires creator authorization");
-    await anonymous.arrayBuffer();
-    const outsiderId = typedIdFromStableSeed("usr", "workflows-order-fixture-outsider");
-    const outsiderSeed = await postgres.exec(["psql", "-U", "postgres", "-d", "workflow_fixture", "-v", "ON_ERROR_STOP=1", "-c",
-      "INSERT INTO zeroship.users (id, email, name, email_verified_at) VALUES ('" + outsiderId + "', 'outsider-" + outsiderId + "@zeroship.test', 'Other creator', NOW())"]);
-    assert.equal(outsiderSeed.exitCode, 0, outsiderSeed.output);
-    const outsider = identity.bearer(issuerUrl, outsiderId);
-    const denied = await fetch(provisionUrl, { method: "POST", headers: { authorization: "Bearer " + outsider } });
-    assert.equal(denied.status, 403, "Another creator cannot provision this app");
-    await denied.arrayBuffer();
-    // Retrying the lifecycle operation must preserve the existing journal.
-    for (let attempt = 0; attempt < 2; attempt++) {
-      await this.httpReady(provisionUrl, { method: "POST", headers: { authorization: "Bearer " + bearer } });
-    }
+    // THERE IS NO PROVISIONING CALL HERE ANY MORE, and its absence is the
+    // change rather than a gap. The journal used to be installed through a
+    // creator-authorized endpoint on the migration service, which is why this
+    // fixture drove that endpoint's authorization. The migration service no
+    // longer knows what a workflow is: the manager holds the journal artifacts
+    // and sends them as a schema bundle, and the trigger is the WORKER, whose
+    // host asks for a repair when it finds no journal it will use. So the app
+    // below gets its journal by running, which is the path production takes.
     // Workflow rollout and plan capabilities are operator-owned. A plan carries
     // the policy the manager grants an app's host under, and Control's startup
     // seeding leaves that column null, which refuses every policy lease. This is

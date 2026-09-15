@@ -8776,6 +8776,7 @@ dependencies = [
  "zeroship-data-orm",
  "zeroship-workflow-client",
  "zeroship-workflow-manager",
+ "zeroship-workflow-schema",
 ]
 
 [[package]]

@@ -19,10 +19,11 @@ use ntex::{
 use serde::{de::DeserializeOwned, Serialize};
 use std::time::Duration;
 use zeroship_core::{
+    schema_bundle::EnsureJournal,
     service_identity::endpoints,
     workflow_coordination::{
-        AssignedScope, Failure, FailureCode, ManageRun, ManagementStatus,
-        RegisterWorker, ReleaseScope, ScopePage, VerifyAssignment,
+        AssignedScope, Failure, FailureCode, ManageRun, ManagementStatus, RegisterWorker,
+        ReleaseScope, ScopePage, VerifyAssignment,
     },
 };
 
@@ -63,6 +64,10 @@ pub fn configure_with_limit(config: &mut web::ServiceConfig, limit: usize) {
         .service(
             web::resource(endpoints::WORKFLOW_RELEASE.path_template())
                 .route(web::post().to(release)),
+        )
+        .service(
+            web::resource(endpoints::WORKFLOW_JOURNAL_ENSURE.path_template())
+                .route(web::post().to(ensure_journal)),
         )
         .service(web::resource("/{path:.*}").route(web::route().to(not_found)));
 }
@@ -295,6 +300,66 @@ async fn renew(
                 .renew(actor.id(), &command)
                 .await
                 .map_err(Error::from)
+        }
+        .await,
+    )
+}
+
+/// Ensure a creator database's workflow journal is at the current version.
+///
+/// # Two callers, one capability
+///
+/// Control when an app registers, and a WORKER whose host refused the journal it
+/// found. The second is the repair path: before it, a refusal was terminal and
+/// nothing in the system could bring the journal forward.
+///
+/// The request names a SCHEMA, not an app. A creator database holds the journals
+/// of every app inside it, and one stamp covers them all, so provisioning is
+/// per-database and an app id would not identify it.
+///
+/// Idempotent, so neither caller has to check first and a redeploy is free.
+async fn ensure_journal(
+    request: web::HttpRequest,
+    state: State<SharedState>,
+    body: web::types::Payload,
+) -> web::HttpResponse {
+    respond(
+        async {
+            // TWO CALLERS, TWO IDENTITY SHAPES. Control presents a ROLE assertion
+            // verified against the peer bundle; a worker presents an INSTANCE
+            // assertion verified against the enrolment registry. The presented
+            // issuer selects which, so neither is a fallback for the other and a
+            // forged role arity cannot reach the worker path.
+            let actor = compio::time::timeout(
+                Duration::from_secs(5),
+                state
+                    .auth
+                    .journal_caller(authorization(&request), endpoints::WORKFLOW_JOURNAL_ENSURE),
+            )
+            .await
+            .map_err(|_| Error::Unavailable)??;
+            let command: EnsureJournal = read_json(&request, body).await?;
+            let journal = state.journal.as_ref().ok_or_else(|| {
+                tracing::error!(
+                    "workflow manager cannot provision journals: set workflow.migrate_url"
+                );
+                Error::Unavailable
+            })?;
+            // The bundle apply is DDL against a creator database and can take
+            // longer than a metadata call, so it gets its own bound rather than
+            // the five-second one the metadata handlers share.
+            let outcome =
+                compio::time::timeout(Duration::from_secs(60), journal.ensure(&command.schema))
+                    .await
+                    .map_err(|_| Error::Unavailable)??;
+            tracing::info!(
+                schema = %outcome.schema,
+                version = outcome.version,
+                action = ?outcome.action,
+                caller = %actor,
+                "workflow journal ensured"
+            );
+            Ok(outcome)
         }
         .await,
     )

@@ -2820,6 +2820,17 @@
           },
           "primaryKey": true
         },
+        "version": {
+          "type": "bigInt",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "version"
+          }
+        },
         "fingerprint": {
           "type": "string",
           "required": true,

@@ -140,6 +140,78 @@ async fn conflicting_journal_metadata_cannot_replace_the_app_descriptor() {
     assert!(database.collection("__zeroship_workflow_requests").is_err());
 }
 
+/// Re-initializing a journal already at the current version must be a no-op,
+/// because it runs on every local start. The rows are the property that matters:
+/// a re-install that recreated the tables would silently empty them.
+#[test]
+fn reinitializing_a_current_journal_preserves_its_rows() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("zs-workflow.sqlite");
+    schema::initialize_sqlite(&path).unwrap();
+    let connection = rusqlite::Connection::open(&path).unwrap();
+    connection
+        .execute(
+            "INSERT INTO __zeroship_workflow_app_state (id, app_id) VALUES ('row', 'app')",
+            [],
+        )
+        .unwrap();
+    schema::initialize_sqlite(&path).unwrap();
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT app_id FROM __zeroship_workflow_app_state WHERE id='row'",
+                [],
+                |row| row.get::<_, String>(0)
+            )
+            .unwrap(),
+        "app"
+    );
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT version FROM __zeroship_workflow_schema_version WHERE id='workflow'",
+                [],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+        i64::from(zeroship_workflow_schema::VERSION)
+    );
+}
+
+/// A journal a NEWER platform installed must never be written over by an older
+/// series. The refusal is distinct from the corrupted-journal one because the
+/// remedy is the opposite: upgrade the process, do not repair the database.
+#[test]
+fn a_journal_ahead_of_this_build_is_refused_without_being_touched() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("zs-workflow.sqlite");
+    schema::initialize_sqlite(&path).unwrap();
+    let connection = rusqlite::Connection::open(&path).unwrap();
+    let ahead = i64::from(zeroship_workflow_schema::VERSION) + 1;
+    connection
+        .execute(
+            "UPDATE __zeroship_workflow_schema_version SET version = ?1",
+            [ahead],
+        )
+        .unwrap();
+    let error = schema::initialize_sqlite(&path).expect_err("a newer journal must be refused");
+    assert!(
+        format!("{error}").contains("ahead of this build"),
+        "the refusal must name the direction: {error}"
+    );
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT version FROM __zeroship_workflow_schema_version WHERE id='workflow'",
+                [],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+        ahead,
+        "the refused journal's stamp must be left alone"
+    );
+}
+
 #[test]
 fn partial_workflow_schema_is_refused_in_a_shared_database() {
     let directory = tempfile::tempdir().unwrap();

@@ -230,4 +230,3 @@ CREATE UNIQUE INDEX IF NOT EXISTS "__zeroship_workflow_propagation_pages_scope_k
 CREATE TABLE "__zeroship_workflow_reconciliation_scans" ("id" TEXT PRIMARY KEY NOT NULL, "revision" INTEGER NOT NULL, "phase" TEXT NOT NULL, "after_id" TEXT, "upper_id" TEXT, CONSTRAINT "__zeroship_workflow_reconciliation_scan_app" FOREIGN KEY (id) REFERENCES "__zeroship_workflow_app_state"(app_id) ON DELETE RESTRICT);
 
 SELECT 1;
-INSERT INTO "main".__zeroship_workflow_schema_version (id, version, fingerprint) VALUES ('workflow', 1, '77e08a8b6eb69a5eec2164ce2a0297daf7a6caed3d51f21c197851bd2db49b93');
