@@ -1417,7 +1417,7 @@ pub async fn run_search(
     let rows = crate::backend_handle::routed_vector_search(route, &binding, plan.query).await?;
 
     // Count the successful database read even if later result decoding fails.
-    crate::metrics::emit_db_metric(route.meter(), crate::metrics::DB_READS, 1);
+    crate::metrics::emit_db_metric(route.usage(), crate::metrics::DB_READS, 1);
 
     read_pipeline::apply(
         route,
@@ -1550,7 +1550,7 @@ pub async fn run_near(
     .await?;
 
     // Count the successful database read even if later result decoding fails.
-    crate::metrics::emit_db_metric(route.meter(), crate::metrics::DB_READS, 1);
+    crate::metrics::emit_db_metric(route.usage(), crate::metrics::DB_READS, 1);
 
     read_pipeline::apply(
         route,

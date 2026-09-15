@@ -6,12 +6,15 @@
 
 use crate::schema::{FieldMap, Schema};
 pub use crate::value::Value;
-use std::{cell::Cell, future::Future, marker::PhantomData, rc::Rc};
+use std::{cell::Cell, future::Future, marker::PhantomData, rc::Rc, sync::Arc};
 use zeroship_data_orm::binding::DbBinding;
 use zeroship_data_orm::cdc::ChangeOp;
 pub use zeroship_data_orm::error::DbError;
 
-use crate::{backend::BackendHandle, crud, sql::compiler::CompiledQuery, tx_route::CapturedRoute};
+use crate::{
+    backend::BackendHandle, crud, metrics::UsageSink, sql::compiler::CompiledQuery,
+    tx_route::CapturedRoute,
+};
 
 /// A database connection bound to an app deployment.
 #[derive(Clone, Debug)]
@@ -21,6 +24,7 @@ pub struct Database {
     binding: DbBinding,
     backend: BackendHandle,
     actor_id: Option<String>,
+    usage: Option<Arc<dyn UsageSink>>,
     scope: Option<Rc<Cell<bool>>>,
     transaction_scope: Option<crate::transaction::scope::TransactionScope>,
 }
@@ -44,7 +48,8 @@ impl Database {
         Self::from_schema(binding, options.connect().await?, schema)
     }
 
-    /// Bind an installed schema to a backend.
+    /// Bind an installed schema to a backend. The database reports no usage
+    /// until a host attaches a sink with [`Self::with_usage_sink`].
     pub fn new(context: crate::OrmContext, binding: DbBinding, backend: BackendHandle) -> Self {
         Self {
             identity: Rc::new(()),
@@ -52,6 +57,7 @@ impl Database {
             binding,
             backend,
             actor_id: None,
+            usage: None,
             scope: None,
             transaction_scope: None,
         }
@@ -85,6 +91,15 @@ impl Database {
     #[must_use]
     pub fn with_actor(mut self, actor_id: Option<String>) -> Self {
         self.actor_id = actor_id;
+        self
+    }
+
+    /// Report this binding's usage to `sink`, including work done in the
+    /// transactions it opens. The sink carries the host's attribution; the ORM
+    /// derives none from the binding.
+    #[must_use]
+    pub fn with_usage_sink(mut self, sink: Arc<dyn UsageSink>) -> Self {
+        self.usage = Some(sink);
         self
     }
 
@@ -141,6 +156,7 @@ impl Database {
             self.binding.schema().clone(),
             self.backend.sql_registration().clone(),
             self.backend.connection_identity(),
+            self.usage.clone(),
         )
     }
 }

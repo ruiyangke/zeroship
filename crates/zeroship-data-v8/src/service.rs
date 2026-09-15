@@ -10,6 +10,8 @@ pub struct DbServiceConfig {
     /// Project material and app bindings delivered by the trusted host.
     pub project_keys: Arc<zeroship_data_orm::encryption::SuppliedProjectKeys>,
     pub cdc_relay: Option<zeroship_data_orm::cdc::relay::RelayConfig>,
+    /// Records each creator dispatch's database usage under its app id. With a
+    /// meter, a binding whose app id is not an app id is refused.
     pub meter: Option<Arc<zeroship_metering::Meter>>,
 }
 
