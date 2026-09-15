@@ -132,6 +132,10 @@ impl Database {
     /// # Errors
     /// The backend's connection failure, or `transaction_scope_expired` on a
     /// settled transaction handle.
+    #[expect(
+        clippy::future_not_send,
+        reason = "the probe runs on this thread's compio session"
+    )]
     pub async fn check_connection(&self) -> Result<(), DbError> {
         self.check_scope()?;
         let backend = self.backend.clone();

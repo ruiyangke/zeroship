@@ -125,7 +125,7 @@ async fn set_label(db: &Database, id: &str, label: &str) -> Result<(), DbError> 
 /// **A root handle re-entering its own lane is refused, not parked.**
 ///
 /// The lane is held by the callback that is polling this call, so the claim can
-/// never be released from here: parking is a self-deadlock that PostgreSQL
+/// never be released from here: parking is a self-deadlock that `PostgreSQL`
 /// cannot see and that only a caller-side timeout ends.
 ///
 /// CONTROL: the same nesting through the transaction handle opens a savepoint
@@ -719,7 +719,7 @@ async fn a_deferred_unique_violation_at_commit_reaches_the_callers_error_type() 
     owner.close().await;
 }
 
-/// **SQLite refuses an independent handle before any SQL.**
+/// **`SQLite` refuses an independent handle before any SQL.**
 ///
 /// CONTROL: ordinary transactions and the connection probe still work on the
 /// handle that was refused.
