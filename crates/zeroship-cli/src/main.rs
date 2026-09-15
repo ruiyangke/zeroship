@@ -9,7 +9,7 @@
 //!   zeroship config path [--config=PATH]
 //!   zeroship login [--control=URL] [--config=PATH] [--env=NAME]
 //!   zeroship dev init [--secrets-dir=PATH] [--env-file=PATH]
-//!   zeroship dev enroller --credential=PATH --import-file=PATH [--zone=NAME]
+//!   zeroship join-token --credential=PATH [--zone=NAME] [--ttl=DURATION] [--uses=N]
 //!
 //! `build` and `inspect` were removed in the artifact-layout redesign —
 //! the canonical build path is now `@zeroship/vite-plugin`, which emits
@@ -70,6 +70,7 @@ fn main() {
         "logout" => exit_on_error("logout", auth::cmd_logout()),
         "whoami" => exit_on_error("whoami", auth::cmd_whoami()),
         "dev" => exit_on_error("dev", dev::cmd_dev(&args)),
+        "join-token" => exit_on_error("join-token", dev::cmd_join_token(&args)),
         "organization" => exit_on_error("organization", organizations::cmd_organization(&args)),
         "secret" => secrets::cmd_secret(&args),
         "var" => secrets::cmd_var(&args),
@@ -1323,8 +1324,9 @@ fn print_usage() {
     );
     eprintln!("  zeroship dev init [--secrets-dir=PATH] [--env-file=PATH]");
     eprintln!("                   Provision stable, strong local platform secrets.");
-    eprintln!("  zeroship dev enroller --credential=PATH --import-file=PATH [--zone=NAME]");
-    eprintln!("                   Provision one more worker deployment unit's enroller.");
+    eprintln!("  zeroship join-token --credential=PATH [--zone=NAME] [--ttl=DURATION] [--uses=N]");
+    eprintln!("                   Mint a join token for workers you are about to provision.");
+    eprintln!("                   Short-lived by default; the token is printed on stdout.");
     eprintln!("  zeroship organization create|list|show|use|members|invite|revoke|join|role|remove|transfer|projects");
     eprintln!("                   The organization owns your projects and is the billed party.");
     eprintln!("                   `use <org_...>` records which one, so the other subcommands");
