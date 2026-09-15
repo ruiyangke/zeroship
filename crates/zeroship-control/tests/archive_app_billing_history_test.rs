@@ -30,7 +30,7 @@ async fn pg(db_url: &str) -> Client {
 const FX_SCALE: i64 = 1_000_000_000_000;
 
 #[compio::test]
-async fn archive_migration_removes_hard_delete_capability_and_grants_only_the_worker_fence() {
+async fn archive_migration_removes_hard_delete_capability_and_keeps_the_worker_out_of_the_catalog() {
     let url = db_url();
     let client = pg(&url).await;
     let row = client
@@ -49,7 +49,14 @@ async fn archive_migration_removes_hard_delete_capability_and_grants_only_the_wo
         .expect("inspect archive privileges");
     assert!(!row.get::<_, bool>("control_can_delete"));
     assert!(row.get::<_, bool>("control_can_update"));
-    assert!(row.get::<_, bool>("worker_can_read_archive"));
+    // INVERTED by the legacy-path removal, and deliberately so. The worker used
+    // to read `archived_at` as its own archive fence, which required reaching
+    // the platform catalog. It no longer reaches that catalog at all: the
+    // cutover revoked `USAGE ON SCHEMA zeroship` from `zeroship_worker`, and
+    // `crates/zeroship-worker/src/db_posture.rs` refuses to boot against a
+    // login that can see the platform schema. A worker that could still read
+    // this column would mean that revocation had been undone.
+    assert!(!row.get::<_, bool>("worker_can_read_archive"));
 
     drop(client);
     common::drain_pg().await;
