@@ -65,6 +65,10 @@ fn conflict_conditions_reject_nonportable_comparison_operators() {
             Value::Decimal("1.00".into()),
         ),
         (StorageType::Json, value!({"key":1})),
+        (
+            StorageType::Array(crate::sql::statement::ArrayElement::Text),
+            value!(["a"]),
+        ),
         (StorageType::Vector, value!([1.0, 2.0])),
         (StorageType::GeoPoint, value!({"lat":1.0,"lng":2.0})),
     ] {
@@ -200,7 +204,13 @@ async fn sqlite_conflict_conditions_compare_json_structurally() {
     )
     .await
     .unwrap();
-    let driver = backend.connection_driver("comparison").await.unwrap();
+    let driver = backend
+        .connection_driver(
+            "comparison",
+            &crate::sql::SchemaName::new("comparison").unwrap(),
+        )
+        .await
+        .unwrap();
     let session = driver.acquire(LeaseKind::Autocommit).await.unwrap();
     exercise_json_condition(&SqliteCompiler, &*session, "comparison", "TEXT").await;
 }
@@ -285,7 +295,7 @@ fn comparison_projections_validate_sources_storage_grouping_and_bind_budgets() {
             (StorageType::Text, value!("Ada")),
             (StorageType::Integer, value!(9_007_199_254_740_993_i64)),
         ] {
-            let statement = Statement::Select(
+            let statement = Statement::select(
                 comparison_projection(storage, value.clone(), false, false).unwrap(),
             );
             assert_eq!(Requirements::for_statement(&statement).bind_parameters, 1);
@@ -294,7 +304,7 @@ fn comparison_projections_validate_sources_storage_grouping_and_bind_budgets() {
             let mut unsupported = compiler.support();
             unsupported.max_bind_parameters = 0;
             let statement =
-                Statement::Select(comparison_projection(storage, value, false, false).unwrap());
+                Statement::select(comparison_projection(storage, value, false, false).unwrap());
             assert!(matches!(
                 compiler.compile(statement, &unsupported),
                 Err(CompileError::BindLimitExceeded { .. })

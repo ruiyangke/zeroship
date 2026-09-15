@@ -61,6 +61,7 @@ pub struct EntityQuery<E: Entity> {
     filter: Filter<E>,
     options: FindOptions,
     order: Vec<FieldOrder<E>>,
+    lock: bool,
 }
 
 impl<E: Entity> EntityCollection<E> {
@@ -75,6 +76,7 @@ impl<E: Entity> EntityCollection<E> {
             filter: Filter::all(),
             options: FindOptions::default(),
             order: Vec::new(),
+            lock: false,
         }
     }
 
@@ -134,6 +136,20 @@ impl<E: Entity> EntityQuery<E> {
         self
     }
 
+    /// Lock every returned row, exclusively, until the transaction settles.
+    /// A competing lock waits within the transaction's lock timeout.
+    ///
+    /// # Errors
+    /// `transaction_required` unless the collection came from a transaction
+    /// handle. Execution refuses `count`, `exists` and relation loading with
+    /// `invalid_read`, and backends without row locks with
+    /// `unsupported_backend_feature`.
+    pub fn for_update(mut self) -> Result<Self, DbError> {
+        super::require_lock_receiver(&self.entity.collection.database)?;
+        self.lock = true;
+        Ok(self)
+    }
+
     pub(in crate::orm) const fn with_options(mut self, options: FindOptions) -> Self {
         self.options = options;
         self
@@ -144,6 +160,9 @@ impl<E: Entity> EntityQuery<E> {
         let mut query = ReadQuery::new(ReadSource::new(E::COLLECTION, "source"));
         query.source.include_deleted = self.options.include_deleted;
         query.model_filter = Some(self.filter.into_predicate());
+        if self.lock {
+            query.lock = read::ReadLock::Update { of: Vec::new() };
+        }
         query.limit = self
             .options
             .limit

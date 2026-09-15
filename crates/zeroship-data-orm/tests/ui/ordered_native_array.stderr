@@ -1,0 +1,28 @@
+warning: unused import: `zeroship_data_orm::orm::*`
+ --> tests/ui/ordered_native_array.rs:1:5
+  |
+1 | use zeroship_data_orm::orm::*;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+error[E0599]: the method `lt` exists for struct `zeroship_data_orm::orm::Field<scopes>`, but its trait bounds were not satisfied
+ --> tests/ui/ordered_native_array.rs:4:44
+  |
+4 | fn main() { let _ = schema::grants::scopes.lt(vec!["a"]); }
+  |                                            ^^ method cannot be called on `zeroship_data_orm::orm::Field<scopes>` due to unsatisfied trait bounds
+  |
+ ::: src/orm/codecs.rs
+  |
+  |     pub struct Array<S>(std::marker::PhantomData<S>);
+  |     ------------------- doesn't satisfy `_: OrderedSqlType`
+  |
+ ::: src/orm/model.rs
+  |
+  | pub struct Field<C>(PhantomData<fn() -> C>);
+  | ------------------- doesn't satisfy `zeroship_data_orm::orm::Field<scopes>: Iterator`
+  |
+  = note: the following trait bounds were not satisfied:
+          `zeroship_data_orm::orm::sql_types::Array<zeroship_data_orm::orm::sql_types::Text>: OrderedSqlType`
+          `zeroship_data_orm::orm::Field<scopes>: Iterator`
+          which is required by `&mut zeroship_data_orm::orm::Field<scopes>: Iterator`

@@ -2,13 +2,15 @@
 
 use std::sync::Arc;
 
-use compio_postgres::Client;
 use ntex::web::{self, HttpResponse};
 use serde_json::{json, Map, Value};
 use zeroship_core::device_grant;
+use zeroship_data_orm::Database;
 
 use crate::config::AuthConfig;
 use crate::error::{AuthError, Result};
+
+mod registry;
 
 const DISCOVERY_CACHE_CONTROL: &str = "public, max-age=300";
 pub(crate) const JWKS_MAX_AGE_SECS: i64 = 5 * 60;
@@ -24,8 +26,8 @@ fn jwks_cache_control() -> String {
 
 #[web::get("/.well-known/jwks.json")]
 #[allow(clippy::future_not_send)]
-pub async fn jwks(db: web::types::State<Arc<Client>>) -> HttpResponse {
-    match jwks_document(db.as_ref()).await {
+pub async fn jwks(db: web::types::State<Database>) -> HttpResponse {
+    match jwks_document(&db).await {
         Ok(doc) => HttpResponse::Ok()
             .content_type("application/json")
             .header("cache-control", jwks_cache_control())
@@ -69,27 +71,18 @@ fn discovery_response(issuer: String) -> HttpResponse {
 }
 
 /// Build a public JWKS from active/next/retiring registry rows.
-pub async fn jwks_document(db: &Client) -> Result<Value> {
-    let rows = db
-        .query(
-            "SELECT kid, public_jwk \
-             FROM zeroship.signing_keys \
-             WHERE status IN ('active', 'next', 'retiring') \
-             ORDER BY CASE status \
-                WHEN 'active' THEN 0 \
-                WHEN 'next' THEN 1 \
-                ELSE 2 \
-             END, created_at DESC, kid ASC",
-            &[],
-        )
-        .await
-        .map_err(|e| AuthError::Db(format!("select signing_keys JWKS: {e}")))?;
+///
+/// # Errors
+/// Returns registry read failures or invalid public key data.
+#[allow(clippy::future_not_send, reason = "the ORM belongs to this compio runtime")]
+pub async fn jwks_document(db: &Database) -> Result<Value> {
+    let rows = registry::published_keys(db).await?;
 
     let mut keys = Vec::with_capacity(rows.len());
     for row in rows {
-        let kid: String = row.get("kid");
-        let jwk: Value = row.get("public_jwk");
-        keys.push(public_jwk_only(&kid, jwk)?);
+        let jwk = zeroship_data_orm::value::from_value(row.public_jwk)
+            .map_err(|error| AuthError::Db(format!("decode signing key {}: {error}", row.kid)))?;
+        keys.push(public_jwk_only(&row.kid, jwk)?);
     }
     Ok(json!({ "keys": keys }))
 }

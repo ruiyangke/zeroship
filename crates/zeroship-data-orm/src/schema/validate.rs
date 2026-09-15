@@ -95,6 +95,17 @@ fn validate_column(name: &str, column: &ColumnSchema, depth: usize) -> Result<()
     if depth > crate::sql::codecs::MAX_JSON_DEPTH {
         return Err(invalid("schema nesting exceeds the supported depth"));
     }
+    if column.storage.array == ArrayStorage::Native
+        && (depth > 0
+            || column.logical_type != LogicalType::Array
+            || column.items != Some(LogicalType::Text)
+            || column.encrypted
+            || column.is_masked())
+    {
+        return Err(invalid(format!(
+            "native array storage for '{name}' requires an unprotected top-level text array"
+        )));
+    }
     if let Some(assignment) = &column.assignment {
         let valid = match assignment.by {
             AssignmentGenerator::Now => column.logical_type == LogicalType::Timestamp,

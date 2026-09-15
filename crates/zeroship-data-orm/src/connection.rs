@@ -78,12 +78,17 @@ pub struct ConnectOptions {
     key_source: ProjectKeySource,
     max_connections: Option<NonZeroUsize>,
     session_authority: SessionAuthority,
+    transaction_setting_namespaces: Vec<&'static str>,
 }
 impl std::fmt::Debug for ConnectOptions {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ConnectOptions")
             .field("max_connections", &self.max_connections)
             .field("session_authority", &self.session_authority)
+            .field(
+                "transaction_setting_namespaces",
+                &self.transaction_setting_namespaces,
+            )
             .finish_non_exhaustive()
     }
 }
@@ -94,6 +99,7 @@ impl ConnectOptions {
             key_source,
             max_connections: None,
             session_authority: SessionAuthority::PerAppRole,
+            transaction_setting_namespaces: Vec::new(),
         }
     }
     /// Set the capacity of a backend that uses a connection pool.
@@ -109,14 +115,34 @@ impl ConnectOptions {
         self.session_authority = SessionAuthority::Connection;
         self
     }
+    /// Allow transactions on this connection to set custom settings under
+    /// `namespace`. Undeclared namespaces are refused, so this surface cannot
+    /// reach a setting the host did not choose to expose. Repeat to declare
+    /// several.
+    pub fn transaction_setting_namespace(mut self, namespace: &'static str) -> Self {
+        self.transaction_setting_namespaces.push(namespace);
+        self
+    }
     pub async fn connect(self) -> Result<BackendHandle, DbError> {
-        ConnectionFactory::for_url_with_limit(
+        for namespace in &self.transaction_setting_namespaces {
+            if !crate::sql::coordination::valid_setting_namespace(namespace) {
+                return Err(DbError::config_hinted(
+                    "invalid_transaction_setting_namespace",
+                    format!("'{namespace}' is not a transaction setting namespace"),
+                    "A namespace is a lowercase identifier, such as app_ns.",
+                ));
+            }
+        }
+        let namespaces: std::rc::Rc<[&'static str]> =
+            self.transaction_setting_namespaces.into();
+        Ok(ConnectionFactory::for_url_with_limit(
             &self.url,
             self.max_connections,
             self.session_authority,
         )?
         .connect(self.key_source)
-        .await
+        .await?
+        .declare_transaction_setting_namespaces(namespaces))
     }
 }
 

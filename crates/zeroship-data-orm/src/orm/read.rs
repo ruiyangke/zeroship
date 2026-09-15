@@ -74,6 +74,7 @@ pub struct ReadQuery {
     pub offset: RowOffset,
     pub(crate) summary: Option<crate::sql::statement::SelectSummary>,
     pub(crate) model_filter: Option<super::model::ModelPredicate>,
+    pub(crate) lock: ReadLock,
 }
 impl ReadQuery {
     pub fn new(source: ReadSource) -> Self {
@@ -89,8 +90,18 @@ impl ReadQuery {
             offset: RowOffset::default(),
             model_filter: None,
             summary: None,
+            lock: ReadLock::None,
         }
     }
+}
+
+/// Row locks requested through the typed Rust builders.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) enum ReadLock {
+    #[default]
+    None,
+    /// Exclusive locks on the rows of every source, or of the named aliases.
+    Update { of: Vec<String> },
 }
 
 pub(super) fn invalid(message: impl Into<String>) -> DbError {
@@ -119,9 +130,11 @@ pub(super) struct PreparedRead {
 }
 
 impl PreparedRead {
+    /// `in_transaction` is the captured route's decision; row locks need it.
     pub(super) fn new(
         binding: &DbBinding,
         registration: &crate::sql::registration::SqlRegistration,
+        in_transaction: bool,
         input: ReadQuery,
     ) -> Result<Self, DbError> {
         if input.joins.len() >= crate::sql::MAX_READ_SOURCES {
@@ -304,6 +317,8 @@ impl PreparedRead {
         if projected.len() > MAX_READ_FIELDS {
             return Err(invalid("read projection exceeds its field budget"));
         }
+        let lock = row_lock(&input, &sources, aggregating, in_transaction, registration)?;
+        let locked = lock != crate::sql::statement::RowLock::None;
         let mut filter = match input.model_filter {
             Some(filter) => crate::crud::predicate::resolve_model(
                 filter,
@@ -348,7 +363,7 @@ impl PreparedRead {
             limit: Some(input.limit.get()),
             offset: Some(input.offset.get()),
             distinct: false,
-            lock: crate::sql::statement::RowLock::None,
+            lock,
         })
         .map_err(|error| invalid(error.to_string()))?;
         let statement = match input.summary {
@@ -356,8 +371,13 @@ impl PreparedRead {
             None => statement,
         };
         let query = registration
-            .compile(Statement::Select(statement))
-            .map_err(|error| invalid(error.to_string()))?;
+            .compile(Statement::select(statement))
+            .map_err(|error| match error {
+                crate::sql::compiler::CompileError::Unsupported(feature) if locked => {
+                    super::unsupported_backend_feature(feature)
+                }
+                error => invalid(error.to_string()),
+            })?;
         for source in &sources {
             crate::cdc::read_set::record_if_active(
                 &source.source.collection,
@@ -510,6 +530,59 @@ impl PreparedRead {
             has_masked,
         })
     }
+}
+
+/// Resolve a requested row lock against the prepared sources.
+///
+/// Every refusal happens before SQL, so a refused locking read leaves its
+/// transaction usable.
+fn row_lock(
+    input: &ReadQuery,
+    sources: &[SourceLayout],
+    aggregating: bool,
+    in_transaction: bool,
+    registration: &crate::sql::registration::SqlRegistration,
+) -> Result<crate::sql::statement::RowLock, DbError> {
+    let ReadLock::Update { of } = &input.lock else {
+        return Ok(crate::sql::statement::RowLock::None);
+    };
+    if !in_transaction {
+        return Err(super::transaction_required("row locks"));
+    }
+    if input.summary.is_some() {
+        return Err(invalid("row locks cannot be combined with count or exists"));
+    }
+    if aggregating || !input.group_by.is_empty() || !matches!(input.having, Predicate::Const(true))
+    {
+        return Err(invalid("row locks require an ungrouped read without aggregates"));
+    }
+    if of.is_empty() && sources.iter().any(|source| source.nullable) {
+        return Err(invalid(
+            "an unqualified row lock cannot lock the nullable side of a left join; \
+             name the locked sources with for_update_of",
+        ));
+    }
+    let mut targets: Vec<Ident> = Vec::with_capacity(of.len());
+    for alias in of {
+        let source = sources
+            .iter()
+            .find(|source| &source.source.alias == alias)
+            .ok_or_else(|| invalid("a row lock target must be a read source"))?;
+        if source.nullable {
+            return Err(invalid(
+                "a row lock target cannot be the nullable side of a left join",
+            ));
+        }
+        let target = ident(alias, IdentRole::Alias)?;
+        if targets.contains(&target) {
+            return Err(invalid("duplicate row lock target"));
+        }
+        targets.push(target);
+    }
+    if !registration.support().row_locks {
+        return Err(super::unsupported_backend_feature("row locks"));
+    }
+    Ok(crate::sql::statement::RowLock::Required { of: targets })
 }
 
 pub(super) fn consume_budget(value: &Value, budget: &mut usize) -> Result<(), DbError> {
@@ -1019,7 +1092,7 @@ mod tests {
                     output: "present".into(),
                 });
                 query.limit = RowLimit::new(1).unwrap();
-                let prepared = PreparedRead::new(&binding, &registration, query).unwrap();
+                let prepared = PreparedRead::new(&binding, &registration, false, query).unwrap();
                 assert!(prepared
                     .query
                     .sql()

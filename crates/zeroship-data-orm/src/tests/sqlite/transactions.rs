@@ -971,12 +971,13 @@ fn a_write_upgrade_on_a_stale_wal_snapshot_is_refused() {
                  fault; got {other:?}"
                 ),
             }
-            // The discriminator between 517 and a plain 5. `busy_timeout` is 5000 ms
-            // (`BOOT_PRAGMAS`), and SQLite does NOT invoke the busy handler for
-            // SQLITE_BUSY_SNAPSHOT because retrying can never succeed - so an
-            // ordinary lock conflict would have sat here for five seconds and this
-            // one returns at once. Without this the assertion above passes on
-            // either code and the arm proves only that something was locked.
+            // The discriminator between 517 and a plain 5. Every connection waits
+            // on a lock for the lock budget (`budgets::DB_LOCK_TIMEOUT_MS`), and
+            // SQLite does NOT invoke the busy handler for SQLITE_BUSY_SNAPSHOT
+            // because retrying can never succeed - so an ordinary lock conflict
+            // would have sat here for the whole budget and this one returns at
+            // once. Without this the assertion above passes on either code and
+            // the arm proves only that something was locked.
             assert!(
                 elapsed < std::time::Duration::from_millis(1500),
                 "a snapshot conflict must not go through the busy handler; waited {elapsed:?}, \

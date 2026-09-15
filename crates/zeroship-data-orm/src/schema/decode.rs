@@ -95,7 +95,14 @@ fn column(value: &Value, depth: usize) -> Result<ColumnSchema, DbError> {
     }
     let kind =
         text(value, "type")?.ok_or_else(|| invalid("field descriptor requires a logical type"))?;
-    let mut field = ColumnSchema::new(logical_type(&kind)?);
+    // The migration engine's `textArray` column: a text array in the database's
+    // own array type.
+    let native_text_array = kind == "textArray";
+    let mut field = ColumnSchema::new(if native_text_array {
+        LogicalType::Array
+    } else {
+        logical_type(&kind)?
+    });
     field.required = flag(value, "required", false)?;
     field.primary_key = flag(value, "primaryKey", false)?;
     field.unique = flag(value, "unique", false)?;
@@ -163,6 +170,7 @@ fn column(value: &Value, depth: usize) -> Result<ColumnSchema, DbError> {
             raw_filterable: flag(storage, "rawFilterable", false)?,
             raw_sortable: flag(storage, "rawSortable", false)?,
             raw_projectable: flag(storage, "rawProjectable", false)?,
+            array: ArrayStorage::Json,
         };
     }
     if let Some(mask) = value.get("mask") {
@@ -221,6 +229,13 @@ fn column(value: &Value, depth: usize) -> Result<ColumnSchema, DbError> {
         .as_deref()
         .map(logical_type)
         .transpose()?;
+    if native_text_array {
+        if field.items.is_some_and(|items| items != LogicalType::Text) {
+            return Err(invalid("textArray items must be text"));
+        }
+        field.items = Some(LogicalType::Text);
+        field.storage.array = ArrayStorage::Native;
+    }
     if let Some(shape) = value.get("shape") {
         field.shape = fields(shape, depth + 1)?;
     }

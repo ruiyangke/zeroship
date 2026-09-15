@@ -145,8 +145,9 @@ async fn clear_watermark(db: &Client, kid: &str) {
     .unwrap_or_else(|err| panic!("clear signing key watermark {kid}: {err}"));
 }
 
-async fn jwks_contains(db: &Client, kid: &str) -> bool {
-    jwks_document(db)
+#[allow(clippy::future_not_send, reason = "the ORM belongs to this compio runtime")]
+async fn jwks_contains(database: &Database, kid: &str) -> bool {
+    jwks_document(&database.orm().await)
         .await
         .expect("JWKS document")
         .get("keys")
@@ -171,7 +172,7 @@ async fn retiring_key_inside_horizon_remains_published() {
             .expect("retention tick");
 
         assert!(
-            jwks_contains(&db, &kid).await,
+            jwks_contains(database, &kid).await,
             "a retiring key inside the retention horizon must remain published"
         );
     })
@@ -216,7 +217,7 @@ async fn key_past_horizon_leaves_jwks_with_reason_and_idempotently_keeps_audit_r
             "retirement log must identify the key and structured reason"
         );
         assert!(
-            !jwks_contains(&db, &kid).await,
+            !jwks_contains(database, &kid).await,
             "retired key must leave JWKS"
         );
         let (status, retired_at) = key_status(&db, &kid).await;
@@ -267,8 +268,8 @@ async fn active_and_next_keys_are_never_pruned_regardless_of_age() {
             .all(|retired| { retired.kid != active_kid && retired.kid != next_kid }));
         assert_eq!(key_status(&db, &active_kid).await.0, "active");
         assert_eq!(key_status(&db, &next_kid).await.0, "next");
-        assert!(jwks_contains(&db, &active_kid).await);
-        assert!(jwks_contains(&db, &next_kid).await);
+        assert!(jwks_contains(database, &active_kid).await);
+        assert!(jwks_contains(database, &next_kid).await);
     })
     .await;
 }
@@ -300,13 +301,13 @@ async fn missing_watermark_uses_full_horizon_from_retiring_at() {
             .await
             .expect("retention tick");
 
-        assert!(jwks_contains(&db, &inside_kid).await);
+        assert!(jwks_contains(database, &inside_kid).await);
         assert_eq!(key_status(&db, &inside_kid).await.0, "retiring");
         assert!(report
             .retired
             .iter()
             .all(|retired| retired.kid != inside_kid));
-        assert!(!jwks_contains(&db, &past_kid).await);
+        assert!(!jwks_contains(database, &past_kid).await);
         assert_eq!(key_status(&db, &past_kid).await.0, "retired");
         assert!(report.retired.iter().any(|retired| retired.kid == past_kid));
     })
@@ -358,7 +359,7 @@ async fn issuance_and_prune_never_return_a_token_without_its_published_key() {
             signing_key_retention::tick(&prune_db)
         );
         let report = report.expect("concurrent retention tick");
-        let published = jwks_contains(&db, &kid).await;
+        let published = jwks_contains(database, &kid).await;
         let (status, _) = key_status(&db, &kid).await;
 
         match issued {
@@ -677,7 +678,7 @@ async fn concurrent_retirement_cannot_be_undone_by_signer_startup() {
         assert!(publish_result.is_err(), "retired key was reactivated");
         assert!(report.retired.iter().any(|retired| retired.kid == kid));
         assert_eq!(key_status(&db, &kid).await.0, "retired");
-        assert!(!jwks_contains(&db, &kid).await);
+        assert!(!jwks_contains(database, &kid).await);
     })
     .await;
 }

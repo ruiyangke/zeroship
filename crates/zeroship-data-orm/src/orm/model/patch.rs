@@ -1,6 +1,6 @@
 use super::{
-    field_error, Changeset, Column, DbError, EncodeValue, Entity, Field, PhantomData, Record,
-    UpdatableColumn, Value,
+    Changeset, Column, DbError, EncodeValue, Entity, Field, PhantomData, Record, UpdatableColumn,
+    Value, field_error,
 };
 use crate::sql::update::Operator;
 use indexmap::IndexMap;
@@ -24,8 +24,14 @@ impl<S: NumericSqlType> NumericSqlType for super::super::sql_types::Nullable<S> 
 
 #[derive(Debug)]
 pub struct Patch<E> {
-    assignments: IndexMap<String, (Operator, Value)>,
+    assignments: IndexMap<String, PatchAssignment>,
     entity: PhantomData<fn() -> E>,
+}
+
+#[derive(Debug)]
+enum PatchAssignment {
+    Value(Operator, Value),
+    Timestamp(super::super::TimestampExpr),
 }
 impl<E> Patch<E> {
     #[doc(hidden)]
@@ -34,7 +40,7 @@ impl<E> Patch<E> {
         Self {
             assignments: fields
                 .into_iter()
-                .map(|(field, value)| (field, (Operator::Set, value)))
+                .map(|(field, value)| (field, PatchAssignment::Value(Operator::Set, value)))
                 .collect(),
             entity: PhantomData,
         }
@@ -46,15 +52,23 @@ impl<E> Patch<E> {
 
     pub(super) fn operation<C: Column<Entity = E>>(operator: Operator, value: Value) -> Self {
         Self {
-            assignments: [(C::NAME.into(), (operator, value))].into(),
+            assignments: [(C::NAME.into(), PatchAssignment::Value(operator, value))].into(),
             entity: PhantomData,
         }
     }
 
-    pub(in crate::orm) fn into_update(self) -> Value {
+    pub(in crate::orm) fn into_update(self) -> crate::crud::update::Input {
         let mut sets = Record::new();
         let mut update = Record::new();
-        for (field, (operator, operand)) in self.assignments {
+        let mut expressions = IndexMap::new();
+        for (field, assignment) in self.assignments {
+            let (operator, operand) = match assignment {
+                PatchAssignment::Timestamp(expression) => {
+                    expressions.insert(field, expression);
+                    continue;
+                }
+                PatchAssignment::Value(operator, operand) => (operator, operand),
+            };
             if operator == Operator::Set {
                 sets.insert(field, operand);
             } else {
@@ -67,7 +81,27 @@ impl<E> Patch<E> {
         if !sets.is_empty() {
             update.insert("$set".into(), Value::Object(sets));
         }
-        Value::Object(update)
+        crate::crud::update::Input::new(Value::Object(update), expressions)
+    }
+}
+
+/// Timestamp columns, including nullable timestamps, accept database expressions.
+pub trait TimestampSqlType {}
+impl TimestampSqlType for super::super::sql_types::Timestamp {}
+impl TimestampSqlType for super::super::sql_types::Nullable<super::super::sql_types::Timestamp> {}
+
+impl<C: UpdatableColumn> Field<C>
+where
+    C::SqlType: TimestampSqlType,
+{
+    pub fn set_expression(
+        self,
+        expression: super::super::TimestampExpr,
+    ) -> Result<Patch<C::Entity>, DbError> {
+        Ok(Patch {
+            assignments: [(C::NAME.into(), PatchAssignment::Timestamp(expression))].into(),
+            entity: PhantomData,
+        })
     }
 }
 impl<E: Entity> Patch<E> {

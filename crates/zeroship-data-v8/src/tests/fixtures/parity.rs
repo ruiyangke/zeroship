@@ -29,7 +29,7 @@ thread_local! {
 }
 
 /// Drive `fut` on this thread's long-lived compio runtime.
-fn block_on<F: std::future::Future>(fut: F) -> F::Output {
+pub(crate) fn block_on<F: std::future::Future>(fut: F) -> F::Output {
     RT.with(|rt| rt.block_on(fut))
 }
 
@@ -401,6 +401,21 @@ pub fn dispatch_zs_with_descriptor(
     app_id: &str,
     descriptor: &str,
 ) -> (u16, Value) {
+    dispatch_zs_metered(url, source, name, app_id, descriptor, None)
+}
+
+/// Dispatch an RPC through a database service that records into `meter`.
+///
+/// The runtime registers the plugin on the calling thread, so ORM work the
+/// caller runs on this thread afterwards shares it with the creator isolate.
+pub fn dispatch_zs_metered(
+    url: &str,
+    source: &str,
+    name: &str,
+    app_id: &str,
+    descriptor: &str,
+    meter: Option<Arc<zeroship_metering::Meter>>,
+) -> (u16, Value) {
     init_v8();
     let modules = vec![ModuleEntry {
         specifier: "index.js".into(),
@@ -411,7 +426,7 @@ pub fn dispatch_zs_with_descriptor(
             project_keys: crate::tests::fixtures::project_keys(),
             connection: crate::tests::fixtures::recording::connection(url),
             cdc_relay: None,
-            meter: None,
+            meter,
         })
         .expect("db service")
         .plugin(),

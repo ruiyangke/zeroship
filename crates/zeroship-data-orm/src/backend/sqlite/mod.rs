@@ -18,6 +18,7 @@ use zeroship_data_orm::error::DbError;
 use zeroship_data_orm::storage::LockManager;
 
 use crate::cdc::ChangeSink;
+use crate::sql::SchemaName;
 
 /// No-op change sink for backend tests.
 #[cfg(test)]
@@ -34,6 +35,7 @@ pub mod cdc;
 mod decimal;
 pub mod error;
 mod json;
+mod temporal;
 pub mod lock;
 pub mod reservation;
 pub mod row_json;
@@ -335,7 +337,33 @@ impl LockManager for SqliteBackend {
     }
 }
 
+/// SQLite's name for the database file a connection opened.
+const MAIN_DATABASE: &str = "main";
+
 impl SqliteBackend {
+    /// The database a binding's statements address.
+    ///
+    /// A binding on schema `main` addresses the file this backend opened. Every
+    /// other binding addresses its app's own file, attached under the app id.
+    pub(crate) fn database_alias<'a>(app_id: &'a str, schema: &'a SchemaName) -> &'a str {
+        if schema.as_str() == MAIN_DATABASE {
+            MAIN_DATABASE
+        } else {
+            app_id
+        }
+    }
+
+    /// Make a binding's database addressable on this backend's connections.
+    ///
+    /// A binding on schema `main` needs no attachment, so no app file is
+    /// created for it.
+    pub async fn attach_binding(&self, app_id: &str, schema: &SchemaName) -> Result<(), DbError> {
+        if Self::database_alias(app_id, schema) == MAIN_DATABASE {
+            return Ok(());
+        }
+        self.attach_app_file(app_id).await
+    }
+
     /// Attach the app’s database file under its schema alias, caching successful attaches.
     /// Schema changes are owned by the migration engine.
     pub async fn attach_app_file(&self, app_id: &str) -> Result<(), DbError> {

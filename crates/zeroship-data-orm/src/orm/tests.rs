@@ -7,6 +7,7 @@ posts_schema!(pub test_schema);
 use crate::schema::{CollectionSchema, ColumnSchema, LogicalType, Schema};
 use test_schema::posts;
 
+mod advisory_locks;
 mod aggregate_protection;
 mod bulk;
 mod calendar_date;
@@ -26,15 +27,18 @@ mod internal_tables;
 mod joins;
 mod json;
 mod lifecycle;
+mod native_arrays;
 mod nested_temporal;
 mod nested_values;
 mod protected_projections;
 mod protected_updates;
 mod relations;
 mod schema_updates;
+mod session_leases;
 mod sql_registration;
 mod timestamp;
 mod transaction_options;
+mod transaction_settings;
 mod typed_arrays;
 mod typed_composition;
 mod typed_exists;
@@ -42,11 +46,13 @@ mod typed_mutations;
 mod typed_predicates;
 mod typed_reads;
 mod typed_relations;
+mod typed_row_locks;
 mod typed_schema_lifetime;
 mod typed_updates;
 mod update_operators;
 mod update_validation;
 mod upsert_contract;
+mod usage;
 
 #[derive(Debug, FromRow)]
 #[orm(entity = posts)]
@@ -964,8 +970,12 @@ struct RegisteredBackend {
 }
 #[async_trait::async_trait(?Send)]
 impl crate::executor::ScopedExecutor for RegisteredBackend {
-    async fn prepare_for_app(&self, app_id: &str) -> Result<(), DbError> {
-        self.inner.prepare_for_app(app_id).await
+    async fn prepare_for_app(
+        &self,
+        app_id: &str,
+        schema: &crate::sql::SchemaName,
+    ) -> Result<(), DbError> {
+        self.inner.prepare_for_app(app_id, schema).await
     }
     async fn query(
         &self,
@@ -1298,3 +1308,5 @@ async fn cancelled_transaction_cleans_up_its_own_context() {
 mod typed_read_terminals;
 
 mod typed_mutation_expressions;
+mod typed_native_arrays;
+mod typed_timestamp;

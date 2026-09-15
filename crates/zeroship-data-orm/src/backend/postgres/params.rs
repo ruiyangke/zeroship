@@ -1,10 +1,15 @@
 //! Encode native database values at the PostgreSQL protocol boundary.
 use crate::value::Value;
-use compio_postgres::types::{private::BytesMut, Format, IsNull, ToSql, Type};
+use compio_postgres::types::{private::BytesMut, Format, IsNull, Kind, ToSql, Type};
 type EncodeError = Box<dyn std::error::Error + Send + Sync>;
 
 #[derive(Debug)]
 pub struct Parameter<'a>(pub &'a Value);
+
+/// A one-dimensional array whose elements use the text binary format.
+fn is_text_array(ty: &Type) -> bool {
+    matches!(ty.kind(), Kind::Array(member) if <&str as ToSql>::accepts(member))
+}
 
 impl ToSql for Parameter<'_> {
     fn accepts(_: &Type) -> bool {
@@ -12,6 +17,9 @@ impl ToSql for Parameter<'_> {
     }
     fn encode_format(&self, ty: &Type) -> Format {
         if matches!(self.0, Value::Object(_)) && ty.name() == "geography" {
+            return Format::Binary;
+        }
+        if matches!(self.0, Value::Array(_)) && is_text_array(ty) {
             return Format::Binary;
         }
         match (self.0, ty) {
@@ -50,6 +58,18 @@ impl ToSql for Parameter<'_> {
             }
         }
         if let Value::Array(values) = self.0 {
+            if is_text_array(ty) {
+                // The binary array protocol preserves order, duplicates, empty
+                // strings and the text "NULL" exactly.
+                let elements = values
+                    .iter()
+                    .map(|value| match value {
+                        Value::String(text) if !text.contains('\0') => Ok(text.as_str()),
+                        _ => Err("text array parameters require strings without NUL"),
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                return elements.to_sql(ty, out);
+            }
             if ty.name() == "vector" {
                 out.extend_from_slice(b"[");
                 for (index, value) in values.iter().enumerate() {
@@ -206,6 +226,115 @@ mod tests {
                 .unwrap(),
             IsNull::Yes
         ));
+    }
+
+    #[test]
+    fn text_array_parameters_encode_binary_arrays() {
+        for items in [
+            vec![],
+            vec!["only"],
+            vec!["dup", "dup"],
+            vec!["NULL", "", "{\"q\",\\x} é"],
+        ] {
+            let value = Value::Array(items.iter().copied().map(Value::from).collect());
+            let parameter = Parameter(&value);
+            assert!(matches!(
+                parameter.encode_format(&Type::TEXT_ARRAY),
+                Format::Binary
+            ));
+            let mut encoded = BytesMut::new();
+            assert!(matches!(
+                parameter.to_sql(&Type::TEXT_ARRAY, &mut encoded).unwrap(),
+                IsNull::No
+            ));
+            let mut expected = BytesMut::new();
+            items.to_sql(&Type::TEXT_ARRAY, &mut expected).unwrap();
+            assert_eq!(encoded.as_ref(), expected.as_ref(), "{items:?}");
+        }
+        for value in [
+            crate::value!([1]),
+            crate::value!(["a", null]),
+            crate::value!([["nested"]]),
+            crate::value!(["nul\u{0}"]),
+        ] {
+            assert!(Parameter(&value)
+                .to_sql(&Type::TEXT_ARRAY, &mut BytesMut::new())
+                .is_err());
+        }
+        let strings = crate::value!(["a"]);
+        for ty in [Type::TEXT, Type::INT4_ARRAY] {
+            assert!(Parameter(&strings)
+                .to_sql(&ty, &mut BytesMut::new())
+                .is_err());
+        }
+        let mut json = BytesMut::new();
+        Parameter(&strings).to_sql(&Type::JSONB, &mut json).unwrap();
+        assert_eq!(json.as_ref(), br#"["a"]"#);
+        assert!(matches!(
+            Parameter(&strings).encode_format(&Type::JSONB),
+            Format::Text
+        ));
+        let raw = Value::Bytes(vec![0, 1]);
+        assert!(matches!(
+            Parameter(&raw).encode_format(&Type::BYTEA),
+            Format::Binary
+        ));
+    }
+
+    #[compio::test]
+    async fn text_array_parameters_match_a_server_oracle() {
+        let postgres = crate::tests::fixtures::postgres::Postgres::start();
+        let (client, connection) =
+            compio_postgres::connect(&postgres.url(), compio_postgres::NoTls)
+                .await
+                .unwrap();
+        compio::runtime::spawn(async move {
+            connection.run().await.unwrap();
+        })
+        .detach();
+        let unusual = "{\"q\",\\x} é , NULL";
+        for (items, cardinality, lower) in [
+            (vec![], 0, None),
+            (vec!["b", "a", "a"], 3, Some(1)),
+            (vec!["NULL"], 1, Some(1)),
+            (vec![""], 1, Some(1)),
+            (vec![unusual, ","], 2, Some(1)),
+        ] {
+            let array = Value::Array(items.iter().copied().map(Value::from).collect());
+            let first = Value::from(items.first().copied().unwrap_or(""));
+            let rows = query(
+                &client,
+                "SELECT cardinality($1::text[]) AS cardinality, \
+                 array_lower($1::text[], 1) AS lower, \
+                 array_position($1::text[], NULL) IS NULL AS no_null_element, \
+                 coalesce(($1::text[])[1] = $2::text, false) AS first_matches, \
+                 $1::text[] = ARRAY['b','a','a']::text[] AS ordered, \
+                 $1::text[] IS NULL AS absent, \
+                 $1::text[] AS labels",
+                &[array.clone(), first],
+            )
+            .await
+            .unwrap();
+            let row = &crate::backend::postgres::pg_row_json::rows_to_values(&rows).unwrap()[0];
+            assert_eq!(row["cardinality"], Value::from(cardinality), "{items:?}");
+            assert_eq!(row["lower"], lower.map_or(Value::Null, Value::from));
+            assert_eq!(row["no_null_element"], Value::Bool(true));
+            assert_eq!(row["first_matches"], Value::Bool(!items.is_empty()));
+            assert_eq!(row["ordered"], Value::Bool(items == ["b", "a", "a"]));
+            assert_eq!(row["absent"], Value::Bool(false));
+            assert_eq!(row["labels"], array);
+        }
+        let rows = query(
+            &client,
+            "SELECT $1::text[] IS NULL AS absent",
+            &[Value::Null],
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            crate::backend::postgres::pg_row_json::rows_to_values(&rows).unwrap()[0]["absent"],
+            Value::Bool(true)
+        );
     }
 
     #[compio::test]

@@ -3,7 +3,7 @@ use super::{
     SqlSupport, SqlWriter,
 };
 use crate::{
-    sql::statement::{ArrayOperator, Column, IdentityRequest, Statement},
+    sql::statement::{ArrayOperator, Column, IdentityRequest, Statement, StorageType},
     value::Value,
 };
 
@@ -22,16 +22,22 @@ const SUPPORT: SqlSupport = SqlSupport {
     insert_generated_identity: true,
     identity_allocation: true,
     default_expression: false,
+    row_locks: false,
+    advisory_locks: false,
+    transaction_settings: false,
     max_bind_parameters: super::SQLITE_BIND_LIMIT,
 };
 
 const SYNTAX: super::shared::Syntax = super::shared::Syntax {
     current_timestamp: "(strftime('%Y-%m-%dT%H:%M:%fZ','now'))",
+    database_timestamp: write_database_timestamp,
     generated_identity_override: None,
     timestamp_cast: "",
     vector_cast: "",
     numeric_cast: "",
-    first_row_lock: "",
+    text_array_cast: None,
+    write_target_lock: "",
+    required_row_lock: None,
     insensitive_like: "LIKE",
     insensitive_like_suffix: " COLLATE NOCASE",
     average_suffix: "",
@@ -41,6 +47,18 @@ const SYNTAX: super::shared::Syntax = super::shared::Syntax {
     vector_distance: write_vector_distance,
     array_mutation: write_array_mutation,
 };
+
+fn write_database_timestamp(
+    writer: &mut SqlWriter,
+    offset_millis: i64,
+) -> Result<(), CompileError> {
+    writer
+        .sql
+        .push_str("zeroship_timestamp_add(strftime('%Y-%m-%dT%H:%M:%fZ','now'), ");
+    writer.write_param(Value::from(offset_millis))?;
+    writer.sql.push(')');
+    Ok(())
+}
 
 fn write_vector_distance(
     writer: &mut SqlWriter,
@@ -98,6 +116,9 @@ fn write_array_mutation(
     operator: ArrayOperator,
     operand: super::ParameterSlot,
 ) -> Result<(), CompileError> {
+    if column.storage() != StorageType::Json {
+        return Err(CompileError::Unsupported("native array storage"));
+    }
     writer.sql.push_str("CASE WHEN ");
     write_column(writer, column);
     writer.sql.push_str(" IS NULL OR json_type(");
@@ -181,7 +202,7 @@ impl SqlCompiler for SqliteCompiler {
         )?;
         match statement {
             Statement::Select(statement) => {
-                super::shared::compile_select(SYNTAX, effective, statement)
+                super::shared::compile_select(SYNTAX, effective, *statement)
             }
             Statement::VectorSearch(statement) => {
                 super::shared::compile_vector_search(SYNTAX, effective, statement)
@@ -198,6 +219,11 @@ impl SqlCompiler for SqliteCompiler {
             }
             Statement::Delete(statement) => {
                 super::shared::compile_delete(SYNTAX, effective, statement)
+            }
+            // A file-local engine has no server-wide locks and no settings.
+            Statement::AdvisoryLock(_) => Err(CompileError::Unsupported("advisory locks")),
+            Statement::SetTransactionSetting(_) => {
+                Err(CompileError::Unsupported("transaction settings"))
             }
         }
     }

@@ -1,11 +1,19 @@
 //! SQL compiler contracts and native execution output.
 
 #[cfg(test)]
+mod array_tests;
+#[cfg(test)]
 mod comparison_tests;
+#[cfg(test)]
+mod coordination_tests;
+#[cfg(test)]
+mod lock_tests;
 mod postgres;
 mod query;
 mod shared;
 mod sqlite;
+#[cfg(test)]
+mod timestamp_tests;
 mod writer;
 pub use postgres::PostgresCompiler;
 pub use query::{CompiledQuery, ParameterType};

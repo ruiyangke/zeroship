@@ -77,7 +77,7 @@ pub(crate) fn raw_column(
         lock: crate::sql::statement::RowLock::None,
     })?;
     registration
-        .compile(Statement::Select(statement))
+        .compile(Statement::select(statement))
         .map_err(Into::into)
 }
 

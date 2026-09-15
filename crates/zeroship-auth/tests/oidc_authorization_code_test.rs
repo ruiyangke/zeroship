@@ -146,7 +146,7 @@ async fn authorize_token_happy_path_mints_pairwise_access_and_nonce_at_hash_id_t
         assert!(token.expires_in > 0);
         assert!(token.scope.contains("openid"));
 
-        let jwks = jwks_document(&fx.db).await.expect("jwks");
+        let jwks = jwks_document(&fx.server.orm).await.expect("jwks");
         let access = verify_with_jwks::<AccessTokenClaims>(
             &jwks,
             &token.access_token,
@@ -203,7 +203,7 @@ async fn id_token_includes_email_and_profile_claims_when_scopes_granted() {
             .await
             .expect("token response");
 
-        let jwks = jwks_document(&fx.db).await.expect("jwks");
+        let jwks = jwks_document(&fx.server.orm).await.expect("jwks");
         let id = verify_with_jwks::<Value>(
             &jwks,
             &token.id_token,
@@ -249,7 +249,7 @@ async fn id_token_omits_identity_claims_without_email_and_profile_scopes() {
             .expect("token response");
         assert_eq!(token.scope, "openid");
 
-        let jwks = jwks_document(&fx.db).await.expect("jwks");
+        let jwks = jwks_document(&fx.server.orm).await.expect("jwks");
         let id = verify_with_jwks::<Value>(
             &jwks,
             &token.id_token,
@@ -281,7 +281,7 @@ async fn id_token_email_verified_false_for_unverified_user() {
             .await
             .expect("token response");
 
-        let jwks = jwks_document(&fx.db).await.expect("jwks");
+        let jwks = jwks_document(&fx.server.orm).await.expect("jwks");
         let id = verify_with_jwks::<Value>(
             &jwks,
             &token.id_token,

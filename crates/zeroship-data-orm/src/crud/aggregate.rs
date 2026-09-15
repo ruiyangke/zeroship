@@ -138,7 +138,7 @@ pub(crate) fn build(
         lock: crate::sql::statement::RowLock::None,
     })?;
     Ok((
-        registration.compile(Statement::Select(statement))?,
+        registration.compile(Statement::select(statement))?,
         result_projection,
     ))
 }

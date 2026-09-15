@@ -198,6 +198,25 @@ a separate local connection, so an older pending open cannot overwrite the new
 binding. Reinstalling the same identity preserves the existing connection.
 Connection identity and factory internals are opaque in Debug output.
 
+### Usage reporting
+
+The ORM measures database usage at its operation boundaries and reports it,
+after an operation succeeds, to the `metrics::UsageSink` attached to the
+binding. `metrics` names the reported quantities (`DB_READS`, `DB_WRITES`,
+`DB_ROWS_WRITTEN`). The sink decides attribution: the ORM derives none from the
+binding and depends on no metering implementation.
+
+- A Rust host attaches a sink with `Database::with_usage_sink`. Transactions
+  the database opens report to the same sink.
+- A host that captures routes itself passes the sink to
+  `CapturedRoute::capture`. The V8 adapter does so for every creator dispatch:
+  it wraps `DbServiceConfig::meter` in a `MeterHandle` for the binding's app,
+  and refuses a metered binding whose app id is not an app id with
+  `invalid_meter_app_id`.
+- A binding without a sink reports nothing and is never refused on
+  attribution, so a platform binding served on a creator isolate's thread is
+  neither billed to that app nor refused.
+
 SQLite opens or creates a filesystem database, for example
 `sqlite:.zeroship/dev.sqlite`. Memory selectors, empty paths, and SQLite URI
 options are rejected. Tests provide explicit temporary files; the ORM owns no
@@ -309,6 +328,60 @@ relay remains the authoritative PostgreSQL change source. Removing returned
 records avoids result-buffer growth; it does not eliminate database locking,
 WAL work, or SQLite's bounded CDC buffers.
 
+## Array storage
+
+An array column has a logical element type and a declared physical storage.
+JSON storage keeps the array in a JSON document. Native storage uses the
+database's own array type and is available for text elements:
+
+```rust,ignore
+schema! { pub models { grants {
+    #[orm(primary_key)] id: Text,
+    #[orm(array_storage = "native")] scopes: Array<Text>,
+    #[orm(array_storage = "native")] amr: Nullable<Array<Text>>,
+    tags: Array<Text>,
+}}}
+```
+
+Runtime descriptors spell the same declaration as the migration engine's
+`textArray` column type. Native storage on another element type, on a nested
+member, or combined with encryption or masking fails schema validation with
+`invalid_schema`; the `schema!` macro refuses the same declarations at compile
+time.
+
+```text
+Array<Text> + storage        PostgreSQL                 SQLite
+-------------------------    -----------------------    --------------------
+Json (default)               jsonb                      JSON text
+Native                       text[]                     JSON text
+```
+
+Every array column uses the `sql_types::Array<S>` codec. Models read `Vec<T>`
+and nullable columns `Option<Vec<T>>`; writes accept `Vec<T>` or `&[T]` whose
+elements encode through `S`. Arrays support `eq`, `ne`, `in_values`,
+`not_in_values`, `is_null` and `is_not_null` against whole values, and `push`,
+`pull` and `add_to_set` for elements. Equality is exact: element order and
+duplicates are significant. Arrays have no ordered comparisons, grouping,
+distinct selection or column-to-column comparisons; those do not compile or are
+refused before execution.
+
+PostgreSQL binds native arrays in the binary array protocol with an explicit
+`text[]` cast, so order, duplicates, empty strings and the text `NULL` reach the
+database unchanged. Equality and membership use PostgreSQL array equality.
+`push` uses `array_append`, `pull` uses `array_remove`, and `add_to_set` appends
+only when `array_position` finds no equal element, leaving existing duplicates in
+place. SQLite has no array type, so native declarations keep JSON text, the
+structural JSON equality function and the JSON array renderer described below.
+Both backends return the same values for the same operations.
+
+Native text elements are strings without NUL characters, and a null element is
+refused on write with `invalid_array_element` on both backends. SQL NULL, an
+empty array and an array containing the text `NULL` remain distinct. A
+PostgreSQL value with a NULL element, more than one dimension or a lower bound
+other than one fails to decode with `row_decode_failed` rather than being
+flattened. JSON array values bind as JSON text, so a declaration whose storage
+differs from the physical column fails at its first bind in either direction.
+
 ## Explicit joins
 
 `Database::from` builds source-qualified reads from generated entity aliases.
@@ -360,6 +433,65 @@ loading relation projections.
 Repeated `filter` and `having` calls combine with AND. Ordering accepts
 `nulls_first` and `nulls_last`. An alias's `include_deleted()` applies only
 to that source, including a joined source's visibility condition.
+
+## Row locks
+
+Typed reads on a transaction handle can take exclusive row locks, held until
+the transaction commits or rolls back:
+
+```rust,ignore
+db.transaction(|tx| async move {
+    let state: Option<CredentialState> = tx.entity::<schema::users::Entity>()?
+        .query()
+        .filter(schema::users::id.eq(user_id)?)
+        .for_update()?
+        .first()
+        .await?;
+    let s = tx.entity::<schema::sessions::Entity>()?.alias("s")?;
+    let g = tx.entity::<schema::grants::Entity>()?.alias("g")?;
+    let rows = tx.from(&s)
+        .inner_join(&g, g.column(schema::grants::id).eq(s.column(schema::sessions::grantId))?)?
+        .for_update_of(&s)?
+        .select((s.row::<Session>(), g.row::<Grant>()))?
+        .all()
+        .await?;
+    Ok(())
+}).await?;
+```
+
+`for_update` locks the rows of every source. `for_update_of` names the sources
+to lock and can be repeated; the two cannot be mixed on one read. PostgreSQL
+renders `FOR UPDATE [OF ...]` after the page bounds, using the aliases the read
+already emits, so only the locked sources need `UPDATE` privilege. The strength
+is always exclusive and a competing lock waits. There is no `NOWAIT` or
+`SKIP LOCKED`: skipping locked rows would silently omit them. Waits are bounded
+by the transaction's lock timeout (`budgets::DB_LOCK_TIMEOUT_MS`) and surface as
+`lock_not_available`.
+
+Under read committed, a waiter returns the latest committed version of the row
+it waited for. Under repeatable read or serializable, locking a row changed
+after the transaction's snapshot fails with `serialization_failure`. A lock
+taken inside a nested callback whose savepoint rolls back is released with that
+savepoint; locks taken in the enclosing frame survive it.
+
+The builders refuse a root handle with `transaction_required`. A root handle
+stays a pooled receiver even inside another handle's callback. A lock target
+must be a source already registered on the same database handle. Preparation
+checks the captured transaction route again and refuses, before any SQL runs,
+`count`, `exists`, aggregates, grouping, relation loading, an unqualified lock
+on a read with a left join, and a lock on the nullable side of a left join
+(`invalid_read`). SQLite has no row locks and refuses locking reads with
+`unsupported_backend_feature`; the transaction stays usable. The V8 adapter's
+`ReadQuery` decoding has no lock input.
+
+Every ORM read carries a row limit. A lock set larger than one page is taken as
+keyset pages in one transaction, in a stable order; each page's locks
+accumulate until settlement.
+
+Single-row updates and deletes lock their target through a first-row
+subselect, and protected writes probe their targets the same way. These
+internal write-target probes render no locking clause on SQLite, whose single
+writer serializes writes.
 
 ## Named relations
 
@@ -418,8 +550,11 @@ counts, and handles settlement, cancellation, cleanup, and discard.
 
 `executor::ScopedExecutor` resolves the app's physical SQL namespace and applies its authority
 on the connection that executes its statements. PostgreSQL uses a transaction
-with local role and timeout settings. SQLite attaches the database and selects
-its transaction lane before exposing a physical connection source.
+with local role and timeout settings. SQLite attaches the app's database file
+and selects its transaction lane before exposing a physical connection source.
+A SQLite binding on schema `main` addresses the file the backend opened: it
+attaches no `zs-<app>.sqlite`, and its catalog, protection floor and statements
+all read that file.
 
 `backend::Backend` is the host registration contract above the driver:
 
@@ -455,9 +590,10 @@ includes SQL and native parameter types without parameter contents. Execution
 borrows the bindings or consumes the output through `into_parts`.
 
 Parameters and result records use native `Value` types. Dynamic dispatch does
-not require JSON serialization. Strings and binary buffers remain native;
-JSON encoding is reserved for JSON columns and explicit wire contracts. The
-implementation still allocates records and futures and copies some inputs.
+not require JSON serialization. Strings, binary buffers and native text arrays
+remain native; JSON encoding is reserved for JSON columns and explicit wire
+contracts. The implementation still allocates records and futures and copies
+some inputs.
 
 The ORM refuses caller-supplied typed-ID assignments before insert, batch insert, or
 upsert can mutate rows. Upsert conflict keys must be declared, supplied,
@@ -507,8 +643,10 @@ Array mutations compile into an atomic SQL update. `$push` appends the operand
 as a complete element; `$pull` removes every structurally equal element;
 `$addToSet` appends only when no equal element exists. Objects compare without
 key order, arrays retain order, and numbers compare by exact decimal value.
-JSON null is an element when used as an operand; null columns remain null.
-The dialect renderer lives in `zeroship_data_orm::sql`.
+In JSON storage, JSON null is an element when used as an operand; native
+arrays refuse a null operand. Null columns remain null. The operand is encoded
+as one element of the column's storage: JSON for JSON arrays, the element type
+for native arrays. The dialect renderer lives in `zeroship_data_orm::sql`.
 
 The SQL module also owns the shared update grammar. It validates assignments
 before declared generators and protection transforms, rejecting conflicting writes and
@@ -606,6 +744,93 @@ revocation remain in its driver. SQLite translates its actor's terminal outcome
 before returning it to the ORM. The shared protocol sees no vendor outcome type.
 Withdrawal consumes the session through `discard`; ordinary Drop must recover or
 quarantine unfinished work before physical resources can be reused.
+
+## PostgreSQL coordination
+
+`Database::postgres()` returns PostgreSQL-specific coordination for native Rust
+hosts: advisory locks, transaction-local settings and session leases. Other
+backends refuse it with `unsupported_backend_feature`. The V8 adapter has no
+route to it, and it must stay that way: advisory locks and settings are
+server-wide, so creator code must not reach them.
+
+```rust,ignore
+use zeroship_data_orm::orm::{AdvisoryKey, TransactionSetting};
+
+db.transaction(|tx| async move {
+    let postgres = tx.postgres()?;
+    postgres.advisory_xact_lock(AdvisoryKey::hashed_pair(NAMESPACE, user_id)).await?;
+    postgres.set_local(&TransactionSetting::new("app_ns.retention")?, "on").await?;
+    Ok(())
+}).await?;
+```
+
+Both commands compile through the handle's SQL registration and run on its
+captured transaction route, so they share the transaction's pinned session,
+savepoint frames, budgets and supervised cancellation. They carry no data and
+emit no usage metrics.
+
+### Advisory transaction locks
+
+`advisory_xact_lock` waits for a transaction-scoped advisory lock and holds it
+until the transaction commits or rolls back, including the rollback a dropped
+callback performs. Taking the same key again stacks and still releases once.
+A lock taken inside a savepoint that rolls back is released with that
+savepoint, so a lock that must outlive nested work belongs in the root frame.
+The wait is bounded by the transaction's lock timeout; a timeout surfaces as
+`lock_not_available` and aborts the transaction.
+
+Keys are PostgreSQL's closed forms, and the database computes every hash:
+
+| Constructor | Rendered key |
+| --- | --- |
+| `AdvisoryKey::single(i64)` | `$1::int8` |
+| `AdvisoryKey::pair(i32, i32)` | `$1::int4, $2::int4` |
+| `AdvisoryKey::hashed_pair(i32, text)` | `$1::int4, hashtext($2::text)` |
+| `AdvisoryKey::hashed(text)` | `hashtext($1::text)::int8` |
+| `AdvisoryKey::hashed_lowercase(text)` | `hashtext(lower($1::text))::int8` |
+
+Hashing and case folding happen in the database, never in Rust, so a caller
+that spells the same form in SQL contends on the identical lock. One-argument
+and two-argument keys are separate key spaces and never contend with each
+other. Transaction locks conflict with session locks other sessions hold on
+the same key. A root handle is refused with `transaction_required`.
+
+### Transaction-local settings
+
+`set_local` runs `set_config(name, value, true)` with the name and the value
+bound. PostgreSQL reverts the value when the transaction ends and when an
+enclosing savepoint rolls back, so it can never reach a pooled session.
+`TransactionSetting::new` accepts only two lowercase identifiers joined by a
+dot; every built-in setting, including the role and the resource limits the
+ORM applies to its sessions, is dotless and therefore unreachable. The host
+declares which namespaces its connection may set:
+
+```rust,ignore
+ConnectOptions::new(url, keys)
+    .connection_authority()
+    .transaction_setting_namespace("app_ns")
+```
+
+An undeclared namespace, a malformed name, or a value containing NUL is
+refused with `invalid_transaction_setting` before any SQL runs. The ORM owns
+no setting names; hosts own theirs.
+
+### Session leases
+
+`try_session_lease` takes a session-scoped advisory lock for work that spans
+several transactions, such as a fleet-wide sweep. It runs on a root handle
+only; a transaction handle is refused with `session_lease_requires_root`.
+Acquisition opens a pooled session with the backend's authority and limits,
+tries the key once, and commits that short transaction; session locks survive
+it. `Ok(None)` means another session holds the key.
+
+The lease pins its session until `release`, which unlocks and returns the
+session to the pool. Dropping an unreleased lease discards the session
+instead, so the server frees the key when the connection closes and no pooled
+session inherits it. A release whose unlock fails, or whose unlock reports the
+key was not held, also discards the session and returns an error. A held lease
+occupies one pooled connection, so the pool must cover the lease and the
+transactions the caller runs beside it.
 
 ## SQL portability and extension points
 

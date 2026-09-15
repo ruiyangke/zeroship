@@ -4,6 +4,7 @@ mod codecs;
 mod composition;
 mod fixtures;
 mod joins;
+mod metering;
 mod parity;
 mod read_capture;
 mod relations;
