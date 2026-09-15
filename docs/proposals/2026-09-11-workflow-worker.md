@@ -2432,9 +2432,11 @@ with no dependency on the platform ledger implementation.
 Acquisition and reclamation serialize on the deployment record. Confirm retention
 before admitting a new dependency. Before releasing a journal hold, a bounded
 worker job closes admission for that deployment, checks all customer dependencies
-under its app lock, and commits release intent. Generation tombstones reject stale
-release/reacquire messages. Queue release similarly accounts for every referencing
-schedule/job under manager serialization.
+under its app lock, and commits release intent; the
+[journal hold release policy](#journal-hold-release-policy) is how that job is
+asked for and answered. Generation tombstones reject stale release/reacquire
+messages. Queue release similarly accounts for every referencing schedule/job
+under manager serialization.
 
 A lost acquire reply causes an idempotent retry before admission. A lost release
 reply retains intent until reconciliation; it must not turn into a new release
@@ -2486,21 +2488,59 @@ collector reclaims a deployment only once both holder classes are released and
 no current, staged or pending pointer needs it; the local host's catalog applies
 the same holder-aware fence.
 
-**Remaining before superseded code is actually reclaimed:** creator activation
-acquires a journal hold on its deployment, and no creator job releases journal
-holds yet. `WorkflowService::release_deployment_hold` performs a checked release,
-but nothing schedules it, so every activated deployment keeps its journal hold
-and the collector still cannot reclaim it. The journal release job described
-above must land for reclamation to follow republication in practice.
+#### Journal hold release policy
+
+Both holder classes release, and each requires something different. The queue
+holder answers to the manager alone, on the conditions above. The journal holder
+answers only to the creator engine, which is the one process that can read the
+customer journal, so the manager cannot decide a journal release: it asks.
+
+The same retention lane carries the request. The manager's hold row records the
+journal release duty for its deployment alongside its own hold, and a deployment
+whose queue hold is released becomes a candidate again on the terms the queue
+hold used: the app's enabled calendar does not select it, no unsettled job
+projects it, and it is older than `hold_grace`. `Queue::maintain_deployment`
+then publishes one `JobOperation::ReleaseHold` for it through the ordinary
+durable job path. That operation names a deployment but reports no
+`JobSpec::deployment_id`, because a release is exactly the case where no hold
+remains to confirm; `worker_operation` and the client's `worker_publication`
+refuse it from a worker, so only a manager publishes one.
+
+The creator engine answers it in `AppWorkflows::release_hold_job`, which runs
+`WorkflowService::release_deployment_hold` under the app state lock: close
+admission on the deployment record, then refuse while any live run or retained
+generation names it, or any unconfirmed publication projects it. Unfinished
+continuations and prepared payloads are restricting references to those
+generations, so the generation check covers them. A refusal settles `Waiting`,
+which returns the duty to pending; nothing is forced and the hold stays held.
+Success settles `Completed` and discharges the duty. A deployment this journal
+never held is already given back and settles `Completed` without a platform
+call. Committed receipts replay without repeating the release.
+
+Two things fence a late reply. The duty records the job identity it published
+and applies only that one, and reacquisition of the queue hold clears the duty,
+so a release already in flight cannot report the fresh journal hold released.
+The hold row also records the manager time of the latest release publication, so
+a refused release waits out another grace before the lane asks again rather than
+republishing every sweep.
+
+Terminal history still pins code: a completed run's retained generation keeps
+its deployment's journal hold, because a partial restart replays against it.
+Reclaiming that deployment needs journal history retention, which is a separate
+contract, not a release decision.
 
 The manager's `tests/hold_release.rs` contracts run on PostgreSQL and SQLite:
 replacement, archive and restore through holder-aware reclamation, an activation
 reacquiring its hold while another replica's lane passes, stale candidate pages,
-and a hold without a recorded time. The CLI's `workflow_local` contract completes
-a run on one bundle, republishes, and observes the superseded deployment's queue
-hold released, in the manager and in the ledger, once every job pinned to it has
-settled. The server's driver contract releases an aged, unselected hold through
-its Control client.
+a hold without a recorded time, one release publication per grace with its
+settled reply applied, and the reacquisition tombstone. The creator engine's
+`service::tests::hold_release` contract refuses the release of a deployment its
+journal still needs and gives back a superseded one it never used, after which
+the platform reclamation fence commits. The CLI's `workflow_local` contract
+completes a run on one bundle, republishes, and observes the superseded
+deployment's queue hold released, in the manager and in the ledger, once every
+job pinned to it has settled. The server's driver contract releases an aged,
+unselected hold through its Control client.
 
 ## Payloads, effects and collection
 

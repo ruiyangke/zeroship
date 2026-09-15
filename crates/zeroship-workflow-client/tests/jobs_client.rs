@@ -354,6 +354,10 @@ fn manager_operations() -> Vec<JobOperation> {
             deployment_id: DeploymentId::mint(),
             revision: 1.try_into().unwrap(),
         },
+        // A worker answers a release; it never asks for one.
+        JobOperation::ReleaseHold {
+            deployment_id: DeploymentId::mint(),
+        },
         JobOperation::Cron {
             deployment_id: DeploymentId::mint(),
             schedule_id: ScheduleId::mint(),
