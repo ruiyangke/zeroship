@@ -764,7 +764,7 @@ async fn a_callback_fault_rolls_back_every_staged_catalog_write() {
     let faulted = command(&app, &actor, verified(labelled("faulted")));
     let outcome = catalog::transact(&database, |tx| async move {
         let accepted =
-            catalog::accept(&tx, &faulted, zeroship_control::publication::now_millis()).await?;
+            catalog::accept(&tx, &faulted, zeroship_control::publication::now()?).await?;
         assert!(!accepted.replayed());
         Err::<(), _>(CatalogError::Storage("injected fault after staged writes"))
     })
@@ -781,7 +781,7 @@ async fn a_callback_fault_rolls_back_every_staged_catalog_write() {
         }
         let before = snapshot(&fixture, target).await;
         let outcome = catalog::transact(&database, |tx| async move {
-            let now = zeroship_control::publication::now_millis();
+            let now = zeroship_control::publication::now()?;
             let transition = if restore {
                 catalog::restore(&tx, target, now).await?
             } else {
