@@ -1196,6 +1196,20 @@ async fn activation_at_revision(
         .await?)
 }
 
+/// The deployment of the app's enabled calendar selection. A disabled calendar
+/// retains its last selection for restore, but selects nothing for new work.
+/// The caller holds the app lock.
+pub(crate) async fn selected_deployment_in(
+    tx: &Database,
+    app: &AppId,
+) -> Result<Option<String>, Error> {
+    let Some(scope) = active(tx, app).await?.filter(|scope| scope.enabled) else {
+        return Ok(None);
+    };
+    let activation = scope.activation_id.as_deref().ok_or(Error::Storage)?;
+    Ok(Some(load_activation(tx, app, activation).await?.deployment_id))
+}
+
 /// Shared calendar eligibility for the public due page and the driver's bounded
 /// identity sweep. Filtering precedes the limit so stopped apps cannot hide work.
 pub(crate) async fn due_in(

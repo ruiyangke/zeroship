@@ -50,9 +50,12 @@ export function workflowManagerSchema(namespace) {
     },
     primaryKey: ["id"],
   });
+  // held_at is the manager time of the latest transition to held. The release
+  // policy leaves a hold alone until it is older than the queue transaction
+  // budget, so an acquirer that confirmed it outside its transaction commits first.
   create("deployment_holds", {
     app_id: text(), deployment_id: text(), holder_id: text(),
-    deploy_hash: t.text(), generation: integer(), state: text(),
+    deploy_hash: t.text(), generation: integer(), state: text(), held_at: t.bigInt(),
   }, ["app_id", "deployment_id"], [
     fk("deployment_hold_scope", ["app_id"], "queue_scopes", ["id"]),
   ]);

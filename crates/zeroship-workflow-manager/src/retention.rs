@@ -8,13 +8,13 @@ use crate::{
     deployments::{self, DeploymentHolds},
     models::{
         jobs,
-        schema::{deployment_holds as holds, schedule_activations, schedules},
+        schema::{deployment_holds as holds, schedule_activations, schedule_scopes, schedules},
         Job,
     },
     queue::{self, Budget},
-    Error, Queue,
+    scheduling, Error, Queue,
 };
-use std::{fmt::Debug, future::Future, pin::Pin};
+use std::{fmt::Debug, future::Future, pin::Pin, time::Duration};
 use zeroship_core::{
     app_id::AppId,
     typed_id,
@@ -44,6 +44,12 @@ pub trait HoldClient: Debug {
 pub(crate) enum Retention<T> {
     Ready(T),
     Acquire(DeploymentId),
+}
+
+enum Maintenance {
+    Settled,
+    Resume,
+    Release(HoldGeneration),
 }
 
 #[derive(Insertable)]
@@ -130,6 +136,7 @@ struct Intent {
     deploy_hash: Option<String>,
     generation: i64,
     state: String,
+    held_at: Option<i64>,
 }
 impl Intent {
     fn validate(&self, scope: &HoldScope) -> Result<HoldGeneration, Error> {
@@ -330,6 +337,73 @@ impl Queue {
         }
     }
 
+    /// One retention-lane turn for a hold. An unfinished intent resumes. A held
+    /// deployment is released once the app's enabled calendar no longer selects
+    /// it, its hold is older than `grace` and nothing depends on it. A hold in
+    /// use stays held for a later turn; the policy never forces release.
+    pub(crate) async fn maintain_deployment(
+        &self,
+        app: &AppId,
+        deployment: &DeploymentId,
+        grace: Duration,
+    ) -> Result<(), Error> {
+        let grace = i64::try_from(grace.as_millis()).map_err(|_| Error::Invalid)?;
+        let budget = Budget::new(self.options.transaction_timeout);
+        let scope = HoldScope::for_queue(app.clone());
+        let step = self
+            .transact_for(budget.clone(), |tx| {
+                let scope = &scope;
+                async move {
+                    queue::lock_scope(&tx, app).await?;
+                    let intent = read(&tx, app, deployment).await?.ok_or(Error::Conflict)?;
+                    let generation = intent.validate(scope)?;
+                    match intent.state.as_str() {
+                        "acquiring" | "releasing" => return Ok(Maintenance::Resume),
+                        "released" => return Ok(Maintenance::Settled),
+                        "held" => {}
+                        _ => return Err(Error::Storage),
+                    }
+                    // The candidate page may predate a reacquisition or a new
+                    // selection, so both are decided again under the app lock.
+                    let held_at = intent.held_at.ok_or(Error::Storage)?;
+                    if held_at > self.clock.now().await?.saturating_sub(grace)
+                        || scheduling::selected_deployment_in(&tx, app).await?.as_deref()
+                            == Some(deployment.as_str())
+                    {
+                        return Ok(Maintenance::Settled);
+                    }
+                    match require_unused(&tx, app, deployment).await {
+                        Ok(()) => {}
+                        Err(Error::Conflict) => return Ok(Maintenance::Settled),
+                        Err(error) => return Err(error),
+                    }
+                    if tx
+                        .entity::<holds::Entity>()?
+                        .update_many(
+                            identity(app, deployment)?
+                                .and(holds::generation.eq(generation.get())?)
+                                .and(holds::state.eq("held")?),
+                            holds::state.set("releasing")?,
+                        )
+                        .await?
+                        != 1
+                    {
+                        return Err(Error::Storage);
+                    }
+                    Ok(Maintenance::Release(generation))
+                }
+            })
+            .await?;
+        let transition = match step {
+            Maintenance::Settled => return Ok(()),
+            Maintenance::Resume => None,
+            Maintenance::Release(generation) => Some((generation, HoldState::Released)),
+        };
+        self.reconcile_for(app, deployment, transition, budget)
+            .await
+            .map(drop)
+    }
+
     /// Recover a durable intent after loss of the manager or its Control response.
     ///
     /// # Errors
@@ -401,9 +475,15 @@ impl Queue {
                 return Err(Error::Conflict);
             }
             current.check_receipt(&scope, deployment, desired, &receipt)?;
-            if desired == HoldState::Released {
-                require_unused(&tx, app, deployment).await?;
-            }
+            // A confirmed hold restarts its release grace: the acquirer that
+            // requested it commits its dependency within its own budget.
+            let held_at = match desired {
+                HoldState::Held => Some(self.clock.now().await?),
+                HoldState::Released => {
+                    require_unused(&tx, app, deployment).await?;
+                    current.held_at
+                }
+            };
             if tx
                 .entity::<holds::Entity>()?
                 .update_many(
@@ -412,7 +492,8 @@ impl Queue {
                         .and(holds::state.eq(current.state.as_str())?),
                     holds::deploy_hash
                         .set(Some(receipt.deploy_hash.as_str()))?
-                        .and(holds::state.set(desired.as_str())?)?,
+                        .and(holds::state.set(desired.as_str())?)?
+                        .and(holds::held_at.set(held_at)?)?,
                 )
                 .await?
                 != 1
@@ -461,6 +542,90 @@ impl Queue {
 #[orm(entity = holds)]
 struct Dependency {
     deployment_id: String,
+}
+
+/// The retention lane's candidates in hold identity order: unfinished intents,
+/// and holds confirmed no later than `cutoff` that the app's enabled calendar
+/// does not select and no unsettled job projects. Selection and use are joined
+/// before the limit, so retained holds take no page slot; an unconfirmed hold
+/// time is surfaced as damage. `Queue::maintain_deployment` decides each
+/// candidate again under its app lock.
+pub(crate) async fn maintenance_in<R: FromRow<holds::Entity>>(
+    tx: &Database,
+    cutoff: i64,
+    after: Option<&str>,
+    upper: Option<&str>,
+    descending: bool,
+    limit: u32,
+) -> Result<Vec<R>, Error> {
+    let hold = tx.entity::<holds::Entity>()?.alias("hold")?;
+    let scope = tx.entity::<schedule_scopes::Entity>()?.alias("scope")?;
+    let selected = tx.entity::<schedule_activations::Entity>()?.alias("selected")?;
+    let job = tx.entity::<jobs::Entity>()?.alias("job")?;
+    let mut filter = hold
+        .column(holds::state)
+        .eq("acquiring")?
+        .or(hold.column(holds::state).eq("releasing")?)
+        .or(hold
+            .column(holds::state)
+            .eq("held")?
+            .and(
+                hold.column(holds::held_at)
+                    .is_null()
+                    .or(hold.column(holds::held_at).lte(Some(cutoff))?),
+            )
+            .and(selected.column(schedule_activations::id).is_null())
+            .and(job.column(jobs::id).is_null()));
+    if let Some(after) = after {
+        filter = filter.and(hold.column(holds::id).gt(after)?);
+    }
+    if let Some(upper) = upper {
+        filter = filter.and(hold.column(holds::id).lte(upper)?);
+    }
+    Ok(tx
+        .from(&hold)
+        .left_join(
+            &scope,
+            scope
+                .column(schedule_scopes::id)
+                .eq(hold.column(holds::app_id))?
+                .and(scope.column(schedule_scopes::enabled).eq(true)?),
+        )?
+        .left_join(
+            &selected,
+            selected
+                .column(schedule_activations::app_id)
+                .eq(scope.column(schedule_scopes::id))?
+                .and(
+                    selected
+                        .column(schedule_activations::id)
+                        .eq(scope.column(schedule_scopes::activation_id))?,
+                )
+                .and(
+                    selected
+                        .column(schedule_activations::deployment_id)
+                        .eq(hold.column(holds::deployment_id))?,
+                ),
+        )?
+        // Only a held row joins its jobs, so no candidate repeats per job.
+        .left_join(
+            &job,
+            job.column(jobs::app_id)
+                .eq(hold.column(holds::app_id))?
+                .and(job.column(jobs::deployment_id).eq(hold.column(holds::deployment_id))?)
+                .and(job.column(jobs::state).ne("settled")?)
+                .and(hold.column(holds::state).eq("held")?),
+        )?
+        .filter(filter)
+        .order_by(if descending {
+            hold.column(holds::id).desc()
+        } else {
+            hold.column(holds::id).asc()
+        })
+        .select(hold.row::<R>())?
+        .limit(i64::from(limit))?
+        .all()
+        .await?)
 }
 
 pub(crate) async fn require_held(
@@ -543,8 +708,11 @@ async fn require_unused(
             after = Some(job.id);
         }
     }
+    // Only an enabled calendar can publish from its frontiers. A disabled one
+    // keeps them for restore, whose fresh activation holds the code again first.
     let schedule = tx.entity::<schedules::Entity>()?.alias("s")?;
     let activation = tx.entity::<schedule_activations::Entity>()?.alias("a")?;
+    let calendar = tx.entity::<schedule_scopes::Entity>()?.alias("c")?;
     let live = tx
         .from(&schedule)
         .inner_join(
@@ -557,6 +725,13 @@ async fn require_unused(
                         .column(schedules::activation_id)
                         .eq(activation.column(schedule_activations::id))?,
                 ),
+        )?
+        .inner_join(
+            &calendar,
+            calendar
+                .column(schedule_scopes::id)
+                .eq(schedule.column(schedules::app_id))?
+                .and(calendar.column(schedule_scopes::enabled).eq(true)?),
         )?
         .filter(
             schedule
