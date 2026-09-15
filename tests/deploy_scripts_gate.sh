@@ -581,9 +581,9 @@ fi
 # THE INTERNAL-ROUTE BOUNDARY AT THE EDGE.
 #
 # Control's /internal/* routes are service-to-service. The catch-all used to
-# forward them from the public edge, and `/internal/workers/enrol` in particular
+# forward them from the public edge, and `/internal/workers/join` in particular
 # then observed CADDY as the peer - so control derived the proxy's address for
-# every enrolment, while the `ProxyFronted` arm stayed silent because its input
+# every join, while the `ProxyFronted` arm stayed silent because its input
 # is control's own `trust_proxy` declaration rather than an observation.
 #
 # This is EDGE CONFIGURATION, so nothing in Rust notices it being deleted. That
