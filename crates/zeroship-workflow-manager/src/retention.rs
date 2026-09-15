@@ -412,7 +412,10 @@ impl Queue {
                     }
                     // The candidate page may predate a reacquisition or a new
                     // selection, so both are decided again under the app lock.
-                    if !self.unused_deployment(&tx, app, deployment, intent.held_at, grace).await? {
+                    if !self
+                        .unused_deployment(&tx, app, deployment, intent.held_at, grace)
+                        .await?
+                    {
                         return Ok(Maintenance::Settled);
                     }
                     if tx
@@ -459,7 +462,9 @@ impl Queue {
     ) -> Result<bool, Error> {
         let held_at = held_at.ok_or(Error::Storage)?;
         if held_at > self.clock.now().await?.saturating_sub(grace)
-            || scheduling::selected_deployment_in(tx, app).await?.as_deref()
+            || scheduling::selected_deployment_in(tx, app)
+                .await?
+                .as_deref()
                 == Some(deployment.as_str())
         {
             return Ok(false);
@@ -752,7 +757,9 @@ pub(crate) async fn maintenance_in<R: FromRow<holds::Entity>>(
 ) -> Result<Vec<R>, Error> {
     let hold = tx.entity::<holds::Entity>()?.alias("hold")?;
     let scope = tx.entity::<schedule_scopes::Entity>()?.alias("scope")?;
-    let selected = tx.entity::<schedule_activations::Entity>()?.alias("selected")?;
+    let selected = tx
+        .entity::<schedule_activations::Entity>()?
+        .alias("selected")?;
     let job = tx.entity::<jobs::Entity>()?.alias("job")?;
     let aged = hold
         .column(holds::held_at)
@@ -783,9 +790,7 @@ pub(crate) async fn maintenance_in<R: FromRow<holds::Entity>>(
             .and(
                 hold.column(holds::journal_published_at)
                     .is_null()
-                    .or(hold
-                        .column(holds::journal_published_at)
-                        .lte(Some(cutoff))?),
+                    .or(hold.column(holds::journal_published_at).lte(Some(cutoff))?),
             )
             .and(aged)
             .and(idle));
@@ -827,7 +832,10 @@ pub(crate) async fn maintenance_in<R: FromRow<holds::Entity>>(
             &job,
             job.column(jobs::app_id)
                 .eq(hold.column(holds::app_id))?
-                .and(job.column(jobs::deployment_id).eq(hold.column(holds::deployment_id))?)
+                .and(
+                    job.column(jobs::deployment_id)
+                        .eq(hold.column(holds::deployment_id))?,
+                )
                 .and(job.column(jobs::state).ne("settled")?)
                 .and(
                     hold.column(holds::state)

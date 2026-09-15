@@ -98,6 +98,7 @@ mod deployments;
 mod fanout;
 mod frontier_models;
 mod graph;
+mod hold_release;
 mod ingress_models;
 mod journal_models;
 mod management;
