@@ -349,11 +349,44 @@ export class CompensableCarryWorkflow {
   }
 }
 
+// Reaches nothing outside its own journal, so a completed run proves the host
+// delivered and executed it rather than that the app database also worked.
+export class HostIngressWorkflow {
+  async run(trigger, step) {
+    const echoed = await step.run("echo", () => ({ via: trigger.input.via }));
+    return { echoed };
+  }
+}
+
 export default {
-  async fetch() {
+  // Ordinary app ingress. `/__host/start/<Workflow>` and
+  // `/__host/status/<Workflow>/<run>` exercise `env.workflows` from a request
+  // isolate, which reaches whatever backend the process made ready for this
+  // app - and nothing else.
+  async fetch(request, env) {
+    const path = new URL(request.url).pathname;
+    const start = path.match(/^\/__host\/start\/([A-Za-z]+)$/);
+    if (start) {
+      try {
+        const run = await env.workflows[start[1]].start({ input: { via: "ingress" } });
+        return Response.json({ id: run.id });
+      } catch (error) {
+        return Response.json({ code: error.code, message: error.message }, { status: 503 });
+      }
+    }
+    const status = path.match(/^\/__host\/status\/([A-Za-z]+)\/([A-Za-z0-9_]+)$/);
+    if (status) {
+      try {
+        const state = await env.workflows[status[1]].get(status[2]).status();
+        return Response.json({ state: state.state, output: state.output ?? null });
+      } catch (error) {
+        return Response.json({ code: error.code, message: error.message }, { status: 503 });
+      }
+    }
     return new Response("dw07-ok");
   },
   workflows: {
+    HostIngressWorkflow,
     KeystoneWorkflow,
     SignalWorkflow,
     TopicSignalWorkflow,
