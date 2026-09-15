@@ -13,7 +13,10 @@
 //!     different ring keys, which is the end-to-end form of "the registrant
 //!     contributes nothing to it";
 //!   * that a refused enrolment writes nothing at all;
-//!   * that the HANDLER really reads `req.peer_addr()`.
+//!   * that the HANDLER really reads `req.peer_addr()`;
+//!   * option 1A of the worker-enrollment-bootstrap design: an enroller's
+//!     lock, idempotent enrolment on the instance public key, and the race
+//!     between an in-flight enrolment and a concurrent revocation.
 //!
 //! THAT LAST ONE IS WHY THERE IS A LIVE SERVER IN THIS FILE. ntex's
 //! `TestRequest::peer_addr` is dropped by `to_request` - its own unit test in
@@ -31,6 +34,7 @@ use std::net::SocketAddr;
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use ed25519_dalek::pkcs8::EncodePrivateKey as _;
@@ -49,10 +53,10 @@ use zeroship_control::worker_enrolment::{
 use zeroship_control::{
     internal, AppState, EnvStore, Quota, RateLimiter, Registry, SecretString, StripeStore,
 };
-use zeroship_core::service_assertion::ServiceAssertionVerifier;
+use zeroship_core::service_assertion::{ServiceAssertionVerifier, ServiceIssuer, ServiceTrustBundle};
 use zeroship_core::service_peers::{
-    service_issuer, ServiceAuth, ServiceKeyring, CONTROL_SERVICE_NAME, GATEWAY_SERVICE_NAME,
-    WORKER_SERVICE_NAME,
+    service_issuer, InstanceSigningKey, ServiceAuth, ServiceKeyring, CONTROL_SERVICE_NAME,
+    GATEWAY_SERVICE_NAME, SERVICE_TRUST_DOMAIN, WORKER_ENROLLER_SERVICE_NAME, WORKER_SERVICE_NAME,
 };
 
 use crate::common;
@@ -72,6 +76,10 @@ const ENROLMENT_PORTS: &str = "8080-8090";
 const IN_ENVELOPE_PEER: &str = "10.7.3.9:51314";
 const OUT_OF_ENVELOPE_PEER: &str = "203.0.113.9:51314";
 const ADVERTISED_PORT: u16 = 8080;
+
+/// The deployment's single execution zone, seeded by
+/// `db/migrations-ts/20260914000400_execution_zones_and_worker_enrollers.ts`.
+const DEFAULT_ZONE_ID: &str = "ezn_default000000000000000000";
 
 fn tmpdir(label: &str) -> PathBuf {
     let path = std::env::temp_dir().join(format!(
@@ -113,6 +121,79 @@ fn keyring_for(name: &str, dir: &Path, peers: &Path) -> ServiceKeyring {
         peers,
     )
     .expect("load the keyring")
+}
+
+/// The instance identifier one enroller of `svc/worker-enroller` mints under.
+fn enroller_issuer(enroller_id: &str) -> ServiceIssuer {
+    ServiceIssuer::parse(&format!(
+        "spiffe://{SERVICE_TRUST_DOMAIN}/{WORKER_ENROLLER_SERVICE_NAME}/{enroller_id}"
+    ))
+    .expect("an instance issuer parses")
+}
+
+/// The instance identifier one enrolled worker of `svc/worker` mints under.
+fn worker_instance_issuer(instance_id: &str) -> ServiceIssuer {
+    ServiceIssuer::parse(&format!(
+        "spiffe://{SERVICE_TRUST_DOMAIN}/{WORKER_SERVICE_NAME}/{instance_id}"
+    ))
+    .expect("an instance issuer parses")
+}
+
+fn new_enroller_id() -> String {
+    format!("wen_{}", &Uuid::new_v4().simple().to_string()[..25])
+}
+
+/// Insert one `zeroship.worker_enrollers` row directly, the row an operator's
+/// import file would leave (the import itself is measured in
+/// `worker_enroller_import_test`), with a public key nothing here needs to hold
+/// the private half of.
+async fn seed_enroller(pg: &compio_postgres::Client, status: &str) -> String {
+    let id = new_enroller_id();
+    let mut public = [0_u8; PUBLIC_KEY_LENGTH];
+    rand::rngs::OsRng.fill_bytes(&mut public);
+    pg.execute(
+        "INSERT INTO zeroship.worker_enrollers (id, public_key, execution_zone_id, status) \
+         VALUES ($1, $2, $3, $4)",
+        &[&id, &public.as_slice(), &DEFAULT_ZONE_ID, &status],
+    )
+    .await
+    .expect("insert enroller row");
+    id
+}
+
+/// Like [`seed_enroller`], but also returns a keyring that mints under the
+/// enroller's own instance identifier, for arms that drive enrolment over real
+/// HTTP rather than calling [`enrol`] directly.
+async fn seed_enroller_keyring(pg: &compio_postgres::Client) -> (String, ServiceKeyring) {
+    let id = new_enroller_id();
+    let key = InstanceSigningKey::generate();
+    let public = *key.public_key();
+    pg.execute(
+        "INSERT INTO zeroship.worker_enrollers (id, public_key, execution_zone_id, status) \
+         VALUES ($1, $2, $3, 'active')",
+        &[&id, &public.as_slice(), &DEFAULT_ZONE_ID],
+    )
+    .await
+    .expect("insert enroller row");
+    let keyring = key
+        .into_keyring(enroller_issuer(&id), ServiceTrustBundle::new())
+        .expect("a boot-drawn key an empty bundle does not publish builds a keyring");
+    (id, keyring)
+}
+
+async fn revoke_enroller(pg: &compio_postgres::Client, enroller_id: &str) {
+    pg.execute("SELECT zeroship.revoke_worker_enroller($1)", &[&enroller_id])
+        .await
+        .expect("revoke_worker_enroller runs");
+}
+
+async fn forget_enroller(pg: &compio_postgres::Client, enroller_id: &str) {
+    pg.execute(
+        "DELETE FROM zeroship.worker_enrollers WHERE id = $1",
+        &[&enroller_id],
+    )
+    .await
+    .expect("probe enroller row removed");
 }
 
 struct Fixture {
@@ -295,16 +376,29 @@ async fn count_instances(pg: &compio_postgres::Client) -> i64 {
         .get(0)
 }
 
+async fn instance_status(pg: &compio_postgres::Client, instance_id: &str) -> Option<String> {
+    pg.query(
+        "SELECT status FROM zeroship.worker_instances WHERE id = $1",
+        &[&instance_id],
+    )
+    .await
+    .expect("read instance status")
+    .first()
+    .map(|row| row.get(0))
+}
+
 /// THE CONTROL. Without an arm that succeeds, every refusal below passes
 /// against an endpoint that refuses everything.
 #[ntex::test]
 async fn an_admitted_enrolment_records_the_derived_address_and_a_minted_ring_key() {
     let fixture = build_fixture(declared_envelope()).await;
+    let enroller_id = seed_enroller(&fixture.state.control_pg, "active").await;
     let key = instance_key(0x11);
 
     let response = enrol(
         &fixture.state,
         peer(IN_ENVELOPE_PEER),
+        &enroller_id,
         request(&key, ADVERTISED_PORT),
     )
     .await;
@@ -317,7 +411,7 @@ async fn an_admitted_enrolment_records_the_derived_address_and_a_minted_ring_key
         .state
         .control_pg
         .query_one(
-            "SELECT advertise_host, advertise_port, public_key, ring_key, status \
+            "SELECT advertise_host, advertise_port, public_key, ring_key, status, enroller_id \
              FROM zeroship.worker_instances WHERE id = $1",
             &[&instance_id],
         )
@@ -329,6 +423,7 @@ async fn an_admitted_enrolment_records_the_derived_address_and_a_minted_ring_key
     // row behind on exactly the runs that matter - which is how a mutation run
     // of this suite left two rows in the registry for a later reader to find.
     forget(&fixture.state.control_pg, &instance_id).await;
+    forget_enroller(&fixture.state.control_pg, &enroller_id).await;
 
     // THE HOST IS THE OBSERVED PEER'S, THE PORT IS THE CALLER'S. That split is
     // the whole design: reading the port off the socket would advertise the
@@ -349,6 +444,7 @@ async fn an_admitted_enrolment_records_the_derived_address_and_a_minted_ring_key
     assert_ne!(ring_key, key.to_vec());
 
     assert_eq!(row.get::<_, &str>("status"), "active");
+    assert_eq!(row.get::<_, &str>("enroller_id"), enroller_id);
 
     drop(fixture);
     common::drain_pg().await;
@@ -358,18 +454,20 @@ async fn an_admitted_enrolment_records_the_derived_address_and_a_minted_ring_key
 #[ntex::test]
 async fn two_enrolments_with_identical_input_land_different_ring_keys() {
     let fixture = build_fixture(declared_envelope()).await;
+    let enroller_id = seed_enroller(&fixture.state.control_pg, "active").await;
     // BYTE-IDENTICAL caller input: the same instance key, the same claimed
     // port, from the same peer. Anything derived from what the caller sent
-    // would come out the same twice.
-    let key = instance_key(0x22);
-
+    // would come out the same twice. Distinct KEYS across the loop, because
+    // enrolment is now idempotent on the public key and a repeated key would
+    // exercise the retry path this test does not intend to.
     let mut ids = Vec::new();
     let mut ring_keys = Vec::new();
-    for _ in 0..2 {
+    for fill in [0x22_u8, 0x23_u8] {
         let response = enrol(
             &fixture.state,
             peer(IN_ENVELOPE_PEER),
-            request(&key, ADVERTISED_PORT),
+            &enroller_id,
+            request(&instance_key(fill), ADVERTISED_PORT),
         )
         .await;
         assert_eq!(response.status(), StatusCode::CREATED);
@@ -395,16 +493,11 @@ async fn two_enrolments_with_identical_input_land_different_ring_keys() {
     for id in &ids {
         forget(&fixture.state.control_pg, id).await;
     }
+    forget_enroller(&fixture.state.control_pg, &enroller_id).await;
 
     assert_ne!(ring_keys[0], ring_keys[1], "the ring key must not be derivable from the request");
-    // And the SECOND row exists at all, which is this endpoint stating plainly
-    // that it is not idempotent: a repeat is a second instance, not a lookup.
-    // Nothing marks the first one `gone`; there is no reaper.
     assert_ne!(ids[0], ids[1]);
 
-    for id in &ids {
-        forget(&fixture.state.control_pg, id).await;
-    }
     drop(fixture);
     common::drain_pg().await;
 }
@@ -412,6 +505,7 @@ async fn two_enrolments_with_identical_input_land_different_ring_keys() {
 #[ntex::test]
 async fn a_refused_enrolment_writes_no_row() {
     let fixture = build_fixture(declared_envelope()).await;
+    let enroller_id = seed_enroller(&fixture.state.control_pg, "active").await;
     let before = count_instances(&fixture.state.control_pg).await;
 
     // Three refusals, each one variable away from the control above: the peer,
@@ -419,6 +513,7 @@ async fn a_refused_enrolment_writes_no_row() {
     let outside = enrol(
         &fixture.state,
         peer(OUT_OF_ENVELOPE_PEER),
+        &enroller_id,
         request(&instance_key(0x33), ADVERTISED_PORT),
     )
     .await;
@@ -428,6 +523,7 @@ async fn a_refused_enrolment_writes_no_row() {
     let bad_port = enrol(
         &fixture.state,
         peer(IN_ENVELOPE_PEER),
+        &enroller_id,
         request(&instance_key(0x33), 9999),
     )
     .await;
@@ -439,6 +535,7 @@ async fn a_refused_enrolment_writes_no_row() {
         before,
         "a refused enrolment must leave the registry untouched"
     );
+    forget_enroller(&fixture.state.control_pg, &enroller_id).await;
     drop(fixture);
     common::drain_pg().await;
 }
@@ -448,11 +545,13 @@ async fn an_undeclared_envelope_refuses_every_enrolment() {
     // ABSENCE REFUSES. This is the deployment-state arm, so it answers 503 and
     // points an operator at the configuration rather than at a credential.
     let fixture = build_fixture(EnrolmentEnvelope::closed()).await;
+    let enroller_id = seed_enroller(&fixture.state.control_pg, "active").await;
     let before = count_instances(&fixture.state.control_pg).await;
 
     let response = enrol(
         &fixture.state,
         peer(IN_ENVELOPE_PEER),
+        &enroller_id,
         request(&instance_key(0x44), ADVERTISED_PORT),
     )
     .await;
@@ -460,66 +559,154 @@ async fn an_undeclared_envelope_refuses_every_enrolment() {
     assert_eq!(body_json(response).await["reason"], "envelope_unset");
     assert_eq!(count_instances(&fixture.state.control_pg).await, before);
 
+    forget_enroller(&fixture.state.control_pg, &enroller_id).await;
     drop(fixture);
     common::drain_pg().await;
 }
 
-macro_rules! enrol_app {
-    ($state:expr) => {
-        test::init_service(web::App::new().state($state).service(
-            web::resource("/internal/workers/enrol")
-                .route(web::post().to(internal::enrol_worker_instance)),
-        ))
-        .await
-    };
-}
-
+/// Success criterion 2 of the option-1A PoC: an ACTIVE WORKER INSTANCE's own
+/// assertion is refused at `CONTROL_WORKER_ENROL`, and the ENROLLER's
+/// assertion is admitted. This is also the RENAMED and REWRITTEN control for
+/// what this test used to check (`only_the_worker_may_enrol_an_instance`,
+/// before `svc/worker` held the grant at all): the shared control key and the
+/// gateway's assertion are unchanged refusals, but the worker's own assertion
+/// moves from a 403 (reached the handler, refused on address) to a 401 (never
+/// reaches the handler - `svc/worker` carries no grant on this endpoint under
+/// any assertion it can mint, instance included).
+///
+/// Driven over a REAL socket (`test::server`, not `test::call_service`),
+/// because the enroller's own successful enrolment needs `req.peer_addr()` to
+/// be a real observed loopback address - `test::call_service`'s request has
+/// none (`TestRequest::peer_addr` is dropped by `to_request`), so it can only
+/// ever reach `peer_address_unobservable` and never actually admit an
+/// enrolment. The envelope here declares `127.0.0.0/8` for exactly that
+/// reason, matching [`a_real_loopback_connection_is_admitted_when_the_envelope_declares_it`].
 #[ntex::test]
-async fn only_the_worker_may_enrol_an_instance() {
-    let fixture = build_fixture(declared_envelope()).await;
-    let app = enrol_app!(Arc::clone(&fixture.state));
-    let body = json!({"port": ADVERTISED_PORT, "public_key": URL_SAFE_NO_PAD.encode(instance_key(0x55))});
+async fn an_active_instance_cannot_enrol_but_its_enroller_can() {
+    let single_host = EnrolmentEnvelope::parse("127.0.0.0/8", ENROLMENT_PORTS, false)
+        .expect("the declaration parses");
+    let fixture = build_fixture(single_host).await;
+    let (enroller_id, enroller_keyring) = seed_enroller_keyring(&fixture.state.control_pg).await;
+    let control = service_issuer(CONTROL_SERVICE_NAME).expect("control issuer");
 
-    // A response borrows the app state, so each arm keeps only its status:
-    // a live `WebResponse` at the end of the body would still be holding this
-    // fixture's Postgres client when `drain_pg` measures.
-    let status = |header: String| {
-        let app = &app;
-        let body = &body;
+    let state = Arc::clone(&fixture.state);
+    let server = test::server(move || {
+        let state = state.clone();
         async move {
-            test::call_service(
-                app,
-                test::TestRequest::post()
-                    .uri("/internal/workers/enrol")
-                    .header("authorization", header)
-                    .set_json(body)
-                    .to_request(),
+            web::App::new().state(state).service(
+                web::resource("/internal/workers/enrol")
+                    .route(web::post().to(internal::enrol_worker_instance)),
             )
-            .await
-            .status()
+        }
+    })
+    .await;
+
+    let call = |header: String, key: [u8; PUBLIC_KEY_LENGTH]| {
+        let server = &server;
+        async move {
+            server
+                .post("/internal/workers/enrol")
+                .header("authorization", header)
+                .send_json(&json!({
+                    "port": ADVERTISED_PORT,
+                    "public_key": URL_SAFE_NO_PAD.encode(key),
+                }))
+                .await
+                .expect("the enrolment response arrives")
         }
     };
-
     // The shared control key proves membership of a group, not an identity.
     assert_eq!(
-        status(format!("Bearer {CONTROL_KEY}")).await,
+        call(format!("Bearer {CONTROL_KEY}"), instance_key(0x50))
+            .await
+            .status(),
         StatusCode::UNAUTHORIZED
     );
-
     // A gateway assertion VERIFIES under the same bundle and the same audience
     // and is still refused: `svc/gateway` holds no grant on this endpoint.
     assert_eq!(
-        status(fixture.gateway_header()).await,
+        call(fixture.gateway_header(), instance_key(0x51))
+            .await
+            .status(),
         StatusCode::UNAUTHORIZED
     );
 
-    // THE CONTROL, one variable apart. The worker's assertion reaches the
-    // handler, which refuses on the ADDRESS - 403 with a reason - rather than
-    // on the credential. `TestRequest::peer_addr` is dropped by `to_request`,
-    // so what an in-process request can reach is exactly this arm.
-    assert_eq!(status(fixture.worker_header()).await, StatusCode::FORBIDDEN);
+    // The enroller enrols a real instance, exactly as production would.
+    let admitted = call(
+        format!(
+            "Bearer {}",
+            enroller_keyring.mint_for(&control).expect("enroller mints")
+        ),
+        instance_key(0x52),
+    )
+    .await;
+    assert_eq!(admitted.status(), StatusCode::CREATED);
+    let instance_id = {
+        let bytes = admitted.body().await.expect("body");
+        let body: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+        body["instance_id"].as_str().expect("instance_id").to_string()
+    };
 
-    drop(app);
+    // THE RED CONTROL'S SHAPE: build a keyring under that exact instance's own
+    // issuer (as if it were the worker itself, minting outbound with the key
+    // whose public half it just enrolled) and try to reach this endpoint AS
+    // AN ACTIVE, JUST-ENROLLED INSTANCE. `svc/worker` never held this grant
+    // under a bare role key either, in the same allowlist row - see the
+    // bare-role control below for that.
+    let instance_key_pair = InstanceSigningKey::generate();
+    let instance_keyring = instance_key_pair
+        .into_keyring(
+            worker_instance_issuer(&instance_id),
+            ServiceTrustBundle::new(),
+        )
+        .expect("a boot-drawn key an empty bundle does not publish builds a keyring");
+    assert_eq!(
+        call(
+            format!(
+                "Bearer {}",
+                instance_keyring.mint_for(&control).expect("instance mints")
+            ),
+            instance_key(0x53),
+        )
+        .await
+        .status(),
+        StatusCode::UNAUTHORIZED,
+        "an active worker instance must not be able to enrol another instance"
+    );
+
+    // A bare `svc/worker` role assertion is refused the same way, although this
+    // fixture's peer document still publishes the key: Control refuses the
+    // worker role at role arity before any grant is consulted.
+    assert_eq!(
+        call(fixture.worker_header(), instance_key(0x54))
+            .await
+            .status(),
+        StatusCode::UNAUTHORIZED
+    );
+
+    // THE CONTROL, one variable apart (a fresh instance key): the SAME
+    // enroller assertion succeeds AGAIN, end to end - proving the refusals
+    // above are about the CREDENTIAL presented, not about the enroller being
+    // spent, revoked, or the server having stopped admitting anyone.
+    let second = call(
+        format!(
+            "Bearer {}",
+            enroller_keyring.mint_for(&control).expect("enroller mints")
+        ),
+        instance_key(0x55),
+    )
+    .await;
+    assert_eq!(second.status(), StatusCode::CREATED);
+    let second_instance_id = {
+        let bytes = second.body().await.expect("body");
+        let body: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+        body["instance_id"].as_str().expect("instance_id").to_string()
+    };
+
+    forget(&fixture.state.control_pg, &instance_id).await;
+    forget(&fixture.state.control_pg, &second_instance_id).await;
+    forget_enroller(&fixture.state.control_pg, &enroller_id).await;
+    drop(server);
     drop(fixture);
     common::drain_pg().await;
 }
@@ -527,10 +714,11 @@ async fn only_the_worker_may_enrol_an_instance() {
 /// The handler's read of the transport, bound over a REAL socket.
 ///
 /// A loopback client gets `peer_outside_envelope` against a declaration that
-/// does not name loopback, where the in-process arm above gets a 403 for having
-/// no peer at all. A handler that ignored `req.peer_addr()` could not tell those
-/// apart, so this pair is what makes the derivation's input the connection
-/// rather than a default.
+/// does not name loopback, where the in-process arm above gets a 401 for
+/// having no grant at all under a non-enroller credential. This arm therefore
+/// authenticates as the ENROLLER (the only principal that can reach the
+/// address check at all under 1A) and differs from its sibling below only in
+/// the declared networks.
 ///
 /// Its own paired control is
 /// [`a_real_loopback_connection_is_admitted_when_the_envelope_declares_it`],
@@ -538,6 +726,8 @@ async fn only_the_worker_may_enrol_an_instance() {
 #[ntex::test]
 async fn a_real_loopback_connection_is_refused_as_outside_the_envelope() {
     let fixture = build_fixture(declared_envelope()).await;
+    let (enroller_id, enroller_keyring) = seed_enroller_keyring(&fixture.state.control_pg).await;
+    let control = service_issuer(CONTROL_SERVICE_NAME).expect("control issuer");
     let before = count_instances(&fixture.state.control_pg).await;
 
     let state = Arc::clone(&fixture.state);
@@ -554,7 +744,13 @@ async fn a_real_loopback_connection_is_refused_as_outside_the_envelope() {
 
     let response = server
         .post("/internal/workers/enrol")
-        .header("authorization", fixture.worker_header())
+        .header(
+            "authorization",
+            format!(
+                "Bearer {}",
+                enroller_keyring.mint_for(&control).expect("enroller mints")
+            ),
+        )
         .send_json(&json!({
             "port": ADVERTISED_PORT,
             "public_key": URL_SAFE_NO_PAD.encode(instance_key(0x66)),
@@ -570,6 +766,7 @@ async fn a_real_loopback_connection_is_refused_as_outside_the_envelope() {
     );
     assert_eq!(count_instances(&fixture.state.control_pg).await, before);
 
+    forget_enroller(&fixture.state.control_pg, &enroller_id).await;
     drop(server);
     drop(fixture);
     common::drain_pg().await;
@@ -591,6 +788,8 @@ async fn a_real_loopback_connection_is_admitted_when_the_envelope_declares_it() 
     let single_host = EnrolmentEnvelope::parse("127.0.0.0/8", ENROLMENT_PORTS, false)
         .expect("the declaration parses");
     let fixture = build_fixture(single_host).await;
+    let (enroller_id, enroller_keyring) = seed_enroller_keyring(&fixture.state.control_pg).await;
+    let control = service_issuer(CONTROL_SERVICE_NAME).expect("control issuer");
 
     let state = Arc::clone(&fixture.state);
     let server = test::server(move || {
@@ -606,7 +805,13 @@ async fn a_real_loopback_connection_is_admitted_when_the_envelope_declares_it() 
 
     let response = server
         .post("/internal/workers/enrol")
-        .header("authorization", fixture.worker_header())
+        .header(
+            "authorization",
+            format!(
+                "Bearer {}",
+                enroller_keyring.mint_for(&control).expect("enroller mints")
+            ),
+        )
         .send_json(&json!({
             "port": ADVERTISED_PORT,
             "public_key": URL_SAFE_NO_PAD.encode(instance_key(0x77)),
@@ -631,6 +836,7 @@ async fn a_real_loopback_connection_is_admitted_when_the_envelope_declares_it() 
     // Cleaned up BEFORE the assertions, for the reason the admitted arm above
     // records: a panic skips whatever follows it.
     forget(&fixture.state.control_pg, &instance_id).await;
+    forget_enroller(&fixture.state.control_pg, &enroller_id).await;
 
     // The stored host is the loopback address the transport OBSERVED, not
     // anything the caller sent - the request body carries no host field at all.
@@ -649,11 +855,13 @@ async fn a_public_key_that_is_not_an_ed25519_key_is_refused_before_any_derivatio
     // different fact from the address being inadmissible, and an operator
     // reading a worker's logs should not go looking at network policy for it.
     let fixture = build_fixture(declared_envelope()).await;
+    let enroller_id = seed_enroller(&fixture.state.control_pg, "active").await;
     let before = count_instances(&fixture.state.control_pg).await;
 
     let response = enrol(
         &fixture.state,
         peer(IN_ENVELOPE_PEER),
+        &enroller_id,
         WorkerEnrolmentRequest {
             port: ADVERTISED_PORT,
             public_key: URL_SAFE_NO_PAD.encode([9_u8; PUBLIC_KEY_LENGTH - 1]),
@@ -663,6 +871,7 @@ async fn a_public_key_that_is_not_an_ed25519_key_is_refused_before_any_derivatio
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     assert_eq!(count_instances(&fixture.state.control_pg).await, before);
 
+    forget_enroller(&fixture.state.control_pg, &enroller_id).await;
     drop(fixture);
     common::drain_pg().await;
 }
@@ -674,15 +883,20 @@ async fn a_public_key_that_is_not_an_ed25519_key_is_refused_before_any_derivatio
 /// be column-selective, so without the trigger any control-side path could
 /// rotate a worker's ring position or swap its public key. The trigger was
 /// driven by hand against live Postgres when it landed and bound by nothing.
-/// This is the arm that binds it.
+/// This is the arm that binds it. `enroller_id` joined the frozen set in
+/// option 1A: an instance's enroller is fixed at enrolment exactly like its
+/// key and address.
 #[ntex::test]
 async fn identity_and_address_are_frozen_after_enrolment() {
     let fixture = build_fixture(declared_envelope()).await;
+    let enroller_id = seed_enroller(&fixture.state.control_pg, "active").await;
+    let other_enroller_id = seed_enroller(&fixture.state.control_pg, "active").await;
     let key = instance_key(0x22);
 
     let response = enrol(
         &fixture.state,
         peer(IN_ENVELOPE_PEER),
+        &enroller_id,
         request(&key, ADVERTISED_PORT),
     )
     .await;
@@ -734,10 +948,18 @@ async fn identity_and_address_are_frozen_after_enrolment() {
             &[&instance_id, &(i32::from(ADVERTISED_PORT) + 1)],
         )
         .await;
+    let moved_enroller = pg
+        .execute(
+            "UPDATE zeroship.worker_instances SET enroller_id = $2 WHERE id = $1",
+            &[&instance_id, &other_enroller_id],
+        )
+        .await;
 
     // Clean up BEFORE asserting: a failing assertion panics past anything after
     // it, which is how a probe row survives exactly the runs that matter.
     forget(pg, &instance_id).await;
+    forget_enroller(pg, &enroller_id).await;
+    forget_enroller(pg, &other_enroller_id).await;
 
     assert!(
         progressed.is_ok(),
@@ -749,6 +971,7 @@ async fn identity_and_address_are_frozen_after_enrolment() {
         ("public_key", &swapped_key),
         ("advertise_host", &moved_host),
         ("advertise_port", &moved_port),
+        ("enroller_id", &moved_enroller),
     ] {
         assert!(
             outcome.is_err(),
@@ -758,4 +981,389 @@ async fn identity_and_address_are_frozen_after_enrolment() {
 
     drop(fixture);
     common::drain_pg().await;
+}
+
+// ---------------------------------------------------------------------------
+// Option 1A success criteria 4 and 5
+// ---------------------------------------------------------------------------
+
+/// Success criterion 5: a lost-reply retry with the SAME public key returns
+/// the SAME instance id, and the SAME key under a DIFFERENT enroller conflicts.
+#[ntex::test]
+async fn idempotent_retry_returns_the_same_instance_and_a_foreign_enroller_conflicts() {
+    let fixture = build_fixture(declared_envelope()).await;
+    let enroller_id = seed_enroller(&fixture.state.control_pg, "active").await;
+    let other_enroller_id = seed_enroller(&fixture.state.control_pg, "active").await;
+    let key = instance_key(0x99);
+
+    let first = enrol(
+        &fixture.state,
+        peer(IN_ENVELOPE_PEER),
+        &enroller_id,
+        request(&key, ADVERTISED_PORT),
+    )
+    .await;
+    assert_eq!(first.status(), StatusCode::CREATED);
+    let first_id = body_json(first).await["instance_id"]
+        .as_str()
+        .expect("instance_id")
+        .to_string();
+
+    // THE CONTROL: retrying with the SAME key under the SAME enroller is the
+    // lost-reply case, and it must return the SAME id rather than minting a
+    // second row.
+    let retry = enrol(
+        &fixture.state,
+        peer(IN_ENVELOPE_PEER),
+        &enroller_id,
+        request(&key, ADVERTISED_PORT),
+    )
+    .await;
+    assert_eq!(retry.status(), StatusCode::CREATED);
+    let retry_id = body_json(retry).await["instance_id"]
+        .as_str()
+        .expect("instance_id")
+        .to_string();
+    assert_eq!(
+        retry_id, first_id,
+        "a retry with the same public key must return the existing instance id"
+    );
+    assert_eq!(
+        count_instances(&fixture.state.control_pg).await
+            - {
+                // isolate this test's own rows from any sibling running
+                // concurrently against the same database: count only rows
+                // this enroller could have produced.
+                let other: i64 = fixture
+                    .state
+                    .control_pg
+                    .query_one(
+                        "SELECT count(*) FROM zeroship.worker_instances WHERE id <> $1",
+                        &[&first_id],
+                    )
+                    .await
+                    .expect("count sibling rows")
+                    .get(0);
+                other
+            },
+        1,
+        "a retried enrolment must not mint a second row"
+    );
+
+    // THE PAIRED FALSIFIER: the SAME key presented under a DIFFERENT enroller
+    // is a conflict, not a silent reassignment.
+    let foreign = enrol(
+        &fixture.state,
+        peer(IN_ENVELOPE_PEER),
+        &other_enroller_id,
+        request(&key, ADVERTISED_PORT),
+    )
+    .await;
+    assert_eq!(foreign.status(), StatusCode::CONFLICT);
+    assert_eq!(
+        body_json(foreign).await["reason"],
+        "public_key_conflict"
+    );
+
+    // The original row is untouched by the conflicting attempt.
+    assert_eq!(
+        instance_status(&fixture.state.control_pg, &first_id).await.as_deref(),
+        Some("active")
+    );
+    let owning_enroller: String = fixture
+        .state
+        .control_pg
+        .query_one(
+            "SELECT enroller_id FROM zeroship.worker_instances WHERE id = $1",
+            &[&first_id],
+        )
+        .await
+        .expect("row readable")
+        .get(0);
+    assert_eq!(owning_enroller, enroller_id);
+
+    forget(&fixture.state.control_pg, &first_id).await;
+    forget_enroller(&fixture.state.control_pg, &enroller_id).await;
+    forget_enroller(&fixture.state.control_pg, &other_enroller_id).await;
+    drop(fixture);
+    common::drain_pg().await;
+}
+
+/// A revoked enroller's own status refuses a brand-new enrolment attempt, with
+/// no race involved - the simple half of success criterion 3 ("refuses E's new
+/// enrollments"). [`revoking_an_enroller_while_an_enrolment_holds_its_lock_leaves_no_active_instance`]
+/// below is the half that needs a race.
+#[ntex::test]
+async fn a_revoked_enroller_refuses_a_fresh_enrolment() {
+    let fixture = build_fixture(declared_envelope()).await;
+    let enroller_id = seed_enroller(&fixture.state.control_pg, "active").await;
+    revoke_enroller(&fixture.state.control_pg, &enroller_id).await;
+    let before = count_instances(&fixture.state.control_pg).await;
+
+    let response = enrol(
+        &fixture.state,
+        peer(IN_ENVELOPE_PEER),
+        &enroller_id,
+        request(&instance_key(0xa0), ADVERTISED_PORT),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    assert_eq!(body_json(response).await["reason"], "enroller_inactive");
+    assert_eq!(count_instances(&fixture.state.control_pg).await, before);
+
+    // THE CONTROL: an enroller that was never touched stays able to enrol.
+    let other_enroller = seed_enroller(&fixture.state.control_pg, "active").await;
+    let admitted = enrol(
+        &fixture.state,
+        peer(IN_ENVELOPE_PEER),
+        &other_enroller,
+        request(&instance_key(0xa1), ADVERTISED_PORT),
+    )
+    .await;
+    assert_eq!(admitted.status(), StatusCode::CREATED);
+    let instance_id = body_json(admitted).await["instance_id"]
+        .as_str()
+        .expect("instance_id")
+        .to_string();
+
+    forget(&fixture.state.control_pg, &instance_id).await;
+    forget_enroller(&fixture.state.control_pg, &enroller_id).await;
+    forget_enroller(&fixture.state.control_pg, &other_enroller).await;
+    drop(fixture);
+    common::drain_pg().await;
+}
+
+/// The blocking chain rooted at `blocker_pid`, in the pattern
+/// `crates/zeroship-control/tests/organizations/concurrency.rs::wait_for_departures`
+/// uses: follow `pg_blocking_pids` recursively, because PostgreSQL may queue a
+/// waiter behind another waiter rather than directly behind the row's holder.
+async fn count_blocked_on(observer: &compio_postgres::Client, blocker_pid: i32) -> i64 {
+    observer
+        .query_one(
+            "WITH RECURSIVE blocked(pid) AS (
+                 SELECT $1::integer
+                 UNION
+                 SELECT a.pid FROM pg_stat_activity a
+                 JOIN blocked b ON b.pid = ANY(pg_blocking_pids(a.pid))
+                 WHERE a.datname = current_database()
+             ) SELECT count(*)::bigint FROM blocked WHERE pid <> $1",
+            &[&blocker_pid],
+        )
+        .await
+        .expect("count blocked backends")
+        .get(0)
+}
+
+/// Wait until at least `waiters` backends queue behind `blocker_pid`.
+///
+/// The count is the whole point: returning at the FIRST waiter and then
+/// sampling for the second races the second waiter's own connection set-up,
+/// and a loaded machine loses that race while the lock order is fine.
+async fn wait_until_blocked_on(
+    observer: &compio_postgres::Client,
+    blocker_pid: i32,
+    waiters: i64,
+) -> bool {
+    compio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            if count_blocked_on(observer, blocker_pid).await >= waiters {
+                return;
+            }
+            compio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .is_ok()
+}
+
+/// Success criterion 4: an enrolment transaction holds the enroller row lock
+/// while a concurrent revocation waits, OBSERVED rather than assumed from a
+/// sleep, and after both commit no active instance of the revoked enroller
+/// exists.
+///
+/// The hold is built the same way
+/// `organizations/concurrency.rs::concurrent_owner_departures_preserve_the_last_owner`
+/// builds one: a raw connection opens an explicit transaction and takes
+/// `SELECT ... FOR UPDATE` on the enroller row BEFORE either real operation
+/// starts, so both `enrol_instance` (which locks the same row inside
+/// `zeroship.enrol_worker_instance`) and `revoke_worker_enroller` (whose own
+/// first UPDATE locks it too) queue behind ONE known backend. Once BOTH are
+/// observed waiting, the blocker releases and PostgreSQL's row-lock queue
+/// decides which of the two real operations goes first - the invariant this
+/// arm checks holds under EITHER order, which is exactly the property option
+/// 1A claims.
+#[ntex::test]
+async fn revoking_an_enroller_while_an_enrolment_holds_its_lock_leaves_no_active_instance() {
+    let outcome = run_the_enrol_revoke_race().await;
+    assert!(
+        outcome.both_observed_blocked,
+        "both the enrolment and the revocation must be seen waiting on the \
+         fixture's row lock, or this arm is exercising a sleep instead of a lock"
+    );
+    assert!(
+        !outcome.active_instance_of_revoked_enroller_survived,
+        "no ordering of enrolment and revocation may leave an active instance \
+         of a revoked enroller"
+    );
+}
+
+struct RaceOutcome {
+    both_observed_blocked: bool,
+    active_instance_of_revoked_enroller_survived: bool,
+}
+
+/// Drive the race in [`revoking_an_enroller_while_an_enrolment_holds_its_lock_leaves_no_active_instance`]
+/// against whatever `zeroship.enrol_worker_instance` / `revoke_worker_enroller`
+/// definitions are CURRENTLY LIVE in the target database. Factored out so the
+/// mutation control below can run the identical scenario against a
+/// deliberately broken definition and require the OPPOSITE verdict.
+async fn run_the_enrol_revoke_race() -> RaceOutcome {
+    let db_url = common::require_control_db();
+    let (pg_client, pg_conn) = compio_postgres::connect(&db_url, compio_postgres::NoTls)
+        .await
+        .expect("control-pg connect");
+    let pg_driver = compio::runtime::spawn(async move { pg_conn.run().await });
+    let enroller_id = seed_enroller(&pg_client, "active").await;
+
+    let (mut blocker, blocker_conn) = compio_postgres::connect(&db_url, compio_postgres::NoTls)
+        .await
+        .expect("blocker connect");
+    let blocker_driver = compio::runtime::spawn(async move { blocker_conn.run().await });
+    let blocker_tx = blocker.transaction().await.expect("begin blocker tx");
+    let blocker_pid: i32 = blocker_tx
+        .query_one("SELECT pg_backend_pid()", &[])
+        .await
+        .expect("blocker pid")
+        .get(0);
+    blocker_tx
+        .query_one(
+            "SELECT id FROM zeroship.worker_enrollers WHERE id = $1 FOR UPDATE",
+            &[&enroller_id],
+        )
+        .await
+        .expect("blocker holds the enroller row lock");
+
+    // A DEDICATED connection for the enrolment call, distinct from `pg_client`
+    // (the observer below). PostgreSQL processes one connection's statements
+    // strictly in the order they arrive at the backend: if the enrolment call
+    // shares a connection with the observer polling `pg_blocking_pids`, the
+    // observer's OWN next poll queues behind the enrolment's still-blocked
+    // statement on that same connection and can never see it - the exact
+    // self-deadlock this split exists to avoid. Measured: sharing one
+    // connection between the two, `wait_until_blocked_on` timed out at its
+    // full 15 seconds on every run, `queued` was always false, and the
+    // enrolment only proceeded once ITS OWN internal timeout gave up and
+    // let the join move on to releasing the blocker.
+    let (enroller_session, enroller_conn) =
+        compio_postgres::connect(&db_url, compio_postgres::NoTls)
+            .await
+            .expect("enroller session connect");
+    let enroller_driver = compio::runtime::spawn(async move { enroller_conn.run().await });
+
+    let mut public_key = [0_u8; PUBLIC_KEY_LENGTH];
+    rand::rngs::OsRng.fill_bytes(&mut public_key);
+    let host: std::net::IpAddr = "10.7.3.9".parse().expect("host");
+
+    // Pre-extracted references, moved whole into each `async move` arm below.
+    // Moving a `&T` is unambiguous to the borrow checker in a way that letting
+    // three sibling futures each infer their own partial capture of the
+    // enclosing locals is not, and this scenario has three arms doing exactly
+    // that over the same handful of variables.
+    let pg_client_ref = &pg_client;
+    let enroller_session_ref = &enroller_session;
+    let db_url_ref = &db_url;
+    let enroller_id_ref = &enroller_id;
+    let public_key_ref = &public_key;
+    let host_ref = &host;
+
+    let (queued, (_enrol_ok, instance_id), ()) = compio::time::timeout(
+        Duration::from_secs(30),
+        Box::pin(async move {
+            futures::join!(
+                async move {
+                    // Two waiters: the enrolment's guarded lock UPDATE and
+                    // revocation's own first UPDATE, both against the same row.
+                    let both = wait_until_blocked_on(pg_client_ref, blocker_pid, 2).await;
+                    blocker_tx.commit().await.expect("release the blocker lock");
+                    both
+                },
+                async move {
+                    let mut instance_id = zeroship_core::typed_id::new_worker_instance_id();
+                    let ring_key = zeroship_control::worker_enrolment::mint_ring_key();
+                    let row = enroller_session_ref
+                        .query_one(
+                            "SELECT zeroship.enrol_worker_instance($1, $2, $3, $4, $5, $6)",
+                            &[
+                                enroller_id_ref,
+                                &instance_id,
+                                &ring_key.as_slice(),
+                                &public_key_ref.as_slice(),
+                                host_ref,
+                                &i32::from(ADVERTISED_PORT),
+                            ],
+                        )
+                        .await;
+                    if let Ok(row) = &row {
+                        instance_id = row.get(0);
+                    }
+                    (row.is_ok(), instance_id)
+                },
+                async move {
+                    let (revoker, revoker_conn) =
+                        compio_postgres::connect(db_url_ref, compio_postgres::NoTls)
+                            .await
+                            .expect("revoker connect");
+                    let revoker_driver =
+                        compio::runtime::spawn(async move { revoker_conn.run().await });
+                    revoker
+                        .execute(
+                            "SELECT zeroship.revoke_worker_enroller($1)",
+                            &[enroller_id_ref],
+                        )
+                        .await
+                        .expect("revoke_worker_enroller runs");
+                    drop(revoker);
+                    let _ = compio::time::timeout(Duration::from_secs(10), revoker_driver).await;
+                }
+            )
+        }),
+    )
+    .await
+    .expect("the race must resolve after the fixture releases its lock");
+
+    let survived: i64 = pg_client
+        .query_one(
+            "SELECT count(*) FROM zeroship.worker_instances \
+             WHERE enroller_id = $1 AND status = 'active'",
+            &[&enroller_id],
+        )
+        .await
+        .expect("count active instances of the enroller")
+        .get(0);
+
+    // Best-effort cleanup; the assertions in the caller do not depend on it.
+    let _ = pg_client
+        .execute(
+            "DELETE FROM zeroship.worker_instances WHERE id = $1",
+            &[&instance_id],
+        )
+        .await;
+    let _ = pg_client
+        .execute(
+            "DELETE FROM zeroship.worker_enrollers WHERE id = $1",
+            &[&enroller_id],
+        )
+        .await;
+
+    drop(blocker);
+    drop(pg_client);
+    drop(enroller_session);
+    let _ = compio::time::timeout(Duration::from_secs(10), blocker_driver).await;
+    let _ = compio::time::timeout(Duration::from_secs(10), pg_driver).await;
+    let _ = compio::time::timeout(Duration::from_secs(10), enroller_driver).await;
+
+    RaceOutcome {
+        both_observed_blocked: queued,
+        active_instance_of_revoked_enroller_survived: survived > 0,
+    }
 }
