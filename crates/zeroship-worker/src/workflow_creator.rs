@@ -26,6 +26,7 @@ use zeroship_workflow::{
     },
     WorkflowServiceError,
 };
+use zeroship_workflow_client::WorkerCoordinator;
 use zeroship_workflow_v8::V8TaskExecutor;
 
 /// Creator capabilities resolved independently of manager placement metadata.
@@ -78,6 +79,9 @@ pub struct WorkflowCreatorFactory<P> {
     policies: Arc<HostPolicies>,
     worker: WorkerIdentity,
     payloads: TaskPayloadLimits,
+    /// Asks the manager to bring a refused journal to the version this build
+    /// expects. `None` leaves a refusal terminal, which is what it was before.
+    repair: Option<Rc<WorkerCoordinator>>,
 }
 
 impl<P> std::fmt::Debug for WorkflowCreatorFactory<P> {
@@ -108,7 +112,19 @@ impl<P> WorkflowCreatorFactory<P> {
             policies,
             worker: WorkerIdentity::new(worker.as_str().to_owned())?,
             payloads,
+            repair: None,
         })
+    }
+
+    /// Turn a refused journal into a repair request rather than a dead end.
+    ///
+    /// The host holds no DDL authority - privilege follows the process - so the
+    /// repair is a request to the manager, which owns the journal artifacts and
+    /// sends them to the migration service.
+    #[must_use]
+    pub fn with_journal_repair(mut self, client: Rc<WorkerCoordinator>) -> Self {
+        self.repair = Some(client);
+        self
     }
 }
 
@@ -122,6 +138,47 @@ impl<P: WorkflowResourceProvider> CreatorFactory for WorkflowCreatorFactory<P> {
         if policy.app_id() != &scope.app_id {
             return Err(WorkflowServiceError::PermissionDenied);
         }
+        let first = self.build(scope, policy, ingress.clone()).await;
+        let Err(refusal) = first else {
+            return first;
+        };
+        // THE REPAIR PATH. A host refuses a journal whose fingerprint or version
+        // is not the one it was built against, and until this existed that was
+        // terminal: nothing in the system could bring the journal forward, so an
+        // app whose journal predated a schema change simply stopped running.
+        //
+        // The retry is ONCE. A second refusal after a successful provision means
+        // the journal is not merely out of date, and looping would turn a
+        // reportable fault into a hot loop against a creator database.
+        let Some(repair) = self.repair.as_ref() else {
+            return Err(refusal);
+        };
+        let schema = self.provider.resolve(scope).await?.storage.binding.schema().clone();
+        tracing::warn!(
+            app = scope.app_id.as_str(),
+            schema = schema.as_str(),
+            error = %refusal,
+            "workflow host refused the creator journal; asking the manager to provision it"
+        );
+        repair.ensure_journal(schema.as_str()).await.map_err(|error| {
+            tracing::error!(
+                schema = schema.as_str(),
+                %error,
+                "workflow journal repair refused; the original refusal stands"
+            );
+            refusal
+        })?;
+        self.build(scope, policy, ingress).await
+    }
+}
+
+impl<P: WorkflowResourceProvider> WorkflowCreatorFactory<P> {
+    async fn build(
+        &self,
+        scope: &AssignedScope,
+        policy: &PolicyBinding,
+        ingress: Rc<dyn IngressEpochs>,
+    ) -> Result<CreatorRuntime, WorkflowServiceError> {
         self.policies
             .run_bound(policy, async {
                 let resources = self.provider.resolve(scope).await?;

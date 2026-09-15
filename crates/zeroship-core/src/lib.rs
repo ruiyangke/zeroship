@@ -30,6 +30,7 @@ pub mod preview_ports;
 pub mod project_data_key;
 pub mod readiness;
 pub mod replication_names;
+pub mod schema_bundle;
 pub mod schema_name;
 pub mod service_assertion;
 pub mod service_identity;
@@ -37,7 +38,6 @@ pub mod service_peers;
 pub mod superjson;
 pub mod types;
 pub mod usage_event;
-pub mod workflow_signal_token;
 pub mod user_envelope;
 pub mod worker_join;
 pub mod worker_ring;
@@ -46,6 +46,7 @@ pub mod workflow_deployments;
 pub mod workflow_jobs;
 pub mod workflow_policy;
 pub mod workflow_schedules;
+pub mod workflow_signal_token;
 
 // The entity-id vocabulary lives in `zeroship-id`, a leaf that carries only
 // `uuid` and `serde`. It is re-exported at the paths it has always occupied

@@ -3,7 +3,7 @@ use std::process::Command;
 
 pub fn run() -> Result<()> {
     for schema in [
-        "crates/zeroship-workflow/schema",
+        "crates/zeroship-workflow-schema/schema",
         "crates/zeroship-workflow-manager/schema",
         "crates/zeroship-workflow-manager/schema/deployments",
     ] {
@@ -37,9 +37,11 @@ pub fn run() -> Result<()> {
             "-p",
             "zeroship-workflow-manager",
             "-p",
+            "zeroship-workflow-schema",
+            "-p",
             "zeroship-workflow-v8",
         ]),
-        "workflow engine, metadata client, manager and binding tests",
+        "workflow engine, schema artifacts, metadata client, manager and binding tests",
     )?;
     checked(
         cargo().args(["test", "-p", "zeroship-workflow-server"]),

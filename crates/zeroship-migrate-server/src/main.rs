@@ -180,6 +180,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "auth_platform_jwks_url",
             CheckValue::Plain(settings.auth_platform_jwks_url.get().clone()),
         );
+        // Reported because its absence DISABLES a capability rather than
+        // degrading one: with no peer bundle the schema-bundle endpoint refuses
+        // every caller, and an operator reading this report should see that
+        // before a platform service discovers it at runtime.
+        report.field(
+            "service_peers_file_configured",
+            CheckValue::Flag(!settings.service_peers_file.get().as_os_str().is_empty()),
+        );
         report.field(
             "service_credentials",
             CheckValue::Plain(credentials.summary().to_string()),
@@ -275,6 +283,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .detach();
 
             let control_pg = Arc::new(control_pg);
+            let replay_client = Arc::clone(&control_pg);
             let bearer_verifier = zeroship_authn::BearerVerifier::new(
                 Arc::clone(&control_pg),
                 Arc::clone(&auth_provider),
@@ -295,7 +304,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 mutation_rate_limit,
             ));
 
-            let state = Arc::new(MigrationServiceState::new(
+            let mut state = MigrationServiceState::new(
                 provision_database_url,
                 database_url,
                 tmp_dir,
@@ -303,7 +312,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 mutation_rate_limiter,
                 *settings.trust_proxy.get(),
                 policy_config,
-            ));
+            );
+            if let Some(verifier) = build_peer_verifier(
+                settings.service_peers_file.get(),
+                Arc::clone(&replay_client),
+            ) {
+                state = state.verifying_peers(verifier);
+            }
+            let state = Arc::new(state);
             let bind_addr = format!("{}:{}", settings.bind.get(), settings.port.get());
             tracing::info!(bind = %bind_addr, "zeroship-migrate-server listening");
             web::server(async move || {
@@ -330,6 +346,46 @@ fn build_mutation_rate_limit(
     Ok(zeroship_authn::rate_limit::Quota::per_minute(
         burst, per_minute,
     ))
+}
+
+/// Build the verifier for inbound platform-service assertions, when peer key
+/// material is configured.
+///
+/// This service is a DESTINATION and never a caller, so it loads a peer bundle
+/// and no signing key. An unconfigured path is not an error at boot: every other
+/// endpoint here authenticates a creator bearer and is unaffected. The
+/// schema-bundle endpoint answers 503 naming this setting rather than accepting
+/// an unverified caller, so the gap is loud at the one place it matters.
+fn build_peer_verifier(
+    peers_file: &std::path::Path,
+    replay_client: Arc<compio_postgres::Client>,
+) -> Option<Arc<dyn zeroship_core::service_identity::IdentityVerifier + Send + Sync>> {
+    use zeroship_core::service_assertion::ServiceAssertionVerifier;
+
+    if peers_file.as_os_str().is_empty() {
+        tracing::info!(
+            "migrate-server: no service peer bundle configured; the schema-bundle endpoint \
+             is unavailable"
+        );
+        return None;
+    }
+    match zeroship_core::service_peers::load_peer_bundle(peers_file) {
+        Ok(bundle) => {
+            let replay = Arc::new(
+                zeroship_authn::service_replay::SharedClientReplayStore::new(replay_client),
+            );
+            Some(Arc::new(ServiceAssertionVerifier::new(bundle, replay)))
+        }
+        Err(error) => {
+            eprintln!("migrated: service peer bundle rejected: {error}");
+            tracing::error!(
+                %error,
+                "migrate-server: refusing to start - migrate_server.service_peers_file names \
+                 key material this service cannot load"
+            );
+            std::process::exit(1);
+        }
+    }
 }
 
 fn build_policy_config(

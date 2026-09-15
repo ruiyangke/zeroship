@@ -243,6 +243,7 @@ zeroship-workflow = { path = "crates/zeroship-workflow" }
 zeroship-workflow-calendar = { path = "crates/zeroship-workflow-calendar" }
 zeroship-workflow-client = { path = "crates/zeroship-workflow-client" }
 zeroship-workflow-manager = { path = "crates/zeroship-workflow-manager" }
+zeroship-workflow-schema = { path = "crates/zeroship-workflow-schema" }
 zeroship-workflow-v8 = { path = "crates/zeroship-workflow-v8" }
 zeroship-metering = { path = "crates/zeroship-metering" }
 zeroship-stream = { path = "crates/zeroship-stream" }

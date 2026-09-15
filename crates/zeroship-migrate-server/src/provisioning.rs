@@ -95,10 +95,13 @@ pub(crate) fn migrator_executor_config(
     Ok((config, role))
 }
 
-/// Idempotently create one database's data schema and migrator role.
+/// Idempotently create one schema and the least-privilege migrator role that
+/// owns it.
 ///
-/// This is the complete create verb. Runtime roles, audit tables, workflow
-/// grants, publications, and apply-ledger rows remain apply-time concerns.
+/// Schema-addressed, so it serves both the app create verb
+/// ([`provision_app_database`], which adds the app's runtime role) and the
+/// schema-bundle path, which has no app to derive one from. Audit tables,
+/// publications and apply-ledger rows remain apply-time concerns.
 pub async fn provision_database(
     admin: &Client,
     schema: &str,
@@ -259,79 +262,41 @@ pub async fn provision_migrator(
     Ok(())
 }
 
-/// The creator workflow journal's PostgreSQL DDL, generated into
-/// `crates/zeroship-workflow/schema/postgres.sql` and carrying the fingerprint
-/// a host verifies before it will use the journal.
+/// Provision an app's creator database: its schema, the least-privilege migrator
+/// role that owns it, and the per-app RUNTIME role the worker opens it under.
 ///
-/// Included rather than called, so this service keeps no dependency on the
-/// creator engine. `crates/zeroship-workflow/src/service/schema.rs`
-/// (`postgres_sql`) performs the same substitution for the hosts that read it,
-/// and both read the one generated artifact, so a regenerated schema moves
-/// them together.
-const WORKFLOW_JOURNAL_TEMPLATE: &str = include_str!("../../zeroship-workflow/schema/postgres.sql");
-
-/// The journal DDL bound to one app's schema.
-fn workflow_journal_tables_sql(app_schema: &str) -> String {
-    WORKFLOW_JOURNAL_TEMPLATE.replace("\"__zeroship_workflow_schema\"", &quote_ident(app_schema))
-}
-
-/// Whether an app's journal is already installed, so provisioning leaves an
-/// existing one, and the rows in it, alone.
-async fn journal_installed(
-    admin: &Client,
-    app_schema: &str,
-) -> Result<bool, compio_postgres::Error> {
-    let rows = admin
-        .query(
-            "SELECT 1 FROM pg_tables WHERE schemaname = $1 \
-               AND tablename = '__zeroship_workflow_schema_version'",
-            &[&app_schema],
-        )
-        .await?;
-    Ok(!rows.is_empty())
-}
-
-/// Provision everything a workflow-only app's runtime needs in its creator
-/// database: the app schema and its migrator role, the journal schema and its
-/// tables, and the per-app RUNTIME role the app opens that database under.
+/// THE RUNTIME ROLE IS PART OF CREATING THE DATABASE, and it was not always. It
+/// used to be provisioned only by the apply path and by a domain-specific entry
+/// point beside it, so an app that never applied a creator migration had a
+/// database it could not open. The create verb now establishes every identity
+/// the database needs, and the apply path still repeats the role provisioning
+/// afterwards so tables an apply CREATED receive its grants.
 ///
-/// An app with creator migrations gets the runtime role from the apply path,
-/// which provisions it around every apply. An app that only runs workflows
-/// never applies one, and its workflow host still opens the creator journal as
-/// the per-app role, so without this it has a journal it cannot read.
-///
-/// Every step is idempotent, so a repeated provision changes nothing.
+/// Every step is idempotent, so a repeated create changes nothing.
 ///
 /// # Errors
 /// Reports schema, migrator-role and runtime-role provisioning failures.
-pub async fn provision_workflow_app(
+pub async fn provision_app_database(
     admin: &Client,
     app_id: &AppId,
-) -> Result<(), ProvisionWorkflowAppError> {
+) -> Result<(), ProvisionAppDatabaseError> {
     let schema = app_derivation::schema_name(app_id);
     provision_database(admin, &schema).await?;
-    // Before the runtime role, whose grants cover every table in the schema.
-    if !journal_installed(admin, &schema).await? {
-        exec_retry(admin, &workflow_journal_tables_sql(&schema)).await?;
-    }
     let (_, migrator) = migrator_executor_config(&schema)?;
     let bound = zeroship_core::schema_name::SchemaName::new(&schema)
         .map_err(|_| ProvisionRoleError::BadRoleName(schema.clone()))?;
     crate::apply::provision_runtime_app_role(admin, app_id, &bound, &migrator)
         .await
-        .map_err(|error| ProvisionWorkflowAppError::RuntimeRole(error.to_string()))?;
+        .map_err(|error| ProvisionAppDatabaseError::RuntimeRole(error.to_string()))?;
     Ok(())
 }
 
-/// Error provisioning a workflow-only app's creator database.
+/// Error creating an app's creator database and its identities.
 #[derive(Debug, thiserror::Error)]
-pub enum ProvisionWorkflowAppError {
+pub enum ProvisionAppDatabaseError {
     /// The app schema or its migrator role could not be provisioned.
     #[error(transparent)]
     Database(#[from] ProvisionDatabaseError),
-    /// The journal schema DDL failed.
-    #[error("workflow journal schema: {0}")]
-    Journal(#[from] compio_postgres::Error),
     /// The migrator role name could not be derived.
     #[error(transparent)]
     Role(#[from] ProvisionRoleError),
@@ -416,11 +381,10 @@ pub fn audit_unmask_table_sql(app_schema: &str) -> String {
 
 /// Idempotently establish an app's unmask audit table, as an admin principal.
 ///
-/// Runs [`audit_unmask_table_sql`], the one generator for this DDL. Exported for
-/// the same reason [`provision_workflow_journal_schema`] is: a caller that needs
-/// the same reason [`provision_workflow_app`] is: a caller that needs
-/// statement rather than a `CREATE TABLE` of its own, or the test proves the
-/// shape of its own fixture instead of the shape production builds.
+/// Runs [`audit_unmask_table_sql`], the one generator for this DDL. Exported so a
+/// caller that needs the table reaches this statement rather than writing a
+/// `CREATE TABLE` of its own - otherwise a test proves the shape of its own
+/// fixture instead of the shape production builds.
 ///
 /// # Errors
 /// Any database error from the DDL, including a permission failure when the

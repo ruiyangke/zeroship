@@ -109,12 +109,8 @@ impl ServerOptions {
                 min_slots: *settings.capacity_min_slots.get(),
                 max_slots: *settings.capacity_max_slots.get(),
                 idle_hold_down: Duration::from_millis(*settings.capacity_hold_down_ms.get()),
-                request_timeout: Duration::from_millis(
-                    *settings.capacity_request_timeout_ms.get(),
-                ),
-                retry_interval: Duration::from_millis(
-                    *settings.capacity_retry_interval_ms.get(),
-                ),
+                request_timeout: Duration::from_millis(*settings.capacity_request_timeout_ms.get()),
+                retry_interval: Duration::from_millis(*settings.capacity_retry_interval_ms.get()),
             },
             // Queue transactions run under the command timeout; a hold outlives
             // twice that budget before the retention lane may release it.
@@ -175,6 +171,7 @@ pub async fn run(settings: WorkflowSettings, options: ServerOptions) -> Result<(
     let verifier = Arc::new(ServiceAssertionVerifier::new(peers, replay.clone()));
     let outbound = Arc::new(ServiceAuth::new(keyring, verifier.clone()));
     let control_url = settings.control_url.get().clone();
+    let migrate_url = settings.migrate_url.get().clone();
     let holds = ControlHolds::new(&control_url, outbound.clone(), options.coordinator)?;
     // Verify migration readiness before accepting connections. Each HTTP thread
     // constructs its own bounded pool and retention transport in the state factory.
@@ -199,18 +196,37 @@ pub async fn run(settings: WorkflowSettings, options: ServerOptions) -> Result<(
         let auth = auth.clone();
         let outbound = outbound.clone();
         let control_url = control_url.clone();
+        let migrate_url = migrate_url.clone();
         async move {
             web::App::new()
                 .state_factory(async move || {
-                    let holds = ControlHolds::new(&control_url, outbound, coordinator)?;
+                    let holds = ControlHolds::new(&control_url, outbound.clone(), coordinator)?;
+                    // Absent when no migration-service origin is configured. The
+                    // journal endpoint then refuses, rather than answering as
+                    // though a journal had been provisioned.
+                    let journal = if migrate_url.is_empty() {
+                        None
+                    } else {
+                        Some(crate::journal::Journal::new(
+                            &migrate_url,
+                            outbound,
+                            client_options(coordinator),
+                        )?)
+                    };
                     let eligibility = Rc::new(connect_eligibility(&url, coordinator).await?);
                     Ok::<_, crate::coordinator::Error>(Rc::new(WorkflowHttpState {
-                        service: Coordinator::connect(&url, coordinator, Rc::new(holds), eligibility)
-                            .await?,
+                        service: Coordinator::connect(
+                            &url,
+                            coordinator,
+                            Rc::new(holds),
+                            eligibility,
+                        )
+                        .await?,
                         auth,
                         policy_source: Some(Rc::new(
                             connect_policies(&url, coordinator, policy_cache_entries).await?,
                         )),
+                        journal,
                     }))
                 })
                 .configure(move |config| {

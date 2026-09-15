@@ -220,6 +220,16 @@ impl CompioPgSession {
     pub fn client(&self) -> &Client {
         &self.client
     }
+
+    /// Borrow the client mutably, which is what opening a TRANSACTION needs.
+    ///
+    /// The engine's apply path drives statements one at a time over the
+    /// `SqlSession` seam and never holds a transaction object, so `client` is
+    /// enough for it. An applier that must commit several statements or none -
+    /// the schema-bundle path - needs the borrow the driver requires for that.
+    pub fn client_mut(&mut self) -> &mut Client {
+        &mut self.client
+    }
 }
 
 // ---------------------------------------------------------------------------

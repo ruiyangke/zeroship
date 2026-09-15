@@ -1177,7 +1177,7 @@ pub const WORKER_ROLE: &str = "zeroship_worker";
 /// 540. The count drifts with every test run and is recorded as a dated
 /// observation, not a figure to carry forward - and much of that population was
 /// this suite's own leak: `cleanup_app` dropped the migrator role but not the
-/// `app_<uuid>_role` or its workflow-journal schema, so one green 17-test run
+/// `app_<uuid>_role` or the platform schema beside it, so one green 17-test run
 /// left 7 of each behind. Fixed in `9cf1b3fb4`; a later reading of 29 on the
 /// same database is the same posture over a smaller population, not a change in
 /// it. The worker's boot-time check walks every membership it holds, so the
@@ -1378,8 +1378,8 @@ pub(crate) async fn provision_runtime_app_role(
 }
 
 #[cfg(test)]
-#[path = "apply/tests/workflow_provisioning.rs"]
-mod workflow_provisioning_tests;
+#[path = "apply/tests/runtime_role_provisioning.rs"]
+mod runtime_role_provisioning_tests;
 
 #[cfg(test)]
 mod tests {

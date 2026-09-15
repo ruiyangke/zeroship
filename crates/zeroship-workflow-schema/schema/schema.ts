@@ -52,7 +52,11 @@ export function workflowSchema(namespace) {
   };
   const index = (name, purpose, columns) => table(name, { schema: namespace }).index(owned(`${name}_${purpose}_idx`)).add({ on: columns });
 
-  create("schema_version", { id: text(), fingerprint: text() }, ["id"]);
+  // The journal's stamp: ONE row, whatever the schema holds. `version` names the
+  // point in the ordered series the installed journal has reached, so an
+  // installer can tell an out-of-date journal from a corrupted one, and refuse
+  // to write an older series over a newer journal.
+  create("schema_version", { id: text(), version: integer(), fingerprint: text() }, ["id"]);
   // closed_epoch is the highest manager ingress epoch a delivered Close fenced.
   // Ingress acceptance requires its captured epoch to exceed it under this
   // row's lock; it never moves backwards.
