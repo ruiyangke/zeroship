@@ -58,7 +58,8 @@ use zeroship_core::{
     },
     typed_id,
     workflow_coordination::{
-        AUDIENCE, AssignScope, Assignment, Failure, FailureCode, RegisterWorker, RequestId,
+        AUDIENCE, AssignScope, AssignedScope, Assignment, Failure, FailureCode, RegisterWorker,
+        RequestId,
         VerifyAssignment, WorkerId, WorkerState,
     },
 };
@@ -614,7 +615,10 @@ async fn signed_deployment_holds_preserve_app_scope_across_worker_replacement() 
     let remote = RemoteDeploymentHolds::new(
         &origin(&control_server),
         auth.clone(),
-        &assignment,
+        &AssignedScope {
+            app_id: assignment.app_id.clone(),
+            assignment_revision: assignment.revision,
+        },
         Options::default(),
     )
     .unwrap();
@@ -682,7 +686,10 @@ async fn signed_deployment_holds_preserve_app_scope_across_worker_replacement() 
     let remote = RemoteDeploymentHolds::new(
         &origin(&control_server),
         replacement_auth.clone(),
-        &replacement_assignment,
+        &AssignedScope {
+            app_id: replacement_assignment.app_id.clone(),
+            assignment_revision: replacement_assignment.revision,
+        },
         Options::default(),
     )
     .unwrap();

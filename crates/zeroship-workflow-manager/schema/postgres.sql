@@ -3,13 +3,15 @@ CREATE TABLE "workflow_manager"."schema_version" ("id" text PRIMARY KEY NOT NULL
 
 CREATE TABLE "workflow_manager"."queue_scopes" ("id" text PRIMARY KEY NOT NULL, "lock_version" bigint NOT NULL DEFAULT 0, "dispatch_cursor" bigint NOT NULL DEFAULT 0);
 
-CREATE TABLE "workflow_manager"."deployment_holds" ("id" text PRIMARY KEY NOT NULL, "app_id" text NOT NULL, "deployment_id" text NOT NULL, "holder_id" text NOT NULL, "deploy_hash" text, "generation" bigint NOT NULL, "state" text NOT NULL, "held_at" bigint, CONSTRAINT "deployment_hold_scope" FOREIGN KEY ("app_id") REFERENCES "workflow_manager"."queue_scopes" (id) ON DELETE RESTRICT);
+CREATE TABLE "workflow_manager"."deployment_holds" ("id" text PRIMARY KEY NOT NULL, "app_id" text NOT NULL, "deployment_id" text NOT NULL, "holder_id" text NOT NULL, "deploy_hash" text, "generation" bigint NOT NULL, "state" text NOT NULL, "held_at" bigint, "journal_state" text NOT NULL DEFAULT 'pending', "journal_job_id" text, "journal_published_at" bigint, CONSTRAINT "deployment_hold_scope" FOREIGN KEY ("app_id") REFERENCES "workflow_manager"."queue_scopes" (id) ON DELETE RESTRICT);
 
 CREATE INDEX IF NOT EXISTS "deployment_hold_scope_idx" ON "workflow_manager"."deployment_holds" ("app_id");
 
 CREATE UNIQUE INDEX IF NOT EXISTS "deployment_holds_scope_key" ON "workflow_manager"."deployment_holds" ("app_id", "deployment_id");
 
 CREATE INDEX IF NOT EXISTS "deployment_holds_pending_idx" ON "workflow_manager"."deployment_holds" ("state", "app_id", "deployment_id");
+
+CREATE INDEX IF NOT EXISTS "deployment_holds_journal_idx" ON "workflow_manager"."deployment_holds" ("journal_state", "state", "app_id", "deployment_id");
 
 CREATE TABLE "workflow_manager"."workers" ("id" text PRIMARY KEY NOT NULL, "capacity" bigint NOT NULL DEFAULT 1, "state" text NOT NULL DEFAULT 'ready', "expires_at" bigint NOT NULL DEFAULT 0, "lock_version" bigint NOT NULL DEFAULT 0);
 
@@ -141,7 +143,7 @@ ALTER TABLE "workflow_manager"."schema_version" ALTER COLUMN "id" TYPE text COLL
 
 ALTER TABLE "workflow_manager"."queue_scopes" ALTER COLUMN "id" TYPE text COLLATE "C";
 
-ALTER TABLE "workflow_manager"."deployment_holds" ALTER COLUMN "id" TYPE text COLLATE "C", ALTER COLUMN "app_id" TYPE text COLLATE "C", ALTER COLUMN "deployment_id" TYPE text COLLATE "C", ALTER COLUMN "holder_id" TYPE text COLLATE "C";
+ALTER TABLE "workflow_manager"."deployment_holds" ALTER COLUMN "id" TYPE text COLLATE "C", ALTER COLUMN "app_id" TYPE text COLLATE "C", ALTER COLUMN "deployment_id" TYPE text COLLATE "C", ALTER COLUMN "holder_id" TYPE text COLLATE "C", ALTER COLUMN "journal_job_id" TYPE text COLLATE "C";
 
 ALTER TABLE "workflow_manager"."workers" ALTER COLUMN "id" TYPE text COLLATE "C";
 
@@ -170,4 +172,4 @@ ALTER TABLE "workflow_manager"."schedule_scopes" ALTER COLUMN "id" TYPE text COL
 ALTER TABLE "workflow_manager"."schedules" ALTER COLUMN "id" TYPE text COLLATE "C", ALTER COLUMN "app_id" TYPE text COLLATE "C", ALTER COLUMN "name" TYPE text COLLATE "C", ALTER COLUMN "activation_id" TYPE text COLLATE "C";
 
 ALTER TABLE "workflow_manager"."schedule_occurrences" ALTER COLUMN "id" TYPE text COLLATE "C", ALTER COLUMN "app_id" TYPE text COLLATE "C", ALTER COLUMN "schedule_id" TYPE text COLLATE "C", ALTER COLUMN "run_id" TYPE text COLLATE "C", ALTER COLUMN "job_id" TYPE text COLLATE "C", ALTER COLUMN "activation_id" TYPE text COLLATE "C";
-INSERT INTO workflow_manager.schema_version (id, fingerprint) VALUES ('manager', '03f9e9849e2baf0f971f5447b3498c67dcfeeee8bd259e82c0b0e9e8d1243862');
+INSERT INTO workflow_manager.schema_version (id, fingerprint) VALUES ('manager', '66f644f59b7654559e65250e163d9552221f1e3735145064ad69ae817b85aa5b');

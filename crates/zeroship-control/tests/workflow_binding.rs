@@ -1,14 +1,12 @@
 #![allow(clippy::await_holding_lock, clippy::future_not_send)]
 
-use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{mpsc, Arc};
 use std::thread;
-use std::time::Duration;
 
 use compio_postgres::{connect, NoTls};
 use ntex::web::{self, test};
-use serde_json::{json, Value};
+use serde_json::json;
 use uuid::Uuid;
 use zeroship_bundle::{BlobStore, LocalDiskBlobStore, LocalWorkflowBlobStore, WorkflowBlobStore};
 use zeroship_control::{
@@ -16,13 +14,14 @@ use zeroship_control::{
     StripeStore,
 };
 use zeroship_core::AppId;
-use zeroship_runtime::channel::CancelFlag;
-use zeroship_runtime::plugin::NativePlugin;
-use zeroship_runtime::{
-    init_v8, EnvSnapshot, FetchOutcome, ModuleEntry, RequestCtx, Runtime, SettledFetch,
+use zeroship_workflow::operations::{
+    RestartOptions, RunOperation, RunState, SignalOptions, StartOptions,
 };
 use zeroship_workflow::store::pg::{PgStore, WorkflowTables};
-use zeroship_workflow_v8::WorkflowBinding;
+use zeroship_workflow::{
+    app_scoped_token, HttpWorkflowBackend, WorkflowBackend, WorkflowClientConfig,
+    WorkflowServiceError,
+};
 
 use crate::common;
 
@@ -266,108 +265,66 @@ fn wf_sql(app_id: &AppId, sql: &str) -> String {
         .replace("zeroship.workflow_blobs", &tables.blobs)
 }
 
-fn modules(source: &str) -> Vec<ModuleEntry> {
-    vec![ModuleEntry {
-        specifier: "index.js".to_string(),
-        source: source.to_string(),
-    }]
-}
-
-async fn run_workflow_app(control_url: String, app_id: &AppId, source: &str) -> (u16, String) {
-    init_v8();
-    let mut env_vars = HashMap::new();
-    env_vars.insert("APP_ID".to_string(), app_id.as_str().to_owned());
-    let plugin: Arc<dyn NativePlugin> =
-        Arc::new(WorkflowBinding::new(control_url, TEST_CONTROL_KEY));
-    let runtime = Runtime::builder()
-        .modules(modules(source))
-        .env_vars(env_vars)
-        .plugins(vec![plugin])
-        .build();
-    runtime.start_pump();
-
-    let env = EnvSnapshot::empty();
-    let ctx = RequestCtx::new(CancelFlag::new());
-    let outcome = runtime.call_fetch_handler("GET", "http://localhost/", &[], "", &env, ctx);
-    match outcome {
-        FetchOutcome::Response { status, body, .. } => {
-            (status, String::from_utf8_lossy(&body).into_owned())
-        }
-        FetchOutcome::Pending { rx, cancel: _ } => {
-            let settled = compio::time::timeout(Duration::from_secs(30), rx.recv())
-                .await
-                .expect("workflow plugin fetch timed out")
-                .expect("workflow plugin pending dispatch failed");
-            match settled {
-                SettledFetch::Response { status, body, .. } => {
-                    (status, String::from_utf8_lossy(&body).into_owned())
-                }
-                other => {
-                    let name = match other {
-                        SettledFetch::Stream { .. } => "Stream",
-                        SettledFetch::WebSocketUpgrade { .. } => "WebSocketUpgrade",
-                        SettledFetch::Response { .. } => unreachable!(),
-                    };
-                    panic!("workflow plugin: expected response, got {name}");
-                }
-            }
-        }
-        FetchOutcome::Stream { .. } => panic!("workflow plugin: unexpected stream"),
-        FetchOutcome::WebSocketUpgrade { .. } => {
-            panic!("workflow plugin: unexpected websocket upgrade")
-        }
-    }
+/// The Control instance API client for one app, under its app-scoped token.
+fn backend(control: &ControlServer, app: &AppId) -> HttpWorkflowBackend {
+    HttpWorkflowBackend::new(WorkflowClientConfig::new(
+        &control.base,
+        app.as_str().to_owned(),
+        app_scoped_token(TEST_CONTROL_KEY, app.as_str()),
+    ))
 }
 
 #[compio::test]
-async fn v8_binding_round_trips_through_the_control_instance_api() {
+async fn control_instance_api_round_trips_lifecycle_operations() {
     let fx = build_fixture(crate::workflow_postgres::Database::new(), "round-trip").await;
     let app_id = seed_app(&fx, &["Checkout"]).await;
     let control = ControlServer::start(Arc::clone(&fx.state));
-    let control_url = control.base.clone();
-    let source = r#"
-        export default {
-          async fetch(_req, env) {
-            const failures = [];
-            function check(ok, step, value) {
-              if (!ok) failures.push({ step, value });
-            }
-            check(env.workflows.then === undefined, "then", typeof env.workflows.then);
-            check(env.workflows[Symbol.toStringTag] === undefined, "symbol", String(env.workflows[Symbol.toStringTag]));
-            check(env.workflows.toJSON === undefined, "toJSON", typeof env.workflows.toJSON);
-            check(env.workflows.toString === undefined, "inherited", typeof env.workflows.toString);
-            const run = await env.workflows.Checkout.start({ input: { orderId: "ord_1" } });
-            check(typeof run.id === "string" && run.id.startsWith("run_"), "run.id", run.id);
-            const first = await run.status();
-            check(first.state === "queued", "status.queued", first);
-            const signal = await run.signal({ type: "approved", payload: { by: "tester" } });
-            check(typeof signal.id === "string" && signal.id.startsWith("sig_"), "signal.id", signal.id);
-            const cancel = await run.cancel();
-            check(cancel.state === "cancelled", "cancel.state", cancel);
-            const finalStatus = await env.workflows.Checkout.get(run.id).status();
-            check(finalStatus.state === "cancelled", "status.cancelled", finalStatus);
-            const restarted = await run.restart();
-            check(restarted.id === run.id, "restart.sameRun", restarted.id);
-            const restartStatus = await restarted.status();
-            check(restartStatus.state === "queued", "restart.status", restartStatus);
-            return Response.json({
-              ok: failures.length === 0,
-              failures,
-              runId: run.id,
-              signalId: signal.id,
-              first,
-              cancel,
-              finalStatus,
-              restartStatus
-            }, { status: failures.length === 0 ? 200 : 500 });
-          }
-        };
-    "#;
-    let (status, body) = run_workflow_app(control_url, &app_id, source).await;
-    assert_eq!(status, 200, "body: {body}");
-    let value: Value = serde_json::from_str(&body).expect("body json");
-    assert_eq!(value["ok"], true, "body: {body}");
-    let run_id = value["runId"].as_str().expect("run id");
+    let backend = backend(&control, &app_id);
+    let run = backend
+        .start(
+            "Checkout".into(),
+            StartOptions {
+                input: json!({ "orderId": "ord_1" }),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("start through the Control instance API");
+    let run_id = run.id.clone();
+    assert!(run_id.starts_with("run_"), "{run_id}");
+    assert_eq!(
+        backend.status(run_id.clone()).await.unwrap().state,
+        RunState::Queued
+    );
+    let signal = backend
+        .signal(
+            run_id.clone(),
+            SignalOptions {
+                signal_type: "approved".into(),
+                payload: json!({ "by": "tester" }),
+            },
+        )
+        .await
+        .expect("signal through the Control instance API");
+    assert!(signal.id.starts_with("sig_"), "{}", signal.id);
+    let cancelled = backend
+        .transition(run_id.clone(), RunOperation::Cancel)
+        .await
+        .expect("cancel through the Control instance API");
+    assert_eq!(cancelled.state, RunState::Cancelled);
+    assert_eq!(
+        backend.status(run_id.clone()).await.unwrap().state,
+        RunState::Cancelled
+    );
+    let restarted = backend
+        .restart(run_id.clone(), RestartOptions::default())
+        .await
+        .expect("restart through the Control instance API");
+    assert_eq!(restarted.run_id, run_id);
+    assert_eq!(
+        backend.status(run_id.clone()).await.unwrap().state,
+        RunState::Queued
+    );
 
     let run = fx
         .pg
@@ -407,25 +364,18 @@ async fn v8_binding_round_trips_through_the_control_instance_api() {
 }
 
 #[compio::test]
-async fn native_output_reads_preserve_bytes_and_reject_another_apps_run() {
+async fn output_reads_preserve_bytes_and_reject_another_apps_run() {
     use sha2::{Digest, Sha256};
-    use zeroship_workflow::{
-        app_scoped_token, HttpWorkflowBackend, WorkflowBackend, WorkflowClientConfig,
-    };
 
     let fx = build_fixture(crate::workflow_postgres::Database::new(), "output-read").await;
     let app = seed_app(&fx, &["Checkout"]).await;
     let other = seed_app(&fx, &["Checkout"]).await;
     let control = ControlServer::start(Arc::clone(&fx.state));
-    let backend = HttpWorkflowBackend::new(WorkflowClientConfig::new(
-        &control.base,
-        app.as_str().to_owned(),
-        app_scoped_token(TEST_CONTROL_KEY, app.as_str()),
-    ));
-    let started = backend
+    let owner = backend(&control, &app);
+    let started = owner
         .start(
             "Checkout".into(),
-            zeroship_workflow::operations::StartOptions {
+            StartOptions {
                 input: json!({}),
                 ..Default::default()
             },
@@ -446,27 +396,21 @@ async fn native_output_reads_preserve_bytes_and_reject_another_apps_run() {
          VALUES ($1, 0, 'payload', 0, 'run', 'completed', 'blob', $2, $3, 'application/octet-stream', 'batch_output')"),
         &[&run, &hash, &(bytes.len() as i64)],
     ).await.unwrap();
-    let source = format!(
-        r#"
-        export default {{ async fetch(_request, env) {{
-          try {{
-            const bytes = await env.workflows.Checkout.get({run:?}).readStepOutput("payload", 0);
-            return Response.json({{ bytes: [...bytes], typed: bytes instanceof Uint8Array }});
-          }} catch (error) {{ return Response.json({{code: error.code, message: error.message}}, {{status: 400}}); }}
-        }} }};
-    "#
-    );
-    let (status, body) = run_workflow_app(control.base.clone(), &app, &source).await;
-    assert_eq!(status, 200, "{body}");
     assert_eq!(
-        serde_json::from_str::<Value>(&body).unwrap(),
-        json!({"bytes":bytes,"typed":true})
+        owner
+            .read_step_output(run.clone(), "payload".into(), 0)
+            .await
+            .unwrap(),
+        bytes
     );
-    let (status, body) = run_workflow_app(control.base.clone(), &other, &source).await;
-    assert_eq!(status, 400, "another app read the saved output: {body}");
-    let error: Value = serde_json::from_str(&body).unwrap();
-    assert_eq!(error["code"], "workflow_not_found");
-    assert_eq!(error["message"], "workflow resource not found");
+    let error = backend(&control, &other)
+        .read_step_output(run.clone(), "payload".into(), 0)
+        .await
+        .expect_err("another app read the saved output");
+    assert!(
+        matches!(error, WorkflowServiceError::NotFound(_)),
+        "{error:?}"
+    );
     drop(control);
     drop(fx);
     common::drain_pg().await;

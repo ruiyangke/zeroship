@@ -191,13 +191,13 @@ impl Fixture {
         let resources = WorkflowResources {
             storage,
             deployments: deployments.binding(&[&app]),
-            signal_authority: Arc::new(
+            signal_authority: Some(Arc::new(
                 SignalAuthority::new(
                     Arc::new(ServiceSigningKey::generate()),
                     ServiceTrustBundle::new(),
                 )
                 .unwrap(),
-            ),
+            )),
             contexts: contexts.clone(),
         };
         Self {
