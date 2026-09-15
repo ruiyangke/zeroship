@@ -68,6 +68,10 @@ async fn backend_is_published_only_after_preparation_and_withdrawn_on_removal() 
     .await;
 }
 
+/// A generation this process is not permitted to serve is refused, never
+/// published, and given back: the host releases the placement with the closed
+/// refused reason so the manager places the app on another instance and never
+/// offers this pair to this one again.
 #[compio::test]
 async fn a_request_backend_from_another_generation_is_refused_and_never_published() {
     let fixture = Fixture::new();
@@ -75,6 +79,7 @@ async fn a_request_backend_from_another_generation_is_refused_and_never_publishe
     let scope = scope();
     let mut exchanges = fixture.scan(std::slice::from_ref(&scope));
     exchanges.extend(fixture.establish(&scope));
+    exchanges.push(fixture.release());
     peer(&fixture, exchanges, async |client| {
         let (mut consumer, probe) = fixture.consumer(1);
         let bindings = fixture.bindings(client, &consumer, 1);
@@ -91,6 +96,14 @@ async fn a_request_backend_from_another_generation_is_refused_and_never_publishe
                 .await,
         );
         assert!(claims(&mut consumer, &probe).await.is_empty());
+        let released = fixture.submitted.borrow().clone();
+        assert_eq!(released.len(), 1, "{released:?}");
+        assert_eq!(released[0]["appId"], json!(scope.app_id));
+        assert_eq!(
+            released[0]["assignmentRevision"],
+            json!(scope.assignment_revision)
+        );
+        assert_eq!(released[0]["reason"], json!("refused"));
     })
     .await;
 }

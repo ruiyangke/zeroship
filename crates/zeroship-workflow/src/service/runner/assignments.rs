@@ -35,7 +35,9 @@ use std::{
 };
 use zeroship_core::{
     app_id::AppId,
-    workflow_coordination::{AssignedScope, Assignment, ScopePage},
+    workflow_coordination::{
+        AssignedScope, Assignment, ReleaseReason, ReleaseScope, RequestId, ScopePage,
+    },
 };
 use zeroship_workflow_client::WorkerCoordinator;
 
@@ -465,7 +467,7 @@ impl<F: CreatorFactory> AssignmentBindings<F> {
             ));
         }
         let _busy = Busy(&entry.busy);
-        match futures::future::select(
+        let outcome = match futures::future::select(
             entry.stopped.clone(),
             bounded(self.options.operation_timeout, self.prepare(entry)).boxed_local(),
         )
@@ -473,7 +475,52 @@ impl<F: CreatorFactory> AssignmentBindings<F> {
         {
             Either::Left(_) => Err(retired()),
             Either::Right((result, _)) => result,
+        };
+        if matches!(outcome, Err(WorkflowServiceError::PermissionDenied)) {
+            self.refuse(entry).await;
         }
+        outcome
+    }
+
+    /// Give up a placement this process is not permitted to serve.
+    ///
+    /// Refusal is for the one failure a retry cannot change: the manager's
+    /// grant does not authorize this process for this app, so preparing it
+    /// again here would fail the same way forever. Every other failure -
+    /// unavailable storage, a timeout, an internal fault - keeps the placement
+    /// and retries. The release carries the closed reason and no hint: it
+    /// discharges no recovery responsibility, and the manager both stops
+    /// offering this pair to this instance and places the app elsewhere.
+    ///
+    /// A release that does not reach the manager changes nothing: the
+    /// placement stands and the next refresh refuses again.
+    async fn refuse(&self, entry: &Rc<Entry>) {
+        let scope = entry.policies.scope().clone();
+        let released = self
+            .client
+            .release(&ReleaseScope {
+                request_id: RequestId::mint(),
+                app_id: scope.app_id.clone(),
+                assignment_revision: scope.assignment_revision,
+                reason: ReleaseReason::Refused,
+            })
+            .await;
+        if let Err(error) = released {
+            tracing::warn!(
+                app_id = %scope.app_id.as_str(),
+                %error,
+                "workflow host could not release a placement it cannot serve"
+            );
+            return;
+        }
+        tracing::warn!(
+            app_id = %scope.app_id.as_str(),
+            "workflow host refused a placement it is not permitted to serve"
+        );
+        if let Some(entry) = self.entries.borrow_mut().remove(&scope.app_id) {
+            let _ = entry.retire();
+        }
+        let _ = self.publish();
     }
 
     async fn prepare(&self, entry: &Rc<Entry>) -> Result<(), WorkflowServiceError> {
