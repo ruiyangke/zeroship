@@ -544,7 +544,7 @@ async fn held_app_lock(fixture: &Fixture) {
                         "final enrollment cannot pass the held app lock"
                     );
                     source.change(change);
-                    Ok(())
+                    Ok::<(), Error>(())
                 })
                 .await
                 .unwrap();

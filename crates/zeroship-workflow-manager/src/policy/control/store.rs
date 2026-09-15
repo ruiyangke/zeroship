@@ -7,7 +7,10 @@ use std::time::{Duration, Instant};
 use zeroship_core::{app_id::AppId, workflow_coordination::Revision, workflow_policy::AppPolicy};
 use zeroship_data_orm::{
     error::DbError,
-    orm::{ConflictTarget, Database, FromRow, Insertable, IsolationLevel, TransactionOptions},
+    orm::{
+        ConflictTarget, Database, FromRow, Insertable, IsolationLevel, TransactionOptions,
+        UtcInstant,
+    },
     Value,
 };
 
@@ -136,7 +139,7 @@ impl ControlPolicyStore {
 #[orm(entity = apps)]
 struct AppRecord {
     workflows_enabled: bool,
-    archived_at: Option<i64>,
+    archived_at: Option<UtcInstant>,
 }
 #[derive(FromRow)]
 #[orm(entity = plans)]

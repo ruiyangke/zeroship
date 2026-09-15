@@ -274,7 +274,7 @@ async fn current_pointer(fixture: LatestFixture) {
         .patch(
             "app_deploys",
             later.deployment_id.as_str(),
-            value!({"activated_at":Value::Timestamp(1000)}),
+            value!({"activated_at":Value::TimestampMicros(1000)}),
         )
         .await;
     fixture.assert_write_rejected(&app).await;
@@ -414,7 +414,7 @@ async fn malformed_storage(fixture: LatestFixture) {
         .unwrap()
         .insert(value!({
             "id":"malformed-deployment-id", "app_id":app.as_str(), "deploy_hash":bad_hash,
-            "manifest_json":"unread", "created_at":Value::Timestamp(0), "activated_at":null,
+            "manifest_json":"unread", "created_at":Value::TimestampMicros(0), "activated_at":null,
             "retention_state":"available", "retention_lock":0,
         }))
         .await
