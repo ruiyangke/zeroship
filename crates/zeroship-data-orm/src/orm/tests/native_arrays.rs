@@ -95,7 +95,7 @@ async fn insert_cases(records: &Collection) {
         assert_eq!(&row["labels"], labels, "{key}");
         assert_eq!(&row["maybe"], maybe, "{key}");
     }
-    for (key, labels, maybe) in single.iter().cloned() {
+    for (key, labels, maybe) in single {
         let Output::Rows { rows, .. } = records
             .insert(value!({"key":key, "labels":labels.clone(), "maybe":maybe.clone()}))
             .await
@@ -103,14 +103,15 @@ async fn insert_cases(records: &Collection) {
         else {
             panic!("insert must return rows")
         };
-        assert_eq!(rows[0]["labels"], labels, "{key}");
-        assert_eq!(rows[0]["maybe"], maybe, "{key}");
+        assert_eq!(&rows[0]["labels"], labels, "{key}");
+        assert_eq!(&rows[0]["maybe"], maybe, "{key}");
     }
     for (key, labels, maybe) in cases() {
         assert_eq!(labels_of(records, key).await, (labels, maybe), "{key}");
     }
 }
 
+#[expect(clippy::too_many_lines, reason = "shared backend conformance scenario")]
 async fn exercise(owner: &CollectionFixture) {
     let records = owner.database.collection("records").unwrap();
     assert_eq!(
