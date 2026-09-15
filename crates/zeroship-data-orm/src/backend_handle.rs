@@ -64,7 +64,7 @@ impl BackendHandle {
         self
     }
     pub(crate) fn declares_transaction_setting_namespace(&self, namespace: &str) -> bool {
-        self.4.iter().any(|declared| *declared == namespace)
+        self.4.contains(&namespace)
     }
     pub fn sql_registration(&self) -> &crate::sql::registration::SqlRegistration {
         &self.2

@@ -371,7 +371,7 @@ impl PreparedRead {
             None => statement,
         };
         let query = registration
-            .compile(Statement::Select(statement))
+            .compile(Statement::select(statement))
             .map_err(|error| match error {
                 crate::sql::compiler::CompileError::Unsupported(feature) if locked => {
                     super::unsupported_backend_feature(feature)

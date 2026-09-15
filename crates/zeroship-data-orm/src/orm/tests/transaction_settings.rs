@@ -72,10 +72,9 @@ fn flag() -> TransactionSetting {
 }
 
 fn assert_code(error: DbError, expected: &str) {
-    assert!(
-        matches!(&error, DbError::ValidationFailed { code, .. } if *code == expected),
-        "expected {expected}: {error:?}"
-    );
+    let matched =
+        matches!(&error, DbError::ValidationFailed { code, .. } if *code == expected);
+    assert!(matched, "expected {expected}: {}", error.into_string());
 }
 
 /// The committed row's defaulted setting and backend pid, read outside the ORM.

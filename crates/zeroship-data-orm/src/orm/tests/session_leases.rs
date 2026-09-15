@@ -46,10 +46,9 @@ async fn fixture(postgres: bool, pool_size: usize) -> CollectionFixture {
 }
 
 fn assert_code(error: DbError, expected: &str) {
-    assert!(
-        matches!(&error, DbError::ValidationFailed { code, .. } if *code == expected),
-        "expected {expected}: {error:?}"
-    );
+    let matched =
+        matches!(&error, DbError::ValidationFailed { code, .. } if *code == expected);
+    assert!(matched, "expected {expected}: {}", error.into_string());
 }
 
 fn postgres_backend(owner: &CollectionFixture) -> &crate::backend::postgres::PostgresBackend {

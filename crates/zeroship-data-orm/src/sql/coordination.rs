@@ -15,7 +15,7 @@ pub const ADVISORY_RELEASED: &str = "released";
 /// Longest identifier segment accepted in a setting name.
 const MAX_SETTING_SEGMENT_BYTES: usize = 63;
 
-/// An advisory lock key in one of PostgreSQL's key forms.
+/// An advisory lock key in one of the `PostgreSQL` key forms.
 ///
 /// The hashed forms send their text to the database, which computes the key.
 /// One-argument keys (`Single`, `Hashed`, `HashedLowercase`) and two-argument
@@ -72,7 +72,7 @@ impl AdvisoryKey {
 
     /// Bound parameters used by this key form.
     #[must_use]
-    pub fn bind_parameters(&self) -> usize {
+    pub const fn bind_parameters(&self) -> usize {
         match self {
             Self::Single(_) | Self::Hashed(_) | Self::HashedLowercase(_) => 1,
             Self::Pair(..) | Self::HashedPair { .. } => 2,
@@ -121,6 +121,8 @@ pub struct AdvisoryLock {
 }
 
 impl AdvisoryLock {
+    /// # Errors
+    /// Refuses a transaction-scoped release and NUL bytes in key text.
     pub fn new(
         key: AdvisoryKey,
         scope: AdvisoryLockScope,
@@ -131,6 +133,8 @@ impl AdvisoryLock {
         Ok(lock)
     }
 
+    /// # Errors
+    /// Refuses a transaction-scoped release and NUL bytes in key text.
     pub fn validate(&self) -> Result<(), CompileError> {
         if self.scope == AdvisoryLockScope::Transaction && self.action == AdvisoryLockAction::Release
         {
@@ -145,24 +149,24 @@ impl AdvisoryLock {
     }
 
     #[must_use]
-    pub fn key(&self) -> &AdvisoryKey {
+    pub const fn key(&self) -> &AdvisoryKey {
         &self.key
     }
 
     #[must_use]
-    pub fn scope(&self) -> AdvisoryLockScope {
+    pub const fn scope(&self) -> AdvisoryLockScope {
         self.scope
     }
 
     #[must_use]
-    pub fn action(&self) -> AdvisoryLockAction {
+    pub const fn action(&self) -> AdvisoryLockAction {
         self.action
     }
 }
 
 /// A custom setting name: two lowercase identifiers joined by one dot.
 ///
-/// Every built-in PostgreSQL setting is dotless, including the role and
+/// Every built-in `PostgreSQL` setting is dotless, including the role and
 /// resource limits the ORM applies to its sessions, so a valid name can
 /// never override them. Which namespaces a connection may set is the host's
 /// declaration, checked where the setting is applied.
@@ -173,6 +177,8 @@ pub struct SettingName {
 }
 
 impl SettingName {
+    /// # Errors
+    /// Refuses anything but two lowercase identifiers joined by one dot.
     pub fn new(name: &str) -> Result<Self, CompileError> {
         let (namespace, setting) = name
             .split_once('.')
@@ -222,6 +228,8 @@ pub struct SetTransactionSetting {
 }
 
 impl SetTransactionSetting {
+    /// # Errors
+    /// Refuses a value containing a NUL byte.
     pub fn new(name: SettingName, value: impl Into<String>) -> Result<Self, CompileError> {
         let setting = Self {
             name,
@@ -231,6 +239,8 @@ impl SetTransactionSetting {
         Ok(setting)
     }
 
+    /// # Errors
+    /// Refuses a value containing a NUL byte.
     pub fn validate(&self) -> Result<(), CompileError> {
         if self.value.contains('\0') {
             return Err(invalid("a transaction setting value cannot contain a NUL byte"));
@@ -239,7 +249,7 @@ impl SetTransactionSetting {
     }
 
     #[must_use]
-    pub fn name(&self) -> &SettingName {
+    pub const fn name(&self) -> &SettingName {
         &self.name
     }
 
@@ -248,6 +258,7 @@ impl SetTransactionSetting {
         &self.value
     }
 
+    #[must_use]
     pub fn into_parts(self) -> (SettingName, String) {
         (self.name, self.value)
     }

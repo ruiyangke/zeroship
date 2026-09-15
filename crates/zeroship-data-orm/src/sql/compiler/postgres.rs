@@ -294,7 +294,7 @@ impl SqlCompiler for PostgresCompiler {
         )?;
         match statement {
             Statement::Select(statement) => {
-                super::shared::compile_select(SYNTAX, effective, statement)
+                super::shared::compile_select(SYNTAX, effective, *statement)
             }
             Statement::VectorSearch(statement) => {
                 super::shared::compile_vector_search(SYNTAX, effective, statement)
