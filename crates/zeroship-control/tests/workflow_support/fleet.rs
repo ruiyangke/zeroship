@@ -368,7 +368,7 @@ impl Fleet {
         let mut worker_env = vec![
             (
                 "ZEROSHIP_WORKER_DATABASE_URL",
-                fleet.role_url("zeroship_worker"),
+                fleet.creator_role_url("zeroship_worker"),
             ),
             (
                 "ZEROSHIP_WORKER_CDC_RELAY_URL",
@@ -494,7 +494,15 @@ impl Fleet {
                 .await
                 .unwrap();
         let driver = compio::runtime::spawn(connection.run());
-        zeroship_migrate_server::provisioning::provision_database(&pg, fleet.app_id.as_str())
+        // THE CREATOR ZONE. Every schema statement below runs on the creator
+        // database, which has no platform schema;  above stays on the
+        // platform one and is used only for platform catalog rows.
+        let (creator_pg, creator_connection) =
+            compio_postgres::connect(&fleet.database.creator_url(), compio_postgres::NoTls)
+                .await
+                .unwrap();
+        let creator_driver = compio::runtime::spawn(creator_connection.run());
+        zeroship_migrate_server::provisioning::provision_database(&creator_pg, fleet.app_id.as_str())
             .await
             .unwrap();
         if fleet.manager_url.is_some() {
@@ -504,7 +512,7 @@ impl Fleet {
             // reaches it exactly as it reaches the creator's own tables.
             let schema = zeroship_workflow::service::store::SchemaName::new(fleet.app_id.as_str())
                 .expect("the app's schema name");
-            pg.batch_execute(&zeroship_workflow::service::schema::postgres_sql(&schema))
+            creator_pg.batch_execute(&zeroship_workflow::service::schema::postgres_sql(&schema))
                 .await
                 .expect("install the creator workflow journal");
         }
@@ -520,8 +528,11 @@ impl Fleet {
         let ledger = zeroship_migrate_server::schema_apply_store::SchemaApplyStore::new(
             fleet.database.url(),
         );
+        // The DDL lands in the creator database; the apply LEDGER stays a
+        // platform table, which is the same split the migration service runs
+        // under in production.
         zeroship_migrate_server::apply::apply_ir_documents(
-            &fleet.database.url(),
+            &fleet.database.creator_url(),
             &schema_work,
             &fleet.app_id,
             &request,
@@ -571,6 +582,8 @@ impl Fleet {
         pg.batch_execute("INSERT INTO zeroship.workflow_rollout_config (id, dispatch_paused, ingress_disabled, source_validity_ms, updated_by) VALUES ('global', false, false, 30000, 'workflow-fixture') ON CONFLICT (id) DO UPDATE SET dispatch_paused = false, ingress_disabled = false").await.unwrap();
         fleet.deploy_id = pg.query_one("SELECT id FROM zeroship.app_deploys WHERE app_id = $1 ORDER BY activated_at DESC, created_at DESC, id DESC LIMIT 1", &[&fleet.app_id.as_str()]).await.unwrap().get(0);
         drop(pg);
+        drop(creator_pg);
+        creator_driver.await.unwrap().unwrap();
         driver.await.unwrap().unwrap();
         fleet
     }
@@ -588,8 +601,16 @@ impl Fleet {
         fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
     }
 
-    fn role_url(&self, role: &str) -> String {
+    pub fn role_url(&self, role: &str) -> String {
         let mut url = url::Url::parse(&self.database.url()).unwrap();
+        url.set_username(role).unwrap();
+        url.set_password(Some(role)).unwrap();
+        url.into()
+    }
+
+    /// The same login against the CREATOR zone. Only the worker takes one.
+    pub fn creator_role_url(&self, role: &str) -> String {
+        let mut url = url::Url::parse(&self.database.creator_url()).unwrap();
         url.set_username(role).unwrap();
         url.set_password(Some(role)).unwrap();
         url.into()
