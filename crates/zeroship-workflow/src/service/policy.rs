@@ -240,8 +240,8 @@ impl HostPolicies {
     /// # Errors
     /// Reports unavailable state or exhausted generation identity.
     pub fn bind(self: &Arc<Self>, app: AppId) -> Result<PolicyBinding, WorkflowServiceError> {
-        let mut state = self.state.write().map_err(|_| unavailable())?;
-        let generation = state.generation.checked_add(1).ok_or_else(unavailable)?;
+        let mut state = self.state.write().map_err(|_| unavailable("registry lock poisoned"))?;
+        let generation = state.generation.checked_add(1).ok_or_else(|| unavailable("no installed policy for this binding"))?;
         let current = Current {
             snapshot: None,
             ticket_sequence: 0,
@@ -272,12 +272,12 @@ impl HostPolicies {
         self: &Arc<Self>,
         app: &AppId,
     ) -> Result<PolicyBinding, WorkflowServiceError> {
-        let state = self.state.read().map_err(|_| unavailable())?;
+        let state = self.state.read().map_err(|_| unavailable("registry lock poisoned"))?;
         let entry = state
             .entries
             .get(app)
             .filter(|entry| entry.current.is_some())
-            .ok_or_else(unavailable)?;
+            .ok_or_else(|| unavailable("no installed policy for this binding"))?;
         let generation = entry.generation;
         drop(state);
         Ok(PolicyBinding {
@@ -290,7 +290,7 @@ impl HostPolicies {
     /// Expired current snapshots remain discoverable for explicit host recovery.
     /// Uninitialized and revoked bindings supply no maintenance authority.
     pub(crate) fn app_ids(&self) -> Result<Vec<AppId>, WorkflowServiceError> {
-        let state = self.state.read().map_err(|_| unavailable())?;
+        let state = self.state.read().map_err(|_| unavailable("registry lock poisoned"))?;
         Ok(state
             .entries
             .iter()
@@ -305,7 +305,7 @@ impl HostPolicies {
     }
 
     pub(crate) fn resolve(&self, app: &AppId) -> Result<AppPolicy, WorkflowServiceError> {
-        let state = self.state.read().map_err(|_| unavailable())?;
+        let state = self.state.read().map_err(|_| unavailable("registry lock poisoned"))?;
         state
             .entries
             .get(app)
@@ -338,7 +338,7 @@ impl PolicyBinding {
             .get(&self.app)
             .filter(|entry| entry.generation == self.generation)
             .and_then(|entry| entry.current.as_ref())
-            .ok_or_else(unavailable)
+            .ok_or_else(|| unavailable("no installed policy for this binding"))
     }
 
     /// Reserve a refresh before starting metadata I/O. Existing snapshot authority
@@ -347,7 +347,7 @@ impl PolicyBinding {
     /// # Errors
     /// Rejects retired bindings and unavailable or exhausted ticket state.
     pub fn begin_refresh(&self) -> Result<PolicyRefresh, WorkflowServiceError> {
-        let mut state = self.registry.state.write().map_err(|_| unavailable())?;
+        let mut state = self.registry.state.write().map_err(|_| unavailable("registry lock poisoned"))?;
         // Each step reports ITSELF. Folded into one `ok_or_else`, an app with no
         // entry, a binding superseded by a newer generation and an entry holding
         // no installed policy all answered "workflow host policy unavailable",
@@ -370,7 +370,7 @@ impl PolicyBinding {
         let ticket = current
             .ticket_sequence
             .checked_add(1)
-            .ok_or_else(unavailable)?;
+            .ok_or_else(|| unavailable("no installed policy for this binding"))?;
         current.ticket_sequence = ticket;
         current.ticket = Some(ticket);
         drop(state);
@@ -387,12 +387,12 @@ impl PolicyBinding {
     /// # Errors
     /// Rejects replaced bindings and unavailable state.
     pub fn revoke(&self) -> Result<(), WorkflowServiceError> {
-        let mut state = self.registry.state.write().map_err(|_| unavailable())?;
+        let mut state = self.registry.state.write().map_err(|_| unavailable("registry lock poisoned"))?;
         let entry = state
             .entries
             .get_mut(&self.app)
             .filter(|entry| entry.generation == self.generation)
-            .ok_or_else(unavailable)?;
+            .ok_or_else(|| unavailable("no installed policy for this binding"))?;
         let retired = entry.current.take();
         drop(state);
         if let Some(retired) = retired {
@@ -402,12 +402,12 @@ impl PolicyBinding {
     }
 
     pub(crate) fn resolve(&self) -> Result<AppPolicy, WorkflowServiceError> {
-        let state = self.registry.state.read().map_err(|_| unavailable())?;
+        let state = self.registry.state.read().map_err(|_| unavailable("registry lock poisoned"))?;
         self.current(&state)?
             .snapshot
             .as_ref()
             .map(PolicySnapshot::effective)
-            .ok_or_else(unavailable)
+            .ok_or_else(|| unavailable("no installed policy for this binding"))
     }
 
     /// The ingress epoch of this generation's installed snapshot. Retired,
@@ -419,9 +419,9 @@ impl PolicyBinding {
     }
 
     pub(crate) fn authority(&self) -> Result<PolicyAuthority, WorkflowServiceError> {
-        let state = self.registry.state.read().map_err(|_| unavailable())?;
+        let state = self.registry.state.read().map_err(|_| unavailable("registry lock poisoned"))?;
         let current = self.current(&state)?;
-        let snapshot = current.snapshot.as_ref().ok_or_else(unavailable)?;
+        let snapshot = current.snapshot.as_ref().ok_or_else(|| unavailable("no installed policy for this binding"))?;
         let deadline = live_deadline(&snapshot.validity)?;
         let authority = PolicyAuthority {
             binding: self.clone(),
@@ -451,15 +451,15 @@ impl PolicyRefresh {
             .registry
             .state
             .write()
-            .map_err(|_| unavailable())?;
+            .map_err(|_| unavailable("registry lock poisoned"))?;
         let entry = state
             .entries
             .get_mut(&self.binding.app)
             .filter(|entry| entry.generation == self.binding.generation)
-            .ok_or_else(unavailable)?;
-        let current = entry.current.as_mut().ok_or_else(unavailable)?;
+            .ok_or_else(|| unavailable("no installed policy for this binding"))?;
+        let current = entry.current.as_mut().ok_or_else(|| unavailable("no installed policy for this binding"))?;
         if current.ticket != Some(self.ticket) {
-            return Err(unavailable());
+            return Err(unavailable("refresh ticket superseded by a newer refresh"));
         }
         current.ticket = None;
         if let Some((revision, policy)) = &entry.high_water {
@@ -486,7 +486,7 @@ impl PolicyRefresh {
                 .epoch
                 .number
                 .checked_add(1)
-                .ok_or_else(unavailable)?;
+                .ok_or_else(|| unavailable("no installed policy for this binding"))?;
             Some(std::mem::replace(&mut current.epoch, Epoch::new(number)))
         } else {
             None
@@ -533,11 +533,11 @@ impl PolicyAuthority {
             .registry
             .state
             .read()
-            .map_err(|_| unavailable())?;
+            .map_err(|_| unavailable("registry lock poisoned"))?;
         let current = self.binding.current(&state)?;
-        let snapshot = current.snapshot.as_ref().ok_or_else(unavailable)?;
+        let snapshot = current.snapshot.as_ref().ok_or_else(|| unavailable("no installed policy for this binding"))?;
         if current.epoch.number != self.epoch || snapshot.revision != self.revision {
-            return Err(unavailable());
+            return Err(unavailable("installed policy moved to another epoch or revision"));
         }
         live_deadline(&snapshot.validity)?;
         if self
@@ -585,8 +585,8 @@ impl PolicyAuthority {
             let operation = operation.fuse();
             futures::pin_mut!(cancelled, expiry, operation);
             futures::select_biased! {
-                () = cancelled => Err(unavailable()),
-                () = expiry => Err(unavailable()),
+                () = cancelled => Err(unavailable("binding cancelled while the operation ran")),
+                () = expiry => Err(unavailable("lease expired while the operation ran")),
                 result = operation => { self.check()?; result },
             }
         })
@@ -633,12 +633,23 @@ fn live_deadline(validity: &Validity) -> Result<Option<Instant>, WorkflowService
     match validity {
         Validity::Configuration => Ok(None),
         Validity::Until(deadline) if *deadline > Instant::now() => Ok(Some(*deadline)),
-        Validity::Until(_) => Err(unavailable()),
+        Validity::Until(_) => Err(unavailable("lease deadline had already elapsed")),
     }
 }
 
-fn unavailable() -> WorkflowServiceError {
-    WorkflowServiceError::Unavailable("workflow host policy unavailable".into())
+/// The policy registry cannot answer, and WHY.
+///
+/// The reason is not decoration. A host that stops consuming reports
+/// `workflow_unavailable` and nothing else, and this one message used to stand
+/// for a poisoned lock, an app with no entry, a superseded generation, an
+/// uninstalled policy, a stale refresh ticket, a cancelled operation and THREE
+/// separate expiry paths. Chasing a consumption stall through that produced one
+/// wrong diagnosis after another: the expiry hypothesis was refuted by renaming
+/// a single expiry site while two others still answered with the shared string.
+///
+/// Every caller names its own condition, so the log says which one fired.
+fn unavailable(reason: &'static str) -> WorkflowServiceError {
+    WorkflowServiceError::Unavailable(format!("workflow host policy unavailable: {reason}"))
 }
 
 /// The installed policy outlived its lease.

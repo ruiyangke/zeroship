@@ -173,7 +173,9 @@ impl AssignedPolicies {
             || lease.signing_key_id() != self.client.signing_key_id()
             || lease.assignment_revision() != self.scope.assignment_revision
         {
-            return Err(super::unavailable());
+            return Err(super::unavailable(
+                "the manager's lease does not match this binding's app, worker, key or assignment revision",
+            ));
         }
         lease.remaining().map_err(transport_error)?;
         ticket.install(
