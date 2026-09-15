@@ -563,9 +563,6 @@ async fn race_target(fixture: &Fixture) -> Cost {
     }
 }
 
-
-/// Make an intent's paced retry due without waiting out its interval.
-
 /// Both replicas tick until every app is owned.
 async fn settle(a: &Host, b: &Host, provider: Rc<dyn CapacityProvider>, apps: &[AppId]) {
     let mut first = a.driver(LONG, provider.clone());

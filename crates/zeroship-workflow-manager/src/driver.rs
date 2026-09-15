@@ -240,12 +240,10 @@ impl Driver {
 
     async fn lane(&mut self, lane: usize) -> LaneReport {
         let deadline = Deadline(Instant::now() + self.options.lane_timeout);
-        let page = if lane < 4 {
-            self.maintenance_page(lane, deadline).await
-        } else if lane == 4 {
-            self.closing_candidates(deadline).await.map(whole)
-        } else {
-            Box::pin(self.placement_page(lane, deadline)).await
+        let page = match lane {
+            0..=3 => self.maintenance_page(lane, deadline).await,
+            4 => self.closing_candidates(deadline).await.map(whole),
+            _ => Box::pin(self.placement_page(lane, deadline)).await,
         };
         let mut report = LaneReport::default();
         let (page, fetched) = match page {
@@ -550,8 +548,7 @@ impl Candidate {
             Self::Scheduled(row) => row.id(),
             Self::Recoverable(_, row) => row.id(),
             Self::Hold(row) => row.id(),
-            Self::Closing { id, .. } => id,
-            Self::Visit(id) | Self::Zone(id) => id,
+            Self::Closing { id, .. } | Self::Visit(id) | Self::Zone(id) => id,
         }
     }
 }
