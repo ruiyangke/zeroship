@@ -110,6 +110,14 @@ use crate::channel::{
     self, CancelFlag, ResultSender,
 };
 
+/// Specifier of the host-only module that owns durable workflow replay.
+///
+/// `WorkflowBinding` in `zeroship-workflow-v8` supplies the source through
+/// `NativePlugin::host_javascript_modules`; the runtime knows only this name
+/// and the `dispatch` export it calls. A runtime that registers no plugin
+/// supplying it cannot dispatch workflows, and creator code cannot import it.
+pub const WORKFLOW_DISPATCH_MODULE: &str = "zeroship:workflows/dispatch";
+
 /// Count of near-heap-limit callback invocations across every isolate in this
 /// process, since start. Monotonic; never reset.
 ///
@@ -545,9 +553,9 @@ impl Runtime {
         )
     }
 
-    /// Durable-workflow replay dispatch. Invokes the embedded workflow
-    /// bridge's `default.workflow(envelope, ctx)` entry and returns the JSON
-    /// StepResult object it produced.
+    /// Durable-workflow replay dispatch. Invokes the `dispatch` export of the
+    /// host-only [`WORKFLOW_DISPATCH_MODULE`] against the creator entry's own
+    /// namespace and returns the JSON `StepResult` object it produced.
     pub fn call_workflow_dispatch(
         &self,
         envelope_json: &str,
@@ -912,8 +920,8 @@ enum PendingOrigin {
     Fetch,
     /// A native procedure call is waiting for its loader or handler promise.
     Rpc,
-    /// Promise came from `default.workflow` — resolved value is the
-    /// StepResult object the embedded workflow bridge returns.
+    /// Promise came from the host workflow bridge — resolved value is the
+    /// `StepResult` object its `dispatch` export returns.
     Workflow,
 }
 
@@ -980,7 +988,13 @@ pub(crate) struct RuntimeInner {
     /// A dispatch holds this snapshot while later loading can replace it.
     pub(crate) application: Option<Rc<super::application_entry::ApplicationEntry>>,
 
-    pub(crate) workflow_fn: Option<v8::Global<v8::Function>>,
+    /// The creator entry module, retained from compilation so startup can
+    /// publish its namespace without evaluating the entry a second time.
+    pub(crate) creator_entry: Option<v8::Global<v8::Module>>,
+    /// The creator entry's module namespace, published only once startup has
+    /// evaluated it. Workflow replay passes this to the host bridge, so the
+    /// module instance it sees is the one request dispatch imported.
+    pub(crate) creator_namespace: Option<v8::Global<v8::Value>>,
     startup: StartupState,
     dev_entry_factory: Option<String>,
     dev_entry_loader: Option<super::dev_entry::DevEntryLoader>,
@@ -1309,7 +1323,8 @@ impl RuntimeInner {
             isolate,
             context,
             application: None,
-            workflow_fn: None,
+            creator_entry: None,
+            creator_namespace: None,
             startup: StartupState::Uninitialized,
             dev_entry_factory: None,
             dev_entry_loader: None,
@@ -2002,13 +2017,13 @@ impl RuntimeInner {
         crate::node::net::state::reset_dispatch_egress(&self.state);
 
         let init_result = self.initialize_modules(modules, env);
-        if self.workflow_fn.is_none() || self.host_interrupt.load(Ordering::Acquire) {
+        if self.creator_namespace.is_none() || self.host_interrupt.load(Ordering::Acquire) {
             let msg = match init_result {
                 Err(err) => err,
                 Ok(_) if self.host_interrupt.load(Ordering::Acquire) => {
                     self.termination_message().to_string()
                 }
-                Ok(true) => "No default.workflow handler exported".to_string(),
+                Ok(true) => "Startup published no creator module for workflow dispatch".to_string(),
                 Ok(false) => "Runtime startup is pending; await initialize before workflow dispatch".to_string(),
             };
             return crate::WorkflowOutcome::Response {
@@ -2032,7 +2047,7 @@ impl RuntimeInner {
         let dispatch_result: Result<Result<String, DispatchError>, v8::Global<v8::Promise>> =
             enter_v8!(self, |scope| {
                 crate::core::invocation::with_context(scope, &invocation_context, |scope| {
-                    let workflow_fn = v8::Local::new(scope, self.workflow_fn.as_ref().unwrap());
+                    let creator = v8::Local::new(scope, self.creator_namespace.as_ref().unwrap());
                     match parse_workflow_envelope(scope, envelope_json) {
                         Ok(envelope_arg) => {
                             let ctx_arg: v8::Local<v8::Value> = {
@@ -2042,7 +2057,7 @@ impl RuntimeInner {
                                     None => v8::Object::new(scope).into(),
                                 }
                             };
-                            call_workflow_inner(scope, workflow_fn, envelope_arg, ctx_arg)
+                            call_workflow_inner(scope, creator, envelope_arg, ctx_arg)
                         }
                         Err(e) => Ok(Err(e)),
                     }
@@ -4265,51 +4280,45 @@ fn workflow_rejection_to_error(
     }
 }
 
+/// Replay one dispatch through the host-only workflow bridge.
+///
+/// The bridge is a plugin-registered host module, so it is outside the
+/// creator's module graph and nothing in that graph instantiates it.
+/// `invoke_module_export` links and evaluates it before invoking, so a dispatch
+/// cannot run against an uninstantiated module even if it is the first one this
+/// isolate serves. `creator` is the creator entry's own namespace, which the
+/// bridge reads workflow classes from.
 fn call_workflow_inner<'s>(
     scope: &mut v8::PinScope<'s, '_>,
-    workflow_fn: v8::Local<'s, v8::Function>,
+    creator: v8::Local<'s, v8::Value>,
     envelope_arg: v8::Local<'s, v8::Value>,
     ctx_arg: v8::Local<'s, v8::Value>,
 ) -> Result<Result<String, DispatchError>, v8::Global<v8::Promise>> {
-    let undefined: v8::Local<v8::Value> = v8::undefined(scope).into();
-    let (result_val, caught_exception) = {
-        v8::tc_scope!(let tc, scope);
-        let r = workflow_fn.call(tc, undefined, &[envelope_arg, ctx_arg]);
-        if tc.has_caught() {
-            let exc = tc.exception();
-            let exc_global = exc.map(|e| v8::Global::new(tc, e));
-            (None, exc_global)
-        } else {
-            (r.map(|v| v8::Global::new(tc, v)), None)
-        }
+    let invoked = crate::core::modules::invoke_module_export(
+        scope,
+        crate::WORKFLOW_DISPATCH_MODULE,
+        "dispatch",
+        &[creator, envelope_arg, ctx_arg],
+    );
+    let promise = match invoked {
+        Ok(promise) => promise,
+        Err(error) => return Ok(Err(DispatchError::new(error, 500))),
     };
 
     crate::core::init::perform_microtask_checkpoint(scope);
 
-    if let Some(exc_global) = caught_exception {
-        let exc_local = v8::Local::new(scope, &exc_global);
-        return Ok(Err(workflow_rejection_to_error(scope, exc_local)));
+    let promise = v8::Local::new(scope, &promise);
+    match promise.state() {
+        v8::PromiseState::Fulfilled => {
+            let resolved = promise.result(scope);
+            Ok(stringify_json_value(scope, resolved))
+        }
+        v8::PromiseState::Rejected => {
+            let exc = promise.result(scope);
+            Ok(Err(workflow_rejection_to_error(scope, exc)))
+        }
+        v8::PromiseState::Pending => Err(v8::Global::new(scope, promise)),
     }
-
-    let Some(result_global) = result_val else {
-        return Ok(Err(DispatchError::new("workflow dispatch returned no value", 500)));
-    };
-    let result = v8::Local::new(scope, &result_global);
-    if result.is_promise() {
-        let promise = v8::Local::<v8::Promise>::try_from(result).unwrap();
-        return match promise.state() {
-            v8::PromiseState::Fulfilled => {
-                let resolved = promise.result(scope);
-                Ok(stringify_json_value(scope, resolved))
-            }
-            v8::PromiseState::Rejected => {
-                let exc = promise.result(scope);
-                Ok(Err(workflow_rejection_to_error(scope, exc)))
-            }
-            v8::PromiseState::Pending => Err(v8::Global::new(scope, promise)),
-        };
-    }
-    Ok(stringify_json_value(scope, result))
 }
 
 fn settle_workflow_promise(

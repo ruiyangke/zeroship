@@ -8,6 +8,15 @@ and exposes workflow and run handles to JavaScript.
 binds the customer's native plugins and runtime identity to retained code.
 PostgreSQL journal logic and the HTTP client belong to `zeroship-workflow`.
 
+`js/dispatch.js` is the replay interpreter: it reads workflow classes off the
+creator entry's namespace, drives the journal-backed `step` surface, and returns
+a StepResult-shaped object. `WorkflowBinding` registers it as a host-only module
+under `zeroship_runtime::WORKFLOW_DISPATCH_MODULE`, so creator code cannot import
+it and nothing is injected into the creator's module graph. It is hand-written
+JavaScript embedded with `include_str!`; there is no build step. Startup calls
+its `installBodyGuards` export before creator modules evaluate, and
+`Runtime::call_workflow_dispatch` calls its `dispatch` export per replay.
+
 `executor.rs` implements the shared service runner's `TaskExecutor`. A trusted
 loader supplies a fresh runtime for the assignment's immutable deployment. The
 executor installs the runner's deadline interrupt before module initialization;
