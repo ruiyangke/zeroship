@@ -12,7 +12,7 @@ export const managerIdentityColumns = {
   management: ["id", "app_id", "request_id", "run_id"],
   management_scopes: ["id", "app_id", "run_id"],
   jobs: ["id", "app_id", "deployment_id", "worker_id", "run_id", "management_request_id"],
-  recovery_scopes: ["id", "deployment_id"],
+  recovery_scopes: ["id", "deployment_id", "close_job_id"],
   recovery_duties: ["id", "app_id", "pending_job_id"],
   schedule_deployments: ["id", "app_id"],
   schedule_activations: ["id", "app_id", "deployment_id"],
@@ -175,10 +175,19 @@ export function workflowManagerSchema(namespace) {
   ]);
   table("schedule_occurrences", { schema: namespace }).index("schedule_occurrences_job_key").add({ on: ["app_id", "job_id"], unique: true });
 
+  // The scope row is the ingress epoch's tombstone: it survives retirement and
+  // abandonment so an epoch is never reused. A closing attempt records the
+  // app's dispatch cursor as its watermark and names its Close job through a
+  // scoped reference. active_at is the latest activity of the current epoch;
+  // close_after and close_attempts pace closing attempts.
   create("recovery_scopes", {
     deployment_id: text(), activation_revision: integer(),
+    ingress_epoch: integer(), state: text(),
+    closing_watermark: t.bigInt(), close_job_id: t.text(), active_at: integer(),
+    close_after: t.bigInt(), close_attempts: integer().default(0),
   }, ["id"], [
     fk("recovery_scope", ["id"], "queue_scopes", ["id"]),
+    fk("recovery_close_job", ["id", "close_job_id"], "jobs", ["app_id", "id"]),
   ]);
   create("recovery_duties", {
     app_id: text(), kind: text(), next_due_at: integer(), pending_job_id: t.text(),

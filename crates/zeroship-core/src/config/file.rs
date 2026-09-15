@@ -404,6 +404,14 @@ pub struct WorkflowSection {
     pub driver_interval_ms: Option<u64>,
     /// Deadline for each lane in a native manager pass.
     pub driver_lane_timeout_ms: Option<u64>,
+    /// Inactivity after which an app's recovery responsibility may close.
+    pub closing_idle_ms: Option<u64>,
+    /// Bound on a closing attempt's delivery before responsibility reopens.
+    pub closing_timeout_ms: Option<u64>,
+    /// Delay before retrying a closing attempt that did not retire.
+    pub closing_backoff_ms: Option<u64>,
+    /// Ceiling of the doubling closing backoff.
+    pub closing_backoff_max_ms: Option<u64>,
     /// Platform coordination metadata login; no customer database credentials.
     pub database_url: Option<String>,
 }

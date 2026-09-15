@@ -1026,3 +1026,395 @@ async fn manager_reconciliation_publishes_creator_work_before_the_consumer_execu
     assert_eq!(requests[0].delivery.job.id, reconciliation.id);
     assert_eq!(requests[2].delivery.job.id, fixture.job.id);
 }
+
+/// The platform policy source composed beside the native manager.
+#[derive(Debug)]
+struct Policies(zeroship_workflow_manager::policy::PolicyObservation);
+
+impl zeroship_workflow_manager::policy::PolicySource for Policies {
+    fn observe<'a>(
+        &'a self,
+        _: &'a AppId,
+    ) -> std::pin::Pin<
+        Box<
+            dyn Future<
+                    Output = Result<
+                        zeroship_workflow_manager::policy::PolicyObservation,
+                        zeroship_workflow_manager::Error,
+                    >,
+                > + 'a,
+        >,
+    > {
+        Box::pin(std::future::ready(Ok(self.0.clone())))
+    }
+
+    fn revalidate(
+        &self,
+        observation: &zeroship_workflow_manager::policy::PolicyObservation,
+    ) -> Result<Instant, zeroship_workflow_manager::Error> {
+        Ok(observation.expires_at())
+    }
+}
+
+impl Policies {
+    fn new(app: &AppId) -> Self {
+        Self(
+            zeroship_workflow_manager::policy::PolicyObservation::new(
+                app.clone(),
+                Revision::try_from(1).unwrap(),
+                AppPolicy::default(),
+                Instant::now() + Duration::from_secs(600),
+            )
+            .unwrap(),
+        )
+    }
+}
+
+impl NativeManager {
+    /// The worker host's policy exchange; `after` names the epoch it was refused.
+    async fn establish(&self, source: &Policies, after: Option<i64>) -> Option<Revision> {
+        let request = zeroship_core::workflow_policy::PolicyLeaseRequest {
+            scope: self.scope.clone(),
+            establish: after.map(|epoch| zeroship_core::workflow_policy::EstablishIngress {
+                after: Some(Revision::try_from(epoch).unwrap()),
+            }),
+            ingress_used: true,
+        };
+        self.coordinator
+            .policy_lease(&self.worker, "enrolled-key", &request, source, || async {
+                Ok(self.worker.clone())
+            })
+            .await
+            .unwrap()
+            .lease()
+            .unwrap()
+            .ingress_epoch
+    }
+
+    async fn settle_directly(&self, settlement: &Settlement) -> SettlementReceipt {
+        self.coordinator
+            .settle_job(&self.worker, settlement, || async { Ok(self.worker.clone()) })
+            .await
+            .unwrap()
+    }
+}
+
+/// Installs the manager's epoch beside the policy, as the host's refresh does.
+fn install_epoch(fixture: &Fixture, epoch: Option<Revision>) {
+    fixture
+        .service
+        .policies
+        .fixture_install(
+            fixture.app.app_id(),
+            PolicySnapshot::configuration(Revision::try_from(1).unwrap(), AppPolicy::default())
+                .unwrap()
+                .with_ingress_epoch(epoch),
+        )
+        .unwrap();
+}
+
+/// Intents whose jobs the manager already delivered and settled.
+struct Settled(AppId);
+impl crate::service::publication::JobPublisher for Settled {
+    fn app_id(&self) -> &AppId {
+        &self.0
+    }
+    async fn submit(&self, job: &JobSpec) -> Result<JobSpec, WorkflowServiceError> {
+        Ok(job.clone())
+    }
+}
+
+fn recovery(manager: &NativeManager) -> zeroship_workflow_manager::recovery::Recovery {
+    zeroship_workflow_manager::recovery::Recovery::new(
+        manager.database.queue.clone(),
+        zeroship_workflow_manager::recovery::Options::default(),
+    )
+    .unwrap()
+}
+
+/// Close delivered to a creator journal fences ingress under a still-valid
+/// epoch, and a propagation page claimed after closing began commits intents
+/// after that fence. Its dispatch ticket above the closing watermark keeps the
+/// manager's responsibility open over separate creator and manager databases.
+#[compio::test]
+async fn closing_watermark_keeps_late_delivered_intents_across_separate_databases() {
+    use zeroship_workflow_manager::recovery::{DutyKind, ScopeState};
+    let fixture = Fixture::new(AppPolicy::default()).await;
+    let app = fixture.app.app_id().clone();
+    let (page, _child) = super::propagation::cascade(&fixture).await;
+    let manager = NativeManager::new(&fixture).await;
+    let recovery = recovery(&manager);
+    recovery
+        .ensure(
+            &app,
+            fixture.job.deployment_id().unwrap(),
+            Revision::try_from(1).unwrap(),
+        )
+        .await
+        .unwrap();
+    let source = Policies::new(&app);
+    let epoch = manager.establish(&source, None).await;
+    assert_eq!(epoch, Some(Revision::try_from(1).unwrap()));
+    install_epoch(&fixture, epoch);
+    for job in fixture.app.pending_jobs(None, 100).await.unwrap() {
+        if job.id == page.id {
+            fixture
+                .app
+                .publish_job(&job.id, manager.as_ref())
+                .await
+                .unwrap();
+        } else {
+            fixture
+                .app
+                .publish_job(&job.id, &Settled(app.clone()))
+                .await
+                .unwrap();
+        }
+    }
+    assert!(fixture.app.pending_jobs(None, 1).await.unwrap().is_empty());
+
+    let close = recovery.begin_close(&app).await.unwrap().unwrap();
+    let page_grant = manager.claim(&manager.scope).await.unwrap().unwrap();
+    assert_eq!(page_grant.delivery().job, page);
+    let close_grant = manager.claim(&manager.scope).await.unwrap().unwrap();
+    assert_eq!(close_grant.delivery().job, close);
+    let closed = fixture.app.close_job(&close_grant).await.unwrap();
+    assert_eq!(
+        closed.outcome,
+        JobOutcome::Closed { drained: true },
+        "every intent was confirmed when the fence committed"
+    );
+    // Delivered work runs under delivery authority, not the ingress fence.
+    let applied = fixture
+        .app
+        .propagation_job(
+            &page_grant,
+            crate::service::propagation::PropagationOptions::default(),
+        )
+        .await
+        .unwrap();
+    let late = fixture.app.pending_jobs(None, 100).await.unwrap();
+    assert!(!late.is_empty(), "the page committed intents after the fence");
+    manager
+        .settle_directly(&applied.settlement(&page_grant).unwrap())
+        .await;
+    manager
+        .settle_directly(&closed.settlement(&close_grant).unwrap())
+        .await;
+    let kept = recovery.responsibility(&app).await.unwrap().unwrap();
+    assert_eq!(
+        kept.state,
+        ScopeState::Open,
+        "retired while the creator journal holds {} unconfirmed intents",
+        late.len()
+    );
+    assert!(recovery
+        .dispatch(&app, DutyKind::Reconcile)
+        .await
+        .unwrap()
+        .is_some());
+
+    // The creator refuses the still-valid epoch; the host establishes the next.
+    assert_eq!(
+        fixture
+            .app
+            .start(&RequestId::mint(), "Example", StartOptions::default())
+            .await
+            .unwrap_err(),
+        WorkflowServiceError::IngressFenced(Some(Revision::try_from(1).unwrap()))
+    );
+    let next = manager.establish(&source, Some(1)).await;
+    assert_eq!(next, Some(Revision::try_from(2).unwrap()));
+    assert_eq!(manager.establish(&source, Some(1)).await, next);
+    install_epoch(&fixture, next);
+    fixture
+        .app
+        .start(&RequestId::mint(), "Example", StartOptions::default())
+        .await
+        .unwrap();
+    assert_eq!(
+        recovery
+            .responsibility(&app)
+            .await
+            .unwrap()
+            .unwrap()
+            .ingress_epoch,
+        Revision::try_from(2).unwrap()
+    );
+}
+
+/// The consumer dispatches Close to the creator handler. A lost settlement
+/// acknowledgement is retried with the identical settlement, and the manager
+/// retires exactly once. A crashed first attempt redelivered to another worker
+/// replays the committed creator receipt.
+#[compio::test]
+async fn consumer_closes_retires_once_after_lost_ack_and_redelivery() {
+    use zeroship_workflow_manager::recovery::ScopeState;
+    let fixture = Fixture::new(AppPolicy::default()).await;
+    let app = fixture.app.app_id().clone();
+    let manager = NativeManager::new(&fixture).await;
+    let recovery = recovery(&manager);
+    recovery
+        .ensure(
+            &app,
+            fixture.job.deployment_id().unwrap(),
+            Revision::try_from(1).unwrap(),
+        )
+        .await
+        .unwrap();
+    install_epoch(&fixture, manager.establish(&Policies::new(&app), None).await);
+    for job in fixture.app.pending_jobs(None, 100).await.unwrap() {
+        fixture
+            .app
+            .publish_job(&job.id, &Settled(app.clone()))
+            .await
+            .unwrap();
+    }
+    let close = recovery.begin_close(&app).await.unwrap().unwrap();
+    // A first worker commits the creator receipt, then crashes before settling.
+    let crashed = manager.claim(&manager.scope).await.unwrap().unwrap();
+    assert_eq!(crashed.delivery().job, close);
+    let committed = fixture.app.close_job(&crashed).await.unwrap();
+    assert_eq!(committed.outcome, JobOutcome::Closed { drained: true });
+    let expire = rusqlite::Connection::open(&manager.database.path).unwrap();
+    assert_eq!(
+        expire
+            .execute(
+                "UPDATE jobs SET lease_deadline=0 WHERE id=?1",
+                [close.id.as_str()],
+            )
+            .unwrap(),
+        1
+    );
+    let mut consumer =
+        JobConsumer::new(manager.clone(), manager.worker.clone(), options(1)).unwrap();
+    consumer
+        .bindings()
+        .replace(vec![scope(
+            &fixture,
+            manager.scope.assignment_revision.get(),
+        )])
+        .unwrap();
+    finished(consumer.run_until(async {
+        manager.completion.recv_async().await.unwrap();
+    }))
+    .await;
+    {
+        let requests = manager.requests.borrow();
+        assert_eq!(requests.len(), 2, "the lost acknowledgement was retried");
+        assert_eq!(requests[0], requests[1]);
+        assert_eq!(requests[0].delivery.job, close);
+        assert_eq!(requests[0].delivery.attempt.get(), 2);
+        assert_eq!(requests[0].outcome, committed.outcome);
+    }
+    assert_eq!(fixture.probe.starts.get(), 0, "closure runs no app code");
+    assert_eq!(
+        fixture.app.job_receipt(&close).await.unwrap(),
+        Some(committed)
+    );
+    let retired = recovery.responsibility(&app).await.unwrap().unwrap();
+    assert_eq!(retired.state, ScopeState::Retired);
+    assert_eq!(retired.ingress_epoch, Revision::try_from(1).unwrap());
+    assert!(manager.claim(&manager.scope).await.unwrap().is_none());
+}
+
+/// Archive masks admission, dispatch and ingress. The manager refuses to
+/// establish ingress, yet the consumer still delivers the manager-origin Close
+/// to the creator handler, the evidence drains and the scope retires.
+#[compio::test]
+async fn consumer_delivers_close_under_archived_policy_and_the_scope_retires() {
+    use zeroship_workflow_manager::recovery::ScopeState;
+    let fixture = Fixture::new(AppPolicy::default()).await;
+    let app = fixture.app.app_id().clone();
+    let manager = NativeManager::new(&fixture).await;
+    let recovery = recovery(&manager);
+    recovery
+        .ensure(
+            &app,
+            fixture.job.deployment_id().unwrap(),
+            Revision::try_from(1).unwrap(),
+        )
+        .await
+        .unwrap();
+    for job in fixture.app.pending_jobs(None, 100).await.unwrap() {
+        fixture
+            .app
+            .publish_job(&job.id, &Settled(app.clone()))
+            .await
+            .unwrap();
+    }
+    let archived = AppPolicy {
+        admission: false,
+        dispatch: false,
+        ingress: false,
+        ..AppPolicy::default()
+    };
+    let source = Policies(
+        zeroship_workflow_manager::policy::PolicyObservation::new(
+            app.clone(),
+            Revision::try_from(2).unwrap(),
+            archived.clone(),
+            Instant::now() + Duration::from_secs(600),
+        )
+        .unwrap(),
+    );
+    let refused = manager
+        .coordinator
+        .policy_lease(
+            &manager.worker,
+            "enrolled-key",
+            &zeroship_core::workflow_policy::PolicyLeaseRequest {
+                scope: manager.scope.clone(),
+                establish: Some(zeroship_core::workflow_policy::EstablishIngress {
+                    after: Some(Revision::try_from(1).unwrap()),
+                }),
+                ingress_used: false,
+            },
+            &source,
+            || async { Ok(manager.worker.clone()) },
+        )
+        .await
+        .map(|grant| grant.ingress_epoch());
+    assert_eq!(refused, Err(zeroship_workflow_manager::Error::Denied));
+    // The host installs the archived policy with the epoch it still holds.
+    fixture
+        .service
+        .policies
+        .fixture_install(
+            &app,
+            PolicySnapshot::configuration(Revision::try_from(2).unwrap(), archived)
+                .unwrap()
+                .with_ingress_epoch(Some(Revision::try_from(1).unwrap())),
+        )
+        .unwrap();
+    let close = recovery.begin_close(&app).await.unwrap().unwrap();
+    let mut consumer =
+        JobConsumer::new(manager.clone(), manager.worker.clone(), options(1)).unwrap();
+    consumer
+        .bindings()
+        .replace(vec![scope(
+            &fixture,
+            manager.scope.assignment_revision.get(),
+        )])
+        .unwrap();
+    finished(consumer.run_until(async {
+        manager.completion.recv_async().await.unwrap();
+    }))
+    .await;
+    assert_eq!(
+        fixture.app.job_receipt(&close).await.unwrap().unwrap().outcome,
+        JobOutcome::Closed { drained: true }
+    );
+    assert_eq!(fixture.probe.starts.get(), 0);
+    let retired = recovery.responsibility(&app).await.unwrap().unwrap();
+    assert_eq!(retired.state, ScopeState::Retired);
+    assert_eq!(
+        fixture
+            .app
+            .start(&RequestId::mint(), "Example", StartOptions::default())
+            .await
+            .unwrap_err(),
+        WorkflowServiceError::PermissionDenied,
+        "archive refuses admission itself"
+    );
+}

@@ -29,7 +29,9 @@ use zeroship_core::{
 use zeroship_workflow_client::{Options as ClientOptions, QueueDeploymentHolds, Transport};
 use zeroship_workflow_manager::{
     driver::{Driver, Options as DriverOptions, TickReport},
+    lifecycle::{self, ControlLifecycle},
     policy::control::{self, ControlPolicies, ControlPolicyStore},
+    recovery::Options as RecoveryOptions,
     retention::HoldClient,
     Error as ManagerError,
 };
@@ -95,6 +97,13 @@ impl ServerOptions {
         let driver = DriverOptions {
             page_limit: coordinator.batch_limit.try_into()?,
             lane_timeout: Duration::from_millis(*settings.driver_lane_timeout_ms.get()),
+            recovery: RecoveryOptions {
+                idle_after: Duration::from_millis(*settings.closing_idle_ms.get()),
+                closing_timeout: Duration::from_millis(*settings.closing_timeout_ms.get()),
+                closing_backoff: Duration::from_millis(*settings.closing_backoff_ms.get()),
+                closing_backoff_max: Duration::from_millis(*settings.closing_backoff_max_ms.get()),
+                ..RecoveryOptions::default()
+            },
             // Queue transactions run under the command timeout; a hold outlives
             // twice that budget before the retention lane may release it.
             hold_grace: DriverOptions::default()
@@ -159,7 +168,8 @@ pub async fn run(settings: WorkflowSettings, options: ServerOptions) -> Result<(
     // constructs its own bounded pool and retention transport in the state factory.
     let startup = Coordinator::connect(&url, options.coordinator, Rc::new(holds)).await?;
     connect_policies(&url, options.coordinator, options.policy_cache_entries).await?;
-    let driver = Driver::new(startup.queue.clone(), options.driver)?;
+    let lifecycle = connect_lifecycle(&url, options.coordinator).await?;
+    let driver = Driver::new(startup.queue.clone(), options.driver, Rc::new(lifecycle))?;
     drop(startup);
     compio::time::timeout(options.coordinator.command_timeout, replay.purge_expired()).await??;
     let auth = Arc::new(WorkflowAuth::new(
@@ -257,6 +267,36 @@ async fn connect_policies(
     .map_err(|_| ManagerError::Unavailable)?
 }
 
+/// Control's app catalog for the closing lane: identity and the deletion
+/// marker only, through the manager's column grants.
+async fn connect_lifecycle(url: &str, options: Options) -> Result<ControlLifecycle, ManagerError> {
+    use zeroship_core::schema_name::SchemaName;
+    use zeroship_data_orm::{
+        binding::DbBinding, encryption::ProjectKeySource, orm::Database, ConnectOptions,
+    };
+    compio::time::timeout(options.command_timeout, async {
+        let database = Database::connect(
+            DbBinding::new(
+                "platform",
+                "workflow-lifecycle",
+                SchemaName::new("zeroship").map_err(|_| ManagerError::Invalid)?,
+            ),
+            ConnectOptions::new(url, ProjectKeySource::unavailable())
+                .max_connections(
+                    NonZeroUsize::new(options.connections).ok_or(ManagerError::Invalid)?,
+                )
+                .connection_authority(),
+            lifecycle::collections()?,
+        )
+        .await?;
+        let lifecycle = ControlLifecycle::new(database)?;
+        lifecycle.ready().await?;
+        Ok(lifecycle)
+    })
+    .await
+    .map_err(|_| ManagerError::Unavailable)?
+}
+
 async fn sweep_assertions(
     replay: Arc<SharedClientReplayStore>,
     timeout: Duration,
@@ -293,12 +333,7 @@ async fn drive(
 }
 
 fn report_tick(report: TickReport) {
-    for (lane, progress) in [
-        ("scheduling", report.scheduling),
-        ("reconciliation", report.reconciliation),
-        ("collection", report.collection),
-        ("retention", report.retention),
-    ] {
+    for (lane, progress) in report.lanes() {
         if let Some(error) = progress.scan_error {
             tracing::warn!(lane, %error, "workflow manager scan unavailable");
         }

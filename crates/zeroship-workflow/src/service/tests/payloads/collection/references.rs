@@ -167,7 +167,17 @@ pub(super) async fn late_upload(store: Rc<OrmStore>) {
         .collect_job(&Grant::new(fixture.scope.app_id()), options(1))
         .await
         .unwrap();
-    assert_eq!(fixture.payload(&id).await.state, "deleted");
+    // The resweep after the window makes the tombstone final.
+    let purged = fixture.payload(&id).await;
+    assert_eq!(purged.state, "purged");
     assert!(!fixture.exists(fixture.scope.app_id(), &id).await);
-    assert_eq!(fixture.backend.calls(), [id.clone(), id]);
+    assert_eq!(fixture.backend.calls(), [id.clone(), id.clone()]);
+    fixture.expire(&id).await;
+    fixture
+        .scope
+        .collect_job(&Grant::new(fixture.scope.app_id()), options(1))
+        .await
+        .unwrap();
+    assert_eq!(fixture.payload(&id).await.state, "purged");
+    assert_eq!(fixture.backend.calls().len(), 2, "a final tombstone is never swept");
 }

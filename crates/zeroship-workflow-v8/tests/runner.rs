@@ -142,7 +142,12 @@ impl Fixture {
         binding
             .begin_refresh()
             .unwrap()
-            .install(PolicySnapshot::configuration(1.try_into().unwrap(), policy).unwrap())
+            // The host holds the manager's first ingress epoch; the journal closed none.
+            .install(
+                PolicySnapshot::configuration(1.try_into().unwrap(), policy)
+                    .unwrap()
+                    .with_ingress_epoch(Some(1.try_into().unwrap())),
+            )
             .unwrap();
         let service = WorkflowService::open(
             std::rc::Rc::new(orm_fixture::store(dir.path()).await),
@@ -900,7 +905,9 @@ async fn replay_loads_retained_dependencies_after_redeploy_and_host_restart() {
         .begin_refresh()
         .unwrap()
         .install(
-            PolicySnapshot::configuration(1.try_into().unwrap(), AppPolicy::default()).unwrap(),
+            PolicySnapshot::configuration(1.try_into().unwrap(), AppPolicy::default())
+                .unwrap()
+                .with_ingress_epoch(Some(1.try_into().unwrap())),
         )
         .unwrap();
     let service = WorkflowService::open(

@@ -3,8 +3,8 @@ use std::time::{Duration, Instant};
 use zeroship_core::{
     app_id::AppId,
     service_identity::endpoints,
-    workflow_coordination::{AssignedScope, Revision, WorkerId},
-    workflow_policy::{AppPolicy, PolicyLease},
+    workflow_coordination::{Revision, WorkerId},
+    workflow_policy::{AppPolicy, PolicyLease, PolicyLeaseRequest},
 };
 
 /// Validated policy for an exact worker key and app assignment.
@@ -48,6 +48,13 @@ impl LeasedPolicy {
         self.lease.policy_revision
     }
 
+    /// The manager's open or closing ingress epoch, absent once responsibility
+    /// retired. Creator acceptance captures it beside the policy.
+    #[must_use]
+    pub const fn ingress_epoch(&self) -> Option<Revision> {
+        self.lease.ingress_epoch
+    }
+
     /// Install this original deadline; sampling remaining time and adding it
     /// to a later instant would extend authority.
     #[must_use]
@@ -86,20 +93,28 @@ impl LeasedPolicy {
 impl WorkerCoordinator {
     /// Obtain policy under this client's enrolled key and current app assignment.
     /// The host must install it through the refresh ticket reserved before I/O.
+    /// An establishment request is honored only by an epoch above the named one,
+    /// or by any epoch when it names none.
     ///
     /// # Errors
-    /// Refuses substituted identities, invalid or incomplete policy, failed
-    /// exchanges and authority exhausted by transport or outside clock bounds.
-    pub async fn policy_lease(&self, scope: &AssignedScope) -> Result<LeasedPolicy, Error> {
+    /// Refuses substituted identities, invalid or incomplete policy, an
+    /// establishment reply without a newer epoch, failed exchanges and authority
+    /// exhausted by transport or outside clock bounds.
+    pub async fn policy_lease(&self, request: &PolicyLeaseRequest) -> Result<LeasedPolicy, Error> {
         let started = Instant::now();
         let lease: PolicyLease = self
             .transport
-            .post(endpoints::WORKFLOW_POLICY_LEASE, scope)
+            .post(endpoints::WORKFLOW_POLICY_LEASE, request)
             .await?;
-        if lease.app_id != scope.app_id
+        if lease.app_id != request.scope.app_id
             || lease.worker_id != self.worker_id
             || lease.signing_key_id != self.signing_key_id
-            || lease.assignment_revision != scope.assignment_revision
+            || lease.assignment_revision != request.scope.assignment_revision
+            || request.establish.is_some_and(|establish| {
+                lease
+                    .ingress_epoch
+                    .is_none_or(|epoch| establish.after.is_some_and(|after| epoch <= after))
+            })
         {
             return Err(Error::InvalidResponse);
         }

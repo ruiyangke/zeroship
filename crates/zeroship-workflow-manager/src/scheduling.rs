@@ -1126,6 +1126,12 @@ async fn prepared(
         .next())
 }
 
+/// Whether Control's latest lifecycle command disabled the app's calendar, as
+/// archive does. The caller holds the app lock.
+pub(crate) async fn archived_in(tx: &Database, app: &AppId) -> Result<bool, Error> {
+    Ok(active(tx, app).await?.is_some_and(|scope| !scope.enabled))
+}
+
 async fn active(tx: &Database, app: &AppId) -> Result<Option<Active>, Error> {
     let scope = tx
         .entity::<schedule_scopes::Entity>()?

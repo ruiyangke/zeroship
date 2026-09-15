@@ -7,6 +7,7 @@ mod bundle;
 pub use backend::{AppBackend, CommitHint};
 pub use bundle::{BundleDeclarations, BundleExecutable};
 pub mod capability;
+mod closure;
 pub mod collection;
 mod continuations;
 mod control;
@@ -29,7 +30,9 @@ pub mod propagation;
 pub mod publication;
 pub mod reconciliation;
 pub use payloads::{PayloadRead, PayloadSlot, StagedPayload};
-pub use policy::{AssignedPolicies, HostPolicies, PolicyBinding, PolicyRefresh, PolicySnapshot};
+pub use policy::{
+    AssignedPolicies, HostPolicies, IngressEpochs, PolicyBinding, PolicyRefresh, PolicySnapshot,
+};
 pub mod runner;
 mod schedules;
 mod signals;
