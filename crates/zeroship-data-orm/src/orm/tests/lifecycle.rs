@@ -80,7 +80,7 @@ async fn lifecycle(mut fixture: CollectionFixture) {
     assert_eq!(upserted["revision"], value!(4));
 
     let deleted = row(entries.delete(value!({"id":key.clone()})).await.unwrap());
-    assert!(deleted["removed"].as_i64().unwrap() > 0);
+    assert!(deleted["removed"].as_timestamp_micros().unwrap() > 0);
     assert_eq!(deleted["revision"], value!(5));
     let Output::Rows { rows, .. } = entries.find(value!({}), value!({})).await.unwrap() else {
         panic!("rows")
