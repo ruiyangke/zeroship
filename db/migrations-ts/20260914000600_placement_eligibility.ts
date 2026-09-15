@@ -18,20 +18,20 @@ export default {
   name: "placement_eligibility",
   schema() {
     // ---- apps.execution_zone_id ---------------------------------------------
-    // Control names the zone when it creates an app: it resolves the caller's
-    // zone, or the deployment's one declared zone when the caller names none,
-    // and refuses to create an app it cannot place. The column therefore
-    // carries NO default. It is added with one because ADD COLUMN NOT NULL
-    // needs a value for the rows already there, and the default is dropped in
-    // the same migration so nothing after this can land an app in a zone by
-    // omission. The frozen trigger below then keeps whatever Control wrote.
+    // Control NAMES the zone when it creates an app: `Registry::create_app`
+    // resolves the zone the creator asked for, or the deployment's one
+    // declared zone when the creator named none, and refuses a deployment that
+    // declares several without being told which. The creation path therefore
+    // never relies on this default.
+    //
+    // The default names the deployment's single seeded zone
+    // (20260914000450_execution_zones_default_zone.ts) and stays for the rows
+    // written outside that path: harness scripts and test fixtures across
+    // several crates insert an app row directly. The trigger below freezes
+    // whatever value the row was created with, however it got there.
     table("apps", { schema: "zeroship" })
       .column("execution_zone_id")
       .add({ type: t.text().notNull().default("ezn_default000000000000000000") });
-    raw({
-      sql: 'ALTER TABLE "zeroship"."apps" ALTER COLUMN "execution_zone_id" DROP DEFAULT',
-      reason: "an app's execution zone is named by its creator, never defaulted",
-    });
     table("apps", { schema: "zeroship" })
       .foreignKey("apps_execution_zone_fk")
       .add({
