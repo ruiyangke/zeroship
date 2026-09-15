@@ -649,8 +649,7 @@ with this queue namespace; it is not a second authoritative placement store.
 | `workflow_manager.assignments` | App/worker placement revision, expiry, release tombstone and refusal tombstone. A refused pair is never offered again during that instance's life. |
 | `workflow_manager.placement_receipts` | Immutable assignment/release request identity, release reason and recorded result. |
 | `workflow_manager.capacity_demands` | Apps with claimable work that free eligible capacity did not absorb, keyed by app and recorded with its zone. The committed input of every replica's target. |
-| `workflow_manager.capacity_targets` | One declarative target per execution zone in placement slots, with its revision, provider state, closed refusal, claimed attempt and pacing. |
-| `workflow_manager.capacity_intents` | The rejected per-app provisioning contract, kept only as the proof of concept's comparison. |
+| `workflow_manager.capacity_targets` | One declarative target per execution zone in placement slots, with its revision, provider state, closed refusal, claimed attempt and pacing. Scale-down drains against it; `workflow_manager.workers.state` records the drain. |
 | `workflow_manager.management` | Job-linked authorized command, original request provenance, per-run revision, provisional execution barrier and reported closed outcome. |
 | `workflow_manager.management_scopes` | Accepted and settled management revisions per app/run; independent of the creator's run existence. |
 | `workflow_manager.jobs` | Immutable job specification, checked operation/run/request projections, availability, current attempt, delivery fence and settlement digest/outcome. It also supplies submission and settlement deduplication. |
