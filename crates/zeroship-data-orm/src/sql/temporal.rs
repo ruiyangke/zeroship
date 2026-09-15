@@ -7,12 +7,12 @@ const UNIX_EPOCH_DAY: i32 = OffsetDateTime::UNIX_EPOCH.date().to_julian_day();
 pub const MIN_TIMESTAMP_MILLIS: i64 = -62_135_596_800_000;
 pub const MAX_TIMESTAMP_MILLIS: i64 = 253_402_300_799_999;
 
-/// The same calendar span, at the resolution PostgreSQL stores.
+/// The same calendar span, at the resolution `PostgreSQL` stores.
 pub const MIN_TIMESTAMP_MICROS: i64 = MIN_TIMESTAMP_MILLIS * 1_000;
 pub const MAX_TIMESTAMP_MICROS: i64 = MAX_TIMESTAMP_MILLIS * 1_000 + 999;
 
-/// The resolution a backend stores a timestamp at. PostgreSQL keeps
-/// microseconds; SQLite's canonical fixed-width text keeps milliseconds and
+/// The resolution a backend stores a timestamp at. `PostgreSQL` keeps
+/// microseconds; `SQLite`'s canonical fixed-width text keeps milliseconds and
 /// refuses a finer value rather than flooring it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TimestampResolution {

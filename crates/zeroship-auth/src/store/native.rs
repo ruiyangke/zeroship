@@ -85,7 +85,7 @@ pub(crate) fn user_id_text(value: UserId) -> Result<String, DbError> {
 }
 
 /// Auth owns its own chrono conversion; the ORM carries the instant untyped by
-/// any auth concept, at the microsecond resolution PostgreSQL stores.
+/// any auth concept, at the microsecond resolution `PostgreSQL` stores.
 pub(crate) fn instant(value: UtcInstant) -> Result<DateTime<Utc>, DbError> {
     DateTime::from_timestamp_micros(value.unix_micros())
         .ok_or_else(|| DbError::validation("invalid_timestamp", "invalid stored timestamp"))
