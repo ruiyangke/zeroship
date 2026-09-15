@@ -513,7 +513,7 @@ impl PolicyAuthority {
             .deadline
             .is_some_and(|deadline| deadline <= Instant::now())
         {
-            return Err(unavailable());
+            return Err(lease_expired());
         }
         let state = self
             .binding
@@ -531,7 +531,7 @@ impl PolicyAuthority {
             .deadline
             .is_some_and(|deadline| deadline <= Instant::now())
         {
-            return Err(unavailable());
+            return Err(lease_expired());
         }
         drop(state);
         Ok(())
@@ -626,6 +626,18 @@ fn live_deadline(validity: &Validity) -> Result<Option<Instant>, WorkflowService
 
 fn unavailable() -> WorkflowServiceError {
     WorkflowServiceError::Unavailable("workflow host policy unavailable".into())
+}
+
+/// The installed policy outlived its lease.
+///
+/// SEPARATE from [`unavailable`] on purpose. A lapsed lease is a statement
+/// about time - the holder stopped renewing, or renewal is failing - and it is
+/// answered by looking at the renewal path. A poisoned registry lock or a
+/// missing entry are statements about state. Reporting all three as "workflow
+/// host policy unavailable" is why a host that had simply stopped renewing read
+/// in the log as a broken registry.
+fn lease_expired() -> WorkflowServiceError {
+    WorkflowServiceError::Unavailable("workflow host policy lease expired".into())
 }
 fn conflict() -> WorkflowServiceError {
     WorkflowServiceError::Conflict("workflow host policy revision conflicts".into())
