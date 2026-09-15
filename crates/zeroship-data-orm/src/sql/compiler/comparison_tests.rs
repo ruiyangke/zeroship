@@ -285,7 +285,7 @@ fn comparison_projections_validate_sources_storage_grouping_and_bind_budgets() {
             (StorageType::Text, value!("Ada")),
             (StorageType::Integer, value!(9_007_199_254_740_993_i64)),
         ] {
-            let statement = Statement::Select(
+            let statement = Statement::select(
                 comparison_projection(storage, value.clone(), false, false).unwrap(),
             );
             assert_eq!(Requirements::for_statement(&statement).bind_parameters, 1);
@@ -294,7 +294,7 @@ fn comparison_projections_validate_sources_storage_grouping_and_bind_budgets() {
             let mut unsupported = compiler.support();
             unsupported.max_bind_parameters = 0;
             let statement =
-                Statement::Select(comparison_projection(storage, value, false, false).unwrap());
+                Statement::select(comparison_projection(storage, value, false, false).unwrap());
             assert!(matches!(
                 compiler.compile(statement, &unsupported),
                 Err(CompileError::BindLimitExceeded { .. })

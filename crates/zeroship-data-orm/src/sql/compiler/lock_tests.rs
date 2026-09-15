@@ -66,7 +66,7 @@ fn required(of: &[&str]) -> RowLock {
 
 #[test]
 fn postgres_row_locks_follow_pagination_and_name_only_the_locked_aliases() {
-    let statement = Statement::Select(
+    let statement = Statement::select(
         SelectStatement::new(parts(Some(JoinKind::Inner), required(&["s"]))).unwrap(),
     );
     let requirements = Requirements::for_statement(&statement);
@@ -83,7 +83,7 @@ fn postgres_row_locks_follow_pagination_and_name_only_the_locked_aliases() {
 
     let unqualified = PostgresCompiler
         .compile(
-            Statement::Select(SelectStatement::new(parts(None, required(&[]))).unwrap()),
+            Statement::select(SelectStatement::new(parts(None, required(&[]))).unwrap()),
             &PostgresCompiler.support(),
         )
         .unwrap();
@@ -91,7 +91,7 @@ fn postgres_row_locks_follow_pagination_and_name_only_the_locked_aliases() {
 
     let several = PostgresCompiler
         .compile(
-            Statement::Select(
+            Statement::select(
                 SelectStatement::new(parts(Some(JoinKind::Inner), required(&["s", "g"])))
                     .unwrap(),
             ),
@@ -103,7 +103,7 @@ fn postgres_row_locks_follow_pagination_and_name_only_the_locked_aliases() {
     // Control: a read without a lock renders no locking clause.
     let plain = PostgresCompiler
         .compile(
-            Statement::Select(SelectStatement::new(parts(None, RowLock::None)).unwrap()),
+            Statement::select(SelectStatement::new(parts(None, RowLock::None)).unwrap()),
             &PostgresCompiler.support(),
         )
         .unwrap();
@@ -113,7 +113,7 @@ fn postgres_row_locks_follow_pagination_and_name_only_the_locked_aliases() {
 #[test]
 fn required_row_locks_are_refused_where_the_backend_has_none() {
     let statement =
-        || Statement::Select(SelectStatement::new(parts(None, required(&[]))).unwrap());
+        || Statement::select(SelectStatement::new(parts(None, required(&[]))).unwrap());
     assert_eq!(
         SqliteCompiler
             .compile(statement(), &SqliteCompiler.support())
@@ -131,7 +131,7 @@ fn required_row_locks_are_refused_where_the_backend_has_none() {
     // Control: the internal write-target probe compiles on both backends,
     // with no locking clause where the single writer serializes writes.
     let probe =
-        || Statement::Select(SelectStatement::new(parts(None, RowLock::WriteTargets)).unwrap());
+        || Statement::select(SelectStatement::new(parts(None, RowLock::WriteTargets)).unwrap());
     let sqlite = SqliteCompiler
         .compile(probe(), &SqliteCompiler.support())
         .unwrap();

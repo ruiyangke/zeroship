@@ -72,10 +72,9 @@ async fn fixture(postgres: bool) -> CollectionFixture {
 }
 
 fn assert_code(error: DbError, expected: &str) {
-    assert!(
-        matches!(&error, DbError::ValidationFailed { code, .. } if *code == expected),
-        "expected {expected}: {error:?}"
-    );
+    let matched =
+        matches!(&error, DbError::ValidationFailed { code, .. } if *code == expected);
+    assert!(matched, "expected {expected}: {}", error.into_string());
 }
 
 fn postgres_backend(owner: &CollectionFixture) -> &crate::backend::postgres::PostgresBackend {
@@ -427,7 +426,14 @@ async fn postgres_for_update_of_needs_update_privilege_only_on_the_locked_source
     };
     let locked = read(true).await.unwrap();
     assert_eq!(locked.len(), 1);
-    assert_eq!((locked[0].0.label.as_str(), locked[0].1.label.as_str()), ("original", "view"));
+    assert_eq!(
+        (
+            locked[0].0.label.as_str(),
+            locked[0].1.id.as_str(),
+            locked[0].1.label.as_str()
+        ),
+        ("original", "held", "view")
+    );
     // Control: locking every source also needs UPDATE on the select-only table.
     let refused = read(false).await.unwrap_err();
     assert!(

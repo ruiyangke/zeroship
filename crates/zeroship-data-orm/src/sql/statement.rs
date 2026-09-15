@@ -798,7 +798,7 @@ impl Upsert {
 
 #[derive(Debug)]
 pub enum Statement {
-    Select(SelectStatement),
+    Select(Box<SelectStatement>),
     VectorSearch(VectorSearchStatement),
     SpatialNear(SpatialNearStatement),
     Insert(Insert),
@@ -809,6 +809,16 @@ pub enum Statement {
     AdvisoryLock(super::coordination::AdvisoryLock),
     /// Coordination rather than data: a transaction-local setting.
     SetTransactionSetting(super::coordination::SetTransactionSetting),
+}
+
+impl Statement {
+    /// A select statement. Selects carry the grammar's largest payload, so the
+    /// variant holds it behind a pointer and every other statement stays cheap
+    /// to move.
+    #[must_use]
+    pub fn select(statement: SelectStatement) -> Self {
+        Self::Select(Box::new(statement))
+    }
 }
 
 fn validate_vector_search(parts: &VectorSearchParts) -> Result<(), CompileError> {

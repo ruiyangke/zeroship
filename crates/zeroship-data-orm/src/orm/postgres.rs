@@ -1,4 +1,4 @@
-//! PostgreSQL coordination for native Rust hosts: advisory locks and
+//! `PostgreSQL` coordination for native Rust hosts: advisory locks and
 //! transaction-local settings.
 //!
 //! The extension is part of the Rust `Database` API only. Its statements are
@@ -60,11 +60,11 @@ pub struct Postgres {
 }
 
 impl Database {
-    /// PostgreSQL coordination for this handle.
+    /// `PostgreSQL` coordination for this handle.
     ///
     /// # Errors
-    /// `unsupported_backend_feature` when the handle's backend is not
-    /// PostgreSQL, or `transaction_scope_expired` for a settled transaction
+    /// `unsupported_backend_feature` when the handle is not bound to
+    /// `PostgreSQL`, or `transaction_scope_expired` for a settled transaction
     /// handle.
     pub fn postgres(&self) -> Result<Postgres, DbError> {
         self.check_scope()?;
@@ -164,8 +164,8 @@ impl Postgres {
                 ));
             }
             let registration = database.backend.sql_registration();
-            let compile = |action| {
-                AdvisoryLock::new(key.clone(), AdvisoryLockScope::Session, action)
+            let compile = |key: AdvisoryKey, action| {
+                AdvisoryLock::new(key, AdvisoryLockScope::Session, action)
                     .and_then(|lock| registration.compile(Statement::AdvisoryLock(lock)))
                     .map_err(|error| {
                         coordination_error(SESSION_LEASES, "invalid_advisory_key", error)
@@ -176,8 +176,8 @@ impl Postgres {
                 backend: database.backend.clone(),
                 app_id: database.binding.app_id().to_owned(),
                 schema: database.binding.schema().clone(),
-                acquire: compile(AdvisoryLockAction::Try)?,
-                release: compile(AdvisoryLockAction::Release)?,
+                acquire: compile(key.clone(), AdvisoryLockAction::Try)?,
+                release: compile(key, AdvisoryLockAction::Release)?,
             })
         });
         async move { request?.acquire().await }
@@ -342,7 +342,7 @@ impl std::fmt::Debug for SessionLease {
 struct PinnedSession(Option<Session>);
 
 impl PinnedSession {
-    fn get(&self) -> &Session {
+    const fn get(&self) -> &Session {
         self.0.as_ref().expect("a pinned session is present until consumed")
     }
 
