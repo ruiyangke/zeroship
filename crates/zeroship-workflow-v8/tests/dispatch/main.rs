@@ -1,23 +1,41 @@
+use std::sync::Arc;
 use std::time::Duration;
 
-mod workflow_shutdown;
-mod workflow_failure;
+mod failure;
+mod host_module;
 
 use serde_json::Value;
+use zeroship_runtime::plugin::NativePlugin;
 use zeroship_runtime::{
     init_v8, EnvSnapshot, ModuleEntry, RequestCtx, WorkflowOutcome,
 };
 use zeroship_runtime::channel::CancelFlag;
 use zeroship_runtime::runtime::Runtime;
+use zeroship_workflow::service::runner::ready::ReadyApps;
+use zeroship_workflow_v8::WorkflowBinding;
+
+/// The binding registers the host dispatch module, so a runtime without it
+/// cannot replay a workflow at all.
+fn workflow_plugin() -> Arc<dyn NativePlugin> {
+    Arc::new(WorkflowBinding::ready(ReadyApps::default()))
+}
 
 fn build_runtime(user_src: &str) -> Runtime {
+    build_runtime_with(vec![ModuleEntry {
+        specifier: "index.js".into(),
+        source: user_src.into(),
+    }])
+}
+
+fn build_runtime_with(modules: Vec<ModuleEntry>) -> Runtime {
+    workflow_builder().modules(modules).build()
+}
+
+/// Every runtime that replays a workflow needs the binding registered: it is
+/// what supplies the host dispatch module the runtime calls into.
+fn workflow_builder() -> zeroship_runtime::RuntimeBuilder {
     init_v8();
-    Runtime::builder()
-        .modules(vec![ModuleEntry {
-            specifier: "index.js".into(),
-            source: user_src.into(),
-        }])
-        .build()
+    Runtime::builder().plugins(vec![workflow_plugin()])
 }
 
 fn dispatch_workflow(runtime: &Runtime, envelope: &str) -> Value {
@@ -107,4 +125,4 @@ fn unawaited_step_frontier_fails_closed() {
     );
 }
 
-mod workflow_lookup;
+mod lookup;

@@ -16,7 +16,7 @@ pub use loader::AppRuntimeLoader;
 
 use std::sync::Arc;
 
-use zeroship_runtime::plugin::{NativePlugin, NativeRegistrar};
+use zeroship_runtime::plugin::{JavaScriptModule, NativePlugin, NativeRegistrar};
 use zeroship_workflow::backend::SharedWorkflowBackend;
 use zeroship_workflow::service::runner::ready::ReadyApps;
 
@@ -87,6 +87,34 @@ impl NativePlugin for WorkflowBinding {
     }
 
     fn register(&self, _r: &mut NativeRegistrar) {}
+
+    /// The replay bridge. Host-only: creator modules cannot import it, so the
+    /// interpreter is never part of the creator's module graph and never
+    /// reachable from creator code.
+    fn host_javascript_modules(&self) -> &'static [JavaScriptModule] {
+        &[JavaScriptModule {
+            specifier: zeroship_runtime::WORKFLOW_DISPATCH_MODULE,
+            source: include_str!("../js/dispatch.js"),
+        }]
+    }
+
+    /// Wrap the ambient I/O globals before creator modules evaluate. A creator
+    /// that captures `fetch` or `setTimeout` at module scope must still hold a
+    /// binding that refuses direct I/O from a workflow body.
+    fn prepare_runtime<'s>(
+        &self,
+        scope: &mut v8::PinScope<'s, '_>,
+        _namespace: v8::Local<'s, v8::Object>,
+        _descriptor: Option<&serde_json::Value>,
+    ) -> Result<Option<v8::Global<v8::Promise>>, String> {
+        zeroship_runtime::modules::invoke_module_export(
+            scope,
+            zeroship_runtime::WORKFLOW_DISPATCH_MODULE,
+            "installBodyGuards",
+            &[],
+        )
+        .map(Some)
+    }
 
     fn build_instance<'s>(
         &self,
