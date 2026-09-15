@@ -333,6 +333,19 @@ export class Platform {
     for (const target of targets) await this.waitFor(target.name, () => this.httpReady(`${target.apiUrl}/__zeroship/v1/wf.ping`, {
       method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ json: {} }),
     }));
+    // Serving RPC is not yet serving workflows. A deployed app reaches
+    // env.workflows only once the manager has placed it and the worker host has
+    // published its backend, which is later than the gateway route table. An
+    // accepted start is that readiness.
+    for (const target of targets) await this.waitFor(`${target.name} workflows`, async () => {
+      const response = await fetch(`${target.apiUrl}/__zeroship/v1/wf.start`, {
+        method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ json: { case: "basic" } }),
+        signal: AbortSignal.any([this.processes.signal, AbortSignal.timeout(15_000)]),
+      });
+      const body = await response.json().catch(() => null);
+      return response.ok && typeof body?.json?.runId === "string";
+    });
     return targets;
   }
 

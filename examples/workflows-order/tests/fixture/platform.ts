@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { generateKeyPairSync, randomBytes } from "node:crypto";
+import { generateKeyPairSync, randomBytes, randomUUID } from "node:crypto";
 import { cp, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import { connect, createServer } from "node:net";
 import { tmpdir } from "node:os";
@@ -321,6 +321,19 @@ export class Platform {
       { name: "deployed", apiUrl: gateway.url + "/apps/orders", uiUrl: "http://orders.localhost:" + gateway.number },
     ];
     for (const target of targets) await this.waitFor(target.name, () => this.httpReady(target.apiUrl + "/"));
+    // Serving the app is not yet serving workflows. A deployed app reaches
+    // env.workflows only once the manager has placed it and the worker host has
+    // published its backend, which is later than the gateway route table. An
+    // accepted order start is that readiness.
+    for (const target of targets) await this.waitFor(target.name + " workflows", async () => {
+      const response = await fetch(target.apiUrl + "/orders", {
+        method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ orderId: randomUUID(), sku: "readiness", quantity: 1 }),
+        signal: AbortSignal.any([this.processes.signal, AbortSignal.timeout(15_000)]),
+      });
+      const body = await response.json().catch(() => null);
+      return response.ok && typeof body?.runId === "string";
+    });
     return targets;
   }
 
