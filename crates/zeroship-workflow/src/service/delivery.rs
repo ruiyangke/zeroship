@@ -198,11 +198,6 @@ impl Record {
             return Err(conflict());
         }
         let valid = match &job.operation {
-            JobOperation::Activate { .. } => {
-                self.run_id.is_none()
-                    && self.reconciliation.is_none()
-                    && self.reconciliation_next.is_none()
-            }
             JobOperation::Advance { run_id, .. } => {
                 self.run_id.as_deref() == Some(run_id.as_str())
                     && self.reconciliation.is_none()
@@ -218,7 +213,8 @@ impl Record {
                     && self.reconciliation.is_some()
                     && self.reconciliation_next.is_some()
             }
-            JobOperation::Management { .. }
+            JobOperation::Activate { .. }
+            | JobOperation::Management { .. }
             | JobOperation::Collect {}
             | JobOperation::Close { .. }
             | JobOperation::Fanout { .. }
