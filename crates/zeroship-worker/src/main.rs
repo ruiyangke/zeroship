@@ -891,6 +891,14 @@ fn main() -> std::io::Result<()> {
                 meter: Arc::clone(&meter),
             },
         );
+        // The Control-driven advance path still replays workflows in this
+        // process, and a replayed workflow reads its own run through
+        // `env.workflows`. Only its deploy-pinned isolates get this backend;
+        // request isolates resolve the host's ready registry above.
+        cache::init_advance_workflow_control(
+            config.control_url.clone(),
+            config.control_key.clone(),
+        );
         // Per-thread reconcile loop — reads from the shared version map,
         // writes env into the process-wide env cache.
         sync::start_sync(config.clone(), shared, envs.clone());
