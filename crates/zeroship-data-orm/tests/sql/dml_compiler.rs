@@ -6,7 +6,8 @@ use zeroship_data_orm::{
         },
         registration::{SqlFamily, SqlRegistration, SqlStorageCodecs},
         statement::{
-            ArithmeticOperator, ArrayOperator, Assignment, Comparison, Delete, DeleteParts,
+            ArithmeticOperator, ArrayElement, ArrayOperator, Assignment, Comparison, Delete,
+            DeleteParts,
             Expression, IdentityRequest, Insert, InsertParts, MutationScope, ResolvedJoin,
             ResolvedOperand, ResolvedPredicate, ResolvedPredicateValue, ReturnedColumn,
             SelectParts, SelectStatement, SelectedExpression, SpatialNearParts,
@@ -164,6 +165,7 @@ fn resolved_selects_reject_backend_dependent_ordering() {
         StorageType::Bytes,
         StorageType::exact_decimal(38, 9).unwrap(),
         StorageType::Json,
+        StorageType::Array(ArrayElement::Text),
         StorageType::Vector,
         StorageType::GeoPoint,
     ] {
@@ -224,6 +226,7 @@ fn resolved_selects_reject_backend_dependent_grouping_and_distinctness() {
     for storage in [
         StorageType::exact_decimal(38, 9).unwrap(),
         StorageType::Json,
+        StorageType::Array(ArrayElement::Text),
         StorageType::Vector,
         StorageType::GeoPoint,
     ] {
@@ -262,6 +265,7 @@ fn count_distinct_rejects_backend_dependent_equality() {
     for storage in [
         StorageType::exact_decimal(38, 9).unwrap(),
         StorageType::Json,
+        StorageType::Array(ArrayElement::Text),
         StorageType::Vector,
         StorageType::GeoPoint,
     ] {

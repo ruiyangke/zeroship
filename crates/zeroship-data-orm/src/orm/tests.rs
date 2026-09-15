@@ -26,6 +26,7 @@ mod internal_tables;
 mod joins;
 mod json;
 mod lifecycle;
+mod native_arrays;
 mod nested_temporal;
 mod nested_values;
 mod protected_projections;
@@ -1303,4 +1304,5 @@ async fn cancelled_transaction_cleans_up_its_own_context() {
 mod typed_read_terminals;
 
 mod typed_mutation_expressions;
+mod typed_native_arrays;
 mod typed_timestamp;

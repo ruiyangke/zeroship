@@ -363,10 +363,16 @@ pub(crate) fn resolve_assignments(
                         Operator::AddToSet => ArrayOperator::AddToSet,
                         _ => unreachable!(),
                     };
+                    let element = input.storage.array_operand().ok_or_else(|| {
+                        invalid(format!(
+                            "array operation requires array storage: {}",
+                            assignment.field
+                        ))
+                    })?;
                     Expression::ArrayMutation {
                         column: column.clone(),
                         operator,
-                        operand: registration.encode(input.storage, assignment.operand)?,
+                        operand: registration.encode(element, assignment.operand)?,
                     }
                 }
             };

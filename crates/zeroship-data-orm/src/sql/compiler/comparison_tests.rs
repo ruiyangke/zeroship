@@ -65,6 +65,10 @@ fn conflict_conditions_reject_nonportable_comparison_operators() {
             Value::Decimal("1.00".into()),
         ),
         (StorageType::Json, value!({"key":1})),
+        (
+            StorageType::Array(crate::sql::statement::ArrayElement::Text),
+            value!(["a"]),
+        ),
         (StorageType::Vector, value!([1.0, 2.0])),
         (StorageType::GeoPoint, value!({"lat":1.0,"lng":2.0})),
     ] {

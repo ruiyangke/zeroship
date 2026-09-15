@@ -146,7 +146,12 @@ fn generate(input: Input, orm: &syn::Path) -> syn::Result<TokenStream> {
 }
 
 fn sql_type(column: &Column, orm: &syn::Path) -> TokenStream {
-    let ty = type_marker(column.kind, &column.name, orm);
+    let ty = if column.kind == Kind::Array {
+        let item = type_marker(column.items.unwrap_or(Kind::Json), &column.name, orm);
+        quote!(#orm::sql_types::Array<#item>)
+    } else {
+        type_marker(column.kind, &column.name, orm)
+    };
     if column.nullable {
         quote!(#orm::sql_types::Nullable<#ty>)
     } else {
@@ -244,6 +249,10 @@ fn column_schema(column: &Column, orm: &syn::Path) -> TokenStream {
             Property::VectorMetric(metric) => {
                 let metric = Ident::new(match metric.to_string().as_str() { "cosine" => "Cosine", "l2" => "L2", _ => "InnerProduct" }, metric.span());
                 fields.push(quote!(vector_metric: #schema::VectorMetric::#metric));
+            }
+            Property::ArrayStorage(array_storage) => {
+                let representation = Ident::new(if array_storage.native { "Native" } else { "Json" }, array_storage.span);
+                storage.push(quote!(array: #schema::ArrayStorage::#representation));
             }
         }
     }

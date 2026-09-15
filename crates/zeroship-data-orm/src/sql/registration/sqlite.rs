@@ -16,6 +16,8 @@ impl SqlStorageCodecs for SqliteCodecs {
         if let Some(decimal) = crate::sql::decimal::storage(definition)? {
             return Ok(StorageType::ExactDecimal(decimal));
         }
+        // SQLite has no array type: arrays declared with native storage keep the
+        // JSON text representation, operators and equality.
         Ok(match definition.logical_type {
             LogicalType::Text | LogicalType::CalendarDate => StorageType::Text,
             LogicalType::Boolean => StorageType::Integer,
@@ -37,6 +39,9 @@ impl SqlStorageCodecs for SqliteCodecs {
     fn encode(&self, storage: StorageType, value: Value) -> Result<Value, CompileError> {
         if storage == StorageType::Json && value.is_null() {
             return Ok(Value::Json("null".into()));
+        }
+        if matches!(storage, StorageType::Array(_)) {
+            return Err(unsupported_array());
         }
         if value.is_null() {
             return Ok(value);
@@ -101,6 +106,7 @@ impl SqlStorageCodecs for SqliteCodecs {
 
     fn decode(&self, storage: StorageType, value: Value) -> Result<Value, CompileError> {
         match (storage, value) {
+            (StorageType::Array(_), _) => Err(unsupported_array()),
             (StorageType::Json, Value::String(encoded) | Value::Json(encoded)) => {
                 serde_json::from_str(&encoded).map_err(|_| invalid_json())
             }
@@ -153,6 +159,10 @@ fn decode_point_blob(bytes: &[u8]) -> Result<Value, CompileError> {
 
 fn unsupported_type() -> CompileError {
     CompileError::InvalidStatement("descriptor has no supported SQLite storage type".into())
+}
+
+fn unsupported_array() -> CompileError {
+    CompileError::Unsupported("native array storage")
 }
 
 fn invalid_timestamp() -> CompileError {

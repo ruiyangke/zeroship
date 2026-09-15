@@ -3,7 +3,7 @@ use super::{
     SqlSupport, SqlWriter,
 };
 use crate::{
-    sql::statement::{ArrayOperator, Column, IdentityRequest, Statement},
+    sql::statement::{ArrayOperator, Column, IdentityRequest, Statement, StorageType},
     value::Value,
 };
 
@@ -32,6 +32,7 @@ const SYNTAX: super::shared::Syntax = super::shared::Syntax {
     timestamp_cast: "",
     vector_cast: "",
     numeric_cast: "",
+    text_array_cast: None,
     first_row_lock: "",
     insensitive_like: "LIKE",
     insensitive_like_suffix: " COLLATE NOCASE",
@@ -111,6 +112,9 @@ fn write_array_mutation(
     operator: ArrayOperator,
     operand: super::ParameterSlot,
 ) -> Result<(), CompileError> {
+    if column.storage() != StorageType::Json {
+        return Err(CompileError::Unsupported("native array storage"));
+    }
     writer.sql.push_str("CASE WHEN ");
     write_column(writer, column);
     writer.sql.push_str(" IS NULL OR json_type(");
