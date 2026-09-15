@@ -356,8 +356,8 @@ impl Fleet {
                 control_port,
                 "--blob-store".into(),
                 blobs.clone(),
+                "--worker-urls".into(),
                 fleet.worker_url.clone(),
-                "--disable-workflow-engine".into(),
             ],
             &control_env,
         );
