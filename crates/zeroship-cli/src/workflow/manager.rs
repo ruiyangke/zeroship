@@ -39,6 +39,7 @@ use zeroship_workflow_manager::{
     coordinator::{Coordinator, Options as CoordinatorOptions},
     deployments,
     driver::{Driver, Options as DriverOptions},
+    lifecycle::Undeletable,
     local::LocalPlatform,
     recovery::{Options as RecoveryOptions, Recovery},
     scheduling::{Options as SchedulingOptions, Scheduler, SelectedActivation},
@@ -53,8 +54,13 @@ pub struct ManagerOptions {
     pub lease: Duration,
     pub placement_ttl: Duration,
     pub recovery_interval: Duration,
+    pub hold_grace: Duration,
     pub lane_timeout: Duration,
     pub driver_interval: Duration,
+    pub idle_close: Duration,
+    pub closing_timeout: Duration,
+    pub closing_backoff: Duration,
+    pub closing_backoff_max: Duration,
 }
 
 type Request = Box<dyn FnOnce(Rc<LocalManager>) -> LocalBoxFuture<'static, ()> + Send>;
@@ -151,12 +157,7 @@ async fn drive(driver: &mut Driver, interval: Duration, stop: Shared<LocalBoxFut
         }
         // A pass is bounded by its lanes' deadlines and joins before shutdown.
         let report = driver.tick().await;
-        for (lane, progress) in [
-            ("scheduling", report.scheduling),
-            ("reconciliation", report.reconciliation),
-            ("collection", report.collection),
-            ("retention", report.retention),
-        ] {
+        for (lane, progress) in report.lanes() {
             if let Some(error) = progress.scan_error {
                 tracing::warn!(lane, %error, "workflow manager scan unavailable");
             }
@@ -220,14 +221,18 @@ impl LocalManager {
         })
     }
 
+    /// The local host is its app's only platform authority, so no deletion
+    /// can abandon the app's responsibility; idleness still closes it.
     fn driver(&self) -> Result<Driver, WorkflowServiceError> {
         Driver::new(
             self.queue.clone(),
             DriverOptions {
                 recovery: recovery_options(self.options),
                 lane_timeout: self.options.lane_timeout,
+                hold_grace: self.options.hold_grace,
                 ..DriverOptions::default()
             },
+            Rc::new(Undeletable),
         )
         .map_err(manager_error)
     }
@@ -347,9 +352,13 @@ impl LocalManager {
     }
 }
 
-fn recovery_options(options: ManagerOptions) -> RecoveryOptions {
+pub fn recovery_options(options: ManagerOptions) -> RecoveryOptions {
     RecoveryOptions {
         interval: options.recovery_interval,
+        idle_after: options.idle_close,
+        closing_timeout: options.closing_timeout,
+        closing_backoff: options.closing_backoff,
+        closing_backoff_max: options.closing_backoff_max,
         ..RecoveryOptions::default()
     }
 }
@@ -525,6 +534,53 @@ impl ManagerClient {
                 manager
                     .recovery
                     .ensure(&app, &deployment, revision)
+                    .await
+                    .map_err(manager_error)
+            }
+            .boxed_local()
+        })
+        .await
+    }
+
+    /// Establish an open ingress epoch above `after`, committed before it is
+    /// returned. The local host is its app's platform authority, so its own
+    /// policy's admission decides establishment in place of a policy lease.
+    ///
+    /// # Errors
+    /// Refuses an app without activated responsibility, an epoch the manager
+    /// never issued, disabled admission and unavailable storage.
+    pub async fn establish(
+        &self,
+        app: &AppId,
+        after: Option<Revision>,
+        admission: bool,
+    ) -> Result<Revision, WorkflowServiceError> {
+        let app = app.clone();
+        self.call(move |manager| {
+            async move {
+                manager
+                    .recovery
+                    .establish(&app, after, admission)
+                    .await
+                    .map_err(manager_error)
+            }
+            .boxed_local()
+        })
+        .await
+    }
+
+    /// Report ingress the host accepted since its previous report, keeping
+    /// the app's responsibility from closing as idle.
+    ///
+    /// # Errors
+    /// Reports unavailable storage.
+    pub async fn note_ingress(&self, app: &AppId) -> Result<(), WorkflowServiceError> {
+        let app = app.clone();
+        self.call(move |manager| {
+            async move {
+                manager
+                    .recovery
+                    .note_ingress(&app)
                     .await
                     .map_err(manager_error)
             }

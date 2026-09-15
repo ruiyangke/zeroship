@@ -28,7 +28,7 @@ use zeroship_core::{
     workflow_coordination::{
         AssignScope, AssignedScope, RegisterWorker, RequestId, Revision, WorkerId, WorkerState,
     },
-    workflow_policy::AppPolicy,
+    workflow_policy::{AppPolicy, PolicyLeaseRequest},
 };
 use zeroship_data_orm::orm::{Database, FromRow};
 use zeroship_workflow_manager::{
@@ -279,6 +279,7 @@ enum Change {
 struct Host {
     coordinator: Coordinator,
     scope: AssignedScope,
+    request: PolicyLeaseRequest,
     worker: WorkerId,
 }
 
@@ -312,13 +313,15 @@ async fn host(fixture: &Fixture, options: Options) -> Host {
         })
         .await
         .unwrap();
+    let scope = AssignedScope {
+        app_id: assignment.app_id,
+        assignment_revision: assignment.revision,
+    };
     Host {
         coordinator,
         worker,
-        scope: AssignedScope {
-            app_id: assignment.app_id,
-            assignment_revision: assignment.revision,
-        },
+        request: plain(&scope),
+        scope,
     }
 }
 
@@ -378,7 +381,7 @@ async fn exact_tuple(fixture: &Fixture) {
     for _ in 0..2 {
         let grant = host
             .coordinator
-            .policy_lease(&host.worker, KEY, &host.scope, &source, || {
+            .policy_lease(&host.worker, KEY, &host.request, &source, || {
                 ready(Ok(host.worker.clone()))
             })
             .await
@@ -430,7 +433,7 @@ async fn authority_caps(fixture: &Fixture) {
         );
         let grant = host
             .coordinator
-            .policy_lease(&host.worker, KEY, &host.scope, &source, || {
+            .policy_lease(&host.worker, KEY, &host.request, &source, || {
                 ready(Ok(host.worker.clone()))
             })
             .await
@@ -464,14 +467,14 @@ async fn refusals(fixture: &Fixture) {
     ] {
         let result = host
             .coordinator
-            .policy_lease(&worker, KEY, &scope, &source, || ready(Ok(worker.clone())))
+            .policy_lease(&worker, KEY, &plain(&scope), &source, || ready(Ok(worker.clone())))
             .await;
         assert!(matches!(result, Err(Error::Denied)), "{result:?}");
     }
     assert_eq!(source.observations.get(), 0);
     let wrong = host
         .coordinator
-        .policy_lease(&host.worker, KEY, &host.scope, &source, || {
+        .policy_lease(&host.worker, KEY, &host.request, &source, || {
             ready(Ok(WorkerId::mint()))
         })
         .await;
@@ -479,7 +482,7 @@ async fn refusals(fixture: &Fixture) {
     assert_eq!(source.observations.get(), 0);
     let missing_key = host
         .coordinator
-        .policy_lease(&host.worker, "", &host.scope, &source, || {
+        .policy_lease(&host.worker, "", &host.request, &source, || {
             ready(Ok(host.worker.clone()))
         })
         .await;
@@ -488,7 +491,7 @@ async fn refusals(fixture: &Fixture) {
     source.failure.set(Some(Error::Denied));
     let unavailable = host
         .coordinator
-        .policy_lease(&host.worker, KEY, &host.scope, &source, || {
+        .policy_lease(&host.worker, KEY, &host.request, &source, || {
             ready(Ok(host.worker.clone()))
         })
         .await;
@@ -496,7 +499,7 @@ async fn refusals(fixture: &Fixture) {
     let foreign = Source::new(&AppId::mint(), AppPolicy::default(), until(LONG));
     let mismatched = host
         .coordinator
-        .policy_lease(&host.worker, KEY, &host.scope, &foreign, || {
+        .policy_lease(&host.worker, KEY, &host.request, &foreign, || {
             ready(Ok(host.worker.clone()))
         })
         .await;
@@ -519,7 +522,7 @@ async fn held_app_lock(fixture: &Fixture) {
         let calls = Cell::new(0);
         let issue = host
             .coordinator
-            .policy_lease(&host.worker, KEY, &host.scope, &source, || {
+            .policy_lease(&host.worker, KEY, &host.request, &source, || {
                 calls.set(calls.get() + 1);
                 ready(Ok(host.worker.clone()))
             });
@@ -618,7 +621,7 @@ async fn enrollment_waits(fixture: &Fixture) {
             let (enrollment, entered, release) = Enrollment::new(&host.worker, wait_at);
             let issue =
                 host.coordinator
-                    .policy_lease(&host.worker, KEY, &host.scope, &source, || {
+                    .policy_lease(&host.worker, KEY, &host.request, &source, || {
                         enrollment.authorize()
                     });
             let invalidate = async {
@@ -634,7 +637,7 @@ async fn enrollment_waits(fixture: &Fixture) {
         let (enrollment, entered, release) = Enrollment::new(&host.worker, wait_at);
         let issue = host
             .coordinator
-            .policy_lease(&host.worker, KEY, &host.scope, &source, || {
+            .policy_lease(&host.worker, KEY, &host.request, &source, || {
                 enrollment.authorize()
             });
         let invalidate = async {
@@ -657,7 +660,7 @@ async fn original_source_expiry(fixture: &Fixture) {
     let (enrollment, entered, release) = Enrollment::new(&host.worker, 2);
     let issue = host
         .coordinator
-        .policy_lease(&host.worker, KEY, &host.scope, &source, || {
+        .policy_lease(&host.worker, KEY, &host.request, &source, || {
             enrollment.authorize()
         });
     let extend = async {
@@ -676,7 +679,7 @@ async fn original_source_expiry(fixture: &Fixture) {
     );
     let fresh = host
         .coordinator
-        .policy_lease(&host.worker, KEY, &host.scope, &source, || {
+        .policy_lease(&host.worker, KEY, &host.request, &source, || {
             ready(Ok(host.worker.clone()))
         })
         .await
@@ -703,7 +706,7 @@ async fn extensions(fixture: &Fixture) {
     let (observed, release) = source.pause_observation();
     let issue = host
         .coordinator
-        .policy_lease(&host.worker, KEY, &host.scope, &source, || {
+        .policy_lease(&host.worker, KEY, &host.request, &source, || {
             ready(Ok(host.worker.clone()))
         });
     let renew = async {
@@ -726,7 +729,7 @@ async fn extensions(fixture: &Fixture) {
     let before = state(&database, &host).await;
     let issue = host
         .coordinator
-        .policy_lease(&host.worker, KEY, &host.scope, &source, || {
+        .policy_lease(&host.worker, KEY, &host.request, &source, || {
             ready(Ok(host.worker.clone()))
         });
     let extend_placement = async {
@@ -765,7 +768,7 @@ async fn retained_grants(fixture: &Fixture) {
         let source = Source::new(&host.scope.app_id, AppPolicy::default(), until(LONG));
         let grant = host
             .coordinator
-            .policy_lease(&host.worker, KEY, &host.scope, &source, || {
+            .policy_lease(&host.worker, KEY, &host.request, &source, || {
                 ready(Ok(host.worker.clone()))
             })
             .await
@@ -777,7 +780,7 @@ async fn retained_grants(fixture: &Fixture) {
         assert_eq!(cloned.lease(), Err(Error::Unavailable));
         if !matches!(change, Change::Revoke) {
             host.coordinator
-                .policy_lease(&host.worker, KEY, &host.scope, &source, || {
+                .policy_lease(&host.worker, KEY, &host.request, &source, || {
                     ready(Ok(host.worker.clone()))
                 })
                 .await
@@ -795,7 +798,7 @@ async fn retained_grants(fixture: &Fixture) {
     let original = source.observation();
     let grant = host
         .coordinator
-        .policy_lease(&host.worker, KEY, &host.scope, &source, || {
+        .policy_lease(&host.worker, KEY, &host.request, &source, || {
             ready(Ok(host.worker.clone()))
         })
         .await
@@ -812,7 +815,7 @@ async fn retained_grants(fixture: &Fixture) {
     assert_eq!(grant.lease(), Err(Error::Unavailable));
     assert_eq!(cloned.lease(), Err(Error::Unavailable));
     host.coordinator
-        .policy_lease(&host.worker, KEY, &host.scope, &source, || {
+        .policy_lease(&host.worker, KEY, &host.request, &source, || {
             ready(Ok(host.worker.clone()))
         })
         .await
@@ -859,4 +862,13 @@ fn observations_reject_invalid_or_expired_raw_authority() {
         ),
         Err(Error::Unavailable)
     ));
+}
+
+/// A plain refresh: it never establishes or reports ingress.
+fn plain(scope: &AssignedScope) -> PolicyLeaseRequest {
+    PolicyLeaseRequest {
+        scope: scope.clone(),
+        establish: None,
+        ingress_used: false,
+    }
 }

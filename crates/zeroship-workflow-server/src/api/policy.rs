@@ -2,7 +2,7 @@ use super::{authorization, read_json, respond};
 use crate::{coordinator::Error, SharedState};
 use ntex::web::{self, types::State};
 use std::time::Duration;
-use zeroship_core::{service_identity::endpoints, workflow_coordination::AssignedScope};
+use zeroship_core::{service_identity::endpoints, workflow_policy::PolicyLeaseRequest};
 use zeroship_workflow_manager::Error as NativeError;
 
 pub fn configure(config: &mut web::ServiceConfig) {
@@ -27,7 +27,7 @@ async fn lease(
             )
             .await
             .map_err(|_| Error::Unavailable)??;
-            let command: AssignedScope = read_json(&request, body).await?;
+            let command: PolicyLeaseRequest = read_json(&request, body).await?;
             let source = state.policy_source.as_ref().ok_or(Error::Unavailable)?;
             let signing_key = actor.signing_key_id();
             state

@@ -318,6 +318,7 @@ impl CreatorFactory for UnexpectedCreator {
         &self,
         _: &AssignedScope,
         _: &PolicyBinding,
+        _: Rc<dyn crate::service::IngressEpochs>,
     ) -> Result<CreatorRuntime, WorkflowServiceError> {
         panic!("empty placement fixture cannot authorize creator setup")
     }

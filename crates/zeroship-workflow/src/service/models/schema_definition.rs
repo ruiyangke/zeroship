@@ -29,6 +29,8 @@ zeroship_data_orm::orm::schema! {
             subscription_sequence: BigInt,
             #[orm(default = 0)]
             signal_sequence: BigInt,
+            #[orm(default = 0)]
+            closed_epoch: BigInt,
         }
 
         __zeroship_workflow_broadcasts {

@@ -1126,6 +1126,12 @@ async fn prepared(
         .next())
 }
 
+/// Whether Control's latest lifecycle command disabled the app's calendar, as
+/// archive does. The caller holds the app lock.
+pub(crate) async fn archived_in(tx: &Database, app: &AppId) -> Result<bool, Error> {
+    Ok(active(tx, app).await?.is_some_and(|scope| !scope.enabled))
+}
+
 async fn active(tx: &Database, app: &AppId) -> Result<Option<Active>, Error> {
     let scope = tx
         .entity::<schedule_scopes::Entity>()?
@@ -1188,6 +1194,20 @@ async fn activation_at_revision(
         )
         .first::<Activation>()
         .await?)
+}
+
+/// The deployment of the app's enabled calendar selection. A disabled calendar
+/// retains its last selection for restore, but selects nothing for new work.
+/// The caller holds the app lock.
+pub(crate) async fn selected_deployment_in(
+    tx: &Database,
+    app: &AppId,
+) -> Result<Option<String>, Error> {
+    let Some(scope) = active(tx, app).await?.filter(|scope| scope.enabled) else {
+        return Ok(None);
+    };
+    let activation = scope.activation_id.as_deref().ok_or(Error::Storage)?;
+    Ok(Some(load_activation(tx, app, activation).await?.deployment_id))
 }
 
 /// Shared calendar eligibility for the public due page and the driver's bounded

@@ -22,7 +22,11 @@ customer work; that behavior does not define the target role split.
 
 The driver runs independently of HTTP threads and worker registration. Each pass
 visits bounded pages of due schedules, independent reconciliation and collection
-obligations, and unfinished deployment holds. A deadline shared by each lane's
+obligations, and deployment holds: it resumes unfinished holds and releases the
+queue hold of a deployment the app no longer selects once no job needs it. A
+confirmed hold first stays held for the driver's hold grace, which the server
+derives from `workflow.database_command_timeout_ms` so that it outlasts the
+transaction that commits a dependency on it. A deadline shared by each lane's
 scans and candidate operations prevents a slow candidate from consuming the next
 lane's turn. Failed candidates
 remain durable and retry after a finite identity sweep; restarts preserve the
@@ -142,8 +146,13 @@ public key. The Control origin requires HTTPS except for literal loopback HTTP
 addresses. The host needs no customer connection or payload location.
 `workflow.driver_interval_ms` controls the delay after a completed pass;
 `workflow.driver_lane_timeout_ms` bounds each lane. `workflow.batch_limit` also
-bounds the candidate page. These settings control the manager host and add no
-workflow-specific creator CLI setup.
+bounds the candidate page. The closing lane begins closing an app's recovery
+responsibility after `workflow.closing_idle_ms` without activity, or once
+Control archived the app; `workflow.closing_timeout_ms` bounds an attempt, and
+`workflow.closing_backoff_ms` doubles up to `workflow.closing_backoff_max_ms`
+between attempts that did not retire. The lane abandons an app Control deleted
+instead, reading only the deletion marker. These settings control the manager
+host and add no workflow-specific creator CLI setup.
 `zeroship-workflow-server --config zeroship.toml --check-config`
 validates settings without connecting to dependencies. `/healthz` reports process
 liveness; `/readyz` verifies metadata and worker-registry access.

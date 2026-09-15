@@ -798,7 +798,7 @@ async fn payload_usage(tx: &Transaction, app: &AppId) -> Result<(i64, i64), Work
         .collection(models::payloads::Entity::COLLECTION)?
         .execute(Operation::Aggregate {
             pipeline: value!([
-                {"$match":{"app_id":app.as_str(), "state":{"$ne":"deleted"}}},
+                {"$match":{"app_id":app.as_str(), "state":{"$nin":["deleted","purged"]}}},
                 {"$group":{"total":{"$sum":"size"}, "objects":{"$count":true}}},
             ]),
             options: value!({}),

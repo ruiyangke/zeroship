@@ -100,6 +100,8 @@ pub trait PolicySource: Debug {
 
 /// An issued lease retains source authority through response construction.
 /// There is no public constructor and no serde implementation for this handle.
+///
+/// The ingress epoch was committed before the grant was built.
 #[derive(Clone, Debug)]
 pub struct PolicyGrant<'a> {
     observation: PolicyObservation,
@@ -107,6 +109,7 @@ pub struct PolicyGrant<'a> {
     worker_id: WorkerId,
     signing_key_id: String,
     assignment_revision: Revision,
+    ingress_epoch: Option<Revision>,
     expires_at: Instant,
 }
 
@@ -117,6 +120,7 @@ impl<'a> PolicyGrant<'a> {
         worker_id: WorkerId,
         signing_key_id: String,
         scope: &AssignedScope,
+        ingress_epoch: Option<Revision>,
         expires_at: Instant,
     ) -> Self {
         Self {
@@ -125,8 +129,15 @@ impl<'a> PolicyGrant<'a> {
             worker_id,
             signing_key_id,
             assignment_revision: scope.assignment_revision,
+            ingress_epoch,
             expires_at,
         }
+    }
+
+    /// The open or closing ingress epoch this grant carries, if any.
+    #[must_use]
+    pub const fn ingress_epoch(&self) -> Option<Revision> {
+        self.ingress_epoch
     }
 
     /// Convert after transaction settlement, charging all intervening waits.
@@ -152,6 +163,7 @@ impl<'a> PolicyGrant<'a> {
             assignment_revision: self.assignment_revision,
             policy_revision: self.observation.revision,
             policy: self.observation.policy.clone(),
+            ingress_epoch: self.ingress_epoch,
             remaining_ms,
         })
     }

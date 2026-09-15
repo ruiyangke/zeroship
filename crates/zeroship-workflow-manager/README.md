@@ -86,21 +86,28 @@ still need integration.
 Calendar disable shares the platform's activation revision sequence. Its durable
 receipt remains replayable after restore, and disabling before the first
 activation fences delayed older requests. Disable retains accepted jobs, calendar
-progress, recovery responsibility and holds. Restoring the same deployment
-preserves its interval anchor and catch-up progress while creating new activation
-readiness. Due scans exclude disabled scopes before applying their page limits.
+progress and recovery responsibility. Frozen frontiers retain no code, so the
+driver releases the disabled deployment's queue hold once its jobs settle.
+Restoring the same deployment acquires the hold again and preserves its interval
+anchor and catch-up progress while creating new activation readiness. Due scans
+exclude disabled scopes before applying their page limits.
 This gate controls calendar publication; creator admission and executor shutdown
 have separate policy authority.
 
 `driver::Driver` visits independent bounded calendar, reconciliation, collection
-and unfinished-hold pages.
+and retention pages.
 Each lane captures its upper identity and advances past an attempted candidate
 before I/O. A shared lane deadline bounds scans and candidate operations; failed
 items remain durable and retry after the finite sweep wraps. Cancellation retains
 scan progress and rotates the next lane. The host owns cadence and shutdown.
-The driver needs no worker registration, placement or creator database. Retention
-processing resumes acquiring/releasing intents; releasing a held deployment still
-requires the host's explicit release operation and its dependency checks.
+The driver needs no worker registration, placement or creator database. The
+retention lane resumes acquiring/releasing intents and releases the queue hold
+of a deployment the app's enabled calendar no longer selects once no unsettled
+job needs it. A hold becomes eligible only after `Options::hold_grace`, which
+`Driver::new` requires to exceed the queue's transaction timeout: an acquirer
+confirms its hold outside its transaction, so it commits within that budget
+before any pass may release the hold. Each candidate is decided again under the
+app lock; a hold still in use stays held for a later pass.
 
 `recovery::Recovery` retains activation provenance in `recovery_scopes` and
 independent Reconcile and Collect responsibilities in `recovery_duties`. Trusted
@@ -142,9 +149,9 @@ boundaries. The operation carries executable identity; decoding stored jobs veri
 the kind, run, request and nullable deployment projections against its immutable
 specification digest. The queue persists
 acquire/release intents and generations; network requests run outside its database
-transactions. Release closes publication and checks pending jobs and schedule
-frontiers under the app lock. It validates bounded pages of unsettled job
-specifications before ruling out executable dependencies. Recovery provenance
+transactions. Release closes publication and checks pending jobs and the
+frontiers of an enabled calendar under the app lock. It validates bounded pages
+of unsettled job specifications before ruling out executable dependencies. Recovery provenance
 does not retain code. Completed receipts may
 replay after code reclamation. A host must reconcile unfinished intents, and
 Control reclamation must consult the shared ledger before deleting manifests.
