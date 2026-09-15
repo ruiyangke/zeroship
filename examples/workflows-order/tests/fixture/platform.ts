@@ -336,17 +336,44 @@ export class Platform {
     for (const target of targets) await this.waitFor(target.name, () => this.httpReady(target.apiUrl + "/"));
     // Serving the app is not yet serving workflows. A deployed app reaches
     // env.workflows only once the manager has placed it and the worker host has
-    // published its backend, which is later than the gateway route table. An
-    // accepted order start is that readiness.
-    for (const target of targets) await this.waitFor(target.name + " workflows", async () => {
-      const response = await fetch(target.apiUrl + "/orders", {
-        method: "POST", headers: { "content-type": "application/json" },
-        body: JSON.stringify({ orderId: randomUUID(), sku: "readiness", quantity: 1 }),
-        signal: AbortSignal.any([this.processes.signal, AbortSignal.timeout(15_000)]),
+    // published its backend, which is later than the gateway route table.
+    //
+    // An accepted start proves only the ACCEPTANCE half of that chain: a
+    // request isolate writing to the creator journal. DELIVERY - the manager
+    // handing the job back to a worker consumer - is a separate chain that
+    // becomes ready later, so a gate that stopped at an accepted start let the
+    // first timed assertion in the suite measure cold delivery.
+    //
+    // This order workflow parks on its payment signal and so never completes
+    // unattended; `sleeping` is the reachable proof instead, and a strong one.
+    // Reaching it requires the child risk review to have been delivered and to
+    // have completed, and the parent to have been resumed after it - two
+    // deliveries, without needing a signal this readiness run will never get.
+    for (const target of targets) {
+      let runId: string | null = null;
+      await this.waitFor(target.name + " workflows accept a start", async () => {
+        const response = await fetch(target.apiUrl + "/orders", {
+          method: "POST", headers: { "content-type": "application/json" },
+          body: JSON.stringify({ orderId: randomUUID(), sku: "readiness", quantity: 1 }),
+          signal: AbortSignal.any([this.processes.signal, AbortSignal.timeout(15_000)]),
+        });
+        const body = await response.json().catch(() => null);
+        if (!response.ok || typeof body?.runId !== "string") return false;
+        runId = body.runId as string;
+        return true;
       });
-      const body = await response.json().catch(() => null);
-      return response.ok && typeof body?.runId === "string";
-    });
+      await this.waitFor(target.name + " workflows deliver a run", async () => {
+        const response = await fetch(target.apiUrl + "/orders/" + runId, {
+          signal: AbortSignal.any([this.processes.signal, AbortSignal.timeout(15_000)]),
+        });
+        const body = await response.json().catch(() => null);
+        // `sleeping` ONLY. `waiting` is also what the parent reports while it
+        // awaits the child, so accepting it here would pass on the single
+        // delivery this gate exists to look past. The sleep is orders of
+        // magnitude wider than the poll interval, so it cannot be stepped over.
+        return response.ok && body?.state === "sleeping";
+      });
+    }
     return targets;
   }
 
