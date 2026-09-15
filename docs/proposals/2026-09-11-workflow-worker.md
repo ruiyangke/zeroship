@@ -418,12 +418,20 @@ capability.
 
 The manager selects workers itself. It takes the app lock, then the worker
 lock, and admits a placement only when all of these hold: the app is not
-deleted, the zones match, the enrollment is active, the registration is ready
-and unexpired, and the worker has capacity. It reads these facts from
-Control-owned rows through column grants and an injected eligibility
-capability, after the lock waits and again before commit. A revocation that
-commits after the second read is caught by the next registration, renewal,
-ownership or delivery check, the same eventual admission fence enrollment has.
+deleted, the zones match, the instance is active and its Control lease has not
+run out, the registration is ready and unexpired, and the worker has capacity.
+It reads these facts from Control-owned rows through column grants and an
+injected eligibility capability, after the lock waits and again before commit. A
+revocation that commits after the second read is caught by the next
+registration, renewal, ownership or delivery check, the same eventual admission
+fence enrollment has.
+
+The lease is the one fact there that moves both ways, because a worker renews
+it, and the manager reads it as a liveness hint rather than as authority: a
+worker whose lease has lapsed can no longer fetch an app's environment or
+project data key, so placing on it would stall instead of failing where a caller
+can see it. The fence stays Control's, which refuses a lapsed instance on every
+call it authenticates against its own clock.
 Archived apps remain placeable for maintenance jobs; policy still refuses their
 admission, dispatch and ingress. Deleted apps are abandoned.
 
