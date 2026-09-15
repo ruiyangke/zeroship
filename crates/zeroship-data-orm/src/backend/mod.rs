@@ -23,6 +23,12 @@ pub trait Backend:
     fn sql_registration(&self) -> crate::sql::registration::SqlRegistration;
     /// Whether the host publishes changes from the database commit stream.
     fn publishes_committed_changes(&self) -> bool;
+    /// Whether one app may hold more than one open transaction at a time.
+    ///
+    /// `false` for a host that reserves a single transaction connection per
+    /// app: forking a second lane there could only serialize invisibly or be
+    /// refused at BEGIN, so `Database::independent` refuses up front instead.
+    fn admits_concurrent_transactions(&self) -> bool;
 }
 pub use crate::sql::descriptors::{GeoPoint, VectorMetric};
 pub use crate::storage::{Backup, LockManager};

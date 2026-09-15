@@ -318,10 +318,23 @@ pub fn transaction_dispatch<'s>(
         // and disarmed once the client is installed; it is not here because it
         // is unverified". That guard is now here, and it is SC-1 rule 5 - the
         // defect labelled DBR-11.
+        // A refusal here is the engine's re-entrant case: a claim held by the
+        // very poll asking for it. A creator cannot reach it - a nested call
+        // is `nested` above and needs no claim - so it rejects the outer
+        // promise directly rather than joining the BEGIN arm below.
         let admission = if nested {
             None
         } else {
-            Some(TxAdmission::acquire(app_id.clone()).await)
+            match TxAdmission::acquire(app_id.clone()).await {
+                Ok(admission) => Some(admission),
+                Err(error) => {
+                    return OpResult::JsValue {
+                        resolver: outer_global,
+                        value: ResolveValue::RejectError(error.to_op_error()),
+                        request_id,
+                    };
+                }
+            }
         };
         // Resolved adapter-side. A resolution failure folds into the same
         // `Err` arm as a begin failure, so the admission claim is dropped and

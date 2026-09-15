@@ -55,6 +55,16 @@ pub struct TxLane {
     /// on ROLLBACK. Only fills inside a transaction - the autocommit path emits
     /// directly.
     pending_emits: Vec<ChangeEvent>,
+
+    /// Nonzero for exactly as long as this lane's callback is being polled.
+    ///
+    /// A top-level `transaction()` reached from inside that poll can never be
+    /// admitted: the claim it would wait for is held by the callback it is
+    /// running in, and only this poll returning can release it. The counter is
+    /// raised and lowered around each poll rather than for the callback's whole
+    /// lifetime, so a sibling task polled while the callback is suspended still
+    /// sees a lane it may legitimately queue behind.
+    callback_polls: u32,
 }
 
 /// **A lane cannot outlive its session, and the disposition is destroy.**
@@ -294,6 +304,31 @@ impl TxLanes {
         for waker in std::mem::take(&mut lane.claim_waiters) {
             waker.wake();
         }
+    }
+
+    /// Raise `app_id`'s callback marker for the duration of one poll.
+    ///
+    /// A no-op when the lane is gone, which is the state a torn-down
+    /// transaction leaves behind; there is then no claim for a re-entrant
+    /// caller to deadlock on.
+    pub fn enter_callback(&mut self, app_id: &str) {
+        if let Some(lane) = self.lanes.get_mut(app_id) {
+            lane.callback_polls += 1;
+        }
+    }
+
+    /// Lower the marker [`Self::enter_callback`] raised.
+    pub fn exit_callback(&mut self, app_id: &str) {
+        if let Some(lane) = self.lanes.get_mut(app_id) {
+            lane.callback_polls = lane.callback_polls.saturating_sub(1);
+        }
+    }
+
+    /// `true` when this poll is running inside `app_id`'s transaction callback.
+    pub fn callback_is_polling(&self, app_id: &str) -> bool {
+        self.lanes
+            .get(app_id)
+            .is_some_and(|lane| lane.callback_polls > 0)
     }
 
     /// Park a waker on `app_id`'s lane closing.

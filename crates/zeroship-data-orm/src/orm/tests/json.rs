@@ -87,7 +87,7 @@ async fn exercise_json_values(db: &Database) {
                     rows[0]["payload"], payload,
                     "update must preserve the JSON type"
                 );
-                Ok(id)
+                Ok::<_, DbError>(id)
             })
             .await
             .unwrap();

@@ -38,6 +38,10 @@ pub trait ScopedExecutor: Any + Debug {
         sql: &str,
         params: &[Value],
     ) -> Result<u64, DbError>;
+    /// Confirm the connection source can answer, in one round trip on an
+    /// autocommit lease. It claims no transaction lane, installs no authority
+    /// and reads no table.
+    async fn check_connection(&self) -> Result<(), DbError>;
     /// Return only after BEGIN and session authority setup have succeeded.
     async fn open_tx_session(
         &self,

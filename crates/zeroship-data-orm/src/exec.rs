@@ -956,7 +956,9 @@ mod tests {
             // engine cannot name it any more.
             let handle = BackendHandle::new(Rc::clone(&backend));
 
-            let admission = crate::transaction::TxAdmission::acquire("app_exec".to_owned()).await;
+            let admission = crate::transaction::TxAdmission::acquire("app_exec".to_owned())
+                .await
+                .expect("the fixture claims a free lane");
             crate::transaction::exec_begin_or_savepoint(
                 false,
                 None,
@@ -1380,8 +1382,9 @@ mod tests {
             // engine cannot name it any more.
             let handle = BackendHandle::new(Rc::clone(&backend));
 
-            let admission =
-                crate::transaction::TxAdmission::acquire("app_exec_cancel".to_owned()).await;
+            let admission = crate::transaction::TxAdmission::acquire("app_exec_cancel".to_owned())
+                .await
+                .expect("the fixture claims a free lane");
             crate::transaction::exec_begin_or_savepoint(
                 false,
                 None,

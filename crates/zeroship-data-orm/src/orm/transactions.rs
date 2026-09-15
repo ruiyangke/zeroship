@@ -19,10 +19,18 @@ impl Database {
     /// Commit a successful callback or roll back its error. Nested calls use
     /// the transaction protocol's savepoint frames. Escaped handles expire
     /// when their callback finishes, including when its future is cancelled.
-    pub async fn transaction<T, F, Fut>(&self, body: F) -> Result<T, DbError>
+    ///
+    /// The callback chooses its own error type, so a domain refusal that must
+    /// roll back is returned as itself: `Err(refusal)` rolls back and hands the
+    /// refusal to the caller, while `Ok(Err(refusal))` commits the work done
+    /// before it. Database failures reach the caller through
+    /// `E: From<DbError>`. A callback that only ever fails with [`DbError`]
+    /// states so at one of its `Ok` arms, because nothing else fixes `E`.
+    pub async fn transaction<T, E, F, Fut>(&self, body: F) -> Result<T, E>
     where
+        E: From<DbError>,
         F: FnOnce(Database) -> Fut,
-        Fut: Future<Output = Result<T, DbError>>,
+        Fut: Future<Output = Result<T, E>>,
     {
         self.transaction_with_options(TransactionOptions::default(), body)
             .await
@@ -30,14 +38,20 @@ impl Database {
 
     /// Open a transaction with explicit settings. Isolation can only be selected
     /// on the outermost transaction; nested callbacks use savepoints.
-    pub async fn transaction_with_options<T, F, Fut>(
+    ///
+    /// A top-level transaction opened on a root handle while a callback on the
+    /// same context holds that app's lane is refused with
+    /// `nested_top_level_transaction`; see [`Database::independent`] for the
+    /// handle that runs one concurrently instead.
+    pub async fn transaction_with_options<T, E, F, Fut>(
         &self,
         options: TransactionOptions,
         body: F,
-    ) -> Result<T, DbError>
+    ) -> Result<T, E>
     where
+        E: From<DbError>,
         F: FnOnce(Database) -> Fut,
-        Fut: Future<Output = Result<T, DbError>>,
+        Fut: Future<Output = Result<T, E>>,
     {
         self.context
             .scope(async {
@@ -55,7 +69,8 @@ impl Database {
                 transaction.transaction_scope = Some(
                     crate::transaction::scope::TransactionScope::current(self.binding.app_id())?,
                 );
-                let result = body(transaction).await;
+                let result =
+                    crate::transaction::in_callback(self.binding.app_id(), body(transaction)).await;
                 active.set(false);
                 frame.finish(result).await
             })

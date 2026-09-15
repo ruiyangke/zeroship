@@ -126,7 +126,7 @@ async fn requires_transaction(postgres: bool) {
             assert!(tx.from(&inside).for_update().is_ok());
             assert!(tx.from(&inside).for_update_of(&inside).is_ok());
             assert!(tx.entity::<lock_rows::Entity>()?.query().for_update().is_ok());
-            Ok(())
+            Ok::<_, DbError>(())
         })
         .await
         .unwrap();
@@ -174,7 +174,7 @@ async fn sqlite_refuses_required_row_locks_without_poisoning_the_transaction() {
             tx.collection("lock_rows")?
                 .insert(value!({"id":"after", "label":"committed"}))
                 .await?;
-            Ok(())
+            Ok::<_, DbError>(())
         })
         .await
         .unwrap();
@@ -362,7 +362,7 @@ async fn postgres_for_update_of_locks_only_the_selected_alias() {
                 )
                 .await
             ));
-            Ok(())
+            Ok::<_, DbError>(())
         })
         .await
         .unwrap();
@@ -610,7 +610,7 @@ async fn postgres_keyset_locking_pages_accumulate_until_settlement() {
                 )
                 .await
                 .is_ok());
-            Ok(())
+            Ok::<_, DbError>(())
         })
         .await
         .unwrap();
@@ -670,7 +670,7 @@ async fn postgres_row_lock_in_rolled_back_savepoint() {
                 )
                 .await
             ));
-            Ok(())
+            Ok::<_, DbError>(())
         })
         .await
         .unwrap();
@@ -762,7 +762,7 @@ async fn postgres_row_locks_reject_summary_grouping_and_nullable_join_targets() 
                 tx.from(&left).for_update_of(&foreign).unwrap_err(),
                 "invalid_read",
             );
-            Ok(())
+            Ok::<_, DbError>(())
         })
         .await
         .unwrap();
@@ -780,7 +780,7 @@ async fn postgres_row_lock_handles_and_unpolled_reads_expire_with_the_callback()
                 .query()
                 .for_update()?
                 .all::<LockedRow>();
-            Ok((tx, pending))
+            Ok::<_, DbError>((tx, pending))
         })
         .await
         .unwrap();
@@ -797,7 +797,7 @@ async fn postgres_row_lock_handles_and_unpolled_reads_expire_with_the_callback()
                     .len(),
                 2
             );
-            Ok(())
+            Ok::<_, DbError>(())
         })
         .await
         .unwrap();

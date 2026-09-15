@@ -384,7 +384,7 @@ async fn exercise_mutations(db: &Database) {
     }
     let prepared = db
         .transaction(|tx| async move {
-            Ok(tx
+            Ok::<_, DbError>(tx
                 .entity::<documents::Entity>()?
                 .update_many(Filter::all(), documents::label.set("expired")?))
         })

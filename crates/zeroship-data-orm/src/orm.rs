@@ -81,6 +81,69 @@ impl Database {
         &self.context
     }
 
+    /// A handle on the same binding, backend, installed schema, mask policy,
+    /// protection floors and usage sink, with a transaction lane of its own.
+    ///
+    /// Top-level transactions serialize through one lane per app, so a second
+    /// transaction opened on this handle - or on a clone of it - waits for the
+    /// first to settle. A fork admits its own, so a host that wants several
+    /// transactions in flight at once takes one fork per concurrent unit of
+    /// work. Concurrency is then bounded by the backend's connection pool: a
+    /// fork whose transaction cannot get a connection fails with the pool's
+    /// acquire timeout rather than running unbounded.
+    ///
+    /// Forks are separate handles, not clones: a read source built on one is
+    /// refused by the other, which is what keeps a transaction's aliases from
+    /// executing on a lane that is not its own.
+    ///
+    /// Locks are not forgiving here. A fork awaited from inside another
+    /// transaction's callback can still block on rows that transaction holds,
+    /// and only the lock timeout ends that.
+    ///
+    /// # Errors
+    /// `unsupported_backend_feature` on a backend that reserves one
+    /// transaction connection per app, where a second lane could only
+    /// serialize invisibly or refuse at BEGIN; `transaction_scope_expired` on a
+    /// settled transaction handle.
+    pub fn independent(&self) -> Result<Self, DbError> {
+        self.check_scope()?;
+        if !self.backend.admits_concurrent_transactions() {
+            return Err(unsupported_backend_feature("independent transaction lanes"));
+        }
+        Ok(Self {
+            identity: Rc::new(()),
+            context: self.context.fork_lanes(),
+            binding: self.binding.clone(),
+            backend: self.backend.clone(),
+            actor_id: self.actor_id.clone(),
+            usage: self.usage.clone(),
+            scope: None,
+            transaction_scope: None,
+        })
+    }
+
+    /// Confirm the backend is reachable, in one round trip on an autocommit
+    /// lease.
+    ///
+    /// It takes no transaction lane, installs no session authority and reads no
+    /// table, so it answers while this handle's transaction is open. The wait
+    /// is the backend's connection wait: on a pool, the acquire timeout.
+    ///
+    /// # Errors
+    /// The backend's connection failure, or `transaction_scope_expired` on a
+    /// settled transaction handle.
+    #[expect(
+        clippy::future_not_send,
+        reason = "the probe runs on this thread's compio session"
+    )]
+    pub async fn check_connection(&self) -> Result<(), DbError> {
+        self.check_scope()?;
+        let backend = self.backend.clone();
+        self.context
+            .scope(async move { backend.check_connection().await })
+            .await
+    }
+
     /// Install the app's immutable startup policy in this database context.
     pub fn install_mask_policy(&self, policy: Value) -> Result<(), DbError> {
         self.context

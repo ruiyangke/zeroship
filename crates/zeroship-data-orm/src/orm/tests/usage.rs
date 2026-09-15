@@ -74,7 +74,7 @@ async fn usage_follows_the_attached_sink(postgres: bool) {
             tx.collection("records")?
                 .insert(value!({"id":"b", "label":"second"}))
                 .await?;
-            Ok(())
+            Ok::<_, DbError>(())
         })
         .await
         .unwrap();

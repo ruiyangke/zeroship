@@ -115,7 +115,7 @@ async fn concurrent_upsert(identity: IdentityMode, masked: bool, nested: bool) {
             .await?;
         inserted_tx.send(()).unwrap();
         commit_rx.await.unwrap();
-        Ok(row)
+        Ok::<_, DbError>(row)
     });
     let second = async {
         inserted_rx.await.unwrap();
@@ -230,7 +230,7 @@ async fn cancelling_a_waiting_protected_upsert_rolls_back_its_internal_frame() {
         upsert_ready_tx.send(()).unwrap();
         observer_ready_tx.send(()).unwrap();
         commit_rx.await.unwrap();
-        Ok(output)
+        Ok::<_, DbError>(output)
     });
     let (abort, registration) = futures::future::AbortHandle::new_pair();
     let waiting = futures::future::Abortable::new(

@@ -285,7 +285,7 @@ async fn postgres_advisory_key_spaces_and_case_folding() {
             );
             // Control: hashing without folding names a different key.
             assert!(free(oracle, &AdvisoryKey::hashed("MiXeD@x.test")).await);
-            Ok(())
+            Ok::<_, DbError>(())
         })
         .await
         .unwrap();
@@ -317,7 +317,7 @@ async fn postgres_advisory_xact_lock_stacks_and_releases_once_at_settlement() {
                 .get(0);
             assert_eq!(holds, 1, "a stacked key is one lock");
             assert!(!free(oracle, &inside).await);
-            Ok(())
+            Ok::<_, DbError>(())
         })
         .await
         .unwrap();
@@ -463,7 +463,7 @@ async fn advisory_xact_lock_requires_the_transaction_receiver() {
             // Control: the transaction handle takes the lock.
             tx.postgres()?.advisory_xact_lock(inside.clone()).await?;
             assert!(!free(oracle, &inside).await);
-            Ok(())
+            Ok::<_, DbError>(())
         })
         .await
         .unwrap();
@@ -485,7 +485,7 @@ async fn sqlite_refuses_postgres_extension() {
             tx.collection("advisory_rows")?
                 .insert(value!({"id":"kept", "label":"committed"}))
                 .await?;
-            Ok(())
+            Ok::<_, DbError>(())
         })
         .await
         .unwrap();
@@ -526,7 +526,7 @@ async fn postgres_advisory_lock_in_rolled_back_savepoint() {
             assert!(free(oracle, &nested_key).await);
             // Control: the root frame's lock survives the nested rollback.
             assert!(!free(oracle, &root_key).await);
-            Ok(())
+            Ok::<_, DbError>(())
         })
         .await
         .unwrap();
@@ -564,7 +564,7 @@ async fn postgres_cancelled_advisory_wait_leaves_a_clean_pool() {
             tx.collection("advisory_rows")?
                 .insert(value!({"id":"after-cancel", "label":"committed"}))
                 .await?;
-            Ok(())
+            Ok::<_, DbError>(())
         }),
     )
     .await
