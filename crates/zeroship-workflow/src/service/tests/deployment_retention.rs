@@ -251,6 +251,9 @@ async fn dependencies_contract(store: Rc<OrmStore>) {
         .await
         .unwrap();
     service.activate_deploy(&app, &second).await.unwrap();
+    // With the outbox drained, the journal's own references are the only reason
+    // to refuse; an unconfirmed publication would retain the deployment anyway.
+    drain(&scope).await;
     assert!(service
         .release_deployment_hold(&app, &first.id, &client)
         .await
@@ -259,6 +262,7 @@ async fn dependencies_contract(store: Rc<OrmStore>) {
         .transition(&RequestId::mint(), &run.id, RunOperation::Cancel)
         .await
         .unwrap();
+    drain(&scope).await;
     assert!(service
         .release_deployment_hold(&app, &first.id, &client)
         .await
@@ -274,6 +278,7 @@ async fn dependencies_contract(store: Rc<OrmStore>) {
         )
         .await
         .unwrap();
+    drain(&scope).await;
     // The run head moved, but its retained previous generation still needs code.
     assert!(service
         .release_deployment_hold(&app, &first.id, &client)
