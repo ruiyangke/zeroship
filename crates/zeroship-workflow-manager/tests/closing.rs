@@ -26,7 +26,7 @@ use support::{Backend, Fixture};
 use zeroship_core::{
     app_id::AppId,
     workflow_coordination::{
-        AssignScope, AssignedScope, RegisterWorker, RequestId, Revision, WorkerId, WorkerState,
+        AssignedScope, RegisterWorker, Revision, WorkerId, WorkerState,
     },
     workflow_jobs::{
         BroadcastId, DeploymentId, JobId, JobOperation, JobOutcome, JobSpec, Settlement, SubmitJob,
@@ -39,7 +39,7 @@ use zeroship_data_orm::{
     value, Value,
 };
 use zeroship_workflow_manager::{
-    coordinator::{self, Coordinator},
+    coordinator::{self, Coordinator, Placed},
     driver,
     lifecycle::AppLifecycle,
     policy::{PolicyObservation, PolicySource},
@@ -164,15 +164,9 @@ async fn host(fixture: &Fixture) -> Host {
         )
         .await
         .unwrap();
-    let assignment = coordinator
-        .assign(&AssignScope {
-            request_id: RequestId::mint(),
-            app_id: app.clone(),
-            worker_id: worker.clone(),
-            expected_revision: None,
-        })
-        .await
-        .unwrap();
+    let Placed::Assigned(assignment) = coordinator.place(&app).await.unwrap() else {
+        panic!("the app has one eligible worker");
+    };
     let host = Host {
         queue,
         coordinator,

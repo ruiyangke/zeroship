@@ -14,8 +14,7 @@ pub use placement::Placed;
 use crate::{
     eligibility::{EligibilitySource, ZoneId},
     models::{
-        assignments, management as management_records, placement_receipts, queue_scopes, workers,
-        Scope, Worker,
+        assignments, management as management_records, placement_receipts, workers, Worker,
     },
     queue::{lock_scope, register_scope_in, Budget},
     Error, Queue,
@@ -225,48 +224,6 @@ impl Coordinator {
                 .iter()
                 .map(registered)
                 .collect()
-            })
-            .await
-    }
-
-    /// Missing owners require recovery even when no wake hint was published.
-    ///
-    /// # Errors
-    /// Rejects unavailable or malformed placement metadata.
-    pub async fn recovery_scopes(&self, after: Option<&AppId>) -> Result<Vec<AppId>, Error> {
-        self.queue
-            .transact(|tx| async move {
-                let mut cursor = after.map(|app| app.as_str().to_owned());
-                let mut recovered = Vec::new();
-                loop {
-                    let filter = if let Some(after) = cursor.as_deref() {
-                        queue_scopes::id.gt(after)?
-                    } else {
-                        Filter::all()
-                    };
-                    let scopes = rows::<queue_scopes::Entity, Scope>(
-                        &tx,
-                        filter,
-                        [queue_scopes::id.asc()],
-                        self.options.batch_limit,
-                    )
-                    .await?;
-                    if scopes.is_empty() {
-                        return Ok(recovered);
-                    }
-                    for row in scopes {
-                        cursor = Some(row.id.clone());
-                        let app = AppId::parse(&row.id).map_err(|_| Error::Storage)?;
-                        if !self.has_owner(&tx, &app, false).await? {
-                            recovered.push(app);
-                            if recovered.len() == self.options.batch_limit {
-                                return Ok(recovered);
-                            }
-                        }
-                    }
-                    // Filter ownership before ending the result page; a page of
-                    // owned scopes must not hide later recoverable applications.
-                }
             })
             .await
     }

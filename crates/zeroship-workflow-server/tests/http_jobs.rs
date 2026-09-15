@@ -96,22 +96,15 @@ impl Fixture {
         enroll(&platform, &http, &server.url, &worker).await;
         let app = AppId::mint();
         platform.seed_app(&app).await;
-        let (status, body) = post(
-            &http,
-            &server.url,
-            endpoints::WORKFLOW_ASSIGN,
-            &assertion(&control, &control_key, AUDIENCE),
-            &json!({"requestId":RequestId::mint(),"appId":app,
-                "workerId":worker.id,"expectedRevision":null}),
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK, "{body}");
+        let assignment = platform
+            .seed_placement(&app, &worker.id, Duration::from_secs(30))
+            .await;
         Self {
             platform,
             http,
             server,
             worker,
-            assignment: serde_json::from_value(body).unwrap(),
+            assignment,
             control,
             control_key,
         }
@@ -769,17 +762,10 @@ async fn revoking_an_enroller_denies_its_worker_while_a_sibling_enroller_stays_a
     assert_eq!(register_status, StatusCode::OK, "{body}");
     let app_g = AppId::mint();
     fixture.platform.seed_app(&app_g).await;
-    let (status, body) = post(
-        &fixture.http,
-        &fixture.server.url,
-        endpoints::WORKFLOW_ASSIGN,
-        &assertion(&fixture.control, &fixture.control_key, AUDIENCE),
-        &json!({"requestId":RequestId::mint(),"appId":app_g,
-            "workerId":worker_g.id,"expectedRevision":null}),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "{body}");
-    let assignment_g: Assignment = serde_json::from_value(body).unwrap();
+    let assignment_g = fixture
+        .platform
+        .seed_placement(&app_g, &worker_g.id, Duration::from_secs(30))
+        .await;
     let scope_g = AssignedScope {
         app_id: assignment_g.app_id.clone(),
         assignment_revision: assignment_g.revision,

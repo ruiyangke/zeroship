@@ -21,7 +21,7 @@ use zeroship_core::{
     workflow_coordination::*,
     workflow_jobs::{JobOperation, JobOutcome, ManagementCommand, Settlement},
 };
-use zeroship_workflow_manager::Error;
+use zeroship_workflow_manager::{coordinator::Placed, Error};
 use zeroship_workflow_server::coordinator::{Coordinator, Error as HostError, Options, SCHEMA_SQL};
 
 type StoredIds = BTreeMap<(String, String, String), String>;
@@ -173,14 +173,14 @@ async fn register_worker(service: &Coordinator, capacity: u32) -> WorkerId {
         .unwrap();
     worker
 }
-fn assignment_request(app: &AppId, worker: &WorkerId) -> AssignScope {
-    AssignScope {
-        request_id: RequestId::mint(),
-        app_id: app.clone(),
-        worker_id: worker.clone(),
-        expected_revision: None,
+/// The manager selects an eligible worker for the app.
+async fn place(service: &Coordinator, app: &AppId) -> Assignment {
+    match service.manager.place(app).await.unwrap() {
+        Placed::Assigned(assignment) => assignment,
+        other => panic!("expected a placement: {other:?}"),
     }
 }
+
 fn assigned(assignment: &Assignment) -> AssignedScope {
     AssignedScope {
         app_id: assignment.app_id.clone(),
@@ -206,6 +206,9 @@ fn command(app: &AppId) -> ManageRun {
     }
 }
 
+/// Two replicas placing the same app converge on one placement, a second
+/// visit reports it owned, and a full instance admits nothing more. Giving the
+/// placement up advances its revision and retires the old authority.
 #[compio::test]
 async fn replicas_fence_placement_retries_and_capacity() {
     let fixture = Fixture::new().await;
@@ -213,10 +216,12 @@ async fn replicas_fence_placement_retries_and_capacity() {
     let b = fixture.service().await;
     let worker = register_worker(&a, 1).await;
     let app = AppId::mint();
-    let request = assignment_request(&app, &worker);
-    let (first, second) = futures::join!(a.manager.assign(&request), b.manager.assign(&request));
-    let assignment = first.unwrap();
-    assert_eq!(assignment, second.unwrap());
+    let (first, second) = futures::join!(a.manager.place(&app), b.manager.place(&app));
+    let assignment = match (first.unwrap(), second.unwrap()) {
+        (Placed::Assigned(assignment), Placed::Owned)
+        | (Placed::Owned, Placed::Assigned(assignment)) => assignment,
+        results => panic!("racing visits must converge on one placement: {results:?}"),
+    };
     let initial_ids = fixture.stored_ids().await;
     b.manager
         .register(
@@ -229,44 +234,35 @@ async fn replicas_fence_placement_retries_and_capacity() {
         .await
         .unwrap();
     assert_eq!(fixture.stored_ids().await, initial_ids);
-    let mut conflict = request.clone();
-    conflict.expected_revision = Some(assignment.revision);
-    assert_eq!(b.manager.assign(&conflict).await, Err(Error::Conflict));
-    assert_eq!(
-        b.manager.assign(&assignment_request(&app, &worker)).await,
-        Err(Error::Conflict)
-    );
-    assert_eq!(
-        b.manager
-            .assign(&assignment_request(&AppId::mint(), &worker))
-            .await,
-        Err(Error::Capacity)
-    );
-    let next_request = AssignScope {
-        request_id: RequestId::mint(),
-        expected_revision: Some(assignment.revision),
-        ..request.clone()
-    };
-    let replacement = b.manager.assign(&next_request).await.unwrap();
+    assert_eq!(b.manager.place(&app).await.unwrap(), Placed::Owned);
+    // The instance's one slot is taken, so another app finds no capacity.
+    assert!(matches!(
+        b.manager.place(&AppId::mint()).await.unwrap(),
+        Placed::Unplaced(_)
+    ));
+    b.manager
+        .release(&worker, &release(&assignment, ReleaseReason::Relinquished))
+        .await
+        .unwrap();
+    let replacement = place(&b, &app).await;
     assert!(replacement.revision > assignment.revision);
     assert_ids_retained(&initial_ids, &fixture.stored_ids().await);
     assert_eq!(
         a.manager.renew(&worker, &assigned(&assignment)).await,
         Err(Error::Denied)
     );
-    assert_eq!(a.manager.assign(&request).await.unwrap(), assignment);
     assert_eq!(
         a.manager.assignments(&worker, None).await.unwrap(),
         vec![replacement]
     );
 
     let spare = register_worker(&a, 1).await;
-    let left = assignment_request(&AppId::mint(), &spare);
-    let right = assignment_request(&AppId::mint(), &spare);
-    let (left, right) = futures::join!(a.manager.assign(&left), b.manager.assign(&right));
+    let (left, right) = (AppId::mint(), AppId::mint());
+    let (left, right) = futures::join!(a.manager.place(&left), b.manager.place(&right));
     assert!(matches!(
         (&left, &right),
-        (Ok(_), Err(Error::Capacity)) | (Err(Error::Capacity), Ok(_))
+        (Ok(Placed::Assigned(_)), Ok(Placed::Unplaced(_)))
+            | (Ok(Placed::Unplaced(_)), Ok(Placed::Assigned(_)))
     ));
     assert_eq!(a.manager.assignments(&spare, None).await.unwrap().len(), 1);
 }
@@ -275,19 +271,14 @@ async fn release_needs_neither_a_wake_hint_nor_a_responsible_peer() {
     let fixture = Fixture::new().await;
     let a = fixture.service().await;
     let b = fixture.service().await;
-    let w1 = register_worker(&a, 2).await;
-    let w2 = register_worker(&a, 2).await;
-    let app = AppId::mint();
-    let first = a
-        .manager
-        .assign(&assignment_request(&app, &w1))
-        .await
-        .unwrap();
-    let second = b
-        .manager
-        .assign(&assignment_request(&app, &w2))
-        .await
-        .unwrap();
+    register_worker(&a, 1).await;
+    register_worker(&a, 1).await;
+    let (app, other) = (AppId::mint(), AppId::mint());
+    // One slot per worker, so the two apps land on different instances.
+    let first = place(&a, &app).await;
+    let second = place(&b, &other).await;
+    let (w1, w2) = (first.worker_id.clone(), second.worker_id.clone());
+    assert_ne!(w1, w2);
     // A worker holding no placement of the app releases nothing.
     let stranger = register_worker(&a, 2).await;
     assert_eq!(
@@ -322,66 +313,46 @@ async fn release_needs_neither_a_wake_hint_nor_a_responsible_peer() {
         a.manager.renew(&w1, &assigned(&first)).await,
         Err(Error::Denied)
     );
-    let request = AssignScope {
-        expected_revision: Some(first.revision),
-        ..assignment_request(&app, &w1)
-    };
-    let replacement = a.manager.assign(&request).await.unwrap();
+    let replacement = place(&a, &app).await;
     assert!(replacement.revision > first.revision);
     assert_ids_retained(&released_ids, &fixture.stored_ids().await);
     assert_eq!(
-        b.manager.assignments(&w1, None).await.unwrap(),
+        b.manager
+            .assignments(&replacement.worker_id, None)
+            .await
+            .unwrap(),
         vec![replacement.clone()]
     );
-    // A refused release tombstones the pair for this instance's life.
+    // A refused release tombstones the pair for this instance's life, so the
+    // next selection never offers that instance the app again.
+    let refused = replacement.worker_id.clone();
     a.manager
-        .release(&w1, &release(&replacement, ReleaseReason::Refused))
+        .release(&refused, &release(&replacement, ReleaseReason::Refused))
         .await
         .unwrap();
-    assert_eq!(
-        a.manager
-            .assign(&AssignScope {
-                expected_revision: Some(replacement.revision),
-                ..assignment_request(&app, &w1)
-            })
-            .await,
-        Err(Error::Denied)
-    );
+    let next = place(&a, &app).await;
+    assert_ne!(next.worker_id, refused);
 
-    let foreign = AppId::mint();
-    let foreign_assignment = a
-        .manager
-        .assign(&assignment_request(&foreign, &w2))
-        .await
-        .unwrap();
+    let foreign = place(&a, &AppId::mint()).await;
     assert_eq!(
         a.manager
-            .claim_job(&w1, &assigned(&foreign_assignment), || async {
-                Ok(w1.clone())
-            })
+            .claim_job(&refused, &assigned(&foreign), || async { Ok(refused.clone()) })
             .await
             .unwrap_err(),
         Error::Denied
     );
 }
 
+/// An expired placement leaves its app unowned, so the manager places it
+/// again under a higher revision while the stale authority stays refused.
 #[compio::test]
-async fn lost_assignments_are_rescanned_as_recovery_scopes() {
+async fn expired_placements_leave_the_app_unowned_and_replaceable() {
     let fixture = Fixture::new().await;
     let service = fixture.service().await;
     let worker = register_worker(&service, 1).await;
     let app = AppId::mint();
-    let assignment = service
-        .manager
-        .assign(&assignment_request(&app, &worker))
-        .await
-        .unwrap();
-    assert!(service
-        .manager
-        .recovery_scopes(None)
-        .await
-        .unwrap()
-        .is_empty());
+    let assignment = place(&service, &app).await;
+    assert!(service.manager.owned(&app).await.unwrap());
     fixture
         .admin
         .execute(
@@ -390,10 +361,7 @@ async fn lost_assignments_are_rescanned_as_recovery_scopes() {
         )
         .await
         .unwrap();
-    assert_eq!(
-        service.manager.recovery_scopes(None).await.unwrap(),
-        vec![app.clone()]
-    );
+    assert!(!service.manager.owned(&app).await.unwrap());
     service
         .manager
         .register(
@@ -415,21 +383,10 @@ async fn lost_assignments_are_rescanned_as_recovery_scopes() {
         .await
         .unwrap()
         .is_empty());
-    let replacement = service
-        .manager
-        .assign(&AssignScope {
-            expected_revision: Some(assignment.revision),
-            ..assignment_request(&app, &worker)
-        })
-        .await
-        .unwrap();
+    let replacement = place(&service, &app).await;
     assert!(replacement.revision > assignment.revision);
-    assert!(service
-        .manager
-        .recovery_scopes(None)
-        .await
-        .unwrap()
-        .is_empty());
+    assert!(service.manager.owned(&app).await.unwrap());
+    // An expired registration is neither a candidate nor an owner.
     fixture
         .admin
         .execute(
@@ -444,10 +401,11 @@ async fn lost_assignments_are_rescanned_as_recovery_scopes() {
         .await
         .unwrap()
         .is_empty());
-    assert_eq!(
-        service.manager.recovery_scopes(None).await.unwrap(),
-        vec![app]
-    );
+    assert!(!service.manager.owned(&app).await.unwrap());
+    assert!(matches!(
+        service.manager.place(&app).await.unwrap(),
+        Placed::Unplaced(_)
+    ));
 }
 
 #[compio::test]
@@ -480,10 +438,8 @@ async fn management_is_durable_bounded_typed_and_assignment_scoped() {
     let receipt = left.unwrap();
     assert_eq!(receipt, right.unwrap());
     let initial_ids = fixture.stored_ids().await;
-    assert_eq!(
-        a.manager.recovery_scopes(None).await.unwrap(),
-        vec![app.clone()]
-    );
+    // Enqueued management is claimable work, so the app now needs an owner.
+    assert!(!a.manager.owned(&app).await.unwrap());
     let mut changed = one.clone();
     changed.run_id = RunId::mint();
     assert_eq!(
@@ -506,8 +462,8 @@ async fn management_is_durable_bounded_typed_and_assignment_scoped() {
         Err(Error::Capacity)
     );
     let worker = register_worker(&a, 1).await;
-    let assigned_request = assignment_request(&app, &worker);
-    let assignment = a.manager.assign(&assigned_request).await.unwrap();
+    let assignment = place(&a, &app).await;
+    assert_eq!(assignment.worker_id, worker);
     let scope = assigned(&assignment);
     let grant = b
         .manager
@@ -590,15 +546,11 @@ async fn management_is_durable_bounded_typed_and_assignment_scoped() {
             .await,
         Err(Error::Denied)
     );
-    let renewed = a
-        .manager
-        .assign(&AssignScope {
-            request_id: RequestId::mint(),
-            expected_revision: Some(assignment.revision),
-            ..assigned_request
-        })
+    a.manager
+        .release(&worker, &release(&assignment, ReleaseReason::Relinquished))
         .await
         .unwrap();
+    let renewed = place(&a, &app).await;
     // Exact committed settlement remains readable after placement replacement.
     assert_eq!(
         b.manager
@@ -657,11 +609,8 @@ async fn lock_waits_cannot_extend_authority_and_timeout_sessions_are_reusable() 
     let normal = fixture.service().await;
     let worker = register_worker(&normal, 1).await;
     let app = AppId::mint();
-    let assignment = normal
-        .manager
-        .assign(&assignment_request(&app, &worker))
-        .await
-        .unwrap();
+    let assignment = place(&normal, &app).await;
+    assert_eq!(assignment.worker_id, worker);
     let options = Options {
         connections: 1,
         command_timeout: Duration::from_millis(80),
@@ -847,11 +796,8 @@ async fn assignment_verification_preserves_leases_and_fences_app_authority() {
     let service = fixture.service().await;
     let worker = register_worker(&service, 2).await;
     let app = AppId::mint();
-    let assignment = service
-        .manager
-        .assign(&assignment_request(&app, &worker))
-        .await
-        .unwrap();
+    let assignment = place(&service, &app).await;
+    assert_eq!(assignment.worker_id, worker);
     let request = VerifyAssignment {
         app_id: app.clone(),
         worker_id: worker.clone(),
@@ -968,11 +914,8 @@ async fn assignment_verification_checks_expiry_after_waiting_for_scope_lock() {
     let service = fixture.service().await;
     let worker = register_worker(&service, 1).await;
     let app = AppId::mint();
-    let assignment = service
-        .manager
-        .assign(&assignment_request(&app, &worker))
-        .await
-        .unwrap();
+    let assignment = place(&service, &app).await;
+    assert_eq!(assignment.worker_id, worker);
     let request = VerifyAssignment {
         app_id: app.clone(),
         worker_id: worker.clone(),

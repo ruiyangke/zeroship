@@ -18,7 +18,7 @@ use zeroship_core::{
     app_id::AppId,
     typed_id,
     workflow_coordination::{
-        AssignScope, AssignedScope, Assignment, ReleaseReason, ReleaseScope, RequestId, Revision,
+        AssignedScope, Assignment, ReleaseReason, ReleaseScope, RequestId, Revision,
         VerifyAssignment, WorkerId,
     },
 };
@@ -38,16 +38,6 @@ pub enum Placed {
     Unplaced(ZoneId),
     /// Control has no live app to place: it is unknown or deleted.
     Ineligible,
-}
-
-/// Who chose the worker a placement names.
-#[derive(Clone, Copy)]
-enum Admission<'a> {
-    /// A trusted host nominated the worker and asserts the prior revision.
-    Nominated(&'a AssignScope),
-    /// The manager selected the worker. It places only an app that has no
-    /// ready eligible owner when it holds the app lock.
-    Selected,
 }
 
 impl Coordinator {
@@ -90,23 +80,6 @@ impl Coordinator {
         assignment(&row, Some(expires))
     }
 
-    /// Place an app on a worker a trusted host nominated, under the complete
-    /// eligibility predicate. Receipt identities and revision tombstones make
-    /// retries exact.
-    ///
-    /// # Errors
-    /// Rejects conflicting requests, ineligible pairs, unavailable workers and
-    /// exhausted capacity.
-    pub async fn assign(&self, request: &AssignScope) -> Result<Assignment, Error> {
-        self.admit(
-            &request.app_id,
-            &request.worker_id,
-            Admission::Nominated(request),
-        )
-        .await?
-        .ok_or(Error::Storage)
-    }
-
     /// Manager-selected placement. The manager chooses among ready workers
     /// registered in the app's zone and admits the first that passes the
     /// eligibility predicate. A refused pair is never offered again.
@@ -125,7 +98,7 @@ impl Coordinator {
                 return Ok(Placed::Unplaced(facts.zone));
             };
             for worker in &page {
-                match self.admit(app, worker, Admission::Selected).await {
+                match self.admit(app, worker).await {
                     Ok(Some(assignment)) => return Ok(Placed::Assigned(assignment)),
                     Ok(None) => return Ok(Placed::Owned),
                     // The facts, the registration or the capacity changed
@@ -191,46 +164,20 @@ impl Coordinator {
             .await
     }
 
-    async fn admit(
-        &self,
-        app: &AppId,
-        worker: &WorkerId,
-        admission: Admission<'_>,
-    ) -> Result<Option<Assignment>, Error> {
+    /// Admit one selected pair. The manager places only an app that has no
+    /// ready eligible owner when it holds the app lock.
+    async fn admit(&self, app: &AppId, worker: &WorkerId) -> Result<Option<Assignment>, Error> {
         let budget = self.budget();
-        let request_id = match admission {
-            Admission::Nominated(request) => request.request_id.clone(),
-            Admission::Selected => RequestId::mint(),
-        };
+        let request_id = RequestId::mint();
         self.queue.transact_for(budget.clone(), |tx| {
             let request_id = &request_id;
             let budget = &budget;
             async move {
             self.scope(&tx, app, true).await?;
-            let expected = match admission {
-                Admission::Nominated(request) => {
-                    let expected = request.expected_revision.map(Revision::get);
-                    if let Some(receipt) = receipt(&tx, app, request_id).await? {
-                        if receipt.operation != "assign" || receipt.worker_id != worker.as_str()
-                            || receipt.expected_revision != expected {
-                            return Err(Error::Conflict);
-                        }
-                        return Ok(Some(Assignment { app_id: app.clone(), worker_id: worker.clone(),
-                            revision: revision(receipt.result_revision)?, expires_at: timestamp(receipt.result_expires_at)? }));
-                    }
-                    Some(expected)
-                }
-                Admission::Selected => {
-                    if self.has_owner(&tx, app, true).await? { return Ok(None); }
-                    None
-                }
-            };
+            if self.has_owner(&tx, app, true).await? { return Ok(None); }
             // Scope before worker: the worker row serializes capacity across apps.
             let registration = lock_worker(&tx, worker).await?;
             let previous = placement(&tx, app, worker).await?;
-            if let Some(expected) = expected {
-                if previous.as_ref().map(|row| row.revision) != expected { return Err(Error::Conflict); }
-            }
             if previous.as_ref().is_some_and(|row| row.refused) { return Err(Error::Denied); }
             // Read the facts in force after every lock wait, not at selection.
             self.eligible(app, worker, &registration).await?;

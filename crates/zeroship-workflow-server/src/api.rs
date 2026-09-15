@@ -21,8 +21,8 @@ use std::time::Duration;
 use zeroship_core::{
     service_identity::endpoints,
     workflow_coordination::{
-        AssignScope, AssignedScope, Failure, FailureCode, ManageRun, ManagementStatus,
-        RegisterWorker, ReleaseScope, ScopePage, VerifyAssignment, WorkerPage,
+        AssignedScope, Failure, FailureCode, ManageRun, ManagementStatus,
+        RegisterWorker, ReleaseScope, ScopePage, VerifyAssignment,
     },
 };
 
@@ -39,19 +39,8 @@ pub fn configure_with_limit(config: &mut web::ServiceConfig, limit: usize) {
         .service(web::resource("/healthz").route(web::get().to(health)))
         .service(web::resource("/readyz").route(web::get().to(ready)))
         .service(
-            web::resource(endpoints::WORKFLOW_WORKERS.path_template())
-                .route(web::post().to(workers)),
-        )
-        .service(
-            web::resource(endpoints::WORKFLOW_ASSIGN.path_template()).route(web::post().to(assign)),
-        )
-        .service(
             web::resource(endpoints::WORKFLOW_VERIFY_ASSIGNMENT.path_template())
                 .route(web::post().to(verify_assignment)),
-        )
-        .service(
-            web::resource(endpoints::WORKFLOW_RECOVERY.path_template())
-                .route(web::post().to(recovery)),
         )
         .service(
             web::resource(endpoints::WORKFLOW_MANAGE.path_template()).route(web::post().to(manage)),
@@ -145,60 +134,6 @@ async fn read_json<T: DeserializeOwned + 'static>(
     })
 }
 
-async fn workers(
-    request: web::HttpRequest,
-    state: State<SharedState>,
-    body: web::types::Payload,
-) -> web::HttpResponse {
-    respond(
-        async {
-            let _actor = compio::time::timeout(
-                Duration::from_secs(5),
-                state
-                    .auth
-                    .peer(authorization(&request), endpoints::WORKFLOW_WORKERS),
-            )
-            .await
-            .map_err(|_| Error::Unavailable)??;
-            let command: WorkerPage = read_json(&request, body).await?;
-            state
-                .service
-                .manager
-                .ready_workers(command.after.as_ref())
-                .await
-                .map_err(Error::from)
-        }
-        .await,
-    )
-}
-
-async fn assign(
-    request: web::HttpRequest,
-    state: State<SharedState>,
-    body: web::types::Payload,
-) -> web::HttpResponse {
-    respond(
-        async {
-            let _actor = compio::time::timeout(
-                Duration::from_secs(5),
-                state
-                    .auth
-                    .peer(authorization(&request), endpoints::WORKFLOW_ASSIGN),
-            )
-            .await
-            .map_err(|_| Error::Unavailable)??;
-            let command: AssignScope = read_json(&request, body).await?;
-            state
-                .service
-                .manager
-                .assign(&command)
-                .await
-                .map_err(Error::from)
-        }
-        .await,
-    )
-}
-
 async fn verify_assignment(
     request: web::HttpRequest,
     state: State<SharedState>,
@@ -224,33 +159,6 @@ async fn verify_assignment(
             .await
             .map_err(|_| Error::Unavailable)??;
             Ok(assignment)
-        }
-        .await,
-    )
-}
-
-async fn recovery(
-    request: web::HttpRequest,
-    state: State<SharedState>,
-    body: web::types::Payload,
-) -> web::HttpResponse {
-    respond(
-        async {
-            let _actor = compio::time::timeout(
-                Duration::from_secs(5),
-                state
-                    .auth
-                    .peer(authorization(&request), endpoints::WORKFLOW_RECOVERY),
-            )
-            .await
-            .map_err(|_| Error::Unavailable)??;
-            let command: ScopePage = read_json(&request, body).await?;
-            state
-                .service
-                .manager
-                .recovery_scopes(command.after.as_ref())
-                .await
-                .map_err(Error::from)
         }
         .await,
     )

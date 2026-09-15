@@ -56,7 +56,7 @@ use zeroship_core::{
     },
     typed_id,
     workflow_coordination::{
-        AUDIENCE, AssignScope, Assignment, Failure, FailureCode, RegisterWorker, RequestId,
+        AUDIENCE, Assignment, Failure, FailureCode, RegisterWorker,
         VerifyAssignment, WorkerId, WorkerState,
     },
 };
@@ -478,16 +478,17 @@ fn generation(value: i64) -> HoldGeneration {
     value.try_into().unwrap()
 }
 
-async fn placement(control: &ControlCoordinator, worker: &WorkerId, app: &AppId) -> Assignment {
-    control
-        .assign(&AssignScope {
-            request_id: RequestId::mint(),
-            app_id: app.clone(),
-            worker_id: worker.clone(),
-            expected_revision: None,
-        })
+/// These contracts exercise deployment holds against a live placement, not
+/// the selection that produced it, so the fixture seeds the row the manager
+/// would have committed.
+async fn placement(
+    platform: &platform::Platform,
+    worker: &WorkerId,
+    app: &AppId,
+) -> Assignment {
+    platform
+        .seed_placement(app, worker, std::time::Duration::from_secs(60))
         .await
-        .unwrap()
 }
 
 #[ntex::test]
@@ -525,7 +526,7 @@ async fn signed_deployment_holds_preserve_app_scope_across_worker_replacement() 
         .await
         .unwrap();
     }
-    let assignment = placement(&coordinator, &worker, &app).await;
+    let assignment = placement(&fixture.platform, &worker, &app).await;
     let request = HoldRequest {
         app_id: app.clone(),
         assignment_revision: assignment.revision,
@@ -644,7 +645,7 @@ async fn signed_deployment_holds_preserve_app_scope_across_worker_replacement() 
     assert_eq!(remote.acquire(&deploy, generation(1)).await.unwrap(), first);
     assert_eq!(fixture.rows().await, original_rows);
 
-    let replacement_assignment = placement(&coordinator, &replacement, &app).await;
+    let replacement_assignment = placement(&fixture.platform, &replacement, &app).await;
     let verification = VerifyAssignment {
         app_id: app.clone(),
         worker_id: worker.clone(),

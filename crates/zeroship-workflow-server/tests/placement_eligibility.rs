@@ -20,7 +20,7 @@ use zeroship_core::{
     app_id::AppId,
     service_assertion::ServiceSigningKey,
     typed_id,
-    workflow_coordination::{AssignScope, RegisterWorker, RequestId, WorkerId, WorkerState},
+    workflow_coordination::{RegisterWorker, WorkerId, WorkerState},
 };
 use zeroship_workflow_manager::{coordinator::Placed, eligibility::ZoneId, Error};
 use zeroship_workflow_server::coordinator::{
@@ -103,15 +103,6 @@ const fn ready() -> RegisterWorker {
     }
 }
 
-fn nominate(app: &AppId, worker: &WorkerId) -> AssignScope {
-    AssignScope {
-        request_id: RequestId::mint(),
-        app_id: app.clone(),
-        worker_id: worker.clone(),
-        expected_revision: None,
-    }
-}
-
 /// Control's zones decide placement. An app created without a zone lands in
 /// the seeded zone and is placed there; an app created in a second zone is
 /// placed only on that zone's enrolled instance. Instances Control never
@@ -147,14 +138,10 @@ async fn control_zone_facts_decide_placement() {
         panic!("the second zone's instance takes its app");
     };
     assert_eq!(far.worker_id, away_worker);
-    assert_eq!(
-        service.manager.assign(&nominate(&home_app, &away_worker)).await,
-        Err(Error::Denied)
-    );
-    assert_eq!(
-        service.manager.assign(&nominate(&away_app, &home_worker)).await,
-        Err(Error::Denied)
-    );
+    // Each app stays with its own zone: the other zone's instance is never
+    // a candidate, so a second visit reports the app already owned.
+    assert_eq!(service.manager.place(&home_app).await, Ok(Placed::Owned));
+    assert_eq!(service.manager.place(&away_app).await, Ok(Placed::Owned));
     assert_eq!(
         service.manager.register(&WorkerId::mint(), &ready()).await,
         Err(Error::Denied)

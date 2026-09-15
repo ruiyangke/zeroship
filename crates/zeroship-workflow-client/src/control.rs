@@ -1,13 +1,11 @@
 use super::{transport::Transport, Error, Options};
 use std::sync::Arc;
 use zeroship_core::{
-    app_id::AppId,
     service_assertion::ServiceIssuer,
     service_identity::endpoints,
     service_peers::{service_issuer, ServiceAuth, CONTROL_SERVICE_NAME},
     workflow_coordination::{
-        AssignScope, Assignment, ManageRun, ManagementReceipt, ManagementStatus, RegisteredWorker,
-        Revision, ScopePage, VerifyAssignment, WorkerPage, WorkerState, AUDIENCE,
+        Assignment, ManageRun, ManagementReceipt, ManagementStatus, VerifyAssignment, AUDIENCE,
     },
     workflow_jobs::{JobOperation, JobSpec},
     workflow_schedules::{ActivateSchedules, DisableSchedules, RegisterSchedules},
@@ -116,68 +114,6 @@ impl ControlCoordinator {
             return Err(Error::InvalidResponse);
         }
         Ok(receipt)
-    }
-
-    /// # Errors
-    /// Refuses failed exchanges, non-ready workers and unordered or repeated entries.
-    pub async fn ready_workers(
-        &self,
-        request: &WorkerPage,
-    ) -> Result<Vec<RegisteredWorker>, Error> {
-        let workers: Vec<RegisteredWorker> = self
-            .transport
-            .post(endpoints::WORKFLOW_WORKERS, request)
-            .await?;
-        let mut previous = request.after.as_ref();
-        for worker in &workers {
-            if worker.state != WorkerState::Ready
-                || previous.is_some_and(|id| id.as_str() >= worker.worker_id.as_str())
-            {
-                return Err(Error::InvalidResponse);
-            }
-            previous = Some(&worker.worker_id);
-        }
-        Ok(workers)
-    }
-
-    /// Reuse the request identity after an uncertain exchange. An assignment
-    /// receipt describes the original placement, which may since have expired.
-    ///
-    /// # Errors
-    /// Refuses failed exchanges, foreign scope and a revision other than the next one.
-    pub async fn assign(&self, request: &AssignScope) -> Result<Assignment, Error> {
-        let assignment: Assignment = self
-            .transport
-            .post(endpoints::WORKFLOW_ASSIGN, request)
-            .await?;
-        let revision = request
-            .expected_revision
-            .map_or(0, Revision::get)
-            .checked_add(1);
-        if assignment.app_id != request.app_id
-            || assignment.worker_id != request.worker_id
-            || revision != Some(assignment.revision.get())
-        {
-            return Err(Error::InvalidResponse);
-        }
-        Ok(assignment)
-    }
-
-    /// # Errors
-    /// Refuses failed exchanges and unordered, repeated or pre-cursor app identities.
-    pub async fn recovery_scopes(&self, request: &ScopePage) -> Result<Vec<AppId>, Error> {
-        let apps: Vec<AppId> = self
-            .transport
-            .post(endpoints::WORKFLOW_RECOVERY, request)
-            .await?;
-        let mut previous = request.after.as_ref();
-        for app in &apps {
-            if previous.is_some_and(|id| id.as_str() >= app.as_str()) {
-                return Err(Error::InvalidResponse);
-            }
-            previous = Some(app);
-        }
-        Ok(apps)
     }
 
     /// Accept durable lifecycle metadata for delivery through the app's job queue.

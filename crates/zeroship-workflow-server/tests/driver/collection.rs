@@ -11,7 +11,7 @@ use zeroship_core::{
     service_assertion::{ServiceAssertionMinter, ServiceIssuer, ServiceSigningKey},
     service_identity::{endpoints, ServiceEndpoint},
     service_peers::{service_issuer, CONTROL_SERVICE_NAME},
-    workflow_coordination::{AssignedScope, Assignment, RequestId, WorkerId, AUDIENCE},
+    workflow_coordination::{AssignedScope, WorkerId, AUDIENCE},
     workflow_deployments::{HoldGeneration, HoldReceipt},
     workflow_jobs::{
         Delivery, DeliveryLease, DeploymentId, JobId, JobOperation, JobOutcome, JobSpec,
@@ -105,7 +105,7 @@ async fn enroll(
     platform: &platform::Platform,
     http: &Client,
     url: &str,
-    control: &Actor,
+    _control: &Actor,
     app: &AppId,
 ) -> (Actor, AssignedScope) {
     let worker = WorkerId::mint();
@@ -131,20 +131,9 @@ async fn enroll(
         &json!({"capacity":1,"state":"ready"}),
     )
     .await;
-    let assignment: Assignment = serde_json::from_value(
-        post(
-            http,
-            url,
-            control,
-            endpoints::WORKFLOW_ASSIGN,
-            &json!({"requestId":RequestId::mint(),"appId":app,
-                "workerId":worker,"expectedRevision":null}),
-        )
-        .await,
-    )
-    .unwrap();
-    assert_eq!(assignment.app_id, *app);
-    assert_eq!(assignment.worker_id, worker);
+    let assignment = platform
+        .seed_placement(app, &worker, std::time::Duration::from_secs(30))
+        .await;
     (
         actor,
         AssignedScope {
