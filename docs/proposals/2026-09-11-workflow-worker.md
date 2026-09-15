@@ -2569,6 +2569,20 @@ instance key. A host that stops on its own stops the request server with it and
 exits non-zero, so the orchestrator replaces a process that can no longer serve
 the durable work it accepted.
 
+A consequence to close with placement: a deployed app reaches `env.workflows`
+only once a manager has placed it on the worker serving the request, and nothing
+places an app on its own yet. The manager's assign route is a Control-authorized
+peer call, so today a placement exists only where something acts as Control and
+makes it - which the fleet process contract does and the example fleets, which
+run no manager at all, do not. Both workflow examples therefore serve
+`workflow_unavailable` on their deployed tier while their local tier, whose CLI
+host places its own app, is unaffected. The fix belongs to
+[placement](#placement-eligibility-and-capacity-provider): a driver that places
+an app with workflows enabled on a ready worker gives the examples their deployed
+tier back without a second placement path. Assigning from the fixtures would mean
+minting platform service assertions outside the one implementation that mints
+them, which is the property `service_peers` exists to hold.
+
 The local host uses the same `JobConsumer` with a CLI-owned native `JobTransport`
 over the manager coordinator's real delivery grants. The manager, its Driver and
 the platform metadata file live on a dedicated manager thread; the consumer,
@@ -3442,7 +3456,9 @@ is the merge order.
    ready-registry contracts, the assignment host's publication contracts, the
    `env.workflows` binding contracts that refuse an unready or foreign app, and
    the fleet process contract that starts a run through ordinary app ingress and
-   sees it complete through manager delivery.
+   sees it complete through manager delivery. The example fleets run no manager,
+   so their deployed tier refuses `env.workflows` until placement lands; see
+   [executable host composition](#executable-host-composition).
 5. **Ingress responsibility and capacity.** The ingress epoch gates every
    creator acceptance, hosts establish it at startup and after a fenced
    refusal, and the closing lane retires idle or archived responsibility and
