@@ -17,7 +17,7 @@ mod array_tests;
 #[path = "pg_row_json/network_tests.rs"]
 mod network_tests;
 
-/// PostgreSQL counts binary timestamps from 2000-01-01, the Unix epoch plus
+/// `PostgreSQL` counts binary timestamps from 2000-01-01, the Unix epoch plus
 /// this many microseconds.
 pub(crate) const POSTGRES_EPOCH_UNIX_MICROS: i64 = 946_684_800_000_000;
 
