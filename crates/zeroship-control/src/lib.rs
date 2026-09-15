@@ -60,7 +60,8 @@ pub mod stripe_store;
 pub mod tax;
 mod user_id;
 pub mod void_reissue;
-pub mod worker_enrolment;
+pub mod join_minter;
+pub mod worker_join;
 pub mod worker_health;
 pub mod workflow_instance_api;
 pub mod deployment_hold_api;
@@ -525,13 +526,13 @@ pub struct AppState {
     pub trust_proxy: bool,
     /// Where a worker instance may enrol FROM, and on what port it may claim to
     /// be listening. Operator-declared, held here because nothing on the wire
-    /// may widen it; see [`worker_enrolment::EnrolmentEnvelope`] for why an
+    /// may widen it; see [`worker_join::EnrolmentEnvelope`] for why an
     /// undeclared envelope refuses instead of defaulting open.
     ///
     /// It is a field on this struct rather than per-resource ntex state so a
     /// route registered without it is a compile error rather than a 500 nobody
     /// reads as a policy that stopped being enforced.
-    pub worker_enrolment: worker_enrolment::EnrolmentEnvelope,
+    pub worker_enrolment: worker_join::EnrolmentEnvelope,
     /// Directory where in-flight `.zship` deploy bodies are streamed
     /// before mmap+ingest. Defaults to `std::env::temp_dir()`. Operators
     /// may pin it to a fast local disk (`--deploy-tmp-dir`) so deploy

@@ -1,39 +1,54 @@
-//! Worker-instance enrolment, the enroller import, and instance retirement.
-//!
-//! It holds the operator's enroller import, the operator-declared address
-//! envelope, the address derivation, the ring-key mint, the row control writes,
-//! and the instance's own retirement.
+//! Worker JOIN: the trusted-signer import, join-token verification, the row
+//! Control writes, the instance lease, and the instance's own retirement.
 //!
 //! ONE ROW IS ONE LIVE WORKER PROCESS. The worker generates an Ed25519 instance
-//! keypair at boot, in memory, never on disk, and enrols the public half over
-//! HTTP authenticated by the mounted enroller key of its deployment unit (a
-//! host or pool in exactly one execution zone), under the issuer
-//! `svc/worker-enroller/<wen_id>`. Control writes the row; the worker holds no
-//! privilege on the table. The schema and the reasons for each of its columns
-//! are in `db/migrations-ts/20260907000300_worker_instances.ts` and
-//! `db/migrations-ts/20260914000400_execution_zones_and_worker_enrollers.ts` /
-//! `db/migrations-ts/20260914000500_worker_instances_enroller_binding.ts`.
+//! keypair at boot, in memory, never on disk, and presents the public half with
+//! a JOIN TOKEN a trusted signer minted, plus a signature over the request made
+//! by that very key. Control writes the row; the worker holds no privilege on
+//! the table. The schema and the reasons for each of its columns are in
+//! `db/migrations-ts/20260907000300_worker_instances.ts`,
+//! `db/migrations-ts/20260914000400_execution_zones_and_join_signers.ts` and
+//! `db/migrations-ts/20260914000500_worker_join_bindings.ts`.
 //!
-//! Control learns enrollers from ONE place: the operator's import file,
-//! `control.worker_enrollers_file`, read at startup by [`import_enrollers`]. The
-//! import only ever ADDS: it inserts enrollers Control has not recorded, never
+//! Control learns signers from ONE place: the operator's import file,
+//! `control.join_signers_file`, read at startup by [`import_join_signers`]. The
+//! import only ever ADDS: it inserts signers Control has not recorded, never
 //! reactivates a revoked one, and refuses the whole file when any entry
-//! disagrees with what is recorded. Revocation is the other direction and is
-//! not configuration at all - see `docs/runbooks/worker-enrollers.md`.
+//! disagrees with what is recorded - including a different set of permitted
+//! zones, because a signer's zones ARE its authority and widening them is
+//! provisioning a new signer. Revocation is the other direction and is not
+//! configuration at all: `zeroship.rotate_worker_join_signer` stops future
+//! tokens, `zeroship.purge_worker_join_signer` additionally retires everything
+//! the signer admitted, and neither has a runtime EXECUTE grant. See
+//! `docs/runbooks/worker-join-signers.md`.
 //!
-//! WHAT THIS BUYS, STATED SO NOTHING HERE OVERSELLS IT (option 1A of the
-//! worker-enrollment-bootstrap design). Enrolment authenticates with a key
-//! SHARED BY THE DEPLOYMENT UNIT, so a holder of it can enrol many instances in
-//! that unit and zone. Per-instance identity is a DISTINGUISHER against a
-//! unit-key holder, NOT a boundary WITHIN the unit. What it buys is
-//! attribution, per-instance retirement, a countable event, and - because
-//! every instance carries the `enroller_id` of the unit that admitted it -
-//! revoking that ONE enroller row (`zeroship.revoke_worker_enroller`, an
-//! explicit operator database operation with no runtime EXECUTE grant) retires
-//! every instance it ever enrolled in one transaction. A revoked unit cannot
-//! regain equivalent authority by enrolling a fresh instance identity: the
-//! enroller row itself is what `enrol_worker_instance` locks and checks, and a
-//! revoked one refuses before any row is written.
+//! # The order of the checks, and why each is separate
+//!
+//! [`join`] runs them in exactly this order, each as its own statement with its
+//! own refusal reason, so an operator reading a refused boot learns which one
+//! fired and a mutation of any one of them fails exactly one test:
+//!
+//! 1. resolve the ACTIVE signer the token names, with its permitted zones;
+//! 2. the token's SIGNATURE under that signer's recorded key;
+//! 3. the AUDIENCE - this control plane and no other;
+//! 4. EXPIRY, under the same skew bounds every service assertion uses;
+//! 5. the token's `zone` is one this signer may mint for;
+//! 6. one USE of that token id, consumed atomically;
+//! 7. the request's SELF-SIGNATURE, which binds the presented public key, and
+//!    equals `cnf` when the token carries one;
+//! 8. the ADVERTISE ADDRESS, inside the operator's declared envelope.
+//!
+//! Only then is the instance minted. Steps 2 through 5 are
+//! `zeroship_core::worker_join::verify_join_token`, which takes key material
+//! rather than a registry; step 5's registry half and step 6 are here.
+//!
+//! WHAT THIS BUYS, STATED SO NOTHING HERE OVERSELLS IT. A captured token admits
+//! workers the captor controls - up to the uses that remain, until its expiry,
+//! in the one zone it names - and nothing more, because step 7 means a key
+//! whose private half the presenter does not hold cannot be registered. The
+//! instance identity that results is per-process and its private half exists
+//! only in that process's memory, so retiring one instance IS a boundary here
+//! rather than only attribution.
 //!
 //! # The two decisions this module exists to enforce
 //!
@@ -44,69 +59,64 @@
 //! placement fence becomes a lottery the attacker plays until it wins.
 //! [`mint_ring_key`] reads the OS CSPRNG and nothing else.
 //!
-//! **The address is derived from the enrolment connection.** The worker
-//! contributes only its listening port. Control takes the host from the observed
-//! peer address and validates the pair against [`EnrolmentEnvelope`].
-//! There is deliberately NO fallback to a caller-supplied host: that fallback is
-//! the vulnerability, not a convenience. `collect_forwarded_headers` in
+//! **The address is derived from the join connection.** The worker contributes
+//! only its listening port, and even that is covered by the join proof. Control
+//! takes the host from the observed peer address and validates the pair against
+//! [`EnrolmentEnvelope`]. There is deliberately NO fallback to a caller-supplied
+//! host: that fallback is the vulnerability, not a convenience.
+//! `collect_forwarded_headers` in
 //! `crates/zeroship-gateway/src/router/dispatch.rs` strips a named header set
 //! and COOKIE IS NOT IN IT, and `forward_dispatch` posts the full request -
 //! body, cookies, and the gateway-signed user envelope - to whatever address the
-//! ring returns. A registrant-supplied address would therefore let an
-//! enroller-key holder intercept and impersonate end-user sessions under the
-//! app's own origin, which is worse than the exposure the registry exists to
-//! reduce.
+//! ring returns. A registrant-supplied address would therefore let a token
+//! holder intercept and impersonate end-user sessions under the app's own
+//! origin, which is worse than the exposure the registry exists to reduce.
 //!
 //! Derivation is also what makes the design deployable: a per-process address
 //! setting has no producer, because compose replicas share one environment block
 //! and a Kubernetes Deployment is one pod spec for N pods, so every replica would
 //! present the same address.
 //!
-//! # Enrolment IS idempotent, on the instance's public key
+//! # Joining IS idempotent, on the instance's public key
 //!
-//! [`enrol`] mints a candidate instance id and ring key up front, then spends
-//! them inside `zeroship.enrol_worker_instance`
-//! (`db/migrations-ts/20260914000500_worker_instances_enroller_binding.ts`),
-//! which conflicts on `worker_instances.public_key`. Three consequences:
+//! [`join`] mints a candidate instance id and ring key up front, then spends
+//! them inside `zeroship.join_worker_instance`
+//! (`db/migrations-ts/20260914000500_worker_join_bindings.ts`), which conflicts
+//! on `worker_instances.public_key`. Three consequences:
 //!
 //! 1. A worker restart is a NEW instance by construction - the keypair is
 //!    generated at boot in memory, so there is nothing to deduplicate across
 //!    restarts. A worker that exited gracefully has already retired its old
-//!    row through [`retire`]; one that crashed leaves it `active` with no
-//!    process behind it, and nothing here adds a reaper or a liveness sweep.
-//! 2. A retried enrolment inside one boot - the response was lost, the worker
-//!    asks again with the SAME instance key - returns the id of the row the
-//!    first attempt (or a concurrent racing attempt) already committed,
-//!    rather than minting a second row for one process. This closes the
-//!    double-row-per-lost-reply gap this module used to record here as an
-//!    open cost.
-//! 3. The SAME public key presented under a DIFFERENT enroller is a conflict,
-//!    refused rather than silently reassigned: a public key names exactly one
-//!    enroller for its life, so row surgery or a restored enroller cannot
-//!    transfer an existing instance's authority to itself.
+//!    row through [`retire`]; one that crashed leaves a row that stops being
+//!    live when its LEASE runs out, which is what replaced the sweep this
+//!    module used to say it did not have.
+//! 2. A retried join - the response was lost, the worker asks again with the
+//!    SAME instance key - returns the id of the row the first attempt (or a
+//!    concurrent racing replica) already committed, rather than minting a
+//!    second row for one process. The use accounting is idempotent on the same
+//!    pair, so the retry costs no second use either.
+//! 3. The SAME public key presented under a DIFFERENT signer or token is a
+//!    conflict, refused rather than silently reassigned.
 //!
-//! # The enroller row is locked, and the lock is what makes revocation exact
+//! # The signer row is locked, and the lock is what makes revocation exact
 //!
-//! `enrol_worker_instance` first takes a guarded no-op update lock on the
-//! calling enroller's row, conditioned on `status = 'active'`. A concurrent
-//! `zeroship.revoke_worker_enroller` call's own first UPDATE targets that same
-//! row and queues behind this lock, so revocation always observes every
-//! enrolment that committed before it and marks the resulting instance `gone`
-//! in the same operator transaction. An enroller found `revoked` at lock time
-//! refuses before any instance row is written - the race a compromised or
-//! decommissioned unit's in-flight enrolments lose.
+//! `join_worker_instance` first takes a guarded no-op update lock on the named
+//! signer's row, conditioned on `status = 'active'`. A concurrent rotate or
+//! purge call's own first UPDATE targets that same row and queues behind this
+//! lock, so revocation always observes every join that committed before it. A
+//! signer found `revoked` at lock time refuses before any instance row is
+//! written - the race a compromised signer's in-flight joins lose.
 //!
 //! # The rows are READ as well as written, and the read is where revocation lives
 //!
-//! [`active_instance_public_key`] and [`active_enroller_public_key`] are their
-//! tables' readers. Control resolves one of them before verifying an assertion
-//! whose `iss` names an instance (`crate::internal::resolve_instance_public_key`),
-//! because no peer document has ever carried an instance or enroller key: the
-//! keypair is drawn in memory (the worker's, at boot) or mounted as a file
-//! outside any document control loads (the enroller's, by the operator). The
-//! `status` filter on each read is the ONLY thing that makes marking a row
-//! `draining`/`gone`/`revoked` mean anything, which is why it is stated on the
-//! reader rather than left to the caller.
+//! [`active_instance_public_key`] and [`trusted_join_signer`] are their tables'
+//! readers. Control resolves the first before verifying an assertion whose `iss`
+//! names a worker instance (`crate::internal::resolve_instance_public_key`),
+//! because no peer document has ever carried an instance key: the keypair is
+//! drawn in memory at boot. The instance read filters on `status` AND on the
+//! LEASE, and both halves are load-bearing - the status filter is what makes
+//! retirement and purge mean anything, and the lease is what makes an abandoned
+//! credential stop working with nobody acting.
 
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
@@ -121,7 +131,10 @@ use ntex::web;
 use rand::RngCore as _;
 use serde::Deserialize;
 
-use zeroship_core::worker_enrollers::{parse_enroller_import, EnrollerRecord};
+use zeroship_core::worker_join::{
+    parse_join_signer_import, verify_join_proof, verify_join_token, JoinSignerRecord,
+    JoinTokenRefusal, VerifiedJoinToken, INSTANCE_LEASE_TTL,
+};
 
 use crate::{AppState, Registry};
 
@@ -134,11 +147,10 @@ use crate::{AppState, Registry};
 /// not the weak term in any placement argument.
 pub const RING_KEY_BYTES: usize = 32;
 
-/// The status control writes on an admitted enrolment, and on an imported
-/// enroller.
+/// The status control writes on an admitted join, and on an imported signer.
 ///
 /// Of the instance column's other two members, `gone` has exactly two writers,
-/// `zeroship.revoke_worker_enroller` (an operator's database operation) and
+/// `zeroship.purge_worker_join_signer` (an operator's database operation) and
 /// [`retire`] (the instance declaring its own exit), and `draining` has none.
 const ENROLLED_STATUS: &str = "active";
 
@@ -146,7 +158,7 @@ const ENROLLED_STATUS: &str = "active";
 /// row never authenticates again, and nothing moves it back.
 const RETIRED_STATUS: &str = "gone";
 
-/// The status `zeroship.revoke_worker_enroller` writes on an enroller. Terminal.
+/// The status the two signer verbs write. Terminal.
 const REVOKED_STATUS: &str = "revoked";
 
 /// The status of an execution zone this deployment declares, the only member
@@ -401,26 +413,46 @@ impl EnrolmentEnvelope {
     }
 }
 
-/// What a worker sends. Its listening PORT and its instance PUBLIC KEY, and
-/// nothing else - there is no host field on purpose, and adding one is the
-/// vulnerability the module header describes.
+/// What a worker sends.
+///
+/// Its listening PORT, its instance PUBLIC KEY, and a PROOF that it holds the
+/// private half. There is no host field on purpose, and adding one is the
+/// vulnerability the module header describes. There is no ZONE field either,
+/// and that is the same kind of absence: the zone is the token's claim, so a
+/// field here would be a second source for a fact that must have one.
 #[derive(Debug, Deserialize)]
-pub struct WorkerEnrolmentRequest {
+pub struct WorkerJoinRequest {
     /// The port the worker is listening on.
     pub port: u16,
     /// The raw Ed25519 public key, base64url without padding.
     pub public_key: String,
+    /// The detached Ed25519 signature over
+    /// `zeroship_core::worker_join::join_proof_message`, base64url without
+    /// padding, made with the private half of `public_key`.
+    pub proof: String,
 }
 
-/// What control returns on an admitted enrolment.
+/// What control returns on an admitted join.
 #[derive(Debug, serde::Serialize)]
-pub struct WorkerEnrolmentAccepted {
+pub struct WorkerJoinAccepted {
     /// The minted `wkr_` instance id. The worker mints under
     /// `svc/worker/<instance_id>` and is still ADDRESSED as `svc/worker`.
     pub instance_id: String,
+    /// Seconds until this identity lapses unless renewed. The worker derives
+    /// its renewal schedule from the shared constants rather than from this
+    /// value; it is reported so an operator reading a boot log sees the lease
+    /// the control plane actually granted.
+    pub lease_seconds: u64,
 }
 
-/// Serve one enrolment.
+/// What control returns on a renewal.
+#[derive(Debug, serde::Serialize)]
+pub struct WorkerLeaseRenewed {
+    /// Seconds until the extended identity lapses.
+    pub lease_seconds: u64,
+}
+
+/// Serve one join.
 ///
 /// Split from the ntex handler on exactly one seam: `peer` is passed in rather
 /// than read here. That is not a testability concession dressed up as design -
@@ -431,37 +463,147 @@ pub struct WorkerEnrolmentAccepted {
 /// test can only ever exercise the unobservable-peer arm; the accepted arms are
 /// driven here, and the handler's real read of the transport is bound by a
 /// live-server arm that gets a genuine loopback peer and is refused BY NAME as
-/// outside the declared envelope rather than for having no peer. The two
-/// refusals being distinct is what gives that arm its power: it proves the
-/// handler read an address, not merely that it failed.
-pub async fn enrol(
+/// outside the declared envelope rather than for having no peer.
+///
+/// `token` is the raw bearer this request presented. It is passed rather than
+/// re-read for the same reason: the proof is signed over the EXACT bytes, so
+/// there must be one reading of them.
+pub async fn join(
     state: &AppState,
     peer: Option<SocketAddr>,
-    enroller_id: &str,
-    request: WorkerEnrolmentRequest,
+    token: &str,
+    request: WorkerJoinRequest,
 ) -> web::HttpResponse {
     let public_key = match decode_instance_public_key(&request.public_key) {
         Ok(key) => key,
         Err(message) => {
-            return web::HttpResponse::BadRequest()
-                .json(&serde_json::json!({"error": message}));
+            return web::HttpResponse::BadRequest().json(&serde_json::json!({"error": message}));
+        }
+    };
+    let proof = match decode_join_proof(&request.proof) {
+        Ok(proof) => proof,
+        Err(message) => {
+            return web::HttpResponse::BadRequest().json(&serde_json::json!({"error": message}));
         }
     };
 
-    let address = match state
-        .worker_enrolment
-        .derive_address(peer, request.port)
-    {
+    // 1. The signer. Resolved from the id the UNVERIFIED token claims, which
+    //    selects a key and grants nothing: the signature below still has to
+    //    hold under it.
+    let signer_id = match zeroship_core::worker_join::unverified_join_signer_id(token) {
+        Some(id) => id,
+        None => return join_refused(JoinTokenRefusal::SignerMalformed.as_str()),
+    };
+    let signer = match trusted_join_signer(&state.control_pg, &signer_id).await {
+        Ok(Some(signer)) => signer,
+        Ok(None) => {
+            tracing::warn!(
+                signer_id,
+                "control-internal: join refused - no ACTIVE signer is recorded under this id"
+            );
+            return join_refused("signer_unknown");
+        }
+        Err(error) => {
+            tracing::error!(%error, signer_id, "control-internal: the signer registry could not be read");
+            return web::HttpResponse::ServiceUnavailable()
+                .json(&serde_json::json!({"error": "service unavailable"}));
+        }
+    };
+
+    // 2-4. Signature, audience, expiry. One call, but each of them is its own
+    //      statement inside it with its own reason.
+    let audience = match crate::internal::control_service_issuer() {
+        Ok(issuer) => issuer,
+        Err(error) => {
+            tracing::error!(%error, "control-internal: this control plane's own issuer is malformed");
+            return web::HttpResponse::InternalServerError()
+                .json(&serde_json::json!({"error": "internal error"}));
+        }
+    };
+    let verified = match verify_join_token(
+        token,
+        &signer.public_key,
+        &audience,
+        std::time::SystemTime::now(),
+    ) {
+        Ok(verified) => verified,
+        Err(refusal) => {
+            tracing::warn!(
+                signer_id,
+                reason = refusal.as_str(),
+                "control-internal: join refused - the token did not verify"
+            );
+            return join_refused(refusal.as_str());
+        }
+    };
+
+    // 5. The zone must be one this signer may mint for. Checked here against
+    //    the recorded set, and AGAIN inside the insert under the signer's row
+    //    lock; the two refusals carry different reasons so neither can hide
+    //    the other's absence.
+    let Some(zone_id) = signer.zones.get(&verified.zone).cloned() else {
+        tracing::warn!(
+            signer_id,
+            zone = verified.zone.as_str(),
+            "control-internal: join refused - the signer may not mint for this zone"
+        );
+        return join_refused("zone_not_permitted");
+    };
+
+    // 6. One use of this token, consumed atomically. A repeat presentation of
+    //    the same joining key is the lost-reply retry and costs nothing.
+    let joining_key = zeroship_core::service_assertion::thumbprint_key_id(&public_key);
+    match consume_join_use(&state.control_pg, &verified, &joining_key).await {
+        Ok(()) => {}
+        Err(UseFailure::Exhausted) => {
+            tracing::warn!(
+                signer_id,
+                token_id = verified.token_id.as_str(),
+                "control-internal: join refused - the token has no uses left"
+            );
+            return join_refused("token_exhausted");
+        }
+        Err(UseFailure::Database(error)) => {
+            tracing::error!(%error, signer_id, "control-internal: join use accounting failed");
+            return web::HttpResponse::ServiceUnavailable()
+                .json(&serde_json::json!({"error": "service unavailable"}));
+        }
+    }
+
+    // 7. Proof of possession. Without it a token is a bearer credential over
+    //    ANY public key, so a captor could register a key it does not hold and
+    //    make Control attribute a worker to somebody else's material.
+    if !verify_join_proof(&public_key, token, request.port, &proof) {
+        tracing::warn!(
+            signer_id,
+            token_id = verified.token_id.as_str(),
+            "control-internal: join refused - the request was not signed by the presented key"
+        );
+        return join_refused("proof_invalid");
+    }
+    if let Some(expected) = verified.confirmation.as_deref() {
+        if expected != joining_key {
+            tracing::warn!(
+                signer_id,
+                token_id = verified.token_id.as_str(),
+                "control-internal: join refused - the presented key is not the confirmed one"
+            );
+            return join_refused("confirmation_mismatch");
+        }
+    }
+
+    // 8. The address, derived from the connection and held to the envelope.
+    let address = match state.worker_enrolment.derive_address(peer, request.port) {
         Ok(address) => address,
         Err(refusal) => {
             tracing::warn!(
                 peer = ?peer,
                 claimed_port = request.port,
                 reason = refusal.as_str(),
-                "control-internal: worker enrolment refused"
+                "control-internal: worker join refused"
             );
             let body = serde_json::json!({
-                "error": "enrolment refused",
+                "error": "join refused",
                 "reason": refusal.as_str(),
             });
             return if refusal.is_deployment_state() {
@@ -472,49 +614,72 @@ pub async fn enrol(
         }
     };
 
-    match enrol_instance(&state.control_pg, enroller_id, address, &public_key).await {
+    match join_instance(&state.control_pg, &verified, &zone_id, address, &public_key).await {
         Ok(instance_id) => {
             tracing::info!(
-                enroller_id,
+                signer_id,
+                token_id = verified.token_id.as_str(),
+                zone = verified.zone.as_str(),
                 instance_id = %instance_id,
                 advertise_host = %address.ip(),
                 advertise_port = address.port(),
-                "control-internal: worker instance enrolled"
+                "control-internal: worker instance joined"
             );
-            web::HttpResponse::Created().json(&WorkerEnrolmentAccepted { instance_id })
+            web::HttpResponse::Created().json(&WorkerJoinAccepted {
+                instance_id,
+                lease_seconds: INSTANCE_LEASE_TTL.as_secs(),
+            })
         }
-        Err(EnrolmentFailure::EnrollerInactive) => {
+        Err(JoinFailure::SignerInactive) => {
             tracing::warn!(
-                enroller_id,
-                "control-internal: worker enrolment refused - enroller is not active"
+                signer_id,
+                "control-internal: join refused - the signer stopped being active mid-join"
             );
-            web::HttpResponse::Forbidden().json(&serde_json::json!({
-                "error": "enrolment refused",
-                "reason": "enroller_inactive",
-            }))
+            join_refused("signer_inactive")
         }
-        Err(EnrolmentFailure::PublicKeyConflict) => {
+        Err(JoinFailure::ZoneNotPermitted) => {
             tracing::warn!(
-                enroller_id,
-                "control-internal: worker enrolment refused - public key enrolled under another enroller"
+                signer_id,
+                zone = verified.zone.as_str(),
+                "control-internal: join refused by the registry - signer may not mint for this zone"
+            );
+            join_refused("zone_not_permitted_by_registry")
+        }
+        Err(JoinFailure::PublicKeyConflict) => {
+            tracing::warn!(
+                signer_id,
+                "control-internal: join refused - public key joined under another signer or token"
             );
             web::HttpResponse::Conflict().json(&serde_json::json!({
-                "error": "enrolment refused",
+                "error": "join refused",
                 "reason": "public_key_conflict",
             }))
         }
-        Err(EnrolmentFailure::Database(error)) => {
+        Err(JoinFailure::Database(error)) => {
             tracing::error!(
-                enroller_id,
+                signer_id,
                 error = %error,
                 advertise_host = %address.ip(),
                 advertise_port = address.port(),
-                "control-internal: worker enrolment insert failed"
+                "control-internal: worker join insert failed"
             );
             web::HttpResponse::InternalServerError()
                 .json(&serde_json::json!({"error": "internal error"}))
         }
     }
+}
+
+/// The one 403 body shape every join refusal uses.
+///
+/// The reason travels to the caller. That leaks nothing a probe could not
+/// already learn from success-versus-failure, and an operator reading a refused
+/// worker boot has no other way to tell an unknown signer from an exhausted
+/// token from a zone the signer may not mint for.
+fn join_refused(reason: &str) -> web::HttpResponse {
+    web::HttpResponse::Forbidden().json(&serde_json::json!({
+        "error": "join refused",
+        "reason": reason,
+    }))
 }
 
 /// Decode and width-check the instance public key.
@@ -531,111 +696,217 @@ fn decode_instance_public_key(encoded: &str) -> Result<[u8; PUBLIC_KEY_LENGTH], 
         .map_err(|_| "public_key is not a raw ed25519 public key")
 }
 
-/// Why [`enrol_instance`] refused, or could not tell.
+/// Decode and width-check the join proof.
+fn decode_join_proof(encoded: &str) -> Result<[u8; 64], &'static str> {
+    let raw = URL_SAFE_NO_PAD
+        .decode(encoded.trim())
+        .map_err(|_| "proof is not base64url")?;
+    <[u8; 64]>::try_from(raw.as_slice()).map_err(|_| "proof is not a raw ed25519 signature")
+}
+
+/// A trusted signer as Control recorded it: its key and the zones it may mint
+/// for, by NAME to zone id.
+#[derive(Clone, Debug)]
+pub struct TrustedSigner {
+    /// The signer's verification key.
+    pub public_key: [u8; PUBLIC_KEY_LENGTH],
+    /// Zone NAME to zone id, for every zone this signer may mint for.
+    pub zones: BTreeMap<String, String>,
+}
+
+/// The recorded key and permitted zones of an ACTIVE signer, or nothing.
 ///
-/// A closed set over the SQLSTATEs `zeroship.enrol_worker_instance` raises
-/// (`db/migrations-ts/20260914000500_worker_instances_enroller_binding.ts`),
-/// plus the store-unavailable case every other registry read/write in this
-/// module carries. Distinguishing the first two from a bare database error is
-/// what lets [`enrol`] answer 403/409 rather than 500 for the two outcomes the
-/// design specifically names.
+/// THE `status` FILTER IS SIGNER REVOCATION, AND IT IS THE WHOLE OF IT. Both
+/// operator verbs move the row to `revoked` and this read is what makes that
+/// mean something; drop the filter and rotating a leaked key changes nothing at
+/// all while looking exactly like a mechanism that ran and approved.
+///
+/// The zones come back with the key rather than from a second call, because the
+/// two are one question - "may this signer mint this token" - and answering it
+/// in two reads is how a caller ends up answering half of it.
+///
+/// # Errors
+///
+/// Returns the driver's error when the registry cannot be read. A caller must
+/// refuse on that rather than fall through: control that cannot reach the
+/// registry has not established that this signer is trusted.
+pub async fn trusted_join_signer(
+    pg: &compio_postgres::Client,
+    signer_id: &str,
+) -> Result<Option<TrustedSigner>, compio_postgres::Error> {
+    let rows = pg
+        .query(
+            "SELECT s.public_key, z.name, z.id \
+               FROM zeroship.worker_join_signers s \
+               JOIN zeroship.worker_join_signer_zones sz ON sz.signer_id = s.id \
+               JOIN zeroship.execution_zones z ON z.id = sz.execution_zone_id \
+              WHERE s.id = $1 AND s.status = $2",
+            &[&signer_id, &ENROLLED_STATUS],
+        )
+        .await?;
+    let Some(first) = rows.first() else {
+        return Ok(None);
+    };
+    let stored: &[u8] = first.get(0);
+    // `worker_join_signers_public_key_shape` already refuses every other width,
+    // so this arm cannot fire on a row this platform wrote. It is here because
+    // the alternative is an unwrap inside an authentication path over a value
+    // read from a table.
+    let Ok(public_key) = <[u8; PUBLIC_KEY_LENGTH]>::try_from(stored) else {
+        return Ok(None);
+    };
+    let mut zones = BTreeMap::new();
+    for row in &rows {
+        zones.insert(row.get::<_, String>(1), row.get::<_, String>(2));
+    }
+    Ok(Some(TrustedSigner { public_key, zones }))
+}
+
+/// Why consuming a use failed.
 #[derive(Debug)]
-enum EnrolmentFailure {
-    /// The enroller was not `active` when this call took its row lock: either
-    /// it was never enrolled, or it was revoked - possibly by a
-    /// `zeroship.revoke_worker_enroller` call that was waiting on this exact
-    /// lock and proceeded the instant this call released it.
-    EnrollerInactive,
-    /// The presented public key already names an instance enrolled under a
-    /// DIFFERENT enroller. A public key names exactly one enroller for its
-    /// life; this is not the lost-reply retry case, which returns `Ok` with
-    /// the existing instance id instead.
+enum UseFailure {
+    /// Every use this token was minted with has gone to some other key.
+    Exhausted,
+    /// The accounting could not be reached at all.
+    Database(compio_postgres::Error),
+}
+
+/// Consume one use of `token` for `joining_key`, or refuse.
+///
+/// One server-side statement, so one transaction: see
+/// `zeroship.claim_worker_join_use` for why the claim and the counter are two
+/// guarded writes rather than a read followed by a write, and why an exhausted
+/// token has to roll the claim back.
+///
+/// The key is `<signer issuer>|<token id>`, scoped by issuer exactly as the
+/// service-assertion replay key is, so one signer cannot burn another's token
+/// id and one table is safe to share across every signer.
+async fn consume_join_use(
+    pg: &compio_postgres::Client,
+    token: &VerifiedJoinToken,
+    joining_key: &str,
+) -> Result<(), UseFailure> {
+    let key = format!(
+        "spiffe://{}/{}/{}|{}",
+        zeroship_core::service_peers::SERVICE_TRUST_DOMAIN,
+        zeroship_core::service_peers::WORKER_JOIN_SIGNER_SERVICE_NAME,
+        token.signer_id,
+        token.token_id
+    );
+    let uses = i32::try_from(token.uses).unwrap_or(i32::MAX);
+    let expires_at: std::time::SystemTime = token.expires_at;
+    pg.query_one(
+        "SELECT zeroship.claim_worker_join_use($1, $2, $3, $4)",
+        &[&key, &joining_key, &uses, &expires_at],
+    )
+    .await
+    .map(|_| ())
+    .map_err(|error| {
+        use compio_postgres::error::SqlState;
+        if error.code() == Some(&SqlState::INSUFFICIENT_RESOURCES) {
+            UseFailure::Exhausted
+        } else {
+            UseFailure::Database(error)
+        }
+    })
+}
+
+/// Why [`join_instance`] refused, or could not tell.
+///
+/// A closed set over the SQLSTATEs `zeroship.join_worker_instance` raises, plus
+/// the store-unavailable case every other registry read/write in this module
+/// carries. Distinguishing the first three from a bare database error is what
+/// lets [`join`] answer 403/409 rather than 500 for outcomes the design names.
+#[derive(Debug)]
+enum JoinFailure {
+    /// The signer was not `active` when this call took its row lock: rotated or
+    /// purged, possibly by a call that was waiting on this exact lock.
+    SignerInactive,
+    /// The registry does not record this signer for this zone. Reachable only
+    /// if the Rust check above it stopped running, which is why it has a reason
+    /// of its own.
+    ZoneNotPermitted,
+    /// The presented public key already names an instance joined under a
+    /// DIFFERENT signer or token.
     PublicKeyConflict,
     /// The registry could not be consulted at all.
     Database(compio_postgres::Error),
 }
 
-/// Mint the id and the ring key, then spend them inside the server-side
-/// enrolment critical section.
+/// Mint the id and the ring key, then spend them inside the server-side join
+/// critical section.
 ///
-/// Both mints happen HERE, after the address was derived and admitted, so
-/// nothing the registrant sent has reached either of them. The lock-then-
-/// insert sequence itself runs inside `zeroship.enrol_worker_instance` as ONE
-/// statement rather than a client-driven multi-statement transaction: `pg` is
-/// the process-wide shared `control_pg` client every internal handler borrows
-/// concurrently (`&self`-taking calls only), and compio-postgres's
-/// `Client::transaction` needs exclusive (`&mut self`) access this call site
-/// does not have. See the function's own migration-file comment for why the
-/// lock and the insert have to be one round trip for the race in option 1A's
-/// PoC (revoke-during-enrol) to be judged correctly rather than by a sleep.
-///
-/// # Errors
-///
-/// Returns [`EnrolmentFailure`] on refusal or when the registry could not be
-/// read at all.
-async fn enrol_instance(
+/// Both mints happen HERE, after every check has passed, so nothing the
+/// registrant sent has reached either of them. The lock-then-insert sequence
+/// runs inside `zeroship.join_worker_instance` as ONE statement rather than a
+/// client-driven transaction: `pg` is the process-wide shared `control_pg`
+/// client every internal handler borrows concurrently (`&self`-taking calls
+/// only), and compio-postgres's `Client::transaction` needs exclusive
+/// (`&mut self`) access this call site does not have.
+async fn join_instance(
     pg: &compio_postgres::Client,
-    enroller_id: &str,
+    token: &VerifiedJoinToken,
+    zone_id: &str,
     address: SocketAddr,
     public_key: &[u8; PUBLIC_KEY_LENGTH],
-) -> Result<String, EnrolmentFailure> {
+) -> Result<String, JoinFailure> {
     let instance_id = zeroship_core::typed_id::new_worker_instance_id();
     let ring_key = mint_ring_key();
     let host = address.ip();
     let port = i32::from(address.port());
+    let lease = i32::try_from(INSTANCE_LEASE_TTL.as_secs()).unwrap_or(i32::MAX);
     let row = pg
         .query_one(
-            "SELECT zeroship.enrol_worker_instance($1, $2, $3, $4, $5, $6)",
+            "SELECT zeroship.join_worker_instance($1, $2, $3, $4, $5, $6, $7, $8, $9)",
             &[
-                &enroller_id,
+                &token.signer_id,
+                &token.token_id,
+                &zone_id,
                 &instance_id,
                 &ring_key.as_slice(),
                 &public_key.as_slice(),
                 &host,
                 &port,
+                &lease,
             ],
         )
         .await
-        .map_err(classify_enrolment_error)?;
+        .map_err(classify_join_error)?;
     Ok(row.get(0))
 }
 
 /// Route the function call's SQLSTATE to the outcome it names.
 ///
-/// `insufficient_privilege` and `unique_violation` are RAISED by
-/// `zeroship.enrol_worker_instance` itself for exactly the two refusal cases
-/// it distinguishes; every other error - including a genuine constraint
-/// violation this function did not anticipate - is a store failure the caller
-/// cannot make sense of and must refuse on rather than guess at.
-fn classify_enrolment_error(error: compio_postgres::Error) -> EnrolmentFailure {
+/// `insufficient_privilege`, `invalid_parameter_value` and `unique_violation`
+/// are RAISED by `zeroship.join_worker_instance` itself for exactly the three
+/// refusal cases it distinguishes; every other error - including a genuine
+/// constraint violation this function did not anticipate - is a store failure
+/// the caller cannot make sense of and must refuse on rather than guess at.
+fn classify_join_error(error: compio_postgres::Error) -> JoinFailure {
     use compio_postgres::error::SqlState;
     match error.code() {
-        Some(code) if code == &SqlState::INSUFFICIENT_PRIVILEGE => {
-            EnrolmentFailure::EnrollerInactive
-        }
-        Some(code) if code == &SqlState::UNIQUE_VIOLATION => EnrolmentFailure::PublicKeyConflict,
-        _ => EnrolmentFailure::Database(error),
+        Some(code) if code == &SqlState::INSUFFICIENT_PRIVILEGE => JoinFailure::SignerInactive,
+        Some(code) if code == &SqlState::INVALID_PARAMETER_VALUE => JoinFailure::ZoneNotPermitted,
+        Some(code) if code == &SqlState::UNIQUE_VIOLATION => JoinFailure::PublicKeyConflict,
+        _ => JoinFailure::Database(error),
     }
 }
 
-/// The verification key an ACTIVE instance's assertions are checked under, or
+/// The verification key a LIVE instance's assertions are checked under, or
 /// nothing.
 ///
-/// THE `status` FILTER IS PER-INSTANCE REVOCATION, AND IT IS THE WHOLE OF IT.
-/// The registry buys attribution, a countable event, and the ability to retire
-/// one process without touching the enroller key its whole deployment unit
-/// shares; the third is bought HERE and nowhere else. Resolve the key without
-/// the filter and marking a row `gone` changes nothing at all, while looking
-/// exactly like a revocation mechanism that ran and approved.
+/// TWO FILTERS, AND EACH IS A DIFFERENT WAY A CREDENTIAL STOPS WORKING.
 ///
-/// It admits exactly `ENROLLED_STATUS`. The write side moved into
-/// `zeroship.enrol_worker_instance` (a literal `'active'` in its own migration
-/// file) when enrolment became a single server-side statement, so this is now
-/// a SECOND spelling of that string rather than a shared Rust constant - the
-/// two must be kept in agreement by convention, and `worker_instances_status_check`
-/// / `worker_enrollers_status_check` are what would catch either one drifting
-/// to a value the other does not recognise. The other two members of the
-/// column's closed set authenticate nothing.
+/// `status` is retirement and purge. Resolve the key without it and marking a
+/// row `gone` changes nothing at all, while looking exactly like a revocation
+/// mechanism that ran and approved.
+///
+/// `expires_at` is the LEASE, and it is what makes revocation stop being the
+/// only way a credential ever dies. A worker that crashed, was killed, or was
+/// simply forgotten leaves an `active` row with no process behind it; without
+/// this comparison that row authenticates forever and only an operator noticing
+/// would stop it. The comparison is against the DATABASE's clock, which is also
+/// what keeps the answer the same across Control replicas whose clocks differ.
 ///
 /// # Errors
 ///
@@ -648,7 +919,8 @@ pub(crate) async fn active_instance_public_key(
 ) -> Result<Option<[u8; PUBLIC_KEY_LENGTH]>, compio_postgres::Error> {
     let rows = pg
         .query(
-            "SELECT public_key FROM zeroship.worker_instances WHERE id = $1 AND status = $2",
+            "SELECT public_key FROM zeroship.worker_instances \
+              WHERE id = $1 AND status = $2 AND expires_at > now()",
             &[&instance_id, &ENROLLED_STATUS],
         )
         .await?;
@@ -664,40 +936,79 @@ pub(crate) async fn active_instance_public_key(
     Ok(<[u8; PUBLIC_KEY_LENGTH]>::try_from(stored).ok())
 }
 
-/// The verification key an ACTIVE enroller's assertions are checked under, or
-/// nothing.
+// ---------------------------------------------------------------------------
+// Renewal: an instance extending its own lease
+// ---------------------------------------------------------------------------
+
+/// Serve one lease renewal for the calling instance.
 ///
-/// The enroller-table twin of [`active_instance_public_key`], read by the same
-/// `status = 'active'` predicate its own table uses, and by nothing else: an
-/// enroller found `revoked` here holds no credential, exactly as an instance
-/// found `draining`/`gone` does not. `zeroship.revoke_worker_enroller`
-/// (`db/migrations-ts/20260914000500_worker_instances_enroller_binding.ts`) is
-/// the row's only writer of `status`, and it is an explicit operator database
-/// operation with no runtime EXECUTE grant - Control never calls it.
+/// `instance_id` is the instance segment of the issuer the caller VERIFIED as,
+/// never a value from a body, so no caller can renew another's identity. No
+/// join token is involved and none would help: possession of the instance key
+/// was proved at join, and demanding a fresh token here would make a use-capped
+/// token useless.
 ///
-/// # Errors
+/// A renewal that finds nothing to extend answers 403 rather than 204, and the
+/// distinction matters to the worker: an identity that lapsed or was retired
+/// cannot be revived, so the worker must stop rather than keep trying.
+pub async fn renew(state: &AppState, instance_id: &str) -> web::HttpResponse {
+    match renew_instance(&state.control_pg, instance_id).await {
+        Ok(true) => {
+            tracing::debug!(instance_id, "control-internal: worker instance lease renewed");
+            web::HttpResponse::Ok().json(&WorkerLeaseRenewed {
+                lease_seconds: INSTANCE_LEASE_TTL.as_secs(),
+            })
+        }
+        Ok(false) => {
+            tracing::warn!(
+                instance_id,
+                "control-internal: lease renewal refused - the instance is retired or lapsed"
+            );
+            web::HttpResponse::Forbidden().json(&serde_json::json!({
+                "error": "renewal refused",
+                "reason": "instance_not_live",
+            }))
+        }
+        Err(error) => {
+            tracing::error!(
+                instance_id,
+                %error,
+                "control-internal: worker instance lease could not be renewed"
+            );
+            web::HttpResponse::ServiceUnavailable()
+                .json(&serde_json::json!({"error":"service unavailable"}))
+        }
+    }
+}
+
+/// Extend one live instance's lease, returning whether it was extended.
 ///
-/// Returns the driver's error when the registry cannot be read, for the same
-/// reason [`active_instance_public_key`] does: a store that cannot answer has
-/// not established that this enroller is live.
-pub(crate) async fn active_enroller_public_key(
+/// `GREATEST` rather than an assignment, and that is the whole of the
+/// concurrency story: several Control replicas serve renewals for one fleet,
+/// and a slow replica whose statement commits after a newer one's would
+/// otherwise move the expiry BACKWARDS to the window it computed before it
+/// waited. Taking the later of the two makes the column monotonic whatever
+/// order the writes land in.
+///
+/// The guard is the same predicate [`active_instance_public_key`] reads with,
+/// so an identity that has lapsed cannot be renewed: expiry is terminal in the
+/// way retirement is, and rejoining - which needs a token - is the way back.
+async fn renew_instance(
     pg: &compio_postgres::Client,
-    enroller_id: &str,
-) -> Result<Option<[u8; PUBLIC_KEY_LENGTH]>, compio_postgres::Error> {
-    let rows = pg
-        .query(
-            "SELECT public_key FROM zeroship.worker_enrollers WHERE id = $1 AND status = $2",
-            &[&enroller_id, &ENROLLED_STATUS],
+    instance_id: &str,
+) -> Result<bool, compio_postgres::Error> {
+    let lease = f64::from(u32::try_from(INSTANCE_LEASE_TTL.as_secs()).unwrap_or(u32::MAX));
+    let moved = pg
+        .execute(
+            "UPDATE zeroship.worker_instances \
+                SET expires_at = GREATEST(expires_at, now() + make_interval(secs => $3)) \
+              WHERE id = $1 AND status = $2 AND expires_at > now()",
+            &[&instance_id, &ENROLLED_STATUS, &lease],
         )
         .await?;
-    let Some(row) = rows.first() else {
-        return Ok(None);
-    };
-    let stored: &[u8] = row.get(0);
-    // `worker_enrollers_public_key_shape` already refuses every other width;
-    // see the parallel comment on `active_instance_public_key`.
-    Ok(<[u8; PUBLIC_KEY_LENGTH]>::try_from(stored).ok())
+    Ok(moved == 1)
 }
+
 
 // ---------------------------------------------------------------------------
 // Retirement: an instance declaring its own exit
@@ -756,18 +1067,18 @@ async fn retire_instance(
 }
 
 // ---------------------------------------------------------------------------
-// The operator's enroller import
+// The operator's trusted-signer import
 // ---------------------------------------------------------------------------
 
-// The document's shape and its validation are
-// `zeroship_core::worker_enrollers`, shared with `zeroship dev init`, which
-// writes it. `zone` is an execution zone's NAME
-// (`zeroship.execution_zones.name`), the word an operator provisions units by;
-// the id it resolves to is Control's, and resolving it is the import's job.
+// The document's shape and its validation are `zeroship_core::worker_join`,
+// shared with `zeroship dev init`, which writes it. Each permitted zone is an
+// execution zone's NAME (`zeroship.execution_zones.name`), the word an operator
+// provisions by; the id it resolves to is Control's, and resolving it is the
+// import's job.
 
 /// What one import pass found, entry by entry.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct EnrollerImportReport {
+pub struct JoinSignerImportReport {
     /// Entries Control had not recorded. Inserted `active`.
     pub inserted: usize,
     /// Entries already recorded exactly as the file states them, and active.
@@ -777,72 +1088,77 @@ pub struct EnrollerImportReport {
     pub revoked: usize,
 }
 
-/// Import the operator's enroller file, or refuse it.
+/// Import the operator's trusted-signer file, or refuse it.
 ///
 /// An empty `path` - the setting's default - imports nothing and returns
-/// `None`: a deployment that provisions no workers has no enrollers, and every
-/// enrolment it receives is refused because no enroller resolves.
+/// `None`: a deployment that trusts no signer has none, and every join it
+/// receives is refused because no signer resolves.
 ///
 /// # What the import may do, which is only ever to ADD
 ///
-/// - An entry Control has not recorded is inserted `active`.
-/// - An entry recorded with the same key and zone is left exactly as it is. A
-///   REVOKED one stays revoked: revocation is terminal, and leaving a revoked
-///   unit's line in the file must not restore it on the next restart. That is
-///   what makes revocation survive a file nobody edited.
-/// - An entry that DISAGREES with what is recorded refuses the whole file:
-///   the same id under another key or zone, or the same key under another id.
-///   A key names exactly one enroller for its life, so a replacement unit is a
-///   new id AND a new key, never a re-keyed row.
-/// - Recorded enrollers the file no longer names are left alone. Removing a
-///   line revokes nothing; `zeroship.revoke_worker_enroller` does.
+/// - An entry Control has not recorded is inserted `active`, with a row per
+///   permitted zone.
+/// - An entry recorded with the same key and the same zone set is left exactly
+///   as it is. A REVOKED one stays revoked: revocation is terminal, and leaving
+///   a rotated signer's line in the file must not restore it on the next
+///   restart. That is what makes revocation survive a file nobody edited.
+/// - An entry that DISAGREES with what is recorded refuses the whole file: the
+///   same id under another key, the same key under another id, or the same id
+///   with a different set of permitted zones. A key names exactly one signer
+///   for its life, and a signer's zones ARE its authority - widening them is
+///   provisioning a new signer, never re-keying or re-scoping a row.
+/// - Recorded signers the file no longer names are left alone. Removing a line
+///   revokes nothing; `zeroship.rotate_worker_join_signer` does.
 ///
 /// Every entry is decided inside ONE transaction and nothing commits unless
-/// every entry is admissible, so a refused file writes no row. Two Control
-/// replicas importing concurrently converge: the loser of an insert race finds
-/// the winner's row and judges it like any other recorded row.
+/// every entry is admissible, so a refused file writes no row. Several Control
+/// replicas importing concurrently converge, because the only write is an add:
+/// the loser of an insert race finds the winner's row and judges it like any
+/// other recorded row. A file that CONTRADICTS the record refuses only the
+/// replica that read it, which during a rolling deploy means replicas fail one
+/// at a time with a message naming the entries rather than a fleet that
+/// half-believes a new file.
 ///
 /// # Errors
 ///
 /// Returns a message naming every refused entry when the file is unreadable,
-/// malformed, internally inconsistent, names an unknown zone, or conflicts
-/// with a recorded enroller, and when the database cannot be reached. Callers
-/// treat this as fatal: a boot that skipped its enrollers would refuse every
-/// enrolment while looking configured.
-pub async fn import_enrollers(
+/// malformed, internally inconsistent, names an unknown zone, or conflicts with
+/// a recorded signer, and when the database cannot be reached. Callers treat
+/// this as fatal: a boot that skipped its signers would refuse every join while
+/// looking configured.
+pub async fn import_join_signers(
     registry: &Registry,
     path: &Path,
-) -> Result<Option<EnrollerImportReport>, String> {
+) -> Result<Option<JoinSignerImportReport>, String> {
     if path.as_os_str().is_empty() {
         return Ok(None);
     }
-    let enrollers = read_enroller_file(path)?;
+    let signers = read_signer_file(path)?;
     let mut conn = registry
         .conn()
         .await
-        .map_err(|error| format!("worker enroller import: connect: {error}"))?;
+        .map_err(|error| format!("join signer import: connect: {error}"))?;
     let tx = conn
         .transaction()
         .await
-        .map_err(|error| format!("worker enroller import: begin: {error}"))?;
+        .map_err(|error| format!("join signer import: begin: {error}"))?;
 
-    let zones = resolve_zones(&tx, &enrollers).await?;
-    let mut report = EnrollerImportReport::default();
+    let zones = resolve_zones(&tx, &signers).await?;
+    let mut report = JoinSignerImportReport::default();
     let mut refusals = Vec::new();
-    for enroller in &enrollers {
-        let zone_id = &zones[&enroller.zone];
-        match import_one(&tx, enroller, zone_id).await? {
+    for signer in &signers {
+        match import_one(&tx, signer, &zones).await? {
             Imported::Inserted => report.inserted += 1,
             Imported::Unchanged => report.unchanged += 1,
             Imported::Revoked => {
                 tracing::warn!(
-                    enroller_id = enroller.id.as_str(),
-                    "control: the worker enroller file still names a REVOKED enroller; it stays \
-                     revoked - remove the line, and provision a new enroller for that unit"
+                    signer_id = signer.id.as_str(),
+                    "control: the join signer file still names a REVOKED signer; it stays \
+                     revoked - remove the line, and provision a new signer"
                 );
                 report.revoked += 1;
             }
-            Imported::Conflict(reason) => refusals.push(format!("{}: {reason}", enroller.id)),
+            Imported::Conflict(reason) => refusals.push(format!("{}: {reason}", signer.id)),
         }
     }
     if !refusals.is_empty() {
@@ -850,57 +1166,57 @@ pub async fn import_enrollers(
         // file is visibly a write-nothing outcome rather than one by omission.
         tx.rollback()
             .await
-            .map_err(|error| format!("worker enroller import: rollback: {error}"))?;
+            .map_err(|error| format!("join signer import: rollback: {error}"))?;
         return Err(format!(
-            "worker enroller file {} conflicts with recorded enrollers, and nothing was \
-             imported: {}",
+            "join signer file {} conflicts with recorded signers, and nothing was imported: {}",
             path.display(),
             refusals.join("; ")
         ));
     }
     tx.commit()
         .await
-        .map_err(|error| format!("worker enroller import: commit: {error}"))?;
+        .map_err(|error| format!("join signer import: commit: {error}"))?;
     Ok(Some(report))
 }
 
 /// Read and validate the import file, before any database work.
 ///
-/// The document holds PUBLIC keys, so it is deliberately not held to a
-/// private file's permission rule - the same call as the peer document.
-fn read_enroller_file(path: &Path) -> Result<Vec<EnrollerRecord>, String> {
+/// The document holds PUBLIC keys, so it is deliberately not held to a private
+/// file's permission rule - the same call as the peer document.
+fn read_signer_file(path: &Path) -> Result<Vec<JoinSignerRecord>, String> {
     let display = path.display();
     let bytes = std::fs::read(path)
-        .map_err(|error| format!("worker enroller file {display}: read: {error}"))?;
-    parse_enroller_import(&bytes)
-        .map_err(|reason| format!("worker enroller file {display}: {reason}"))
+        .map_err(|error| format!("join signer file {display}: read: {error}"))?;
+    parse_join_signer_import(&bytes)
+        .map_err(|reason| format!("join signer file {display}: {reason}"))
 }
 
 /// Map every zone name the file uses to its id, or refuse the file.
 async fn resolve_zones(
     tx: &compio_postgres::Transaction<'_>,
-    enrollers: &[EnrollerRecord],
+    signers: &[JoinSignerRecord],
 ) -> Result<BTreeMap<String, String>, String> {
     let mut zones = BTreeMap::new();
-    for enroller in enrollers {
-        let name = enroller.zone.as_str();
-        if zones.contains_key(name) {
-            continue;
+    for signer in signers {
+        for name in &signer.zones {
+            if zones.contains_key(name.as_str()) {
+                continue;
+            }
+            let row = tx
+                .query_opt(
+                    "SELECT id FROM zeroship.execution_zones WHERE name = $1 AND status = $2",
+                    &[&name.as_str(), &DECLARED_ZONE_STATUS],
+                )
+                .await
+                .map_err(|error| format!("join signer import: read execution zones: {error}"))?;
+            let Some(row) = row else {
+                return Err(format!(
+                    "join signer file names execution zone {name:?}, which this deployment \
+                     does not declare"
+                ));
+            };
+            zones.insert(name.clone(), row.get::<_, String>(0));
         }
-        let row = tx
-            .query_opt(
-                "SELECT id FROM zeroship.execution_zones WHERE name = $1 AND status = $2",
-                &[&name, &DECLARED_ZONE_STATUS],
-            )
-            .await
-            .map_err(|error| format!("worker enroller import: read execution zones: {error}"))?;
-        let Some(row) = row else {
-            return Err(format!(
-                "worker enroller file names execution zone {name:?}, which this deployment \
-                 does not declare"
-            ));
-        };
-        zones.insert(name.to_owned(), row.get::<_, String>(0));
     }
     Ok(zones)
 }
@@ -920,33 +1236,36 @@ enum Imported {
 /// comparison below rather than abort the transaction.
 async fn import_one(
     tx: &compio_postgres::Transaction<'_>,
-    enroller: &EnrollerRecord,
-    zone_id: &str,
+    signer: &JoinSignerRecord,
+    zones: &BTreeMap<String, String>,
 ) -> Result<Imported, String> {
-    let fault = |error: compio_postgres::Error| {
-        format!("worker enroller import: enroller {}: {error}", enroller.id)
-    };
+    let fault =
+        |error: compio_postgres::Error| format!("join signer import: signer {}: {error}", signer.id);
     let inserted = tx
         .execute(
-            "INSERT INTO zeroship.worker_enrollers (id, public_key, execution_zone_id, status) \
-             VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING",
-            &[
-                &enroller.id,
-                &enroller.public_key.as_slice(),
-                &zone_id,
-                &ENROLLED_STATUS,
-            ],
+            "INSERT INTO zeroship.worker_join_signers (id, public_key, status) \
+             VALUES ($1, $2, $3) ON CONFLICT DO NOTHING",
+            &[&signer.id, &signer.public_key.as_slice(), &ENROLLED_STATUS],
         )
         .await
         .map_err(fault)?;
     if inserted == 1 {
+        for zone in &signer.zones {
+            tx.execute(
+                "INSERT INTO zeroship.worker_join_signer_zones (signer_id, execution_zone_id) \
+                 VALUES ($1, $2) ON CONFLICT DO NOTHING",
+                &[&signer.id, &zones[zone]],
+            )
+            .await
+            .map_err(fault)?;
+        }
         return Ok(Imported::Inserted);
     }
     let rows = tx
         .query(
-            "SELECT id, public_key, execution_zone_id, status FROM zeroship.worker_enrollers \
+            "SELECT id, public_key, status FROM zeroship.worker_join_signers \
              WHERE id = $1 OR public_key = $2",
-            &[&enroller.id, &enroller.public_key.as_slice()],
+            &[&signer.id, &signer.public_key.as_slice()],
         )
         .await
         .map_err(fault)?;
@@ -954,24 +1273,26 @@ async fn import_one(
     for row in &rows {
         let id: String = row.get(0);
         let public_key: &[u8] = row.get(1);
-        let recorded_zone: String = row.get(2);
-        let status: String = row.get(3);
-        if id != enroller.id {
+        let status: String = row.get(2);
+        if id != signer.id {
             return Ok(Imported::Conflict(format!(
-                "its public key is already recorded for enroller {id}"
+                "its public key is already recorded for signer {id}"
             )));
         }
-        if public_key != enroller.public_key.as_slice() {
+        if public_key != signer.public_key.as_slice() {
             return Ok(Imported::Conflict(
                 "it is already recorded with a different public key; a changed key is a new \
-                 enroller with a new id"
+                 signer with a new id"
                     .to_owned(),
             ));
         }
-        if recorded_zone != zone_id {
+        let recorded = recorded_zone_names(tx, &signer.id).await?;
+        if recorded != signer.zones {
             return Ok(Imported::Conflict(format!(
-                "it is already recorded in execution zone {recorded_zone}, not {}",
-                enroller.zone
+                "it is already recorded for zones {}, not {}; a signer's zones are its \
+                 authority, so widening them is a new signer with a new id",
+                recorded.join(", "),
+                signer.zones.join(", ")
             )));
         }
         verdict = Some(if status == REVOKED_STATUS {
@@ -987,6 +1308,25 @@ async fn import_one(
         Imported::Conflict("a conflicting row disappeared during the import".to_owned())
     }))
 }
+
+/// The zone NAMES a recorded signer is permitted, sorted so the comparison
+/// against the file's canonical list is order-insensitive at both ends.
+async fn recorded_zone_names(
+    tx: &compio_postgres::Transaction<'_>,
+    signer_id: &str,
+) -> Result<Vec<String>, String> {
+    let rows = tx
+        .query(
+            "SELECT z.name FROM zeroship.worker_join_signer_zones sz \
+               JOIN zeroship.execution_zones z ON z.id = sz.execution_zone_id \
+              WHERE sz.signer_id = $1 ORDER BY z.name",
+            &[&signer_id],
+        )
+        .await
+        .map_err(|error| format!("join signer import: read recorded zones: {error}"))?;
+    Ok(rows.iter().map(|row| row.get::<_, String>(0)).collect())
+}
+
 
 #[cfg(test)]
 mod tests {
