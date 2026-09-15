@@ -23,7 +23,7 @@ async fn backend_is_published_only_after_preparation_and_withdrawn_on_removal() 
     let scope = scope();
     let (observed, release) = fixture.factory.gate(&scope.app_id);
     let mut exchanges = fixture.scan(std::slice::from_ref(&scope));
-    exchanges.extend(fixture.refresh(&scope));
+    exchanges.extend(fixture.establish(&scope));
     exchanges.push(fixture.page(None, &[]));
     peer(&fixture, exchanges, async |client| {
         let (consumer, _probe) = fixture.consumer(1);
@@ -74,7 +74,7 @@ async fn a_request_backend_from_another_generation_is_refused_and_never_publishe
     fixture.factory.foreign_backend();
     let scope = scope();
     let mut exchanges = fixture.scan(std::slice::from_ref(&scope));
-    exchanges.extend(fixture.refresh(&scope));
+    exchanges.extend(fixture.establish(&scope));
     peer(&fixture, exchanges, async |client| {
         let (mut consumer, probe) = fixture.consumer(1);
         let bindings = fixture.bindings(client, &consumer, 1);
@@ -104,9 +104,9 @@ async fn replacement_and_closure_withdraw_published_backends() {
         ..original.clone()
     };
     let mut exchanges = fixture.scan(std::slice::from_ref(&original));
-    exchanges.extend(fixture.refresh(&original));
+    exchanges.extend(fixture.establish(&original));
     exchanges.extend(fixture.scan(std::slice::from_ref(&replacement)));
-    exchanges.extend(fixture.refresh(&replacement));
+    exchanges.extend(fixture.establish(&replacement));
     peer(&fixture, exchanges, async |client| {
         let (consumer, _probe) = fixture.consumer(1);
         let bindings = fixture.bindings(client, &consumer, 1);
@@ -134,6 +134,14 @@ async fn replacement_and_closure_withdraw_published_backends() {
             requests.status(run_id()).await,
             Err(WorkflowServiceError::NotFound(_))
         ));
+        // A retired generation cannot withdraw its replacement: a late
+        // retirement of the old binding leaves the published one reachable.
+        fixture.ready.retire(old.binding());
+        assert!(fixture.ready.is_ready(&original.app_id));
+        assert!(matches!(
+            requests.status(run_id()).await,
+            Err(WorkflowServiceError::NotFound(_))
+        ));
         bindings.close().unwrap();
         assert!(!fixture.ready.is_ready(&original.app_id));
         not_ready(requests.status(run_id()).await);
@@ -148,7 +156,7 @@ async fn readiness_and_request_mutations_publish_intents_under_the_assignment() 
     fixture.factory.deployed(true).await;
     let scope = scope();
     let mut exchanges = fixture.scan(std::slice::from_ref(&scope));
-    exchanges.extend(fixture.refresh(&scope));
+    exchanges.extend(fixture.establish(&scope));
     exchanges.push(fixture.submission());
     exchanges.push(fixture.submission());
     peer(&fixture, exchanges, async |client| {
