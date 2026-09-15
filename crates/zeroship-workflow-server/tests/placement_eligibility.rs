@@ -401,3 +401,70 @@ async fn blocked_manager(observer: &compio_postgres::Client) {
     .await
     .expect("the placement must reach the held app lock");
 }
+
+/// An instance whose Control lease has run out is not placed, and stops owning
+/// what it holds.
+///
+/// This is liveness, not authority: Control refuses a lapsed instance on every
+/// call it authenticates, and the manager reads the lease only so it does not
+/// hand an app to a worker that can no longer fetch the app's environment or
+/// data key. The control differs in one variable, the lease, and it is moved
+/// with Control's own column rather than by anything the worker sends.
+#[ntex::test]
+async fn an_instance_whose_lease_has_run_out_is_not_placed() {
+    let platform = platform::Platform::new().await;
+    let service = service(&platform).await;
+    let worker = joined(
+        &platform,
+        &service,
+        &platform.default_join_signer_id,
+        ZoneId::default_zone().as_str(),
+    )
+    .await;
+    let (held, fresh) = (AppId::mint(), AppId::mint());
+    platform.seed_app(&held).await;
+    platform.seed_app(&fresh).await;
+    // While the lease is live the instance takes an app and owns it.
+    assert!(matches!(
+        service.manager.place(&held).await,
+        Ok(Placed::Assigned(ref assignment)) if assignment.worker_id == worker
+    ));
+    assert!(service.manager.owned(&held).await.unwrap());
+
+    // THE VARIABLE: the lease runs out. Nothing else about the row changes -
+    // it is still `active`, still registered, still in the app's zone.
+    platform
+        .admin
+        .execute(
+            "UPDATE zeroship.worker_instances SET expires_at=now() - interval '1 hour' \
+             WHERE id=$1",
+            &[&worker.as_str()],
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        service.manager.place(&fresh).await,
+        Ok(Placed::Unplaced(ZoneId::default_zone())),
+        "a lapsed instance is no longer a candidate"
+    );
+    assert!(
+        !service.manager.owned(&held).await.unwrap(),
+        "a lapsed instance no longer owns what it holds"
+    );
+
+    // THE CONTROL, one renewal apart: the same row placed again.
+    platform
+        .admin
+        .execute(
+            "UPDATE zeroship.worker_instances SET expires_at=now() + interval '1 hour' \
+             WHERE id=$1",
+            &[&worker.as_str()],
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        service.manager.place(&fresh).await,
+        Ok(Placed::Assigned(ref assignment)) if assignment.worker_id == worker
+    ));
+    assert!(service.manager.owned(&held).await.unwrap());
+}

@@ -75,13 +75,15 @@ export default {
       });
     // ---- the manager's read of the zone facts -------------------------------
     // Column grants only: the manager learns an app's zone and terminal
-    // deletion, and an instance's zone. Its id and status are already granted
-    // by 20260911000000_workflow_coordination.ts. It still cannot read creator
+    // deletion, and an instance's zone and lease. Its id and status are already
+    // granted by 20260911000000_workflow_coordination.ts. The lease is read as
+    // a liveness hint, never as authority - Control refuses a lapsed instance
+    // on every call it authenticates. The manager still cannot read creator
     // data, keys or addresses, and it cannot write any of these rows.
     raw({
       sql: "GRANT SELECT (execution_zone_id,deleted_at) ON zeroship.apps TO zeroship_workflow; "
-        + "GRANT SELECT (execution_zone_id) ON zeroship.worker_instances TO zeroship_workflow",
-      reason: "workflow placement reads Control-owned zone facts without write authority",
+        + "GRANT SELECT (execution_zone_id,expires_at) ON zeroship.worker_instances TO zeroship_workflow",
+      reason: "workflow placement reads Control-owned zone and lease facts without write authority",
     });
   },
 };

@@ -10,19 +10,28 @@
 //! The queue's database binding covers only the manager's own schema, so the
 //! facts arrive through [`EligibilitySource`], the same seam the host's join
 //! callback uses. Placement consults it after taking its locks and again
-//! before commit. Zones never change, and liveness only moves forward: an
-//! instance is revoked, retired, or its lease runs out, and none of those
-//! reverse. A change committed before the first read is seen, one committed
-//! between the reads is caught by the second, and one committed after the
-//! second is caught by the next renewal, delivery or placement check. That is
-//! an eventual admission fence, the same one the join path has.
+//! before commit. Zones never change, and status only moves forward: an
+//! instance is revoked or retired and neither reverses. A change committed
+//! before the first read is seen, one committed between the reads is caught by
+//! the second, and one committed after the second is caught by the next
+//! renewal, delivery or placement check. That is an eventual admission fence,
+//! the same one the join path has.
+//!
+//! An instance's lease is read too, but as a liveness hint rather than part of
+//! that fence: see `LEASE_SKEW`. A lease is the one fact here that can move
+//! backwards and forwards, because a worker renews it.
 #![expect(
     clippy::future_not_send,
     reason = "Control reads stay on the owning compio runtime"
 )]
 
 use crate::Error;
-use std::{fmt::Debug, future::Future, pin::Pin};
+use std::{
+    fmt::Debug,
+    future::Future,
+    pin::Pin,
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 use zeroship_core::{app_id::AppId, typed_id, workflow_coordination::WorkerId};
 use zeroship_data_orm::{
     orm::{Database, FromRow},
@@ -82,9 +91,11 @@ pub struct AppFacts {
 pub struct WorkerFacts {
     /// The zone recorded on the instance when it joined, and frozen there.
     pub zone: ZoneId,
-    /// The instance is still live: `active` and within its lease. Revoking or
-    /// purging a signer marks its instances gone in the same transaction, and
-    /// a worker that stopped renewing falls out on its own.
+    /// The instance is still live: `active`, and within its lease as this
+    /// process's clock reads it. The lease half is a hint, not a fence - see
+    /// [`LEASE_SKEW`]. Revoking or purging a signer marks its instances gone in
+    /// the same transaction, and a worker that stopped renewing falls out on
+    /// its own once its lease runs out.
     pub active: bool,
 }
 
@@ -115,6 +126,7 @@ mod control {
                 id: Text,
                 status: Text,
                 execution_zone_id: Text,
+                expires_at: Timestamp,
             }
         }
     }
@@ -180,8 +192,8 @@ impl ControlEligibility {
     }
 }
 
-/// One instance's zone and liveness. Both are on the instance row, so this is
-/// one read of one table: the zone is the join token's verified claim frozen
+/// One instance's zone and liveness. All of it is on the instance row, so this
+/// is one read of one table: the zone is the join token's verified claim frozen
 /// there, and a signer's revoke or purge marks its instances `gone` in the same
 /// transaction, so a signer's own state needs no second read.
 #[derive(FromRow)]
@@ -189,6 +201,38 @@ impl ControlEligibility {
 struct InstanceRow {
     status: String,
     execution_zone_id: String,
+    /// The instance's Control lease. See [`LEASE_SKEW`].
+    expires_at: i64,
+}
+
+/// How far past an instance's lease this process still treats it as live.
+///
+/// THIS IS A LIVENESS HINT, NOT AN AUTHORIZATION FENCE. The fence is Control's:
+/// it refuses an expired instance on every call it authenticates, against its
+/// own database `now()`, and that is what actually stops a lapsed worker. What
+/// the manager needs the lease for is different - it should not hand an app to
+/// a worker whose lease has run out, because that worker can no longer fetch
+/// the app's environment or project data key, so the placement would stall
+/// instead of failing cleanly somewhere a caller can see it.
+///
+/// A hint tolerates a poor clock, which is why this compares against this
+/// process's wall clock rather than the manager's database `Clock`. The worst
+/// case is that two replicas disagree by their clock skew about when one worker
+/// stops being a candidate, and Control refuses it either way. The allowance
+/// runs in the permissive direction for the same reason: a clock running fast
+/// should not shed a worker whose renewal is in flight. Reaching for the exact
+/// answer would thread a database clock through this seam and buy no authority.
+const LEASE_SKEW: Duration = Duration::from_secs(30);
+
+/// This process's wall clock, in the milliseconds the lease is stored in.
+///
+/// Before the epoch is not a time any lease carries, so it reads as expired.
+fn wall_clock_millis() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .and_then(|since| i64::try_from(since.as_millis()).ok())
+        .unwrap_or(i64::MAX)
 }
 
 impl EligibilitySource for ControlEligibility {
@@ -229,9 +273,13 @@ impl EligibilitySource for ControlEligibility {
                 .await
                 .map_err(|_| Error::Unavailable)?;
             row.map(|row| {
+                let lease = i64::try_from(LEASE_SKEW.as_millis())
+                    .ok()
+                    .and_then(|skew| row.expires_at.checked_add(skew))
+                    .unwrap_or(i64::MAX);
                 Ok(WorkerFacts {
                     zone: ZoneId::parse(&row.execution_zone_id)?,
-                    active: row.status == "active",
+                    active: row.status == "active" && lease > wall_clock_millis(),
                 })
             })
             .transpose()
