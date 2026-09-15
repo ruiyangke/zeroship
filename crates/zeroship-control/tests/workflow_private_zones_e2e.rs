@@ -221,10 +221,19 @@ async fn the_two_zones_run_a_workflow_without_reaching_each_other() {
         "a retained handle must answer while its generation is published: {body}",
     );
 
-    // Removing the app is what withdraws that generation. Control marks the
-    // deletion in the platform catalog; the manager's recovery lane abandons
-    // the app, the placement is released, and the worker retires the backend
-    // synchronously. The retained handle must go with it.
+    // Removing the app is what withdraws that generation. The manager's
+    // recovery lane reads `zeroship.apps.deleted_at` through
+    // `ControlLifecycle` and abandons an app it finds marked, the placement is
+    // released, and the worker retires the backend synchronously. The retained
+    // handle must go with it.
+    //
+    // THE COLUMN IS DELIBERATELY THE SEAM, and this arm is about the manager
+    // and the worker rather than about Control's delete handler. The marker is
+    // the whole of what the manager reads - `lifecycle.rs` filters on
+    // `deleted_at IS NOT NULL` and nothing else - so writing it is writing the
+    // input under test. What this therefore does NOT cover: whether Control's
+    // own delete endpoint stamps that column, or what else it does around it.
+    // A handler that stopped stamping it would leave this green.
     let (platform, connection) = compio_postgres::connect(&fleet.database.url(), NoTls)
         .await
         .expect("open the platform database");
@@ -235,8 +244,13 @@ async fn the_two_zones_run_a_workflow_without_reaching_each_other() {
             &[&fleet.app_id.as_str()],
         )
         .await
-        .expect("mark the app deleted the way Control does");
+        .expect("mark the app deleted");
 
+    // The exact code, not merely some code: a retired generation is
+    // `WorkflowServiceError::Unavailable` from `ReadyApps::current`, and a
+    // refusal that changed to anything else - a policy denial, a fenced
+    // ingress, an internal error - would be a different mechanism wearing the
+    // same status.
     let refusal = until(
         &mut fleet,
         "a retained handle outlived the app's retired generation",
@@ -246,9 +260,9 @@ async fn the_two_zones_run_a_workflow_without_reaching_each_other() {
         },
     )
     .await;
-    assert!(
-        !refusal.is_empty(),
-        "the revoked handle must name why it refused",
+    assert_eq!(
+        refusal, "workflow_unavailable",
+        "the revoked handle must refuse as a retired generation",
     );
 
     drop(creator);
