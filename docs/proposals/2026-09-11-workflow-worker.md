@@ -325,64 +325,6 @@ still exist and are held to the same predicate. The worker does not yet release
 refused apps, request placement on ingress, or narrow Control's host app reads
 to its zone.
 
-### Placement eligibility and capacity provider
-
-Each app belongs to exactly one execution zone, recorded by Control in
-`zeroship.apps.execution_zone_id` when the app is created and frozen by trigger.
-An execution zone is an operator-declared set of deployment units that share
-creator-side connectivity. A worker's zone is the zone of the enroller Control
-verified when it enrolled, also frozen. Registration carries no zone; the
-manager copies it from Control's rows and nothing a worker sends can change it.
-
-The manager selects workers itself. It takes the app lock, then the worker
-lock, and admits a placement only when all of these hold: the app is not
-deleted, the zones match, the enrollment is active, the registration is ready
-and unexpired, and the worker has capacity. It reads these facts from
-Control-owned rows through column grants and an injected eligibility
-capability, after the lock waits and again before commit. A revocation that
-commits after the second read is caught by the next registration, renewal,
-ownership or delivery check, the same eventual admission fence enrollment has.
-Archived apps remain placeable for maintenance jobs; policy still refuses their
-admission, dispatch and ingress. Deleted apps are abandoned.
-
-A worker that cannot serve an assigned app releases it as refused, and the
-manager does not offer that app to that instance again. Release carries a
-closed reason and no wake hint, needs no responsible peer, and never discharges
-recovery responsibility.
-
-The driver's placement lanes key on claimable jobs; the recovery lanes turn due
-duties into jobs first, and a closing scope's Close job is a job. An app with
-claimable work and no ready eligible owner is placed on free eligible capacity
-first. Otherwise its demand is recorded durably in its zone. Each zone has one
-declarative capacity target in placement slots, its live placements plus its
-unplaced demand, so placing an app leaves the target unchanged. The target's
-revision advances only when that number changes, under the zone row's lock, and
-one request per revision is claimed in the same transaction. An injected
-provider applies the target outside every lock and replies with progress or a
-closed, durable, retryable refusal (`pool_exhausted`, `no_enroller`,
-`unavailable`). Replies apply only to the revision and attempt they answered. A
-lower target applies only after the idle hold-down. Provider failure keeps jobs,
-demand and targets pending.
-
-A provider holds only scale authority over worker units in one zone. It never
-receives creator credentials, secret-mount authority or queue messages. The
-local host injects an always-satisfied provider for its trusted in-process
-worker. Single-host deployments use a static pool that never starts processes
-and reports exhaustion durably.
-
-A native proof of concept on branch `poc/workflow-placement` passes this
-contract on PostgreSQL and SQLite, and against Control's migrated rows and
-grants. It compares the declarative target with per-app provisioning intents:
-racing replicas converge on one revision and one request under either
-contract, but a retried intent starts another worker unless the provider
-deduplicates it, and intents do not coalesce apps onto shared workers.
-
-**Implementation boundary:** providers that start processes wait for the
-production orchestrator. Control's assign, worker listing and recovery routes
-still exist and are held to the same predicate. The worker does not yet release
-refused apps, request placement on ingress, or narrow Control's host app reads
-to its zone.
-
 ## Policy bindings and authenticated leases
 
 **Native lifecycle, lease transport and Control source implemented; production
