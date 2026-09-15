@@ -523,10 +523,13 @@ fn republished_bundle_releases_both_deployment_holders() {
     compile(root.path(), "final", "2s");
     let host = Host::launch(root.path(), None, false, Some(&config));
     let deadline = Instant::now() + Duration::from_secs(90);
+    // The ledger records the release; the manager discharges its journal duty
+    // when it applies the settled reply, which is a later transaction.
     while platform
         .holders(&replacement)
         .iter()
         .any(|(_, state)| state != "released")
+        || platform.journal_duty(&replacement) != "released"
     {
         assert!(
             Instant::now() < deadline,
