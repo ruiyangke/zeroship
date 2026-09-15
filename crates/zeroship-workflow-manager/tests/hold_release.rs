@@ -82,6 +82,16 @@ case!(
     postgres_hold_without_confirmation_time_is_reported_and_retained,
     unconfirmed_time
 );
+case!(
+    sqlite_journal_release_asks_once_and_a_refusal_waits_out_the_grace,
+    postgres_journal_release_asks_once_and_a_refusal_waits_out_the_grace,
+    journal_release_policy
+);
+case!(
+    sqlite_reacquisition_tombstones_a_journal_release_in_flight,
+    postgres_reacquisition_tombstones_a_journal_release_in_flight,
+    journal_release_tombstone
+);
 
 /// The default grace, far beyond each contract's duration: a hold is old only
 /// once a contract ages it explicitly.
@@ -96,9 +106,14 @@ fn options() -> Options {
 }
 
 async fn queue(fixture: &Fixture, holds: Rc<dyn HoldClient>) -> Queue {
-    Queue::connect(fixture.binding(), fixture.url(), QueueOptions::default(), holds)
-        .await
-        .unwrap()
+    Queue::connect(
+        fixture.binding(),
+        fixture.url(),
+        QueueOptions::default(),
+        holds,
+    )
+    .await
+    .unwrap()
 }
 
 fn daily() -> ScheduleDescriptor {
@@ -248,6 +263,89 @@ fn released(generation: i64) -> (String, i64) {
     ("released".into(), generation)
 }
 
+/// The journal release duty of a hold: its state and the release job it published.
+async fn journal(
+    fixture: &Fixture,
+    app: &AppId,
+    deployment: &Published,
+) -> (String, Option<String>) {
+    let stored = intent(fixture, app, deployment).await;
+    (
+        stored["journal_state"].as_str().unwrap().to_owned(),
+        stored["journal_job_id"].as_str().map(ToOwned::to_owned),
+    )
+}
+
+/// Every release job this app's manager published, oldest first.
+async fn releases(fixture: &Fixture, app: &AppId) -> Vec<(String, String)> {
+    let mut published = rows(
+        fixture,
+        "jobs",
+        value!({"app_id":app.as_str(),"operation_kind":"release_hold"}),
+    )
+    .await;
+    published.sort_by_key(|job| job["id"].as_str().unwrap().to_owned());
+    published
+        .into_iter()
+        .map(|job| {
+            let JobOperation::ReleaseHold { deployment_id } =
+                serde_json::from_str(job["operation"].as_str().unwrap()).unwrap()
+            else {
+                panic!("expected a release operation");
+            };
+            (
+                job["id"].as_str().unwrap().to_owned(),
+                deployment_id.as_str().to_owned(),
+            )
+        })
+        .collect()
+}
+
+/// Drain the app's queue as its worker would, answering the release job with
+/// `outcome` and completing whatever maintenance work shares the queue.
+async fn settle_release(queue: &Queue, app: &AppId, outcome: JobOutcome) -> JobSpec {
+    let authority = Assignment {
+        app_id: app.clone(),
+        worker_id: WorkerId::mint(),
+        revision: 1.try_into().unwrap(),
+        expires_at: i64::MAX.try_into().unwrap(),
+    };
+    for _ in 0..32 {
+        let grant = queue
+            .claim(&authority)
+            .await
+            .unwrap()
+            .expect("a deliverable job");
+        let job = grant.delivery().job.clone();
+        let release = job.released_deployment().is_some();
+        let settlement = Settlement {
+            delivery: grant.delivery().clone(),
+            outcome: if release {
+                outcome
+            } else {
+                JobOutcome::Completed {}
+            },
+            successors: vec![],
+        };
+        queue.settle(&authority, &settlement).await.unwrap();
+        if release {
+            return job;
+        }
+    }
+    panic!("no release job was delivered");
+}
+
+/// Move this app's latest release publications past the republication grace.
+async fn age_publications(fixture: &Fixture, app: &AppId) {
+    patch(
+        fixture,
+        "deployment_holds",
+        value!({"app_id":app.as_str(),"journal_state":"pending"}),
+        value!({"journal_published_at":0}),
+    )
+    .await;
+}
+
 /// Retained holds take no candidate slot: the lane visited nothing.
 fn idle(report: &LaneReport) {
     completed(report, 0);
@@ -318,10 +416,10 @@ async fn release_policy(fixture: &Fixture) {
     idle(&driver.tick().await.retention);
     assert_eq!(hold(fixture, &app, &first).await, held(1));
     catalog.assert_retained(&app, &first).await;
-    let journal = HoldScope::for_app(app.clone());
+    let journal_holder = HoldScope::for_app(app.clone());
     let journal_hold = catalog
         .ledger
-        .acquire(&journal, first.id.as_str(), 1.try_into().unwrap())
+        .acquire(&journal_holder, first.id.as_str(), 1.try_into().unwrap())
         .await
         .unwrap();
     settle_all(&queue, &app).await;
@@ -332,12 +430,20 @@ async fn release_policy(fixture: &Fixture) {
     catalog.assert_retained(&app, &first).await;
     catalog
         .ledger
-        .release(&journal, first.id.as_str(), journal_hold.generation)
+        .release(&journal_holder, first.id.as_str(), journal_hold.generation)
         .await
         .unwrap();
     catalog.reclaim(&app, &first).await;
     catalog.assert_retained(&app, &second).await;
-    idle(&driver.tick().await.retention);
+    // A released queue hold leaves the journal duty, which the lane now carries:
+    // it asks the creator engine for that deployment through the job path.
+    completed(&driver.tick().await.retention, 1);
+    let (release, released_deployment) = releases(fixture, &app).await.remove(0);
+    assert_eq!(released_deployment, first.id.as_str());
+    assert_eq!(
+        journal(fixture, &app, &first).await,
+        ("releasing".into(), Some(release))
+    );
 
     // Archive disables the calendar; its frozen frontier needs no code.
     let (_, selected, frontier) = calendar(fixture, &app).await;
@@ -351,8 +457,13 @@ async fn release_policy(fixture: &Fixture) {
         .unwrap();
     settle_all(&queue, &app).await;
     age(fixture, &app).await;
-    completed(&driver.tick().await.retention, 1);
+    // The archived hold and the settled release reply are both this page's work.
+    completed(&driver.tick().await.retention, 2);
     assert_eq!(hold(fixture, &app, &second).await, released(1));
+    assert_eq!(
+        journal(fixture, &app, &first).await,
+        ("released".into(), None)
+    );
     assert_eq!(
         calendar(fixture, &app).await,
         (schedule.clone(), selected, frontier)
@@ -594,13 +705,21 @@ async fn stale_candidates(fixture: &Fixture) {
     assert_eq!(hold(fixture, &app, &pinned).await, held(1));
     catalog.assert_retained(&app, &pinned).await;
 
-    // A later pass releases what stayed in use, once nothing needs it.
+    // A later pass releases what stayed in use, once nothing needs it, and
+    // carries the journal duty of the hold released on the previous page.
     settle_all(&queue, &app).await;
     age(fixture, &app).await;
-    completed(&driver.tick().await.retention, 2);
+    completed(&driver.tick().await.retention, 3);
     assert_eq!(hold(fixture, &app, &reacquired).await, released(2));
     assert_eq!(hold(fixture, &app, &pinned).await, released(1));
     assert_eq!(hold(fixture, &app, &selected).await, held(1));
+    assert_eq!(
+        releases(fixture, &app).await,
+        vec![(
+            journal(fixture, &app, &first).await.1.unwrap(),
+            first.id.as_str().to_owned()
+        )]
+    );
     catalog.reclaim(&app, &pinned).await;
 }
 
@@ -634,4 +753,131 @@ async fn unconfirmed_time(fixture: &Fixture) {
         assert_eq!(hold(fixture, &app, &deployment).await, held(1));
         catalog.assert_retained(&app, &deployment).await;
     }
+}
+
+/// A superseded deployment whose queue hold is gone: the lane asks its journal
+/// holder once, waits out a grace after a refusal, and stops once it is given back.
+async fn journal_release_policy(fixture: &Fixture) {
+    let catalog = Catalog::new(fixture).await;
+    let queue = queue(fixture, catalog.client()).await;
+    let mut driver = Driver::new(queue.clone(), options()).unwrap();
+    let scheduler = Scheduler::new(queue.clone(), SchedulerOptions::default()).unwrap();
+    let app = AppId::mint();
+    let first = catalog.publish(&app, "first", &[daily()]).await;
+    let second = catalog.publish(&app, "second", &[daily()]).await;
+    activate(&scheduler, &app, &first, 1, vec![daily()]).await;
+    // The creator engine takes journal retention behind the activation.
+    let journal_holder = HoldScope::for_app(app.clone());
+    let journal_hold = catalog
+        .ledger
+        .acquire(&journal_holder, first.id.as_str(), 1.try_into().unwrap())
+        .await
+        .unwrap();
+    activate(&scheduler, &app, &second, 2, vec![daily()]).await;
+    settle_all(&queue, &app).await;
+    age(fixture, &app).await;
+    completed(&driver.tick().await.retention, 1);
+    assert_eq!(hold(fixture, &app, &first).await, released(1));
+    assert_eq!(journal(fixture, &app, &first).await.0, "pending");
+    assert!(releases(fixture, &app).await.is_empty());
+    catalog.assert_retained(&app, &first).await;
+
+    // One release job, delivered through the ordinary durable job path.
+    completed(&driver.tick().await.retention, 1);
+    let published = releases(fixture, &app).await;
+    assert_eq!(published.len(), 1);
+    assert_eq!(published[0].1, first.id.as_str());
+    assert_eq!(
+        journal(fixture, &app, &first).await,
+        ("releasing".into(), Some(published[0].0.clone()))
+    );
+    // A live release is not republished, however many turns the lane takes.
+    for _ in 0..2 {
+        completed(&driver.tick().await.retention, 1);
+        assert_eq!(releases(fixture, &app).await, published);
+    }
+
+    // A journal that still needs the deployment refuses; the hold stays held.
+    let refused = settle_release(&queue, &app, JobOutcome::Waiting {}).await;
+    assert_eq!(refused.id.as_str(), published[0].0);
+    assert_eq!(refused.deployment_id(), None, "a release needs no hold");
+    completed(&driver.tick().await.retention, 1);
+    assert_eq!(
+        journal(fixture, &app, &first).await,
+        ("pending".into(), None)
+    );
+    catalog.assert_retained(&app, &first).await;
+    // Within the grace of its last publication, the duty takes no page slot.
+    for _ in 0..2 {
+        idle(&driver.tick().await.retention);
+        assert_eq!(releases(fixture, &app).await, published);
+    }
+
+    age_publications(fixture, &app).await;
+    completed(&driver.tick().await.retention, 1);
+    let retried = releases(fixture, &app).await;
+    assert_eq!(retried.len(), 2);
+    assert_eq!(retried[1].1, first.id.as_str());
+    // The creator engine gave the deployment back with its accepted reply.
+    catalog
+        .ledger
+        .release(&journal_holder, first.id.as_str(), journal_hold.generation)
+        .await
+        .unwrap();
+    let accepted = settle_release(&queue, &app, JobOutcome::Completed {}).await;
+    assert_eq!(accepted.id.as_str(), retried[1].0);
+    completed(&driver.tick().await.retention, 1);
+    assert_eq!(
+        journal(fixture, &app, &first).await,
+        ("released".into(), None)
+    );
+    // Both holder classes released, so the superseded deployment is collected.
+    catalog.reclaim(&app, &first).await;
+    // It takes no further candidate slot once its duty is discharged.
+    age_publications(fixture, &app).await;
+    idle(&driver.tick().await.retention);
+    assert_eq!(releases(fixture, &app).await, retried);
+}
+
+/// A deployment made executable again keeps a fresh journal hold: the reply of
+/// the release already in flight names a duty that no longer exists.
+async fn journal_release_tombstone(fixture: &Fixture) {
+    let catalog = Catalog::new(fixture).await;
+    let queue = queue(fixture, catalog.client()).await;
+    let mut driver = Driver::new(queue.clone(), options()).unwrap();
+    let scheduler = Scheduler::new(queue.clone(), SchedulerOptions::default()).unwrap();
+    let app = AppId::mint();
+    let first = catalog.publish(&app, "first", &[daily()]).await;
+    let second = catalog.publish(&app, "second", &[daily()]).await;
+    activate(&scheduler, &app, &first, 1, vec![daily()]).await;
+    activate(&scheduler, &app, &second, 2, vec![daily()]).await;
+    settle_all(&queue, &app).await;
+    age(fixture, &app).await;
+    completed(&driver.tick().await.retention, 1);
+    completed(&driver.tick().await.retention, 1);
+    let published = releases(fixture, &app).await;
+    assert_eq!(published.len(), 1);
+
+    // Restoring the deployment takes the queue hold again, and the creator
+    // engine will take a fresh journal hold behind it.
+    activate(&scheduler, &app, &first, 3, vec![daily()]).await;
+    assert_eq!(hold(fixture, &app, &first).await, held(2));
+    assert_eq!(
+        journal(fixture, &app, &first).await,
+        ("pending".into(), None)
+    );
+
+    // The reply of the superseded release cannot report the new hold released.
+    settle_release(&queue, &app, JobOutcome::Completed {}).await;
+    age_publications(fixture, &app).await;
+    // The restore left the other deployment as the lane's only candidate.
+    completed(&driver.tick().await.retention, 1);
+    assert_eq!(hold(fixture, &app, &second).await, released(1));
+    assert_eq!(hold(fixture, &app, &first).await, held(2));
+    assert_eq!(
+        journal(fixture, &app, &first).await,
+        ("pending".into(), None)
+    );
+    assert_eq!(releases(fixture, &app).await, published);
+    catalog.assert_retained(&app, &first).await;
 }
