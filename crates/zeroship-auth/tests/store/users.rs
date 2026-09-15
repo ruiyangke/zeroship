@@ -127,9 +127,10 @@ async fn native_user_rows_keep_the_microseconds_the_server_stored() {
             let stamp = format!("2026-05-07 01:02:03.{fraction}+00");
             let oracle: i64 = pg
                 .query_one(
-                    "UPDATE zeroship.users SET locked_until = $2::timestamptz WHERE id = $1 \
+                    "UPDATE zeroship.users SET locked_until = $2::text::timestamptz \
+                     WHERE id = $1 \
                      RETURNING (extract(epoch FROM locked_until) * 1000000)::bigint",
-                    &[&created.id.as_str(), &stamp],
+                    &[&created.id.as_str(), &stamp.as_str()],
                 )
                 .await
                 .unwrap()
