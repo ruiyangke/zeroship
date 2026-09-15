@@ -21,9 +21,6 @@ import { grant, now, raw, t, table } from "@zeroship/migrate";
 // to `app_deploys` follow in 20260914000200_deploy_publication_references.ts,
 // because a composite key must match the referenced collation at every
 // position when it is lowered against the live catalog.
-//
-// `workflow_schedules` belonged to Control's former schedule sweep, which is
-// deleted in the same change: only the manager creates occurrences now.
 export default {
   name: "deploy_publication",
   schema() {
@@ -151,7 +148,5 @@ export default {
       on: { kind: "table", schema: "zeroship", names: ["app_lifecycle_intents"] },
       to: ["zeroship_control"],
     });
-
-    table("workflow_schedules", { schema: "zeroship" }).drop();
   },
 };

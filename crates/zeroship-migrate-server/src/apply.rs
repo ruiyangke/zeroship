@@ -1164,14 +1164,8 @@ const APP_ROLE_TEMPLATE: &str = "__zeroship_app_role_template";
 /// without copying this login-role literal.
 pub const WORKER_ROLE: &str = "zeroship_worker";
 
-/// Both dependents of a freshly provisioned app schema: the worker's membership
-/// in the app's runtime role, and the app's workflow journal schema.
-///
-/// The journal half is [`crate::provisioning::workflow_journal_schema_sql`]
-/// verbatim rather than a second copy of it, so a caller that needs a deployed
-/// app's journal schema without running an apply
-/// ([`crate::provisioning::provision_workflow_journal_schema`]) runs the same
-/// statement this does.
+/// The one dependent of a freshly provisioned app schema: the worker's
+/// membership in the app's runtime role.
 ///
 /// # `WITH INHERIT FALSE` is what makes `SET LOCAL ROLE` a fence
 ///
@@ -1234,19 +1228,7 @@ pub const WORKER_ROLE: &str = "zeroship_worker";
 /// row is `zeroship_worker`'s boot-time posture check, which refuses on ANY
 /// inheriting app-role membership regardless of who granted it.
 ///
-/// # The journal schema is named by the seam, not composed here
-///
-/// This used to compose `format!("app_{}", schema.as_str())` - a SECOND spelling
-/// of a name whose first spelling is
-/// [`crate::provisioning::workflow_journal_schema_name`], and one derived from
-/// the SCHEMA rather than from the tenant. The two agreed only because the
-/// schema was the bare uuid and the journal schema was that uuid with an `app_`
-/// prefix. With the app id itself printed as `app_<base36>` the composition
-/// would have produced `app_app_<base36>` while the workflow plugin read
-/// somewhere else, and nothing would have failed: the deploy would write its
-/// journal where nothing looks for it. It takes the tenant and asks the one
-/// derivation.
-fn runtime_dependents_sql_for_role(app_id: &AppId, runtime_role: &str) -> String {
+fn runtime_dependents_sql_for_role(runtime_role: &str) -> String {
     let runtime_role_q = quote_ident(runtime_role);
     let worker_q = quote_ident(WORKER_ROLE);
     format!(
@@ -1254,12 +1236,8 @@ fn runtime_dependents_sql_for_role(app_id: &AppId, runtime_role: &str) -> String
             IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '{worker_lit}') THEN
                 GRANT {runtime_role_q} TO {worker_q} WITH INHERIT FALSE;
             END IF;
-         END $runtime_dependents$;
-         {journal}",
+         END $runtime_dependents$;",
         worker_lit = quote_lit(WORKER_ROLE),
-        journal = crate::provisioning::workflow_journal_schema_sql(
-            &crate::provisioning::workflow_journal_schema_name(app_id)
-        ),
     )
 }
 
@@ -1330,8 +1308,11 @@ impl RuntimeRoleProvisioningSql {
 ///
 /// The durable fix is to stop pre-interpolating and let the block quote its own
 /// identifiers with `format('%I', ...)`.
+/// The tenant is no longer an input: every statement below is derived from the
+/// SCHEMA and the migrator role. The parameter stays so callers keep naming the
+/// app they are provisioning for.
 pub fn runtime_role_provisioning_sql(
-    app_id: &AppId,
+    _app_id: &AppId,
     schema: &SchemaName,
     migrator_role: &str,
 ) -> Result<RuntimeRoleProvisioningSql, PerAppRoleNameError> {
@@ -1374,7 +1355,7 @@ pub fn runtime_role_provisioning_sql(
     );
     // The migration identity creates no platform role here. It only delegates
     // to the narrow roles that the platform role migration precreated.
-    let dependents = runtime_dependents_sql_for_role(app_id, &role_name);
+    let dependents = runtime_dependents_sql_for_role(&role_name);
     Ok(RuntimeRoleProvisioningSql {
         role_name,
         create_role,
@@ -1468,23 +1449,6 @@ mod tests {
             !sql.contains("TO \"zeroship_worker\";"),
             "an unqualified grant re-opens the ambient union across every app: {sql}"
         );
-        // THE JOURNAL SCHEMA IS THE APP'S OWN SCHEMA NOW. It was
-        // `app_<hyphenated uuid>` beside a data schema of the bare uuid; a
-        // printed app id already carries the `app_` prefix, so the one
-        // derivation names one schema for both. The literal below is that
-        // schema, NOT the old prefix-on-a-prefix, and it is spelled out so a
-        // regression to `format!("app_{}", schema)` - which would emit
-        // `app_app_...` and put the journal where the workflow plugin does not
-        // look - fails here.
-        assert!(sql.contains(
-            "CREATE SCHEMA IF NOT EXISTS \"app_02xfboclmnln2ar6iblni0000\" \
-             AUTHORIZATION \"zeroship_workflow_owner\""
-        ));
-        assert!(
-            !sql.contains("\"app_app_02xfboclmnln2ar6iblni0000\""),
-            "a doubled prefix means the journal schema was composed from the \
-             schema instead of asked of the seam: {sql}"
-        );
         assert!(!sql.contains("CREATE ROLE"));
     }
 
@@ -1506,33 +1470,6 @@ mod tests {
                 actual_bytes: 64,
                 max_bytes: 63,
             })
-        );
-    }
-
-    /// The apply path and the exported
-    /// [`provision_workflow_journal_schema`](crate::provisioning::provision_workflow_journal_schema)
-    /// build the journal schema DDL from ONE generator, not two that resemble
-    /// each other. A caller outside the apply path (control's workflow seeding)
-    /// therefore reproduces the deployed privilege shape - owner role, ownership
-    /// transfer and grant - rather than a CREATE SCHEMA of its own.
-    ///
-    /// Asserts the apply path's SQL CONTAINS the exported generator's output
-    /// verbatim, so editing either generator alone fails here. It says nothing
-    /// about whether the statement is correct, and nothing about whether any
-    /// caller actually calls the exported one - the assertions above cover the
-    /// shape, and only a live apply covers the effect.
-    #[test]
-    fn the_apply_path_and_the_exported_helper_share_one_journal_statement() {
-        let app_id = fixture_app_id();
-        let sql = runtime_role_provisioning_sql(&app_id, &fixture_schema(), "zs_migrator_fixture")
-            .expect("test runtime role name")
-            .dependents;
-        let exported = crate::provisioning::workflow_journal_schema_sql(
-            &crate::provisioning::workflow_journal_schema_name(&app_id),
-        );
-        assert!(
-            sql.contains(&exported),
-            "apply must embed the exported journal DDL verbatim:\n{sql}\n---\n{exported}"
         );
     }
 
@@ -1774,18 +1711,6 @@ mod live_audit_unmask_provisioning {
     /// Drop everything a case created, by name. Never a blanket sweep: this
     /// server is shared with other work.
     async fn teardown(admin: &compio_postgres::Client, schema: &str) {
-        // ONE SCHEMA, NOT TWO. This also dropped `app_<schema>`, because the
-        // workflow journal used to live in its own schema beside the data
-        // schema. The journal schema is now the tenant's own schema, so a
-        // second drop would name something nothing creates. The assertion
-        // makes that a checked fact rather than a remembered one: the day the
-        // two derivations diverge, this fails here rather than leaking a
-        // schema per run on a shared server.
-        assert_eq!(
-            crate::provisioning::workflow_journal_schema_name(&scratch_app_id(schema)),
-            schema,
-            "the journal schema no longer equals the data schema; teardown must drop both"
-        );
         let _ = admin
             .batch_execute(&format!(
                 "DROP SCHEMA IF EXISTS {} CASCADE;",
@@ -2122,18 +2047,6 @@ mod live_creator_schema_table_privileges {
     /// Drop everything a case created, by name. Roles are CLUSTER-wide, so a
     /// case that leaves one behind poisons the next run in any database here.
     async fn teardown(admin: &compio_postgres::Client, schema: &str) {
-        // ONE SCHEMA, NOT TWO. This also dropped `app_<schema>`, because the
-        // workflow journal used to live in its own schema beside the data
-        // schema. The journal schema is now the tenant's own schema, so a
-        // second drop would name something nothing creates. The assertion
-        // makes that a checked fact rather than a remembered one: the day the
-        // two derivations diverge, this fails here rather than leaking a
-        // schema per run on a shared server.
-        assert_eq!(
-            crate::provisioning::workflow_journal_schema_name(&scratch_app_id(schema)),
-            schema,
-            "the journal schema no longer equals the data schema; teardown must drop both"
-        );
         let _ = admin
             .batch_execute(&format!(
                 "DROP SCHEMA IF EXISTS {} CASCADE;",
@@ -2514,12 +2427,6 @@ mod live_worker_role_fence {
         app_role: String,
         worker: String,
         schema: String,
-        /// The TENANT the production statement names its workflow journal
-        /// schema from. It is not derived from [`Fixture::schema`] and cannot
-        /// be: the journal schema comes from the app id through
-        /// [`crate::provisioning::workflow_journal_schema_name`], and an
-        /// [`AppId`] admits no case prefix.
-        app_id: AppId,
     }
 
     impl Fixture {
@@ -2531,22 +2438,12 @@ mod live_worker_role_fence {
                 app_role: format!("{PREFIX}_{case}_{unique}_role"),
                 worker: format!("{PREFIX}_{case}_{unique}_worker"),
                 schema: format!("{PREFIX}_{case}_{unique}_ns"),
-                app_id: AppId::mint(),
             }
         }
 
         /// The `LIKE` pattern covering every PREFIXED object this case creates.
-        ///
-        /// It does NOT cover the workflow journal schema - see
-        /// [`Fixture::app_id`] and [`teardown`].
         fn like(&self) -> String {
             format!("{PREFIX}_{}_%", self.case)
-        }
-
-        /// The workflow journal schema the production statement creates, by the
-        /// one derivation rather than a second spelling of it.
-        fn journal_schema(&self) -> String {
-            crate::provisioning::workflow_journal_schema_name(&self.app_id)
         }
     }
 
@@ -2571,13 +2468,6 @@ mod live_worker_role_fence {
     /// short of a per-run database fixes that, and the sibling module carries
     /// the same exposure.
     ///
-    /// SECOND RESIDUAL, NEW WITH THE TYPED ID. This used to also match
-    /// `app\_{like}`, because the journal schema was the case's own schema with
-    /// an `app_` prefix. It is now derived from the tenant
-    /// ([`Fixture::journal_schema`]) and carries no case prefix, so a case that
-    /// PANICS leaves exactly one `app_<base36>` schema behind. [`teardown`]
-    /// drops it by name on every run that reaches its end; nothing reaches a
-    /// leaked one, because the next `Fixture` mints a different tenant.
     async fn sweep(admin: &compio_postgres::Client, fx: &Fixture) {
         let _ = admin.batch_execute("RESET SESSION AUTHORIZATION").await;
         admin
@@ -2632,15 +2522,9 @@ mod live_worker_role_fence {
     /// Drop everything a case created, by name. Never a blanket sweep: this
     /// server is shared with other work.
     ///
-    /// [`Fixture::journal_schema`] is the workflow journal schema the SECOND
-    /// half of `runtime_dependents_sql` creates. Leaving it behind would
-    /// accumulate a schema per run on a shared server, and it is easy to miss
-    /// because nothing in these cases mentions the journal. It is asked of the
-    /// fixture rather than composed here, so it cannot name a schema the
-    /// statement did not create.
     async fn teardown(admin: &compio_postgres::Client, fx: &Fixture) {
         let _ = admin.batch_execute("RESET SESSION AUTHORIZATION").await;
-        for schema in [fx.schema.clone(), fx.journal_schema()] {
+        for schema in [fx.schema.clone()] {
             let _ = admin
                 .batch_execute(&format!(
                     "DROP SCHEMA IF EXISTS {} CASCADE",
@@ -2669,22 +2553,12 @@ mod live_worker_role_fence {
     /// literal or the block silently no-ops and every assertion below would
     /// then be measuring the ABSENCE of a grant while reading as a fence.
     fn production_grant_for(fx: &Fixture) -> String {
-        let sql = runtime_dependents_sql_for_role(&fx.app_id, &fx.app_role);
+        let sql = runtime_dependents_sql_for_role(&fx.app_role);
         assert!(
             sql.matches(WORKER_ROLE).count() >= 2,
             "expected the worker role as both a quoted ident and a literal: {sql}"
         );
         let retargeted = sql.replace(WORKER_ROLE, &fx.worker);
-        // `zeroship_worker` is not a substring of `zeroship_workflow_owner`
-        // ("worker" vs "workflow"), so the journal half of the statement must
-        // come through untouched. Asserted rather than assumed: a rename that
-        // made one a prefix of the other would corrupt the journal DDL silently,
-        // and these cases would then be measuring a statement production never
-        // issues.
-        assert!(
-            retargeted.contains("zeroship_workflow_owner"),
-            "the substitution must not touch the journal owner: {retargeted}"
-        );
         retargeted
     }
 
