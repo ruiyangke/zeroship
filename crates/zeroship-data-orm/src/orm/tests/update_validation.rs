@@ -109,7 +109,7 @@ async fn exercise_arithmetic_validation(db: &Database) {
         let mut patch = value!({"balance":{"$inc":0}});
         patch["balance"]["$inc"] = Value::Decimal("1.5".into());
         accounts.update(value!({}), patch).await?;
-        Ok(())
+        Ok::<_, DbError>(())
     })
     .await
     .unwrap();

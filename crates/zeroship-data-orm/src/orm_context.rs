@@ -19,10 +19,20 @@ use std::{
 pub struct OrmContext(Rc<State>);
 #[derive(Default)]
 struct State {
+    /// Held jointly with every context forked from this one, so a fork cannot
+    /// resolve a different schema, install a second mask policy or execute
+    /// under a weaker protection floor than the handle it came from.
+    shared: Rc<Shared>,
+    /// This context's alone. Forking is how one app runs more than one
+    /// top-level transaction at a time: admission is per lane set, and each
+    /// fork brings its own.
+    lanes: RefCell<TxLanes>,
+}
+#[derive(Default)]
+struct Shared {
     schemas: RefCell<SchemaCache>,
     policies: RefCell<HashMap<DbBinding, MaskPolicy>>,
     floors: RefCell<HashMap<DbBinding, Rc<ProtectionFloor>>>,
-    lanes: RefCell<TxLanes>,
 }
 impl std::fmt::Debug for OrmContext {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -49,33 +59,46 @@ impl OrmContext {
             future: Some(Box::pin(future)),
         }
     }
+    /// A context over the same schemas, mask policies and protection floors,
+    /// with transaction lanes of its own.
+    ///
+    /// Admission is per lane set, so a fork's top-level transaction does not
+    /// queue behind one open on the context it was forked from. Everything a
+    /// dispatch is checked against stays shared, so the two cannot disagree
+    /// about what a collection is or what may be unmasked.
+    pub(crate) fn fork_lanes(&self) -> Self {
+        Self(Rc::new(State {
+            shared: Rc::clone(&self.0.shared),
+            lanes: RefCell::new(TxLanes::default()),
+        }))
+    }
     pub(crate) fn schemas<T>(&self, f: impl FnOnce(&SchemaCache) -> T) -> T {
-        f(&self.0.schemas.borrow())
+        f(&self.0.shared.schemas.borrow())
     }
     pub(crate) fn schemas_mut<T>(&self, f: impl FnOnce(&mut SchemaCache) -> T) -> T {
-        f(&mut self.0.schemas.borrow_mut())
+        f(&mut self.0.shared.schemas.borrow_mut())
     }
     #[cfg(test)]
     pub(crate) fn policies<T>(&self, f: impl FnOnce(&HashMap<DbBinding, MaskPolicy>) -> T) -> T {
-        f(&self.0.policies.borrow())
+        f(&self.0.shared.policies.borrow())
     }
     pub(crate) fn policies_mut<T>(
         &self,
         f: impl FnOnce(&mut HashMap<DbBinding, MaskPolicy>) -> T,
     ) -> T {
-        f(&mut self.0.policies.borrow_mut())
+        f(&mut self.0.shared.policies.borrow_mut())
     }
     pub(crate) fn floors<T>(
         &self,
         f: impl FnOnce(&HashMap<DbBinding, Rc<ProtectionFloor>>) -> T,
     ) -> T {
-        f(&self.0.floors.borrow())
+        f(&self.0.shared.floors.borrow())
     }
     pub(crate) fn floors_mut<T>(
         &self,
         f: impl FnOnce(&mut HashMap<DbBinding, Rc<ProtectionFloor>>) -> T,
     ) -> T {
-        f(&mut self.0.floors.borrow_mut())
+        f(&mut self.0.shared.floors.borrow_mut())
     }
     pub(crate) fn lanes<T>(&self, f: impl FnOnce(&TxLanes) -> T) -> T {
         f(&self.0.lanes.borrow())

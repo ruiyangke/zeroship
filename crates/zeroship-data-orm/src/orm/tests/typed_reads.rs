@@ -283,7 +283,7 @@ async fn exercise(db: &Database) {
                 })
                 .await?;
             assert_eq!(readings.count(Filter::all()).await?, 3);
-            Ok(readings.query())
+            Ok::<_, DbError>(readings.query())
         })
         .await
         .unwrap();
@@ -434,7 +434,7 @@ async fn typed_sources_and_projections_keep_their_originating_transaction_scope(
                 .select(count_rows())?;
             let row = alias.row::<Reading>();
             let scalar = alias.column(readings::title).select::<String>();
-            Ok((alias, row, scalar, built, prepared, grouped))
+            Ok::<_, DbError>((alias, row, scalar, built, prepared, grouped))
         })
         .await
         .unwrap();

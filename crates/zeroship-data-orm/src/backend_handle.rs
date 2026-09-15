@@ -322,7 +322,9 @@ mod routed_read_tests {
                 }
             });
 
-            let admission = crate::transaction::TxAdmission::acquire(app.to_owned()).await;
+            let admission = crate::transaction::TxAdmission::acquire(app.to_owned())
+                .await
+                .expect("the fixture claims a free lane");
             crate::transaction::exec_begin_or_savepoint(false, None, app,
                 crate::sql::SchemaName::new(app).unwrap(), handle.clone()).await.unwrap();
             admission.handed_to_reducer();

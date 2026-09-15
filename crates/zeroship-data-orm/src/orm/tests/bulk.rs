@@ -172,7 +172,7 @@ async fn bulk_counts(mut fixture: CollectionFixture) {
                 ),
                 0
             );
-            Ok(entries)
+            Ok::<_, DbError>(entries)
         })
         .await
         .unwrap();
@@ -349,7 +349,7 @@ async fn postgres_bulk_counts_do_not_require_unrelated_column_reads() {
             ),
             2
         );
-        Ok(())
+        Ok::<_, DbError>(())
     })
     .await
     .unwrap();
@@ -446,7 +446,7 @@ async fn bulk_cdc(fixture: CollectionFixture) {
                 2
             );
             assert!(sub.pop().is_none(), "no delivery before commit");
-            Ok(())
+            Ok::<_, DbError>(())
         }
     })
     .await
