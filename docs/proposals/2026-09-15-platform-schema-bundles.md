@@ -171,10 +171,28 @@ process: the worker executes creator code and must not hold DDL authority.
 
 ## Open questions
 
-1. Does the bundle carry recorded operations or compiled per-dialect SQL? The
-   operations keep one representation and let the service validate against its
-   ceiling; the SQL is simpler to apply but harder to police. Leaning
-   operations, because the ceiling check is the reason the service exists.
+1. ~~Does the bundle carry recorded operations or compiled per-dialect SQL?~~
+   **SETTLED 2026-09-15: compiled per-dialect SQL, and operations were never
+   available.** `validate_collection` in
+   `crates/zeroship-migrate-core/src/schema/query.rs` refuses any collection
+   whose name carries the reserved `__zeroship` prefix. It is unconditional and
+   fail-closed, no capability or policy layer lifts it, and it is the same
+   function CRUD dispatch uses. That rule is WHY `names.mjs` exists: `schema.ts`
+   authors unprefixed names and `bindOwnedNames` rewrites the compiled SQL
+   afterwards. So an operation-carrying bundle cannot express this journal, and
+   the only op form that could - `raw` - is compiled SQL wearing an operation's
+   clothes, which the ceiling polices no more finely than the text.
+
+   The service still polices the bundle, at the layer where schema confinement
+   actually lives: `MigrationGuard::check` bound to the target schema. Measured:
+   the journal artifact bound to `customer` passes, and the same artifact bound
+   to `someone_else` is refused `CrossSchema`. Two consequences the
+   implementation must carry: the guard FLAGS rather than denies a destructive
+   bundle, so the service gates `outcome.destructive` against the composed
+   `safety.destructive_ops` itself (the creator path gets that from the engine's
+   plan gate, which a direct-SQL applier never runs); and the endpoint is
+   addressed by SCHEMA, not by app, because a project-level creator database
+   makes the schema underivable from an app id.
 2. Should the stamp live in the app schema (where it is today) or in a platform
    registry? In the app schema it travels with the thing it describes and
    survives a platform database restore; in a registry the manager can answer
