@@ -184,7 +184,7 @@ pub(crate) fn validate_results(
         for check in checks {
             if row
                 .get(&check.output)
-                .and_then(crate::sql::temporal::timestamp_millis)
+                .and_then(crate::sql::temporal::timestamp_micros)
                 .is_none()
             {
                 return Err(crate::error::DbError::timestamp_expression_outside_calendar());
@@ -387,7 +387,7 @@ pub(crate) fn resolve_assignments(
         assignments.push(Assignment {
             column: resolved.table.column(&input.column)?,
             value: Expression::DatabaseTimestamp {
-                offset_millis: expression.offset_millis(),
+                offset_micros: expression.offset_micros(),
             },
         });
     }
@@ -614,7 +614,7 @@ mod tests {
             assert!(
                 matches!(
                     assignments[0].value,
-                    Expression::DatabaseTimestamp { offset_millis: 0 }
+                    Expression::DatabaseTimestamp { offset_micros: 0 }
                 ),
                 "{values:?}"
             );

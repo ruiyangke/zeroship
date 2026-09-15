@@ -47,9 +47,14 @@ impl SqlStorageCodecs for SqliteCodecs {
             return Ok(value);
         }
         Ok(match (storage, value) {
+            // The canonical fixed-width text carries three fractional digits.
+            // A finer value never reaches here: the registration refuses it
+            // against the declared millisecond resolution.
             (StorageType::Timestamp, value) => {
-                let millis =
-                    crate::sql::temporal::timestamp_millis(&value).ok_or_else(invalid_timestamp)?;
+                let micros =
+                    crate::sql::temporal::timestamp_micros(&value).ok_or_else(invalid_timestamp)?;
+                let millis = crate::sql::temporal::exact_timestamp_millis(micros)
+                    .ok_or(CompileError::TimestampPrecisionUnsupported)?;
                 Value::String(
                     crate::sql::temporal::format_timestamp_millis(millis)
                         .expect("validated portable timestamp"),

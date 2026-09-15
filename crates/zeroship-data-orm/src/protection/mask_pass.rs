@@ -115,6 +115,8 @@ pub fn apply_mask_on_write(
                 Some(Zeroizing::new(decimal.clone()))
             } else if let Some(s) = value.as_str() {
                 Some(Zeroizing::new(s.to_string()))
+            } else if let Some(micros) = value.as_timestamp_micros() {
+                Some(Zeroizing::new(micros.to_string()))
             } else if let Some(n) = value.as_i64() {
                 Some(Zeroizing::new(n.to_string()))
             } else if let Some(f) = value.as_f64() {

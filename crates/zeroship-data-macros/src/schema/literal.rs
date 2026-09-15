@@ -18,7 +18,7 @@ pub enum Literal {
     Array(Vec<Self>),
     Object(Vec<(String, Self)>),
     Decimal(String),
-    Timestamp(i64),
+    TimestampMicros(i64),
 }
 
 impl Parse for Literal {
@@ -73,18 +73,18 @@ impl Parse for Literal {
                     }
                     return Ok(Self::Decimal(value.value()));
                 }
-                "timestamp" => {
+                "timestamp_micros" => {
                     let content;
                     parenthesized!(content in input);
                     let value = content.parse::<Self>()?;
                     if !content.is_empty() {
-                        return Err(content.error("expected timestamp milliseconds"));
+                        return Err(content.error("expected timestamp microseconds"));
                     }
                     return match value {
-                        Self::Signed(value) => Ok(Self::Timestamp(value)),
+                        Self::Signed(value) => Ok(Self::TimestampMicros(value)),
                         _ => Err(syn::Error::new(
                             name.span(),
-                            "timestamp requires signed integer milliseconds",
+                            "timestamp_micros requires signed integer microseconds",
                         )),
                     };
                 }
@@ -157,7 +157,7 @@ impl Literal {
             Self::Decimal(value) => {
                 quote!(#orm::Value::Decimal(::std::string::String::from(#value)))
             }
-            Self::Timestamp(value) => quote!(#orm::Value::Timestamp(#value)),
+            Self::TimestampMicros(value) => quote!(#orm::Value::TimestampMicros(#value)),
         }
     }
 }

@@ -27,6 +27,7 @@ const SUPPORT: SqlSupport = SqlSupport {
     row_locks: true,
     advisory_locks: true,
     transaction_settings: true,
+    timestamp_resolution: crate::sql::temporal::TimestampResolution::Microsecond,
     max_bind_parameters: super::POSTGRES_BIND_LIMIT,
 };
 
@@ -50,11 +51,15 @@ const SYNTAX: super::shared::Syntax = super::shared::Syntax {
     array_mutation: write_array_mutation,
 };
 
-// The last instant before the portable calendar, one millisecond before
-// `MIN_TIMESTAMP_MILLIS`, independent of the session time zone.
-const BEFORE_PORTABLE_CALENDAR: &str = "'0001-12-31 23:59:59.999+00 BC'::timestamptz";
+// The last instant before the portable calendar, one microsecond before
+// `MIN_TIMESTAMP_MICROS`, independent of the session time zone.
+const BEFORE_PORTABLE_CALENDAR: &str = "'0001-12-31 23:59:59.999999+00 BC'::timestamptz";
 
-// The database clock shifted by an exact millisecond interval.
+// The database clock shifted by an exact microsecond interval.
+//
+// The offset is rendered as exact decimal seconds and never through a floating
+// point value: the portable span in microseconds exceeds the range where a
+// double holds every integer.
 //
 // PostgreSQL raises for an instant before its own calendar begins, and the
 // largest negative offset reaches past it. A negative offset therefore first
@@ -65,19 +70,19 @@ const BEFORE_PORTABLE_CALENDAR: &str = "'0001-12-31 23:59:59.999+00 BC'::timesta
 // stays far inside PostgreSQL's range.
 fn write_database_timestamp(
     writer: &mut SqlWriter,
-    offset_millis: i64,
+    offset_micros: i64,
 ) -> Result<(), CompileError> {
-    let seconds = offset_millis / 1000;
-    let fraction = (offset_millis % 1000).unsigned_abs();
-    let sign = if offset_millis < 0 && seconds == 0 {
+    let seconds = offset_micros / 1_000_000;
+    let fraction = (offset_micros % 1_000_000).unsigned_abs();
+    let sign = if offset_micros < 0 && seconds == 0 {
         "-"
     } else {
         ""
     };
     let offset = writer.bind(Value::from(format!(
-        "{sign}{seconds}.{fraction:03} seconds"
+        "{sign}{seconds}.{fraction:06} seconds"
     )))?;
-    if offset_millis < 0 {
+    if offset_micros < 0 {
         writer.sql.push_str("(GREATEST(clock_timestamp(), ");
         writer.sql.push_str(BEFORE_PORTABLE_CALENDAR);
         writer.sql.push_str(" - ");

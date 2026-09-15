@@ -74,9 +74,9 @@ impl StorageType {
             Self::Text => matches!(value, Value::String(_)),
             Self::Bytes => matches!(value, Value::Bytes(_)),
             Self::Timestamp => {
-                matches!(value, Value::Timestamp(_))
+                matches!(value, Value::TimestampMicros(_))
                     || matches!(value, Value::String(_))
-                        && crate::sql::temporal::timestamp_millis(value).is_some()
+                        && crate::sql::temporal::timestamp_micros(value).is_some()
             }
             Self::Json => matches!(value, Value::Json(_) | Value::Array(_) | Value::Object(_)),
             Self::Vector => matches!(value, Value::Array(_) | Value::Bytes(_)),
@@ -292,7 +292,7 @@ pub enum Expression {
     },
     CurrentTimestamp,
     DatabaseTimestamp {
-        offset_millis: i64,
+        offset_micros: i64,
     },
 }
 
@@ -1316,8 +1316,8 @@ fn validate_update_expression(
 }
 
 fn validate_timestamp_expression(expression: &Expression) -> Result<(), CompileError> {
-    if let Expression::DatabaseTimestamp { offset_millis } = expression {
-        if !super::temporal::is_timestamp_offset_millis(*offset_millis) {
+    if let Expression::DatabaseTimestamp { offset_micros } = expression {
+        if !super::temporal::is_timestamp_offset_micros(*offset_micros) {
             return Err(invalid("timestamp offset is outside the portable calendar"));
         }
     }

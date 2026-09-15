@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use zeroship_auth::store::users;
 use zeroship_core::UserId;
-use zeroship_data_orm::orm::{Entity, Insertable};
+use zeroship_data_orm::orm::{Entity, Insertable, UtcInstant};
 
 #[compio::test]
 async fn user_repository_uses_native_ids_and_case_insensitive_email() {
@@ -86,7 +86,10 @@ async fn native_user_rows_apply_the_callers_identity_conversion() {
         assert_eq!(user.email, created.email);
         assert_eq!(user.name, created.name);
         assert_eq!(model::Entity::COLLECTION, "users");
-        let locked_until = chrono::Utc::now().timestamp_millis() + 60_000;
+        let locked_until = UtcInstant::from_unix_millis(
+            chrono::Utc::now().timestamp_millis() + 60_000,
+        )
+        .unwrap();
         let updated: Option<users::UserRow> = native
             .entity::<model::Entity>()
             .unwrap()
@@ -97,8 +100,82 @@ async fn native_user_rows_apply_the_callers_identity_conversion() {
             .await
             .unwrap();
         assert_eq!(
-            updated.unwrap().locked_until,
-            chrono::DateTime::from_timestamp_millis(locked_until)
+            updated.unwrap().locked_until.unwrap().timestamp_micros(),
+            locked_until.unix_micros()
+        );
+    })
+    .await;
+}
+
+/// An instant written with a microsecond fraction reads back through the
+/// model's own conversion as exactly that instant.
+///
+/// The raw connection is the oracle: it writes the value and reports the
+/// microsecond count the server holds, so the assertion never restates what the
+/// conversion is supposed to produce. A decode that floored to the containing
+/// millisecond would disagree with the oracle on every row here.
+#[compio::test]
+async fn native_user_rows_keep_the_microseconds_the_server_stored() {
+    Database::run(async |database| {
+        let pg = database.connect_as_auth().await;
+        let orm = database.orm().await;
+        use zeroship_auth::store::native::models::users as model;
+        let created = users::create(&orm, "micros@example.test", "Micros", None)
+            .await
+            .unwrap();
+        for fraction in ["000001", "999999", "500000"] {
+            let stamp = format!("2026-05-07 01:02:03.{fraction}+00");
+            let oracle: i64 = pg
+                .query_one(
+                    "UPDATE zeroship.users SET locked_until = $2::text::timestamptz \
+                     WHERE id = $1 \
+                     RETURNING (extract(epoch FROM locked_until) * 1000000)::bigint",
+                    &[&created.id.as_str(), &stamp.as_str()],
+                )
+                .await
+                .unwrap()
+                .get(0);
+            let row = users::find_by_id(&orm, &created.id).await.unwrap().unwrap();
+            assert_eq!(
+                row.locked_until.unwrap().timestamp_micros(),
+                oracle,
+                "{stamp}"
+            );
+            // The value read back re-binds to its own row, which is what a
+            // reservation token compared for equality depends on.
+            let matched = orm
+                .entity::<model::Entity>()
+                .unwrap()
+                .query()
+                .filter(
+                    model::locked_until
+                        .eq(Some(
+                            UtcInstant::from_unix_micros(
+                                row.locked_until.unwrap().timestamp_micros(),
+                            )
+                            .unwrap(),
+                        ))
+                        .unwrap(),
+                )
+                .count()
+                .await
+                .unwrap();
+            assert_eq!(matched, 1, "{stamp}");
+        }
+        // Control: an instant one microsecond away matches no row, so the
+        // equality above is the stored value and not a coarse comparison.
+        let row = users::find_by_id(&orm, &created.id).await.unwrap().unwrap();
+        let skewed =
+            UtcInstant::from_unix_micros(row.locked_until.unwrap().timestamp_micros() + 1).unwrap();
+        assert_eq!(
+            orm.entity::<model::Entity>()
+                .unwrap()
+                .query()
+                .filter(model::locked_until.eq(Some(skewed)).unwrap())
+                .count()
+                .await
+                .unwrap(),
+            0
         );
     })
     .await;

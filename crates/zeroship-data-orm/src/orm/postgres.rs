@@ -378,5 +378,10 @@ fn coordination_error(feature: &str, invalid_code: &'static str, error: CompileE
         CompileError::Unsupported(_) => super::unsupported_backend_feature(feature),
         CompileError::InvalidStatement(message) => DbError::validation(invalid_code, message),
         error @ CompileError::BindLimitExceeded { .. } => DbError::internal(error.to_string()),
+        // Advisory-lock and session coordination statements carry no instant,
+        // so a precision refusal from this compiler would be a bug here.
+        error @ CompileError::TimestampPrecisionUnsupported => {
+            DbError::internal(error.to_string())
+        }
     }
 }

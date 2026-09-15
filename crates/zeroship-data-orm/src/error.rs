@@ -743,6 +743,10 @@ impl From<crate::sql::mapping::QueryError> for DbError {
                 "immutable_assigned_field", m,
                 Some("This field is assigned by its descriptor and cannot be changed through UPDATE.".into()),
             ),
+            QueryError::TimestampPrecisionUnsupported(m) => (
+                "timestamp_precision_unsupported", m,
+                Some("Round the instant to a whole millisecond before writing it to this database.".into()),
+            ),
         };
         DbError::ValidationFailed {
             code,

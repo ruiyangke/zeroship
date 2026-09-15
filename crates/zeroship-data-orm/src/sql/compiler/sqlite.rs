@@ -25,6 +25,7 @@ const SUPPORT: SqlSupport = SqlSupport {
     row_locks: false,
     advisory_locks: false,
     transaction_settings: false,
+    timestamp_resolution: crate::sql::temporal::TimestampResolution::Millisecond,
     max_bind_parameters: super::SQLITE_BIND_LIMIT,
 };
 
@@ -48,10 +49,15 @@ const SYNTAX: super::shared::Syntax = super::shared::Syntax {
     array_mutation: write_array_mutation,
 };
 
+// The canonical storage text carries three fractional digits, so the shift is
+// bound in whole milliseconds. An offset with a finer part is refused rather
+// than rounded, matching the declared `timestamp_resolution`.
 fn write_database_timestamp(
     writer: &mut SqlWriter,
-    offset_millis: i64,
+    offset_micros: i64,
 ) -> Result<(), CompileError> {
+    let offset_millis = crate::sql::temporal::exact_timestamp_millis(offset_micros)
+        .ok_or(CompileError::TimestampPrecisionUnsupported)?;
     writer
         .sql
         .push_str("zeroship_timestamp_add(strftime('%Y-%m-%dT%H:%M:%fZ','now'), ");

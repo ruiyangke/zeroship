@@ -51,8 +51,8 @@ impl SqlStorageCodecs for PostgresCodecs {
             return Ok(value);
         }
         Ok(match (storage, value) {
-            (StorageType::Timestamp, value) => Value::Timestamp(
-                crate::sql::temporal::timestamp_millis(&value).ok_or_else(invalid_timestamp)?,
+            (StorageType::Timestamp, value) => Value::TimestampMicros(
+                crate::sql::temporal::timestamp_micros(&value).ok_or_else(invalid_timestamp)?,
             ),
             (StorageType::Array(ArrayElement::Text), Value::Json(encoded)) => {
                 text_array(serde_json::from_str(&encoded).map_err(|_| invalid_array())?)?

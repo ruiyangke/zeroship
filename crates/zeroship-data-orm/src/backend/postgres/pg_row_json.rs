@@ -17,6 +17,10 @@ mod array_tests;
 #[path = "pg_row_json/network_tests.rs"]
 mod network_tests;
 
+/// `PostgreSQL` counts binary timestamps from 2000-01-01, the Unix epoch plus
+/// this many microseconds.
+pub(crate) const POSTGRES_EPOCH_UNIX_MICROS: i64 = 946_684_800_000_000;
+
 pub fn rows_to_values(rows: &[Row]) -> Result<Vec<Value>, DbError> {
     rows.iter().map(row_to_value).collect()
 }
@@ -83,8 +87,20 @@ fn decode_value(ty: &Type, bytes: &[u8]) -> Result<Value, String> {
             if matches!(micros, i64::MIN | i64::MAX) {
                 return Err("infinite timestamps are unsupported".into());
             }
-            // Floor to the containing millisecond on both sides of the epoch.
-            Ok(Value::Timestamp(micros.div_euclid(1000) + 946_684_800_000))
+            // The wire value counts microseconds from 2000-01-01. Rebasing it
+            // on the Unix epoch is the whole conversion: nothing is rounded, so
+            // a value read back equals the value stored and can be compared for
+            // equality.
+            //
+            // The portable calendar is not enforced here. A clock expression
+            // whose offset leaves the calendar must reach the update's result
+            // check, which reports it as the caller's invalid offset on both
+            // backends; a column value outside the calendar is refused one
+            // layer up by the temporal codec, with the column named.
+            micros
+                .checked_add(POSTGRES_EPOCH_UNIX_MICROS)
+                .map(Value::TimestampMicros)
+                .ok_or_else(|| "timestamp exceeds the native instant range".into())
         }
         Type::DATE => {
             let days =

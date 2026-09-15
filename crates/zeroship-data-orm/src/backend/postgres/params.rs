@@ -26,7 +26,7 @@ impl ToSql for Parameter<'_> {
             (Value::Null, _) | (Value::Bytes(_), &Type::BYTEA) | (Value::Bool(_), &Type::BOOL) => {
                 Format::Binary
             }
-            (Value::Timestamp(_), &Type::TIMESTAMP | &Type::TIMESTAMPTZ) => Format::Binary,
+            (Value::TimestampMicros(_), &Type::TIMESTAMP | &Type::TIMESTAMPTZ) => Format::Binary,
             (Value::Number(n), &Type::INT2 | &Type::INT4 | &Type::INT8) if n.as_i64().is_some() => {
                 Format::Binary
             }
@@ -127,14 +127,15 @@ impl ToSql for Parameter<'_> {
             }
             (Value::Number(v), _) => out.extend_from_slice(v.to_string().as_bytes()),
             (Value::Bool(v), _) => out.extend_from_slice(if *v { b"true" } else { b"false" }),
-            (Value::Timestamp(v), &Type::TIMESTAMP | &Type::TIMESTAMPTZ) => {
+            // The exact inverse of the decode: rebase on 2000-01-01 and send
+            // every microsecond.
+            (Value::TimestampMicros(v), &Type::TIMESTAMP | &Type::TIMESTAMPTZ) => {
                 let micros = v
-                    .checked_sub(946_684_800_000)
-                    .and_then(|v| v.checked_mul(1000))
+                    .checked_sub(super::pg_row_json::POSTGRES_EPOCH_UNIX_MICROS)
                     .ok_or("timestamp exceeds PostgreSQL range")?;
                 out.extend_from_slice(&micros.to_be_bytes());
             }
-            (Value::Timestamp(v), _) => out.extend_from_slice(v.to_string().as_bytes()),
+            (Value::TimestampMicros(v), _) => out.extend_from_slice(v.to_string().as_bytes()),
             (Value::Array(_) | Value::Object(_), &Type::JSON | &Type::JSONB) => {
                 out.extend_from_slice(&serde_json::to_vec(self.0)?)
             }
@@ -357,7 +358,7 @@ mod tests {
             crate::value!({"nested":[1, false]}),
             Value::Decimal("12345678901234567890.12345678901234567890".into()),
             Value::try_from(1.25).unwrap(),
-            Value::Timestamp(-1),
+            Value::TimestampMicros(-1),
         ];
         let rows = query(&client, "SELECT $1::bigint AS integer, $2::bytea AS bytes, $3::boolean AS flag, $4::text AS absent, $5::text AS text, $6::jsonb AS document, $7::numeric AS decimal, $8::double precision AS number, $9::timestamptz AS stamp", &values).await.unwrap();
         let native = crate::backend::postgres::pg_row_json::rows_to_values(&rows).unwrap();
