@@ -14,7 +14,7 @@ use crate::apply::{
     apply_error_kind, apply_ir_documents, ApplyMigrationsRequest, ApplyRequestError,
 };
 use crate::auth::AuthError;
-use crate::provisioning::{provision_database, provision_workflow_journal_schema};
+use crate::provisioning::{provision_database, provision_workflow_app};
 use crate::session::CompioPgSession;
 use crate::MigrationServiceState;
 
@@ -71,7 +71,7 @@ pub async fn provision_workflows(
     };
     let result = async {
         let session = CompioPgSession::connect(&state.provision_dsn).await?;
-        provision_workflow_journal_schema(session.client(), &app_id).await
+        provision_workflow_app(session.client(), &app_id).await
     }
     .await;
     match result {

@@ -1383,7 +1383,7 @@ pub fn runtime_role_provisioning_sql(
     })
 }
 
-async fn provision_runtime_app_role(
+pub(crate) async fn provision_runtime_app_role(
     conn: &compio_postgres::Client,
     app_id: &AppId,
     schema: &SchemaName,
