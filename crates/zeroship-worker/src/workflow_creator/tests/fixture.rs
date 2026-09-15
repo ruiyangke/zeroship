@@ -237,6 +237,47 @@ impl Fixture {
         .unwrap()
     }
 
+    /// A factory that WILL ask the manager to repair a refused journal, bound to
+    /// an origin nothing answers on.
+    ///
+    /// The unreachable origin is the point: it separates "the repair was
+    /// attempted" from "the repair succeeded", and pins which error an operator
+    /// sees when the manager cannot be reached.
+    pub fn factory_with_unreachable_repair(&self) -> WorkflowCreatorFactory<Provider> {
+        use zeroship_core::service_assertion::{ServiceTrustBundle, TransportAssertionVerifier};
+        use zeroship_core::service_peers::{
+            service_issuer, InstanceSigningKey, ServiceAuth, WORKER_SERVICE_NAME,
+        };
+        use zeroship_workflow_client::{Options as ClientOptions, WorkerCoordinator};
+
+        let role = service_issuer(WORKER_SERVICE_NAME).expect("worker issuer");
+        let instance = zeroship_core::service_assertion::ServiceIssuer::parse(&format!(
+            "{}/{}",
+            role.as_str(),
+            self.worker.as_str()
+        ))
+        .expect("worker instance issuer");
+        let keyring = InstanceSigningKey::generate()
+            .into_keyring(instance, ServiceTrustBundle::new())
+            .expect("worker instance keyring");
+        let auth = Arc::new(ServiceAuth::new(
+            keyring,
+            Arc::new(TransportAssertionVerifier::new(ServiceTrustBundle::new())),
+        ));
+        // A loopback port nothing binds. The client accepts plain HTTP only for
+        // loopback, so this is the one shape that constructs and never connects.
+        let client = WorkerCoordinator::new(
+            "http://127.0.0.1:1",
+            auth,
+            ClientOptions {
+                timeout: std::time::Duration::from_millis(250),
+                ..ClientOptions::default()
+            },
+        )
+        .expect("a client against a syntactically valid loopback origin");
+        self.factory().with_journal_repair(std::rc::Rc::new(client))
+    }
+
     pub fn assert_storage_unopened(&self) {
         assert!(
             self.directory.path().read_dir().unwrap().next().is_none(),
