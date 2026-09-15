@@ -17,10 +17,12 @@ use zeroship_data_orm::{
     schema::Schema,
     value, ConnectOptions, Value,
 };
+use zeroship_data_orm::orm::{FromRow, UtcInstant};
 use zeroship_workflow_manager::{
     deployments::{
         self,
         latest::{self, LatestDeployment, LatestDeploymentSource},
+        models::app_deploys as deploys,
         DeploymentHolds,
     },
     Error,
@@ -53,6 +55,11 @@ case!(
     sqlite_latest_rejects_malformed_storage,
     postgres_latest_rejects_malformed_storage,
     malformed_storage
+);
+case!(
+    sqlite_activation_instants_survive_the_catalog,
+    postgres_activation_instants_survive_the_catalog,
+    activation_instant_round_trip
 );
 
 struct LatestFixture {
@@ -431,4 +438,57 @@ async fn malformed_storage(fixture: LatestFixture) {
         )
         .await;
     assert_eq!(fixture.observe(&app).await.unwrap(), deployment);
+}
+
+/// `app_deploys.activated_at` as the retention fence reads it: the column is a
+/// timestamp, so the field is a [`UtcInstant`] and a bare integer would not
+/// compile against it.
+#[derive(FromRow)]
+#[orm(entity = deploys)]
+struct Activation {
+    activated_at: Option<UtcInstant>,
+}
+
+/// An activation instant written through the catalog comes back as the same
+/// microseconds, and an unactivated deployment comes back with none.
+///
+/// The value is what is asserted, not merely that the read succeeded: a codec
+/// that scaled milliseconds against microseconds would return an instant three
+/// orders of magnitude away and still report success. The instant is a whole
+/// millisecond because `SQLite`'s canonical timestamp text keeps milliseconds
+/// and refuses a finer value rather than flooring it.
+///
+/// This binds the column's codec and unit only. Whether the collector compares
+/// the value it reads against the right cutoff is a separate contract.
+async fn activation_instant_round_trip(fixture: LatestFixture) {
+    const ACTIVATED_MICROS: i64 = 1_789_279_200_004_000;
+    let app = AppId::mint();
+    let activated = fixture.publish(&app, "activated").await;
+    let never = fixture.publish(&app, "never activated").await;
+    fixture
+        .patch(
+            "app_deploys",
+            activated.deployment_id.as_str(),
+            value!({"activated_at":Value::TimestampMicros(ACTIVATED_MICROS)}),
+        )
+        .await;
+    let read = async |id: &DeploymentId| {
+        fixture
+            .writer
+            .entity::<deploys::Entity>()
+            .unwrap()
+            .query()
+            .filter(deploys::id.eq(id.as_str()).unwrap())
+            .first::<Activation>()
+            .await
+            .unwrap()
+            .expect("the published deployment is in the catalog")
+            .activated_at
+    };
+    assert_eq!(
+        read(&activated.deployment_id).await.map(UtcInstant::unix_micros),
+        Some(ACTIVATED_MICROS),
+    );
+    // Control, differing only in whether the column was ever set.
+    assert_eq!(read(&never.deployment_id).await, None);
 }
