@@ -255,10 +255,12 @@ async fn concurrent_deploys_to_many_apps_share_the_session_bound() {
             most.set(most.get().max(held));
             held
         };
-        // Every session the bound allows is busy at the gate at once.
+        // Every session the bound allows is busy at the gate at once. The
+        // wait ends at the bound rather than on it, so a catalog holding more
+        // is reported by the bound assertion below rather than by a timeout.
         until(&fixture, "every catalog session waits at the gate", || async {
             sample().await;
-            blocked_by(&fixture, gate_holder).await.len() == BOUND
+            blocked_by(&fixture, gate_holder).await.len() >= BOUND
         })
         .await;
         // The surplus deploys wait for a session instead of opening one.
