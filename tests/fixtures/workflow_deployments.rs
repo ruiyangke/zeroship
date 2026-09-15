@@ -245,6 +245,30 @@ impl Deployments {
             })
         ));
     }
+
+    /// Every holder gave this deployment back, so the platform collector's
+    /// fence commits. The probe rolls back, leaving the catalog collectable.
+    pub async fn assert_reclaimable(&self, app: &AppId, deployment: &str) {
+        let rolled_back = self
+            .database
+            .transaction(async |tx| {
+                deployment_holds::fence_reclamation(&tx, app, deployment)
+                    .await
+                    .expect("released holders leave a collectable deployment");
+                Err::<(), _>(zeroship_data_orm::error::DbError::validation(
+                    "fixture_rollback",
+                    "rollback deployment probe",
+                ))
+            })
+            .await;
+        assert!(matches!(
+            rolled_back,
+            Err(zeroship_data_orm::error::DbError::ValidationFailed {
+                code: "fixture_rollback",
+                ..
+            })
+        ));
+    }
 }
 
 #[derive(Clone)]
