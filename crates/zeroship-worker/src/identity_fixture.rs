@@ -112,7 +112,7 @@ async fn credentials_are_minted_for_each_request_under_the_same_trust() {
         "request credentials must not be cached for the test process"
     );
     for header in [&first, &next, &first] {
-        auth.verify(Some(header), endpoints::WORKER_WORKFLOW_ADVANCE)
+        auth.verify(Some(header), endpoints::WORKER_DISPATCH)
             .await
             .unwrap();
     }

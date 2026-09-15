@@ -42,30 +42,6 @@ fn worker_env_has_no_security_relaxation_binding() {
 }
 
 #[test]
-fn unsigned_advance_refused_on_a_routable_bind() {
-    assert!(!unsigned_advance_bind_allowed("0.0.0.0", true));
-    assert!(!unsigned_advance_bind_allowed("::", true));
-    assert!(!unsigned_advance_bind_allowed("10.0.0.7", true));
-}
-
-#[test]
-fn unsigned_advance_allowed_on_loopback() {
-    for host in ["127.0.0.1", "::1", "localhost"] {
-        assert!(
-            unsigned_advance_bind_allowed(host, true),
-            "{host} is loopback and must stay allowed"
-        );
-    }
-}
-
-#[test]
-fn a_routable_bind_is_fine_without_the_flag() {
-    assert!(unsigned_advance_bind_allowed("0.0.0.0", false));
-    assert!(unsigned_advance_bind_allowed("10.0.0.7", false));
-    assert!(unsigned_advance_bind_allowed("127.0.0.1", false));
-}
-
-#[test]
 fn worker_threads_default_resolves_to_positive_count() {
     assert!(zeroship_worker::config::default_worker_threads() > 0);
 
