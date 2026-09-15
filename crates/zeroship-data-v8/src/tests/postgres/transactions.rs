@@ -986,7 +986,7 @@ async function timestamps() {
     const instants = [
         [253402300790001, "9999-12-31T23:59:50.001Z"],
         [-62135596800000, "0001-01-01"],
-        [-1, "1969-12-31T23:59:59.999999Z"],
+        [-1, "1969-12-31T23:59:59.999Z"],
         [0, "1970-01-01T02:00:00+02:00"],
         [253402300799999, "9999-12-31T23:59:59.999Z"],
     ];
@@ -1004,6 +1004,16 @@ async function timestamps() {
         return {preserved:true};
     });
     if (result.error) throw result.error;
+    // JavaScript keeps its millisecond contract. PostgreSQL stores the whole
+    // instant, so an outbound value floors toward negative infinity and no
+    // longer matches an equality filter written in milliseconds. The row is
+    // still there: only the equality is lost.
+    const fine = await env.db.collection("notes").insert({title:"fine", instant:"1969-12-31T23:59:59.999999Z"});
+    if (fine.instant !== -1) throw new Error("outbound instant must floor toward negative infinity");
+    const missed = await env.db.collection("notes").find({id:fine.id, instant:-1});
+    if (missed.length !== 0) throw new Error("a floored instant must not match its own row by equality");
+    const present = await env.db.collection("notes").find({id:fine.id});
+    if (present.length !== 1 || present[0].instant !== -1) throw new Error("the stored row is unchanged");
     for (const instant of ["private_not_a_timestamp", "2026-02-30T00:00:00Z", 0.5, 253402300800000]) {
         let refused = false;
         try {
@@ -1025,7 +1035,9 @@ const _procedures = {timestamps};
         dispatch_zs_with_descriptor(&url, &source, "timestamps", app, descriptor.to_string());
     assert_eq!(status, 200, "worker timestamps: {body}");
     assert_eq!(body["json"], serde_json::json!({"preserved":true}));
-    assert_eq!(count_notes(&url, app), 15);
+    // Three accepted forms of each instant, plus the microsecond row the
+    // boundary case writes. Every refused value writes nothing.
+    assert_eq!(count_notes(&url, app), 16);
 }
 
 #[test]
