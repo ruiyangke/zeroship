@@ -913,7 +913,7 @@ fn classify_join_error(error: compio_postgres::Error) -> JoinFailure {
 /// Returns the driver's error when the registry cannot be read. A caller must
 /// refuse on that rather than fall through to anything else: control that
 /// cannot reach the registry has not established that this instance is live.
-pub(crate) async fn active_instance_public_key(
+pub async fn active_instance_public_key(
     pg: &compio_postgres::Client,
     instance_id: &str,
 ) -> Result<Option<[u8; PUBLIC_KEY_LENGTH]>, compio_postgres::Error> {

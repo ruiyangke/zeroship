@@ -31,7 +31,7 @@ fn key(service: &str) -> ed25519_dalek::SigningKey {
         // A `svc/worker` ROLE key exists only for arms that present the stale
         // credential and expect a refusal: no fleet process holds or trusts it.
         "worker" => 33,
-        "enroller" => 34,
+        "join-signer" => 34,
         _ => panic!("unknown fixture service"),
     };
     ed25519_dalek::SigningKey::from_bytes(&[seed; 32])
@@ -190,9 +190,9 @@ impl Fleet {
         };
         fs::create_dir_all(&fleet.blob_root).unwrap();
         let mut peer_keys = vec![];
-        // The worker is not a peer with a key of its own: it enrols with the
-        // unit's enroller credential below and mints under an instance key it
-        // draws at boot, so the document publishes no `svc/worker` key.
+        // The worker is not a peer with a key of its own: it joins with a
+        // TOKEN and mints under an instance key it draws in memory at boot, so
+        // the document publishes no `svc/worker` key.
         for name in ["control", "gateway"] {
             fleet.secret(
                 &format!("{name}.pem"),
@@ -207,23 +207,26 @@ impl Fleet {
             "peers.json",
             &serde_json::to_vec(&json!({"keys":peer_keys})).unwrap(),
         );
-        // The fleet's one deployment unit: the worker's enroller credential
-        // and Control's import file naming its public half.
-        let enroller_id = zeroship_core::typed_id::new_worker_enroller_id();
+        // The fleet's trusted signer, and Control's import file naming its
+        // public half. Control is also the MINTER here, exactly as a
+        // single-host deployment configures it: it rotates a token into a file
+        // the worker reads at boot, so this fixture exercises the real minting
+        // path rather than a token written by the test.
+        let signer_id = zeroship_core::typed_id::new_join_signer_id();
         fleet.secret(
-            "enroller.json",
+            "join-signer.json",
             &serde_json::to_vec(&json!({
-                "enroller_id": enroller_id,
-                "private_key": key("enroller").to_pkcs8_pem(Default::default()).unwrap().as_str(),
+                "signer_id": signer_id,
+                "private_key": key("join-signer").to_pkcs8_pem(Default::default()).unwrap().as_str(),
             }))
             .unwrap(),
         );
         fleet.secret(
-            "enrollers.json",
-            &serde_json::to_vec(&json!({"enrollers": [{
-                "id": enroller_id,
-                "zone": "default",
-                "public_key": signing_key("enroller").public_jwk_x(),
+            "join-signers.json",
+            &serde_json::to_vec(&json!({"signers": [{
+                "id": signer_id,
+                "zones": ["default"],
+                "public_key": signing_key("join-signer").public_jwk_x(),
             }]}))
             .unwrap(),
         );
@@ -307,9 +310,18 @@ impl Fleet {
                     worker_port.clone(),
                 ),
                 (
-                    "ZEROSHIP_CONTROL_WORKER_ENROLLERS_FILE",
-                    fleet.path("enrollers.json"),
+                    "ZEROSHIP_CONTROL_JOIN_SIGNERS_FILE",
+                    fleet.path("join-signers.json"),
                 ),
+                (
+                    "ZEROSHIP_CONTROL_JOIN_TOKEN_SIGNER_FILE",
+                    fleet.path("join-signer.json"),
+                ),
+                (
+                    "ZEROSHIP_CONTROL_JOIN_TOKEN_FILE",
+                    fleet.path("join-token"),
+                ),
+                ("ZEROSHIP_CONTROL_JOIN_TOKEN_ZONE", "default".into()),
             ],
         );
         fleet.ready(fleet.control_url.clone()).await;
@@ -346,7 +358,10 @@ impl Fleet {
                     "ZEROSHIP_WORKER_CDC_RELAY_CA_FILE",
                     fleet.path("relay-cert.pem"),
                 ),
-                ("ZEROSHIP_WORKER_ENROLLER_FILE", fleet.path("enroller.json")),
+                // Control mints this before it binds, and `fleet.ready` above
+                // waited for that bind, so the file is there by the time the
+                // worker reads it.
+                ("ZEROSHIP_WORKER_JOIN_TOKEN_FILE", fleet.path("join-token")),
             ],
         );
         fleet.ready(fleet.worker_url.clone()).await;
@@ -545,8 +560,9 @@ impl Fleet {
             .env("ZEROSHIP_AUTH_PLATFORM_ISSUER", &self.issuer_url)
             .env("ZEROSHIP_OBSERVABILITY_LOG_FORMAT", "json");
         if name != "relay" {
-            // The worker's own key is its enroller credential, set by its
-            // spawn; every other service holds a role key of its own.
+            // The worker holds no key of its own: it reads a join token, set
+            // by its spawn, and draws its instance key in memory. Every other
+            // service holds a role key of its own.
             if name != "worker" {
                 cmd.env(
                     format!("ZEROSHIP_{}_SERVICE_KEY_FILE", name.to_uppercase()),
