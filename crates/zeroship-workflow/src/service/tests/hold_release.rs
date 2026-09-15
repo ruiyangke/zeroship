@@ -6,11 +6,40 @@
 )]
 
 use super::*;
-use crate::operations::RunOperation;
+use crate::{
+    operations::RunOperation,
+    service::{publication::JobPublisher, AppWorkflows},
+};
 use std::time::{Duration, Instant};
 use zeroship_core::workflow_jobs::{
     Delivery, DeploymentId, JobId, JobLease, JobOperation, JobOutcome, JobSpec,
 };
+
+/// Confirms every publication exactly as submitted, so the creator outbox drains
+/// without a manager. An unconfirmed publication retains its deployment on its
+/// own, which would hide whether the journal's own dependencies were checked.
+struct Confirming(AppId);
+impl JobPublisher for Confirming {
+    fn app_id(&self) -> &AppId {
+        &self.0
+    }
+    async fn submit(&self, job: &JobSpec) -> Result<JobSpec, WorkflowServiceError> {
+        Ok(job.clone())
+    }
+}
+
+async fn drain(scope: &AppWorkflows) {
+    let publisher = Confirming(scope.app_id().clone());
+    loop {
+        let pending = scope.pending_jobs(None, 64).await.unwrap();
+        if pending.is_empty() {
+            return;
+        }
+        for job in &pending {
+            scope.publish_job(&job.id, &publisher).await.unwrap();
+        }
+    }
+}
 
 struct Lease {
     delivery: Delivery,
@@ -90,6 +119,8 @@ async fn release_contract(store: Rc<OrmStore>) {
         .await
         .unwrap();
     service.activate_deploy(&app, &second).await.unwrap();
+    // With the outbox drained, the run itself is the only reason to refuse.
+    drain(&scope).await;
 
     // A live run pinned to the deployment refuses the release, retryably.
     let pinned = Lease::release(&app, &first.id);
@@ -106,6 +137,7 @@ async fn release_contract(store: Rc<OrmStore>) {
         .transition(&RequestId::mint(), &run.id, RunOperation::Cancel)
         .await
         .unwrap();
+    drain(&scope).await;
     assert_eq!(
         scope
             .release_hold_job(&Lease::release(&app, &first.id))
@@ -126,6 +158,7 @@ async fn release_contract(store: Rc<OrmStore>) {
         .await
         .unwrap();
     service.activate_deploy(&app, &third).await.unwrap();
+    drain(&scope).await;
     platform.assert_held(&app, &second.id).await;
     let released = Lease::release(&app, &second.id);
     assert_eq!(
