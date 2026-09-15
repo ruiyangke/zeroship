@@ -41,6 +41,15 @@ fn main() {
             "max_replication_slots=128",
             "-c",
             "max_wal_senders=128",
+            // One server hosts every fleet the test binary runs at once, and
+            // one fleet is a control plane, a worker, a gateway, a CDC relay
+            // and the test process, each holding connection pools. The stock
+            // ceiling is reached while fewer fleets run than a machine has
+            // cores, and a service that cannot connect exits rather than
+            // waits, so the suite fails as a dead worker rather than as a
+            // refused connection.
+            "-c",
+            "max_connections=512",
             "-c",
             "fsync=off",
         ])
