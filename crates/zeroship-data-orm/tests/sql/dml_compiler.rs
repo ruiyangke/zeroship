@@ -206,13 +206,13 @@ fn resolved_selects_reject_backend_dependent_ordering() {
 fn offset_without_limit_uses_valid_backend_syntax() {
     let postgres = scalar_select(StorageType::Integer, |parts| parts.offset = Some(5)).unwrap();
     let postgres = PostgresCompiler
-        .compile(Statement::Select(postgres), &PostgresCompiler.support())
+        .compile(Statement::select(postgres), &PostgresCompiler.support())
         .unwrap();
     assert!(postgres.sql().ends_with(" OFFSET $1"), "{}", postgres.sql());
 
     let sqlite = scalar_select(StorageType::Integer, |parts| parts.offset = Some(5)).unwrap();
     let sqlite = SqliteCompiler
-        .compile(Statement::Select(sqlite), &SqliteCompiler.support())
+        .compile(Statement::select(sqlite), &SqliteCompiler.support())
         .unwrap();
     assert!(
         sqlite.sql().ends_with(" LIMIT -1 OFFSET $1"),
@@ -343,7 +343,7 @@ fn sqlite_uses_structural_json_equality_for_filters() {
     };
     let compiled = SqliteCompiler
         .compile(
-            Statement::Select(select_with_predicate(table.clone(), predicate).unwrap()),
+            Statement::select(select_with_predicate(table.clone(), predicate).unwrap()),
             &SqliteCompiler.support(),
         )
         .unwrap();
@@ -356,7 +356,7 @@ fn sqlite_uses_structural_json_equality_for_filters() {
     };
     let compiled = SqliteCompiler
         .compile(
-            Statement::Select(select_with_predicate(table, predicate).unwrap()),
+            Statement::select(select_with_predicate(table, predicate).unwrap()),
             &SqliteCompiler.support(),
         )
         .unwrap();
@@ -693,7 +693,7 @@ fn column_comparisons_do_not_consume_the_bind_budget() {
     )
     .unwrap();
     let statement = || {
-        Statement::Select(
+        Statement::select(
             SelectStatement::new(SelectParts {
                 table: source.clone(),
                 joins: vec![ResolvedJoin {
@@ -1693,7 +1693,7 @@ fn registration_enforces_bind_limits_on_downstream_compiler_output() {
     )
     .unwrap();
     let source = search_table();
-    let statement = Statement::Select(
+    let statement = Statement::select(
         SelectStatement::new(SelectParts {
             table: source.clone(),
             joins: Vec::new(),
