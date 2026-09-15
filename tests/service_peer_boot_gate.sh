@@ -30,7 +30,7 @@
 #               the loader by different routes - one never opens a file, the
 #               other opens it and fails to read it as a document - and a fence
 #               that caught only one would be half a fence.
-#   envelope    the worker with a well-formed document that publishes its OWN
+#   envelope    the worker with a well-formed document that publishes a peer
 #               key and NOT the gateway's. This is F4's own sentence: the
 #               material the worker verifies `ZeroShip-User` under is missing,
 #               everything else is present, and it must still refuse.
@@ -45,7 +45,8 @@
 #               format carries a key id and NO ISSUER, and both the signer and
 #               the loader derive that id from the public bytes. The worker's
 #               verifier resolves the gateway's key BY ISSUER STRING. So a
-#               document publishing the WORKER's own key under the GATEWAY's
+#               document publishing the WORKER's own key - its unit's enroller
+#               key, the one key it loads from disk - under the GATEWAY's
 #               issuer makes the worker's own signer stamp exactly the key id
 #               its own verifier looks up: the worker can MINT the identity
 #               envelope it then ACCEPTS. That is precisely what F4 forbids,
@@ -81,7 +82,10 @@
 # would make sharper.
 #
 # THE MATERIAL ARRIVES THROUGH THE ENVIRONMENT, matching
-# `deploy/compose/docker-compose.yml`, which supplies all six paths that way.
+# `deploy/compose/docker-compose.yml`, which supplies every path that way. The
+# worker's own key material is its deployment unit's ENROLLER CREDENTIAL
+# (`worker.enroller_file`): no worker holds a `svc/worker` role key, so no
+# document below publishes one for it.
 # Note that an EMPTY environment variable is NOT the unset case: clap rejects
 # `ZEROSHIP_GATEWAY_SERVICE_KEY_FILE=` with "a value is required" before any of
 # this runs, so the unset arm omits the variables entirely. A gate that spelled
@@ -97,9 +101,10 @@
 #     verifies a service assertion, so neither holds a peer bundle and neither
 #     has anything to refuse.
 #   - how the `forged` document gets WRITTEN. This gate rules on the reader.
-#     The writer is `zeroship dev init`, whose `SERVICE_KEY_FILES` rustdoc has
-#     always said four keys and not one shared file; it now refuses a secrets
-#     directory in which two of the four paths hold the same key, and
+#     The writer is `zeroship dev init`, whose `SERVICE_KEY_FILES` rustdoc says
+#     one key per service and not one shared file; it refuses a secrets
+#     directory in which two service key paths, or a service key path and the
+#     worker enroller credential, hold the same key, and
 #     `dev_init_refuses_when_two_service_key_paths_hold_the_same_key` in
 #     crates/zeroship-cli/tests/dev_init_test.rs is the one-variable control for
 #     that. The two halves are deliberately separate: an operator can hand a
@@ -172,11 +177,11 @@ peer_entry() {
     "$DOMAIN" "$1" "$2"
 }
 
-new_key svc-worker || { echo "REFUSED: could not generate the worker key" >&2; exit 1; }
+new_key worker-enroller || { echo "REFUSED: could not generate the worker enroller key" >&2; exit 1; }
 new_key svc-gateway || { echo "REFUSED: could not generate the gateway key" >&2; exit 1; }
 # A key belonging to NEITHER launched binary, for the third `forged` launch.
 new_key svc-control || { echo "REFUSED: could not generate the control key" >&2; exit 1; }
-WORKER_X="$(public_x svc-worker)"
+WORKER_X="$(public_x worker-enroller)"
 GATEWAY_X="$(public_x svc-gateway)"
 CONTROL_X="$(public_x svc-control)"
 [ -n "$WORKER_X" ] && [ -n "$GATEWAY_X" ] && [ -n "$CONTROL_X" ] || {
@@ -193,13 +198,25 @@ if [ "$WORKER_X" = "$GATEWAY_X" ] || [ "$WORKER_X" = "$CONTROL_X" ] \
   exit 1
 fi
 
+# The worker's credential: the enroller key above and an enroller id, in the
+# one document `ServiceKeyring::load_worker_enroller` reads. The id is a
+# well-formed `wen_` typed id; no Control is involved, because every arm here
+# stops before enrolment.
+ENROLLER_FILE="$TMP/worker-enroller.json"
+{
+  printf '{"enroller_id":"wen_0000000000000000000000001","private_key":"'
+  awk '{printf "%s\\n", $0}' "$TMP/worker-enroller.pem"
+  printf '"}'
+} > "$ENROLLER_FILE"
+chmod 600 "$ENROLLER_FILE"
+
 PEERS="$TMP/service-peers.json"
 printf '{"keys":[%s,%s]}' \
-  "$(peer_entry "$WORKER_NAME" "$WORKER_X")" \
+  "$(peer_entry "$CONTROL_NAME" "$CONTROL_X")" \
   "$(peer_entry "$GATEWAY_NAME" "$GATEWAY_X")" > "$PEERS"
 # The same document with the GATEWAY entry removed and nothing else changed.
 PEERS_NO_GATEWAY="$TMP/service-peers-no-gateway.json"
-printf '{"keys":[%s]}' "$(peer_entry "$WORKER_NAME" "$WORKER_X")" > "$PEERS_NO_GATEWAY"
+printf '{"keys":[%s]}' "$(peer_entry "$CONTROL_NAME" "$CONTROL_X")" > "$PEERS_NO_GATEWAY"
 PEERS_MALFORMED="$TMP/service-peers-malformed.json"
 printf '{ this is not a JWKS document' > "$PEERS_MALFORMED"
 PEERS_ABSENT="$TMP/service-peers-absent.json"
@@ -209,13 +226,13 @@ rm -f "$PEERS_ABSENT"
 # Each is `$PEERS` with ONE member's `x` changed and nothing else, so the arm
 # below and the `configured` control differ in exactly one variable.
 #
-# The WORKER's own key published under the GATEWAY's issuer as well. The worker
-# signs with the private half; the loader files the public half under the
-# gateway issuer; the key ids agree because both are the thumbprint of the same
-# bytes. So the worker mints an identity envelope its own verifier accepts.
+# The WORKER's own key published under the GATEWAY's issuer. The worker signs
+# with the private half; the loader files the public half under the gateway
+# issuer; the key ids agree because both are the thumbprint of the same bytes.
+# So the worker mints an identity envelope its own verifier accepts.
 PEERS_WORKER_MINTS_ITS_OWN="$TMP/service-peers-worker-mints-its-own.json"
 printf '{"keys":[%s,%s]}' \
-  "$(peer_entry "$WORKER_NAME" "$WORKER_X")" \
+  "$(peer_entry "$CONTROL_NAME" "$CONTROL_X")" \
   "$(peer_entry "$GATEWAY_NAME" "$WORKER_X")" > "$PEERS_WORKER_MINTS_ITS_OWN"
 # The same shape on the gateway: its own key also published as the worker's, so
 # it can present as the worker to any peer that reads this document.
@@ -223,13 +240,12 @@ PEERS_GATEWAY_MINTS_ITS_OWN="$TMP/service-peers-gateway-mints-its-own.json"
 printf '{"keys":[%s,%s]}' \
   "$(peer_entry "$WORKER_NAME" "$GATEWAY_X")" \
   "$(peer_entry "$GATEWAY_NAME" "$GATEWAY_X")" > "$PEERS_GATEWAY_MINTS_ITS_OWN"
-# The blast-radius case: the valid worker/gateway pair, PLUS control and auth
-# sharing one key that belongs to neither launched binary. Whoever holds it
-# presents as either service, and the process reading this document is not a
-# party to the collision - so a refusal here is a property of the document.
+# The blast-radius case: the valid gateway entry, PLUS control and auth sharing
+# one key that belongs to neither launched binary. Whoever holds it presents as
+# either service, and the process reading this document is not a party to the
+# collision - so a refusal here is a property of the document.
 PEERS_THIRD_PARTIES_SHARE="$TMP/service-peers-third-parties-share.json"
-printf '{"keys":[%s,%s,%s,%s]}' \
-  "$(peer_entry "$WORKER_NAME" "$WORKER_X")" \
+printf '{"keys":[%s,%s,%s]}' \
   "$(peer_entry "$GATEWAY_NAME" "$GATEWAY_X")" \
   "$(peer_entry "$CONTROL_NAME" "$CONTROL_X")" \
   "$(peer_entry "$AUTH_NAME" "$CONTROL_X")" > "$PEERS_THIRD_PARTIES_SHARE"
@@ -243,8 +259,10 @@ CONFIGURED_EXAMINED=0
 
 # The refusal every arm below looks for. Read as a substring of the boot log,
 # which is JSON with a wall-clock timestamp, so a whole-line comparison is not
-# available and is not wanted: what is asserted is the SENTENCE.
+# available and is not wanted: what is asserted is the SENTENCE. The worker's
+# key material is its enroller credential, so it names that.
 REFUSAL="refusing to start - service key material rejected"
+WORKER_REFUSAL="refusing to start - enroller credential rejected"
 
 # The NEXT boot refusal each binary reaches once it is past this fence: the
 # worker's database posture check, the gateway's broker master secret. Each is
@@ -254,8 +272,8 @@ WORKER_NEXT="refusing unsafe database authority"
 GATEWAY_NEXT="without a readable"
 
 # EVERY REFUSAL ARM CALLS THIS, and it exists because of a measurement rather
-# than for symmetry. Mutating the key-material loader - `load_role_material` in
-# the worker, `build_service_auth` in the gateway - to log its message and then
+# than for symmetry. Mutating the key-material loader - `load_enroller_material`
+# in the worker, `build_service_auth` in the gateway - to log its message and then
 # CARRY ON rather than exit left this gate fully green: the message
 # assertion still matched the line the mutation had not touched, and the
 # non-zero exit was supplied by the later refusal. Two assertions, and both were
@@ -310,10 +328,10 @@ UNSET_EXAMINED=$((UNSET_EXAMINED + 1))
 if [ "$status" -eq 0 ]; then
   note_fail "zeroship-worker BOOTED with no service key material (exit 0)"
 else
-  grep -qF "$REFUSAL" "$TMP/wk_unset.log" \
-    || note_fail "the worker's unconfigured refusal does not say '$REFUSAL'"
+  grep -qF "$WORKER_REFUSAL" "$TMP/wk_unset.log" \
+    || note_fail "the worker's unconfigured refusal does not say '$WORKER_REFUSAL'"
   # It cannot name a file, so it must name the settings.
-  for token in "worker.service_key_file" "worker.service_peers_file"; do
+  for token in "worker.enroller_file" "worker.service_peers_file"; do
     grep -qF "$token" "$TMP/wk_unset.log" \
       || note_fail "the worker's unconfigured refusal does not name '$token'"
   done
@@ -322,13 +340,13 @@ stopped_at_the_fence "$TMP/wk_unset.log" "$WORKER_NEXT" "the unconfigured worker
 
 # --- ARM: missing ----------------------------------------------------------
 status=$(worker_run "$TMP/wk_missing.log" \
-  "ZEROSHIP_WORKER_SERVICE_KEY_FILE=$TMP/svc-worker.pem" \
+  "ZEROSHIP_WORKER_ENROLLER_FILE=$ENROLLER_FILE" \
   "ZEROSHIP_WORKER_SERVICE_PEERS_FILE=$PEERS_ABSENT")
 MISSING_EXAMINED=$((MISSING_EXAMINED + 1))
 if [ "$status" -eq 0 ]; then
   note_fail "zeroship-worker BOOTED with an absent peer document (exit 0)"
 else
-  grep -qF "$REFUSAL" "$TMP/wk_missing.log" \
+  grep -qF "$WORKER_REFUSAL" "$TMP/wk_missing.log" \
     || note_fail "the worker did not refuse an absent peer document by name"
   grep -qF "$PEERS_ABSENT" "$TMP/wk_missing.log" \
     || note_fail "the worker's refusal does not name the absent file $PEERS_ABSENT"
@@ -337,13 +355,13 @@ stopped_at_the_fence "$TMP/wk_missing.log" "$WORKER_NEXT" "the worker with an ab
 
 # --- ARM: malformed --------------------------------------------------------
 status=$(worker_run "$TMP/wk_malformed.log" \
-  "ZEROSHIP_WORKER_SERVICE_KEY_FILE=$TMP/svc-worker.pem" \
+  "ZEROSHIP_WORKER_ENROLLER_FILE=$ENROLLER_FILE" \
   "ZEROSHIP_WORKER_SERVICE_PEERS_FILE=$PEERS_MALFORMED")
 MALFORMED_EXAMINED=$((MALFORMED_EXAMINED + 1))
 if [ "$status" -eq 0 ]; then
   note_fail "zeroship-worker BOOTED with an unparseable peer document (exit 0)"
 else
-  grep -qF "$REFUSAL" "$TMP/wk_malformed.log" \
+  grep -qF "$WORKER_REFUSAL" "$TMP/wk_malformed.log" \
     || note_fail "the worker did not refuse an unparseable peer document by name"
   grep -qF "$PEERS_MALFORMED" "$TMP/wk_malformed.log" \
     || note_fail "the worker's refusal does not name the unparseable file"
@@ -355,7 +373,7 @@ stopped_at_the_fence "$TMP/wk_malformed.log" "$WORKER_NEXT" "the worker with an 
 # `worker_key` used to turn the envelope check OFF. One member of the document
 # differs from the control below.
 status=$(worker_run "$TMP/wk_no_gateway.log" \
-  "ZEROSHIP_WORKER_SERVICE_KEY_FILE=$TMP/svc-worker.pem" \
+  "ZEROSHIP_WORKER_ENROLLER_FILE=$ENROLLER_FILE" \
   "ZEROSHIP_WORKER_SERVICE_PEERS_FILE=$PEERS_NO_GATEWAY")
 ENVELOPE_EXAMINED=$((ENVELOPE_EXAMINED + 1))
 if [ "$status" -eq 0 ]; then
@@ -372,8 +390,8 @@ stopped_at_the_fence "$TMP/wk_no_gateway.log" "$WORKER_NEXT" "the worker without
 # stamps the key id its own verifier resolves for the gateway.
 #
 # WHAT THIS ASSERTS AND WHY IT IS NOT THE LOADER'S EXACT WORDING. The refusal
-# has to come from `ServiceKeyring::load`, which the worker reports as
-# `$REFUSAL`; asserting the loader's own sentence would pin this gate to a
+# has to come from `ServiceKeyring::load_worker_enroller`, which the worker
+# reports as `$WORKER_REFUSAL`; asserting the loader's own sentence would pin this gate to a
 # message in a crate it does not own. `stopped_at_the_fence` supplies the other
 # half - the discriminator this file already relies on, because a fence that
 # logs and carries on satisfies a message assertion and a non-zero exit both.
@@ -381,20 +399,20 @@ forged_worker() {
   local log="$1" peers="$2" label="$3"
   local status
   status=$(worker_run "$log" \
-    "ZEROSHIP_WORKER_SERVICE_KEY_FILE=$TMP/svc-worker.pem" \
+    "ZEROSHIP_WORKER_ENROLLER_FILE=$ENROLLER_FILE" \
     "ZEROSHIP_WORKER_SERVICE_PEERS_FILE=$peers")
   FORGED_EXAMINED=$((FORGED_EXAMINED + 1))
   if [ "$status" -eq 0 ]; then
     note_fail "zeroship-worker BOOTED on a document where $label (exit 0)"
   else
-    grep -qF "$REFUSAL" "$log" \
+    grep -qF "$WORKER_REFUSAL" "$log" \
       || note_fail "the worker did not refuse a document where $label"
   fi
   stopped_at_the_fence "$log" "$WORKER_NEXT" "the worker on a document where $label"
 }
 
 forged_worker "$TMP/wk_forged_self.log" "$PEERS_WORKER_MINTS_ITS_OWN" \
-  "its OWN key is also published as the gateway's, so it can mint the identity envelope it accepts"
+  "its OWN enroller key is published as the gateway's, so it can mint the identity envelope it accepts"
 forged_worker "$TMP/wk_forged_third.log" "$PEERS_THIRD_PARTIES_SHARE" \
   "control and auth share one key, which is neither the worker's nor the gateway's"
 
@@ -402,10 +420,10 @@ forged_worker "$TMP/wk_forged_third.log" "$PEERS_THIRD_PARTIES_SHARE" \
 # Only the peer document changes from the arm above. The worker must walk past
 # this fence and fail on the NEXT one, which is the database posture check.
 worker_run "$TMP/wk_ok.log" \
-  "ZEROSHIP_WORKER_SERVICE_KEY_FILE=$TMP/svc-worker.pem" \
+  "ZEROSHIP_WORKER_ENROLLER_FILE=$ENROLLER_FILE" \
   "ZEROSHIP_WORKER_SERVICE_PEERS_FILE=$PEERS" > /dev/null
 CONFIGURED_EXAMINED=$((CONFIGURED_EXAMINED + 1))
-grep -qF "$REFUSAL" "$TMP/wk_ok.log" \
+grep -qF "$WORKER_REFUSAL" "$TMP/wk_ok.log" \
   && note_fail "zeroship-worker refused VALID key material"
 grep -qF "refusing unsafe database authority" "$TMP/wk_ok.log" \
   || note_fail "the worker did not reach the database check, so it never passed the fence"

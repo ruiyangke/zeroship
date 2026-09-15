@@ -43,11 +43,11 @@ const WORKER_LISTEN_BACKLOG: i32 = 1024;
 /// Every credential the worker needs, tagged by the subsystem that needs it.
 ///
 /// ONE, and unconditional: a worker that cannot poll control for versions is a
-/// worker with nothing to do. The dispatch credential is NOT here and is not an
-/// omission - it is an ed25519 key file loaded by
-/// [`load_role_material`], which refuses a file it cannot read or that other
-/// local users can, checks this audit cannot express and a strength floor on a
-/// shared string cannot replace.
+/// worker with nothing to do. The enrolment credential is NOT here and is not
+/// an omission - it is the enroller credential file loaded by
+/// [`load_enroller_material`], which refuses a file it cannot read or that
+/// other local users can, checks this audit cannot express and a strength floor
+/// on a shared string cannot replace.
 /// [`zeroship_core::config::audit_credentials`] handles the three material
 /// cases, so a `--check-config` run still never judges a secret it deliberately
 /// did not read.
@@ -129,14 +129,15 @@ fn unsigned_advance_bind_allowed(bind_host: &str, unsigned_advance: bool) -> boo
     !unsigned_advance || is_loopback_bind(bind_host)
 }
 
-/// Load the operator's `svc/worker` key material, or refuse to start.
+/// Load this worker's deployment-unit ENROLLER key material, or refuse to
+/// start.
 ///
-/// It is NOT this process's serving identity, and that is the change this
-/// function's name now carries. The role key is shared by every worker replica,
-/// so an assertion minted under it names a fleet; what serves is the INSTANCE
-/// identity `crate::enrol::enrol` exchanges this material for, once, after the
-/// port is bound. See that module for why there are two keyrings and why the
-/// split is forced rather than chosen.
+/// It is NOT this process's serving identity. The enroller key is shared by
+/// every worker of one deployment unit, so an assertion minted under it names a
+/// unit; what serves is the INSTANCE identity `crate::enrol::enrol` exchanges
+/// this material for, once, after the port is bound. No `svc/worker` role key
+/// is loaded, because none exists. See that module for why there are two
+/// keyrings and why the split is forced rather than chosen.
 ///
 /// The verifier is the TRANSPORT-ONLY one. The worker is a callee on exactly
 /// one edge - the gateway's dispatch hop - and that hop carries every end-user
@@ -147,16 +148,17 @@ fn unsigned_advance_bind_allowed(bind_host: &str, unsigned_advance: bool) -> boo
 ///
 /// EVERY OUTCOME BUT ONE IS AN EXIT, and that is fence F4 of
 /// `docs/proposals/2026-09-05-auth-foundation-redesign.md` in full: "absent a
-/// configured gateway public key the worker refuses to start". Unconfigured,
-/// unreadable, unparseable and missing-the-gateway-key are one fate, because
-/// from the outside they produce one behaviour - a worker that binds its port,
-/// passes a liveness probe and turns away every request that reaches it. Step 3
-/// landed the request-time half of this and left the startup half owing; this
-/// is the half that is loud where an operator is looking.
+/// configured gateway public key the worker refuses to start". An unconfigured,
+/// unreadable, insecurely permissioned or unparseable enroller credential or
+/// peer document, and a peer document missing the gateway key, are one fate,
+/// because from the outside they produce one behaviour - a worker that binds
+/// its port, passes a liveness probe and turns away every request that reaches
+/// it.
 ///
-/// The unconfigured case is refused by `ServiceKeyring::load` rather than by a
-/// branch here, so no future edit of this function can restore the escape by
-/// giving the empty path its own arm.
+/// The unconfigured credential file is refused by
+/// `ServiceKeyring::load_worker_enroller` rather than by a branch here, so no
+/// future edit of this function can restore the escape by giving the empty path
+/// its own arm.
 ///
 /// The same peer document also supplies the GATEWAY's public key for the
 /// `ZeroShip-User` identity envelope, and a document that omits it is a HARD
@@ -164,14 +166,14 @@ fn unsigned_advance_bind_allowed(bind_host: &str, unsigned_advance: bool) -> boo
 /// opposite - an empty `worker_key` turned the envelope check off and the
 /// bearer check with it - so the missing-key branch here is the point of the
 /// change, not an edge case of it.
-fn load_role_material(
-    key_file: &std::path::Path,
+fn load_enroller_material(
+    enroller_file: &std::path::Path,
     peers_file: &std::path::Path,
-) -> crate::enrol::RoleMaterial {
+) -> crate::enrol::EnrollerMaterial {
     use zeroship_core::service_peers::{service_issuer, ServiceKeyring};
     use zeroship_core::user_envelope::UserEnvelopeVerifier;
 
-    let issuer = match service_issuer(zeroship_core::service_peers::WORKER_SERVICE_NAME) {
+    let role = match service_issuer(zeroship_core::service_peers::WORKER_SERVICE_NAME) {
         Ok(issuer) => issuer,
         Err(error) => {
             tracing::error!(%error, "worker: refusing to start - worker service issuer is malformed");
@@ -185,13 +187,13 @@ fn load_role_material(
             std::process::exit(1);
         }
     };
-    let mut keyring = match ServiceKeyring::load(issuer.clone(), key_file, peers_file) {
+    let mut keyring = match ServiceKeyring::load_worker_enroller(enroller_file, peers_file) {
         Ok(keyring) => keyring,
         Err(error) => {
             tracing::error!(
                 %error,
-                "worker: refusing to start - service key material rejected; set \
-                 worker.service_key_file and worker.service_peers_file"
+                "worker: refusing to start - enroller credential rejected; set \
+                 worker.enroller_file and worker.service_peers_file"
             );
             std::process::exit(1);
         }
@@ -221,7 +223,7 @@ fn load_role_material(
             std::process::exit(1);
         }
     };
-    crate::enrol::RoleMaterial::new(keyring, bundle, user_envelope, issuer)
+    crate::enrol::EnrollerMaterial::new(keyring, bundle, user_envelope, role)
 }
 
 fn main() -> std::io::Result<()> {
@@ -332,6 +334,12 @@ fn main() -> std::io::Result<()> {
             CheckValue::Plain(boot.overlay.source.to_string()),
         );
         report.field("control_url", CheckValue::Plain(control_url.clone()));
+        // Presence only: the credential is a private key, and a dry run does
+        // not read secret material.
+        report.field(
+            "enroller_file_configured",
+            CheckValue::Flag(!settings.enroller_file.get().as_os_str().is_empty()),
+        );
         report.field("worker_threads", CheckValue::Count(workers_count));
         report.field("max_isolates", CheckValue::Count(max_isolates));
         report.field(
@@ -449,8 +457,8 @@ fn main() -> std::io::Result<()> {
     // hop claims no `jti` precisely so inbound authentication needs no database
     // at all. Reading two files needs no async runtime, so nothing is lost by
     // doing it first.
-    let role_material = load_role_material(
-        settings.service_key_file.get(),
+    let enroller_material = load_enroller_material(
+        settings.enroller_file.get(),
         settings.service_peers_file.get(),
     );
 
@@ -652,18 +660,18 @@ fn main() -> std::io::Result<()> {
     };
 
     // EVERY FAILURE HERE REFUSES THE BOOT, and that is the whole of it. A
-    // worker that logged this and carried on would serve traffic under the
-    // SHARED role key while control's registry either knows nothing about it or
-    // holds a row for a process that never finished starting - and from the
-    // outside it would look exactly like a worker that enrolled, which is the
-    // failure shape this platform keeps re-learning.
+    // worker that logged this and carried on would have no identity to verify
+    // dispatch or read an app with, while control's registry either knows
+    // nothing about it or holds a row for a process that never finished
+    // starting - and from the outside it would look exactly like a worker that
+    // enrolled, which is the failure shape this platform keeps re-learning.
     //
-    // `enrol` CONSUMES the role material, so the operator's shared key is
+    // `enrol` CONSUMES the enroller material, so the unit's shared key is
     // spent on this one call and is unreachable afterwards. What comes back
     // mints under `svc/worker/<wkr_id>` and is addressed as `svc/worker`;
-    // everything below - the version poller, every reconcile, every dispatch -
-    // is handed that and only that.
-    let service_auth = match enrol::enrol(role_material, &control_url, port).await {
+    // everything below - every reconcile, every dispatch, the CDC relay and
+    // the retirement at exit - is handed that and only that.
+    let service_auth = match enrol::enrol(enroller_material, &control_url, port).await {
         Ok(auth) => Arc::new(auth),
         Err(error) => {
             tracing::error!(
@@ -708,6 +716,10 @@ fn main() -> std::io::Result<()> {
     };
 
 
+    // Kept back for the retirement after the server drains: the config itself
+    // moves into the server factory below.
+    let retirement = (Arc::clone(&service_auth), control_url.clone());
+
     let config = Arc::new(WorkerConfig {
         service_auth,
         control_url,
@@ -733,9 +745,9 @@ fn main() -> std::io::Result<()> {
     // known-app set, so env entries for deleted apps don't leak forever.
     //
     // It is also the LAST thing before the server that talks to control, and it
-    // is now downstream of enrolment - so no outbound call this process makes
-    // can be minted under the role key. Nothing before this point mints at all:
-    // the poller's own credential is the shared control key
+    // is downstream of enrolment - so every service assertion this process
+    // mints after enrolment is the instance's, and the enroller key is already
+    // gone. The poller's own credential is the shared control key
     // (`sync::version_poll_authorization`), and the two service-assertion
     // callers - `fetch_app_version` and `fetch_app_env` - are reachable only
     // from the per-thread reconcile loop, the dispatch handler and the log
@@ -823,6 +835,23 @@ fn main() -> std::io::Result<()> {
     // (fetch body readers, stream drainers) whose futures the pump is
     // polling get one last chance to run during the drain window.
     let run_result = server.run().await;
+
+    // THE INSTANCE RETIRES ITSELF, and only here: after the drain, so no
+    // request still in flight loses its identity mid-read, and only on the
+    // graceful path, because a process that crashed says nothing at all. The
+    // server factory does not stop this runtime when it stops, so the call
+    // runs on the same thread that enrolled. A retirement that fails is
+    // logged and the exit carries on - the row then stays `active` with no
+    // process behind it, which is what a crash leaves.
+    let (retirement_auth, retirement_control) = retirement;
+    match enrol::retire(&retirement_auth, &retirement_control).await {
+        Ok(()) => tracing::info!("worker: instance retired at control"),
+        Err(error) => tracing::warn!(
+            %error,
+            "worker: could not retire this instance at control; it stays active until its \
+             enroller is revoked"
+        ),
+    }
     tracing::info!("worker shutdown complete");
     run_result
         })

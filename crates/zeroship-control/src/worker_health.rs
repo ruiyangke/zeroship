@@ -33,8 +33,8 @@
 //! THE PROBE TARGET IS THE DERIVED ADDRESS. `advertise_host` and
 //! `advertise_port` are written by control from the accepted enrolment socket and
 //! frozen by a trigger, so probing them cannot be redirected by the registrant.
-//! Probing a registrant-supplied address would hand a role-key holder the ability
-//! to answer health checks on behalf of a worker it does not run.
+//! Probing a registrant-supplied address would hand an enroller-key holder the
+//! ability to answer health checks on behalf of a worker it does not run.
 //!
 //! `tick` RETURNS WHAT IT SAW rather than only logging it. A monitor that logs
 //! "unhealthy" and changes nothing prints exactly what a working monitor prints;

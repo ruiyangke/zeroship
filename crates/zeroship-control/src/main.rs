@@ -671,6 +671,12 @@ fn main() -> std::io::Result<()> {
             "worker_enrolment_declared",
             CheckValue::Flag(worker_enrolment.is_declared()),
         );
+        // Presence only: the file is read, and its enrollers imported, at
+        // boot, which a dry run does not reach.
+        report.field(
+            "worker_enrollers_file_configured",
+            CheckValue::Flag(!settings.worker_enrollers_file.get().as_os_str().is_empty()),
+        );
         report.field("origin_scheme", CheckValue::Plain(origin_scheme.to_string()));
         report.field("blob_store", CheckValue::Plain(blob_store_root.clone()));
         report.field("blob_store_remote", CheckValue::Flag(blob_store_is_remote));
@@ -876,6 +882,32 @@ fn main() -> std::io::Result<()> {
             registered = report.registered,
             pruned = report.pruned,
             "control: first-party OAuth clients reconciled from config"
+        ),
+        Err(message) => {
+            eprintln!("control: {message}");
+            std::process::exit(2);
+        }
+    }
+
+    // The worker enrollers this deployment provisions, from the operator's
+    // import file. FATAL on refusal for the reason the OAuth reconcile above
+    // is: nobody is watching, and a skipped import is every worker refused at
+    // enrolment while this process looks configured.
+    match zeroship_control::worker_enrolment::import_enrollers(
+        &registry,
+        settings.worker_enrollers_file.get(),
+    )
+    .await
+    {
+        Ok(Some(report)) => tracing::info!(
+            inserted = report.inserted,
+            unchanged = report.unchanged,
+            revoked = report.revoked,
+            "control: worker enrollers imported from config"
+        ),
+        Ok(None) => tracing::info!(
+            "control: no worker enroller file configured; only enrollers recorded by an \
+             earlier boot can enrol workers"
         ),
         Err(message) => {
             eprintln!("control: {message}");
@@ -1436,6 +1468,10 @@ fn main() -> std::io::Result<()> {
             .service(
                 web::resource("/internal/workers/enrol")
                     .route(web::post().to(internal::enrol_worker_instance)),
+            )
+            .service(
+                web::resource("/internal/workers/retire")
+                    .route(web::post().to(internal::retire_worker_instance)),
             )
             // The erasure seam: the auth service asks, before it opens the
             // grace window and again before the reaper deletes, whether this

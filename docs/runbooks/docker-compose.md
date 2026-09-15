@@ -44,12 +44,19 @@ paths because Compose must receive both the custom env-file and mount path.
 The secret directory contains these private files:
 
 `migrate-dsn` `gateway-signing.pem` `auth-signing.pem` `broker-secret`
-`pairwise-salt` `refresh-hash-key` `refresh-idem-key`
+`pairwise-salt` `refresh-hash-key` `refresh-idem-key` `svc-gateway.pem`
+`svc-control.pem` `svc-auth.pem` `worker-enroller.json`
+
+and these public ones: `service-peers.json`, the peer document derived from the
+service keys, and `worker-enrollers.json`, the enroller import file Control
+reads. `worker-enroller.json` is this host's worker enroller credential; every
+`worker` replica mounts it. There is no worker service key: see
+`docs/runbooks/worker-enrollers.md`.
 
 The list comes from `secret_specs()` in `crates/zeroship-cli/src/dev.rs` plus
 `pairwise-salt`, which is written separately because its bytes must equal the
-`.env` scalar below. An earlier version omitted `migrate-dsn`, the privileged
-DSN.
+`.env` scalar below, and the two derived public documents. An earlier version
+omitted `migrate-dsn`, the privileged DSN.
 
 The env overlay contains these generated scalar values:
 
