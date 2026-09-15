@@ -3,8 +3,8 @@
 //!
 //! Every admission takes the app lock, then the worker lock, then reads the
 //! eligibility facts, and reads them again before commit. It admits only when
-//! the app is not deleted, the app's zone equals the worker's enroller zone,
-//! the instance is active, the registration is ready and unexpired, and the
+//! the app is not deleted, the app's zone equals the instance's zone,
+//! the instance is live, the registration is ready and unexpired, and the
 //! worker has spare capacity. Archived apps stay placeable so maintenance jobs
 //! can drain them; policy still refuses their admission, dispatch and ingress.
 
@@ -355,8 +355,8 @@ impl Coordinator {
         Ok((row, sample, expires))
     }
 
-    /// A live placement on a live worker whose enrollment is active and whose
-    /// enroller zone is the app's zone. A deleted or unknown app has no owner.
+    /// A live placement on a live worker Control still considers live and whose
+    /// zone is the app's zone. A deleted or unknown app has no owner.
     pub(crate) async fn has_owner(
         &self,
         tx: &Database,

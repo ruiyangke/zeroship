@@ -13,4 +13,5 @@ mod common;
 mod billing_pipeline_redpanda_e2e;
 mod config_env_tier;
 mod provider_conformance;
+mod startup_refusal_test;
 mod trusted_clients_test;

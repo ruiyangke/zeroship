@@ -7,22 +7,32 @@
 //! the manager returned for that exact request. A lost reply, a timeout, a
 //! refusal or a failed confirmation leaves the intent pending, and the next
 //! attempt resends the same revision, which the manager replays exactly.
+//!
+//! An app whose attempt fails is not attempted again until its retry delay
+//! has passed. The delay doubles with each consecutive failure up to a cap and
+//! resets after a success, while every other app keeps publishing. A failure
+//! is therefore logged once per attempt, not once per pass.
 
 use super::catalog::{self, CatalogError, ACKNOWLEDGED, ACTIVATE, DISABLE, PENDING};
 use super::models::catalog::app_lifecycle_intents as intents;
-use crate::AppState;
-use std::{future::Future, pin::Pin, sync::Arc, time::Duration};
+use super::shared::{Catalog, Closing};
+use futures::future::{self, Either};
+use std::{
+    collections::{HashMap, HashSet},
+    future::Future,
+    pin::{pin, Pin},
+    sync::Arc,
+    time::{Duration, Instant},
+};
 use zeroship_core::{
     app_id::AppId,
+    service_peers::ServiceAuth,
     workflow_coordination::Revision,
     workflow_jobs::{DeploymentId, JobOperation, JobSpec},
     workflow_schedules::{ActivateSchedules, DisableSchedules, RegisterSchedules},
 };
 use zeroship_data_orm::orm::{Database, FromRow};
-use zeroship_workflow_client::{ControlCoordinator, Error as ManagerError, Options};
-
-/// Delay between publication passes.
-pub const DEFAULT_TICK: Duration = Duration::from_secs(1);
+use zeroship_workflow_client::{ControlCoordinator, Error as ManagerError, Options, Transport};
 
 /// A boxed manager exchange, local to the publisher's compio thread.
 pub type Exchange<'a, T> = Pin<Box<dyn Future<Output = Result<T, ManagerError>> + 'a>>;
@@ -48,13 +58,20 @@ impl ScheduleManager for ControlCoordinator {
     }
 }
 
-/// Page and attempt bounds for one publication pass.
+/// Page, attempt and pacing bounds of the publisher.
 #[derive(Debug, Clone, Copy)]
 pub struct PublisherConfig {
     /// Pending intents read per pass.
     pub batch_size: i64,
     /// Bound on one intent's manager exchange and its confirmation.
     pub attempt_timeout: Duration,
+    /// Pause between passes that read their page.
+    pub interval: Duration,
+    /// Delay before an app whose attempt failed is attempted again, and the
+    /// pause after a pass that could not read its page.
+    pub retry_initial: Duration,
+    /// Cap of a retry delay, which doubles with each consecutive failure.
+    pub retry_max: Duration,
 }
 
 impl Default for PublisherConfig {
@@ -62,18 +79,67 @@ impl Default for PublisherConfig {
         Self {
             batch_size: 128,
             attempt_timeout: Duration::from_secs(30),
+            interval: Duration::from_secs(1),
+            retry_initial: Duration::from_secs(1),
+            retry_max: Duration::from_secs(60),
         }
     }
 }
 
+impl PublisherConfig {
+    /// Check that every bound can be honoured.
+    ///
+    /// # Errors
+    /// Names the first bound that cannot.
+    pub fn validate(&self) -> Result<(), &'static str> {
+        if self.batch_size <= 0 || self.batch_size > zeroship_data_orm::sql::MAX_ROW_LIMIT {
+            return Err("the publication batch size must be positive and within the row limit");
+        }
+        if self.attempt_timeout.is_zero() {
+            return Err("the publication attempt timeout must be positive");
+        }
+        if self.interval.is_zero() {
+            return Err("the publication interval must be positive");
+        }
+        if self.retry_initial.is_zero() {
+            return Err("the first publication retry delay must be positive");
+        }
+        if self.retry_max < self.retry_initial {
+            return Err("the publication retry cap must not be below the first retry delay");
+        }
+        if Instant::now().checked_add(self.retry_max).is_none() {
+            return Err("the publication retry cap is out of range");
+        }
+        Ok(())
+    }
+
+    /// The delay after a failure that followed a delay of `previous`, if any.
+    fn next_delay(&self, previous: Option<Duration>) -> Duration {
+        previous
+            .map_or(self.retry_initial, |delay| delay.saturating_mul(2))
+            .min(self.retry_max)
+    }
+}
+
 /// What one pass did. `deferred` counts intents left behind an earlier
-/// failure of the same app.
+/// failure of the same app in this pass; `waiting` counts intents of apps
+/// whose retry delay has not passed.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct PublisherStats {
     pub attempted: usize,
     pub acknowledged: usize,
     pub failed: usize,
     pub deferred: usize,
+    pub waiting: usize,
+}
+
+/// The retry an app is waiting for after a failed attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Retry {
+    /// The delay since the failed attempt.
+    pub delay: Duration,
+    /// The earliest pass that attempts the app again.
+    pub at: Instant,
 }
 
 /// Why an intent stayed pending.
@@ -118,6 +184,7 @@ pub struct Publisher<M> {
     manager: M,
     config: PublisherConfig,
     after: Option<String>,
+    retries: HashMap<String, Retry>,
 }
 
 impl<M> std::fmt::Debug for Publisher<M> {
@@ -125,7 +192,16 @@ impl<M> std::fmt::Debug for Publisher<M> {
         f.debug_struct("Publisher")
             .field("config", &self.config)
             .field("after", &self.after)
+            .field("retries", &self.retries)
             .finish_non_exhaustive()
+    }
+}
+
+impl<M> Publisher<M> {
+    /// The retry `app` is waiting for, if its last attempt failed.
+    #[must_use]
+    pub fn retry(&self, app: &AppId) -> Option<Retry> {
+        self.retries.get(app.as_str()).copied()
     }
 }
 
@@ -139,29 +215,36 @@ impl<M: ScheduleManager> Publisher<M> {
         manager: M,
         config: PublisherConfig,
     ) -> Result<Self, CatalogError> {
-        if config.batch_size <= 0
-            || config.batch_size > zeroship_data_orm::sql::MAX_ROW_LIMIT
-            || config.attempt_timeout.is_zero()
-        {
-            return Err(CatalogError::Storage("invalid publication bounds"));
-        }
+        config.validate().map_err(CatalogError::Storage)?;
         database.entity::<intents::Entity>()?;
         Ok(Self {
             database,
             manager,
             config,
             after: None,
+            retries: HashMap::new(),
         })
     }
 
-    /// Publish one bounded page. Pending intents are read in `(app, revision)`
-    /// order; an app's first failure defers its later intents, and the cursor
-    /// then moves to the next app so a blocked app cannot starve the others.
+    /// Publish one bounded page now. See [`Self::tick_at`].
+    ///
+    /// # Errors
+    /// Reports a failed page read.
+    pub async fn tick(&mut self) -> Result<PublisherStats, CatalogError> {
+        self.tick_at(Instant::now()).await
+    }
+
+    /// Publish one bounded page as of `now`. Pending intents are read in
+    /// `(app, revision)` order. An app waiting out a retry delay is skipped;
+    /// an app's failure defers its later intents and schedules its retry; and
+    /// the cursor then moves to the next app so a blocked app cannot starve
+    /// the others.
     ///
     /// # Errors
     /// Reports a failed page read. Individual failures leave their intents
     /// pending and are counted in the returned statistics.
-    pub async fn tick(&mut self) -> Result<PublisherStats, CatalogError> {
+    pub async fn tick_at(&mut self, now: Instant) -> Result<PublisherStats, CatalogError> {
+        let from_start = self.after.is_none();
         let mut filter = intents::state.eq(PENDING)?;
         if let Some(after) = &self.after {
             filter = filter.and(intents::app_id.gt(after.as_str())?);
@@ -182,8 +265,13 @@ impl<M: ScheduleManager> Publisher<M> {
         let mut stats = PublisherStats::default();
         let mut blocked: Option<&str> = None;
         for intent in &page {
-            if blocked == Some(intent.app_id.as_str()) {
+            let app = intent.app_id.as_str();
+            if blocked == Some(app) {
                 stats.deferred += 1;
+                continue;
+            }
+            if self.retries.get(app).is_some_and(|retry| now < retry.at) {
+                stats.waiting += 1;
                 continue;
             }
             stats.attempted += 1;
@@ -191,22 +279,43 @@ impl<M: ScheduleManager> Publisher<M> {
                 .await
                 .unwrap_or(Err(PublishError::Timeout));
             match outcome {
-                Ok(()) => stats.acknowledged += 1,
+                Ok(()) => {
+                    stats.acknowledged += 1;
+                    self.retries.remove(app);
+                }
                 Err(error) => {
                     stats.failed += 1;
-                    blocked = Some(intent.app_id.as_str());
+                    blocked = Some(app);
+                    let delay = self
+                        .config
+                        .next_delay(self.retries.get(app).map(|retry| retry.delay));
+                    self.retries.insert(
+                        intent.app_id.clone(),
+                        Retry {
+                            delay,
+                            at: now + delay,
+                        },
+                    );
                     tracing::warn!(app_id = %intent.app_id, revision = intent.revision,
-                        action = %intent.action, %error, "lifecycle intent remains pending");
+                        action = %intent.action, %error, retry_in = ?delay,
+                        "lifecycle intent remains pending");
                 }
             }
         }
         let full = usize::try_from(self.config.batch_size)
             .map_err(|_| CatalogError::Storage("invalid publication bounds"))?;
-        self.after = if page.len() < full {
-            None
+        if page.len() < full {
+            if from_start {
+                // This page held every pending intent, so an app absent from
+                // it has nothing left to retry.
+                let pending: HashSet<&str> =
+                    page.iter().map(|intent| intent.app_id.as_str()).collect();
+                self.retries.retain(|app, _| pending.contains(app.as_str()));
+            }
+            self.after = None;
         } else {
-            page.last().map(|intent| intent.app_id.clone())
-        };
+            self.after = page.last().map(|intent| intent.app_id.clone());
+        }
         Ok(stats)
     }
 
@@ -351,46 +460,232 @@ fn same_receipt(action: &str, recorded: &str, received: &str) -> bool {
     }
 }
 
-/// Run the publisher for the life of the process. Without Control's service
-/// signer the manager routes are unreachable, and intents stay pending.
-pub async fn run(state: Arc<AppState>, coordinator_url: String, tick: Duration) {
-    if state.service_auth.signing_identity().is_none() {
-        tracing::warn!("control has no service signer; lifecycle intents remain pending");
-        return;
-    }
-    let manager = match ControlCoordinator::new(
-        &coordinator_url,
-        state.service_auth.clone(),
-        Options::default(),
-    ) {
-        Ok(manager) => manager,
-        Err(error) => {
-            tracing::error!(%error, "lifecycle publisher cannot reach the workflow manager");
-            return;
-        }
-    };
-    let mut publisher = None;
+/// Why Control cannot publish lifecycle intents. Each is a refusal to start:
+/// a Control that accepted deploys it could never publish would leave them
+/// pending forever.
+#[derive(Debug, thiserror::Error)]
+pub enum StartError {
+    #[error(
+        "Control has no Control service signer, and the workflow manager refuses unsigned \
+         schedule publication; configure control.service_key_file and control.service_peers_file"
+    )]
+    Unsigned,
+    #[error(
+        "control.workflow_coordinator_url is not a usable workflow coordinator origin ({0}); \
+         use an https origin without path, query or credentials, or http on a loopback address"
+    )]
+    Coordinator(ManagerError),
+    #[error("invalid lifecycle publisher bounds: {0}")]
+    Config(&'static str),
+    #[error("the control catalog could not start the lifecycle publisher: {0}")]
+    Catalog(CatalogError),
+}
+
+/// Check the coordinator origin publication would use, without keys, sockets
+/// or a client, so configuration checks refuse it before anything starts.
+///
+/// # Errors
+/// Refuses an origin the manager client would refuse.
+pub fn validate_coordinator(url: &str) -> Result<(), StartError> {
+    Transport::validate_config(url, Options::default()).map_err(StartError::Coordinator)
+}
+
+/// Start delivering lifecycle intents on one of the shared catalog's threads,
+/// with that thread's database, until the catalog closes.
+///
+/// # Errors
+/// Refuses invalid bounds, a coordinator origin the manager client refuses,
+/// and a Control without a Control service signer, before any intent is read.
+pub async fn start(
+    catalog: &Catalog,
+    service_auth: Arc<ServiceAuth>,
+    coordinator_url: &str,
+    config: PublisherConfig,
+) -> Result<(), StartError> {
+    config.validate().map_err(StartError::Config)?;
+    validate_coordinator(coordinator_url)?;
+    // Built here to refuse, and again on the catalog thread to use: the HTTP
+    // client's pooled streams belong to the thread that opens them.
+    manager(coordinator_url, service_auth.clone())?;
+    let url = coordinator_url.to_owned();
+    catalog
+        .spawn(move |database, closing| {
+            let manager = manager(&url, service_auth)
+                .map_err(|_| CatalogError::Storage("the workflow manager client was refused"))?;
+            let publisher = Publisher::new(database, manager, config)?;
+            Ok(Box::pin(serve(publisher, closing)))
+        })
+        .await
+        .map_err(StartError::Catalog)
+}
+
+/// The manager client publication would use. Building one is the signer
+/// check: the client refuses a missing signer and a signer that is not
+/// Control's, which are the two ways the schedule routes are unreachable.
+fn manager(url: &str, auth: Arc<ServiceAuth>) -> Result<ControlCoordinator, StartError> {
+    ControlCoordinator::new(url, auth, Options::default()).map_err(|error| match error {
+        ManagerError::Unauthenticated => StartError::Unsigned,
+        other => StartError::Coordinator(other),
+    })
+}
+
+/// Publish a pass every interval until the catalog closes. A pass that cannot
+/// read its page is logged once and followed by a pause that doubles up to
+/// the retry cap, so an unreachable catalog is not logged on every interval.
+async fn serve<M: ScheduleManager>(mut publisher: Publisher<M>, closing: Closing) {
+    let mut paused: Option<Duration> = None;
     loop {
-        if publisher.is_none() {
-            match catalog::connect(state.registry.workflow_store_db_url()).await {
-                Ok(database) => {
-                    match Publisher::new(database, manager.clone(), PublisherConfig::default()) {
-                        Ok(connected) => publisher = Some(connected),
-                        Err(error) => tracing::error!(%error, "lifecycle publisher is invalid"),
-                    }
-                }
-                Err(error) => tracing::error!(%error, "lifecycle publisher could not connect"),
+        let pass = {
+            let pass = pin!(publisher.tick());
+            match future::select(pass, pin!(closing.clone().wait())).await {
+                Either::Left((pass, _)) => pass,
+                Either::Right(_) => return,
             }
-        }
-        if let Some(publisher) = &mut publisher {
-            match publisher.tick().await {
-                Ok(visited) if visited.attempted != 0 => {
+        };
+        let config = publisher.config;
+        let pause = match pass {
+            Ok(visited) => {
+                paused = None;
+                if visited.attempted != 0 {
                     tracing::info!(?visited, "lifecycle publisher visited pending intents");
                 }
-                Ok(_) => {}
-                Err(error) => tracing::error!(%error, "lifecycle publication pass failed"),
+                config.interval
             }
+            Err(error) => {
+                let delay = config.next_delay(paused);
+                paused = Some(delay);
+                tracing::error!(%error, retry_in = ?delay, "lifecycle publication pass failed");
+                delay.max(config.interval)
+            }
+        };
+        let sleep = pin!(compio::time::sleep(pause));
+        if let Either::Right(_) = future::select(sleep, pin!(closing.clone().wait())).await {
+            return;
         }
-        compio::time::sleep(tick).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use zeroship_core::{
+        service_assertion::{ServiceSigningKey, ServiceTrustBundle, TransportAssertionVerifier},
+        service_peers::{service_issuer, ServiceKeyring, CONTROL_SERVICE_NAME, WORKER_SERVICE_NAME},
+    };
+
+    fn signer(service: &str) -> Arc<ServiceAuth> {
+        Arc::new(ServiceAuth::new(
+            ServiceKeyring::from_parts(
+                service_issuer(service).unwrap(),
+                ServiceSigningKey::generate(),
+                ServiceTrustBundle::new(),
+            )
+            .unwrap(),
+            Arc::new(TransportAssertionVerifier::new(ServiceTrustBundle::new())),
+        ))
+    }
+
+    #[test]
+    fn configuration_refuses_each_bound_it_cannot_honour() {
+        let usable = PublisherConfig::default();
+        assert_eq!(usable.validate(), Ok(()));
+        let refused = [
+            PublisherConfig {
+                batch_size: 0,
+                ..usable
+            },
+            PublisherConfig {
+                batch_size: zeroship_data_orm::sql::MAX_ROW_LIMIT + 1,
+                ..usable
+            },
+            PublisherConfig {
+                attempt_timeout: Duration::ZERO,
+                ..usable
+            },
+            PublisherConfig {
+                interval: Duration::ZERO,
+                ..usable
+            },
+            PublisherConfig {
+                retry_initial: Duration::ZERO,
+                ..usable
+            },
+            PublisherConfig {
+                retry_max: usable
+                    .retry_initial
+                    .saturating_sub(Duration::from_millis(1)),
+                ..usable
+            },
+            PublisherConfig {
+                retry_max: Duration::MAX,
+                ..usable
+            },
+        ];
+        for config in refused {
+            assert!(config.validate().is_err(), "{config:?}");
+        }
+    }
+
+    #[test]
+    fn retry_delay_doubles_from_the_first_delay_to_the_cap() {
+        let config = PublisherConfig {
+            retry_initial: Duration::from_millis(250),
+            retry_max: Duration::from_secs(1),
+            ..PublisherConfig::default()
+        };
+        let mut delays = Vec::new();
+        let mut previous = None;
+        for _ in 0..5 {
+            let delay = config.next_delay(previous);
+            delays.push(delay.as_millis());
+            previous = Some(delay);
+        }
+        assert_eq!(delays, [250, 500, 1000, 1000, 1000]);
+        // Doubling a delay near the representable range stays at the cap.
+        let wide = PublisherConfig {
+            retry_max: Duration::MAX,
+            ..config
+        };
+        assert_eq!(wide.next_delay(Some(Duration::MAX)), Duration::MAX);
+    }
+
+    #[test]
+    fn startup_refuses_an_unsigned_control_and_an_unusable_coordinator() {
+        const ORIGIN: &str = "http://127.0.0.1:9093";
+        assert!(validate_coordinator(ORIGIN).is_ok());
+        assert!(manager(ORIGIN, signer(CONTROL_SERVICE_NAME)).is_ok());
+
+        assert!(matches!(
+            manager(ORIGIN, Arc::new(ServiceAuth::unconfigured())),
+            Err(StartError::Unsigned)
+        ));
+        // The schedule routes accept only Control's own signer.
+        assert!(matches!(
+            manager(ORIGIN, signer(WORKER_SERVICE_NAME)),
+            Err(StartError::Unsigned)
+        ));
+        for origin in [
+            "",
+            "not a url",
+            "ftp://127.0.0.1:9093",
+            "http://coordinator.internal:9093",
+            "https://coordinator.internal/manager",
+            "https://user:secret@coordinator.internal",
+        ] {
+            assert!(
+                matches!(
+                    validate_coordinator(origin),
+                    Err(StartError::Coordinator(ManagerError::InvalidConfig))
+                ),
+                "{origin}"
+            );
+            assert!(
+                matches!(
+                    manager(origin, signer(CONTROL_SERVICE_NAME)),
+                    Err(StartError::Coordinator(ManagerError::InvalidConfig))
+                ),
+                "{origin}"
+            );
+        }
     }
 }

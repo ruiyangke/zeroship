@@ -49,8 +49,8 @@ case!(
     other_zone
 );
 case!(
-    sqlite_a_revoked_enrollers_worker_is_never_placed_or_renewed,
-    postgres_a_revoked_enrollers_worker_is_never_placed_or_renewed,
+    sqlite_an_instance_control_no_longer_admits_is_never_placed_or_renewed,
+    postgres_an_instance_control_no_longer_admits_is_never_placed_or_renewed,
     revoked
 );
 case!(
@@ -107,9 +107,9 @@ async fn other_zone(fixture: &Fixture) {
     assert!(driver.capacity().demands(&home).await.unwrap().is_empty());
 }
 
-/// A revoked enroller's instance fails the predicate and cannot renew its
-/// registration. A live placement is rechecked: once its instance is revoked
-/// it no longer owns the app, and the lane places the app elsewhere.
+/// An instance Control no longer admits fails the predicate and cannot renew
+/// its registration. A live placement is rechecked: once the instance stops
+/// being live it no longer owns the app, and the lane places it elsewhere.
 async fn revoked(fixture: &Fixture) {
     let host = Host::new(fixture, Rc::new(Facts::default())).await;
     let zone = ZoneId::mint();

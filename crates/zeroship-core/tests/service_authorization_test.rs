@@ -36,8 +36,8 @@ const CATALOG: &[ServiceEndpoint] = &[
     endpoints::CONTROL_APP_ENV,
     endpoints::CONTROL_APP_DATA_KEY,
     endpoints::CDC_SUBSCRIBE,
-    endpoints::CONTROL_WORKER_ENROL,
     endpoints::CONTROL_WORKER_RETIRE,
+    endpoints::CONTROL_WORKER_RENEW,
     endpoints::CONTROL_BILLING_RECONCILE,
     endpoints::CONTROL_SPEND_RECONCILE,
     endpoints::CONTROL_ERASURE_PREFLIGHT,
@@ -47,13 +47,12 @@ const CATALOG: &[ServiceEndpoint] = &[
 ];
 
 /// The principals the table grants to, which must each own exactly one row.
-const PRINCIPALS: [&str; 7] = [
+const PRINCIPALS: [&str; 6] = [
     "svc/control",
     "svc/auth",
     "svc/migrate-server",
     "svc/gateway",
     "svc/worker",
-    "svc/worker-enroller",
     "svc/workflow",
 ];
 
@@ -259,16 +258,16 @@ fn endpoint_catalog_records_exact_measured_operations() {
             "/internal/apps/{app_id}/data-key",
         ),
         (
-            endpoints::CONTROL_WORKER_ENROL,
-            "control",
-            "POST",
-            "/internal/workers/enrol",
-        ),
-        (
             endpoints::CONTROL_WORKER_RETIRE,
             "control",
             "POST",
             "/internal/workers/retire",
+        ),
+        (
+            endpoints::CONTROL_WORKER_RENEW,
+            "control",
+            "POST",
+            "/internal/workers/renew",
         ),
         (
             endpoints::CONTROL_BILLING_RECONCILE,
@@ -379,37 +378,51 @@ fn measured_allowlist_is_encoded_and_enforced_row_by_row() {
             // An instance may retire ITSELF on graceful exit, and nothing
             // else: the endpoint takes no selector.
             endpoints::CONTROL_WORKER_RETIRE,
+            // The same shape for extending its own lease.
+            endpoints::CONTROL_WORKER_RENEW,
         ],
         all,
     );
-    // Enrolment belongs to the deployment unit's credential and to nothing
-    // else. An enrolled instance resolves to `svc/worker`, which the row above
-    // leaves without it, so an instance key cannot enrol another instance.
-    assert_allowlist_row("svc/worker-enroller", &[endpoints::CONTROL_WORKER_ENROL], all);
 }
 
-/// The enrolment grant moved from the worker role to the enroller role, and
-/// the move is one grant in each direction: the enroller gains enrolment and
-/// holds nothing a worker instance needs, and the worker keeps every other
-/// grant it had.
+/// JOINING IS NOT IN THIS TABLE AT ALL, and its absence is the contract rather
+/// than an omission.
+///
+/// A joining process has no service identity yet: it presents a join token a
+/// trusted signer minted, under its own `typ`, verified against Control's
+/// signer registry. So there is no endpoint constant to grant, no principal to
+/// grant it to, and no assertion any process can mint that reaches the join
+/// route.
+///
+/// What CAN be asserted is the consequence: the worker role - the only role a
+/// joined instance resolves to - holds exactly the grants a running worker
+/// needs and no grant that would let one instance act for another. Renewal and
+/// retirement are selector-free by design, so holding them is holding them over
+/// oneself.
 #[test]
-fn only_the_enroller_role_may_enrol_and_it_may_do_nothing_else() {
+fn no_principal_holds_a_join_grant_and_the_worker_holds_its_own_lifecycle() {
     let worker = identity("zeroship.ai", "svc/worker");
-    let enroller = identity("zeroship.ai", "svc/worker-enroller");
+    assert!(authorize(&worker, endpoints::CONTROL_WORKER_RETIRE));
+    assert!(authorize(&worker, endpoints::CONTROL_WORKER_RENEW));
 
-    assert!(!authorize(&worker, endpoints::CONTROL_WORKER_ENROL));
-    assert!(authorize(&enroller, endpoints::CONTROL_WORKER_ENROL));
-    // The control, one variable apart: the enroller cannot read an app, retire
-    // an instance or take a job, and the worker still can.
-    for endpoint in [
-        endpoints::CONTROL_APP_ENV,
-        endpoints::CONTROL_WORKER_RETIRE,
-        endpoints::WORKFLOW_JOB_CLAIM,
-        endpoints::CDC_SUBSCRIBE,
-    ] {
-        assert!(!authorize(&enroller, endpoint), "{endpoint:?}");
-        assert!(authorize(&worker, endpoint), "{endpoint:?}");
+    // No endpoint in the table names the join route. A grant that appeared here
+    // would mean some assertion could reach it, which is exactly what the join
+    // contract exists to prevent.
+    for endpoint in CATALOG {
+        assert_ne!(
+            endpoint.path_template(),
+            "/internal/workers/join",
+            "joining must have no allowlist endpoint: it takes a token, not an assertion"
+        );
     }
+
+    // The control, one variable apart: another role that DOES appear in the
+    // table holds neither of the worker's own lifecycle grants, so the two
+    // acceptances above are the worker's row rather than a table that grants
+    // everything.
+    let gateway = identity("zeroship.ai", "svc/gateway");
+    assert!(!authorize(&gateway, endpoints::CONTROL_WORKER_RETIRE));
+    assert!(!authorize(&gateway, endpoints::CONTROL_WORKER_RENEW));
 }
 
 #[test]

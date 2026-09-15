@@ -81,8 +81,8 @@ http://control.{$ZEROSHIP_DOMAIN:zeroship.localhost} {
 	}
 	# EVERY OTHER /internal ROUTE IS SERVICE-TO-SERVICE AND IS NOT PUBLIC.
 	# Without this, the catch-all below forwarded them from the public edge, and
-	# `/internal/workers/enrol` in particular then observed CADDY's address as
-	# the peer - so control derived the proxy's address for every enrolment and
+	# `/internal/workers/join` in particular then observed CADDY's address as
+	# the peer - so control derived the proxy's address for every join and
 	# the `ProxyFronted` arm could not fire, because its input is control's own
 	# `trust_proxy` declaration rather than an observation.
 	#

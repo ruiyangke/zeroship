@@ -1,7 +1,7 @@
 import { table } from "@zeroship/migrate";
 
 // The deployment's single execution zone, split from
-// 20260914000400_execution_zones_and_worker_enrollers.ts because a migration
+// 20260914000400_execution_zones_and_join_signers.ts because a migration
 // module is EITHER schema() (DDL only) OR data()+inverse()/irreversible (DML
 // only) - never both. `schema()`'s host recorder refuses a recorded DML
 // operation outright, so the seed row belongs in its own data phase.

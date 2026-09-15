@@ -113,8 +113,8 @@ fn millis(value: Duration) -> Result<i64, Error> {
 pub enum Refusal {
     /// A fixed pool has no more capacity to give; an operator must scale it.
     PoolExhausted,
-    /// No active enroller exists in the zone to enroll new workers.
-    NoEnroller,
+    /// No active join signer exists for the zone, so no worker can join it.
+    NoSigner,
     /// The provider could not be reached or did not answer in time.
     Unavailable,
 }
@@ -124,7 +124,7 @@ impl Refusal {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::PoolExhausted => "pool_exhausted",
-            Self::NoEnroller => "no_enroller",
+            Self::NoSigner => "no_signer",
             Self::Unavailable => "unavailable",
         }
     }
@@ -132,7 +132,7 @@ impl Refusal {
     fn parse(value: &str) -> Result<Self, Error> {
         match value {
             "pool_exhausted" => Ok(Self::PoolExhausted),
-            "no_enroller" => Ok(Self::NoEnroller),
+            "no_signer" => Ok(Self::NoSigner),
             "unavailable" => Ok(Self::Unavailable),
             _ => Err(Error::Storage),
         }

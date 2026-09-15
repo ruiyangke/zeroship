@@ -68,12 +68,13 @@ impl Facts {
         );
     }
 
-    /// The enroller revocation cascade: the instance is no longer active.
+    /// Control stops admitting this instance: a signer purge, a retirement or
+    /// a lapsed lease all reach the manager as the same fact.
     pub fn revoke(&self, worker: &WorkerId) {
         self.workers
             .borrow_mut()
             .get_mut(worker.as_str())
-            .expect("enrolled worker")
+            .expect("a joined worker")
             .active = false;
     }
 

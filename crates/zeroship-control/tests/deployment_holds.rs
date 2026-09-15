@@ -15,6 +15,8 @@ mod queue_holds;
 mod collector;
 #[path = "deployment_holds/publication.rs"]
 mod publication;
+#[path = "deployment_holds/catalog.rs"]
+mod shared_catalog;
 
 use ntex::{
     client::Client,
@@ -24,6 +26,7 @@ use ntex::{
         types::{Json, State},
     },
 };
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use serde_json::{Value, json};
 use std::{
     num::NonZeroU32,
@@ -52,9 +55,10 @@ use zeroship_core::{
     service_identity::{ServiceEndpoint, endpoints, verify_service_call},
     service_peers::{
         CONTROL_SERVICE_NAME, ServiceAuth, ServiceKeyring, WORKER_SERVICE_NAME,
-        WORKFLOW_SERVICE_NAME, service_issuer, worker_enroller_issuer,
+        WORKFLOW_SERVICE_NAME, service_issuer,
     },
     typed_id,
+    worker_join::{join_proof_message, mint_join_token, JoinTokenGrant, DEFAULT_EXECUTION_ZONE},
     workflow_coordination::{
         AUDIENCE, AssignedScope, Assignment, Failure, FailureCode, RegisterWorker,
         VerifyAssignment, WorkerId, WorkerState,
@@ -93,10 +97,10 @@ fn origin(server: &test::TestServer) -> String {
 struct Fixture {
     platform: platform::Platform,
     state: Arc<AppState>,
-    /// The deployment unit's enroller: the only credential that may enrol a
-    /// worker instance, recorded in `zeroship.worker_enrollers` as the
+    /// A join token minted by a signer this deployment trusts: what a worker
+    /// presents to join, recorded in `zeroship.worker_join_signers` as the
     /// operator's import would leave it.
-    enroller: Arc<ServiceAuth>,
+    join_token: String,
     /// A bare `svc/worker` ROLE key that Control's peer bundle still trusts:
     /// the stale shared credential no process holds any more. Every endpoint
     /// here must refuse it at role arity.
@@ -166,7 +170,7 @@ impl Fixture {
             webhook_limiter: Arc::new(RateLimiter::new(Quota::per_minute(100, 10))),
             origin_scheme: zeroship_core::config::OriginScheme::Https,
             trust_proxy: false,
-            worker_enrolment: zeroship_control::worker_enrolment::EnrolmentEnvelope::parse(
+            worker_enrolment: zeroship_control::worker_join::EnrolmentEnvelope::parse(
                 "127.0.0.0/8",
                 "8080",
                 false,
@@ -199,23 +203,44 @@ impl Fixture {
         zeroship_control::plan_catalog::seed_plans(&state.registry)
             .await
             .unwrap();
-        let enroller_key = ServiceSigningKey::generate();
-        let enroller_id = typed_id::new_worker_enroller_id();
+        let signer_key = ServiceSigningKey::generate();
+        let signer_id = typed_id::new_join_signer_id();
         let inserted = platform
             .admin
             .execute(
-                "INSERT INTO zeroship.worker_enrollers (id, public_key, execution_zone_id, status) \
-                 VALUES ($1, $2, 'ezn_default000000000000000000', 'active')",
-                &[&enroller_id, &enroller_key.verifying_key_bytes().to_vec()],
+                "INSERT INTO zeroship.worker_join_signers (id, public_key, status) \
+                 VALUES ($1, $2, 'active')",
+                &[&signer_id, &signer_key.verifying_key_bytes().to_vec()],
             )
             .await
             .unwrap();
         assert_eq!(inserted, 1);
-        let enroller = signer(worker_enroller_issuer(&enroller_id).unwrap(), enroller_key);
+        let inserted = platform
+            .admin
+            .execute(
+                "INSERT INTO zeroship.worker_join_signer_zones (signer_id, execution_zone_id) \
+                 VALUES ($1, 'ezn_default000000000000000000')",
+                &[&signer_id],
+            )
+            .await
+            .unwrap();
+        assert_eq!(inserted, 1);
+        let join_token = mint_join_token(
+            &signer_id,
+            &signer_key,
+            &service_issuer(CONTROL_SERVICE_NAME).unwrap(),
+            &JoinTokenGrant {
+                zone: DEFAULT_EXECUTION_ZONE.to_owned(),
+                lifetime: Duration::from_secs(600),
+                uses: 16,
+                confirm: None,
+            },
+        )
+        .unwrap();
         Self {
             platform,
             state,
-            enroller,
+            join_token,
             worker_role,
             workflow_role,
             control_url,
@@ -373,8 +398,8 @@ impl Fixture {
                     .state(state)
                     .state(api)
                     .service(
-                        web::resource(endpoints::CONTROL_WORKER_ENROL.path_template()).route(
-                            web::post().to(zeroship_control::internal::enrol_worker_instance),
+                        web::resource("/internal/workers/join").route(
+                            web::post().to(zeroship_control::internal::join_worker_instance),
                         ),
                     )
                     .configure(deployment_hold_api::configure)
@@ -383,22 +408,30 @@ impl Fixture {
         .await
     }
 
-    async fn enrolled_worker(
+    async fn joined_worker(
         &self,
         http: &Client,
         control_url: &str,
     ) -> (WorkerId, Arc<ServiceAuth>) {
         let key = ServiceSigningKey::generate();
-        let token = control_header(&self.enroller);
-        let (status, response) = post(
+        let public = key.verifying_key_bytes();
+        // The join proof: the same bytes `crates/zeroship-worker/src/join.rs`
+        // signs, made with the key being registered. Presenting the token
+        // without it registers nothing.
+        let proof = key.sign_detached(&join_proof_message(&self.join_token, &public, 8080));
+        let (status, response) = post_to(
             http,
             control_url,
-            endpoints::CONTROL_WORKER_ENROL,
-            Some(&token),
-            &json!({"port":8080,"public_key":key.public_jwk_x()}),
+            "/internal/workers/join",
+            Some(&format!("Bearer {}", self.join_token)),
+            &json!({
+                "port": 8080,
+                "public_key": URL_SAFE_NO_PAD.encode(public),
+                "proof": URL_SAFE_NO_PAD.encode(proof),
+            }),
         )
         .await;
-        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(status, StatusCode::CREATED, "{response}");
         let worker = WorkerId::parse(response["instance_id"].as_str().unwrap()).unwrap();
         let issuer = ServiceIssuer::parse(&format!(
             "spiffe://zeroship.ai/svc/worker/{}",
@@ -456,12 +489,21 @@ async fn post(
     token: Option<&str>,
     body: &Value,
 ) -> (StatusCode, Value) {
+    post_to(http, url, endpoint.path_template(), token, body).await
+}
+
+/// The same exchange against a literal path, for the JOIN route: joining is not
+/// behind the service-assertion allowlist, so it has no `ServiceEndpoint` to
+/// name it.
+async fn post_to(
+    http: &Client,
+    url: &str,
+    path: &str,
+    token: Option<&str>,
+    body: &Value,
+) -> (StatusCode, Value) {
     compio::time::timeout(Duration::from_secs(10), async {
-        let mut request = http.post(format!(
-            "{}{}",
-            url.trim_end_matches('/'),
-            endpoint.path_template()
-        ));
+        let mut request = http.post(format!("{}{}", url.trim_end_matches('/'), path));
         if let Some(token) = token {
             request = request.header("authorization", token);
         }
@@ -506,10 +548,10 @@ async fn signed_deployment_holds_preserve_app_scope_across_worker_replacement() 
     .unwrap();
     let http = Client::new().await;
     let (worker, auth) = fixture
-        .enrolled_worker(&http, &origin(&control_server))
+        .joined_worker(&http, &origin(&control_server))
         .await;
     let (replacement, replacement_auth) = fixture
-        .enrolled_worker(&http, &origin(&control_server))
+        .joined_worker(&http, &origin(&control_server))
         .await;
     let registration = RegisterWorker {
         capacity: NonZeroU32::new(3).unwrap(),

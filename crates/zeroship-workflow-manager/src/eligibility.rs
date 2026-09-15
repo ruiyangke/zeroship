@@ -1,19 +1,21 @@
 //! Control-owned placement eligibility, read through an injected capability.
 //!
 //! An app belongs to exactly one execution zone, fixed when Control creates it.
-//! A worker instance belongs to the zone of the enroller Control verified when
-//! it enrolled. The manager reads both facts, and the instance's current
-//! enrollment, from rows no worker can write. Registration carries no zone and
-//! nothing a worker sends can change either fact.
+//! A worker instance belongs to exactly one too: the `zone` claim of the join
+//! token Control verified, resolved to an id and frozen on the instance row.
+//! The manager reads both facts, and the instance's liveness, from rows no
+//! worker can write. Registration carries no zone and nothing a worker sends
+//! can change either fact.
 //!
 //! The queue's database binding covers only the manager's own schema, so the
-//! facts arrive through [`EligibilitySource`], the same seam the host's
-//! enrollment callback uses. Placement consults it after taking its locks and
-//! again before commit. Zones never change and revocation only moves forward:
-//! a revocation committed before the first read is seen, one committed between
-//! the reads is caught by the second, and one committed after the second is
-//! caught by the next renewal, delivery or placement check. That is an eventual
-//! admission fence, the same one enrollment already has.
+//! facts arrive through [`EligibilitySource`], the same seam the host's join
+//! callback uses. Placement consults it after taking its locks and again
+//! before commit. Zones never change, and liveness only moves forward: an
+//! instance is revoked, retired, or its lease runs out, and none of those
+//! reverse. A change committed before the first read is seen, one committed
+//! between the reads is caught by the second, and one committed after the
+//! second is caught by the next renewal, delivery or placement check. That is
+//! an eventual admission fence, the same one the join path has.
 #![expect(
     clippy::future_not_send,
     reason = "Control reads stay on the owning compio runtime"
@@ -75,13 +77,14 @@ pub struct AppFacts {
     pub deleted: bool,
 }
 
-/// Control's placement facts for one enrolled worker instance.
+/// Control's placement facts for one joined worker instance.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WorkerFacts {
-    /// The zone of the enroller that admitted this instance.
+    /// The zone recorded on the instance when it joined, and frozen there.
     pub zone: ZoneId,
-    /// Both the instance and its enroller are active. Revoking an enroller
-    /// marks its instances gone in the same transaction; either status refuses.
+    /// The instance is still live: `active` and within its lease. Revoking or
+    /// purging a signer marks its instances gone in the same transaction, and
+    /// a worker that stopped renewing falls out on its own.
     pub active: bool,
 }
 
@@ -111,18 +114,12 @@ mod control {
                 #[orm(primary_key)]
                 id: Text,
                 status: Text,
-                enroller_id: Text,
-            }
-            worker_enrollers {
-                #[orm(primary_key)]
-                id: Text,
                 execution_zone_id: Text,
-                status: Text,
             }
         }
     }
 }
-use control::schema::{apps, worker_enrollers as enrollers, worker_instances as instances};
+use control::schema::{apps, worker_instances as instances};
 
 /// Native metadata for the Control binding [`ControlEligibility`] reads. The
 /// projections name only the columns the manager's role is granted.
@@ -157,7 +154,6 @@ impl ControlEligibility {
     pub fn new(database: Database) -> Result<Self, Error> {
         database.entity::<apps::Entity>()?;
         database.entity::<instances::Entity>()?;
-        database.entity::<enrollers::Entity>()?;
         Ok(Self { database })
     }
 
@@ -172,7 +168,11 @@ impl ControlEligibility {
                 .query()
                 .first::<AppRow>()
                 .await?;
-            worker_row(&self.database, None).await?;
+            self.database
+                .entity::<instances::Entity>()?
+                .query()
+                .first::<InstanceRow>()
+                .await?;
             Ok::<_, zeroship_data_orm::error::DbError>(())
         }
         .await
@@ -180,34 +180,15 @@ impl ControlEligibility {
     }
 }
 
-async fn worker_row(
-    database: &Database,
-    worker: Option<&WorkerId>,
-) -> Result<Vec<(String, String, String)>, zeroship_data_orm::error::DbError> {
-    let instance = database.entity::<instances::Entity>()?.alias("instance")?;
-    let enroller = database.entity::<enrollers::Entity>()?.alias("enroller")?;
-    let filter = match worker {
-        Some(worker) => instance.column(instances::id).eq(worker.as_str())?,
-        // Readiness checks the grants without naming an instance.
-        None => instance.column(instances::id).is_not_null(),
-    };
-    database
-        .from(&instance)
-        .inner_join(
-            &enroller,
-            instance
-                .column(instances::enroller_id)
-                .eq(enroller.column(enrollers::id))?,
-        )?
-        .filter(filter)
-        .select((
-            instance.column(instances::status).select::<String>(),
-            enroller.column(enrollers::execution_zone_id).select::<String>(),
-            enroller.column(enrollers::status).select::<String>(),
-        ))?
-        .limit(1)?
-        .all()
-        .await
+/// One instance's zone and liveness. Both are on the instance row, so this is
+/// one read of one table: the zone is the join token's verified claim frozen
+/// there, and a signer's revoke or purge marks its instances `gone` in the same
+/// transaction, so a signer's own state needs no second read.
+#[derive(FromRow)]
+#[orm(entity = instances)]
+struct InstanceRow {
+    status: String,
+    execution_zone_id: String,
 }
 
 impl EligibilitySource for ControlEligibility {
@@ -234,18 +215,26 @@ impl EligibilitySource for ControlEligibility {
 
     fn worker<'a>(&'a self, worker: &'a WorkerId) -> EligibilityFuture<'a, Option<WorkerFacts>> {
         Box::pin(async move {
-            let rows = worker_row(&self.database, Some(worker))
+            let row = self
+                .database
+                .entity::<instances::Entity>()
+                .map_err(|_| Error::Unavailable)?
+                .query()
+                .filter(
+                    instances::id
+                        .eq(worker.as_str())
+                        .map_err(|_| Error::Unavailable)?,
+                )
+                .first::<InstanceRow>()
                 .await
                 .map_err(|_| Error::Unavailable)?;
-            rows.into_iter()
-                .next()
-                .map(|(instance, zone, enroller)| {
-                    Ok(WorkerFacts {
-                        zone: ZoneId::parse(&zone)?,
-                        active: instance == "active" && enroller == "active",
-                    })
+            row.map(|row| {
+                Ok(WorkerFacts {
+                    zone: ZoneId::parse(&row.execution_zone_id)?,
+                    active: row.status == "active",
                 })
-                .transpose()
+            })
+            .transpose()
         })
     }
 }

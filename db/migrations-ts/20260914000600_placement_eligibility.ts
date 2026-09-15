@@ -3,17 +3,18 @@ import { createFunction, raw, t, table } from "@zeroship/migrate";
 // Placement eligibility: the Control-owned zone facts the workflow manager reads
 // before it admits a placement. An execution zone is an operator-declared set
 // of worker deployment units that share creator-side connectivity. An app
-// belongs to exactly one zone, a worker instance belongs to the zone of the
-// enroller Control verified when it enrolled, and the manager places an app
-// only on a worker of the same zone. Nothing a worker sends can change either
-// fact: both live here, in rows no worker can write.
+// belongs to exactly one zone, a worker instance belongs to the zone its join
+// token claimed and Control resolved, and the manager places an app only on a
+// worker of the same zone. Nothing a worker sends can change either fact: both
+// live in rows no worker can write.
 //
-// Both zone columns are frozen. Moving an app between zones is a data
-// migration of its creator storage, not a metadata edit, and an enroller's
-// zone is part of the deployment unit's identity. Placement relies on that:
-// it reads the facts after taking its locks and again before commit, and a
-// fact that could move between those two reads would reopen the window the
-// second read exists to close.
+// Both zone columns are frozen - the app's by the trigger below, the
+// instance's by the one that guards everything a join recorded
+// (20260914000500_worker_join_bindings.ts). Moving an app between zones is a
+// data migration of its creator storage, not a metadata edit. Placement relies
+// on that: it reads the facts after taking its locks and again before commit,
+// and a fact that could move between those two reads would reopen the window
+// the second read exists to close.
 export default {
   name: "placement_eligibility",
   schema() {
@@ -44,23 +45,12 @@ export default {
       reason: "typed-id text domains need bytewise comparison with execution_zones.id",
     });
 
-    // ---- worker_enrollers.execution_zone_id ---------------------------------
-    // 20260914000400_execution_zones_and_worker_enrollers.ts left this column
-    // as unenforced intent because a same-file foreign key to the freshly
-    // collated execution_zones.id is refused. That collation now exists, so
-    // the reference is enforced here.
-    table("worker_enrollers", { schema: "zeroship" })
-      .foreignKey("worker_enrollers_execution_zone_fk")
-      .add({
-        columns: ["execution_zone_id"],
-        references: { table: "execution_zones", columns: ["id"], schema: "zeroship" },
-        onDelete: "restrict",
-      });
-
-    // ---- frozen zone facts ---------------------------------------------------
-    // Control holds UPDATE on both tables for other columns (archive, delete,
-    // revoke), and UPDATE is not column-selective in a grant, so the zone
-    // columns are frozen by trigger instead.
+    // ---- the app's frozen zone ----------------------------------------------
+    // Control holds UPDATE on this table for other columns (archive, delete),
+    // and UPDATE is not column-selective in a grant, so the zone column is
+    // frozen by trigger instead. A worker instance's zone is frozen by its own
+    // table's trigger (20260914000500_worker_join_bindings.ts), which already
+    // refuses every change to the identity a join recorded.
     createFunction({
       schema: "zeroship",
       name: "apps_reject_execution_zone_change",
@@ -83,39 +73,15 @@ export default {
         forEach: "row",
         execute: "apps_reject_execution_zone_change",
       });
-    createFunction({
-      schema: "zeroship",
-      name: "worker_enrollers_reject_execution_zone_change",
-      returns: "trigger",
-      language: "procedural",
-      body:
-        "BEGIN\n"
-        + "  IF NEW.execution_zone_id IS DISTINCT FROM OLD.execution_zone_id THEN\n"
-        + "    RAISE EXCEPTION 'an enroller''s execution zone is fixed when it is provisioned'\n"
-        + "      USING ERRCODE = 'check_violation';\n"
-        + "  END IF;\n"
-        + "  RETURN NEW;\n"
-        + "END;",
-    });
-    table("worker_enrollers", { schema: "zeroship" })
-      .trigger("worker_enrollers_frozen_execution_zone")
-      .create({
-        timing: "before",
-        events: ["update"],
-        forEach: "row",
-        execute: "worker_enrollers_reject_execution_zone_change",
-      });
-
     // ---- the manager's read of the zone facts -------------------------------
     // Column grants only: the manager learns an app's zone and terminal
-    // deletion, an instance's enroller, and an enroller's zone and status.
-    // It still cannot read creator data, keys or addresses, and it cannot
-    // write any of these rows.
+    // deletion, and an instance's zone. Its id and status are already granted
+    // by 20260911000000_workflow_coordination.ts. It still cannot read creator
+    // data, keys or addresses, and it cannot write any of these rows.
     raw({
       sql: "GRANT SELECT (execution_zone_id,deleted_at) ON zeroship.apps TO zeroship_workflow; "
-        + "GRANT SELECT (enroller_id) ON zeroship.worker_instances TO zeroship_workflow; "
-        + "GRANT SELECT (id,execution_zone_id,status) ON zeroship.worker_enrollers TO zeroship_workflow",
-      reason: "workflow placement reads Control-owned zone and enrollment facts without write authority",
+        + "GRANT SELECT (execution_zone_id) ON zeroship.worker_instances TO zeroship_workflow",
+      reason: "workflow placement reads Control-owned zone facts without write authority",
     });
   },
 };

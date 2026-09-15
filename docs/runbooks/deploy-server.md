@@ -146,10 +146,11 @@ docker run --rm \
 The explicit paths are necessary because the CLI's repository-local defaults
 are `deploy/compose/secrets` and `deploy/compose/.env`. The command creates
 the private files listed in `docs/runbooks/docker-compose.md` ("Local secret
-provisioning") - among them this host's worker enroller credential,
-`worker-enroller.json` - plus the public `service-peers.json` and
-`worker-enrollers.json`. Adding a second worker host is
-`docs/runbooks/worker-enrollers.md`.
+provisioning") - among them this host's operator join signer credential,
+`join-signer.json` - plus the public `service-peers.json` and
+`join-signers.json`. Control mints its own zone's join tokens from that
+credential; workers never hold it. Minting a token for a separate worker host
+or fleet is `docs/runbooks/worker-join-signers.md`.
 
 It also appends the generated scalar values described below to `.env`. The
 directory is mode 0700 and the private files are mode 0600 on Unix. Rerunning is safe:

@@ -1071,7 +1071,7 @@ pub async fn deploy(
         blobs_uploaded: success.blobs_uploaded,
         blobs_deduped: success.blobs_deduped,
     };
-    match state.registry.deploy(&command).await {
+    match state.registry.deploy(command).await {
         Ok(acceptance) => accepted_response(acceptance.result(), acceptance.replayed()),
         Err(error) => catalog_error_response(&uid, error),
     }

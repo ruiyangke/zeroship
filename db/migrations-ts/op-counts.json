@@ -285,8 +285,8 @@
     "opCount": 1
   },
   {
-    "file": "20260914000400_execution_zones_and_worker_enrollers.ts",
-    "name": "execution_zones_and_worker_enrollers",
+    "file": "20260914000400_execution_zones_and_join_signers.ts",
+    "name": "execution_zones_and_join_signers",
     "opCount": 14
   },
   {
@@ -295,13 +295,13 @@
     "opCount": 1
   },
   {
-    "file": "20260914000500_worker_instances_enroller_binding.ts",
-    "name": "worker_instances_enroller_binding",
+    "file": "20260914000500_worker_join_bindings.ts",
+    "name": "worker_join_bindings",
     "opCount": 10
   },
   {
     "file": "20260914000600_placement_eligibility.ts",
     "name": "placement_eligibility",
-    "opCount": 9
+    "opCount": 6
   }
 ]
