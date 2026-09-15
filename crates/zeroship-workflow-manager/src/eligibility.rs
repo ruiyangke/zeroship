@@ -289,9 +289,10 @@ impl EligibilitySource for ControlEligibility {
 
 /// Trusted facts for a host with exactly one zone.
 ///
-/// Every app and every worker of this host is in `zone` and active. The local
-/// host uses it for its in-process worker; it performs no enrollment and reads
-/// no Control rows.
+/// Every app and every worker of this host is in `zone` and active. Fixtures
+/// that register several workers of one host use it; a host whose capacity is
+/// one process wants [`SoleWorker`] instead, because this source cannot tell a
+/// live registration from a stale one.
 #[derive(Debug, Clone)]
 pub struct LocalEligibility {
     zone: ZoneId,
@@ -319,6 +320,52 @@ impl EligibilitySource for LocalEligibility {
             Ok(Some(WorkerFacts {
                 zone: self.zone.clone(),
                 active: true,
+            }))
+        })
+    }
+}
+
+/// Trusted facts for a host whose zone holds one live worker: this process.
+///
+/// A host that is its app's only capacity still outlives none of its own
+/// registrations: the platform file survives the process, and a registration
+/// survives it by the worker TTL, so a predecessor that died without draining
+/// is still stored `ready`. Reporting it active would let a dead process hold
+/// the app against the running one, which reads to the manager as an app that
+/// already has a ready eligible owner, so it would place nothing and the host
+/// could never take its own app back.
+///
+/// This is the fact Control supplies in production, where a dead instance stops
+/// being active and the manager selects elsewhere. A host with no Control to
+/// ask knows it directly: the live worker is the one this process minted.
+#[derive(Debug, Clone)]
+pub struct SoleWorker {
+    zone: ZoneId,
+    worker: WorkerId,
+}
+
+impl SoleWorker {
+    #[must_use]
+    pub const fn new(zone: ZoneId, worker: WorkerId) -> Self {
+        Self { zone, worker }
+    }
+}
+
+impl EligibilitySource for SoleWorker {
+    fn app<'a>(&'a self, _: &'a AppId) -> EligibilityFuture<'a, Option<AppFacts>> {
+        Box::pin(async move {
+            Ok(Some(AppFacts {
+                zone: self.zone.clone(),
+                deleted: false,
+            }))
+        })
+    }
+
+    fn worker<'a>(&'a self, worker: &'a WorkerId) -> EligibilityFuture<'a, Option<WorkerFacts>> {
+        Box::pin(async move {
+            Ok(Some(WorkerFacts {
+                zone: self.zone.clone(),
+                active: *worker == self.worker,
             }))
         })
     }
