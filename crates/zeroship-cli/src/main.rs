@@ -9,7 +9,7 @@
 //!   zeroship config path [--config=PATH]
 //!   zeroship login [--control=URL] [--config=PATH] [--env=NAME]
 //!   zeroship dev init [--secrets-dir=PATH] [--env-file=PATH]
-//!   zeroship join-token --credential=PATH [--zone=NAME] [--ttl=DURATION] [--uses=N]
+//!   zeroship join-token --credential=PATH [--zone=NAME] [--ttl=SECONDS] [--uses=N] [--confirm=KEY]
 //!
 //! `build` and `inspect` were removed in the artifact-layout redesign —
 //! the canonical build path is now `@zeroship/vite-plugin`, which emits
@@ -1324,7 +1324,7 @@ fn print_usage() {
     );
     eprintln!("  zeroship dev init [--secrets-dir=PATH] [--env-file=PATH]");
     eprintln!("                   Provision stable, strong local platform secrets.");
-    eprintln!("  zeroship join-token --credential=PATH [--zone=NAME] [--ttl=DURATION] [--uses=N]");
+    eprintln!("  zeroship join-token --credential=PATH [--zone=NAME] [--ttl=SECONDS] [--uses=N] [--confirm=KEY]");
     eprintln!("                   Mint a join token for workers you are about to provision.");
     eprintln!("                   Short-lived by default; the token is printed on stdout.");
     eprintln!("  zeroship organization create|list|show|use|members|invite|revoke|join|role|remove|transfer|projects");

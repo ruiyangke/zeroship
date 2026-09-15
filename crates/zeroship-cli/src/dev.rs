@@ -1269,7 +1269,7 @@ mod tests {
 
 fn join_token_usage() -> &'static str {
     "Usage: zeroship join-token --credential=PATH [--zone=NAME] [--ttl=SECONDS] [--uses=N] \
-     [--audience=URI]"
+     [--confirm=KEY] [--audience=URI]"
 }
 
 /// The default lifetime of a minted token, in seconds.
@@ -1303,6 +1303,7 @@ pub(crate) fn cmd_join_token(args: &[String]) -> Result<(), String> {
     let mut zone = None;
     let mut ttl = None;
     let mut uses = None;
+    let mut confirm = None;
     let mut audience = None;
     // Both spellings `dev init` takes: `--name=value` and `--name value`.
     let mut index = 2;
@@ -1316,6 +1317,7 @@ pub(crate) fn cmd_join_token(args: &[String]) -> Result<(), String> {
             "--zone" => &mut zone,
             "--ttl" => &mut ttl,
             "--uses" => &mut uses,
+            "--confirm" => &mut confirm,
             "--audience" => &mut audience,
             "--help" => return Err(join_token_usage().to_string()),
             _ => return Err(format!("unknown argument {arg:?}. {}", join_token_usage())),
@@ -1355,7 +1357,13 @@ pub(crate) fn cmd_join_token(args: &[String]) -> Result<(), String> {
             u64::from(DEFAULT_JOIN_TOKEN_USES),
         )?)
         .map_err(|_| "--uses is too large".to_owned())?,
-        confirm: None,
+        // The joining key, when the issuer knows it in advance. A token that
+        // names one admits that key and no other, which removes even the
+        // "workers the captor controls" a captured token otherwise buys.
+        confirm: match confirm.as_deref() {
+            None => None,
+            Some(encoded) => Some(parse_confirmation(encoded)?),
+        },
     };
     // The audience is the control plane the token will be presented to, and it
     // is checked there: a token minted for another deployment's issuer is
@@ -1373,13 +1381,31 @@ pub(crate) fn cmd_join_token(args: &[String]) -> Result<(), String> {
             .map_err(|error| format!("join signer credential: {error}"))?;
     let token = zeroship_core::worker_join::mint_join_token(&signer_id, &key, &audience, &grant)?;
     eprintln!(
-        "zeroship join-token: signer {signer_id}, zone {:?}, {} uses, valid {}s",
+        "zeroship join-token: signer {signer_id}, zone {:?}, {} uses, valid {}s{}",
         grant.zone,
         grant.uses,
-        grant.lifetime.as_secs()
+        grant.lifetime.as_secs(),
+        if grant.confirm.is_some() {
+            ", bound to one key"
+        } else {
+            ""
+        }
     );
     println!("{token}");
     Ok(())
+}
+
+/// The raw Ed25519 public key `--confirm` names.
+///
+/// Base64url without padding, the spelling a worker posts its own key in, so an
+/// operator can copy it straight out of a provisioning step rather than
+/// re-encoding it.
+fn parse_confirmation(encoded: &str) -> Result<[u8; 32], String> {
+    let raw = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(encoded.trim())
+        .map_err(|error| format!("--confirm is not base64url: {error}"))?;
+    <[u8; 32]>::try_from(raw.as_slice())
+        .map_err(|_| "--confirm is not a raw ed25519 public key".to_owned())
 }
 
 /// One numeric option, or its default.
