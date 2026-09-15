@@ -1,6 +1,6 @@
 //! Placement against Control's own rows: the migrated zone facts, the manager
-//! role's column grants, the frozen-zone triggers and the real enroller
-//! revocation cascade.
+//! role's column grants, the frozen-zone triggers and the real signer purge
+//! cascade.
 #![expect(
     clippy::future_not_send,
     reason = "platform fixtures stay on their compio runtime"
@@ -43,8 +43,8 @@ async fn service(platform: &platform::Platform) -> Coordinator {
     .unwrap()
 }
 
-/// An operator-provisioned zone and an active enroller in it.
-async fn zone_with_enroller(platform: &platform::Platform) -> (ZoneId, String) {
+/// An operator-declared zone and a join signer trusted for it.
+async fn zone_with_signer(platform: &platform::Platform) -> (ZoneId, String) {
     let zone = ZoneId::mint();
     platform
         .admin
@@ -54,36 +54,52 @@ async fn zone_with_enroller(platform: &platform::Platform) -> (ZoneId, String) {
         )
         .await
         .unwrap();
-    let enroller = typed_id::generate("wen");
+    let signer = typed_id::generate("wjs");
     platform
         .admin
         .execute(
-            "INSERT INTO zeroship.worker_enrollers(id,public_key,execution_zone_id,status) \
-             VALUES($1,$2,$3,'active')",
+            "INSERT INTO zeroship.worker_join_signers(id,public_key,status) \
+             VALUES($1,$2,'active')",
             &[
-                &enroller,
+                &signer,
                 &ServiceSigningKey::generate().verifying_key_bytes().to_vec(),
-                &zone.as_str(),
             ],
         )
         .await
         .unwrap();
-    (zone, enroller)
+    platform
+        .admin
+        .execute(
+            "INSERT INTO zeroship.worker_join_signer_zones(signer_id,execution_zone_id) \
+             VALUES($1,$2)",
+            &[&signer, &zone.as_str()],
+        )
+        .await
+        .unwrap();
+    (zone, signer)
 }
 
-/// An instance Control enrolled under `enroller`, registered with the manager.
-async fn enrolled(platform: &platform::Platform, service: &Coordinator, enroller: &str) -> WorkerId {
+/// An instance Control admitted through `signer` into `zone`, registered with
+/// the manager. The zone is on the instance row, frozen there at join.
+async fn joined(
+    platform: &platform::Platform,
+    service: &Coordinator,
+    signer: &str,
+    zone: &str,
+) -> WorkerId {
     let worker = WorkerId::mint();
     platform
         .admin
         .execute(
-            "INSERT INTO zeroship.worker_instances(id,ring_key,public_key,advertise_host,advertise_port,status,enroller_id) \
-             VALUES($1,$2,$3,'127.0.0.1',8080,'active',$4)",
+            "INSERT INTO zeroship.worker_instances(id,ring_key,public_key,advertise_host,advertise_port,status,join_signer_id,join_token_id,execution_zone_id,expires_at) \
+             VALUES($1,$2,$3,'127.0.0.1',8080,'active',$4,$5,$6,now() + interval '1 hour')",
             &[
                 &worker.as_str(),
                 &vec![1_u8],
                 &ServiceSigningKey::generate().verifying_key_bytes().to_vec(),
-                &enroller,
+                &signer,
+                &typed_id::generate("wjt"),
+                &zone,
             ],
         )
         .await
@@ -96,6 +112,29 @@ async fn enrolled(platform: &platform::Platform, service: &Coordinator, enroller
     worker
 }
 
+/// The identity of one joined instance, for tests that need the row rather
+/// than a registration.
+async fn joined_row(platform: &platform::Platform, signer: &str, zone: &str) -> String {
+    let worker = WorkerId::mint();
+    platform
+        .admin
+        .execute(
+            "INSERT INTO zeroship.worker_instances(id,ring_key,public_key,advertise_host,advertise_port,status,join_signer_id,join_token_id,execution_zone_id,expires_at) \
+             VALUES($1,$2,$3,'127.0.0.1',8080,'active',$4,$5,$6,now() + interval '1 hour')",
+            &[
+                &worker.as_str(),
+                &vec![2_u8],
+                &ServiceSigningKey::generate().verifying_key_bytes().to_vec(),
+                &signer,
+                &typed_id::generate("wjt"),
+                &zone,
+            ],
+        )
+        .await
+        .unwrap();
+    worker.as_str().to_owned()
+}
+
 const fn ready() -> RegisterWorker {
     RegisterWorker {
         capacity: NonZeroU32::new(4).unwrap(),
@@ -105,8 +144,8 @@ const fn ready() -> RegisterWorker {
 
 /// Control's zones decide placement. An app created without a zone lands in
 /// the seeded zone and is placed there; an app created in a second zone is
-/// placed only on that zone's enrolled instance. Instances Control never
-/// enrolled cannot register.
+/// placed only on that zone's joined instance. Instances Control never
+/// admitted cannot register.
 #[ntex::test]
 async fn control_zone_facts_decide_placement() {
     let platform = platform::Platform::new().await;
@@ -123,9 +162,15 @@ async fn control_zone_facts_decide_placement() {
         ZoneId::default_zone().as_str()
     );
     let service = service(&platform).await;
-    let (away, away_enroller) = zone_with_enroller(&platform).await;
-    let home_worker = enrolled(&platform, &service, &platform.default_enroller_id).await;
-    let away_worker = enrolled(&platform, &service, &away_enroller).await;
+    let (away, away_signer) = zone_with_signer(&platform).await;
+    let home_worker = joined(
+        &platform,
+        &service,
+        &platform.default_join_signer_id,
+        ZoneId::default_zone().as_str(),
+    )
+    .await;
+    let away_worker = joined(&platform, &service, &away_signer, away.as_str()).await;
     let (home_app, away_app) = (AppId::mint(), AppId::mint());
     platform.seed_app(&home_app).await;
     platform.seed_app_in(&away_app, Some(away.as_str())).await;
@@ -153,7 +198,8 @@ async fn control_zone_facts_decide_placement() {
 #[ntex::test]
 async fn zone_facts_are_frozen_and_the_manager_reads_only_its_grants() {
     let platform = platform::Platform::new().await;
-    let (other, _) = zone_with_enroller(&platform).await;
+    let (other, other_signer) = zone_with_signer(&platform).await;
+    let instance = joined_row(&platform, &other_signer, other.as_str()).await;
     let app = AppId::mint();
     platform.seed_app(&app).await;
     assert!(platform
@@ -167,8 +213,8 @@ async fn zone_facts_are_frozen_and_the_manager_reads_only_its_grants() {
     assert!(platform
         .admin
         .execute(
-            "UPDATE zeroship.worker_enrollers SET execution_zone_id=$2 WHERE id=$1",
-            &[&platform.default_enroller_id, &other.as_str()],
+            "UPDATE zeroship.worker_instances SET execution_zone_id=$2 WHERE id=$1",
+            &[&instance, &ZoneId::default_zone().as_str()],
         )
         .await
         .is_err());
@@ -187,7 +233,7 @@ async fn zone_facts_are_frozen_and_the_manager_reads_only_its_grants() {
     // Without the manager's column grant the eligibility source is not ready.
     platform
         .admin
-        .batch_execute("REVOKE SELECT (execution_zone_id) ON zeroship.worker_enrollers FROM zeroship_workflow")
+        .batch_execute("REVOKE SELECT (execution_zone_id) ON zeroship.worker_instances FROM zeroship_workflow")
         .await
         .unwrap();
     assert_eq!(
@@ -198,7 +244,7 @@ async fn zone_facts_are_frozen_and_the_manager_reads_only_its_grants() {
     );
     platform
         .admin
-        .batch_execute("GRANT SELECT (execution_zone_id) ON zeroship.worker_enrollers TO zeroship_workflow")
+        .batch_execute("GRANT SELECT (execution_zone_id) ON zeroship.worker_instances TO zeroship_workflow")
         .await
         .unwrap();
     connect_eligibility(&platform.runtime_url, Options::default())
@@ -212,7 +258,13 @@ async fn zone_facts_are_frozen_and_the_manager_reads_only_its_grants() {
 async fn archived_apps_stay_placeable_and_deleted_apps_do_not() {
     let platform = platform::Platform::new().await;
     let service = service(&platform).await;
-    let worker = enrolled(&platform, &service, &platform.default_enroller_id).await;
+    let worker = joined(
+        &platform,
+        &service,
+        &platform.default_join_signer_id,
+        ZoneId::default_zone().as_str(),
+    )
+    .await;
     let (archived, deleted) = (AppId::mint(), AppId::mint());
     platform.seed_app(&archived).await;
     platform.seed_app(&deleted).await;
@@ -256,11 +308,11 @@ async fn archived_apps_stay_placeable_and_deleted_apps_do_not() {
     );
 }
 
-/// Revoking an enroller with Control's own function while a placement waits
+/// Purging a join signer with Control's own function while a placement waits
 /// for the app lock refuses that placement: the facts are read after the
-/// wait. The control differs only in the revocation.
+/// wait. The control differs only in the purge.
 #[ntex::test]
-async fn the_revocation_cascade_during_the_lock_wait_refuses_placement() {
+async fn the_purge_cascade_during_the_lock_wait_refuses_placement() {
     let platform = platform::Platform::new().await;
     let revoker = platform::connect(
         &platform
@@ -270,13 +322,13 @@ async fn the_revocation_cascade_during_the_lock_wait_refuses_placement() {
     .await;
     for revoke in [true, false] {
         let service = service(&platform).await;
-        let (_, enroller) = zone_with_enroller(&platform).await;
-        let worker = enrolled(&platform, &service, &enroller).await;
+        let (declared, signer) = zone_with_signer(&platform).await;
+        let worker = joined(&platform, &service, &signer, declared.as_str()).await;
         let zone = platform
             .admin
             .query(
-                "SELECT execution_zone_id FROM zeroship.worker_enrollers WHERE id=$1",
-                &[&enroller],
+                "SELECT execution_zone_id FROM zeroship.worker_instances WHERE id=$1",
+                &[&worker.as_str()],
             )
             .await
             .unwrap()[0]
@@ -306,7 +358,7 @@ async fn the_revocation_cascade_during_the_lock_wait_refuses_placement() {
             blocked_manager(&revoker).await;
             if revoke {
                 revoker
-                    .execute("SELECT zeroship.revoke_worker_enroller($1)", &[&enroller])
+                    .execute("SELECT zeroship.purge_worker_join_signer($1)", &[&signer])
                     .await
                     .unwrap();
             }

@@ -75,8 +75,8 @@ impl Options {
 /// Host-authenticated coordination over the same physical namespace as job delivery.
 ///
 /// Placement eligibility comes from the injected [`EligibilitySource`]: the
-/// app's execution zone and deletion, and each instance's enroller zone and
-/// enrollment. Registration, placement, renewal and ownership read it under
+/// app's execution zone and deletion, and each instance's own zone and
+/// liveness. Registration, placement, renewal and ownership read it under
 /// their locks; no worker request supplies a zone.
 #[derive(Debug, Clone)]
 pub struct Coordinator {
@@ -127,9 +127,9 @@ impl Coordinator {
     }
 
     /// Soft liveness never revives an expired placement or a draining instance.
-    /// The registration records the zone of the enroller Control verified for
-    /// this instance, read after the worker row lock and again before commit;
-    /// an instance whose enrollment is no longer active cannot renew.
+    /// The registration records the zone Control recorded for this instance,
+    /// read after the worker row lock and again before commit; an instance
+    /// that is no longer live cannot renew.
     ///
     /// # Errors
     /// Rejects storage failures, inactive or unknown enrollment and attempts to
@@ -191,7 +191,7 @@ impl Coordinator {
             .await
     }
 
-    /// The zone of an instance whose enrollment is active.
+    /// The zone of an instance Control still considers live.
     async fn enrolled_zone(&self, worker: &WorkerId) -> Result<ZoneId, Error> {
         match self.eligibility.worker(worker).await? {
             Some(facts) if facts.active => Ok(facts.zone),

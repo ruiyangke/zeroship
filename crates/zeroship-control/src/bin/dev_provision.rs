@@ -136,9 +136,16 @@ async fn run(cli: Cli) -> Result<zeroship_core::types::AppRecord, DevProvisionEr
         ))
     })?;
 
-    let registry = Registry::new(&cli.db)
-        .await
-        .map_err(|e| err(format!("connect registry: {e}")))?;
+    // One catalog session: this tool runs one deploy and exits, so a server's
+    // connection budget should not carry a bound sized for a serving process.
+    let registry = Registry::connect(
+        &cli.db,
+        zeroship_control::publication::CatalogOptions {
+            max_connections: std::num::NonZeroUsize::MIN,
+        },
+    )
+    .await
+    .map_err(|e| err(format!("connect registry: {e}")))?;
     seed_plans(&registry)
         .await
         .map_err(|e| err(format!("seed built-in plans: {e}")))?;
@@ -201,7 +208,7 @@ async fn run(cli: Cli) -> Result<zeroship_core::types::AppRecord, DevProvisionEr
         blobs_uploaded: success.blobs_uploaded,
         blobs_deduped: success.blobs_deduped,
     };
-    registry.deploy(&command).await.map_err(|e| match e {
+    registry.deploy(command).await.map_err(|e| match e {
         // The schema precondition, restated for a tool whose caller is a
         // shell script rather than the deploy CLI. Without the second
         // sentence this reads as a bug in the artifact.

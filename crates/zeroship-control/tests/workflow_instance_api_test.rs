@@ -115,7 +115,7 @@ async fn build_fixture(database: crate::workflow_postgres::Database, label: &str
             webhook_limiter: Arc::new(RateLimiter::new(Quota::per_minute(10_000, 100))),
             origin_scheme: zeroship_core::config::OriginScheme::Https,
             trust_proxy: false,
-            worker_enrolment: zeroship_control::worker_enrolment::EnrolmentEnvelope::closed(),
+            worker_enrolment: zeroship_control::worker_join::EnrolmentEnvelope::closed(),
             deploy_tmp_dir: deploy_tmp_dir.clone(),
             control_pg: Arc::clone(&control_pg),
             app_base_domain: "zeroship.localhost".to_string(),
@@ -302,15 +302,16 @@ async fn workflow_routes_reject_missing_auth() {
             .configure(workflow_instance_api::configure),
     )
     .await;
+    // The app-scoped token is derived from the app id, so the handler parses
+    // a canonical id before it can check the token. Every request below names
+    // a real app, so only the credential differs between them.
+    let (app_id, _) = seed_app(&fx, "auth-required", &[]).await;
+    let list = || test::TestRequest::get().uri("/internal/workflows/runs");
 
     let status = test::call_service(
         &app,
-        test::TestRequest::get()
-            .uri("/internal/workflows/runs")
-            .header(
-                workflow_instance_api::APP_ID_HEADER,
-                Uuid::new_v4().to_string(),
-            )
+        list()
+            .header(workflow_instance_api::APP_ID_HEADER, app_id.as_str())
             .to_request(),
     )
     .await
@@ -319,6 +320,34 @@ async fn workflow_routes_reject_missing_auth() {
         status,
         StatusCode::UNAUTHORIZED,
         "app-scoped workflow routes require a derived control token"
+    );
+
+    let foreign = zeroship_core::auth::derive_app_scoped_control_token(
+        TEST_CONTROL_KEY,
+        AppId::mint().as_str(),
+    );
+    let status = test::call_service(
+        &app,
+        list()
+            .header(workflow_instance_api::APP_ID_HEADER, app_id.as_str())
+            .header("authorization", format!("Bearer {foreign}"))
+            .to_request(),
+    )
+    .await
+    .status();
+    assert_eq!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "a token derived for another app does not authorize this one"
+    );
+
+    let status = test::call_service(&app, authed(list(), &app_id).to_request())
+        .await
+        .status();
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "the app's own derived token is accepted, so the refusals above are the credential's"
     );
 
     let status = test::call_service(

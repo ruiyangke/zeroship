@@ -116,6 +116,15 @@ e2e_start_cdc_relay "$BIN/zeroship-data-cdc-server" || exit 1
 PIDS+=($!)
 sleep 3
 
+# A join token for the worker below, minted from the signer
+# `e2e_export_runtime_secrets` already provisioned. Control read the signer's
+# public half from `ZEROSHIP_CONTROL_JOIN_SIGNERS_FILE` at the boot above.
+ZEROSHIP_WORKER_JOIN_TOKEN_FILE="$BENCH_SECURITY_DIR/join-token"
+e2e_mint_join_token "$BIN/zeroship" "$E2E_JOIN_SIGNER_CREDENTIAL" \
+    "$ZEROSHIP_WORKER_JOIN_TOKEN_FILE" \
+    || { echo "FAIL: could not mint a worker join token" >&2; exit 1; }
+export ZEROSHIP_WORKER_JOIN_TOKEN_FILE
+
 "$BIN/zeroship-worker" --port "$BENCH_WORKER_PORT" --threads $CORES --control-url http://localhost:9090 \
     --poll-interval 60 > /dev/null 2>&1 &
 PIDS+=($!)

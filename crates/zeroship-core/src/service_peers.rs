@@ -145,20 +145,23 @@ pub const GATEWAY_SERVICE_NAME: &str = "svc/gateway";
 /// the bare name: no process holds a `svc/worker` role key, the peer document
 /// publishes none, and Control refuses a role-arity assertion naming it.
 pub const WORKER_SERVICE_NAME: &str = "svc/worker";
-/// The hierarchical name of a deployment unit's enrolment identity.
+/// The hierarchical name of a trusted join signer.
 ///
-/// An enroller is a HOST OR POOL's bootstrap credential, one Ed25519 keypair
-/// per deployment unit, provisioned by the operator, recorded by Control with
-/// an execution zone and a status, and mounted into that unit's worker
-/// containers as the credential file [`ServiceKeyring::load_worker_enroller`]
-/// reads. Only this principal holds `CONTROL_WORKER_ENROL`
-/// (`crates/zeroship-core/src/service_identity.rs`); an enrolled worker
-/// INSTANCE cannot enrol another instance. Every enroller mints under an
-/// INSTANCE identifier of this role (`svc/worker-enroller/<wen_id>`), never
-/// under the bare role name, exactly as a worker instance does under
-/// `svc/worker/<wkr_id>` -- see `crates/zeroship-control/src/worker_enrolment.rs`
-/// for how Control resolves and locks the enroller row that identifier names.
-pub const WORKER_ENROLLER_SERVICE_NAME: &str = "svc/worker-enroller";
+/// A join signer is the authority that decides a worker should exist: one
+/// Ed25519 keypair whose PRIVATE half stays with the operator (or, on a single
+/// host, with the control plane that mints for its own zone) and whose public
+/// half and permitted execution zones Control records in advance. It appears
+/// here because a join token's `iss` is an INSTANCE identifier of this role
+/// (`svc/worker-join-signer/<wjs_id>`), which is what
+/// `crate::worker_join::unverified_join_signer_id` reads to select the recorded
+/// key a token is verified under.
+///
+/// IT HOLDS NO ENDPOINT GRANT, and that is deliberate rather than an omission.
+/// A join token is not a service assertion: it carries its own `typ`, it is
+/// verified by `crates/zeroship-control/src/worker_join.rs` against Control's
+/// signer registry, and the endpoint it reaches is not in the allowlist at all.
+/// A signer therefore cannot present its key anywhere else in the platform.
+pub const WORKER_JOIN_SIGNER_SERVICE_NAME: &str = "svc/worker-join-signer";
 /// The hierarchical name of the control plane's service identity.
 pub const CONTROL_SERVICE_NAME: &str = "svc/control";
 /// The hierarchical name of the workflow manager's service identity.
@@ -329,37 +332,47 @@ impl PeerKeyError {
     }
 }
 
-/// A worker deployment unit's enroller credential, as the operator writes it.
-///
-/// ```json
-/// { "enroller_id": "wen_...",
-///   "private_key": "-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----\n" }
-/// ```
-///
-/// ONE document rather than a key file and a separate id setting, because the
-/// two are one credential: Control verifies the assertion against the key it
-/// recorded FOR THAT ID, so an id and a key that drifted apart would refuse
-/// every enrolment while each half looked configured. The shape is the one
-/// service-account key files use for the same reason.
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct EnrollerCredentialDocument {
-    enroller_id: String,
-    private_key: String,
-}
-
-/// The issuer a worker deployment unit's enroller mints under:
-/// `svc/worker-enroller/<enroller_id>`.
+/// The issuer a trusted join signer mints under:
+/// `svc/worker-join-signer/<signer_id>`.
 ///
 /// # Errors
 ///
-/// Returns [`AssertionError::MalformedIssuer`] when `enroller_id` is not a
-/// `wen_` typed id. The id reaches this from an operator's file, and an id
-/// Control could not have recorded must not become an issuer at all.
-pub fn worker_enroller_issuer(enroller_id: &str) -> Result<ServiceIssuer, AssertionError> {
-    crate::typed_id::parse_with_prefix(enroller_id, crate::typed_id::WORKER_ENROLLER_PREFIX)
+/// Returns [`AssertionError::MalformedIssuer`] when `signer_id` is not a `wjs_`
+/// typed id. The id reaches this from an operator's file or from an unverified
+/// token payload, and an id Control could not have recorded must not become an
+/// issuer at all.
+pub fn join_signer_issuer(signer_id: &str) -> Result<ServiceIssuer, AssertionError> {
+    crate::typed_id::parse_with_prefix(signer_id, crate::typed_id::JOIN_SIGNER_PREFIX)
         .map_err(|_| AssertionError::MalformedIssuer)?;
-    service_issuer(&format!("{WORKER_ENROLLER_SERVICE_NAME}/{enroller_id}"))
+    service_issuer(&format!("{WORKER_JOIN_SIGNER_SERVICE_NAME}/{signer_id}"))
+}
+
+/// Read a join signer's credential document from disk, refusing a file other
+/// local users can read.
+///
+/// The parse lives in [`crate::worker_join::parse_join_signer_credential`] so
+/// the writer and the reader are one definition; this adds the two things a
+/// path has that bytes do not - the empty-setting refusal and the permission
+/// check - so every reader of a PRIVATE key file in this tree is held to the
+/// same rule.
+///
+/// # Errors
+///
+/// Returns [`PeerKeyError::NotConfigured`] when the path is empty, and
+/// [`PeerKeyError`] otherwise when the file is unreadable, insecurely
+/// permissioned, or does not hold a signer credential.
+pub fn load_join_signer_credential(
+    credential_path: &Path,
+) -> Result<(String, ServiceSigningKey), PeerKeyError> {
+    require_configured(credential_path, "join signer credential file")?;
+    let bytes = read_file(credential_path)?;
+    reject_insecure_permissions(credential_path)?;
+    crate::worker_join::parse_join_signer_credential(&bytes).map_err(|reason| {
+        PeerKeyError::Document {
+            path: credential_path.display().to_string(),
+            reason,
+        }
+    })
 }
 
 /// One published peer key.
@@ -436,62 +449,6 @@ impl ServiceKeyring {
             load_peer_bundle(peers_path)?,
         )
         .map_err(|error| error.naming_document(key_path, peers_path))
-    }
-
-    /// Load a worker deployment unit's ENROLLER keyring from its credential
-    /// file and the peer bundle.
-    ///
-    /// The keyring mints under `svc/worker-enroller/<enroller_id>`, the id the
-    /// credential names. It is the ONE key a worker loads from disk, and it
-    /// authenticates the enrolment call and nothing else: no worker holds a
-    /// `svc/worker` role key. See [`EnrollerCredentialDocument`] for the shape
-    /// and why it is one document.
-    ///
-    /// Held to the same rules as [`ServiceKeyring::load`]: both paths are
-    /// required and an empty one is a refusal, the credential is refused when
-    /// any other local user can read it, and the private key's public half may
-    /// be published in the peer document under no issuer but the enroller's
-    /// own. A key published under the gateway's issuer would otherwise let this
-    /// process's envelope signer stamp a `kid` its own verifier resolves.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`PeerKeyError::NotConfigured`] when either path is empty, and
-    /// [`PeerKeyError`] otherwise when either file is unreadable, the
-    /// credential is insecurely permissioned, malformed, names an id that is
-    /// not a `wen_` typed id or holds no ed25519 PKCS#8 key, or the pair
-    /// publishes the key under a foreign issuer.
-    pub fn load_worker_enroller(
-        credential_path: &Path,
-        peers_path: &Path,
-    ) -> Result<Self, PeerKeyError> {
-        require_configured(credential_path, "worker enroller credential file")?;
-        require_configured(peers_path, "service peer document")?;
-        let bytes = read_file(credential_path)?;
-        reject_insecure_permissions(credential_path)?;
-        let fault = |reason: String| PeerKeyError::Document {
-            path: credential_path.display().to_string(),
-            reason,
-        };
-        let document: EnrollerCredentialDocument =
-            serde_json::from_slice(&bytes).map_err(|error| fault(error.to_string()))?;
-        let issuer = worker_enroller_issuer(&document.enroller_id).map_err(|_| {
-            fault(format!(
-                "enroller_id {:?} is not a worker enroller id",
-                document.enroller_id
-            ))
-        })?;
-        if !document.private_key.contains("-----BEGIN PRIVATE KEY-----") {
-            return Err(fault(
-                "private_key is not a PKCS#8 PEM private key".to_owned(),
-            ));
-        }
-        let der = pem_body(&document.private_key).ok_or_else(|| {
-            fault("private_key carries PEM armor but its body did not decode".to_owned())
-        })?;
-        let signing_key = ServiceSigningKey::from_pkcs8_der(&der)?;
-        Self::from_parts(issuer, signing_key, load_peer_bundle(peers_path)?)
-            .map_err(|error| error.naming_document(credential_path, peers_path))
     }
 
     /// Build a keyring from material already in memory.
@@ -662,14 +619,15 @@ mod instance_key {
     /// [`InstanceSigningKey::into_keyring`] consumes it, and is the one thing
     /// that can.
     ///
-    /// # Per-instance identity is a DISTINGUISHER, not a boundary
+    /// # Per-instance identity is a BOUNDARY here, not only a distinguisher
     ///
-    /// A process minting under a name of its own is attributable, individually
-    /// retirable, and countable. It is not contained: enrolment authenticates
-    /// with the key of the instance's deployment unit, its enroller, so whoever
-    /// holds that key can enrol as many instances in the unit as they like and
-    /// each one is as genuine as the last. Nothing here narrows what an
-    /// instance may do; revoking the enroller is what bounds the unit.
+    /// The private half exists in one process's memory and nowhere else, so
+    /// retiring one instance takes a capability away rather than only removing
+    /// an attribution. What a JOIN TOKEN buys its holder is bounded separately
+    /// and differently: the uses it was minted with, until its expiry, in the
+    /// one zone it names - and a captured token admits only workers whose keys
+    /// the captor holds, because `crate::worker_join::verify_join_proof` is
+    /// what Control registers a key on.
     pub struct InstanceSigningKey {
         key: ServiceSigningKey,
         /// Kept beside the key rather than re-derived, so the bytes the check
@@ -703,6 +661,21 @@ mod instance_key {
         #[must_use]
         pub const fn public_key(&self) -> &[u8; 32] {
             &self.public
+        }
+
+        /// Sign the JOIN PROOF with the key being registered.
+        ///
+        /// The one thing this key does BEFORE it becomes a keyring, and the
+        /// reason it can: at join time there is no instance id yet, so there is
+        /// no issuer to mint a JWT under and nothing but a detached signature
+        /// will do. `crate::worker_join::join_proof_message` is the only caller
+        /// and it domain-separates what it hands over, so this cannot be turned
+        /// into a signing oracle for another protocol by passing it other
+        /// bytes - the verifier reconstructs the message rather than trusting
+        /// one.
+        #[must_use]
+        pub fn sign_join_proof(&self, message: &[u8]) -> [u8; 64] {
+            self.key.sign_detached(message)
         }
 
         /// Spend this key on the keyring it exists to become.
@@ -1129,7 +1102,7 @@ mod tests {
         let names = [
             GATEWAY_SERVICE_NAME,
             WORKER_SERVICE_NAME,
-            WORKER_ENROLLER_SERVICE_NAME,
+            WORKER_JOIN_SIGNER_SERVICE_NAME,
             CONTROL_SERVICE_NAME,
             WORKFLOW_SERVICE_NAME,
             AUTH_SERVICE_NAME,

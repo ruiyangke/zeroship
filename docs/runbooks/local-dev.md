@@ -150,9 +150,9 @@ Notes:
   per-app `pws_`.
 - `zeroship-worker` binds `127.0.0.1` by default (loopback, as above). Only add
   `--bind 0.0.0.0` if another host must reach it. Every worker needs
-  `ZEROSHIP_WORKER_ENROLLER_FILE` (its deployment unit's enroller credential)
+  `ZEROSHIP_WORKER_JOIN_TOKEN_FILE` (a join token minted by a trusted signer)
   and `ZEROSHIP_WORKER_SERVICE_PEERS_FILE` to start; see
-  `docs/runbooks/worker-enrollers.md`.
+  `docs/runbooks/worker-join-signers.md`.
 - Except for the worker, `--config <path>` or `ZEROSHIP_CONFIG=<path>` loads the optional TOML
   overlay; add `--check-config` to the normal command for a read-only dry run
   that validates CLI/env/file config and the startup guards, then exits before

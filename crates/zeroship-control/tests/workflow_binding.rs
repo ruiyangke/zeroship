@@ -170,7 +170,7 @@ async fn build_fixture(database: crate::workflow_postgres::Database, label: &str
             webhook_limiter: Arc::new(RateLimiter::new(Quota::per_minute(10_000, 100))),
             origin_scheme: zeroship_core::config::OriginScheme::Https,
             trust_proxy: false,
-            worker_enrolment: zeroship_control::worker_enrolment::EnrolmentEnvelope::closed(),
+            worker_enrolment: zeroship_control::worker_join::EnrolmentEnvelope::closed(),
             deploy_tmp_dir: deploy_tmp_dir.clone(),
             control_pg: Arc::clone(&control_pg),
             app_base_domain: "zeroship.localhost".to_string(),

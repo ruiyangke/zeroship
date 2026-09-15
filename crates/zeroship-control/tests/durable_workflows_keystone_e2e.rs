@@ -221,7 +221,7 @@ async fn build_fixture(
             webhook_limiter: Arc::new(RateLimiter::new(Quota::per_minute(10_000, 100))),
             origin_scheme: zeroship_core::config::OriginScheme::Http,
             trust_proxy: false,
-            worker_enrolment: zeroship_control::worker_enrolment::EnrolmentEnvelope::closed(),
+            worker_enrolment: zeroship_control::worker_join::EnrolmentEnvelope::closed(),
             deploy_tmp_dir: deploy_tmp_dir.clone(),
             control_pg: Arc::clone(&control_pg),
             app_base_domain: "zeroship.localhost".to_string(),
@@ -2042,7 +2042,7 @@ async fn redeploy(
     .expect("sealed redeploy manifest verifies");
     fx.state
         .registry
-        .deploy(&common::deployments::command(
+        .deploy(common::deployments::command(
             &fx.app_id, &owner, deployment,
         ))
         .await

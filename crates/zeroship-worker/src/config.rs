@@ -60,30 +60,32 @@ pub struct WorkerSettings {
     #[config(shared = CONTROL_KEY)]
     pub control_key: Secret<String>,
 
-    /// JSON FILE holding this worker's deployment-unit ENROLLER credential: the
-    /// enroller's `wen_` id and its ed25519 PKCS#8 PEM private key, in one
-    /// document so the two cannot drift apart. The enroller is the one
-    /// credential that may enrol a worker instance.
+    /// FILE holding the JOIN TOKEN this worker presents at boot.
     ///
-    /// It is spent on exactly one call - the boot-time enrolment, minted under
-    /// `svc/worker-enroller/<id>` - and every assertion after that is minted
-    /// under the instance key the process draws in memory. No worker holds a
-    /// `svc/worker` role key. Every worker of one unit mounts the same file, so
-    /// revoking the unit's enroller in Control retires all of them.
-    /// `crates/zeroship-core/src/service_peers.rs` (`load_worker_enroller`)
-    /// carries the shape and `docs/runbooks/worker-enrollers.md` the operator
+    /// The one thing a worker carries, and it is not a signing key: it is a JWT
+    /// a trusted signer minted, naming a zone, an expiry and a use budget. The
+    /// worker cannot mint anything with it, and presenting it without the
+    /// keypair this process draws in memory registers nothing - the join request
+    /// is signed by that key. Every assertion after the join is minted under
+    /// that instance key. No worker holds a `svc/worker` role key.
+    /// `crates/zeroship-core/src/worker_join.rs` carries the token and proof
+    /// formats, and `docs/runbooks/worker-join-signers.md` the operator
     /// procedure.
+    ///
+    /// The token is read FRESH AT EVERY BOOT, so a single-host deployment can
+    /// have its control plane rotate the file and a container restarted days
+    /// later still gets a token minted minutes ago.
     ///
     /// A PATH, not a `Secret<String>`: the loader refuses a group- or
     /// world-readable file, which is not possible once the material has become
     /// an in-memory `String`.
     ///
-    /// Empty (the default) REFUSES THE BOOT. A worker that cannot enrol has no
+    /// Empty (the default) REFUSES THE BOOT. A worker that cannot join has no
     /// identity to verify dispatch or read an app's environment with, so it
     /// would bind its port, pass a liveness probe and turn away every request
     /// that reached it - a failure first visible to an end user.
-    #[config(name = "worker.enroller_file", default = PathBuf::new())]
-    pub enroller_file: Operational<PathBuf>,
+    #[config(name = "worker.join_token_file", default = PathBuf::new())]
+    pub join_token_file: Operational<PathBuf>,
 
     /// JWKS-shaped FILE holding the public key of every peer service.
     ///

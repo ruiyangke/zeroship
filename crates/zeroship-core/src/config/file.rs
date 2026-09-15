@@ -123,6 +123,8 @@ pub struct FileConfig {
 pub struct ControlSection {
     /// Workflow coordinator origin used by Control's metadata client.
     pub workflow_coordinator_url: Option<String>,
+    /// Catalog sessions the Control process may hold at once.
+    pub catalog_max_connections: Option<usize>,
     /// `PostgreSQL` DSN for control-plane data. A DSN grammar admits userinfo,
     /// so it is secret-classed regardless of whether a given value carries a
     /// password.
@@ -186,13 +188,20 @@ pub struct ControlSection {
     pub supabase_jwt_issuer: Option<String>,
     /// Apex domain hosted creator apps serve under.
     pub app_base_domain: Option<String>,
-    /// Comma-separated CIDRs a worker instance may enrol from.
+    /// Comma-separated CIDRs a worker instance may join from.
     pub worker_enrolment_networks: Option<String>,
     /// Listening ports a worker instance may claim, as `<low>-<high>`.
     pub worker_enrolment_ports: Option<String>,
-    /// Worker enroller import FILE: the public key, id and zone of every
-    /// deployment unit's enroller, imported at startup.
-    pub worker_enrollers_file: Option<std::path::PathBuf>,
+    /// Trusted JOIN SIGNER import FILE: the id, permitted execution zones and
+    /// Ed25519 public key of every signer this deployment trusts.
+    pub join_signers_file: Option<std::path::PathBuf>,
+    /// The signer CREDENTIAL this control plane mints join tokens with, on a
+    /// single-host deployment. Empty is the multi-host shape.
+    pub join_token_signer_file: Option<std::path::PathBuf>,
+    /// Where the minted join token is written for the workers to read.
+    pub join_token_file: Option<std::path::PathBuf>,
+    /// The execution zone the minted join token admits into.
+    pub join_token_zone: Option<String>,
     /// Audit retention horizon in months.
     pub audit_retention_months: Option<u32>,
     /// Audit retention cron tick in seconds.
@@ -264,10 +273,10 @@ pub struct WorkerSection {
     pub cdc_relay_ca_file: Option<std::path::PathBuf>,
     /// TOML configuration for the app-runtime KV deployment. May carry credentials.
     pub kv_config: Option<String>,
-    /// This worker's deployment-unit enroller credential FILE. A worker holds
-    /// no assertion key of its own on disk: it enrols with this credential
-    /// and mints under an instance key it draws at boot.
-    pub enroller_file: Option<std::path::PathBuf>,
+    /// The JOIN TOKEN file this worker reads at boot. A worker holds no key of
+    /// its own on disk: it joins with a token a trusted signer minted and
+    /// mints under an instance key it draws in memory.
+    pub join_token_file: Option<std::path::PathBuf>,
     /// See `AuthSection::service_key_file`.
     pub service_peers_file: Option<std::path::PathBuf>,
     /// HTTP listen port.
@@ -1259,25 +1268,34 @@ relay_smtp_tls = "starttls"
         assert!(matches!(err, ConfigError::Parse { .. }));
     }
 
-    // Control's enroller import file and the worker's enroller credential are
-    // overlay leaves their resolvers walk, so the schema must accept both. A
-    // worker reads no assertion key file of its own, so that key in the worker
-    // table is refused rather than accepted and ignored.
+    // Control's trusted-signer import, its optional minter credential and the
+    // worker's join token are overlay leaves their resolvers walk, so the
+    // schema must accept all of them. A worker reads no assertion key file of
+    // its own, so that key in the worker table is refused rather than accepted
+    // and ignored.
     #[test]
-    fn the_enroller_files_parse_and_the_worker_table_has_no_service_key_file() {
+    fn the_join_files_parse_and_the_worker_table_has_no_service_key_file() {
         let file = TempFile::write(
-            "enroller-files.toml",
-            "[control]\nworker_enrollers_file = \"/etc/zeroship/secrets/worker-enrollers.json\"\n\
-             [worker]\nenroller_file = \"/etc/zeroship/secrets/worker-enroller.json\"\n",
+            "join-files.toml",
+            "[control]\njoin_signers_file = \"/etc/zeroship/secrets/join-signers.json\"\n\
+             join_token_signer_file = \"/etc/zeroship/secrets/join-signer.json\"\n\
+             join_token_file = \"/var/lib/zeroship/join/token\"\n\
+             join_token_zone = \"default\"\n\
+             [worker]\njoin_token_file = \"/var/lib/zeroship/join/token\"\n",
         );
-        let config = FileConfig::load(Some(&file.path)).expect("the enroller files parse");
+        let config = FileConfig::load(Some(&file.path)).expect("the join files parse");
         assert_eq!(
-            config.control.worker_enrollers_file.as_deref(),
-            Some(Path::new("/etc/zeroship/secrets/worker-enrollers.json"))
+            config.control.join_signers_file.as_deref(),
+            Some(Path::new("/etc/zeroship/secrets/join-signers.json"))
         );
         assert_eq!(
-            config.worker.enroller_file.as_deref(),
-            Some(Path::new("/etc/zeroship/secrets/worker-enroller.json"))
+            config.control.join_token_signer_file.as_deref(),
+            Some(Path::new("/etc/zeroship/secrets/join-signer.json"))
+        );
+        assert_eq!(config.control.join_token_zone.as_deref(), Some("default"));
+        assert_eq!(
+            config.worker.join_token_file.as_deref(),
+            Some(Path::new("/var/lib/zeroship/join/token"))
         );
 
         let key_file = TempFile::write(

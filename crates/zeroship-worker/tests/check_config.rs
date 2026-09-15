@@ -80,17 +80,17 @@ fn check_config_reports_json_without_contacting_control_or_creating_blob_state()
 }
 
 #[test]
-fn check_config_reports_whether_an_enroller_credential_is_configured() {
-    // Presence only: a dry run never opens the credential, so a path that
-    // does not exist still reports as configured.
-    const KEY: &str = "enroller_file_configured";
+fn check_config_reports_whether_a_join_token_is_configured() {
+    // Presence only: a dry run never opens the token, so a path that does not
+    // exist still reports as configured.
+    const KEY: &str = "join_token_file_configured";
     let configured = |output: &Output| {
         assert_success(output);
         report(&output.stdout).get(KEY).cloned()
     };
 
-    // The control: nothing supplies the credential, so a report that always
-    // said `true` fails here.
+    // The control: nothing supplies the token, so a report that always said
+    // `true` fails here.
     let unset = run(&["--check-config", "--check-config-format", "json"]);
     assert_eq!(configured(&unset), Some(serde_json::Value::Bool(false)));
 
@@ -98,15 +98,15 @@ fn check_config_reports_whether_an_enroller_credential_is_configured() {
         "--check-config",
         "--check-config-format",
         "json",
-        "--enroller-file",
-        "/flag/worker-enroller.json",
+        "--join-token-file",
+        "/flag/worker-join-token",
     ]);
     assert_eq!(configured(&flagged), Some(serde_json::Value::Bool(true)));
 
     let from_env = Command::new(env!("CARGO_BIN_EXE_zeroship-worker"))
         .env_clear()
         .env("ZEROSHIP_CONTROL_KEY", STRONG_HEX)
-        .env("ZEROSHIP_WORKER_ENROLLER_FILE", "/env/worker-enroller.json")
+        .env("ZEROSHIP_WORKER_JOIN_TOKEN_FILE", "/env/worker-join-token")
         .args(["--check-config", "--check-config-format", "json"])
         .output()
         .expect("spawn zeroship-worker");

@@ -2250,7 +2250,7 @@ left the product's deployment story, whatever its security merit.
 *The derivation is defeated by the shipped edge, and the fence that exists to
 catch it cannot fire.* Measured on 2026-09-08. `deploy/ops/Caddyfile`'s control
 block is `handle /v1/*` to the migration service plus an UNFILTERED catch-all
-`handle { reverse_proxy control:9090 }`, so `/internal/workers/enrol` is forwarded
+`handle { reverse_proxy control:9090 }`, so `/internal/workers/join` is forwarded
 from the public edge. Control sets no `trust_proxy` and its default is false, so
 `EnrolmentEnvelope`'s `ProxyFronted` arm cannot fire. Caddy sits inside the
 declared enrolment network, so the peer check approves.
