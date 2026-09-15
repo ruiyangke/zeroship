@@ -2,6 +2,10 @@
     clippy::future_not_send,
     reason = "ORM fixtures use thread-local compio sessions"
 )]
+#![expect(
+    clippy::large_futures,
+    reason = "typed operations keep their prepared state in the awaited future"
+)]
 
 use super::fixtures::CollectionFixture;
 use super::*;
