@@ -1163,4 +1163,11 @@ impl crate::backend::Backend for SqliteBackend {
     fn publishes_committed_changes(&self) -> bool {
         true
     }
+
+    /// The actor reserves one transaction connection per app, and refuses a
+    /// second explicit transaction for that app with
+    /// `transaction_connection_busy`.
+    fn admits_concurrent_transactions(&self) -> bool {
+        false
+    }
 }

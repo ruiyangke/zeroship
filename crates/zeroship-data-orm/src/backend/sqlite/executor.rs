@@ -46,6 +46,12 @@ impl ScopedExecutor for SqliteBackend {
             .exec(sql, params)
             .await
     }
+    async fn check_connection(&self) -> Result<(), DbError> {
+        // One round trip to the actor on the autocommit connection. It does not
+        // reserve a lane, so an app's open transaction does not delay it.
+        self.autocommit_client().query("SELECT 1", &[]).await?;
+        Ok(())
+    }
     async fn open_tx_session(
         &self,
         app_id: &str,

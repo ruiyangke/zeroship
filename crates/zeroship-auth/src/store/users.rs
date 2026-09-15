@@ -141,7 +141,9 @@ pub async fn record_login_failure(db: &Database, id: &UserId) -> Result<i32> {
             )
             .await?
         else {
-            return Ok(0);
+            // The callback's error type is the ORM's here; nothing else in the
+            // body fixes it.
+            return Ok::<_, DbError>(0);
         };
         if let Some(seconds) = lockout::backoff_secs(row.failed_login_count) {
             let duration = std::time::Duration::from_secs(seconds.unsigned_abs());

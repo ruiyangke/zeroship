@@ -49,4 +49,10 @@ impl crate::backend::Backend for PostgresBackend {
     fn publishes_committed_changes(&self) -> bool {
         false
     }
+
+    /// Each transaction holds a pool lease of its own, so the ceiling is the
+    /// pool's size rather than one per app.
+    fn admits_concurrent_transactions(&self) -> bool {
+        true
+    }
 }

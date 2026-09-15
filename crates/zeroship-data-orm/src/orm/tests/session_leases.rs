@@ -282,7 +282,7 @@ async fn session_lease_refused_on_transaction_receivers_and_sqlite() {
                     .unwrap_err(),
                 "session_lease_requires_root",
             );
-            Ok(())
+            Ok::<_, DbError>(())
         })
         .await
         .unwrap();

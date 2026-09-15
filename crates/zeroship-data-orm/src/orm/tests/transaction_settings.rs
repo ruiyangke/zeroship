@@ -188,7 +188,7 @@ async fn postgres_trigger_gated_delete_mirrors_audit_retention() {
             tx.postgres()?.set_local(&flag(), "on").await?;
             enabled.send(()).unwrap();
             std::future::pending::<()>().await;
-            Ok(())
+            Ok::<_, DbError>(())
         })
         .boxed_local();
     match select(ready, cancelled).await {
@@ -301,7 +301,7 @@ async fn transaction_setting_names_are_validated_before_sql() {
                 tx.postgres()?.set_local(&flag(), "on").await.unwrap_err(),
                 "invalid_transaction_setting",
             );
-            Ok(())
+            Ok::<_, DbError>(())
         })
         .await
         .unwrap();
@@ -343,7 +343,7 @@ async fn set_local_requires_the_transaction_receiver_and_postgres() {
     sqlite
         .transaction(|tx| async move {
             assert_code(tx.postgres().unwrap_err(), "unsupported_backend_feature");
-            Ok(())
+            Ok::<_, DbError>(())
         })
         .await
         .unwrap();

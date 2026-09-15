@@ -264,7 +264,7 @@ async fn locking_reads_refuse_relation_loading() {
                 .all::<Post, Author>()
                 .await?;
             assert_eq!(loaded.len(), 3);
-            Ok(())
+            Ok::<_, DbError>(())
         })
         .await
         .unwrap();
@@ -367,7 +367,7 @@ async fn scope_and_schema(postgres: bool) {
                 .query()
                 .with_related(posts::relations::author)
                 .all::<Post, Author>();
-            Ok((
+            Ok::<_, DbError>((
                 posts.query().with_related(posts::relations::author),
                 prepared,
             ))

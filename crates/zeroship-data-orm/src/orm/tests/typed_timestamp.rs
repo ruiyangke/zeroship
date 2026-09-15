@@ -228,7 +228,7 @@ async fn exercise(postgres: bool) {
                     "declared transaction-clock assignments retain their semantics"
                 );
             }
-            Ok(next)
+            Ok::<_, DbError>(next)
         })
         .await
         .unwrap();
@@ -307,7 +307,7 @@ async fn exercise(postgres: bool) {
             table
                 .update::<_, Moment>(moments::id.eq("row")?, moments::happened.set(7_i64)?)
                 .await?;
-            Ok(())
+            Ok::<_, DbError>(())
         })
         .await
         .unwrap();

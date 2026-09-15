@@ -293,6 +293,19 @@ impl CollectionFixture {
         }
     }
 
+    /// The URL of the server this fixture started, for a test that needs a
+    /// second connection pool over the same database.
+    pub fn server_url(&self) -> String {
+        self.server.as_ref().expect("PostgreSQL fixture").url()
+    }
+
+    /// Stop the server this fixture started, for a test about what an
+    /// unreachable database does. Everything opened against it is dead
+    /// afterwards, so such a test drops the fixture instead of closing it.
+    pub fn stop_server(&mut self) {
+        drop(self.server.take().expect("PostgreSQL fixture"));
+    }
+
     /// Run a raw PostgreSQL oracle query; `{table}` names the qualified collection.
     pub async fn postgres_oracle(&self, collection: &str, sql: &str) -> Vec<compio_postgres::Row> {
         let (backend, schema, _) = self.postgres.as_ref().expect("PostgreSQL fixture");
