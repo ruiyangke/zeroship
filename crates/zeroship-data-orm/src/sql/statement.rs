@@ -35,6 +35,7 @@ pub enum ArrayElement {
 
 impl ArrayElement {
     /// Storage of a single element, such as an array mutation operand.
+    #[must_use]
     pub const fn storage(self) -> StorageType {
         match self {
             Self::Text => StorageType::Text,
@@ -49,6 +50,7 @@ impl StorageType {
 
     /// Storage of an array mutation operand: an element for native arrays, a
     /// JSON value for JSON documents.
+    #[must_use]
     pub const fn array_operand(self) -> Option<Self> {
         match self {
             Self::Json => Some(Self::Json),

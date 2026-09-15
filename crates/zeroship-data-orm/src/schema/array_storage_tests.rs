@@ -1,8 +1,8 @@
 use super::*;
 use crate::value;
 
-fn descriptor(value: Value) -> Result<ColumnSchema, DbError> {
-    ColumnSchema::from_descriptor(&value)
+fn descriptor(value: &Value) -> Result<ColumnSchema, DbError> {
+    ColumnSchema::from_descriptor(value)
 }
 
 fn identity() -> ColumnSchema {
@@ -33,14 +33,14 @@ fn text_array_token_declares_native_text_storage() {
         value!({"type":"textArray", "items":"string"}),
         value!({"type":"textArray", "items":"text"}),
     ] {
-        let column = descriptor(token).unwrap();
+        let column = descriptor(&token).unwrap();
         assert_eq!(column.logical_type, LogicalType::Array);
         assert_eq!(column.items, Some(LogicalType::Text));
         assert_eq!(column.storage.array, ArrayStorage::Native);
         assert!(column.has_native_array_storage());
     }
     let mapped =
-        descriptor(value!({"type":"textArray", "storage":{"valueColumn":"stored_labels"}}))
+        descriptor(&value!({"type":"textArray", "storage":{"valueColumn":"stored_labels"}}))
             .unwrap();
     assert_eq!(mapped.storage.array, ArrayStorage::Native);
     assert_eq!(
@@ -48,7 +48,7 @@ fn text_array_token_declares_native_text_storage() {
         Some("stored_labels")
     );
 
-    let json = descriptor(value!({"type":"array", "items":"string"})).unwrap();
+    let json = descriptor(&value!({"type":"array", "items":"string"})).unwrap();
     assert_eq!(json.logical_type, LogicalType::Array);
     assert_eq!(json.storage.array, ArrayStorage::Json);
     assert!(!json.has_native_array_storage());
@@ -62,7 +62,7 @@ fn text_array_token_refuses_conflicting_or_unknown_spellings() {
         value!({"type":"integerArray"}),
         value!({"type":"array", "items":"textArray"}),
     ] {
-        let error = descriptor(rejected.clone()).unwrap_err();
+        let error = descriptor(&rejected).unwrap_err();
         assert!(
             matches!(
                 error,
@@ -74,7 +74,7 @@ fn text_array_token_refuses_conflicting_or_unknown_spellings() {
             "{rejected}: {error:?}"
         );
     }
-    assert!(descriptor(value!({"type":"textArray"})).is_ok());
+    assert!(descriptor(&value!({"type":"textArray"})).is_ok());
 }
 
 #[test]
@@ -83,7 +83,7 @@ fn schema_validation_limits_native_storage_to_unprotected_top_level_text_arrays(
     let mut nullable = native(LogicalType::Array, Some(LogicalType::Text));
     nullable.required = false;
     validate(nullable).unwrap();
-    validate(descriptor(value!({"type":"textArray", "default":[]})).unwrap()).unwrap();
+    validate(descriptor(&value!({"type":"textArray", "default":[]})).unwrap()).unwrap();
 
     let mut encrypted = native(LogicalType::Array, Some(LogicalType::Text));
     encrypted.encrypted = true;
