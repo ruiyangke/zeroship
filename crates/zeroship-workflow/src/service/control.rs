@@ -178,7 +178,12 @@ impl AppWorkflows {
             .await?
             .accept()?;
         captured.check()?;
-        require_open_epoch(plan.transaction(), &self.app, captured).await?;
+        Box::pin(require_open_epoch(
+            plan.transaction(),
+            &self.app,
+            captured,
+        ))
+        .await?;
         let result = plan.apply().await?;
         store_request(
             &mut tx, &self.app, request, "restart", &digest, &result, now,

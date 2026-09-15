@@ -585,7 +585,7 @@ async fn restart_cancels_an_in_flight_closing_attempt() {
     // Startup's maintenance duties are delivered and settled while the host
     // runs; a pending one would refuse every closing attempt once it stops.
     for kind in [DutyKind::Reconcile, DutyKind::Collect] {
-        until(async || {
+        Box::pin(until(async || {
             let pending = retry(async || {
                 recovery(root.path())
                     .await?
@@ -595,11 +595,11 @@ async fn restart_cancels_an_in_flight_closing_attempt() {
             })
             .await;
             pending.is_none().then_some(())
-        })
+        }))
         .await;
     }
     drop(host);
-    let close = until(async || {
+    let close = Box::pin(until(async || {
         retry(async || {
             recovery(root.path())
                 .await?
@@ -608,7 +608,7 @@ async fn restart_cancels_an_in_flight_closing_attempt() {
                 .map_err(manager::manager_error)
         })
         .await
-    })
+    }))
     .await;
     let closing = responsibility(root.path(), &app).await.unwrap();
     assert_eq!(closing.state, ScopeState::Closing);

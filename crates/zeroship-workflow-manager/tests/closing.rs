@@ -101,7 +101,7 @@ fn revision(value: i64) -> Revision {
 }
 
 /// Bounds a test chooses per call, so no case waits on a real idle window.
-fn options(
+const fn options(
     idle: Duration,
     timeout: Duration,
     backoff: Duration,

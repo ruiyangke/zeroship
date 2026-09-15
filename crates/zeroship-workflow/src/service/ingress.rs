@@ -261,6 +261,10 @@ impl AppWorkflows {
         .await
     }
 
+    #[expect(
+        clippy::future_not_send,
+        reason = "signal ingestion stays on the creator transaction's owning thread"
+    )]
     async fn ingest_captured(
         &self,
         request: &RequestId,

@@ -723,7 +723,7 @@ async fn sqlite_closed_epoch_fences_restart() {
     restart_path(&fixture, 1).await;
 }
 
-/// Every fenced path on PostgreSQL, each after Close fenced the epoch the
+/// Every fenced path on `PostgreSQL`, each after Close fenced the epoch the
 /// previous path's admission installed.
 #[compio::test]
 async fn postgres_closed_epoch_fences_every_ingress_path() {
@@ -780,6 +780,7 @@ impl super::super::IngressEpochs for Epochs {
 
 #[compio::test]
 async fn sqlite_fenced_acceptance_establishes_a_newer_epoch_and_retries_once() {
+    use crate::backend::WorkflowBackend;
     let (_dir, fixture) = sqlite_fenced_app().await;
     let epochs = Rc::new(Epochs {
         service: fixture.service.clone(),
@@ -839,7 +840,6 @@ async fn sqlite_fenced_acceptance_establishes_a_newer_epoch_and_retries_once() {
     epochs.fails.set(false);
     epochs.installs.set(true);
     let backend = scope.clone().into_backend(1024).unwrap();
-    use crate::backend::WorkflowBackend;
     backend
         .signal(started.id.clone(), approved())
         .await

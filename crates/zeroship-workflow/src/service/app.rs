@@ -241,6 +241,10 @@ impl AppWorkflows {
     /// the host and retry once, capturing the binding's newly installed
     /// authority under the same request identity. The refused attempt
     /// committed nothing.
+    #[expect(
+        clippy::future_not_send,
+        reason = "acceptance retries on the creator transaction's owning thread"
+    )]
     pub(super) async fn accept<'a, T>(
         &'a self,
         attempt: impl Fn(Self) -> futures::future::LocalBoxFuture<'a, Result<T, WorkflowServiceError>>,
@@ -408,6 +412,10 @@ impl AppWorkflows {
         .await
     }
 
+    #[expect(
+        clippy::future_not_send,
+        reason = "signal acceptance stays on the creator transaction's owning thread"
+    )]
     async fn signal_captured(
         &self,
         request_id: &RequestId,
