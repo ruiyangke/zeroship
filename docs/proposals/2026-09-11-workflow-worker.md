@@ -334,6 +334,27 @@ interval`, which is why that difference is the quantity the boot margin has to
 fit inside. The file is replaced atomically, so no worker ever reads half a
 token.
 
+Minting is a LEASED ROLE, not something every replica does. Deployments run
+several Control replicas against one database, and two of them rotating the same
+volume would write over each other. The minter is elected with a database
+advisory lock: the holder rotates, the others stand by, and a holder that dies
+drops its lease with its session so the next tick elects a successor. A replica
+that is not the minter writes nothing at all.
+
+**Concurrency, because there is more than one Control.** Consuming a use is a
+guarded write, never a read followed by a write, so a token with N uses admits
+exactly N workers however many present it at once. The instance public key is
+UNIQUE, so two replicas racing a lost-reply retry converge on one instance row
+rather than minting two identities for one key. Renewal extends monotonically -
+it takes the later of the recorded expiry and the new one - so a slow replica's
+in-flight renewal cannot shorten a window a newer one already extended.
+
+The signer import converges for a different reason: it only ever ADDS, so any
+order of replicas reaches the same recorded set. A configuration that
+CONTRADICTS what is recorded refuses only the replica that read it, which during
+a rolling deploy means replicas fail one at a time with a message naming the
+offending entries, rather than a fleet that half-believes a new file.
+
 **What the shared file is, stated plainly.** It is a bearer artifact: whoever can
 read that volume can join a worker in that zone, for the TTL, up to the uses that
 remain. Rotation bounds the window and the use cap bounds the blast radius, but
