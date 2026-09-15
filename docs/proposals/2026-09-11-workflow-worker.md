@@ -267,9 +267,37 @@ while an attacker's workers keep serving. The recorded signer id on the instance
 row is what makes that set enumerable. Rotate when the key is merely old; purge
 when you believe it leaked.
 
-Retiring one instance is unchanged - the `status` filter on the instance key
-read is the whole of it - and a worker that exits gracefully retires itself once
-its server has drained. Observed liveness never writes enrollment status.
+Retiring one instance is unchanged - a worker that exits gracefully retires
+itself once its server has drained - and observed liveness never writes
+enrollment status.
+
+**The instance identity expires, and the worker renews it.** An instance is
+admitted with an expiry, and Control's instance verification refuses an expired
+instance exactly as it refuses a retired or revoked one. Revocation therefore
+stops being the only way a credential ever stops working: an abandoned worker's
+credential dies on its own, and a crashed worker's row stops being live without
+anyone sweeping it. Nothing observes liveness to make that happen; the row
+simply stops satisfying the read.
+
+Renewal is authenticated by the INSTANCE KEY and by nothing else. No join token
+is involved, and requiring a fresh one would defeat the point of a use-capped
+token: the worker proved possession of its key at join, and that proof is what
+renewal rests on. Control extends the expiry only for an instance that is
+active, unretired and not already expired, so expiry is terminal in the same way
+retirement is - a worker that let its identity lapse rejoins, which needs a
+token, rather than reviving a row.
+
+The worker renews on a schedule DERIVED from the lease, not on a constant chosen
+beside it. The renewal interval is the lease divided by a stated factor, so
+several attempts fall inside one lease and a renewal that fails is retried well
+before the identity lapses. The two quantities move together by construction;
+they are not two settings an operator can put out of order.
+
+What this replaces is one sentence: "an instance row is live until an operator
+says otherwise". It does NOT replace the manager's registration lease, which is
+a different fact - that a particular worker is currently carrying a particular
+app - asserted by a different service. A worker can hold a live instance
+identity and no placement, and losing a placement is not losing an identity.
 
 Every enrollment reader reads the authoritative row: Control on each internal
 request, the manager at ingress and again after lock waits and before commit,
@@ -329,7 +357,10 @@ allowlist: a join token carries its own `typ`, so it can neither be presented as
 a service assertion nor accept one in its place. Control's minter is configured
 separately (`control.join_token_signer_file`, `control.join_token_file`,
 `control.join_token_zone`) and is inert when unset, so a multi-host Control
-verifies without holding a signing key. `zeroship dev init` provisions the
+verifies without holding a signing key. A joined worker renews its own instance
+through `CONTROL_WORKER_RENEW`, a grant `svc/worker` holds at instance arity and
+which takes no selector, so no worker can renew another's identity.
+`zeroship dev init` provisions the
 signer credential and the import file; `zeroship join-token` mints from that
 credential; compose mounts the import file and the signer credential into
 Control and the minted-token volume into the workers; and
@@ -711,7 +742,7 @@ with this queue namespace; it is not a second authoritative placement store.
 | `workflow_manager.schedule_scopes` | App lifecycle revision, calendar-enabled state and optional selected activation; historical receipts remain independently replayable. |
 | `workflow_manager.schedules` | Logical schedule identity across deployments, active descriptor and persisted due/catch-up frontier. |
 | `workflow_manager.schedule_occurrences` | Stable occurrence request, run and job identities bound to a schedule revision, instant and activation prerequisite. |
-| `zeroship.worker_instances` | Control-owned enrollment, public key, frozen execution zone, admitting signer and token id, and revocation state; distinct from workflow registration. |
+| `zeroship.worker_instances` | Control-owned enrollment, public key, frozen execution zone, admitting signer and token id, identity expiry and revocation state; distinct from workflow registration. |
 | `zeroship.execution_zones`, `zeroship.worker_join_signers` | Control-owned zones and the trusted signers that may mint join tokens for them. The manager reads an instance's frozen zone and its status. |
 | `zeroship.app_deploys` | Control-owned immutable deployment metadata and reclamation state. |
 | `zeroship.app_deploy_holds` | Control-owned app/deployment/holder generation and retention state. |
