@@ -37,7 +37,7 @@
 //!
 //! Deployments run several Control replicas against one database, and two of
 //! them rotating the same volume would write over each other. The writer is
-//! elected with a PostgreSQL session advisory lock on [`MINTER_LOCK_KEY`]: the
+//! elected with a `PostgreSQL` session advisory lock on [`MINTER_LOCK_KEY`]: the
 //! holder rotates, the others stand by and write nothing at all. The lease ends
 //! with the session, so a holder that dies drops it and the next tick elects a
 //! successor. `pg_try_advisory_lock` is re-entrant within a session - a holder
@@ -226,8 +226,11 @@ mod tests {
             TOKEN_TTL > ROTATION_INTERVAL,
             "a token must outlive the interval that replaces it"
         );
+        let overlap = TOKEN_TTL
+            .checked_sub(ROTATION_INTERVAL)
+            .expect("a token outlives the interval that replaces it");
         assert!(
-            TOKEN_TTL - ROTATION_INTERVAL >= BOOT_MARGIN,
+            overlap >= BOOT_MARGIN,
             "the overlap a rotation leaves must cover a worker's boot"
         );
     }

@@ -6,7 +6,7 @@
 //! no database and runs under a bare `cargo test -p zeroship-control`. The
 //! token grammar itself - signature, audience, expiry, lifetime, claims - is
 //! exercised in `zeroship_core::worker_join`. What lives HERE is everything
-//! that cannot be stated without a real PostgreSQL and a real ntex transport:
+//! that cannot be stated without a real `PostgreSQL` and a real ntex transport:
 //!
 //!   * that an admitted join writes the derived address, the presented key,
 //!     the admitting signer and token, and the token's zone into
@@ -406,8 +406,8 @@ fn loopback_envelope() -> EnrolmentEnvelope {
         .expect("the declaration parses")
 }
 
-fn peer(text: &str) -> Option<SocketAddr> {
-    Some(text.parse().expect("peer socket parses"))
+fn peer(text: &str) -> SocketAddr {
+    text.parse().expect("peer socket parses")
 }
 
 async fn body_json(mut response: web::HttpResponse) -> serde_json::Value {
@@ -500,7 +500,7 @@ async fn an_admitted_join_records_the_address_the_signer_and_the_token() {
 
     let response = join(
         &fixture.state,
-        peer(IN_ENVELOPE_PEER),
+        Some(peer(IN_ENVELOPE_PEER)),
         &token,
         joiner.request(&token, ADVERTISED_PORT),
     )
@@ -584,7 +584,7 @@ async fn two_joins_with_identical_input_land_different_ring_keys() {
     for joiner in [Joiner::random(), Joiner::random()] {
         let response = join(
             &fixture.state,
-            peer(IN_ENVELOPE_PEER),
+            Some(peer(IN_ENVELOPE_PEER)),
             &token,
             joiner.request(&token, ADVERTISED_PORT),
         )
@@ -631,7 +631,7 @@ async fn a_refused_join_writes_no_row() {
     let joiner = Joiner::random();
     let outside = join(
         &fixture.state,
-        peer(OUT_OF_ENVELOPE_PEER),
+        Some(peer(OUT_OF_ENVELOPE_PEER)),
         &token,
         joiner.request(&token, ADVERTISED_PORT),
     )
@@ -642,7 +642,7 @@ async fn a_refused_join_writes_no_row() {
     let bad_port = Joiner::random();
     let refused_port = join(
         &fixture.state,
-        peer(IN_ENVELOPE_PEER),
+        Some(peer(IN_ENVELOPE_PEER)),
         &token,
         bad_port.request(&token, 9999),
     )
@@ -676,7 +676,7 @@ async fn an_undeclared_envelope_refuses_every_join() {
     let joiner = Joiner::random();
     let response = join(
         &fixture.state,
-        peer(IN_ENVELOPE_PEER),
+        Some(peer(IN_ENVELOPE_PEER)),
         &token,
         joiner.request(&token, ADVERTISED_PORT),
     )
@@ -792,7 +792,7 @@ async fn a_token_control_cannot_trust_is_refused_and_writes_no_row() {
         let joiner = Joiner::random();
         let response = join(
             &fixture.state,
-            peer(IN_ENVELOPE_PEER),
+            Some(peer(IN_ENVELOPE_PEER)),
             token,
             joiner.request(token, ADVERTISED_PORT),
         )
@@ -808,7 +808,7 @@ async fn a_token_control_cannot_trust_is_refused_and_writes_no_row() {
     let token = signer.token(DEFAULT_EXECUTION_ZONE, 1);
     let admitted = join(
         &fixture.state,
-        peer(IN_ENVELOPE_PEER),
+        Some(peer(IN_ENVELOPE_PEER)),
         &token,
         joiner.request(&token, ADVERTISED_PORT),
     )
@@ -883,7 +883,7 @@ async fn a_join_not_signed_by_the_presented_key_is_refused() {
     ];
     let mut verdicts = Vec::new();
     for (label, request) in cases {
-        let response = join(&fixture.state, peer(IN_ENVELOPE_PEER), &token, request).await;
+        let response = join(&fixture.state, Some(peer(IN_ENVELOPE_PEER)), &token, request).await;
         let status = response.status();
         verdicts.push((label, status, body_json(response).await));
     }
@@ -898,7 +898,7 @@ async fn a_join_not_signed_by_the_presented_key_is_refused() {
     let wrong_key = Joiner::random();
     let mismatched = join(
         &fixture.state,
-        peer(IN_ENVELOPE_PEER),
+        Some(peer(IN_ENVELOPE_PEER)),
         &confirmed_token,
         wrong_key.request(&confirmed_token, ADVERTISED_PORT),
     )
@@ -911,7 +911,7 @@ async fn a_join_not_signed_by_the_presented_key_is_refused() {
     // can use.
     let confirmed = join(
         &fixture.state,
-        peer(IN_ENVELOPE_PEER),
+        Some(peer(IN_ENVELOPE_PEER)),
         &confirmed_token,
         holder.request(&confirmed_token, ADVERTISED_PORT),
     )
@@ -935,9 +935,8 @@ async fn a_join_not_signed_by_the_presented_key_is_refused() {
     }
     assert_eq!(mismatched_status, StatusCode::FORBIDDEN, "{mismatched_body}");
     assert_eq!(mismatched_body["reason"], "confirmation_mismatch");
-    assert_eq!(
+    assert!(
         confirmed_body["instance_id"].as_str().is_some(),
-        true,
         "{confirmed_body}"
     );
     assert_eq!(confirmed_status, StatusCode::CREATED);
@@ -972,7 +971,7 @@ async fn a_token_admits_exactly_its_uses_and_a_retry_costs_none() {
     let first_id = admitted_id(
         join(
             &fixture.state,
-            peer(IN_ENVELOPE_PEER),
+            Some(peer(IN_ENVELOPE_PEER)),
             &token,
             first.request(&token, ADVERTISED_PORT),
         )
@@ -985,7 +984,7 @@ async fn a_token_admits_exactly_its_uses_and_a_retry_costs_none() {
     let retry_id = admitted_id(
         join(
             &fixture.state,
-            peer(IN_ENVELOPE_PEER),
+            Some(peer(IN_ENVELOPE_PEER)),
             &token,
             first.request(&token, ADVERTISED_PORT),
         )
@@ -995,7 +994,7 @@ async fn a_token_admits_exactly_its_uses_and_a_retry_costs_none() {
     let second_id = admitted_id(
         join(
             &fixture.state,
-            peer(IN_ENVELOPE_PEER),
+            Some(peer(IN_ENVELOPE_PEER)),
             &token,
             second.request(&token, ADVERTISED_PORT),
         )
@@ -1004,7 +1003,7 @@ async fn a_token_admits_exactly_its_uses_and_a_retry_costs_none() {
     .await;
     let exhausted = join(
         &fixture.state,
-        peer(IN_ENVELOPE_PEER),
+        Some(peer(IN_ENVELOPE_PEER)),
         &token,
         third.request(&token, ADVERTISED_PORT),
     )
@@ -1018,7 +1017,7 @@ async fn a_token_admits_exactly_its_uses_and_a_retry_costs_none() {
     let fourth = Joiner::random();
     let admitted = join(
         &fixture.state,
-        peer(IN_ENVELOPE_PEER),
+        Some(peer(IN_ENVELOPE_PEER)),
         &fresh,
         fourth.request(&fresh, ADVERTISED_PORT),
     )
@@ -1064,7 +1063,7 @@ async fn one_key_joined_under_another_signer_conflicts() {
     let instance_id = admitted_id(
         join(
             &fixture.state,
-            peer(IN_ENVELOPE_PEER),
+            Some(peer(IN_ENVELOPE_PEER)),
             &owner_token,
             joiner.request(&owner_token, ADVERTISED_PORT),
         )
@@ -1073,7 +1072,7 @@ async fn one_key_joined_under_another_signer_conflicts() {
     .await;
     let foreign = join(
         &fixture.state,
-        peer(IN_ENVELOPE_PEER),
+        Some(peer(IN_ENVELOPE_PEER)),
         &other_token,
         joiner.request(&other_token, ADVERTISED_PORT),
     )
@@ -1125,7 +1124,7 @@ async fn an_instance_renews_its_own_lease_monotonically_until_it_lapses() {
     let instance_id = admitted_id(
         join(
             &fixture.state,
-            peer(IN_ENVELOPE_PEER),
+            Some(peer(IN_ENVELOPE_PEER)),
             &token,
             joiner.request(&token, ADVERTISED_PORT),
         )
@@ -1207,7 +1206,7 @@ async fn a_lapsed_instance_key_no_longer_resolves() {
     let instance_id = admitted_id(
         join(
             &fixture.state,
-            peer(IN_ENVELOPE_PEER),
+            Some(peer(IN_ENVELOPE_PEER)),
             &token,
             joiner.request(&token, ADVERTISED_PORT),
         )
@@ -1451,7 +1450,7 @@ async fn a_malformed_body_is_refused_before_any_derivation() {
     };
 
     for (label, request) in [("a short key", short_key), ("a short proof", short_proof)] {
-        let response = join(&fixture.state, peer(IN_ENVELOPE_PEER), &token, request).await;
+        let response = join(&fixture.state, Some(peer(IN_ENVELOPE_PEER)), &token, request).await;
         assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{label}");
     }
     assert_eq!(instances_of(pg, &signer.id).await, 0);
@@ -1482,7 +1481,7 @@ async fn identity_zone_and_provenance_are_frozen_after_joining() {
     let instance_id = admitted_id(
         join(
             &fixture.state,
-            peer(IN_ENVELOPE_PEER),
+            Some(peer(IN_ENVELOPE_PEER)),
             &token,
             joiner.request(&token, ADVERTISED_PORT),
         )
@@ -1630,7 +1629,7 @@ async fn rotate_leaves_the_fleet_running_and_purge_retires_it() {
             admitted_id(
                 join(
                     &fixture.state,
-                    peer(IN_ENVELOPE_PEER),
+                    Some(peer(IN_ENVELOPE_PEER)),
                     &token,
                     joiner.request(&token, ADVERTISED_PORT),
                 )
@@ -1683,7 +1682,7 @@ async fn rotate_leaves_the_fleet_running_and_purge_retires_it() {
 
 /// The blocking chain rooted at `blocker_pid`, in the pattern
 /// `crates/zeroship-control/tests/organizations/concurrency.rs::wait_for_departures`
-/// uses: follow `pg_blocking_pids` recursively, because PostgreSQL may queue a
+/// uses: follow `pg_blocking_pids` recursively, because `PostgreSQL` may queue a
 /// waiter behind another waiter rather than directly behind the row's holder.
 async fn count_blocked_on(observer: &compio_postgres::Client, blocker_pid: i32) -> i64 {
     observer
@@ -1743,7 +1742,7 @@ async fn wait_until_blocked_on(
 /// starts, so both `zeroship.join_worker_instance` (which locks the same row)
 /// and `zeroship.purge_worker_join_signer` (whose own first UPDATE locks it
 /// too) queue behind ONE known backend. Once BOTH are observed waiting, the
-/// blocker releases and PostgreSQL's row-lock queue decides which of the two
+/// blocker releases and `PostgreSQL`'s row-lock queue decides which of the two
 /// real operations goes first. Both orders are admissible and the two of them
 /// are exhaustive: either the join committed first and the purge's second
 /// statement retires what it finds, or the purge committed first and the join's
@@ -1761,8 +1760,8 @@ async fn purging_a_signer_while_a_join_holds_its_lock_leaves_no_active_instance(
         "no ordering of join and purge may leave an active instance of a \
          purged signer"
     );
-    assert_eq!(
-        outcome.join_committed, outcome.instance_row_exists,
+    assert!(
+        outcome.verdict_matches_the_registry,
         "a join that reported success must have left a row and one that \
          refused must have left none; anything else is a torn outcome"
     );
@@ -1771,8 +1770,9 @@ async fn purging_a_signer_while_a_join_holds_its_lock_leaves_no_active_instance(
 struct RaceOutcome {
     both_observed_blocked: bool,
     active_instance_of_purged_signer_survived: bool,
-    join_committed: bool,
-    instance_row_exists: bool,
+    /// Whether the join's own verdict and the row it left AGREE: a reported
+    /// success with no row, or a refusal with one, is a torn outcome.
+    verdict_matches_the_registry: bool,
 }
 
 /// Drive the race in [`purging_a_signer_while_a_join_holds_its_lock_leaves_no_active_instance`]
@@ -1941,8 +1941,7 @@ async fn run_the_join_purge_race() -> RaceOutcome {
     RaceOutcome {
         both_observed_blocked: queued,
         active_instance_of_purged_signer_survived: survived > 0,
-        join_committed: join_ok,
-        instance_row_exists: rows > 0,
+        verdict_matches_the_registry: join_ok == (rows > 0),
     }
 }
 
@@ -1974,13 +1973,13 @@ async fn two_replicas_racing_one_use_admit_exactly_one_worker() {
     let (a, b) = futures::join!(
         join(
             &left.state,
-            peer(IN_ENVELOPE_PEER),
+            Some(peer(IN_ENVELOPE_PEER)),
             &token,
             first.request(&token, ADVERTISED_PORT),
         ),
         join(
             &right.state,
-            peer(IN_ENVELOPE_PEER),
+            Some(peer(IN_ENVELOPE_PEER)),
             &token,
             second.request(&token, ADVERTISED_PORT),
         )
@@ -2033,13 +2032,13 @@ async fn two_replicas_racing_one_key_converge_on_one_instance() {
     let (a, b) = futures::join!(
         join(
             &left.state,
-            peer(IN_ENVELOPE_PEER),
+            Some(peer(IN_ENVELOPE_PEER)),
             &token,
             joiner.request(&token, ADVERTISED_PORT),
         ),
         join(
             &right.state,
-            peer(IN_ENVELOPE_PEER),
+            Some(peer(IN_ENVELOPE_PEER)),
             &token,
             joiner.request(&token, ADVERTISED_PORT),
         )
@@ -2060,7 +2059,7 @@ async fn two_replicas_racing_one_key_converge_on_one_instance() {
     let sibling = Joiner::random();
     let second = join(
         &left.state,
-        peer(IN_ENVELOPE_PEER),
+        Some(peer(IN_ENVELOPE_PEER)),
         &token,
         sibling.request(&token, ADVERTISED_PORT),
     )
