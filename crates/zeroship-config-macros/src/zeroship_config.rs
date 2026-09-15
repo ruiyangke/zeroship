@@ -1104,8 +1104,8 @@ mod tests {
                 quote!(binary = "zeroship-worker", scope = "worker"),
                 quote! {
                     struct Controls {
-                        #[config(name = "worker.workflow_advance_unsigned", env = false)]
-                        workflow_advance_unsigned: BootstrapControl<bool>,
+                        #[config(name = "worker.unsafe_local_escape", env = false)]
+                        unsafe_local_escape: BootstrapControl<bool>,
                         #[config(shared = NO_CONFIG)]
                         no_config: BootstrapControl<bool>,
                     }
@@ -1114,11 +1114,11 @@ mod tests {
             .expect("env-free safety control expands"),
         );
         assert!(
-            !output.contains("ZEROSHIP_WORKER_WORKFLOW_ADVANCE_UNSIGNED"),
+            !output.contains("ZEROSHIP_WORKER_UNSAFE_LOCAL_ESCAPE"),
             "the disabled environment name must appear nowhere:\n{output}"
         );
         assert!(
-            !output.contains("__ZEROSHIP_CONFIG_READ_SITE_CONTROLS_WORKFLOW_ADVANCE_UNSIGNED_ENV"),
+            !output.contains("__ZEROSHIP_CONFIG_READ_SITE_CONTROLS_UNSAFE_LOCAL_ESCAPE_ENV"),
             "a disabled source must not register a read site"
         );
         // The one-variable control: the sibling field differs only by not

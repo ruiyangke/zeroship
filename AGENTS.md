@@ -122,10 +122,10 @@ list describing an edge you replaced.
 **This line listed `console · auth · {app}` until 2026-08-30** - omitting `control`, omitting `api`,
 and leading with the one host that is dead. Read the Caddyfile, not this line, if the answer matters.
 
-**`api.<domain>` is the gateway, and it is not a management API.** It serves nine endpoints, of which
-exactly one is a proxy (`/__zeroship/internal/workflow-advance`, which forwards to a worker over the
-hash ring). Seven terminate at the gateway - `/healthz`, `/readyz`, and the browser identity surface
-under `/__zeroship/auth/*` that mints and re-signs session cookies - and the rest is app dispatch.
+**`api.<domain>` is the gateway, and it is not a management API.** Nothing on it proxies a
+platform operation: the manager delivers workflow work to the worker that owns the app, so the
+edge is `/healthz`, `/readyz`, the browser identity surface under `/__zeroship/auth/*` that mints
+and re-signs session cookies, and app dispatch.
 That hostname is also the gateway's `iss` claim (`--public-url` default `https://api.zeroship.ai`),
 so it is a cryptographic identity, not just an address: repointing it moves end-user session issuance,
 not a route.
