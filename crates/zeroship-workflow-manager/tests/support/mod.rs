@@ -19,7 +19,7 @@ use zeroship_data_orm::{
     binding::DbBinding, encryption::ProjectKeySource, orm::Database, ConnectOptions,
 };
 use zeroship_workflow_manager::{
-    capacity::{Contract, LocalCapacity},
+    capacity::LocalCapacity,
     coordinator::{self, Coordinator},
     driver::{self, Driver},
     eligibility::{EligibilitySource, LocalEligibility, ZoneId},
@@ -69,7 +69,7 @@ pub fn try_driver(
         coordinator(queue, coordinator::Options::default()),
         options,
         lifecycle,
-        Contract::declarative(Rc::new(LocalCapacity)),
+        Rc::new(LocalCapacity),
     )
 }
 

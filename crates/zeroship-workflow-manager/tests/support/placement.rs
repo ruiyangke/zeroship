@@ -19,10 +19,7 @@ use zeroship_core::{
     workflow_jobs::{BroadcastId, JobId, JobOperation, JobSpec},
 };
 use zeroship_workflow_manager::{
-    capacity::{
-        self, CapacityFuture, CapacityProvider, CapacityReply, CapacityRequest, Contract,
-        ProvisionFuture, ProvisionReply, ProvisionRequest, ProvisioningProvider, Refusal,
-    },
+    capacity::{self, CapacityFuture, CapacityProvider, CapacityReply, CapacityRequest, Refusal},
     coordinator::{self, Coordinator},
     driver::{self, Driver},
     eligibility::{AppFacts, EligibilityFuture, EligibilitySource, WorkerFacts, ZoneId},
@@ -154,6 +151,7 @@ pub fn options(retry: Duration) -> driver::Options {
             idle_hold_down: LONG,
             request_timeout: Duration::from_secs(10),
             retry_interval: retry,
+            ..capacity::Options::default()
         },
         ..driver::Options::default()
     }
@@ -219,12 +217,12 @@ impl Host {
         self.queue.submit(&fanout(app)).await.unwrap()
     }
 
-    pub fn driver(&self, retry: Duration, contract: Contract) -> Driver {
+    pub fn driver(&self, retry: Duration, provider: Rc<dyn CapacityProvider>) -> Driver {
         Driver::new(
             self.coordinator.clone(),
             options(retry),
             Rc::new(Undeletable),
-            contract,
+            provider,
         )
         .unwrap()
     }
@@ -356,81 +354,6 @@ impl CapacityProvider for Pool {
                 }
                 Some(Step::Gate { .. }) => unreachable!("gates release a step"),
                 Some(Step::Proceed) | None => Ok(self.apply(request).await),
-            }
-        })
-    }
-}
-
-/// An imperative provider: every request starts a worker for its app. With
-/// `dedupe`, a repeated intent identity starts nothing.
-#[derive(Debug)]
-pub struct Starts {
-    starter: Starter,
-    dedupe: bool,
-    pub calls: RefCell<Vec<ProvisionRequest>>,
-    pub started: RefCell<Vec<(AppId, Revision, WorkerId)>>,
-    pub script: RefCell<VecDeque<Step>>,
-}
-
-impl Starts {
-    pub fn new(starter: Starter, dedupe: bool) -> Rc<Self> {
-        Rc::new(Self {
-            starter,
-            dedupe,
-            calls: RefCell::default(),
-            started: RefCell::default(),
-            script: RefCell::default(),
-        })
-    }
-
-    pub fn starts(&self) -> usize {
-        self.started.borrow().len()
-    }
-
-    pub fn calls(&self) -> usize {
-        self.calls.borrow().len()
-    }
-
-    async fn apply(&self, request: &ProvisionRequest) {
-        let seen = self
-            .started
-            .borrow()
-            .iter()
-            .any(|(app, generation, _)| app == &request.app && *generation == request.generation);
-        if self.dedupe && seen {
-            return;
-        }
-        let worker = self.starter.start(&request.zone).await;
-        self.started
-            .borrow_mut()
-            .push((request.app.clone(), request.generation, worker));
-    }
-}
-
-impl ProvisioningProvider for Starts {
-    fn provision<'a>(&'a self, request: &'a ProvisionRequest) -> ProvisionFuture<'a> {
-        Box::pin(async move {
-            self.calls.borrow_mut().push(request.clone());
-            let step = self.script.borrow_mut().pop_front();
-            let step = match step {
-                Some(Step::Gate { entered, release }) => {
-                    let _ = entered.send(());
-                    Some(release.await.expect("gate released"))
-                }
-                step => step,
-            };
-            match step {
-                Some(Step::Refuse(refusal)) => Ok(ProvisionReply::Refused(refusal)),
-                Some(Step::Fail) => Err(Error::Unavailable),
-                Some(Step::Lose) => {
-                    self.apply(request).await;
-                    Err(Error::Unavailable)
-                }
-                Some(Step::Gate { .. }) => unreachable!("gates release a step"),
-                Some(Step::Proceed) | None => {
-                    self.apply(request).await;
-                    Ok(ProvisionReply::Provisioned)
-                }
             }
         })
     }

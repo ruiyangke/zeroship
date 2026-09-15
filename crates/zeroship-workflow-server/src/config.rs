@@ -96,6 +96,21 @@ pub struct WorkflowSettings {
     /// Ceiling of the doubling closing backoff.
     #[config(name = "workflow.closing_backoff_max_ms", default = 3_600_000)]
     pub closing_backoff_max_ms: Operational<u64>,
+    /// Fewest placement slots an execution zone's capacity target may name.
+    #[config(name = "workflow.capacity_min_slots", default = 0)]
+    pub capacity_min_slots: Operational<i64>,
+    /// Most placement slots an execution zone's capacity target may name.
+    #[config(name = "workflow.capacity_max_slots", default = 1024)]
+    pub capacity_max_slots: Operational<i64>,
+    /// Idleness a zone's demand must stay below its target before it shrinks.
+    #[config(name = "workflow.capacity_hold_down_ms", default = 300_000)]
+    pub capacity_hold_down_ms: Operational<u64>,
+    /// Deadline for one claimed capacity request before it is recorded unavailable.
+    #[config(name = "workflow.capacity_request_timeout_ms", default = 10000)]
+    pub capacity_request_timeout_ms: Operational<u64>,
+    /// Pause after a capacity reply before the same target is requested again.
+    #[config(name = "workflow.capacity_retry_interval_ms", default = 30000)]
+    pub capacity_retry_interval_ms: Operational<u64>,
     /// Platform coordination metadata login; no customer database credentials.
     #[config(name = "workflow.database_url")]
     pub database_url: Secret<String>,

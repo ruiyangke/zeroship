@@ -24,7 +24,7 @@ use zeroship_core::{
     },
 };
 use zeroship_workflow_manager::{
-    capacity::{Contract, StaticPool},
+    capacity::StaticPool,
     coordinator::Placed,
     eligibility::ZoneId,
     Error,
@@ -102,7 +102,7 @@ async fn other_zone(fixture: &Fixture) {
     let app = AppId::mint();
     host.due(&app, &home).await;
     let far = host.worker(&away, 8).await;
-    let mut driver = host.driver(LONG, Contract::declarative(Rc::new(StaticPool)));
+    let mut driver = host.driver(LONG, Rc::new(StaticPool));
     driver.tick().await;
     driver.tick().await;
     assert!(host.placed(&far).await.is_empty());
@@ -136,7 +136,7 @@ async fn revoked(fixture: &Fixture) {
     let app = AppId::mint();
     host.due(&app, &zone).await;
     let first = host.worker(&zone, 4).await;
-    let mut driver = host.driver(LONG, Contract::declarative(Rc::new(StaticPool)));
+    let mut driver = host.driver(LONG, Rc::new(StaticPool));
     driver.tick().await;
     assert_eq!(host.placed(&first).await, vec![app.clone()]);
     let scope = host.coordinator.assignments(&first, None).await.unwrap()[0].clone();
@@ -228,7 +228,7 @@ async fn after_reads(fixture: &Fixture) {
         Err(Error::Denied)
     );
     let replacement = host.worker(&zone, 4).await;
-    let mut driver = host.driver(LONG, Contract::declarative(Rc::new(StaticPool)));
+    let mut driver = host.driver(LONG, Rc::new(StaticPool));
     driver.tick().await;
     assert_eq!(host.placed(&replacement).await, vec![app.clone()]);
     assert!(host.coordinator.owned(&app).await.unwrap());
@@ -244,7 +244,7 @@ async fn refused(fixture: &Fixture) {
         let app = AppId::mint();
         host.due(&app, &zone).await;
         let worker = host.worker(&zone, 4).await;
-        let mut driver = host.driver(LONG, Contract::declarative(Rc::new(StaticPool)));
+        let mut driver = host.driver(LONG, Rc::new(StaticPool));
         driver.tick().await;
         let assignment = host.coordinator.assignments(&worker, None).await.unwrap()[0].clone();
         host.coordinator
@@ -356,7 +356,7 @@ async fn lifecycle(fixture: &Fixture) {
     let (archived, deleted) = (AppId::mint(), AppId::mint());
     host.due(&archived, &zone).await;
     host.due(&deleted, &zone).await;
-    let mut driver = host.driver(LONG, Contract::declarative(Rc::new(StaticPool)));
+    let mut driver = host.driver(LONG, Rc::new(StaticPool));
     driver.tick().await;
     let mut unplaced = vec![archived.clone(), deleted.clone()];
     unplaced.sort();

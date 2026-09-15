@@ -28,7 +28,7 @@ use zeroship_core::{
 };
 use zeroship_workflow_client::{Options as ClientOptions, QueueDeploymentHolds, Transport};
 use zeroship_workflow_manager::{
-    capacity::{Contract, StaticPool},
+    capacity::{Options as CapacityOptions, StaticPool},
     driver::{Driver, Options as DriverOptions, TickReport},
     lifecycle::{self, ControlLifecycle},
     policy::control::{self, ControlPolicies, ControlPolicyStore},
@@ -104,6 +104,17 @@ impl ServerOptions {
                 closing_backoff: Duration::from_millis(*settings.closing_backoff_ms.get()),
                 closing_backoff_max: Duration::from_millis(*settings.closing_backoff_max_ms.get()),
                 ..RecoveryOptions::default()
+            },
+            capacity: CapacityOptions {
+                min_slots: *settings.capacity_min_slots.get(),
+                max_slots: *settings.capacity_max_slots.get(),
+                idle_hold_down: Duration::from_millis(*settings.capacity_hold_down_ms.get()),
+                request_timeout: Duration::from_millis(
+                    *settings.capacity_request_timeout_ms.get(),
+                ),
+                retry_interval: Duration::from_millis(
+                    *settings.capacity_retry_interval_ms.get(),
+                ),
             },
             // Queue transactions run under the command timeout; a hold outlives
             // twice that budget before the retention lane may release it.
@@ -254,7 +265,7 @@ async fn driver(url: &str, options: &ServerOptions, holds: ControlHolds) -> Resu
         startup.manager.clone(),
         options.driver,
         Rc::new(lifecycle),
-        Contract::declarative(Rc::new(StaticPool)),
+        Rc::new(StaticPool),
     )?)
 }
 

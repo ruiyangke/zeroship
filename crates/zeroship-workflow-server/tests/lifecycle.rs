@@ -22,7 +22,7 @@ use zeroship_data_orm::{
     binding::DbBinding, encryption::ProjectKeySource, orm::Database, ConnectOptions,
 };
 use zeroship_workflow_manager::{
-    capacity::{Contract, LocalCapacity},
+    capacity::LocalCapacity,
     coordinator::{Coordinator, Options as CoordinatorOptions},
     driver::{Driver, Options as DriverOptions},
     lifecycle::{self, AppLifecycle, ControlLifecycle},
@@ -207,7 +207,7 @@ async fn the_driver_abandons_deleted_apps_over_the_canonical_schema() {
             ..DriverOptions::default()
         },
         Rc::new(connect_lifecycle(&platform.runtime_url).await),
-        Contract::declarative(Rc::new(LocalCapacity)),
+        Rc::new(LocalCapacity),
     )
     .unwrap();
     let report = driver.tick().await.closing;

@@ -40,7 +40,6 @@ const MANAGER_TABLES: &[&str] = &[
     "recovery_duties",
     "capacity_demands",
     "capacity_targets",
-    "capacity_intents",
 ];
 const FINGERPRINT: &str = include_str!("../../zeroship-workflow-manager/schema/fingerprint.txt");
 
@@ -286,7 +285,6 @@ impl Coordinator {
              SELECT id,app_id,kind,next_due_at,pending_job_id FROM workflow_manager.recovery_duties LIMIT 0;
              SELECT id,execution_zone_id,recorded_at FROM workflow_manager.capacity_demands LIMIT 0;
              SELECT id,revision,desired,state,refusal,observed,attempt,attempt_deadline,retry_at,below_since,lock_version FROM workflow_manager.capacity_targets LIMIT 0;
-             SELECT id,execution_zone_id,generation,state,refusal,attempt,attempt_deadline,retry_at FROM workflow_manager.capacity_intents LIMIT 0;
              SELECT id,deploy_hash,deleted_at FROM zeroship.apps LIMIT 0;
              SELECT id,app_id,deploy_hash,retention_state FROM zeroship.app_deploys LIMIT 0;"
         ).await?;
