@@ -20,6 +20,8 @@ pub mod models;
 pub mod publisher;
 pub mod shared;
 
+use zeroship_data_orm::orm::UtcInstant;
+
 pub use catalog::{CatalogError, Transition};
 pub use shared::{Catalog, CatalogOptions, Closing};
 pub use command::{
@@ -27,9 +29,13 @@ pub use command::{
     DeploymentRejected, VerifiedDeployment, DEPLOY_OPERATION, ZSHIP_CONTENT_TYPE,
 };
 
-/// Wall-clock milliseconds for catalog timestamps. Control replicas share the
-/// platform clock discipline; ordering never depends on these values alone.
-#[must_use]
-pub fn now_millis() -> i64 {
-    chrono::Utc::now().timestamp_millis()
+/// The wall-clock instant catalog timestamp columns take. Control replicas
+/// share the platform clock discipline; ordering never depends on these values
+/// alone.
+///
+/// # Errors
+/// Refuses a process clock outside the portable calendar rather than storing a
+/// timestamp the database cannot represent.
+pub fn now() -> Result<UtcInstant, zeroship_data_orm::error::DbError> {
+    UtcInstant::from_unix_micros(chrono::Utc::now().timestamp_micros())
 }

@@ -31,7 +31,7 @@ use zeroship_core::{
     workflow_jobs::{DeploymentId, JobOperation, JobSpec},
     workflow_schedules::{ActivateSchedules, DisableSchedules, RegisterSchedules},
 };
-use zeroship_data_orm::orm::{Database, FromRow};
+use zeroship_data_orm::orm::{Database, FromRow, UtcInstant};
 use zeroship_workflow_client::{ControlCoordinator, Error as ManagerError, Options, Transport};
 
 /// A boxed manager exchange, local to the publisher's compio thread.
@@ -373,7 +373,8 @@ impl<M: ScheduleManager> Publisher<M> {
             }
             _ => return Err(PublishError::InvalidIntent("action")),
         };
-        let now = super::now_millis();
+        let now =
+            super::now().map_err(|error| PublishError::Catalog(CatalogError::Database(error)))?;
         catalog::transact(&self.database, |tx| async move {
             confirm(&tx, intent, &receipt, now).await
         })
@@ -400,7 +401,7 @@ async fn confirm(
     tx: &Database,
     intent: &PendingIntent,
     receipt: &str,
-    now: i64,
+    now: UtcInstant,
 ) -> Result<(), CatalogError> {
     let entity = tx.entity::<intents::Entity>()?;
     let updated = entity

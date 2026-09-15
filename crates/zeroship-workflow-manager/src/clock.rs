@@ -46,9 +46,12 @@ impl Clock {
         ) {
             return Err(Error::Invalid);
         }
-        compio::time::timeout(timeout, backend.prepare_for_app(binding.app_id()))
-            .await
-            .map_err(|_| Error::Timeout)??;
+        compio::time::timeout(
+            timeout,
+            backend.prepare_for_app(binding.app_id(), binding.schema()),
+        )
+        .await
+        .map_err(|_| Error::Timeout)??;
         Ok(Self {
             backend,
             binding,
