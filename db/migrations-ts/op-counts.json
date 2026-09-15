@@ -47,7 +47,7 @@
   {
     "file": "20260705000000_durable_workflows_journal.ts",
     "name": "durable_workflows_journal",
-    "opCount": 85
+    "opCount": 13
   },
   {
     "file": "20260708000100_billing_provider_corrections.ts",
@@ -63,11 +63,6 @@
     "file": "20260811000000_auth_token_revocations_delete.ts",
     "name": "auth_token_revocations_delete",
     "opCount": 1
-  },
-  {
-    "file": "20260811000100_workflow_scheduler_store.ts",
-    "name": "workflow_scheduler_store",
-    "opCount": 7
   },
   {
     "file": "20260811000200_control_audit_grants.ts",
@@ -157,17 +152,12 @@
   {
     "file": "20260818000200_worker_database_authority.ts",
     "name": "worker_database_authority",
-    "opCount": 12
+    "opCount": 6
   },
   {
     "file": "20260818000300_credential_lifecycle.ts",
     "name": "credential_lifecycle",
     "opCount": 3
-  },
-  {
-    "file": "20260820000000_control_workflow_journal_access.ts",
-    "name": "control_workflow_journal_access",
-    "opCount": 1
   },
   {
     "file": "20260820000100_app_egress_rules.ts",
@@ -177,12 +167,12 @@
   {
     "file": "20260831000000_archive_apps.ts",
     "name": "archive_apps",
-    "opCount": 3
+    "opCount": 2
   },
   {
     "file": "20260831000001_sortable_entity_id_collations.ts",
     "name": "sortable_entity_id_collations",
-    "opCount": 75
+    "opCount": 66
   },
   {
     "file": "20260905000000_drop_jwk_key_state.ts",
@@ -272,7 +262,7 @@
   {
     "file": "20260914000100_deploy_publication.ts",
     "name": "deploy_publication",
-    "opCount": 23
+    "opCount": 22
   },
   {
     "file": "20260914000200_deploy_publication_references.ts",
@@ -287,7 +277,7 @@
   {
     "file": "20260914000400_execution_zones_and_join_signers.ts",
     "name": "execution_zones_and_join_signers",
-    "opCount": 14
+    "opCount": 13
   },
   {
     "file": "20260914000450_execution_zones_default_zone.ts",
@@ -297,7 +287,7 @@
   {
     "file": "20260914000500_worker_join_bindings.ts",
     "name": "worker_join_bindings",
-    "opCount": 10
+    "opCount": 33
   },
   {
     "file": "20260914000600_placement_eligibility.ts",

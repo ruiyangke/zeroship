@@ -431,18 +431,8 @@ pub mod endpoints {
 
     pub const GATEWAY_BACKCHANNEL_LOGOUT: ServiceEndpoint =
         ServiceEndpoint::new("gateway", "POST", "/oidc/backchannel-logout");
-    pub const GATEWAY_WORKFLOW_ADVANCE: ServiceEndpoint = ServiceEndpoint::new(
-        "gateway",
-        "POST",
-        "/__zeroship/internal/workflow-advance",
-    );
     pub const CONTROL_ROUTES: ServiceEndpoint =
         ServiceEndpoint::new("control", "GET", "/internal/routes");
-    pub const CONTROL_WORKFLOW_SIGNAL_INGRESS: ServiceEndpoint = ServiceEndpoint::new(
-        "control",
-        "POST",
-        "/internal/workflows/signals/ingress",
-    );
     pub const CONTROL_VERSIONS: ServiceEndpoint =
         ServiceEndpoint::new("control", "GET", "/internal/versions");
     pub const CONTROL_APP: ServiceEndpoint =
@@ -522,11 +512,6 @@ pub mod endpoints {
         ServiceEndpoint::new("workflow", "POST", "/v1/jobs/settle");
     pub const WORKER_DISPATCH: ServiceEndpoint =
         ServiceEndpoint::new("worker", "POST", "/dispatch/{app_id}");
-    pub const WORKER_WORKFLOW_ADVANCE: ServiceEndpoint = ServiceEndpoint::new(
-        "worker",
-        "POST",
-        "/workflow-advance-unsigned/{app_id}",
-    );
     pub const WORKER_APP_LOGS: ServiceEndpoint =
         ServiceEndpoint::new("worker", "GET", "/logs/{app_id}");
 }
@@ -576,7 +561,6 @@ pub fn service_allowlist() -> &'static [ServiceAuthorization] {
             ServiceAuthorization::new(
                 principal("svc/control"),
                 &[
-                    endpoints::GATEWAY_WORKFLOW_ADVANCE,
                     endpoints::WORKFLOW_VERIFY_ASSIGNMENT,
                     endpoints::WORKFLOW_MANAGE,
                     endpoints::WORKFLOW_MANAGEMENT_STATUS,
@@ -614,9 +598,7 @@ pub fn service_allowlist() -> &'static [ServiceAuthorization] {
                 principal("svc/gateway"),
                 &[
                     endpoints::CONTROL_ROUTES,
-                    endpoints::CONTROL_WORKFLOW_SIGNAL_INGRESS,
                     endpoints::WORKER_DISPATCH,
-                    endpoints::WORKER_WORKFLOW_ADVANCE,
                 ],
             ),
             ServiceAuthorization::new(

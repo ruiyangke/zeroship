@@ -60,7 +60,7 @@ None of this is licence to measure less - measure more, and put the result in a 
 | **Object storage and SDK** (`@zeroship/storage`) | `docs/reference/storage.md` · `crates/zeroship-storage/` (Rust operations) · `crates/zeroship-storage-v8/` (V8 binding) · `packages/storage/` |
 | **KV storage and SDK** (`@zeroship/kv`) | `docs/reference/kv.md` · `crates/zeroship-kv/` (storage) · `crates/zeroship-kv-v8/` (V8 binding) · `packages/kv/` |
 | **The RPC SDK / server functions** (`@zeroship/rpc`) | `docs/reference/rpc.md` · `packages/rpc/` · `packages/vite-plugin/src/{transform,rpc-registry,manifest}.ts` · `crates/zeroship-runtime/src/rpc/` |
-| **Durable workflows** (`@zeroship/workflows`, `env.workflows`) | `docs/reference/workflows.md` · `packages/workflows/` · `crates/zeroship-workflow/` (Rust engine/client) · `crates/zeroship-workflow-v8/` (binding/executor) · `crates/zeroship-control/src/{workflow_instance_api.rs,cron/workflow_engine.rs}` · `crates/zeroship-worker/src/handler.rs` |
+| **Durable workflows** (`@zeroship/workflows`, `env.workflows`) | `docs/reference/workflows.md` · `packages/workflows/` · `crates/zeroship-workflow/` (Rust engine/client) · `crates/zeroship-workflow-v8/` (binding/executor) · `crates/zeroship-workflow-manager/` + `crates/zeroship-workflow-server/` (the manager that owns delivery) · `crates/zeroship-worker/src/workflow_host.rs` (the host that owns the creator journal) |
 | **Build a creator app + deploy** (the primary creator flow) | `docs/build-and-deploy-golden-path.md` · `examples/starter/` (scaffold + `CLAUDE.md`) · `tests/golden_path.sh` · `crates/zeroship-cli/` (`zeroship deploy`) |
 | **Creator project config** (`zeroship.jsonc`: app, control, build shape, migration paths, environments) | `docs/reference/project-config.md`, `schema/project-v1.json`, `crates/zeroship-cli/src/project_config/`, `packages/vite-plugin/src/project-config/` |
 | **zeroship deploy contract** (`default = { fetch?, rpc? }`, dispatcher, raw-JS deploys) | `docs/reference/zeroship-standard.md` · `crates/zeroship-runtime/src/core/runtime_startup.rs` · `crates/zeroship-runtime/src/rpc/dispatch.rs` |
@@ -122,10 +122,10 @@ list describing an edge you replaced.
 **This line listed `console · auth · {app}` until 2026-08-30** - omitting `control`, omitting `api`,
 and leading with the one host that is dead. Read the Caddyfile, not this line, if the answer matters.
 
-**`api.<domain>` is the gateway, and it is not a management API.** It serves nine endpoints, of which
-exactly one is a proxy (`/__zeroship/internal/workflow-advance`, which forwards to a worker over the
-hash ring). Seven terminate at the gateway - `/healthz`, `/readyz`, and the browser identity surface
-under `/__zeroship/auth/*` that mints and re-signs session cookies - and the rest is app dispatch.
+**`api.<domain>` is the gateway, and it is not a management API.** Nothing on it proxies a
+platform operation: the manager delivers workflow work to the worker that owns the app, so the
+edge is `/healthz`, `/readyz`, the browser identity surface under `/__zeroship/auth/*` that mints
+and re-signs session cookies, and app dispatch.
 That hostname is also the gateway's `iss` claim (`--public-url` default `https://api.zeroship.ai`),
 so it is a cryptographic identity, not just an address: repointing it moves end-user session issuance,
 not a route.

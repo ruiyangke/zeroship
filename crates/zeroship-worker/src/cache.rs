@@ -1,6 +1,5 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::hash::{Hash, Hasher};
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -37,37 +36,7 @@ struct IsolateEntry {
 
 struct AppCache {
     isolates: HashMap<AppId, IsolateEntry>,
-    workflow_isolates: HashMap<PinnedWorkflowKey, IsolateEntry>,
     max_size: usize,
-    max_pinned_isolates_per_app: usize,
-}
-
-#[derive(Clone, Debug, Eq)]
-pub struct PinnedWorkflowKey {
-    app_id: AppId,
-    deploy_hash: String,
-}
-
-impl PinnedWorkflowKey {
-    fn new(app_id: AppId, deploy_hash: impl Into<String>) -> Self {
-        Self {
-            app_id,
-            deploy_hash: deploy_hash.into(),
-        }
-    }
-}
-
-impl PartialEq for PinnedWorkflowKey {
-    fn eq(&self, other: &Self) -> bool {
-        self.app_id == other.app_id && self.deploy_hash == other.deploy_hash
-    }
-}
-
-impl Hash for PinnedWorkflowKey {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        self.app_id.hash(state);
-        self.deploy_hash.hash(state);
-    }
 }
 
 thread_local! {
@@ -151,13 +120,11 @@ impl std::fmt::Debug for KernelConfig {
 /// Replacing the kernel also replaces its DB and KV stores. Passing no KV
 /// store removes the previous binding and invalidates cached plugin prototypes.
 /// Storage retains its existing installation behavior.
-pub fn init_cache(max_size: usize, max_pinned_isolates_per_app: usize, kernel: KernelConfig) {
+pub fn init_cache(max_size: usize, kernel: KernelConfig) {
     CACHE.with(|c| {
         *c.borrow_mut() = Some(AppCache {
             isolates: HashMap::new(),
             max_size,
-            workflow_isolates: HashMap::new(),
-            max_pinned_isolates_per_app,
         });
     });
     DB_SERVICE.with(|s| *s.borrow_mut() = kernel.db_service);
@@ -172,31 +139,6 @@ pub fn init_cache(max_size: usize, max_pinned_isolates_per_app: usize, kernel: K
     // "init_cache runs once" keeps the cache correct under repeated
     // installation instead of correct-by-convention.
     PLUGIN_SET.with(|p| *p.borrow_mut() = None);
-    WORKFLOW_PLUGIN_SET.with(|p| *p.borrow_mut() = None);
-}
-
-/// Install the Control credentials the deploy-pinned workflow isolates of the
-/// Control-driven advance path run under.
-///
-/// Only [`IsolateKind::PinnedWorkflow`] reads these: a workflow replayed over
-/// `/workflow-advance-unsigned/{app_id}` reaches its own run through
-/// `env.workflows`, and Control is the only engine that path has. Request
-/// isolates never see them; they resolve the host's ready registry, which is
-/// why a shared control key cannot be reached from creator request code.
-///
-/// Call once per HTTP thread, beside [`init_cache`].
-pub fn init_advance_workflow_control(control_url: String, control_key: String) {
-    ADVANCE_CONTROL.with(|c| *c.borrow_mut() = Some((control_url, control_key)));
-    WORKFLOW_PLUGIN_SET.with(|p| *p.borrow_mut() = None);
-}
-
-pub fn db_url() -> Option<String> {
-    DB_SERVICE.with(|service| {
-        service
-            .borrow()
-            .as_ref()
-            .and_then(|service| service.connection().url().map(str::to_owned))
-    })
 }
 
 /// Project material held by the installed database service for this host.
@@ -214,10 +156,10 @@ thread_local! {
     ///
     /// SC-5 of the runtime-db-binding design requires `build_runtime` to
     /// perform no backend selection and clone an `Arc` rather than minting a
-    /// plugin set, so that current and deploy-pinned isolates on one OS thread
-    /// share one backend and one cache instead of each resolving their own.
-    /// This is the first, behaviour-neutral half of that: the plugins are the
-    /// same values, constructed once.
+    /// plugin set, so that the isolates on one OS thread share one backend and
+    /// one cache instead of each resolving their own. This is the first,
+    /// behaviour-neutral half of that: the plugins are the same values,
+    /// constructed once.
     ///
     /// Cleared by [`init_cache`], which is the single writer of every
     /// thread-local this set is built from. Without that invalidation a second
@@ -227,40 +169,17 @@ thread_local! {
     /// wrong backend.
     static PLUGIN_SET: RefCell<Option<Vec<Arc<dyn NativePlugin>>>> =
         const { RefCell::new(None) };
-    /// As [`PLUGIN_SET`], for deploy-pinned workflow isolates. It differs in
-    /// exactly one plugin: `env.workflows`.
-    static WORKFLOW_PLUGIN_SET: RefCell<Option<Vec<Arc<dyn NativePlugin>>>> =
-        const { RefCell::new(None) };
-    /// Control origin and key for the advance path's workflow isolates, from
-    /// [`init_advance_workflow_control`].
-    static ADVANCE_CONTROL: RefCell<Option<(String, String)>> = const { RefCell::new(None) };
-}
-
-/// Which isolate a plugin set is being built for.
-///
-/// The two differ only in the `env.workflows` backend: a request isolate
-/// reaches the workflow host's ready registry, and a replayed workflow reaches
-/// the engine that dispatched it, which on the Control-driven advance path is
-/// Control.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum IsolateKind {
-    Request,
-    PinnedWorkflow,
 }
 
 /// The thread's plugin set, minting it on first use.
 ///
 /// Returns clones of the same `Arc`s on every call, so two runtimes built on
 /// one thread share plugin instances rather than each holding their own.
-fn plugin_set(kind: IsolateKind) -> Vec<Arc<dyn NativePlugin>> {
-    let cache = match kind {
-        IsolateKind::Request => &PLUGIN_SET,
-        IsolateKind::PinnedWorkflow => &WORKFLOW_PLUGIN_SET,
-    };
-    cache.with(|p| {
+fn plugin_set() -> Vec<Arc<dyn NativePlugin>> {
+    PLUGIN_SET.with(|p| {
         let mut slot = p.borrow_mut();
         if slot.is_none() {
-            *slot = Some(create_plugins(kind));
+            *slot = Some(create_plugins());
         }
         slot.as_ref().expect("just populated").clone()
     })
@@ -288,7 +207,7 @@ fn plugin_set(kind: IsolateKind) -> Vec<Arc<dyn NativePlugin>> {
 ///   (S3/R2/MinIO) is the prod backend behind the same `Backend` trait and is
 ///   inherently shared across nodes. An object written on node A is readable
 ///   on node B in both cases.
-fn create_plugins(kind: IsolateKind) -> Vec<Arc<dyn NativePlugin>> {
+fn create_plugins() -> Vec<Arc<dyn NativePlugin>> {
     let mut plugins: Vec<Arc<dyn NativePlugin>> = Vec::new();
     // The process-wide meter, if configured. Metering is infrastructure:
     // rather than a creator-facing `env.meter` namespace, the meter is
@@ -324,21 +243,8 @@ fn create_plugins(kind: IsolateKind) -> Vec<Arc<dyn NativePlugin>> {
             }
         }
     }
-    match kind {
-        IsolateKind::Request => {
-            if let Some(apps) = WORKFLOWS.with(|w| w.borrow().clone()) {
-                plugins.push(Arc::new(zeroship_workflow_v8::WorkflowBinding::ready(apps)));
-            }
-        }
-        // A replayed workflow reads its own run - step outputs staged as blobs,
-        // above all - through `env.workflows`, and on this path the engine
-        // holding that run is Control. The key stays in Rust memory and is
-        // never reachable from a request isolate.
-        IsolateKind::PinnedWorkflow => {
-            if let Some((url, key)) = ADVANCE_CONTROL.with(|c| c.borrow().clone()) {
-                plugins.push(Arc::new(zeroship_workflow_v8::WorkflowBinding::new(url, key)));
-            }
-        }
+    if let Some(apps) = WORKFLOWS.with(|w| w.borrow().clone()) {
+        plugins.push(Arc::new(zeroship_workflow_v8::WorkflowBinding::ready(apps)));
     }
     plugins.push(Arc::new(zeroship_runtime::auth::AuthPlugin));
     plugins
@@ -382,29 +288,6 @@ pub fn record_request(
             if !recorded {
                 meter.record_request(app_id, cpu_us, wall_us, egress_bytes, ingress_bytes);
             }
-        }
-    });
-}
-
-/// Observability-only durable-workflow step volume. Billing parity rides the
-/// fixed `requests` counter from `record_request`; this custom metric lets
-/// operators inspect workflow replay volume without double-counting it.
-pub fn record_workflow_step(app_id: &AppId) {
-    METER.with(|m| {
-        if let Some(meter) = m.borrow().as_ref() {
-            meter.increment(app_id, "workflow_steps", 1);
-        }
-    });
-}
-
-/// Record a successful workflow output blob write. The workflow blob store is
-/// a trusted platform storage path, so it uses the same storage usage counters
-/// as the native storage primitive.
-pub fn record_workflow_blob_write(app_id: &AppId, bytes: u64) {
-    METER.with(|m| {
-        if let Some(meter) = m.borrow().as_ref() {
-            meter.increment(app_id, "storage_ops", 1);
-            meter.increment(app_id, "storage_bytes", bytes);
         }
     });
 }
@@ -477,20 +360,6 @@ fn limits_without_touching_recency(cache: &AppCache, app_id: &AppId) -> Option<R
         .map(|entry| entry.runtime.limits())
 }
 
-pub fn get_workflow_runtime(app_id: &AppId, deploy_hash: &str) -> Option<Runtime> {
-    let key = PinnedWorkflowKey::new(app_id.clone(), deploy_hash);
-    CACHE.with(|c| {
-        let mut cache = c.borrow_mut();
-        let cache = cache.as_mut()?;
-        if let Some(entry) = cache.workflow_isolates.get_mut(&key) {
-            entry.last_used = std::time::Instant::now();
-            Some(entry.runtime.clone())
-        } else {
-            None
-        }
-    })
-}
-
 /// The worker-internal environment handed to an isolate.
 ///
 /// EVERY ENTRY OF THIS MAP IS READABLE BY APP JS. It is not a private channel:
@@ -537,9 +406,8 @@ async fn build_runtime(
     deploy_hash: Option<&str>,
     runtime_descriptor: Option<&str>,
     env: &EnvSnapshot,
-    kind: IsolateKind,
 ) -> Result<Runtime, String> {
-    let plugins = plugin_set(kind);
+    let plugins = plugin_set();
     let meter = METER.with(|m| m.borrow().clone());
     let env_vars = app_visible_env_vars(app_id.as_str(), deploy_hash);
 
@@ -604,7 +472,6 @@ pub async fn load_app(
         deploy_hash,
         runtime_descriptor,
         env,
-        IsolateKind::Request,
     ).await?;
     let policy = Rc::new(CompiledManifest::compile(manifest));
 
@@ -654,78 +521,6 @@ pub fn get_declared_policy(app_id: &AppId) -> Option<Rc<CompiledManifest>> {
     CACHE.with(|c| {
         let cache = c.borrow();
         Some(cache.as_ref()?.isolates.get(app_id)?.policy.clone())
-    })
-}
-
-/// Load the deploy-pinned isolate a durable workflow replays against.
-///
-/// `manifest` is the PINNED deploy's manifest - the one fetched by deploy hash
-/// in `handler::load_pinned_workflow_on_demand`, not the app's current one -
-/// so the entry carries the policy of the code it actually runs. Nothing
-/// consults it yet: workflow replay arrives over
-/// `/workflow-advance-unsigned/{app_id}`, which is not a creator route and
-/// carries no `RequiredPrincipal`. It is compiled anyway so the two isolate
-/// maps hold the same shape; an entry whose policy could be absent invites a
-/// future dispatch path to reach for one and find `None`.
-#[allow(clippy::too_many_arguments)]
-pub async fn load_pinned_workflow_app(
-    app_id: AppId,
-    deploy_hash: &str,
-    modules: Vec<ModuleEntry>,
-    app_limits: AppRuntimeLimits,
-    app_net_policy: AppNetPolicy,
-    runtime_descriptor: Option<&str>,
-    manifest: &Manifest,
-    env: &EnvSnapshot,
-) -> Result<(), String> {
-    let key = PinnedWorkflowKey::new(app_id.clone(), deploy_hash);
-    let runtime = build_runtime(
-        &app_id,
-        modules,
-        app_limits,
-        app_net_policy,
-        Some(deploy_hash),
-        runtime_descriptor,
-        env,
-        IsolateKind::PinnedWorkflow,
-    ).await?;
-    let policy = Rc::new(CompiledManifest::compile(manifest));
-
-    CACHE.with(|c| {
-        let mut cache = c.borrow_mut();
-        let cache = cache.as_mut().unwrap();
-        if cache.max_pinned_isolates_per_app == 0 {
-            return Err("pinned workflow isolate cache is disabled".to_string());
-        }
-
-        if !cache.workflow_isolates.contains_key(&key) {
-            while pinned_count_for_app(cache, &app_id) >= cache.max_pinned_isolates_per_app {
-                if !evict_pinned_lru_for_app(cache, &app_id) {
-                    tracing::warn!(
-                        app_id = app_id.as_str(),
-                        deploy_hash = %deploy_hash,
-                        max_pinned_isolates_per_app = cache.max_pinned_isolates_per_app,
-                        "worker: pinned workflow isolate cache full and every isolate is leased"
-                    );
-                    return Err(
-                        "pinned workflow isolate cache full and every isolate is leased".into(),
-                    );
-                }
-            }
-        }
-
-        runtime.start_pump();
-        cache.workflow_isolates.insert(
-            key,
-            IsolateEntry {
-                runtime,
-                last_used: std::time::Instant::now(),
-                app_id,
-                policy,
-            },
-        );
-
-        Ok(())
     })
 }
 
@@ -803,9 +598,6 @@ pub fn evict_app(app_id: &AppId) {
         let mut cache = c.borrow_mut();
         if let Some(cache) = cache.as_mut() {
             cache.isolates.remove(app_id);
-            cache
-                .workflow_isolates
-                .retain(|key, _| &key.app_id != app_id);
         }
     });
 }
@@ -927,69 +719,8 @@ fn evict_lru(cache: &mut AppCache) -> bool {
     true
 }
 
-fn pinned_count_for_app(cache: &AppCache, app_id: &AppId) -> usize {
-    cache
-        .workflow_isolates
-        .keys()
-        .filter(|key| &key.app_id == app_id)
-        .count()
-}
-
-fn evict_pinned_lru_for_app(cache: &mut AppCache, app_id: &AppId) -> bool {
-    refresh_socket_activity(cache);
-
-    let Some(oldest_key) = cache
-        .workflow_isolates
-        .iter()
-        .filter(|(key, entry)| &key.app_id == app_id && !entry.runtime.is_isolate_leased())
-        .min_by_key(|(_, entry)| {
-            (
-                entry.runtime.active_native_socket_count() > 0,
-                entry.last_used,
-            )
-        })
-        .map(|(key, _)| key.clone())
-    else {
-        return false;
-    };
-
-    tracing::info!(
-        app_id = oldest_key.app_id.as_str(),
-        deploy_hash = %oldest_key.deploy_hash,
-        "worker: evicting pinned workflow LRU isolate"
-    );
-    crate::metrics::inc(&crate::metrics::LRU_EVICTIONS_TOTAL);
-
-    if let Some(entry) = cache.workflow_isolates.get(&oldest_key) {
-        let active_sockets = entry.runtime.active_native_socket_count();
-        if active_sockets > 0 {
-            let closed = entry.runtime.close_native_sockets_for_eviction();
-            tracing::info!(
-                app_id = oldest_key.app_id.as_str(),
-                deploy_hash = %oldest_key.deploy_hash,
-                active_sockets,
-                closed,
-                "worker: closing native sockets before pinned workflow isolate eviction"
-            );
-        }
-        entry.runtime.with_scope(|scope| {
-            zeroship_runtime::rpc::entered_for_eviction(scope, &oldest_key.app_id);
-        });
-    }
-
-    cache.workflow_isolates.remove(&oldest_key);
-    true
-}
-
 fn refresh_socket_activity(cache: &mut AppCache) {
     for entry in cache.isolates.values_mut() {
-        if let Some(activity) = entry.runtime.last_native_socket_activity() {
-            if activity > entry.last_used {
-                entry.last_used = activity;
-            }
-        }
-    }
-    for entry in cache.workflow_isolates.values_mut() {
         if let Some(activity) = entry.runtime.last_native_socket_activity() {
             if activity > entry.last_used {
                 entry.last_used = activity;
@@ -1118,7 +849,7 @@ mod tests {
     /// stateless, so it is pushed even when no DB URL is configured.
     #[test]
     fn create_plugins_registers_auth_namespace() {
-        let plugins = create_plugins(IsolateKind::Request);
+        let plugins = create_plugins();
         assert!(
             plugins.iter().any(|p| p.namespace() == "auth"),
             "worker create_plugins must include the auth namespace; got: {:?}",
@@ -1142,7 +873,6 @@ mod tests {
 
             init_cache(
                 4,
-                4,
                 KernelConfig {
                     workflows: ReadyApps::default(),
                     db_service: Some(service),
@@ -1151,7 +881,7 @@ mod tests {
                     meter: Arc::new(zeroship_metering::Meter::new()),
                 },
             );
-            let plugins = plugin_set(IsolateKind::Request);
+            let plugins = plugin_set();
             assert!(
                 plugins.iter().any(|p| p.namespace() == "db"),
                 "the arm must rule on a plugin set that actually contains db; got {:?}",
@@ -1184,7 +914,6 @@ mod tests {
                         Some("deploy_build_runtime_guard"),
                         None,
                         &EnvSnapshot::empty(),
-                        IsolateKind::Request,
                     ).await
                     .expect("the guard needs a runtime that actually built");
                     // The DSN is unreachable, so a build that DID connect would
@@ -1240,7 +969,7 @@ mod tests {
     #[test]
     fn db_plugin_prototype_is_one_object_across_worker_threads() {
         fn db_plugin() -> Arc<dyn NativePlugin> {
-            let set = plugin_set(IsolateKind::Request);
+            let set = plugin_set();
             assert!(!set.is_empty(), "the kernel must register some namespaces");
             set.iter()
                 .find(|p| p.namespace() == "db")
@@ -1258,7 +987,7 @@ mod tests {
 
         let one = Arc::clone(&service);
         let first = std::thread::spawn(move || {
-            init_cache(4, 4, kernel(one));
+            init_cache(4, kernel(one));
             db_plugin()
         })
         .join()
@@ -1266,7 +995,7 @@ mod tests {
 
         let two = Arc::clone(&service);
         let second = std::thread::spawn(move || {
-            init_cache(4, 4, kernel(two));
+            init_cache(4, kernel(two));
             db_plugin()
         })
         .join()
@@ -1312,9 +1041,9 @@ mod tests {
                 meter: Arc::new(zeroship_metering::Meter::new()),
             };
 
-            init_cache(4, 4, kernel());
-            let a = plugin_set(IsolateKind::Request);
-            let b = plugin_set(IsolateKind::Request);
+            init_cache(4, kernel());
+            let a = plugin_set();
+            let b = plugin_set();
             assert_eq!(a.len(), b.len(), "the set must be stable across calls");
             assert!(!a.is_empty(), "the kernel must register some namespaces");
             for (x, y) in a.iter().zip(b.iter()) {
@@ -1327,8 +1056,8 @@ mod tests {
             }
 
             // Re-installing the kernel must drop the cached prototypes.
-            init_cache(4, 4, kernel());
-            let c = plugin_set(IsolateKind::Request);
+            init_cache(4, kernel());
+            let c = plugin_set();
             assert_eq!(c.len(), a.len());
             assert!(
                 a.iter().zip(c.iter()).all(|(x, y)| !Arc::ptr_eq(x, y)),
@@ -1338,59 +1067,6 @@ mod tests {
         })
         .join()
         .expect("plugin-sharing guard thread panicked");
-    }
-
-    /// A replayed workflow reads its own run - a step output staged as a blob,
-    /// above all - through `env.workflows`, and the engine holding that run is
-    /// the one that dispatched it. On the Control-driven advance path that is
-    /// Control, never the workflow host's ready registry, which is empty for
-    /// an app no manager placed here. Binding the replay isolate to the
-    /// registry instead fails the app's own read with a retryable refusal it
-    /// can never outlive.
-    ///
-    /// The two sets are told apart by their inputs rather than by a namespace
-    /// name they share: the request set follows `init_cache`, and the replay
-    /// set follows `init_advance_workflow_control` and nothing else.
-    #[test]
-    fn a_replayed_workflow_follows_control_while_requests_follow_the_ready_registry() {
-        std::thread::spawn(|| {
-            init_cache(
-                4,
-                4,
-                KernelConfig {
-                    workflows: ReadyApps::default(),
-                    db_service: None,
-                    kv_store: None,
-                    storage_backend: None,
-                    meter: Arc::new(zeroship_metering::Meter::new()),
-                },
-            );
-            let workflows = |kind| {
-                plugin_set(kind)
-                    .iter()
-                    .any(|plugin| plugin.namespace() == "workflows")
-            };
-            assert!(
-                workflows(IsolateKind::Request),
-                "the kernel's ready registry is the request path's backend"
-            );
-            assert!(
-                !workflows(IsolateKind::PinnedWorkflow),
-                "a replay isolate must not borrow the request path's registry"
-            );
-
-            init_advance_workflow_control("http://127.0.0.1:1".into(), "advance-key".into());
-            assert!(
-                workflows(IsolateKind::PinnedWorkflow),
-                "the advance path's Control engine is the replay isolate's backend"
-            );
-            assert!(
-                workflows(IsolateKind::Request),
-                "installing the replay backend must not disturb the request set"
-            );
-        })
-        .join()
-        .expect("advance-backend guard thread panicked");
     }
 
     /// Re-installing a kernel with no database must turn the `db` namespace
@@ -1416,15 +1092,17 @@ mod tests {
                 meter: Arc::new(zeroship_metering::Meter::new()),
             };
 
-            init_cache(4, 4, with_db());
+            init_cache(4, with_db());
             assert!(
-                plugin_set(IsolateKind::Request).iter().any(|p| p.namespace() == "db"),
+                plugin_set().iter().any(|p| p.namespace() == "db"),
                 "the fixture must start from a kernel that HAS the db namespace",
             );
-            assert!(db_url().is_some(), "the fixture must start from a bound db");
+            assert!(
+                DB_SERVICE.with(|service| service.borrow().is_some()),
+                "the fixture must start from a bound database service",
+            );
 
             init_cache(
-                4,
                 4,
                 KernelConfig {
                     db_service: None,
@@ -1432,17 +1110,17 @@ mod tests {
                 },
             );
             assert!(
-                !plugin_set(IsolateKind::Request).iter().any(|p| p.namespace() == "db"),
+                !plugin_set().iter().any(|p| p.namespace() == "db"),
                 "a kernel installed with no database must not keep serving env.db \
                  against the previous one; got {:?}",
-                plugin_set(IsolateKind::Request)
+                plugin_set()
                     .iter()
                     .map(|p| p.namespace())
                     .collect::<Vec<_>>(),
             );
             assert!(
-                db_url().is_none(),
-                "the previous DSN must not survive a kernel that carries none",
+                DB_SERVICE.with(|service| service.borrow().is_none()),
+                "the previous database service must not survive a kernel that carries none",
             );
         })
         .join()
@@ -1466,7 +1144,6 @@ mod tests {
         std::thread::spawn(|| {
             init_cache(
                 4,
-                4,
                 KernelConfig {
                     workflows: ReadyApps::default(),
                     db_service: Some(fixture::database_service("postgres://localhost/zs_unused")),
@@ -1482,7 +1159,7 @@ mod tests {
                     meter: Arc::new(zeroship_metering::Meter::new()),
                 },
             );
-            let plugins = create_plugins(IsolateKind::Request);
+            let plugins = create_plugins();
             let namespaces: Vec<String> =
                 plugins.iter().map(|p| p.namespace().to_string()).collect();
             // Metering is infrastructure now: there is NO `meter` namespace.
@@ -1519,10 +1196,10 @@ mod tests {
                 }),
             })
             .unwrap();
-            init_cache(4, 4, kernel(Some(store)));
-            assert!(plugin_set(IsolateKind::Request).iter().any(|plugin| plugin.namespace() == "kv"));
-            init_cache(4, 4, kernel(None));
-            assert!(!plugin_set(IsolateKind::Request).iter().any(|plugin| plugin.namespace() == "kv"));
+            init_cache(4, kernel(Some(store)));
+            assert!(plugin_set().iter().any(|plugin| plugin.namespace() == "kv"));
+            init_cache(4, kernel(None));
+            assert!(!plugin_set().iter().any(|plugin| plugin.namespace() == "kv"));
         })
         .join()
         .unwrap();
@@ -1537,7 +1214,6 @@ mod tests {
         std::thread::spawn(|| {
             init_cache(
                 4,
-                4,
                 KernelConfig {
                     workflows: ReadyApps::default(),
                     db_service: None,
@@ -1550,7 +1226,7 @@ mod tests {
                     meter: Arc::new(zeroship_metering::Meter::new()),
                 },
             );
-            let plugins = create_plugins(IsolateKind::Request);
+            let plugins = create_plugins();
             let namespaces: Vec<String> =
                 plugins.iter().map(|p| p.namespace().to_string()).collect();
             let has = |n: &str| namespaces.iter().any(|x| x == n);
@@ -1804,7 +1480,6 @@ mod tests {
                 let app_id = AppId::mint();
                 init_cache(
                     4,
-                    4,
                     KernelConfig {
                         workflows: ReadyApps::default(),
                         db_service: None,
@@ -1860,7 +1535,7 @@ mod tests {
     }
 
     #[test]
-    fn active_and_pinned_isolates_load_their_complete_module_graph() {
+    fn an_active_isolate_loads_its_complete_module_graph() {
         std::thread::spawn(|| {
             let runtime = compio::runtime::Runtime::new().unwrap();
             runtime.block_on(async {
@@ -1868,7 +1543,7 @@ mod tests {
 
                 zeroship_runtime::init::init_v8();
                 let app_id = AppId::mint();
-                init_cache(4, 4, KernelConfig {
+                init_cache(4, KernelConfig {
                     workflows: ReadyApps::default(),
                     db_service: None,
                     kv_store: None,
@@ -1899,20 +1574,12 @@ mod tests {
                     let executable = crate::executable::load_executable(&manifest, &blobs).await.unwrap();
                     assert_eq!(executable.modules[0].specifier, "app/z-entry.js");
                     assert_eq!(serde_json::from_str::<serde_json::Value>(executable.descriptor.as_deref().unwrap()).unwrap(), serde_json::from_str::<serde_json::Value>(descriptor).unwrap());
-                    if deployment == "original" {
-                        load_pinned_workflow_app(app_id.clone(), deployment, executable.modules,
-                            AppRuntimeLimits::default(), AppNetPolicy::default(),
-                            executable.descriptor.as_deref(), &manifest, &EnvSnapshot::empty()).await.unwrap();
-                    } else {
-                        load_app(app_id.clone(), executable.modules, AppRuntimeLimits::default(),
-                            AppNetPolicy::default(), Some(deployment), executable.descriptor.as_deref(),
-                            &manifest, &EnvSnapshot::empty()).await.unwrap();
-                    }
+                    load_app(app_id.clone(), executable.modules, AppRuntimeLimits::default(),
+                        AppNetPolicy::default(), Some(deployment), executable.descriptor.as_deref(),
+                        &manifest, &EnvSnapshot::empty()).await.unwrap();
                 }
                 let active = get_runtime(&app_id).unwrap();
                 assert_eq!(fetch_body(&active).await, (200, "replacement:dynamic".into()));
-                let pinned = get_workflow_runtime(&app_id, "original").unwrap();
-                assert_eq!(fetch_body(&pinned).await, (200, "original:dynamic".into()));
             });
         }).join().unwrap();
     }
@@ -1926,7 +1593,6 @@ mod tests {
                 zeroship_runtime::init::init_v8();
                 let app_id = AppId::mint();
                 init_cache(
-                    4,
                     4,
                     KernelConfig {
                         workflows: ReadyApps::default(),
@@ -1993,7 +1659,7 @@ mod tests {
         std::thread::spawn(|| {
             use futures::FutureExt;
             compio::runtime::Runtime::new().unwrap().block_on(async {
-                init_cache(4, 4, KernelConfig {
+                init_cache(4, KernelConfig {
                     workflows: ReadyApps::default(),
                     db_service: None,
                     kv_store: None,
@@ -2040,7 +1706,6 @@ mod tests {
                 zeroship_runtime::init::init_v8();
                 let app_id = AppId::mint();
                 init_cache(
-                    4,
                     4,
                     KernelConfig {
                         workflows: ReadyApps::default(),
@@ -2091,7 +1756,6 @@ mod tests {
             runtime.block_on(async {
                 let app_id = AppId::mint();
                 init_cache(
-                    4,
                     4,
                     KernelConfig {
                         workflows: ReadyApps::default(),
@@ -2171,9 +1835,7 @@ mod tests {
             let socketless = test_runtime();
             let mut cache = AppCache {
                 isolates: HashMap::new(),
-                workflow_isolates: HashMap::new(),
                 max_size: 2,
-                max_pinned_isolates_per_app: 4,
             };
             cache.isolates.insert(
                 socketed_id.clone(),
@@ -2222,9 +1884,7 @@ mod tests {
             let victim = test_runtime();
             let mut cache = AppCache {
                 isolates: HashMap::new(),
-                workflow_isolates: HashMap::new(),
                 max_size: 2,
-                max_pinned_isolates_per_app: 4,
             };
             cache.isolates.insert(
                 leased_id.clone(),
@@ -2269,9 +1929,7 @@ mod tests {
 
             let mut cache = AppCache {
                 isolates: HashMap::new(),
-                workflow_isolates: HashMap::new(),
                 max_size: 1,
-                max_pinned_isolates_per_app: 4,
             };
             cache.isolates.insert(
                 app_id.clone(),

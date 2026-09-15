@@ -13,7 +13,7 @@ use clap::Parser;
 use ntex::web;
 use std::sync::{Arc, RwLock};
 use zeroship_bundle::{
-    build_blob_store, build_workflow_blob_store, BlobStore, StoreUrl, WorkflowBlobStore,
+    build_blob_store, BlobStore, StoreUrl,
 };
 use zeroship_core::config::{
     audit_credentials, bootstrap_or_exit, mark_dev_escape_active, require_nonempty, BuildProfile,
@@ -100,32 +100,6 @@ fn worker_rejects_db_url(db_url: &str) -> bool {
     !normalized.is_empty()
         && !normalized.starts_with("postgres://")
         && !normalized.starts_with("postgresql://")
-}
-
-/// Whether `bind_host` reaches only this machine.
-///
-/// String comparison, not a parse, because this compares against the value the
-/// operator supplied rather than a resolved socket address - `--bind localhost` is
-/// loopback in intent and does not parse as an `IpAddr` at all. It is therefore
-/// deliberately conservative: an unusual spelling of loopback (`127.1`,
-/// `::ffff:127.0.0.1`) reads as routable and is refused, which fails in the safe
-/// direction for both callers.
-///
-/// Extracted so the two guards that need it cannot drift apart. The set used to be
-/// inlined at the credential guard only; a second copy at the unsigned-advance
-/// guard would have been one edit away from disagreeing about what counts as local.
-fn is_loopback_bind(bind_host: &str) -> bool {
-    bind_host == "127.0.0.1" || bind_host == "::1" || bind_host == "localhost"
-}
-
-/// Whether the worker may bind `bind_host` given the unsigned-workflow-advance flag.
-///
-/// With the flag off - the default, and what every deployment under `deploy/` uses -
-/// any bind is fine, because the endpoint answers 403. With it on, the endpoint
-/// replays workflow state with no signature or nonce check, so it must not be
-/// reachable from off-box.
-fn unsigned_advance_bind_allowed(bind_host: &str, unsigned_advance: bool) -> bool {
-    !unsigned_advance || is_loopback_bind(bind_host)
 }
 
 /// A workflow host prepares creator journals in the worker's own database and
@@ -252,7 +226,6 @@ fn main() -> std::io::Result<()> {
         "worker",
     );
     let check_config = *settings.check_config.get();
-    let workflow_advance_unsigned = *settings.workflow_advance_unsigned.get();
 
     let port = *settings.port.get();
     let workers_count = *settings.threads.get();
@@ -264,7 +237,6 @@ fn main() -> std::io::Result<()> {
     // report below asks `is_configured()` and the boot path is not reached.
     let control_key = settings.control_key.expose_str().to_owned();
     let max_isolates = *settings.max_isolates.get();
-    let max_pinned_isolates_per_app = *settings.max_pinned_isolates_per_app.get();
     let poll_interval =
         match crate::sync::validate_poll_interval_secs(*settings.poll_interval.get()) {
             Ok(secs) => secs,
@@ -338,23 +310,6 @@ fn main() -> std::io::Result<()> {
     // doubly-misconfigured launch reports changes.
     let credentials = enforce_worker_credentials(&settings, &boot.overlay.source, check_config);
 
-    // `--workflow-advance-unsigned` makes POST /internal/workflow/advance-unsigned
-    // live. That route is registered unconditionally (handler.rs) and performs NO
-    // signature or nonce verification - its own doc records that DW-05 deferred
-    // that - so the flag is the only thing standing between an unauthenticated
-    // caller and workflow state replay.
-    //
-    // The unsigned route has its own deliberately narrow loopback-only guard. It is
-    // unrelated to the deleted process-wide security-relaxation mode.
-    if !unsigned_advance_bind_allowed(&bind_host, workflow_advance_unsigned) {
-        tracing::error!(
-            bind = %bind_host,
-            "refusing to bind non-loopback with --workflow-advance-unsigned — would expose \
-             unauthenticated workflow replay"
-        );
-        std::process::exit(1);
-    }
-
     // SQLite belongs to local `zeroship serve`. Require a PostgreSQL selector
     // here rather than treating an invalid SQLite selector as another backend.
     // A configuration dry run deliberately leaves secret files unread.
@@ -385,10 +340,6 @@ fn main() -> std::io::Result<()> {
         report.field("worker_threads", CheckValue::Count(workers_count));
         report.field("max_isolates", CheckValue::Count(max_isolates));
         report.field(
-            "max_pinned_isolates_per_app",
-            CheckValue::Count(max_pinned_isolates_per_app),
-        );
-        report.field(
             "poll_interval_secs",
             CheckValue::Count(usize::try_from(poll_interval).unwrap_or(usize::MAX)),
         );
@@ -400,12 +351,6 @@ fn main() -> std::io::Result<()> {
         report.field("log_format", CheckValue::Plain(log_format));
         report.field("blob_store", CheckValue::Plain(blob_store_root.clone()));
         report.field("blob_store_remote", CheckValue::Flag(blob_store_is_remote));
-        report.field(
-            "max_step_blob_bytes",
-            CheckValue::Count(
-                usize::try_from(*settings.max_step_blob_bytes.get()).unwrap_or(usize::MAX),
-            ),
-        );
         report.field(
             "socket_configured",
             CheckValue::Flag(!socket_path.is_empty()),
@@ -538,9 +483,6 @@ fn main() -> std::io::Result<()> {
     });
     let blob_store: Arc<dyn BlobStore> = build_blob_store(&store_url, s3_runtime.as_ref())
         .expect("failed to initialise blob store");
-    let workflow_blob_store: Arc<dyn WorkflowBlobStore> =
-        build_workflow_blob_store(&store_url, s3_runtime.as_ref())
-            .expect("failed to initialise workflow blob store");
     tracing::info!(
         blob_store_root = %blob_store_root,
         blob_store_remote = blob_store_is_remote,
@@ -800,17 +742,12 @@ fn main() -> std::io::Result<()> {
         service_auth,
         control_url,
         control_key,
-        db_url: db_url_opt,
         kv_store,
         storage_backend,
         max_isolates,
-        max_pinned_isolates_per_app,
         poll_interval_secs: poll_interval,
         shutdown_timeout_secs: shutdown_timeout,
         blob_store,
-        workflow_blob_store,
-        max_step_blob_bytes: *settings.max_step_blob_bytes.get(),
-        workflow_advance_unsigned,
     });
 
     // The single process-wide version poller. Started after the `env.db`
@@ -885,7 +822,6 @@ fn main() -> std::io::Result<()> {
         bind = %bind_addr,
         threads = workers_count,
         max_isolates = config.max_isolates,
-        max_pinned_isolates_per_app = config.max_pinned_isolates_per_app,
         shutdown_timeout_secs = config.shutdown_timeout_secs,
         "worker listening"
     );
@@ -903,7 +839,6 @@ fn main() -> std::io::Result<()> {
         let logs = shared_logs.clone();
         cache::init_cache(
             config.max_isolates,
-            config.max_pinned_isolates_per_app,
             cache::KernelConfig {
                 workflows: workflows.clone(),
                 db_service: db_service.clone(),
@@ -912,14 +847,6 @@ fn main() -> std::io::Result<()> {
                 // The ONE process-wide meter the usage-event outbox drains.
                 meter: Arc::clone(&meter),
             },
-        );
-        // The Control-driven advance path still replays workflows in this
-        // process, and a replayed workflow reads its own run through
-        // `env.workflows`. Only its deploy-pinned isolates get this backend;
-        // request isolates resolve the host's ready registry above.
-        cache::init_advance_workflow_control(
-            config.control_url.clone(),
-            config.control_key.clone(),
         );
         // Per-thread reconcile loop — reads from the shared version map,
         // writes env into the process-wide env cache.

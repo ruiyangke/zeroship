@@ -16,7 +16,7 @@ async fn next_chunk(body: &mut ResponseBody<Body>) -> Option<Bytes> {
 #[compio::test]
 async fn long_stream_accrues_egress_before_close() {
     let meter = Arc::new(zeroship_metering::Meter::new());
-    let _kernel = Kernel::install(10, 4, empty_kernel(meter.clone()));
+    let _kernel = Kernel::install(10, empty_kernel(meter.clone()));
     let app_id = AppId::mint();
     let (writer, reader) = stream_buffer_with_cap(16 * 1024 * 1024);
     let mut body = stream_response(200, &[], reader, app_id.clone()).take_body();
@@ -52,7 +52,7 @@ async fn long_stream_accrues_egress_before_close() {
 #[compio::test]
 async fn streaming_counts_request_exactly_once() {
     let meter = Arc::new(zeroship_metering::Meter::new());
-    let _kernel = Kernel::install(10, 4, empty_kernel(meter.clone()));
+    let _kernel = Kernel::install(10, empty_kernel(meter.clone()));
     let app_id = AppId::mint();
     record_stream_unary(&app_id, 123, 456, std::time::Instant::now());
     let (writer, reader) = stream_buffer_with_cap(16 * 1024 * 1024);

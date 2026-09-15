@@ -390,29 +390,6 @@ export interface SetKeyValueInput {
   value: string;
 }
 
-export interface WorkflowSignalTokenInput {
-  appId: AppId;
-  types: string[];
-  ttl: string;
-}
-
-export interface WorkflowSignalTokenResult {
-  token: string;
-  expiresAt: string;
-}
-
-export interface WorkflowTopicBroadcastInput {
-  appId: AppId;
-  type: string;
-  payload?: unknown;
-  idempotencyKey?: string;
-}
-
-export interface WorkflowTopicBroadcastResult {
-  id: string;
-  topic: string;
-}
-
 /**
  * An organization: the root that owns projects, and the party that is billed.
  *
@@ -980,46 +957,6 @@ export class ControlClient {
         `/api/projects/${pathPart(projectId)}/members/${pathPart(userId)}`,
         { method: "DELETE", parseAs: "void" },
       ),
-  };
-
-  readonly workflows = {
-    createSignalToken: (
-      runId: string,
-      input: WorkflowSignalTokenInput,
-    ): Promise<WorkflowSignalTokenResult> =>
-      this.request(`/internal/workflows/runs/${pathPart(runId)}/signal-token`, {
-        method: "POST",
-        headers: { "x-zeroship-app-id": input.appId },
-        body: {
-          types: input.types,
-          ttl: input.ttl,
-        },
-      }),
-    createTopicSignalToken: (
-      topic: string,
-      input: WorkflowSignalTokenInput,
-    ): Promise<WorkflowSignalTokenResult> =>
-      this.request(`/internal/workflows/topics/${pathPart(topic)}/signal-token`, {
-        method: "POST",
-        headers: { "x-zeroship-app-id": input.appId },
-        body: {
-          types: input.types,
-          ttl: input.ttl,
-        },
-      }),
-    publishTopic: (
-      topic: string,
-      input: WorkflowTopicBroadcastInput,
-    ): Promise<WorkflowTopicBroadcastResult> =>
-      this.request(`/internal/workflows/topics/${pathPart(topic)}/broadcast`, {
-        method: "POST",
-        headers: { "x-zeroship-app-id": input.appId },
-        body: {
-          type: input.type,
-          payload: input.payload,
-          idempotencyKey: input.idempotencyKey,
-        },
-      }),
   };
 
   constructor(options: ControlClientOptions) {

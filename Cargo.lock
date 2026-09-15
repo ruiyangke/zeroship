@@ -7933,7 +7933,6 @@ dependencies = [
  "zeroship-gateway",
  "zeroship-migrate-server",
  "zeroship-worker",
- "zeroship-workflow-scheduler",
  "zeroship-workflow-server",
 ]
 
@@ -8002,10 +8001,8 @@ dependencies = [
  "zeroship-runtime",
  "zeroship-stream",
  "zeroship-workflow",
- "zeroship-workflow-calendar",
  "zeroship-workflow-client",
  "zeroship-workflow-manager",
- "zeroship-workflow-scheduler",
  "zeroship-workflow-server",
  "zeroship-workflow-v8",
  "zstd",
@@ -8169,7 +8166,6 @@ dependencies = [
  "zeroship-migrate-sqlite",
  "zeroship-runtime",
  "zeroship-runtime-macros",
- "zeroship-workflow",
 ]
 
 [[package]]
@@ -8749,25 +8745,6 @@ dependencies = [
  "zeroship-core",
  "zeroship-data-orm",
  "zeroship-workflow-calendar",
-]
-
-[[package]]
-name = "zeroship-workflow-scheduler"
-version = "0.1.0"
-dependencies = [
- "chrono",
- "clap",
- "compio",
- "compio-postgres",
- "flume 0.11.1",
- "serde",
- "serde_json",
- "testcontainers",
- "thiserror 2.0.18",
- "toml 0.8.23",
- "tracing",
- "uuid",
- "zeroship-core",
 ]
 
 [[package]]

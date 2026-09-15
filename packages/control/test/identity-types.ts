@@ -5,7 +5,6 @@ import {
   type DeployCommand,
   type DeployCommandId,
   type UserId,
-  type WorkflowSignalTokenInput,
 } from "../src/index.js";
 
 const appId: AppId = "app_0000000002e4nenowz3qmamtd";
@@ -18,10 +17,9 @@ client.env.listVars(appId);
 client.egressRules.list(appId);
 
 const app = { id: appId } as AppRecord;
-const signal: WorkflowSignalTokenInput = { appId, types: ["ready"], ttl: "1h" };
 const command: DeployCommand = { id: commandId, archive: new Blob([]) };
 client.apps.deploy(appId, command);
-void [app, signal];
+void [app];
 
 // @ts-expect-error A platform user id cannot address an app route.
 client.apps.get(userId);

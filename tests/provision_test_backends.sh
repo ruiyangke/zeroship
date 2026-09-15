@@ -271,8 +271,6 @@ database_url = "$PG_DSN"
 [worker]
 database_url = "$PG_DSN"
 
-[workflow_scheduler]
-database_url = "$PG_DSN"
 EOF
 echo "  ok   wrote ${TEST_OVERLAY#"$ROOT/"}"
 

@@ -38,10 +38,8 @@ pub fn run() -> Result<()> {
             "zeroship-workflow-manager",
             "-p",
             "zeroship-workflow-v8",
-            "-p",
-            "zeroship-workflow-scheduler",
         ]),
-        "workflow engine, metadata client, manager, binding and scheduler tests",
+        "workflow engine, metadata client, manager and binding tests",
     )?;
     checked(
         cargo().args(["test", "-p", "zeroship-workflow-server"]),
@@ -77,10 +75,6 @@ pub fn run() -> Result<()> {
             "test",
             "-p",
             "zeroship-control",
-            "--test",
-            "workflow_api",
-            "--test",
-            "workflow_engine_test",
             "--test",
             "workflow_e2e",
         ]),

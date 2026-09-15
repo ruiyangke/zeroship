@@ -14,14 +14,13 @@ pub mod rule;
 pub mod s3_blob;
 pub mod store;
 pub mod unpack;
-pub mod workflow_blob;
 
 pub use asset::{AssetEntry, AssetVariant};
 pub use blob::{
     sha256_hex, validate_hash_format, BlobError, BlobStore, LocalDiskBlobStore, PutOutcome,
 };
 pub use blob_config::{
-    build_blob_store, build_workflow_blob_store, BlobStoreConfigError, S3Runtime, StoreUrl,
+    build_blob_store, BlobStoreConfigError, S3Runtime, StoreUrl,
 };
 pub use executable::{
     deployment_manifest_hash, verify_deployment_manifest, ExecutableError, LoadedWorker,
@@ -41,6 +40,3 @@ pub use rule::{
 pub use s3_blob::{S3BlobStore, PART_SIZE};
 pub use store::{BundleStore, LocalFs, VfsError, VfsResult};
 pub use unpack::{ingest, IngestError, IngestSuccess};
-pub use workflow_blob::{
-    LocalWorkflowBlobStore, RemoteWorkflowBlobStore, WorkflowBlobEntry, WorkflowBlobStore,
-};

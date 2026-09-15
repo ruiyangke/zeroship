@@ -2,7 +2,7 @@ use super::*;
 
 async fn memberships(client: &compio_postgres::Client) -> (i64, Option<String>) {
     let row = client
-        .query_one(INHERITED_MEMBERSHIPS_SQL, &[&AMBIENT_MEMBERSHIP_EXEMPTION])
+        .query_one(INHERITED_MEMBERSHIPS_SQL, &[])
         .await
         .expect("inspect the connected login's memberships");
     (
@@ -50,13 +50,9 @@ async fn membership_inheritance_changes_are_visible_on_the_same_login_connection
 }
 
 #[compio::test]
-async fn the_workflow_owner_is_exempt_while_other_inherited_roles_are_reported() {
+async fn any_inherited_role_is_reported_and_refuses_boot() {
     Database::migrated(async |database| {
         let worker = database.connect_as(WORKER_DATABASE_ROLE).await;
-        let owns_journal: bool = worker.query_one(
-            "SELECT pg_has_role(current_user, 'zeroship_workflow_owner', 'USAGE')", &[],
-        ).await.unwrap().get(0);
-        assert!(owns_journal, "the accepted role must actually inherit journal authority");
         assert_eq!(memberships(&worker).await, (0, None));
 
         database.admin.batch_execute("CREATE ROLE unexpected_role; GRANT unexpected_role TO zeroship_worker WITH INHERIT TRUE").await.unwrap();

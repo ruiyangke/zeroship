@@ -66,8 +66,6 @@ zeroship-workflow = { workspace = true }
 zeroship-workflow-client = { workspace = true }
 zeroship-workflow-manager = { workspace = true }
 zeroship-data-orm = { workspace = true }
-zeroship-workflow-scheduler = { workspace = true }
-zeroship-workflow-calendar = { workspace = true }
 zeroship-stream = { workspace = true }
 zeroship-metering = { workspace = true }
 clap = { workspace = true, features = ["derive", "env"] }
@@ -172,14 +170,6 @@ path = "tests/live_db.rs"
 [[test]]
 name = "workflow_e2e"
 path = "tests/workflow_e2e.rs"
-
-[[test]]
-name = "workflow_api"
-path = "tests/workflow_api.rs"
-
-[[test]]
-name = "workflow_engine_test"
-path = "tests/workflow_engine_test.rs"
 
 [[test]]
 name = "no_liquibase_residue_test"

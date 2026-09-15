@@ -291,60 +291,6 @@ test("deploy refuses a raw artifact without sending it", async () => {
   assert.equal(calls, 0);
 });
 
-test("workflow helpers send app scope headers and JSON bodies", async () => {
-  const requests: Request[] = [];
-  const client = createControlClient({
-    baseUrl: "http://control.local",
-    fetch: async (input, init) => {
-      requests.push(new Request(input, init));
-      const path = new URL(String(input)).pathname;
-      if (path.endsWith("/broadcast")) {
-        return json({ id: "wbc_1", topic: "approvals" }, 202);
-      }
-      return json({ token: "wst_claim.sig", expiresAt: "2026-07-06T00:00:00Z" });
-    },
-  });
-
-  await client.workflows.createSignalToken("run_1", {
-    appId: APP_ID,
-    types: ["approved"],
-    ttl: "PT5M",
-  });
-  await client.workflows.createTopicSignalToken("approvals", {
-    appId: APP_ID,
-    types: ["approved"],
-    ttl: "PT5M",
-  });
-  await client.workflows.publishTopic("approvals", {
-    appId: APP_ID,
-    type: "approved",
-    payload: { ok: true },
-    idempotencyKey: "idem-1",
-  });
-
-  assert.deepEqual(
-    requests.map((req) => `${req.method} ${new URL(req.url).pathname}`),
-    [
-      "POST /internal/workflows/runs/run_1/signal-token",
-      "POST /internal/workflows/topics/approvals/signal-token",
-      "POST /internal/workflows/topics/approvals/broadcast",
-    ],
-  );
-  for (const req of requests) {
-    assert.equal(req.headers.get("x-zeroship-app-id"), APP_ID);
-    assert.equal(req.headers.get("content-type"), "application/json");
-  }
-  assert.deepEqual(await requests[0]!.json(), {
-    types: ["approved"],
-    ttl: "PT5M",
-  });
-  assert.deepEqual(await requests[2]!.json(), {
-    type: "approved",
-    payload: { ok: true },
-    idempotencyKey: "idem-1",
-  });
-});
-
 test("request builds query strings and supports raw text", async () => {
   const client = createControlClient({
     baseUrl: "http://control.local/root",
