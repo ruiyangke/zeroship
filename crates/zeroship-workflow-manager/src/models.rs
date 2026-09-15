@@ -145,6 +145,7 @@ pub const fn operation_kind(
         JobOperation::Management { .. } => "management",
         JobOperation::Fanout { .. } => "fanout",
         JobOperation::Propagate { .. } => "propagate",
+        JobOperation::ReleaseHold { .. } => "release_hold",
         JobOperation::Close { .. } => "close",
         JobOperation::Reconcile {} => "reconcile",
         JobOperation::Collect {} => "collect",
