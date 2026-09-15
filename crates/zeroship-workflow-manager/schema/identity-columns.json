@@ -9,7 +9,8 @@
     "id",
     "app_id",
     "deployment_id",
-    "holder_id"
+    "holder_id",
+    "journal_job_id"
   ],
   "workers": [
     "id"
