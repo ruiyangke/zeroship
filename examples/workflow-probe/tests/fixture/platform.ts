@@ -348,17 +348,38 @@ export class Platform {
     }));
     // Serving RPC is not yet serving workflows. A deployed app reaches
     // env.workflows only once the manager has placed it and the worker host has
-    // published its backend, which is later than the gateway route table. An
-    // accepted start is that readiness.
-    for (const target of targets) await this.waitFor(`${target.name} workflows`, async () => {
-      const response = await fetch(`${target.apiUrl}/__zeroship/v1/wf.start`, {
-        method: "POST", headers: { "content-type": "application/json" },
-        body: JSON.stringify({ json: { case: "basic" } }),
-        signal: AbortSignal.any([this.processes.signal, AbortSignal.timeout(15_000)]),
+    // published its backend, which is later than the gateway route table.
+    //
+    // An accepted start proves only the ACCEPTANCE half of that chain: a
+    // request isolate writing to the creator journal. DELIVERY - the manager
+    // handing the job back to a worker consumer - is a separate chain that
+    // becomes ready later, so a gate that stopped at an accepted start let the
+    // first timed assertion in the suite measure cold delivery. Carry one run
+    // through to completion, and keep the two waits separately named so an
+    // acceptance failure and a delivery failure do not report as one thing.
+    for (const target of targets) {
+      let run: { workflow: string; runId: string } | null = null;
+      await this.waitFor(`${target.name} workflows accept a start`, async () => {
+        const response = await fetch(`${target.apiUrl}/__zeroship/v1/wf.start`, {
+          method: "POST", headers: { "content-type": "application/json" },
+          body: JSON.stringify({ json: { case: "basic" } }),
+          signal: AbortSignal.any([this.processes.signal, AbortSignal.timeout(15_000)]),
+        });
+        const body = await response.json().catch(() => null);
+        if (!response.ok || typeof body?.json?.runId !== "string") return false;
+        run = body.json as { workflow: string; runId: string };
+        return true;
       });
-      const body = await response.json().catch(() => null);
-      return response.ok && typeof body?.json?.runId === "string";
-    });
+      await this.waitFor(`${target.name} workflows deliver a run`, async () => {
+        const response = await fetch(`${target.apiUrl}/__zeroship/v1/wf.status`, {
+          method: "POST", headers: { "content-type": "application/json" },
+          body: JSON.stringify({ json: run }),
+          signal: AbortSignal.any([this.processes.signal, AbortSignal.timeout(15_000)]),
+        });
+        const body = await response.json().catch(() => null);
+        return response.ok && body?.json?.state === "completed";
+      });
+    }
     return targets;
   }
 
