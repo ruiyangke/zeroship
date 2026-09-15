@@ -543,6 +543,15 @@ async fn abandonment(fixture: &Fixture) {
         host.lease(Some(EstablishIngress { after: None })).await,
         Err(Error::Denied)
     );
+    // Abandonment answers before the epoch bound is judged, so a host naming an
+    // epoch above the last one is refused rather than told to retry lower.
+    assert_eq!(
+        host.lease(Some(EstablishIngress {
+            after: Some(revision(2))
+        }))
+        .await,
+        Err(Error::Denied)
+    );
     assert_eq!(host.lease(None).await, Ok(None));
     assert_eq!(
         recovery.establish(&host.app, None, true).await,
