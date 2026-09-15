@@ -10,7 +10,7 @@ impl Kernel {
             10,
             max_pinned,
             KernelConfig {
-                workflows: Default::default(),
+                workflows: ReadyApps::default(),
                 db_service: Some(database_service(url)),
                 kv_store: None,
                 storage_backend: None,
@@ -40,7 +40,7 @@ async fn unwinding_releases_the_thread_kernel_and_its_database_service() {
             Arc::new(zeroship_metering::Meter::new()),
         );
         *service.borrow_mut() = DB_SERVICE.with(|slot| slot.borrow().as_ref().map(Arc::downgrade));
-        assert!(!plugin_set().is_empty());
+        assert!(!plugin_set(super::IsolateKind::Request).is_empty());
         panic!("intentional kernel fixture failure");
     }))
     .expect_err("propagate case failure");
