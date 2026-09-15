@@ -108,6 +108,10 @@ pub struct ManagerConfig {
     pub driver_interval_ms: u64,
     /// Bound on each maintenance lane's pass.
     pub lane_timeout_ms: u64,
+    /// How long a confirmed deployment hold stays held before the manager may
+    /// release it for a deployment nothing selects or uses. It must exceed the
+    /// manager's transaction timeout.
+    pub hold_grace_ms: u64,
     /// Periodic reconciliation and collection deadline.
     pub recovery_interval_ms: u64,
     /// Inactivity after which the app's recovery responsibility may close.
@@ -126,6 +130,7 @@ impl Default for ManagerConfig {
             placement_ttl_ms: 30_000,
             driver_interval_ms: 1_000,
             lane_timeout_ms: 10_000,
+            hold_grace_ms: 60_000,
             recovery_interval_ms: 30_000,
             idle_close_ms: 900_000,
             closing_timeout_ms: 300_000,
@@ -170,6 +175,10 @@ impl LocalConfig {
                 manager.recovery_interval_ms,
             ]
             .contains(&0)
+            // A hold confirmed outside a manager transaction must outlive the
+            // transaction that commits its dependency.
+            || Duration::from_millis(manager.hold_grace_ms)
+                <= zeroship_workflow_manager::Options::default().transaction_timeout
             // The renewal interval derived from the lifetime must be positive.
             || self.renew_interval().is_zero()
             || manager::recovery_options(self.manager_options())
@@ -208,6 +217,7 @@ impl LocalConfig {
             lease: Duration::from_millis(self.manager.lease_ms),
             placement_ttl: Duration::from_millis(self.manager.placement_ttl_ms),
             recovery_interval: Duration::from_millis(self.manager.recovery_interval_ms),
+            hold_grace: Duration::from_millis(self.manager.hold_grace_ms),
             lane_timeout: Duration::from_millis(self.manager.lane_timeout_ms),
             driver_interval: Duration::from_millis(self.manager.driver_interval_ms),
             idle_close: Duration::from_millis(self.manager.idle_close_ms),

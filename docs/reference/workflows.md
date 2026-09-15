@@ -160,8 +160,10 @@ is likewise refused without being rewritten.
 `--workflow-config=workflow.toml` configures native execution limits. Its optional
 `consumer` table bounds execution slots, claim polling, backoff, execution and
 per-operation time; `manager` bounds delivery leases, the worker's placement
-lifetime, maintenance cadence and lanes, and the reconciliation and collection
-interval; `payloads` configures `TaskPayloadLimits`. Database paths and object
+lifetime, maintenance cadence and lanes, the minimum time the manager keeps a
+deployment held before it may release one a republished archive replaced
+(`hold_grace_ms`), and the reconciliation and collection interval; `payloads`
+configures `TaskPayloadLimits`. Database paths and object
 storage belong to normal app configuration; workflow TOML rejects separate
 `journal`, `objects` and database settings. The CLI has no dedicated workflow
 reset command.

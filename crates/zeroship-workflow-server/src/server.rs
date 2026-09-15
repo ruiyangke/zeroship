@@ -104,6 +104,11 @@ impl ServerOptions {
                 closing_backoff_max: Duration::from_millis(*settings.closing_backoff_max_ms.get()),
                 ..RecoveryOptions::default()
             },
+            // Queue transactions run under the command timeout; a hold outlives
+            // twice that budget before the retention lane may release it.
+            hold_grace: DriverOptions::default()
+                .hold_grace
+                .max(coordinator.command_timeout.saturating_mul(2)),
             ..DriverOptions::default()
         };
         driver.validate()?;

@@ -3,7 +3,7 @@ CREATE TABLE "workflow_manager"."schema_version" ("id" text PRIMARY KEY NOT NULL
 
 CREATE TABLE "workflow_manager"."queue_scopes" ("id" text PRIMARY KEY NOT NULL, "lock_version" bigint NOT NULL DEFAULT 0, "dispatch_cursor" bigint NOT NULL DEFAULT 0);
 
-CREATE TABLE "workflow_manager"."deployment_holds" ("id" text PRIMARY KEY NOT NULL, "app_id" text NOT NULL, "deployment_id" text NOT NULL, "holder_id" text NOT NULL, "deploy_hash" text, "generation" bigint NOT NULL, "state" text NOT NULL, CONSTRAINT "deployment_hold_scope" FOREIGN KEY ("app_id") REFERENCES "workflow_manager"."queue_scopes" (id) ON DELETE RESTRICT);
+CREATE TABLE "workflow_manager"."deployment_holds" ("id" text PRIMARY KEY NOT NULL, "app_id" text NOT NULL, "deployment_id" text NOT NULL, "holder_id" text NOT NULL, "deploy_hash" text, "generation" bigint NOT NULL, "state" text NOT NULL, "held_at" bigint, CONSTRAINT "deployment_hold_scope" FOREIGN KEY ("app_id") REFERENCES "workflow_manager"."queue_scopes" (id) ON DELETE RESTRICT);
 
 CREATE INDEX IF NOT EXISTS "deployment_hold_scope_idx" ON "workflow_manager"."deployment_holds" ("app_id");
 
@@ -170,4 +170,4 @@ ALTER TABLE "workflow_manager"."schedule_scopes" ALTER COLUMN "id" TYPE text COL
 ALTER TABLE "workflow_manager"."schedules" ALTER COLUMN "id" TYPE text COLLATE "C", ALTER COLUMN "app_id" TYPE text COLLATE "C", ALTER COLUMN "name" TYPE text COLLATE "C", ALTER COLUMN "activation_id" TYPE text COLLATE "C";
 
 ALTER TABLE "workflow_manager"."schedule_occurrences" ALTER COLUMN "id" TYPE text COLLATE "C", ALTER COLUMN "app_id" TYPE text COLLATE "C", ALTER COLUMN "schedule_id" TYPE text COLLATE "C", ALTER COLUMN "run_id" TYPE text COLLATE "C", ALTER COLUMN "job_id" TYPE text COLLATE "C", ALTER COLUMN "activation_id" TYPE text COLLATE "C";
-INSERT INTO workflow_manager.schema_version (id, fingerprint) VALUES ('manager', '5bf17bd3a131495b50b784d5b0255decced1c30b707c5d2a390d3588589df64e');
+INSERT INTO workflow_manager.schema_version (id, fingerprint) VALUES ('manager', '03f9e9849e2baf0f971f5447b3498c67dcfeeee8bd259e82c0b0e9e8d1243862');

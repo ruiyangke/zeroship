@@ -11,6 +11,7 @@ use crate::{
         schema::{deployment_holds, schedules},
     },
     recovery::{self, DutyKind, Recovery},
+    retention,
     scheduling::{self, Due as Scheduled, Scheduler},
     Error, Queue,
 };
@@ -32,6 +33,10 @@ pub struct Options {
     pub page_limit: u32,
     /// Shared deadline for a lane's scans and entire candidate page.
     pub lane_timeout: Duration,
+    /// How long a confirmed queue hold stays held before the retention lane
+    /// may release it. It must exceed the queue's transaction timeout, the
+    /// budget within which an acquirer commits the dependency it confirmed.
+    pub hold_grace: Duration,
 }
 
 impl Default for Options {
@@ -41,6 +46,7 @@ impl Default for Options {
             recovery: recovery::Options::default(),
             page_limit: 128,
             lane_timeout: Duration::from_secs(10),
+            hold_grace: Duration::from_secs(60),
         }
     }
 }
@@ -55,6 +61,8 @@ impl Options {
             || i64::from(self.page_limit) > zeroship_data_orm::sql::MAX_ROW_LIMIT
             || self.lane_timeout.is_zero()
             || Instant::now().checked_add(self.lane_timeout).is_none()
+            || self.hold_grace.is_zero()
+            || i64::try_from(self.hold_grace.as_millis()).is_err()
             || self.scheduling.max_schedules == 0
             || self.scheduling.max_backfill == 0
             || i64::try_from(self.scheduling.max_backfill).is_err()
@@ -153,6 +161,9 @@ impl Driver {
         queue.database.entity::<schedules::Entity>()?;
         queue.database.entity::<recovery_duties::Entity>()?;
         queue.database.entity::<deployment_holds::Entity>()?;
+        if options.hold_grace <= queue.options.transaction_timeout {
+            return Err(Error::Invalid);
+        }
         Ok(Self {
             scheduler: Scheduler::new(queue.clone(), options.scheduling)?,
             recovery: Recovery::new(queue.clone(), options.recovery)?,
@@ -168,8 +179,9 @@ impl Driver {
     /// independently.
     ///
     /// A lane's deadline covers its scans and candidate operations together.
-    /// Failures never prevent another lane's turn. Held deployments require the
-    /// host's explicit release policy; this driver only resumes acquiring/releasing.
+    /// Failures never prevent another lane's turn. The retention lane resumes
+    /// unfinished hold intents and releases holds no enabled selection or
+    /// unsettled job needs once they are older than `Options::hold_grace`.
     /// Dropping this future advances past an attempted candidate without deleting
     /// its durable work. A dispatched commit may remain uncertain until replay.
     pub async fn tick(&mut self) -> TickReport {
@@ -218,17 +230,12 @@ impl Driver {
                     .map(|row| Candidate::Recoverable(lane_kind(lane), row))
                     .collect()
             }),
-            3 => scan::<_, Hold>(
+            3 => scan_holds(
                 &self.queue,
                 &mut self.cursors[lane],
                 deadline,
                 self.options.page_limit,
-                deployment_holds::id,
-                |_| {
-                    Ok(deployment_holds::state
-                        .eq("acquiring")?
-                        .or(deployment_holds::state.eq("releasing")?))
-                },
+                self.options.hold_grace,
             )
             .await
             .map(|rows| rows.into_iter().map(Candidate::Hold).collect()),
@@ -289,7 +296,9 @@ impl Driver {
                 let app = AppId::parse(&row.app_id).map_err(|_| Error::Storage)?;
                 let deployment =
                     DeploymentId::parse(&row.deployment_id).map_err(|_| Error::Storage)?;
-                self.queue.reconcile_deployment(&app, &deployment).await?;
+                self.queue
+                    .maintain_deployment(&app, &deployment, self.options.hold_grace)
+                    .await?;
             }
             Candidate::Closing { id, deleted } => {
                 let app = AppId::parse(id).map_err(|_| Error::Storage)?;
@@ -506,6 +515,35 @@ where
                 .limit(i64::from(limit))?
                 .all::<R>()
                 .await?)
+        }))
+        .await
+}
+
+async fn scan_holds(
+    queue: &Queue,
+    cursor: &mut Cursor,
+    deadline: Deadline,
+    limit: u32,
+    grace: Duration,
+) -> Result<Vec<Hold>, Error> {
+    let grace = i64::try_from(grace.as_millis()).map_err(|_| Error::Invalid)?;
+    if cursor.upper.is_none() {
+        let upper = deadline
+            .run(queue.transact(|tx| async move {
+                let cutoff = queue.clock.now().await?.saturating_sub(grace);
+                retention::maintenance_in(&tx, cutoff, None, None, true, 1).await
+            }))
+            .await?;
+        cursor.upper = upper.into_iter().next().map(|row: Hold| row.id);
+    }
+    let Some(upper) = cursor.upper.as_deref() else {
+        return Ok(Vec::new());
+    };
+    let after = cursor.after.as_deref();
+    deadline
+        .run(queue.transact(|tx| async move {
+            let cutoff = queue.clock.now().await?.saturating_sub(grace);
+            retention::maintenance_in(&tx, cutoff, after, Some(upper), false, limit).await
         }))
         .await
 }

@@ -22,7 +22,11 @@ customer work; that behavior does not define the target role split.
 
 The driver runs independently of HTTP threads and worker registration. Each pass
 visits bounded pages of due schedules, independent reconciliation and collection
-obligations, and unfinished deployment holds. A deadline shared by each lane's
+obligations, and deployment holds: it resumes unfinished holds and releases the
+queue hold of a deployment the app no longer selects once no job needs it. A
+confirmed hold first stays held for the driver's hold grace, which the server
+derives from `workflow.database_command_timeout_ms` so that it outlasts the
+transaction that commits a dependency on it. A deadline shared by each lane's
 scans and candidate operations prevents a slow candidate from consuming the next
 lane's turn. Failed candidates
 remain durable and retry after a finite identity sweep; restarts preserve the

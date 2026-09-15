@@ -23,6 +23,7 @@ zeroship_data_orm::orm::schema! {
             deploy_hash: Nullable<Text>,
             generation: BigInt,
             state: Text,
+            held_at: Nullable<BigInt>,
         }
 
         jobs {

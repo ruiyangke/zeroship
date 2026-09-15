@@ -259,7 +259,7 @@ impl Coordinator {
         self.pool.batch_execute(
             "SELECT id,capacity,state,expires_at,lock_version FROM workflow_manager.workers LIMIT 0;
              SELECT id,lock_version,dispatch_cursor FROM workflow_manager.queue_scopes LIMIT 0;
-             SELECT id,app_id,deployment_id,holder_id,deploy_hash,generation,state FROM workflow_manager.deployment_holds LIMIT 0;
+             SELECT id,app_id,deployment_id,holder_id,deploy_hash,generation,state,held_at FROM workflow_manager.deployment_holds LIMIT 0;
              SELECT id,app_id,deployment_id,operation,operation_kind,run_id,management_request_id,spec_digest,available_at,dispatch_order,state,attempt,worker_id,assignment_revision,lease_deadline,outcome,settlement_digest,created_at FROM workflow_manager.jobs LIMIT 0;
              SELECT app_id,worker_id,revision,expires_at,released,wake_revision,next_due_at FROM workflow_manager.assignments LIMIT 0;
              SELECT app_id,request_id,operation,worker_id,expected_revision,wake_revision,result_revision,result_expires_at FROM workflow_manager.placement_receipts LIMIT 0;
