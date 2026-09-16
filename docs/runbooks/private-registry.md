@@ -72,7 +72,6 @@ Published packages:
 - `@zeroship/rpc`
 - `@zeroship/server`
 - `@zeroship/react`
-- `@zeroship/ui`
 - `@zeroship/payments`
 - `@zeroship/eslint-config`
 - `@zeroship/vite-plugin`
@@ -85,7 +84,7 @@ Skipped package:
 ## Verify Registry Resolution
 
 ```bash
-npm view @zeroship/ui version --registry http://localhost:4873
+npm view @zeroship/payments version --registry http://localhost:4873
 npm view @zeroship/db version --registry http://localhost:4873
 npm view @zeroship/rpc version --registry http://localhost:4873
 ```
@@ -97,8 +96,8 @@ TMPDIR="$(mktemp -d)"
 cd "$TMPDIR"
 printf '{"name":"zeroship-registry-smoke","version":"0.0.0","private":true,"type":"module"}\n' > package.json
 printf '@zeroship:registry=http://localhost:4873\n' > .npmrc
-pnpm add @zeroship/ui
-node --input-type=module -e "console.log(import.meta.resolve('@zeroship/ui'))"
+pnpm add @zeroship/payments
+node --input-type=module -e "console.log(import.meta.resolve('@zeroship/payments'))"
 ```
 
 The resolved path should point inside the throwaway directory's `node_modules`, not back into the monorepo.

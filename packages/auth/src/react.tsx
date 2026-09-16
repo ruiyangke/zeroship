@@ -456,12 +456,12 @@ export function SignIn(props: SignInProps): ReactNode {
 
 // ── immersive login modal (hosts the cross-origin auth iframe) ───────────────
 
-// The SDK can't depend on @zeroship/ui (it's framework-agnostic), so the modal
+// The SDK is framework-agnostic and takes no styling dependency, so the modal
 // ships unstyled-but-structured: stable class hooks (`zs-auth-*`) + a tiny
 // scoped stylesheet a consumer fully overrides by re-declaring those classes.
 // The modal hosts the cross-origin `auth.zeroship.ai/login` iframe; the
 // password is typed INTO that auth-origin frame, so console JS never sees the
-// credential (SOP, §6.1). The builder themes these with its crystal tokens.
+// credential (SOP, §6.1).
 
 /** Minimal, override-friendly default styling for the login modal chrome. */
 const MODAL_STYLE = `

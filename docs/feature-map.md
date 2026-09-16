@@ -54,8 +54,7 @@ catalogs.
 | 16 | [Worker](#16-worker) | 26 | V8 execution tier: dispatch, per-thread isolate LRU, version/env reconcile. |
 | 17 | [Drivers + core infra](#17-drivers--core-infra) | 51 | compio-postgres, compio-redis, and zeroship-core shared types/crypto/auth/config. |
 | 18 | [CLI + developer experience](#18-cli--developer-experience) | 33 | The zeroship binary, create-zeroship-app, and the vite-plugin dev/build loop. |
-| 19 | [@zeroship/ui design system](#19-zeroshipui-design-system) | 80 | Governed React design system on Base UI: primitives, layouts, blocks, sections. |
-| 20 | [Other SDK packages](#20-other-sdk-packages) | 8 | The remaining published `@zeroship/*` packages: React db-bindings, eslint-config, ambient types, the `zeroship` stub. |
+| 19 | [Other SDK packages](#19-other-sdk-packages) | 8 | The remaining published `@zeroship/*` packages: React db-bindings, eslint-config, ambient types, the `zeroship` stub. |
 
 ---
 
@@ -981,98 +980,7 @@ replaces the external auth/gateway stack. Production builds produce a `.zship` a
 
 ---
 
-## 19. @zeroship/ui design system
-
-A governed React design system on Base UI (headless primitives) with a single registered theme,
-"crystal" (cool pastel glass). Four export tiers: interactive primitives (40+), layout
-primitives (7 layouts + 2 compositions), composed application blocks (12), and marketing page
-sections (7). All styling uses semantic CSS custom properties (`--zs-*`) with an oklch-only
-palette. **Storybook is the sole reference doc surface** — there is no prose doc in
-`docs/reference/` for this package.
-
-| Feature | Status | Surface | Code | Docs | Example | Notes |
-| --- | --- | --- | --- | --- | --- | --- |
-| ThemeProvider + useTheme | 🟡 | `ThemeProvider, useTheme, themes` | `packages/ui/src/theme.tsx` | — | `packages/ui/src/stories/story.css` | ADR specified 3 themes; only crystal built. |
-| Design token foundation (styles.css) | 🟢 | `import '@zeroship/ui/styles.css'` | `packages/ui/src/styles.css` | — | — | Theme-invariant; Tailwind contract file missing. |
-| Crystal theme palette | 🟢 | internal CSS ([data-theme='crystal']) | `packages/ui/src/styles.css` | — | — | Only registered theme. |
-| Button | 🟢 | `Button` | `packages/ui/src/components/Button/Button.tsx` | — | `packages/ui/src/stories/Button.stories.tsx` | 4 variants, loading, asChild, a11y guard. |
-| Input | 🟢 | `Input` | `packages/ui/src/components/Input/Input.tsx` | — | `packages/ui/src/stories/Input.stories.tsx` | outline/filled/plain; Field context. |
-| Field | 🟢 | `Field, useFieldVisualSize` | `packages/ui/src/components/Field/Field.tsx` | — | `packages/ui/src/stories/Field.stories.tsx` | Cascades required/disabled/size. |
-| Fieldset | 🟢 | `Fieldset, useFieldsetDisabledContext` | `packages/ui/src/components/Fieldset/Fieldset.tsx` | — | `packages/ui/src/stories/Fieldset.stories.tsx` | Propagates disabled to descendants. |
-| Form | 🟢 | `Form, FormActions` | `packages/ui/src/components/Form/Form.tsx` | — | `packages/ui/src/stories/Form.stories.tsx` | Server-error routing; no initialValues. |
-| Checkbox | 🟢 | `Checkbox` | `packages/ui/src/components/Checkbox/Checkbox.tsx` | — | `packages/ui/src/stories/Checkbox.stories.tsx` | Indeterminate-capable. |
-| CheckboxGroup | 🟢 | `CheckboxGroup` | `packages/ui/src/components/CheckboxGroup/CheckboxGroup.tsx` | — | `packages/ui/src/stories/CheckboxGroup.stories.tsx` | Controlled/uncontrolled multi-value. |
-| Switch | 🟢 | `Switch` | `packages/ui/src/components/Switch/Switch.tsx` | — | `packages/ui/src/stories/Switch.stories.tsx` | Field context. |
-| Radio / RadioGroup | 🟢 | `Radio, RadioGroup` | `packages/ui/src/components/Radio/Radio.tsx` | — | `packages/ui/src/stories/Radio.stories.tsx` | Horizontal/vertical. |
-| Toggle / ToggleGroup | 🟢 | `Toggle, ToggleGroup` | `packages/ui/src/components/Toggle/Toggle.tsx` | — | `packages/ui/src/stories/Toggle.stories.tsx` | Single/multiple exclusive. |
-| Select | 🟢 | `Select` | `packages/ui/src/components/Select/Select.tsx` | — | `packages/ui/src/stories/Select.stories.tsx` | Single/multiple; hidden input. |
-| Combobox | 🟢 | `Combobox` | `packages/ui/src/components/Combobox/Combobox.tsx` | — | `packages/ui/src/stories/Combobox.stories.tsx` | Typeahead; chips in multiple. |
-| Autocomplete | 🟢 | `Autocomplete` | `packages/ui/src/components/Autocomplete/Autocomplete.tsx` | — | `packages/ui/src/stories/Autocomplete.stories.tsx` | Free-text value kept as-is. |
-| NumberField | 🟢 | `NumberField` | `packages/ui/src/components/NumberField/NumberField.tsx` | — | `packages/ui/src/stories/NumberField.stories.tsx` | Stepper; min/max/step. |
-| Slider | 🟢 | `Slider` | `packages/ui/src/components/Slider/Slider.tsx` | — | `packages/ui/src/stories/Slider.stories.tsx` | Auto single/range; value badge. |
-| OtpField | 🟢 | `OtpField` | `packages/ui/src/components/OtpField/OtpField.tsx` | — | `packages/ui/src/stories/OtpField.stories.tsx` | Paste-split; keyboard nav. |
-| Card | 🟢 | `Card` | `packages/ui/src/components/Card/Card.tsx` | — | `packages/ui/src/stories/Card.stories.tsx` | header/media/footer anatomy. |
-| Dialog | 🟢 | `Dialog, createDialogHandle` | `packages/ui/src/components/Dialog/Dialog.tsx` | — | `packages/ui/src/stories/Dialog.stories.tsx` | Glass backdrop; imperative handle. |
-| AlertDialog | 🟢 | `AlertDialog` | `packages/ui/src/components/AlertDialog/AlertDialog.tsx` | — | `packages/ui/src/stories/AlertDialog.stories.tsx` | Destructive-confirm variant. |
-| Drawer | 🟢 | `Drawer` | `packages/ui/src/components/Drawer/Drawer.tsx` | — | `packages/ui/src/stories/Drawer.stories.tsx` | Slide-in from 4 edges. |
-| Popover | 🟢 | `Popover, createPopoverHandle` | `packages/ui/src/components/Popover/Popover.tsx` | — | `packages/ui/src/stories/Popover.stories.tsx` | Anchored floating panel. |
-| Tooltip | 🟢 | `Tooltip, createTooltipHandle` | `packages/ui/src/components/Tooltip/Tooltip.tsx` | — | `packages/ui/src/stories/Tooltip.stories.tsx` | Hover/focus; decorative-safe. |
-| PreviewCard | 🟢 | `PreviewCard, createPreviewCardHandle` | `packages/ui/src/components/PreviewCard/PreviewCard.tsx` | — | `packages/ui/src/stories/PreviewCard.stories.tsx` | Hover rich preview. |
-| Menu | 🟢 | `Menu, createMenuHandle` | `packages/ui/src/components/Menu/Menu.tsx` | — | `packages/ui/src/stories/Menu.stories.tsx` | Items/groups/submenus/radio. |
-| ContextMenu | 🟢 | `ContextMenu` | `packages/ui/src/components/ContextMenu/ContextMenu.tsx` | — | `packages/ui/src/stories/ContextMenu.stories.tsx` | Right-click; cursor position. |
-| Menubar | 🟢 | `Menubar` | `packages/ui/src/components/Menubar/Menubar.tsx` | — | `packages/ui/src/stories/Menubar.stories.tsx` | App-style menu bar. |
-| Toolbar | 🟢 | `Toolbar, ToolbarComponent` | `packages/ui/src/components/Toolbar/Toolbar.tsx` | — | `packages/ui/src/stories/Toolbar.stories.tsx` | Roving tabindex. |
-| NavigationMenu | 🟢 | `NavigationMenu` | `packages/ui/src/components/NavigationMenu/NavigationMenu.tsx` | — | `packages/ui/src/stories/NavigationMenu.stories.tsx` | Mega-menu popouts. |
-| Tabs | 🟢 | `Tabs` | `packages/ui/src/components/Tabs/Tabs.tsx` | — | `packages/ui/src/stories/Tabs.stories.tsx` | underline/chip/pill; indicator. |
-| Accordion | 🟢 | `Accordion` | `packages/ui/src/components/Accordion/Accordion.tsx` | — | `packages/ui/src/stories/Accordion.stories.tsx` | single/multiple; animated. |
-| Collapsible | 🟢 | `Collapsible` | `packages/ui/src/components/Collapsible/Collapsible.tsx` | — | `packages/ui/src/stories/Collapsible.stories.tsx` | Single-section disclosure. |
-| Toast + useToast | 🟢 | `Toast, useToast` | `packages/ui/src/components/Toast/Toast.tsx` | — | `packages/ui/src/stories/Toast.stories.tsx` | Imperative; success/error/warn/info. |
-| ScrollArea | 🟢 | `ScrollArea` | `packages/ui/src/components/ScrollArea/ScrollArea.tsx` | — | `packages/ui/src/stories/ScrollArea.stories.tsx` | Auto-hide scrollbars. |
-| Avatar | 🟢 | `Avatar` | `packages/ui/src/components/Avatar/Avatar.tsx` | — | `packages/ui/src/stories/Avatar.stories.tsx` | Image/initials/icon fallback. |
-| Badge | 🟢 | `Badge` | `packages/ui/src/components/Badge/Badge.tsx` | — | `packages/ui/src/stories/Badge.stories.tsx` | 5 intents; static. |
-| Tag | 🟢 | `Tag` | `packages/ui/src/components/Tag/Tag.tsx` | — | `packages/ui/src/stories/Tag.stories.tsx` | Removable chip. |
-| Icon | 🟢 | `Icon` | `packages/ui/src/components/Icon/Icon.tsx` | — | `packages/ui/src/stories/Icon.stories.tsx` | Governed lucide wrapper. |
-| Separator | 🟢 | `Separator` | `packages/ui/src/components/Separator/Separator.tsx` | — | `packages/ui/src/stories/Separator.stories.tsx` | solid/dashed/dotted. |
-| Breadcrumbs | 🟢 | `Breadcrumbs` | `packages/ui/src/components/Breadcrumbs/Breadcrumbs.tsx` | — | `packages/ui/src/stories/Breadcrumbs.stories.tsx` | aria-current on last. |
-| Meter | 🟢 | `Meter, meterStatus` | `packages/ui/src/components/Meter/Meter.tsx` | — | `packages/ui/src/stories/Meter.stories.tsx` | Semantic <meter>. |
-| Progress | 🟢 | `Progress` | `packages/ui/src/components/Progress/Progress.tsx` | — | `packages/ui/src/stories/Progress.stories.tsx` | Indeterminate/determinate. |
-| Skeleton | 🟢 | `Skeleton` | `packages/ui/src/components/Skeleton/Skeleton.tsx` | — | `packages/ui/src/stories/Skeleton.stories.tsx` | text/rounded/circular shimmer. |
-| Spinner | 🟢 | `Spinner` | `packages/ui/src/components/Spinner/Spinner.tsx` | — | `packages/ui/src/stories/Spinner.stories.tsx` | sr-only label; reduced-motion. |
-| Stack layout primitive | 🟢 | `Stack` | `packages/ui/src/layouts/Stack/Stack.tsx` | — | `packages/ui/src/stories/Stack.stories.tsx` | 1D flex; governed gap. |
-| Grid layout primitive | 🟢 | `Grid` | `packages/ui/src/layouts/Grid/Grid.tsx` | — | `packages/ui/src/stories/Grid.stories.tsx` | minColWidth or columns. |
-| Cluster layout primitive | 🟢 | `Cluster` | `packages/ui/src/layouts/Cluster/Cluster.tsx` | — | `packages/ui/src/stories/Cluster.stories.tsx` | Wrapping inline row. |
-| Container layout primitive | 🟢 | `Container` | `packages/ui/src/layouts/Container/Container.tsx` | — | `packages/ui/src/stories/Container.stories.tsx` | The single width authority. |
-| Split layout primitive | 🟢 | `Split` | `packages/ui/src/layouts/Split/Split.tsx` | — | `packages/ui/src/stories/Split.stories.tsx` | Fixed Side + fluid Main. |
-| Center layout primitive | 🟢 | `Center` | `packages/ui/src/layouts/Center/Center.tsx` | — | `packages/ui/src/stories/Center.stories.tsx` | Intrinsic centering. |
-| AppShell layout composition | 🟢 | `AppShell, useAppShellSidebar` | `packages/ui/src/layouts/AppShell/AppShell.tsx` | — | `packages/ui/src/stories/AppShell.stories.tsx` | Header/body/footer; skip-link. |
-| PageHeader layout composition | 🟢 | `PageHeader` | `packages/ui/src/layouts/PageHeader/PageHeader.tsx` | — | `packages/ui/src/stories/PageHeader.stories.tsx` | breadcrumbs/title/actions. |
-| EmptyState block | 🟢 | `EmptyState` | `packages/ui/src/blocks/EmptyState/EmptyState.tsx` | — | `packages/ui/src/stories/EmptyState.stories.tsx` | Centered empty-collection. |
-| ErrorState block | 🟢 | `ErrorState` | `packages/ui/src/blocks/ErrorState/ErrorState.tsx` | — | `packages/ui/src/stories/ErrorState.stories.tsx` | Intent colors; retry actions. |
-| StatCard block | 🟢 | `StatCard` | `packages/ui/src/blocks/StatCard/StatCard.tsx` | — | `packages/ui/src/stories/StatCard.stories.tsx` | value + delta arrow. |
-| Banner block | 🟢 | `Banner` | `packages/ui/src/blocks/Banner/Banner.tsx` | — | `packages/ui/src/stories/Banner.stories.tsx` | 5 intents; live-region option. |
-| DescriptionList block | 🟢 | `DescriptionList` | `packages/ui/src/blocks/DescriptionList/DescriptionList.tsx` | — | `packages/ui/src/stories/DescriptionList.stories.tsx` | DL/DT/DD semantics. |
-| DataTable block | 🟢 | `DataTable` | `packages/ui/src/blocks/DataTable/DataTable.tsx` | — | `packages/ui/src/stories/DataTable.stories.tsx` | @tanstack/react-table; sort/filter/paginate/select. |
-| Pagination block | 🟢 | `Pagination, buildPageItems` | `packages/ui/src/blocks/Pagination/Pagination.tsx` | — | `packages/ui/src/stories/Pagination.stories.tsx` | prev/next + numbered. |
-| FilterBar block | 🟢 | `FilterBar` | `packages/ui/src/blocks/FilterBar/FilterBar.tsx` | — | `packages/ui/src/stories/FilterBar.stories.tsx` | Search + active-filter chips. |
-| ListView block | 🟢 | `ListView` | `packages/ui/src/blocks/ListView/ListView.tsx` | — | `packages/ui/src/stories/ListView.stories.tsx` | Stacked rows; href/onClick a11y. |
-| FormSection block | 🟢 | `FormSection` | `packages/ui/src/blocks/FormSection/FormSection.tsx` | — | `packages/ui/src/stories/FormSection.stories.tsx` | stacked/aside; footer actions. |
-| AuthForm block | 🟢 | `AuthForm` | `packages/ui/src/blocks/AuthForm/AuthForm.tsx` | — | `packages/ui/src/stories/AuthForm.stories.tsx` | signIn/signUp; no bundled auth. |
-| Stepper block | 🟢 | `Stepper` | `packages/ui/src/blocks/Stepper/Stepper.tsx` | — | `packages/ui/src/stories/Stepper.stories.tsx` | WCAG 1.4.1 (not color-only). |
-| Hero section | 🟢 | `Hero, SectionTone` | `packages/ui/src/sections/Hero/Hero.tsx` | — | `packages/ui/src/stories/Hero.stories.tsx` | eyebrow/title/media; Container-wrapped. |
-| PricingTable section | 🟢 | `PricingTable` | `packages/ui/src/sections/PricingTable/PricingTable.tsx` | — | `packages/ui/src/stories/PricingTable.stories.tsx` | Featured tier ring + badge. |
-| FeatureGrid section | 🟢 | `FeatureGrid` | `packages/ui/src/sections/FeatureGrid/FeatureGrid.tsx` | — | `packages/ui/src/stories/FeatureGrid.stories.tsx` | 2/3/4 cols. |
-| Cta section | 🟢 | `Cta` | `packages/ui/src/sections/Cta/Cta.tsx` | — | `packages/ui/src/stories/Cta.stories.tsx` | inline/stacked; accent tone. |
-| StatsBand section | 🟢 | `StatsBand` | `packages/ui/src/sections/StatsBand/StatsBand.tsx` | — | `packages/ui/src/stories/StatsBand.stories.tsx` | Billboard stats. |
-| Faq section | 🟢 | `Faq` | `packages/ui/src/sections/Faq/Faq.tsx` | — | `packages/ui/src/stories/Faq.stories.tsx` | Built on Accordion. |
-| Footer section | 🟢 | `Footer` | `packages/ui/src/sections/Footer/Footer.tsx` | — | `packages/ui/src/stories/Footer.stories.tsx` | Multi-column link groups. |
-| SectionTone system | 🟢 | `SectionTone` (type) | `packages/ui/src/sections/_tone.ts` | — | — | data-section-band + data-tone. |
-| Storybook documentation + a11y gate | 🟢 | http://127.0.0.1:6006 | `packages/ui/.storybook/` | `packages/ui/README.md` | `packages/ui/src/stories/` | Sole API reference; MCP server. |
-| Tailwind v4 contract file | 🔵 | `@zeroship/ui/tailwind.css` (declared) | `packages/ui/package.json` | `docs/decisions/2026-05-26-design-system.md` | — | Export declared; file does not exist. |
-| Atelier / Studio / Dusk themes | 🔵 | (would be themes/ThemeName) | `packages/ui/src/styles.css` | `docs/decisions/2026-05-26-design-system.md` | — | ADR-specified; never implemented. |
-
----
-
-## 20. Other SDK packages
+## 19. Other SDK packages
 
 The remaining published `@zeroship/*` packages not covered above (added 2026-06-11 per the
 completeness critic).
@@ -1143,7 +1051,6 @@ found unwired; the per-area counts in the Index above predate this recount and r
 - 🟠 Per-procedure `middleware` list — carried in the manifest but the runtime middleware chain is not wired.
 - 🟡 compio-postgres TLS — full negotiation code exists but only `NoTls` is exported.
 - 🔵 compio-redis TLS — `rediss://` not implemented (MITM possible on plaintext link).
-- 🔵 `@zeroship/ui` Tailwind v4 contract file and Atelier/Studio/Dusk themes — declared in the ADR / package.json but never built (only "crystal" ships).
 
 ### Consolidated documentation gaps
 
@@ -1243,7 +1150,3 @@ wire format, pool config, TLS gaps); `typed_id`, the wire types, the AES-256-GCM
 `urn:zeroship:` secret system (vault/awssm unresolvable), observability log formats, the BCL
 verifier, the native OP client, SuperJSON (Rust side), the preview port allowlist, and
 wrapper revocation.
-
-**@zeroship/ui:** every component, layout, block, and section is documented **only in Storybook**;
-there is no `docs/reference/` page for the package, the crystal token contract, the design-token
-foundation, the `SectionTone` system, the Toast imperative API, or the Storybook MCP server.
