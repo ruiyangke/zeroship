@@ -39,7 +39,7 @@ fn golden_lines(text: &str) -> Vec<&str> {
 
 /// **The behaviour-preservation gate for the move.**
 ///
-/// 27 recorded streams and 23 carriers under 3 dialects, reduced to a hash per artifact,
+/// Every recorded stream and carrier is reduced to a hash per artifact,
 /// a line per COLUMN carrying its whole wire `FieldDef`, and - on SQLite - the
 /// `CREATE TABLE` the 12-step rebuild would render from the map. The hash and the
 /// per-field lines are both here on purpose and neither substitutes for the other: the
@@ -144,13 +144,10 @@ fn the_corpus_golden_actually_covers_the_map_that_moved() {
         );
     }
 
-    // THE V2 KEYS, held to the same floor and for the same reason. The wire `FieldDef`
-    // gained four read-surface flags and a physical-`storage` block
-    // (`crates/zeroship-migrate-core/src/render/gen_types.rs:320-360`), and this file was
-    // REGENERATED to record them. A golden regenerated once can be regenerated again;
-    // without a floor, a later capture that emitted none of these would look exactly like
-    // a clean run. Every rendered field carries all five, so the floor is the field-row
-    // count rather than a token number - a partial stamp fails here too.
+    // The read-surface keys and the physical-`storage` block, held to the same floor and
+    // for the same reason: a later capture that emitted none of these would look exactly
+    // like a clean run. Every rendered field carries all five, so the floor is the
+    // field-row count rather than a token number - a partial stamp fails here too.
     let field_rows = count("|field|");
     assert!(
         field_rows >= 300,
@@ -224,9 +221,9 @@ fn carrier(name: &str) -> Vec<Op> {
         .unwrap_or_else(|| panic!("the corpus has no carrier named {name}"))
 }
 
-/// FAMILY 1. The retired walker lifted a single-column `UNIQUE` onto the column and
-/// had no arm that could take it back, so `schema.runtime.json` kept calling a column
-/// unique after the constraint that made it so was dropped.
+/// FAMILY 1. A dropped single-column `UNIQUE` must not keep
+/// `schema.runtime.json` calling a column unique after the constraint that made it so
+/// is gone.
 ///
 /// The two halves are asserted together because either alone is satisfiable by a bug:
 /// "the dropped one is gone" is satisfied by dropping every `unique`, and "the kept one
@@ -265,12 +262,12 @@ fn a_dropped_unique_constraint_does_not_outlive_itself() {
     }
 }
 
-/// FAMILIES 2 and 3. The same un-lift hole on the CHECK-derived facets: a numeric
-/// `min`/`max` bound and an `enum` membership.
+/// FAMILIES 2 and 3. The CHECK-derived facets: a numeric `min`/`max` bound and an
+/// `enum` membership. A dropped CHECK takes both with it.
 ///
-/// PostgreSQL only, and that is measured rather than a convenience: `addConstraint(check)`
-/// is refused off Postgres by the fold itself, so these two families do not exist on
-/// SQLite or MySQL at all. The refusal is pinned in the golden.
+/// PostgreSQL only: `addConstraint(check)` is refused off Postgres by the fold
+/// itself, so these two families do not exist on SQLite or MySQL at all. The
+/// refusal is pinned in the golden.
 #[test]
 fn a_dropped_check_constraint_does_not_outlive_itself() {
     let policy = support::no_inject(SCHEMA);
@@ -325,10 +322,8 @@ fn a_dropped_check_constraint_does_not_outlive_itself() {
     }
 }
 
-/// FAMILY 4. The walker kept its recovered CHECK and FK facets in a side map keyed by
-/// TABLE and lifted them by column NAME once the whole stream had been walked, so
-/// `dropColumn` never took a facet with its column - and a column re-added under the
-/// same name inherited it.
+/// FAMILY 4. A column re-added under a dropped column's name must not inherit its
+/// constraints: `dropColumn` takes the column's CHECK and FK facets with it.
 ///
 /// This is the family the recorded corpus was furthest from: it needs a drop AND a
 /// re-add of the same name, which no fixture does.
@@ -382,11 +377,10 @@ fn a_re_added_column_does_not_inherit_the_dropped_columns_constraints() {
 
 /// FAMILY 5. A dropped partition is a dropped RELATION, so it leaves the map.
 ///
-/// Adjudicated against a live PostgreSQL by consumer 2 in
-/// `crates/zeroship-migrate/tests/fold_live/env_db_ts_matches_the_server_pg.rs`: after the drop, `pg_class` no longer
-/// holds the child and the parent survives. `env.db.ts` has agreed since that move; this
-/// is `schema.runtime.json` catching up, so the two halves of ONE `render_artifacts`
-/// call stop disagreeing about which relations exist.
+/// The live PostgreSQL sibling
+/// `env_db_ts_matches_the_server_pg.rs` adjudicates the behaviour: after the drop,
+/// `pg_class` no longer holds the child and the parent survives, so the two halves
+/// of ONE `render_artifacts` call agree about which relations exist.
 ///
 /// `detachPartition` is the control that stops "a partition op removes the table" from
 /// being applied to the op next door - a detached partition survives as a standalone
@@ -513,32 +507,21 @@ fn control_cases() -> Vec<(String, Vec<Op>, bool)> {
 /// **The over-refusal control: `render_artifacts` accepts exactly the streams the
 /// coherence oracle accepts, and refuses with the same message.**
 ///
-/// An equality gate is STRUCTURALLY BLIND to a refusal change, because it only compares
-/// streams that produced an answer on both sides: a stream that starts erroring simply
-/// leaves the sample and the count falls, which reads as green everywhere except in a
-/// pinned total. So the property is asserted as a BICONDITIONAL, and both directions
-/// panic.
+/// It is a REGRESSION GUARD, not a discovery instrument. An equality gate is
+/// STRUCTURALLY BLIND to a refusal change, because it only compares streams that
+/// produced an answer on both sides: a stream that starts erroring simply leaves the
+/// sample and the count falls, which reads as green everywhere except in a pinned
+/// total. So the property is asserted as a BICONDITIONAL, and both directions panic.
 ///
-/// # Be precise about what this is worth HERE
+/// The two refusal sets are equal BY CONSTRUCTION: `single_fold::fold` runs the same
+/// catalog replay through `fold_ops_onto` before any authored rule executes. What this
+/// still catches is an arm that stopped calling `ResolvedInject::for_table`,
+/// `create_enum` or `create_domain` - fallible in both - which would show up here as
+/// UNDER-REFUSAL.
 ///
-/// It is a REGRESSION GUARD, not a discovery instrument, and the reason is specific.
-/// The walker this move deletes ran `fold_ops` itself as its fail-closed gate, and
-/// `single_fold::fold` runs the same catalog replay through `fold_ops_onto` before any
-/// authored rule executes. So the two refusal sets are equal BY CONSTRUCTION, and that
-/// was not a prediction: the sweep behind this move compared the walker and the
-/// projection over 702 prefix/dialect pairs and found ZERO on which one refused and the
-/// other did not - 486 both answered, 216 both refused.
-///
-/// What it can still catch, and what no other gate in this change can: the deletion
-/// removing a refusal the walker's own authored replay made and the fold's does not -
-/// `ResolvedInject::for_table`, `create_enum` and `create_domain` are fallible in both,
-/// and an arm that stopped calling one would show up here as UNDER-REFUSAL.
-///
-/// The comparison is against `fold_ops` rather than against the deleted walker, and that
-/// is weaker in one stateable way: `fold_ops` cannot see a refusal the walker's AUTHORED
-/// half made that the catalog half does not. What covers that gap is the golden, whose
-/// `refused|` lines were captured from the OLD path in full and are compared line for
-/// line above.
+/// The comparison is against `fold_ops`, which cannot see a refusal the AUTHORED half
+/// makes that the catalog half does not. The golden covers that gap: its `refused|`
+/// lines are compared line for line above.
 #[test]
 fn the_move_changed_no_refusal_that_the_old_path_already_made() {
     let confined = support::confined_charter();

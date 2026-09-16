@@ -1,13 +1,12 @@
 //! Live PostgreSQL oracle for the two rules a `setColumnType` must obey when the
 //! column it names carries a GENERATION contract, and the end-to-end proof that
-//! the engine now obeys them.
+//! the engine obeys them.
 //!
-//! Both rules were measured as plans that cleared `validate` AND `preview` and
-//! then died partway through `apply` — the worst failure this engine can produce,
-//! because the operator is left with a half-applied schema. Reproduced here
-//! through the real path (author → lower → apply → introspect), on the engine's
-//! OWN emitted SQL rather than hand-written DDL, because for the second rule the
-//! defect IS what the renderer emits:
+//! Both rules guard the same worst failure: a plan that clears `validate` AND
+//! `preview` and then dies partway through `apply`, leaving the operator with a
+//! half-applied schema. Reproduced here through the real path (author → lower →
+//! apply → introspect), on the engine's OWN emitted SQL rather than hand-written
+//! DDL, because for the second rule the defect IS what the renderer emits:
 //!
 //! ```text
 //!   int identity  -> text     APPLY DIED: identity column type must be
@@ -49,12 +48,10 @@ use zeroship_migrate_postgres::backend::drift_sql::snapshot_schema;
 use zeroship_migrate_postgres::PostgresBackend;
 
 /// The test-side PostgreSQL identifier spelling, written out here rather than
-/// imported from the crate. It used to be
-/// `zeroship_migrate::schema::query::quote_ident`, which was `pub`, un-dialected, and a
-/// SECOND physical home for the spelling `render::backends::ansi_double_quote_ident`
-/// owns; it is gone. A probe that builds its expectation by calling the emitter it is
-/// checking is not an oracle anyway, so the replacement is deliberately independent —
-/// the same shape the sibling `fold_rename_column_constraint_definition_pg` and
+/// imported from the crate. A probe that builds its expectation by calling the
+/// emitter it is checking is not an oracle, so the spelling is deliberately
+/// independent — the same shape the sibling
+/// `fold_rename_column_constraint_definition_pg` and
 /// `fold_rename_column_check_body_pg` probes already use.
 fn quote_ident(identifier: &str) -> String {
     format!("\"{}\"", identifier.replace('"', "\"\""))

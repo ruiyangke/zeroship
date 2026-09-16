@@ -3,9 +3,9 @@
 //! `ColumnSnapshot::inline_checks` is the enum / domain / UUID / TypeID-ULID
 //! membership and format predicates, rendered to SQL text at fold time. Every one of
 //! them names ITS OWN column. `declarative::build_column_rename_rebuild` derives the
-//! post-rename table from the LIVE one by rewriting `ColumnSnapshot::name`, so before
-//! this fix the
-//! rebuilt `CREATE TABLE` said
+//! post-rename table from the LIVE one by rewriting `ColumnSnapshot::name`; if the
+//! check bodies are not rewritten with it, the
+//! rebuilt `CREATE TABLE` says
 //!
 //! ```sql
 //! "state" TEXT NOT NULL CHECK ("status" IN ('UNCONFIRMED','CONFIRMED','status'))
@@ -24,7 +24,7 @@
 //! which is the shape whose `inline_checks` are populated at all. A SQLite CATALOG
 //! read leaves the field EMPTY (`zeroship_migrate_sqlite::backend::drift_sql`), so the
 //! catalog-sourced rebuild renders from the SDK descriptor or replays the stored
-//! body; the last test here pins that leg so the fix cannot start rewriting a body
+//! body; the last test here pins that leg so the rewrite cannot start rewriting a body
 //! it is meant to leave alone.
 //!
 //! The fixture is built to catch the two ways naive text substitution gets this
@@ -333,7 +333,7 @@ async fn a_sqlite_rename_rebuild_emits_a_check_body_over_the_new_column_name() {
 /// The OTHER leg, which must not start being rewritten. A SQLite CATALOG read leaves
 /// `inline_checks` EMPTY and `stored_create_sql` SET, so a pure rename replays the
 /// stored body byte-for-byte and lets SQLite's own `RENAME COLUMN` rewrite the
-/// predicate. Pinned so the fix above cannot leak into it.
+/// predicate. Pinned so the rebuild rewrite cannot leak into it.
 #[compio::test]
 async fn a_catalog_sourced_rename_still_replays_the_stored_body() {
     let effective = support::confined_charter();

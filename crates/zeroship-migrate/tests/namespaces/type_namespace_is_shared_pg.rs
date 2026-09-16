@@ -5,7 +5,7 @@
 //! `duplicate definition`, but nothing checked one KIND against the other, and
 //! nothing knew that every table and view also creates a composite row type.
 //!
-//! MEASURED AGAINST LIVE POSTGRESQL, every cell:
+//! Against live PostgreSQL, every cell:
 //!
 //!     CREATE TYPE e AS ENUM; CREATE DOMAIN e     type "e" already exists
 //!     CREATE DOMAIN d;       CREATE TYPE d       type "d" already exists
@@ -20,8 +20,7 @@
 //! THE LAST LINE IS WHY THIS IS NOT A NAMESPACE MERGE. Every other pair collides
 //! in both directions, so the obvious fix - fold types into the relation
 //! namespace - passes all seven refusal cases and REFUSES that last one, which
-//! PostgreSQL accepts. It was surprising enough that it was re-measured in
-//! isolation before being believed.
+//! PostgreSQL accepts.
 //!
 //! The model the fix implements, stated as claim-vs-check:
 //!
@@ -62,20 +61,11 @@ fn dom(n: &str) -> String {
 
 /// Assert the refusal is the TYPE-namespace one, not merely that one happened.
 ///
-/// Added by the F769 audit. Every site below had a bare `expect_err`, and the
-/// partition fixture proved that is not idle worry: two of its claims were
-/// answered by a different rule than they named, and stayed green for it.
-///
-/// All seven refusals here were measured before this helper was written, and all
-/// seven really are the type-namespace rule - so this pins behaviour that was
-/// already correct rather than papering over a discrepancy. The point is that it
-/// STAYS pinned: "verified once" is the guarantee that decays.
-/// SHARPENED after the audit's own guard failed the same test it was applying.
-/// The first version asserted only "one type namespace", which EVERY refusal in
-/// this file contains - so each of the seven tests would have passed on any
-/// sibling's refusal, exactly the non-discriminating guard batch 4 found
-/// elsewhere. The claiming op and the kind that holds the name are what
-/// distinguish them, so both are asserted.
+/// A bare `expect_err` is not enough: a claim can be answered by a different rule
+/// than it names and stay green for it. Asserting only "one type namespace" is
+/// non-discriminating, because EVERY refusal in this file contains it, so each
+/// test would pass on any sibling's refusal. The claiming op and the kind that
+/// holds the name distinguish them, so both are asserted here.
 const TYPE_NS: &str = "one type namespace";
 
 fn expect_type_namespace_refusal(ops: &str, claiming_op: &str, held_by: &str, what: &str) {
@@ -174,10 +164,10 @@ fn a_sequence_may_not_take_a_live_enum_name() {
 
 #[test]
 fn an_enum_may_take_a_live_sequence_name() {
-    // MEASURED AND RE-MEASURED IN ISOLATION: PostgreSQL accepts this, even though
-    // the reverse collides. A merged namespace - the obvious implementation -
-    // would refuse it. This control is the whole reason the fix distinguishes
-    // CLAIMING a namespace from merely CHECKING it.
+    // PostgreSQL accepts this, even though the reverse collides. A merged
+    // namespace - the obvious implementation - would refuse it. This control is
+    // the whole reason the fix distinguishes CLAIMING a namespace from merely
+    // CHECKING it.
     verdict(&format!(
         r#"{{"op":"createSequence","name":"n"}},{}"#,
         enm("n")

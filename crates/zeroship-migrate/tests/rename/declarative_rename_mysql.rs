@@ -1,45 +1,24 @@
 //! **A MySQL declarative rename is refused at PLAN time, and nothing reaches the
 //! server. Asked of a live MySQL server.**
 //!
-//! # The defect this pins closed
+//! # The invariant
 //!
-//! `render::declarative`'s rename author used to have no dialect guard. The only gate
-//! in the diff span asked whether the target was SQLite and `continue`d past the
-//! author; PostgreSQL
-//! AND MySQL both reached `ExpandContractAuthor::author` and both pushed an
-//! `ExpandContractPlan` into the plan's `renames`. `engine.rs`'s shape-adapter then
-//! mapped EVERY `renames` entry to `RenameStep::PgExpandContract` unconditionally, so
-//! a MySQL deploy carrying a rename hint reached apply holding a step whose own doc
-//! comment labels it **Postgres**, and the MySQL backend's `online()` is `None`.
+//! `render::declarative` refuses a MySQL rename at PLAN time, so zero statements
+//! reach the server. The shape-adapter maps EVERY `renames` entry to
+//! `RenameStep::PgExpandContract` unconditionally and the MySQL backend's
+//! `online()` is `None`, so without the refusal a MySQL deploy carrying a rename
+//! hint would reach apply holding a Postgres-only step and fail mid-apply after a
+//! plain `ADD COLUMN` in the same deploy had already committed. That leaves a
+//! schema which is neither the old shape nor the new one, and which no retry can
+//! complete.
 //!
-//! Measured against live MySQL 8 / InnoDB before the fix, the deploy failed
-//! mid-apply with `ApplyError::Backend("plan carries a PG online rename but the
-//! backend has no online schema-change capability ... a PgExpandContract here is a
-//! routing bug")` - an internal-invariant string reaching an operator - and
-//! `information_schema.COLUMNS` reported `["id", "email", "nickname"]`. The plain
-//! `ADD COLUMN` riding in the same deploy had COMMITTED while the rename had not
-//! happened: a schema that was neither the old shape nor the new one, and one no
-//! retry could complete, because the refusal was structural and every re-plan landed
-//! on the same arm. Three source comments asserted this could not happen
-//! (`engine.rs`'s shape-adapter, `mysql/mod.rs`'s `online()`,
-//! `apply/backend/mod.rs`'s `blocking_column_dependents`); all three were false, and
-//! all three now say what is true.
+//! # Why refusal, not a product change
 //!
-//! # Why refusing was the fix, and not a promise being withdrawn
-//!
-//! Everything else in the repo already said MySQL cannot rename a column.
-//! `docs/dialects.md`'s "Rename column" row reads `MySQL 8 | No`.
-//! MySQL's validation policy records `renameColumn | base` as `Unsupported`. The
-//! IR lane onto the SAME `ExpandContractAuthor` answers `&MYSQL =>
-//! Err(UnsupportedInV1)` at plan time. The declarative differ was the lone dissenter
-//! and the only path that reached a live server, so the guard makes the code honor a
-//! promise it was breaking rather than changing what the product offers.
-//!
-//! The precedent sits 60 lines below the rename loop in the same function: the
-//! `ExistingColumnChangeRefused` arm, whose comment already argued exactly this -
-//! refuse before rendering so "an authored change and a declarative one refuse alike
-//! rather than one lane silently planning invalid DDL". That reasoning had been
-//! applied to ALTER COLUMN and not to the rename above it.
+//! MySQL cannot rename a column: `docs/dialects.md`'s "Rename column" row reads
+//! `MySQL 8 | No`, the validation policy records `renameColumn | base` as
+//! `Unsupported`, and the IR lane onto the SAME `ExpandContractAuthor` answers
+//! `&MYSQL => Err(UnsupportedInV1)` at plan time. Refusing the declarative path
+//! makes it honor the same promise rather than change what the product offers.
 //!
 //! # What this file asserts, and why it is not an error-type check
 //!
@@ -58,12 +37,6 @@
 //! A final leg proves the refusal is SCOPED: the same desired schema deployed with NO
 //! rename hint still plans and applies on MySQL, so a guard that broke ordinary MySQL
 //! declarative deploys could not pass this file.
-//!
-//! # The oracle is the server
-//!
-//! Every assertion reads `information_schema` or `SHOW CREATE TABLE` - never the SQL
-//! the engine emitted. Asserting on emitted bytes would only prove the renderer
-//! agrees with itself.
 //!
 //! # The oracle is the server
 //!
@@ -349,13 +322,10 @@ async fn a_mysql_declarative_rename_is_refused_at_plan_time_and_nothing_reaches_
     );
 
     // **Drive whichever path the engine actually takes.** This deliberately does NOT
-    // stop at `expect_err` on the plan: if the plan-time refusal is ever lost, the
-    // planner succeeds and the deploy must then be APPLIED, because the property
-    // being measured is "nothing reached the server", not "an error had the right
-    // type". Removing the guard arm from `render/declarative.rs` sends control
-    // through the `Ok` branch below, the plain `ADD COLUMN` commits ahead of the
-    // unroutable rename, and the `information_schema` assertions after this block are
-    // what fail. That is the red this test is built to produce.
+    // stop at `expect_err` on the plan: the property being measured is "nothing
+    // reached the server", not "an error had the right type". If the plan-time
+    // refusal is lost, the planner succeeds and the deploy is APPLIED, and the
+    // `information_schema` assertions after this block are what fail.
     let refusal = match planned {
         Err(error) => error.to_string(),
         Ok(plan) => engine
@@ -385,12 +355,9 @@ async fn a_mysql_declarative_rename_is_refused_at_plan_time_and_nothing_reaches_
 
     // **NOTHING IS HALF-APPLIED**, and this is the assertion that protects the user.
     // A plan-time refusal means zero statements executed, so the plain `ADD COLUMN`
-    // that rode along in the same deploy must NOT be here. Before the fix it was: the
-    // shape-adapter orders plain DDL ahead of renames and each lowered unit commits
-    // in its own transaction, so `nickname` committed and stayed committed while the
-    // rename died, leaving a schema that was neither shape and that no retry could
-    // complete. Stated as an EXACT column list rather than three `!contains` checks,
-    // so an unexpected column is a failure too.
+    // that rode along in the same deploy must NOT be here. Stated as an EXACT column
+    // list rather than three `!contains` checks, so an unexpected column is a failure
+    // too.
     assert_eq!(
         columns,
         vec!["id".to_string(), OLD_COLUMN.to_string()],

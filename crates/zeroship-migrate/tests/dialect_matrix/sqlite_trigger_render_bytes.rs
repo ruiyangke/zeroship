@@ -1,43 +1,20 @@
-//! The bytes `render_sqlite_trigger_op` emits, pinned, because NOTHING pinned them.
+//! The bytes `render_sqlite_trigger_op` emits, pinned.
 //!
-//! # Why this file exists: a coverage hole found by a control that came out wrong
+//! # Why this file exists
 //!
-//! The SQLite trigger render path previously resolved its identifier quotes through
-//! `PostgresDmlRenderer::quote_ident`. Fixing that had to be proven byte-neutral, and
-//! the tree's own established technique for proving a render dependency is NEUTERING:
-//! replace a renderer method with a marker and watch which suites go red.
-//! `backends/sqlite.rs` records exactly that argument for the earlier half of the same
-//! fix ("the SQLite-only `sqlite_engine` binary went from 148 passed / 7 failed to
-//! 155 / 0 over the same 155 tests, so the dependency is gone rather than merely
-//! re-covered").
-//!
-//! Run against the trigger path, that instrument was BLIND, and it took a two-sided
-//! control to see it. Neutering `PostgresDmlRenderer::quote_ident` and running
-//! `sqlite_engine`:
-//!
-//! ```text
-//!   BEFORE the fix, PostgreSQL renderer neutered    156 passed / 0 failed
-//!   AFTER  the fix, PostgreSQL renderer neutered    156 passed / 0 failed
-//! ```
-//!
-//! The first line is the one that matters. Before the fix the SQLite trigger path
-//! DEMONSTRABLY reached the PostgreSQL renderer, so a suite that exercised it had to
-//! go red — and `sqlite_engine` did not move. It never renders a trigger: its five
-//! `CREATE TRIGGER` occurrences are raw SQL strings handed straight to SQLite, not
-//! `Op::CreateTrigger` lowered through `render_sqlite_trigger_op`. A green there was
-//! evidence of nothing, and had the control been left out it would have been read as
-//! proof the fix was safe.
-//!
-//! Widening the search: no offline test in this crate asserted the emitted bytes of a
-//! rendered SQLite trigger at all. The path is reached by the live conformance sweep,
-//! which needs a database and cannot say WHICH renderer spelled a quote. So the
-//! coupling was not merely hard to see - the bytes it produced were unpinned, which is
-//! the more useful finding and the one this file closes.
+//! The SQLite trigger render path must not resolve its identifier quotes through
+//! `PostgresDmlRenderer::quote_ident`. Nothing offline pinned the bytes that path
+//! produces, so a render dependency could return unnoticed: `sqlite_engine` never
+//! renders a trigger - its `CREATE TRIGGER` occurrences are raw SQL strings handed
+//! straight to SQLite, not `Op::CreateTrigger` lowered through
+//! `render_sqlite_trigger_op` - and the live conformance sweep cannot say WHICH
+//! renderer spelled a quote. This file closes that hole with a database-free test
+//! over the emitted bytes.
 //!
 //! # What is pinned, and why these particular ops
 //!
 //! One `createTrigger` and one `dropTrigger` chosen to touch EVERY identifier quote in
-//! `render_sqlite_trigger_op` and its two helpers - all six of the calls the census
+//! `render_sqlite_trigger_op` and its two helpers - the calls the census
 //! next door counts:
 //!
 //! | quote                          | reached by                                  |
