@@ -1,31 +1,23 @@
 //! Native `Headers` per WHATWG Fetch §2.2 (https://fetch.spec.whatwg.org/#headers-class).
 //!
-//! Replaces the JS Headers polyfill that lived in `embed/fetch.js`,
-//! which had several spec divergences (no ByteString validation, no
-//! Set-Cookie special cases, name validation skipped on delete/has/get).
-//!
 //! Storage is `Vec<(Vec<u8>, Vec<u8>)>` — see "Storage" section of the
 //! design doc for why bytes-not-strings and list-not-multimap. The list
 //! is in insertion order; sort-and-combine runs lazily on iteration.
 //!
-//! ## Key correctness fixes vs the JS polyfill
+//! ## Spec points that bite
 //!
 //! - **ByteString validation**: code units > 0xFF throw
-//!   TypeError before any storage write. The JS polyfill silently
-//!   coerced via `String(value)` which lossily round-tripped non-Latin-1
-//!   bytes.
+//!   TypeError before any storage write. A `String(value)` coercion
+//!   would lossily round-trip non-Latin-1 bytes.
 //! - **Normalize-then-validate**: Fetch §2.2.1 step 1 of
-//!   `append`/`set` is *normalize value*, then validate. The polyfill
-//!   validated the raw value, rejecting `"hello\r\n"` instead of
-//!   stripping outer ws first.
+//!   `append`/`set` is *normalize value*, then validate: `"hello\r\n"`
+//!   is stripped of outer whitespace first, not rejected.
 //! - **Validate name on delete/has/get**: Fetch §2.2.1
-//!   step 1 of each calls validate(name, ""). The polyfill skipped
-//!   this check, silently no-op'ing on bad names.
+//!   step 1 of each calls validate(name, "").
 //! - **Live iteration**: per WebIDL §3.7.10.2, iterator
 //!   `next()` re-reads "value pairs to iterate over" on every call.
-//!   Mutation between calls IS observable. The polyfill snapshotted
-//!   keys at iterator construction.
-//! - **Set-Cookie semantics** (PR #1346): `getSetCookie()` returns
+//!   Mutation between calls IS observable.
+//! - **Set-Cookie semantics**: `getSetCookie()` returns
 //!   un-joined values; iteration emits one pair per set-cookie value;
 //!   `get("set-cookie")` STILL JOINS with ", ".
 //! - **Casing semantics**: at append time, reuse the casing of the
@@ -33,11 +25,11 @@
 //!   list. After `delete`, casing resets — there's nothing in the
 //!   list anymore. Iteration always emits lowercase.
 //!
-//! ## Forward-compat (Request/Response, `[SameObject]`)
+//! ## `[SameObject]` readiness (Request/Response)
 //!
-//! Native Request/Response are coming. Spec marks `Request.headers` /
-//! `Response.headers` as `[SameObject]`. v1 storage is owned by Headers
-//! directly; the migration to shared ownership is a one-shot move of
+//! Spec marks `Request.headers` / `Response.headers` as `[SameObject]`.
+//! Storage is owned by Headers directly; if shared ownership is needed,
+//! the move is a one-shot migration of
 //! `list`/`sorted_cache` into a `HeaderList` struct + `Rc<RefCell<…>>`
 //! aliasing. Public algorithms here take `&mut self` / `&self` and
 //! don't bake in single-owner assumptions.
@@ -150,10 +142,10 @@ impl Headers {
     ///      response-header name: return false.
     ///   5. Return true.
     ///
-    /// v1 enforces step 1 (always) and step 2 (immutable guard, used
-    /// for `Response.error()`). Steps 3-4 (request/response guards)
-    /// are deferred because they only filter, never throw, so future
-    /// guard expansion stays back-compatible.
+    /// This implementation enforces step 1 (always) and step 2 (immutable
+    /// guard, used for `Response.error()`). Steps 3-4 (request/response
+    /// guards) are not enforced: they only filter, never throw, so adding
+    /// them later stays back-compatible.
     fn validate(&self, name: &[u8], value: &[u8]) -> Result<bool, OpError> {
         if !is_header_name(name) || !is_header_value(value) {
             return Err(OpError::type_error("Invalid header name or value"));
@@ -679,12 +671,8 @@ impl Headers {
     /// copy). The Err arm — bad header name (`!is_header_name`) — is
     /// re-routed through CallbackScope::new(options) + throw_exception,
     /// which deopts and re-routes to the slow path next iteration.
-    /// Promoted to Tier 1 by the 2026-05-04 httpGet regression bisect
-    /// (`docs/archive/perf/httpget-regression-2026-05-04.md`): scenarios.js
-    /// does `request.headers.get("upgrade")` per request, but
-    /// `headers.has` is a hot enough close-relative on the fetch
-    /// dispatch path that fastcalling it delivers measurable savings
-    /// per `crates/runtime-macros/TODO.md` ROI table.
+    /// `has` sits on the fetch dispatch path, hot enough to earn the
+    /// shim.
     #[v8_method(fastcall)]
     fn has(&self, name: ByteString) -> Result<bool, OpError> {
         self.validate_query_name(name.as_slice())?;

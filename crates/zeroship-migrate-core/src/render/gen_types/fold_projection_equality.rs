@@ -6,13 +6,9 @@
 //! when its walker goes, at which point this file has nothing to measure and goes
 //! with it.
 //!
-//! `docs/proposals/single-fold-and-effects.md` section G:
-//!
-//! > Write `fold(ops) -> SchemaModel` and the four projections. Gate: every projection
-//! > must reproduce its current walker byte-for-byte on the differential corpus. Where
-//! > they differ, the difference is a section B defect and is triaged individually.
-//!
-//! This file is that gate. It replays every stream the differential corpus records - and
+//! This file is the gate: every projection must reproduce its current walker
+//! byte-for-byte on the differential corpus, and where they differ the difference is
+//! triaged individually. It replays every stream the differential corpus records - and
 //! every PREFIX of every stream - through both sides and compares the two canonical
 //! texts BYTE FOR BYTE. The corpus's fixtures are reused rather than re-authored:
 //! `differential_corpus` owns the streams and this file owns the comparison, so a
@@ -32,8 +28,8 @@
 //!
 //! * a bug in the fold, which is FIXED rather than recorded; or
 //! * a defect in the walker, which is RECORDED with its evidence, because this gate
-//!   must not hold the single fold to a shipped bug. `docs/review-log.md` calls a corpus
-//!   that only says "the walkers still do what they did" a bug-preservation machine,
+//!   must not hold the single fold to a shipped bug. A corpus
+//!   that only says "the walkers still do what they did" is a bug-preservation machine,
 //!   and this file inherits that rule from the one next to it.
 //!
 //! Every recorded row therefore states which side it believes and why. Nothing here
@@ -44,10 +40,7 @@
 //! The fold fails CLOSED: it runs the structural catalog replay, so a stream that
 //! replay refuses produces no projection at all. The one walker still compared here -
 //! `fold_ops` - IS that replay, so [`Verdict::FoldRefused`] is **zero** and
-//! `BOTH_REFUSED` carries every refused prefix. That was not true while
-//! the authoring-table walker was in this gate: it applied no coherence gate at all and
-//! answered about streams the fold refused, which is what the fold-refused prefixes
-//! were.
+//! `BOTH_REFUSED` carries every refused prefix.
 //!
 //! The consequence is worth stating rather than celebrating. A `FOLD_REFUSED` of zero
 //! does not mean the gate sees more; it means the last walker whose answer could have
@@ -74,16 +67,13 @@ use zeroship_migrate_ir::dialect::DialectId;
 
 /// The projections still measurable here, named for the walker each must reproduce.
 ///
-/// The runtime-metadata, authoring-table and `FieldDef` projections are NOT in this
-/// list, and their absence is the point rather than a gap. This gate compares a
-/// projection to the WALKER it replaces; those three walkers are all deleted, so for
-/// each of them there is no second answer left
-/// and keeping
-/// the leg would have compared the projection to itself. What replaces each is a gate at
+/// This gate compares a projection to the WALKER it replaces, so a projection whose
+/// walker is gone has no second answer left and no leg here - keeping the leg would
+/// compare the projection to itself. What covers each retired leg is a gate at
 /// the ARTIFACT level - `crates/zeroship-migrate/tests/gen_types/gen_types_runtime_metadata_from_the_fold.rs`,
 /// `crates/zeroship-migrate/tests/gen_types/gen_types_authoring_tables_from_the_fold.rs` and
 /// `crates/zeroship-migrate/tests/gen_types/gen_types_field_defs_from_the_fold.rs` - whose goldens were captured from the
-/// walkers before they were deleted, so the evidence a walker used to provide outlives
+/// walkers, so the evidence a walker provided outlives
 /// the walker. The last leg retires the same way when its walker goes.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Projection {
@@ -308,36 +298,30 @@ struct Divergence {
 /// The recorded set. EMPTY is not the goal and a shrinking count is not automatically
 /// progress - see `the_gate_has_the_shape_it_claims`.
 ///
-/// It is empty NOW, and the reason is worth stating rather than leaving to be inferred
-/// from a bare `&[]`: every divergence this gate ever recorded belonged to a leg that
-/// has since retired with its walker, so there is no longer a second answer to differ
-/// from. The one leg left compares `project_snapshot` to `fold_ops`, and those two have
-/// agreed byte for byte on the whole corpus.
+/// It is empty, and the reason is worth stating rather than leaving to be inferred
+/// from a bare `&[]`: every divergence this gate recorded belonged to a leg that
+/// retired with its walker, so there is no second answer left to differ
+/// from. The one leg left compares `project_snapshot` to `fold_ops`, and those two
+/// agree byte for byte on the whole corpus.
 #[rustfmt::skip]
 const DIVERGENCES: &[Divergence] = &[
-    // SIX ROWS RETIRED WITH THEIR LEG, not fixed away and not lost.
+    // ROWS RETIRE WITH THEIR LEG, not fixed away and not lost.
     //
     // `v_primary_key|{Postgres,Sqlite,Mysql}|authoring_tables` recorded
-    // `line 45: fold "legacy_id," walker "id,"` - the authoring-table walker had no
-    // `Op::AlterPrimaryKey` arm, so `env.db.ts` kept the primary key the migration
-    // replaced. That walker is deleted. The defect it named is now pinned
-    // FIVE ways at the artifact level in
+    // `line 45: fold "legacy_id," walker "id,"` - the authoring-table walker's missing
+    // `Op::AlterPrimaryKey` arm meant `env.db.ts` kept the primary key the migration
+    // replaced. The defect it named is pinned
+    // at the artifact level in
     // `crates/zeroship-migrate/tests/gen_types/gen_types_authoring_tables_from_the_fold.rs` and adjudicated against a live
     // PostgreSQL in `crates/zeroship-migrate/tests/fold_live/env_db_ts_matches_the_server_pg.rs`.
     //
     // `v_index_and_constraint|{Postgres,Sqlite,Mysql}|field_defs` recorded
     // `line 9: fold "\"required\": true" walker "\"required\": true,"` -
-    // the `FieldDef` walker lifted a single-column `UNIQUE` onto the column descriptor
-    // and had no arm that could take it back, so `schema.runtime.json` kept calling a
-    // column unique after the `dropConstraint` that removed the constraint. (The FK half
-    // of exactly that lift WAS un-lifted; the walker's `Op::DropConstraint` arm existed
-    // and touched `fks` only - the F113 pattern the review log names, one fix with its
-    // sibling left open.) That walker is deleted, so the row has no
-    // second side to differ from.
-    //
-    // It is not evidence that evaporated, and it did not shrink either: measured through
-    // the artifact rather than through this gate's canonical text, the same walker was
-    // wrong in FIVE families, not one. All five are pinned in
+    // the `FieldDef` walker's single-column `UNIQUE` lift onto the column descriptor
+    // had no arm that could take it back, so `schema.runtime.json` kept calling a
+    // column unique after the `dropConstraint` that removed the constraint. The
+    // pinned families are broader than the one row this gate recorded: all are
+    // pinned in
     // `crates/zeroship-migrate/tests/gen_types/gen_types_field_defs_from_the_fold.rs`, and the claim that none of them can
     // reach a SQLite table rebuild is measured against a real database in
     // `crates/zeroship-migrate/tests/fold_live/sqlite_rebuild_field_defs_live.rs`. A recorded divergence traded for a live
@@ -479,15 +463,15 @@ fn the_gate_has_the_shape_it_claims() {
 
 /// Byte-identical comparisons across the whole corpus.
 ///
-/// The number has fallen three times and ALL THREE falls are a leg retiring with the
-/// walker it compared against, not a stream leaving the corpus. A shrinking coverage
-/// count is the one number here that reads as progress and is usually a leak, so each
-/// drop is accounted for EXACTLY rather than plausibly.
+/// A shrinking coverage count is the one number here that reads as progress and is
+/// usually a leak, so every drop is accounted for EXACTLY rather than plausibly: a
+/// leg retiring with the walker it compared against removes its own share, and no
+/// stream leaves the corpus.
 ///
 /// Every leg measures the same set of prefixes:
 /// `sum over streams of (len + 1) * DIALECTS`. The four counters for ONE leg therefore
 /// always sum to that total, and each leg retiring removes its own share of it - which
-/// is what makes every historical fall accountable rather than merely plausible.
+/// is what makes every fall accountable rather than merely plausible.
 ///
 /// The live values are the constants themselves ([`EQUAL_COMPARISONS`],
 /// [`DIVERGENCES`], [`BOTH_REFUSED`], [`FOLD_REFUSED`]); they are deliberately NOT
