@@ -173,19 +173,18 @@ pub(crate) fn mint_tx_view<'s>(
 // The V8 half of `Db.transaction(fn)`
 // ---------------------------------------------------------------------------
 //
-// These eleven items lived in `crate::transaction` until 2026-09-02. They are
-// the promise machinery: mint the outer resolver, run the creator callback
-// inside a `TryCatch`, attach native then/catch handlers whose `.data()`
-// carries a boxed `TxFinalizer`, and lower a settle outcome into a
+// The promise machinery lives here: mint the outer resolver, run the creator
+// callback inside a `TryCatch`, attach native then/catch handlers whose
+// `.data()` carries a boxed `TxFinalizer`, and lower a settle outcome into a
 // `ResolveValue`.
 //
-// **The SC-1 protocol did not move with them, and that is the point.** The
-// reducer, the admission claim, the frame stack, the deadline and the driver
-// stay in `crate::transaction`, which now names no `v8::` type in any
+// **The transaction protocol itself stays in `crate::transaction`, and that is
+// the point.** The reducer, the admission claim, the frame stack, the deadline
+// and the driver stay there, and that module names no `v8::` type in any
 // signature. What crosses between the two is data: an app id, a `FrameId`, a
-// `SettleOutcome`. The eleven were picked by exactly that test - does the
-// signature (or, for `TxFinalizer`, a field) name a `v8::` type - which is why
-// `exec_begin_or_savepoint` and `exec_settle` stayed behind despite being the
+// `SettleOutcome`. The split follows exactly that test - does the signature
+// (or, for `TxFinalizer`, a field) name a `v8::` type - which is why
+// `exec_begin_or_savepoint` and `exec_settle` stay behind despite being the
 // things these functions call.
 
 /// Owned state the begin-continuation attaches (as a `v8::External`) to
@@ -260,22 +259,20 @@ pub fn transaction_dispatch<'s>(
     // Decide BEGIN vs SAVEPOINT from the calling frame's ASYNC CONTEXT,
     // not from whether the app happens to have a transaction open.
     //
-    // Until 2026-08-10 this read `has_tx_for(app_id)` — "does this app
-    // have a tx open right now?". That is a temporal test standing in for
-    // a structural one, and it is wrong whenever two transactions for one
-    // app overlap in time, which they routinely do: a worker thread
-    // multiplexes many requests over one isolate and yields at every
-    // `.await`, and `pnpm dev` is one isolate by construction. An
-    // unrelated request's `transaction()` read `true`, opened a SAVEPOINT
-    // on the FIRST request's connection, reported success, and then lost
-    // its row to the first request's ROLLBACK. Measured on both tiers by
-    // `examples/db-todos/tests/database.test.ts` (`cxOvl`).
+    // A "does this app have a tx open right now?" test is temporal, not
+    // structural, and it is wrong whenever two transactions for one app
+    // overlap in time, which they routinely do: a worker thread multiplexes
+    // many requests over one isolate and yields at every `.await`, and
+    // `pnpm dev` is one isolate by construction. An unrelated request's
+    // `transaction()` would read `true`, open a SAVEPOINT on the FIRST
+    // request's connection, report success, and then lose its row to the
+    // first request's ROLLBACK.
     //
     // `current_tx_app` is true only inside the enclosing callback's own
-    // continuation chain — see `crate::tx_scope`. SEC-1 still holds and is
-    // now structural rather than incidental: a co-resident app's callback
-    // plants ITS app_id, so the comparison below fails and this app opens
-    // its own top-level BEGIN.
+    // continuation chain — see `crate::tx_scope`. Cross-tenant isolation is
+    // therefore structural rather than incidental: a co-resident app's callback
+    // plants ITS app_id, so the comparison below fails and this app opens its
+    // own top-level BEGIN.
     let parent_scope =
         crate::tx_scope::current_tx_scope(scope).filter(|parent| parent.app_id() == app_id);
     let nested = parent_scope.is_some();
