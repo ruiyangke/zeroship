@@ -35,6 +35,11 @@ zeroship-workflow-client = { workspace = true }
 tempfile = { workspace = true }
 toml = { workspace = true }
 testcontainers = { version = "0.28", default-features = false, features = ["blocking"] }
+# The journal bundle's declared charter is only meaningful against the service
+# that composes it. `vet_schema_bundle` answers "would this service accept every
+# step" with no database, so the manager can prove the artifact it ships is
+# installable instead of finding out against a creator database.
+zeroship-migrate-server = { workspace = true }
 
 [lints]
 workspace = true

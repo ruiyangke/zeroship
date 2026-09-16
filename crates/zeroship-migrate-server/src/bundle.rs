@@ -133,9 +133,7 @@ pub async fn apply_schema_bundle(
     provision_dsn: &str,
     bundle: &SchemaBundle,
 ) -> Result<SchemaBundleOutcome, BundleError> {
-    let schema = validate(bundle)?;
-    let policy = bundle_policy_for_schema(schema.as_str(), &bundle.policy)?;
-    let guard = PgGuard::from_config(GuardConfig::from_policy(policy, POSTGRES, schema.as_str()));
+    let (schema, guard) = compose(bundle)?;
 
     let mut session = CompioPgSession::connect(provision_dsn).await?;
     // The schema and its least-privilege migrator role are this service's OWN
@@ -143,6 +141,42 @@ pub async fn apply_schema_bundle(
     // bundle therefore never has to be sequenced behind a separate create call.
     provision_database(session.client(), schema.as_str()).await?;
     apply_within_transaction(session.client_mut(), bundle, &schema, &guard).await
+}
+
+/// Compose the bundle's declared policy against this service's ceiling and build
+/// the guard bound to its target schema. No connection, no writes.
+fn compose(bundle: &SchemaBundle) -> Result<(SchemaName, PgGuard), BundleError> {
+    let schema = validate(bundle)?;
+    let policy = bundle_policy_for_schema(schema.as_str(), &bundle.policy)?;
+    let guard = PgGuard::from_config(GuardConfig::from_policy(policy, POSTGRES, schema.as_str()));
+    Ok((schema, guard))
+}
+
+/// Answer whether this service would accept every step of a bundle, WITHOUT a
+/// database.
+///
+/// The composition and the per-step checks are the ones [`apply_schema_bundle`]
+/// runs before it opens a connection; this vets the WHOLE series, which is what
+/// a schema with no stamp receives. It exists so a bundle's OWNER can prove the
+/// artifact it ships is one this service accepts - that proof belongs beside the
+/// artifact, and until it existed the only way to find out was to install a
+/// journal against a live creator database.
+///
+/// # Errors
+/// [`BundleError::Invalid`] for a bundle this service cannot reason about,
+/// [`BundleError::Policy`] for a declared charter that does not compose, and
+/// [`BundleError::Guarded`] naming the first version whose SQL the guard refuses.
+pub fn vet_schema_bundle(bundle: &SchemaBundle) -> Result<(), BundleError> {
+    let (_, guard) = compose(bundle)?;
+    for step in &bundle.versions {
+        guard
+            .check(&step.sql)
+            .map_err(|error| BundleError::Guarded {
+                version: step.version,
+                detail: format!("{error:?}"),
+            })?;
+    }
+    Ok(())
 }
 
 /// The whole decision and every write, inside ONE transaction.
