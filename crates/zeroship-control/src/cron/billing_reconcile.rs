@@ -12,14 +12,9 @@
 //! organization_id)` consumes, so it cannot name an organization the app's
 //! project does not belong to.
 //!
-//! IT WAS NOT ALWAYS ONE COLUMN, AND WHAT THAT COST IS WORTH KNOWING. The
-//! subject used to be a HUMAN, reached by walking `apps.project_id ->
-//! projects.organization_id -> that organization's owners` and collapsing the
-//! fan-out to the longest-standing owner. Every consumer of that walk had to
-//! collapse identically or two of them would bill different people for one app,
-//! and an app whose organization seated nobody had no billable subject at all
-//! and was silently skipped. Neither hazard exists now: an organization is
-//! single-valued and always present.
+//! The subject is the ORGANIZATION, not one of its humans: an organization is
+//! single-valued and always present, so every consumer bills the same subject
+//! for an app and no app is silently skipped for lack of a billable owner.
 //!
 //! Idempotency — three airtight layers under at-least-once delivery (mapped onto
 //! the provider-agnostic invoice model: `invoices` + `invoice_lines` +
@@ -34,8 +29,7 @@
 //!      `billing_line_provider_refs(provider='stripe', ref_kind='invoice_item')`
 //!      row (a REAL composite FK → the line) is written AFTER. So the durable
 //!      record PRECEDES the irreversible Stripe POST. On (re-)drive: a line whose
-//!      provider-ref EXISTS is skipped outright (== old `stripe_item_id NOT
-//!      NULL`); a line with NO provider-ref (intent recorded, outcome unknown —
+//!      provider-ref EXISTS is skipped outright; a line with NO provider-ref (intent recorded, outcome unknown —
 //!      the crash-mid-call case) is reconciled by LOOKING UP the item via its
 //!      deterministic `metadata.zs_item_key` (`find_invoice_item_by_key`) and
 //!      adopting it if present, else posting fresh. This guarantees each app's
@@ -126,8 +120,8 @@ pub enum ReconcileFindingKind {
     /// A monetary correction (`InvoiceCredit`) is owed but its per-unit price
     /// cannot be derived from a real invoiced basis — e.g. a self-invoicing
     /// provider prices the meter itself and writes no local invoice lines. We
-    /// refuse to guess an amount (the old fallback silently priced at 1¢/unit);
-    /// the drift is flagged for operator/provider-authoritative repricing.
+    /// refuse to guess an amount; the drift is flagged for
+    /// operator/provider-authoritative repricing.
     CorrectionUnpriceable,
 }
 
@@ -475,16 +469,12 @@ async fn sweep<S: StripeApi>(
     _stripe: &S,
     period_start: i64,
 ) -> Result<usize, RegistryError> {
-    // Organization -> apps is now ONE column read. `apps.organization_id` is a
+    // Organization -> apps is ONE column read. `apps.organization_id` is a
     // copy the composite key `(project_id, organization_id) -> projects(id,
     // organization_id)` consumes, so it cannot disagree with the project's
-    // organization and needs no join to be trusted.
-    //
-    // What that deleted is the whole reason this used to be delicate: the old
-    // read walked apps -> projects -> organization_members, which fans out once
-    // per owner, so it needed `app_owner_map`'s DISTINCT ON to avoid billing a
-    // two-owner organization's apps twice. There is no fan-out to collapse now,
-    // because the subject is the organization rather than one of its humans.
+    // organization and needs no join to be trusted. The subject is the
+    // organization rather than one of its humans, so there is no per-owner
+    // fan-out to collapse.
     let conn = state.registry.conn().await?;
     // NO `archived_at` FILTER, AND THAT IS THE POINT. Archiving an app must not
     // discard the money it already owes: usage accrued before the archive is
@@ -1427,8 +1417,7 @@ pub(crate) async fn bill_organization_with_parts<S: StripeApi>(
         None => {
             let new_id = zeroship_core::typed_id::new_invoice_id();
             // ON CONFLICT targets the PARTIAL unique index `invoices_organization_active_period_claim`
-            // (WHERE status <> 'void') the 0042 reshape introduced — NOT the old
-            // unconditional UNIQUE (which is gone). The `WHERE status <> 'void'` on the
+            // (WHERE status <> 'void') the 0042 reshape introduced. The `WHERE status <> 'void'` on the
             // conflict clause names the partial index's predicate so a voided prior
             // invoice does NOT collide: a corrected invoice can reissue into the released
             // period slot (billing-ops PR-1, gap #26 C).
@@ -1792,12 +1781,12 @@ pub(crate) async fn bill_organization_with_parts<S: StripeApi>(
     // seam over the POST-CREDIT subtotal (`subtotal − applied_credit`, the amount the
     // organization actually owes; tax is computed on the post-credit base, matching the
     // balance CHECK's `total = subtotal − credit + tax` ordering). The result is frozen
-    // into `tax_cents` in the ONE-statement finalize UPDATE (replacing today's hard-wired
-    // `0`), so `total = subtotal − credit + tax` holds without the CHECK ever seeing a
+    // into `tax_cents` in the ONE-statement finalize UPDATE, so `total = subtotal −
+    // credit + tax` holds without the CHECK ever seeing a
     // half-written row. Tax is computed ONCE per invoice over the summed segment subtotal
     // (the multi-segment proration composes: `amount_i64` is the sum of every app/segment
-    // line). `NativeTaxProvider` returns 0 at launch (USD), so `total = subtotal − credit`
-    // is unchanged; enabling Stripe Tax later is a provider swap (`automatic_tax`), not a
+    // line). `NativeTaxProvider` returns 0 (USD), so `total = subtotal − credit`;
+    // enabling Stripe Tax is a provider swap (`automatic_tax`), not a
     // schema change — `tax_cents` already exists.
     let tx = conn.transaction().await?;
     let credit = crate::credit::consume_at_finalize(
@@ -2093,7 +2082,7 @@ pub(crate) struct BilledLine {
 }
 
 /// Per-segment Stripe line-item description (MISSING-3). The no-change path (a
-/// single full-period segment) keeps today's description with no day-span suffix;
+/// single full-period segment) keeps the plain description with no day-span suffix;
 /// a prorated segment carries its plan + half-open day-span so the organization's
 /// Stripe-hosted invoice reads correctly per segment, e.g.
 /// `"Infra usage — app <id> — 2026-05 (pln_… days 11–30)"`.
@@ -2496,8 +2485,8 @@ mod tests {
     fn safety_net_unpriceable_invoice_credit_flags_instead_of_mispricing() {
         // A self-invoicing provider writes no local invoice lines, so there is
         // no monetary basis (`cents_per_unit == None`). The drift is real and
-        // the capability is InvoiceCredit, but we must NOT emit a credit priced
-        // at the old ~1¢/unit fallback — flag it for repricing instead.
+        // the capability is InvoiceCredit, but we must NOT guess a unit price —
+        // flag it for repricing instead.
         let decision = reconcile_decision(ReconcileInputs {
             ownership: InvoiceOwnership::SelfInvoicing,
             correction_capability: CorrectionCapability::InvoiceCredit,

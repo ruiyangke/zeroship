@@ -1,22 +1,21 @@
-//! PR-8 regression tests for billing-ops gap #26: disputes / chargebacks (the FINAL PR).
+//! PR-8 regression tests for billing-ops gap #26: disputes / chargebacks.
 //!
 //! FAITHFUL by construction (gap #26 PR-8 review, CRITICAL-2): a REAL Stripe Dispute object
-//! carries NO `invoice` field — only `charge` (`ch_…`) and `payment_intent` (`pi_…`). The
-//! pre-fix suite masked the dead resolution path by putting an `in_…` in the dispute's
-//! `charge`; that NEVER appears at Stripe and let the suite pass while production was dead.
-//! Here every test FIRST drives the REAL `invoice.paid` webhook (carrying the settling
-//! `pi_…`) so the handler records the `pi_…`→invoice `billing_provider_refs` linkage EXACTLY
-//! as production does, and the dispute object then names that REAL `pi_…`. No `in_…` ever
-//! appears on a dispute object. The whole chain runs end to end against a live, migrated
-//! Postgres: `stripe_handlers::webhook` (signature path, JSON parse, dispatch) →
+//! carries NO `invoice` field — only `charge` (`ch_…`) and `payment_intent` (`pi_…`). No
+//! `in_…` ever appears on a dispute object here: one that did would resolve nothing at
+//! Stripe and let the suite pass while the production resolution path stayed dead. Every
+//! test FIRST drives the REAL `invoice.paid` webhook (carrying the settling `pi_…`) so the
+//! handler records the `pi_…`→invoice `billing_provider_refs` linkage EXACTLY as production
+//! does, and the dispute object then names that REAL `pi_…`. The whole chain runs end to
+//! end against a live, migrated Postgres: `stripe_handlers::webhook` (signature path,
+//! JSON parse, dispatch) →
 //! `record_infra_payment` (charge row + pi_/ch_ linkage) → `charge.dispute.*` →
 //! `disputes::record_dispute_*` → `invoice_payments::append_dispute_row`. The over-refund
 //! interaction runs the REAL `refund::issue_refund` against the REAL trigger. Gated on
 //! a configured test database (`zeroship_core::config::test_database_url_opt`);
 //! the run refuses otherwise.
 //!
-//! These FAIL against the broken resolution (an `in_…`-on-dispute test would resolve
-//! nothing → no dispute recorded → assertions on the debit / cap / reversal all fail):
+//! Invariants pinned:
 //!   (a) `charge.dispute.created` (naming the REAL `pi_…`) records a `billing_disputes` row
 //!       + a `dispute_debit` lowering cash_collected; a redelivered event (same du_…) does
 //!       NOT double-debit.
@@ -829,9 +828,9 @@ async fn refund_count(conn: &compio_postgres::Client, inv: &str) -> i64 {
 // ───────────────────────────────────────────────────────────────────────────
 // (g) LIFECYCLE (CRITICAL-3): a won → (late/replayed) lost reorder is REJECTED — the row
 //     stays `won`, the reversal stands, and the over-refund cap reflects the terminal
-//     (won) outcome (no stranded restored cash on a lost dispute). Pre-fix the close
-//     UPDATE was unconditional, so the late `lost` flipped status to lost while the
-//     reversal (restored cash) remained — an over-refund window.
+//     (won) outcome (no stranded restored cash on a lost dispute). The close UPDATE is
+//     gated on the open state, so a late `lost` can never flip a won dispute while its
+//     reversal (restored cash) stands — that combination would be an over-refund window.
 // ───────────────────────────────────────────────────────────────────────────
 
 #[compio::test]
@@ -884,9 +883,7 @@ async fn dispute_won_then_late_lost_is_rejected_cash_stays_restored() {
 // ───────────────────────────────────────────────────────────────────────────
 // (h) ORDER-INDEPENDENCE (MAJOR-4): `.closed won` delivered BEFORE `.created` (legal
 //     at-least-once reordering) ends with the dispute won, debit + reversal both present
-//     (net cash restored), and the late `.created` does NOT resurrect it to `open`. Pre-fix
-//     the close-before-create was dropped (no row) and the later created left it open
-//     forever.
+//     (net cash restored), and the late `.created` does NOT resurrect it to `open`.
 // ───────────────────────────────────────────────────────────────────────────
 
 #[compio::test]
@@ -935,12 +932,12 @@ async fn dispute_closed_won_before_created_is_order_independent() {
 // ───────────────────────────────────────────────────────────────────────────
 // (i) ORDER-INDEPENDENCE vs. the LINKAGE (gap #26 dispute-vs-invoice.paid race, 0055):
 //     `charge.dispute.created` delivered BEFORE the `invoice.paid` that writes the
-//     pi_…→invoice linkage. Pre-fix the created acked "no_internal_invoice" and DROPPED
-//     the dispute (no row, no debit, cap untightened) — and it was NOT self-healing (the
-//     later invoice.paid never re-checked; a Stripe resend is dedup-acked). Post-fix the
-//     created PARKS the dispute (recorded, no debit yet); the later invoice.paid promotes
-//     it (billing_disputes row + dispute_debit + cap tightened). A redelivery of either
-//     event is a no-op; both delivery orders converge identically.
+//     pi_…→invoice linkage. The created PARKS the dispute (recorded, no debit yet);
+//     the later invoice.paid promotes it (billing_disputes row + dispute_debit + cap
+//     tightened). Parking is what makes the race self-healing: an acked-and-dropped
+//     dispute would never recover, because the later invoice.paid does not re-check
+//     and a Stripe resend is dedup-acked. A redelivery of either event is a no-op;
+//     both delivery orders converge identically.
 // ───────────────────────────────────────────────────────────────────────────
 
 /// Seed a FINALIZED infra invoice + its `ref_kind='invoice'` linkage WITHOUT driving
@@ -976,7 +973,7 @@ macro_rules! seed_finalized_unpaid_invoice {
 
 /// Drive the REAL `invoice.paid` webhook for an ALREADY-seeded finalized invoice, naming a
 /// KNOWN settling `pi_…` (so a dispute can have referenced it before this paid arrives). This
-/// records the charge row + the `pi_…`→invoice linkage AND (post-fix) promotes any parked
+/// records the charge row + the `pi_…`→invoice linkage AND promotes any parked
 /// dispute matching that `pi_…`.
 macro_rules! drive_invoice_paid_for {
     ($app:expr, $conn:expr, $organization:expr, $provider_invoice:expr, $pi:expr, $total:expr) => {{
@@ -1208,11 +1205,6 @@ async fn pr8_schema_objects_present() {
 //     anchor (`cash = Σ(invoice_payments)`) pre-debit. We prove the lock by holding
 //     the per-organization key on an observer txn and showing `record_dispute_created`
 //     BLOCKS (its `lock_dispute_organization` waits on the held key) until we release it.
-//
-// RED pre-fix: `disputes.rs` took NO advisory lock, so `record_dispute_created`
-//     would commit the dispute row WHILE the observer held the organization key — the
-//     `timeout` would NOT elapse and the post-release assert that the row appears
-//     "only after release" would be false (the row exists during the held window).
 // ───────────────────────────────────────────────────────────────────────────
 
 #[compio::test]
@@ -1306,13 +1298,10 @@ async fn dispute_created_takes_per_organization_advisory_lock() {
 // ───────────────────────────────────────────────────────────────────────────
 // BUG-4: a `charge.dispute.created` with amount>0 but NEITHER `payment_intent` NOR `charge`
 // has NO settling object to resolve OR park against. `resolve_invoice_for_dispute` returns
-// None and `park_pending_dispute` REJECTS (it requires a candidate) — so the pre-fix park
-// branch 500'd, and Stripe would retry the malformed event FOREVER (a poison/retry storm).
-// The fix ACKS 200 with a warn (matching every other unrecognized-input ignore path) and
-// writes nothing.
-//
-// RED pre-fix: the handler reached `park_pending_dispute(no candidate) → Err → err_json(500)`,
-// so `r.status()` is 500, not 200.
+// None and `park_pending_dispute` REJECTS (it requires a candidate) — so the handler must
+// ACK 200 with a warn (matching every other unrecognized-input ignore path) and write
+// nothing. A 500 would make Stripe retry the malformed event FOREVER (a poison/retry
+// storm).
 // ───────────────────────────────────────────────────────────────────────────
 
 /// A `charge.dispute.created` with amount>0 but NO `payment_intent`/`charge` (the BUG-4
@@ -1504,9 +1493,8 @@ async fn dispute_closed_before_created_with_no_invoice_acks_no_dispute_row() {
 // exercises the trigger. We seed rows directly and assert the DB RAISEs on every illegal
 // mutation: won→lost, won→open, lost→won, a frozen-money-column rewrite, and a DELETE.
 //
-// FAITHFUL / would-FAIL-if-removed: each raw statement below succeeds (no error) if the
-// trigger is dropped or its guard inverted, so every `expect_err` flips to a pass → the test
-// FAILS. (Proven by dropping the trigger on the dedicated DB — see the fix report.)
+// FAITHFUL: each raw statement below succeeds (no error) if the trigger is dropped
+// or its guard inverted, so every `expect_err` flips to a pass → the test FAILS.
 // ───────────────────────────────────────────────────────────────────────────
 
 /// Seed a `billing_disputes` row DIRECTLY in a given terminal/open status (bypassing the
