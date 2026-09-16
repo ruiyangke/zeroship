@@ -1,16 +1,11 @@
 //! The per-dialect DDL EMISSION seam: the [`DdlEmitter`] trait and the
 //! [`CreateTableRequest`] its widest method takes.
 //!
-//! The third of this crate's vendor traits to arrive, and it came for the same
-//! reason as [`crate::renderer::DmlRenderer`] and [`crate::schema::SchemaRenderer`]:
+//! This is a vendor trait, and it lives in the contract crate for the same reason
+//! as [`crate::renderer::DmlRenderer`] and [`crate::schema::SchemaRenderer`]:
 //! declared in the engine, it would have forced every vendor crate to depend on the
 //! engine, which already depends on every vendor. Cargo refuses that cycle, so the
 //! CONTRACT sits below both and the arrow never comes back.
-//!
-//! Everything below this line is the engine's own header for the seam, moved with
-//! it unchanged. It describes what the trait isolates and what deliberately stayed
-//! in the differ; both are still true, and the only thing that changed is which
-//! crate the words live in.
 //!
 //! DdlEmitter - the per-dialect EMISSION seam.
 //!
@@ -24,24 +19,16 @@
 //! Three impls - PostgreSQL (schema-qualified DDL: access methods, WITH storage
 //! params, `COMMENT ON COLUMN` sentinels), SQLite (unqualified `main` DDL: inline
 //! `/* ... */` sentinels, plain B-tree indexes), and MySQL (backtick-qualified DDL,
-//! native enum folding, and inline foreign-key-supporting indexes). Each method body is
-//! the EXACT former arm of a two-way SQLite-or-not branch, moved VERBATIM - code
-//! motion, not a rewrite, so the bytes are unchanged (the goldens prove
-//! it). The ROUTING branches (FK inline-vs-defer, rebuild-vs-ALTER, policy-injected
-//! index skip, the unreachable guard) stay in `diff()` - they are diff-logic.
+//! native enum folding, and inline foreign-key-supporting indexes). The ROUTING
+//! branches (FK inline-vs-defer, rebuild-vs-ALTER, policy-injected index skip, the
+//! unreachable guard) stay in `diff()` - they are diff-logic.
 //!
-//! The CREATE TABLE renderers ARE extracted, as of [`DdlEmitter::create_table`].
-//! The header used to say they were not, on the grounds that "column/constraint
-//! spelling is large enough to remain dialect-specific" - which is true of the
-//! BODIES and says nothing about the seam. What actually blocked it was that the
-//! three renderers took three DIFFERENT parameter lists; see
-//! [`CreateTableRequest`] for why that divergence was apparent rather than real.
+//! The CREATE TABLE renderers are extracted through [`DdlEmitter::create_table`],
+//! unified by [`CreateTableRequest`], whose doc comment explains why their
+//! divergent parameter lists were apparent rather than real.
 //!
-//! The three per-dialect ADAPTERS that briefly stood between the call sites and
-//! that method are gone: every caller now builds its own [`CreateTableRequest`]
-//! and asks an emitter directly. The adapters had been the last place where a
-//! caller's dialect was inferred from WHICH function it called rather than stated,
-//! and the `lower_create_table` site shows what that bought - one request, built
+//! Every caller builds its own [`CreateTableRequest`] and asks an emitter directly,
+//! so its dialect is stated rather than inferred from WHICH function it called.
 
 use crate::fold::CatalogFoldPolicy;
 use crate::snapshot::{
@@ -58,18 +45,15 @@ use zeroship_migrate_ir::ir::{ExclusionMethod, ExclusionOperator};
 /// the differ never emits DDL for it.
 ///
 /// `policy` is the REGISTERED backend, and it is a parameter rather than a
-/// convention because there is no convention: this predicate used to spell one
-/// shipping vendor's `<table>_pkey` here, in the crate whose whole purpose is to
-/// name no vendor, and the cost was paid by the other backends. A server that calls
-/// every primary key `PRIMARY` had to report `<table>_pkey` instead so this
-/// comparison kept matching - a backend impersonating another to satisfy a shared
-/// check. Asking the backend is what removes the need to impersonate one.
+/// convention because there is no convention: a shared predicate cannot spell one
+/// vendor's `<table>_pkey` in the crate whose whole purpose is to name no vendor.
+/// Without it, a server that calls every primary key `PRIMARY` would have to report
+/// `<table>_pkey` so this comparison kept matching - a backend impersonating another
+/// to satisfy a shared check. Asking the backend removes the need to impersonate one.
 #[must_use]
 pub fn is_pk_index(policy: &dyn CatalogFoldPolicy, table: &str, index_name: &str) -> bool {
     index_name == policy.implicit_primary_key_name(table)
 }
-
-// once, handed to whichever emitter the dialect selects.
 
 /// Everything a backend needs to spell ONE `CREATE TABLE`, and nothing about which
 /// backend is spelling it.
@@ -115,11 +99,10 @@ pub struct CreateTableRequest<'a> {
     /// caller had no inject to give", which today is only ever a PostgreSQL or
     /// MySQL caller - neither of which looks at this field.
     ///
-    /// # Why this is a name list and not the `ResolvedInject` it used to be
+    /// # Why this is a name list rather than the inject spec
     ///
-    /// The field was `Option<&ResolvedInject>` and SQLite read it through exactly
-    /// one expression: `is_injected_index(table, &idx.name, inj)`. That predicate
-    /// lives in the engine and cannot leave it - it resolves an inject spec's
+    /// The predicate that decides membership (`is_injected_index`) lives in the
+    /// engine and cannot leave it - it resolves an inject spec's
     /// columns through `zeroship_migrate::schema::query::index_name`, i.e. the ENGINE's
     /// index-naming convention, which is a decision core makes and not a spelling a
     /// vendor is asked for.
@@ -143,15 +126,13 @@ pub struct CreateTableRequest<'a> {
     ///
     /// # Exactness of the precompute
     ///
-    /// The former MySQL emitter computed
-    /// `check_constraint_name(table, column.name, "enum")` inside its column loop.
-    /// Within one create, `table` and the literal kind `"enum"` are invariant; the
-    /// result is therefore a pure function of that loop element's `column.name`.
-    /// Core maps that same function over the same ordered `columns` slice, so element
-    /// `i` is byte-identical to the old call for column `i`. Duplicate column names
-    /// retain duplicate entries and receive the same answer just as before; long-name
-    /// truncation and hashing also run through the same function before the vendor is
-    /// called.
+    /// Within one create, `table` and the literal kind `"enum"` are invariant, so
+    /// `check_constraint_name(table, column.name, "enum")` is a pure function of
+    /// the loop element's `column.name`. Core maps that same function over the
+    /// same ordered `columns` slice, so element `i` carries the name
+    /// `check_constraint_name` produces for column `i`. Duplicate column names retain duplicate entries and
+    /// receive the same answer; long-name truncation and hashing also run through
+    /// the same function before the vendor is called.
     pub enum_check_names: Vec<String>,
 }
 
@@ -213,8 +194,7 @@ pub trait DdlEmitter {
     ///
     /// Required, with no default body. That is the whole point of the method: the
     /// verb, any cast clause, and any cast operator are three separate vendor
-    /// decisions, and before this seam existed a backend had nowhere to state any of
-    /// them. It received one vendor's answers to all three by omission.
+    /// decisions a backend must state rather than inherit by omission.
     fn alter_column_type_up(
         &self,
         table: &str,
@@ -244,9 +224,8 @@ pub trait DdlEmitter {
     /// one method because they are one statement with two tails, which is why the
     /// `down` of a set and the `up` of a drop come out byte-identical.
     ///
-    /// Required, with no default body - and this is the member of the family a
-    /// SHIPPING backend other than the one whose grammar core used to write already
-    /// reaches, so the seam is not a precaution here.
+    /// Required, with no default body - a SHIPPING backend other than the origin
+    /// dialect reaches this member, so the seam is not a precaution here.
     fn alter_column_default(
         &self,
         table: &str,
@@ -545,26 +524,19 @@ pub fn fk_referenced_columns(definition: &str) -> Vec<String> {
 // ===========================================================================
 // The COLUMN-CLAUSE spellings every backend shares.
 //
-// Moved here from `zeroship_migrate::render::declarative`, where they were private
-// siblings of the three `DdlEmitter` impls. All three impls call every one of
-// them, from BOTH `create_table` and `add_column`, so a helper the vendors share
-// cannot stay above the vendors - that is the same arrow the trait itself moved
-// to satisfy.
+// All three `DdlEmitter` impls call every one of them, from BOTH
+// `create_table` and `add_column`, so a helper the vendors share cannot live
+// above the vendors - the same arrow the trait itself satisfies.
 //
-// They are dialect-neutral: every helper left here has one spelling shared by all
+// They are dialect-neutral: every helper here has one spelling shared by all
 // three backends. Nothing here resolves a vendor or names one it was not handed,
-// so the boundary rule in `zeroship_migrate::render::backends`'s header is unchanged -
+// so the boundary rule in `zeroship_migrate::render::backends`'s header holds -
 // the caller has already decided which vendor it is.
 //
-// Moved VERBATIM: same bodies, same names, same order of tests over the same
-// snapshot fields. The engine's own non-emitter render paths still call them, now
-// across the crate boundary rather than from a private sibling.
-//
-// `pub` HERE IS WIDER THAN THE `pub(crate)` / private THEY HAD, and there is no
-// modifier that says "visible to the engine and to a vendor but to nobody else".
-// The property that matters is the one the boundary rule states and it is
-// unchanged: these SPELL, they do not COMPARE. None of them decides whether two
-// schemas differ.
+// They are `pub` because both the engine's render paths and the vendor crates call
+// them; there is no modifier that says "visible to the engine and to a vendor but
+// to nobody else". The property that matters is the one the boundary rule states:
+// these SPELL, they do not COMPARE. None of them decides whether two schemas differ.
 
 /// Render a column's trailing `DEFAULT <expr>` clause from its emission-only
 /// `default` body. Empty string when the column has no default.
