@@ -284,8 +284,8 @@ mod tests {
 
     #[test]
     fn observability_comes_from_the_overlay_when_no_flag_is_given() {
-        // The overlay tier the old ObsSection read by hand, now reached by the
-        // generated declaration's canonical path.
+        // The overlay tier, reached by the generated declaration's canonical
+        // path.
         let overlay: toml::Value = toml::from_str(
             "[observability]\nlog_filter = \"warn,zeroship_gateway=trace\"\nlog_format = \"logfmt\"\n",
         )
@@ -337,10 +337,9 @@ mod tests {
 
     #[test]
     fn topology_settings_keep_their_pre_conversion_precedence() {
-        // These three used to be merged by hand: `resolve_origin_scheme` and
-        // `resolve_trusted_origins` did CLI-or-file-or-default, and trust_proxy
-        // did `unwrap_or(false)`. The generated resolver has to reproduce
-        // exactly that, because the hand-written helpers are now deleted.
+        // The precedence these three must keep: CLI-or-file-or-default for
+        // `origin_scheme` and `trusted_origins`, and `false` for `trust_proxy`.
+        // The generated resolver has to reproduce exactly that.
         let overlay: toml::Value = toml::from_str(
             "origin_scheme = \"http\"\ntrusted_origins = [\"https://a.example\"]\n\
              trust_proxy = true\n",

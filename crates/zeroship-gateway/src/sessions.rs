@@ -86,11 +86,9 @@ pub struct NewSession<'a> {
 
 /// Idle window stamped on the audit row at `create`, as `NOW() + IDLE_MINUTES`.
 ///
-/// IT NO LONGER SLIDES. It used to be the sliding half of the pair, reset by
-/// each successful `validate` call - and `validate` had no production caller
-/// and is deleted, so nothing bumps this. The row simply carries the window it
-/// was created with. See the deletion note further down for where revocation is
-/// actually enforced; this constant is a record on an audit row, not a fence.
+/// It does NOT slide: nothing bumps it, and the row simply carries the window it
+/// was created with. This constant is a record on an audit row, not a fence -
+/// see the note below for where revocation is actually enforced.
 pub const IDLE_MINUTES: i64 = 30;
 
 /// Hard absolute lifetime. After this many hours the session is dead
@@ -154,23 +152,15 @@ pub async fn create(conn: &mut Client, params: &NewSession<'_>) -> Result<AppSes
     Ok(session)
 }
 
-// NOTE (validate, deleted): a `validate(conn, id, app_id)` used to live here.
-// It read the row, checked `revoked_at IS NULL` and both expiries, and slid
-// `idle_expires_at` forward in the same `UPDATE ... RETURNING`. It had NO
-// production caller, and its every caller was a gateway integration test using
-// it as an oracle to assert that a revoke had written `revoked_at`. Those tests
-// now read the row themselves.
+// "Valid means not revoked" is NOT enforced by a `validate`-style read of this
+// table, and the absence of such a gate is not the absence of the property. A
+// function named `validate` that reads this table looks like THE revocation
+// gate, so if one appears here again, check whether it is the enforcement point.
 //
-// THE REASON THIS NOTE EXISTS is that the deletion invites exactly the wrong
-// conclusion. "Valid means not revoked", on a function named `validate`, reads
-// like THE revocation gate - so finding it uncalled reads like the gate is
-// missing, and the next author rebuilds it. THE ABSENCE OF THIS MECHANISM IS
-// NOT THE ABSENCE OF THE PROPERTY.
-//
-// Where the property actually lives: since slice R1b the per-request identity
-// check verifies the signed stateless cookie locally and gates it on the
-// per-app family marker - `is_family_revoked_since(client_id, pws_, iat)`, an
-// uncached `SELECT EXISTS` on every request, in
+// Where the property actually lives: the per-request identity check verifies the
+// signed stateless cookie locally and gates it on the per-app family marker -
+// `is_family_revoked_since(client_id, pws_, iat)`, an uncached `SELECT EXISTS` on
+// every request, in
 // `crate::router::auth::resolve_app_session_user_header_inner`. This table is
 // the AUDIT and visibility record; the family marker is the enforcement truth.
 // Both revoke paths below (`revoke_app_sessions_for_sid` and
@@ -180,17 +170,14 @@ pub async fn create(conn: &mut Client, params: &NewSession<'_>) -> Result<AppSes
 // The idle window is therefore set once, at `create`, and nothing bumps it -
 // see [`IDLE_MINUTES`].
 
-// NOTE (RLS, changeset 0025): the former `revoke(conn, id)` (revoke-one by id,
-// no app scope) and `revoke_all_for_user(conn, user_id)` (CROSS-TENANT
-// `WHERE user_id=$1` across every app) were removed. Both are incompatible with
-// the gateway's non-bypass `zeroship_gateway` role under FORCE-RLS:
-//   - `revoke` had ZERO callers (dead code) and carried no `app_id` to set the
-//     `zeroship.tenant_app` GUC, so it could never resolve a row.
-//   - `revoke_all_for_user` was the legacy shared-`gateway`-client BCL path's
-//     "all apps" fan-out. A single statement cannot span tenants under RLS, and
-//     every real BCL now arrives with a per-app `aud` (→ `app_id`), so the
-//     back-channel-logout handler's no-per-app-match branch is a logged no-op
-//     rather than a cross-tenant nuke. See `backchannel_logout.rs`.
+// Revocation here is PER APP, and that is an RLS constraint rather than a
+// preference. The gateway connects as the non-bypass `zeroship_gateway` role
+// under FORCE-RLS, and a single statement cannot span tenants, so there is no
+// cross-tenant `WHERE user_id=$1` revoke: every revoke carries an `app_id` to set
+// the `zeroship.tenant_app` GUC and resolves rows within one tenant. A
+// back-channel logout arrives with a per-app `aud` (-> `app_id`), so the
+// handler's no-per-app-match branch is a logged no-op rather than a cross-tenant
+// nuke. See `backchannel_logout.rs`.
 
 /// Revoke every live session for `user_id` **at one app**, identified by its
 /// stable `app_id`. Returns the count of rows updated.
