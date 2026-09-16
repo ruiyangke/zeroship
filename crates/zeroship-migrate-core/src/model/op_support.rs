@@ -515,8 +515,8 @@ feature_support_registry! {
 /// The generated-dialect-table lookup key for this op: its wire kind token and
 /// the variant that selects the payload-dependent support branch. The variant
 /// derivation is the SINGLE source shared with `dialect_table_faithfulness`'s
-/// corpus (via [`op_variant`]) - the branch-selection that used to live in
-/// the hand-written `support()` dialect arms.
+/// corpus (via [`op_variant`]), so the branch-selection is shared rather than
+/// restated per dialect.
 pub(crate) fn op_kind_and_variant(op: &Op) -> (&'static str, &'static str) {
     match op {
         Op::CreateTable {
