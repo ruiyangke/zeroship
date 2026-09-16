@@ -1,27 +1,22 @@
 //! Native `AbortSignal` per DOM §3.3
 //! (https://dom.spec.whatwg.org/#interface-AbortSignal).
 //!
-//! Replaces the JS polyfill that lived in `embed/fetch.js:438-538`.
-//! The polyfill had the right shape for fetch cancellation but
-//! cut corners on every spec corner that matters elsewhere:
+//! The behaviours that matter beyond fetch cancellation, each a spec
+//! corner this implementation must honour:
 //!
-//!   - `signal instanceof EventTarget === false` (no native base
-//!     class) — breaks duck-typing in libraries like langgraph.
-//!   - `addEventListener` ignored `once: true`, `passive: true`,
+//!   - `signal instanceof EventTarget` must be true (a native base
+//!     class), or duck-typing in libraries like langgraph breaks.
+//!   - `addEventListener` must honour `once: true`, `passive: true`,
 //!     and the `signal: AbortSignal` removal pattern.
-//!   - `AbortSignal.timeout(ms)` had no GC-retention strategy — a
-//!     pending timeout's signal could be reclaimed before the
-//!     timer fired.
-//!   - `AbortSignal.any([s1, s2])` registered abort listeners on
-//!     each input but didn't flatten through transitive
+//!   - `AbortSignal.timeout(ms)` must retain its signal until the
+//!     timer fires, or GC can reclaim it early.
+//!   - `AbortSignal.any([s1, s2])` must flatten through transitive
 //!     `AbortSignal.any` returns per DOM §3.3.4.
-//!   - The "signal abort" algorithm fired listeners BEFORE running
-//!     abort algorithms, which the spec specifically calls out as
-//!     wrong.
+//!   - The "signal abort" algorithm must run abort algorithms BEFORE
+//!     firing listeners; the spec calls the reverse out as wrong.
 //!
-//! This implementation honours all of the above. See design fetch-
-//! native §IX.4 (signal abort algorithm), §IX.5 (timeout GC),
-//! §IX.6 (any flattening).
+//! See design fetch-native §IX.4 (signal abort algorithm), §IX.5
+//! (timeout GC), §IX.6 (any flattening).
 //!
 //! ## Storage layout (§XIII.3)
 //!
