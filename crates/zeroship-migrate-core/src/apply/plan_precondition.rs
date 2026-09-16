@@ -32,15 +32,13 @@
 //!
 //! # The classification: does the assertion range over objects the model carries?
 //!
-//! Classifying by VARIANT ALONE is measurably wrong - every variant can be
-//! flipped from unmet to met by SOME earlier step. The variants do split cleanly,
-//! but NOT on the axis this module first shipped with.
+//! Classifying by VARIANT ALONE is wrong - every variant can be flipped from
+//! unmet to met by SOME earlier step.
 //!
-//! The axis used to be "additive versus removal" - a property of how the assertion
-//! responds to the ordinary work a plan does. Since the effect model it is **does
-//! this assertion range over objects the model carries** - a property of the
-//! MODEL'S CLOSURE. The two agree on today's verdicts and disagree about why, and
-//! the second one is the reason the answer cannot be improved by trying harder:
+//! The axis is **does this assertion range over objects the model carries** - a
+//! property of the MODEL'S CLOSURE, not of how the assertion responds to the
+//! ordinary work a plan does. That is why the answer cannot be improved by trying
+//! harder:
 //!
 //! - An **obstruction** assertion - [`Precondition::ColumnHasNoBlockingDependents`]
 //!   and [`Precondition::ColumnTypeChangeHasNoBlockers`] - ranges over `pg_depend`
@@ -72,27 +70,24 @@
 //! # The prefix test reads the OP, not the rendered SQL
 //!
 //! The question is still ONE boolean per step - "can this step clear an
-//! obstruction?" - and this module still does not maintain a per-object ledger. The
-//! change is WHERE THE BOOLEAN COMES FROM.
+//! obstruction?" - and this module still does not maintain a per-object ledger.
+//! What matters is WHERE THE BOOLEAN COMES FROM.
 //!
-//! It used to come from parsing each step's rendered `up` with PostgreSQL's parser
-//! and matching the parse tree against a whitelist. That had three costs, and all
-//! three are gone:
+//! It comes from [`Effect`], stamped on each unit at IR-lower time from the op it
+//! was lowered from. A parse-tree approach cannot serve here:
 //!
-//! 1. it made core code hold a VENDOR PARSER and apply it dialect-blind, in a module
-//!    with no backend-identity reference of its own;
-//! 2. it needed a whitelist at all, because a parse tree cannot tell `CREATE VIEW`
+//! 1. it would make core code hold a VENDOR PARSER and apply it dialect-blind, in a
+//!    module with no backend-identity reference of its own;
+//! 2. it would need a whitelist, because a parse tree cannot tell `CREATE VIEW`
 //!    from `CREATE OR REPLACE VIEW` - the shape that silently recomputes a view's
 //!    dependency edges and so removes a column's blocker with no `DROP` anywhere;
-//! 3. its `_ => false` fallback answered for every shape nobody had thought about,
-//!    and it answered CONSERVATIVELY - which is safe, but was measurably
-//!    over-conservative on five shapes this engine really emits, including
-//!    `CREATE MATERIALIZED VIEW`. Each one silently disarmed the hoist and let a
-//!    plan half-apply.
+//! 3. its `_ => false` fallback would answer for every shape nobody had thought
+//!    about, and answer CONSERVATIVELY - which is safe, but over-conservative on
+//!    shapes this engine really emits, including `CREATE MATERIALIZED VIEW`. Each
+//!    one silently disarms the hoist and lets a plan half-apply.
 //!
-//! The verdict now comes from [`Effect`], stamped on each unit at IR-lower time from
-//! the op it was lowered from. `Op::CreateView` carries `replace` as a NAMED FIELD,
-//! so the case the whitelist existed for is right by construction, and the match in
+//! `Op::CreateView` carries `replace` as a NAMED FIELD, so the case the whitelist
+//! existed for is right by construction, and the match in
 //! `render::fold::effects::effect_of` is EXHAUSTIVE - a new `Op` variant is a
 //! compile error rather than a silent guess.
 //!
@@ -123,12 +118,11 @@ use crate::render::step::PlanStep;
 /// See the module docs. This is the axis the whole mechanism turns on, and it is
 /// a property of the QUESTION, not of the plan.
 ///
-/// **NOT retired by the effect model, and that is the honest answer** rather than a
+/// The effect model does not retire it, and that is the honest answer rather than a
 /// missing feature. `state_at` makes the five existence variants ANSWERABLE; it
 /// cannot make the two obstruction variants answerable, because their blocker set
-/// includes objects the model never carried. So the classification survives, its
-/// axis is redrawn, and its effect inverts: the variants that used to be excluded
-/// for being repairable are now excluded only until hoisting is turned on.
+/// includes objects the model never carried. The existence variants are still
+/// excluded until hoisting is turned on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Answerability {
     /// "Nothing is in the way." Ranges over catalog EDGES the model does not carry,
