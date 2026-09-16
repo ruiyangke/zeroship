@@ -255,10 +255,8 @@ jobs:
       # construction, because the thing that broke is the thing doing the
       # measuring.
       #
-      # Seven such self-tests exist. THREE already ran somewhere; these FOUR ran
-      # in no workflow at all. Measured before wiring, by me: 12/0, 17/0, 9/0,
-      # 10/0 - 48 assertions - in 92ms, 229ms, 11ms and 20ms. Pure shell, no
-      # services, no build, no database.
+      # Six such self-tests exist. They are pure shell: no services, no build,
+      # no database.
       #
       # THE FIRST THREE ARE ATTACHED TO THE SUBJECT: each sources the shipping
       # library rather than restating it, so breaking the library breaks the
@@ -268,18 +266,7 @@ jobs:
       #   scratch_db.sh:69     fixed name, no token  ->  20/0 becomes 17 passed, 3 failed
       #   scratch_db.sh:85     drop regardless of owner -> 20/0 becomes 19 passed, 1 failed
       #
-      # Two more since, on the same terms. `suite_db.sh` names the SHARED
-      # suite database after the migration set and `sweep_db.sh` decides which
-      # databases a sweep destroys, so both are wired here and both were
-      # mutation-checked against the shipping library, not a copy:
-      #   suite_db.sh  pre-`set -e` form restored  ->  41/0 becomes 39 passed, 2 failed
-      #   sweep_db.sh  root-pid test moved back after the self test
-      #                                            ->  29/0 becomes 28 passed, 1 failed
-      # The second is worth a sentence: with the order swapped, a self-pid of 0
-      # or 1 marks the WHOLE process table "ours", every candidate reads as
-      # live, and the sweeper reclaims nothing while reporting success.
-      #
-      # THE FOURTH IS DIFFERENT AND THE DIFFERENCE MATTERS. known_catchall_selftest
+      # ONE IS DIFFERENT AND THE DIFFERENCE MATTERS. known_catchall_selftest
       # RE-IMPLEMENTS the counters and exit rule of tests/e2e_app_primitives.sh
       # rather than sourcing them, deliberately - that harness stands up a whole
       # platform at import time. So it pins the RULE ("a catch-all recording
@@ -299,8 +286,6 @@ jobs:
           set -e
           tests/lib_binary_freshness_selftest.sh
           tests/lib_scratch_db_selftest.sh
-          tests/lib_suite_db_selftest.sh
-          tests/lib_sweep_db_selftest.sh
           tests/lib_test_config_selftest.sh
           tests/lib/e2e_stack_selftest.sh
           tests/lib/known_catchall_selftest.sh

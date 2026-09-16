@@ -33,6 +33,30 @@ enum Task {
         #[command(subcommand)]
         suite: Suite,
     },
+    /// Reclaim the test databases no branch can still need.
+    #[command(subcommand)]
+    PlatformDb(PlatformDbCmd),
+}
+
+#[derive(Subcommand)]
+enum PlatformDbCmd {
+    /// Decide which suite databases are unreachable, and optionally drop them.
+    Sweep {
+        /// Actually drop. Without it the plan is printed and nothing is destroyed.
+        #[arg(long)]
+        apply: bool,
+        /// Also consider pre-hash names, whose reachability cannot be decided.
+        #[arg(long)]
+        legacy: bool,
+        #[arg(long)]
+        host: Option<String>,
+        #[arg(long)]
+        port: Option<String>,
+        #[arg(long)]
+        user: Option<String>,
+        #[arg(long)]
+        password: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -68,6 +92,31 @@ fn main() -> ExitCode {
         return ExitCode::FAILURE;
     }
     let result = match args.command {
+        Task::PlatformDb(PlatformDbCmd::Sweep {
+            apply,
+            legacy,
+            host,
+            port,
+            user,
+            password,
+        }) => {
+            // The sweeper's exit codes ARE its contract - 2 is "could not look",
+            // 3 is "incomplete evidence and something to destroy" - and
+            // `Result<()>` collapses them all to 1. So this arm leaves through
+            // the same door `main` would have, with the code intact.
+            let code = xtask::platform_db::sweep_command::run(
+                &root(),
+                &xtask::platform_db::sweep_command::Args {
+                    apply,
+                    legacy,
+                    host,
+                    port,
+                    user,
+                    password,
+                },
+            );
+            return ExitCode::from(u8::try_from(code).unwrap_or(1));
+        }
         Task::Test { suite: Suite::Auth } => auth::run(),
         Task::Test {
             suite: Suite::Billing,

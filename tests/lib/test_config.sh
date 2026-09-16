@@ -20,7 +20,7 @@
 #
 # WHY THE FOUR WANTED VALUES GO IN ON STDIN. `PG_PASS` on a command line is
 # readable by every user on the box through `ps` and through /proc/<pid>/cmdline
-# - which tests/lib/sweep_db.sh's own scanner reads by design. They travel as a
+# - which the sweeper's own scanner reads by design. They travel as a
 # key=value block instead. Nothing about them is read by the Rust side from the
 # environment: this file reads its own environment and passes what it found,
 # which is what keeps the binary free of ambient configuration.

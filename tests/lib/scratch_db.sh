@@ -184,8 +184,8 @@ zs_scratch_db_cleanup_on_success() {
 
   # WITH (FORCE) is correct HERE and nowhere near a sweeper: this run created
   # this database, so the only backends left on it are its own stragglers, and
-  # a plain DROP would fail on them and leak it. tests/lib/sweep_db.sh carries
-  # the other half of that asymmetry.
+  # a plain DROP would fail on them and leak it. The sweeper carries the other
+  # half of that asymmetry.
   run_psql -d postgres -c "DROP DATABASE IF EXISTS ${TEST_DB} WITH (FORCE);" \
     >/dev/null 2>&1 \
     || echo "WARN: could not drop ${TEST_DB}; drop it by hand." >&2

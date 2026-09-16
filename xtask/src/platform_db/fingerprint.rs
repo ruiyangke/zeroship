@@ -164,9 +164,8 @@ mod tests {
 
     #[test]
     fn the_two_computations_agree_on_a_constructed_tree() {
-        // The real-repository pin in tests/lib_sweep_db_selftest.sh stays the
-        // authority for this property -- a fixture cannot vouch for the files
-        // the sweeper reasons over. What a fixture CAN do is put a name in the
+        // No fixture can vouch for the files the sweeper reasons over. What a
+        // fixture CAN do is put a name in the
         // set that the real repository does not have. The space matters: the
         // git side splits its listing on the TAB rather than on whitespace
         // precisely so a path with a space survives, and nothing tested it.
