@@ -44,6 +44,7 @@ concurrent container startup and V8 memory use. Pure SQL and wire tests can run
 concurrently. Retries are disabled so a failing first attempt remains a failure.
 
 Platform database orchestration lives in this package. The `zs-testkit` binary
-serves `tests/lib/` scripts; service tests include preflight source from
+is the suite-database provisioner, spawned as a child process by
+`tests/live_suite_db.rs`; service tests include preflight source from
 `tests/fixtures/platform_db/`. Its integration tests own PostgreSQL containers
 and generated overlays. No helper package or optional test feature is required.

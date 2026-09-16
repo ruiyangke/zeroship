@@ -16,33 +16,9 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Read the generated test overlay, `deploy/ops/zeroship.test.toml`.
-    #[command(subcommand)]
-    Overlay(OverlayCmd),
     /// The branch-keyed suite database.
     #[command(subcommand)]
     SuiteDb(SuiteDbCmd),
-}
-
-#[derive(Subcommand)]
-enum OverlayCmd {
-    /// Print one `section.key`, or nothing when it is absent.
-    Get {
-        #[arg(long)]
-        file: PathBuf,
-        #[arg(long)]
-        section: String,
-        #[arg(long)]
-        key: String,
-    },
-    /// Print the shell assignments an overlay load exports.
-    ///
-    /// The four values the caller asked for arrive as a `key=value` block on
-    /// stdin -- see [`overlay::Wanted::from_block`] for why not argv.
-    Load {
-        #[arg(long)]
-        root: PathBuf,
-    },
 }
 
 #[derive(Subcommand)]
@@ -102,45 +78,9 @@ enum SuiteDbCmd {
 
 fn main() -> ExitCode {
     let code = match Cli::parse().command {
-        Command::Overlay(cmd) => run_overlay(cmd),
         Command::SuiteDb(cmd) => run_suite_db(cmd),
     };
     ExitCode::from(code as u8)
-}
-
-fn run_overlay(cmd: OverlayCmd) -> i32 {
-    match cmd {
-        OverlayCmd::Get { file, section, key } => {
-            // A missing file prints nothing and succeeds, which is what the awk
-            // did: the `get` is a reader, and the refusal for an
-            // absent overlay belongs to `load`, which says what to do about it.
-            let document = std::fs::read_to_string(&file).unwrap_or_default();
-            if let Some(value) = overlay::get(&document, &section, &key) {
-                println!("{value}");
-            }
-            exit::OK
-        }
-        OverlayCmd::Load { root } => {
-            let loaded = match overlay::load(&root) {
-                Ok(loaded) => loaded,
-                Err(refusal) => return refuse(&refusal, exit::NO),
-            };
-            let wanted = overlay::Wanted::from_block(&read_stdin());
-            if let Err(refusal) = overlay::assert_agrees(&loaded, &wanted) {
-                return refuse(&refusal, exit::NO);
-            }
-            // Named exactly as the shell exported them: these go into a suite's
-            // environment and crates read them there.
-            assign("ZS_TEST_OVERLAY", &loaded.overlay.display().to_string());
-            assign("PG_HOST", &loaded.host);
-            assign("PG_PORT", &loaded.port);
-            assign("PG_USER", &loaded.user);
-            assign("PG_PASS", &loaded.pass);
-            assign("PG_DB", &loaded.db);
-            assign("ZS_TEST_PG_DSN", &loaded.dsn);
-            exit::OK
-        }
-    }
 }
 
 fn run_suite_db(cmd: SuiteDbCmd) -> i32 {
@@ -282,11 +222,4 @@ fn assign(name: &str, value: &str) {
 fn refuse(message: &str, code: i32) -> i32 {
     eprint!("{message}");
     code
-}
-
-fn read_stdin() -> String {
-    use std::io::Read;
-    let mut buffer = String::new();
-    let _ = std::io::stdin().read_to_string(&mut buffer);
-    buffer
 }
