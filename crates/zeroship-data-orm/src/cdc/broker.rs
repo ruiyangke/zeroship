@@ -1514,8 +1514,8 @@ mod tests {
         assert_eq!(v["event"]["collection"], "messages");
         assert_eq!(v["event"]["pk"], "7");
         assert_eq!(v["event"]["columns"][0], "userId");
-        // The frame names columns and carries NO values. `row` used to be
-        // `ev.new_tuple` verbatim - every physical column with its contents.
+        // The frame names columns and carries NO values - not `ev.new_tuple`,
+        // which would be every physical column with its contents.
         assert!(
             v["event"].get("row").is_none(),
             "a change frame must carry no row payload: {frame}",
