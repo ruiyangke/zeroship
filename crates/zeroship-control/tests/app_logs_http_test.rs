@@ -1,9 +1,7 @@
-//! HTTP regression for `GET /api/apps/{id}/logs`.
+//! HTTP coverage for `GET /api/apps/{id}/logs` (B2).
 //!
 //! This drives the control-plane route over a running ntex server and
 //! makes it fetch log lines from a running worker-shaped HTTP endpoint.
-//! Before B2 the control router did not register this path, so the same
-//! request returned 404.
 
 use std::path::PathBuf;
 use std::sync::Arc;

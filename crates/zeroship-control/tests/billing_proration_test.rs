@@ -859,8 +859,9 @@ async fn two_segment_change_with_different_fx_posts_two_items_two_lines() {
 /// assert each carries its own CU in description + `compute_units` metadata, and
 /// that the per-metric `usage` blob is the segment delta (not the period total).
 ///
-/// RED pre-change (description-only): the item description had NO CU suffix and the
-/// POST carried NO `compute_units`/`usage` metadata — every assertion below fails.
+/// Each item must carry its own CU suffix in the description and its own
+/// `compute_units`/`usage` metadata; the description-only shape fails every
+/// assertion below.
 // See the allow on `two_segment_change_with_different_fx_posts_two_items_two_lines` above.
 #[allow(clippy::await_holding_lock)]
 #[compio::test]
@@ -1466,11 +1467,11 @@ async fn end_missing_metric_does_not_credit_the_bill() {
 }
 
 /// (h) CRITICAL-1: segment pricing reads the LIVE catalog at RECONCILE time — it
-/// does NOT replay off any frozen base fee on `plan_change_events` (those columns
-/// were removed). Record a plan change at one plan price, then EDIT the catalog
-/// (raise the base fee) BEFORE the reconcile, and assert the frozen invoice line
-/// reflects the catalog value AT RECONCILE — documenting the intended (operator-
-/// gated, open-period-floats-until-finalize) behaviour.
+/// does NOT replay off any frozen base fee on `plan_change_events`. Record a plan
+/// change at one plan price, then EDIT the catalog (raise the base fee) BEFORE the
+/// reconcile, and assert the frozen invoice line reflects the catalog value AT
+/// RECONCILE — documenting the intended (operator-gated, open-period-floats-until-
+/// finalize) behaviour.
 // See the allow on `two_segment_change_with_different_fx_posts_two_items_two_lines` above.
 #[allow(clippy::await_holding_lock)]
 #[compio::test]

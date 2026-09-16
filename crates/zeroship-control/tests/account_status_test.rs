@@ -407,15 +407,14 @@ async fn get_routes_reports_each_app_its_own_organization_state() {
     common::drain_pg().await;
 }
 
-/// CRITICAL #1 regression — an out-of-order/redelivered `payment_failed` whose
-/// Stripe `event.created` predates a recovery MUST NOT re-arm `past_due` on an
-/// already-recovered (paying) organization, and the dunning sweep must therefore NOT
-/// suspend them.
+/// CRITICAL #1: an out-of-order/redelivered `payment_failed` whose Stripe
+/// `event.created` predates a recovery MUST NOT re-arm `past_due` on an
+/// already-recovered (paying) organization, and the dunning sweep must therefore
+/// NOT suspend them.
 ///
-/// RED before the fix: `record_payment_failed` guarded only on `state`, so a
-/// stale failure delivered AFTER recovery would flip active→past_due and the
-/// sweep would suspend a paying organization. GREEN: the `last_recovered_at`
-/// high-water (stamped from `event.created`) makes the stale failure a no-op.
+/// The `last_recovered_at` high-water (stamped from `event.created`) makes the
+/// stale failure a no-op; guarding on `state` alone would flip active→past_due
+/// and let the sweep suspend a paying organization.
 #[compio::test]
 async fn out_of_order_paid_then_failed_does_not_resuspend() {
     let _ = db_url();
