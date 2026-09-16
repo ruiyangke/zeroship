@@ -23,7 +23,7 @@ use zeroship_core::{
     workflow_jobs::{Delivery, JobLease, JobOperation, JobOutcome, JobSpec, Settlement},
 };
 use zeroship_data_orm::{
-    orm::{Entity, FindOptions, FromRow, Operation, Output},
+    orm::{Entity, EntityAlias, FindOptions, FromRow, Operation, Output, ReadPredicate},
     value,
 };
 
@@ -185,8 +185,6 @@ pub(super) struct Record {
     specification: String,
     outcome: Option<String>,
     completed_at: Option<i64>,
-    pub(super) reconciliation: Option<String>,
-    pub(super) reconciliation_next: Option<i64>,
 }
 
 impl Record {
@@ -197,21 +195,14 @@ impl Record {
         if decode::<JobSpec>(&self.specification)? != *job {
             return Err(conflict());
         }
+        // `run_id` is the receipt's one kind-blind column: the scan that finds
+        // runs with no outstanding receipt joins on it without reading the
+        // specification, so every operation declares whether its receipt names
+        // a run. Whatever else a kind stores lives in that kind's own table.
         let valid = match &job.operation {
-            JobOperation::Advance { run_id, .. } => {
-                self.run_id.as_deref() == Some(run_id.as_str())
-                    && self.reconciliation.is_none()
-                    && self.reconciliation_next.is_none()
-            }
+            JobOperation::Advance { run_id, .. } => self.run_id.as_deref() == Some(run_id.as_str()),
             JobOperation::Cron { run_id, .. } => {
-                (self.run_id.is_none() || self.run_id.as_deref() == Some(run_id.as_str()))
-                    && self.reconciliation.is_none()
-                    && self.reconciliation_next.is_none()
-            }
-            JobOperation::Reconcile {} => {
-                self.run_id.is_none()
-                    && self.reconciliation.is_some()
-                    && self.reconciliation_next.is_some()
+                self.run_id.is_none() || self.run_id.as_deref() == Some(run_id.as_str())
             }
             JobOperation::Activate { .. }
             | JobOperation::Management { .. }
@@ -219,11 +210,8 @@ impl Record {
             | JobOperation::Close { .. }
             | JobOperation::Fanout { .. }
             | JobOperation::Propagate { .. }
-            | JobOperation::ReleaseHold { .. } => {
-                self.run_id.is_none()
-                    && self.reconciliation.is_none()
-                    && self.reconciliation_next.is_none()
-            }
+            | JobOperation::Reconcile {}
+            | JobOperation::ReleaseHold { .. } => self.run_id.is_none(),
         };
         if !valid {
             return Err(invalid());
@@ -652,6 +640,12 @@ impl AppWorkflows {
             tx.commit().await?;
             return Ok(receipt);
         }
+        if matches!(job.operation, JobOperation::Reconcile {}) {
+            lock_app_state(&mut tx, &self.app).await?;
+            let receipt = super::reconciliation::receipt(&tx, job).await?;
+            tx.commit().await?;
+            return Ok(receipt);
+        }
         if matches!(job.operation, JobOperation::Close { .. }) {
             lock_app_state(&mut tx, &self.app).await?;
             let receipt = super::closure::receipt(&tx, job).await?;
@@ -853,6 +847,114 @@ pub(super) async fn read(
         .await?
         .into_iter()
         .next())
+}
+
+/// A job kind's receipt extension: a table keyed by the job id, scoped by the
+/// app, whose foreign key onto `job_receipts(app_id, id)` is what forbids an
+/// extension without its receipt. The scope is also the join below, so a kind
+/// reaches its own extension and no other's.
+pub(super) trait ReceiptExtension: Entity + Sized {
+    fn scope(
+        extension: &EntityAlias<Self>,
+        receipts: &EntityAlias<job_receipts::Entity>,
+    ) -> Result<ReadPredicate, WorkflowServiceError>;
+}
+
+macro_rules! receipt_extension {
+    ($($module:ident),+ $(,)?) => {$(
+        impl ReceiptExtension for models::$module::Entity {
+            fn scope(
+                extension: &EntityAlias<Self>,
+                receipts: &EntityAlias<job_receipts::Entity>,
+            ) -> Result<ReadPredicate, WorkflowServiceError> {
+                Ok(extension
+                    .column(models::$module::app_id)
+                    .eq(receipts.column(job_receipts::app_id))?
+                    .and(
+                        extension
+                            .column(models::$module::id)
+                            .eq(receipts.column(job_receipts::id))?,
+                    ))
+            }
+        }
+    )+};
+}
+receipt_extension!(
+    collection_pages,
+    fanout_pages,
+    propagation_pages,
+    reconciliation_pages,
+);
+
+/// Read a receipt together with its kind's extension.
+///
+/// A kind writes both rows in one transaction and the extension's foreign key
+/// makes an orphan extension impossible, so the pair is present or absent
+/// together. A receipt whose extension is missing is a damaged journal, not an
+/// absent job, and the outer join reports it as exactly that.
+pub(super) async fn read_extended<E: ReceiptExtension, P: FromRow<E>>(
+    tx: &Transaction,
+    job: &JobSpec,
+    invalid: fn() -> WorkflowServiceError,
+) -> Result<Option<(Record, P)>, WorkflowServiceError> {
+    let receipts = tx.database().entity::<job_receipts::Entity>()?.alias("r")?;
+    let extension = tx.database().entity::<E>()?.alias("x")?;
+    let scope = E::scope(&extension, &receipts)?;
+    let row = tx
+        .database()
+        .from(&receipts)
+        .left_join(&extension, scope)?
+        .filter(
+            receipts
+                .column(job_receipts::app_id)
+                .eq(job.app_id.as_str())?
+                .and(receipts.column(job_receipts::id).eq(job.id.as_str())?),
+        )
+        .select((receipts.row::<Record>(), extension.optional_row::<P>()))?
+        .limit(1)?
+        .all()
+        .await?
+        .into_iter()
+        .next();
+    match row {
+        None => Ok(None),
+        Some((record, Some(extension))) => Ok(Some((record, extension))),
+        Some((_, None)) => Err(invalid()),
+    }
+}
+
+/// The extension a paged sweep stores: the plan its delivered page committed to
+/// and the index of the next item it reserves. Both sweeps store that shape, so
+/// one reservation advances either.
+pub(super) trait PageCursor: ReceiptExtension {}
+impl PageCursor for models::collection_pages::Entity {}
+impl PageCursor for models::reconciliation_pages::Entity {}
+
+/// Reserve the item a paged sweep is about to visit by advancing its stored
+/// cursor past it. Matching the index the page read is what makes a lost update
+/// impossible: a concurrent reservation moved it, so the filter matches no row
+/// and the zero-row result fails the attempt.
+pub(super) async fn reserve<E: PageCursor>(
+    tx: &Transaction,
+    job: &JobSpec,
+    next: usize,
+    invalid: fn() -> WorkflowServiceError,
+) -> Result<(), WorkflowServiceError> {
+    let next = i64::try_from(next).map_err(|_| invalid())?;
+    let changed = tx
+        .database()
+        .collection(E::COLLECTION)?
+        .execute(Operation::Update {
+            filter: value!({"id":job.id.as_str(), "app_id":job.app_id.as_str(), "next_index":next}),
+            patch: value!({"next_index":next.checked_add(1).ok_or_else(invalid)?}),
+            many: true,
+        })
+        .await?;
+    if matches!(changed, Output::Count(1)) {
+        Ok(())
+    } else {
+        Err(invalid())
+    }
 }
 
 fn conflict() -> WorkflowServiceError {

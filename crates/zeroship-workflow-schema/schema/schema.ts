@@ -13,7 +13,10 @@ const bytewiseColumns = {
     "collection_after_id", "collection_upper_id",
     "reconciliation_after_id", "reconciliation_upper_id",
   ],
-  job_publications: ["id", "app_id", "run_id", "deploy_id", "broadcast_id"],
+  job_publications: ["id", "app_id"],
+  advance_publications: ["id", "app_id", "run_id", "deploy_id"],
+  fanout_publications: ["id", "app_id", "broadcast_id"],
+  propagation_publications: ["id", "app_id"],
   fanout_pages: ["id", "app_id", "broadcast_id"],
   propagation_pages: ["id", "app_id"],
   broadcasts: ["id", "app_id", "topic"],
@@ -21,6 +24,7 @@ const bytewiseColumns = {
   deployment_holds: ["deploy_id"],
   job_receipts: ["id", "app_id", "run_id"],
   collection_pages: ["id", "app_id"],
+  reconciliation_pages: ["id", "app_id"],
   payloads: ["id", "app_id"],
   activations: ["id", "app_id", "deploy_id"],
   activation_scopes: ["id", "activation_id"],
@@ -193,17 +197,28 @@ export function workflowSchema(namespace) {
     },
     sqlite() {},
   });
+  // A column lives here only when code that has not yet determined the job's
+  // kind reads it: `run_id` answers the kind-blind left join that finds runs
+  // with no outstanding receipt. Everything a single kind stores lives in that
+  // kind's own table, keyed by the job id and scoped by the app.
   create("job_receipts", {
     ...identity(), run_id: t.text(), id: text(), specification: text(), outcome: t.text(),
-    reconciliation: t.text(), reconciliation_next: t.bigInt(),
     created_at: integer(), completed_at: t.bigInt(),
   }, ["app_id", "id"], [appFk("job_receipts")]);
   index("job_receipts", "run", ["app_id", "run_id"]);
+  // Both paged sweeps store the same extension: the plan the delivered page
+  // committed to, and the index of the next item it will reserve.
   create("collection_pages", {
     ...identity(), plan: text(), next_index: integer(),
   }, ["app_id", "id"], [
     appFk("collection_pages"),
     fk("collection_page_receipt", ["app_id", "id"], "job_receipts", ["app_id", "id"]),
+  ]);
+  create("reconciliation_pages", {
+    ...identity(), plan: text(), next_index: integer(),
+  }, ["app_id", "id"], [
+    appFk("reconciliation_pages"),
+    fk("reconciliation_page_receipt", ["app_id", "id"], "job_receipts", ["app_id", "id"]),
   ]);
   create("activations", {
     ...identity(), deploy_id: text(), revision: integer(),
@@ -310,19 +325,46 @@ export function workflowSchema(namespace) {
     ...identity(), id: text(), kind: text(), payload: text(), created_at: integer(), delivered_at: t.bigInt(),
   }, ["app_id", "id"], [appFk("outbox")]);
   index("outbox", "delivery", ["delivered_at", "created_at"]);
+  // Only Advance, Fanout and Propagate are ever published, and this row holds
+  // what the sweep that has not yet read the specification needs: the intent's
+  // identity, the specification itself, and whether a manager receipt confirmed
+  // it. Each operation's own projection is a row in its own table, so a kind
+  // reaches its own columns and no other's, and the key that deduplicates that
+  // kind is total there rather than a unique index over a nullable group.
   create("job_publications", {
-    ...identity(), id: text(), run_id: t.text(), deploy_id: t.text(), generation: t.bigInt(),
-    frontier_revision: t.bigInt(), broadcast_id: t.text(), broadcast_revision: t.bigInt(),
-    propagation_id: t.text(), propagation_revision: t.bigInt(),
-    available_at: integer(), specification: text(),
+    ...identity(), specification: text(),
     created_at: integer(), confirmed_at: t.bigInt(),
-  }, ["app_id", "id"], [appFk("job_publications")], [
-    { name: "job_publication_frontier", columns: ["app_id", "run_id", "generation", "frontier_revision", "available_at"] },
-    { name: "job_publication_fanout", columns: ["app_id", "broadcast_id", "broadcast_revision"] },
-    { name: "job_publication_propagation", columns: ["app_id", "propagation_id", "propagation_revision"] },
-  ]);
+  }, ["app_id", "id"], [appFk("job_publications")]);
   index("job_publications", "pending", ["app_id", "confirmed_at", "id"]);
-  index("job_publications", "deployment", ["app_id", "deploy_id", "confirmed_at"]);
+  // An advance intent's due time is part of its identity: a run whose frontier
+  // revision has not moved but whose due time has is a different job, so the
+  // deduplication key carries it.
+  create("advance_publications", {
+    ...identity(), deploy_id: text(), run_id: text(), generation: integer(),
+    frontier_revision: integer(), available_at: integer(),
+  }, ["app_id", "id"], [
+    appFk("advance_publications"),
+    fk("advance_publication_intent", ["app_id", "id"], "job_publications", ["app_id", "id"]),
+  ], [
+    { name: "advance_publication_frontier", columns: ["app_id", "run_id", "generation", "frontier_revision", "available_at"] },
+  ]);
+  index("advance_publications", "deployment", ["app_id", "deploy_id"]);
+  create("fanout_publications", {
+    ...identity(), broadcast_id: text(), revision: integer(),
+  }, ["app_id", "id"], [
+    appFk("fanout_publications"),
+    fk("fanout_publication_intent", ["app_id", "id"], "job_publications", ["app_id", "id"]),
+  ], [
+    { name: "fanout_publication_broadcast", columns: ["app_id", "broadcast_id", "revision"] },
+  ]);
+  create("propagation_publications", {
+    ...identity(), propagation_id: text(), revision: integer(),
+  }, ["app_id", "id"], [
+    appFk("propagation_publications"),
+    fk("propagation_publication_intent", ["app_id", "id"], "job_publications", ["app_id", "id"]),
+  ], [
+    { name: "propagation_publication_obligation", columns: ["app_id", "propagation_id", "revision"] },
+  ]);
   create("fanout_pages", {
     ...identity(), broadcast_id: text(), revision: integer(), result: text(),
   }, ["app_id", "id"], [

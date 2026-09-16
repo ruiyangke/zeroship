@@ -121,10 +121,17 @@ impl Fixture {
         .await;
         assert_eq!(history.len(), 1);
         assert_eq!(history[0].text("deploy_id").unwrap(), deployment);
+        let frontiers = journal_rows(
+            tx,
+            "advance_publications",
+            json!({"app_id":self.owner.as_str(),"run_id":self.run,"generation":generation}),
+        )
+        .await;
+        assert_eq!(frontiers.len(), 1);
         let publications = journal_rows(
             tx,
             "job_publications",
-            json!({"app_id":self.owner.as_str(),"run_id":self.run,"generation":generation}),
+            json!({"app_id":self.owner.as_str(),"id":frontiers[0].text("id").unwrap()}),
         )
         .await;
         assert_eq!(publications.len(), 1);
@@ -189,6 +196,9 @@ impl Fixture {
             "signals",
             "payload_refs",
             "job_publications",
+            "advance_publications",
+            "fanout_publications",
+            "propagation_publications",
             "outbox",
             "requests",
             "management_receipts",

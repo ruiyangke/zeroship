@@ -231,7 +231,7 @@ async fn assert_unaccepted(service: &WorkflowService, scope: &AppWorkflows, gran
     assert_eq!(
         journal_count(
             &tx,
-            "job_publications",
+            "advance_publications",
             json!({"app_id":scope.app_id().as_str(), "run_id":grant.run_id()})
         )
         .await,
@@ -870,6 +870,7 @@ async fn rollback(store: Rc<OrmStore>, fault: ReceiptFault) {
         "generations",
         "outbox",
         "job_publications",
+        "advance_publications",
         "occurrences",
     ] {
         assert_eq!(
@@ -889,6 +890,7 @@ async fn rollback(store: Rc<OrmStore>, fault: ReceiptFault) {
         "generations",
         "outbox",
         "job_publications",
+        "advance_publications",
         "occurrences",
     ] {
         assert_eq!(

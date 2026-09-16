@@ -11,7 +11,10 @@
 
 use super::{
     app::{decode, encode, lock_app, not_found, parse_state},
-    models::{job_publications as publications, runs},
+    models::{
+        advance_publications, fanout_publications, job_publications as publications,
+        propagation_publications, runs,
+    },
     store::Transaction,
     AppWorkflows,
 };
@@ -25,7 +28,10 @@ use zeroship_core::{
     },
 };
 use zeroship_data_orm::{
-    orm::{Entity, FindOptions, FromRow, Insertable, Operation, Output},
+    orm::{
+        Entity, EntityAlias, EntityProjection, FindOptions, FromRow, Insertable, Operation, Output,
+        ReadBuilder,
+    },
     sql::MAX_ROW_LIMIT,
     value,
 };
@@ -80,135 +86,234 @@ impl JobPublisher for AssignedPublisher<'_> {
     }
 }
 
+/// What a reader that has not yet decoded the specification needs. The
+/// operation's own projection lives in that operation's table.
 #[derive(FromRow, Insertable)]
 #[orm(entity = publications)]
 struct Intent {
     id: String,
     app_id: String,
-    deploy_id: Option<String>,
-    run_id: Option<String>,
-    generation: Option<i64>,
-    frontier_revision: Option<i64>,
-    broadcast_id: Option<String>,
-    broadcast_revision: Option<i64>,
-    propagation_id: Option<String>,
-    propagation_revision: Option<i64>,
-    available_at: i64,
     specification: String,
     created_at: i64,
     confirmed_at: Option<i64>,
 }
 
 impl Intent {
-    const fn frontier_absent(&self) -> bool {
-        self.deploy_id.is_none()
-            && self.run_id.is_none()
-            && self.generation.is_none()
-            && self.frontier_revision.is_none()
+    fn new(job: &JobSpec, now: i64) -> Result<Self, WorkflowServiceError> {
+        Ok(Self {
+            id: job.id.as_str().to_owned(),
+            app_id: job.app_id.as_str().to_owned(),
+            specification: encode(job)?,
+            created_at: now,
+            confirmed_at: None,
+        })
     }
-    const fn broadcast_absent(&self) -> bool {
-        self.broadcast_id.is_none() && self.broadcast_revision.is_none()
-    }
-    const fn propagation_absent(&self) -> bool {
-        self.propagation_id.is_none() && self.propagation_revision.is_none()
-    }
+}
 
+/// The frontier an advance intent names. Its due time is part of the identity
+/// the scoped unique key deduplicates on, so it is stored here rather than
+/// beside the specification.
+#[derive(FromRow, Insertable)]
+#[orm(entity = advance_publications)]
+struct Advance {
+    id: String,
+    app_id: String,
+    deploy_id: String,
+    run_id: String,
+    generation: i64,
+    frontier_revision: i64,
+    available_at: i64,
+}
+
+#[derive(FromRow, Insertable)]
+#[orm(entity = fanout_publications)]
+struct Fanout {
+    id: String,
+    app_id: String,
+    broadcast_id: String,
+    revision: i64,
+}
+
+#[derive(FromRow, Insertable)]
+#[orm(entity = propagation_publications)]
+struct Propagation {
+    id: String,
+    app_id: String,
+    propagation_id: String,
+    revision: i64,
+}
+
+/// An intent and the projection of the one operation it publishes. Every column
+/// of that projection is required, and its foreign key ties it to this intent,
+/// so the only thing left to check is that the row belongs to the operation the
+/// specification names.
+struct Record {
+    intent: Intent,
+    advance: Option<Advance>,
+    fanout: Option<Fanout>,
+    propagation: Option<Propagation>,
+}
+
+impl Record {
     fn job(&self, app: &AppId) -> Result<JobSpec, WorkflowServiceError> {
-        let job: JobSpec = decode(&self.specification)?;
+        let job: JobSpec = decode(&self.intent.specification)?;
         if job.app_id != *app
-            || self.app_id != app.as_str()
-            || job.id.as_str() != self.id
-            || job.available_at.get() != self.available_at
+            || self.intent.app_id != app.as_str()
+            || job.id.as_str() != self.intent.id
         {
             return Err(invalid());
         }
-        let valid = match &job.operation {
-            JobOperation::Advance {
-                deployment_id,
-                run_id,
-                generation,
-                revision,
-            } => {
-                self.deploy_id.as_deref() == Some(deployment_id.as_str())
-                    && self.run_id.as_deref() == Some(run_id.as_str())
-                    && self.generation == Some(i64::from(*generation))
-                    && self.frontier_revision == Some(revision.get())
-                    && self.broadcast_absent()
-                    && self.propagation_absent()
-            }
-            JobOperation::Fanout {
-                broadcast_id,
-                revision,
-            } => {
-                self.broadcast_id.as_deref() == Some(broadcast_id.as_str())
-                    && self.broadcast_revision == Some(revision.get())
-                    && self.frontier_absent()
-                    && self.propagation_absent()
-            }
-            JobOperation::Propagate {
-                propagation_id,
-                revision,
-            } => {
-                self.propagation_id.as_deref() == Some(propagation_id.as_str())
-                    && self.propagation_revision == Some(revision.get())
-                    && self.frontier_absent()
-                    && self.broadcast_absent()
-            }
-            _ => false,
-        };
+        let projections = usize::from(self.advance.is_some())
+            + usize::from(self.fanout.is_some())
+            + usize::from(self.propagation.is_some());
+        let valid = projections == 1
+            && match (
+                &job.operation,
+                &self.advance,
+                &self.fanout,
+                &self.propagation,
+            ) {
+                (
+                    JobOperation::Advance {
+                        deployment_id,
+                        run_id,
+                        generation,
+                        revision,
+                    },
+                    Some(frontier),
+                    ..,
+                ) => {
+                    frontier.deploy_id == deployment_id.as_str()
+                        && frontier.run_id == run_id.as_str()
+                        && frontier.generation == i64::from(*generation)
+                        && frontier.frontier_revision == revision.get()
+                        && frontier.available_at == job.available_at.get()
+                }
+                (
+                    JobOperation::Fanout {
+                        broadcast_id,
+                        revision,
+                    },
+                    _,
+                    Some(page),
+                    _,
+                ) => page.broadcast_id == broadcast_id.as_str() && page.revision == revision.get(),
+                (
+                    JobOperation::Propagate {
+                        propagation_id,
+                        revision,
+                    },
+                    ..,
+                    Some(page),
+                ) => {
+                    page.propagation_id == propagation_id.as_str()
+                        && page.revision == revision.get()
+                }
+                _ => false,
+            };
         if !valid {
             return Err(invalid());
         }
         Ok(job)
     }
+}
 
-    fn new(job: &JobSpec, now: i64) -> Result<Self, WorkflowServiceError> {
-        let mut intent = Self {
-            id: job.id.as_str().to_owned(),
-            app_id: job.app_id.as_str().to_owned(),
-            deploy_id: None,
-            run_id: None,
-            generation: None,
-            frontier_revision: None,
-            broadcast_id: None,
-            broadcast_revision: None,
-            propagation_id: None,
-            propagation_revision: None,
-            available_at: job.available_at.get(),
-            specification: encode(job)?,
-            created_at: now,
-            confirmed_at: None,
-        };
-        match &job.operation {
-            JobOperation::Advance {
-                deployment_id,
-                run_id,
-                generation,
-                revision,
-            } => {
-                intent.deploy_id = Some(deployment_id.as_str().to_owned());
-                intent.run_id = Some(run_id.as_str().to_owned());
-                intent.generation = Some(i64::from(*generation));
-                intent.frontier_revision = Some(revision.get());
-            }
-            JobOperation::Fanout {
-                broadcast_id,
-                revision,
-            } => {
-                intent.broadcast_id = Some(broadcast_id.as_str().to_owned());
-                intent.broadcast_revision = Some(revision.get());
-            }
-            JobOperation::Propagate {
-                propagation_id,
-                revision,
-            } => {
-                intent.propagation_id = Some(propagation_id.as_str().to_owned());
-                intent.propagation_revision = Some(revision.get());
-            }
-            _ => return Err(invalid()),
-        }
-        Ok(intent)
+/// One intent row beside each projection the outer join may or may not find.
+type Row = (Intent, Option<Advance>, Option<Fanout>, Option<Propagation>);
+type Projection = (
+    EntityProjection<publications::Entity, Intent, false>,
+    EntityProjection<advance_publications::Entity, Advance, true>,
+    EntityProjection<fanout_publications::Entity, Fanout, true>,
+    EntityProjection<propagation_publications::Entity, Propagation, true>,
+);
+
+/// The intent table outer-joined to all three projections. A read that already
+/// knows its operation still joins all three, because reading exactly one of
+/// them is what proves the intent publishes exactly one.
+struct Sources {
+    intents: EntityAlias<publications::Entity>,
+    advance: EntityAlias<advance_publications::Entity>,
+    fanout: EntityAlias<fanout_publications::Entity>,
+    propagation: EntityAlias<propagation_publications::Entity>,
+}
+
+impl Sources {
+    fn new(tx: &Transaction) -> Result<Self, WorkflowServiceError> {
+        Ok(Self {
+            intents: tx.database().entity::<publications::Entity>()?.alias("p")?,
+            advance: tx
+                .database()
+                .entity::<advance_publications::Entity>()?
+                .alias("a")?,
+            fanout: tx
+                .database()
+                .entity::<fanout_publications::Entity>()?
+                .alias("f")?,
+            propagation: tx
+                .database()
+                .entity::<propagation_publications::Entity>()?
+                .alias("g")?,
+        })
     }
+
+    fn scan(&self, tx: &Transaction) -> Result<ReadBuilder, WorkflowServiceError> {
+        Ok(tx
+            .database()
+            .from(&self.intents)
+            .left_join(
+                &self.advance,
+                self.advance
+                    .column(advance_publications::app_id)
+                    .eq(self.intents.column(publications::app_id))?
+                    .and(
+                        self.advance
+                            .column(advance_publications::id)
+                            .eq(self.intents.column(publications::id))?,
+                    ),
+            )?
+            .left_join(
+                &self.fanout,
+                self.fanout
+                    .column(fanout_publications::app_id)
+                    .eq(self.intents.column(publications::app_id))?
+                    .and(
+                        self.fanout
+                            .column(fanout_publications::id)
+                            .eq(self.intents.column(publications::id))?,
+                    ),
+            )?
+            .left_join(
+                &self.propagation,
+                self.propagation
+                    .column(propagation_publications::app_id)
+                    .eq(self.intents.column(publications::app_id))?
+                    .and(
+                        self.propagation
+                            .column(propagation_publications::id)
+                            .eq(self.intents.column(publications::id))?,
+                    ),
+            )?)
+    }
+
+    fn projection(&self) -> Projection {
+        (
+            self.intents.row::<Intent>(),
+            self.advance.optional_row::<Advance>(),
+            self.fanout.optional_row::<Fanout>(),
+            self.propagation.optional_row::<Propagation>(),
+        )
+    }
+}
+
+fn records(rows: Vec<Row>) -> Vec<Record> {
+    rows.into_iter()
+        .map(|(intent, advance, fanout, propagation)| Record {
+            intent,
+            advance,
+            fanout,
+            propagation,
+        })
+        .collect()
 }
 
 impl AppWorkflows {
@@ -232,24 +337,34 @@ impl AppWorkflows {
             .run(async {
                 captured.check()?;
                 let tx = self.service.begin().await?;
-                let source = tx.database().entity::<publications::Entity>()?.alias("p")?;
-                let mut predicate = source
+                let sources = Sources::new(&tx)?;
+                let mut predicate = sources
+                    .intents
                     .column(publications::app_id)
                     .eq(self.app.as_str())?
-                    .and(source.column(publications::confirmed_at).eq(None::<i64>)?);
+                    .and(
+                        sources
+                            .intents
+                            .column(publications::confirmed_at)
+                            .eq(None::<i64>)?,
+                    );
                 if let Some(after) = after {
-                    predicate = predicate.and(source.column(publications::id).gt(after.as_str())?);
+                    predicate = predicate.and(
+                        sources
+                            .intents
+                            .column(publications::id)
+                            .gt(after.as_str())?,
+                    );
                 }
-                let rows = tx
-                    .database()
-                    .from(&source)
+                let rows = sources
+                    .scan(&tx)?
                     .filter(predicate)
-                    .order_by(source.column(publications::id).asc())
-                    .select(source.row::<Intent>())?
+                    .order_by(sources.intents.column(publications::id).asc())
+                    .select(sources.projection())?
                     .limit(i64::from(limit))?
                     .all()
                     .await?;
-                let jobs = rows
+                let jobs = records(rows)
                     .iter()
                     .map(|row| row.job(&self.app))
                     .collect::<Result<_, _>>()?;
@@ -295,7 +410,7 @@ impl AppWorkflows {
                 let job = intent.job(&self.app)?;
                 captured.recheck()?;
                 tx.commit().await?;
-                if intent.confirmed_at.is_some() {
+                if intent.intent.confirmed_at.is_some() {
                     return Ok(job);
                 }
                 captured.check()?;
@@ -318,7 +433,7 @@ impl AppWorkflows {
                 if current.job(&self.app)? != job {
                     return Err(invalid());
                 }
-                if current.confirmed_at.is_none() {
+                if current.intent.confirmed_at.is_none() {
                     let now = tx.now().await?;
                     captured.check()?;
                     if let Some(authority) = authority {
@@ -428,23 +543,49 @@ pub(super) async fn record_job(
         generation: frontier.generation.try_into().map_err(|_| invalid())?,
         revision: Revision::try_from(frontier.frontier_revision).map_err(|_| invalid())?,
     };
-    let existing = tx
-        .database()
-        .entity::<publications::Entity>()?
-        .find::<Intent>(
-            publications::app_id
-                .eq(app.as_str())?
-                .and(publications::run_id.eq(Some(run))?)
-                .and(publications::generation.eq(Some(frontier.generation))?)
-                .and(publications::frontier_revision.eq(Some(frontier.frontier_revision))?)
-                .and(publications::available_at.eq(due)?),
-            one(),
-        )
-        .await?;
+    let sources = Sources::new(tx)?;
+    let existing = records(
+        sources
+            .scan(tx)?
+            .filter(
+                sources
+                    .intents
+                    .column(publications::app_id)
+                    .eq(app.as_str())?
+                    .and(
+                        sources
+                            .advance
+                            .column(advance_publications::run_id)
+                            .eq(run)?,
+                    )
+                    .and(
+                        sources
+                            .advance
+                            .column(advance_publications::generation)
+                            .eq(frontier.generation)?,
+                    )
+                    .and(
+                        sources
+                            .advance
+                            .column(advance_publications::frontier_revision)
+                            .eq(frontier.frontier_revision)?,
+                    )
+                    .and(
+                        sources
+                            .advance
+                            .column(advance_publications::available_at)
+                            .eq(due)?,
+                    ),
+            )
+            .select(sources.projection())?
+            .limit(1)?
+            .all()
+            .await?,
+    );
     let job = JobSpec {
         id: existing
             .first()
-            .map(|row| JobId::parse(&row.id).map_err(|_| invalid()))
+            .map(|row| JobId::parse(&row.intent.id).map_err(|_| invalid()))
             .transpose()?
             .unwrap_or_else(JobId::mint),
         app_id: app.clone(),
@@ -461,16 +602,22 @@ pub(super) async fn record_job(
     Ok(Some(job))
 }
 
-async fn read(tx: &Transaction, app: &AppId, id: &JobId) -> Result<Intent, WorkflowServiceError> {
-    tx.database()
-        .entity::<publications::Entity>()?
-        .find::<Intent>(
-            publications::app_id
+async fn read(tx: &Transaction, app: &AppId, id: &JobId) -> Result<Record, WorkflowServiceError> {
+    let sources = Sources::new(tx)?;
+    let rows = sources
+        .scan(tx)?
+        .filter(
+            sources
+                .intents
+                .column(publications::app_id)
                 .eq(app.as_str())?
-                .and(publications::id.eq(id.as_str())?),
-            one(),
+                .and(sources.intents.column(publications::id).eq(id.as_str())?),
         )
-        .await?
+        .select(sources.projection())?
+        .limit(1)?
+        .all()
+        .await?;
+    records(rows)
         .into_iter()
         .next()
         .ok_or_else(|| not_found("workflow job publication"))
@@ -487,12 +634,86 @@ fn invalid() -> WorkflowServiceError {
     WorkflowServiceError::Internal("invalid workflow job publication journal".into())
 }
 
+/// Write the intent and the one projection its operation owns. The projection's
+/// foreign key needs its intent first, and the seven operations that are never
+/// published have no projection to write, so they are refused here.
 async fn insert(tx: &Transaction, job: &JobSpec, now: i64) -> Result<(), WorkflowServiceError> {
-    let saved = tx
-        .database()
-        .entity::<publications::Entity>()?
-        .insert::<_, Intent>(Intent::new(job, now)?)
-        .await?;
+    let id = job.id.as_str().to_owned();
+    let app_id = job.app_id.as_str().to_owned();
+    let intent = Box::pin(
+        tx.database()
+            .entity::<publications::Entity>()?
+            .insert::<_, Intent>(Intent::new(job, now)?),
+    )
+    .await?;
+    let mut saved = Record {
+        intent,
+        advance: None,
+        fanout: None,
+        propagation: None,
+    };
+    match &job.operation {
+        JobOperation::Advance {
+            deployment_id,
+            run_id,
+            generation,
+            revision,
+        } => {
+            saved.advance = Some(
+                Box::pin(
+                    tx.database()
+                        .entity::<advance_publications::Entity>()?
+                        .insert::<_, Advance>(Advance {
+                            id,
+                            app_id,
+                            deploy_id: deployment_id.as_str().to_owned(),
+                            run_id: run_id.as_str().to_owned(),
+                            generation: i64::from(*generation),
+                            frontier_revision: revision.get(),
+                            available_at: job.available_at.get(),
+                        }),
+                )
+                .await?,
+            );
+        }
+        JobOperation::Fanout {
+            broadcast_id,
+            revision,
+        } => {
+            saved.fanout = Some(
+                Box::pin(
+                    tx.database()
+                        .entity::<fanout_publications::Entity>()?
+                        .insert::<_, Fanout>(Fanout {
+                            id,
+                            app_id,
+                            broadcast_id: broadcast_id.as_str().to_owned(),
+                            revision: revision.get(),
+                        }),
+                )
+                .await?,
+            );
+        }
+        JobOperation::Propagate {
+            propagation_id,
+            revision,
+        } => {
+            saved.propagation = Some(
+                Box::pin(
+                    tx.database()
+                        .entity::<propagation_publications::Entity>()?
+                        .insert::<_, Propagation>(Propagation {
+                            id,
+                            app_id,
+                            propagation_id: propagation_id.as_str().to_owned(),
+                            revision: revision.get(),
+                        }),
+                )
+                .await?,
+            );
+        }
+        _ => return Err(invalid()),
+    }
     if saved.job(&job.app_id)? != *job {
         return Err(invalid());
     }
@@ -521,17 +742,33 @@ pub(super) async fn fanout(
     revision: Revision,
     now: i64,
 ) -> Result<JobSpec, WorkflowServiceError> {
-    let existing = tx
-        .database()
-        .entity::<publications::Entity>()?
-        .find::<Intent>(
-            publications::app_id
-                .eq(app.as_str())?
-                .and(publications::broadcast_id.eq(Some(broadcast.as_str()))?)
-                .and(publications::broadcast_revision.eq(Some(revision.get()))?),
-            one(),
-        )
-        .await?;
+    let sources = Sources::new(tx)?;
+    let existing = records(
+        sources
+            .scan(tx)?
+            .filter(
+                sources
+                    .intents
+                    .column(publications::app_id)
+                    .eq(app.as_str())?
+                    .and(
+                        sources
+                            .fanout
+                            .column(fanout_publications::broadcast_id)
+                            .eq(broadcast.as_str())?,
+                    )
+                    .and(
+                        sources
+                            .fanout
+                            .column(fanout_publications::revision)
+                            .eq(revision.get())?,
+                    ),
+            )
+            .select(sources.projection())?
+            .limit(1)?
+            .all()
+            .await?,
+    );
     let operation = JobOperation::Fanout {
         broadcast_id: broadcast.clone(),
         revision,
@@ -562,17 +799,33 @@ pub(super) async fn propagate(
     revision: Revision,
     now: i64,
 ) -> Result<JobSpec, WorkflowServiceError> {
-    let existing = tx
-        .database()
-        .entity::<publications::Entity>()?
-        .find::<Intent>(
-            publications::app_id
-                .eq(app.as_str())?
-                .and(publications::propagation_id.eq(Some(propagation.as_str()))?)
-                .and(publications::propagation_revision.eq(Some(revision.get()))?),
-            one(),
-        )
-        .await?;
+    let sources = Sources::new(tx)?;
+    let existing = records(
+        sources
+            .scan(tx)?
+            .filter(
+                sources
+                    .intents
+                    .column(publications::app_id)
+                    .eq(app.as_str())?
+                    .and(
+                        sources
+                            .propagation
+                            .column(propagation_publications::propagation_id)
+                            .eq(propagation.as_str())?,
+                    )
+                    .and(
+                        sources
+                            .propagation
+                            .column(propagation_publications::revision)
+                            .eq(revision.get())?,
+                    ),
+            )
+            .select(sources.projection())?
+            .limit(1)?
+            .all()
+            .await?,
+    );
     let operation = JobOperation::Propagate {
         propagation_id: propagation.clone(),
         revision,
@@ -595,31 +848,40 @@ pub(super) async fn propagate(
 }
 
 /// The app lock prevents new intents while every pending specification is checked.
-/// Nullable projections cannot conceal a code-dependent publication from release.
+/// Reading the specification, rather than the advance projection's deployment,
+/// is what keeps a damaged projection from concealing a code-dependent
+/// publication from release.
 pub(super) async fn retains_deployment(
     tx: &Transaction,
     app: &AppId,
     deployment: &str,
 ) -> Result<bool, WorkflowServiceError> {
-    let source = tx.database().entity::<publications::Entity>()?.alias("p")?;
+    let sources = Sources::new(tx)?;
     let mut after: Option<String> = None;
     loop {
-        let mut predicate = source
+        let mut predicate = sources
+            .intents
             .column(publications::app_id)
             .eq(app.as_str())?
-            .and(source.column(publications::confirmed_at).eq(None::<i64>)?);
+            .and(
+                sources
+                    .intents
+                    .column(publications::confirmed_at)
+                    .eq(None::<i64>)?,
+            );
         if let Some(after) = after.as_deref() {
-            predicate = predicate.and(source.column(publications::id).gt(after)?);
+            predicate = predicate.and(sources.intents.column(publications::id).gt(after)?);
         }
-        let rows = tx
-            .database()
-            .from(&source)
-            .filter(predicate)
-            .order_by(source.column(publications::id).asc())
-            .select(source.row::<Intent>())?
-            .limit(128)?
-            .all()
-            .await?;
+        let rows = records(
+            sources
+                .scan(tx)?
+                .filter(predicate)
+                .order_by(sources.intents.column(publications::id).asc())
+                .select(sources.projection())?
+                .limit(128)?
+                .all()
+                .await?,
+        );
         if rows.is_empty() {
             return Ok(false);
         }
@@ -632,6 +894,6 @@ pub(super) async fn retains_deployment(
                 return Ok(true);
             }
         }
-        after = rows.last().map(|row| row.id.clone());
+        after = rows.last().map(|row| row.intent.id.clone());
     }
 }

@@ -165,7 +165,7 @@ async fn parent_state(
 ) -> BTreeMap<&'static str, Vec<zeroship_data_orm::Value>> {
     let tx = service.begin().await.unwrap();
     let mut snapshot = BTreeMap::new();
-    for table in ["steps", "waits", "job_publications"] {
+    for table in ["steps", "waits", "advance_publications"] {
         snapshot.insert(
             table,
             journal_rows(&tx, table, json!({"app_id":app.as_str(), "run_id":parent}))
@@ -333,6 +333,9 @@ async fn all_state(
         "continuation_heads",
         "continuation_members",
         "job_publications",
+        "advance_publications",
+        "fanout_publications",
+        "propagation_publications",
         "outbox",
         "steps",
         "waits",
