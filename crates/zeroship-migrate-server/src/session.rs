@@ -29,9 +29,8 @@
 //! through `model::load::load_ir_document_authorized`. THIS MODULE LOWERS
 //! NOTHING - it is the session newtype and nothing else - so the consumers to
 //! read are this crate's own `apply::apply_one_ir_file_postgres` and
-//! `apply::preflight_ir_documents`, the two `load_and_lower_guarded` call sites.
-//! The note stays because the seam this module exposes is what those callers
-//! drive. They are named rather than cited by line number, which cannot rot.
+//! `apply::preflight_ir_documents`, the two `load_and_lower_guarded` call
+//! sites. They are named rather than cited by line number, which cannot rot.
 //!
 //! `IrAuthor::lower`, `lower_plan` and `lower_steps` take an ALREADY-deserialized
 //! `MigrationIr` and do NOT run the loader. What that actually costs is narrower
@@ -101,10 +100,9 @@
 //! resolved bytes to the guarded door, which is the same shape the engine's own
 //! Node addon uses. What must not happen is deserialize-then-lower.
 //!
-//! Established 2026-08-10 with the engine maintainers (inter-project thread
-//! ZEROSHIP-2026-08-10-148 through ZERO-MIGRATE-2026-08-10-151). Recorded here
-//! because nothing in the type system prevents reaching for the cheaper door:
-//! the bypass is currently avoided by convention, not by construction.
+//! Recorded here because nothing in the type system prevents reaching for
+//! the cheaper door: the bypass is currently avoided by convention, not by
+//! construction.
 //!
 //! # What this module maps
 //!
@@ -117,29 +115,10 @@
 //! `bind_holders` / `holder_params` on the way in and `row_to_neutral` /
 //! `cell_to_value` (OID -> cell classification) on the way out.
 //!
-//! THIS BLOCK CALLED THAT "a near-mechanical port of the engine's own
-//! `crates/zeroship-migrate-postgres/src/backend/session.rs` `PgSession` impl"
-//! UNTIL 2026-09-04, with a `SeamBind` / `SeamRow` / `SeamError` rename table.
-//! None of those four names has ever existed anywhere in this tree - each
-//! occurred only in that sentence, which a plain grep could not see because
-//! `CompioPgSession` contains the substring `PgSession`. The cited file is real
-//! and is the wrong artifact: it holds no `impl SqlSession for` anything, only
-//! generic `<D: SqlSession>` free functions (project locking, session
-//! snapshot/restore, transactional and non-transactional apply), so it CONSUMES
-//! this seam rather than producing it. Nor was a `PgSession` ever renamed away:
-//! `docs/proposals/2026-07-10-migrate-pg-driver-seam-design.md` opens by calling
-//! the seam dialect-neutral, "`SqlSession`, not a PG-only `PgSession`".
-//!
-//! There was a port, and its source is simply not citable from here: the
-//! standalone, out-of-repo `zero-migrate` project's own PG session. The engine
-//! was in-sourced as `crates/zeroship-migrate*` and that source did not come
-//! with it.
-//!
-//! The seam's `execute_text_params -> exec_text` leg is GONE, and its replacement is
-//! not a rename. Server-inferred typing moved from a whole-statement verb to a
-//! per-value one, [`Bind::Inferred`], so a statement can mix an inferred instant
-//! with a typed key. This adapter carries it by binding through `execute_typed` /
-//! `query_typed` with `Type::UNKNOWN` for those values - see `Untyped`.
+//! Server-inferred typing is a per-value property, [`Bind::Inferred`], so a
+//! statement can mix an inferred instant with a typed key. This adapter
+//! carries it by binding through `execute_typed` / `query_typed` with
+//! `Type::UNKNOWN` for those values - see `Untyped`.
 
 use compio_postgres::types::private::BytesMut;
 use compio_postgres::types::{to_sql_checked, Format, IsNull, Kind, ToSql, Type};
@@ -340,24 +319,17 @@ impl ToSqlHolder {
 fn to_holder(bind: &Bind) -> Result<ToSqlHolder, DbError> {
     // The wildcard arm is NOT optional: `Bind` is `#[non_exhaustive]`, so an
     // out-of-crate match cannot be exhaustive and the compiler will never warn a
-    // driver that a variant arrived unhandled. That is precisely how
-    // `Bind::Inferred` went missing here - the enum grew, this file did not, the
-    // build stayed green, and every inferred parameter failed at RUNTIME with
-    // "unsupported bind variant". The PostgreSQL backend maps every `BindValue` to
-    // `Inferred`, so that was the main path rather than an edge.
+    // driver that a variant arrived unhandled. A new `Bind` variant then fails
+    // only at RUNTIME with "unsupported bind variant" - and the PostgreSQL
+    // backend maps every `BindValue` to `Inferred`, so the main path is the one
+    // a missing arm would break.
     //
-    // Since the compiler cannot hold this seam, the driver conformance suite has to:
-    // `zeroship_migrate_backend::driver::conformance` invariant 3 binds a declared
-    // and an inferred parameter, separately and mixed, against a live server. A
-    // driver that adds a variant here without running it is back to a green build
-    // over a broken bind path.
-    //
-    // That suite is now pointed at THIS driver, from
-    // `tests/compio_pg_conformance.rs`. Measured 2026-09-04 against PostgreSQL
-    // 18.6: deleting the `Bind::Inferred` arm below reproduces the historic bug
-    // exactly, and the target reports it as
-    //   check "bind-inference-semantics": all-inferred INSERT with a
-    //   text-to-timestamp coercion failed: unsupported bind variant
+    // Since the compiler cannot hold this seam, the driver conformance suite has
+    // to: `zeroship_migrate_backend::driver::conformance` invariant 3 binds a
+    // declared and an inferred parameter, separately and mixed, against a live
+    // server, and `tests/compio_pg_conformance.rs` points that suite at THIS
+    // driver. A driver that adds a variant here without running it is back to a
+    // green build over a broken bind path.
     match bind {
         Bind::Null => Ok(ToSqlHolder::Null),
         Bind::Bool(b) => Ok(ToSqlHolder::Bool(*b)),
@@ -369,10 +341,8 @@ fn to_holder(bind: &Bind) -> Result<ToSqlHolder, DbError> {
         // text parameter into a numeric column is refused with
         //   column "amount" is of type numeric but expression is of type text
         // (SQLSTATE 42804), and `numeric = $n` with `$n` declared text finds no
-        // operator. This arm read `ToSqlHolder::Text` until 2026-09-04 under a
-        // comment claiming PG inferred the target from context - it does not, and
-        // declaring `text` is precisely what stops it. Measured on PostgreSQL 18.6:
-        // conformance invariant 5 failed with the 42804 above before this changed.
+        // operator. Declaring `text` is precisely what stops the server from
+        // inferring the target type; conformance invariant 5 pins this arm.
         Bind::Decimal(s) => Ok(ToSqlHolder::Untyped(Untyped(Some(s.clone())))),
         Bind::Text(s) => Ok(ToSqlHolder::Text(s.clone())),
         Bind::Inferred(v) => Ok(ToSqlHolder::Untyped(Untyped(v.clone()))),
@@ -505,25 +475,16 @@ fn row_to_neutral(row: &PgRow) -> Result<Row, DbError> {
 /// SQL issued, the transaction boundaries and the decoded [`Value`] cells have
 /// to come out the same.
 ///
-/// THIS DOC SAID "NOTHING IN THE TREE HOLDS THAT" UNTIL 2026-09-04, and for the
-/// half about THIS driver it is no longer true.
-/// `zeroship_migrate_backend::driver::conformance` is the suite built for it, and
-/// it was driven only from `crates/zeroship-migrate/tests/` - `pg_engine/`
-/// `pg_conformance.rs` against the harness `PgDevSession`, `mysql_engine/`
-/// `mysql_conformance.rs` against `MysqlDevSession`. Both are TEST drivers, so the
-/// one that ships was the one nothing conformed. `tests/compio_pg_conformance.rs`
-/// now runs the full suite against `CompioPgSession` on a live server, and proves
-/// it reached THIS session rather than some other: `pg_my_temp_schema()` is 0
-/// before the run and non-zero after, on the same backend pid the borrowed
-/// `compio_postgres::Client` reports. That closes the gap `to_holder`'s comment
-/// above names when it says the compiler cannot hold this seam and the conformance
-/// suite has to.
+/// `tests/compio_pg_conformance.rs` runs the
+/// `zeroship_migrate_backend::driver::conformance` suite against THIS session
+/// on a live server, and proves the suite reached this session rather than
+/// some other: `pg_my_temp_schema()` is 0 before the run and non-zero after,
+/// on the same backend pid the borrowed `compio_postgres::Client` reports.
+/// That is the gap `to_holder`'s comment above names: the compiler cannot
+/// hold this seam, so the conformance suite has to.
 ///
-/// The OTHER half stands: `NapiHostSession` still has no conformance target, so
-/// nothing holds the two producers to the same behaviour.
-///
-/// This doc said "identical to the platform's in-tree `PgSession` impl" until
-/// 2026-09-04. No such type exists or has existed; see the module header.
+/// `NapiHostSession` has no conformance target, so nothing holds the two
+/// producers to the same behaviour.
 impl SqlSession for CompioPgSession {
     async fn batch(&self, sql: &str) -> Result<(), DbError> {
         self.client

@@ -941,15 +941,14 @@ pub trait MigrationBackend {
     /// [`rebuild_one`](Self::rebuild_one), so its declarative `renames` set is
     /// structurally EMPTY).
     ///
-    /// This REPLACES the old escape hatch that handed the apply path a concrete
-    /// connection to drive the online sequence with: the generic declarative apply
-    /// path branches on `online().is_some()` and holds no connection at all.
+    /// The generic declarative apply path branches on `online().is_some()` and
+    /// holds no connection at all.
     ///
     /// Ask it through [`provides`](Self::provides) rather than directly when the
     /// question is "can this target run this plan". That is what the engine's
     /// plan-wide capability preflight does, for every step, before the first one
-    /// commits. Asking it here, at the step that needs the capability, is what used
-    /// to leave a database half-migrated: the answer is the same, but by the time it
+    /// commits. Asking it at the step that needs the capability would leave a
+    /// database half-migrated: the answer is the same, but by the time it
     /// arrives every earlier step of the plan has already committed.
     fn online(&self) -> Option<&dyn crate::capability::OnlineSchemaChange>;
 
@@ -977,10 +976,7 @@ pub trait MigrationBackend {
     /// Adopt the LIVE schema as the project's **baseline**
     /// (multi-engine abstraction) - a `kind='baseline'`, `completed` journal
     /// event recorded WITHOUT running `m`'s `up`. The single neutral baseline entry
-    /// point that folds the two former dialect-specific baseline functions - one
-    /// free function taking a PG `&Client`, one inherent method on the SQLite
-    /// backend - behind ONE trait method, so no PG-`&Client`-typed baseline remains
-    /// on the abstraction surface.
+    /// point: no PG-`&Client`-typed baseline exists on the abstraction surface.
     ///
     /// First-entry-only: idempotent for the SAME version
     /// ([`BaselineOutcome::already_present`]); refuses if the journal already
