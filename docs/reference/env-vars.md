@@ -721,7 +721,7 @@ Reachable only from test code. Setting them in a deployment does nothing.
 The one test PostgreSQL is named ONCE, in `deploy/ops/zeroship.test.toml`,
 written by `tests/provision_test_backends.sh` beside the servers it starts and
 read through the platform's own `FileConfig` parser
-(`zeroship_core::config::test_overlay` in Rust, `tests/lib/test_config.sh` in
+(`zeroship_core::config::test_overlay` in Rust, `zs-testkit overlay` in
 shell). `deny_unknown_fields` applies, so a misspelled key in it is an error
 rather than a value that silently configures nothing.
 

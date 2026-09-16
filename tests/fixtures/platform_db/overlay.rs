@@ -65,7 +65,7 @@ pub fn get(document: &str, want_section: &str, want_key: &str) -> Option<String>
     None
 }
 
-/// Everything `zs_test_config_load` exported, in one value.
+/// Everything one overlay load establishes, in one value.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Loaded {
     /// `ZS_TEST_OVERLAY` -- the file that was read.

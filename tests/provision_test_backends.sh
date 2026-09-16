@@ -253,7 +253,7 @@ cat >"$TEST_OVERLAY" <<EOF
 # (deploy/ops/zeroship.test.toml is gitignored; see the note in that script).
 #
 # Shared PostgreSQL coordinates for suites using the overlay. Read through
-# zeroship_core::config::test_overlay in Rust and tests/lib/test_config.sh in
+# zeroship_core::config::test_overlay in Rust and `zs-testkit overlay` in
 # shell. PG_TEST_URL overrides it for a per-run scratch database.
 
 [control]
