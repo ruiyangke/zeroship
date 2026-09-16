@@ -190,10 +190,10 @@ pub(crate) async fn resolve_auth(
     // must NEVER scope-403 an authenticated visitor — otherwise a logged-in
     // browser whose session lacks a scope inherited from a broad `*`
     // parent would get 403 on public pages a logged-OUT user loads fine. That
-    // is the "logged-in is worse than anonymous on public routes" footgun the
-    // Invalid-Bearer fix removed; scope gating must not re-introduce
-    // it. Scopes on `*` therefore constrain only the protected (`User`)
-    // descendants, exactly like the auth level itself.
+    // is the "logged-in is worse than anonymous on public routes" footgun;
+    // scope gating must not re-introduce it. Scopes on `*` therefore constrain
+    // only the protected (`User`) descendants, exactly like the auth level
+    // itself.
     if policy.required_scopes.is_empty()
         || matches!(policy.auth, zeroship_bundle::RequiredPrincipal::Anonymous)
     {
@@ -783,7 +783,7 @@ enum CookieOutcome {
 }
 
 /// Resolve the `ZeroShip-User` header value from the SIGNED STATELESS session
-/// cookie (BFF redesign **slice R1b** — the addendum). The `__Host-zeroship_app_session`
+/// cookie. The `__Host-zeroship_app_session`
 /// cookie is a gateway-signed `zeroship-sess+jwt` identity assertion, verified LOCALLY
 /// here on every request — **no `sessions::validate`, no per-request DB read for
 /// identity**.
@@ -807,7 +807,7 @@ enum CookieOutcome {
 ///     already happened at ISSUE time (`/session` / interactive callback); the
 ///     hot path does not re-derive them.
 ///
-/// `gateway_sessions` is NO LONGER read here (the cookie is self-contained; the
+/// `gateway_sessions` is not read here (the cookie is self-contained; the
 /// revocation truth is the family marker). The binding key is the cookie's `app`
 /// claim — so this arm takes NO `app_id`/`sector_identifier`: the cookie carries
 /// its own per-app `pws_` subject and `app` (client_id) binding, and neither the
@@ -867,10 +867,9 @@ async fn resolve_app_session_user_header_inner(
     // Revocation gate — the per-app family marker (spec §8.5), keyed on
     // `(client_id, pws_)` with `iat` as the binding instant. The SAME mechanism
     // the Bearer arm uses: a revoked family rejects a still-valid signed
-    // cookie. Routed through the short-TTL read-through `revocation_cache`
-    // (R1d): a fresh cache hit decides `> iat` LOCALLY with NO DB round-trip,
-    // so the steady-state (no-revocation) cookie request is fully DB-free —
-    // the last per-request DB read on the hot path is gone on a cache hit. A
+    // cookie. Routed through the short-TTL read-through `revocation_cache`:
+    // a fresh cache hit decides `> iat` LOCALLY with NO DB round-trip, so the
+    // steady-state (no-revocation) cookie request is fully DB-free. A
     // cross-node revocation is honored within `<= REVOCATION_CACHE_TTL_SECS`;
     // same-node `/signout` busts the entry immediately. Skipped when no DB is
     // configured (smoke mode) — proving the verify path itself is DB-free for a
@@ -1988,8 +1987,8 @@ mod tests {
 
     #[ntex::test]
     async fn resolve_auth_underscoped_authenticated_on_anonymous_route_is_allowed() {
-        // Regression: the scope gate must NOT fire
-        // on an `Anonymous` (public) route. A logged-in browser whose session lacks
+        // The scope gate must NOT fire on an `Anonymous` (public) route.
+        // A logged-in browser whose session lacks
         // a scope that a broad `*` parent put into `required_scopes` would
         // otherwise get 403 on the app's own HTML/JS/CSS while a logged-OUT
         // visitor loads it fine — the "logged-in is worse than anonymous on
@@ -2145,8 +2144,8 @@ mod tests {
         // binding on `aud`, because `aud` names the resource server and an ID
         // token carries `aud == client_id` (which would let an ID token stand
         // in for an access token). Here the JWT has NO client_id claim and
-        // lists the route's client id in `aud` - the exact shape the removed
-        // fallback would have accepted. It must be rejected.
+        // lists the route's client id in `aud`, which must not satisfy the
+        // binding. It must be rejected.
         let jwks_signing = ed25519_dalek::SigningKey::from_bytes(&[55u8; 32]);
         let gateway_signing = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
         let srv = start_jwks_server(op_jwks_doc(&jwks_signing)).await;
@@ -2328,9 +2327,8 @@ mod tests {
 
     // ─── End-to-end positive path through resolve_auth (minor) ────────────
     //
-    // The valid-Bearer success was only exercised at the helper level. These
-    // drive the FULL resolve_auth on a User route and assert the line-110
-    // short-circuit (BearerOutcome::Allowed → AuthOutcome::Allowed{Some}).
+    // Drive the FULL resolve_auth on a User route and assert the short-circuit
+    // (BearerOutcome::Allowed → AuthOutcome::Allowed{Some}).
 
     #[ntex::test]
     async fn resolve_auth_valid_raw_op_on_user_route_allows_with_header() {
