@@ -430,16 +430,11 @@ async fn handle_request(
     // match if the user wants a fallback handler).
     let Some(resolved_resource) = resolved_resource else {
         // On the RPC rail, answer in the WORKER's error envelope rather than
-        // the gateway's generic one. Measured 2026-08-11 by
-        // `tests/e2e_dev_vs_deployed_errors.sh` (dispatcher leg): an unknown
-        // procedure id returned `{"message":"Method not found: <id>",
-        // "name":"Error","code":"NOT_FOUND"}` in `pnpm dev` and
-        // `{"error":"no resource matched"}` deployed. Different key, different
-        // text, and no `code` at all deployed - so a client that branches on
-        // `code === "NOT_FOUND"` works locally and silently stops working in
-        // production. Both shapes were defensible in isolation; two shapes for
-        // one operation is not, and the gateway is the side that has to move
-        // because the worker's envelope is what every other RPC error uses.
+        // the gateway's generic one. Dev and deployed must agree: an unknown
+        // procedure id has to carry the same `code` (`NOT_FOUND`) a client
+        // branches on, or a client works locally and silently stops working in
+        // production. The gateway is the side that moves because the worker's
+        // envelope is what every other RPC error uses.
         if let Some(resp) = rpc_predispatch_not_found(&dispatch_path) {
             return resp;
         }
@@ -512,22 +507,17 @@ async fn execute_resource_tree(
 
     // 1c. Global per-app rate limit + concurrency ceiling. Hoisted to sit with
     //     the two gates above, and for the same reason: so they bind every
-    //     action class rather than only the worker arms. These two are the
-    //     ONLY readers of the degraded registries, so while they lived inside
-    //     `handle_dispatch` / `handle_subscription_dispatch`, `Degrade` was a
-    //     no-op for `Static` and `Redirect` — the arms that serve an SPA, and
-    //     the same egress `Block` refuses above and step 8b meters as
-    //     `gateway_egress_bytes`. Billing it, refusing it when Blocked, and
-    //     never throttling it when Degraded was not a coherent set.
+    //     action class rather than only the worker arms. `Static` and `Redirect`
+    //     serve the same egress `Block` refuses above and step 8b meters as
+    //     `gateway_egress_bytes`, so billing it, refusing it when Blocked, and
+    //     never throttling it when Degraded would not be a coherent set.
     //
     //     A Degraded app pays `DEGRADE_FACTOR` tokens per request against the
     //     same bucket and gets `limit / DEGRADE_FACTOR` concurrency, so this
-    //     throttles rather than refuses: at the shipped ceilings that is ~125
-    //     rps and 12 in flight, which slows an SPA without taking it down.
+    //     throttles rather than refuses: it slows an SPA without taking it down.
     //
     //     The guard binds for the rest of this function, so it covers building
-    //     the response as well as producing it — wider than the handler-local
-    //     scope it replaces.
+    //     the response as well as producing it.
     if let Err(resp) = enforce::check_rate_limit(&state.rate_limiters, app_id) {
         return resp;
     }
@@ -574,14 +564,11 @@ async fn execute_resource_tree(
             // Same envelope decision as the 404 arm above. Native development
             // dispatch answers this case with
             // `{"message":"method PUT not allowed on /__zeroship/v1/<id>",
-            // "name":"Error","code":"FAILED_PRECONDITION"}`; the gateway used to
-            // answer `{"error":"method not allowed for this procedure kind"}`.
-            // The message is built the same way on both sides so the two tiers
-            // are byte-identical, and it is NOT the old text: the old one named
-            // the procedure kind, which dev has no way to know, so keeping it
-            // would have meant the deployed tier is the only one a client can
-            // parse. The `kind` is recoverable from the manifest; the `code` is
-            // what a client actually branches on.
+            // "name":"Error","code":"FAILED_PRECONDITION"}`. The message is
+            // built the same way on both sides so the two tiers are
+            // byte-identical: it must not name the procedure kind, which dev
+            // has no way to know. The `kind` is recoverable from the manifest;
+            // the `code` is what a client actually branches on.
             return zs_rpc_predispatch_error(
                 ntex::http::StatusCode::METHOD_NOT_ALLOWED,
                 "FAILED_PRECONDITION",
@@ -607,8 +594,7 @@ async fn execute_resource_tree(
     // 3. Auth gate. `anonymous` always passes (subject to
     //    `publicly_accessible` being set, which is enforced at
     //    validate-time). `user` require a valid
-    //    `__Host-zeroship_app_session` cookie. Richer admin-vs-user role
-    //    checks will arrive with the auth tier.
+    //    `__Host-zeroship_app_session` cookie.
     //
     //    On miss for an HTML navigation we kick off the OIDC dance via
     //    a 302 → the platform OP; API clients see a 401 with a `WWW-Authenticate`
@@ -705,16 +691,13 @@ async fn execute_resource_tree(
     //    Only mutations enter the dedupe path. Queries are inherently
     //    safe; streams and subscriptions do not use dedupe either.
     //
-    //    `None` is admitted alongside `Some(Action)`. The stated reason
-    //    used to be that the emitter omits `kind` for actions; it does
-    //    not, and never should — it writes every capability precisely so
-    //    that unknown and action are distinguishable. `None` therefore
-    //    means "hand-authored manifest declared no capability", and
-    //    admitting it here treats an undeclared procedure as the most
-    //    permissive one, which is the opposite of how the CSRF guard
-    //    above reads it. No test constructs `kind: None` on this path.
-    //    Tracked as task #202; left as-is because narrowing it changes
-    //    what raw-JS deploys get, which is a contract call.
+    //    `None` is admitted alongside `Some(Action)`. The emitter writes
+    //    every capability precisely so that unknown and action are
+    //    distinguishable, so `None` means "hand-authored manifest declared
+    //    no capability", and admitting it here treats an undeclared
+    //    procedure as the most permissive one, which is the opposite of how
+    //    the CSRF guard above reads it. Narrowing it changes what raw-JS
+    //    deploys get, which is a contract call.
     let idempotency_handle = if policy.idempotent
         && matches!(
             policy.kind,
@@ -750,15 +733,15 @@ async fn execute_resource_tree(
 
     // 8. Execute the resolved action.
     //
-    //    Metering coverage (#27): track whether THIS arm produced
-    //    gateway-originated egress — a body the worker never sees (static
-    //    asset, redirect, or the gateway's own error page for those arms).
-    //    Only such bodies are metered as `gateway_egress_bytes` in step 8b
-    //    below. The worker-proxy arms (`WorkerRpc`/`WorkerSsr`/`Rewrite`)
-    //    are NOT gateway-owned: the worker already counts its response body
-    //    as `egress_bytes`, so the gateway must never meter it (that would
-    //    double-bill the same byte — the one over-bill vector). The two
-    //    metrics are disjoint BY CONSTRUCTION (worker-body vs gateway-body).
+    //    Track whether THIS arm produced gateway-originated egress — a body
+    //    the worker never sees (static asset, redirect, or the gateway's own
+    //    error page for those arms). Only such bodies are metered as
+    //    `gateway_egress_bytes` in step 8b below. The worker-proxy arms
+    //    (`WorkerRpc`/`WorkerSsr`/`Rewrite`) are NOT gateway-owned: the worker
+    //    already counts its response body as `egress_bytes`, so the gateway
+    //    must never meter it (that would double-bill the same byte — the one
+    //    over-bill vector). The two metrics are disjoint BY CONSTRUCTION
+    //    (worker-body vs gateway-body).
     let gateway_owned_egress = matches!(
         policy.action,
         ResolvedAction::Static { .. } | ResolvedAction::Redirect { .. }
@@ -778,16 +761,14 @@ async fn execute_resource_tree(
             // Affinity routing uses `(app_id, principal)` so reconnects
             // from the same caller pin the same worker.
             //
-            // THE TRANSPARENT WS PROXY DOES NOT EXIST. Until 2026-08-12
-            // this comment named a helper in the `proxy` module as the
-            // place it was wired. The module is real; that function was
-            // in no file in this repo, and the claim contradicted
-            // `handle_subscription_dispatch` below, which says so plainly
-            // and returns 501. Deployed subscriptions are a stub; only
-            // single-tenant `zeroship serve` speaks WebSocket.
-            // Bounded: `docs/reference/rpc.md` states subscriptions are
-            // not part of the public client surface, so no creator can
-            // reach this today. Latent, not live.
+            // There is no transparent WS proxy: the gateway does not forward
+            // the upgraded connection (that needs hijacking the TCP stream
+            // from ntex), so `handle_subscription_dispatch` below returns 501.
+            // Deployed subscriptions are a stub; only single-tenant
+            // `zeroship serve` speaks WebSocket. Bounded:
+            // `docs/reference/rpc.md` states subscriptions are not part of the
+            // public client surface, so no creator can reach this today.
+            // Latent, not live.
             if matches!(policy.kind, Some(ProcedureKind::Subscription)) {
                 // The 501 stub is the gateway's own answer, not the app's.
                 (
@@ -876,7 +857,7 @@ async fn execute_resource_tree(
         }
     };
 
-    // 8b. Gateway egress metering (#27). For gateway-owned arms only, record
+    // 8b. Gateway egress metering. For gateway-owned arms only, record
     //     the served body length as `gateway_egress_bytes` against the
     //     route's server-resolved `app_id` (never a client value).
     //
@@ -890,7 +871,7 @@ async fn execute_resource_tree(
     //         DELIVERED bytes itself (incremental accrual + a final delta on
     //         completion/disconnect) and stamps `EGRESS_METERED_HEADER`;
     //         `record_gateway_egress` sees the marker and skips the up-front
-    //         size so a stream is never double-counted (finding #2).
+    //         size so a stream is never double-counted.
     //
     //     The bump is cheap — `Meter::increment` takes an `RwLock` read plus a
     //     per-app `Mutex` for the custom metric (uncontended, no await, no
@@ -926,7 +907,7 @@ async fn execute_resource_tree(
 }
 
 /// Record a gateway-originated response's body length as
-/// `gateway_egress_bytes` for `app_id` (metering coverage #27).
+/// `gateway_egress_bytes` for `app_id`.
 ///
 /// Called ONLY for gateway-owned arms (static asset / redirect / the
 /// gateway error page those arms emit) — bodies the worker never sees. The
@@ -939,7 +920,7 @@ async fn execute_resource_tree(
 /// redirect, the static arm's 404/503 error bodies) — `BodySize::Sized(n)` is
 /// the exact delivered length there. The streamed-static (`SizedStream`) path
 /// instead meters DELIVERED bytes inside its own drain (a disconnect bills
-/// only what was written, not the intended size — finding #2) and stamps
+/// only what was written, not the intended size) and stamps
 /// `EGRESS_METERED_HEADER`; we detect that marker, strip it, and skip the
 /// up-front size so a stream is never double-counted.
 ///
@@ -1653,7 +1634,7 @@ fn collect_forwarded_headers(headers: &ntex::http::HeaderMap) -> Vec<(String, St
 /// Reconstruct the URL the worker's JS handler sees, re-appending the raw
 /// query string the ntex `{tail*}` path extractor drops. Preserving the query
 /// is load-bearing: `query()` RPC input rides in `?input=<base64url>` and apps
-/// read `request.url` query params directly. See ISS-70.
+/// read `request.url` query params directly.
 fn forward_url(scheme: &str, host: &str, tail: &str, query: Option<&str>) -> String {
     match query {
         Some(q) if !q.is_empty() => format!("{scheme}://{host}/{tail}?{q}"),
@@ -1702,7 +1683,7 @@ async fn handle_dispatch(
     // ntex `{tail*}` extractor yields the PATH only, so the raw query has to be
     // re-appended here — dropping it makes every GET query-RPC arrive with
     // `input: undefined` (→ 400 INVALID_ARGUMENT) and silently strips app query
-    // params (ISS-70).
+    // params.
     // The worker sees the browser-visible URL, not the gateway-to-edge
     // transport. A TLS-terminating edge legitimately forwards over HTTP.
     let host = req
@@ -1757,12 +1738,6 @@ async fn handle_dispatch(
     // `user` and answered 401, or the worker's own declared-policy fence
     // refused before creator code ran (`crates/zeroship-worker/src/policy.rs`).
     // API clients still see the 401 verbatim.
-    //
-    // THIS COMMENT SAID resource-tree `user` routes "never reach the worker",
-    // on the strength of `resolve_auth` short-circuiting them upstream. That
-    // was a description of the gateway's behaviour, not an invariant anything
-    // enforced, and the worker now refuses them itself rather than trusting it.
-    // The redirect is the right answer either way, so no arm changes here.
     //
     // Both arms REPLACE the worker's answer with the gateway's own, so both
     // are `Gateway`-origin. That matters beyond bookkeeping for the redirect:
@@ -1923,8 +1898,8 @@ async fn handle_auth_callback(
     let Some((app_id, route)) = state.routes.lookup_by_name(&app_name) else {
         return render_callback_error("app not found for this host");
     };
-    // The interactive flow now issues the SAME signed `zeroship-sess+jwt` cookie the
-    // SDK popup flow does (BFF slice R1b) — so the cookie arm has ONE
+    // The interactive flow issues the SAME signed `zeroship-sess+jwt` cookie the
+    // SDK popup flow does — so the cookie arm has ONE
     // local-verify path. We need the route's per-app `oauth_client_id` (the
     // signed cookie's `app` binding) + `sector_identifier` (the `pws_`
     // derivation). An app with no OAuth client provisioned can't have a signed
@@ -2039,7 +2014,7 @@ async fn handle_auth_callback(
     };
     // Release the pooled connection before building the response — no
     // further DB work happens on this path. `session.id` is the audit row id;
-    // it is no longer used as the cookie value (BFF R1b: the cookie is signed).
+    // it is not the cookie value (the cookie is signed).
     let _ = session.id;
     drop(conn);
 
@@ -2425,7 +2400,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // ISS-70: the worker-forward URL must carry the query string. Dropping it
+    // The worker-forward URL must carry the query string. Dropping it
     // makes every GET `query()` RPC arrive with `input: undefined` (the input
     // rides in `?input=<base64url>`) and silently strips app query params.
     // -----------------------------------------------------------------------
@@ -2479,7 +2454,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // L7: platform-reserved headers must be scrubbed from the worker
+    // Platform-reserved headers must be scrubbed from the worker
     // dispatch envelope so a forged inbound ZeroShip-User / Authorization /
     // x-zs-* cannot ride into app JS `request.headers`.
     // -----------------------------------------------------------------------
@@ -2580,14 +2555,11 @@ mod tests {
 
     #[test]
     fn compute_bucket_id_ip_ignores_the_source_port_of_one_client() {
-        // The reviewer's report, end to end through a real `HttpRequest` and
-        // real header parsing rather than by reading code.
-        //
         // Two requests from ONE client on two connections differ only in the
-        // ephemeral source port. Before the fix each got its OWN bucket
-        // (`192.0.2.43:40001` and `192.0.2.43:40002` were distinct keys), so a
-        // client that reconnected drew a fresh allowance every time and the
-        // per-IP limit limited nothing. They must share one bucket.
+        // ephemeral source port. If the source port were part of the bucket
+        // key (`192.0.2.43:40001` and `192.0.2.43:40002` were distinct), a
+        // client that reconnected would draw a fresh allowance every time and
+        // the per-IP limit would limit nothing. They must share one bucket.
         let from_port = |port: u16| {
             let req = ntex::web::test::TestRequest::default()
                 .header("x-forwarded-for", format!("192.0.2.43:{port}"))
@@ -2608,8 +2580,8 @@ mod tests {
         //
         // rps=1, so the bucket admits one request and refuses the next within
         // the same second. If the two connections key differently they each
-        // get their own allowance and BOTH are admitted -- which is what the
-        // limiter did before the fix, for every reconnect, forever.
+        // get their own allowance and BOTH are admitted -- the per-IP limit
+        // would not bind across reconnects.
         use crate::enforce::PerRuleRateLimitRegistry;
         use zeroship_bundle::RateLimit;
 
@@ -2669,19 +2641,18 @@ mod tests {
 
     #[test]
     fn client_ip_ignores_a_forwarded_header_entirely() {
-        // ntex reads `Forwarded` BEFORE `X-Forwarded-For` (ntex 3.7.2
-        // web/info.rs:35-59 runs ahead of :101), so a test matrix built only
-        // around XFF cannot catch this.
+        // ntex reads `Forwarded` BEFORE `X-Forwarded-For`, so a test matrix
+        // built only around XFF cannot catch this.
         //
-        // Measured against this deployment's own proxy (caddy:2-alpine, the
-        // image and `reverse_proxy` shape of deploy/ops/Caddyfile, probed
-        // 2026-08-18): Caddy REPLACES `X-Forwarded-For` with the peer it
-        // accepted -- a caller's `X-Forwarded-For: 1.2.3.4` arrived as
-        // `127.0.0.1` -- but it neither sets nor strips `Forwarded`, and
-        // passed `Forwarded: for=9.9.9.9` through verbatim. So the one header
-        // ntex preferred is the one the caller still controls, and preferring
-        // it handed the caller their own bucket. Control and auth read
-        // `X-Forwarded-For` only; this is the gateway agreeing with them.
+        // This deployment's own proxy (caddy:2-alpine, the image and
+        // `reverse_proxy` shape of deploy/ops/Caddyfile) REPLACES
+        // `X-Forwarded-For` with the peer it accepted -- a caller's
+        // `X-Forwarded-For: 1.2.3.4` arrives as `127.0.0.1` -- but it neither
+        // sets nor strips `Forwarded`, and passes `Forwarded: for=9.9.9.9`
+        // through verbatim. So the one header ntex prefers is the one the
+        // caller still controls, and preferring it hands the caller their own
+        // bucket. Control and auth read `X-Forwarded-For` only; this is the
+        // gateway agreeing with them.
         let req = ntex::web::test::TestRequest::default()
             .header("forwarded", "for=1.2.3.4")
             .header("x-forwarded-for", "203.0.113.7")
@@ -2860,14 +2831,14 @@ mod tests {
         );
     }
 
-    /// On an `auth: "anonymous"` resource the caller used to control the
-    /// `per: "session"` discriminator outright. `extract_session_cookie`
+    /// On an `auth: "anonymous"` resource the caller must not control the
+    /// `per: "session"` discriminator. `extract_session_cookie`
     /// returns the raw `__Host-zeroship_app_session` value without
     /// verifying anything, and an anonymous route serves happily without a
     /// session — `resolve_auth` answers `Allowed { user_header: None }`
-    /// rather than rejecting. So rotating the cookie minted a fresh
-    /// `TokenBucket` every request and the creator's declared cap never
-    /// bound: 50 of 50 admitted against `rps: 1`.
+    /// rather than rejecting. Rotating the cookie would otherwise mint a
+    /// fresh `TokenBucket` every request and the creator's declared cap would
+    /// never bind.
     ///
     /// `identity_verified: false` is the shape of that request — the gate
     /// resolved nobody — and the caller must land in one IP bucket.
@@ -2996,8 +2967,7 @@ mod tests {
         // SEC-2: the dispatch layer rejects (400) any path carrying a
         // traversal / empty-interior-segment form a browser's `new URL` would
         // rewrite, and otherwise forwards the CANONICAL form (so the worker
-        // re-parses the exact path the gateway matched auth on). Pre-fix the
-        // helper forwards the raw path and never rejects → RED.
+        // re-parses the exact path the gateway matched auth on).
         for traversal in [
             "/api/foo/../admin",
             "/api/%2e/admin",
@@ -3050,8 +3020,7 @@ mod tests {
             .lookup_resource("/__zeroship/v1/listTodos")
             .expect("matches rpc:listTodos");
         assert_eq!(p.kind, Some(ProcedureKind::Query));
-        // Bare /_rpc/ paths are no longer dispatched — `/__zeroship/v1/` is
-        // the only RPC wire prefix.
+        // `/__zeroship/v1/` is the only RPC wire prefix.
         assert!(c.lookup_resource("/_rpc/listTodos").is_none());
     }
 
@@ -3659,22 +3628,16 @@ mod tests {
     // ----------------------------------------------------------------------
     // Host-based routing has NO platform-internal escape hatch.
     //
-    // The gateway used to special-case `auth.zeroship.ai` /
-    // `auth.zeroship.localhost` and proxy those hosts to the auth service.
-    // Two anchored-match tests guarded that arm, because a loose
-    // prefix/substring compare let a crafted Host (`auth.zeroship.ai.evil.com`,
-    // `authx.zeroship.ai`, `evil-auth.zeroship.ai`) reach a platform-internal
-    // upstream (finding P2-A2). The arm is gone: the gateway serves apps on the
-    // worker and nothing else, and `auth.<domain>` reaches the auth service
-    // through the edge proxy (deploy/ops/Caddyfile), never through here.
-    //
-    // The test below replaces those two. It does not re-check anchoring -
-    // there is no longer a name to anchor against - it records that the
-    // formerly-special hosts now resolve as ordinary app names.
+    // The gateway serves apps on the worker and nothing else, and
+    // `auth.<domain>` reaches the auth service through the edge proxy
+    // (deploy/ops/Caddyfile), never through here. A crafted Host
+    // (`auth.zeroship.ai.evil.com`, `authx.zeroship.ai`,
+    // `evil-auth.zeroship.ai`) must resolve as an ordinary app name and never
+    // reach a platform-internal upstream.
     //
     // WHAT IT DOES NOT CATCH, so nobody reads it as a guard it is not: it
     // calls `extract_app_name` directly, not `handle_subdomain`. Someone who
-    // re-added a host special-case ABOVE the `extract_app_name` call would not
+    // added a host special-case ABOVE the `extract_app_name` call would not
     // turn this red. Only the absence of such an arm keeps the property, and
     // that is a review question, not something asserted here. What this does
     // pin is the layer below: name resolution itself has no reserved word, so
@@ -3689,9 +3652,8 @@ mod tests {
 
     #[test]
     fn no_host_bypasses_app_name_resolution_for_a_platform_service() {
-        // The formerly-special hosts now resolve like any other subdomain:
-        // to an app NAME that must be looked up in the registry. `auth` is a
-        // name, not a route to `crates/auth`.
+        // `auth` resolves like any other subdomain: to an app NAME that must be
+        // looked up in the registry. It is a name, not a route to `crates/auth`.
         for host in [
             "auth.zeroship.ai",
             "AUTH.ZEROSHIP.AI",
@@ -4015,9 +3977,9 @@ mod tests {
     }
 
     /// A route whose manifest serves a publicly-accessible STATIC resource at
-    /// `/about`. Used to prove the spend gate covers the static-asset path
-    /// (#3): a Blocked app must 402 BEFORE serving static egress, not fall
-    /// through to the static server.
+    /// `/about`. Used to prove the spend gate covers the static-asset path:
+    /// a Blocked app must 402 BEFORE serving static egress, not fall through
+    /// to the static server.
     fn static_spend_route(
         spend_state: zeroship_core::types::SpendState,
     ) -> zeroship_core::types::RouteEntry {
@@ -4120,9 +4082,8 @@ mod tests {
     /// Degrade must throttle a STATIC resource, exactly as Block refuses one.
     ///
     /// `check_rate_limit` and `acquire_concurrency` are the only readers of the
-    /// degraded registries, and they ran only inside `handle_dispatch` /
-    /// `handle_subscription_dispatch`. The `Static` and `Redirect` arms return
-    /// from the action match without reaching either, so a Degraded app served
+    /// degraded registries. The `Static` and `Redirect` arms must reach them
+    /// rather than return from the action match, or a Degraded app serves
     /// unthrottled static egress — the same egress `Block` refuses one gate
     /// earlier and step 8b meters as `gateway_egress_bytes`.
     ///
@@ -4210,12 +4171,12 @@ mod tests {
         }
     }
 
-    /// #3 (RED→GREEN): a Blocked app serving a STATIC resource must 402 BEFORE
-    /// any static egress. Pre-fix, the spend gate lived only in the worker
-    /// dispatch path, so `ResolvedAction::Static` fell straight through to the
-    /// static server (egress the platform eats). This drives the REAL
-    /// `handle_request` → `execute_resource_tree` → static action against a
-    /// Blocked route and asserts the 402/`SPEND_LIMIT` envelope fires first.
+    /// A Blocked app serving a STATIC resource must 402 BEFORE any static
+    /// egress. The spend gate must cover `ResolvedAction::Static` rather than
+    /// let it fall straight through to the static server (egress the platform
+    /// eats). This drives the REAL `handle_request` → `execute_resource_tree`
+    /// → static action against a Blocked route and asserts the
+    /// 402/`SPEND_LIMIT` envelope fires first.
     #[compio::test]
     async fn over_limit_static_asset_blocked_at_gateway() {
         use zeroship_core::types::SpendState;
@@ -4286,7 +4247,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Metering coverage (#27) — gateway egress + the no-double-count partition
+    // Gateway egress + the no-double-count partition
     // -----------------------------------------------------------------------
 
     /// THE load-bearing regression (§2.4): the egress ownership partition.
@@ -4297,10 +4258,6 @@ mod tests {
     /// `egress_bytes` (which the WORKER owns). This drives the REAL
     /// `handle_request` → `execute_resource_tree` → static arm against the
     /// SAME `Arc<Meter>` in `GateState`, then drains it.
-    ///
-    /// RED pre-fix: the gateway had no meter and recorded nothing, so
-    /// `gateway_egress_bytes` is absent. GREEN post-fix: the static arm
-    /// records the served body length, and `egress_bytes` stays untouched.
     #[compio::test]
     async fn static_response_meters_gateway_egress_not_worker_egress() {
         use zeroship_core::types::SpendState;
@@ -4391,7 +4348,7 @@ mod tests {
     /// A worker RPC route that caps input at `max` bytes, so a body over the
     /// cap trips the gateway's 413 early-return arm in `execute_resource_tree`
     /// (a gateway-edge error envelope) BEFORE any worker proxy. Used to pin
-    /// finding #1: gateway error/4xx envelopes are platform overhead and are
+    /// that gateway error/4xx envelopes are platform overhead and are
     /// deliberately NOT metered as `gateway_egress_bytes`.
     fn max_input_route(max: u32) -> zeroship_core::types::RouteEntry {
         use zeroship_bundle::{ProcedureKind, ResourceEntry};
@@ -4423,7 +4380,7 @@ mod tests {
         }
     }
 
-    /// FINDING #1 (pinning): a gateway-EMITTED error envelope (here a 413 from
+    /// A gateway-EMITTED error envelope (here a 413 from
     /// the `max_input_bytes` early-return arm — a body the worker never sees)
     /// is PLATFORM OVERHEAD and must NOT emit `gateway_egress_bytes`. The
     /// gateway only bills successful static + redirect bodies; error/4xx/5xx/204
@@ -4625,7 +4582,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // G2 — faithful account-suspension enforcement at the gateway edge.
+    // Faithful account-suspension enforcement at the gateway edge.
     //
     // Drives the REAL path: a `RouteEntry` carrying the pulled `account_state`
     // (and `spend_state`) is pushed through the REAL `RouteCache::update`, then

@@ -1,21 +1,18 @@
 //! `/__zeroship/auth/session` (POST + GET) — the ONE identity-session resource of the
-//! `@zeroship/auth` SDK, **BFF redesign slice R1b**
-//! (`2026-05-30-auth-bff-session-redesign` §2.2 + the signed-cookie addendum).
-//!
-//! **`POST /__zeroship/auth/token` is GONE — merged into `POST /__zeroship/auth/session`.**
+//! `@zeroship/auth` SDK.
 //!
 //! The browser receives **only an identity projection + HttpOnly cookies** —
 //! NO power/wrapper access token, NO scopes, NO JWT in any response body. The
 //! `__Host-zeroship_app_session` cookie is a gateway-SIGNED, short-lived (~15 min)
 //! `zeroship-sess+jwt` identity assertion verified LOCALLY on every request (no
-//! per-request DB read). The server-held refresh family (the anchor) stays as
-//! the BFF custody store; the platform is the resource server.
+//! per-request DB read). The server-held refresh family (the anchor) is the
+//! custody store; the platform is the resource server.
 //!
 //! - **`POST /__zeroship/auth/session`** runs the PKCE code→token exchange on the
-//!   browser's behalf, then: (a) writes a `zeroship.gateway_sessions` ROW — KEPT as
-//!   the revocation/audit record + `auth_time`/`amr` source, NO LONGER read on
-//!   the per-request path — AND keeps creating the encrypted server-held
-//!   refresh-family anchor (`zeroship.app_session_anchors`); (b) ISSUES the signed
+//!   browser's behalf, then: (a) writes a `zeroship.gateway_sessions` ROW — the
+//!   revocation/audit record + `auth_time`/`amr` source, not read on the
+//!   per-request path (the signed cookie is) — AND keeps creating the encrypted
+//!   server-held refresh-family anchor (`zeroship.app_session_anchors`); (b) ISSUES the signed
 //!   `__Host-zeroship_app_session` cookie (`zeroship-sess+jwt`, Lax, ~15m) + the
 //!   `__Host-zeroship_app_anchor` cookie (Strict, 30d, reload-recovery) + the
 //!   `zs.<host>.is.authenticated` breadcrumb; (c) returns ONLY
@@ -41,9 +38,9 @@
 //!
 //! Concurrent `?mint=1` callers for the same anchor on one worker thread
 //! coalesce into ONE OP refresh via a per-thread in-process single-flight
-//! keyed on `anchor_id` ([`crate::anchors::with_single_flight`]). With the
-//! browser wrapper gone (BFF §3.1) there is no cached-wrapper short-circuit;
-//! reload-storm coalescing is the family-rotation single-flight alone. **NO db
+//! keyed on `anchor_id` ([`crate::anchors::with_single_flight`]). There is no
+//! cached-wrapper short-circuit; reload-storm coalescing is the
+//! family-rotation single-flight alone. **NO db
 //! connection or lock is held across the OP HTTP call**: the rotation future
 //! checks a pooled connection out, reads the anchor, RELEASES it, does the
 //! OP refresh, then checks another out to persist.
@@ -73,7 +70,7 @@ pub(crate) struct RouteCtx {
     /// `zeroship.gateway_sessions` + `zeroship.app_session_anchors` rows,
     /// whose `app_id` columns are `text` and hold `app_id.as_str()`. Keying
     /// on the immutable app id (the slug can be renamed) is what lets a
-    /// `/token`-minted cookie validate on the real SPA→app dispatch path.
+    /// session-minted cookie validate on the real SPA→app dispatch path.
     pub(crate) app_id: AppId,
     pub(crate) host: String,
     pub(crate) client_id: String,
@@ -308,9 +305,8 @@ struct TokenRequest {
     iss: Option<String>,
 }
 
-/// `POST /__zeroship/auth/session` — code→token exchange, then identity-only response
-/// (BFF redesign §2.2 + slice R1b). This is the POST method of the MERGED
-/// identity-session resource (the old `POST /__zeroship/auth/token` is gone).
+/// `POST /__zeroship/auth/session` — code→token exchange, then identity-only response.
+/// This is the POST method of the merged identity-session resource.
 ///
 /// The browser receives ONLY `{ user, expires_at }` (relay-swapped email,
 /// `pws_` id) + two HttpOnly cookies: the SIGNED `__Host-zeroship_app_session`
@@ -462,23 +458,15 @@ pub(crate) async fn mint_session_from_code(
     //    `expected_c_hash_input` is None, NOT `Some(code)`. `c_hash` is defined
     //    only for the AUTHORIZATION-endpoint id_token of the implicit/hybrid
     //    flows (OIDC Core 3.3.2.11); the TOKEN-endpoint id_token of the
-    //    authorization-code flow carries none, and the platform OP does not
-    //    emit one: `crates/zeroship-auth/src/oidc/issuer.rs` mints `at_hash` and no
-    //    `c_hash` at all (measured: 0 occurrences in that file, against 3 for
-    //    `at_hash`). `c_hash` DOES appear elsewhere under `crates/auth`, and
-    //    every occurrence agrees with this — the test mock provider sets it to
-    //    `None` citing OIDC Core 3.1.3.6, and the Google RP client passes
-    //    `None` for the same reason. It is not absent from the tree, it is
-    //    absent from what our OP issues.
-    //    Requiring it here made `verify_id_token` fail CLOSED on every single
-    //    end-user login through this endpoint:
-    //      400 {"error":"invalid_token","error_description":"id_token verification failed"}
-    //      gate.log: "c_hash missing while authorization code binding was requested"
-    //    measured by tests/e2e_dev_vs_deployed_login.sh against a live OP. The
-    //    sibling RP path already passes None for exactly this reason and says so
-    //    (`crate::oidc_rp::exchange_code`); the two call sites had drifted.
-    //    Code injection is blocked by mandatory S256 PKCE, which is enforced by
-    //    both the gateway (`browser_auth::authorize`) and the OP.
+    //    authorization-code flow carries none, and the platform OP does not emit
+    //    one: `crates/zeroship-auth/src/oidc/issuer.rs` mints `at_hash` and no
+    //    `c_hash`. The test mock provider sets `c_hash` to `None` citing OIDC
+    //    Core 3.1.3.6, and the Google RP client passes `None` for the same
+    //    reason, matching the sibling RP path (`crate::oidc_rp::exchange_code`).
+    //    Requiring it here makes `verify_id_token` fail CLOSED on every end-user
+    //    login through this endpoint. Code injection is blocked by mandatory S256
+    //    PKCE, which is enforced by both the gateway (`browser_auth::authorize`)
+    //    and the OP.
     let Some(id_token) = tokens.id_token.as_deref() else {
         return error_response(
             HttpResponse::BadRequest(),
@@ -566,8 +554,8 @@ pub(crate) async fn mint_session_from_code(
     let amr = claims.amr.clone().unwrap_or_default();
 
     // 6. Write the gateway_sessions ROW (the revocation/audit record + the
-    //    auth_time/amr source — BFF R1b: NO LONGER read on the per-request path;
-    //    the signed cookie is the live credential) AND the reload-recovery
+    //    auth_time/amr source, not read on the per-request path — the signed
+    //    cookie is the live credential) AND the reload-recovery
     //    anchor, on one pooled connection. The row carries the GLOBAL user id
     //    (internal), the consent scopes, and the id-token auth_time/amr; the
     //    anchor carries the encrypted refresh family. NO connection is held
@@ -586,9 +574,9 @@ pub(crate) async fn mint_session_from_code(
             Err(e) => return db_error(e),
         };
 
-        // 6a. The gateway session — KEPT as the revocation/audit record (+
-        //     auth_time/amr source). NO LONGER read per request; the signed
-        //     cookie is the live credential.
+        // 6a. The gateway session — the revocation/audit record (+ auth_time/amr
+        //     source). The per-request path reads the signed cookie, not this
+        //     row; the cookie is the live credential.
         let session = match crate::sessions::create(
             &mut conn,
             &crate::sessions::NewSession {
@@ -647,10 +635,10 @@ pub(crate) async fn mint_session_from_code(
                 );
             }
         };
-        // `session.id` (the gateway_sessions row) is KEPT as the
-        // revocation/audit record + the auth_time/amr source — it is NO LONGER
-        // read on the per-request path (the signed cookie is self-contained;
-        // revocation is the per-app family marker). `_session_id` documents that.
+        // `session.id` (the gateway_sessions row) is the revocation/audit
+        // record + the auth_time/amr source; the per-request path does not read
+        // it (the signed cookie is self-contained; revocation is the per-app
+        // family marker). `_session_id` documents that.
         let _session_id = session.id;
 
         // 6c. Reassert the per-app pairwise mapping in
@@ -663,7 +651,7 @@ pub(crate) async fn mint_session_from_code(
         //     learn each `(client_id, pws_)` to revoke — would write ZERO markers
         //     for a cookie-only user, so the victim's live
         //     `__Host-zeroship_app_session` cookie would outlive the reset for its
-        //     full TTL (security finding F1). A mapping write failure must fail
+        //     full TTL. A mapping write failure must fail
         //     the mint because account deletion and password reset enumerate
         //     these rows to recall access-only and cookie credentials.
         if let Err(e) =
@@ -726,8 +714,8 @@ pub(crate) async fn mint_session_from_code(
         }))
 }
 
-/// `GET /__zeroship/auth/session[?mint=1]` — the identity projection (BFF redesign
-/// §2.2). Returns ONLY `{ user, expires_at }` (relay-swapped email, `pws_` id);
+/// `GET /__zeroship/auth/session[?mint=1]` — the identity projection.
+/// Returns ONLY `{ user, expires_at }` (relay-swapped email, `pws_` id);
 /// NO JWT in any body; the real email never appears.
 ///
 /// Read path: the signed `__Host-zeroship_app_session` cookie is verified
@@ -844,10 +832,9 @@ pub async fn session(req: HttpRequest, state: State<Arc<GateState>>) -> HttpResp
             Ok(c) => c,
             Err(e) => return db_error(e),
         };
-        // RLS-scoped to `route.app_id` (changeset 0025): an anchor cookie
-        // replayed against the wrong app resolves to `None`, so this READ both
-        // loads the anchor AND enforces the former post-hoc
-        // `anchor.app_id == route.app_id` bind check.
+        // RLS-scoped to `route.app_id`: an anchor cookie replayed against the
+        // wrong app resolves to `None`, so this READ both loads the anchor AND
+        // enforces the `anchor.app_id == route.app_id` bind check.
         match anchors::read_live(&mut conn, &route.app_id, anchor_id).await {
             Ok(Some(a)) => a,
             Ok(None) => return login_required(&route.host),
@@ -1159,17 +1146,15 @@ async fn do_refresh(
     // `c_hash` and `nonce` really are inapplicable here: both bind to the
     // authorization request, and a refresh grant has neither a `code` nor a
     // nonce. `at_hash` is DIFFERENT - it binds to the ACCESS TOKEN, which a
-    // refresh grant does return, and which we are holding. This used to pass
-    // `None` for all three under one rationale ("on a refresh grant there is no
-    // `code`"), which is true of c_hash and false of at_hash. That had two
-    // costs: the binding went unchecked, and because the verifier fails closed
-    // on a binding claim it cannot check (`AtHashInputMissing`), an OP that
-    // mints a spec-conformant `at_hash` on its refresh grant was REJECTED.
-    // Our own OP returns `id_token: None` on refresh (`oidc/refresh.rs`), so
-    // this never fired against the native provider - which is why nothing
-    // noticed until the mock OP started binding its rotated token the way the
-    // real issuer binds every token it mints (`oidc/issuer.rs`, at_hash is
-    // unconditional there).
+    // refresh grant does return, and which we are holding. Passing `None` for
+    // all three under one rationale ("on a refresh grant there is no `code`")
+    // is true of c_hash and false of at_hash: it leaves the binding unchecked,
+    // and because the verifier fails closed on a binding claim it cannot check
+    // (`AtHashInputMissing`), an OP that mints a spec-conformant `at_hash` on
+    // its refresh grant is REJECTED. Our own OP returns `id_token: None` on
+    // refresh (`oidc/refresh.rs`), so this does not fire against the native
+    // provider; the real issuer binds every token it mints (`oidc/issuer.rs`,
+    // at_hash is unconditional there).
     let id_claims: Option<zeroship_core::oidc_verify::TokenClaims> =
         match tokens.id_token.as_deref() {
             Some(id_token) => match zeroship_core::oidc_verify::verify_id_token(
@@ -1375,7 +1360,7 @@ fn now_secs() -> i64 {
         .unwrap_or(0)
 }
 
-/// Mint the gateway-SIGNED `zeroship-sess+jwt` session cookie (BFF slice R1b) from the
+/// Mint the gateway-SIGNED `zeroship-sess+jwt` session cookie from the
 /// resolved identity facts, and return the `Set-Cookie` value. The cookie is
 /// self-contained: it carries the per-app `pws_` subject, the relay-alias email
 /// (or empty — fail closed), `name`/`avatar`/`email_verified`, the granted
@@ -1489,9 +1474,8 @@ pub async fn issue_interactive_session_cookie(
     // (`password_reset::complete`) learns each `(client_id, pws_)` family to
     // revoke by JOINing `app_user_identities`; without this row the INTERACTIVE
     // login cookie minted here would survive a reset for its full TTL; the
-    // cookie arm's SOLE revocation gate is that family marker (security finding
-    // 0.0, the F1 missed sibling). Fail closed when the durable mapping cannot
-    // be recorded.
+    // cookie arm's SOLE revocation gate is that family marker. Fail closed when
+    // the durable mapping cannot be recorded.
     let pool = crate::db::checkout(db_cfg)
         .await
         .map_err(|e| format!("identity mapping pool checkout failed: {e}"))?;
@@ -1543,7 +1527,7 @@ fn credential_authentication_allows(
         .credential_authentication_allowed(client_id, subject, issued_at, freshness_budget)
 }
 
-/// The browser-facing identity projection (BFF redesign §2.2). Carries ONLY
+/// The browser-facing identity projection. Carries ONLY
 /// `{ id: pws_, email: relay-alias, name, avatar, email_verified }`. **No
 /// scopes** — the SPA holds no capability and makes no authz decision. `email`
 /// is the relay alias or **empty string** (fail closed — `None` ⇒ `""`), never
@@ -1658,11 +1642,10 @@ mod user_projection_tests {
 
 #[cfg(test)]
 mod session_csrf_tests {
-    //! Regression for L1 (2026-06-02 auth-pipeline security review):
     //! `GET /session?mint=1` rotates the server-held refresh family — a
-    //! state-changing op — yet originally tolerated a missing `Origin`
-    //! (`require_origin=false`), leaving `X-ZS-Auth` as the sole CSRF gate.
-    //! `session_csrf_guard` pins the post-fix policy: a mint request MUST
+    //! state-changing op — so it must never tolerate a missing `Origin`
+    //! (`require_origin=false`), which would leave `X-ZS-Auth` as the sole CSRF
+    //! gate. `session_csrf_guard` enforces the policy: a mint request MUST
     //! carry both `X-ZS-Auth` and a present same-origin `Origin`.
     use super::session_csrf_guard;
     use ntex::web::test::TestRequest;
