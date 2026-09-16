@@ -240,10 +240,9 @@ pub async fn evaluate<D: SqlSession>(
 /// Evaluate ALL of a migration's preconditions, in declaration order,
 /// BEFORE its `up` runs - the **Postgres** precondition path behind
 /// [`PostgresBackend::evaluate_preconditions`](super::PostgresBackend),
-/// reached only via the backend seam (multi-engine abstraction). Folds the
-/// former generic-executor `evaluate_preconditions` loop into the PG leaf, so the
-/// `&Client` + per-check `pg_query`/`information_schema` evaluation never sits in
-/// the dialect-agnostic executor body.
+/// reached only via the backend seam (multi-engine abstraction). The
+/// `&Client` + per-check `pg_query`/`information_schema` evaluation lives here
+/// in the PG leaf, never in the dialect-agnostic executor body.
 ///
 /// All evaluation is read-only (parameterized catalog reads + a guarded single
 /// read-only `SELECT` under the migrator role).

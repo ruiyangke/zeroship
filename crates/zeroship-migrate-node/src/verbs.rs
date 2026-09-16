@@ -315,19 +315,18 @@ pub async fn apply_ir_with_locked_backend<B: MigrationBackend>(
     let charter_refs = charter_layer_refs(charter_layers);
     // The project lock comes FIRST, so it serializes the journal bootstrap too.
     //
-    // Bootstrapping ahead of the lock left the one window nothing serialized: on a
-    // first deploy the journal namespace, its types, its table and its triggers do
-    // not exist yet, so two processes both found them absent and both tried to
-    // create them. PostgreSQL's `CREATE ... IF NOT EXISTS` is racy exactly there,
-    // and the loser surfaced a raw catalog error -- `duplicate key value violates
-    // unique constraint "pg_type_typname_nsp_index"`, `tuple concurrently
-    // updated`, or a trigger that "already exists" -- which reads like corruption
-    // but is only contention. Measured three times out of three before this order
-    // changed.
+    // The bootstrap needs that serialization: on a first deploy the journal
+    // namespace, its types, its table and its triggers do not exist yet, and
+    // PostgreSQL's `CREATE ... IF NOT EXISTS` is racy exactly there. Without
+    // the lock two processes both find them absent and both try to create
+    // them, and the loser surfaces a raw catalog error -- `duplicate key value
+    // violates unique constraint "pg_type_typname_nsp_index"`, `tuple
+    // concurrently updated`, or a trigger that "already exists" -- which reads
+    // like corruption but is only contention.
     //
-    // Nothing in the acquisition needs the journal: it is an advisory lock keyed
-    // on the project id. Taking it first also means a failed acquisition no longer
-    // leaves journal objects behind for a deploy that never ran.
+    // Nothing in the acquisition needs the journal: it is an advisory lock
+    // keyed on the project id. Taking it first also means a failed acquisition
+    // leaves no journal objects behind for a deploy that never ran.
     backend
         .acquire_project_lock(cfg)
         .await
@@ -707,19 +706,18 @@ pub async fn rollback_with_locked_backend<B: MigrationBackend>(
     let charter_refs = charter_layer_refs(charter_layers);
     // The project lock comes FIRST, so it serializes the journal bootstrap too.
     //
-    // Bootstrapping ahead of the lock left the one window nothing serialized: on a
-    // first deploy the journal namespace, its types, its table and its triggers do
-    // not exist yet, so two processes both found them absent and both tried to
-    // create them. PostgreSQL's `CREATE ... IF NOT EXISTS` is racy exactly there,
-    // and the loser surfaced a raw catalog error -- `duplicate key value violates
-    // unique constraint "pg_type_typname_nsp_index"`, `tuple concurrently
-    // updated`, or a trigger that "already exists" -- which reads like corruption
-    // but is only contention. Measured three times out of three before this order
-    // changed.
+    // The bootstrap needs that serialization: on a first deploy the journal
+    // namespace, its types, its table and its triggers do not exist yet, and
+    // PostgreSQL's `CREATE ... IF NOT EXISTS` is racy exactly there. Without
+    // the lock two processes both find them absent and both try to create
+    // them, and the loser surfaces a raw catalog error -- `duplicate key value
+    // violates unique constraint "pg_type_typname_nsp_index"`, `tuple
+    // concurrently updated`, or a trigger that "already exists" -- which reads
+    // like corruption but is only contention.
     //
-    // Nothing in the acquisition needs the journal: it is an advisory lock keyed
-    // on the project id. Taking it first also means a failed acquisition no longer
-    // leaves journal objects behind for a deploy that never ran.
+    // Nothing in the acquisition needs the journal: it is an advisory lock
+    // keyed on the project id. Taking it first also means a failed acquisition
+    // leaves no journal objects behind for a deploy that never ran.
     backend
         .acquire_project_lock(cfg)
         .await
@@ -839,11 +837,12 @@ pub async fn rollback_with_locked_backend<B: MigrationBackend>(
 /// it is in `unrepresentable`, which exists precisely because the engine reduced it
 /// to a per-step identity it can no longer match.
 ///
-/// The second message REPLACES the engine's rather than appending to it. It used to
-/// append, which produced "migration mig_... is applied but absent from the supplied
-/// set ... That version is `<name>`" - a sentence that denies the migration was
-/// supplied and then names it from the supplied set two clauses later. An operator
-/// reading the first half goes looking for a migration file that is not missing.
+/// The second message REPLACES the engine's rather than appending to it: an
+/// appended name would read "migration mig_... is applied but absent from the
+/// supplied set ... That version is `<name>`" - a sentence that denies the
+/// migration was supplied and then names it from the supplied set two clauses
+/// later. An operator reading the first half goes looking for a migration file
+/// that is not missing.
 fn describe_rollback_error(error: &zeroship_migrate::RollbackError, set: &RollbackSet) -> String {
     let zeroship_migrate::RollbackError::MissingFromSet { version } = error else {
         return error.to_string();
@@ -891,11 +890,10 @@ pub async fn status_ir_with_locked_backend<B: MigrationBackend>(
     read_only: bool,
 ) -> std::result::Result<StatusReply, String> {
     let charter_refs = charter_layer_refs(charter_layers);
-    // The lock comes first here too. A non-read-only status BOOTSTRAPS the journal,
-    // and bootstrapping before the lock left it racing a concurrent deploy on a
-    // fresh project: measured four times out of four, and the raw catalog error
-    // landed on the DEPLOY as readily as on the status. Fixing only the deploy
-    // verbs left a status able to break a deploy.
+    // The lock comes first here too. A non-read-only status BOOTSTRAPS the
+    // journal, so it must hold the lock before bootstrapping: without it the
+    // bootstrap races a concurrent deploy on a fresh project, and the raw
+    // catalog error lands on the DEPLOY as readily as on the status.
     //
     // Still non-blocking: a contended acquisition returns the busy reply having
     // bootstrapped nothing, which is the honest answer for a reader that arrived
@@ -1430,12 +1428,11 @@ pub async fn baseline_ir_with_locked_backend<B: MigrationBackend>(
 ///
 /// The comparison is [`zeroship_migrate::diff_snapshots`] - the same structural
 /// differ `status`'s drift surface runs - so it reaches columns, indexes,
-/// constraints, sequences, views, roles and extensions rather than table names. It
-/// used to compare `projected.tables.keys()` against `live.tables` and discard the
-/// rest of both snapshots, which caught the wrong database and NOT the subtly wrong
+/// constraints, sequences, views, roles and extensions rather than table names. A
+/// name-only comparison would catch the wrong database and NOT the subtly wrong
 /// one: a peer environment whose trailing migrations only ALTER has every table
-/// name present, so adoption journaled those ALTERs as applied and the columns the
-/// app needs never arrived.
+/// name present, so adoption would journal those ALTERs as applied and the columns
+/// the app needs never arrive.
 ///
 /// # Which classes of difference are fatal
 ///

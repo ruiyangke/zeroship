@@ -11,18 +11,12 @@
 //! This CRATE names its dialect exactly ONCE - [`DIALECT`] in this file - and no
 //! module names another vendor at all. Everything else reads `crate::DIALECT`.
 //!
-//! The rule used to be per-MODULE: each renderer held its own
-//! `const DIALECT: DialectId = POSTGRES;` and imported that name from
-//! `zeroship-migrate-ir`, the neutral vocabulary crate, which declared the ids for all
-//! the shipping vendors. The ids moved into the vendor crates; this crate exports
-//! its `DIALECT` identity and its modules read that value.
-//!
 //! # What the rule does NOT catch
 //!
 //! A backend can still reach another vendor's spelling THROUGH a contract helper
 //! that hard-codes a dialect, and no grep of this crate can see it because the
-//! literal lives in `zeroship-migrate-backend`. That is measured, not hypothetical -
-//! `zeroship_migrate_backend::dml`'s header carries the numbers. The identifier seam
+//! literal lives in `zeroship-migrate-backend`. That hazard is documented, not
+//! hypothetical - see `zeroship_migrate_backend::dml`'s header. The identifier seam
 //! (`*_for_dialect(.., DIALECT)`) is how this crate stays clear of it.
 
 mod advisory;
@@ -57,19 +51,11 @@ mod vendor;
 
 // `render_vendor_op` IS NOT RE-EXPORTED, and its absence is the enforcement.
 //
-// It used to be `pub use vendor::render_vendor_op`, because the engine called it
-// directly at three sites covering sixteen op kinds that never reach
-// `DmlRenderer::render_trigger_op`. That made the vendor-op surface the one part of
-// a backend the engine knew by NAME rather than by contract, and both this file and
-// `zeroship_migrate::render::vendor` said so in as many words.
-//
-// It is behind `DmlRenderer::render_vendor_op` now. `mod vendor` above is private,
-// so with this re-export gone the function is UNREACHABLE from outside this crate:
-// core naming it again is an E0603 privacy error at the use site, not a review
-// comment. Privacy enforces this boundary within the vendor crate.
-//
-// The function itself did not move and did not change. `crate::vendor` is the same
-// module it was; what changed is who may ask for it.
+// The vendor-op surface is reached through the `DmlRenderer::render_vendor_op`
+// contract, never by name. `mod vendor` above is private, so the function is
+// UNREACHABLE from outside this crate: core naming it is an E0603 privacy
+// error at the use site, not a review comment. Privacy enforces this boundary
+// within the vendor crate.
 
 /// This vendor's line-1 guard, re-exported because the engine's public API has
 /// surfaced it since before the vendor crates existed.

@@ -785,14 +785,10 @@ impl<D: SqlSession> MigrationBackend for PostgresBackend<'_, D> {
 impl<D: SqlSession> OnlineSchemaChange for PostgresBackend<'_, D> {
     /// Mirror the pre-existing rows of one online rename into the new column.
     ///
-    /// This is the whole of PostgreSQL's online capability now. It used to be the
-    /// whole online DRIVE: it applied E1/E2 by calling `apply_with_lock_backend` -
-    /// the engine's orchestrator - back across the backend boundary, tripped an
-    /// engine fault point, and read the journal to decide whether the marker still
-    /// needed running. Those phases were neutral in every line and the engine owns
-    /// them now; what is left here is the one phase that is irreducibly Postgres:
-    /// naming the managed dual-write trigger this backfill is allowed to run
-    /// beneath, and running the paged `UPDATE`.
+    /// This is the whole of PostgreSQL's online capability: the one phase of the
+    /// online sequence that is irreducibly Postgres. The engine owns the neutral
+    /// phases; what runs here is naming the managed dual-write trigger this
+    /// backfill is allowed to run beneath, and running the paged `UPDATE`.
     ///
     /// The trigger identity is derived from the `intent`, not accepted from the
     /// caller. `run_backfill` refuses to mirror rows under any trigger it was not
@@ -968,11 +964,10 @@ impl<D: SqlSession> CrossDeployObligations for PostgresBackend<'_, D> {
 
 /// Genericity proof: the apply path monomorphizes over a
 /// **non-compio** [`SqlSession`] driver. An in-crate recording driver records the
-/// SQL of every WRITE verb, and - now that the read side is widened to the
+/// SQL of every WRITE verb, and - the read side being widened to the
 /// driver-neutral [`Row`]/[`DbError`] - RETURNS canned `Row`s from
 /// its read verbs. This proves `PostgresBackend<'a, D>` is genuinely generic AND
-/// that a host driver can build return values without a `compio_postgres::Row`,
-/// closing the old `unreachable!("read verbs...")` gap.
+/// that a host driver can build return values without a `compio_postgres::Row`.
 #[cfg(test)]
 #[cfg(test)]
 mod recording_session_genericity {
@@ -1206,10 +1201,9 @@ mod recording_session_genericity {
         );
     }
 
-    /// The read side is now RUN, not merely compiled: the generic journal read
+    /// The read side is RUN, not merely compiled: the generic journal read
     /// (`applied`) is driven against canned neutral `Row`s and its decode
-    /// (`Row -> AppliedEntry`) runs end-to-end over a non-compio driver - the
-    /// closure of the old `unreachable!("read verbs...")` gap.
+    /// (`Row -> AppliedEntry`) runs end-to-end over a non-compio driver.
     #[compio::test]
     async fn read_path_runs_generically_over_canned_seam_rows() {
         let rec =

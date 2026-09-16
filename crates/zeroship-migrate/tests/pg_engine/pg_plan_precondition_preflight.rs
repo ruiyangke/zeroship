@@ -403,11 +403,9 @@ async fn a_blocked_drop_behind_a_committing_op_leaves_nothing_behind() {
 /// `materialized + replace` fail-closed - so it can never be the replacing leg that
 /// silently recomputes another object's dependency edges.
 ///
-/// The SQL whitelist this replaces could not see that. `CREATE MATERIALIZED VIEW`
-/// parses as a `CreateTableAsStmt`, which was outside the list, so it answered "may
-/// clear an obstruction", the hoist was disarmed, and the plan half-applied. It was
-/// one of five renderer-emitted additive shapes measured to answer that way on
-/// `839b9aca`.
+/// A SQL statement whitelist cannot see that: `CREATE MATERIALIZED VIEW` parses
+/// as a `CreateTableAsStmt`, outside any such list, so the check answers "may
+/// clear an obstruction", the hoist is disarmed, and the plan half-applies.
 ///
 /// THE ORACLE IS THE SERVER, AND IT IS ASSERTED FIRST. Before anything is claimed
 /// about the engine, this drives a matview and then the blocked drop through raw

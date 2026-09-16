@@ -187,12 +187,10 @@ pub enum CastTarget {
 
 /// The CLOSED field set for SQL `EXTRACT(<field> FROM <expr>)`.
 ///
-/// ONE set for one SQL construct. This used to be two enums - a six-member
-/// `ExtractField` and a fifteen-member `PgExtractField` - split on a claim about
-/// which parts are portable. That claim is not core's to make: it is a fact
-/// about the shipping backends, it cannot be right for a backend that does not
-/// exist yet, and it was already wrong (MySQL renders `QUARTER`, `WEEK` and
-/// `MICROSECOND` natively, all three of which sat under the PostgreSQL name).
+/// ONE set for one SQL construct. Which fields are portable is not core's
+/// claim to make: it is a fact about the shipping backends, and it cannot be
+/// right for a backend that does not exist yet (MySQL, for instance, renders
+/// `QUARTER`, `WEEK` and `MICROSECOND` natively).
 ///
 /// Which parts a target can actually render is asked per field, per backend,
 /// through
@@ -458,11 +456,11 @@ pub enum Expr {
     /// operator - `(<expr> ~ <pattern>)` on `PostgreSQL`, `(<expr> REGEXP
     /// <pattern>)` on `MySQL` - through `DmlRenderer::render_regex_match`.
     ///
-    /// NOT vendor-only, despite what this node used to be called. A backend
-    /// without a stock regex operation refuses it by answering
+    /// NOT vendor-only. A backend without a stock regex operation refuses it by
+    /// answering
     /// [`ExprDialectFeature::RegexMatch`](crate::validate::ExprDialectFeature::RegexMatch),
     /// which is how `SQLite` (no built-in `REGEXP`) declines it while `MySQL`
-    /// accepts. That gate was already neutral; only the node name was not.
+    /// accepts.
     RegexMatch {
         /// The value expression to match.
         expr: Box<Self>,

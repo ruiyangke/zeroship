@@ -370,15 +370,14 @@ fn parse_partition_bounds_pg(raw: &str) -> Result<PartitionBounds, String> {
 
 /// Read an index's live `reloptions` into this backend's declared attribute namespace.
 ///
-/// The FILTER is the vocabulary, not a hand-written pair of field names. This used to
-/// keep exactly `pages_per_range` and `fillfactor` because those were the two fields
-/// `IndexStorageParams` had; it now keeps whatever this crate DECLARES on `createIndex`,
-/// which is the same two today and extends itself when a third is declared.
+/// The FILTER is the vocabulary, not a hand-written pair of field names: it keeps
+/// whatever this crate DECLARES on `createIndex`, so it extends itself when a new
+/// storage parameter is declared.
 ///
-/// Anything the server reports that is NOT declared is dropped, exactly as before. That
-/// is deliberate and it is the conservative direction: an undeclared reloption carried
-/// into the snapshot would be compared against a desired side that can never contain it,
-/// so every such index would report drift forever.
+/// Anything the server reports that is NOT declared is dropped. That is deliberate
+/// and it is the conservative direction: an undeclared reloption carried into the
+/// snapshot would be compared against a desired side that can never contain it, so
+/// every such index would report drift forever.
 fn parse_index_storage_params_pg(
     reloptions: Option<Vec<String>>,
 ) -> Result<Attributes, DriftError> {
@@ -609,8 +608,7 @@ async fn resolve_view_bodies_in_transaction<D: SqlSession>(
 ///
 ///   * `Ok(None)` - the server refused the probe view. That is the read-only
 ///     session, the hot standby, and a body whose dependencies no longer resolve.
-///     The view declines and drift says nothing about its body, which is the
-///     behaviour that existed before any of this.
+///     The view declines and drift says nothing about its body.
 ///   * `Err(..)` - the catalog would not answer for a view the caller has ALREADY
 ///     established is present in the introspected snapshot. A missing row is an
 ///     error rather than an absent body, because silently reading it as "no body"
@@ -619,9 +617,9 @@ async fn resolve_view_bodies_in_transaction<D: SqlSession>(
 /// Spell the `<schema>.<view>` argument of the `pg_get_viewdef` probe below.
 ///
 /// PostgreSQL, named rather than assumed: `pg_get_viewdef` is a PG catalog
-/// function and this whole probe lives in the PostgreSQL backend. It used to call
-/// the crate's raw escape primitive, which produced correct bytes for no stated
-/// dialect.
+/// function and this whole probe lives in the PostgreSQL backend, so the escape
+/// goes through the backend's PG renderer - a dialect-free escape would produce
+/// correct bytes for no stated dialect.
 fn pg_view_ident(ident: &str) -> String {
     zeroship_migrate_backend::dml::escape_quote_ident_for_backend(ident, &crate::dml::RENDERER)
 }
@@ -1079,7 +1077,7 @@ pub(crate) async fn snapshot_schema_for<D: SqlSession>(
     // pull `pg_catalog.format_type(atttypid, atttypmod)` (the canonical PG
     // spelling, e.g. `vector(384)` / `geography(Point,4326)`) and, for a
     // `USER-DEFINED` column, normalise it back to the engine's DDL spelling
-    // (see [`canonical_extension_type`]). T13.
+    // (see [`canonical_extension_type`]).
     let col_rows = conn
         .query(
             "SELECT c.table_name, c.column_name, c.data_type, \
@@ -1215,8 +1213,8 @@ pub(crate) async fn snapshot_schema_for<D: SqlSession>(
                 // populates `character_maximum_length` for exactly the four types that
                 // take a length (`character`, `character varying`, `bit`,
                 // `bit varying`) and leaves it NULL everywhere else, so a per-name arm
-                // would leave the same gap open for the next type. Widens the previous
-                // `character`-only arm; `character(N)` keeps its exact spelling.
+                // would leave the same gap open for the next type. `character(N)`
+                // keeps its exact spelling.
                 //
                 // Does NOT cover the modifiers information_schema reports through
                 // OTHER catalog columns: `numeric(p, s)` precision/scale and
@@ -1239,9 +1237,8 @@ pub(crate) async fn snapshot_schema_for<D: SqlSession>(
             // clean generated UUID/TypeID expression onto the ID-default drift
             // surface even though information_schema.column_default is NULL.
             //
-            // The same char is ALSO the structural drift key. It used to be read
-            // only for the gate above, so a column that stopped being generated out
-            // of band changed nothing this differ looked at - see
+            // The same char is ALSO the structural drift key, so a column that
+            // stopped being generated out of band shows up as drift - see
             // `comparable_generated_column`.
             let attgenerated: String = r.try_get("generated_kind")?;
             let is_generated = !attgenerated.is_empty();

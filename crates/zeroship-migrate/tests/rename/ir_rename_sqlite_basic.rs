@@ -403,7 +403,7 @@ async fn renamecolumn_lowers_and_applies_as_sqlite_rebuild_through_apply_plan() 
 // Neutral-type translation on the SQLite leg: a renameColumn whose neutral
 // ColType is `Int` renders the correct SQLite affinity (INTEGER) in the rebuilt
 // table's CREATE — NOT a PG type string. (The PG-type-string assertion is the PG
-// suite's job; here we prove the SQLite leg never receives one.)
+// suite's job; this suite proves the SQLite leg never receives one.)
 #[compio::test]
 async fn renamecolumn_sqlite_renders_neutral_type_as_affinity_not_pg_string() {
     let p = paths("sqlite_affinity");
@@ -515,11 +515,9 @@ async fn renamecolumn_sqlite_renders_neutral_type_as_affinity_not_pg_string() {
 // IR-vs-live type reconciliation is SYMMETRIC across the two
 // legs: the SQLite leg must reject a wrong IR `ty` IDENTICALLY to the PG leg
 // (`RenameTypeMismatch`), not silently ignore the IR type and use the live type.
-// Pre-fix the SQLite leg carried the live `data_type` across UNCHANGED and renamed
-// only the SDK field KEY, so the neutral `ColType` was decorative — a wrong `ty`
-// (here `Int` over a live `string`/text column) lowered with NO rejection. The
-// reconciliation now runs BEFORE the dialect dispatch, so both legs fail closed on
-// the same mismatch (proving the two cannot diverge-detect a wrong `ty`).
+// The reconciliation runs BEFORE the dialect dispatch, so both legs fail closed
+// on the same mismatch (here `Int` over a live `string`/text column) and the
+// two legs cannot diverge on detecting a wrong `ty`.
 #[test]
 fn renamecolumn_sqlite_rejects_ir_type_disagreeing_with_live_column() {
     // v1: people(nickname:string) — the live column is text-affinity.
@@ -551,12 +549,9 @@ fn renamecolumn_sqlite_rejects_ir_type_disagreeing_with_live_column() {
 
 // Cross-app guard on the SQLite rebuild leg. The rebuild
 // routes through the declarative differ, whose `enforce_ownership` refuses a
-// structural change to a FOREIGN table. Pre-fix
-// `declarative::build_column_rename_rebuild` fabricated
-// BOTH ownership maps as the deploying app, so app B could silently rebuild app
-// A's table. Post-fix the REAL introspected owner is carried in
-// `LiveSchema::table_ownership`; a rename by a non-owner is rejected. Here the
-// table is owned by `app_other` but the IrAuthor deploys as `APP`.
+// structural change to a FOREIGN table: the REAL introspected owner is carried
+// in `LiveSchema::table_ownership`, and a rename by a non-owner is rejected.
+// Here the table is owned by `app_other` but the IrAuthor deploys as `APP`.
 #[test]
 fn renamecolumn_sqlite_rejects_cross_app_rename() {
     let v1 = vec![descriptor("people", "nickname", "string")];
