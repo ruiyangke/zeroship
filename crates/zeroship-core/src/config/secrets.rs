@@ -6,10 +6,9 @@ use base64::Engine;
 
 use crate::config::credential_gate::{is_unset_credential, unset_credential_message};
 
-// These values used to be shipped development defaults. They are public and
-// therefore compromised even when they happen to meet a length or decoding
-// requirement. Keep them only as denylist entries; no runtime path supplies
-// them as defaults.
+// These values are public and therefore compromised even when they happen to
+// meet a length or decoding requirement. They exist only as denylist entries;
+// no runtime path supplies them as defaults.
 const KNOWN_WEAK_STASH_KEYS: &[&str] = &[
     "dev-stash-key-please-rotate",
     "dev-stash-signing-key-not-for-production",
@@ -79,11 +78,10 @@ pub struct PlatformSecret {
 ///
 /// This is the enumerable form of "which secrets have a minimum". It is read
 /// by `zeroship dev init` (to generate and re-validate the overlay) and by
-/// every service's boot-time credential audit. NOTHING READS IT AGAINST
-/// `deploy/compose/docker-compose.yml` as of 2026-08-21: the compose
-/// secret-strength gate that did was deleted, so a deployment file shipping a
-/// value below the floor is a crash-loop on the next bring-up rather than a
-/// build failure.
+/// every service's boot-time credential audit. Nothing checks deployment files
+/// against it at the compose layer, so a deployment file shipping a value
+/// below the floor is a crash-loop on the next bring-up rather than a build
+/// failure.
 pub const PLATFORM_SECRETS: &[PlatformSecret] = &[
     PlatformSecret {
         env: "ZEROSHIP_CONTROL_KEY",
@@ -186,8 +184,7 @@ pub fn require_nonempty(label: &str, value: &str) -> Result<(), String> {
 /// this validator is shared by two binaries that read two DIFFERENT variables -
 /// gateway reads `gateway.stash_signing_key` and auth reads
 /// `auth.stash_signing_key` - so no single name baked in here can be right for
-/// both. It previously interpolated a bare `STASH_SIGNING_KEY`, which was right
-/// for neither and named nothing a binary reads.
+/// both.
 ///
 /// # Errors
 ///
@@ -300,13 +297,13 @@ pub fn validate_master_key_material(label: &str, value: &str) -> Result<(), Stri
 ///
 /// The single bridge between [`crate::config::Secret`] and the `&str`
 /// validators above, so every binary answers "does this secret still get
-/// validated" the same way. Three cases, and only the middle one is new:
+/// validated" the same way. Three cases:
 ///
 /// * material present (any real boot, and a `--check-config` run whose secret
 ///   is an in-memory literal) - the validator runs on the real material;
 /// * configured but unread - only reachable under `--check-config` for a source
 ///   that would need I/O. There is nothing to check, and checking the reference
-///   TEXT instead of the secret is what the old `is_secret_ref` dance did;
+///   TEXT instead of the secret would validate the wrong thing;
 /// * unsupplied - the validator runs on `""`, which is how each one already
 ///   produces its own "X is required" message rather than a generic one.
 ///
@@ -360,13 +357,11 @@ pub fn is_loopback_url(url: &str) -> bool {
 ///
 /// The type admits exactly two things, and that is the whole point. A secret is
 /// either the material itself or a path to the file holding it; there is no
-/// third form. The env-to-env alias (`urn:zeroship:env:<VAR>`) is gone because
-/// an environment source that points at another environment name is the
-/// deployment alias hop under a different spelling, and the parsed-but-
-/// unresolvable Vault / AWS Secrets Manager forms are gone because a syntax the
-/// runtime always refuses is not a deployment source. `arn:` stays a RESERVED
-/// prefix so an AWS ARN is refused loudly rather than silently taken as a
-/// literal secret.
+/// third form. An environment source pointing at another environment name would
+/// be the deployment alias hop under a different spelling, and a Vault / AWS
+/// Secrets Manager syntax the runtime always refuses is not a deployment
+/// source, so neither gets a variant. `arn:` stays a RESERVED prefix so an AWS
+/// ARN is refused loudly rather than silently taken as a literal secret.
 #[derive(Debug, PartialEq, Eq)]
 pub enum SecretRef<'a> {
     /// A literal secret value, used verbatim.
@@ -593,18 +588,13 @@ mod tests {
         MIN_SECRET_BYTES, PLATFORM_SECRETS,
     };
 
-    /// THE DEFECT THIS TABLE EXISTS FOR. The compose secret-strength gate
-    /// (deleted 2026-08-21) derived its rule set by regexing the message text out of
-    /// this file. 2c56e92a3 replaced the baked-in credential names in those
-    /// messages with a `{label}` format parameter - a correct change - and the regex
-    /// silently matched nothing from that day on. The gate's anti-vacuity guard
-    /// caught it, so it went RED rather than falsely green, but the invariant
-    /// went unenforced for seven days.
-    ///
-    /// The fix is that the rule set is TYPED DATA, and this is the test that
-    /// keeps a row honest: every row is driven at exactly its stated floor and
-    /// one byte under, through the validator the row itself names. A row whose
-    /// `strength` does not describe what its `validate` does fails here.
+    /// Deriving the rule set from the validators' message TEXT would couple
+    /// enforcement to wording: a message edit could silently empty the set
+    /// while the suite stayed green. The rule set is TYPED DATA instead, and
+    /// this is the test that keeps a row honest: every row is driven at
+    /// exactly its stated floor and one byte under, through the validator the
+    /// row itself names. A row whose `strength` does not describe what its
+    /// `validate` does fails here.
     #[test]
     fn platform_secret_rows_state_the_floor_their_validator_applies() {
         assert!(
@@ -738,21 +728,18 @@ mod tests {
         validate_stash_key(SENTINEL, "0123456789abcdef0123456789abcdef").expect("strong key");
     }
 
-    /// THE DEFECT. Three validators interpolated a bare `STASH_SIGNING_KEY`,
-    /// `PAIRWISE_SALT` and a third name into their refusals. None of those is a
-    /// variable any binary reads: the shared identities in
+    /// This module names NOTHING. The shared identities in
     /// `crates/zeroship-config-macros/src/shared.rs` project to
     /// `ZEROSHIP_PAIRWISE_SALT`, and the stash key is not shared at all -
     /// it is `gateway.stash_signing_key` and `auth.stash_signing_key`, two
-    /// different variables behind one validator. An operator who followed any
-    /// of these refusals set a variable the binary does not read. (The third
-    /// validator was the worker key's, deleted with the shared secret itself
-    /// once the identity envelope became asymmetric.)
+    /// different variables behind one validator. A refusal that interpolated a
+    /// bare `STASH_SIGNING_KEY`-style name would send the operator to set a
+    /// variable no binary reads.
     ///
-    /// The fix is that this module names NOTHING. Every refusal carries only
-    /// the caller's label, so the operator-facing spelling lives next to the
-    /// declaration it must agree with, where each binary's own diagnostic test
-    /// checks it against the set of names that binary really reads.
+    /// So every refusal carries only the caller's label, and the
+    /// operator-facing spelling lives next to the declaration it must agree
+    /// with, where each binary's own diagnostic test checks it against the set
+    /// of names that binary really reads.
     #[test]
     fn every_refusal_names_the_callers_label_and_invents_no_name_of_its_own() {
         // Drive every message-producing arm of every labelled validator.

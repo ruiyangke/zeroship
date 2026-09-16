@@ -12,31 +12,21 @@
 //! forwarder dedups on, and the same `event_time` that decides which billing
 //! period the usage lands in.
 //!
-//! It DOES survive a process restart. It did not until 2026-08-07, and the
-//! reason is worth keeping because the mechanism was not the obvious one.
-//!
-//! redb's `Database::create` opens an existing file rather than truncating it,
-//! and `load_pending` already ran on every publish cycle, so the replay
-//! machinery was complete and working the whole time. What broke was the KEY:
-//! the default WAL path was derived from `producer_source`, and both binaries
-//! mint that source with a fresh uuid per boot. A restart therefore aimed a
-//! working replay at a NEW, empty file and orphaned the old one on disk with
-//! nothing left that could read it. Nothing in `deploy/` overrode the path.
-//!
-//! The fix separates the two identities that had been one string, because they
-//! have opposite requirements - see [`WalIdentity`], which is a newtype
-//! precisely so a producer source cannot be passed where a WAL key belongs.
-//! `zeroship-control` never had the defect: it passes a stable constant
+//! The WAL survives a process restart. redb's `Database::create` opens an
+//! existing file rather than truncating it, and `load_pending` runs on every
+//! publish cycle, so survival rests on the KEY being stable across boots.
+//! That key is [`WalIdentity`], deliberately distinct from `producer_source`:
+//! both binaries mint the source with a fresh uuid per boot, because
+//! producer/client ids must not collide between two live producers, while the
+//! WAL must survive exactly the event that changes that uuid. `WalIdentity` is
+//! a newtype precisely so a producer source cannot be passed where a WAL key
+//! belongs. `zeroship-control` passes a stable constant
 //! (`DEFAULT_CONTROL_USAGE_OUTBOX_WAL_PATH`).
 //!
-//! A stable path could NOT land on its own, and this is the part that makes
-//! the two changes one change. redb is single-writer, so co-located producers
-//! sharing a path fail to open - and a failed open used to degrade to a
-//! drain-and-drop task rather than refusing to boot. Stabilising the path
-//! alone would therefore have converted an intermittent partial loss into a
-//! permanent total one. The worker and gateway now treat a build failure as
-//! fatal when brokers are configured, so the two properties hold together or
-//! not at all.
+//! A stable path is only safe because the collision it creates is loud. redb
+//! is single-writer, so co-located producers sharing a path fail to open, and
+//! the worker and gateway treat a WAL build failure as fatal when brokers are
+//! configured: a shared path is a boot refusal, not silent interleaving.
 
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
@@ -72,15 +62,10 @@ pub const DEFAULT_MAX_RETAINED_EVENTS: usize = 100_000;
 /// Resolved usage-stream producer settings. The source of these values is the
 /// caller's concern - this crate only consumes the resolved struct.
 ///
-/// Both producers now build it from their own generated `metering.*`
-/// declarations, so one operator-visible identity carries the flag, the
+/// Both producers build it from their own generated `metering.*` declarations,
+/// so one operator-visible identity carries the flag, the
 /// `ZEROSHIP_METERING_*` environment name and the `[metering]` overlay path.
-/// It used to carry a `from_env()` constructor reading `REDPANDA_BROKERS` and
-/// three siblings directly, plus an `or()` back-fill each caller used to layer
-/// the file overlay underneath. That was the ONLY channel either producer had,
-/// and after 9b205f6ed removed the worker's overlay source the worker had no
-/// interface for the stream at all - every metering harness had to set ambient
-/// variables on the worker's command prefix. Use [`from_resolved`] instead.
+/// Construct it with [`from_resolved`].
 ///
 /// [`from_resolved`]: UsageStreamSettings::from_resolved
 #[derive(Debug, Clone, Default)]
@@ -920,37 +905,24 @@ mod tests {
         }
     }
 
-    /// Pins the defect: two boots of the SAME process on the SAME host get
-    /// different WAL files, so a restart never finds its predecessor's
-    /// unpublished events.
+    /// A restart must reach the SAME WAL file as the previous boot on the same
+    /// host, or it opens an empty one and orphans whatever the previous boot
+    /// had not yet published.
     ///
-    /// This asserts what the code does today, NOT what it should do. It exists
-    /// because the defect was previously visible only in prose, and prose is
-    /// exactly what a green suite does not check. The other restart-shaped test
-    /// in this module hand-passes one path to both opens, so it proves the WAL
-    /// layer replays and says nothing about whether a restart reaches the same
-    /// file - its passing is why this went unnoticed.
+    /// WHAT IT CATCHES: the derivation from [`WalIdentity`] to path. Keying
+    /// the path on anything per-boot turns this red.
     ///
-    /// WHAT IT CATCHES, stated narrowly because the first version of this
-    /// comment claimed more than the test delivers. Verified by mutation:
-    /// collapsing `default_wal_path` to a constant turns it red.
-    ///
-    /// WHAT IT DOES NOT CATCH, and this is the likelier fix: the per-boot UUID
-    /// is minted in `crates/zeroship-worker/src/main.rs` and `crates/zeroship-gateway/src/main.rs`,
-    /// NOT here. Stop appending it there and the restart defect is fixed while
-    /// this test stays green, because it hands `default_wal_path` two different
-    /// source strings by hand and only ever observes the derivation. This crate
-    /// cannot see those binaries, so nothing here can assert on the source they
-    /// mint - a test that covers it belongs beside them.
+    /// WHAT IT DOES NOT CATCH: whether the identity the binaries hand over is
+    /// itself stable. The per-boot uuid is minted into the producer source in
+    /// `crates/zeroship-worker/src/main.rs` and
+    /// `crates/zeroship-gateway/src/main.rs`, NOT here, and this crate cannot
+    /// see those binaries - a test that covers what they mint belongs beside
+    /// them.
     ///
     /// So: a red here means the DERIVATION changed. It is not, on its own, a
-    /// signal that the restart defect is fixed or unfixed.
+    /// signal that the binaries' identities are stable.
     #[test]
     fn a_restart_reuses_the_previous_boots_wal() {
-        // This used to assert INEQUALITY and carried a note saying that if it
-        // ever held, the restart-loses-usage defect was fixed and the test
-        // should assert equality instead. This is that rewrite.
-        //
         // The WAL identity is deliberately NOT the producer source. The source
         // still carries a per-boot uuid, because producer/client ids must not
         // collide between two live producers; the WAL must survive exactly the
@@ -980,12 +952,10 @@ mod tests {
 
     #[test]
     fn a_wal_identity_carries_no_per_boot_component() {
-        // The defect was not that the path was recreated - redb's
-        // `Database::create` opens an existing file. It was that the KEY
-        // changed every boot, so a working replay path pointed at a new empty
-        // file. This asserts the property that was actually missing, so the
-        // regression cannot come back by someone threading a fresh uuid into
-        // the identity again.
+        // redb's `Database::create` opens an existing file, so a restart only
+        // loses usage if the KEY changes between boots. This asserts the
+        // identity is stable and carries no uuid-shaped component, so a fresh
+        // uuid cannot be threaded into it.
         //
         // Deliberately calls the seam twice rather than comparing one call to
         // a literal: a hardcoded expected string would still pass if the
@@ -994,8 +964,8 @@ mod tests {
         // POSITIVE CONTROL first. `contains_uuid_shape` returning false is the
         // pass condition below, so a detector that never fires would make this
         // test green against the exact code it exists to reject. Prove it
-        // fires on what the worker actually used to pass - `{host}-{uuid}` -
-        // in both the raw and path-sanitised spellings.
+        // fires on the per-boot producer-source shape - `{host}-{uuid}` - in
+        // both the raw and path-sanitised spellings.
         let boot_uuid = Uuid::new_v4().to_string();
         assert!(
             contains_uuid_shape(&format!("worker-host-{boot_uuid}")),
@@ -1060,20 +1030,20 @@ mod tests {
 
     #[test]
     fn a_second_live_producer_is_refused_the_wal() {
-        // The claim three comments in this file rest on, and that nothing
-        // measured until now: redb is single-writer, so two LIVE producers
-        // that resolved to one `WalIdentity` collide loudly rather than
-        // interleaving or corrupting. The worker's fatal boot-refusal arm
-        // (crates/zeroship-worker/src/main.rs) is built on it - if the second opener
-        // silently succeeded, two co-located workers would share one file and
-        // the refusal that arm exists to trigger would never fire.
+        // The claim the WAL design in this file rests on: redb is
+        // single-writer, so two LIVE producers that resolved to one
+        // `WalIdentity` collide loudly rather than interleaving or corrupting.
+        // The worker's fatal boot-refusal arm
+        // (crates/zeroship-worker/src/main.rs) is built on it - if the second
+        // opener silently succeeded, two co-located workers would share one
+        // file and the refusal that arm exists to trigger would never fire.
         //
         // `wal_identity` is deliberately stable per (role, host), so two
         // same-role peers that agree on `host` DO name one path. That is safe
-        // only because of what this test measures. Note what it does NOT
-        // catch: redb falls back to `lock_supported: false` on a filesystem
-        // whose `flock` returns `Unsupported` (some network mounts), and there
-        // the second opener succeeds. This runs on the test runner's own
+        // only because of what this test shows. Note what it does NOT catch:
+        // redb falls back to `lock_supported: false` on a filesystem whose
+        // `flock` returns `Unsupported` (some network mounts), and there the
+        // second opener succeeds. This runs on the test runner's own
         // filesystem and says nothing about that case.
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("contended.redb");
@@ -1117,10 +1087,8 @@ mod tests {
 
     #[test]
     fn a_reopened_wal_still_holds_the_unpublished_events() {
-        // The half of the fix that the path change exists to enable. Without
-        // this, a stable path would be necessary but unproven: the claim is
-        // that a NEW `UsageWal` over the SAME file sees what the previous one
-        // wrote and never published.
+        // The restart half of the WAL contract: a NEW `UsageWal` over the SAME
+        // file sees what the previous one wrote and never published.
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("restart.redb");
 

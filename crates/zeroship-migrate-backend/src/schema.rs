@@ -179,10 +179,9 @@ pub struct CreateIndexIfNotExistsRequest<'a> {
 /// all depend on vendor grammar. Keeping their bodies in the registering backend
 /// means core never dispatches on a closed vendor enum to answer them.
 pub trait SchemaRenderer: std::fmt::Debug + Sync {
-    /// Which vendor this is, as the OPEN [`DialectId`] rather than the former
-    /// closed dialect enum.
+    /// Which vendor this is, as the OPEN [`DialectId`].
     ///
-    /// The same signature change, and for the same reason, as
+    /// The same signature, and for the same reason, as
     /// [`DmlRenderer::dialect`](crate::renderer::DmlRenderer::dialect): a backend
     /// crate cannot construct a variant of an enum it does not own, so a closed
     /// return type left `todo!()` as the only body a fourth backend could write.
@@ -326,9 +325,9 @@ pub trait SchemaRenderer: std::fmt::Debug + Sync {
     /// A refusal that says only "not that one" is not actionable, and
     /// `crates/zeroship-migrate/tests/column_shapes/set_column_type_generation_contracts.rs` pins that the
     /// message must name the legal set. That set is this backend's, so this backend
-    /// spells it: the string used to be written into
+    /// spells it: written into
     /// [`IrLowerError::IdentityColumnTypeUnsupported`](crate::error::IrLowerError)'s
-    /// message in the neutral contract, where it was one vendor's rule printed at
+    /// message in the neutral contract, it would be one vendor's rule printed at
     /// every target that reached the arm.
     ///
     /// Required rather than defaulted, like every other method here: a backend that
@@ -567,12 +566,9 @@ pub const RAW_COLUMN_PREFIX: &str = "__zs_raw__";
 /// this function needs no hashing cap and can therefore stay trivially
 /// byte-identical to its runtime twin.
 ///
-/// (The pre-flip `<field>_masked` sibling had exactly this bug and did not cap:
-/// a 60-character masked field produced a 67-character sibling.)
-///
 /// **This is the copy that gates real creator tables.** The data plane declares
-/// the same cap, but its only reader is an emitter with no `src` call site
-/// (measured 2026-09-04), so an accepted declaration is accepted HERE. The two
+/// the same cap, but its only reader is an emitter with no `src` call site,
+/// so an accepted declaration is accepted HERE. The two
 /// are pinned to each other, and this literal `63` to the tightest identifier
 /// budget the shipping vendors declare, by `zeroship_data_sql::compile`'s
 /// `raw_column_parity`.
@@ -594,11 +590,6 @@ pub const MAX_MASKED_FIELD_NAME_BYTES: usize = 63 - RAW_COLUMN_PREFIX.len();
 /// still caught. It lives over there because that crate already dev-depends on
 /// `zeroship-migrate-core` (which re-exports this module), so the check costs no
 /// production dependency edge and this crate keeps none on the data plane.
-///
-/// These three doc blocks said instead that two implementations "could not be
-/// checked to agree by any compiler", which was true and was not a guard - it
-/// was a note that nothing checked them. A plain concatenation is the right
-/// choice BECAUSE it is checkable; the checking is the half that had to exist.
 #[must_use]
 pub fn raw_column_name(field: &str) -> String {
     format!("{RAW_COLUMN_PREFIX}{field}")
