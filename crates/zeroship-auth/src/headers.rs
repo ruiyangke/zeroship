@@ -146,9 +146,9 @@ fn framed_route_csp(origins: &[String]) -> String {
 /// or unparseable we fall back to the raw socket peer, then the `"0.0.0.0"`
 /// sentinel (e.g. unit tests with neither).
 ///
-/// WHY THE RIGHTMOST TOKEN IS THE PROXY'S, measured against Caddy 2.11.4 on
-/// 2026-08-19 rather than assumed. Caddy's `reverse_proxy` writes XFF two ways
-/// and the rightmost entry is its own under both:
+/// WHY THE RIGHTMOST TOKEN IS THE PROXY'S, not assumed: Caddy 2.11.4's
+/// `reverse_proxy` writes XFF two ways and the rightmost entry is its own
+/// under both:
 ///
 ///   * with no `servers { trusted_proxies }` - the case here, the repo
 ///     configures none - it REPLACES the header outright with the peer it
@@ -169,11 +169,9 @@ fn framed_route_csp(origins: &[String]) -> String {
 /// proxy is the only writer of the header it reads. The gateway and control
 /// take the flag from configuration because they can be fronted or not.
 ///
-/// THAT PREMISE IS NOW UNCHECKED. It was held by
-/// `tests/compose_port_exposure_gate.sh`, which allowed only the edge to
-/// publish on all interfaces; that gate was deleted on 2026-08-21. Publishing
-/// this service in `deploy/compose/docker-compose.yml` would make the
-/// unconditional `true` above a client-IP spoof, and nothing would say so.
+/// THAT PREMISE IS UNCHECKED. Publishing this service in
+/// `deploy/compose/docker-compose.yml` would make the unconditional `true`
+/// above a client-IP spoof, and nothing would say so.
 #[must_use]
 pub(crate) fn client_ip(req: &HttpRequest) -> String {
     trusted_client_ip(req.headers(), req.peer_addr().map(|addr| addr.ip()))
@@ -689,14 +687,8 @@ mod tests {
         // `connection_info().remote()` takes the leftmost and is unsafe here.
         //
         // This is the ONLY thing standing between a caller and unlimited
-        // rate-limit evasion, and it is load-bearing on its own: the gateway
-        // used to proxy auth.<domain> and scrub the inbound header first, but
-        // it never sat on this path in any shipped topology (Caddy routes
-        // auth.<domain> straight here) and that arm has been deleted. Nothing
-        // sanitises the header before this function now.
-        //
-        // Pre-fix `client_ip` returns the leftmost `1.2.3.4` (the spoofed
-        // value an attacker prepends) → RED.
+        // rate-limit evasion: nothing sanitises the header before this
+        // function.
         let req = test::TestRequest::default()
             // Attacker prepends a forged leftmost token; the proxy-authored
             // real peer is the rightmost.
@@ -711,16 +703,15 @@ mod tests {
 
     #[test]
     fn client_ip_ignores_the_forwarding_headers_the_edge_does_not_scrub() {
-        // Measured against Caddy 2.11.4 on 2026-08-19: `reverse_proxy` takes
-        // ownership of `X-Forwarded-For` (replacing it outright when no
+        // Caddy 2.11.4's `reverse_proxy` takes ownership of
+        // `X-Forwarded-For` (replacing it outright when no
         // `trusted_proxies` is configured, as here), but passes `X-Real-IP` and
         // `Forwarded` through VERBATIM from the caller. Both are therefore
         // attacker-controlled by the time they reach this service.
         //
-        // The gateway's deleted auth proxy used to strip all three. Now only
-        // the fact that this service reads none but `x-forwarded-for` keeps a
-        // forged `X-Real-IP` / `Forwarded` out of the rate-limit bucket key.
-        // Wire either one into `trusted_client_ip` and this goes RED.
+        // Only the fact that this service reads none but `x-forwarded-for`
+        // keeps a forged `X-Real-IP` / `Forwarded` out of the rate-limit bucket
+        // key. Wire either one into `trusted_client_ip` and this goes RED.
         let req = test::TestRequest::default()
             .header("x-forwarded-for", "203.0.113.7")
             .header("x-real-ip", "1.2.3.4")
@@ -751,8 +742,6 @@ mod tests {
         // a rate-limit bucket key (that lets an attacker mint unbounded
         // `zeroship.rate_limits` rows). With no socket peer in the test
         // fixture, an unparseable value falls back to the `0.0.0.0` sentinel.
-        //
-        // Pre-fix `client_ip` returns the raw `not-an-ip` string → RED.
         let req = test::TestRequest::default()
             .header("x-forwarded-for", "not-an-ip")
             .to_http_request();

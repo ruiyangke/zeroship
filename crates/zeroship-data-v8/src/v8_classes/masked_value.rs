@@ -1,14 +1,6 @@
 //! `MaskedValue` — the V8 wrapper minted directly by the row
 //! serializer for every masked column on a row crossing back to JS.
 //!
-//! Previously the runtime emitted a `{sentinel: "__zsmask__", ...}`
-//! JSON sentinel and the SDK's `mapResultDoc` re-hydrated it into a
-//! TypeScript `MaskedValue` instance on every row. The sentinel
-//! round-trip + JS rehydration is gone — Rust now mints native
-//! `MaskedValue` v8_class instances directly when V8 parses the
-//! result, so the SDK surface receives the wrapper instances on the
-//! first hop.
-//!
 //! ## JS surface (matches the §4.1 proposal mapping table)
 //!
 //! Getters (`v8_getter`):
@@ -31,8 +23,7 @@
 //!   `dispatch_bulk_unmask_field` with a single-row `items` payload.
 //! - `canUnmask(opts?)` — dry-run probe. Issues a real unmask with
 //!   reason `"permission probe"` and treats `unmask_not_permitted` as
-//!   `false`. Per the design Q-MASK-C contract this WRITES the audit
-//!   row regardless of outcome.
+//!   `false`. The probe WRITES the audit row regardless of outcome.
 //! - `toString()` / `toJSON()` — both return the masked string.
 //!   `Symbol.toPrimitive` is installed manually after the class
 //!   template finishes minting (see `register_to_primitive`).
@@ -179,8 +170,7 @@ impl MaskedValue {
     /// shape-confusion.
     ///
     /// Authorization, audit-row emission, and decrypt are all handled
-    /// by the shared `protection::unmask` module — same code path the old
-    /// `Db.unmaskField` / `Db.bulkUnmaskFields` v8_methods went through.
+    /// by the shared `protection::unmask` module.
     ///
     /// Returns `Promise<string>` on the single-column path
     /// (resolves with the bare plaintext string) or
@@ -229,7 +219,7 @@ impl MaskedValue {
     /// Issues a real unmask with reason `"permission probe"`; treats
     /// `unmask_not_permitted` as `false`, every other outcome (success,
     /// `unmask_value_null`, `unmask_not_found`, SQL errors) re-throws.
-    /// Per Q-MASK-C the probe DOES write an audit row.
+    /// The probe DOES write an audit row.
     #[v8_method]
     #[v8_name = "canUnmask"]
     fn can_unmask<'s>(
@@ -315,15 +305,9 @@ impl MaskedValue {
         };
         let binding = self.binding.clone();
         // The route is captured HERE, on the adapter side, while the V8 frame
-        // is live, and handed to the engine. `protection::unmask` resolved its own
-        // backend through `exec::ensure_backend_for_shared_sql` until
-        // 2026-09-03, which put an ENGINE file's hands on `crate::context`.
-        //
-        // **This captured no route until 2026-09-03**, on the claim that "a
-        // `MaskedValue` unmask carries no route - it is not a routed
-        // statement". The ciphertext read IS a statement, and
-        // `row.ssn.unmask()` inside a `db.transaction(fn)` callback over a row
-        // that transaction just wrote has to issue it on the transaction's
+        // is live, and handed to the engine. The ciphertext read IS a statement,
+        // and `row.ssn.unmask()` inside a `db.transaction(fn)` callback over a
+        // row that transaction just wrote has to issue it on the transaction's
         // connection.
         let route = crate::startup_policy::require_finalized(scope)
             .and_then(|()| crate::tx_scope::capture_route(scope, &binding));

@@ -212,7 +212,7 @@ impl Harness {
 /// forceable state added later is covered without anyone editing this test.
 ///
 /// Where this would fail today: on any implementation that parks a force in
-/// `Poisoned` - which is the shape SC-1 previously described, and which passes
+/// `Poisoned` - which is the shape SC-1 describes, and which passes
 /// every other arm in this file except this one and
 /// `a_forced_transaction_cannot_be_resurrected_by_rollback_to`. `Poisoned` is
 /// the single nonterminal state invariant 13 lets a creator command walk back
@@ -701,7 +701,7 @@ fn an_unproved_cleanup_withdraws_the_session_rather_than_returning_it() {
 /// `take_tx_client_for` returning `None` falls into "Slot already drained ...
 /// Treat as settled", releases the claim, clears pending emits and returns
 /// `SettleOutcome::Ok` **without sending anything**
-/// (`transaction/mod.rs:1034-1039`). This arm asserts the opposite of that on
+/// (`transaction/mod.rs`). This arm asserts the opposite of that on
 /// both halves: nothing is sent while the command is out, and exactly one
 /// terminal statement is sent after it returns.
 #[test]
@@ -827,8 +827,8 @@ fn a_force_in_quiescing_does_not_issue_the_latched_terminal_sql() {
 /// transaction for the same app can be admitted.
 ///
 /// Where this would fail today: on an implementation without the second-stage
-/// deadline. This is invariant 3's claim balance on the path that previously
-/// had nothing to release the claim - so such an implementation **hangs** this
+/// deadline. This is invariant 3's claim balance on a path with nothing to
+/// release the claim - so such an implementation **hangs** this
 /// arm rather than failing it. The reducer is synchronous, so the hang becomes
 /// a missing `ReleaseAdmission` rather than a wall-clock stall, which is why
 /// this arm can assert it directly.
@@ -1213,9 +1213,8 @@ fn poisoned_refuses_data_sql_but_a_rollback_to_recovers_it() {
 /// transaction and publishes nothing.
 ///
 /// Where this would fail today: on an implementation that reads the result
-/// code rather than the command tag - the exact defect L8 closed, in which the
-/// settle path reported success and went on to publish change events for
-/// writes that never landed.
+/// code rather than the command tag, reporting success and publishing change
+/// events for writes that never landed.
 #[test]
 fn a_commit_postgres_rolled_back_publishes_nothing() {
     let mut harness = Harness::at(TxState::Idle);
@@ -1467,10 +1466,8 @@ fn a_force_cannot_claim_settling() {
 /// outlives the isolate parks every later transaction for that app.
 ///
 /// Where this would fail today: on an implementation that releases the claim
-/// on some cleanup paths and not others - which is what the shipped code does,
-/// by its own admission (`transaction/mod.rs`: "if this op is CANCELLED
-/// between taking the claim and the `BEGIN` returning ... the claim leaks and
-/// later transactions for this app park until the isolate is evicted").
+/// on some cleanup paths and not others, leaving a claim that outlives the
+/// isolate and parks every later transaction for that app.
 #[test]
 fn every_granted_admission_has_exactly_one_release() {
     let acks = [

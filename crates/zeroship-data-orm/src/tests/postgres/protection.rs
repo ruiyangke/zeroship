@@ -484,10 +484,9 @@ fn the_real_value_is_still_stored_and_still_reachable_by_the_audited_path() {
 // The arm above is the only exercise `dispatch_unmask` had on Postgres, and the
 // only actor it passes is `{"kind":"auto"}`. The no-policy fallback inside
 // `check_unmask_authorization` is literally `Ok(kind == "auto")`, so that arm
-// tests the check against its own allow-literal: neutering the whole call to
-// `... ? || true` leaves it green, and left the entire `if !allowed` branch -
-// the denied audit row and the `unmask_not_permitted` error - with no Postgres
-// coverage at all. The SQLite suite caught the mutation; this file did not.
+// tests the check against its own allow-literal. The refusal branch - the
+// denied audit row and the `unmask_not_permitted` error - needs its own arm
+// against real Postgres.
 
 /// Stand up everything the audited unmask path needs on a real server, and put
 /// one row behind it whose real SSN is genuinely recoverable through that path.
@@ -1250,10 +1249,8 @@ fn a_rejected_impersonation_is_distinguishable_from_an_absent_actor() {
 // `check_unmask_authorization` has three call sites. Section 1b bound the
 // single-cell one. The other two - `dispatch_bulk_unmask`
 // (`bulkUnmaskFields`) and `authorize_query_hint` (`find({ unmask: [...] })`)
-// - had NO Postgres coverage: neutering either loop to
-// `if false && !check_unmask_authorization(...)` left all nine tests in this
-// file green, and only two SQLite tests went red. Both are creator-facing read
-// paths, and both are the shape DB-3 came from.
+// - are creator-facing read paths and need their own arms. Both are of the
+// shape DB-3 records.
 //
 // Neither authorises a CELL. Each authorises a REQUEST, and one denied column
 // refuses the whole call - so each arm below drives a HALF-AUTHORISED request,
@@ -1287,7 +1284,7 @@ fn bulk_args(row_pk: &str, columns: &[&str], actor: Option<Value>) -> BulkUnmask
 /// That second half is the property worth binding. The all-or-nothing decision
 /// is `if !unauthorized.is_empty()` at
 /// `crates/zeroship-data-orm/src/protection/unmask.rs`, which returns before
-/// the decrypt loop at `:1119` runs at all, and the reason is in that
+/// the decrypt loop runs at all, and the reason is in that
 /// function's own doc: a partial grant leaks the authorisation verdict through
 /// which columns came back populated, which is a read oracle over the policy
 /// itself.
@@ -1496,9 +1493,9 @@ fn a_bulk_unmask_batch_with_one_forbidden_column_is_refused_whole() {
             // broke out of the loop on the first denial would satisfy all of them: one
             // audit row, one refusal, same code. The loop at
             // `crates/zeroship-data-orm/src/protection/unmask.rs` has no `break`
-            // and no early return - it pushes every denied pair and refuses once at
-            // `:1093` - and TWO observable things follow that a short-circuit would get
-            // wrong. The refusal counts the pairs (`unauthorized.len()` at `:1107`), so
+            // and no early return - it pushes every denied pair and refuses once -
+            // and TWO observable things follow that a short-circuit would get
+            // wrong. The refusal counts the pairs (`unauthorized.len()`), so
             // it must say TWO; and the whole call still audits exactly ONCE, so two
             // denials must not become two rows.
             let both_denied = BulkUnmaskArgs {
@@ -1889,15 +1886,15 @@ fn a_query_hint_reads_the_column_its_alias_resolved_to() {
 
 /// **Outward.** No row-returning write verb may hand back the raw column.
 ///
-/// The twelve write sites in `zeroship-data-orm::sql` emitted `RETURNING *` - every
-/// physical column, never passing through the projection allowlist, which was
+/// A write site in `zeroship-data-orm::sql` that emits `RETURNING *` returns every
+/// physical column, never passing through the projection allowlist, which is
 /// SELECT-side only. Without the read pipeline's row-surface stage, `insert`
-/// returned the real value under a key the generated `Row<S>` type does not
+/// returns the real value under a key the generated `Row<S>` type does not
 /// declare - invisible to any review written against the generated types, and
-/// doubly silent because the mask still came back correctly beside it.
+/// doubly silent because the mask still comes back correctly beside it.
 ///
 /// **Both boundaries are asserted here, in the order a row crosses them.** The
-/// projection is first: the write's own SQL no longer names the raw column, so
+/// projection is first: the write's own SQL must not name the raw column, so
 /// the value never leaves the database. The surface stage is second, and still
 /// necessary - the write is not the only producer of a row, and the second half
 /// of this test feeds it the kind of row that has no projection in front of it.
@@ -1929,11 +1926,6 @@ fn no_write_verb_hands_back_a_column_the_descriptor_does_not_declare() {
             assert_eq!(returned.len(), 1);
             // BOUNDARY 1, the database's. The row PostgreSQL sent back does not contain
             // the raw column at all - not "contains it and we removed it".
-            //
-            // This assertion is the inverse of the one it replaced, which required the
-            // raw column to be present "or this test proves nothing". That was true
-            // while the write starred; the value it was guarding against is now
-            // unreachable one layer earlier.
             assert!(
                 returned[0].get(raw_column_name("ssn").as_str()).is_none(),
                 "the write's projection must not name the raw column: {:?}",
@@ -1992,7 +1984,7 @@ fn no_write_verb_hands_back_a_column_the_descriptor_does_not_declare() {
 
             // ---- and the arm that binds the SURFACE stage specifically ----
             //
-            // The arm above no longer exercises the surface stage AT ALL: the row it
+            // The arm above does not exercise the surface stage AT ALL: the row it
             // finalizes came out of a named projection, so there is nothing off-surface
             // in it to remove. That is the point of the projection, and it is also why
             // this arm has to build its own row.
@@ -2623,7 +2615,7 @@ fn deleting_the_mask_key_from_the_descriptor_must_not_write_plaintext() {
     })
 }
 
-/// The same shape for ENCRYPTION, measured separately.
+/// The same shape for ENCRYPTION, asserted separately.
 ///
 /// The two passes read different descriptor keys (`encrypted` vs `mask`) and
 /// place their output in different physical columns, so one answer says nothing
@@ -2732,8 +2724,7 @@ fn confined_ceiling_for(app_id: &zeroship_core::AppId) -> zeroship_migrate_polic
 ///
 /// [`fixture`] renders its DDL with the DATA PLANE's emitter,
 /// `crate::sql::mapping::build_create_table_with_fks`, whose only callers are
-/// tests (measured 2026-09-04: no `src` call site outside its own module in any
-/// crate). Every creator table that exists on the platform is instead rendered by
+/// tests. Every creator table that exists on the platform is instead rendered by
 /// the MIGRATION ENGINE and applied by `zeroship-migrate-server`. A protection
 /// test that builds its table with the data-plane emitter therefore agrees with
 /// the reader by construction and cannot see a disagreement between the two -
@@ -2943,7 +2934,7 @@ fn a_migration_engine_built_table_refuses_a_mask_downgrade() {
 
 /// The same shape for ENCRYPTION, on a migration-engine-built table.
 ///
-/// Measured separately for the reason its data-plane peer is: the two passes read
+/// Asserted separately for the reason its data-plane peer is: the two passes read
 /// different descriptor keys and their sentinels are different strings on
 /// different columns, so one answer says nothing about the other. Here that is
 /// sharper still - the encryption sentinel rides the ENCRYPTED column while the

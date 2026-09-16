@@ -136,18 +136,17 @@ export interface DiscoveredWorkflowRecord {
 /**
  * File-level `"use server"` directive detector.
  *
- * The old path convention (`src/server.{ts,tsx,js,jsx}` single-file
- * layout, anything under `src/server/**` directory layout) is gone.
- * It silently turned every exported function — including helpers
- * reached via `export * from "./helpers"` — into a public, network-
- * reachable RPC endpoint.
- *
- * The replacement: a file is a server module iff it opens with the
+ * A file is a server module iff it opens with the
  * ECMAScript Directive Prologue string-literal expression statement
  * `"use server"`. Per the spec, only string-literal expression
  * statements at the top of the body count as directives, BEFORE the
  * first non-string-expression statement. Comments are stripped by the
  * parser; we just look at body[0].
+ *
+ * A path convention (`src/server.{ts,tsx,js,jsx}` single-file layout,
+ * anything under `src/server/**`) would silently turn every exported function —
+ * including helpers reached via `export * from "./helpers"` — into a public,
+ * network-reachable RPC endpoint, which is why the marker is explicit.
  *
  * Note this is the file-level marker only. A later function-level
  * `"use server"` mode may let one file mix client and server code; for
@@ -296,10 +295,9 @@ export function detectFunctionLevelUseServer(ast: { body?: unknown[] }): Set<str
 
 /**
  * Path predicate for the legacy `src/server.{ts,tsx,js,jsx}` /
- * `src/server/**` shape. The path convention itself is gone, but the
- * predicate stays around so the transform can emit a friendly
+ * `src/server/**` shape. It exists so the transform can emit a friendly
  * "you probably want a `"use server"` directive at the top of this
- * file" hint when a developer trips over the breaking change.
+ * file" hint for a file laid out this way.
  */
 export function looksLikeLegacyServerPath(root: string, filePath: string): boolean {
   const rel = relative(root, filePath).replace(/\\/g, "/");
@@ -1306,16 +1304,14 @@ export function transformPlugin(state: TransformState): Plugin {
         }
 
         // 3. Server-module gate — file-level `"use server"` directive.
-        //    The path convention is gone; only this directive opts a
-        //    file into RPC discovery.
+        //    Only this directive opts a file into RPC discovery.
         if (!detectFileLevelUseServer(ast)) return null;
 
         // 4. Find server-procedure exports inside the server module.
         //
         //    The file already declared `"use server"` at the top — so
-        //    every code path below it is server-side — but unlike the
-        //    legacy path-convention behavior, NOT every export is
-        //    automatically an RPC. Only exports whose initializer is a
+        //    every code path below it is server-side — but NOT every
+        //    export is an RPC. Only exports whose initializer is a
         //    call to one of the wrapper markers (`procedure`, `query`,
         //    `mutation`, `stream`, `subscription` imported from
         //    `@zeroship/rpc/server`) are registered.
@@ -1323,9 +1319,9 @@ export function transformPlugin(state: TransformState): Plugin {
         //    Plain `export function helper(...)` and `export const x =
         //    ...` stay private; they survive in the server bundle and
         //    are callable by other server code, but they are NOT
-        //    network-reachable. That means a
-        //    misplaced `export * from "./helpers"` no longer publishes
-        //    helpers as `/__zeroship/v1/<helperName>` endpoints.
+        //    network-reachable, so a misplaced `export * from "./helpers"`
+        //    cannot publish helpers as `/__zeroship/v1/<helperName>`
+        //    endpoints.
         const wrapperBindings = collectWrapperBindings(ast.body);
         interface ServerFn {
           name: string;

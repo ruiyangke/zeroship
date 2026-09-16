@@ -24,20 +24,14 @@
 // real `pg` driver seam against a live database, with the pre-state created OUT OF BAND
 // so the adoption is genuine rather than a re-run of the engine's own DDL.
 //
-// MySQL is covered at the bottom, and the reason it needed covering is that this
-// comment used to say the wrong thing. It read: "does NOT cover MySQL
-// (`mysql_canonical_type` folds `varchar(N)` to `text`, so the MySQL guard never
-// compared the length in the first place)" - which describes a guard that would
-// ADOPT a divergent column silently, the worst outcome available, and would have
-// sent the next reader hunting a bug that does not exist.
-//
-// Measured, it is the opposite. MySQL refuses the guarded adoption outright, with
-// `<unknown: MySQL column-type equality ...>` on the live side, and it refuses
-// EVEN WHEN THE DECLARED TYPE MATCHES. That is what `support-matrix.md` footnote 1
-// means by "any decision requiring column-type equality is refused until
-// modifier-preserving equality is implemented": presence-only guards work on MySQL
-// (an `ifExists` drop does), but a `createTable ifNotExists` over an existing table
-// always needs column-type equality, so guarded ADOPTION is unavailable there.
+// MySQL is covered at the bottom. MySQL refuses the guarded adoption outright,
+// with `<unknown: MySQL column-type equality ...>` on the live side, and it
+// refuses EVEN WHEN THE DECLARED TYPE MATCHES. That is what `support-matrix.md`
+// footnote 1 means by "any decision requiring column-type equality is refused
+// until modifier-preserving equality is implemented": presence-only guards work
+// on MySQL (an `ifExists` drop does), but a `createTable ifNotExists` over an
+// existing table always needs column-type equality, so guarded ADOPTION is
+// unavailable there.
 //
 // Does NOT cover SQLite, and the reason is the same class as MySQL's, not a missing
 // seam: the SQLite leg of `existence_probe::decide` canonicalises BOTH sides through
@@ -227,10 +221,9 @@ test("PostgreSQL: a guarded createTable still fails closed on a genuinely diverg
         schema,
         driver,
       ),
-      // Naming BOTH widths is the point: before the fix this arm also refused, but
-      // because the live side reported a bare `character varying`. Requiring the
-      // message to carry `(100)` against `(255)` proves the refusal is now about the
-      // WIDTHS DIFFERING rather than about the length having gone missing.
+      // Naming BOTH widths is the point: requiring the message to carry `(100)`
+      // against `(255)` proves the refusal is about the WIDTHS DIFFERING rather
+      // than about the length having gone missing.
       /existence-guard drift[\s\S]*column notes\.body[\s\S]*data_type[\s\S]*character varying\(100\)[\s\S]*character varying\(255\)/,
       "a declared width that differs from the live width must be refused fail-closed",
     );

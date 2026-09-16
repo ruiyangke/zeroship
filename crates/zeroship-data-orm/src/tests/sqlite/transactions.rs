@@ -279,13 +279,8 @@ fn a_command_bearing_a_foreign_reservation_is_refused() {
 /// The interrupt arm: cancellation takes effect **during** a long-running
 /// statement, not after it.
 ///
-/// Pre-SC-2 the actor's own comment said the opposite - "the SQL has already
-/// committed (or rolled back) by then" - because nothing could reach a running
-/// statement.
-///
 /// **What proves "during" is the cleanup, not the error and not the clock.**
-/// This doc comment used to say the error proved it - that `statement_cancelled`
-/// "can only come from `SQLITE_INTERRUPT`". It cannot: the *pre-start* path
+/// `statement_cancelled` does not prove it: the *pre-start* path
 /// (`enter_running` refusing, `cancelled_before_start`) produces
 /// `Cancelled { NoSqlStarted }`, whose `into_result` carries the identical
 /// `statement_cancelled` code, and `matches!(outcome, Cancelled { .. })` is
@@ -426,8 +421,8 @@ fn a_cancellation_after_commit_does_not_roll_the_commit_back() {
 /// that path does not claim the reservation's terminal - it stays `PENDING`. A
 /// cancel handle taken from that lease therefore still wins its claim later,
 /// arbitrarily far in the future. By then `tx_conn` can belong to an entirely
-/// different transaction, and `run_cancel` used to issue its `ROLLBACK`
-/// unconditionally: it destroyed the *current* owner's writes.
+/// different transaction, and issuing its `ROLLBACK` unconditionally would
+/// destroy the *current* owner's writes.
 ///
 /// The second half of the damage is the part a creator sees. The stale cancel
 /// leaves the current owner's `tx_bound` untouched, so its `COMMIT` still
@@ -532,10 +527,8 @@ fn a_cancel_for_a_retired_reservation_does_not_roll_back_the_next_transaction() 
 
 /// A cancellation is a claim on one terminal, and a claim can be won once.
 ///
-/// `claim_cancelled` used to return `true` for a terminal already reading
-/// `CLAIMED_CANCELLED`, so a second `Cancel` re-entered the cleanup path and
-/// issued a second `ROLLBACK` on the lane. Here the second cancel must instead
-/// be answered with what the first one decided.
+/// A second `Cancel` must be answered with what the first one decided, not
+/// re-enter the cleanup path and issue a second `ROLLBACK` on the lane.
 #[test]
 fn a_second_cancellation_is_answered_not_re_executed() {
     Host::test(|host| {
@@ -670,8 +663,6 @@ fn two_apps_hold_transactions_at_the_same_time() {
                 .await
                 .expect("app_a writes inside its transaction");
 
-            // The whole defect: this used to be refused because app A - a
-            // DIFFERENT tenant - was holding the one transaction connection.
             let b = backend
                 .fixture_session("app_b")
                 .await
@@ -781,10 +772,9 @@ fn a_transaction_lane_cannot_address_another_apps_tables() {
 /// The refusal that survives, and the message that must name the app.
 ///
 /// A second top-level transaction for the SAME app is still refused
-/// immediately. What changed is that this is now the *only* producer of
-/// `transaction_connection_busy` on this path, so the message can say whose
-/// transaction it is - defect L22b's "reads as your transaction when it is
-/// another tenant's" is gone with the cause.
+/// immediately. This is the only producer of `transaction_connection_busy` on
+/// this path, so the message can say whose transaction it is - the distinction
+/// defect L22b names.
 #[test]
 fn a_second_transaction_for_the_same_app_is_still_refused_and_names_it() {
     Host::test(|host| {
@@ -904,8 +894,7 @@ fn transaction_lanes_are_capped_and_the_refusal_has_its_own_code() {
     })
 }
 
-/// `SQLITE_BUSY_SNAPSHOT` on a write upgrade - the last of SC-2's three owed
-/// arms.
+/// `SQLITE_BUSY_SNAPSHOT` on a write upgrade.
 ///
 /// SC-2 names it "the real serialization point" and the epoch bullet rests on
 /// it. It needs a read snapshot held open ACROSS commands, which the autocommit
@@ -1006,10 +995,10 @@ fn a_write_upgrade_on_a_stale_wal_snapshot_is_refused() {
 /// `SQLITE_BUSY_SNAPSHOT` there.
 ///
 /// `PRAGMA journal_mode` is per database and does NOT propagate across `ATTACH`
-/// (measured: attaching a fresh file to a WAL connection leaves it `delete`),
+/// (attaching a fresh file to a WAL connection leaves it `delete`),
 /// and the migration engine pins every app file to DELETE outright and refuses
 /// to run otherwise -
-/// `crates/zeroship-migrate-sqlite/src/backend/actor.rs:719-729`. So the arm
+/// `crates/zeroship-migrate-sqlite/src/backend/actor.rs`. So the arm
 /// above proves the mapping and the lane mechanics; it does not prove anything
 /// about app data. This one records which mode app data is actually in, so a
 /// change to that fact fails here rather than silently making the arm above
@@ -1217,7 +1206,7 @@ fn two_replicas_reading_before_they_write_both_commit() {
     })
 }
 
-/// **The cost, measured rather than asserted in prose.**
+/// **The cost.**
 ///
 /// `IMMEDIATE` locks every database the connection has open. A transaction lane
 /// carries `main` plus its own app's attached file, so a transaction whose

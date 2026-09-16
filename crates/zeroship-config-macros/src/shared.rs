@@ -136,10 +136,10 @@ pub(crate) const SHARED_IDENTITIES: &[SharedIdentity] = &[
     // carries that table.
     //
     // The provider selector is ONE deployment decision seen from two vantage
-    // points: auth SERVES the provider, control VERIFIES its tokens. It used to
-    // be two identities with two value sets (`native|supabase` against
-    // `platform|supabase`) and no mechanism keeping them coherent, so an
-    // operator could set them to disagree and find out at request time. The
+    // points: auth SERVES the provider, control VERIFIES its tokens. Two
+    // identities with two value sets (`native|supabase` against
+    // `platform|supabase`) would have no mechanism keeping them coherent, so
+    // an operator could set them to disagree and find out at request time. The
     // typed inner enum is what makes the disagreement unrepresentable; the
     // shared name is what makes it one operator-visible setting.
     SharedIdentity {
@@ -162,9 +162,8 @@ pub(crate) const SHARED_IDENTITIES: &[SharedIdentity] = &[
     },
     // The GoTrue base URL is ONE deployment fact read by two binaries: control
     // verifies Supabase tokens against it and auth drives the browser-side
-    // GoTrue login with it. It became shared the moment auth converted; before
-    // that it was a single-consumer `#[config(name = "auth.supabase_url")]` on
-    // control, which is what a single consumer is required to write.
+    // GoTrue login with it. A single consumer writes the name directly; two
+    // readers declare the sharing here.
     SharedIdentity {
         symbol: "AUTH_SUPABASE_URL",
         canonical: "auth.supabase_url",
@@ -172,10 +171,10 @@ pub(crate) const SHARED_IDENTITIES: &[SharedIdentity] = &[
         inner: "String",
     },
     // Platform-global SECRETS. These are the shape the flat `[secrets]` table
-    // could not express: one value, set once, read by several binaries. A former
-    // `ZEROSHIP_CONTROL_KEY` split used literals in some consumers and an env
-    // indirection in another. That is what a flat table with nothing marking
-    // sharing produces, so the sharing is declared here instead.
+    // could not express: one value, set once, read by several binaries. Without
+    // a marker for sharing, the same key splits between literals in some
+    // consumers and an env indirection in another, so the sharing is declared
+    // here instead.
     SharedIdentity {
         symbol: "CONTROL_KEY",
         canonical: "control_key",
@@ -205,12 +204,10 @@ pub(crate) const SHARED_IDENTITIES: &[SharedIdentity] = &[
     // binary prefix for the same reason `blob_store` does not: an operator
     // points a deployment at one stream, not at a per-service stream.
     //
-    // Until 2026-08-20 they were not settings at all. Both producers read
-    // `REDPANDA_BROKERS` / `USAGE_EVENTS_TOPIC` directly through
-    // `UsageStreamSettings::from_env`, which is why the worker - whose TOML
-    // overlay source was removed as a credential boundary in 9b205f6ed - had
-    // NO interface for them and every metering harness had to set ambient
-    // variables on the command prefix.
+    // The worker has no TOML overlay - its overlay source is removed as a
+    // credential boundary - so without these identities it has no interface
+    // for the stream and every metering harness has to set ambient variables
+    // on the command prefix.
     SharedIdentity {
         symbol: "METERING_BROKERS",
         canonical: "metering.brokers",

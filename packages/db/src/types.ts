@@ -861,11 +861,11 @@ export type Id<T extends string, V extends IdValue = string> = V & {
  * invisible; they are not now, and the rule that survived is the logical one. That
  * makes the flip a rename rather than a re-encrypt.
  *
- * This comment used to say the opposite - that the AEAD binds `rawColumn` when present,
- * so moving an encrypted value is a re-encrypt. Acting on that (changing the AAD to
- * match) would destroy every ciphertext in the deployment, because every stored cell is
- * authenticated under the logical name. There is deliberately no separate `aadColumn`:
- * a field that can disagree with the rule is a second source of truth for one fact.
+ * **Why there is no separate `aadColumn`.** `canonical_aad` must use the logical
+ * field name: every stored cell is authenticated under it, so binding `rawColumn`
+ * instead would destroy every ciphertext in the deployment and make moving an
+ * encrypted value a re-encrypt. A field that can disagree with the rule is a second
+ * source of truth for one fact.
  *
  * Emitted by the migration fold, which is the only producer that knows physical
  * layout. It is absent on a `FieldDef` built by the `t.*()` authoring builders, which
