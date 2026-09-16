@@ -67,6 +67,34 @@
             # PLAYWRIGHT_BROWSERS_PATH below; the version of the CLI
             # must match the bundled chromium build (currently 1208).
             playwright-test
+
+            # --- CI parity ------------------------------------------------
+            # CI runs inside this shell (`.github/workflows/ci.yml` sets
+            # `shell: nix develop --command bash -e {0}`). These are the tools
+            # the harnesses and CI steps invoke that the flake did not already
+            # supply. Without them the workflow needs a second, separately
+            # maintained apt list, and those two definitions drift.
+            #
+            # cargo-nextest replaces taiki-e/install-action. lsof and zstd are
+            # harness dependencies: golden_path.sh frees its ports with
+            # `lsof -ti` and reads the artifact manifest with `tar --zstd`.
+            # git, procps, which, netcat, net-tools and jq are invoked by
+            # tests/provision_test_backends.sh, tests/deploy_scripts_gate.sh
+            # and the e2e harnesses.
+            #
+            # pnpm is deliberately absent. package.json#packageManager pins the
+            # pnpm CI must use, and a devShell entry is PREPENDED to PATH, so a
+            # shell-provided pnpm would shadow that pin (this nixpkgs carries an
+            # older major than the pin). Move it here only with a nixpkgs bump.
+            cargo-nextest
+            git
+            lsof
+            zstd
+            jq
+            procps
+            which
+            netcat
+            net-tools
           ];
 
           RUST_BACKTRACE = "1";
