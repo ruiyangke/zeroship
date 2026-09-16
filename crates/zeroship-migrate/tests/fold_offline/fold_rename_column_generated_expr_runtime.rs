@@ -15,13 +15,11 @@
 //! failing, so `min`/`max` and `onDelete`/`onUpdate` simply vanish.
 //!
 //! The offline `SchemaSnapshot` lane follows the rename too, and the last test here
-//! pins that. It did not always: the snapshot rendered the expression to a `String`
-//! at construction and threw the AST away, so the rename had nothing structural to
-//! walk. It now keeps the closed `Expr` beside the rendering
+//! pins that. It keeps the closed `Expr` beside the rendering
 //! (`GeneratedColumnSnapshot::source`) for that reason alone — which is the treatment
 //! `apply::drift::comparable_generated_column` prescribes, and the one an INDEX body
 //! still does not get from introspection (see `fold_rename_column_index_body_pg.rs`:
-//! the fold's own predicate and expression key DO follow a rename now, and what stays
+//! the fold's own predicate and expression key DO follow a rename, and what stays
 //! stale is a CATALOG-derived body, which no AST is recovered from).
 
 use crate::support;
@@ -229,10 +227,10 @@ fn col_ref_tables(value: &serde_json::Value, found: &mut Vec<String>) {
 
 // A generated expression may QUALIFY its column references with the enclosing table,
 // and a TABLE rename moves that qualifier exactly as it moves the collection key. The
-// `env.db.ts` replay in `render::gen_types` has rewritten it all along; this descriptor
-// fold did not, so the two artifacts shipped SIDE BY SIDE out of one `render_artifacts`
-// call described the same column under different table names — the runtime descriptor
-// still naming a collection that no longer exists.
+// descriptor fold must therefore carry the qualifier forward: otherwise the two
+// artifacts shipped SIDE BY SIDE out of one `render_artifacts` call describe the same
+// column under different table names, with the runtime descriptor naming a collection
+// that no longer exists.
 //
 // Asserted through `render_artifacts`, which produces both, so the test fails if
 // EITHER lane regresses rather than only the one being repaired.
@@ -377,24 +375,23 @@ fn a_rename_carries_a_recovered_check_bound_onto_the_new_column_name() {
     );
 }
 
-// The OTHER lane, which used to be excluded here and no longer is.
+// The OTHER lane: the snapshot lane must also follow the rename.
 //
-// THIS TEST WAS REVERSED, DELIBERATELY. It previously asserted that the snapshot lane
-// KEEPS a stale generated body, on the stated grounds that "no reader exists". That
-// grounds is a testable claim and it was measured FALSE: on SQLite a rename is a
-// 12-step table REBUILD, and `declarative::render_create_table_rebuild` renders the
-// new-table CREATE from the TABLE SNAPSHOT — not from the SDK descriptor — for exactly
-// the tables that carry a generated column. A stale body therefore reached emitted DDL
-// as `GENERATED ALWAYS AS (("qty" * "unit_cents"))` over a table whose column is now
+// The snapshot lane must NOT keep a stale generated body. A "no reader exists"
+// reading of that body would be wrong on SQLite, where a rename is a 12-step table
+// REBUILD: `declarative::render_create_table_rebuild` renders the new-table CREATE
+// from the TABLE SNAPSHOT — not from the SDK descriptor — for exactly the tables that
+// carry a generated column. A stale body then reaches emitted DDL as
+// `GENERATED ALWAYS AS (("qty" * "unit_cents"))` over a table whose column is now
 // `quantity`, which SQLite refuses inside the rebuild transaction. See
 // `rename_column_generated_expr_snapshot.rs`, which applies it for real, and
 // `fold_rename_column_generated_expr_pg.rs`, which shows the server deparsing the NEW
-// name. The old assertion was pinning a defect, not a boundary.
+// name.
 //
-// The second half is UNCHANGED and still true: the differ does not compare the body.
-// That remains correct — live PostgreSQL reports a DEPARSED string and the fold a
-// rendered one, so the two spellings would never meet. Following the rename is about
-// what the fold EMITS, not about what it can compare.
+// The differ, by contrast, does not compare the body. That is correct — live
+// PostgreSQL reports a DEPARSED string and the fold a rendered one, so the two
+// spellings would never meet. Following the rename is about what the fold EMITS, not
+// about what it can compare.
 //
 // Each side is asserted SEPARATELY. Asserting only that the differ is quiet would
 // pass just as well against a differ that had stopped looking at columns entirely.
