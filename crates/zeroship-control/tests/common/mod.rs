@@ -900,11 +900,10 @@ pub fn months_since_band_start(period: chrono::NaiveDate) -> u32 {
 ///     PROCESS from `tests/live_db.rs` against the SAME database, so the
 ///     allocator's process-global counter cannot see them at all.
 ///
-/// Measured 2026-08-20 with the band at 2030: `spend_recompute`'s hardcoded
-/// far-future period landed inside a window this allocator had handed to a
-/// proration test, putting two modules' apps in one period. Nothing asserted on
-/// that period, so it was latent - but it is the same defect, and "we got away
-/// with it" is not isolation.
+/// WHY ABOVE RATHER THAN AMONG: a hardcoded far-future period would otherwise
+/// land inside a window this allocator handed to another test, putting two
+/// modules' apps in one period. That defect can be latent - nothing need assert
+/// on the period - but "we got away with it" is not isolation.
 ///
 /// So the band sits ABOVE every literal in the crate rather than among them,
 /// and `period_band_is_reserved_for_the_allocator` in `billing_safety_net_test`
