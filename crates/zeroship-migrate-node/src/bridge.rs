@@ -806,7 +806,7 @@ fn decode_rollback(req: &RollbackRequest) -> Result<DecodedRollback> {
             // Cloned because this decoder borrows the request and reads more of it
             // below; the normalization has to happen before re-serializing either
             // way, or a large integer literal in a rolled-back migration hits the
-            // same fractional-number refusal `apply` used to.
+            // same fractional-number refusal.
             let mut envelope = envelope.clone();
             crate::wire::restore_exact_integers(&mut envelope);
             serde_json::to_string(&envelope).map_err(|error| {
