@@ -60,6 +60,10 @@ pub struct PolicySnapshot {
     policy: AppPolicy,
     ingress_epoch: Option<Revision>,
     validity: Validity,
+    /// How far [`Validity::Until`] may under-state the granted expiry, because
+    /// the deadline was reconstructed from a duration measured across a round
+    /// trip. Zero for configuration policy, which is not reconstructed at all.
+    anchor_slack: std::time::Duration,
 }
 impl PolicySnapshot {
     /// Explicit host configuration has no remote metadata lease to refresh.
@@ -76,6 +80,7 @@ impl PolicySnapshot {
             policy,
             ingress_epoch: None,
             validity: Validity::Configuration,
+            anchor_slack: std::time::Duration::ZERO,
         })
     }
 
@@ -95,7 +100,20 @@ impl PolicySnapshot {
             policy,
             ingress_epoch: None,
             validity: Validity::Until(valid_until),
+            anchor_slack: std::time::Duration::ZERO,
         })
+    }
+
+    /// Record how far this deadline may under-state the granted expiry.
+    ///
+    /// Supplied by the caller that reconstructed it, because only that caller
+    /// measured the round trip. It never extends authority: the deadline is
+    /// unchanged, and the slack is used solely to tell a re-anchored copy of
+    /// the SAME window from a genuine reduction of it.
+    #[must_use]
+    pub const fn with_anchor_slack(mut self, slack: std::time::Duration) -> Self {
+        self.anchor_slack = slack;
+        self
     }
 
     /// Attach the manager-issued ingress epoch delivered with this policy.
@@ -493,8 +511,21 @@ impl PolicyRefresh {
             // anchoring error is known and can be allowed for - not here, where
             // a genuine shortening and an anchoring artefact are indistinguish-
             // able.
+            // ALLOW FOR THE ANCHORING ERROR, THEN FENCE ON WHAT IS LEFT.
+            //
+            // The incoming deadline was rebuilt from a duration measured across
+            // a round trip and anchored at the near end, so it under-states by
+            // up to `anchor_slack`. A renewal of the SAME window therefore
+            // lands slightly earlier than its predecessor - measured at 137
+            // retirements in a single probe run, every one of them this. Adding
+            // the slack back before comparing removes that artefact and nothing
+            // else: a genuine shortening exceeds a round trip by orders of
+            // magnitude and still fences, which is what
+            // `shortening_then_extension_never_revives_captured_authority`
+            // holds and what an earlier attempt at this broke by clamping.
             let deadline_regressed = matches!((&previous.validity, &snapshot.validity),
-                (Validity::Until(old), Validity::Until(new)) if new < old);
+                (Validity::Until(old), Validity::Until(new))
+                    if new.checked_add(snapshot.anchor_slack).is_none_or(|n| n < *old));
             // SAY WHY, because the consequence is severe and invisible from the
             // outside: retiring an epoch cancels every operation bound to it, so
             // a delivery in flight is aborted and its run goes back to the
@@ -591,6 +622,10 @@ impl PolicyAuthority {
             validity: self
                 .deadline
                 .map_or(Validity::Configuration, Validity::Until),
+            // Computing the effective policy reads the deadline it already
+            // holds; it never compares two deadlines, so the anchoring error
+            // has nothing to correct here.
+            anchor_slack: std::time::Duration::ZERO,
         }
         .effective())
     }
