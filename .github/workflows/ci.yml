@@ -1,6 +1,20 @@
 name: CI
 on: [push, pull_request]
 
+# Toolchain jobs run inside the flake's devShell rather than a separate apt list,
+# so the environment has one definition. `nix develop` is required for the native
+# build inputs and not only for Rust: `rdkafka` is configured with `cmake-build`,
+# so `rdkafka-sys` compiles librdkafka and needs `curl/curl.h`, which the
+# devShell supplies through `curl.dev`. Anything that builds the workspace needs
+# those inputs, which is why every job opts in instead of only the Rust steps.
+#
+# pnpm is deliberately NOT in the devShell: a devShell entry is PREPENDED to
+# PATH, and `package.json#packageManager` pins the pnpm CI must use. Declaring it
+# in the shell would shadow that pin. See the matching note in flake.nix.
+defaults:
+  run:
+    shell: nix develop --command bash -e {0}
+
 jobs:
   # Commit conventions, in CI as well as in the local commit-msg hook. The hook
   # is the one that matters - it fails at the moment of the mistake - but it
@@ -13,6 +27,10 @@ jobs:
   # every unenforced invariant in this tree has. That is what this job is for.
   commit-messages:
     runs-on: ubuntu-latest
+    # No toolchain needed, so this job keeps the runner's own shell.
+    defaults:
+      run:
+        shell: bash -e {0}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -42,8 +60,7 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: ./.github/actions/nix-toolchain
       # Build SDK sources before Cargo: zeroship-data-v8 embeds the database facade.
       # runtime entry, and zeroship-data-v8 embeds the DB internal adapter.
       # These gitignored build outputs are absent from a fresh checkout.
@@ -151,11 +168,6 @@ jobs:
       # testcontainers separately; this job uses the compose definition.
       - name: Provision the shared PostgreSQL test backend
         run: bash tests/provision_test_backends.sh
-      - name: Install snapshot clients matching the test server
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y postgresql-client-16
-          echo '/usr/lib/postgresql/16/bin' >> "$GITHUB_PATH"
       - name: Install the extensions required by ordinary database tests
         run: |
           set -euo pipefail
@@ -426,8 +438,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: ./.github/actions/nix-toolchain
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -442,8 +453,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: ./.github/actions/nix-toolchain
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -458,9 +468,7 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - uses: taiki-e/install-action@nextest
+      - uses: ./.github/actions/nix-toolchain
       # Build the SDK modules embedded by the V8 runtime.
       - uses: actions/setup-node@v4
         with:
@@ -469,11 +477,6 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm --filter @zeroship/migrate build
       - run: pnpm build
-      - name: Install snapshot clients matching the test server
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y postgresql-client-16
-          echo '/usr/lib/postgresql/16/bin' >> "$GITHUB_PATH"
       - name: Run native data tests with owned PostgreSQL
         run: cargo xtask test data
       - name: Upload native test results
@@ -488,8 +491,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: ./.github/actions/nix-toolchain
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -639,22 +641,15 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: ./.github/actions/nix-toolchain
       - uses: actions/setup-node@v4
         with:
           node-version: 22
       - uses: pnpm/action-setup@v4
-      # lsof is not optional decoration here. golden_path.sh frees its ports with
-      # `lsof -ti :$PORT -sTCP:LISTEN` and, in step 7c, FINDS the live dev runtime
-      # the same way in order to SIGABRT it. Without lsof every one of those calls
-      # returns empty, step 7c takes its `could not find the healthy runtime` arm
-      # and fails - loudly, which is the right direction, but the reason would be
-      # a missing package rather than a defect.
-      # zstd because step 1b reads the manifest out of the artifact with
-      # `tar --zstd -xOf`, which shells out to the zstd binary.
-      - name: Install harness prerequisites
-        run: sudo apt-get update && sudo apt-get install -y lsof zstd postgresql-client
+      # lsof and zstd are harness dependencies the devShell supplies:
+      # golden_path.sh frees its ports with `lsof -ti :$PORT -sTCP:LISTEN` and
+      # finds the live dev runtime the same way in step 7c, and step 1b reads
+      # the artifact manifest with `tar --zstd -xOf`.
       # Postgres as an explicit `docker run`, NOT a `services:` entry, and the
       # container NAME is the reason. golden_path.sh creates and drops its own
       # dedicated database through `docker exec "$PG_CONTAINER" psql` (default
@@ -876,20 +871,15 @@ jobs:
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: ./.github/actions/nix-toolchain
       - uses: actions/setup-node@v4
         with:
           node-version: 22
       - uses: pnpm/action-setup@v4
-      # lsof only, and the omissions are deliberate rather than an oversight.
-      # Every one of these six frees its ports with `lsof -ti :$PORT`; without it
-      # each such call returns empty and a stale listener survives into the run.
-      # NOT postgresql-client: unlike golden_path.sh, every psql call in this
-      # family goes through `docker exec <container> psql`, which uses the
-      # client inside the image. NOT zstd: nothing here unpacks a .zship.
-      - name: Install harness prerequisites
-        run: sudo apt-get update && sudo apt-get install -y lsof
+      # Every one of these six frees its ports with `lsof -ti :$PORT`, which the
+      # devShell supplies. Unlike golden_path.sh they need no postgresql client
+      # (every psql call goes through `docker exec <container> psql`, using the
+      # client inside the image) and no zstd (nothing here unpacks a .zship).
       # Postgres as an explicit `docker run`, NOT a `services:` entry, and the
       # container NAME is the reason: stream harnesses create and drop
       # their own dedicated database through `docker exec "$PG_CONTAINER" psql`
@@ -1273,17 +1263,14 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: ./.github/actions/nix-toolchain
       - uses: actions/setup-node@v4
         with:
           node-version: 22
       - uses: pnpm/action-setup@v4
-      # No lsof: the harness allocates its ports per run (tests/lib/e2e_ports.sh)
-      # instead of pinning a band and SIGKILLing whatever holds it, so there is
-      # no stale listener to clear. This comment used to explain the opposite.
-      - name: Install harness prerequisites
-        run: sudo apt-get update && sudo apt-get install -y postgresql-client
+      # No lsof needed: the harness allocates its ports per run
+      # (tests/lib/e2e_ports.sh) instead of pinning a band and SIGKILLing
+      # whatever holds it, so there is no stale listener to clear.
       - run: pnpm install --frozen-lockfile
       # The vendored engine ships no dist/ and the vite-plugin imports it, so it
       # builds before the SDKs. Same ordering as the `sdk` and golden-path jobs.

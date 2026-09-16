@@ -1,0 +1,21 @@
+name: nix toolchain
+description: >
+  Install Nix, warm its cache, and expose the flake toolchain to host-level
+  actions. Toolchain jobs use this so the environment has one definition
+  (flake.nix) rather than a separately-maintained apt list.
+
+runs:
+  using: composite
+  steps:
+    - uses: DeterminateSystems/nix-installer-action@v23
+    - uses: DeterminateSystems/magic-nix-cache-action@v15
+    # Swatinem/rust-cache keys itself on `rustc -vV`, and the compiler now comes
+    # from the flake rather than from dtolnay/rust-toolchain, so it has to be
+    # visible on PATH before that action runs.
+    - name: Expose the flake toolchain for cache keying
+      shell: bash
+      run: |
+        nix develop --command bash -c \
+          'printf "%s:%s\n" "$(dirname "$(command -v cargo)")" "$(dirname "$(command -v rustc)")"' \
+          >> "$GITHUB_PATH"
+    - uses: Swatinem/rust-cache@v2
