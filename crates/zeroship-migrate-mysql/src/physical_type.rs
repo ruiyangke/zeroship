@@ -3,11 +3,10 @@
 //!
 //! # Why this is not a field on the neutral column snapshot
 //!
-//! It used to be one - a named field on the neutral `ColumnSnapshot`, in
-//! `zeroship-migrate-backend` - and the engine `match`ed on its variants in three
-//! places. That put both halves of the hard limit in the wrong crate: the neutral
-//! vocabulary spelled a vendor's name, and neutral code resolved a vendor's type
-//! grammar to decide whether two columns were the same.
+//! A field on the neutral `ColumnSnapshot` would put both halves of the hard
+//! limit in the wrong crate: the neutral vocabulary would spell a vendor's
+//! name, and neutral code would resolve a vendor's type grammar to decide
+//! whether two columns were the same.
 //!
 //! The type lives here, where its parser and its speller already had to be, and
 //! reaches the neutral snapshot as an opaque leg of
@@ -69,8 +68,8 @@ pub enum MysqlPhysicalType {
         /// The catalog `DATA_TYPE`, e.g. `tinytext`, `text`, `mediumblob`.
         tier: String,
     },
-    /// An integer family member. Display width is dropped because MySQL 8 no longer
-    /// stores it - EXCEPT for `tinyint(1)`, which is how the renderer spells a
+    /// An integer family member. Display width is dropped because MySQL 8 does
+    /// not store it - EXCEPT for `tinyint(1)`, which is how the renderer spells a
     /// boolean and which MySQL does preserve, so it is carried as its own flag
     /// rather than as a width.
     Integer {
@@ -184,7 +183,7 @@ impl MysqlPhysicalType {
             "tinytext" | "text" | "mediumtext" | "longtext" | "tinyblob" | "blob"
             | "mediumblob" | "longblob" => Self::Lob { tier: family },
             "tinyint" | "smallint" | "mediumint" | "int" | "bigint" => Self::Integer {
-                // MySQL 8 no longer stores a display width, with `tinyint(1)` the one
+                // MySQL 8 does not store a display width, with `tinyint(1)` the one
                 // exception it keeps - and that exception is the boolean the renderer
                 // emits, so it is carried as a flag rather than discarded as a width.
                 boolean: family == "tinyint" && numeric_args.first() == Some(&1),
@@ -406,9 +405,6 @@ pub fn carrier(physical: MysqlPhysicalType) -> Dialectal<dyn VendorColumnFacts> 
 mod mysql_physical_type_round_trip {
     //! `parse` and `type_text` are one contract read in two directions, so the tests
     //! that hold them to each other sit with them rather than with either consumer.
-    //! They moved here from `zeroship_migrate::apply::drift`, where the speller used to
-    //! live: they were never about the differ, and leaving them behind would have left
-    //! the round trip asserted from a crate that no longer owns either half.
 
     use super::MysqlPhysicalType;
 
@@ -504,11 +500,11 @@ mod physical_contract_rules {
     //! What makes two MySQL physical contracts THE SAME COLUMN, and how a difference
     //! between them is spelled.
     //!
-    //! These moved out of `zeroship_migrate::apply::drift`'s in-src tests, where they
-    //! asserted core's comparator against a MySQL rule core no longer holds. Core's
-    //! half - that it asks a leg exactly when one is present on both sides, and falls
-    //! through to the portable comparison otherwise - is asserted there still, against
-    //! a stand-in contract. This is the vendor's half, asserted where the rule lives.
+    //! Core's half of the comparison - that it asks a leg exactly when one is
+    //! present on both sides, and falls through to the portable comparison
+    //! otherwise - is asserted in `zeroship_migrate::apply::drift` against a
+    //! stand-in contract. This is the vendor's half, asserted where the rule
+    //! lives.
 
     use super::MysqlPhysicalType;
     use zeroship_migrate_backend::dialectal::VendorColumnFacts;
@@ -546,8 +542,8 @@ mod physical_contract_rules {
     #[test]
     fn a_width_change_the_portable_type_cannot_see_is_spelled_both_ways() {
         // The defect this contract exists for: both sides read `text` portably, so
-        // the report used to print two equal strings and the caller's equal-sides
-        // guard dropped the entry.
+        // printing both portably would print two equal strings, and the caller's
+        // equal-sides guard would drop the entry.
         let (expected, actual) = report("text", "varchar(64)").expect("a difference to name");
         assert_ne!(
             expected, actual,

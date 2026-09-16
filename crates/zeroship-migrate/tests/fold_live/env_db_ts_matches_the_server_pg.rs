@@ -1,11 +1,9 @@
-//! **The oracle that adjudicates step 4 consumer 2, live.**
+//! **`env.db.ts` adjudicated against a live PostgreSQL server.**
 //!
-//! `docs/proposals/single-fold-and-effects.md` section G step 4 moves `env.db.ts` off
-//! a private op-stream walker and onto `FoldedSchema::project_authoring_tables`. Two
-//! ops answer differently across that move - `alterPrimaryKey`, which the walker had
-//! no arm for at all, and `dropPartition`, which the walker also ignored - and a
-//! differential gate can only say THAT they differ. Which side is right is a question
-//! about a database, so it is asked of one.
+//! `env.db.ts` is rendered from `FoldedSchema::project_authoring_tables`, and for
+//! `alterPrimaryKey` and `dropPartition` the correctness of that rendering is a
+//! question about a database - a differential gate can only say THAT two answers
+//! differ, not which one is right. So it is asked of one.
 //!
 //! Each test here APPLIES the migration to a real PostgreSQL through the shipped
 //! `MigrationEngine::apply_plan`, reads the answer out of `pg_catalog`, and then
@@ -24,8 +22,9 @@
 //! than reporting an artifact defect.
 //!
 //! REQUIRES `ZERO_MIGRATE_TEST_PG_URL`: without it these tests FAIL. A skipped run
-//! of this file proved nothing at all while reporting the same pass count as a real
-//! one, which is why it can no longer skip. The offline halves of these claims live in
+//! of this file proves nothing while reporting the same pass count as a real one,
+//! which is why it fails rather than skipping. The offline halves of these claims
+//! live in
 //! `crates/zeroship-migrate/tests/gen_types/gen_types_authoring_tables_from_the_fold.rs` and always run.
 
 use crate::support;

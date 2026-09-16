@@ -1,46 +1,27 @@
 //! The offline op fold must replay the ops that change a column's shape.
 //!
 //! The `FieldDef` projection reconstructs a per-table FieldDescriptor map from
-//! an envelope's ops. It handles eight of them - createTable, addColumn,
-//! dropColumn, renameColumn, dropTable, renameTable, addConstraint,
-//! alterPrimaryKey - and its catch-all drops the rest. The ops that change a
-//! column's TYPE or its NULLABILITY are among the rest, so they were applied,
-//! accepted, and then ignored by the reconstruction.
+//! an envelope's ops, and the ops that change a column's TYPE, its NULLABILITY,
+//! its DEFAULT, its FK policy or its single-column uniqueness must be reflected
+//! in that reconstruction - not applied, accepted, and ignored.
 //!
-//! WHY THIS IS NOT A COHERENCE BUG, which matters for where the fix belongs:
-//! The fold behind it runs the catalog replay FIRST, and that is the fail-closed
+//! WHY THIS IS NOT A COHERENCE QUESTION, which matters for where the check
+//! belongs: the fold runs the catalog replay FIRST, and that is the fail-closed
 //! structural oracle (add-to-missing-table, drop-absent-column, duplicate-create).
-//! Coherence is already enforced. What leaks is FIDELITY - the op is legal and the
-//! reconstruction simply does not reflect it.
+//! Coherence is enforced there. What can leak is FIDELITY - the op is legal and
+//! the reconstruction must still reflect it.
 //!
 //! THE CONSUMER IS CODEGEN, which is what makes it user-facing rather than
-//! internal. The IR schema records it directly: "the OFFLINE op fold ... and
-//! `gen-types` have NO live DB". (That sentence named a standalone `zeroship_migrate`
-//! walker until step 4 consumer 3 of `docs/proposals/single-fold-and-effects.md`
-//! deleted it; the map is a
-//! projection of the single fold now and the claim is unchanged - still no live DB.) So a
-//! migration that widens a column to `bigInt`, or tightens one to NOT NULL,
-//! produces generated TypeScript that still describes the old shape - a
-//! type-safety claim the codegen makes and the schema no longer honours.
+//! internal. The IR schema records it directly: the OFFLINE op fold and
+//! `gen-types` have NO live DB. So a migration that widens a column to `bigInt`,
+//! or tightens one to NOT NULL, must change the generated TypeScript too -
+//! otherwise a type-safety claim the codegen makes stops being true.
 //!
-//! MEASURED BEFORE THIS FIXTURE EXISTED, by folding each envelope and printing the
-//! result:
-//!
-//!     createTable a(v int); setColumnType a.v -> bigInt
-//!         folded v = {"type":"int"}            STALE
-//!     createTable a(v int NULL); setColumnNotNull a.v
-//!         folded v = {"type":"int"}            STALE (no `required`)
-//!     createTable a(c0 int NOT NULL); dropColumnNotNull a.c0
-//!         folded c0 = {"required":true}        STALE (still required)
-//!
-//! SCOPE, stated rather than implied: three facet ops are pinned here because
-//! three were measured. `setColumnDefault`, `dropColumnDefault`,
-//! `synchronizeIdentity` and `dropConstraint` are also absent from the replay and
-//! are NOT asserted, because my probes of them were inconclusive - one never
-//! parsed, and one tested dropping a default from a column that had none, which a
-//! correct implementation also leaves unchanged. They are covered instead by the
-//! exhaustive match the fix installs: the compiler now demands a decision for
-//! every op, so their status is recorded in an arm rather than guessed at here.
+//! SCOPE: `AuthoredState::advance` matches on every `Op` with no catch-all arm,
+//! so the compiler demands a decision for each one. The arms below pin the
+//! decisions that move a column facet; an op that legitimately leaves the
+//! descriptor alone is recorded in an arm of that match rather than guessed at
+//! here.
 
 use crate::support;
 
@@ -119,8 +100,8 @@ fn set_column_not_null_is_replayed() {
 
 #[test]
 fn drop_column_not_null_is_replayed() {
-    // The other direction, and the one a fix written only into the tightening arm
-    // would miss.
+    // The other direction - the one an implementation that only tightened would
+    // miss.
     let a = folded(r#",{"op":"dropColumnNotNull","table":"a","column":"c0"}"#);
     assert_eq!(
         field(&a, "c0").get("required"),
@@ -130,15 +111,14 @@ fn drop_column_not_null_is_replayed() {
 }
 
 // ---------------------------------------------------------------------------
-// The DEFAULT facet. Measured after the three above were fixed, on the
-// prediction that `FieldDescriptor.default` had the same shape of hole - the
-// descriptor carries the slot, the ops write it, the replay ignored them.
+// The DEFAULT facet. The descriptor carries the slot and the ops write it, so
+// the replay must reflect them.
 //
-// THESE NEED THEIR OWN BASELINE. An earlier probe tested "drop a default" on a
-// column that had none, where "unchanged" is also the CORRECT answer, so it
-// proved nothing. `folded_with_default` gives the column a default first, and
-// the baseline test below asserts the fold can SEE it - without that, the drop
-// test cannot distinguish a working implementation from a broken one.
+// THESE NEED THEIR OWN BASELINE. "Drop a default" on a column that has none is
+// a case where "unchanged" is also the CORRECT answer, so it proves nothing.
+// `folded_with_default` gives the column a default first, and the baseline test
+// below asserts the fold can SEE it - without that, the drop test cannot
+// distinguish a working implementation from a broken one.
 // ---------------------------------------------------------------------------
 
 /// Like [`folded`], but `v` is declared carrying a literal default.
@@ -201,14 +181,14 @@ fn set_column_default_is_replayed() {
 // ---------------------------------------------------------------------------
 // The FK POLICY facet, which the fold LIFTS onto a ref-typed column.
 //
-// `addConstraint` was already replayed - it FEEDS the lift - while its inverse
-// was not, so an ON DELETE outlived the constraint that granted it. That is
-// worse than a stale type: it describes a DELETION BEHAVIOUR the database no
+// `addConstraint` is replayed - it FEEDS the lift - so its inverse must be
+// replayed too, or an ON DELETE outlives the constraint that granted it. That
+// is worse than a stale type: it describes a DELETION BEHAVIOUR the database no
 // longer has.
 //
 // BOTH AUTHORING ROUTES ARE PINNED. The policy can arrive inline on createTable
-// or from a later addConstraint, and the fix had to record the constraint name
-// at both push sites. A fixture testing one route would pass with the other half
+// or from a later addConstraint, and the fold records the constraint name at
+// both push sites. A fixture testing one route would pass with the other half
 // missing - the same inline-vs-standalone split that `f721_unguarded_index_shape`
 // exists for.
 // ---------------------------------------------------------------------------
@@ -267,7 +247,7 @@ fn dropping_an_inline_declared_constraint_un_lifts_its_policy() {
 
 #[test]
 fn dropping_an_add_constraint_declared_policy_un_lifts_it_too() {
-    // The other authoring route. The fix records the constraint name at two push
+    // The other authoring route. The fold records the constraint name at two push
     // sites; missing either leaves one route undroppable.
     let before = folded_ref(A_REF_ONLY, ADD_FK);
     assert_eq!(
@@ -286,10 +266,10 @@ fn dropping_an_add_constraint_declared_policy_un_lifts_it_too() {
 // ---------------------------------------------------------------------------
 // A SINGLE-COLUMN UNIQUE is a column facet, whichever way it is authored.
 //
-// `t.string().unique()` set `unique` on the descriptor; the same constraint
-// declared at table level - inline on createTable, or via addConstraint - set
-// nothing, so two authoring routes to one uniqueness produced different
-// generated types.
+// `t.string().unique()` sets `unique` on the descriptor; the same constraint
+// declared at table level - inline on createTable, or via addConstraint - must
+// reach the same field, or two authoring routes to one uniqueness produce
+// different generated types.
 //
 // Multi-column unique is deliberately NOT a column facet: it is a table key,
 // and the fold already draws that single-column line for foreign-key policy.
@@ -319,7 +299,7 @@ const ADD_UNIQUE: &str = r#",{"op":"addConstraint","table":"a","constraint":{"na
 #[test]
 fn a_column_level_unique_is_visible_to_the_fold() {
     // The precondition: without it, the two tests below could pass by the
-    // descriptor's `unique` slot being unreachable rather than by the fix.
+    // descriptor's `unique` slot being unreachable rather than by the lift.
     let a = folded_table(A_COL_UNIQUE, "");
     assert_eq!(
         field(&a, "v")

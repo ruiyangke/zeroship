@@ -67,8 +67,8 @@ struct TableBlock {
     partition_by: Option<String>,
     /// FIELD `schema`.
     schema: Option<String>,
-    /// CONTROL: the runtime options line, which consumer 1 moved and this move must
-    /// leave exactly where it is.
+    /// CONTROL: the runtime options line, which the fold routing must leave
+    /// exactly where it is.
     options: Option<String>,
     /// CONTROL: anything the classifier did not recognise. Non-empty means the
     /// emitter grew a section this probe cannot see, and every assertion below would
@@ -237,7 +237,7 @@ fn the_per_field_reader_is_not_a_broken_instrument() {
 }
 
 // ---------------------------------------------------------------------------
-// The op the walker never had an arm for, per action shape
+// `alterPrimaryKey`, per action shape
 // ---------------------------------------------------------------------------
 
 /// The stream shapes the five `alterPrimaryKey` arms below share, so the golden and
@@ -421,9 +421,8 @@ fn a_rename_after_a_primary_key_replace_follows_the_new_key() {
     }
 }
 
-/// Two `alterPrimaryKey` ops compose: the second sees the key the first installed.
-/// This is the corpus stream `v_primary_key`, which is where the step 3 gate recorded
-/// the divergence, driven end to end through the artifact.
+/// Two `alterPrimaryKey` ops compose: the second sees the key the first installed,
+/// driven end to end through the artifact.
 #[test]
 fn two_primary_key_ops_compose_in_env_db_ts() {
     for dialect in DIALECTS {
@@ -624,8 +623,8 @@ fn every_other_field_of_the_authoring_map_reaches_env_db_ts_unchanged() {
 // The corpus: both artifacts, whole, on real recorded streams
 // ---------------------------------------------------------------------------
 
-/// The recorded op fixtures, the same 27 `crates/zeroship-migrate/tests/ir_contract/op_fixture_goldens.rs` owns and the
-/// same list consumer 1's gate drives. Real drained recorder envelopes, already
+/// The recorded op fixtures, the same corpus `crates/zeroship-migrate/tests/ir_contract/op_fixture_goldens.rs` owns.
+/// Real drained recorder envelopes, already
 /// policy-resolved, so they fold under the confined charter that produced them.
 const STEMS: [&str; 27] = [
     "alter_primary_key",
@@ -659,16 +658,14 @@ const STEMS: [&str; 27] = [
 
 /// The carrier streams, folded into the SAME golden as the recorded fixtures.
 ///
-/// They are here because the recorded corpus does not cover what moved.
-/// `the_corpus_golden_actually_covers_the_map_that_moved` is the assertion that keeps
-/// that statement true: it counts, in the golden itself, the primary-key spellings
-/// and the partition rows this move is about.
+/// They are here because the recorded corpus does not cover the shapes this file
+/// pins. `the_corpus_golden_actually_covers_the_map_that_moved` is the assertion
+/// that keeps that statement true: it counts, in the golden itself, the
+/// primary-key spellings and the partition rows under test.
 ///
-/// The brief for this move warned that the step 1 corpus holds exactly ONE
-/// `unique: true` column and that a gate blind to a carrier proves nothing about it.
-/// The same warning applies to KEY naming, which is what this move touches, so the
-/// carriers below cross a primary key with every shape that renders differently:
-/// single, composite, absent, injected, renamed, dropped-with-its-column.
+/// A gate blind to a carrier proves nothing about it, so the carriers below cross
+/// a primary key with every shape that renders differently: single, composite,
+/// absent, injected, renamed, dropped-with-its-column.
 const CARRIERS: &[(&str, &str)] = &[
     ("pk_replace_single", PK_REPLACE_SINGLE),
     ("pk_replace_composite", PK_REPLACE_COMPOSITE),
@@ -727,12 +724,10 @@ const CARRIERS: &[(&str, &str)] = &[
     ),
     ("every_other_field", EVERY_OTHER_FIELD),
     // The `constraints` field renders through four blocks and the recorded fixtures
-    // reach almost none of them: measured on the first capture of this golden, the 27
-    // fixtures plus the carriers above produced only TEN `constraint` rows, because a
-    // single-column FK is LIFTED onto the column as `.references(…)` and never
-    // reaches a `foreignKeys:` block. A field this move could break with ten rows of
-    // evidence is the corpus narrowing that `the_corpus_golden_actually_covers_the_map_that_moved`
-    // exists to refuse, so the three streams below were added to cover it rather than
+    // reach almost none of them: a single-column FK is LIFTED onto the column as
+    // `.references(…)` and never reaches a `foreignKeys:` block. That corpus
+    // narrowing is what `the_corpus_golden_actually_covers_the_map_that_moved`
+    // exists to refuse, so the three streams below cover the field rather than
     // the floor being lowered to match.
     (
         "composite_foreign_key",
@@ -797,8 +792,8 @@ fn read_stem(stem: &str) -> Vec<Op> {
 /// Three kinds of line, and all three are needed:
 ///
 /// * a `sha` line per artifact - the WHOLE artifact. `env.db.ts`'s is the thing under
-///   test; `runtime.json`'s is the CONTROL, because this move must not touch it at
-///   all and a hash is the only way to say "nothing else";
+///   test; `runtime.json`'s is the CONTROL, because the fold routing must not touch
+///   it at all and a hash is the only way to say "nothing else";
 /// * one line per FIELD of `AuthoringTable` as `env.db.ts` spells it, so when a `sha`
 ///   line moves the lines beside it name the field instead of printing two hashes;
 /// * an `unclassified` line whenever the reader could not bucket something, so a
@@ -904,18 +899,15 @@ fn measure_corpus() -> Vec<String> {
     measured
 }
 
-/// **The behaviour-preservation gate for the move.**
+/// **The behaviour-preservation gate for the fold routing.**
 ///
-/// The golden was captured from the OLD path - `render_artifacts` driven by
-/// the authoring-table walker - BEFORE the consumer was switched, and committed with
-/// exactly the rows that the walker's defects made wrong edited by hand, each of them
-/// recorded in `docs/review-log.md` with the measurement that settles which side is
-/// right. So this test compares what the new path emits against what the walker
-/// emitted, on 27 real recorded streams and 20 carriers under 3 dialects, and it is
-/// not circular: the side that produced the expectation is not the side under test.
+/// The golden is committed expectation data: this test compares what
+/// `render_artifacts` emits through the fold against it, on the recorded streams
+/// and the carriers under every shipping dialect, and it is not circular - the
+/// side that produced the expectation is not the side under test.
 ///
 /// There is deliberately NO re-bless environment variable, matching
-/// `crates/zeroship-migrate/tests/ir_contract/op_fixture_goldens.rs` and consumer 1's gate: an easy update affordance is
+/// `crates/zeroship-migrate/tests/ir_contract/op_fixture_goldens.rs`: an easy update affordance is
 /// what turns a corpus into a mirror of whatever the code emits today.
 #[test]
 fn the_recorded_corpus_renders_the_same_artifacts_through_the_fold() {
@@ -955,9 +947,9 @@ fn the_recorded_corpus_renders_the_same_artifacts_through_the_fold() {
     );
 }
 
-/// The corpus is only evidence if it covers the thing that moved. A golden with no
+/// The corpus is only evidence if it covers the shapes under test. A golden with no
 /// composite primary key, no `primaryKey: null`, and no partition rows would pass the
-/// test above while measuring nothing about the map this change replaced.
+/// test above while measuring nothing about the map under test.
 ///
 /// Every floor below names the shape it protects, and every one of them counts rows
 /// in the GOLDEN FILE rather than in the measurement, so a run in which the code
@@ -983,10 +975,8 @@ fn the_corpus_golden_actually_covers_the_map_that_moved() {
     let schema = count(&|l| l.contains("|schema|"));
     let unclassified = count(&|l| l.contains("|unclassified|"));
 
-    // Each floor sits below its MEASURED value, quoted in the message so a reader can
-    // see how much slack there is rather than guessing. Measured on the golden this
-    // change commits: single 59, composite 9, null 27, constraint 19, index 66,
-    // partition_by 13, schema 1.
+    // Each floor sits below its measured value, quoted in the message so a reader can
+    // see how much slack there is rather than guessing.
     assert!(
         single >= 40,
         "the golden must cover single-column primary keys, which render as a COLUMN \
@@ -1043,11 +1033,11 @@ fn the_corpus_golden_actually_covers_the_map_that_moved() {
 /// Streams whose refusal is the interesting part, plus the ordinary ones, so the
 /// control below is exercised on the arms that could plausibly refuse.
 ///
-/// The walker being deleted had exactly ONE fallible call, `flatten_dialectal_ops`.
-/// `single_fold::fold` makes the same call and then runs the whole structural catalog
-/// replay on top of it, so the deletion should be able to REMOVE a refusal and never
-/// add one. These probes put both directions under load: streams a dialect leg
-/// refuses, streams the catalog refuses, and streams the named-type registry refuses.
+/// `single_fold::fold` calls `flatten_dialectal_ops` and then runs the whole
+/// structural catalog replay on top of it, so routing artifact reads through the
+/// fold can REMOVE a refusal and must never add one. These probes put both
+/// directions under load: streams a dialect leg refuses, streams the catalog
+/// refuses, and streams the named-type registry refuses.
 const REFUSAL_PROBES: &[(&str, &str)] = &[
     (
         "dialect_leg_selection",
@@ -1153,24 +1143,21 @@ fn control_cases() -> Vec<(String, Vec<Op>, &'static str)> {
     cases
 }
 
-/// **The over-refusal control: this move added no refusal, and removed none either.**
+/// **The over-refusal control: the fold routing adds no refusal, and removes none.**
 ///
 /// An equality gate is STRUCTURALLY BLIND to a refusal change, because it only
 /// compares streams that produced an answer on both sides: a stream that starts
 /// erroring simply leaves the sample and the count falls, which reads as green
 /// everywhere except in a pinned total. So the property is asserted as a
-/// BICONDITIONAL against `fold_ops` - the surviving half of the coherence gate
-/// `render_artifacts` applies beside the fold - and both directions panic.
+/// BICONDITIONAL against `fold_ops` - the independent coherence gate
+/// `render_artifacts` is checked beside - and both directions panic.
 ///
-/// Be precise about how much this proves FOR THIS MOVE, because it is less than it
-/// proved for consumer 1. Consumer 1 introduced the `single_fold::fold` call into
-/// `render_artifacts`, so its control was measuring a genuinely new failure surface.
-/// That call is already there; this move only changes which value is READ from it, and
-/// `project_authoring_tables` is infallible. So the expected refusal delta is zero BY
-/// CONSTRUCTION, and this control is a regression guard rather than a discovery
-/// instrument. What it does still catch, and what no other gate in this change can:
-/// the deletion removing the walker's own `flatten_dialectal_ops` refusal in a stream
-/// where the fold does not make the same call, which would show up as UNDER-REFUSAL.
+/// Be precise about how much this proves. `render_artifacts` already runs
+/// `single_fold::fold` first, and `project_authoring_tables` is an infallible READ
+/// of it, so the expected refusal delta is zero BY CONSTRUCTION and this control
+/// is a regression guard rather than a discovery instrument. What it still
+/// catches: an op stream where the fold's own refusal differs from the one the
+/// artifact path makes, which would show up as UNDER- or OVER-REFUSAL.
 #[test]
 fn the_move_changed_no_refusal_that_the_old_path_already_made() {
     let confined = support::confined_charter();
@@ -1203,17 +1190,14 @@ fn the_move_changed_no_refusal_that_the_old_path_already_made() {
                 SCHEMA,
             );
             let Ok(resolved) = resolved else {
-                // The resolve step is BEFORE the fold and this move did not touch it;
-                // a stream it rejects reaches neither side.
+                // The resolve step is BEFORE the fold and the fold routing does not
+                // touch it; a stream it rejects reaches neither side.
                 continue;
             };
-            // The independent oracle is `fold_ops`, NOT the fold. This comparison was
-            // written against the `FieldDef` walker, which ran `fold_ops` itself and was
-            // therefore a second opinion; step 4 consumer 3 deleted it, and rewriting
-            // this line to `single_fold::fold(…).project_field_defs()` would have made
-            // the biconditional compare `render_artifacts` to the very call it makes
-            // first - a control that can only ever agree with itself. `fold_ops` is the
-            // half of the old gate that still exists independently.
+            // The independent oracle is `fold_ops`, NOT the fold. Comparing against
+            // `single_fold::fold(…).project_field_defs()` would make the
+            // biconditional compare `render_artifacts` to the very call it makes
+            // first - a control that can only ever agree with itself.
             let old_gate = zeroship_migrate::fold_ops(
                 zeroship_migrate::shipping_vendors(),
                 &resolved.ops,
@@ -1391,10 +1375,9 @@ fn the_corpus_golden_records_both_refusals_and_renders() {
 }
 
 /// The two artifacts out of ONE `render_artifacts` call must describe the same
-/// database. Section B row 2 of the proposal is a case where they did not, and this
-/// move is the last chance to check it for the primary key specifically: the runtime
-/// descriptor's `fields` come from the `FieldDef` projection, which DOES handle
-/// `alterPrimaryKey`, and `env.db.ts` came from a walker that did not.
+/// database. The primary key is the case to check: the runtime descriptor's
+/// `fields` come from the `FieldDef` projection, which DOES handle
+/// `alterPrimaryKey`, and `env.db.ts` must agree with it.
 #[test]
 fn both_artifacts_agree_about_the_key_the_op_installed() {
     for dialect in DIALECTS {
@@ -1408,9 +1391,9 @@ fn both_artifacts_agree_about_the_key_the_op_installed() {
         .expect("the stream renders");
         let runtime: Value =
             serde_json::from_str(&rendered.runtime_json).expect("`schema.runtime.json` parses");
-        // the `FieldDef` projection clears the identity facet on `dropIdentityFrom`; this is
-        // the half that was ALREADY right, asserted so the fix cannot be "make them
-        // agree by breaking the other one".
+        // the `FieldDef` projection clears the identity facet on `dropIdentityFrom`;
+        // this half is asserted so the agreement cannot be reached by breaking the
+        // other one.
         let id = runtime
             .pointer("/collections/orders/fields/id")
             .unwrap_or_else(|| panic!("{dialect:?}: the descriptor carries `orders.id`"));

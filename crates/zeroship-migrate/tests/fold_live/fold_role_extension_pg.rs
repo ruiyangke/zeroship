@@ -53,15 +53,10 @@ const OWNER: &str = "app_fold_role_extension";
 /// under `support::extension_claim` - keyed by the extension so every binary that
 /// installs `unaccent` queues on one key.
 ///
-/// MEASURED on the unchanged tree, four concurrent copies of this case, eight
-/// rounds, 28 of 32 processes red. Both halves of the test were corrupted, and the
-/// second is the one that matters: property (1) failed as `a role and an extension
-/// must round-trip: missing=["extension unaccent"]` when a sibling dropped it
-/// mid-case, and property (2) - the half that proves the oracle NOTICES a removal -
-/// failed as `dropping the role out of band must be reported`, `left: ["extension
-/// unaccent", "role ..."] right: ["role ..."]`, because a sibling had already
-/// removed the extension this case had not removed yet. A test whose negative
-/// control can be forged by a neighbour is not measuring the differ.
+/// A sibling run can forge BOTH halves of this case: the round-trip, by dropping
+/// the extension mid-case, and the negative control, by removing one this case has
+/// not removed yet. A test whose negative control can be forged by a neighbour is
+/// not measuring the differ.
 const EXTENSION: &str = "unaccent";
 
 fn token(tag: &str) -> String {
@@ -288,10 +283,9 @@ async fn a_role_and_an_extension_fold_to_what_live_introspection_reports() {
             quote_ident(&cfg.confinement.meta_schema)
         ))
         .await;
-    // `release` carries the `DROP EXTENSION IF EXISTS` that used to stand here, so
-    // the removal happens INSIDE the claim rather than beside it, and the claim ends
-    // at the case boundary. Sequenced before the two `expect`s below, both of which
-    // panic. The unwinding path is covered by the pinned connection closing.
+    // `release` drops the extension INSIDE the claim rather than beside it, so the
+    // claim ends at the case boundary. Sequenced before the two `expect`s below, both
+    // of which panic. The unwinding path is covered by the pinned connection closing.
     support::extension_claim::release(&session, EXTENSION).await;
     schemas.expect("drop the test schemas");
     work.expect("fold a role and an extension against live PostgreSQL");

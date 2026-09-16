@@ -2,24 +2,10 @@
 //!
 //! PostgreSQL holds a generated expression as a parse tree over ATTRIBUTE NUMBERS, so
 //! `pg_get_expr` deparses the NEW name the instant the rename commits. That makes the
-//! server the arbiter between the two offline replays that used to disagree: the
-//! descriptor fold behind the `FieldDef` map rewrote the expression to follow the rename,
-//! while the snapshot fold (`fold_ops`) kept the old name. Measured on PostgreSQL 18.4,
-//! after `RENAME COLUMN qty_on_hand TO amount_on_hand`:
-//!
-//! | side                  | generated expression      |
-//! |-----------------------|---------------------------|
-//! | `fold_ops` (was)      | `("qty_on_hand" + 1)`     |
-//! | the `FieldDef` map *  | `amount_on_hand`          |
-//! | live `pg_get_expr`    | `(amount_on_hand + 1)`    |
-//!
-//! \* measured when a standalone walker produced it; step 4 consumer 3 of
-//! `docs/proposals/single-fold-and-effects.md` deleted that walker and the map is a
-//! projection of the single fold now. The measurement stands - this test reads the
-//! catalog rather than either replay, which is the whole point of it.
-//!
-//! So the snapshot fold was the wrong one. This test does not take the docs' word for
-//! it: it reads the catalog and asserts the fold names the column the SERVER names.
+//! server the arbiter for the fold's answer: the folded snapshot's generated body must
+//! name the column the SERVER names, and so must the `FieldDef` projection behind the
+//! runtime descriptor. This test does not take either replay's word for it - it reads
+//! the catalog.
 //!
 //! The rendered SPELLING still differs — the fold quotes identifiers and PostgreSQL's
 //! deparse does not — and that is not what is asserted. What is asserted is the
@@ -49,12 +35,10 @@ use zeroship_migrate::{
 use zeroship_migrate_postgres::PostgresBackend;
 
 /// The test-side PostgreSQL identifier spelling, written out here rather than
-/// imported from the crate. It used to be
-/// `zeroship_migrate::schema::query::quote_ident`, which was `pub`, un-dialected, and a
-/// SECOND physical home for the spelling `render::backends::ansi_double_quote_ident`
-/// owns; it is gone. A probe that builds its expectation by calling the emitter it is
-/// checking is not an oracle anyway, so the replacement is deliberately independent —
-/// the same shape the sibling `fold_rename_column_constraint_definition_pg` and
+/// imported from the crate: a probe that builds its expectation by calling the
+/// emitter it is checking is not an oracle. Deliberately independent of
+/// `render::backends::ansi_double_quote_ident`, which owns the spelling - the same
+/// shape the sibling `fold_rename_column_constraint_definition_pg` and
 /// `fold_rename_column_check_body_pg` probes already use.
 fn quote_ident(identifier: &str) -> String {
     format!("\"{}\"", identifier.replace('"', "\"\""))

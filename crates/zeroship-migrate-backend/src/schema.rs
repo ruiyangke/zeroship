@@ -600,13 +600,14 @@ pub fn raw_column_name(field: &str) -> String {
 /// for non-masked columns and for columns that explicitly opt out via
 /// `.mask({ kind: "none" })`.
 ///
-/// # The storage flip (2026-08-28)
+/// # Storage layout
 ///
 /// The field's OWN column holds the **mask**; this sibling holds the **real
-/// value** and is unqueryable. It used to be the other way round, and because
-/// the WHERE builder takes no schema hint and so could not substitute,
-/// `find({ ssn: { $gt: v } })` compared against plaintext - an unaudited,
-/// unauthorized binary search over a value the caller could not read.
+/// value** and is unqueryable. The WHERE builder takes no schema hint and so
+/// cannot substitute, so the real value must stay out of the queryable column:
+/// `find({ ssn: { $gt: v } })` would otherwise compare against plaintext - an
+/// unaudited, unauthorized binary search over a value the caller could not
+/// read.
 ///
 /// Every caller is a DDL emitter - create-table, add-column and index creation
 /// all ask this, so the raw column is declared and indexed alongside the masked

@@ -1170,10 +1170,9 @@ impl IrClassification {
 ///
 /// **Why CARRIED, not recovered (unlike the runtime path).** The runtime recovers a
 /// mask from the LIVE `zero-migrate:mask` COMMENT sentinel on the `_masked` sibling
-/// (`crates/plugin-db .../introspect_schema.rs`). But the OFFLINE op fold - the wire
-/// `FieldDef` map, produced by `zeroship_migrate`'s single-fold `project_field_defs`
-/// projection that replaced a deleted op-stream `FieldDef` walker
-/// (`docs/proposals/single-fold-and-effects.md`) - and `gen-types` have NO live DB, so there
+/// (`crates/zeroship-data-orm` `introspect_schema`). But the OFFLINE op fold - the wire
+/// `FieldDef` map, produced by the single fold's `project_field_defs`
+/// projection - and `gen-types` have NO live DB, so there
 /// is no sentinel to read. So a STANDALONE `.mask()` on a plaintext column must be carried
 /// on the IR or it is DROPPED through author->generate->fold (the creator's
 /// `MaskedValue<T>` silently downgrades to `T`, and the runtime - which DOES read the
@@ -1804,15 +1803,12 @@ pub enum IndexMethod {
 ///
 /// `rename_all` is not decoration here. Every other field on this struct is a
 /// single word, so camelCase and snake_case coincide and the attribute changes
-/// nothing for them; `nulls_not_distinct` is the only multi-word field, and
-/// without the rename its wire name was snake_case while the DSL (and the add-op
-/// route, whose `Op::CreateIndex` inherits `rename_all_fields` from the enclosing
-/// enum) both spell it camelCase. With `deny_unknown_fields` that made the option
-/// unreachable through `create({ indexes })` alone: it typechecked and then failed
-/// as `unknown field nullsNotDistinct`. Because the field is
-/// `skip_serializing_if = "Option::is_none"` and nothing could ever set it on this
-/// route, no envelope carrying the old spelling can exist, so the rename is
-/// byte-neutral for existing content.
+/// nothing for them; `nulls_not_distinct` is the only multi-word field, and the
+/// DSL (and the add-op route, whose `Op::CreateIndex` inherits
+/// `rename_all_fields` from the enclosing enum) spells it camelCase. Without the
+/// rename, `deny_unknown_fields` would make the option unreachable through
+/// `create({ indexes })` alone: it typechecks and then fails as
+/// `unknown field nullsNotDistinct`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct IrIndex {
@@ -2875,9 +2871,8 @@ pub enum Op {
         /// without interpreting them. See [`crate::attribute`].
         ///
         /// `skip_serializing_if` is load-bearing, not tidiness: an empty set is omitted
-        /// entirely, so adding this field changed the wire form - and therefore the
-        /// checksum - of NO migration that carries no attributes, which is every
-        /// migration authored before it existed.
+        /// entirely, so a migration that carries no attributes is unchanged on the wire
+        /// and in the checksum.
         #[serde(default, skip_serializing_if = "CreateTableAttributes::is_empty")]
         attributes: CreateTableAttributes,
     },
@@ -2900,8 +2895,8 @@ pub enum Op {
         /// A partition IS a table and takes its own storage options; PostgreSQL lets a partition override what its parent declared.
         ///
         /// Which keys exist is declared by each vendor crate, not here. An empty set is
-        /// omitted entirely, so adding this field changed the wire form of no migration
-        /// that carries no attributes. See [`crate::attribute`].
+        /// omitted entirely, so a migration that carries no attributes is unchanged on
+        /// the wire. See [`crate::attribute`].
         #[serde(default, skip_serializing_if = "CreatePartitionAttributes::is_empty")]
         attributes: CreatePartitionAttributes,
     },
@@ -2964,8 +2959,8 @@ pub enum Op {
         /// This is how a table option is CHANGED after creation. Without it `postgres.fillfactor` could be set at create and never altered, which would make the knob write-once for no reason the server imposes.
         ///
         /// Which keys exist is declared by each vendor crate, not here. An empty set is
-        /// omitted entirely, so adding this field changed the wire form of no migration
-        /// that carries no attributes. See [`crate::attribute`].
+        /// omitted entirely, so a migration that carries no attributes is unchanged on
+        /// the wire. See [`crate::attribute`].
         #[serde(default, skip_serializing_if = "SetTableOptionsAttributes::is_empty")]
         attributes: SetTableOptionsAttributes,
     },
@@ -3031,7 +3026,7 @@ pub enum Op {
             skip_serializing_if = "Option::is_none"
         )]
         value_format: Option<ValueFormat>,
-        /// **#173** - the pgvector distance metric for a `t.vector(n, { metric })` added
+        /// The pgvector distance metric for a `t.vector(n, { metric })` added
         /// column (the same DECLARED-ONLY facet `IrColumn` carries on createTable).
         /// Meaningful on an added column (a vector ADD COLUMN renders the metric opclass),
         /// so it is carried here. Validated to co-occur ONLY with a [`ColType::Vector`]
@@ -3046,14 +3041,15 @@ pub enum Op {
         )]
         vector_metric: Option<VectorMetric>,
         /// Case-sensitivity facet for a text added column. Only `Some(false)` is
-        /// meaningful; absent/true omits the key and preserves the old wire image.
+        /// meaningful; absent/true omits the key, so the wire image is unchanged
+        /// for a column that does not declare it.
         #[serde(
             rename = "caseSensitive",
             default,
             skip_serializing_if = "Option::is_none"
         )]
         case_sensitive: Option<bool>,
-        /// **#173** - a STANDALONE column mask for a masked added column (the same facet
+        /// A STANDALONE column mask for a masked added column (the same facet
         /// `IrColumn` carries). Meaningful on an added column (a masked ADD COLUMN emits
         /// the `zero-migrate:mask` sentinel + `_masked` sibling). Default-absent +
         /// `skip_serializing_if` => byte-identical when absent.
@@ -3077,8 +3073,8 @@ pub enum Op {
         /// Per-column vendor options - PostgreSQL's STORAGE and COMPRESSION, MySQL's per-column character set.
         ///
         /// Which keys exist is declared by each vendor crate, not here. An empty set is
-        /// omitted entirely, so adding this field changed the wire form of no migration
-        /// that carries no attributes. See [`crate::attribute`].
+        /// omitted entirely, so a migration that carries no attributes is unchanged on
+        /// the wire. See [`crate::attribute`].
         #[serde(default, skip_serializing_if = "AddColumnAttributes::is_empty")]
         attributes: AddColumnAttributes,
     },
@@ -3318,8 +3314,8 @@ pub enum Op {
         /// `IrConstraint` is `{name, kind}` and models no deferrability, so DEFERRABLE / INITIALLY DEFERRED - which PostgreSQL and SQLite have and MySQL does not - is a genuine vendor surface here rather than a duplicate.
         ///
         /// Which keys exist is declared by each vendor crate, not here. An empty set is
-        /// omitted entirely, so adding this field changed the wire form of no migration
-        /// that carries no attributes. See [`crate::attribute`].
+        /// omitted entirely, so a migration that carries no attributes is unchanged on
+        /// the wire. See [`crate::attribute`].
         #[serde(default, skip_serializing_if = "AddConstraintAttributes::is_empty")]
         attributes: AddConstraintAttributes,
     },
@@ -5615,9 +5611,7 @@ mod tests {
 
     // ---- ir_version fail-closed ----
     // The loader MUST reject a FUTURE ir_version it cannot interpret, BEFORE any
-    // checksum/lower runs. Before this fix nothing validated `ir_version`: a
-    // IR envelope with `ir_version: 999` deserialized successfully and the field
-    // gave a false impression of a guard that did not exist.
+    // checksum/lower runs.
 
     #[test]
     fn future_ir_version_is_rejected_fail_closed() {

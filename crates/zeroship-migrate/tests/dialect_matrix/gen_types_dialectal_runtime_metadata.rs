@@ -1,38 +1,27 @@
 //! **`schema.runtime.json` sees inside the selected dialect leg.**
 //!
-//! `render_artifacts` builds its two projections from the SAME op stream, and there
-//! was a time when only one of the producers expanded `Op::Dialectal`.
-//! The `FieldDef` map and the authoring tables both route through
-//! `flatten_dialectal_ops`, so COLUMNS authored inside a `dialect()` leg reach the
-//! artifact. (That claim was first written of the standalone walker that produced the
-//! map until step 4 consumer 3 deleted it; the claim is unchanged because
-//! `FoldedSchema::project_field_defs` reads a traversal that makes the same call, one
-//! op earlier.) The runtime-metadata walker walked the raw list with a catch-all
-//! `_ => {}` arm, so the wrapper fell through and the runtime OPTIONS and plain
-//! INDEXES authored in that same leg did not.
-//!
-//! All THREE artifact walkers are gone: step 4 of
-//! `docs/proposals/single-fold-and-effects.md` replaced them with
-//! `FoldedSchema::project_runtime_metadata`,
+//! `render_artifacts` builds its projections from the SAME op stream, and all
+//! three - `FoldedSchema::project_field_defs`,
 //! `FoldedSchema::project_authoring_tables` and
-//! `FoldedSchema::project_field_defs`, reads of ONE traversal that
-//! `flatten_dialectal_ops` opens. The hole this file pins therefore cannot reopen the
-//! way it opened; the file stays because "cannot reopen by construction" is a claim
-//! worth a test rather than a comment.
+//! `FoldedSchema::project_runtime_metadata` - read ONE traversal that
+//! `flatten_dialectal_ops` opens. So COLUMNS, runtime OPTIONS and plain INDEXES
+//! authored inside a `dialect()` leg must all reach the artifact: the wrapper is
+//! transparent to the projection, never a fall-through.
 //!
-//! The result was an artifact describing a table the database does not have: a
-//! collection whose fields are present and whose index is missing, on the very dialect
-//! whose leg declared it. Nothing else covers the map -
-//! `render_runtime_descriptor_v2` takes it as given and falls back to
+//! The rule this file pins: the artifact must never describe a table the database
+//! does not have - a collection whose fields are present and whose index is
+//! missing, on the very dialect whose leg declared it. Nothing else covers the
+//! map - `render_runtime_descriptor_v2` takes it as given and falls back to
 //! `unwrap_or_default()` for a collection it lacks, so an absent entry is
 //! indistinguishable from a table that genuinely declared nothing.
 //!
-//! The arms below pin the rule from both sides, because a walker that simply unioned
-//! every leg would pass the first arm and be just as wrong: an index declared only in
-//! the SQLite leg must NOT appear in the PostgreSQL artifact. Selection, not union.
+//! The arms below pin the rule from both sides, because a projection that simply
+//! unioned every leg would pass the first arm and be just as wrong: an index
+//! declared only in the SQLite leg must NOT appear in the PostgreSQL artifact.
+//! Selection, not union.
 //!
-//! No live database is needed. The defect is entirely in the offline projection, and
-//! the oracle is the emitted artifact rather than a catalog.
+//! No live database is needed. The rule lives entirely in the offline projection,
+//! and the oracle is the emitted artifact rather than a catalog.
 
 use crate::support;
 
@@ -98,8 +87,8 @@ fn notes(dialect: &zeroship_migrate::DialectId) -> Value {
         .clone()
 }
 
-/// The reported defect: an index authored inside the SELECTED leg is part of the table
-/// PostgreSQL gets, so the artifact has to name it.
+/// An index authored inside the SELECTED leg is part of the table PostgreSQL
+/// gets, so the artifact has to name it.
 #[test]
 fn an_index_authored_in_the_selected_leg_reaches_the_runtime_descriptor() {
     let collection = notes(&zeroship_migrate_postgres::DIALECT);
@@ -111,9 +100,10 @@ fn an_index_authored_in_the_selected_leg_reaches_the_runtime_descriptor() {
     );
 }
 
-/// The same hole on the other kind of metadata the walker owns. A runtime option set
-/// inside the selected leg changes how the collection behaves at runtime, and an
-/// absent map entry silently reads as the default rather than as unknown.
+/// The same rule on the other kind of metadata the projection owns. A runtime
+/// option set inside the selected leg changes how the collection behaves at
+/// runtime, and an absent map entry silently reads as the default rather than as
+/// unknown.
 #[test]
 fn a_runtime_option_set_in_the_selected_leg_reaches_the_runtime_descriptor() {
     let collection = notes(&zeroship_migrate_postgres::DIALECT);
@@ -125,11 +115,11 @@ fn a_runtime_option_set_in_the_selected_leg_reaches_the_runtime_descriptor() {
     );
 }
 
-/// The control that makes the fix SELECTION rather than union. `notes_sqlite_idx` is
-/// declared only in the inactive leg, so PostgreSQL never creates it and an artifact
-/// naming it would describe an index the database does not have. A walker that
-/// flattened every leg instead of the selected one passes the arms above and fails
-/// here.
+/// The control that keeps the rule SELECTION rather than union. `notes_sqlite_idx`
+/// is declared only in the inactive leg, so PostgreSQL never creates it and an
+/// artifact naming it would describe an index the database does not have. A
+/// projection that unioned every leg instead of selecting one passes the arms
+/// above and fails here.
 #[test]
 fn an_index_authored_only_in_an_inactive_leg_stays_out_of_the_artifact() {
     let collection = notes(&zeroship_migrate_postgres::DIALECT);
@@ -142,8 +132,8 @@ fn an_index_authored_only_in_an_inactive_leg_stays_out_of_the_artifact() {
 }
 
 /// The mirror of the control, run under SQLite: the same history has to produce the
-/// SQLite leg's index and not the PostgreSQL one. Without this arm a walker hardcoded
-/// to the PostgreSQL leg would pass every arm above.
+/// SQLite leg's index and not the PostgreSQL one. Without this arm a projection
+/// hardcoded to the PostgreSQL leg would pass every arm above.
 #[test]
 fn the_sqlite_artifact_carries_the_sqlite_leg_and_not_the_postgres_one() {
     let collection = notes(&zeroship_migrate_sqlite::DIALECT);

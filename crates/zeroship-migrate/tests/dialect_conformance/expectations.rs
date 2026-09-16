@@ -9,17 +9,13 @@
 //
 // ONE OUTCOME CANNOT APPEAR HERE AT ALL. `observed: Outcome::ServerError` is
 // rejected by a const-eval guard in the including file, so writing one does not
-// fail the suite - it fails the COMPILE of the suite, the way the proposal's
-// "the exception file cannot suppress" asks for. This paragraph used to say a
-// ServerError "is never absorbed by an allowance" and nothing enforced it: such an
-// entry would have matched the fall-through in `judge`, satisfied both of its
-// assertions, and excused a migration that dies partway through applying. It held
-// only because none of the entries below happened to name one.
+// fail the suite - it fails the COMPILE of the suite. Without that guard such an
+// entry would match the fall-through in `judge`, satisfy both of its assertions,
+// and excuse a migration that dies partway through applying.
 //
-// Every entry below was produced by running this suite against PostgreSQL 18.4 on
-// 2026-08-18, against MySQL 8.4.11 on 2026-08-19, and against in-process SQLite.
-// Nothing here is a guess, and the `words` field is the verbatim text that run
-// produced.
+// Every entry below was produced by running this suite against live PostgreSQL,
+// live MySQL, and in-process SQLite. Nothing here is a guess, and the `words`
+// field is the verbatim text that run produced.
 //
 // The entries fall into three families, and the distinction is the point:
 //
@@ -30,30 +26,17 @@
 //       nothing about the declaration and everything about the corpus, and they
 //       are the reason a live layer needs its own fixture review.
 //   (B) DECLARATION ERROR. The sidecar says supported and the engine itself
-//       refuses, cleanly, every time. Six were recorded here; FIVE HAVE SINCE
-//       BEEN FIXED and their allowances removed, each as a sidecar line PLUS an
+//       refuses, cleanly, every time. The repair is a sidecar line PLUS an
 //       `op_support.rs::unsupported_reason` arm PLUS a regenerate of both
 //       generated artifacts - the arm is not optional, because `Op::support()`
 //       reads the table and a flip without it hands the operator the literal
 //       string "internal: supported cell has no refusal reason".
-//       The sixth was REFUTED and moved to (A): see `dropConstraint/base` below.
 //       Before flipping a cell, check whether the gate that refuses it is
 //       unconditional or conditional on the payload. A conditional gate means the
 //       representative measured one SHAPE, not the op.
 //   (C) ENGINE DEFECT. The declaration is defensible and the engine still gets it
-//       wrong at or after render. There were two, `alterSequence/base` on
-//       PostgreSQL and `createTrigger/bodyInsteadOf` on SQLite, and BOTH ARE GONE:
-//       the engine now refuses an option-less `alterSequence` and an `INSTEAD OF`
-//       trigger aimed at a table, and both representatives - which were degenerate
-//       in the (A) sense, since neither shape could apply on any dialect - were
-//       corrected, so both rows APPLY. There is no (C) entry left in this file and
-//       there should never be one for long: a (C) entry is a bug with a note on it.
-//       The refusals themselves are pinned by
-//       `crates/zeroship-migrate/tests/refusals/alter_sequence_needs_an_action.rs` and
-//       `crates/zeroship-migrate/tests/refusals/instead_of_trigger_needs_a_view.rs`, each with its over-refusal
-//       control.
-//
-// The full accounting is in `docs/review-log.md`.
+//       wrong at or after render. There is no (C) entry in this file and there
+//       should never be one for long: a (C) entry is a bug with a note on it.
 
 /// Rows where the declaration and the server disagree.
 const ALLOWANCES: &[Allowance] = &[
@@ -134,44 +117,33 @@ const ALLOWANCES: &[Allowance] = &[
         words: "omits its owning table",
         why: "(A) same representative defect as the postgres row above.",
     },
-    // (B) DECLARATION ERRORS - FIVE OF THE SIX ARE NOW FIXED, so their allowances
-    // are GONE rather than re-worded. `setColumnType/base`, `setColumnDefault/base`,
-    // `setColumnDefault/containerOrJson`, `addConstraint/unique` and
-    // `createTrigger/bodyMultipleEvents` now declare `unsupported` on SQLite, which
-    // is what the server said, so they no longer disagree and a lingering allowance
-    // here would fail as STALE. Each flip came with the matching
-    // `op_support.rs::unsupported_reason` arm, so none of them ships the internal
-    // placeholder - see PLACEHOLDER_REASONS below, now empty.
-    //
-    // (A) THE SIXTH WAS REFUTED, and it is the interesting one. This row was
-    // recorded as a (B) declaration error on the same evidence as the other five: it
-    // refuses with `TableRebuildUnavailable`. But SQLite HAS a dropConstraint lane. When
-    // the live snapshot carries the table and the named constraint is a FOREIGN KEY,
+    // (A) NOT A DECLARATION ERROR, though the row refuses with
+    // `TableRebuildUnavailable`: SQLite HAS a dropConstraint lane. When the live
+    // snapshot carries the table and the named constraint is a FOREIGN KEY,
     // `render/lower.rs` lowers the op to a 12-step rebuild and it APPLIES. The
-    // refusal is reached only for a missing snapshot or a NON-FK constraint, and the
-    // representative below drops `c`, which is not a foreign key.
+    // refusal is reached only for a missing snapshot or a NON-FK constraint, and
+    // the representative below drops `c`, which is not a foreign key - so this is
+    // a DEGENERATE REPRESENTATIVE, not a wrong declaration.
     //
-    // So the observation was right and the classification was not: this is a
-    // DEGENERATE REPRESENTATIVE, not a wrong declaration. Flipping the cell was
-    // tried and REVERTED - `crates/zeroship-migrate/tests/dialect_matrix/sqlite_declaration_flip_over_refusal_control.rs`
-    // drives a foreign-key drop through validate + lower + apply, and the flip made
-    // it fail with `UNSUPPORTED`, refusing a migration that works today. There is
+    // Flipping the cell is an over-refusal:
+    // `crates/zeroship-migrate/tests/dialect_matrix/sqlite_declaration_flip_over_refusal_control.rs`
+    // drives a foreign-key drop through validate + lower + apply, and a flip turns
+    // it into `UNSUPPORTED`, refusing a migration that works today. There is
     // one row for all constraint kinds, so `portable` is the only disposition that
     // does not break the working case.
     //
-    // The general lesson, which is why this comment is long: a refusal measured from
-    // ONE representative bounds what that SHAPE does, not what the OP does. Five of
-    // these six generalized safely because their gate is unconditional; this one did
-    // not, because its gate is conditional on the constraint kind.
+    // The lesson, which is why this comment is long: a refusal measured from
+    // ONE representative bounds what that SHAPE does, not what the OP does. A
+    // cell flip generalizes safely only when its gate is unconditional; this
+    // gate is conditional on the constraint kind.
     Allowance {
         kind: "dropConstraint",
         variant: "base",
         dialect: "sqlite",
         observed: Outcome::RefusedByCapability,
-        // Tracks the message `IrLowerError::TableRebuildUnavailable` prints. The
-        // pinned substring stayed the same LENGTH of claim when that variant lost its
-        // vendor name ("needs the 12-step table rebuild" -> this): it still names the
-        // refusal's reason and still fails if the arm reached is a different one.
+        // Tracks the message `IrLowerError::TableRebuildUnavailable` prints: the
+        // pin names the refusal's reason and fails if the arm reached is a
+        // different one.
         words: "needs a whole-table rebuild, which this path cannot emit",
         why: "(A) the representative drops a NON-FK constraint, the one shape SQLite's \
                rebuild lane does not cover. FK drops apply end to end; flipping this \
@@ -231,16 +203,15 @@ const ALLOWANCES: &[Allowance] = &[
     },
 
     // ------------------------------------------------------------------- mysql
-    // Measured against MySQL 8.4.11 on 2026-08-19, the day the MySQL leg was added.
+    // Measured against live MySQL.
     //
-    // EIGHT rows, and SEVEN of them are the SAME (A) representative defects the two
-    // older columns already record - which is itself a result: the third dialect
-    // found no new class of fixture problem, only the ones already named. The MySQL
-    // problems that WERE new were all fixable in the PRELUDE and are not here: MySQL
-    // cannot key a TEXT column without a prefix length, and MySQL cannot host a
-    // result-set-returning trigger body. Both were the fixture measuring something
-    // other than the row's question, and `prelude` now supplies a bounded string and
-    // a DELETE-bodied trigger. See its comments.
+    // The rows here are the SAME (A) representative defects the two older columns
+    // already record: the third dialect found no new class of fixture problem,
+    // only the ones already named. The genuine MySQL limits are fixture-level,
+    // not rows: MySQL cannot key a TEXT column without a prefix length, and MySQL
+    // cannot host a result-set-returning trigger body. Both are the fixture
+    // measuring something other than the row's question, so `prelude` supplies a
+    // bounded string and a DELETE-bodied trigger. See its comments.
     Allowance {
         kind: "dropIndex",
         variant: "base",
@@ -298,16 +269,13 @@ const ALLOWANCES: &[Allowance] = &[
                by capability before the empty rows list is ever reached - it agrees \
                with its declaration and takes no allowance here.",
     },
-    // (A) THE ONE THAT WAS A SERVER ERROR. `createTrigger/bodySimple`'s body is one
-    // `SELECT <expr>` statement, and MySQL forbids a trigger from returning a result
-    // set. Before the gate, this row cleared validate, the guard and lower and died
-    // mid-apply with `[0A000] Not allowed to return a result set from a trigger` -
-    // the outcome class this layer exists to catch, and the reason a ServerError is
-    // never absorbed by an allowance. `render/renderer.rs` now refuses the statement
-    // at lower, beside RAISE IGNORE. Note what the repair WAS: the ENGINE learned to
-    // refuse, which is the only reason this entry can name `RefusedByCapability`.
-    // Recording the ServerError instead was never an option and is now not even
-    // compilable - see the const-eval guard in the including file.
+    // (A) `createTrigger/bodySimple`'s body is one `SELECT <expr>` statement, and
+    // MySQL forbids a trigger from returning a result set. `render/renderer.rs`
+    // refuses the statement at lower, beside RAISE IGNORE - and it is the ENGINE
+    // refusing, which is the only reason this entry can name `RefusedByCapability`.
+    // A ServerError here would be the outcome class this layer exists to catch,
+    // and recording one is not even compilable - see the const-eval guard in the
+    // including file.
     //
     // Recorded as (A) and NOT as a declaration error, which is the `dropConstraint`
     // lesson applied a second time: the cell is right and the REPRESENTATIVE is
@@ -325,62 +293,31 @@ const ALLOWANCES: &[Allowance] = &[
                statement MySQL cannot host. It was a ServerError until the engine \
                learned to refuse it; it is not a wrong declaration.",
     },
-    // WHAT USED TO BE HERE, and why its removal is the finding rather than a
-    // relaxation. `setColumnType/base [mysql]` was the ONE (B) DECLARATION ERROR this
-    // column found: the sidecar said `portable`, the engine refused every
-    // alter-column op on MySQL unconditionally, and the recommended repair was to
-    // flip the cell to `unsupported`.
-    //
-    // The declaration was right and the engine was wrong. MySQL's `MODIFY COLUMN`
-    // does restate the whole definition, but the definition is RECOVERABLE - the
-    // server reports it in `SHOW CREATE TABLE`, which this backend already reads for
-    // `dropIdentityFrom`. `setColumnType` now lowers on MySQL to a runtime-resolved
-    // step that restates the live clause with only its type token replaced, and
-    // `tests/mysql_engine/mysql_setcolumntype_restate.rs` deploys one against a live
-    // server and reads every facet back from `information_schema`.
-    //
-    // The lesson is the one `dropConstraint` taught two allowances above, in the
-    // other direction: an allowance recording a refusal is a claim about the ENGINE,
-    // and "the gate is unconditional" describes the gate rather than the database.
-    // This suite now reports the row as AGREEING, which is what removed the entry.
 ];
 
 /// Rows that hand the operator `op_support.rs`'s internal placeholder instead of a
 /// reason.
 ///
-/// EMPTY, and that is a repair rather than a relaxation. Four rows were pinned
-/// here - `setColumnNotNull/base`, `dropColumnNotNull/base`,
-/// `dropColumnDefault/base` and `validateConstraint/base` - because
-/// `op_support.rs::unsupported_reason` had no arm for them and so answered
-/// "internal: supported cell has no refusal reason". Three of the four were
-/// F674's own: it moved the cells to `unsupported` and did not write the arms.
-/// The arms are now written and every one of these rows names a real limit.
+/// EMPTY, and that is a repair rather than a relaxation.
 ///
 /// The sweep above stays, and it is what keeps this list empty: it fails on any
 /// row that starts showing the sentinel, and on any pin left here once its row
 /// stops. Do not re-populate this list to make a red run green - a sentinel in
 /// the output means a cell was declared `unsupported` without its reason arm.
 ///
-/// This suite now covers all three dialects, so the MySQL column is swept here too
+/// This suite covers all three dialects, so the MySQL column is swept here too
 /// and stays empty with them. The offline sweep in
-/// `tests/dialect_matrix/unsupported_reason_is_operator_facing.rs` remains the
+/// `tests/dialect_matrix/unsupported_reason_is_operator_facing.rs` is the
 /// PRIMARY guard: it reaches every cell of the table rather than only the cells a
 /// corpus representative happens to drive.
 const PLACEHOLDER_REASONS: &[PlaceholderReason] = &[];
 
 /// Rows whose representative could not be made executable, with the reason.
 ///
-/// Empty, and that is a measurement rather than an omission: every one of the 92
-/// rows reached the subject op on ALL THREE dialects - 276 of 276. The rows whose
-/// representative is degenerate still got an ANSWER; they are in `ALLOWANCES` above,
-/// not here.
+/// Empty, and that is a measurement rather than an omission: every row reached
+/// the subject op on all three dialects. The rows whose representative is
+/// degenerate still got an ANSWER; they are in `ALLOWANCES` above, not here.
 ///
-/// It was NOT empty for MySQL on the first run. Eight rows demoted to
-/// `NotExecutable` there because their PRELUDE could not be established: seven keyed
-/// a TEXT column, which MySQL refuses without a prefix length, and `dropTrigger`'s
-/// trigger body was a bare `SELECT`, which MySQL will not host. Every one of the
-/// eight was the FIXTURE naming a referent in a shape MySQL cannot build, not the
-/// engine failing, so all eight were repaired in `prelude` rather than pinned here.
-/// That is the order this file's header asks for: ask whether the fixture is wrong
+/// The order this file's header asks for: ask whether the fixture is wrong
 /// before recording a row as inexecutable.
 const NOT_EXECUTABLE: &[NotExecutableRow] = &[];

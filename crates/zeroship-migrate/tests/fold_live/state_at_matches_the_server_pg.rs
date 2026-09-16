@@ -1,7 +1,6 @@
 //! **`state_at(N)` adjudicated by a live PostgreSQL server, over a NON-EMPTY `live_at_0`.**
 //!
-//! `docs/proposals/single-fold-and-effects.md` names this check itself, and the
-//! wording is the specification:
+//! The specification:
 //!
 //! > **`state_at(N)` against a live server.** For a plan of N steps, apply steps
 //! > 0..N-1 for real, introspect, and assert the introspected model equals
@@ -30,13 +29,11 @@
 //! object in it is one the fold could have emitted itself, and it compares one final
 //! state rather than a prefix.
 //!
-//! What is new here is therefore narrower than "the base term is untested", and worth
-//! saying exactly: this is `state_at`'s FIRST caller of any kind outside its own
-//! module's unit tests, the first PostgreSQL live test to fold onto an introspected
-//! base, the first on any dialect whose base objects were created by RAW SQL rather
-//! than by the engine, and the first to compare at every PREFIX rather than at the
-//! end. A pre-existing index, CHECK constraint, view or partition parent is a
-//! dependent the fold has to follow without ever having seen it created.
+//! What distinguishes this file is therefore narrower than "the base term is
+//! untested", and worth saying exactly: the base is introspected from objects created
+//! by RAW SQL rather than by the engine, and the comparison runs at every PREFIX
+//! rather than at the end. A pre-existing index, CHECK constraint, view or partition
+//! parent is a dependent the fold has to follow without ever having seen it created.
 //!
 //! # The identity is NOT universal, and the last test here is the counter-example
 //!
@@ -49,22 +46,20 @@
 //! > `to`. That divergence is correctly EXCLUDED from the fold==live equality oracle.
 //!
 //! So `state_at(N)` deliberately models the LOGICAL post-contract shape, and the
-//! server at step N is mid-expand. The proposal's identity does not hold for that op,
+//! server at step N is mid-expand. The identity does not hold for that op,
 //! and `the_identity_does_not_hold_across_an_online_rename` PINS the disagreement
 //! rather than routing around it - the existing live rename tests all drive the
-//! rename with native `ALTER TABLE ... RENAME COLUMN` precisely to avoid it, which is
-//! why the gap survived. A test that merely omitted the op would leave a reader
-//! believing the identity is total.
+//! rename with native `ALTER TABLE ... RENAME COLUMN` precisely to avoid it. A test
+//! that merely omitted the op would leave a reader believing the identity is total.
 //!
-//! The consequence reaches past this file. Section E promises that five existence
-//! assertions - `TableExists`, `TableNotExists`, `ColumnExists`, `ColumnNotExists`,
-//! `RowCount` - are "answered exactly at `state_at(N)`". Two of them answer WRONG
-//! across this rename, and in the UNSAFE direction: at prefix 1 `state_at` says
-//! `person.nick` does not exist while the server still has it, so a hoisted
-//! `ColumnNotExists("nick")` would be SATISFIED at preflight against a database where
-//! it is false. That is a wrong ACCEPT, which is the opposite of the wrong-refusal
-//! direction `effect_of` is deliberately tuned toward. This file measures it; fixing
-//! it is step 6's problem.
+//! The consequence reaches past this file. `apply::plan_precondition` states that
+//! the five existence assertions - `TableExists`, `TableNotExists`, `ColumnExists`,
+//! `ColumnNotExists`, `RowCount` - are answered exactly at `state_at(N)`. Two of
+//! them answer WRONG across this rename, and in the UNSAFE direction: at prefix 1
+//! `state_at` says `person.nick` does not exist while the server still has it, so a
+//! hoisted `ColumnNotExists("nick")` would be SATISFIED at preflight against a
+//! database where it is false. That is a wrong ACCEPT, which is the opposite of the
+//! wrong-refusal direction `effect_of` is deliberately tuned toward.
 //!
 //! # The introspection surface, named
 //!
@@ -485,10 +480,8 @@ async fn a_drop_cascades_through_dependents_only_the_live_base_carries() {
 /// applying at all is server-side proof that the blocker moved.
 ///
 /// The differ compares NOTHING about a view body, so a clean drift here would be
-/// vacuous for the thing under test. That is measured, not assumed: neutering the
-/// fold so a `replace` KEEPS the pre-existing body left every test in the
-/// `zero-migrate` crate green - all 2988 of them, live PostgreSQL suites included -
-/// because `diff_snapshots` compares only a view's `materialized` flag and `comment`.
+/// vacuous for the thing under test: `diff_snapshots` compares only a view's
+/// `materialized` flag and `comment`.
 ///
 /// So this case reads BOTH bodies itself, off fields the differ ignores: the live one
 /// from `ViewSnapshot::definition` (`pg_get_viewdef`), and the predicted one from
@@ -525,7 +518,7 @@ async fn a_replaced_view_moves_the_blocker_a_later_drop_needs() {
         "the seeded view must read src.a: {before}"
     );
 
-    // After the replace, the live body reads `b` and no longer reads `a`. The differ
+    // After the replace, the live body reads `b` and not `a`. The differ
     // compares neither, so this is the assertion that carries the case.
     let replaced = live_view_body(&measured[1], "labelled");
     assert!(
@@ -652,8 +645,8 @@ async fn an_attach_and_detach_relocate_a_pre_existing_relation() {
 /// function keeping them in sync - while `state_at(1)` reports the collapsed
 /// post-contract shape. `render/fold.rs` documents this as deliberately excluded from
 /// the fold==live oracle, and every other live rename test drives the rename with
-/// native `ALTER TABLE ... RENAME COLUMN` to avoid it. That is why no test had ever
-/// caught it, and why omitting the op here would leave the identity looking total.
+/// native `ALTER TABLE ... RENAME COLUMN` to avoid it. Omitting the op here would
+/// leave the identity looking total.
 ///
 /// The disagreement is asserted in SHAPE, not merely in existence: a future change
 /// that makes the contract phase part of the same deploy, or that stops emitting the

@@ -7,20 +7,19 @@
 //!
 //! # Why this lives in the leaf crate
 //!
-//! `docs/proposals/pluggable-backends.md` puts this contract in a separate
-//! `zeroship-migrate-backend` crate. While the backend crates sit in-tree, a separate
-//! contract crate would have exactly one consumer and one implementor, so the
-//! contract lives here instead: this is already the bottom of the crate graph,
-//! already the crate the engine, the guard, and the N-API addon all name, and
-//! relocating these items is a `pub use` away.
+//! While the backend crates sit in-tree, a separate contract crate would have
+//! exactly one consumer and one implementor, so the contract lives here instead:
+//! this is already the bottom of the crate graph, already the crate the engine,
+//! the guard, and the N-API addon all name, and relocating these items is a
+//! `pub use` away.
 //!
 //! # What is NOT here
 //!
-//! The `Backend` trait itself (`introspect` / `render` / `execute`) as
-//! `docs/proposals/pluggable-backends.md` sketches it. Those signatures take the
-//! engine's schema model, the diff it computes and the plan it orders - engine
-//! types every one; naming them here would invert the crate graph. This module
-//! promotes IDENTITY and CAPABILITY to public vocabulary and nothing else.
+//! The `Backend` trait itself (`introspect` / `render` / `execute`). Those
+//! signatures take the engine's schema model, the diff it computes and the plan
+//! it orders - engine types every one; naming them here would invert the crate
+//! graph. This module promotes IDENTITY and CAPABILITY to public vocabulary and
+//! nothing else.
 
 use core::fmt;
 
@@ -32,13 +31,9 @@ use crate::dialect::{DialectId, DialectSet};
 
 /// A question CORE ASKS a backend. Never a vendor name.
 ///
-/// Promoted from `zeroship_migrate::render::renderer`, where it was `pub(crate)`.
-/// The promotion changed neither spelling nor meaning of any predicate it
-/// carried over; membership has grown since, which is what the paragraph below
-/// is about. (This doc used to pin a count of the promoted predicates. The count
-/// was already wrong by four before this variant was added, and a stale number
-/// in prose reads as authoritative - so the invariant is stated instead:
-/// `ALL` is the membership, and the shipping census asserts against its length.)
+/// The membership invariant is stated, not counted: `ALL` is the membership, and
+/// the shipping census asserts against its length - a count pinned in prose would
+/// read as authoritative after it went stale.
 ///
 /// Keep this enum CLOSED. Adding a capability is a core change and should be
 /// rare; adding a BACKEND is not a core change at all. A backend that needs a
@@ -109,10 +104,9 @@ pub enum Capability {
     /// rolls back rather than leaving the catalog half-changed.
     ///
     /// The render layer needs this to set `MigrationFlags::transactional`, and
-    /// it is the SAME fact the apply layer already asks by property as
-    /// `Backend::ddl_is_transactional`. Before this capability existed the
-    /// renderer asked it by NAME (comparing against the former closed enum's MySQL
-    /// variant), so a fourth backend would have silently claimed transactional DDL.
+    /// it is the SAME fact the apply layer asks by property as
+    /// `Backend::ddl_is_transactional`. Asking by property rather than by backend
+    /// NAME keeps a fourth backend from silently claiming transactional DDL.
     ///
     /// Note this is stricter than MySQL 8.0's ATOMIC DDL: atomic DDL makes a
     /// single DDL statement all-or-nothing, but an implicit COMMIT still

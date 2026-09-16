@@ -1,12 +1,11 @@
 //! **The neutral model, measured against live PostgreSQL.**
 //!
-//! `docs/proposals/single-fold-and-effects.md` section G step 2 adds `SchemaModel`,
-//! `VendorFacts` and the named comparators, and is required to change NOTHING. This file
-//! is the proof, and it runs through the real path on both sides: the schema is built by
-//! applying an IR document through `IrAuthor::load_and_lower_guarded` +
-//! `MigrationEngine::apply_plan` against a real server, then read back with the shipped
-//! `snapshot_schema`. The same ops are folded offline. Both snapshots go through the
-//! model.
+//! `SchemaModel`, `VendorFacts` and the named comparators are required to change
+//! NOTHING. This file is the proof, and it runs through the real path on both sides:
+//! the schema is built by applying an IR document through
+//! `IrAuthor::load_and_lower_guarded` + `MigrationEngine::apply_plan` against a real
+//! server, then read back with the shipped `snapshot_schema`. The same ops are folded
+//! offline. Both snapshots go through the model.
 //!
 //! Three claims, all in `support::model_equivalence`:
 //!
@@ -315,10 +314,10 @@ async fn the_neutral_model_preserves_postgresql_behaviour_exactly() {
 
     // ---- Claim 3: drift and shape are two questions ------------------------
     //
-    // The measurement that refutes the proposal's premise that `ColumnSnapshot::eq`
-    // should be extracted UNDER the name `drift_identity`. `apply/drift.rs` compares
-    // `generated_kind` through `comparable_generated_column` and `ColumnSnapshot::eq`
-    // does not, so the two already disagree about what "the same column" means.
+    // `drift_identity` and `ColumnSnapshot::eq` are genuinely two questions:
+    // `apply/drift.rs` compares `generated_kind` through `comparable_generated_column`
+    // and `ColumnSnapshot::eq` does not, so the two disagree about what "the same
+    // column" means.
     // ---- Claim 2b: every TERM of every comparator, one field at a time -----
     //
     // The pairwise sweep above catches a comparator that ADDED a term. It cannot catch

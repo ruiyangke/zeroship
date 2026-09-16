@@ -1,8 +1,8 @@
 //! **The RENAME CARRIER SWEEP, measured against live PostgreSQL.**
 //!
-//! `docs/proposals/single-fold-and-effects.md` section H: "For every carrier that can
-//! spell a column name ... a rename must follow it. Section B shows four found one at a
-//! time and four still open." This is the sweep that ends the one-at-a-time pattern.
+//! The requirement: for every carrier that can spell a column name, a rename must
+//! follow it. The sweep enumerates the carriers exhaustively rather than finding
+//! them one at a time.
 //!
 //! A CARRIER is any place a column's name is stored as TEXT rather than as a structured
 //! reference. `support::carriers` enumerates them by EXHAUSTIVE DESTRUCTURING of every
@@ -25,8 +25,8 @@
 //! PostgreSQL follows the rename into EVERY carrier, because every one of them is held
 //! in the catalog as ATTRIBUTE NUMBERS and deparsed on read - `conkey` for a
 //! constraint, `indkey` / `indpred` / `indexprs` for an index, `partattrs` for a
-//! partition key, the generated column's parse tree for its expression. Measured on
-//! PostgreSQL 18.4, renaming `a` to `renamed_a`:
+//! partition key, the generated column's parse tree for its expression. Renaming `a`
+//! to `renamed_a`:
 //!
 //! ```text
 //! CHECK (((a > 0) AND (note <> 'a'::text)))  ->  CHECK (((renamed_a > 0) AND (note <> 'a'::text)))
@@ -41,7 +41,7 @@
 //! ```
 //!
 //! Note the LITERAL: `note <> 'a'` survives untouched while the reference beside it
-//! moves. That is the trap that ruled out naive text substitution for years, and
+//! moves. That is the trap that rules out naive text substitution, and
 //! `have_the_carriers_that_hold_rendered_sql_kept_their_string_literals` pins it
 //! directly - a rewrite that corrupts a literal spelling the old column name is worse
 //! than the staleness it repairs.

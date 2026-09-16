@@ -1,9 +1,7 @@
 //! **THE FAILURE DIRECTION**, made into a runnable measurement.
 //!
-//! `docs/proposals/single-fold-and-effects.md` section D:
-//!
-//! > A new field is compared by default rather than silently ignored, so the failure
-//! > direction flips from "invisible" to "noisy".
+//! The design rule: a new field is compared by default rather than silently
+//! ignored, so the failure direction flips from "invisible" to "noisy".
 //!
 //! That is a property, and this file is the property test. It asks ONE question of a
 //! type: **if I change exactly one field, does `==` notice?** A type that answers "yes"
@@ -433,13 +431,13 @@ fn every_field_of_the_neutral_index_constraint_and_table_is_compared_by_default(
     assert!(invisible.is_empty(), "`Table` ignored {invisible:?}");
 }
 
-/// The other three snapshot types, measured for the record.
+/// The same record for the other three snapshot types.
 ///
-/// `TableSnapshot` ignores three of eight; `IndexSnapshot` ignores four of thirteen;
-/// `ConstraintSnapshot` ignores one of five. All eight shrink to ZERO in the model,
-/// because every one is either a vendor fact that moved into `VendorFacts`, an
-/// emission-only field that moved onto a named comparator, or - for `attributes` - a
-/// field the model DOES compare and only the snapshot's hand-written `eq` excludes.
+/// Every field a snapshot's hand-written `eq` ignores is COMPARED in the model,
+/// because each is either a vendor fact that moved into `VendorFacts`, an
+/// emission-only field that moved onto a named comparator, or - for
+/// `attributes` - a field the model DOES compare and only the snapshot's
+/// hand-written `eq` excludes.
 #[test]
 fn the_other_snapshot_types_ignore_seven_more_fields_between_them() {
     let table = field_probes::table_snapshot_probes();
