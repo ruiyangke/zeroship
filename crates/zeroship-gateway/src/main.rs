@@ -459,8 +459,7 @@ fn main() -> std::io::Result<()> {
         );
         // The posture, PLUS how much of it was measured. `service_credentials
         // = configured` over zero checked credentials is the vacuous green this
-        // report must not be able to print, so the counts ride alongside it and
-        // `tests/service_credential_boot_gate.sh` rules on them.
+        // report must not be able to print, so the counts ride alongside it.
         report.field(
             "service_credentials",
             CheckValue::Plain(credentials.summary().to_string()),
@@ -1052,7 +1051,8 @@ mod tests {
         // tier is `resolve_secret_sources`'s, asserted in core. It also does not
         // prove `main` calls `gateway_credentials` - only that the function main
         // calls behaves this way. That link is covered by
-        // `tests/service_credential_boot_gate.sh`, which drives the real binary.
+        // `crates/zeroship-gateway/tests/credential_boot.rs`, which drives the
+        // real binary.
     }
 
     /// THE PER-SUBSYSTEM PROPERTY, on the gateway's own row set: every row names

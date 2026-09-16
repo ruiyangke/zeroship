@@ -7,6 +7,8 @@
 
 use std::process::{Command, Output};
 
+use zeroship_core::config::{REMEDIATION_COMMAND, SERVICE_CREDENTIAL_SENTINEL};
+
 const STRONG_HEX: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
 fn run(args: &[&str]) -> Output {
@@ -255,4 +257,92 @@ fn check_config_rejects_an_unknown_report_format() {
         stderr.contains("invalid value 'yaml'") && stderr.contains("--check-config-format"),
         "unexpected clap diagnostic:\n{stderr}"
     );
+}
+
+/// A dry run with the control key under test.
+fn dry_run_with(key: &str) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_zeroship-worker"))
+        .env_clear()
+        .env("ZEROSHIP_CONTROL_KEY", key)
+        .args(["--check-config", "--check-config-format", "json"])
+        .output()
+        .expect("spawn zeroship-worker")
+}
+
+fn combined(output: &Output) -> String {
+    format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    )
+}
+
+/// Two runs of one refusal are never byte-identical as emitted because the
+/// tracing lines carry a wall-clock timestamp. The identity under test is the
+/// MESSAGE, so drop the timestamp and compare what is left.
+fn normalised(text: &str) -> String {
+    text.lines()
+        .map(|line| match serde_json::from_str::<serde_json::Value>(line) {
+            Ok(mut value) => {
+                if let Some(object) = value.as_object_mut() {
+                    object.remove("timestamp");
+                }
+                value.to_string()
+            }
+            Err(_) => line.to_string(),
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// The worker's control key is floorless - `SecretStrength::Unrestricted` - so
+/// no length floor can refuse a placeholder. Only the sentinel branch can, and
+/// that is the case this test exists for.
+#[test]
+fn a_placeholder_control_key_is_refused_on_a_floorless_credential() {
+    let output = dry_run_with(SERVICE_CREDENTIAL_SENTINEL);
+
+    assert!(
+        !output.status.success(),
+        "the worker accepted the {SERVICE_CREDENTIAL_SENTINEL} placeholder on a floorless \
+         credential"
+    );
+
+    let banner = combined(&output);
+    for token in [SERVICE_CREDENTIAL_SENTINEL, REMEDIATION_COMMAND, "REFUSES TO START"] {
+        assert!(
+            banner.contains(token),
+            "the sentinel banner does not name {token:?}:\n{banner}"
+        );
+    }
+}
+
+#[test]
+fn an_empty_control_key_is_refused_in_the_same_words_as_the_sentinel() {
+    let sentinel = dry_run_with(SERVICE_CREDENTIAL_SENTINEL);
+    let empty = dry_run_with("");
+
+    assert!(
+        !empty.status.success(),
+        "the worker accepted an EMPTY floorless credential"
+    );
+
+    // Not "both failed" but "both failed in the same words": a build giving the
+    // empty case its own branch would satisfy a both-failed check and fail this.
+    assert_eq!(
+        normalised(&combined(&sentinel)),
+        normalised(&combined(&empty)),
+        "empty and sentinel must reach ONE branch"
+    );
+}
+
+/// One byte of real material in the same floorless credential. This is the
+/// control that proves the refusals above are about the placeholder and not
+/// about length: `require_nonempty` has no floor to fail.
+#[test]
+fn one_byte_of_real_material_is_accepted_on_a_floorless_credential() {
+    let output = dry_run_with("x");
+
+    assert_success(&output);
+    assert!(!combined(&output).contains("REFUSES TO START"));
 }
