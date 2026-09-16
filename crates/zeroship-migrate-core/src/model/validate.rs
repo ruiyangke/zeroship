@@ -38,10 +38,10 @@
 //! resolved column set. A self-contained `createTable` DOES resolve (c) against
 //! its own declared columns at load.
 //!
-//! There is no layering exception left here: raw view-body validation is handed
-//! to the TARGET BACKEND's `ValidationPolicy::raw_view_body_refusal`, so the
-//! deny-list scanning that used to force a `model -> guard` edge now sits behind
-//! the backend descriptor with every other vendor grammar.
+//! Raw view-body validation is handed to the TARGET BACKEND's
+//! `ValidationPolicy::raw_view_body_refusal`, so the deny-list scanning sits behind
+//! the backend descriptor with every other vendor grammar rather than behind a
+//! `model -> guard` edge.
 //!
 //! # Structural vs. policy split
 //!
@@ -52,8 +52,8 @@
 //! [`SchemaScope`](crate::model::policy::SchemaScope) dependency and no `pg_query`.
 //! THIS module keeps the policy-bound layer: the `SchemaScope`-threaded op/IR
 //! validators, the vendor-capability gate, the raw-view-body hand-off to the target
-//! backend's `ValidationPolicy` (this module no longer parses SQL itself - it holds
-//! the authoring envelope and the vendor holds the grammar), and
+//! backend's `ValidationPolicy` (this module holds the authoring envelope; the
+//! vendor holds the grammar), and
 //! the pure primary-key validation. (Author-PK CONFORMANCE against the operator's
 //! injected shape is owned by the injection resolver, not this validator.) The
 //! structural surface is re-exported below so callers name it unchanged.
@@ -564,10 +564,8 @@ fn authored_name_within_bound(
         return Ok(());
     }
     // Does THIS target silently truncate THIS name? The backend answers; core does not
-    // decide it from an id. The two sentences below are different facts, and the old
-    // single sentence - "PostgreSQL truncates identifiers to 63 bytes" - was the first
-    // one, emitted unconditionally, including on the two shipping backends for which it
-    // is false.
+    // decide it from an id. Truncation is per-backend, not a fixed 63-byte rule: it is
+    // true on some shipping backends and false on others.
     let truncates_here = registered_vendor(vendors, target_dialect, op_index)?
         .existence_probe
         .truncated_identifier(name)
@@ -1210,17 +1208,13 @@ fn alter_primary_key_candidate_key(
             {
                 sources.primary_key = Some(columns.clone());
             }
-            // A REPLACE HAS TWO HALVES WITH DIFFERENT CERTAINTIES, and requiring
-            // both left the old key in place when only the new one was unprovable.
-            // Once the expectedColumns precondition matches, REMOVING the old key
-            // is certain - the op does it unconditionally at apply, exactly as the
-            // Drop arm below already models with no `has_alternate` requirement.
-            // INSTALLING the new one stays conservative: an offline replay must
-            // never invent a key it cannot prove.
-            //
-            // Keeping the stale key admitted a foreign key whose target had
-            // stopped being a candidate key - measured, and the dangerous half of
-            // the defect, since the FK then fails at apply.
+            // A REPLACE HAS TWO HALVES WITH DIFFERENT CERTAINTIES. Once the
+            // expectedColumns precondition matches, REMOVING the old key is certain -
+            // the op does it unconditionally at apply, exactly as the Drop arm below
+            // already models with no `has_alternate` requirement. INSTALLING the new
+            // one stays conservative: an offline replay must never invent a key it
+            // cannot prove. Requiring both would leave the stale key in place, admitting
+            // a foreign key whose target had stopped being a candidate key.
             AlterPrimaryKeyAction::Replace {
                 expected_columns,
                 columns,
@@ -3372,11 +3366,9 @@ fn validate_no_name_is_claimed_twice(
     // CLUSTER-wide rather than schema-scoped, so these are flat sets and not
     // keyed by `Key`; policies are scoped PER TABLE, like triggers.
     //
-    // These four were previously recorded as "closed by the capability gate" and
-    // therefore not worth checking. That was wrong: the gate hides them from a
-    // CONFINED migration, but a migration authorised by a granting profile
-    // reaches all four, and every one of them was accepted with a duplicate name.
-    // Measured against live PostgreSQL, second claim plain:
+    // The capability gate hides these from a CONFINED migration, but a migration
+    // authorised by a granting profile reaches all four, so a duplicate name here
+    // must be refused. Against live PostgreSQL a second plain claim errors:
     //
     //     CREATE SCHEMA f759a     x2   ERROR: schema "f759a" already exists
     //     CREATE ROLE f759role    x2   ERROR: role "f759role" already exists
@@ -3554,11 +3546,10 @@ fn validate_no_name_is_claimed_twice(
                 if let Some(moved) = policy_names.remove(&from_key) {
                     policy_names.insert(to_key, moved);
                 }
-                // The dependents move with their container. Without this the map
-                // is stranded on the OLD name, and a later drop of the new name
-                // releases nothing - measured: `createIndex ix on a`, rename a to
-                // b, drop b, then `createTable ix` was refused although
-                // PostgreSQL frees the name.
+                // The dependents move with their container. A later drop of the new
+                // name must release them (`createIndex ix on a`, rename a to b, drop b,
+                // then `createTable ix` is allowed because PostgreSQL frees the name
+                // with the container).
                 if let Some(moved) = dependents_of.remove(&from_key) {
                     dependents_of.insert(to_key, moved);
                 }
@@ -3640,12 +3631,9 @@ fn validate_no_name_is_claimed_twice(
                     .push((schema.as_deref(), name.as_str()));
             }
             // A DETACHED partition becomes a standalone table: its name stays
-            // taken (F722 pins that), but it is no longer a DEPENDENT, so a later
-            // drop of its former parent must not release it.
-            //
-            // Measured: detach p1, drop par, then `CREATE TABLE p1` is
-            // `relation "p1" already exists` on the server - the engine accepted
-            // it until this arm forgot the parentage.
+            // taken (F722 pins that), but it is not a DEPENDENT, so a later drop of
+            // its parent must not release it. Confirmed live: detach p1, drop par, then
+            // `CREATE TABLE p1` is `relation "p1" already exists` on the server.
             Op::DetachPartition {
                 name,
                 parent,
@@ -4173,10 +4161,9 @@ fn expression_column_references<'a>(
             .flat_map(|expr| refs(table, expr))
             .collect(),
         Op::Delete { table, r#where, .. } => refs(table, r#where),
-        // A BACKFILL READS COLUMNS TOO - the site F711 recorded as the last one
-        // its walk did not reach. `dropColumn v` followed by a backfill setting
-        // `w = v` lowers to `UPDATE a SET "w" = "v"` after the column is gone;
-        // measured live as `column "v" does not exist`.
+        // A BACKFILL READS COLUMNS TOO (F711). `dropColumn v` followed by a
+        // backfill setting `w = v` lowers to `UPDATE a SET "w" = "v"` after the
+        // column is gone; measured live as `column "v" does not exist`.
         //
         // The resolving pass (`validate_ir_resolved`) does check these refs, but
         // against the table's DECLARED column set, which still contains a column
@@ -4542,12 +4529,10 @@ fn effective_ops<'a>(
 /// An absent target leg yields NO OPS rather than refusing - validate must agree
 /// with the fold here, or it judges ops the target will never run.
 ///
-/// INFALLIBLE, and deliberately not a `Result`. It used to return one so it could
-/// refuse an uncovered target; now that an absent leg is empty rather than an
-/// error, a `Result` would be a return type whose `Err` no caller can ever
+/// INFALLIBLE, and deliberately not a `Result`. An absent leg is empty rather than
+/// an error, so a `Result` would be a return type whose `Err` no caller can ever
 /// observe, and every `?` on it would be a branch that reads as a guard while
-/// guarding nothing. `op_index` went with it - it existed only to locate that
-/// refusal for the author.
+/// guarding nothing.
 ///
 /// DELEGATES to [`crate::render::fold::selected_dialectal_leg`] rather than
 /// repeating the exact-id lookup, because that helper is `pub(crate)` for
@@ -4692,12 +4677,10 @@ fn second_relation_references(op: &crate::model::ir::Op) -> Vec<(&str, &'static 
                     .map(|join| (join.table.name.as_str(), "joined table")),
             )
             .collect(),
-        // GRANT AND REVOKE NAME A LIST OF TABLES, which is why they reached this
-        // point unchecked: every sibling rule above is driven by
-        // `touched_table`, and a single-name accessor has nothing to return for
-        // an op whose target is `names: Vec<String>`. They were the only two ops
-        // targeting a vacated relation that the engine still accepted - measured
-        // against a live server, both directions:
+        // GRANT AND REVOKE NAME A LIST OF TABLES, which is why they need this arm:
+        // every sibling rule above is driven by `touched_table`, and a single-name
+        // accessor has nothing to return for an op whose target is
+        // `names: Vec<String>`. Both lower to SQL naming the vacated relation:
         //
         //     CREATE TABLE a; DROP TABLE a; GRANT SELECT ON a TO r
         //         ERROR: relation "a" does not exist
@@ -4742,9 +4725,8 @@ fn validate_no_op_targets_a_renamed_away_table(
         //
         // A `createPartition` DEFINES a relation too: `CREATE TABLE ... PARTITION
         // OF` is a CREATE TABLE, and `touched_table` reports the name it defines,
-        // not one it requires. Without this arm, `dropTable b` followed by
-        // `createPartition b` was refused as a use-after-drop - measured against
-        // live PostgreSQL, which accepts it, so the refusal was wrong.
+        // not one it requires, so `dropTable b` followed by `createPartition b` is
+        // legal and must not be refused as a use-after-drop.
         // SECOND NAMES. This walk compares ONE name per op, via `touched_table`,
         // so a relation an op names in addition to its own target was asked about
         // by nothing at all. Each of these lowers to SQL naming a relation that is
@@ -5614,18 +5596,15 @@ struct PartitionParentFold {
 /// The two ways out of a COLLAPSE-rule refusal: satisfy the rule, or stop asking for
 /// collapse and take a target that partitions natively.
 ///
-/// The second half used to be the literal `"or omit whenUnsupported and target Postgres
-/// only"`, repeated at three sites. It named the one backend that declared
-/// [`Capability::PartitionRelationDdl`] when it was written, in core, where the registry
-/// already answers the question - so it was a cached answer with no invalidation, and a
-/// fourth backend declaring native partitioning would have been left out of its own
-/// advice.
-/// "..., or target X for `what`" - where X is whichever registered backends actually
-/// declare [`Capability::PartitionRelationDdl`], asked at the moment of the refusal.
+/// The second half is "..., or target X for `what`" - where X is whichever registered
+/// backends actually declare [`Capability::PartitionRelationDdl`], asked at the moment
+/// of the refusal. A literal backend name here would be a cached answer with no
+/// invalidation: a backend that later declares native partitioning would be left out of
+/// its own advice.
 ///
-/// Same defect as [`collapse_or_native_target`], different sentence: the advice beside
-/// a partition refusal named PostgreSQL as a literal while the gate that produced the
-/// refusal was already a capability lookup.
+/// Same requirement as [`collapse_or_native_target`], different sentence: the advice
+/// beside a partition refusal must come from the same capability lookup as the gate that
+/// produced the refusal.
 fn native_partition_alternative(vendors: VendorSet, satisfy: &str, what: &str) -> String {
     match crate::render::backends::targets_declaring(vendors, Capability::PartitionRelationDdl) {
         Some(able) => format!("{satisfy}, or target {able} for {what}"),
@@ -7512,10 +7491,9 @@ fn validate_create_table_primary_key_policy(
     // the injection resolver ([`crate::model::table_shape::resolve_create_table_policy`]),
     // which is the `EffectivePolicy`/`injects_for` evaluator: a `createTable` in a
     // mandatory-inject scope whose author declares its own PK is refused there with
-    // `AuthorPrimaryKeyForbidden`. The generic engine no longer bakes zeroship's
-    // shape into validate-time; only the PURE primaryKey validation (empty / dup /
-    // absent-column, above) stays. See the design doc's injection-as-rule section
-    // (II.4), where a single monolithic profile field became one inject rule.
+    // `AuthorPrimaryKeyForbidden`. The generic engine bakes no zeroship shape into
+    // validate-time; only the PURE primaryKey validation (empty / dup /
+    // absent-column, above) stays.
     Ok(())
 }
 
@@ -7776,7 +7754,7 @@ fn validate_op_support(
             }
             for constraint in constraints {
                 // `NOT VALID` is meaningless at create-time: there are no existing rows
-                // to defer. PostgreSQL does not reject it - measured on 18.4, a
+                // to defer. PostgreSQL does not reject it - a
                 // `CREATE TABLE ... FOREIGN KEY ... NOT VALID` is ACCEPTED and the
                 // constraint is stored with `convalidated = true`, so the server
                 // silently neutralizes the request rather than honouring or refusing
@@ -8186,10 +8164,9 @@ fn validate_function_type_refs(
 /// the TARGET BACKEND to vet it in its own grammar.
 ///
 /// Core owns the envelope - which op, which dialect, which error code, what to
-/// suggest - and owns nothing else here. It deliberately does NOT parse: this
-/// function used to call `pg_query::parse` itself, which meant a MySQL or SQLite
-/// raw view body was judged by PostgreSQL's grammar, and each dialect's own native
-/// identifier quoting (`` `id` ``, `[id]`) was refused on its own dialect with a
+/// suggest - and owns nothing else here. It deliberately does NOT parse: parsing
+/// here would judge a MySQL or SQLite raw view body by PostgreSQL's grammar,
+/// refusing each dialect's own native identifier quoting (`` `id` ``, `[id]`) with a
 /// PostgreSQL syntax error.
 ///
 /// What each backend actually does with the text is that backend's stated posture:
@@ -9606,11 +9583,10 @@ pub fn validate_op_resolved(
                     validate_expr(vendors, pred, target_dialect, &scope, op_index)?;
                     // A backfill pages in batches, so a volatile filter selects a
                     // DIFFERENT cohort each batch and the operation has no fixed
-                    // meaning. The offline arm has always refused this; this arm did
-                    // not, and was covered only because the offline validator runs
-                    // first on the apply path. Measured: `where seen < now()` IS
-                    // refused today - so this closes a shape, not a reachable defect,
-                    // and keeps the guarantee off the ordering between two validators.
+                    // meaning. The offline arm already refuses this, and this arm must
+                    // refuse it too so the guarantee does not depend on the ordering
+                    // between two validators. `where seen < now()` IS refused today, so
+                    // this closes a shape rather than a reachable defect.
                     validate_immutable_expr_context(
                         pred,
                         "backfill filter",
@@ -10159,10 +10135,8 @@ mod tests {
                 assert_eq!(err.code, CODE_UNSUPPORTED);
                 assert_eq!(err.kind, Some(UnsupportedKind::Expr));
                 assert_eq!(err.dialect, d.clone());
-                // Stricter than the old `contains("PostgreSQL-only")`: the
-                // refusing backend must name ITSELF, from its own DialectId, so
-                // one shared vendor-flavoured sentence can no longer satisfy
-                // both targets.
+                // The refusing backend must name ITSELF, from its own DialectId, so
+                // one shared vendor-flavoured sentence cannot satisfy both targets.
                 assert!(err.reason.contains(d.as_str()), "got: {err}");
             }
         }
@@ -10312,7 +10286,7 @@ mod tests {
     // n>8, ...) is renderable on Postgres (`split_part` accepts it) and only a
     // hard reject on the SQLite leg. The SAME node must therefore
     // validate OK on a Postgres target and be EXPR_NOT_PORTABLE on a SQLite
-    // target. RED before check_split_part branches on target_dialect.
+    // target.
 
     #[test]
     fn out_of_envelope_split_part_loads_on_native_backends_rejected_on_sqlite() {
@@ -10358,8 +10332,7 @@ mod tests {
     // renderer enforces the same grammar fail-closed on PG and SQLite). The
     // validator (the AI loop's primary structured-feedback signal) must
     // therefore reject it on a Postgres target too, BEFORE the dialect early-return -
-    // not defer the only rejection to render time. RED before check_split_part lifts
-    // the grammar checks above the `if Postgres { return Ok(()) }`.
+    // not defer the only rejection to render time.
     #[test]
     fn grammar_broken_split_part_rejected_on_pg_too() {
         let c = cols();
@@ -10555,8 +10528,8 @@ mod tests {
 
     // -- (b') the remaining SynthFn arities - structural backstop -----------
     // now takes ZERO args; concatWs takes >=2 (a delimiter + >=1
-    // value). Independent of the (not-yet-existing) render seam, the validator
-    // is the structural backstop. RED before the check_synth arity fix.
+    // value). Independent of the render seam, the validator
+    // is the structural backstop.
 
     fn synth(f: SynthFn, args: Vec<Expr>) -> Expr {
         Expr::FnSynth { r#fn: f, args }
@@ -10890,13 +10863,12 @@ mod tests {
         assert_eq!(err.code, CODE_EXPR_NOT_PORTABLE);
     }
 
-    // -- item-4 regression: rule (c) ColRef resolution must cover EVERY splitPart
-    // arg, on PG too. check_split_part returns Ok early on a Postgres target
-    // (the envelope is PG-renderable); but the structural ColRef-resolution walk
-    // (rule c) must STILL run over args[1]/args[2]. Before the fix, check_synth
-    // recursed only args.first() (the column), so a ColRef to a nonexistent
-    // column hidden in the delim/n slot slipped past on PG and deferred the
-    // failure to render/execute. RED before walking every arg unconditionally.
+    // -- rule (c): ColRef resolution must cover EVERY splitPart arg, on PG too.
+    // check_split_part returns Ok early on a Postgres target (the envelope is
+    // PG-renderable); the structural ColRef-resolution walk (rule c) must STILL run
+    // over args[1]/args[2]. Recursing only args.first() (the column) would let a
+    // ColRef to a nonexistent column hidden in the delim/n slot slip past on PG and
+    // defer the failure to render/execute.
 
     #[test]
     fn split_part_colref_in_delim_slot_rejected_on_pg() {
@@ -11739,8 +11711,8 @@ mod tests {
     // -- schema confinement + guard direction + schema-ident safety --------------
 
     /// CONFINED - an explicit `schema != project_schema` is REFUSED fail-closed at
-    /// validate-time with the structured `CROSS_SCHEMA` code. RED before the
-    /// gate (the op would have lowered cross-schema). An op whose schema EQUALS the
+    /// validate-time with the structured `CROSS_SCHEMA` code, so the op never lowers
+    /// cross-schema. An op whose schema EQUALS the
     /// project schema, or omits it, passes.
     #[test]
     fn confined_cross_schema_op_is_refused_at_validate() {
@@ -11831,8 +11803,7 @@ mod tests {
     }
 
     /// A `schema` qualifier that is not a safe bare identifier (injection-shaped) is
-    /// REFUSED with `INVALID_SCHEMA_IDENT` - REGARDLESS of profile. RED before
-    /// `is_safe_schema_ident` guards the author-controlled identifier position.
+    /// REFUSED with `INVALID_SCHEMA_IDENT` - REGARDLESS of profile.
     #[test]
     fn injection_shaped_schema_ident_is_refused() {
         for bad in ["a\"; DROP TABLE x;--", "1bad", "has space", "", "a-b"] {
@@ -11854,7 +11825,7 @@ mod tests {
 
     /// A guard whose DIRECTION is illegal for the op variant is an authoring error
     /// (`GUARD_DIRECTION`): `ifExists` on a create*/add* op, `ifNotExists` on a
-    /// drop*/rename op. RED before the legal-direction check.
+    /// drop*/rename op.
     #[test]
     fn wrong_direction_existence_guard_is_an_authoring_error() {
         // ifExists on createTable - illegal.
@@ -12262,10 +12233,11 @@ mod tests {
 
     /// An unresolved ColRef inside the SELECTED leg is rejected.
     ///
-    /// The wrapper carries no scope of its own, so it used to fall through to the
-    /// structural arm - which validates the legs' SHAPE but never hands them
-    /// `live_columns`. Nested DML therefore skipped resolved-ColRef checking entirely,
-    /// and a caller got a weaker guarantee than the function's name promises.
+    /// The wrapper carries no scope of its own, so without this arm it would fall
+    /// through to the structural arm - which validates the legs' SHAPE but never hands
+    /// them `live_columns`. Nested DML would then skip resolved-ColRef checking
+    /// entirely, and a caller would get a weaker guarantee than the function's name
+    /// promises.
     #[test]
     fn validate_ir_resolved_rejects_an_unresolved_colref_inside_a_selected_leg() {
         let ir = ir_with(vec![dialectal_legs(Some(vec![ghost_update()]), None)]);
@@ -12302,9 +12274,8 @@ mod tests {
     /// nothing from this op", so both must pass rather than one passing and one
     /// refusing on a distinction the author never drew.
     ///
-    /// Not panicking is the original point and still is. An absent leg used to
-    /// reach an `unwrap` here; the guarantee is that it resolves to no ops instead of
-    /// either panicking or inventing a refusal.
+    /// The guarantee is that an absent leg resolves to no ops instead of either
+    /// panicking or inventing a refusal.
     #[test]
     fn validate_ir_resolved_skips_a_missing_target_leg_without_panicking() {
         let ir = ir_with(vec![dialectal_legs(None, Some(vec![ghost_update()]))]);
@@ -13361,9 +13332,9 @@ mod tests {
     }
 
     // -- column-facet validate-time bounds -----------------------------------
-    // RED before the `validate_column_facets` wiring: a hand-crafted IR envelope
-    // carrying a malformed/reserved/over-long id_prefix or a misplaced metric would
-    // have passed validate and deferred the blow-up to render / mint colliding ids.
+    // A hand-crafted IR envelope carrying a malformed/reserved/over-long id_prefix or a
+    // misplaced metric must be caught here rather than passing validate and deferring
+    // the blow-up to render / mint colliding ids.
 
     use crate::model::ir::{EmptyContainerKind, IrJsonValue, ValueFormat, VectorMetric};
 
@@ -14492,9 +14463,8 @@ mod tests {
     // `crates/zeroship-migrate-node/tests/gen_artifacts_reserved_identifiers.rs`
     // drives this through the real production verb over the real committed
     // `examples/db-todos` envelopes, and that is where the wiring is proven. It can
-    // only reach `createTable`, because `createTable` is the only op kind any
-    // committed corpus in this tree contains (measured across all nine
-    // `migrations.ir.json` files). The op shapes below are the ones that suite
+    // only reach `createTable`, because `createTable` is the only op kind the
+    // committed corpus contains. The op shapes below are the ones that suite
     // cannot reach.
 
     #[test]
@@ -14633,7 +14603,7 @@ mod tests {
     /// `validate_field_name_for_declaration` additionally fences the policy-injected
     /// set. Calling it from this pre-injection gate - or moving the gate after
     /// `resolve_create_table_policy` - would refuse `id` / `created_at` / `version` on
-    /// every table the confined charter touches, i.e. on 100% of apps. The seven names
+    /// every table the confined charter touches. The names
     /// are `policies/confined-system-shape.inject.toml`'s.
     #[test]
     fn the_generator_slice_accepts_every_charter_injected_system_column() {

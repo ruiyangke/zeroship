@@ -1,14 +1,11 @@
-//! Resurrected live-Postgres regression scenarios.
+//! Live-Postgres regression scenarios.
 //!
-//! An earlier cut deleted the 42 `#![cfg(feature="native-pg")]` test files: they drove the
-//! now-deleted native compio-postgres client directly, so they never compiled once the
-//! native driver left the tree. Their SCENARIOS — the safety-critical shipped-path
-//! coverage for applying against a REAL Postgres — return here, ADAPTED to drive the
-//! SHIPPED generic `PostgresBackend<PgDevSession>` / `apply::<PgDevSession>` /
-//! journal / drift / status path THROUGH the `driver::SqlSession` seam (the same seam
-//! the production napi/Node `pg` host rides), using the TEST-ONLY [`PgDevSession`]
-//! (blocking `postgres` crate, `[dev-dependency]` only). This is the in-crate live-DB
-//! coverage for the shipped path.
+//! The safety-critical shipped-path coverage for applying against a REAL Postgres:
+//! these drive the SHIPPED generic `PostgresBackend<PgDevSession>` /
+//! `apply::<PgDevSession>` / journal / drift / status path THROUGH the
+//! `driver::SqlSession` seam (the same seam the production napi/Node `pg` host rides),
+//! using the TEST-ONLY [`PgDevSession`] (blocking `postgres` crate, `[dev-dependency]`
+//! only). This is the in-crate live-DB coverage for the shipped path.
 //!
 //! Scenarios covered here (the critical shipped-path list):
 //!   * two-phase apply + `pg_advisory_lock` (transactional + non-transactional paths);
@@ -30,21 +27,18 @@
 //!   * what is AIMED AT: retrying that same deploy automatically recovers the rename
 //!     and applies its later envelope. Ignored, because no recovery driver exists.
 //!
-//! `apply/journal.rs:608-622` says this crate ships the durable recovery primitives
+//! `apply/journal.rs` says this crate ships the durable recovery primitives
 //! AND NO DRIVER: `DeployRecoveryScope` is never constructed, no `deploy_id` is
 //! generated, and the only entry point passes `None`, so no
 //! `__zeroship_schema_deploy_recovery` marker is written or recovered. Keeping both arms means
 //! the shipped behaviour is pinned AND the gap it leaves is legible, rather than the
 //! refusals reading as the finished answer.
 //!
-//! REQUIRES `ZERO_MIGRATE_TEST_PG_URL`: every test FAILS when it is unset. A run
-//! without a database used to report the same passed count as a run with one, which
-//! made "no coverage" and "coverage passed" indistinguishable, so the skip is gone.
-//! The DSN itself is NOT repeated here - `docker-compose.test.yml` carries the canonical
-//! value in its own header, and the port this comment used to name was a third value
-//! that no longer serves anything. Each test runs in its OWN meta + project
-//! schema (suffixed by a unique token) so the shared DB stays clean and re-runs are
-//! independent.
+//! REQUIRES `ZERO_MIGRATE_TEST_PG_URL`: every test FAILS when it is unset, so "no
+//! coverage" and "coverage passed" cannot be confused. The DSN itself is NOT repeated
+//! here - `docker-compose.test.yml` carries the canonical value in its own header.
+//! Each test runs in its OWN meta + project schema (suffixed by a unique token) so the
+//! shared DB stays clean and re-runs are independent.
 
 use crate::support;
 
@@ -2614,8 +2608,8 @@ async fn interrupted_online_rename_is_guarded_until_explicitly_resolved() {
 /// unfinished rename and continues through the later envelope.
 ///
 /// Kept ignored rather than deleted because it states the contract a deploy-recovery
-/// driver has to meet. `apply/journal.rs:608-622` documents the durable primitives and
-/// the absence of that driver today.
+/// driver has to meet. `apply/journal.rs` documents the durable primitives and
+/// the absence of that driver.
 #[ignore = "aspirational: a deploy-recovery driver would make this pass; today no driver exists so a retry cannot progress (#222)"]
 #[compio::test]
 async fn interrupted_online_rename_is_automatically_recovered_on_same_deploy_retry() {
@@ -2735,10 +2729,6 @@ async fn transactional_apply_creates_table_and_journals_completed() {
 /// kind AND the supplied flag to AGREE, and either disagreement is tamper -
 /// aborting even when the checksums match, because the re-classification itself
 /// is the attack.
-///
-/// None of that was measured. `repeatable` appeared across the whole test tree
-/// only as a `false` in two struct literals, so neither direction of the mismatch,
-/// nor a repeatable applying at all, had ever run against a database.
 ///
 /// The mutation here is REAL: `up` creates a second table. If the bypass worked,
 /// the assertion that names the table catches it, rather than only the reply.
@@ -3022,11 +3012,8 @@ async fn non_transactional_two_phase_apply_and_recovery() {
 /// vet it, because `compare_applied_to_set` skips every non-completed entry, and the
 /// recovery path never sees the marker at all - it only gets the migration now in the
 /// set. So editing a `transaction:false` migration in place after it half-applied
-/// used to re-run the edited body and then overwrite the marker, destroying the
+/// would re-run the edited body and then overwrite the marker, destroying the
 /// evidence.
-///
-/// The recovery test above plants a marker whose checksum MATCHES, so the
-/// disagreeing case had no coverage by construction.
 #[compio::test]
 async fn a_mismatched_inflight_marker_aborts_instead_of_replaying() {
     let url = require_live_pg!();
@@ -5501,7 +5488,7 @@ async fn a_crash_between_the_masked_add_column_units_still_adds_the_mask_column_
 /// catalog and must stay a clean no-op: every unit `SatisfiedNoop`s, nothing is
 /// re-added or dropped, and both units journal green.
 ///
-/// This passes before AND after the sibling-probe fix. Without it a red arm would only
+/// Without this control a red arm would only
 /// prove that something about guarded masked addColumn is broken; with it, the red arms
 /// are pinned to the SIBLING'S PROBE specifically - the idempotent re-run the guard
 /// exists for still works, and the fix must not turn it into a duplicate-column error.
@@ -6007,7 +5994,7 @@ async fn a_guarded_partition_probe_fails_closed_on_a_divergent_child() {
 // left mid-transition: both columns present, the trigger gone, the rename
 // unfinished, and the repair manual.
 //
-// MEASURED on PostgreSQL 18.4, the failure this prevents:
+// The failure this prevents:
 //
 //     ERROR:  cannot drop column qty of table t because other objects depend on it
 //     DETAIL:  column total of table t depends on column qty of table t
@@ -6237,8 +6224,7 @@ async fn a_plan_with_a_late_zero_budget_applies_none_of_its_earlier_steps() {
 
 // ---------------------------------------------------------------------------
 // The rollback ORCHESTRATOR against live PostgreSQL. The SQLite proof shows the
-// ordering; this shows the same code path drives a second dialect, which was an
-// argument from the `MigrationBackend` seam until it was measured here.
+// ordering; this shows the same code path drives a second dialect.
 // ---------------------------------------------------------------------------
 #[compio::test]
 async fn rollback_unwinds_both_migrations_in_reverse_order_on_live_postgres() {
@@ -6317,12 +6303,10 @@ async fn rollback_unwinds_both_migrations_in_reverse_order_on_live_postgres() {
 // constraint is NOT refused, because PostgreSQL drops that column and takes the
 // constraint with it.
 //
-// This is the case the predicate got wrong until the NORMAL leg learned to ask
-// whether the same object also holds an AUTO edge (docs/review-log.md F300). A
-// CHECK reports BOTH edges on its column; a view's rewrite rule and a generated
-// column's default report NORMAL alone. Keyed on "any NORMAL dependency", the
-// guard refused this rename, and the twelve-shape oracle agreed with the server
-// on every shape it enumerated because none of them was a CHECK.
+// A CHECK reports BOTH a NORMAL and an AUTO edge on its column; a view's rewrite rule
+// and a generated column's default report NORMAL alone. Keyed on "any NORMAL
+// dependency", the guard would wrongly refuse this rename, so the predicate must ask
+// whether the same object also holds an AUTO edge (docs/review-log.md F300).
 //
 // The second half is what this pins beyond "no error came back": the EXPAND half
 // actually ran, so `quantity` exists alongside `qty`. That is the shape the
@@ -7039,10 +7023,9 @@ async fn a_migration_edited_after_it_applied_aborts_the_next_deploy() {
 /// attacker passes for free. Only re-authoring the real C1 (drop trigger and
 /// function) and C2 (drop column) discharges.
 ///
-/// Nothing measured it. The recognizer had no test at all, and its failure mode is
-/// silent: a forged discharge does not error, it simply un-gates a table whose
-/// rename window is still open, after which an ordinary op can drop or rewrite the
-/// column the window was protecting.
+/// The failure mode is silent: a forged discharge does not error, it simply un-gates a
+/// table whose rename window is still open, after which an ordinary op can drop or
+/// rewrite the column the window was protecting.
 ///
 /// Every assertion is on the DATABASE and on the derived obligation, not on the
 /// reply, because the forged apply is expected to SUCCEED - its steps are
@@ -7330,8 +7313,6 @@ async fn a_plan_carrying_the_contract_ids_with_other_sql_does_not_discharge() {
 /// leave a contract obligation that can never be discharged."
 ///
 /// So the engine asks the database up front, under the lock, before anything runs.
-/// That guard had no test: `RenameSourceHasDependents` appears exactly twice in the
-/// tree, at its definition and at its single construction site.
 ///
 /// THE LOAD-BEARING ASSERTION IS THAT NOTHING STARTED. An error alone is consistent
 /// with a guard that fires after the expand has already committed - which is the
@@ -7525,9 +7506,7 @@ async fn a_rename_whose_source_has_dependents_is_declined_before_the_expand() {
 /// destination column and backfilled it. Run a contract whose expand never landed
 /// and the drop takes the only copy of the data with it.
 ///
-/// `check_expand_contract_gate` is what stands between those, and it had no test:
-/// `ExpandNotApplied` appears in the tree only at its definition and inside the
-/// gate itself.
+/// `check_expand_contract_gate` is what stands between those.
 ///
 /// Two arms, because the gate refuses for two different reasons and the second is
 /// a deliberate fail-closed the source calls out: a contract with an EMPTY
@@ -7745,11 +7724,9 @@ async fn a_contract_whose_expand_never_landed_is_refused() {
 ///                       would re-create what exists
 ///   some satisfied      refuse (`SquashPartialOverlap`) — inconsistent
 ///
-/// `squash_supersession_pg.rs` covers the `ops::squash` verb. It does not reach
-/// these gates, and none of the three `ApplyError` variants appears anywhere in the
-/// tree outside the executor.
+/// `squash_supersession_pg.rs` covers the `ops::squash` verb, not these gates.
 ///
-/// WHAT THE GATE ACTUALLY BUYS, measured rather than assumed. With
+/// WHAT THE GATE ACTUALLY BUYS. With
 /// `check_squash_all_or_none` disabled, the partial arm does not silently record a
 /// bogus supersession — the squash's `up` runs and PostgreSQL rejects it with
 /// `relation "alpha" already exists`. So the gate is not the only thing standing
@@ -8309,7 +8286,7 @@ async fn two_pending_squashes_may_not_claim_the_same_superseded_version() {
 /// a rename could never be retried and the operator is stuck between a deploy that
 /// failed after the expand and a deploy that will not run. `engine.rs` carries the
 /// exemption for exactly this ("the SAME rename re-running idempotently ... must
-/// NOT be refused by its OWN obligation") and nothing measured it.
+/// NOT be refused by its OWN obligation").
 ///
 /// Three re-supplies, each at a different point in the rename's life:
 ///
