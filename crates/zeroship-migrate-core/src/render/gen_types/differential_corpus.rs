@@ -1325,16 +1325,16 @@ const ROWS: &[Row] = &[
     Row { key: "c_retype_of_a_value_format_column|Sqlite|tables", verdict: "AGREED refused", status: Status::Consistent },
     Row { key: "c_retype_of_a_value_format_column|Mysql|tables", verdict: "AGREED refused", status: Status::Consistent },
 
-    // Row 9 (named enum members, docs/review-log.md:27941-27944): FIXED --
-    // the FieldDef projection carries the membership on all three dialects. Note what
+    // Named enum members: the FieldDef projection carries the membership on all
+    // three dialects. Note what
     // the row also shows: on Postgres NOTHING ELSE carries it, so nothing here
-    // cross-checks the fix.
+    // cross-checks that answer.
     Row { key: "c_named_enum_membership|Postgres|column_carries(issues.status ~ open)", verdict: "DIVERGENT FO=no FFD=yes ATO=no", status: Status::ByDesign(A_NAMED_TYPE_HAS_THREE_TRUE_SPELLINGS) },
     Row { key: "c_named_enum_membership|Sqlite|column_carries(issues.status ~ open)", verdict: "DIVERGENT FO=yes FFD=yes ATO=no", status: Status::ByDesign(A_NAMED_TYPE_HAS_THREE_TRUE_SPELLINGS) },
     Row { key: "c_named_enum_membership|Mysql|column_carries(issues.status ~ open)", verdict: "DIVERGENT FO=yes FFD=yes ATO=no", status: Status::ByDesign(A_NAMED_TYPE_HAS_THREE_TRUE_SPELLINGS) },
 
-    // Row 10 (domain base type, docs/review-log.md:29149-29156): FIXED --
-    // the FieldDef projection reports the base type rather than "string".
+    // Domain base type: the FieldDef projection reports the base type rather
+    // than "string".
     Row { key: "c_domain_base_type|Postgres|column_carries(amounts.amount ~ positive_number)", verdict: "DIVERGENT FO=yes FFD=no ATO=yes", status: Status::ByDesign(A_NAMED_TYPE_HAS_THREE_TRUE_SPELLINGS) },
     Row { key: "c_domain_base_type|Sqlite|column_carries(amounts.amount ~ positive_number)", verdict: "DIVERGENT FO=no FFD=no ATO=yes", status: Status::ByDesign(A_NAMED_TYPE_HAS_THREE_TRUE_SPELLINGS) },
     Row { key: "c_domain_base_type|Mysql|column_carries(amounts.amount ~ positive_number)", verdict: "DIVERGENT FO=no FFD=no ATO=yes", status: Status::ByDesign(A_NAMED_TYPE_HAS_THREE_TRUE_SPELLINGS) },
@@ -1342,15 +1342,14 @@ const ROWS: &[Row] = &[
     Row { key: "c_domain_base_type|Sqlite|column_carries(amounts.amount ~ int|Int|integer|INTEGER)", verdict: "DIVERGENT FO=yes FFD=yes ATO=no", status: Status::ByDesign(A_NAMED_TYPE_HAS_THREE_TRUE_SPELLINGS) },
     Row { key: "c_domain_base_type|Mysql|column_carries(amounts.amount ~ int|Int|integer|INTEGER)", verdict: "DIVERGENT FO=yes FFD=yes ATO=no", status: Status::ByDesign(A_NAMED_TYPE_HAS_THREE_TRUE_SPELLINGS) },
 
-    // The encrypted-domain sentinel fix (docs/review-log.md:29643-29667): the
-    // the resolved base reaches the FieldDef projection on all three dialects.
+    // The encrypted-domain sentinel: the resolved base reaches the FieldDef
+    // projection on all three dialects.
     Row { key: "c_encrypted_domain_column|Postgres|column_carries(amounts.amount ~ int|Int|integer|INTEGER)", verdict: "AGREED no", status: Status::Consistent },
     Row { key: "c_encrypted_domain_column|Sqlite|column_carries(amounts.amount ~ int|Int|integer|INTEGER)", verdict: "AGREED no", status: Status::Consistent },
     Row { key: "c_encrypted_domain_column|Mysql|column_carries(amounts.amount ~ int|Int|integer|INTEGER)", verdict: "AGREED no", status: Status::Consistent },
 
-    // Row 11 (`renameColumn` + a CHECK body, docs/review-log.md:28198-28204):
-    // the COLUMN-level inline check was fixed. A TABLE-level CHECK's
-    // `definition` is a different carrier and is still stale.
+    // `renameColumn` + a CHECK body: the COLUMN-level inline check and a
+    // TABLE-level CHECK's `definition` both follow the rename.
     Row { key: "c_rename_column_inline_check_body|Postgres|columns(issues)", verdict: "AGREED {id,status_token}", status: Status::Consistent },
     Row { key: "c_rename_column_inline_check_body|Sqlite|columns(issues)", verdict: "AGREED refused", status: Status::Consistent },
     Row { key: "c_rename_column_inline_check_body|Mysql|columns(issues)", verdict: "AGREED refused", status: Status::Consistent },
@@ -1358,14 +1357,13 @@ const ROWS: &[Row] = &[
     Row { key: "c_rename_column_inline_check_body|Sqlite|carries(state_token)", verdict: "AGREED refused", status: Status::Consistent },
     Row { key: "c_rename_column_inline_check_body|Mysql|carries(state_token)", verdict: "AGREED refused", status: Status::Consistent },
 
-    // Row 12 (`renameColumn` + FK constraint definition,
-    // docs/review-log.md:28404-28416): FIXED, no walker keeps the old name.
+    // `renameColumn` + FK constraint definition: no answer keeps the old name.
     Row { key: "c_rename_column_fk_definition|Postgres|carries(owner_id)", verdict: "AGREED no", status: Status::Consistent },
     Row { key: "c_rename_column_fk_definition|Sqlite|carries(owner_id)", verdict: "AGREED no", status: Status::Consistent },
     Row { key: "c_rename_column_fk_definition|Mysql|carries(owner_id)", verdict: "AGREED no", status: Status::Consistent },
 
-    // Row 13 (`renameColumn` + IndexSnapshot name lists,
-    // docs/review-log.md:6813-6829): the KEY COLUMN lists were fixed (F113)...
+    // `renameColumn` + IndexSnapshot name lists: the KEY COLUMN lists follow
+    // the rename...
     Row { key: "c_rename_column_index_key_columns|Postgres|carries(legacy_qty)", verdict: "AGREED no", status: Status::Consistent },
     Row { key: "c_rename_column_index_key_columns|Sqlite|carries(legacy_qty)", verdict: "AGREED no", status: Status::Consistent },
     Row { key: "c_rename_column_index_key_columns|Mysql|carries(legacy_qty)", verdict: "AGREED no", status: Status::Consistent },
@@ -1373,9 +1371,9 @@ const ROWS: &[Row] = &[
     Row { key: "c_rename_column_index_key_columns|Sqlite|indexes(stock)", verdict: "DIVERGENT FO={stock_multi_idx,stock_pkey,stock_qty_idx} ATO={stock_multi_idx,stock_qty_idx} RMO={stock_multi_idx,stock_qty_idx}", status: Status::ByDesign(PK_IS_AN_INDEX_ONLY_IN_A_CATALOG) },
     Row { key: "c_rename_column_index_key_columns|Mysql|indexes(stock)", verdict: "DIVERGENT FO={PRIMARY,stock_multi_idx,stock_qty_idx} ATO={stock_multi_idx,stock_qty_idx} RMO={stock_multi_idx,stock_qty_idx}", status: Status::ByDesign(PK_IS_AN_INDEX_ONLY_IN_A_CATALOG) },
 
-    // ... and the two rendered-SQL index carriers that entry recorded as still
-    // open at 6837-6847 are still open. This is the corpus reproducing an
-    // OPEN defect, which is the one thing that proves it can see one.
+    // ... and the two rendered-SQL index carriers follow the rename through the
+    // quoted-run walk, so the rows read `AGREED no` on Postgres and SQLite and
+    // `refused` on MySQL, which has neither expression nor partial indexes.
     Row { key: "c_rename_column_index_expression|Postgres|carries(legacy_qty)", verdict: "AGREED no", status: Status::Consistent },
     Row { key: "c_rename_column_index_expression|Sqlite|carries(legacy_qty)", verdict: "AGREED no", status: Status::Consistent },
     Row { key: "c_rename_column_index_expression|Mysql|carries(legacy_qty)", verdict: "AGREED refused", status: Status::Consistent },
@@ -1383,8 +1381,7 @@ const ROWS: &[Row] = &[
     Row { key: "c_rename_column_index_include_and_predicate|Sqlite|carries(legacy_qty)", verdict: "AGREED no", status: Status::Consistent },
     Row { key: "c_rename_column_index_include_and_predicate|Mysql|carries(legacy_qty)", verdict: "AGREED refused", status: Status::Consistent },
 
-    // Row 14 (`dropColumn` cascade + `Expr::Dialectal`,
-    // docs/review-log.md:6873-6878): FIXED on Postgres -- the CHECK whose
+    // `dropColumn` cascade + `Expr::Dialectal`: on Postgres the CHECK whose
     // SELECTED leg names only the surviving column is kept by both walkers that
     // model constraints.
     Row { key: "c_drop_column_cascade_dialectal_expr|Postgres|columns(legs)", verdict: "AGREED {id,kept}", status: Status::Consistent },
@@ -1442,18 +1439,12 @@ const ROWS: &[Row] = &[
 
 /// Which op variants each walker reaches, measured by prefix sweep, one line
 /// per `variant|dialect`. Cells are `FO FFD ATO RMO`, `R`eaches / `S`ilent /
-/// `-` unobserved.
+/// `-` unobserved. `S` means the walker's answer was byte-identical before and
+/// after the appended op.
 ///
-/// Retiring the authoring-tables walker moved every cell for six variants, on every
-/// dialect, from `S` to `R` in the ATO column, and every one is the same mechanism:
-/// `alterPrimaryKey`, `attachPartition`, `dropPartition`, `dropSequence`, `dropView`
-/// and `synchronizeIdentity`. `S` means the walker's answer was byte-identical
-/// before and after the op, which for the deleted walker meant its `_ => {}` swallowed
-/// the variant. The projection behind ATO now either INTERPRETS the op
-/// (`alterPrimaryKey` and `dropPartition` have arms in `AuthoredState::advance`) or
-/// fails closed on it (the other four can make the structural catalog replay refuse,
-/// and a refusal is a changed answer). The ATO column is now identical to the RMO
-/// column, which is what "two projections of one traversal" predicts.
+/// The projection behind ATO either INTERPRETS an op or fails closed on it (a
+/// refusal is a changed answer), so the ATO column is identical to the RMO
+/// column - which is what "two projections of one traversal" predicts.
 const REACH: &[&str] = &[
     "addColumn|Mysql|RRRR",
     "addColumn|Postgres|RRRR",

@@ -751,9 +751,9 @@ async fn unauthorized_token_is_forbidden_on_billing_reads() {
             "no-billing token: 403 on {uri}"
         );
     }
-    // Organization-keyed reads → 403. They now NAME the organization, because
-    // "the caller's own billing" stopped being a single answer the moment a user
-    // could hold seats at several organizations. The refusal is therefore about
+    // Organization-keyed reads → 403. They NAME the organization: "the
+    // caller's own billing" is not a single answer once a user can hold seats
+    // at several organizations. The refusal is therefore about
     // authority at THAT organization, not about the caller having none anywhere.
     for uri in ["/api/billing/credit-balance", "/api/billing/payment-method"] {
         let uri = format!("{uri}?organization_id={organization}");
@@ -1124,9 +1124,9 @@ async fn credit_balance_pm_and_billing_status_are_creator_scoped() {
     assert_eq!(bal_b["balance_cents"], 1000, "B sees ONLY their own $10");
 
     // (c) `?organization_id` naming an organization the caller has no seat at is
-    // 403 for everyone. The parameter is REQUIRED now rather than defaulting to
-    // the caller: a user may hold seats at several organizations, so "my
-    // billing" no longer names one subject. What it selects is checked against
+    // 403 for everyone. The parameter is REQUIRED: a user may hold seats at
+    // several organizations, so "my billing" does not name one subject and
+    // cannot be defaulted from the caller. What it selects is checked against
     // the ladder's money authority at that organization, so naming a stranger's
     // organization is refused rather than silently answered with the caller's.
     let status = test::call_service(
