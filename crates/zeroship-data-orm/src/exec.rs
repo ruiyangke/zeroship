@@ -378,7 +378,7 @@ pub fn drain_pending_emits_on_commit(app_id: &str) {
 /// Clear `app_id`'s `pending_emits` queue without firing any events.
 /// Called by the transaction settle path on ROLLBACK (and by
 /// `exec_begin` to drop any stale residue from an interrupted prior
-/// run). SEC-1: scoped to the app so a ROLLBACK never drops a
+/// run). Scoped to the app so a ROLLBACK never drops a
 /// co-resident app's queued events.
 pub fn clear_pending_emits(app_id: &str) {
     crate::tx_lanes::with_mut(|l| l.clear_pending_emits_for(app_id));
@@ -1534,9 +1534,9 @@ mod tests {
                 Err(e) => {
                     // A Postgres this test cannot dial is a FAILURE, not a
                     // skip: the role/timeout leak this test guards against
-                    // only reproduces against a real backend, and a return
-                    // here used to let that leak go unchecked while the
-                    // suite still reported green.
+                    // only reproduces against a real backend, and returning
+                    // here would let that leak go unchecked while the suite
+                    // still reported green.
                     panic!("autocommit-leak test could not connect to {url}: {e}");
                 }
             }
