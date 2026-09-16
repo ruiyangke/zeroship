@@ -622,9 +622,9 @@ fn private_key_from_config(
     // bad passphrase.
     //
     // The non-UTF8 arm immediately below has NO OBSERVABLE EFFECT and is not a
-    // coverage gap. Measured 2026-09-03: removing it leaves all 768 lib tests
-    // green, and a probe loading a non-UTF8 key file prints the identical chain
-    // either way - "sslkey=<path>: cannot read PEM: no items found" - because
+    // coverage gap: removing it leaves the lib tests green, and a probe loading a
+    // non-UTF8 key file prints the identical chain either way -
+    // "sslkey=<path>: cannot read PEM: no items found" - because
     // `SecretDocument::from_pem` refuses the same bytes with the same message
     // built from the same `unencrypted_error`. It stays as an explicit read of
     // the failure, not as a behaviour any test could pin. Do not re-audit it.
@@ -1278,18 +1278,19 @@ impl MakeRustlsConnect {
         }
         // Leaving resumption ENABLED for every other configuration is safe for
         // a reason that lives on the SERVER, not here, so it is worth writing
-        // down: PostgreSQL hands out no resumable session at all. Measured
-        // 2026-08-23 against the `tls_live_setup.sh` servers with
+        // down: PostgreSQL hands out no resumable session at all. Probing the
+        // `tls_live_setup.sh` servers with
         // `openssl s_client -starttls postgres -sess_out`, on both a TLS 1.2
-        // and a TLS 1.3 server -- the Session-ID comes back empty, no session
-        // ticket arrives, and `-sess_out` writes NO file, so there is nothing a
-        // client could present to resume. A resumed handshake, which is the
-        // thing that would skip `verify_server_cert`, therefore cannot occur.
+        // and a TLS 1.3 server, shows the Session-ID coming back empty, no
+        // session ticket arriving, and `-sess_out` writing NO file - so there is
+        // nothing a client could present to resume. A resumed handshake, which
+        // is the thing that would skip `verify_server_cert`, therefore cannot
+        // occur.
         //
         // This is a property of the peer, so it can change. If PostgreSQL ever
         // enables session tickets, the two arms above stop being the only ones
         // that need `Resumption::disabled()` and this whole decision has to be
-        // re-taken. Re-run the probe above rather than assuming either way.
+        // re-taken. Re-run that probe rather than assuming either way.
 
         let mut connector = MakeRustlsConnect::new(Arc::new(client_config), server_verification);
         connector.ssl_cert_mode = config.get_ssl_cert_mode();

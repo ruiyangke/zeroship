@@ -41,13 +41,10 @@
 //! answers a client close with its own `close_notify`, that write lands on a
 //! socket already shut down for reading, and the kernel replies RST - so
 //! PostgreSQL logs `could not receive data from client: Connection reset by
-//! peer`. MEASURED 2026-08-24: the same 16 tests logged 3 of those lines on the
-//! TLS server and none at all on the plaintext one.
-//!
-//! It was log noise rather than data loss - this side is closing either way -
-//! but it looks exactly like a driver defect to anyone reading a server log,
-//! and it was nearly diagnosed as one. FIXED on 2026-08-25 by sending
-//! `close_notify` BEFORE the synchronous release; the shape that took is at
+//! peer`. It is log noise rather than data loss - this side is closing either
+//! way - but it looks exactly like a driver defect to anyone reading a server
+//! log. It is avoided by sending `close_notify` BEFORE the synchronous release;
+//! the shape that takes is at
 //! the end of this section, and it changed both the release design AND this
 //! file.
 //!
@@ -80,12 +77,10 @@
 //! guard, and `ConnectionRelease::shutdown` called directly all had to be
 //! fixed, and single-connection probes read clean after each one.
 //!
-//! MEASURED 2026-08-25 over a whole `suite-over-tls` run - 1721 tests through
-//! the encrypted server - the TLS server logged **11** of these lines, and the
-//! other four TLS servers logged NONE. Attributed by re-running binaries
-//! alone: `connection_churn` accounts for 7 to 9 of them on its own, and
-//! `cancel_request`, `backend_termination`, `socket_release`,
-//! `query_backpressure` and `connect_failure_diagnosis` each account for zero.
+//! The residue that remains on a whole `suite-over-tls` run comes from
+//! `connection_churn`, which abandons sessions on purpose; `cancel_request`,
+//! `backend_termination`, `socket_release`, `query_backpressure` and
+//! `connect_failure_diagnosis` each account for none.
 //!
 //! That residue is CORRECT, not a fourth missed path. `connection_churn` runs
 //! `BAD_CONNECTION_ITERATIONS` sessions that are abandoned mid-query while
@@ -190,11 +185,10 @@ where
             // rustls treats silent truncation as an attack. The message names
             // the handshake so the cause is legible in a connect error.
             //
-            // Measured 2026-09-03: disabling this does not fail a test, it
-            // HANGS - the loop re-reads a socket that will never yield another
-            // byte, and the lib run was killed at its 1200s bound instead of
-            // reporting. So a timeout here is this guard being load-bearing,
-            // not a flaky run; the guard turns that spin into a named error.
+            // Disabling this does not fail a test, it HANGS - the loop re-reads
+            // a socket that will never yield another byte. So a timeout here is
+            // this guard being load-bearing, not a flaky run; the guard turns
+            // that spin into a named error.
             return Err(io::Error::new(
                 io::ErrorKind::UnexpectedEof,
                 "the peer closed the connection during the TLS handshake",
@@ -292,11 +286,11 @@ impl TlsSession {
     /// through `read_tls`/`process_new_packets` without returning to the
     /// reader in between can cross that line and kill the connection.
     ///
-    /// MEASURED 2026-08-24: it did. `concurrent_large_bidirectional_queries_do
-    /// _not_deadlock` streams 4 MB parameters while the server floods results
-    /// back, and the connection died with `error communicating with the
-    /// server` - this error, surfacing as an I/O failure several layers up.
-    /// The caller loops back to `reader()` between every step now.
+    /// Crossing it kills the connection with `error communicating with the
+    /// server` - this error, surfacing as an I/O failure several layers up - as
+    /// `concurrent_large_bidirectional_queries_do_not_deadlock` exercises by
+    /// streaming a large parameter while the server floods results back. The
+    /// caller loops back to `reader()` between every step.
     /// Returns whether the peer has sent `close_notify`, which the caller needs
     /// to tell a clean shutdown from a stall: `read_tls` answers `Ok(0)`
     /// unconditionally once that alert has arrived, so "rustls took nothing"
@@ -539,9 +533,7 @@ impl SharedSession {
         // thread marks the session terminal while this one waits for the lock.
         // So neither is individually bindable - a single-threaded test that
         // reaches one reaches the other, and disabling either leaves the other
-        // returning the same error. Measured 2026-08-31: disabling ONE keeps
-        // `a_session_that_sent_close_notify_refuses_a_try_lease` green;
-        // disabling BOTH turns it red. The pair is bound, the halves are not.
+        // returning the same error. The pair is bound, the halves are not.
         if self.inner.close_notify_out.load(Ordering::Acquire) {
             return Err(close_notify_sent_error());
         }
