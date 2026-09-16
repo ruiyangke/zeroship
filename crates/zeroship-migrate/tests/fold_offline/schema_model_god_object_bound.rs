@@ -1,18 +1,13 @@
 //! **THE SPIKE QUESTION, measured rather than argued.**
 //!
-//! `docs/proposals/pluggable-backends.md:339-342` records the open risk this file exists
-//! to close:
-//!
-//! > The single fold may resist unification. `TableSnapshot` carries catalog identity,
-//! > the runtime descriptor is a wire contract. Whether one model can serve both without
-//! > becoming a god-object is UNVERIFIED. A design spike should answer this before step 3
-//! > begins.
-//!
-//! `single-fold-and-effects.md` section C answers it in prose - "one traversal, several
-//! typed projections. Not one struct" - and is right about the DIRECTION. What it does
-//! not do is put a number on the cost, and section I concedes that the bound is "a
-//! discipline, not a compiler check": "the first consumer that wants one more field will
-//! make a reasonable case, and the god-object arrives one reasonable case at a time."
+//! The open risk this file exists to close: the single fold may resist unification.
+//! `TableSnapshot` carries catalog identity, the runtime descriptor is a wire
+//! contract, and whether one model can serve both without becoming a god-object is
+//! not something prose can settle. The design answer is "one traversal, several
+//! typed projections. Not one struct" - right about the DIRECTION, but a bound that
+//! stays a discipline rather than a compiler check admits the god-object one
+//! reasonable case at a time: the first consumer that wants one more field makes a
+//! reasonable case, and the growth never trips a gate.
 //!
 //! This is that compiler check, in the form the repo already trusts.
 //! `tests/support/carriers.rs` proved a rename-carrier inventory complete by
@@ -138,8 +133,8 @@ fn route_the_runtime_descriptor() -> Routing {
     //
     // This is the class that answers the spike. Every entry is a fact the IR states, that
     // is dialect-neutral, and that `TableSnapshot` flattens away into a `data_type`
-    // string or a rendered CHECK - which is exactly the loss section B's `setColumnType`
-    // family kept re-discovering.
+    // string or a rendered CHECK - the loss the `setColumnType` family of facet ops
+    // reproduces whenever the fold does not carry the facet forward.
     routing.would_join_the_model(
         "ty",
         ty,
@@ -257,17 +252,6 @@ fn the_unified_model_would_grow_nineteen_fields_and_has_no_projection_private_st
         + routing.would_join_the_model.len()
         + routing.vendor_fact.len()
         + routing.projection_local.len();
-    // 28 -> 30: `precision` and `scale`, added because the `number` token cannot say
-    // whether a column is a float or a fixed-precision decimal and the SQLite emitter
-    // was answering `REAL` for both. That is the case this file demands be made in a
-    // diff that moves a visible number, and this is it.
-    //
-    // 30 -> 28: the two full-text descriptor fields went with full-text support. Both
-    // were routed as `would_join_the_model`, so the whole movement lands on that bucket
-    // (20 -> 18) and none of it on the other three.
-    //
-    // 28 -> 29: `relation`, the authored navigation name for a reference. It is routed
-    // like `references`, so the movement lands on `would_join_the_model` (18 -> 19).
     assert_eq!(
         total, 29,
         "`FieldDescriptor` changed field count; every field must be routed: {routing:#?}"
@@ -315,7 +299,7 @@ fn the_unified_model_would_grow_nineteen_fields_and_has_no_projection_private_st
 }
 
 /// The neutral model's own size, pinned beside the projection's, so "the model must be
-/// RICHER than either current type" (section C) is a measurement.
+/// RICHER than either current type" is a measurement rather than a slogan.
 #[test]
 fn the_neutral_column_carries_eighteen_fields_and_the_catalog_snapshot_carries_twenty_four() {
     let probes = support::field_probes::column_snapshot_probes();

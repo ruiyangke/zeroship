@@ -150,7 +150,7 @@ fn assert_options(
 }
 
 // ---------------------------------------------------------------------------
-// The rename carriers the step 3 corpus never crossed with a `unique` column
+// The rename carriers: a `unique` column crossed with renames and drops
 // ---------------------------------------------------------------------------
 
 /// `createTable users(email unique)` then `renameTable users -> members`.
@@ -213,9 +213,9 @@ fn a_column_rename_moves_the_index_field_and_not_the_index_name() {
 
 /// A `dropIndex` naming the implicit unique index removes it, and leaves the column.
 ///
-/// Asserted with and without the optional `table` qualifier, because the walker had
-/// separate paths for the two and a projection that only handled the qualified one
-/// would keep a dropped index in the artifact for the unqualified spelling.
+/// Asserted with and without the optional `table` qualifier, because the two
+/// spellings resolve separately and a projection that only handled the qualified
+/// one would keep a dropped index in the artifact for the unqualified spelling.
 #[test]
 fn dropping_the_implicit_unique_index_by_name_removes_it_from_the_descriptor() {
     for qualifier in ["\"table\":\"users\",", ""] {
@@ -334,25 +334,15 @@ fn a_plain_index_and_an_implicit_unique_index_are_both_described() {
 }
 
 // ---------------------------------------------------------------------------
-// The one row where the old walker was the wrong one
+// An INCLUDE-payload index follows the server across a DROP COLUMN
 // ---------------------------------------------------------------------------
 
-/// **A deliberate behaviour change.** An index whose `INCLUDE` payload names a
-/// dropped column is dropped by the server, so it must leave the artifact.
-///
-/// The retired runtime-metadata walker kept it: its `DropColumn` arm matched on the
-/// runtime descriptor's own `fields` list, which never contained an `INCLUDE` column.
-/// `render/fold.rs` cites the measurement that settles which side is right - on PG
-/// 18.4, `CREATE INDEX i ON t (b) INCLUDE (a); ALTER TABLE t DROP COLUMN a` leaves no
-/// `i` in `pg_indexes`. The artifact was naming an index the database does not have.
-///
-/// The `env.db.ts` half of the same artifact already agreed with the server, because
-/// it rendered indexes from the authoring-table walker, whose `DropColumn` arm
-/// cascaded on `include` (step 4 consumer 2 has since replaced that walker with
-/// `FoldedSchema::project_authoring_tables`, which cascades the same way). So before
-/// this move the TWO artifacts out of one
-/// `render_artifacts` call disagreed about the same index - which is exactly the
-/// class of defect section B of the proposal is a list of.
+/// An index whose `INCLUDE` payload names a dropped column is dropped by the
+/// server, so it must leave the artifact: `CREATE INDEX i ON t (b) INCLUDE (a);
+/// ALTER TABLE t DROP COLUMN a` leaves no `i` in `pg_indexes` (`render/fold.rs`
+/// records the same measurement). An artifact that kept it would name an index
+/// the database does not have, and the TWO artifacts out of one
+/// `render_artifacts` call must not disagree about it.
 #[test]
 fn dropping_an_included_column_drops_the_index_from_the_runtime_descriptor() {
     let ops = parse(
@@ -374,9 +364,8 @@ fn dropping_an_included_column_drops_the_index_from_the_runtime_descriptor() {
             "{dialect:?}: PG drops an index whose INCLUDE payload names the dropped \
              column, so `schema.runtime.json` must not still name it: {runtime:#}"
         );
-        // The two artifacts now agree, which is the point of the row. This half was
-        // already correct and is asserted so the fix cannot be "make them agree by
-        // breaking the other one".
+        // The two artifacts must agree, which is the point of the row. This half is
+        // asserted so the agreement cannot be reached by breaking the other one.
         assert!(
             !env_db_ts.contains("users_email_idx"),
             "{dialect:?}: `env.db.ts` already cascaded the index away; both artifacts \
@@ -450,7 +439,7 @@ fn a_dropped_table_leaves_no_runtime_metadata_behind() {
 // The corpus: both artifacts, whole, on real recorded streams
 // ---------------------------------------------------------------------------
 
-/// The recorded op fixtures, the same 27 `crates/zeroship-migrate/tests/ir_contract/op_fixture_goldens.rs` owns. These
+/// The recorded op fixtures, the same corpus `crates/zeroship-migrate/tests/ir_contract/op_fixture_goldens.rs` owns. These
 /// are real drained recorder envelopes, already policy-resolved, so they fold under
 /// the confined charter that produced them.
 const STEMS: [&str; 27] = [
@@ -485,11 +474,10 @@ const STEMS: [&str; 27] = [
 
 /// The carrier streams, folded into the SAME golden as the recorded fixtures.
 ///
-/// They are here because the recorded corpus turned out not to cover the thing that
-/// moved: measured on the golden this file writes, the 27 fixtures produce 63 index
-/// rows and NOT ONE of them is an implicit unique index, which is the single carrier
-/// whose name the fold had to freeze. A behaviour-preservation gate that cannot see
-/// the carrier under change proves nothing about it, and
+/// They are here because the recorded corpus does not cover the shape this file
+/// pins: not one recorded fixture produces an implicit unique index, the carrier
+/// whose name the fold must freeze. A behaviour-preservation gate that cannot see
+/// the carrier under test proves nothing about it, and
 /// [`the_corpus_golden_actually_covers_the_map_that_moved`] is the assertion that
 /// keeps that true.
 ///
@@ -590,7 +578,7 @@ fn read_stem(stem: &str) -> Vec<Op> {
 /// Two kinds of line, and both are needed:
 ///
 /// * a `sha` line per artifact - the WHOLE artifact, so a byte moving anywhere in
-///   either file is caught even though this move should not be able to move one;
+///   either file is caught even though the fold routing should not be able to move one;
 /// * one line per FIELD the metadata map owns - so when a `sha` line moves, the
 ///   lines beside it say which field moved and the failure names it instead of
 ///   printing two hashes.
@@ -719,17 +707,14 @@ fn measure_corpus() -> Vec<String> {
     measured
 }
 
-/// **The behaviour-preservation gate for the move.**
+/// **The behaviour-preservation gate for the fold routing.**
 ///
-/// The golden was captured from the OLD path - `render_artifacts` driven by the
-/// runtime-metadata walker - BEFORE the consumer was switched, and committed
-/// unchanged. So this test compares what the new path emits against what the walker
-/// emitted, on 27 real recorded streams under 3 dialects, and it is not circular: the
-/// side that produced the expectation is not the side under test.
+/// The golden is committed expectation data: this test compares what
+/// `render_artifacts` emits through the fold against it, on the recorded streams
+/// under every shipping dialect, and it is not circular - the side that produced
+/// the expectation is not the side under test.
 ///
-/// The one row that had to be edited by hand when the walker was deleted is recorded
-/// in `docs/review-log.md` with the measurement that justified it. There is
-/// deliberately NO re-bless environment variable, matching
+/// There is deliberately NO re-bless environment variable, matching
 /// `crates/zeroship-migrate/tests/ir_contract/op_fixture_goldens.rs`: an easy update affordance is what turns a corpus
 /// into a mirror of whatever the code emits today.
 #[test]
@@ -772,9 +757,9 @@ fn the_recorded_corpus_renders_the_same_artifacts_through_the_fold() {
     );
 }
 
-/// The corpus is only evidence if it covers the thing that moved. A golden with no
+/// The corpus is only evidence if it covers the map under test. A golden with no
 /// `index` lines and no non-default `options` lines would pass the test above while
-/// measuring nothing about the map this change replaced.
+/// measuring nothing about it.
 #[test]
 fn the_corpus_golden_actually_covers_the_map_that_moved() {
     let path = manifest_path(CORPUS_GOLDEN);
@@ -826,8 +811,7 @@ fn the_corpus_golden_actually_covers_the_map_that_moved() {
 ///
 /// `AuthoredState::advance` has exactly three fallible sites - `ResolvedInject::
 /// for_table` in the `createTable` arm, and `NamedTypeRegistry::create_enum` /
-/// `create_domain` in the two named-type arms - and none of them existed on the path
-/// `render_artifacts` took before this move. These streams put each of them under
+/// `create_domain` in the two named-type arms. These streams put each of them under
 /// load.
 const REFUSAL_PROBES: &[(&str, &str)] = &[
     (
@@ -912,25 +896,18 @@ const REFUSAL_PROBES: &[(&str, &str)] = &[
     ),
 ];
 
-/// **The over-refusal control: this move added no refusal.**
+/// **The over-refusal control: the fold routing adds no refusal.**
 ///
-/// Before step 4, the ONLY thing that could make `render_artifacts` refuse a stream
-/// (after the policy resolution it still performs first) was the `FieldDef` walker:
-/// the runtime-metadata and authoring-table walkers applied no coherence gate
-/// at all, and the one fallible call they shared - `flatten_dialectal_ops` - the
-/// `FieldDef` walker made too. After the move, `single_fold::fold` runs FIRST and
-/// brings `AuthoredState::advance` with it, whose three fallible sites have no
-/// counterpart in that old path.
+/// `single_fold::fold` runs FIRST inside `render_artifacts` and brings
+/// `AuthoredState::advance` with it, whose fallible sites must not make the
+/// artifact path refuse a stream the rest of the pipeline accepts.
 ///
-/// Step 4 consumer 3 then deleted that walker, and the comparison below moved
-/// to `fold_ops` for a reason worth stating: the deleted walker ran `fold_ops` itself,
-/// so it was a genuinely SECOND opinion, while the projection that replaced it is read
-/// off the very call `render_artifacts` makes first. Comparing against the projection
-/// would have turned this biconditional into a comparison of the fold with itself.
-/// `fold_ops` is the half of the old gate that still exists independently, and the half
-/// that is lost with it - a refusal the walker's AUTHORED replay made and the catalog
-/// replay does not - is covered instead by the `refused|` lines in
-/// `tests/goldens/field_defs_artifacts.txt`, captured from that walker before it went.
+/// The independent oracle is `fold_ops`, for a reason worth stating: comparing
+/// against the fold's own projection would turn this biconditional into a
+/// comparison of the fold with itself, because the projection is read off the very
+/// call `render_artifacts` makes first. The refusals of the authored replay that
+/// the catalog replay does not make are pinned by the `refused|` lines in
+/// `tests/goldens/field_defs_artifacts.txt`.
 ///
 /// So the property is a BICONDITIONAL, and it is asserted rather than argued:
 /// `render_artifacts` accepts a stream exactly when `fold_ops` accepts it,
@@ -971,8 +948,8 @@ fn the_move_added_no_refusal_that_the_old_path_did_not_already_make() {
     let mut accepted = 0_usize;
     for (label, ops, policy) in &cases {
         for dialect in DIALECTS {
-            // The RIGHT side is the whole of the old path's coherence gate, driven on
-            // the same policy-resolved ops `render_artifacts` folds.
+            // The RIGHT side is the independent coherence gate, driven on the same
+            // policy-resolved ops `render_artifacts` folds.
             let resolved = zeroship_migrate::resolve_create_table_policy(
                 &MigrationIr {
                     inverse_ops: None,
@@ -991,17 +968,14 @@ fn the_move_added_no_refusal_that_the_old_path_did_not_already_make() {
                 SCHEMA,
             );
             let Ok(resolved) = resolved else {
-                // The resolve step is BEFORE the fold and this move did not touch it;
-                // a stream it rejects reaches neither side.
+                // The resolve step is BEFORE the fold and the fold routing does not
+                // touch it; a stream it rejects reaches neither side.
                 continue;
             };
-            // The independent oracle is `fold_ops`, NOT the fold. This comparison was
-            // written against the `FieldDef` walker, which ran `fold_ops` itself and was
-            // therefore a second opinion; step 4 consumer 3 deleted it, and rewriting
-            // this line to `single_fold::fold(…).project_field_defs()` would have made
-            // the biconditional compare `render_artifacts` to the very call it makes
-            // first - a control that can only ever agree with itself. `fold_ops` is the
-            // half of the old gate that still exists independently.
+            // The independent oracle is `fold_ops`, NOT the fold. Comparing against
+            // `single_fold::fold(…).project_field_defs()` would make the
+            // biconditional compare `render_artifacts` to the very call it makes
+            // first - a control that can only ever agree with itself.
             let old_gate = zeroship_migrate::fold_ops(
                 zeroship_migrate::shipping_vendors(),
                 &resolved.ops,

@@ -1,9 +1,8 @@
-//! **The oracle that adjudicates step 4 consumer 3, live, with rows in the table.**
+//! **The wire `FieldDef` map adjudicated live, with rows in the table.**
 //!
-//! `docs/proposals/single-fold-and-effects.md` section G step 4 moves
-//! the wire `FieldDef` map off a standalone walker and onto
-//! `FoldedSchema::project_field_defs`. Two of that walker's consumers only produce a
-//! file a human reads. The third does not:
+//! The map is a projection of the single fold - `FoldedSchema::project_field_defs`.
+//! Most of its consumers only produce a file a human reads. The rebuild path does
+//! not:
 //!
 //! ```text
 //! the FieldDef map
@@ -21,8 +20,7 @@
 //!
 //! # TWO legs, and only one of them reads the map's CONTENT
 //!
-//! This is the correction this file exists to record, and it was found by neutering
-//! rather than by reading. `declarative::render_create_table_rebuild` chooses between two arms
+//! `declarative::render_create_table_rebuild` chooses between two arms
 //! on `preserve_stored_shape = pure_rename.is_some() && dt.stored_create_sql.is_some()`:
 //!
 //! * the STORED-SHAPE arm replays SQLite's own `CREATE TABLE` text and defers the rename
@@ -35,24 +33,17 @@
 //! of PRESENCE, not of content: `render/lower.rs` fails closed when the table's entry is
 //! MISSING (`RenameNeedsLiveTable`) and never looks inside it.
 //!
-//! MEASURED, twice, over the whole 229-binary suite:
-//!
-//! * emptying the map the engine builds fails exactly ONE test,
-//!   `hr_sqlite::hr_migrations_apply_in_sequence_on_real_sqlite`, and it fails on the
-//!   ABSENCE check with `… needs the table's full live structure … it is absent`;
-//!   every test in this file still passed;
-//! * rewriting every column in that map to `{"type":"string"}` and stripping
-//!   `required`, `default`, `unique`, `refTarget` and `onDelete` fails NOTHING AT ALL.
-//!
-//! That second number is the honest statement of the gap: on the deploy path a
-//! present-but-WRONG descriptor was, and is, invisible. [`the_deploy_path_depends_on_the_maps_PRESENCE_not_its_content`]
-//! pins it so the next reader does not have to rediscover it, and
+//! The gap, stated honestly: on the deploy path a present-but-WRONG descriptor is
+//! invisible. Emptying the map trips the ABSENCE check (`RenameNeedsLiveTable`);
+//! corrupting its content trips nothing.
+//! [`the_deploy_path_depends_on_the_maps_PRESENCE_not_its_content`]
+//! pins that so the next reader does not have to rediscover it, and
 //! [`a_fold_seeded_rebuild_renders_its_create_table_from_the_map`] covers the other arm -
 //! the one that DOES read the content - against a real database with rows in the table.
 //!
 //! The second arm is not hypothetical: it is the leg `engine::refresh_historical_live`
 //! builds (table snapshots from `fold_ops`, field maps from the projection, no
-//! `stored_create_sql`), and six existing `*_sqlite.rs` files drive it. What none of
+//! `stored_create_sql`), and the existing `*_sqlite.rs` suites drive it. What none of
 //! them does is assert the DESCRIPTOR'S OWN CLAIMS - column types, nullability, default
 //! and the constraint set - against what the server independently reports afterwards,
 //! with rows in the table across the copy.
@@ -74,7 +65,7 @@
 //!
 //! SQLite is an embedded temp file, so every test here always runs for real. There is
 //! no `ZERO_MIGRATE_*` gate to forget and no skip banner that could read as a pass -
-//! the one respect in which this file is stronger than consumer 2's
+//! the one respect in which this file is stronger than
 //! `crates/zeroship-migrate/tests/fold_live/env_db_ts_matches_the_server_pg.rs`.
 
 use crate::support;
@@ -599,17 +590,13 @@ async fn a_fold_seeded_rebuild_renders_its_create_table_from_the_map() {
 
     let mut expected = before_columns.clone();
     expected[1].0 = "memo".to_string();
-    // `qty`'s `DEFAULT 1` SURVIVES the rebuild, and the line that says so used to say
-    // the opposite. This was a real defect, characterized here rather than expected
-    // away: `schema::query::def_to_constraints_for_dialect` emitted a `DEFAULT` for the
-    // `string`, `number` and `boolean` type tokens and had no arm for `int`, so an
-    // integer column's default was dropped by the rebuilt `CREATE TABLE` while a text
-    // column's survived. Both the walker and the projection put `"default": 1` in the
-    // map (asserted above), so the loss was downstream of the map, in the emitter. The
-    // emitter now renders the numeric and text-shaped token families through the same
-    // renderer its `FieldDescriptor` sibling uses, and the server keeps the default -
-    // so `before_columns` passes through unchanged apart from the rename, which is what
-    // a rebuild is supposed to mean.
+    // `qty`'s `DEFAULT 1` must SURVIVE the rebuild. The map carries `"default": 1`
+    // (asserted above), so the obligation is on the emitter:
+    // `schema::query::def_to_constraints_for_dialect` renders the numeric and
+    // text-shaped token families through the same renderer its `FieldDescriptor`
+    // sibling uses, and the server keeps the default - so `before_columns` passes
+    // through unchanged apart from the rename, which is what a rebuild is supposed
+    // to mean.
     assert_eq!(
         columns(&backend, "orders").await,
         expected,
@@ -753,23 +740,22 @@ async fn the_deploy_path_depends_on_the_maps_PRESENCE_not_its_content() {
 }
 
 // ---------------------------------------------------------------------------
-// The blast radius of the move, measured at the SQLite deploy path
+// The blast radius of a FieldDef-map divergence at the SQLite deploy path
 // ---------------------------------------------------------------------------
 
-/// Every stream on which the two answers differ, with the op that would put the
-/// difference into a rebuilt `CREATE TABLE` appended.
+/// Every stream on which the folded FieldDef map and the walker it replaced gave
+/// different answers, with the op that would put the difference into a rebuilt
+/// `CREATE TABLE` appended.
 ///
-/// The sweep behind this move reported FIVE divergence families between
-/// the retired walker and `FoldedSchema::project_field_defs`, over every prefix of the
-/// 27 recorded fixtures and 22 carriers on 3 dialects. Three of the five never appear on
-/// SQLite at all because the fold refuses the op that creates them; the other two do
-/// appear in the MAP on SQLite. Whether they reach the REBUILD is a different question -
-/// the map is built offline, the rebuild only ever sees ops that a live deploy accepted -
-/// and it is the question this table answers by asking the deploy path.
+/// Some divergence families never appear on SQLite at all because the fold refuses
+/// the op that creates them; the rest appear in the MAP on SQLite. Whether they reach
+/// the REBUILD is a different question - the map is built offline, the rebuild only
+/// ever sees ops that a live deploy accepted - and it is the question this table
+/// answers by asking the deploy path.
 /// Each row carries the substring the engine's refusal must contain, so a stream that
 /// stopped being refused FOR ITS OWN REASON - a typo in the JSON, a table renamed out
 /// from under it, a charter grant that changed - fails here instead of passing the
-/// emptiness assertion for free. Four streams, four DIFFERENT refusal paths.
+/// emptiness assertion for free. Every stream takes a DIFFERENT refusal path.
 const DIVERGENCE_STREAMS: &[(&str, &str, &str)] = &[
     (
         "a dropped UNIQUE constraint",
@@ -814,19 +800,20 @@ const DIVERGENCE_STREAMS: &[(&str, &str, &str)] = &[
     ),
 ];
 
-/// **The blast radius, measured rather than reasoned about: no divergence between the
-/// walker and the projection can reach a SQLite table rebuild.**
+/// **The blast radius, measured rather than reasoned about: no FieldDef-map
+/// divergence can reach a SQLite table rebuild.**
 ///
-/// This is the safety claim the whole move turns on, so it is asked of the engine rather
-/// than argued from the lowering rules. Each stream above is one on which the two
-/// answers provably differ; each is deployed for real on SQLite through the same
+/// This is the safety claim the projection turns on, so it is asked of the engine
+/// rather than argued from the lowering rules. Each stream above is one on which the
+/// two answers provably differ; each is deployed for real on SQLite through the same
 /// `deploy_envelopes` entry point the CLI uses; and each must be REFUSED before it can
 /// put its difference into a rebuilt `CREATE TABLE`.
 ///
-/// Read this as narrowly as it is written. It does NOT say the move changes nothing - it
-/// changes five things, and `crates/zeroship-migrate/tests/gen_types/gen_types_field_defs_from_the_fold.rs` pins all of
-/// them offline. It says the changes are confined to `schema.runtime.json`, and that the
-/// leg which copies rows is not among the consumers whose answer moves.
+/// Read this as narrowly as it is written. It does NOT say the projection changes
+/// nothing -
+/// `crates/zeroship-migrate/tests/gen_types/gen_types_field_defs_from_the_fold.rs` pins
+/// offline what it changes. It says the changes are confined to `schema.runtime.json`,
+/// and that the leg which copies rows is not among the consumers whose answer moves.
 ///
 /// The CONTROL below is what stops that from being a claim about a broken harness: the
 /// same helper, the same charter, the same `renameColumn`, on a stream with no
