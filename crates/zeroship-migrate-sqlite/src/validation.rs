@@ -176,11 +176,9 @@ impl ValidationPolicy for SqliteValidationPolicy {
                 "drop materialized:true for SQLite, or target Postgres for this view".to_string(),
             )),
             // This backend speaks only for itself and names only itself, from its own
-            // DialectId. The old text called the family "Postgres-only" and tagged it
-            // "(PgOnly)" - a variant that does not exist, on a facet no author writes.
-            // What is true is narrower and checkable: these ops have no analogue here,
-            // so an artifact carrying one reaches whichever backend renders them and
-            // this is not that backend.
+            // DialectId. What is true is narrower and checkable: these ops have no
+            // analogue here, so an artifact carrying one reaches whichever backend
+            // renders them and this is not that backend.
             capability @ (VendorCapability::Extension
             | VendorCapability::Schema
             | VendorCapability::Role

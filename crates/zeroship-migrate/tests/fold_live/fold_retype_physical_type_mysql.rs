@@ -16,15 +16,14 @@
 //! Everything here goes through the real pipeline - `load_and_lower_guarded` +
 //! `MigrationEngine::apply_plan` over `MysqlBackend`, then the shipped
 //! `snapshot_schema` - and the ORACLE is always the server, never a literal written
-//! in this file. Three tests, each covering a different half of the contract-stamping
+//! in this file. Each test covers a different half of the contract-stamping
 //! pass - `render::fold::finalize_physical_types`, which hands each replay-decided
 //! column to `MysqlSchemaRenderer::finalize_column_snapshot`:
 //!
 //! 1. `a_narrowing_retype_folds_the_contract_mysql_reports_for_the_target` - the
-//!    retype the field was named for, DEPLOYED. It used to pin the opposite fact,
-//!    that a `setColumnType` could not be applied on MySQL at all; the op now lowers
-//!    to a restate step, so the retyped column itself is an oracle alongside the
-//!    separately deployed one.
+//!    retype the field was named for, DEPLOYED. `setColumnType` lowers to a restate
+//!    step, so the retyped column itself is an oracle alongside the separately
+//!    deployed one.
 //! 2. `folded_column_shapes_describe_the_physical_type_mysql_holds` - the reachable
 //!    half. `createTable` and `addColumn` DO deploy on MySQL, and a drift report
 //!    against the server is the assertion.
@@ -209,12 +208,8 @@ async fn live_column_types(
 /// A `varchar(255) -> varchar(64)` retype DEPLOYS on MySQL, and the fold describes
 /// what the server then holds.
 ///
-/// Both halves are the finding. The first half used to be the opposite claim - the
-/// engine refused every alter-column op on MySQL unconditionally, so a retype
-/// could not be applied and this test pinned the refusal. That is gone:
 /// `setColumnType` lowers to a restate step that reads the live column definition
-/// from `SHOW CREATE TABLE` at apply, so the retype runs and the server is now
-/// available as the oracle for BOTH halves.
+/// from `SHOW CREATE TABLE` at apply, so the server is the oracle for BOTH halves.
 ///
 /// The folded contract still has to be right, because `fold_ops` is public API and
 /// the fold is the expected side of every structural comparison. Two independent
@@ -456,16 +451,12 @@ async fn folded_column_shapes_describe_the_physical_type_mysql_holds() {
 /// `column_data_types_eq` correctly answers "different" and the report then throws the
 /// answer away.
 ///
-/// MEASURED: with the carried-through guard disabled, this test kept passing on the
-/// drift check alone while the fold was reporting `Decimal { precision: 65, scale: 30 }`
-/// for a `decimal(12,2)` column - `mysql_ddl_type` maps a bare "decimal" to
-/// `DECIMAL(65, 30)` and a bare "text" to `VARCHAR(191)`, which is exactly the
+/// With the carried-through guard disabled, the drift check alone would keep passing
+/// while the fold reported a derived type for a `decimal(12,2)` column:
+/// `mysql_ddl_type` maps a bare "decimal" and a bare "text" to defaults that discard
 /// information the base had and the snapshot does not. So the contract comparison is
 /// the instrument here; the drift check stays as the second half, because it is the
 /// one that can see the ADDED column.
-///
-/// That reporting hole is recorded in the review log as its own finding. When it is
-/// closed, the direct assertion below can go - not before.
 #[compio::test]
 async fn folding_onto_a_live_mysql_base_keeps_the_contracts_the_server_reported() {
     let url = require_live_mysql!();
