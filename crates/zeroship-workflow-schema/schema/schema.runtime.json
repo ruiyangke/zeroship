@@ -1802,13 +1802,6 @@
             "id"
           ],
           "unique": true
-        },
-        {
-          "name": "__zeroship_workflow_outbox_delivery_idx",
-          "fields": [
-            "delivered_at",
-            "created_at"
-          ]
         }
       ]
     },
@@ -2069,13 +2062,6 @@
             "request_id"
           ],
           "unique": true
-        },
-        {
-          "name": "__zeroship_workflow_payloads_expiry_idx",
-          "fields": [
-            "state",
-            "expires_at"
-          ]
         }
       ]
     },
@@ -2789,8 +2775,8 @@
         {
           "name": "__zeroship_workflow_runs_due_idx",
           "fields": [
-            "due_at",
             "app_id",
+            "due_at",
             "id"
           ]
         },
