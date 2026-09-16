@@ -1,9 +1,8 @@
 //! The NEUTRAL schema model, and the vendor side table that keeps it neutral.
 //!
-//! Specified by `docs/proposals/single-fold-and-effects.md` section G, shared with
-//! `docs/proposals/pluggable-backends.md`. **No consumer moves here and no fold
+//! **No consumer moves here and no fold
 //! is written here.** What lives here is the TYPE and the COMPARATORS, plus the lossless
-//! bridge to today's [`crate::model::snapshot`] types that makes both falsifiable
+//! bridge to the [`crate::model::snapshot`] types that makes both falsifiable
 //! against a live server.
 //!
 //! ## The one rule this module exists to enforce
@@ -14,9 +13,9 @@
 //!
 //! * **Today** a field added to [`crate::model::snapshot::ColumnSnapshot`] is SILENTLY
 //!   IGNORED by comparison, because `ColumnSnapshot::eq` is a hand-written inclusion
-//!   list of ten fields out of twenty-one. Nobody is told. The measurement is in
+//!   list. Nobody is told. The gate is
 //!   `crates/zeroship-migrate/tests/fold_offline/structural_equality_field_sensitivity.rs`, which points one property at both
-//!   types: ELEVEN of `ColumnSnapshot`'s fields can differ while `==` reports equal.
+//!   types: most of `ColumnSnapshot`'s fields can differ while `==` reports equal.
 //! * **After** a field added to [`Column`] is COMPARED by default, so the same mistake
 //!   is noisy instead of invisible, and a consumer that wants it ignored has to say so
 //!   in a NAMED comparator with a reason next to the field.
@@ -24,13 +23,13 @@
 //! ## Why "equal" is not one question
 //!
 //! `ColumnSnapshot::eq`'s exclusion list is consulted implicitly by every consumer, and
-//! the consumers are not asking the same thing. Measured across `crates/*/src` with
-//! `cfg(test)` excluded, four distinct questions ride these impls today:
+//! the consumers are not asking the same thing. Four distinct questions ride these
+//! impls:
 //!
 //! 1. **table shape** - "are these the same table?" ([`table_shape_identity`], built on
 //!    [`column_shape_identity`], [`index_shape_identity`] and
 //!    [`constraint_shape_identity`]). This is what `TableSnapshot::eq` answers, and its
-//!    four production consumers are all in `render/declarative.rs`.
+//!    production consumers are all in `render/declarative.rs`.
 //! 2. **index pairing** - "is this live index the same index as this declared one, under
 //!    a possibly DIFFERENT NAME?" ([`index_pairing_identity`]). Shared by the migration
 //!    differ and the drift pass through `pair_indexes`, which is the one place two
@@ -44,19 +43,19 @@
 //!    `apply/drift.rs` rolls its own field-by-field pass, and it compares a STRICTLY
 //!    LARGER set than `ColumnSnapshot::eq` does.
 //!
-//! Question 4 refutes the premise `docs/proposals/single-fold-and-effects.md` section D
-//! works from, which is that `drift_identity` is the comparator `ColumnSnapshot::eq`
-//! should be extracted into. It is not: `apply/drift.rs` contains no use of `PartialEq`
+//! Question 4 refutes the premise that `drift_identity` is the comparator
+//! `ColumnSnapshot::eq` should be extracted into. It is not: `apply/drift.rs` contains
+//! no use of `PartialEq`
 //! on `ColumnSnapshot`, `IndexSnapshot`, `ConstraintSnapshot`, `TableSnapshot` or
 //! `ViewSnapshot`, and `ColumnSnapshot::eq` has exactly ONE production consumer -
 //! `TableSnapshot::eq`. The two definitions of "the same
 //! column" already differ by a field, and naming them apart is what stops the next
 //! reader assuming they are one.
 //!
-//! Question 3 is the one that has already BLOCKED A FIX. `docs/review-log.md:28291-28297`
-//! records that `ConstraintSnapshot`'s `PartialEq` compares `definition`, so following a
-//! column rename into a constraint definition inside the column-rename rebuild would have
-//! flipped `preserve_stored_shape` off and stopped the catalog path replaying SQLite's
+//! Question 3 is the one whose coupling has already blocked a fix.
+//! `ConstraintSnapshot`'s `PartialEq` compares `definition`, so following a
+//! column rename into a constraint definition inside the column-rename rebuild would
+//! flip `preserve_stored_shape` off and stop the catalog path replaying SQLite's
 //! own stored body. Whether you may fix a bug currently depends on an exclusion list
 //! written for an unrelated reason. Naming the comparators separately is what makes that
 //! dependency a declared input instead of an accident.
@@ -83,8 +82,8 @@
 //!
 //! ## What this does NOT claim
 //!
-//! The model below is bounded to TABLES, and to the catalog half of the proposal's
-//! section C. It is not yet richer than [`crate::model::snapshot::TableSnapshot`], and
+//! The model below is bounded to TABLES. It is not yet richer than
+//! [`crate::model::snapshot::TableSnapshot`], and
 //! `crates/zeroship-migrate/tests/fold_offline/schema_model_god_object_bound.rs` measures precisely how much it would have to
 //! grow to also carry `render::declarative::FieldDescriptor`, rather than asserting that
 //! it could.
@@ -196,9 +195,8 @@ impl IndexElementKey {
 
 /// Every fact ONE vendor's catalog states and the neutral model therefore may not carry.
 ///
-/// One flat map per fact family rather than one opaque blob per object. The blob is what
-/// `docs/proposals/pluggable-backends.md:376-379` sketches, and it is the right shape
-/// ONCE a backend registry exists to own the blob's type; until then a typed map keeps
+/// One flat map per fact family rather than one opaque blob per object: a typed map
+/// keeps
 /// the round-trip in `SchemaModel::from_tables` / [`SchemaModel::to_tables`] provable and
 /// keeps this struct exhaustively destructurable, which is what
 /// `crates/zeroship-migrate/tests/fold_offline/schema_model_god_object_bound.rs` needs to prove nothing was dropped.
@@ -211,15 +209,11 @@ impl IndexElementKey {
 ///
 /// # The families are named for the FACT, not for the backend that answers
 ///
-/// Six of them used to carry a vendor prefix - one for the stored `CREATE TABLE`
-/// text and five for index facets - while the other five already used the contract's
-/// own spelling. That was not a distinction, it was an inconsistency inside one
-/// struct: every family here is a straight split of a field the neutral
+/// Every family here is a straight split of a field the neutral
 /// [`zeroship_migrate_backend::snapshot`] surface ALREADY names neutrally
 /// (`TableSnapshot::stored_create_sql`, `IndexSnapshot::only` / `opclass` /
-/// `nulls_not_distinct`, `IndexElementSnapshot::Column::opclass` / `collation`), and
-/// this side table is the only place in the round trip where core reached for a vendor
-/// name the contract had not used. The remaining `index_` / `column_` prefixes are the
+/// `nulls_not_distinct`, `IndexElementSnapshot::Column::opclass` / `collation`).
+/// The `index_` / `column_` prefixes are the
 /// KEY type (`IndexKey`, `ColumnKey`, `TableKey`), not a backend.
 ///
 /// WHICH backend populates a family is still recorded, in the per-field doc, where it
@@ -308,7 +302,7 @@ impl VendorFacts {
     /// [`SchemaModel::column_shape_identity`], which is the dependency the old exclusion
     /// list kept implicit.
     ///
-    /// The other three column families are excluded, with the reasons their own field
+    /// The other column families are excluded, with the reasons their own field
     /// docs give in [`crate::model::snapshot`]:
     ///
     /// * `catalog_uuid_format_check` - introspection-only; author-built desired
@@ -339,19 +333,17 @@ impl VendorFacts {
     /// `rowid_alias` only. Two definitions of "the same column" already exist in the
     /// tree; naming both is what stops the next reader assuming there is one.
     ///
-    /// (That reference used to carry a line range. It is a bare function name now,
-    /// deliberately: the range had rotted to 622 lines past the end of the file it
-    /// named, so it pointed at nothing while still reading as precise. A name resolves;
+    /// (References here are bare function names, never line ranges: a name resolves;
     /// a line number rots silently.)
     ///
-    /// The "declines when EITHER side is absent" rule survives the move to the carrier
-    /// and is now enforced by its SHAPE rather than restated here.
+    /// The "declines when EITHER side is absent" rule is enforced by the carrier's
+    /// SHAPE rather than restated here.
     /// [`Dialectal::physical_identity`] pairs legs by dialect, so a contract on one side
     /// only is never yielded and the answer is `None` - which this comparator reads as
     /// "no difference established". An author-built desired snapshot has derived no
     /// contract, and accusing it of a type change would be a phantom.
     ///
-    /// What an UNMODELLED type means is likewise no longer decided here. It cannot be:
+    /// What an UNMODELLED type means is likewise not decided here. It cannot be:
     /// core cannot see inside a leg. The owning vendor answers, and it is held to the
     /// same rule - a DIFFER must refuse to report a difference it cannot establish - by
     /// [`VendorColumnFacts::physical_identity`]'s contract, which requires `true` from a
@@ -375,14 +367,15 @@ impl VendorFacts {
     }
 
     /// The VENDOR half of index PAIRING, of index SHAPE, and of index DRIFT - one
-    /// function, because measurement says all three vendor answers are the same.
+    /// function, because all three vendor answers are the same.
     ///
-    /// Always `true`, and that is a MEASURED statement rather than a stub. All three
+    /// Always `true`, and that is a statement about the families below rather than a
+    /// stub. All three
     /// PostgreSQL index families here are emission-only and excluded from
     /// `IndexSnapshot`'s equality today, each for a reason recorded in its field doc:
     /// `only` because `pg_get_indexdef` renders `ON ONLY` for every index on a
-    /// partitioned parent whether or not it was written (measured on PostgreSQL 18.4,
-    /// `docs/review-log.md:9412-9432`), `opclass` because live introspection cannot
+    /// partitioned parent whether or not it was written,
+    /// `opclass` because live introspection cannot
     /// recover it cheaply, and `nulls_not_distinct` because recovery is out of scope.
     ///
     /// It is a function rather than a constant so the site exists to be changed, and so
@@ -931,12 +924,10 @@ impl SchemaModel {
 // so a field added to the neutral model is a compile error in EVERY comparator until it
 // is either compared or explicitly ignored with a reason.
 //
-// The measurement that fixed the names is in the module doc and is worth restating
-// here, because it contradicts what `docs/proposals/single-fold-and-effects.md` section
-// D asked for. That section proposes `drift_identity(&Column, &Column)` as the
-// replacement for `ColumnSnapshot::eq`'s exclusion list, on the premise that structural
-// drift is what reads it. Measured across `crates/*/src` with `cfg(test)` excluded, that
-// premise is FALSE in both directions:
+// The names are fixed by what the tree actually does: the premise that
+// `drift_identity(&Column, &Column)` is the
+// replacement for `ColumnSnapshot::eq`'s exclusion list, because structural
+// drift is what reads it, is FALSE in both directions:
 //
 //   * `apply/drift.rs` contains NO use of `PartialEq` on `ColumnSnapshot`,
 //     `IndexSnapshot`, `ConstraintSnapshot`, `TableSnapshot` or `ViewSnapshot`. Its
@@ -947,8 +938,8 @@ impl SchemaModel {
 //     columns directly.
 //
 // So `ColumnSnapshot::eq` is not the drift comparator; it is the TABLE-SHAPE
-// comparator, and its four real consumers are all in `render/declarative.rs`. Extracting
-// it under the name `drift_identity` would have taught the next reader something false.
+// comparator, and its real consumers are all in `render/declarative.rs`. Extracting
+// it under the name `drift_identity` would teach the next reader something false.
 // Both questions are named below, and `drift_identity` is defined from what
 // `apply::drift` actually compares - which is STRICTLY STRONGER, one field apart.
 
@@ -988,14 +979,14 @@ impl SchemaModel {
 ///   matching catalog comments into the second rather than into the user-facing
 ///   `comment`, which IS compared.
 ///
-/// Two of those exclusions are LOAD-BEARING for a shipped fix rather than merely
-/// defensible, and that is the fact section D of the proposal is about.
-/// `docs/review-log.md:28481-28486`: `rename_column_in_generated_columns` and
+/// Two of those exclusions are LOAD-BEARING rather than merely
+/// defensible.
+/// `rename_column_in_generated_columns` and
 /// `rename_column_in_inline_checks` write into the DESIRED snapshot from
-/// the column-rename rebuild, and "that is safe only because `ColumnSnapshot`'s
-/// `PartialEq` excludes both fields". The mirror case is the bug that stayed unfixed for
-/// a commit: `ConstraintSnapshot`'s equality does NOT exclude `definition`, so the same
-/// rewrite one field over would have flipped `preserve_stored_shape` off. See
+/// the column-rename rebuild, and that is safe only because `ColumnSnapshot`'s
+/// `PartialEq` excludes both fields. The mirror case is the same dependency with the
+/// sign flipped: `ConstraintSnapshot`'s equality does NOT exclude `definition`, so the same
+/// rewrite one field over would flip `preserve_stored_shape` off. See
 /// [`rename_equivalence_identity`], which is the comparator that dependency actually
 /// runs through.
 #[must_use]
@@ -1051,7 +1042,7 @@ pub fn column_shape_identity(left: &Column, right: &Column) -> bool {
 /// both directions: it must hold, AND there must exist a real column pair where the two
 /// disagree, so "these are two questions" is a measurement and not a claim.
 ///
-/// This divergence is exactly what section D predicted. `generated_kind`'s own field doc
+/// `generated_kind`'s own field doc
 /// declines to join `ColumnSnapshot::eq` because "adding it would change what every
 /// consumer of column equality means by 'the same column' [...] when only the drift
 /// comparator is asking". With the comparators named, that sentence stops being a reason
@@ -1062,9 +1053,7 @@ pub fn column_shape_identity(left: &Column, right: &Column) -> bool {
 /// `apply::drift` compares it only through the dialect-gated
 /// `comparable_column_default`, so it belongs to a backend rather than to the neutral
 /// model, and this comparator declining to guess is the whole point of the dialect
-/// boundary. (Named without a line range for the reason
-/// [`VendorFacts::column_drift_identity`] gives: the range that used to be here had
-/// rotted past the end of the file.)
+/// boundary.
 #[must_use]
 pub fn drift_identity(left: &Column, right: &Column) -> bool {
     // EXHAUSTIVE, no `..`.
@@ -1103,7 +1092,7 @@ pub fn drift_identity(left: &Column, right: &Column) -> bool {
 /// **Index pairing identity**: is this live index the same index as this declared one,
 /// under a possibly DIFFERENT NAME?
 ///
-/// The extraction of `IndexSnapshot::same_definition_except_name`. Measured, this is the
+/// The extraction of `IndexSnapshot::same_definition_except_name`. This is the
 /// one comparator that already has two consumers agreeing through a shared function:
 /// `render::declarative::pair_indexes` adopts an alias-matched live index only if it
 /// holds, and `apply::drift::diff_indexes` delegates to that same `pair_indexes`, so
@@ -1117,10 +1106,8 @@ pub fn drift_identity(left: &Column, right: &Column) -> bool {
 /// superset, so comparing them reports a difference on every index that has one.
 ///
 /// `only`, `opclass` and `nulls_not_distinct` do not appear because they are not
-/// reachable: they live in [`VendorFacts`]. That is the improvement over the impl this
-/// replaces, where all three were fields of `IndexSnapshot` that a comparator had to
-/// remember not to read - and where `only` was read by mistake for as long as nothing
-/// authored it (`docs/review-log.md:9391-9411`).
+/// reachable: they live in [`VendorFacts`]. A comparator cannot read one by mistake;
+/// it can only ask through a named vendor-half function.
 #[must_use]
 pub fn index_pairing_identity(left: &Index, right: &Index) -> bool {
     // EXHAUSTIVE, no `..`.
@@ -1216,12 +1203,12 @@ pub fn constraint_shape_identity(left: &Constraint, right: &Constraint) -> bool 
 
 /// **Table shape identity**: are these the same table?
 ///
-/// The neutral half of `TableSnapshot::eq`, whose four production consumers are all in
-/// `render/declarative.rs`: `DesiredSchema`'s own equality (`:3450`),
-/// `desired_snapshot_second_pass`'s `ConflictingDeclaration` check (`:4128`),
+/// The neutral half of `TableSnapshot::eq`, whose production consumers are all in
+/// `render/declarative.rs`: `DesiredSchema`'s own equality,
+/// `desired_snapshot_second_pass`'s `ConflictingDeclaration` check,
 /// the registered rebuild policy's `pure_column_rename`, and `enforce_ownership`'s
 /// "did anything
-/// actually change" gate (`:6645`, `:6647`).
+/// actually change" gate.
 ///
 /// `runtime_options` is ignored because live catalog introspection cannot recover it, so
 /// the offline fold is its only authority and comparing it would report a difference
@@ -1263,22 +1250,21 @@ pub fn table_shape_identity(left: &Table, right: &Table) -> bool {
 /// it now indistinguishable from the desired one - so the SQLite rebuild may replay
 /// `sqlite_master`'s stored `CREATE TABLE` verbatim instead of re-rendering it?
 ///
-/// The question the registered rebuild policy's `pure_column_rename` asks
+/// The question the registered rebuild policy's `pure_column_rename`
 /// asks. Today it asks it through `TableSnapshot::eq`, so its answer is
 /// [`table_shape_identity`] and this function is defined as that - deliberately, because
 /// this step preserves behaviour exactly and
 /// `crates/zeroship-migrate/tests/fold_live/schema_model_equivalence_pg.rs` proves it does.
 ///
-/// **Naming it is the deliverable, not changing it.** Section D of the proposal shows
-/// this is the comparator that has already BLOCKED A FIX: because
+/// **Naming it is the deliverable, not changing it.** This is the comparator whose
+/// coupling has already blocked a fix: because
 /// `ConstraintSnapshot::eq` compares `definition`, following a column rename into a
-/// constraint definition inside the column-rename rebuild would have made the desired table
-/// unequal to the renamed live one, flipped `preserve_stored_shape` off, and stopped the
-/// catalog path replaying SQLite's own stored body
-/// (`docs/review-log.md:28291-28297`, `28481-28487`). The rewrite had to be moved a layer
-/// down into `render_create_table_rebuild` instead.
+/// constraint definition inside the column-rename rebuild would make the desired table
+/// unequal to the renamed live one, flip `preserve_stored_shape` off, and stop the
+/// catalog path replaying SQLite's own stored body. The rewrite belongs a layer
+/// down, in `render_create_table_rebuild`.
 ///
-/// So the coupling is real and it stays. What changes is that it is now a DECLARED INPUT
+/// So the coupling is real and it stays. It is a DECLARED INPUT
 /// of one named function with the consequence written next to it, instead of a fact you
 /// discover from a failing SQLite rebuild. The next person who wants to follow a rename
 /// into a new carrier can read here what depends on their choice - and, because this is

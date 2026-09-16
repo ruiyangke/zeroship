@@ -9,10 +9,8 @@
 //!
 //! ## Why this is a PROOF and not a list
 //!
-//! `docs/proposals/single-fold-and-effects.md` section H asks for a rename carrier
-//! sweep whose deliverable "FAILS when a new carrier is added and not handled", in the
-//! spirit of its "Op exhaustiveness" item, and says explicitly that a list in a
-//! comment is not a proof. The mechanism here is the language's own:
+//! The sweep must FAIL when a new carrier is added and not handled; a list
+//! in a comment is not a proof. The mechanism here is the language's own:
 //!
 //!   * every snapshot type is destructured with NO `..` REST PATTERN, so adding a
 //!     field to `TableSnapshot`, `ColumnSnapshot`, `GeneratedColumnSnapshot`,
@@ -26,10 +24,9 @@
 //!     classifying a new field as a carrier and then never exercising it is a test
 //!     failure too, not a silent hole.
 //!
-//! The failure mode this closes is the one `docs/review-log.md` records at F113: four
-//! carriers of the same arm were found ONE AT A TIME, each by the corpus rather than by
-//! a survey, because "having fixed one instance actively suppresses the search for the
-//! others".
+//! The failure mode this closes is piecemeal discovery: carriers of the same
+//! arm are found one at a time rather than by a survey, because fixing one
+//! instance actively suppresses the search for the others.
 //!
 //! ## The classification, and what each class costs to get wrong
 //!
@@ -39,9 +36,8 @@
 //!   collation name, an operator class, free prose). Getting this wrong is the same
 //!   failure as missing a carrier, which is why each one carries its reason inline.
 //! * **`must_not_follow`** - the field CAN spell a column name, but rewriting it would
-//!   invent state the live database does not have. Both members are MEASURED on
-//!   PostgreSQL 18.4 rather than assumed: an index or constraint created as `t_a_idx`
-//!   over `a` is still named `t_a_idx` after `a` becomes `b`.
+//!   invent state the live database does not have: an index or constraint created as
+//!   `t_a_idx` over `a` is still named `t_a_idx` after `a` becomes `b`.
 
 use std::collections::BTreeMap;
 

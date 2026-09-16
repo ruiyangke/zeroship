@@ -1,11 +1,9 @@
 //! The managed-policy server: the monorepo's operator-ceiling ⊓ creator-draft
 //! composition + seal, on top of the published `zero-migrate` Policy Decision Point.
 //!
-//! # The model (Phase 3 of the policy redesign)
+//! # The model
 //!
-//! The engine's old `PolicyProfile` value-struct, its `meet_ceiling_draft` compose,
-//! and its `seal_effective_profile` HMAC are DELETED. This module rebuilds the
-//! managed server on the engine's surviving PDP:
+//! This module builds the managed server on the engine's PDP:
 //!
 //! - the OPERATOR CEILING is a [`zeroship_migrate_policy::RootCharter`] — a [`PolicyDoc`]
 //!   loaded [`LoadContext::RootCharter`] (the only layer that may carry a `mandatory`
@@ -14,7 +12,7 @@
 //! - the CREATOR DRAFT is an untrusted [`PolicyDoc`] loaded [`LoadContext::NonRootLayer`].
 //! - the EFFECTIVE policy is [`admit`]`(ceiling, draft)` — operator ⊓ creator
 //!   with ESCALATION-REJECT (a draft grant looser than the ceiling permits is
-//!   rejected, never clamped). This is the direct replacement for `meet_ceiling_draft`.
+//!   rejected, never clamped).
 //! - the SEAL is the `zeroship-migrate-policy` HMAC over the composed [`EffectivePolicy`]
 //!   ([`fn@zeroship_migrate::seal`] / [`SealedPolicy::verify`]).
 //!
@@ -489,11 +487,11 @@ fn bind_confined_charter_to_schema(source: &str, schema: &str) -> Result<String,
             KEY_SCHEMA_CROSS_SCHEMA => {
                 return Err("confined charter must not grant foreign-schema access".to_string());
             }
-            // Any OTHER schema-scoped grant is refused rather than passed through.
-            // This arm used to be `_ => {}`, which let a grant this function does not
-            // know how to bind reach the composed charter still carrying its authored
-            // `scope = "all"` - authority over every schema, from a function whose whole
-            // job is confining authority to one. The registry already defines three such
+            // Any OTHER schema-scoped grant is refused rather than passed through:
+            // a grant this function does not know how to bind must not reach the
+            // composed charter still carrying its authored `scope = "all"` - authority
+            // over every schema, from a function whose whole job is confining authority
+            // to one. The registry already defines three such
             // keys beyond the three handled above (`schema.create_schema` PerSchema,
             // `schema.alter_injected` PerTable, `schema.partition` Global), so this is
             // not a guard against a hypothetical future key.
@@ -735,16 +733,14 @@ mod tests {
     /// `exclude` does. Both arms are here on purpose: the second is the one-variable
     /// control that proves the first is measuring the carve-out and not something else.
     ///
-    /// Reported by zero-migrate (ZERO-MIGRATE-2026-08-12-002) while answering a
-    /// different question, and re-run here against OUR pin (`cb1bcb59`) and OUR
-    /// compose path rather than taken on their report. A grant resolves to the JOIN of
-    /// every covering rule in the same document, so `false` never lowers a `true`; only
-    /// a LOWER LAYER can mask. `exclude` removes the region from the rule's scope, which
-    /// is the mechanism that actually restricts inside one document.
+    /// A grant resolves to the JOIN of every covering rule in the same document, so
+    /// `false` never lowers a `true`; only a LOWER LAYER can mask. `exclude` removes
+    /// the region from the rule's scope, which is the mechanism that actually
+    /// restricts inside one document.
     ///
     /// WHY THIS TEST EXISTS even though nothing is broken today: our three ceilings
     /// (`policies/{confined,confined-guard,platform}.policy.toml`) contain NO
-    /// `value = false` grant - checked, all three, 2026-08-12 - so the trap is latent,
+    /// `value = false` grant, so the trap is latent,
     /// not live. It is worth pinning because our charters are single-layer by
     /// construction, which makes a `false` rule the natural thing to reach for when
     /// someone wants to except one table, and it would land looking like a restriction
@@ -833,12 +829,11 @@ scope = {{ include = ["{schema}"], exclude = ["{schema}.secret"] }}
         ManagedPolicyConfig::new(vec![0; 32], catalog).expect("32-byte MAC key must be accepted");
     }
 
-    /// RED AS OF THE TYPED APP ID, AND THE FIX IS NOT HERE. Do NOT repair the
-    /// final assertion by lowercasing its expectation - see the paragraph on
-    /// `confined_guard_preserves_schema_bound_grants_without_inject`, which
-    /// carries the measurement. The scope this asserts is the same one the
-    /// grant lookup uses, and folding the expectation to match the charter
-    /// would hide a state in which no creator may create a table.
+    /// Do NOT repair the final assertion by lowercasing its expectation - see the
+    /// paragraph on `confined_guard_preserves_schema_bound_grants_without_inject`.
+    /// The scope this asserts is the same one the grant lookup uses, and folding
+    /// the expectation to match the charter would hide a state in which no creator
+    /// may create a table.
     #[test]
     fn no_draft_uses_default_confined_ceiling() {
         let cfg = config();
@@ -931,11 +926,10 @@ scope = {{ include = ["{schema}"], exclude = ["{schema}.secret"] }}
         let owned_table = ObjectName::table(app_schema.as_bytes().to_vec(), b"widgets".to_vec());
         let foreign_table = ObjectName::table(b"other_app".to_vec(), b"widgets".to_vec());
         let objects = [&owned_schema, &owned_table, &foreign_table];
-        // `runtime.lock_timeout_ms` / `runtime.statement_timeout_ms` used to be in
-        // this list. Both charters now grant NEITHER -- the engine registers every
+        // `runtime.lock_timeout_ms` / `runtime.statement_timeout_ms` are deliberately
+        // absent: both charters grant NEITHER -- the engine registers every
         // `runtime.*` knob `DeclaredOnly` and refuses a document that raises one
-        // above its default, which is what stopped `zeroship-migrate-server` from
-        // starting at all (see the note in policies/confined.policy.toml). Keeping
+        // above its default (see the note in policies/confined.policy.toml). Keeping
         // them here would compare "not granted" against "not granted": a row that
         // passes because neither side has the knob, not because they agree on it.
         for key_name in [
@@ -1009,13 +1003,11 @@ scope = "all"
         let app_id = AppId::mint();
         // A draft that only TIGHTENS: forbid destructive ops.
         //
-        // This draft also carried `runtime.lock_timeout_ms = 1000` as a second,
-        // "tighter timeout" tightening. It cannot: the engine registers every
-        // `runtime.*` knob `DeclaredOnly` with default 1, and the load gate refuses
-        // ANY value above the default -- in an operator ceiling OR a creator draft.
-        // So 1000 is not a tightening the creator is allowed to author, it is a
-        // document the loader rejects, and the only admissible value (1) is a no-op.
-        // A creator cannot bound migration lock/statement timeouts at all today.
+        // A `runtime.*` knob cannot appear here as a "tighter timeout" tightening:
+        // the engine registers every `runtime.*` knob `DeclaredOnly` with default 1,
+        // and the load gate refuses ANY value above the default -- in an operator
+        // ceiling OR a creator draft. The only admissible value (1) is a no-op, so a
+        // creator cannot bound migration lock/statement timeouts at all.
         // See policies/confined.policy.toml.
         let draft_toml = r#"policy_version = 1
 
@@ -1094,14 +1086,6 @@ scope = "all"
     /// literal must refuse with `UncoveredRegionNotRepresentable`, not the generic
     /// escalation error.
     ///
-    /// This is the residual I said in ZEROSHIP-2026-08-12-249 could not be tested until
-    /// the pin moved, on the belief that the variant was new in zero-migrate's
-    /// 8c254fa8. They corrected that (ZERO-MIGRATE-2026-08-12-003): the variant is
-    /// ORIGINAL behaviour, constructed at `boundary.rs:174` and `:204` in our vendored
-    /// pin, and what 8c254fa8 added was a SECOND cause for it. They explicitly had NOT
-    /// run it at cb1bcb59 and asked me to, since I am already on that commit. This test
-    /// is that run.
-    ///
     /// WHY THIS INPUT AND NOT THE OTHER TWO ESCALATION TESTS ABOVE: those use `sql.raw`
     /// and `schema.cross_schema`, which the confined ceiling does not grant AT ALL, so
     /// there is no covering rule to subtract and they take a different arm.
@@ -1109,8 +1093,8 @@ scope = "all"
     /// its scope to one exact literal - so `All` minus that literal is the subtraction
     /// with no representation, which is the arm this variant guards.
     ///
-    /// It asserts the VARIANT, not merely that composition failed, because the whole
-    /// point of the exchange was that the two refusals carry different information.
+    /// It asserts the VARIANT, not merely that composition failed, because the two
+    /// refusals carry different information.
     #[test]
     fn draft_all_scope_on_a_literal_bound_key_refuses_as_not_representable() {
         let cfg = config();
@@ -1146,23 +1130,20 @@ scope = "all"
     /// admission check catches wherever it samples; this one is built so a sampled
     /// witness would land on the one object the ceiling does grant.
     ///
-    /// The shape comes from zero-migrate's ZERO-MIGRATE-2026-08-12-001: their `admit`
-    /// proved a draft within a charter by sampling ONE object per charter-partitioned
-    /// region, and the sampled witness of a glob is built from its literal prefix. Our
-    /// confined ceiling binds `schema.create_table` to the app schema EXACTLY
-    /// (`bind_confined_charter_to_schema` rewrites the scope in place), so
-    /// `<app_schema>*` has the app schema itself as its prefix witness while also
+    /// The admission check proves a draft within a charter by sampling ONE object per
+    /// charter-partitioned region, and the sampled witness of a glob is built from its
+    /// literal prefix. Our confined ceiling binds `schema.create_table` to the app
+    /// schema EXACTLY (`bind_confined_charter_to_schema` rewrites the scope in place),
+    /// so `<app_schema>*` has the app schema itself as its prefix witness while also
     /// covering `<app_schema>_evil`, which the ceiling does not grant.
     ///
-    /// This test is a CANARY, not a reproduction: it passes at the vendored pin
-    /// (`cb1bcb59`, which predates their fix). Its value is that it fails if a future
-    /// pin move, or an edit to the confined charter that introduces a glob or a second
-    /// layer, makes the prefix-witness hole reachable here.
+    /// This test is a CANARY: it fails if a future pin move, or an edit to the
+    /// confined charter that introduces a glob or a second layer, makes the
+    /// prefix-witness hole reachable here.
     ///
-    /// What it does NOT cover: the layered-charter escalation their message actually
-    /// reproduces needs an upper layer that LOWERS a value over a sub-region, and our
-    /// charter is single-layer by construction, so no test in this file can exercise
-    /// that arm today.
+    /// What it does NOT cover: the layered-charter escalation needs an upper layer
+    /// that LOWERS a value over a sub-region, and our charter is single-layer by
+    /// construction, so no test in this file can exercise that arm.
     #[test]
     fn draft_glob_scope_anchored_on_the_granted_schema_is_still_rejected() {
         let cfg = config();

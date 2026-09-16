@@ -102,35 +102,28 @@ struct RuntimeCollectionDescriptorV2 {
 ///
 /// A declared field is not always one column. A masked field occupies two: the value a
 /// default projection reads, and the authoritative value behind it. Every consumer that
-/// needs the second name derives it today by formatting `"{col}_masked"` - eight
-/// independent sites, enumerated in
-/// `docs/reviews/2026-08-27-descriptor-specification.md` section 1.4 - and a name
-/// derived at eight sites is eight chances to disagree with the ONE emitter that
-/// created the column. This type is that name, recorded.
+/// needs the second name derives it by formatting `"{col}_masked"` - the sites are
+/// enumerated in `docs/reviews/2026-08-27-descriptor-specification.md` - and every
+/// derived name is a chance to disagree with the ONE emitter that created the column.
+/// This type is that name, recorded.
 ///
-/// **What these names are today.** After the 2026-08-28 storage flip the engine
-/// writes the MASKED value into the field's own column and keeps the authoritative
-/// value in a `__zs_raw__<field>` sibling, so [`Self::value_column`] is the field's
-/// own column (holding the mask) and [`Self::raw_column`] is `__zs_raw__<field>`
-/// (holding the real value). Both come from
+/// The engine writes the MASKED value into the field's own column and keeps the
+/// authoritative value in a `__zs_raw__<field>` sibling, so [`Self::value_column`]
+/// is the field's own column (holding the mask) and [`Self::raw_column`] is
+/// `__zs_raw__<field>` (holding the real value). Both come from
 /// [`crate::schema::query::raw_column_for_field`], the DDL emitter's own function,
 /// rather than being re-derived here - so the descriptor and the database cannot drift
 /// apart, whatever that function decides to spell.
 ///
 /// **The AEAD binds the LOGICAL FIELD NAME, not the physical column.** `canonical_aad`
 /// receives its `col` argument from `for (col, def) in schema_obj.iter()` - the schema
-/// FIELD KEY - in `crud/encryption_pass.rs` and `crud/unmask.rs` alike. The two were the
-/// same string before the storage flip, which is why the distinction was invisible; they
-/// are not the same string now, and the rule that survived is the logical one.
+/// FIELD KEY - in `crud/encryption_pass.rs` and `crud/unmask.rs` alike. The field key
+/// and the physical column name are not the same string, and the rule is the logical
+/// one.
 ///
-/// **That makes the flip a rename and not a re-encrypt, and this comment used to say the
-/// opposite.** It read: "moving an encrypted value to another column is a re-encrypt,
-/// not a rename ... an `ALTER TABLE ... RENAME COLUMN` leaves every stored cell
-/// authenticated under the old name and the table fails tag verification on every row."
-/// That was false about the code even when it was written, and acting on it - "fixing"
-/// the AAD to bind `raw_column` so it matches the comment - would destroy every
-/// ciphertext in the deployment, because every existing cell is authenticated under the
-/// logical name.
+/// **That makes the storage flip a rename and not a re-encrypt.** "Fixing" the AAD
+/// to bind `raw_column` would destroy every ciphertext in the deployment, because
+/// every existing cell is authenticated under the logical name.
 ///
 /// There is deliberately **no separate `aadColumn`**: a field that can disagree with the
 /// rule is a second source of truth for one fact. The rule is "the logical field name,
@@ -323,7 +316,7 @@ pub(crate) fn derived_unique_index_name(vendors: VendorSet, table: &str, field: 
 ///
 /// Takes the map rather than the op stream: the map is
 /// `FoldedSchema::project_field_defs`, read off the same fold the other two projections
-/// come from, so this function no longer folds anything and cannot fail.
+/// come from, so this function folds nothing itself and cannot fail.
 ///
 /// **v2 over v1 because the guarantee changed, not because the shape grew.** Every field
 /// of a v2 descriptor carries a [`FieldStorage`] block, and a consumer that stops
@@ -511,31 +504,25 @@ pub fn render_schema_export(
     )
     .map_err(|error| GenTypesError::Fold(crate::FoldError::Render(error.to_string())))?;
     let ops = resolved.ops.as_slice();
-    // Per `docs/proposals/single-fold-and-effects.md` section G: EVERY value both
+    // Per `docs/proposals/single-fold-and-effects.md`: EVERY value both
     // artifacts are rendered from is a PROJECTION of ONE traversal, not a private
-    // replay of the op stream. The three private replays that used to answer - one for
-    // the runtime metadata, one for the authoring tables, one for the wire `FieldDef`
-    // map - are all gone.
+    // replay of the op stream.
     //
-    // Retiring the `FieldDef` walker changed no refusal. That walker ran
-    // `fold_ops` itself as its fail-closed gate and `single_fold::fold` runs the same
-    // catalog rules, so the two refusal sets are equal - measured over every
-    // prefix/dialect pair in the corpus, with none on which one refused and the other
-    // did not. Pinned as a biconditional by
+    // The fold is the fail-closed gate: `single_fold::fold` runs the catalog
+    // rules, and the refusal set this projection path admits is pinned as a
+    // biconditional with the catalog replay's by
     // `crates/zeroship-migrate/tests/gen_types/gen_types_field_defs_from_the_fold.rs`.
     //
-    // "By construction" no longer holds as the REASON, and the change that broke it is
-    // worth naming here. The catalog rules used to run to completion inside
-    // `fold_ops_onto` before any authored rule executed; they are now driven one op at a
-    // time beside the authored half, so a stream both halves refuse could in principle
-    // report the authored half's reason where it used to report the catalog's. It does
-    // not, for a structural reason rather than a lucky one: each of the authored half's
-    // three fallible sites is the same call the catalog arm for that same op already
-    // makes, and the catalog half advances first. `the_folds_refusal_set_is_the_catalog_
-    // replays_refusal_set` now compares the refusal REASON as well as the set.
+    // The catalog rules are driven one op at a time beside the authored half, so
+    // a stream both halves refuse could in principle report the authored half's
+    // reason rather than the catalog's. It does not, for a structural reason
+    // rather than a lucky one: each of the authored half's three fallible sites
+    // is the same call the catalog arm for that same op already makes, and the
+    // catalog half advances first. `the_folds_refusal_set_is_the_catalog_
+    // replays_refusal_set` compares the refusal REASON as well as the set.
     //
-    // The structural catalog replay runs ONCE per render, and since the extraction so
-    // does `flatten_dialectal_ops`.
+    // The structural catalog replay runs ONCE per render, and so does
+    // `flatten_dialectal_ops`.
     let folded =
         crate::render::fold::single_fold::fold(vendors, ops, dialect, project_schema, effective)
             .map_err(GenTypesError::Fold)?;
@@ -865,9 +852,9 @@ fn selected_dialect_leg<'a>(
 ///
 /// The `DropColumn` cascade is the caller: a `true` verdict DROPS the constraint /
 /// index from the replayed table. So a `dialect()` node must contribute only the
-/// leg the target installs. Unioning every leg made the artifact drop a CHECK and a
-/// partial index that PostgreSQL kept, because a SQLite leg named the dropped
-/// column and the rendered `CHECK (("a" > 0))` never did.
+/// leg the target installs. Unioning every leg would drop a constraint or index
+/// the target keeps, whenever an inactive leg names the dropped column and the
+/// target's own rendering does not.
 ///
 /// The RENAME walks (`rename_expr_column` / `rename_expr_table`) deliberately do
 /// the opposite and rewrite EVERY leg: `render_expr` emits the whole dialectal node
@@ -1078,8 +1065,8 @@ fn render_runtime_options(body: &mut String, options: &crate::TableRuntimeOption
     }
 }
 
-/// Resolve the old `ColType::Ref` carrier and eligible single-column table FKs
-/// into the current typed-reference column modifier. Composite, custom-named,
+/// Resolve the `ColType::Ref` carrier and eligible single-column table FKs
+/// into the typed-reference column modifier. Composite, custom-named,
 /// or deferrable constraints remain in `foreignKeys` so no behavior is silently
 /// discarded. An explicit derived name is carried into the modifier so the
 /// authored IR shape round-trips exactly.
@@ -2428,10 +2415,9 @@ mod tests {
 
 // The differential corpus over the four op-stream answers -- an in-crate test
 // module because the items it drives are crate-private: `AuthoringTable` and
-// `RuntimeCollectionMetadata` here, `single_fold::fold` next door. Those items were
-// the runtime-metadata and authoring-table replays until both were deleted
-// (`docs/proposals/single-fold-and-effects.md`). The alternative to a
-// child module is widening a production item so a test can reach it.
+// `RuntimeCollectionMetadata` here, `single_fold::fold` next door. The
+// alternative to a child module is widening a production item so a test can
+// reach it.
 #[cfg(test)]
 mod differential_corpus;
 

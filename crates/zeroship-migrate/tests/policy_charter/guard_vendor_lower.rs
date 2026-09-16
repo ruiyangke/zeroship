@@ -555,10 +555,7 @@ fn raw_body_backstop_decision(cfg: &GuardConfig, body: &str) -> GuardDecision {
     }
 }
 
-/// The behaviour lock ran over THREE postures. The third was Trusted, the root/host-set
-/// belt-off mode, and every one of its expectations was `Allow` for the trivial reason
-/// that the belt did not run. That posture is gone; the two that decide anything are
-/// what is locked here.
+/// The behaviour lock runs over the two postures that decide anything.
 fn assert_profile_decisions(
     site: &str,
     sql: &str,
@@ -578,10 +575,7 @@ fn assert_profile_decisions(
     }
 }
 
-/// The site this locked was the belt-skip early-return itself, whose whole content
-/// was "the belt-off posture reaches none of this". The posture is gone and so is the
-/// early-return; what the two surviving postures decide about the statement it guarded
-/// is unchanged and is what the lock is now.
+/// The lock pins what the two postures decide about the statement at this site.
 #[test]
 fn m2_stage2_site_459_copy_program_behavior_lock() {
     assert_profile_decisions(
@@ -736,13 +730,9 @@ fn m2_stage2_site_1209_raw_island_body_backstop_behavior_lock() {
         GuardDecision::Allow,
         "Platform is the only posture whose body-token backstop relaxes role/search_path needles"
     );
-    // A third row asserted the same denial for the belt-off posture, and a second half
-    // drove the same body through `lower_guarded` to prove a `createFunction` under
-    // that posture ROUTED here rather than round the belt. Both are gone with the
-    // posture: `lower_guarded` calls this backstop for nobody now — every config it can
-    // be handed runs the full belt through `check` — so there is no routing left to
-    // assert, and the backstop's own two-posture decision above is the surviving
-    // subject.
+    // `lower_guarded` never routes here: every config it can be handed runs the
+    // full belt through `check`, so the backstop's own two-posture decision above
+    // is the whole subject.
 }
 
 #[test]
@@ -783,23 +773,11 @@ fn m2_stage2_superuser_belt_sites_stay_hard_denied() {
 /// The Platform posture is carried by the composed `EffectivePolicy` and by nothing
 /// else, and both readers of that policy agree about it.
 ///
-/// This test used to be named for capability minting and passed a capability token to
-/// a Platform-trust executor-config seam. Both are deleted:
-/// the token's mint was public, so holding one proved nothing, and the seam bound it
-/// to a discarded parameter and returned exactly what `ExecutorConfig::new` returns.
-/// The assertions never depended on the token - they read the schema scope off the
-/// composed policy - so they are unchanged here, and the name now says what they check.
-///
-/// The boundary that IS pinned is the unforgeable `EffectivePolicy`, held by the T8
+/// The boundary that IS pinned is the unforgeable `EffectivePolicy`, held by the
 /// `compile_fail` doctests in `zeroship_migrate_backend::guard`.
 #[test]
 fn t11_platform_posture_is_carried_by_the_composed_policy() {
     // The operator keeps an explicit target alongside its capability grants.
-    //
-    // Each assertion below had a partner reading "Platform runs the full static
-    // belt", which distinguished Platform from the one posture
-    // that did not. That posture is gone and every config runs the belt, so the
-    // question no longer separates anything and both partners came off.
     let gcfg = GuardConfig::from_policy(
         crate::support::operator_no_inject("zero_migrate"),
         POSTGRES,
@@ -1328,13 +1306,11 @@ fn schema_scope_permits_is_case_insensitive() {
 
 // ---- The widest composable charter: an UNCONFINED operator ---------------
 //
-// These fixtures were the Trusted profile: this same charter, plus the root/host-set
-// mode that turned the whole deny-list belt off. Only the mode is gone. What remains
-// is the most permissive posture a charter can compose — `access.role` and
+// This is the most permissive posture a charter can compose — `access.role` and
 // `schema.cross_schema` granted over the whole universe — and it is a posture a real
 // operator charter reaches, which is exactly why the tests below are worth keeping
-// pointed at it: they measure how far the composable grants widen the guard, now that
-// no posture can switch the guard off.
+// pointed at it: they measure how far the composable grants widen the guard, with no
+// posture able to switch the guard off.
 
 /// A guard over the unconfined operator charter, built straight from a composed
 /// `EffectivePolicy` like every other guard here.
@@ -1365,19 +1341,16 @@ fn unconfined_operator_author() -> zeroship_migrate::render::lower::IrAuthor {
 
 /// How far the widest charter widens, and where it STOPS.
 ///
-/// This test used to assert that EVERY one of these passed, because the belt-off
-/// posture skipped the deny-list entirely. Removing that posture is a behaviour change
-/// and this is where it is measured. What the charter genuinely grants — role
-/// management under `access.role`, a write outside the project schema under a
-/// whole-universe `schema.cross_schema` — still passes. Everything else is now
-/// REFUSED where the belt-off posture applied it: the host-reach rules (ALTER SYSTEM,
+/// What the charter genuinely grants — role management under `access.role`, a write
+/// outside the project schema under a whole-universe `schema.cross_schema` — passes.
+/// Everything else is REFUSED: the host-reach rules (ALTER SYSTEM,
 /// COPY … TO PROGRAM, the file-reading function), an extension the charter never
 /// granted, and a GRANT to a host-reaching built-in role, which is hard-denied in
 /// every profile because Platform widens privilege WITHIN the database and never
 /// host reach.
 ///
-/// The Confined column was this test's precondition and is unchanged: every one of
-/// these is a hard Confined denial.
+/// The Confined column is the precondition: every one of these is a hard Confined
+/// denial.
 #[test]
 fn the_unconfined_operator_charter_widens_the_grants_and_nothing_else() {
     let unconfined = unconfined_operator_guard();
@@ -1426,10 +1399,7 @@ fn an_admitted_destructive_op_still_requires_approval() {
 
 /// A raw island creating a SUPERUSER role is refused however wide the charter is.
 ///
-/// The refusal used to come from `check_raw_island_sql`, the narrower backstop
-/// `lower_guarded` ran INSTEAD of the belt for the belt-off posture. There is no
-/// belt-off posture, so it comes from the belt itself now — the same rule, from the
-/// door that is actually open.
+/// The refusal comes from the belt itself.
 #[test]
 fn a_raw_island_creating_a_superuser_role_is_refused() {
     let cfg = unconfined_operator_guard_config();
@@ -1475,9 +1445,8 @@ fn a_raw_island_creating_a_superuser_role_is_refused() {
 }
 
 /// A `createFunction` body that shells out is refused however wide the charter is —
-/// the peer of [`a_raw_island_creating_a_superuser_role_is_refused`], and refused now
-/// by the belt rather than by the body backstop `lower_guarded` used to substitute for
-/// the belt-off posture.
+/// the peer of [`a_raw_island_creating_a_superuser_role_is_refused`], and refused
+/// by the belt.
 #[test]
 fn a_create_function_body_that_shells_out_is_refused() {
     let cfg = unconfined_operator_guard_config();
@@ -1536,11 +1505,6 @@ fn a_create_function_body_that_shells_out_is_refused() {
 
 /// Platform's widening is real and BOUNDED: it admits the privileged role op Confined
 /// denies, and still denies a cross-schema write outside its allowlist.
-///
-/// The framing was "the belt-off early-return is gated on Trusted only, so neither of
-/// these two leaks it". The early-return is gone, so there is nothing left to leak —
-/// but each of the three assertions is a statement about Confined or Platform on its
-/// own terms, and every one of them still holds and is still worth holding.
 #[test]
 fn platform_widening_is_real_and_bounded() {
     // Confined: the privileged op is denied.
@@ -1583,16 +1547,13 @@ fn platform_widening_is_real_and_bounded() {
 ///
 /// Every one of the sibling `destructive_ops` tests above runs at
 /// the PostgreSQL identity, where the denial comes from the SQL-TEXT deny-list instead.
-/// So before this test, deleting the gate left the whole suite green while silently
-/// making `forbid` inert on two of the three shipping dialects — the precise
-/// regression the posture was added to fix.
+/// This test is the lock that keeps `forbid` live on the dialects whose guards are
+/// empty: deleting the gate must fail here.
 ///
-/// The gate WAS `cfg.dialect() != &POSTGRES` — core deciding a security posture by
-/// naming one vendor. It is `!guard.refuses_destructive_ops_itself()` now, and the
-/// equivalent regression this test still catches is a backend answering `true` while
-/// refusing nothing: SQLite and MySQL answer `false` because their guards are
-/// constructed without the policy, and the fourth-backend stub answers `false` for
-/// itself rather than being covered by not being a named id.
+/// The gate is `!guard.refuses_destructive_ops_itself()`, and the regression this
+/// test catches is a backend answering `true` while refusing nothing: SQLite and
+/// MySQL answer `false` because their guards are constructed without the policy, and
+/// the fourth-backend stub answers `false` for itself.
 ///
 /// PostgreSQL is asserted alongside as the CONTROL, and deliberately with the OPPOSITE
 /// assertion: this arm must NOT fire there, because PostgreSQL's denial comes from the
@@ -1610,10 +1571,6 @@ fn platform_widening_is_real_and_bounded() {
 /// Every OTHER method panics rather than answering, because the gate decides from the
 /// structured IR and this guard's one answer; a panic here means the walk started
 /// asking a vendor questions on a path that is supposed to need none.
-///
-/// The gate used to be `cfg.dialect() != &POSTGRES`, so this stub answered nothing at
-/// all and the fourth backend was covered by not being one named id. It is covered by
-/// its own answer now, which is strictly more of what this file exists to prove.
 struct FourthBackendGuard;
 
 impl MigrationGuard for FourthBackendGuard {

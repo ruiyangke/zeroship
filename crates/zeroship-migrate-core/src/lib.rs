@@ -82,7 +82,7 @@
 
 // The NEUTRAL guard seam - `GuardConfig`, `GuardError`, `GuardOutcome`,
 // `MigrationGuard` and the structured-IR data-security walk. Re-exported under the
-// historical `crate::guard::...` path so the engine's dozens of references keep
+// `crate::guard::...` path so the engine's existing references keep
 // resolving unchanged.
 //
 // Core reaches a guard the same way it reaches a renderer:
@@ -111,7 +111,7 @@ pub mod engine;
 #[doc(hidden)]
 pub use zeroship_migrate_backend::fault;
 // The typed-id (base36/UUIDv7) machinery lives in the `zeroship-migrate-ir` leaf crate;
-// re-export it under its historical `crate::id` path.
+// re-export it under the `crate::id` path.
 pub use zeroship_migrate_ir::id;
 // The deploy-bundle migration-file record + content-addressed hash, vendored
 // byte-identically from the upstream bundle layer so the build
@@ -268,11 +268,10 @@ pub use guard::{GuardConfig, GuardError, GuardOutcome, MigrationGuard};
 /// crate.
 ///
 /// Kept as a crate-root function because it is public API: the napi addon calls
-/// `zeroship_migrate::guard_for` across the crate boundary, and the vendor registry it now
-/// delegates to is `pub(crate)`. What changed is not the signature but the OWNER of
-/// the dispatch - it is no longer a second closed-identity match inside the guard crate,
-/// able to disagree with the renderer registry, and it is no longer able to hand a
-/// dialect a guard that dialect did not write.
+/// `zeroship_migrate::guard_for` across the crate boundary, and the vendor registry it
+/// delegates to is `pub(crate)`. Owning the dispatch here means a dialect only ever
+/// receives the guard that dialect wrote - never a closed-identity match able to
+/// disagree with the renderer registry.
 ///
 /// # Errors
 /// None; registration guarantees a guard for each shipping backend.
@@ -292,12 +291,10 @@ pub use zeroship_migrate_policy::{seal, SealError, SealedPolicy};
 // The composed policy-decision point the injection + guard share. Re-exported at
 // the crate root so the napi addon (`gen_artifacts_*`, the schema-emit path) can
 // name it without reaching into the `zeroship-migrate-policy` crate directly.
-// The standalone wire-shape walker is NOT in this list any more. It is deleted
-// (`docs/proposals/single-fold-and-effects.md` section G); the wire `FieldDef`
-// map it produced is now `single_fold::fold(...)?.project_field_defs()`, reached through
-// `render::fold::single_fold`. The replacement is deliberately not a renamed function:
-// one traversal decides what an op means and a projection READS the value, which is the
-// shape the proposal's decision 1 asks for and the shape a second walker would hide.
+// The wire `FieldDef` map is `single_fold::fold(...)?.project_field_defs()`, reached
+// through `render::fold::single_fold` - deliberately not a standalone walker: one
+// traversal decides what an op means and a projection READS the value, a shape a
+// second walker would hide.
 pub use render::fold::{
     descriptors_to_create_ops, fold_ops, fold_ops_onto, history_carries_dialectal_ops,
     recover_check_facet, FoldError, ProduceError, RecoveredCheck,
@@ -372,20 +369,18 @@ pub use plan::pending::{
     CODE_TABLE_HAS_PENDING_CONTRACT,
 };
 // `status_via_backend` / `history_via_backend` live at `ops::status`, reached
-// through the module path rather than promised at the crate root: the root once
-// exported a `status` and a `history` that took a raw connection plus a dialect
-// argument and then read PostgreSQL's journal regardless of what that argument
-// said.
+// through the module path rather than promised at the crate root: journal reads go
+// through the registered backend, so the crate root does not promise entry points a
+// backend may not provide.
 // The confined submit path is PG-only, and no module under `ops` declares it; the
 // note there says why.
 pub use model::migration::{
     migration_id_for_version, Checksum, ChecksumInput, IdError, Migration, MigrationFlags,
     MigrationId, OnlinePhase, MIGRATION_PREFIX,
 };
-// The NEUTRAL schema model of `docs/proposals/single-fold-and-effects.md` section D:
-// derived `PartialEq` on the model, vendor facts in a side table they cannot be reached
-// from, and one NAMED comparator per question instead of one hand-written `eq` every
-// consumer silently inherits. No consumer reads it.
+// The NEUTRAL schema model: derived `PartialEq` on the model, vendor facts in a side
+// table they cannot be reached from, and one NAMED comparator per question instead of
+// one hand-written `eq` every consumer silently inherits.
 pub use model::schema_model;
 pub use model::schema_model::{
     column_shape_identity, constraint_shape_identity, drift_identity, index_pairing_identity,
