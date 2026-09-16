@@ -512,26 +512,10 @@ fn republished_bundle_releases_both_deployment_holders() {
             .map(|(_, state)| state),
         Some("held".into())
     );
-    // Retry a TRANSPORT answer, never a verdict. The local platform is one
-    // SQLite file that the running host is also writing, so this call can come
-    // back `Unavailable` from lock contention - which is not a refusal and not
-    // a permission, and matching it against `Conflict` failed the test at
-    // roughly one run in two. Conflict and Ok are both verdicts and are
-    // returned as they are; only the transient answer is retried.
-    let deadline = Instant::now() + Duration::from_secs(30);
-    let verdict = loop {
-        match platform.reclaim(&original) {
-            Err(deployments::Error::Unavailable(message)) => {
-                assert!(
-                    Instant::now() < deadline,
-                    "the deployment database never answered: {message}"
-                );
-                std::thread::sleep(Duration::from_millis(50));
-            }
-            verdict => break verdict,
-        }
-    };
-    assert!(matches!(verdict, Err(deployments::Error::Conflict(_))));
+    assert!(matches!(
+        platform.reclaim(&original),
+        Err(deployments::Error::Conflict(_))
+    ));
     drop(host);
 
     // A third bundle supersedes the replacement, which no run ever used. Both
