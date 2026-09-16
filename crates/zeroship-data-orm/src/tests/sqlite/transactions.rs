@@ -1119,7 +1119,7 @@ fn main_schema() -> crate::sql::SchemaName {
 fn a_transaction_holds_the_write_lock_from_begin_before_any_statement() {
     Host::test(|host| {
         host.run(async {
-            let (backend, _unused, dir) = replica_backends(host);
+            let (backend, dir) = fresh_backend(host);
             backend
                 .execute_fixture("CREATE TABLE ledger (id INTEGER PRIMARY KEY, who TEXT)", &[])
                 .await
@@ -1232,7 +1232,7 @@ fn two_replicas_reading_before_they_write_both_commit() {
 fn two_apps_on_one_backend_serialize_their_transactions_through_main() {
     Host::test(|host| {
         host.run(async {
-            let (backend, _unused, dir) = replica_backends(host);
+            let (backend, dir) = fresh_backend(host);
             let app_schema =
                 crate::sql::SchemaName::new("tenant_a").expect("legal schema name");
             backend
