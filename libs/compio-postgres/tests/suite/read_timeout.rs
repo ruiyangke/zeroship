@@ -423,9 +423,9 @@ async fn silence_mid_frame_trips_the_deadline_and_retires_the_session() {
 /// The server answers `CopyInResponse` and waits for copy data forever. No
 /// `CopyInReceiver` exists behind an ordinary query, so no byte will ever be
 /// sent: this is a permanent deadlock, and the read deadline is the only thing
-/// that can end it. The connection loop used to pause its read clock on any
-/// `CopyInResponse` -- keyed to what the server sent rather than to whether
-/// this driver had a producer -- and so hid exactly this stall.
+/// that can end it. The connection loop must NOT pause its read clock on a
+/// `CopyInResponse`: that is keyed to what the server sent rather than to
+/// whether this driver had a producer, and it hides exactly this stall.
 ///
 /// ONE VARIABLE against `a_silent_server_trips_a_distinguishable_read_timeout`
 /// above: the peer sends `CopyInResponse` before falling silent instead of
@@ -750,9 +750,8 @@ async fn a_complete_backpressured_response_does_not_arm_an_idle_read() {
         // THE PREMISE, ASSERTED. This test's name says "backpressured", and
         // that is not a property of the client -- it is a property of the
         // peer's phased write producing batches the consumer never polled. The
-        // response was `drop`ped here uninspected until 2026-08-23, so nothing
-        // checked the premise: if the phasing had failed to produce them the
-        // test would silently collapse into
+        // response must be COLLECTED, not dropped uninspected: if the phasing had
+        // failed to produce them the test would silently collapse into
         // `an_idle_connection_does_not_spend_the_read_budget`, which is already
         // covered, and still pass. Collecting it proves the batches were really
         // queued and that they were the complete, well-formed response the
@@ -872,27 +871,18 @@ async fn a_normal_live_query_inside_the_deadline_is_untouched() {
 ///
 /// The absolute values are large because THIS TEST MEASURES THE MACHINE AS
 /// MUCH AS THE DRIVER. Every live round trip it makes runs under the deadline,
-/// including the fixture statement, which is not its subject. Measured
-/// 2026-08-23 on a 16-core box while an unrelated build campaign was running:
+/// including the fixture statement, which is not its subject.
 ///
-/// | 1-min load | 100ms deadline | 500ms deadline |
-/// |------------|----------------|----------------|
-/// | ~18        | 17/30 failed   | 8/30 failed    |
-/// | ~6-9       | 0/25           | 0/25           |
+/// Under load the failures are the FIRST round trip after connect, never the
+/// COPY. A small budget therefore does not measure the exemption at all; it
+/// measures whether the compio task got scheduled, and it makes the whole suite
+/// intermittently red. The fix is a budget with real headroom, not a nudge.
 ///
-/// Every one of those failures was the FIRST round trip after connect, never
-/// the COPY. So the old 100ms budget was not measuring the exemption at all;
-/// it was measuring whether the compio task got scheduled, and it made the
-/// whole suite intermittently red -- 1 failure in 8 full serial runs, which is
-/// how this arrived as an unattributed flake. A 5x budget only halved the rate
-/// at load 18, so the fix is a budget with real headroom, not a nudge.
-///
-/// WIDENED A SECOND TIME on 2026-08-23, and the reason is the point: 2s was
-/// chosen as 4x headroom over the largest budget OBSERVED to fail, which is
-/// not the same as a measured worst case. It then failed at load 23.8 -- in
-/// ISOLATION, not just inside the suite -- on the fixture `CREATE TEMPORARY
-/// TABLE`, which is not this test's subject at all. Headroom over an observed
-/// failure is a guess; this is the third red run it has cost.
+/// The budget was widened more than once, and the reason is the point: a value
+/// chosen as headroom over the largest budget OBSERVED to fail is not a measured
+/// worst case, and it fails again at higher load - in ISOLATION, on the fixture
+/// `CREATE TEMPORARY TABLE`, which is not this test's subject at all. Headroom
+/// over an observed failure is a guess.
 ///
 /// So the budget is now 8s against a 10s sleep. That is slow, and the slowness
 /// is the price of a live test on a shared machine.
