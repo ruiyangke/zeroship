@@ -120,10 +120,9 @@ pub async fn apply(
 
 /// Narrow a shared schema to the fields this read projected.
 ///
-/// Takes and returns the cache's `Arc`. The `All` arm - the common one - now
-/// hands the shared allocation straight through instead of deep-cloning the
-/// schema on every read, which is what the old owned-`Value` signature forced.
-/// The `Only` arm still copies, because it mutates.
+/// Takes and returns the cache's `Arc`. The `All` arm - the common one -
+/// hands the shared allocation straight through rather than deep-cloning the
+/// schema on every read. The `Only` arm still copies, because it mutates.
 fn scope_schema(schema: Arc<FieldMap>, scope: &SchemaFieldScope<'_>) -> Arc<FieldMap> {
     match scope {
         SchemaFieldScope::All => schema,
@@ -187,11 +186,10 @@ mod tests {
     /// A descriptor entry that declares NO creator field still normalizes the
     /// platform system timestamps, and coerces nothing else.
     ///
-    /// This used to be spelled `normalize_row_on_read(None, ...)` — "no schema
-    /// at all". There is no such state any more: an undeclared collection is
-    /// refused by `apply` before a row is touched, and the empty field map
+    /// There is no "no schema at all" state: an undeclared collection is refused
+    /// by `apply` before a row is touched, and the empty field map
     /// (`query::empty_read_schema()`) is the only remaining way to have zero
-    /// declared fields. The behaviour the test pins is unchanged.
+    /// declared fields.
 
     #[test]
     fn scoped_schema_excludes_aggregate_alias_collisions() {
@@ -299,11 +297,9 @@ mod tests {
         let rt = compio::runtime::Runtime::new().expect("compio runtime build");
         // Inside the runtime: see the sibling test above.
         //
-        // ORACLE NOTE: same trade as the sibling. A real handle removed the
-        // free `not_configured` oracle that a regression in the
-        // `wrap_masked: false` narrowing used to trip, so the `assert_eq!` on
-        // `result.rows` and the `has_masked` assertion below are the ONLY
-        // things ruling on it.
+        // ORACLE NOTE: the `assert_eq!` on `result.rows` and the `has_masked`
+        // assertion below are the ONLY things ruling on the `wrap_masked: false`
+        // narrowing - a real handle has no free `not_configured` oracle.
         let (route, dir) =
             rt.block_on(async { crate::tests::fixtures::unit_route(binding.app_id()) });
         let result = rt
