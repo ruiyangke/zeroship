@@ -511,12 +511,12 @@ pub(crate) async fn configure_session_non_txn<D: SqlSession>(
 /// Why this migration's `down` cannot run inside the transaction the rollback leaf
 /// opens, or `None` when nothing in it objects.
 ///
-/// The rollback leaf issues `BEGIN` unconditionally, and gate (5b) of `plan_rollback`
-/// used to consult only `flags.transactional` - the author's DECLARATION. A migration
-/// declaring `transaction: true` whose `down` reverses itself with a statement
-/// PostgreSQL refuses inside a transaction block therefore reached the `BEGIN` and
-/// failed there, giving the operator a raw driver error for something the engine had
-/// already accepted, and only after earlier downs in the batch had committed.
+/// The rollback leaf issues `BEGIN` unconditionally, so gate (5b) of `plan_rollback`
+/// must consult more than `flags.transactional` - the author's DECLARATION. A
+/// migration declaring `transaction: true` whose `down` reverses itself with a
+/// statement PostgreSQL refuses inside a transaction block would otherwise reach the
+/// `BEGIN` and fail there, giving the operator a raw driver error for something the
+/// engine had already accepted, and only after earlier downs in the batch committed.
 ///
 /// # Why only the CONCURRENTLY family
 ///
@@ -1337,7 +1337,7 @@ async fn recover_non_transactional<D: SqlSession>(
 /// `DROP TABLE IF EXISTS t; CREATE TABLE IF NOT EXISTS t (...)` runs clean the first
 /// time and deletes every row written since the migration landed on the second.
 ///
-/// The single-statement rule costs almost nothing measured against a live server:
+/// The single-statement rule costs almost nothing:
 /// PostgreSQL runs a multi-statement simple query inside one implicit transaction
 /// block, and `CREATE INDEX CONCURRENTLY`, `DROP INDEX CONCURRENTLY` and `VACUUM`
 /// all refuse to run in one, so three of the four shapes below cannot reach a
@@ -1690,8 +1690,8 @@ mod pg_confinement_shape_tests {
     ///
     /// This also pins the **lock-safety envelope** default: the DEFAULT
     /// `lock_timeout` (3000 ms) is SHORT and SEPARATE from the long-running
-    /// `statement_timeout` (60000 ms). A regression that folded the two together
-    /// (or restored the old long 30000 ms lock_timeout) flips this assertion RED.
+    /// `statement_timeout` (60000 ms). Folding the two together, or raising the
+    /// lock timeout toward the statement timeout, fails this assertion.
     #[test]
     fn pg_confinement_bracket_is_emitted_from_the_pg_block() {
         let cfg = crate::confinement::PostgresConfinementExt::with_migrator_role(
@@ -1752,8 +1752,8 @@ mod pg_confinement_shape_tests {
     /// mirroring `timeout_ms`) is honoured by the txn-path session render: a
     /// migration that sets its OWN lock budget renders THAT value, not the
     /// executor-wide default - while a migration that sets none falls back to the
-    /// SHORT default. RED pre-change (the field did not exist and the render used
-    /// `cfg.lock_timeout_ms()` unconditionally).
+    /// SHORT default. The render must consult the per-migration override rather than
+    /// `cfg.lock_timeout_ms()` unconditionally.
     #[test]
     fn per_migration_lock_timeout_override_renders_over_default() {
         let cfg = ExecutorConfig::new("prj_x", "proj_x", crate::test_fixtures::no_inject("proj_x"));
@@ -1939,11 +1939,9 @@ mod non_txn_idempotency_tests {
         }
     }
 
-    // REGRESSION (nontxn-dml-recovery-double-apply): a bare INSERT/UPDATE/
-    // DELETE/MERGE/TRUNCATE on the non-txn two-phase path would be re-run
-    // VERBATIM by crash recovery and double-apply on a success-then-crash.
-    // Validation must reject every bare-DML non-txn `up`. Pre-fix these passed
-    // (only CONCURRENTLY / ALTER TYPE ADD VALUE were fenced).
+    // A bare INSERT/UPDATE/DELETE/MERGE/TRUNCATE on the non-txn two-phase path
+    // would be re-run VERBATIM by crash recovery and double-apply on a
+    // success-then-crash, so validation must reject every bare-DML non-txn `up`.
     #[test]
     fn bare_dml_on_non_txn_path_is_rejected() {
         for sql in [
@@ -2095,7 +2093,7 @@ mod non_txn_idempotency_tests {
 /// - **Trusted** => the project schema (the `_` fallback). Trusted has no
 ///   confinement - pinning the project schema is merely the default
 ///   resolution target; an explicitly-qualified reference to any other schema
-///   still resolves (and is no longer guard-blocked), preserving dbmate
+///   still resolves (it is not guard-blocked), preserving dbmate
 ///   parity. The operator owns the DB, so this pin is convenience, not a
 ///   boundary.
 ///
