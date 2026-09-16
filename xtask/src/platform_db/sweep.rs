@@ -1,8 +1,8 @@
-//! The decisions `tests/sweep_test_databases.sh` makes, separated from the
-//! server it makes them against.
+//! The decisions the sweeper makes, separated from the server it makes them
+//! against.
 //!
 //! They are here because they are the part that can be WRONG SILENTLY. The
-//! script's other half either connects or does not; these functions produce a
+//! caller's other half either connects or does not; these functions produce a
 //! VERDICT, and a wrong verdict is a dropped database.
 //!
 //! THE SWEEPER MUST NEVER DROP `WITH (FORCE)`, and that asymmetry against
@@ -29,8 +29,8 @@
 //! and those produced identical output: no holders found, exit 0, drop. See
 //! [`Evidence`], [`gaps`] and [`verdict`] at the bottom of this file for the
 //! sorting that separates a pass which saw nothing from one that saw nothing
-//! BECAUSE it was blind, and `tests/sweep_test_databases.sh` for the caller
-//! that assembles the other half of the evidence.
+//! BECAUSE it was blind, and [`super::sweep_command`] for the caller that
+//! assembles the other half of the evidence.
 
 use std::path::Path;
 
@@ -236,9 +236,9 @@ fn has_exited(dir: &Path) -> bool {
 /// WHAT IT STILL CANNOT SEE, stated because a scan that names its own limits is
 /// the only kind whose empty answer means anything: a run that never spells its
 /// database name in argv or in its environment is invisible here. That is a
-/// property of `tests/lib/suite_db.sh` exporting `TEST_DB`/`PG_TEST_URL`, not
+/// property of the suite database exporting `TEST_DB`/`PG_TEST_URL`, not
 /// of this function, and nothing in this file can detect it changing. The
-/// selftest's holder case is what pins it.
+/// selftest's holder case is what pinned it.
 pub fn scan_holders(names: &[String], self_pid: i32) -> Holders {
     let mut out = Holders::default();
     let mut candidates: Vec<i32> = Vec::new();

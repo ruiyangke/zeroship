@@ -30,7 +30,7 @@
 #
 # WHY ALLOCATION AND NOT A DERIVED PORT. The alternative considered was
 # deriving a port from something stable - the harness name, the branch, the
-# migration-set fingerprint that tests/lib/suite_db.sh hashes for database
+# migration-set fingerprint the suite database hashes for database
 # names. Every such derivation fails the case that actually happens here: TWO
 # AGENTS RUNNING THE SAME HARNESS ON THE SAME COMMIT. A stable derivation
 # returns the same number to both by construction, which is the defect, not the

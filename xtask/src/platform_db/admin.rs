@@ -119,7 +119,7 @@ impl PgAdmin {
     /// but connecting to a template while another session is copying it is a
     /// documented way to make `CREATE DATABASE` fail with "source database is
     /// being accessed by other users".
-    fn simple(&self, sql: &str) -> Result<Vec<Vec<Option<String>>>, String> {
+    pub(crate) fn simple(&self, sql: &str) -> Result<Vec<Vec<Option<String>>>, String> {
         let config = self.server.config("postgres");
         compio::runtime::Runtime::new()
             .map_err(|e| format!("could not start the io_uring runtime: {e}"))?
@@ -159,6 +159,62 @@ impl PgAdmin {
                     })
                     .collect())
             })
+    }
+
+    /// Every database on the server that is not a template, in name order.
+    ///
+    /// The sweeper's candidate list. `NOT datistemplate` is what keeps
+    /// `template0`/`template1` out of it, which no suite ever names.
+    pub fn databases(&self) -> Result<Vec<String>, String> {
+        let rows =
+            self.simple("SELECT datname FROM pg_database WHERE NOT datistemplate ORDER BY 1")?;
+        Ok(rows
+            .into_iter()
+            .filter_map(|mut row| row.drain(..).next().flatten())
+            .collect())
+    }
+
+    /// `(datname, sessions)` for every database with at least one backend.
+    ///
+    /// A database absent from this list has ZERO sessions, which is not the
+    /// same as a count of zero: the query RETURNING is what makes the absence
+    /// meaningful, and the caller distinguishes the two by whether this
+    /// returned `Ok` rather than by reading the rows.
+    pub fn session_counts(&self) -> Result<Vec<(String, i64)>, String> {
+        let rows = self.simple(
+            "SELECT datname, count(*) FROM pg_stat_activity \
+             WHERE datname IS NOT NULL GROUP BY 1",
+        )?;
+        rows.into_iter()
+            .map(|mut row| {
+                let name = row
+                    .drain(..)
+                    .next()
+                    .flatten()
+                    .ok_or_else(|| "pg_stat_activity returned a null datname".to_string())?;
+                let count: i64 = row
+                    .drain(..)
+                    .next()
+                    .flatten()
+                    .and_then(|text| text.parse().ok())
+                    .ok_or_else(|| format!("pg_stat_activity gave no count for {name}"))?;
+                Ok((name, count))
+            })
+            .collect()
+    }
+
+    /// Drop one database, plainly.
+    ///
+    /// `WITH (FORCE)` IS DELIBERATELY ABSENT, and that absence is the safety
+    /// model rather than an omission. FORCE terminates every other backend
+    /// first, so it always succeeds - and a database a peer attached to between
+    /// the liveness scan and this line becomes a casualty instead of a refusal.
+    /// A plain DROP failing with "is being accessed by other users" IS the
+    /// answer; the caller reports it by name.
+    pub fn drop_database(&self, name: &str) -> Result<(), String> {
+        super::suite_db::check_identifier(name)
+            .map_err(|refusal| refusal.trim_end().to_string())?;
+        self.simple(&format!("DROP DATABASE {name}")).map(|_| ())
     }
 }
 

@@ -7,6 +7,7 @@ pub mod lock;
 pub mod overlay;
 pub mod suite_db;
 pub mod sweep;
+pub mod sweep_command;
 
 /// The exit codes the shell library used, kept because callers switch on them.
 ///

@@ -265,8 +265,8 @@ isolates and temporary storage when the case ends, including on failure.
 cargo xtask test auth
 cargo xtask test billing
 cargo xtask test worker
-tests/sweep_test_databases.sh          # inspect reclaimable shared databases
-tests/sweep_test_databases.sh --apply  # reclaim them
+cargo xtask platform-db sweep          # inspect reclaimable shared databases
+cargo xtask platform-db sweep --apply  # reclaim them
 ```
 
 `cargo xtask test billing` builds the migration host and runs control,

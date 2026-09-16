@@ -19,7 +19,7 @@
 //! [`super::fingerprint`]). Every agent on the same commit shares one database;
 //! an agent on a branch that edits a migration gets its own automatically, with
 //! nobody deciding and nobody passing a flag; and cleanup becomes DECIDABLE,
-//! which is what `tests/sweep_test_databases.sh` relies on.
+//! which is what the sweeper relies on.
 //!
 //! NOTHING IS EVER DROPPED HERE, AND THERE IS NO `WITH (FORCE)` IN THIS FILE.
 //! Both halves of that are load-bearing and they are not the same statement.
