@@ -13,11 +13,11 @@
 //! stop at a chosen byte inside a protocol frame, and its keepalives make a
 //! measured zero-byte streaming interval nondeterministic.
 //!
-//! The crate had NO live coverage of `src/replication.rs` before this file.
-//! Its unit tests build `IDENTIFY_SYSTEM` row bodies by hand, and that is
-//! exactly how the defect below survived: the hand-built shape is not the one
-//! `DataRowBody::buffer()` produces, so parser and fixture agreed on a row
-//! layout the server never sends.
+//! This file is the live coverage of `src/replication.rs`. Its unit tests
+//! build `IDENTIFY_SYSTEM` row bodies by hand, and the hand-built shape is
+//! not the one `DataRowBody::buffer()` produces, so parser and fixture can
+//! agree on a row layout the server never sends — the defect class the live
+//! tests below pin.
 
 use compio_postgres::Config;
 use compio_postgres::config::SslMode;
@@ -350,12 +350,12 @@ async fn closed_port() -> u16 {
 
 /// A replication connection must try every host in the configuration.
 ///
-/// `connect_replication` took `get_hosts().first()` and stopped there, so a
-/// two-endpoint configuration had no failover at all: if the first host was
-/// down, the call failed while a healthy second host sat unused. The same
-/// `first()` was applied to DNS resolution, which is the more common way to
-/// meet this - a name that resolves to both an AAAA and an A record against a
-/// server bound only to IPv4 fails on the first address every time.
+/// Stopping at `get_hosts().first()` gives a two-endpoint configuration no
+/// failover at all: if the first host is down, the call fails while a
+/// healthy second host sits unused. The same applies to DNS resolution,
+/// which is the more common way to meet this - a name that resolves to both
+/// an AAAA and an A record against a server bound only to IPv4 fails on the
+/// first address every time.
 #[compio::test]
 async fn replication_connect_tries_every_configured_host() {
     let url = test_url();
@@ -460,12 +460,10 @@ async fn replication_connect_reports_the_error_when_no_host_answers() {
 ///
 /// `postgres-protocol` consumes the `DataRow`'s `u16` field count during
 /// `Message::parse` and keeps only the length-prefixed fields in
-/// `DataRowBody::storage`, which is what `buffer()` hands back. The parser
-/// read a `u16` count of its own as its first action, so it consumed the top
-/// two bytes of the FIRST FIELD'S `i32` length instead. A 19-character
-/// systemid is length `00 00 00 13`, whose leading two bytes are zero, so the
-/// count read as 0, no fields were parsed, and the call returned empty
-/// strings and a zero timeline while reporting success.
+/// `DataRowBody::storage`, which is what `buffer()` hands back — so the
+/// parser must NOT read a field count of its own: the bytes at offset 0 are
+/// the FIRST FIELD's `i32` length, and treating their high two bytes as a
+/// count of 0 yields empty strings and a zero timeline reported as success.
 ///
 /// Asserted against the server's own `pg_control_system()` rather than
 /// against a non-empty string, so the test pins the VALUE and not merely the
@@ -539,11 +537,10 @@ async fn identify_system_returns_the_servers_real_identity() {
 /// be flushed or applied before it has been written. `PostgreSQL` deliberately
 /// trusts the frontend here. `ProcessStandbyReplyMessage` passes `flush_lsn`
 /// straight to `LogicalConfirmReceivedLocation`, and that advances the slot's
-/// `confirmed_flush_lsn`. Before the fix, `advance_lsn` accepted any `u64`, so
-/// this test made the driver send `write=0, flush=consistent_point+1,
-/// apply=consistent_point+1`; the server then made WAL below the false checkpoint
-/// eligible for recycling even though this stream had not read one `XLogData`
-/// or keepalive frame.
+/// `confirmed_flush_lsn`. `advance_lsn` must therefore refuse an LSN past
+/// what this stream has received: acknowledging an unreceived position makes
+/// WAL below the false checkpoint eligible for recycling even though this
+/// stream has not read one `XLogData` or keepalive frame.
 #[compio::test]
 async fn an_unreceived_lsn_is_not_reported_as_flushed() {
     Box::pin(compio::time::timeout(Duration::from_secs(20), async {
@@ -631,8 +628,8 @@ async fn an_unreceived_lsn_is_not_reported_as_flushed() {
             .await
             .expect("read resulting confirmed_flush_lsn");
 
-        // Cleanup precedes the assertion so the deliberate RED run cannot
-        // consume one of the server's finite replication slots.
+        // Cleanup precedes the assertion so a failing run cannot consume
+        // one of the server's finite replication slots.
         drop(stream);
         common::drop_replication_slot(&setup, &slot)
             .await
@@ -949,11 +946,11 @@ async fn a_stalled_start_replication_exchange_times_out_and_retires_its_session(
 /// Asynchronous messages do not answer `START_REPLICATION` and cannot replace
 /// the `ErrorResponse` which eventually does.
 ///
-/// The bespoke pre-CopyBoth loop already skipped notices, but treated the
-/// equally asynchronous `ParameterStatus` and `NotificationResponse` as local
-/// protocol failures. If PostgreSQL's actual refusal followed one of them in
-/// the same read, the local unexpected-tag error won and discarded its
-/// SQLSTATE.
+/// The pre-CopyBoth loop must skip ALL asynchronous messages — notices,
+/// `ParameterStatus` and `NotificationResponse` alike. Treating any of them
+/// as a local protocol failure lets a local unexpected-tag error win over
+/// PostgreSQL's actual refusal when the two arrive in the same read,
+/// discarding its SQLSTATE.
 #[compio::test]
 async fn start_replication_preserves_an_error_behind_asynchronous_messages() {
     compio::time::timeout(ASYNC_WATCHDOG, async {
@@ -1297,10 +1294,10 @@ async fn copy_done_half_close_preserves_a_fatal_terminal_error() {
                 .expect("write backend CopyDone");
             stream.flush().expect("flush backend CopyDone");
 
-            // On the old driver the stream reports `None` and its owner drops
-            // the socket below. Let that EOF end the scripted peer cleanly so
-            // the caller's diagnostic assertion, rather than a harness panic,
-            // is the deterministic RED.
+            // If the client ends the stream here, its owner drops the socket
+            // below. Let that EOF end the scripted peer cleanly so the
+            // caller's diagnostic assertion, rather than a harness panic, is
+            // what reports the failure.
             let mut frontend_copy_done = [0u8; 5];
             if stream.read_exact(&mut frontend_copy_done).is_err() {
                 return;
@@ -1466,8 +1463,8 @@ async fn a_replication_cancel_token_sends_the_full_key_and_surfaces_57014() {
 
 /// An out-of-range `start_lsn` must be REFUSED, not silently replaced by 0.
 ///
-/// MEASURED against the test server on 2026-08-23, because the two parsers
-/// involved disagree and neither is obvious. `START_REPLICATION ... LOGICAL
+/// The two parsers involved disagree and neither is obvious (verified against
+/// a live server). `START_REPLICATION ... LOGICAL
 /// 0/100000000` -- nine hex digits in the low half -- is ACCEPTED by the
 /// replication grammar: the command reaches the slot lookup and fails with
 /// `replication slot "..." does not exist`, i.e. never on the LSN. But
@@ -1475,12 +1472,12 @@ async fn a_replication_cancel_token_sends_the_full_key_and_surfaces_57014() {
 /// type pg_lsn`. So a server accepts a value that does not fit this driver's
 /// u32-per-half representation.
 ///
-/// `parse_lsn` returns `None` there, and the call site paired that with
-/// `unwrap_or(0)`. Zero is not a neutral default for an LSN -- it is the start
-/// of WAL. The server would have begun streaming from wherever it read the
-/// oversized value while `LsnTracker` reported position 0, so every standby
-/// status update afterwards acknowledged a position the stream had never been
-/// at, and nothing anywhere reported a problem.
+/// `parse_lsn` returns `None` there. Zero is not a neutral default for an
+/// LSN -- it is the start of WAL: the server would begin streaming from
+/// wherever it read the oversized value while `LsnTracker` reported
+/// position 0, so every standby status update afterwards would acknowledge a
+/// position the stream had never been at, and nothing anywhere would report
+/// a problem.
 ///
 /// The refusal happens BEFORE the command is sent, so a start position this
 /// driver cannot track never starts a replication stream on the server.
@@ -1586,13 +1583,13 @@ async fn a_representable_start_lsn_still_starts_replication() {
 /// A malformed `IDENTIFY_SYSTEM` row must be refused, not filled in with
 /// plausible-looking defaults.
 ///
-/// Every field was defaulted: a missing or NULL `systemid` became `""`, a
-/// missing, NULL or unparseable `timeline` became `0`, and `xlogpos` became
-/// `""`. Those are not neutral values. `systemid` is the CLUSTER identity, and
-/// callers compare it to notice they have been failed over onto a different
-/// cluster -- two empty strings compare equal, so the check silently passes
-/// exactly when it should fire. `0` is not a valid timeline either;
-/// PostgreSQL numbers them from 1.
+/// No field may be defaulted: a missing or NULL `systemid` must not become
+/// `""`, a missing, NULL or unparseable `timeline` must not become `0`, and
+/// `xlogpos` must not become `""`. Those are not neutral values. `systemid`
+/// is the CLUSTER identity, and callers compare it to notice they have been
+/// failed over onto a different cluster -- two empty strings compare equal,
+/// so the check silently passes exactly when it should fire. `0` is not a
+/// valid timeline either; PostgreSQL numbers them from 1.
 ///
 /// A conforming server always sends all three as non-NULL, so reaching this
 /// needs a hostile or broken peer -- the threat model `libs/compio-postgres/tests/suite/hostile_peer.rs`
@@ -1685,14 +1682,15 @@ fn send_identify_system_without_a_row(stream: &mut TcpStream) {
 
 /// An `IDENTIFY_SYSTEM` response that carried NO `DataRow` must be refused.
 ///
-/// The "refused rather than defaulted" rule was applied inside
-/// `parse_identify_system_row`, which only runs when a row arrives. The
-/// response loop above it seeded `systemid = String::new()`, `timeline = 0` and
-/// `xlogpos = String::new()` and returned them at `ReadyForQuery`, so a
-/// response with no row returned `Ok` carrying exactly the three sentinels the
-/// row parser exists to reject. `systemid` is the CLUSTER identity a caller
-/// compares to notice a failover, and two empty strings compare EQUAL: the
-/// check passes silently in precisely the case it exists to catch.
+/// The "refused rather than defaulted" rule lives in
+/// `parse_identify_system_row`, which only runs when a row arrives — so the
+/// response loop above it must not seed `systemid = String::new()`,
+/// `timeline = 0` and `xlogpos = String::new()` and return them at
+/// `ReadyForQuery`: a response with no row would return `Ok` carrying exactly
+/// the three sentinels the row parser exists to reject. `systemid` is the
+/// CLUSTER identity a caller compares to notice a failover, and two empty
+/// strings compare EQUAL: the check passes silently in precisely the case it
+/// exists to catch.
 #[compio::test]
 async fn identify_system_refuses_a_response_that_carried_no_row() {
     compio::time::timeout(ASYNC_WATCHDOG, async {
@@ -1742,7 +1740,7 @@ async fn identify_system_refuses_a_response_that_carried_no_row() {
 
 /// One variable away from the test above: the SAME script with a row in it must
 /// still return the identity. A refusal that fired on every response would
-/// satisfy the assertion above and turn this red.
+/// satisfy the assertion above, and this control is what catches that.
 #[compio::test]
 async fn identify_system_accepts_a_response_that_carried_a_row() {
     compio::time::timeout(ASYNC_WATCHDOG, async {
@@ -1787,10 +1785,10 @@ async fn identify_system_accepts_a_response_that_carried_a_row() {
 /// `ParameterStatus`, `NoticeResponse` and `NotificationResponse` are
 /// asynchronous: the protocol lets the backend interleave them into any
 /// response, and `connect_raw.rs` / `connection.rs` both fold them out of the
-/// query path for exactly that reason. This loop skipped `NoticeResponse` only,
-/// so a walsender that reported a changed GUC mid-`IDENTIFY_SYSTEM` -- a
-/// conforming server doing a conforming thing -- fell into the
-/// unexpected-message arm and failed the command.
+/// query path for exactly that reason. This loop must fold out all three, not
+/// just `NoticeResponse`: a walsender that reports a changed GUC
+/// mid-`IDENTIFY_SYSTEM` -- a conforming server doing a conforming thing --
+/// must not fall into the unexpected-message arm and fail the command.
 #[compio::test]
 async fn identify_system_tolerates_an_asynchronous_parameter_status() {
     compio::time::timeout(ASYNC_WATCHDOG, async {
@@ -1968,13 +1966,14 @@ async fn an_identify_system_error_outranks_a_later_unaccountable_message() {
 
 /// A server-sent `ErrorResponse` must not leave the session one frame behind.
 ///
-/// The response loop returned the moment it saw the `ErrorResponse`, leaving
-/// the `ReadyForQuery` that closes every simple-query response sitting in the
-/// read buffer. The NEXT command on that connection then read the stale frame
-/// as its own reply: a second `IDENTIFY_SYSTEM` parsed the leftover
-/// `ReadyForQuery`, broke out of its loop before its own response arrived, and
-/// -- with the sentinels above still in place -- reported `Ok` with an empty
-/// identity for a command the server had not answered yet.
+/// The response loop must drain through the `ReadyForQuery` that closes every
+/// simple-query response before reporting the `ErrorResponse`; returning the
+/// moment it arrives leaves `ReadyForQuery` sitting in the read buffer, and
+/// the NEXT command on that connection reads the stale frame as its own
+/// reply: a second `IDENTIFY_SYSTEM` would parse the leftover
+/// `ReadyForQuery`, break out of its loop before its own response arrived,
+/// and -- with the sentinels above still in place -- report `Ok` with an
+/// empty identity for a command the server had not answered yet.
 #[compio::test]
 async fn an_identify_system_error_leaves_the_session_able_to_answer_the_next_command() {
     compio::time::timeout(ASYNC_WATCHDOG, async {
@@ -2045,9 +2044,9 @@ async fn an_identify_system_error_leaves_the_session_able_to_answer_the_next_com
 /// The response loop drains to `ReadyForQuery` and only THEN reports the
 /// `ErrorResponse` it stashed. PostgreSQL does not send a `ReadyForQuery` after
 /// a FATAL error - it writes the `ErrorResponse` and closes the connection - so
-/// the next read fails, and the `?` on it discarded the server's diagnostic and
-/// reported the transport error in its place. `57P01`, `57P03` and
-/// `idle_session_timeout` on a walsender all take this exact path.
+/// the next read fails, and the read-error arm must carry the server's
+/// diagnostic rather than report the transport error in its place. `57P01`,
+/// `57P03` and `idle_session_timeout` on a walsender all take this exact path.
 ///
 /// The pairing with the test above is the one variable that matters: there the
 /// same `ErrorResponse` is followed by a `ReadyForQuery` and the SQLSTATE
@@ -2126,11 +2125,12 @@ async fn a_fatal_identify_system_error_survives_the_close_that_follows_it() {
 /// The ordinary query path applies the ceiling after the handshake
 /// (`connect_raw.rs`: "Applied after the handshake ... so a caller's limit
 /// governs the data phase and cannot make authentication unreachable").
-/// `connect_replication_addr` builds its OWN `BufStream`, which therefore
-/// starts at `DEFAULT_MAX_MESSAGE_SIZE`, and it reapplied only the read
-/// timeout. So the parameter was accepted and ignored in BOTH directions: a
-/// lowered ceiling still admitted 64 MiB, and a ceiling raised to carry large
-/// replication frames still had the stream torn down at 64 MiB.
+/// `connect_replication_addr` builds its OWN `BufStream`, which starts at
+/// `DEFAULT_MAX_MESSAGE_SIZE`; it must apply `max_message_size`, not just the
+/// read timeout, or the parameter is accepted and ignored in BOTH directions:
+/// a lowered ceiling would still admit the default maximum, and a ceiling
+/// raised to carry large replication frames would still tear the stream down
+/// at the default maximum.
 ///
 /// Driven by a scripted peer rather than a live walsender for two reasons.
 /// PostgreSQL cannot be told to declare a frame of a chosen size, and the
@@ -2205,18 +2205,18 @@ async fn a_configured_ceiling_governs_the_replication_stream() {
 /// A declared frame length must be refused BEFORE `Message::parse` sees it.
 ///
 /// `read_one_message` - the read path behind `IDENTIFY_SYSTEM` and the other
-/// replication simple-query commands - called `Message::parse` first and only
-/// then `fill`. That order is what matters: when the body is short of the
-/// declared length, `Message::parse` itself does
-/// `buf.reserve(total_len - buf.len())` (postgres-protocol 0.6.12,
-/// backend.rs:133) before returning `None`. So `D ff ff ff ff` asks the
-/// allocator for roughly 4 GiB from a five-byte frame.
+/// replication simple-query commands - must validate the peeked length BEFORE
+/// `Message::parse` sees the frame. That order is what matters: when the body
+/// is short of the declared length, postgres-protocol's `Message::parse`
+/// itself does `buf.reserve(total_len - buf.len())` before returning `None`.
+/// So `D ff ff ff ff` asks the allocator for roughly 4 GiB from a five-byte
+/// frame.
 ///
 /// `fill` cannot save it. Its ceiling check is on the bytes the CALLER asks
 /// for, and the caller asks for `buf.len() + 1` - a handful of bytes - so the
-/// check passes while the 4 GiB reservation has already happened. The
-/// configured ceiling therefore did not govern this path at all, which is the
-/// opposite of what `fill`'s guard looks like it guarantees.
+/// check passes while the 4 GiB reservation has already happened. A ceiling
+/// consulted only inside `fill` would not govern this path at all, which is
+/// the opposite of what `fill`'s guard looks like it guarantees.
 ///
 /// Validating the peeked length first is O(1) and happens before any
 /// reservation, matching what `read_header` already does on the streaming path.

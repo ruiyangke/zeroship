@@ -521,12 +521,11 @@ impl Registry {
     /// reaches — otherwise the broadened gate becomes a fleet-wide cross-tenant
     /// read.
     ///
-    /// "Reaches" is now the narrowing rule rather than a membership row: the
-    /// caller's organization seat, ceilinged by their project seat when they
-    /// are below admin, must clear `viewer`. An organization developer with no
-    /// row on a project sees none of that project's apps — which is the whole
-    /// point of per-project narrowing, and is a behaviour the old app-level
-    /// membership could not express.
+    /// "Reaches" is the narrowing rule: the caller's organization seat,
+    /// ceilinged by their project seat when they are below admin, must clear
+    /// `viewer`. An organization developer with no row on a project sees none
+    /// of that project's apps — which is the whole point of per-project
+    /// narrowing.
     pub async fn list_apps_for_owner(
         &self,
         owner_id: &UserId,
@@ -937,7 +936,7 @@ impl Registry {
     /// The `manifest_json` column carries the per-app routing manifest
     /// (dispatch rules + asset maps) emitted by the build adapter. NULL
     /// or invalid → synthesize [`zeroship_bundle::Manifest::passthrough`] so dispatch is
-    /// always defined (legacy fallback path was removed).
+    /// always defined.
     pub async fn get_routes(&self) -> Result<RouteMap, RegistryError> {
         let conn = self.conn().await?;
         // LEFT JOIN zeroship.app_oauth_clients: a provisioned app yields
@@ -958,17 +957,10 @@ impl Registry {
         // value as an OUTER AND with spend (Suspended → 402 before spend is
         // even consulted).
         //
-        // THE LATERAL THAT USED TO BE HERE IS GONE, AND WITH IT A WHOLE CLASS OF
-        // BUG. While the billing subject was a human, this had to walk
-        // `apps -> projects -> organization_members(role='owner')`, which FANS
-        // OUT once per owner - so it needed a `LIMIT 1` ordered
-        // most-restrictive-first (suspended > past_due > active > none) purely
-        // so that seating a second owner with a good card could not relax
-        // enforcement for everyone. An organization has exactly one billing
-        // status row, so there is no fan-out to collapse and no ordering to get
-        // wrong. `billing_read::billing_status` reads through the identical
-        // join, which is what keeps the edge and the console from disagreeing
-        // about one app.
+        // An organization has exactly one billing status row, so this join
+        // cannot fan out and needs no ordering. `billing_read::billing_status`
+        // reads through the identical join, which is what keeps the edge and
+        // the console from disagreeing about one app.
         let rows = conn
             .query(
                 "SELECT a.id, a.name, a.plan_id, a.deploy_hash, \
@@ -1140,13 +1132,6 @@ impl Registry {
             family_revocations,
         })
     }
-
-    // -- Usage / Metering ---------------------------------------------------
-    //
-    // Usage snapshot writes + reads moved to `crate::metering::Metering`,
-    // backed by `zeroship.usage_aggregates`. The old raw-additive
-    // `record_usage`/`get_usage` over `zeroship.app_usage` are gone —
-    // pre-launch, no deprecated aliases.
 }
 
 /// Derive an app's [`AppRuntimeLimits`] from its plan-catalog

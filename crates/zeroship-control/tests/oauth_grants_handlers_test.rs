@@ -296,8 +296,8 @@ async fn insert_identity_with_alias(
         .expect("insert app_user_identities row");
 }
 
-/// The active-alias resolution the 5b relay webhook runs on EVERY inbound
-/// (`relay::resolve_active_alias`, sub-spec §4.5). `None` ⇒ the webhook emits a
+/// The active-alias resolution the relay webhook runs on EVERY inbound
+/// (`relay::resolve_active_alias`). `None` ⇒ the webhook emits a
 /// bounce + 200 (the revoked/unknown-alias branch). We assert against the REAL
 /// auth-store gate, not a stub, so this is the faithful cross-service seam.
 async fn alias_is_active(state: &AppState, relay_email: &str) -> bool {
@@ -624,7 +624,7 @@ async fn revoke_does_not_affect_other_users() {
     common::drain_pg().await;
 }
 
-/// 5c §6 — the B4 revocation cascade: revoking a grant sets
+/// The revocation cascade: revoking a grant sets
 /// `app_user_identities.revoked_at` AND a subsequent inbound to that alias
 /// bounces (the real 5b `resolve_active_alias` gate now returns `None`). The
 /// DELETE + UPDATE commit atomically (BEGIN/COMMIT) on control's existing
@@ -873,11 +873,11 @@ async fn revoke_grant_writes_token_family_marker_that_rejects_live_token() {
     common::drain_pg().await;
 }
 
-/// 5c §6.1 — re-grant stability: revoke then re-grant reuses the SAME alias
+/// Re-grant stability: revoke then re-grant reuses the SAME alias
 /// (Apple Hide-My-Email model). After re-grant `revoked_at` is cleared and the
 /// alias forwards again — no new alias, no dead-alias bounce. The auth-side
 /// writer (`mint_alias_at_consent`) clears `revoked_at` on the deterministic
-/// row; here we exercise that clear directly to prove the row is reusable.
+/// row; this test exercises that clear directly to prove the row is reusable.
 #[compio::test]
 async fn re_grant_reuses_same_alias_with_cleared_revoked_at() {
     let db_url = db_url();
@@ -957,17 +957,17 @@ async fn grant_and_alias_state(
     (grant_present, revoked_set)
 }
 
-/// BLOCKER §10 race regression — the relay revoke↔re-consent race.
+/// Race regression — the relay revoke↔re-consent race.
 ///
 /// auth's `accept_consent` (grant upsert + alias un-revoke) and control's
 /// `revoke_grant_cascade` (grant DELETE + alias `revoked_at=now()` UPDATE) write
 /// across two schemas with NO shared mutex (auth holds a `pg_advisory_lock` that
 /// does NOT block control's row DELETE/UPDATE). So an interleaving can reach a
 /// terminal state where the GRANT IS ABSENT but the alias's `revoked_at` is NULL
-/// — which, under the OLD `resolve_active_alias` (alias-flag-only gate), would
-/// keep forwarding third-party mail to the real inbox after the user revoked.
+/// — which an alias-flag-only gate would treat as active, forwarding
+/// third-party mail to the real inbox after the user revoked.
 ///
-/// The structural fix makes `resolve_active_alias` ALSO require a live
+/// `resolve_active_alias` therefore ALSO requires a live
 /// `zeroship.oauth_grants` row, so a deleted grant silences the alias regardless
 /// of the `revoked_at` write ordering. This test drives BOTH commit orders and
 /// asserts the load-bearing invariant in each: **grant-absent ⇒ alias-inert**
@@ -1107,8 +1107,8 @@ async fn revoke_vs_reconsent_race_grant_absent_implies_alias_inert() {
     // ── Commit order B (the DANGEROUS interleaving): revoke commits, then a
     // re-consent's alias UN-REVOKE lands AFTER it but the grant is NOT
     // re-inserted (the writer raced losing the grant DELETE). Terminal: grant
-    // ABSENT but revoked_at NULL. The OLD alias-flag-only gate would FORWARD
-    // here (the privacy failure); the structural gate keeps it INERT. ──
+    // ABSENT but revoked_at NULL. An alias-flag-only gate would FORWARD here
+    // (the privacy failure); requiring a live grant row keeps it INERT. ──
     {
         let client_id = format!("oac_race_b_{}", Uuid::new_v4().simple());
         let sector = format!("https://{}.zeroship.localhost", Uuid::new_v4().simple());

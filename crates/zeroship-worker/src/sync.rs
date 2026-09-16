@@ -14,9 +14,6 @@ use crate::executable::load_executable;
 
 /// Process-wide snapshot of `/internal/versions`, refreshed by a single
 /// background poller regardless of how many ntex worker threads are running.
-///
-/// This replaces the previous "one HTTP poll per thread" behaviour that
-/// multiplied control-plane traffic by `workers_count`.
 pub type SharedVersions = Arc<RwLock<Option<VersionMap>>>;
 
 /// One entry in `SharedEnvs`: the parsed env snapshot together with
@@ -510,8 +507,7 @@ fn control_authorization(
 ///
 /// Validation is `IgnoredAny` — confirms the bytes are valid JSON
 /// without materializing a `serde_json::Value` (and without the
-/// follow-up `value.to_string()` re-serialize the previous code did).
-/// For a 64 KiB env the saved work is meaningful; the wire bytes
+/// follow-up `value.to_string()` re-serialize). The wire bytes
 /// arrive as JSON and the JS side parses with `JSON.parse`, so
 /// keeping them as bytes-in / bytes-out is the only sensible path.
 pub fn put_env_from_json(
@@ -584,9 +580,7 @@ fn this_thread_control_client() -> cyper::Client {
 
 /// HTTP GET returning the response body as bytes. Uses a proper HTTP client
 /// (cyper) so the caller gets correct query-string handling, TLS support,
-/// chunked/compressed decoding, keep-alive, and status-code parsing —
-/// instead of a hand-rolled TCP GET that assumed port 80, dropped the query,
-/// and split the body on `\r\n\r\n`.
+/// chunked/compressed decoding, keep-alive, and status-code parsing.
 ///
 /// Used by the env / version polls (still HTTP). Worker-bundle bytes
 /// come from `BlobStore` directly — see `reconcile_once` and

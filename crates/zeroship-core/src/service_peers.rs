@@ -90,8 +90,7 @@
 //! is the ability to present as either of them.
 //!
 //! Every one of them refuses the BOOT, for the reason the next section gives,
-//! and none has an override. A check with a bypass flag is the shape this
-//! design replaced.
+//! and none has an override.
 //!
 //! # A missing or unparseable document REFUSES STARTUP
 //!
@@ -105,10 +104,9 @@
 //! material: a process that boots and then refuses every guarded edge is
 //! indistinguishable from a healthy one until traffic arrives.
 //!
-//! [`ServiceAuth::unconfigured`] is unchanged and still refuses at request
-//! time. The two are not alternatives - one is loud at deploy time and the
-//! other at request time - and the request-time one is now unreachable from any
-//! binary.
+//! [`ServiceAuth::unconfigured`] refuses at request time. The two are not
+//! alternatives - one is loud at deploy time and the other at request time -
+//! and the request-time one is unreachable from any binary.
 //!
 //! ONE document is handed to every service. That grants nothing extra: a
 //! verified identity still has to pass `aud` equality with the identifier the
@@ -466,15 +464,16 @@ impl ServiceKeyring {
     /// # This service's own key may appear under its OWN issuer and no other
     ///
     /// The one place that holds both the private key and the bundle, so the one
-    /// place that can compare them - and until it did, nothing in this stack
-    /// ever did. Neither loader compared the two, the envelope wire format
-    /// carries a thumbprint `kid` and no issuer, and both the signer and the
-    /// verifier derive that `kid` from the public bytes. A document publishing
-    /// this process's own public half under the GATEWAY's issuer therefore made
-    /// this process's signer stamp exactly the `kid` its own verifier resolves,
-    /// and fence F4 of `docs/proposals/2026-09-05-auth-foundation-redesign.md` -
-    /// "a worker must not be able to mint an envelope it would then accept" -
-    /// became a configuration choice.
+    /// place that can compare them. The comparison is load-bearing because
+    /// nothing else can see the mismatch: the envelope wire format carries a
+    /// thumbprint `kid` and no issuer, and both the signer and the verifier
+    /// derive that `kid` from the public bytes. Without it, a document
+    /// publishing this process's own public half under the GATEWAY's issuer
+    /// would make this process's signer stamp exactly the `kid` its own
+    /// verifier resolves, and fence F4 of
+    /// `docs/proposals/2026-09-05-auth-foundation-redesign.md` - "a worker
+    /// must not be able to mint an envelope it would then accept" - would be
+    /// a configuration choice rather than a property.
     ///
     /// This is NOT the same check as the document-only one in
     /// [`load_peer_bundle`], and neither subsumes the other. A document naming
@@ -525,8 +524,7 @@ impl ServiceKeyring {
     /// The issuer identifier this service MINTS under.
     ///
     /// Not necessarily the identifier it is ADDRESSED by; that is
-    /// [`ServiceKeyring::audience`], and the two were one value until a worker
-    /// instance needed a name of its own.
+    /// [`ServiceKeyring::audience`].
     #[must_use]
     pub const fn issuer(&self) -> &ServiceIssuer {
         &self.issuer

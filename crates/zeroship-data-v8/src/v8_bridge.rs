@@ -25,7 +25,7 @@ pub(crate) fn runtime_state(scope: &mut v8::PinScope<'_, '_>) -> SharedState {
 // Capability gate
 // ---------------------------------------------------------------------------
 
-/// B3 capability gate. Returns `true` if the caller refused the write
+/// Capability gate. Returns `true` if the caller refused the write
 /// because the active procedure kind is `query()` — in which case the
 /// callback has already set a rejected promise on `rv` and the caller
 /// must return immediately.
@@ -269,11 +269,11 @@ fn decode_native_depth(
                 .ok_or(DecodeError::PendingException)?;
             let key = key_v.to_rust_string_lossy(scope);
             budget.take_bytes(key.len())?;
-            // THE DEFECT THIS REPLACES: `obj.get` runs JS (accessor property,
-            // `Proxy` trap). The old arm did `continue` here, treating "I could
-            // not read this" as "this was not there" - so a two-clause filter
-            // decoded to one clause and the mutation ran against a strict
-            // subset of the declared predicate. Read exactly once, and refuse.
+            // `obj.get` runs JS (accessor property, `Proxy` trap) and can
+            // throw. Treating "I could not read this" as "this was not there"
+            // would decode a two-clause filter to one clause and run the
+            // mutation against a strict subset of the declared predicate.
+            // Read exactly once, and refuse.
             let val_v = obj.get(scope, key_v).ok_or(DecodeError::PendingException)?;
             map.insert(key, decode_native_depth(scope, val_v, depth + 1, budget)?);
         }
@@ -473,25 +473,19 @@ mod tests {
         );
     }
 
-    /// REVEAL TEST for L5 - a filter key whose getter throws is SILENTLY
-    /// DROPPED, so a mutation can execute against a strict subset of the
-    /// predicate the caller declared.
+    /// A filter key whose getter throws must REFUSE the whole decode: a
+    /// mutation must never execute against a strict subset of the predicate
+    /// the caller declared.
     ///
     /// `obj.get(scope, key_v)` runs JS: an accessor property, a `Proxy` trap,
-    /// or a `Date`'s `toISOString`. When that throws, `get` returns `None` and
-    /// the object arm does `continue`, which treats "I could not read this" as
-    /// "this was not there".
+    /// or a `Date`'s `toISOString`. When that throws, `get` returns `None`;
+    /// the decoder turns that into an error rather than skipping the key.
     ///
     /// Concretely: `updateMany({ tenantId: <throwing getter>, status: "x" })`
-    /// is validated by the SDK as a two-clause filter, then decoded here into
-    /// a ONE-clause filter, and the UPDATE runs as `WHERE status = 'x'` across
+    /// is validated by the SDK as a two-clause filter; decoding it into a
+    /// ONE-clause filter would run the UPDATE as `WHERE status = 'x'` across
     /// every tenant's rows. That is a tenant-isolation defect, not a
     /// robustness one, which is why this is a security test.
-    ///
-    /// This test asserts the REQUIRED behaviour and therefore FAILS on the
-    /// current decoder. The fix is the total, fallible decode: a failed
-    /// `Object::get` aborts the whole operation with `INVALID_ARGUMENT`
-    /// instead of skipping the key.
     #[test]
     fn decode_must_not_silently_drop_a_key_whose_getter_throws_l5() {
         init_v8();
@@ -536,9 +530,9 @@ mod tests {
         }
     }
 
-    /// The array arm had the same shape as the object arm: an element that
-    /// could not be read was defaulted to `null`, silently substituting the
-    /// caller's value. It must refuse instead.
+    /// The array arm shares the object arm's rule: an element that cannot be
+    /// read must refuse the decode rather than default to `null`, silently
+    /// substituting the caller's value.
     #[test]
     fn decode_must_not_default_an_unreadable_array_element_to_null() {
         init_v8();
@@ -563,9 +557,8 @@ mod tests {
         );
     }
 
-    /// DBR-06: `new Array(4294967295)` is cheap and sparse in V8. The old array
-    /// arm called `Vec::with_capacity(len)` on that attacker-controlled length
-    /// and then walked every index. The breadth is now charged to the budget
+    /// DBR-06: `new Array(4294967295)` is cheap and sparse in V8, so the array
+    /// length is attacker-controlled. The breadth is charged to the budget
     /// BEFORE reserving, so this returns promptly instead of trying to reserve
     /// billions of slots.
     #[test]

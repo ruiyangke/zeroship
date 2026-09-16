@@ -61,12 +61,11 @@ type InflightPart<'a> =
 /// The two upload knobs `put_stream` runs under, resolved ONCE when the
 /// backend is built rather than re-read on every op.
 ///
-/// Both used to be read from the process environment inside the upload loop,
-/// which meant the only way to drive a non-default value was to plant a
-/// process-global variable. That is racy (`set_var` mutates the environment
-/// every other thread is reading) and non-hermetic, so the value a caller
-/// wants is now an argument: [`S3::with_tuning`] takes it, and [`S3::new`]
-/// supplies [`S3UploadTuning::resolved`] so the production path is unchanged.
+/// They are constructor arguments rather than process-environment reads:
+/// driving a non-default value through a process-global variable is racy
+/// (`set_var` mutates the environment every other thread is reading) and
+/// non-hermetic. [`S3::with_tuning`] takes the value; [`S3::new`] supplies
+/// [`S3UploadTuning::resolved`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct S3UploadTuning {
     /// In-flight `UploadPart` PUTs. See [`crate::limits::upload_concurrency`].
@@ -159,14 +158,14 @@ impl S3 {
     /// and the guard is disarmed on a clean complete; no abort happens here —
     /// the caller owns the explicit error-path abort.
     ///
-    /// ## Bounded-concurrency overlap pipeline (HIGH-2)
+    /// ## Bounded-concurrency overlap pipeline
     ///
     /// ONE task drives the producer (`body.next_chunk()`) AND the in-flight
     /// `UploadPart` PUTs CONCURRENTLY via `futures::select!`. When a part PUT
     /// completes *while the next chunk is still arriving*, the two overlap — a
-    /// slow producer no longer starves the in-flight uploads (the prior
-    /// gate-only-drain loop parked on the producer between dispatches, leaving
-    /// in-flight PUTs unpolled while their deadlines ticked). At most
+    /// slow producer does not park the in-flight uploads (a producer-gated
+    /// loop would leave in-flight PUTs unpolled while their deadlines tick).
+    /// At most
     /// [`S3UploadTuning::concurrency`] PUTs run at once: at capacity the
     /// loop drains one before reading more, so live part memory is bounded by
     /// `~(N+1) × PART_SIZE` (the in-flight set plus a transiently-buffered
@@ -442,11 +441,10 @@ impl S3 {
     ///
     /// Bounded retry-with-backoff on *retryable* transport/5xx errors. Part
     /// uploads are idempotent (same `part_number` + bytes), and `Bytes` is
-    /// refcounted so retaining the body across attempts is cheap. The higher
-    /// connection churn of N concurrent PUTs makes transient connect failures
-    /// (`hyper` Connect, ephemeral-port/`TIME_WAIT` pressure) much more likely
-    /// than the old 1-at-a-time loop ever saw; without this the whole upload
-    /// would abort on a single transient blip.
+    /// refcounted so retaining the body across attempts is cheap. Concurrent
+    /// part PUTs churn connections, so transient connect failures (`hyper`
+    /// Connect, ephemeral-port/`TIME_WAIT` pressure) are routine; without
+    /// this the whole upload would abort on a single transient blip.
     #[allow(clippy::future_not_send)] // cyper client is !Send by design (per-thread)
     fn upload_part_owned(
         &self,

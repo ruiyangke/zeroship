@@ -134,12 +134,11 @@ impl Drop for Fixture {
 
 /// A fixture, or no run at all.
 ///
-/// IT RETURNED `Option<Fixture>` UNTIL 2026-09-08, and no arm of it could ever
-/// produce `None`: `db_url` ends the process when there is no migrated
-/// database, and everything after it `expect`s. What the `Option` did produce
-/// was a file full of `let Some(fx) = ... else { return }` - the shape that
-/// used to mean "pass silently" - left standing as a template. Returning the
-/// value makes it unwritable rather than merely unreachable.
+/// No arm produces "no run": `db_url` ends the process when there is no
+/// migrated database, and everything after it `expect`s. Returning the
+/// value (not an `Option`) keeps the silent-skip shape - a
+/// `let Some(fx) = ... else { return }` that reads as a pass - unwritable
+/// rather than merely unreachable.
 async fn fixture_with_platform(label: &str, user_id: &UserId) -> Fixture {
     let jwks = PlatformJwksMock::start();
     let auth_provider = platform_auth_provider(jwks.jwks_url());
@@ -612,8 +611,8 @@ impl PlatformOp {
                     // without it the device-grant exchange below answers 500
                     // with "refresh hash key is not configured" instead of a
                     // token. Shared with the auth crate's fixture through
-                    // `tests/fixtures/session_keys.rs`, which is where the two stopped
-                    // being able to drift apart.
+                    // `tests/fixtures/session_keys.rs`, so the two cannot
+                    // drift apart.
                     let (hash_file, idem_file) = session_keys::session_key_files();
                     cfg.settings.refresh_hash_key_file =
                         zeroship_core::config::Operational::new(hash_file);
@@ -1225,21 +1224,18 @@ async fn oauth_token_ignores_standard_oidc_scopes() {
     common::drain_pg().await;
 }
 
-/// F3 regression — drives the REAL self-service path end to end with NO
-/// pre-seeded `app_members` / platform role:
+/// F3 — drives the REAL self-service path end to end with NO pre-seeded
+/// `app_members` / platform role:
 ///
 ///   1. A default-role creator (OAuth token, scopes `apps:write apps:read`)
-///      POSTs `/api/apps` → 201. This exercises the broadened create gate AND
+///      POSTs `/api/apps` → 201. This exercises the create gate AND
 ///      `registry::create_app` binding the principal as the app's `owner` row.
 ///   2. The same creator GETs `/api/apps` → 200 and sees EXACTLY the app they
 ///      just created (ownership-scoped list).
 ///   3. Another creator's app (owned by a different principal) is NOT visible.
 ///
-/// Before the fix step 1 was a 403 (no policy granted a default-role creator
-/// `apps:write` on `Resource::Any`) and there was no owner-binding at all, so a
-/// creator was locked out of their own apps. This test must NOT pre-seed any
-/// `app_members` row for the principal — the owner row has to come from the
-/// production create path.
+/// This test must NOT pre-seed any `app_members` row for the principal —
+/// the owner row has to come from the production create path.
 #[compio::test]
 async fn creator_self_service_creates_and_lists_only_own_apps() {
     let user_id = UserId::mint();
@@ -1551,8 +1547,8 @@ async fn seed_grants(state: &AppState, principal_id: &UserId, grants: &[&str]) {
 }
 
 /// Both tables carry a plain FK to `zeroship.users` with no ON DELETE action
-/// (`db/migrations-ts/20260702000600_constraints_indexes_fks.ts:159,195`), so
-/// the fixture's `DELETE FROM zeroship.users` is REFUSED while these rows
+/// (`db/migrations-ts/20260702000600_constraints_indexes_fks.ts`), so the
+/// fixture's `DELETE FROM zeroship.users` is REFUSED while these rows
 /// exist - and it is a `let _ =`, so the refusal is silent and the user row
 /// simply leaks. Anything that seeds or materializes them must clear them
 /// here first.
@@ -1600,12 +1596,11 @@ async fn seeding_marker_count(state: &AppState, principal_id: &UserId) -> i64 {
 /// A creator's FIRST CLI request must not be narrowed to nothing, and must
 /// leave the default grants behind for the operator to narrow later.
 ///
-/// Login moved off control's `/api/device/token` in `5ae8c7f7d`, which was the
-/// only thing that had ever written a platform creator's grant rows. So a
-/// platform-native principal reaches control with no `principal_grants` and no
-/// `identity_links` marker at all. If control simply intersected the token's
-/// scope with that empty set, every first `zeroship deploy` would 403 - which
-/// is why the intersection treats an UNSEEDED principal as holding the default
+/// A platform-native principal reaches control with no `principal_grants`
+/// and no `identity_links` marker at all: nothing on the platform login path
+/// writes those rows. If control simply intersected the token's scope with
+/// that empty set, every first `zeroship deploy` would 403 - which is why
+/// the intersection treats an UNSEEDED principal as holding the default
 /// CLI set rather than holding nothing.
 ///
 /// Both halves are asserted because either one alone passes for the wrong

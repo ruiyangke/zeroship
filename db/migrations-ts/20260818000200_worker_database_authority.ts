@@ -5,28 +5,15 @@ import { raw, revoke } from "@zeroship/migrate";
 // role, and reads app metadata from Control over HTTP rather than from a
 // catalog table.
 //
-// Originally landed by EDITING three already-applied files in place
-// (2a44ea8ef, across 20260702000100_schema_roles_extensions.ts,
-// 20260702000900_grants.ts and 20260705000000_durable_workflows_journal.ts).
-// Every one of those had been journalled by a deployed database, so the edits
-// made the runner's checksum guard refuse - correctly, and permanently. The
-// three deltas are one intent and re-land together here.
-//
 // ORDER IS LOAD-BEARING AND RUNS LATE ON PURPOSE. 20260702000900 grants the
 // worker its original, wider privileges; this file must run after it for the
 // deny below to be the final word. Filename order puts it after every file that
-// grants anything in `zeroship`, which is the same relative position the edit
-// held inside 20260702000900.
+// grants anything in `zeroship`.
 //
-// THAT USED TO SAY "asserted, not assumed", citing
-// crates/zeroship-migrate-adapter/tests/platform_migrate.rs (DELETED 2026-08-28
-// in ccda4bb42), which checked the worker holds no write privilege on ANY
-// relation in `zeroship` after the whole corpus runs. The check went with the
-// crate, so NOTHING ASSERTS THIS TODAY - the end-state argument above is
-// reasoning, not a measurement. The claim is stated as unproven rather than
-// repointed at a test that does not check the same thing. What IS measured is
-// the worker's own boot gate: crates/zeroship-worker/src/db_posture.rs refuses
-// to start against a login that can reach the platform schema at all.
+// No test asserts this end state - the argument above is reasoning, not a
+// measurement. What IS measured is the worker's own boot gate:
+// crates/zeroship-worker/src/db_posture.rs refuses to start against a login
+// that can reach the platform schema at all.
 
 export default {
   name: "worker_database_authority",
@@ -43,8 +30,7 @@ export default {
       sql: "REVOKE ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA zeroship FROM zeroship_worker",
       reason: "the worker must not advance platform-owned sequences",
     });
-    // THESE TWO STATEMENTS STORE NOTHING, AND TWO OTHER MIGRATIONS CREDITED
-    // THEM WITH DENYING THE WORKER UNTIL 2026-09-07. `ALTER DEFAULT PRIVILEGES
+    // THESE TWO STATEMENTS STORE NOTHING. `ALTER DEFAULT PRIVILEGES
     // ... REVOKE` subtracts from the default privilege set; `zeroship_worker`
     // was never IN that set, so each is a no-op and `pg_default_acl` stays
     // empty. What actually denies the worker on a new platform table is

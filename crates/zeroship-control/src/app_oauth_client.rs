@@ -41,7 +41,8 @@
 //! both call [`ensure_app_client`] with a single apex host
 //! (`{name}.{app_base_domain}`). The multi-host surface —
 //! [`sync_app_redirect_uris`], [`MAX_HOSTS`], the >1-host branch of
-//! [`redirect_uris_for_hosts`], and the `≤102` cap — is not yet wired to a
+//! [`redirect_uris_for_hosts`], and the [`MAX_REDIRECT_URIS`] cap — is not yet
+//! wired to a
 //! production caller because there is no custom-domain attach handler in the
 //! codebase. These helpers are kept and unit-tested so a custom-domain attach
 //! path can call [`sync_app_redirect_uris`] or a multi-host
@@ -274,15 +275,12 @@ pub fn backchannel_logout_uri(scheme: &str, apex_host: &str) -> String {
     format!("{scheme}://{apex_host}/oidc/backchannel-logout")
 }
 
-// RP-INITIATED LOGOUT IS UNBUILT, NOT REMOVED. `post_logout_redirect_uris`
-// used to be computed here (the apex origin root, spec §1.1) and had nowhere to
-// go: `zeroship.oauth_clients` has a `backchannel_logout_uri` column and no
-// `post_logout_redirect_uris` column, and nothing read the function. It is
-// deleted rather than wired, because the capability it belonged to was never
-// built.
+// RP-INITIATED LOGOUT IS UNBUILT. `zeroship.oauth_clients` has a
+// `backchannel_logout_uri` column and no `post_logout_redirect_uris` column,
+// and nothing here computes post-logout redirect targets.
 //
-// What the deletion must not take with it is the guard that capability owes.
-// `docs/proposals/2026-06-30-op-p0-spec-threat-model.md` specifies it: a
+// The guard that capability owes is already specified:
+// `docs/proposals/2026-06-30-op-p0-spec-threat-model.md` requires that a
 // supplied `post_logout_redirect_uri` MUST exact-match a registered entry for
 // the resolved `client_id`, and on no match the OP renders a local 400 logout
 // confirmation page rather than redirecting to an unvalidated URI. Whoever adds
@@ -396,9 +394,8 @@ fn generate_client_secret_hash() -> String {
 /// exception is a **first-party** caller, which passes
 /// `first_party = true` ⇒ `skip_consent = true` — a consent prompt for the
 /// platform's own surface is meaningless. NOTE: nothing in-tree sets that flag
-/// today. It was the console seed, which was removed when the console stopped
-/// being a built-in app; the flag itself is kept because the OAuth contract
-/// still admits a first-party client. It applies NEVER to creator apps. The
+/// today; it is kept because the OAuth contract still admits a first-party
+/// client. It applies NEVER to creator apps. The
 /// flag is mirrored to `zeroship.oauth_clients.skip_consent`
 /// in the same transaction as the client rows.
 ///
