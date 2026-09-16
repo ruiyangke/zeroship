@@ -1,12 +1,11 @@
 /**
  * R3 MINOR-12 — `_warnedAccShapes` is bounded.
  *
- * Sibling-bug of the `_warnedShapes` cap fix in `collection.ts`: the
- * accumulator-warning dedup set in `utils.ts` used to be an unbounded
- * `Set<string>`. An AI-generated pipeline that synthesises new
- * accumulator names would leak one entry per shape forever. The fix
- * caps the LRU at MAX_WARNED_ACC_SHAPES (1024) using the same pattern
- * as the collection-side warning set.
+ * Sibling of the `_warnedShapes` cap in `collection.ts`: the accumulator-warning
+ * dedup set in `utils.ts` must be BOUNDED. Unbounded, an AI-generated pipeline
+ * that synthesises new accumulator names leaks one entry per shape forever. It is
+ * capped at MAX_WARNED_ACC_SHAPES (1024), using the same pattern as the
+ * collection-side warning set.
  */
 import { test, describe, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";

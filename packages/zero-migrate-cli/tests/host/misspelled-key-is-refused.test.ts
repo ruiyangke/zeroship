@@ -1,10 +1,10 @@
 // A misspelled key in `create()` is refused, by name, before anything runs.
 //
-// It used to be silently dropped. `create({ fk: [...] })` recorded no foreign key
-// and `create({ ifNotExist: true })` recorded no existence guard, and both applied
-// clean - so the authored intent was simply absent, with nothing said. The guard
-// case was the worse half: an existence guard is what makes a migration
-// re-runnable, so dropping it moved the failure onto the exact re-run the guard
+// Silently dropping it is the failure mode: `create({ fk: [...] })` would record
+// no foreign key and `create({ ifNotExist: true })` no existence guard, and both
+// would apply clean - the authored intent simply absent, with nothing said. The
+// guard case is the worse half: an existence guard is what makes a migration
+// re-runnable, so dropping it moves the failure onto the exact re-run the guard
 // was added to survive (`relation "alpha" already exists`).
 //
 // `tsc` rejected the same source all along (TS2353), but `apply` loads migrations
