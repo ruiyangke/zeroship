@@ -248,9 +248,9 @@ fn gen_field_extraction(field: &Field) -> syn::Result<TokenStream2> {
     // so that user JS thrown by V8 callbacks (custom `toString`,
     // `Symbol.toPrimitive`, throwing valueOf, throwing getters on the
     // dict member's value) is captured and re-surfaced verbatim as
-    // an OpError::JsValue. Pre-fix the macro discarded the exception
-    // and threw a generic TypeError("Cannot convert ..."), hiding the
-    // user's custom Error subclass and `.code` properties.
+    // an OpError::JsValue. Discarding the exception and throwing a generic
+    // TypeError("Cannot convert ...") would hide the user's custom Error
+    // subclass and `.code` properties.
     //
     // The tc-scope is reset between members — capturing one member's
     // exception doesn't leak into the next (we early-return on the
