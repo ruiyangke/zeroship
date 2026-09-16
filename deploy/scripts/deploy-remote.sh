@@ -74,11 +74,8 @@ set -euo pipefail
 # SOURCEABLE BY DESIGN. The helpers below are defined at the top level; every
 # side effect lives in main(), which the guard at the bottom of the file calls
 # only when this file is EXECUTED. `source deploy/scripts/deploy-remote.sh`
-# therefore opens no ssh connection and parses no arguments, which is what lets
-# tests/deploy_scripts_gate.sh drive compose_vars and rename_suspects directly.
-# Those two produced two false results between them, both caught by hand; while
-# they were welded to a script whose first act is `ssh`, there was no other way
-# to test them than to run a deploy.
+# therefore opens no ssh connection and parses no arguments, so its helpers can
+# be driven directly instead of by running a deploy.
 
 usage() {
   # BASH_SOURCE, not $0: when this file is sourced $0 is the SOURCING script,

@@ -17,11 +17,6 @@
 # `packages/zero-migrate-cli/src/config.ts` (`enforceOwnerOnly`) refuses a config
 # file that supplies a literal `url` and has any bit set in 0o077, naming the mode
 # and the chmod. The explicit chmod below is what keeps that refusal from firing.
-#
-# The flag spelling is also load-bearing for a gate: `tests/deploy_scripts_gate.sh`
-# scans the shipped compose for `--<name>-file` rows and floors the count, and
-# `migrate --database-url-file` is the only row it finds. Renaming the flag here
-# would empty that scan and the gate would report the same clean line over nothing.
 set -euo pipefail
 
 DSN_FILE=""

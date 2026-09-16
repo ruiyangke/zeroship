@@ -265,9 +265,7 @@ services:
       # is published by `docker inspect`, `docker ps --no-trunc` and
       # /proc/<pid>/cmdline to anything in the PID namespace - and this DSN is the
       # cluster SUPERUSER. `deploy/ops/migrate-entrypoint.sh` therefore takes the
-      # PATH and builds the 0600 config the CLI reads. Keeping the flag name also
-      # keeps tests/deploy_scripts_gate.sh's `--<name>-file` scan non-empty; that
-      # row is the only one it finds in this file.
+      # PATH and builds the 0600 config the CLI reads.
       #
       # `--project-schema` and `--project-id` are gone. Neither was a knob: the
       # corpus spells `schema: "zeroship"` 562 times, and the CLI derives its
