@@ -1,8 +1,8 @@
 //! `subtle.digest(algorithm, data)` — spec §32.
 //!
-//! Per `docs/archive/webcrypto-native.md` §IV.10. aws-lc-rs's
-//! `digest::digest` covers the four normative hashes (SHA-1 via the
-//! `_FOR_LEGACY_USE_ONLY` constant, SHA-256/384/512 normally).
+//! aws-lc-rs's `digest::digest` covers the four normative hashes
+//! (SHA-1 via the `_FOR_LEGACY_USE_ONLY` constant, SHA-256/384/512
+//! normally).
 
 use super::key_material::HashAlgo;
 use crate::state::OpError;

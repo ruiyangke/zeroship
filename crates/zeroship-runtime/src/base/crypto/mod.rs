@@ -1,8 +1,7 @@
 //! Crypto kernel — pure-Rust slice-in/Vec-out primitives.
 //!
-//! See `docs/archive/node-crypto-native.md` §I.1. The kernel owns
-//! digest / HMAC / cipher / sign-verify / KDF state
-//! machines. Both surfaces (`web::crypto` for WebCrypto and the new
+//! The kernel owns digest / HMAC / cipher / sign-verify / KDF state
+//! machines. Both surfaces (`web::crypto` for WebCrypto and
 //! `web::crypto_node` for node:crypto) are thin V8 adapters over the
 //! kernel — they meet here at slice-shaped boundaries, never call each
 //! other.

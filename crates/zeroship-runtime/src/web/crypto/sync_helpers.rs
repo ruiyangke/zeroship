@@ -1,4 +1,4 @@
-//! Surviving crypto helpers after WebCrypto v2 + node:crypto Stage B.
+//! Crypto helpers shared by the WebCrypto and node:crypto surfaces.
 //!
 //! Native `Crypto` / `SubtleCrypto` / `CryptoKey` (`web::crypto`) own
 //! the WebCrypto JS surface. Native `Hash` / `Hmac` / random / KDFs
@@ -9,12 +9,6 @@
 //!    OPENSSL_cleanse pattern), called from `web::crypto::helpers`,
 //!    `node::crypto::random`, and other call sites that need amortised
 //!    CSPRNG bytes.
-//!
-//! Everything else that used to live here (the `__cryptoHashSync` /
-//! `__cryptoHmacSync` ad-hoc V8 callbacks, plus the embed/crypto.js
-//! polyfill helpers) is gone. The native node:crypto surface owns the
-//! `node:crypto` import path now (per `docs/proposals/node-crypto-
-//! native.md` Stage B).
 
 use std::cell::RefCell;
 
@@ -79,8 +73,3 @@ thread_local! {
 pub(crate) fn fast_random(out: &mut [u8]) {
     ENTROPY.with(|e| e.borrow_mut().fill(out));
 }
-
-// (The `__cryptoHashSync` / `__cryptoHmacSync` ad-hoc V8 callbacks
-// were removed alongside the JS shim that consumed them; the native
-// `node::crypto::Hash` / `Hmac` classes own these paths now per Stage B
-// of `docs/archive/node-crypto-native.md`.)

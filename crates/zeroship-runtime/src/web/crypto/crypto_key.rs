@@ -3,8 +3,6 @@
 //! box (so the macro's `&self` cast lines up with the storage we
 //! produce in `build`).
 //!
-//! See `docs/archive/webcrypto-native.md` §V.
-//!
 //! The class is platform-constructed per spec §13 — the constructor
 //! throws if called from JS; real instances come from
 //! `subtle.{generateKey,importKey,...}` via `build`.
@@ -315,8 +313,3 @@ fn vec_to_uint8array<'s>(
     let arr = v8::Uint8Array::new(scope, ab, 0, len).unwrap();
     arr.into()
 }
-
-// #198 — `install_global` removed; bind happens via the macro-emitted
-// `CryptoKey::register` invoked from `crypto::install_globals`'s
-// `register_native_classes!` list. No caller used the previously-
-// returned `Function`.

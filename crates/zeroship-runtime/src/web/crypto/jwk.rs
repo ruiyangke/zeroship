@@ -1,5 +1,4 @@
 //! JsonWebKey import/export — RFC 7517 / RFC 7518.
-//! See `docs/archive/webcrypto-native.md` §VI.
 //!
 //! Each algorithm has `import_xxx` / `export_xxx` helpers that walk a
 //! V8 object's JWK fields, validate, and produce / consume a

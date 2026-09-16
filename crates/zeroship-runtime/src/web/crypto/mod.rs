@@ -1,13 +1,10 @@
 //! Native W3C WebCryptoAPI Level 2.
 //!
-//! Replaces a 313-LOC JS shim and the standalone algorithm-dispatch ops
-//! that preceded it (both since deleted). The pre-existing non-SubtleCrypto
-//! surface survives alongside this module in `sync_helpers.rs`: the
+//! The non-SubtleCrypto surface lives alongside this module in
+//! `sync_helpers.rs`: the
 //! `crypto_random_uuid_callback` / `crypto_get_random_values_callback`
 //! ops + the `__cryptoHashSync` / `__cryptoHmacSync` node-compat
 //! helpers used by the node:crypto polyfill.
-//!
-//! See `docs/archive/webcrypto-native.md` for the full design.
 //!
 //! # Module layout
 //!
@@ -47,9 +44,8 @@
 //!
 //! # Activation
 //!
-//! Native is the only path. The legacy `embed/crypto.js` polyfill has
-//! been deleted; `is_enabled()` is retained as a sentinel function but
-//! always returns true.
+//! Native is the only path; `is_enabled()` is retained as a sentinel
+//! function but always returns true.
 
 #![allow(unsafe_code)]
 
@@ -80,19 +76,17 @@ pub mod wrap;
 // callers naturally migrate.
 pub use crate::base::crypto as kernel;
 
-/// Install Crypto / SubtleCrypto / CryptoKey on `globalThis`. Replaces
-/// the legacy `crypto` ad-hoc op installs in `init.rs` when the
-/// feature flag is set.
+/// Install Crypto / SubtleCrypto / CryptoKey on `globalThis`.
 pub fn install_globals<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     global: v8::Local<v8::Object>,
 ) {
     // Install the classes first so SubtleCrypto::install / CryptoKey::install
     // are cached per-isolate by the time `crypto.subtle` getter runs.
-    // #198 — CryptoKey is bare bind; SubtleCrypto's `install_global`
-    // returns its Function for callers that wanted it (no current users
-    // — the let _ binding swallows it) so it stays on the wrapper for
-    // now; Crypto needs the global `crypto` instance build, also stays.
+    // CryptoKey is bare bind; SubtleCrypto's `install_global` returns its
+    // Function for callers that wanted it (no current users — the let _
+    // binding swallows it) so it stays on the wrapper; Crypto needs the
+    // global `crypto` instance build, also stays.
     crate::register_native_classes!(scope, global, [
         crypto_key::CryptoKey,
     ]);
@@ -100,9 +94,9 @@ pub fn install_globals<'s>(
     crypto_class::install_global(scope, global);
 }
 
-/// Always true because the native implementation is the only path and
-/// the polyfill is gone. Retained as a callable so out-of-tree consumers
-/// that may still query the gate keep building.
+/// Always true because the native implementation is the only path.
+/// Retained as a callable so out-of-tree consumers that may still query
+/// the gate keep building.
 pub fn is_enabled() -> bool {
     true
 }

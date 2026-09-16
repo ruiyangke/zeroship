@@ -1,7 +1,6 @@
 //! Per-operation dispatchers — `encrypt`, `decrypt`, `sign`, `verify`,
 //! `generateKey`, `importKey`, `exportKey`, `deriveBits`, `deriveKey`,
-//! `wrapKey`, `unwrapKey`. Per `docs/archive/webcrypto-native.md`
-//! §IV.
+//! `wrapKey`, `unwrapKey`.
 //!
 //! Each function:
 //!  1. Normalizes the algorithm head (`registry::normalize_head`).
@@ -464,10 +463,9 @@ fn alg_matches_key(name: AlgorithmName, key_state: &CryptoKeyState) -> bool {
     name.canonical() == key_state.algorithm.name()
 }
 
-// Suppress dead warning for unused enum variants in this stub-heavy
-// step. Real uses come online in steps 6-13. The 8-argument shape is
-// deliberate: it's a type-anchor stub enumerating unused variant
-// types, not a real call site to slim down.
+// Suppress dead-code warnings for unused enum variants and imports.
+// The 8-argument shape is deliberate: a type-anchor stub enumerating
+// unused variant types, not a real call site to slim down.
 #[allow(dead_code)]
 #[allow(clippy::too_many_arguments)]
 fn _unused(

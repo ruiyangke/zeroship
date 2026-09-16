@@ -1,8 +1,6 @@
 //! `CryptoKey` storage primitives — the spec's `[[type]]`,
 //! `[[extractable]]`, `[[algorithm]]`, `[[usages]]`, `[[handle]]`
 //! internal slots, modelled as Rust enums and plain fields.
-//!
-//! Per `docs/archive/webcrypto-native.md` §V.3.
 
 #![allow(dead_code)]
 
