@@ -830,7 +830,7 @@ fn allowlist_denies_miss_and_rejects_broad_entries_at_config_time() {
     // An exact host under the same suffix stays grantable: the deleted list was
     // enforcing taste, and reckless is the creator's problem now.
     assert!(EgressRule::parse(Verdict::Accept, "db.neon.tech", 5432).is_ok());
-    // And one ACCEPT rule can no longer be the whole internet.
+    // And one ACCEPT rule cannot be the whole internet.
     assert!(EgressRule::parse(Verdict::Accept, "0.0.0.0/0", 443).is_err());
 
     let result = compio::runtime::Runtime::new().unwrap().block_on(async {
