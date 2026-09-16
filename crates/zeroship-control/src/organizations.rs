@@ -256,23 +256,19 @@ pub(crate) fn ladder_rank_of(role: &str) -> String {
 
 /// Which owner is THE owner, when an organization holds several.
 ///
-/// `app_members` permitted a fan-out only through a data-integrity fault, so
-/// every consumer collapsed it defensively and the comments called it
-/// defensive. An ORGANIZATION legitimately holds several owners, so this is now
-/// the ordinary case and the tiebreak is load-bearing: the longest-standing
-/// owner, with the id as a total order behind it so two owners seated in the
-/// same statement still resolve deterministically.
+/// An ORGANIZATION legitimately holds several owners, so the tiebreak is
+/// load-bearing: the longest-standing owner, with the id as a total order behind
+/// it so two owners seated in the same statement still resolve deterministically.
 ///
-/// The billing subsystems required this rule to be IDENTICAL across the sweep,
-/// the notifier and the per-organization slice, and used to guarantee it by three
-/// matching copies with comments asking future editors to keep them matching.
-/// It is now guaranteed by there being one.
+/// The billing subsystems require this rule to be IDENTICAL across the sweep,
+/// the notifier and the per-organization slice; it is guaranteed by there being
+/// one constant.
 const APP_OWNER_ORDER: &str = "owner_member.added_at, owner_member.user_id";
 
 /// The one join from an app to the human who answers for it, as a LATERAL for
 /// a query that already has `zeroship.apps a` in scope.
 ///
-/// `zeroship.app_members` is gone; an app reaches its organization ONLY through
+/// An app reaches its organization ONLY through
 /// `apps.project_id -> projects.organization_id`. A personal organization has
 /// exactly one owner, so for the common creator this is the creator.
 ///
@@ -2695,8 +2691,7 @@ pub async fn delete_project(
     Ok(())
 }
 
-/// Delete an app: the terminal end of the app lifecycle, and the step the
-/// account-closure funnel used to name without providing.
+/// Delete an app: the terminal end of the app lifecycle.
 ///
 /// # Why it lives here and not beside `archive_app`
 ///
@@ -3012,7 +3007,7 @@ fn project_member_conflict(err: &compio_postgres::Error, context: &str) -> Organ
 ///
 /// Two calls have a window between them in which the member holds NO project
 /// row, and a member below admin with no project row reaches nothing - so
-/// narrowing someone from project owner to project viewer used to blank their
+/// narrowing someone from project owner to project viewer would blank their
 /// access first and restore part of it after. Worse in the other direction: a
 /// crash between the two leaves the seat gone rather than narrowed, and the
 /// caller who asked for an adjustment has performed a removal.
@@ -5011,10 +5006,9 @@ mod tests {
 
     #[test]
     fn the_app_owner_join_reaches_the_organization_through_the_project() {
-        // `zeroship.app_members` is deleted. The one path from an app to a
-        // human runs through its project; a join naming the old table, or
-        // naming `apps.organization_id` (which does not exist), is the failure
-        // this pins.
+        // The one path from an app to a human runs through its project; a join
+        // naming `app_members`, or naming `apps.organization_id` (which does not
+        // exist), is the failure this pins.
         for sql in [app_owner_lateral(), app_owner_map()] {
             assert!(!sql.contains("app_members"), "{sql}");
             assert!(!sql.contains("a.organization_id"), "{sql}");
@@ -5030,9 +5024,9 @@ mod tests {
     /// exactly where two copies would drift, so the tiebreak itself is one
     /// constant and both must be built from it.
     ///
-    /// Three consumers used to carry three hand-matched copies of this ORDER
-    /// BY, each with a comment asking the next editor to keep them matching.
-    /// This is that comment, made checkable.
+    /// The consumers must all build the ORDER BY from the one constant:
+    /// hand-matched copies drift, so the tiebreak is shared and this test
+    /// checks it.
     #[test]
     fn both_owner_shapes_apply_the_same_tiebreak() {
         assert!(
