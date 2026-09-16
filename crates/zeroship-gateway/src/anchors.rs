@@ -16,28 +16,26 @@
 //!     rotating refresh family (`zeroship_core::crypto`). In the default
 //!     `server_anchor` mode the browser never holds a refresh token.
 //!
-//! BFF redesign (`2026-05-30-auth-bff-session-redesign` §3.1): the browser no
-//! longer holds a wrapper access token, so the per-anchor cached-WRAPPER slot
-//! (the former `cached_access_token` / `cached_access_exp` columns) is gone.
-//! Reload-storm coalescing is now provided by the family-rotation single-flight
-//! on `GET /__zeroship/auth/session?mint=1` (still here). The anchor remains the
-//! reload-recovery + server-held refresh-family custody store.
+//! The browser holds no wrapper access token, so there is no per-anchor cached
+//! wrapper slot. Reload-storm coalescing comes from the family-rotation
+//! single-flight on `GET /__zeroship/auth/session?mint=1`. The anchor remains
+//! the reload-recovery + server-held refresh-family custody store.
 //!
 //! Every store fn takes a `&mut Client` (a `PoolConnection` derefs mutably to
 //! it), so the caller checks a pooled connection out for exactly ONE operation
 //! and releases it on drop — NO connection is ever held across the outbound
 //! OP HTTP call.
 //!
-//! RLS (changeset 0025): `zeroship.app_session_anchors` is FORCE-RLS,
+//! RLS: `zeroship.app_session_anchors` is FORCE-RLS,
 //! tenant-isolated on `app_id` via the `zeroship.tenant_app` GUC. The gateway
 //! connects as the non-bypass `zeroship_gateway` role, so EVERY op here must
 //! run inside a transaction that first sets that GUC to `route.app_id` (via
 //! [`crate::rls::set_tenant_app`]). `SET LOCAL` auto-reverts at COMMIT /
 //! ROLLBACK, so a pooled connection can never leak the tenant to the next
 //! checkout. An unset GUC fails CLOSED (policy predicate NULL → zero rows).
-//! This is why `read_live` / `update_rotated_family` / `delete` now take the
-//! `app_id` the caller already holds (`route.app_id`): it is the RLS key, and
-//! it replaces the former post-hoc `anchor.app_id == route.app_id` check.
+//! This is why `read_live` / `update_rotated_family` / `delete` take the
+//! `app_id` the caller already holds (`route.app_id`): it is the RLS key, so
+//! match and isolation are the same check.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -234,8 +232,7 @@ pub async fn create(conn: &mut Client, params: &NewAnchor<'_>) -> Result<Anchor>
 ///
 /// `app_id` (the caller's `route.app_id`) sets the `zeroship.tenant_app` RLS
 /// GUC AND is matched in the predicate, so a cookie replayed against the wrong
-/// app resolves to `None` here — this REPLACES the former post-hoc
-/// `anchor.app_id == route.app_id` check at the call sites.
+/// app resolves to `None` here.
 ///
 /// Does NOT slide any expiry — the anchor has no idle window.
 ///
@@ -266,18 +263,17 @@ pub async fn read_live(conn: &mut Client, app_id: &AppId, id: Uuid) -> Result<Op
 
 /// Persist a rotated refresh family after a `?mint=1` OP refresh.
 /// `abs_expires_at` and `created_at` are UNTOUCHED — the anchor's own 30-day
-/// clock never slides. The browser no longer holds a wrapper (BFF redesign
-/// §3.1), so there is no cached wrapper to persist here — only the rotated
-/// encrypted refresh family + its lineage id.
+/// clock never slides. The browser holds no wrapper, so only the rotated
+/// encrypted refresh family + its lineage id are persisted here.
 ///
 /// Returns the number of rows the UPDATE matched. The `WHERE … revoked_at IS
 /// NULL` predicate is re-evaluated INSIDE this write transaction, so a `0`
 /// return means the anchor was revoked between the caller's `read_live` and
-/// this persist — i.e. a concurrent teardown (H1 password reset, M1
-/// back-channel logout, signout) committed mid-rotation. The caller MUST treat
-/// `0` as fail-closed (`LoginRequired`) and NOT sign a fresh cookie: discarding
-/// this count is exactly the `?mint=1` TOCTOU fail-open (finding F4) that let a
-/// rotation racing a revocation resurrect the session.
+/// this persist — i.e. a concurrent teardown (password reset, back-channel
+/// logout, signout) committed mid-rotation. The caller MUST treat `0` as
+/// fail-closed (`LoginRequired`) and NOT sign a fresh cookie: discarding this
+/// count is exactly the `?mint=1` TOCTOU fail-open that let a rotation racing a
+/// revocation resurrect the session.
 ///
 /// # Errors
 /// [`GatewayError::Db`] on PG failure.
@@ -434,10 +430,10 @@ fn row_to_anchor(row: &compio_postgres::Row) -> Result<Anchor> {
 /// `Output` must be `Clone`).
 pub(crate) type RotationResult = std::result::Result<RotationOk, RotationError>;
 
-/// A successful reload-recovery family rotation (BFF redesign §2.2 / §3.1).
+/// A successful reload-recovery family rotation.
 ///
-/// The browser no longer receives a wrapper, so this no longer carries an
-/// access token. It carries the identity facts the `?mint=1` handler needs to
+/// The browser receives no wrapper, so this carries no access token. It carries
+/// the identity facts the `?mint=1` handler needs to
 /// re-create the gateway session from the rotated id_token — the global user
 /// UUID (the gateway session `user_id`), the freshly-granted scopes, and the
 /// id-token `email_verified` / `name` / `auth_time` / `amr` claims. The
