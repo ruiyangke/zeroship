@@ -18,10 +18,10 @@ use quote::quote;
 /// into JS (e.g. `Local<Function>::call`, fired-event handler) and the
 /// callback synchronously re-enters the SAME instance via the prototype,
 /// the macro materialises ANOTHER `&mut Self` pointing at the same Box.
-/// That's aliased mutable references — UB. Pre-fix, the symptom was a
-/// cryptic `RefCell already mutably borrowed` panic from deep inside V8
-/// when the user's body wrapped state in an inner `RefCell`; classes
-/// without an inner cell silently corrupted memory.
+/// That's aliased mutable references - UB. The symptom is a cryptic `RefCell
+/// already mutably borrowed` panic from deep inside V8 when the user's body
+/// wraps state in an inner `RefCell`; classes without an inner cell silently
+/// corrupt memory.
 ///
 /// **Fix.** A per-method, thread-local `Cell<[Option<usize>; 8]>` keyed
 /// by the External pointer's address (`__ext.value() as usize` ==

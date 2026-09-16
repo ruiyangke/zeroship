@@ -11,7 +11,8 @@
 //! the real pump, then drop the handle (simulating cache eviction) — and
 //! asserts the inner `Rc` strong count falls to zero.
 //!
-//! Pre-fix this FAILS: the pump's strong ref pins the count at >= 1 forever.
+//! The pump's strong ref must NOT pin the count: if it does, the count stays
+//! >= 1 forever.
 
 use std::time::Duration;
 
