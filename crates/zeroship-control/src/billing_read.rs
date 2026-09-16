@@ -728,20 +728,16 @@ pub struct UnbilledPeriod {
     /// the invoice it finalizes. Positive on every row that is here: a period
     /// that prices to nothing is not a debt and is not reported.
     ///
-    /// THIS FIELD USED TO BE RAW METERED UNITS, and that is the defect it
-    /// exists to close. Units cannot tell a month that owed money from a month
-    /// covered by the included quota, so every quota-covered free-tier month
-    /// read as a debt and no such account could ever be closed. The file's own
-    /// header already made this argument about the CURRENT month; it was never
-    /// carried through to a closed one whose charge was nil.
+    /// Cents, not raw metered units: units cannot tell a month that owed
+    /// money from a month covered by the included quota, so only the priced
+    /// amount separates a nil month from a debt.
     pub charge_cents: i64,
 }
 
 /// The one action that clears a billing blocker.
 ///
 /// Every arm names a route that exists AND that would actually change the
-/// answer. That second half is what the unbilled arm used to get wrong: it told
-/// the creator to wait for a sweep, and
+/// answer. Waiting for a sweep fails the second half:
 /// [`crate::cron::billing_reconcile::previous_period_start_unix`] bills only the
 /// immediately previous month, so for anything older the named remedy could
 /// never run. A refusal whose stated remedy cannot possibly work is worse than a
@@ -937,37 +933,32 @@ impl OutstandingBilling {
 /// Archived apps are NOT filtered, matching the reconciler, which bills them on
 /// purpose. The arm is asked only under [`LocalInvoicing::Yes`].
 ///
-/// **THIS ARM USED TO KEY ON RAW METERED UNITS, AND THAT TRAPPED THE ORDINARY
-/// FREE-TIER CREATOR FOREVER.** Any unit in a closed period with no invoice read
-/// as a debt, while `cron::billing_reconcile` writes no invoice row at all for a
-/// period that prices to nothing — the free tier's normal month, whose usage
-/// stayed inside the included quota. A month that owed NOTHING was therefore
-/// indistinguishable from one that was never billed, at all three enforcement
-/// points, permanently. The pricing pass below is the same function the
-/// reconciler runs at finalize, not a second spelling of it, because two pricing
-/// paths that can disagree is a worse defect than the one being fixed.
+/// **THIS ARM KEYS ON THE RE-PRICED AMOUNT, NOT RAW METERED UNITS.**
+/// `cron::billing_reconcile` writes no invoice row at all for a period that
+/// prices to nothing — the free tier's normal month, whose usage stayed inside
+/// the included quota — so a unit-keyed check cannot tell a month that owed
+/// NOTHING from one that was never billed. The pricing pass below is the same
+/// function the reconciler runs at finalize, not a second spelling of it,
+/// because two pricing paths that can disagree is the worse defect.
 ///
-/// **A VOID INVOICE SETTLES THE PERIOD RATHER THAN LEAVING IT UNBILLED.** The
-/// old `status <> 'void'` filter made a voided invoice invisible to this arm, so
-/// voiding one moved the organization from "owes on an invoice" to "owes on
-/// unbilled usage" — the two arms contradicting each other over the same act.
+/// **A VOID INVOICE SETTLES THE PERIOD RATHER THAN LEAVING IT UNBILLED.**
 /// Voiding RELEASES the claim, which is the whole point of the one transition
-/// `invoices_immutable()` permits; it is a deliberate statement that the period
-/// is done, not evidence that it was never billed.
+/// `invoices_immutable()` permits: it is a deliberate statement that the period
+/// is done, not evidence that it was never billed. A filter that hid a voided
+/// invoice from this arm would move the organization from "owes on an invoice"
+/// to "owes on unbilled usage" — the two arms contradicting each other over
+/// the same act.
 ///
-/// **A DRAFT INVOICE SETTLES NOTHING, AND TREATING IT AS PROOF OF BILLING LET A
-/// REAL DEBT THROUGH BOTH ARMS AT ONCE.** The candidate predicate used to read
-/// the mere PRESENCE of an invoice row as "this period was billed", and a draft
-/// is a row. It is not a claim: `invoice_total_balances` holds every amount on
-/// it at zero, so the unpaid arm — keyed on `total > collected` over
-/// `finalized` — cannot see it either. An organization whose reconcile crashed
-/// between claiming the row and finalizing it therefore produced NO blocker of
-/// any kind over a period that owed real money, and could be dissolved and its
-/// sole owner erased. The reconciler writes that row BEFORE any provider call
-/// precisely so a crash is recoverable, which makes a draft the signal "billing
-/// started and did not finish" — exactly what the unbilled arm exists to catch.
-/// So the candidate predicate asks for an invoice that ACCOUNTS for the period
-/// (`finalized` or `void`), and a draft leaves the period to be re-priced.
+/// **A DRAFT INVOICE SETTLES NOTHING.** A draft is a row but not a claim:
+/// `invoice_total_balances` holds every amount on it at zero, so the unpaid
+/// arm — keyed on `total > collected` over `finalized` — cannot see it either.
+/// A reconcile that crashed between claiming the row and finalizing it would
+/// otherwise produce NO blocker of any kind over a period that owed real money.
+/// The reconciler writes that row BEFORE any provider call precisely so a crash
+/// is recoverable, which makes a draft the signal "billing started and did not
+/// finish" — exactly what the unbilled arm exists to catch. So the candidate
+/// predicate asks for an invoice that ACCOUNTS for the period (`finalized` or
+/// `void`), and a draft leaves the period to be re-priced.
 ///
 /// Pricing FAILS CLOSED. An unresolved FX or a compute-unit overflow propagates
 /// as an error, never as a silent zero — a zero here would clear a debt, which
@@ -1096,7 +1087,7 @@ async fn unbilled_priced_periods<C: GenericClient + Sync>(
     // before it writes the replacement, so a period can legitimately hold a
     // void row AND a draft at once. Asking only "is there a finalized or void
     // row" lets the void answer for the period and hides the draft's money
-    // exactly as the bare row-existence test used to. The two cannot both be
+    // the way a bare row-existence test would. The two cannot both be
     // stale in the other direction: `invoices_organization_active_period_claim`
     // is unique on (organization_id, period) where status is not void, so a
     // draft and a finalized invoice cannot coexist for one period.
@@ -1319,9 +1310,9 @@ mod tests {
     }
 
     /// The rendered refusal states BOTH totals. An unbilled-only organization
-    /// is told it owes, and the only figure it used to be given was the zero
-    /// `owed_cents` of the claimed-cash half - a refusal that says you owe and
-    /// then says you owe nothing. The priced amount now travels with it.
+    /// is told it owes, and stating only the zero `owed_cents` of the
+    /// claimed-cash half would be a refusal that says you owe and then says
+    /// you owe nothing. The priced amount travels with it.
     #[test]
     fn the_serialized_refusal_states_the_unbilled_price_beside_the_owed_cash() {
         let rendered =
@@ -1379,11 +1370,11 @@ mod tests {
     }
 
     /// Every remedy names a route, because a refusal with no next step is a
-    /// dead end - and it must name a route that would CHANGE THE ANSWER. The
-    /// arm that used to send the creator to wait for a billing sweep failed the
-    /// second half: `previous_period_start_unix` bills only last month, so for
-    /// an older period the named remedy could never run. Nothing here may name
-    /// a sweep, and everything here must name a route.
+    /// dead end - and it must name a route that would CHANGE THE ANSWER.
+    /// Sending the creator to wait for a billing sweep fails the second half:
+    /// `previous_period_start_unix` bills only last month, so for an older
+    /// period the named remedy could never run. Nothing here may name a sweep,
+    /// and everything here must name a route.
     #[test]
     fn every_remedy_names_a_route_that_exists_and_none_names_the_sweep() {
         for remedy in [

@@ -2165,10 +2165,10 @@ impl Config {
                     //
                     // The server settles it, so neither implementation has to be
                     // taken on trust: `SELECT name, unit FROM pg_settings` gives
-                    // `tcp_user_timeout | ms` and `tcp_keepalives_idle | s`
-                    // (checked on 16.15, 2026-08-26). A peer driver is the wrong
-                    // oracle for a unit question - it can be confidently wrong in
-                    // a way no differential against it will ever surface.
+                    // `tcp_user_timeout | ms` and `tcp_keepalives_idle | s`. A
+                    // peer driver is the wrong oracle for a unit question - it
+                    // can be confidently wrong in a way no differential against
+                    // it will ever surface.
                     self.tcp_user_timeout(Duration::from_millis(timeout as u64));
                 } else {
                     // libpq clamps a negative value to zero, and zero restores
@@ -2188,17 +2188,15 @@ impl Config {
                 self.keepalives(keepalives != 0);
             }
             // ZERO must reach `KeepaliveConfig`; a NEGATIVE must not get
-            // there at all. `keepalives_idle` and `keepalives_interval`
-            // guarded their setters with `> 0`, which discarded the zero
-            // before `keepalive::TcpKeepalive::from` - the one place that
-            // reads a zero as "leave the socket option alone" - could act on
-            // it, so `keepalives_idle=0` silently kept this crate's OWN
-            // two-hour default. That default is neither what PostgreSQL
-            // documents for a zero nor what libpq does with one.
+            // there at all. `keepalive::TcpKeepalive::from` is the one place
+            // that reads a zero as "leave the socket option alone", so the
+            // arms must hand the zero over: discarding it on the way in would
+            // silently keep this crate's OWN two-hour default for
+            // `keepalives_idle=0`, which is neither what PostgreSQL documents
+            // for a zero nor what libpq does with one.
             //
-            // WHAT WAS MEASURED, and it is less than an earlier version of
-            // this comment claimed. Against PostgreSQL 16 on 2026-08-23,
-            // `psql` fails the connection for every one of
+            // What the server does with either: `psql` fails the connection
+            // for every one of
             // `keepalives_idle=0`, `keepalives_idle=-1`,
             // `keepalives_interval=0`, `keepalives_interval=-1`,
             // `keepalives_count=0` and `keepalives_count=-1`, each with
@@ -2662,10 +2660,8 @@ fn keepalive_seconds(value: &str, option: &'static str) -> Result<u64, Error> {
 /// ONE definition, called from all three places that have to rule on it: the
 /// connection string (`Config::param`), the startup `ParameterStatus` a server
 /// sends during the handshake (`connect_raw::read_info`), and a mid-session
-/// change (`connection::route_async`). The predicate was written out separately
-/// in the first two and MISSING ENTIRELY from the third until 2026-08-23, which
-/// is the shape this consolidation exists to prevent: a guard on one door and
-/// not its twin.
+/// change (`connection::route_async`). Consolidating it is what stops the
+/// guard existing on one door and not its twin.
 ///
 /// Rust strings are UTF-8. Any other encoding would be decoded as something it
 /// is not -- and, where the foreign bytes happen to be valid UTF-8, decoded
@@ -3362,10 +3358,9 @@ impl<'a> UrlParser<'a> {
     /// to every one of them by construction. That matters because the three
     /// callers cannot share a return type: a password need not be UTF-8 and a
     /// Unix socket path is an `OsStr`, so only [`Self::decode`] can go on to
-    /// `decode_utf8`. Before this existed the two checks were copied at three
-    /// sites, and adding the raw-space rule on 2026-08-26 meant editing all
-    /// three by hand - miss one and that component silently accepts what the
-    /// others refuse.
+    /// `decode_utf8`. A rule copied at the three call sites would have to be
+    /// edited at all three by hand - miss one and that component silently
+    /// accepts what the others refuse.
     fn validated_percent_decode(s: &str) -> Result<Cow<'_, [u8]>, Error> {
         let encoded = s;
         let s = Self::trim_raw_boundary_spaces(s)?;
@@ -3526,8 +3521,7 @@ mod tests {
     /// than `Prefer` would silently stop negotiating encryption at all, and
     /// nothing else here would notice.
     ///
-    /// Checked against the PostgreSQL 18 documentation on 2026-08-26; all eleven
-    /// matched.
+    /// Checked against the PostgreSQL documentation's own default table.
     mod parameter_defaults {
         use super::super::{
             ChannelBinding, Config, LoadBalanceHosts, SslCertMode, SslMode, SslNegotiation,
@@ -3749,12 +3743,10 @@ mod tests {
 
         /// EVERY component, and the list is the point rather than the count.
         ///
-        /// The PASSWORD and the HOST each had their own decode path, because
-        /// neither can be a `str` - a password need not be UTF-8 and a socket
-        /// path is an `OsStr`. So a rule added to the ordinary path reached
-        /// four components and silently missed those two. This test named only
-        /// four until 2026-08-26 and would have passed with the password
-        /// unchecked.
+        /// The PASSWORD and the HOST cannot be ruled on through the `str`
+        /// decode - a password need not be UTF-8 and a socket path is an
+        /// `OsStr` - so a rule enforced per call site would reach the ordinary
+        /// components and silently miss those two.
         #[test]
         fn an_interior_raw_space_is_refused_in_every_component() {
             for dsn in [
@@ -4375,16 +4367,15 @@ mod tests {
     /// say nothing about the other two.
     ///
     /// The reasoning is separate from the zero's, and deliberately does not
-    /// rest on what libpq does internally. Measured 2026-08-23 against
-    /// PostgreSQL 16, `psql` fails the connection for a negative in any of the
-    /// three - and for a ZERO in any of the three, with the same
-    /// `setsockopt(...) failed: Invalid argument`. Those two outcomes are
-    /// identical, so that measurement cannot show whether libpq clamps or
-    /// passes through, and nothing here depends on it. What it does show is
-    /// that a negative is a value neither implementation runs with; refusing
-    /// it at parse time only moves the failure earlier. Folding it into zero
-    /// instead would make a typo'd `keepalives_idle=-1` connect silently on
-    /// system defaults, which is worse than either.
+    /// rest on what libpq does internally. `psql` fails the connection for a
+    /// negative in any of the three - and for a ZERO in any of the three, with
+    /// the same `setsockopt(...) failed: Invalid argument`. Those two outcomes
+    /// are identical, so that probe cannot show whether libpq clamps or passes
+    /// through, and nothing here depends on it. What it does show is that a
+    /// negative is a value neither implementation runs with; refusing it at
+    /// parse time only moves the failure earlier. Folding it into zero instead
+    /// would make a typo'd `keepalives_idle=-1` connect silently on system
+    /// defaults, which is worse than either.
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn a_negative_keepalive_in_a_dsn_is_refused() {
