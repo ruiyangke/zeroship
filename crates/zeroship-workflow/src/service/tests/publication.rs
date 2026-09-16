@@ -107,6 +107,115 @@ case!(
     postgres_publication_rejects_changed_executable_prerequisite,
     executable_identity
 );
+case!(
+    sqlite_publication_projections_are_bound_by_their_own_tables,
+    postgres_publication_projections_are_bound_by_their_own_tables,
+    kind_projections
+);
+
+/// Each operation's projection is a row in that operation's table with a
+/// foreign key onto its intent, so the database refuses a projection with no
+/// intent, and an intent wearing another operation's projection, or none, is
+/// not the job its specification names.
+async fn kind_projections(store: Rc<OrmStore>, _: &FaultDb) {
+    let (service, app, _, _platform) = registered_service(store).await;
+    let scope = service.fixture_app(app.clone());
+    scope
+        .start(&RequestId::mint(), "Example", StartOptions::default())
+        .await
+        .unwrap();
+    let advance = scope.pending_jobs(None, 1).await.unwrap().remove(0);
+    let manager = Manager::new(&app).await;
+    let publisher = Publisher::new(&app, manager.queue.clone());
+
+    let tx = service.begin().await.unwrap();
+    let orphan = journal_insert(
+        &tx,
+        "fanout_publications",
+        json!({"id":zeroship_core::workflow_jobs::JobId::mint().as_str(),
+            "app_id":app.as_str(), "broadcast_id":"unpublished", "revision":1}),
+    )
+    .await;
+    assert!(orphan.is_err(), "{orphan:?}");
+    drop(tx);
+
+    let tx = service.begin().await.unwrap();
+    let stored = journal_rows(
+        &tx,
+        "advance_publications",
+        json!({"app_id":app.as_str(), "id":advance.id.as_str()}),
+    )
+    .await;
+    assert_eq!(stored.len(), 1);
+    let frontier = json!({
+        "id": advance.id.as_str(), "app_id": app.as_str(),
+        "deploy_id": stored[0].text("deploy_id").unwrap(),
+        "run_id": stored[0].text("run_id").unwrap(),
+        "generation": stored[0].integer("generation").unwrap(),
+        "frontier_revision": stored[0].integer("frontier_revision").unwrap(),
+        "available_at": stored[0].integer("available_at").unwrap(),
+    });
+    tx.commit().await.unwrap();
+
+    for extension in ["fanout_publications", "advance_publications"] {
+        let tx = service.begin().await.unwrap();
+        if extension == "fanout_publications" {
+            journal_insert(
+                &tx,
+                extension,
+                json!({"id":advance.id.as_str(), "app_id":app.as_str(),
+                    "broadcast_id":advance.id.as_str(), "revision":1}),
+            )
+            .await
+            .unwrap();
+        } else {
+            tx.database()
+                .collection("__zeroship_workflow_fanout_publications")
+                .unwrap()
+                .delete(json!({"app_id":app.as_str(), "id":advance.id.as_str()}).into())
+                .await
+                .unwrap();
+            tx.database()
+                .collection("__zeroship_workflow_advance_publications")
+                .unwrap()
+                .delete(json!({"app_id":app.as_str(), "id":advance.id.as_str()}).into())
+                .await
+                .unwrap();
+        }
+        tx.commit().await.unwrap();
+        assert!(
+            matches!(
+                scope.pending_jobs(None, 1).await,
+                Err(WorkflowServiceError::Internal(_))
+            ),
+            "{extension}"
+        );
+        assert!(
+            matches!(
+                scope.publish_job(&advance.id, &publisher).await,
+                Err(WorkflowServiceError::Internal(_))
+            ),
+            "{extension}"
+        );
+        assert_eq!(publisher.calls.get(), 0);
+        assert_eq!(manager.count(), 0);
+    }
+
+    let tx = service.begin().await.unwrap();
+    journal_insert(&tx, "advance_publications", frontier)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    assert_eq!(
+        scope.pending_jobs(None, 1).await.unwrap(),
+        std::slice::from_ref(&advance)
+    );
+    assert_eq!(
+        scope.publish_job(&advance.id, &publisher).await.unwrap(),
+        advance
+    );
+    assert_eq!(manager.count(), 1);
+}
 
 async fn executable_identity(store: Rc<OrmStore>, _: &FaultDb) {
     let (service, app, _, _platform) = registered_service(store).await;

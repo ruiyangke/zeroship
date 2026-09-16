@@ -1,5 +1,5 @@
 use super::*;
-use crate::service::models::{app_state, broadcasts, fanout_pages, job_publications, topics};
+use crate::service::models::{app_state, broadcasts, fanout_pages, fanout_publications, topics};
 
 pub(super) async fn damage(store: Rc<OrmStore>) {
     let (service, app, _, _deployments) = registered_service(store).await;
@@ -82,34 +82,23 @@ pub(super) async fn damage(store: Rc<OrmStore>) {
 }
 
 async fn damaged_publication(service: &WorkflowService, scope: &AppWorkflows, job: &JobSpec) {
-    let tx = service.begin().await.unwrap();
-    tx.database()
-        .entity::<job_publications::Entity>()
-        .unwrap()
-        .update_many(
-            job_publications::id.eq(job.id.as_str()).unwrap(),
-            job_publications::broadcast_revision
-                .set(None::<i64>)
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    tx.commit().await.unwrap();
-    refused(scope, job).await;
-    assert!(scope.pending_jobs(None, 100).await.is_err());
-    let tx = service.begin().await.unwrap();
-    tx.database()
-        .entity::<job_publications::Entity>()
-        .unwrap()
-        .update_many(
-            job_publications::id.eq(job.id.as_str()).unwrap(),
-            job_publications::broadcast_revision
-                .set(Some(1_i64))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    tx.commit().await.unwrap();
+    for revision in [2_i64, 1] {
+        let tx = service.begin().await.unwrap();
+        tx.database()
+            .entity::<fanout_publications::Entity>()
+            .unwrap()
+            .update_many(
+                fanout_publications::id.eq(job.id.as_str()).unwrap(),
+                fanout_publications::revision.set(revision).unwrap(),
+            )
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+        if revision != 1 {
+            refused(scope, job).await;
+            assert!(scope.pending_jobs(None, 100).await.is_err());
+        }
+    }
 }
 
 async fn refused(scope: &AppWorkflows, job: &JobSpec) {

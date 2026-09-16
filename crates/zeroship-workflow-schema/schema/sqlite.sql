@@ -191,19 +191,31 @@ CREATE UNIQUE INDEX IF NOT EXISTS "__zeroship_workflow_outbox_scope_key" ON "__z
 
 CREATE INDEX IF NOT EXISTS "__zeroship_workflow_outbox_delivery_idx" ON "__zeroship_workflow_outbox" ("delivered_at", "created_at");
 
-CREATE TABLE "__zeroship_workflow_job_publications" ("id" TEXT COLLATE BINARY PRIMARY KEY NOT NULL, "app_id" TEXT COLLATE BINARY NOT NULL, "run_id" TEXT COLLATE BINARY, "deploy_id" TEXT COLLATE BINARY, "generation" INTEGER, "frontier_revision" INTEGER, "broadcast_id" TEXT COLLATE BINARY, "broadcast_revision" INTEGER, "propagation_id" TEXT, "propagation_revision" INTEGER, "available_at" INTEGER NOT NULL, "specification" TEXT NOT NULL, "created_at" INTEGER NOT NULL, "confirmed_at" INTEGER, CONSTRAINT "__zeroship_workflow_job_publications_app" FOREIGN KEY (app_id) REFERENCES "__zeroship_workflow_app_state"(app_id) ON DELETE RESTRICT);
-
-CREATE UNIQUE INDEX IF NOT EXISTS "__zeroship_workflow_job_publication_fanout" ON "__zeroship_workflow_job_publications" ("app_id", "broadcast_id", "broadcast_revision");
-
-CREATE UNIQUE INDEX IF NOT EXISTS "__zeroship_workflow_job_publication_frontier" ON "__zeroship_workflow_job_publications" ("app_id", "run_id", "generation", "frontier_revision", "available_at");
-
-CREATE UNIQUE INDEX IF NOT EXISTS "__zeroship_workflow_job_publication_propagation" ON "__zeroship_workflow_job_publications" ("app_id", "propagation_id", "propagation_revision");
+CREATE TABLE "__zeroship_workflow_job_publications" ("id" TEXT COLLATE BINARY PRIMARY KEY NOT NULL, "app_id" TEXT COLLATE BINARY NOT NULL, "specification" TEXT NOT NULL, "created_at" INTEGER NOT NULL, "confirmed_at" INTEGER, CONSTRAINT "__zeroship_workflow_job_publications_app" FOREIGN KEY (app_id) REFERENCES "__zeroship_workflow_app_state"(app_id) ON DELETE RESTRICT);
 
 CREATE UNIQUE INDEX IF NOT EXISTS "__zeroship_workflow_job_publications_scope_key" ON "__zeroship_workflow_job_publications" ("app_id", "id");
 
 CREATE INDEX IF NOT EXISTS "__zeroship_workflow_job_publications_pending_idx" ON "__zeroship_workflow_job_publications" ("app_id", "confirmed_at", "id");
 
-CREATE INDEX IF NOT EXISTS "__zeroship_workflow_job_publications_deployment_idx" ON "__zeroship_workflow_job_publications" ("app_id", "deploy_id", "confirmed_at");
+CREATE TABLE "__zeroship_workflow_advance_publications" ("id" TEXT COLLATE BINARY PRIMARY KEY NOT NULL, "app_id" TEXT COLLATE BINARY NOT NULL, "deploy_id" TEXT COLLATE BINARY NOT NULL, "run_id" TEXT COLLATE BINARY NOT NULL, "generation" INTEGER NOT NULL, "frontier_revision" INTEGER NOT NULL, "available_at" INTEGER NOT NULL, CONSTRAINT "__zeroship_workflow_advance_publication_intent" FOREIGN KEY (app_id, id) REFERENCES "__zeroship_workflow_job_publications"(app_id, id) ON DELETE RESTRICT, CONSTRAINT "__zeroship_workflow_advance_publications_app" FOREIGN KEY (app_id) REFERENCES "__zeroship_workflow_app_state"(app_id) ON DELETE RESTRICT);
+
+CREATE UNIQUE INDEX IF NOT EXISTS "__zeroship_workflow_advance_publication_frontier" ON "__zeroship_workflow_advance_publications" ("app_id", "run_id", "generation", "frontier_revision", "available_at");
+
+CREATE UNIQUE INDEX IF NOT EXISTS "__zeroship_workflow_advance_publications_scope_key" ON "__zeroship_workflow_advance_publications" ("app_id", "id");
+
+CREATE INDEX IF NOT EXISTS "__zeroship_workflow_advance_publications_deployment_idx" ON "__zeroship_workflow_advance_publications" ("app_id", "deploy_id");
+
+CREATE TABLE "__zeroship_workflow_fanout_publications" ("id" TEXT COLLATE BINARY PRIMARY KEY NOT NULL, "app_id" TEXT COLLATE BINARY NOT NULL, "broadcast_id" TEXT COLLATE BINARY NOT NULL, "revision" INTEGER NOT NULL, CONSTRAINT "__zeroship_workflow_fanout_publication_intent" FOREIGN KEY (app_id, id) REFERENCES "__zeroship_workflow_job_publications"(app_id, id) ON DELETE RESTRICT, CONSTRAINT "__zeroship_workflow_fanout_publications_app" FOREIGN KEY (app_id) REFERENCES "__zeroship_workflow_app_state"(app_id) ON DELETE RESTRICT);
+
+CREATE UNIQUE INDEX IF NOT EXISTS "__zeroship_workflow_fanout_publication_broadcast" ON "__zeroship_workflow_fanout_publications" ("app_id", "broadcast_id", "revision");
+
+CREATE UNIQUE INDEX IF NOT EXISTS "__zeroship_workflow_fanout_publications_scope_key" ON "__zeroship_workflow_fanout_publications" ("app_id", "id");
+
+CREATE TABLE "__zeroship_workflow_propagation_publications" ("id" TEXT COLLATE BINARY PRIMARY KEY NOT NULL, "app_id" TEXT COLLATE BINARY NOT NULL, "propagation_id" TEXT NOT NULL, "revision" INTEGER NOT NULL, CONSTRAINT "__zeroship_workflow_propagation_publication_intent" FOREIGN KEY (app_id, id) REFERENCES "__zeroship_workflow_job_publications"(app_id, id) ON DELETE RESTRICT, CONSTRAINT "__zeroship_workflow_propagation_publications_app" FOREIGN KEY (app_id) REFERENCES "__zeroship_workflow_app_state"(app_id) ON DELETE RESTRICT);
+
+CREATE UNIQUE INDEX IF NOT EXISTS "__zeroship_workflow_propagation_publication_obligation" ON "__zeroship_workflow_propagation_publications" ("app_id", "propagation_id", "revision");
+
+CREATE UNIQUE INDEX IF NOT EXISTS "__zeroship_workflow_propagation_publications_scope_key" ON "__zeroship_workflow_propagation_publications" ("app_id", "id");
 
 CREATE TABLE "__zeroship_workflow_fanout_pages" ("id" TEXT COLLATE BINARY PRIMARY KEY NOT NULL, "app_id" TEXT COLLATE BINARY NOT NULL, "broadcast_id" TEXT COLLATE BINARY NOT NULL, "revision" INTEGER NOT NULL, "result" TEXT NOT NULL, CONSTRAINT "__zeroship_workflow_fanout_page_broadcast" FOREIGN KEY (app_id, broadcast_id) REFERENCES "__zeroship_workflow_broadcasts"(app_id, id) ON DELETE RESTRICT, CONSTRAINT "__zeroship_workflow_fanout_page_publication" FOREIGN KEY (app_id, id) REFERENCES "__zeroship_workflow_job_publications"(app_id, id) ON DELETE RESTRICT, CONSTRAINT "__zeroship_workflow_fanout_page_receipt" FOREIGN KEY (app_id, id) REFERENCES "__zeroship_workflow_job_receipts"(app_id, id) ON DELETE RESTRICT);
 
@@ -222,4 +234,4 @@ CREATE TABLE "__zeroship_workflow_propagation_pages" ("id" TEXT COLLATE BINARY P
 CREATE UNIQUE INDEX IF NOT EXISTS "__zeroship_workflow_propagation_page_revision" ON "__zeroship_workflow_propagation_pages" ("app_id", "propagation_id", "revision");
 
 CREATE UNIQUE INDEX IF NOT EXISTS "__zeroship_workflow_propagation_pages_scope_key" ON "__zeroship_workflow_propagation_pages" ("app_id", "id");
-INSERT INTO "main".__zeroship_workflow_schema_version (id, version, fingerprint) VALUES ('workflow', 1, 'c34e05afaad855fa09cdc276acf13a91fbe9499777b5afb324364919f6446b0e');
+INSERT INTO "main".__zeroship_workflow_schema_version (id, version, fingerprint) VALUES ('workflow', 1, 'cf836a545295a934d45018538fe3c88eebe0a4b1e46217df2cfb356476dee93c');
