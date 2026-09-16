@@ -52,11 +52,10 @@ use serde::{Deserialize, Serialize};
 
 /// Shortest IPv4 prefix accepted on an ACCEPT rule.
 ///
-/// A proxy for single-tenancy over ten measured destinations, NOT a tenancy
-/// bound: a single vendor holding a `/12` is refused and a reseller of a `/16`
-/// is admitted. Its guaranteed job is smaller and is the reason it exists -
-/// it stops one ACCEPT rule being `0.0.0.0/0`, which would turn the control off
-/// with a single row.
+/// A proxy for single-tenancy, NOT a tenancy bound: a single vendor holding a
+/// `/12` is refused and a reseller of a `/16` is admitted. Its guaranteed job is
+/// smaller and is the reason it exists - it stops one ACCEPT rule being
+/// `0.0.0.0/0`, which would turn the control off with a single row.
 pub const MIN_ACCEPT_PREFIX_V4: u8 = 16;
 
 /// Shortest IPv6 prefix accepted on an ACCEPT rule.
