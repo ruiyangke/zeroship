@@ -154,14 +154,11 @@ impl URLSearchParams {
     }
 }
 
-// Brand check is now provided by the `#[v8_class]` macro: the
+// Brand check is provided by the `#[v8_class]` macro: the
 // auto-generated `__brand_check_URLSearchParams` walks `obj`'s
 // [[Prototype]] chain for the cached `URLSearchParams.prototype` and
 // is invoked at the top of every method/getter/iterator-factory/
-// forEach callback. The old hand-rolled `is_url_search_params`
-// helper here became dead once the iterator factory + forEach moved
-// into the macro emit (M4/M5 fixes are now expressed by the same
-// brand-check on every entry point).
+// forEach callback.
 
 /// Reach into a V8 object's internal field 0 and recover the raw
 /// pointer to the boxed `URL` if present. Returns `None` for non-URL
@@ -283,9 +280,6 @@ impl URLSearchParams {
     /// optional value):
     ///   - 1 arg: remove all (n, _) pairs where n == name.
     ///   - 2 args: remove all (n, v) pairs where n == name AND v == value.
-    ///
-    /// The 2-arg form is recent (URLSearchParams `value?` parameter
-    /// added 2023). The polyfill ignored the 2nd arg silently.
     #[v8_method]
     fn delete(
         &mut self,

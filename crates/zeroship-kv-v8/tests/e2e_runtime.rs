@@ -889,15 +889,14 @@ fn e2e_backend_unavailable() {
 }
 
 // ===========================================================================
-// `env.meter` is GONE (Refactor A): metering is infrastructure, so there is
-// no creator-facing `env.meter` namespace. App code must observe it as
-// `undefined` — it cannot self-report (forge/suppress) billing.
+// Metering-as-infrastructure (Refactor A): there is no creator-facing
+// `env.meter` namespace. App code must observe it as `undefined` — it cannot
+// self-report (forge/suppress) billing.
 // ===========================================================================
 
 /// Faithful: build a real Runtime with the kv plugin (a representative app
 /// kernel) and assert from inside the isolate that `env.meter` is undefined
-/// and not callable. RED before Refactor A (when `MeterPlugin` registered
-/// the `meter` namespace), GREEN after the deletion.
+/// and not callable.
 #[test]
 fn env_meter_namespace_is_absent_from_app_code() {
     const APP: &str = r#"
@@ -924,11 +923,11 @@ export default {
 }
 
 // ===========================================================================
-// Metering-as-infrastructure (Refactor A): each kv op emits a raw usage
-// metric (kv_reads / kv_writes) into the process-wide Meter at its op
-// boundary, scoped to the server-injected APP_ID. App code can neither forge
-// nor suppress these — they are emitted by trusted Rust inside the primitive,
-// not via a creator-facing `env.meter` API (which no longer exists).
+// Metering-as-infrastructure (Refactor A): each kv op emits a raw usage metric
+// (kv_reads / kv_writes) into the process-wide Meter at its op boundary,
+// scoped to the server-injected APP_ID. App code can neither forge nor
+// suppress these — they are emitted by trusted Rust inside the primitive,
+// not via a creator-facing `env.meter` API.
 // ===========================================================================
 
 /// Build a Runtime around `app` + `backend` + a real Meter bound to

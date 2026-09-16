@@ -14,9 +14,9 @@
 //!
 //! This isn't a literal WPT runner (no testharness.js) but mirrors
 //! the spec coverage WPT exercises against the algorithm chain
-//! (`crates/runtime/src/fetch_native/`).
+//! (`crates/zeroship-runtime/src/web/fetch/`).
 //!
-//! Pass criterion: ≥70% of the cases per the brief.
+//! Pass criterion: the per-suite pass share, enforced by each runner below.
 
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};

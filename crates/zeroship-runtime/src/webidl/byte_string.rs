@@ -13,7 +13,7 @@
 //!    `write_one_byte_v2` to copy the low byte of each code unit.
 //!
 //! The precheck is essential. `write_one_byte_v2` silently truncates
-//! code units > 0xFF (see v8-147.x source string.rs:559-576); calling
+//! code units > 0xFF (see the v8-147.x source, string.rs); calling
 //! it without the precheck would let `'\u0100'` pass through as `0x00`,
 //! violating WebIDL.
 //!
@@ -80,9 +80,8 @@ pub fn read_byte_string(
 ) -> Result<Vec<u8>, OpError> {
     // Step 1: ToString. v8::Value::to_string handles ECMA-262 ToString
     // including Symbol → TypeError. None means an exception was thrown
-    // (e.g. a Proxy trap raised, or the value was a Symbol). We surface
-    // a generic TypeError; if a richer scope-aware error type lands the
-    // pending exception can be preserved instead.
+    // (e.g. a Proxy trap raised, or the value was a Symbol); we surface a
+    // generic TypeError.
     let s = value
         .to_string(scope)
         .ok_or_else(|| OpError::type_error("Cannot convert value to ByteString"))?;

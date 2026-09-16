@@ -1,6 +1,5 @@
 //! Native `TextEncoder` and `TextDecoder` per the WHATWG Encoding spec
-//! (https://encoding.spec.whatwg.org). Replaces the buggy hand-rolled
-//! JS polyfills that lived in `embed/fetch.js`.
+//! (https://encoding.spec.whatwg.org).
 //!
 //! Implementation notes:
 //!
@@ -12,9 +11,8 @@
 //!   IBM866, KOI8-{R,U}, and the `replacement` encoding. Matches WPT
 //!   for U+FFFD substitution counts and stream-state behavior.
 //!
-//! - **TextEncoder is UTF-8 only** by spec — the legacy
-//!   `new TextEncoder("utf-16")` constructor was removed years ago.
-//!   `new TextEncoder()` is the only valid form.
+//! - **TextEncoder is UTF-8 only** by spec: `new TextEncoder()` is the
+//!   only valid form, and `new TextEncoder("utf-16")` is not.
 //!
 //! - **BOM handling** uses `encoding_rs::Encoding::new_decoder` (BOM
 //!   sniffing on) by default; `ignoreBOM: true` switches to
