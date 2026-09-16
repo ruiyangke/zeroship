@@ -322,12 +322,10 @@ mod tests {
         assert!(m.is_ok(), "implicit tls relay build: {:?}", m.err());
     }
 
-    /// Regression for the missing plaintext transport arm (major bug): a
-    /// plaintext dev/test sink (mailpit on `:1025`) MUST build a no-TLS
-    /// transport. Pre-fix there was no `SmtpTls::Plaintext` and both arms
-    /// forced TLS, so a plaintext sink was undeliverable. `builder_dangerous`
-    /// is infallible, so the only thing under test here is that the plaintext
-    /// arm exists and constructs a mailer.
+    /// A plaintext dev/test sink (mailpit on `:1025`) MUST build a no-TLS
+    /// transport: with both arms forcing TLS, a plaintext sink is undeliverable.
+    /// `builder_dangerous` is infallible, so the only thing under test here is
+    /// that the plaintext arm exists and constructs a mailer.
     #[test]
     fn smtp_mailer_builds_for_plaintext_sink() {
         let m = SmtpMailer::new(&SmtpConfig {
@@ -446,13 +444,11 @@ mod tests {
         );
     }
 
-    /// §5.3 / §10 regression (the privacy invariant the round was missing):
-    /// the rendered SMTP message of a relay forward contains the real inbox in
-    /// **no** header line — it lives only in the envelope `RCPT TO`. Pre-fix,
-    /// `build_lettre_message` rendered `To: real@inbox.test` from `msg.to`, so
-    /// `.formatted()` carried the real inbox in a header line and this assertion
-    /// failed. With `header_to` set to the alias, the rendered `To:` is the
-    /// alias and the real inbox appears nowhere in the headers.
+    /// The rendered SMTP message of a relay forward contains the real inbox in
+    /// **no** header line - it lives only in the envelope `RCPT TO`. With
+    /// `header_to` set to the alias, the rendered `To:` is the alias and the real
+    /// inbox appears nowhere in the headers; rendering `msg.to` instead would put
+    /// the real inbox in a header line.
     #[test]
     fn relay_forward_real_inbox_absent_from_all_rendered_headers() {
         let real = "real.user@personal.test";
