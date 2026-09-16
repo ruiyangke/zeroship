@@ -85,7 +85,7 @@ import {
 import { and as removedAnd, or as removedOr, not as removedNot } from "../../src/index.js";
 // The internal closed-set validation arrays (NOT part of the public `index.ts`
 // surface) — imported directly for the LOW-2 element-typing assertion below.
-import { MASK_CLASSIFICATIONS, MASK_KINDS, VECTOR_METRICS } from "../../src/ops.js";
+import { COLUMN_COLLATIONS, MASK_CLASSIFICATIONS, MASK_KINDS, VECTOR_METRICS } from "../../src/ops.js";
 import type {
   Classification,
   ColumnCollation,
@@ -1060,14 +1060,15 @@ export function dbFieldTypeExhaustiveness(token: DbFieldType): void {
 
 // ───────────────────────────────────────────────────────────────────────────
 // 8. LOW-2 — the internal closed-set validation arrays in `ops.ts`
-//    (`MASK_KINDS` / `MASK_CLASSIFICATIONS` / `VECTOR_METRICS`) carry the CLOSED
-//    wire-union element type, NOT a loose `string`.
+//    (`MASK_KINDS` / `MASK_CLASSIFICATIONS` / `VECTOR_METRICS` /
+//    `COLUMN_COLLATIONS`) carry the CLOSED wire-union element type, NOT a loose
+//    `string`.
 //
 //    This turns the array LITERALS into a compile-time drift guard: if the
-//    engine's `MaskKind` / `Classification` / `VectorMetric` union drops a token,
-//    the committed array element that no longer matches becomes a tsc error, so the
-//    runtime `.includes` guard can never silently diverge from the closed enum it
-//    mirrors.
+//    engine's `MaskKind` / `Classification` / `VectorMetric` / `ColumnCollation`
+//    union drops a token, the committed array element that no longer matches
+//    becomes a tsc error, so the runtime `.includes` guard can never silently
+//    diverge from the closed enum it mirrors.
 //
 //    RED PROOF: with the pre-fix `readonly string[]` arrays,
 //    `(typeof MASK_KINDS)[number]` is `string`, which is NOT mutually assignable to
@@ -1090,6 +1091,7 @@ export function closedSetArrayElementTyping(): void {
   expectExactType<(typeof MASK_KINDS)[number], MaskKind>(true);
   expectExactType<(typeof MASK_CLASSIFICATIONS)[number], Classification>(true);
   expectExactType<(typeof VECTOR_METRICS)[number], VectorMetric>(true);
+  expectExactType<(typeof COLUMN_COLLATIONS)[number], ColumnCollation>(true);
 }
 
 // The schema contract test checks serialized shapes. These compiler assertions
@@ -1121,6 +1123,7 @@ type PublishedTypeHasRef = "ref" extends keyof PublishedTypeLexicon ? true : fal
 type PublishedTableHasPrimaryKey = "primaryKey" extends keyof PublishedTableHandle ? true : false;
 type PublishedTableHasChangeIdType = "changeIdType" extends keyof PublishedTableHandle ? true : false;
 type PublishedColumnHasReferences = "references" extends keyof PublishedColumnDef ? true : false;
+type PublishedColumnHasCollation = "collation" extends keyof PublishedColumnDef ? true : false;
 
 export function publishedDeclarationSurface(): void {
   expectExactType<PublishedTypeHasId, false>(true);
@@ -1128,6 +1131,7 @@ export function publishedDeclarationSurface(): void {
   expectExactType<PublishedTableHasPrimaryKey, true>(true);
   expectExactType<PublishedTableHasChangeIdType, false>(true);
   expectExactType<PublishedColumnHasReferences, true>(true);
+  expectExactType<PublishedColumnHasCollation, true>(true);
   expectExactType<keyof PublishedPrimaryKeyOperations, "add" | "drop" | "replace">(true);
 
   const exportedTypes = null as unknown as readonly [
