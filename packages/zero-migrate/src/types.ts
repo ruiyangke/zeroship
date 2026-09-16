@@ -19,6 +19,7 @@ import type {
   Classification,
   CastTarget,
   ColType,
+  ColumnCollation,
   CommentTarget,
   Expr,
   ExtractField,
@@ -56,6 +57,7 @@ import type {
 export type {
   CastTarget,
   ColType,
+  ColumnCollation,
   CommentTarget,
   Expr,
   ExtractField,
@@ -273,6 +275,21 @@ export interface ColumnDef {
    * `.mask()` on an ENCRYPTED column OVERRIDES the auto-mask. Returns a fresh def.
    */
   mask(opts: MaskOptions): ColumnDef;
+  /**
+   * Pin how the column COMPARES, as a closed INTENT token
+   * ({@link ColumnCollation}) rather than a collation NAME — a name is
+   * dialect-private, so the engine spells `"bytewise"` as PostgreSQL
+   * `COLLATE "C"`, SQLite `COLLATE BINARY` and MySQL `utf8mb4_0900_bin`. Use it
+   * where byte order is load-bearing: cursor ranges, identity copies, and any
+   * comparison that must not move when the database's default collation does.
+   *
+   * REFUSED on a non-text type, alongside `caseSensitive: false` (the opposite
+   * ordering), and alongside a value format (`ids.typeId()` / `ids.ulid()`,
+   * which pin bytewise comparison already). Create-table-only, like
+   * {@link ColumnDef.references}: add/rename/set-type and nested type positions
+   * reject the facet instead of dropping it. Returns a fresh def.
+   */
+  collation(intent: ColumnCollation): ColumnDef;
   /** Declare a generated/computed column from a closed expression AST. Omitted
    * options render a STORED generated column; `{ virtual: true }` requests a
    * SQLite VIRTUAL column and is rejected on Postgres. */

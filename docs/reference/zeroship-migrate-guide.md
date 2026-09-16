@@ -419,7 +419,7 @@ opt into constraints; neither helper supplies a key or database default:
 | `ids.typeId({ prefix })` | `valueFormat: { typeId: { prefix } }` | TypeID 0.3 text validation; prefix may be empty and is at most 63 bytes |
 | `ids.ulid()` | `valueFormat: "ulid"` | canonical ULID text validation |
 
-Closed token sets validated client-side (friendly `OP_INVALID` before serde): `VECTOR_METRICS = ["cosine","l2","innerProduct"]` (`ops.ts:631`); `SEQUENCE_AS_TYPES = ["int","bigInt"]` (`ops.ts:634`); `MASK_KINDS = ["full","last4","first4","email","name","date-year","date-decade","none"]` (`ops.ts:642-651`); `MASK_CLASSIFICATIONS = ["public","pii","spi","phi","pci","internal"]` (`ops.ts:652-659`).
+Closed token sets validated client-side (friendly `OP_INVALID` before serde): `VECTOR_METRICS = ["cosine","l2","innerProduct"]` (`ops.ts:631`); `SEQUENCE_AS_TYPES = ["int","bigInt"]` (`ops.ts:634`); `MASK_KINDS = ["full","last4","first4","email","name","date-year","date-decade","none"]` (`ops.ts:642-651`); `MASK_CLASSIFICATIONS = ["public","pii","spi","phi","pci","internal"]` (`ops.ts:652-659`); `COLUMN_COLLATIONS = ["bytewise"]` (`ops.ts`, `COLUMN_COLLATIONS`).
 
 **Bridging from `@zeroship/db`:** `fromDb(field)` lifts a `@zeroship/db` `TypeBuilder`/`FieldDef` into a migration `ColumnDef` through the shared `colTypeFromDbField` reduction, carrying `.required()`→`.notNull()` and `.unique()` (`ops.ts:1518-1528`). Names are never bridged.
 
@@ -434,14 +434,15 @@ Closed token sets validated client-side (friendly `OP_INVALID` before serde): `V
 | `.unique()` | `(): ColumnDef` | single-column UNIQUE |
 | `.references(table, column, opts?)` | `string`, `string`, `{ onDelete?, onUpdate?, name? }` | typed single-column FK **facet** (`IrColumn.references`): keeps this column's storage type and records the full target `{ table, column }`. Both names required (a missing target column is `OP_INVALID`); create-table only — an added/retyped/nested position rejects it |
 | `.default(v)` | `DefaultValue \| DefaultExprFn \| ExprChain \| Expr` | structured default (never raw SQL) |
+| `.collation(intent)` | `ColumnCollation` (closed: `bytewise`) | pins how the column compares (`IrColumn.collation`), as an INTENT the engine spells per dialect — PG `COLLATE "C"`, SQLite `COLLATE BINARY`, MySQL `utf8mb4_0900_bin`. Refused on a non-text type, alongside `caseSensitive:false`, alongside a `valueFormat`, and outside create-table |
 | `.mask(opts)` | `{ kind, classification? }` | column mask; `classification` defaults `"pii"`; `kind:"none"` opts out; overrides an encrypted column's auto-mask (`ops.ts:763-786`) |
 | `.generated(expr, opts?)` | `expr`, `{ virtual? }` | computed column; omitted ⇒ STORED, `{virtual:true}` ⇒ SQLite VIRTUAL (rejected on PG) |
 | `.identity(opts?)` | `{ always? }` | `GENERATED ALWAYS` if `always:true`, else `BY DEFAULT` |
 | `.autoIncrement()` | `(): ColumnDef` | portable sugar for `.identity({ always: false })` |
 
 Two lowering rules matter here: a column that is both `.unique()` and
-`.primaryKey()` emits no separate UNIQUE; a `.references(...)` facet is
-create-table-only, while `ids.typeId(...)` and `ids.ulid()` retain their
+`.primaryKey()` emits no separate UNIQUE; `.references(...)` and `.collation(...)`
+are create-table-only, while `ids.typeId(...)` and `ids.ulid()` retain their
 `valueFormat` facet on both create-table and add-column operations.
 
 **Default forms** (resolved by `toIrDefault`, `ops.ts:1189-1214`):

@@ -27,6 +27,9 @@ for (const file of migrationFiles) {
   series.push({ version, apply: up });
 }
 
+// No `sql.raw` grant: the journal is authored entirely in the portable op DSL,
+// and withholding the grant is what keeps it that way — a raw escape fails the
+// charter here rather than reaching an artifact.
 const charterFor = namespace => `policy_version = 1
 [[grant]]
 key = "schema.create_table"
@@ -34,10 +37,6 @@ value = true
 scope = { include = ["${namespace}"] }
 [[grant]]
 key = "schema.cross_schema"
-value = true
-scope = { include = ["${namespace}"] }
-[[grant]]
-key = "sql.raw"
 value = true
 scope = { include = ["${namespace}"] }
 `;

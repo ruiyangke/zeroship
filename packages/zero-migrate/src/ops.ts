@@ -159,6 +159,7 @@ import { colTypeFromDbField, type DbSchemaField } from "./db-lexicon.js";
 
 import type {
   Classification,
+  ColumnCollation,
   FuncArg,
   FuncLanguage,
   FuncVolatility,
@@ -812,6 +813,23 @@ export const MASK_CLASSIFICATIONS: readonly Classification[] = [
   "internal",
 ];
 
+/** The CLOSED per-column collation-INTENT token set — the wire spelling of the
+ *  engine's `ColumnCollation` enum. The member is an INTENT, never a dialect
+ *  collation NAME: `"bytewise"` is PostgreSQL `COLLATE "C"`, SQLite
+ *  `COLLATE BINARY` and MySQL `utf8mb4_0900_bin`, and only the engine knows
+ *  which. Mirrored here (lock-step with the engine enum) so `.collation(...)`
+ *  rejects an out-of-set token with a friendly client-side OP_INVALID. */
+export const COLUMN_COLLATIONS: readonly ColumnCollation[] = ["bytewise"];
+
+/** The column types a collation may be pinned on, in the wire spelling. A
+ *  collation is a rule for comparing TEXT, so the engine's validator refuses it
+ *  on anything else (`validate_column_facets`, matching `ColType::Text |
+ *  ColType::String`). This mirrors that predicate so an author is refused where
+ *  they wrote the call rather than deep inside the engine. */
+function collatableColumnType(type: ColType): boolean {
+  return type === "text" || (typeof type === "object" && type !== null && "string" in type);
+}
+
 const REF_ACTIONS: readonly RefAction[] = [
   "cascade",
   "restrict",
@@ -854,6 +872,7 @@ class ColumnDefImpl implements ColumnDefType {
   readonly _valueFormat: ValueFormat | undefined;
   readonly _vectorMetric: string | undefined;
   readonly _caseSensitive: boolean | undefined;
+  readonly _collation: ColumnCollation | undefined;
   readonly _mask: { kind: string; classification: string } | undefined;
   readonly _generated: { expr: Node; stored: boolean } | undefined;
   readonly _identity: { always: boolean } | undefined;
@@ -869,6 +888,7 @@ class ColumnDefImpl implements ColumnDefType {
       valueFormat?: ValueFormat;
       vectorMetric?: string;
       caseSensitive?: boolean;
+      collation?: ColumnCollation;
       mask?: { kind: string; classification: string };
       generated?: { expr: Node; stored: boolean };
       identity?: { always: boolean };
@@ -883,6 +903,7 @@ class ColumnDefImpl implements ColumnDefType {
     this._valueFormat = fields?.valueFormat;
     this._vectorMetric = fields?.vectorMetric;
     this._caseSensitive = fields?.caseSensitive;
+    this._collation = fields?.collation;
     this._mask = fields?.mask;
     this._generated = fields?.generated;
     this._identity = fields?.identity;
@@ -899,6 +920,7 @@ class ColumnDefImpl implements ColumnDefType {
     valueFormat?: ValueFormat;
     vectorMetric?: string;
     caseSensitive?: boolean;
+    collation?: ColumnCollation;
     mask?: { kind: string; classification: string };
     generated?: { expr: Node; stored: boolean };
     identity?: { always: boolean };
@@ -912,6 +934,7 @@ class ColumnDefImpl implements ColumnDefType {
       valueFormat: "valueFormat" in over ? over.valueFormat : this._valueFormat,
       vectorMetric: "vectorMetric" in over ? over.vectorMetric : this._vectorMetric,
       caseSensitive: "caseSensitive" in over ? over.caseSensitive : this._caseSensitive,
+      collation: "collation" in over ? over.collation : this._collation,
       mask: "mask" in over ? over.mask : this._mask,
       generated: "generated" in over ? over.generated : this._generated,
       identity: "identity" in over ? over.identity : this._identity,
@@ -1015,6 +1038,45 @@ class ColumnDefImpl implements ColumnDefType {
     return this.with({ mask: { kind: opts.kind, classification } });
   }
 
+  /** `.collation(intent)` — pin the column's comparison order to a CLOSED
+   *  intent token (`COLUMN_COLLATIONS`), never a dialect collation name. Each
+   *  refusal below mirrors one the engine's validator already makes, so an
+   *  author is told at the call site rather than after the whole migration
+   *  lowers. Returns a fresh def. */
+  collation(intent: ColumnCollation): ColumnDefImpl {
+    if (!COLUMN_COLLATIONS.includes(intent)) {
+      throw structuredError(
+        "OP_INVALID",
+        `t.*.collation(intent): intent must be one of ${COLUMN_COLLATIONS.join(" | ")}, ` +
+          `got ${JSON.stringify(intent)}`,
+        { collation: intent },
+      );
+    }
+    if (!collatableColumnType(this._type)) {
+      throw structuredError(
+        "OP_INVALID",
+        "t.*.collation(intent): a collation orders text and has no meaning on this " +
+          "column's type; declare the column as t.text() or t.string()",
+        { type: this._type },
+      );
+    }
+    if (this._caseSensitive === false) {
+      throw structuredError(
+        "OP_INVALID",
+        "t.*.collation(intent): a bytewise collation and caseSensitive:false are " +
+          "contradictory orderings, not composable ones",
+      );
+    }
+    if (this._valueFormat !== undefined) {
+      throw structuredError(
+        "OP_INVALID",
+        "t.*.collation(intent): a value format already pins the column's comparison " +
+          "order; drop the collation",
+      );
+    }
+    return this.with({ collation: intent });
+  }
+
   generated(expr: GeneratedColumnExprFn | ExprChainType | Expr, opts?: GeneratedOptions): ColumnDefImpl {
     if (opts !== undefined && (opts === null || typeof opts !== "object")) {
       throw structuredError("OP_INVALID", "t.*.generated(expr, opts): opts must be { virtual?: boolean }");
@@ -1057,22 +1119,21 @@ class ColumnDefImpl implements ColumnDefType {
       // which never emits a separate UNIQUE for the PK column).
       unique: this._unique && !this._primaryKey ? true : undefined,
       // Carry the semantic facets onto the wire IrColumn (camelCase keys
-      // `valueFormat`/`references`/`vectorMetric`/`mask`). Absent ⇒ omitted, so a
-      // plain column is byte-identical to the pre-facet image (checksum-neutral).
+      // `valueFormat`/`references`/`vectorMetric`/`collation`/`mask`). Absent ⇒
+      // omitted, so a plain column is byte-identical to the pre-facet image
+      // (checksum-neutral).
       valueFormat: this._valueFormat,
       references: this._reference,
       vectorMetric: this._vectorMetric,
       caseSensitive: this._caseSensitive === false ? false : undefined,
+      collation: this._collation,
       mask: this._mask,
       generated: this._generated,
       identity: this._identity,
     });
   }
   __toAddColumnTail(): Node {
-    rejectColumnReferenceFacet(
-      this,
-      ".column(name).add({ type }): typed references are not a lifecycle operation",
-    );
+    rejectCreateTableOnlyFacets(this, ".column(name).add({ type })");
     return compact({
       type: this._type,
       nullable: this._nullable === false ? false : undefined,
@@ -1093,11 +1154,25 @@ function isColumnDef(x: unknown): x is ColumnDefImpl {
   return x instanceof ColumnDefImpl;
 }
 
-function rejectColumnReferenceFacet(def: ColumnDefImpl, where: string): void {
+/** Refuse the facets only a `table(...).create({ columns })` column can carry.
+ *
+ *  `Op::AddColumn` is flat and has no slot for either, and `Op::SetColumnType`
+ *  carries a bare `ColType`; a nested type position (`t.encrypted({ of })`,
+ *  `domain(...).create({ as })`) reduces its argument to that `ColType` too. So
+ *  the choice at these positions is refuse or silently drop, and a dropped facet
+ *  is a column that reads as referencing or collated in the migration source and
+ *  is neither in the database. */
+function rejectCreateTableOnlyFacets(def: ColumnDefImpl, where: string): void {
   if (def._reference !== undefined) {
     throw structuredError(
       "OP_INVALID",
       `${where} cannot use a .references() ColumnDef; typed references are supported only in table(...).create({ columns })`,
+    );
+  }
+  if (def._collation !== undefined) {
+    throw structuredError(
+      "OP_INVALID",
+      `${where} cannot use a .collation() ColumnDef; column collations are supported only in table(...).create({ columns })`,
     );
   }
 }
@@ -1782,7 +1857,7 @@ export const t: TypeLexicon = {
   encrypted: (arg) => {
     const inner = arg && typeof arg === "object" && "of" in arg ? (arg as { of: unknown }).of : arg;
     if (isColumnDef(inner)) {
-      rejectColumnReferenceFacet(inner, "t.encrypted({ of })");
+      rejectCreateTableOnlyFacets(inner, "t.encrypted({ of })");
     }
     const innerType = isColumnDef(inner) ? inner._type : (inner as ColType);
     if (innerType === undefined) {
@@ -1794,7 +1869,7 @@ export const t: TypeLexicon = {
 
 function colTypeOf(typeArg: ColumnDefType | ColType): ColType {
   if (isColumnDef(typeArg)) {
-    rejectColumnReferenceFacet(typeArg, "this lifecycle or nested type position");
+    rejectCreateTableOnlyFacets(typeArg, "this lifecycle or nested type position");
     return typeArg._type;
   }
   return typeArg as ColType;
