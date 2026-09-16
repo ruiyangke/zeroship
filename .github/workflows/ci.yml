@@ -286,7 +286,6 @@ jobs:
           set -e
           tests/lib_binary_freshness_selftest.sh
           tests/lib_scratch_db_selftest.sh
-          tests/lib_test_config_selftest.sh
           tests/lib/e2e_stack_selftest.sh
           tests/lib/known_catchall_selftest.sh
           tests/lib_gate_arms_selftest.sh

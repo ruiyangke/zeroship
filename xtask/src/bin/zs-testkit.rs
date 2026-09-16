@@ -35,7 +35,7 @@ enum OverlayCmd {
         #[arg(long)]
         key: String,
     },
-    /// Print the shell assignments `zs_test_config_load` used to export.
+    /// Print the shell assignments an overlay load exports.
     ///
     /// The four values the caller asked for arrive as a `key=value` block on
     /// stdin -- see [`overlay::Wanted::from_block`] for why not argv.
@@ -112,7 +112,7 @@ fn run_overlay(cmd: OverlayCmd) -> i32 {
     match cmd {
         OverlayCmd::Get { file, section, key } => {
             // A missing file prints nothing and succeeds, which is what the awk
-            // did: `zs_test_config_get` is a reader, and the refusal for an
+            // did: the `get` is a reader, and the refusal for an
             // absent overlay belongs to `load`, which says what to do about it.
             let document = std::fs::read_to_string(&file).unwrap_or_default();
             if let Some(value) = overlay::get(&document, &section, &key) {
