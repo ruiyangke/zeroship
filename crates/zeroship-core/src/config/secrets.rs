@@ -649,8 +649,8 @@ mod tests {
     }
 
     /// The message and the comparison must quote the SAME number. This is what
-    /// stops a future edit from moving one and not the other - the exact drift
-    /// the old text-scraping gate would have reported as a rule set of its own.
+    /// stops a future edit from moving one and not the other - a drift a gate
+    /// over the message text would read as a rule of its own.
     #[test]
     fn the_length_refusal_quotes_the_constant_it_compares_against() {
         for validate in [validate_stash_key, validate_pairwise_salt] {
