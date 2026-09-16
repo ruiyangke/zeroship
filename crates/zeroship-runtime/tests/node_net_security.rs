@@ -431,10 +431,10 @@ fn allowlist(host: &str, port: u16, max_sockets: u32, egress_ceiling_bytes: u64)
 /// evaluator in isolation.
 ///
 /// Every other rule-policy row in these suites connects to `127.0.0.1` or
-/// `169.254.169.254`, both IP literals, which skip the name phase; and until
-/// the connect path was given a resolver seam, no test could see whether it
-/// resolved at all. Both gaps are why deleting the gate from the shipped path
-/// used to leave every suite green.
+/// `169.254.169.254`, both IP literals, which skip the name phase, so without
+/// this row and the connect path's resolver seam no test could see whether a
+/// name was resolved at all - and deleting the gate from the shipped path would
+/// leave every suite green.
 ///
 /// The three arms differ from each other in ONE thing each, so a green result
 /// says which rule decided it rather than only that something refused.
@@ -654,11 +654,11 @@ return out.join("|");
 /// With dev mode OFF the SSRF floor is running and the metadata address is
 /// refused, even on a `Trusted` policy that skips rule matching.
 ///
-/// WHAT THIS DOES NOT CATCH, and where that half went. This used to loop
-/// `ZEROSHIP_DEV` over `"0"` and `""` to prove neither spelling counts as dev.
-/// Dev mode is a cached process-level cell now, so no test in this process can
-/// ask the environment twice; the spelling half is
-/// `only_exactly_one_is_dev_mode` in `crates/zeroship-runtime/src/transport/ssrf.rs`,
+/// WHAT THIS DOES NOT CATCH. The `ZEROSHIP_DEV` spelling half - that neither
+/// `"0"` nor `""` counts as dev - is not testable from this process: dev mode is
+/// a cached process-level cell, so no test here can ask the environment twice.
+/// That half is `only_exactly_one_is_dev_mode` in
+/// `crates/zeroship-runtime/src/transport/ssrf.rs`,
 /// which asks it directly and without an environment. This half asks the other
 /// question - that an off mode really does leave the floor running - which the
 /// spelling test cannot reach.
@@ -820,10 +820,10 @@ return `${{capFailure}}|${{reclaimed}}|${{cycle}}`;
 fn allowlist_denies_miss_and_rejects_broad_entries_at_config_time() {
     let _lock = lock_env();
     let _env = SettingsGuard::set(Settings { dev_mode: true, ..Settings::default() });
-    // Wildcards are not refused by a curated suffix list any more - they are
-    // not REPRESENTABLE. The `*.` form is no longer a grammar the rule parser
-    // accepts, so `*.workers.dev` cannot be written at all rather than being
-    // written and caught.
+    // Wildcards are refused because they are not REPRESENTABLE, not by a curated
+    // suffix list. The `*.` form is not a grammar the rule parser accepts, so
+    // `*.workers.dev` cannot be written at all rather than being written and
+    // caught.
     assert!(EgressRule::parse(Verdict::Accept, "*", 443).is_err());
     assert!(EgressRule::parse(Verdict::Accept, "*.workers.dev", 443).is_err());
     assert!(EgressRule::parse(Verdict::Accept, "*.neon.tech", 5432).is_err());
@@ -856,10 +856,9 @@ return new Promise((resolve) => {{
     });
     assert_eq!(result.status, 200, "unexpected status/body: {}", result.body);
     // An IP literal at a port no rule names is refused in the ADDRESS phase,
-    // so the refusal arrives on the `error` event. It used to throw from
-    // `connect()` because the old check was a boolean over the host string;
-    // an address is now decided by the same ordered phase that decides a
-    // resolved one.
+    // so the refusal arrives on the `error` event rather than throwing from
+    // `connect()`: an address is decided by the same ordered phase that decides
+    // a resolved one.
     assert!(
         result.body.contains("ERR_NET_EGRESS_DENIED"),
         "expected an egress-rule denial, got: {}",
@@ -1391,10 +1390,9 @@ return await new Promise((resolve) => {{
 /// below proves the same call succeeds once the mode is on - so the refusal is
 /// attributable to the mode and not to the call being broken.
 ///
-/// WHAT THIS DOES NOT CATCH, and where that half went. This used to loop
-/// `ZEROSHIP_DEV` over `"0"` and `""` to prove neither spelling counts as dev.
-/// That question is `only_exactly_one_is_dev_mode` in
-/// `crates/zeroship-runtime/src/transport/ssrf.rs` now; dev mode is a cached
+/// WHAT THIS DOES NOT CATCH. The `ZEROSHIP_DEV` spelling half - that neither
+/// `"0"` nor `""` counts as dev - is `only_exactly_one_is_dev_mode` in
+/// `crates/zeroship-runtime/src/transport/ssrf.rs`: dev mode is a cached
 /// process-level cell, so no test in this process can ask the environment
 /// twice.
 #[test]
