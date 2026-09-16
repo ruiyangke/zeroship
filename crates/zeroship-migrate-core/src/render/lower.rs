@@ -2484,7 +2484,7 @@ impl IrAuthor {
     /// `schema` qualifier -> else the connection [`default_schema`](Self::default_schema)
     /// -> else the dialect default (`project_schema`).
     ///
-    /// **Confined gate/render agreement (review F2).** The Confined cross-schema
+    /// **Confined gate/render agreement.** The Confined cross-schema
     /// VALIDATE gate ([`crate::model::policy::SchemaScope::permits`]) accepts an op `schema`
     /// that matches `project_schema` CASE-INSENSITIVELY (`'APP1'` passes under
     /// project `'app1'`). The render seam (`quote_ident`) is byte-verbatim, so
@@ -4565,8 +4565,8 @@ impl IrAuthor {
                     // probe reads one catalog snapshot per unit, and the fold's
                     // `DuplicateIndex` check keys on the target table's own index
                     // list, so it never asks which OTHER table owns a name. The
-                    // fold-level widening that would have closed this was rejected
-                    // on purpose (review-log F48). A hole, not a handoff.
+                    // fold-level widening that would close this is rejected
+                    // on purpose. A hole, not a handoff.
                     //
                     // Does NOT make an unguarded create idempotent in any other
                     // respect; nothing else claims to.
@@ -6294,10 +6294,10 @@ impl IrAuthor {
         // here: under Confined `Single(project_schema)` a truly foreign qualifier is
         // refused upstream, so `eff_schema == project_schema` always; under
         // a widened scope admits a gate-approved foreign schema, which flows
-        // through. So the batched-backfill executor now threads `spec.schema =
+        // through. So the batched-backfill executor threads `spec.schema =
         // eff_schema` (the executor qualifies its windowed UPDATE + anchors its
         // search_path on it and guards via its policy-derived `guard_config_for`).
-        // There is NO lower-time refusal here anymore - confinement is enforced by
+        // There is NO lower-time refusal here - confinement is enforced by
         // the scope gate, not by pinning the backfill to the project schema.
         let mut ordinary = std::collections::BTreeMap::new();
         let mut per_row = std::collections::BTreeMap::new();
@@ -8775,8 +8775,7 @@ fn render_col_ref(
 /// Both its callers ([`render_select_ast`] and [`render_join`]) are private, in this
 /// file, and several frames deep in a walk that has a `dialect` threaded through it.
 /// A POINT-OF-USE registry resolution in the middle of a walk is the one shape that
-/// does not survive the per-vendor crate split of
-/// `docs/proposals/pluggable-backends.md`, so the resolution happens at the
+/// does not survive the per-vendor crate split, so the resolution happens at the
 /// `render_view_query` door instead, where the walk enters.
 fn render_table_ref(
     table: &TableRef,

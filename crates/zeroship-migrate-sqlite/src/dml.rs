@@ -33,9 +33,8 @@ const SPLIT_PART_MAX_N: i64 = 8;
 /// `pub(crate)` rather than private because the batched-backfill executor
 /// (`crate::backend::backfill_sql`) assembles its own per-batch statements and has to
 /// bind through the same spelling the one-shot assembler reaches via
-/// [`SqliteDmlRenderer::placeholder`]. Two paths, one spelling, in the crate that owns
-/// it - the neutral contract used to carry this spelling under a vendor-named function
-/// whose only two callers were both here.
+/// [`SqliteDmlRenderer::placeholder`]. Two paths, one spelling, in the crate
+/// that owns it.
 pub(crate) fn placeholder(n: usize) -> String {
     format!("?{n}")
 }

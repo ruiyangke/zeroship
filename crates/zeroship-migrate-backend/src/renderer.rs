@@ -442,22 +442,19 @@ pub trait DmlRenderer: std::fmt::Debug + Sync {
     /// This vendor's rendering of the PRIVILEGED vendor ops - schemas, extensions,
     /// roles, grants, RLS, policies, functions and the raw escape.
     ///
-    /// # Why this is on the trait, and what it replaced
+    /// # Why this is on the trait
     ///
-    /// The engine used to reach PostgreSQL's renderer BY NAME:
-    /// `zeroship_migrate::render::vendor` re-exported `zeroship_migrate_postgres::render_vendor_op`
-    /// and `render::lower` called it directly for the privileged vendor ops. Those
-    /// op kinds never touch [`DmlRenderer::render_trigger_op`], which is exactly why
-    /// they were left behind when the two renderers went behind the contract, and
-    /// `render/vendor.rs` recorded the gap honestly rather than hiding it. This
-    /// method closes it: the vendor-op surface is now reached the same way every
-    /// other spelling decision is, through the registry.
+    /// The privileged vendor ops never touch [`DmlRenderer::render_trigger_op`],
+    /// so reaching their renderer by name - the engine calling one vendor
+    /// crate's `render_vendor_op` directly - would hard-code a vendor in core
+    /// and bypass the contract. This method puts the vendor-op surface behind
+    /// the same registry every other spelling decision goes through.
     ///
     /// # Two vendors REFUSE, and they refuse in writing
     ///
-    /// Measured rather than assumed: `zeroship-migrate-sqlite` and `zeroship-migrate-mysql`
-    /// contain no vendor-op renderer and never did, every artifact carrying one of the
-    /// sixteen op kinds is pinned to a single dialect by its
+    /// `zeroship-migrate-sqlite` and `zeroship-migrate-mysql`
+    /// contain no vendor-op renderer: every artifact carrying one of the
+    /// privileged op kinds is pinned to a single dialect by its
     /// [`DialectScope::Only`](crate::step::DialectScope::Only), and the engine's lower
     /// seam refuses a target without `Capability::PrivilegedCatalogObjects` before it
     /// ever gets here.

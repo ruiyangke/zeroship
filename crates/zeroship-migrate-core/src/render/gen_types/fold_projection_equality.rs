@@ -501,11 +501,11 @@ fn the_gate_has_the_shape_it_claims() {
 /// direction. A stream deleted from the corpus would move `measured.len()` too; a
 /// dialectal coverage change does not.
 ///
-/// What now covers the retired legs is
+/// What covers the retired legs is
 /// `crates/zeroship-migrate/tests/gen_types/gen_types_runtime_metadata_from_the_fold.rs`,
 /// `crates/zeroship-migrate/tests/gen_types/gen_types_authoring_tables_from_the_fold.rs` and
 /// `crates/zeroship-migrate/tests/gen_types/gen_types_field_defs_from_the_fold.rs`, whose goldens were captured from the
-/// walkers before they were deleted.
+/// walkers.
 const EQUAL_COMPARISONS: usize = 683;
 /// Comparisons whose two texts differ. Every one is attributed in [`DIVERGENCES`].
 ///
@@ -541,9 +541,9 @@ const FOLD_REFUSED: usize = 0;
 ///
 /// Not `==`. A whole-object comparison stops at the first difference, so a probe
 /// written that way measures the FIRST field and nothing after it -
-/// `docs/review-log.md` records a behaviour-preservation proof that passed while a
-/// comparator field was deleted, because two distinct objects always differ in `name`
-/// and no later term ever executed. Every field is compared here, and every one that
+/// a behaviour-preservation proof can pass while a
+/// comparator field is deleted, because two distinct objects always differ in `name`
+/// and no later term ever executes. Every field is compared here, and every one that
 /// differs is named.
 ///
 /// The destructuring is EXHAUSTIVE with no `..`: a field added to any of these four
@@ -915,18 +915,16 @@ fn the_folds_refusal_set_is_the_catalog_replays_refusal_set() {
         catalog_only.join("\n  ")
     );
     // THE ONE THING THE PER-OP DRIVE CAN CHANGE, and the SET assertions above cannot
-    // see it. Since the catalog rules moved into `CatalogFold::advance`, `fold` no
-    // longer runs the whole catalog replay before the authored half starts: the two
-    // halves advance on the same op, catalog first. So a stream the AUTHORED half
-    // refuses at op i and the CATALOG half refuses at some later op j now reports op
-    // i's reason where it used to report op j's. The refusal SET is unchanged either
+    // see it. The two halves advance on the same op, catalog first, so a stream the
+    // AUTHORED half refuses at op i and the CATALOG half refuses at some later op j
+    // reports op i's reason. The refusal SET is unchanged either
     // way - refusing is a disjunction over the same two predicates - which is exactly
     // why an `is_err()` comparison would pass through the change without noticing.
     //
     // UNREACHABLE ON TODAY'S CORPUS, and saying so is the point rather than an
     // admission. The assertion right above already states that
-    // `AuthoredState::advance`'s three fallible sites add nothing here; measured
-    // harder for this check, the authored half never refuses AT ALL on this corpus.
+    // `AuthoredState::advance`'s three fallible sites add nothing here; the authored
+    // half never refuses AT ALL on this corpus.
     // Neuter: give the authored `createEnum` and `createTable` sites a distinct error
     // string AND run the authored half first - both halves of what this check exists to
     // catch - and it still reports empty. So this is a GUARD, not evidence: it costs a
@@ -983,14 +981,14 @@ fn corpus_stream(name: &str) -> Vec<Op> {
         .unwrap_or_else(|| panic!("the step 1 corpus has no stream named {name}"))
 }
 
-/// **The retired `field_defs` divergence, restated as the agreement that replaced it.**
+/// **The dropped-unique un-lift hole, restated as the agreement that covers it.**
 ///
-/// This test used to assert the defect - `TODAY: the FieldDef map still calls the column
-/// unique after its constraint was dropped`. The walker that produced the map lifted a
-/// single-column `UNIQUE` onto the column descriptor and had no arm that could take it back, so
-/// `schema.runtime.json` kept describing a database the catalog did not have. The
-/// walker that produced that answer is gone, so what is left to state is
-/// that the catalog oracle and the shipped artifact now say the same thing about the
+/// The defect this family names: a `FieldDef` answer that lifts a
+/// single-column `UNIQUE` onto the column descriptor and has no arm that can take it
+/// back leaves
+/// `schema.runtime.json` describing a database the catalog does not have. What is
+/// stated here is
+/// that the catalog oracle and the shipped artifact say the same thing about the
 /// same column out of the same stream.
 ///
 /// The anchor is `fold_ops`, not this file's opinion: it is the structural oracle the
@@ -1059,19 +1057,17 @@ fn the_catalog_and_the_runtime_artifact_agree_about_a_dropped_unique_constraint(
 
 /// **The same un-lift hole, on a facet the differential corpus cannot see.**
 ///
-/// The test above found the UNIQUE half because `v_index_and_constraint` adds and then
+/// The test above pins the UNIQUE half because `v_index_and_constraint` adds and then
 /// drops one. No corpus stream drops a CHECK, so this gate is blind to the `min`/`max`
 /// half of the same hole - which is stated here rather than left for the next reader to
 /// rediscover, because "the gate is green" is only as strong as what the gate can see.
 /// The projection derives both from the constraints the model still holds, so one rule
 /// covers the whole family instead of one arm per facet.
 ///
-/// That blindness was measured rather than inherited. A
-/// sweep of the deleted walker against this projection over every prefix of the corpus
-/// AND of a carrier set written for the constraint lifecycle found FIVE divergence
-/// families where this gate had recorded ONE. The other four - the CHECK bound below,
+/// The same hole has more families than this gate can see: the CHECK bound below,
 /// a CHECK membership, a re-added column inheriting a dropped column's facets, and
-/// `dropPartition` - are pinned in `crates/zeroship-migrate/tests/gen_types/gen_types_field_defs_from_the_fold.rs`.
+/// `dropPartition` - all pinned in
+/// `crates/zeroship-migrate/tests/gen_types/gen_types_field_defs_from_the_fold.rs`.
 #[test]
 fn a_dropped_check_constraint_does_not_outlive_itself_in_the_field_def_map() {
     let ops: Vec<Op> = parse(
@@ -1139,11 +1135,11 @@ fn a_dropped_check_constraint_does_not_outlive_itself_in_the_field_def_map() {
     );
 }
 
-/// **The retired divergence's replacement, in this file: the two answers now AGREE.**
+/// **The pre-alter primary key hole, restated as an agreement.**
 ///
-/// This test used to assert the defect - `TODAY: env.db.ts declares the PRE-ALTER
-/// primary key`. The walker that produced that answer is gone, so
-/// what is left to state is that the catalog oracle and the shipped artifact now say
+/// The defect this family names: an `env.db.ts` answer that keeps declaring the
+/// PRE-ALTER primary key. What is stated here is that the catalog oracle and the
+/// shipped artifact say
 /// the same thing about the same table out of the same stream.
 ///
 /// The anchor is `fold_ops`, the structural oracle the live PostgreSQL, SQLite and
