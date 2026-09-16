@@ -66,16 +66,6 @@ pub fn run() -> Result<()> {
         cargo().args([
             "test",
             "-p",
-            "zeroship-runtime",
-            "--test",
-            "workflow_dispatch",
-        ]),
-        "workflow runtime dispatch tests",
-    )?;
-    checked(
-        cargo().args([
-            "test",
-            "-p",
             "zeroship-control",
             "--test",
             "workflow_e2e",

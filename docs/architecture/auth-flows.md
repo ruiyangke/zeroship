@@ -2842,10 +2842,11 @@ VERIFIED items, each paired with a positive live path or complete scoped search:
   `crates/zeroship-gateway/src/lib.rs:192-215`). A scoped search for `.signing_key` and
   `.prev_signing_key` under `crates/zeroship-gateway/src` found no `GateState` reads; the
   old private key therefore remains resident unnecessarily.
-- Workflow replay keeps the host-only bridge (`crates/zeroship-workflow-v8/js/dispatch.js`,
-  registered as `WORKFLOW_DISPATCH_MODULE`) beside the SDK's internal journal
-  module (`packages/workflows/src/journal.ts`). Their output readers use a host-bound
-  callback, and the control credential stays in Rust.
+- Workflow replay runs one host-only bridge (`crates/zeroship-workflow-v8/js/dispatch.js`,
+  registered as `WORKFLOW_DISPATCH_MODULE`); the SDK in `packages/workflows`
+  carries the creator-facing types and error classes and no replay engine. The
+  bridge's output reader uses a host-bound callback, and the control credential
+  stays in Rust.
 - Auth implements a non-brokered stored `client_secret_post` branch, but
   Control's registration API accepts only Basic or public `none` and both
   automatic client writers hardcode Basic

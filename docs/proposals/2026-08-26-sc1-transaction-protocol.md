@@ -581,9 +581,9 @@ durable transaction registry and no durable fence-job system, and neither is a
 deliverable of this contract. The only candidate that could force one is a
 workflow step, and the workflow layer already owns that failure mode: durable
 workflows keep a journal (`StepCheckpoint` / `StepOutcome` / `StepResult` in
-`crates/zeroship-control/src/cron/workflow_engine.rs`, `JournalStepRecord` in
-`packages/workflows/src/journal.ts`) and refuse I/O outside a journaled step by
-construction. A creator transaction inside a workflow therefore runs inside a
+`crates/zeroship-control/src/cron/workflow_engine.rs`, the row shape `wfJournal`
+normalizes in `crates/zeroship-workflow-v8/js/dispatch.js`) and refuse I/O
+outside a journaled step by construction. A creator transaction inside a workflow therefore runs inside a
 journaled step, and process death is handled by replay against that journal.
 The accepted cost is that such a transaction is **at-least-once**: if the step
 commits and the process dies before the journal records the outcome, replay
