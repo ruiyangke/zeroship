@@ -3,21 +3,10 @@
 //! WHY THIS FILE EXISTS
 //! --------------------
 //! Cargo links one executable per `tests/*.rs`, and every one of them
-//! statically links this crate, V8 and the whole dependency graph. There were
-//! 137 such files. Measured on this tree at `[profile.dev]
-//! debug = "line-tables-only"`, 2026-08-20:
-//!
-//!   before  137 integration executables, 20,371,393,640 bytes (18.97 GiB)
-//!   after   9 integration executables, 1,558,333,112 bytes (1.45 GiB)
-//!
-//! `tests/common/` was compiled once per binary that declared it (34 of them)
-//! and is now compiled once here.
-//!
-//! No test was added, dropped or renamed. Checked by keying every test on
-//! `<source file stem>::<name within the file>` - which is the old binary name
-//! plus its `--list` line before the merge, and exactly the module path
-//! `--list` prints after it - and diffing the two sorted sets: 1466 lines
-//! either side, `diff` empty.
+//! statically links this crate, V8 and the whole dependency graph. Each such
+//! file paid that link cost again, including its own copy of `tests/common/`.
+//! Merging the suite into this one target leaves a single integration
+//! executable instead of one per file.
 //!
 //! HOW TO ADD A TEST FILE
 //! ----------------------
@@ -27,7 +16,7 @@
 //!
 //! HOW TO RUN A SUBSET
 //! -------------------
-//! `cargo test -p zeroship-runtime --test <file>` no longer resolves for any
+//! `cargo test -p zeroship-runtime --test <file>` does not resolve for any
 //! file listed below - they are modules, not targets. Filter instead, and note
 //! the module path is now part of the name:
 //!
@@ -38,21 +27,21 @@
 //! `Cargo.toml` declares eight more `[[test]]` entries. None of them is an
 //! oversight:
 //!
-//!   wpt              23 `wpt_*.rs` files, merged into `tests/wpt.rs`. Their
+//!   wpt              `wpt_*.rs` files, merged into `tests/wpt.rs`. Their
 //!                    `include_str!`s read `tests/wpt/`, which is NOT tracked
-//!                    in git - `tests/setup-wpt.sh` fetches ~930 MB on demand.
+//!                    in git - `tests/setup-wpt.sh` fetches it on demand.
 //!                    A checkout that has not run it cannot compile them. Kept
 //!                    as its own target so that stays true of ONE target
 //!                    instead of every integration test in the crate.
 //!
-//!   node_realworld   the six `node_*_e2e.rs` files, merged into
+//!   node_realworld   the `node_*_e2e.rs` files, merged into
 //!                    `tests/node_realworld.rs`. They mutate process
 //!                    environment and serialise it through
 //!                    `support/node_realworld.rs::lock_env()`. Each declared
 //!                    that helper with its own `#[path]`, so merging them
-//!                    naively would compile six independent `ENV_LOCK`s and
-//!                    the mutual exclusion would be gone. The entry declares
-//!                    the helper once and the six consumers `use crate::`.
+//!                    naively would compile independent `ENV_LOCK`s and the
+//!                    mutual exclusion would be gone. The entry declares the
+//!                    helper once and the consumers `use crate::`.
 //!
 //!   dev_auth, node_net, node_net_security, node_pg_e2e, node_tls
 //!                    one target each. Every one saves, overwrites and
@@ -79,15 +68,16 @@
 //!
 //! WHAT THIS CONSOLIDATION DOES NOT PROTECT AGAINST
 //! ------------------------------------------------
-//! State that used to be per-process is now per-target. Concretely, and this
-//! is a loss of isolation, not a neutral change:
+//! State that a standalone test binary keeps per-process is per-target here.
+//! That is a loss of isolation, not a neutral change:
 //!
 //!   * `static`s are shared. A counter, a `OnceLock`, a lazily-installed hook
-//!     in one module is visible to all 102. Nothing in the tree does this
-//!     today - the audit that produced the partition above looked for
-//!     `set_var`, `set_flags_from_string`, `set_hook`, `catch_unwind`,
-//!     `should_panic` and fixed listening ports and found no other case - but
-//!     "no case today" is what the check licenses, not "cannot happen".
+//!     in one module is visible to every other module here. Nothing in the
+//!     tree does this today - the audit that produced the partition above
+//!     looked for `set_var`, `set_flags_from_string`, `set_hook`,
+//!     `catch_unwind`, `should_panic` and fixed listening ports and found no
+//!     other case - but "no case today" is what the check licenses, not
+//!     "cannot happen".
 //!
 //!   * V8 is initialised once for the whole target. The first module to call
 //!     `init_v8()` wins the flag set and the platform flavour; every later
@@ -96,35 +86,24 @@
 //!
 //!   * `ZEROSHIP_DEV` is set to "1" here and never unset. `fetch_native`,
 //!     `fetch_native_install`, `eventsource` and `websocket_e2e` each set it
-//!     one-way, and the five files that also RESTORE it were moved out to
-//!     their own targets precisely so nothing here observes it flipping back.
-//!     A new module added below that asserts the NON-dev path - SSRF blocking
-//!     loopback, say - will pass or fail depending on which of its neighbours
-//!     ran first. That is a real hazard and it is why they are listed.
+//!     one-way, and the files that also RESTORE it live in their own targets
+//!     precisely so nothing here observes it flipping back. A new module added
+//!     below that asserts the NON-dev path - SSRF blocking loopback, say - will
+//!     pass or fail depending on which of its neighbours ran first. That is a
+//!     real hazard and it is why they are listed.
 //!
-//!   * Wall-clock budgets now compete with 1368 neighbours instead of the
-//!     handful in their own file. `url_native::
-//!     search_params_iter_is_linear_not_quadratic` asserts a 2000-entry
-//!     `for-of` finishes inside 1000 ms. On the FIRST full run of this target
-//!     (2026-08-20, `/proc/loadavg` 16-19 on a shared box) it read 1291 ms and
-//!     failed. It then passed 10/10 filtered to itself out of this binary,
-//!     10/10 out of the old `url_native` binary, 5/5 in a full run of this
-//!     binary and 5/5 in a full run of the old one, so it is not
-//!     deterministic. Those clean runs also sat at a LOWER load than the
-//!     failing one, so they do not establish that the merge left its flake
-//!     rate where it was. Read a timing assertion in here as measuring a
-//!     busier machine than it used to.
+//!   * Wall-clock budgets now compete with every other module in the target.
+//!     `url_native::search_params_iter_is_linear_not_quadratic` asserts a
+//!     2000-entry `for-of` finishes inside 1000 ms. Read a timing assertion in
+//!     here as measuring a busier machine than it would in its own binary.
 //!
 //!   * One process means one abort. A module that aborts (not panics) takes
-//!     the other 101 down with it and the run reports no result for any of
-//!     them, where before it reported 136 clean targets and one crash.
+//!     the rest down with it and the run reports no result for any of them.
 //!
-//! What the empty `--list` diff proves is that no test was DROPPED. It does
-//! not prove any test still tests the same thing: a test that passes only
-//! because a neighbour already initialised something lists identically to one
-//! that stands alone. The pass-count comparison either side of the merge is
-//! the check for that, and it is a weaker instrument than it looks - it
-//! cannot distinguish "still correct" from "now passing for a new reason".
+//! An empty `--list` diff proves no test was DROPPED. It does not prove any
+//! test still tests the same thing: a test that passes only because a
+//! neighbour already initialised something lists identically to one that
+//! stands alone.
 
 mod common;
 mod zeroship_module;

@@ -1,11 +1,9 @@
-//! Regression test (review P12): `zeroship.app_audit` / `authz_decisions` are
+//! Test (review P12): `zeroship.app_audit` / `authz_decisions` are
 //! append-only — an un-flagged `DELETE` is rejected by the tamper trigger — but
 //! the sanctioned `control::cron::audit_retention` sweep (which sets
 //! `zeroship.audit_retention = 'on'`) deletes rows past the retention window.
 //!
-//! Would FAIL pre-fix: before this change the tamper trigger blocked EVERY
-//! DELETE (so the retention sweep could never remove a row), and the sweep
-//! didn't exist. Configure a migrated test database
+//! Configure a migrated test database
 //! (`zeroship_core::config::test_database_url_opt`; run
 //! `tests/provision_test_backends.sh` to provision one); skipped otherwise
 //! so this file doesn't gate CI without a DB.

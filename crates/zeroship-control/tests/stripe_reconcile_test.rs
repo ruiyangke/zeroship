@@ -619,10 +619,9 @@ async fn stripe_dispute_with_no_internal_row_is_flagged() {
 // parked row against an already-linked invoice would never promote → the cap would stay at
 // full cash forever (the platform could refund cash it never kept).
 //
-// RED pre-fix: `try_backstop_dispute` called `park_pending_dispute` whenever the linkage
-// resolved, so this test would find a `pending_disputes` row and NO `billing_disputes` row /
-// NO `dispute_debit` — every assert below fails. GREEN post-fix: the dispute is applied
-// directly and Σ(invoice_payments) tightens by the disputed amount.
+// The dispute must be applied directly and Σ(invoice_payments) must tighten by the disputed
+// amount — a parked `pending_disputes` row with no `billing_disputes` row and no
+// `dispute_debit` fails every assert below.
 // See the allow on `missed_invoice_payment_is_flagged` above.
 #[allow(clippy::await_holding_lock)]
 #[compio::test]

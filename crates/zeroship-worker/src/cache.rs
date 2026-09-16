@@ -49,10 +49,6 @@ thread_local! {
     /// [`KernelConfig`]. `create_plugins` clones the service's plugin prototype
     /// rather than minting one, so every runtime in the process shares one
     /// plugin object, one validated configuration and one live-metadata cache.
-    ///
-    /// This slot used to be `DB_URL: Option<String>` plus
-    /// `CDC_WORKER_ID: Option<String>`, and `create_plugins` built a fresh
-    /// `DbPlugin` from them - per thread, and before that per `build_runtime`.
     static DB_SERVICE: RefCell<Option<Arc<zeroship_data_v8::service::DbService>>> =
         const { RefCell::new(None) };
     /// The process-owned store is configured before worker threads start.
@@ -374,8 +370,8 @@ fn limits_without_touching_recency(cache: &AppCache, app_id: &AppId) -> Option<R
 /// costs nothing. An identifier naming a resource SHARED WITH ANOTHER TENANT -
 /// a datastore key, or a database id once databases are shared - must never
 /// enter it, because two apps under one actor that read equal values have
-/// confirmed co-residency. `docs/architecture/data-system.md:62` requires both
-/// of those ids stay internal.
+/// confirmed co-residency. `docs/architecture/data-system.md` requires both of
+/// those ids stay internal.
 ///
 /// Being unforgeable is NOT sufficient to qualify. Creator `vars` cannot shadow
 /// a worker-internal entry, which is why metering is trustworthy, but that is a
@@ -1127,17 +1123,15 @@ mod tests {
         .expect("db-service stickiness guard thread panicked");
     }
 
-    /// Phase-2 structural guard (no external services): when the kernel
-    /// config carries a DB URL, a KV URL, and a storage root, the SAME
-    /// `create_plugins` a deployed app boots against installs all four
+    /// Structural guard (no external services): when the kernel config carries
+    /// a DB URL, a KV URL, and a storage root, the SAME `create_plugins` a
+    /// deployed app boots against installs all four
     /// `env.{db,kv,storage,auth}` namespaces. This is the always-runnable
     /// complement to the redis-gated faithful dispatch test in
     /// `handler.rs` — it asserts the plugin VECTOR, the latter asserts the
     /// JS namespaces resolve + round-trip end-to-end.
     ///
-    /// Pre-Phase-2 this FAILS: `create_plugins` ignored kv/storage
-    /// entirely, so `kv` and `storage` were never in the vector. Runs on a
-    /// fresh thread so the kernel thread-locals don't leak into other
+    /// Runs on a fresh thread so the kernel thread-locals don't leak into other
     /// tests sharing this thread.
     #[test]
     fn create_plugins_registers_full_kernel_when_configured() {

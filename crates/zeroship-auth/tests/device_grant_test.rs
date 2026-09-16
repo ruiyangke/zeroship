@@ -517,10 +517,9 @@ async fn device_get_rate_limits_failed_complete_uri_guesses_by_ip() {
     .await;
 }
 
-/// Regression for the per-IP backstop path the original POST test did not cover:
-/// with no session cookie, wrong `/device` submissions must still drain
-/// `device:ip:<ip>` and throttle. Pre-fix for that coverage gap, only the
-/// signed-in `device:user_ip` bucket was asserted.
+/// With no session cookie, wrong `/device` submissions must still drain
+/// `device:ip:<ip>` and throttle; the per-IP backstop is asserted here, not
+/// only the signed-in `device:user_ip` bucket.
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn device_post_anonymous_failed_user_code_guesses_drain_ip_backstop() {
@@ -1132,16 +1131,14 @@ async fn device_user_code_redirects_anonymous_browser_to_login() {
     .await;
 }
 
-/// Regression for finding M2: `POST /device` (RFC 8628 device confirmation — an
+/// M2: `POST /device` (RFC 8628 device confirmation — an
 /// identity-conferring, state-changing grant) MUST enforce the same
 /// `__Host-zsidp_csrf` double-submit token as every sibling auth form handler.
 ///
-/// Pre-fix the handler had no CSRF check at all, so a signed-in POST carrying a
-/// valid `user_code` + session cookie but NO csrf token was accepted and
-/// completed the device grant and wrote a `device_grant` audit row — a
-/// cross-site request-forgery foothold. Post-fix the same POST is rejected with
-/// 403 and writes no grant, while a faithful double-submit POST (matching csrf
-/// cookie + field) still succeeds.
+/// A signed-in POST carrying a valid `user_code` + session cookie but NO csrf
+/// token must be rejected with 403 and write no grant and no `device_grant`
+/// audit row — otherwise the grant is a cross-site request-forgery foothold.
+/// A faithful double-submit POST (matching csrf cookie + field) must succeed.
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn device_post_requires_csrf_token() {

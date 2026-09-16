@@ -10,15 +10,6 @@ use crate::entities::cedar_string;
 /// resource for surfaces that name nothing (create an organization, list the
 /// ones you belong to, read your own account).
 ///
-/// A previous `Org` variant was deleted because it existed for exactly one
-/// caller - an operator gate probing a synthetic `Org::"zeroship_platform"` that
-/// no migration ever inserted, satisfiable only by a universal-allow policy that
-/// is also gone. The condition that file recorded for reviving it was
-/// "introducing real organizations, with rows and membership, rather than a
-/// sentinel id". [`Resource::Organization`] meets it: every id names a row in
-/// `zeroship.organizations`, and authority over it is resolved from
-/// `zeroship.organization_members` per request.
-///
 /// **Every id here is an opaque typed id** (`app_...`, `prj_...`, `org_...`),
 /// never the slug. A slug is renameable, and a policy or an audit row that
 /// referred to one would change meaning under a rename.
@@ -122,16 +113,13 @@ mod tests {
     const HOSTILE: &str = "x\"; permit (principal, action, resource);";
 
     /// Each id-bearing variant refuses a Cedar-breaking id, and the two halves
-    /// refuse it in different places. The failure this pins is the one the
-    /// catch-all arm used to allow: a variant that carries an id and checks
-    /// nothing.
+    /// refuse it in different places.
     ///
     /// For the `String` ids the refusal is [`Resource::validate_ids`]. For
     /// `App` there is no such call to make, because the value cannot be built:
     /// the hostile text is refused by [`AppId::parse`], which is the same
-    /// refusal one step earlier. Asserting the parse here rather than dropping
-    /// the case keeps `App` in this test - a variant silently absent from an
-    /// "every variant" list is exactly what the catch-all arm used to be.
+    /// refusal one step earlier. Asserting the parse here keeps `App` in this
+    /// "every variant" list, so a variant cannot be silently absent from it.
     #[test]
     fn every_id_bearing_variant_rejects_a_cedar_string_break() {
         assert!(

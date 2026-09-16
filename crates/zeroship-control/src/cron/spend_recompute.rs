@@ -118,20 +118,19 @@ impl From<RegistryError> for SpendRecomputeError {
 /// Cron entry point. A transient stream/PG error is logged and retried after
 /// the next cadence.
 ///
-/// This used to claim that "no partial snapshot is written unless the full scan
-/// completed successfully". Nothing in this function knows whether a scan
-/// completed. The drain loop's ONLY exit is `RECOMPUTE_DRAIN_EMPTY_ROUNDS`
-/// consecutive empty polls, and `replace_period_snapshot` DELETEs the whole
-/// period and rewrites it from whatever that scan happened to see - so a
-/// partial snapshot is written on every cycle that reads anything at all. The
-/// `polled == 0` guard below covers the read-nothing case and nothing else.
+/// This function does not know whether a scan completed. The drain loop's
+/// ONLY exit is `RECOMPUTE_DRAIN_EMPTY_ROUNDS` consecutive empty polls, and
+/// `replace_period_snapshot` DELETEs the whole period and rewrites it from
+/// whatever that scan happened to see - so a partial snapshot is written on
+/// every cycle that reads anything at all. The `polled == 0` guard below covers
+/// the read-nothing case and nothing else.
 ///
-/// What the empty-poll heuristic actually measures is LATENCY, not
-/// end-of-stream: the redpanda adapter returns immediately once it has any
-/// record and only blocks `poll_timeout_ms` when it has none, so three empty
-/// rounds is roughly `3 x poll_timeout_ms` of tolerance. A mid-scan fetch stall
-/// longer than that - a partition leader failover, a broker pause - reads as
-/// "the topic ended here", and the period is rewritten from the truncated read.
+/// The empty-poll heuristic measures LATENCY, not end-of-stream: the redpanda
+/// adapter returns immediately once it has any record and only blocks
+/// `poll_timeout_ms` when it has none, so three empty rounds is roughly
+/// `3 x poll_timeout_ms` of tolerance. A mid-scan fetch stall longer than that -
+/// a partition leader failover, a broker pause - reads as "the topic ended
+/// here", and the period is rewritten from the truncated read.
 ///
 /// No test can currently distinguish the two: every stream double in this
 /// repository is empty-forever once drained, so one empty poll IS end-of-stream
@@ -177,19 +176,16 @@ pub async fn run(
 /// evaluator path (`spend_reconcile::tick`, which calls
 /// `SpendEngine::evaluate_all` under its own multi-instance advisory lock).
 ///
-/// The recompute half now takes a lock too. It was the only periodic sweep in
-/// this crate without one - billing_reconcile, stripe_reconcile, billing_notify
-/// and workflow_blob_gc all single-flight - and since each replica got its own
-/// consumer group, every replica reads the COMPLETE retained stream and writes
-/// the same snapshot. Correct, but N replicas each doing O(period) work per
-/// tick with N concurrent `replace_period_snapshot` transactions contending on
-/// the same rows.
+/// The recompute half takes an advisory lock, like every other periodic sweep
+/// in this crate (billing_reconcile, stripe_reconcile, billing_notify and
+/// workflow_blob_gc all single-flight). Each replica has its own consumer
+/// group, so every replica reads the COMPLETE retained stream and would
+/// otherwise write the same snapshot: correct, but N replicas each doing
+/// O(period) work per tick with N concurrent `replace_period_snapshot`
+/// transactions contending on the same rows.
 ///
-/// ORDERING NOTE, because this lock would have been actively WRONG before the
-/// per-replica group split: under the old shared group the loser held partition
-/// assignments it would then never read, so single-flighting would have made
-/// the winner's snapshot partial. It is safe now precisely because a loser's
-/// group has no other members, so skipping its poll leaves nothing unread.
+/// Single-flighting is safe because a loser's group has no other members, so
+/// skipping its poll leaves nothing unread.
 ///
 /// The lock wraps only the recompute. `spend_reconcile::tick` keeps its own.
 #[allow(clippy::future_not_send)]
@@ -556,10 +552,9 @@ mod tests {
         );
         assert_eq!(totals.get(&(app.clone(), "requests".to_string())), Some(&100));
 
-        // Asserts the REASON, not just the refusal. Under the old `bool` this
-        // read the same as an event with no app subject or a zero value - and
-        // conflating those is what made the aggregate counter unable to show
-        // that a late retry had lost its enforcement value.
+        // Asserts the REASON, not just the refusal: a late retry that lost its
+        // enforcement value must be distinguishable from an event with no app
+        // subject or a zero value.
         assert_eq!(
             apply_event(&mut totals, &mk("evt_late", 5_000, previous + 10), period),
             Applied::OtherPeriod,

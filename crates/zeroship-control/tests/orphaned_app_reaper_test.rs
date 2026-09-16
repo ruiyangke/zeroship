@@ -300,24 +300,16 @@ async fn reaper_archives_ownerless_app_and_retains_its_bundle() {
     // IDEMPOTENCE IS ABOUT THIS APP, NOT ABOUT THE REPORT'S COUNT.
     //
     // `tick` sweeps the whole fleet: every non-system, unarchived, owner-less
-    // app past the five-minute grace, archived one at a time in a loop. This
-    // used to assert `retry.archived == 0`, which is a claim that NOTHING in the
-    // fleet became reapable while the first tick ran - and on a database that
-    // has been used, the first tick has dozens of apps to walk and takes long
-    // enough that apps created a few minutes earlier cross the grace boundary
-    // during it. A fleet count is not this test's subject and it is not stable:
-    // on a database that already holds same-aged orphans from an earlier run,
-    // some cross the grace boundary mid-tick, so the second run against one
-    // database saw a different count than the first and cascaded into this
-    // module's other cases through the poisoned `REAPER_TEST_LOCK`. Orphans
-    // crossing grace mid-tick is the reaper WORKING; nothing about that number
-    // says the orphan below was touched twice.
+    // app past the five-minute grace, archived one at a time in a loop. A fleet
+    // count is not this test's subject and is not stable: on a database that
+    // already holds same-aged orphans, some cross the grace boundary mid-tick.
+    // Orphans crossing grace mid-tick is the reaper WORKING; nothing about that
+    // number says the orphan below was touched twice.
     //
     // So the claim is made about the app the test owns, and about SELECTION
     // rather than about the count: the detection query must no longer return
-    // this id. That is the property `retry.archived == 0` was reaching for -
-    // `archived_at IS NULL` in `find_orphaned_apps` is what makes it true - and
-    // it is the half the count cannot express on its own.
+    // this id. `archived_at IS NULL` in `find_orphaned_apps` is what makes it
+    // true, and it is the half the count cannot express on its own.
     //
     // The count is not a substitute here even in principle: `archive_app`
     // writes `archived_at = COALESCE(archived_at, NOW())`, so re-archiving an
