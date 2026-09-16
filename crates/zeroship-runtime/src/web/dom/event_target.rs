@@ -518,8 +518,8 @@ pub fn dispatch_event(
 
         // Invoke the listener with `this = target_obj`. Errors
         // are swallowed via TryCatch (DOM §2.7 step 4.4 says
-        // "report an exception"; in v1 we have no console.error
-        // routing to a window-level handler, so we just absorb it
+        // "report an exception"; there is no console.error routing
+        // to a window-level handler here, so we just absorb it
         // — the exception doesn't propagate out of dispatchEvent).
         let cb_local = v8::Local::new(scope, cb_global.clone());
         {
@@ -597,7 +597,7 @@ pub fn add_internal_listener(
 /// each EventHandler attribute has at most one internal listener at a
 /// time, removing all non-capture matches for the event_name is sound
 /// and matches undici's behaviour
-/// (`undici/lib/web/websocket/websocket.js:355-445`).
+/// (`undici/lib/web/websocket/websocket.js`).
 pub fn remove_internal_listener(
     scope: &mut v8::PinScope,
     target_obj: v8::Local<v8::Object>,

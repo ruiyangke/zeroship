@@ -180,14 +180,10 @@ fn url_parse_with_base() {
     assert_eq!(s, "https://example.com/api");
 }
 
-/// M6: URL.parse should now parse the input ONCE per call. We don't
-/// have a counter to assert this directly, but we can establish a
-/// rough wall-time budget and assert URL.parse is not slower than
+/// URL.parse must parse the input ONCE per call. There is no parse
+/// counter to assert this directly, so this test establishes a
+/// rough wall-time budget and asserts URL.parse is not slower than
 /// `new URL` (the constructor is the single-parse baseline).
-///
-/// Pre-fix: URL.parse parsed twice (can_parse + new_instance). On a
-/// machine that runs the constructor in ~1µs, URL.parse ran in
-/// ~2µs. Post-fix it's ~1µs.
 #[test]
 fn url_parse_is_not_slower_than_constructor() {
     let s = run_in_v8(
@@ -897,21 +893,19 @@ fn url_search_params_live_size() {
 }
 
 // ===========================================================================
-// Cycle leak regression — C1
+// Cycle leak regression
 // ===========================================================================
 
-/// Regression for C1 (cycle leak between URL ↔ URLSearchParams Globals).
+/// Cycle-leak regression: a bound URLSearchParams must not keep its parent
+/// URL alive. URL.search_params and its SP reference each other; if both
+/// edges were strong `Global<Object>`s the pair could never be GC'd, so the
+/// SP's edge to its parent is a `Weak<Object>` and the cycle is broken.
+/// This test allocates many URL+SP pairs, drops every reference, asks V8
+/// to GC, and verifies the runtime is still healthy.
 ///
-/// Before the fix, URL.search_params held a `Global<Object>` to its SP and
-/// the SP held a `Global<Object>` to its URL. Both Globals are strong, so
-/// neither object could ever be GC'd — even after both were unreachable
-/// from JS. This test allocates many URL+SP pairs, drops every reference,
-/// asks V8 to GC, and verifies the runtime is still healthy. With the fix,
-/// SP holds a `Weak<Object>` to its parent — the cycle is broken.
-///
-/// We can't directly assert "no leak" without instrumentation, but we can
-/// allocate enough that an unfixed cycle would have observable memory
-/// pressure (many MB) over the test run.
+/// "No leak" is not directly assertable without instrumentation, but an
+/// unbroken cycle over this many allocations would show observable memory
+/// pressure over the test run.
 #[test]
 fn url_search_params_cycle_no_leak() {
     let s = run_in_v8(
@@ -931,15 +925,14 @@ fn url_search_params_cycle_no_leak() {
     assert_eq!(s, "ok");
 }
 
-/// Regression for C3 (O(n²) iteration). Each iterator next() used to
-/// re-parse the entire query string; for N entries iterating cost
-/// O(n²). The last_seen_search cache short-circuits when the parent's
-/// search is unchanged.
+/// Iteration must stay O(N): an iterator `next()` must not re-parse the
+/// entire query string per step. The `last_seen_search` cache
+/// short-circuits when the parent's search is unchanged.
 ///
-/// We can't directly assert the parse count without instrumentation,
-/// but we can assert that for-of over a large bound SP completes in
-/// reasonable wall time — quadratic blow-up at N=2000 would push
-/// well past any sane budget.
+/// The parse count is not directly assertable without instrumentation,
+/// but for-of over a large bound SP must complete in reasonable wall
+/// time — quadratic blow-up at this size would push well past any sane
+/// budget.
 #[test]
 fn search_params_iter_is_linear_not_quadratic() {
     let s = run_in_v8(
@@ -964,10 +957,9 @@ fn search_params_iter_is_linear_not_quadratic() {
     );
     let v: serde_json::Value = serde_json::from_str(&s).expect("json");
     assert_eq!(v["count"], 2000);
-    // Wide budget: 2000 entries with O(N) iteration takes <50ms in
-    // release mode; with O(N²) it would take seconds. The 1000ms
-    // bound rejects the quadratic regression while leaving slack
-    // for slow CI machines.
+    // Wide budget: linear iteration over this many entries is fast, so
+    // the bound rejects a quadratic regression while leaving slack for
+    // slow CI machines.
     let ms = v["ms"].as_i64().unwrap();
     assert!(ms < 1000, "iteration too slow ({ms} ms) — possible O(N²) regression");
 }

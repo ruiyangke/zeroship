@@ -1,13 +1,11 @@
 //! Per-project migrator-role + schema provisioning, over the raw compio
 //! `Client`.
 //!
-//! Phase F Stage 3 moved this into the service. The published `zero-migrate`
-//! engine is driver-free and no longer exports a `provision_migrator` free
-//! function (it was `&compio_postgres::Client`-typed, so it did not survive the
-//! engine's decoupling from a concrete network driver). The engine still exports
-//! [`migrator_role_name`](zeroship_migrate_postgres::role::migrator_role_name) (pure identifier
-//! derivation); this module supplies the DDL that establishes the least-privilege
-//! `migrator_<project>_<hash>` role.
+//! The published `zero-migrate` engine is driver-free, so it cannot own this
+//! DDL: it exports only
+//! [`migrator_role_name`](zeroship_migrate_postgres::role::migrator_role_name)
+//! (pure identifier derivation), and this module supplies the DDL that
+//! establishes the least-privilege `migrator_<project>_<hash>` role.
 //!
 //! The provisioning runs over the SAME raw compio `Client` the service already
 //! holds (borrowed from the [`CompioPgSession`](crate::session::CompioPgSession)
@@ -20,7 +18,7 @@
 //! - `NOSUPERUSER NOCREATEROLE NOCREATEDB NOLOGIN NOBYPASSRLS` — no escalation
 //!   surface.
 //! - OWNS the project schema (its DDL + `ALTER DEFAULT PRIVILEGES` targets work),
-//!   with `CREATE, USAGE` on it. The engine journal now lives in that same schema
+//!   with `CREATE, USAGE` on it. The engine journal lives in that same schema
 //!   under the `__zeroship_` prefix, so the migrator owns the journal too. That is
 //!   accepted: an owner's privileges are implicit and cannot be revoked away, so
 //!   the only honest position is that the record of what ran belongs to the tenant
@@ -218,21 +216,17 @@ pub async fn provision_migrator(
     )
     .await?;
 
-    // THERE IS NO STEP 5 ANY MORE, and its removal is the change rather than an
-    // omission. It used to REVOKE ALL on the meta schema from the migrator, so the
-    // journal was unforgeable by deny-by-absence. The journal now lives IN the
-    // project schema, which this role OWNS, so there is nothing left to deny:
-    // owner privileges are implicit and cannot be revoked away. A creator can
-    // destroy their own journal, which is accepted - it is their database and
-    // corrupting it breaks only them - and it is why the platform keeps its own
-    // record in `zeroship.app_schema_applies` rather than trusting this one.
+    // No REVOKE on the meta schema: the journal lives IN the project schema,
+    // which this role OWNS, so there is nothing to deny - owner privileges are
+    // implicit and cannot be revoked away. A creator can destroy their own
+    // journal, which is accepted - it is their database and corrupting it
+    // breaks only them - and it is why the platform keeps its own record in
+    // `zeroship.app_schema_applies` rather than trusting this one.
     //
-    // KEEPING IT WAS NOT MERELY VACUOUS, WHICH IS WHY THIS NOTE EXISTS. With
-    // `meta_schema == project_schema` the revoke named the PROJECT schema and
-    // undid step 4 four statements earlier, so every apply failed with
-    // `permission denied for schema <app_uuid>`. Measured 2026-08-28 against a
-    // live PostgreSQL 16: `apply_api_accepts_apps_migrate_owner_and_applies_ir_pg`
-    // answered 422 with exactly that message until this block was deleted.
+    // A revoke here would not be merely vacuous: with
+    // `meta_schema == project_schema` it would name the PROJECT schema and undo
+    // the CREATE, USAGE grant above, so every apply would fail with
+    // `permission denied for schema <app_uuid>`.
 
     // 6. Pin search_path: project schema FIRST, then extension schema(s).
     let mut path_parts = vec![proj_q.clone()];
@@ -270,12 +264,11 @@ pub async fn provision_migrator(
 /// Provision an app's creator database: its schema, the least-privilege migrator
 /// role that owns it, and the per-app RUNTIME role the worker opens it under.
 ///
-/// THE RUNTIME ROLE IS PART OF CREATING THE DATABASE, and it was not always. It
-/// used to be provisioned only by the apply path and by a domain-specific entry
-/// point beside it, so an app that never applied a creator migration had a
-/// database it could not open. The create verb now establishes every identity
-/// the database needs, and the apply path still repeats the role provisioning
-/// afterwards so tables an apply CREATED receive its grants.
+/// THE RUNTIME ROLE IS PART OF CREATING THE DATABASE: an app that never
+/// applies a creator migration must still have a database it can open. The
+/// create verb establishes every identity the database needs, and the apply
+/// path repeats the role provisioning afterwards so tables an apply CREATED
+/// receive its grants.
 ///
 /// Every step is idempotent, so a repeated create changes nothing.
 ///

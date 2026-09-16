@@ -11,11 +11,10 @@
 //!   zeroship dev init [--secrets-dir=PATH] [--env-file=PATH]
 //!   zeroship join-token --credential=PATH [--zone=NAME] [--ttl=SECONDS] [--uses=N] [--confirm=KEY]
 //!
-//! `build` and `inspect` were removed in the artifact-layout redesign —
-//! the canonical build path is now `@zeroship/vite-plugin`, which emits
-//! `.zship` archives. `deploy` uploads those archives directly to the
-//! control plane. Deploy/secret/var commands read the bearer token from
-//! `--token=TOKEN`, `ZEROSHIP_TOKEN`, or credentials saved by `zeroship login`.
+//! The canonical build path is `@zeroship/vite-plugin`, which emits `.zship`
+//! archives; `deploy` uploads those archives directly to the control plane.
+//! Deploy/secret/var commands read the bearer token from `--token=TOKEN`,
+//! `ZEROSHIP_TOKEN`, or credentials saved by `zeroship login`.
 
 use std::path::PathBuf;
 use std::sync::Arc;

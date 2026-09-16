@@ -20,11 +20,11 @@
 //!
 //! # The cycle this breaks
 //!
-//! Before the split, `render::backends::renderer` was an exhaustive `match` over
-//! the former closed dialect enum, naming `postgres::RENDERER`, `sqlite::RENDERER`
-//! and `mysql::RENDERER` - three statics in the same crate as the trait. Extract the
-//! vendors and the engine names them for its registry while they name the engine for
-//! `DmlRenderer`, `IrLowerError` and `DmlError`. Cargo refuses.
+//! A renderer registry owned by the engine would name `postgres::RENDERER`,
+//! `sqlite::RENDERER` and `mysql::RENDERER` - statics in vendor crates that
+//! themselves name the engine for `DmlRenderer`, `IrLowerError` and `DmlError`.
+//! The engine would name the vendors for its registry while they name the
+//! engine for its traits. Cargo refuses.
 //!
 //! The direction is fixed by putting the CONTRACT below both: the vendor crates
 //! depend on this crate and nothing else of the engine's, the engine depends on this
@@ -32,10 +32,10 @@
 //! backend is a fourth `[dependencies]` line and a fourth entry in the engine's
 //! `VendorSet`, with no edit to any file here.
 //!
-//! # What did NOT change
+//! # The shipping slice
 //!
-//! [`VendorSet`] remains a compile-time shipping slice, not a lazily populated
-//! global. Dispatch now looks up the open [`DialectId`](zeroship_migrate_ir::dialect::DialectId)
+//! [`VendorSet`] is a compile-time shipping slice, not a lazily populated
+//! global. Dispatch looks up the open [`DialectId`](zeroship_migrate_ir::dialect::DialectId)
 //! filed by each descriptor, so the contract contains no enum match and a fourth
 //! backend requires no contract edit. Engine callers pass that open id directly.
 
@@ -63,10 +63,11 @@ pub type GuardFactory = fn(&GuardConfig) -> Box<dyn MigrationGuard>;
 /// Build this vendor's DDL emitter for one project schema.
 ///
 /// PostgreSQL and MySQL retain the schema for ordinary qualification. SQLite emits
-/// ordinary table DDL into unqualified `main`, but retains the schema too so its
-/// capability-gated dormant FK-clause answer stays byte-identical to the former
-/// core route. A function pointer keeps the registered vendor static while each
-/// author receives an owned, schema-bound emitter.
+/// ordinary table DDL into unqualified `main`, but retains the schema too: its
+/// capability-gated dormant `fk_clause` qualifies the referenced table with it,
+/// and unreachable is not permission to change those bytes. A function pointer
+/// keeps the registered vendor static while each author receives an owned,
+/// schema-bound emitter.
 pub type DdlFactory = fn(&str) -> Box<dyn DdlEmitter>;
 
 /// Everything one backend crate exports: its capability row, its renderers,
@@ -85,12 +86,10 @@ pub type DdlFactory = fn(&str) -> Box<dyn DdlEmitter>;
 /// no advisor therefore fails to compile **in its own crate, named** - E0063 for the
 /// missing field - rather than picking one up by omission.
 ///
-/// That is the whole point of the field. It replaced a `guard_for(cfg)` function whose
-/// match on the former closed dialect enum handed both descriptor-only dialects one shared
-/// trusting guard.
-/// The match was exhaustive, so a fourth dialect broke the build - but the obvious way
-/// to fix that break was a `_ =>` arm, which would have granted every future backend
-/// the trusting path in one line and in silence. There is no such arm to add now.
+/// That is the whole point of the field. A `guard_for(cfg)` function keyed on a
+/// closed dialect enum could hand every unlisted dialect one shared trusting
+/// guard through a single `_ =>` arm, in one line and in silence. There is no
+/// such arm to add here.
 ///
 /// Making `guard` an `Option<GuardFactory>`, adding a `Default`, or marking the struct
 /// `#[non_exhaustive]` would each hand that failure mode straight back. Do none of them.
@@ -124,10 +123,10 @@ pub struct BackendVendor {
     /// Backend-owned authoring-validation facts and exact refusals.
     ///
     /// Required, never defaulted: a future backend must state its identifier,
-    /// namespace, and unsupported-shape policy in its own crate. (Its PARTITION
-    /// posture used to be one of these answers; it is now
-    /// `Capability::PartitionRelationDdl` on `descriptor`, so the render and
-    /// validate layers ask one question instead of two.)
+    /// namespace, and unsupported-shape policy in its own crate. (A backend's
+    /// PARTITION posture is `Capability::PartitionRelationDdl` on `descriptor`,
+    /// not one of these answers, so the render and validate layers ask one
+    /// question instead of two.)
     pub validation: &'static dyn ValidationPolicy,
     /// How this vendor spells schema-changing statements.
     ///
@@ -363,10 +362,9 @@ impl VendorSet {
 
     /// Validate this set's descriptors into `-ir`'s [`BackendRegistry`].
     ///
-    /// This is the composition the hard-coded `match` used to stand in for, and it
-    /// is where a duplicate or malformed id is caught - by the leaf crate's builder,
-    /// which names BOTH registrants on a collision, rather than by a rule restated
-    /// here.
+    /// This is where a duplicate or malformed id is caught - by the leaf
+    /// crate's builder, which names BOTH registrants on a collision, rather
+    /// than by a rule restated here.
     ///
     /// # Errors
     ///
