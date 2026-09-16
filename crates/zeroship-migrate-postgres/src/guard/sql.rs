@@ -41,19 +41,14 @@ use zeroship_migrate_policy::{normalize_object_name, GrantRegion, ObjectName, Sh
 // composes it. What is left HERE is everything that needs a PostgreSQL parser:
 // `SqlGuard`, the deny-walk, the classifier, the analyzers.
 //
-// `check_ir_data_security_policy` used to be the exception that pinned this crate in
-// place - dialect-neutral enforcement that nevertheless reached `pg_query::parse` for
-// a raw island. It now lives in the backend contract and asks the vendor that owns
-// the raw door, through `MigrationGuard::raw_island_escapes_rls_net_state`. The
-// PostgreSQL answer is `SqlGuard::raw_island_within_require_rls` below.
+// `check_ir_data_security_policy` lives in the backend contract and asks the vendor
+// that owns the raw door, through `MigrationGuard::raw_island_escapes_rls_net_state`.
+// The PostgreSQL answer is `SqlGuard::raw_island_within_require_rls` below.
 //
 // These are IMPORTED, not re-exported. This module's signatures name them, but a
 // caller wanting the neutral vocabulary must reach `zeroship_migrate_backend::guard` for
-// it. They were `pub use` while this file lived in `zero-migrate-guard`, where the
-// engine depended on that crate directly and the re-export was how `GuardConfig` and
-// its neighbours resolved under that crate's own path. Keeping it here would have a
-// VENDOR crate handing out the neutral seam under its own name, which is the exact
-// confusion this move exists to remove - and it was measured to have no caller.
+// it. A re-export would have a VENDOR crate handing out the neutral seam under its
+// own name, which is the confusion this arrangement exists to prevent.
 use zeroship_migrate_backend::guard::{
     data_security_rule, DeclaredCreateShape, GuardConfig, GuardError, InjectedCreateShape,
 };
@@ -105,9 +100,10 @@ fn grants_drop_object(cfg: &GuardConfig, remove_type: i32, object: Option<&Objec
 /// in the same order: the hard deny first, then membership in the `code.extension`
 /// allowlist. `code.extension` is the one capability knob whose value is a SET OF
 /// NAMES, so "holds the extension capability" and "may name THIS extension" are two
-/// different questions. The drop side used to ask the first one - a predicate over
-/// the allowlist's emptiness that took no object at all - which handed a charter
-/// authority over every extension in the database the moment it was granted one.
+/// different questions. The drop side must ask the SECOND one, "may name THIS
+/// extension", never merely whether the allowlist is empty: the coarser question
+/// would hand a charter authority over every extension in the database the moment
+/// it was granted one.
 ///
 /// # An unresolvable name refuses, it does not fall back
 ///
@@ -452,15 +448,11 @@ struct BodyScopeDecisions<'a> {
 }
 
 impl BodyScopeDecisions<'_> {
-    /// Defer to [`SchemaScope::permits`] rather than re-deciding admission here.
-    ///
-    /// This used to be a second copy of that match, and the copy had drifted: it
-    /// carried an extra arm making `Single("")` permit every schema. `Single("")` is
-    /// what `GuardConfig::schema_scope` produces for a policy that owns NO schema,
-    /// i.e. the tightest posture there is, so the body scanner admitted every
-    /// cross-tenant reference for exactly the policy that should admit none.
-    /// `Unconfined` is the variant that means "permit everything", and it has to be
-    /// chosen deliberately.
+    /// Defer to [`SchemaScope::permits`] rather than re-deciding admission here:
+    /// `Single("")` is what `GuardConfig::schema_scope` produces for a policy that
+    /// owns NO schema, i.e. the tightest posture there is, so it must not admit every
+    /// cross-tenant reference. `Unconfined` is the variant that means "permit
+    /// everything", and it has to be chosen deliberately.
     ///
     /// A `None` scope is the caller declining to confine at all; the body deny-list
     /// still runs.
@@ -531,9 +523,7 @@ impl GuardDecisions for BodyScopeDecisions<'_> {
     /// scope the injected-shape immutability rule cannot fire whatever the policy
     /// says.
     ///
-    /// This is not the unreachable-stub case that removed `effective_destructive_ops`
-    /// from this adapter. That one was deleted because nothing read it. This one IS
-    /// read: `check_body_text` re-parses the body as SQL and recurses into
+    /// This IS read: `check_body_text` re-parses the body as SQL and recurses into
     /// `check_node` for every statement AND for every embedded string literal, and
     /// `check_node` routes to `check_namespace_structural`, which owns the
     /// immutability decision. An `EXECUTE 'ALTER TABLE t RENAME COLUMN ...'` reaches
@@ -550,11 +540,6 @@ impl GuardDecisions for BodyScopeDecisions<'_> {
     /// string literal inside a view body is data that never executes. That is why the
     /// permissive answer is not a live escalation here, and it is a narrower claim than
     /// "nothing calls this".
-    ///
-    /// Measured, not reasoned: `a_rename_inside_a_view_body_literal_is_walked_but_never
-    /// _meets_the_injected_rule` in tests/guard_smoke.rs walks a rename in through a
-    /// literal. Its cross-schema arm denies, proving the literal really is parsed and
-    /// routed here; the same rename inside the scope's own schema is admitted.
     ///
     /// Still unresolved, and a public-API question rather than a local one: this is
     /// `pub`, so an embedder who calls it directly on text that is NOT gated to a single
@@ -604,12 +589,9 @@ impl SqlGuard {
     /// - [`GuardError::CrossSchema`] - a reference outside the project schema.
     /// - [`GuardError::Parse`] - unparseable SQL (deny-by-default).
     ///
-    /// There used to be a posture under which the deny-list, cross-schema and body
-    /// walks were SKIPPED entirely, leaving only `classify` + `analyze` to derive the
-    /// destructive/transactional/approval flags - a config selected it through a
-    /// root/host-set guard mode, not through anything the policy could grant. It is
-    /// gone: every config runs every walk, and how far a caller's SQL gets is decided
-    /// by the composed policy alone.
+    /// Every config runs every walk - deny-list, cross-schema and body - and how far
+    /// a caller's SQL gets is decided by the composed policy alone, never by a
+    /// root/host-set guard mode.
     pub fn check(&self, sql: &str) -> Result<GuardReport, GuardError> {
         // Non-Postgres fail-closed backstop. `SqlGuard` is the **Postgres** line-1
         // (libpg_query below); it is the PG arm of the per-engine
@@ -626,8 +608,6 @@ impl SqlGuard {
 
         // Walk the full parse tree once per statement: the data-security policy check,
         // then the deny-list / cross-schema / body walk. Both run for every config.
-        // There used to be a root/host-set posture that ran the first and skipped the
-        // second, and it is gone.
         let parsed = pg_query::parse(sql).map_err(|e| ParseError::Syntax(e.to_string()))?;
         let mut data_security_advisories = Vec::new();
         let mut class_index = 0;
@@ -675,10 +655,9 @@ impl SqlGuard {
     /// deny-list for host-reaching and privilege-escalating constructs, WITHOUT
     /// project-schema confinement.
     ///
-    /// It exists because a posture once skipped the whole belt for general SQL files,
-    /// and arbitrary SQL embedded inside otherwise structured IR still had to be
-    /// refused a host reach. That posture is gone and `render::lower` no longer routes
-    /// anything here; see [`MigrationGuard::check_raw_island_sql`], which this backs.
+    /// Arbitrary SQL embedded inside otherwise structured IR must still be refused a
+    /// host reach. `render::lower` reaches PostgreSQL's answer through
+    /// [`MigrationGuard::check_raw_island_sql`], which this backs.
     ///
     /// [`MigrationGuard::check_raw_island_sql`]: zeroship_migrate_backend::guard::MigrationGuard::check_raw_island_sql
     ///
@@ -2071,12 +2050,6 @@ impl<D: GuardDecisions> GuardWalker<'_, D> {
         // `access.role` capability - an INTERNAL guard vendor-lower rule, not an
         // operator-authorable knob. Platform holds it and is relaxed; Confined does
         // not and is denied.
-        //
-        // The condition used to carry a second conjunct: the belt-off posture was
-        // excluded from the relaxation, so a config that skipped the whole deny-list
-        // in `check()` was still denied these needles when it reached this body
-        // backstop. That posture is gone and it was the only way the conjunct could
-        // read false, so it came off with it.
         let allow_role = self
             .cfg
             .grants_global_bool(policy_registry::KEY_ACCESS_ROLE);
@@ -2230,9 +2203,9 @@ pub fn check_raw_view_body_text(
     // structured defect the PostgreSQL vendor turns into user-facing diagnostics -
     // which statement index, which dialect, what to write instead. That path owns
     // those messages; this check owns only the precondition, so the two do not
-    // compete. The engine no longer calls either one directly: it reaches
-    // PostgreSQL's answer through `ValidationPolicy::raw_view_body_refusal`, which
-    // is what stops a MySQL or SQLite body from being vetted against PG grammar.
+    // compete. The engine reaches either one through PostgreSQL's answer via
+    // `ValidationPolicy::raw_view_body_refusal`, which is what stops a MySQL or
+    // SQLite body from being vetted against PG grammar.
     let parsed = pg_query::parse(body).map_err(|_| denied(rule::VIEW_BODY_NOT_A_SELECT, raw))?;
     let [only] = parsed.protobuf.stmts.as_slice() else {
         return Err(denied(rule::VIEW_BODY_NOT_A_SELECT, raw));
@@ -2287,7 +2260,7 @@ pub enum RawViewBodyDefect {
 /// This is the WHOLE of PostgreSQL's raw-view-body posture in one call, so that
 /// the vendor seam has a single thing to delegate to and neutral core has nothing
 /// left to parse. It performs exactly the checks the engine's
-/// `validate_raw_view_body_sql` used to perform inline, in the same order, so the
+/// `validate_raw_view_body_sql` performs inline, in the same order, so the
 /// PostgreSQL path is behaviour-identical.
 ///
 /// # Errors
@@ -3647,10 +3620,10 @@ mod white_box_tests {
     use super::*;
 
     /// The body token-scan backstop's literal extractor must preserve multi-byte
-    /// UTF-8 verbatim. Pre-fix it built each literal via `bytes[j] as char`, which
-    /// truncates every non-ASCII byte to a Latin-1 codepoint - corrupting the
-    /// literal and potentially splitting a dangerous token off from its adjacent
-    /// multi-byte char so the word-scan misses it. This pins faithful extraction.
+    /// UTF-8 verbatim: `bytes[j] as char` truncates every non-ASCII byte to a
+    /// Latin-1 codepoint, which would corrupt the literal and could split a
+    /// dangerous token off from its adjacent multi-byte char so the word-scan
+    /// misses it. This pins faithful extraction.
     #[test]
     fn m3_extract_string_literals_preserves_multibyte_utf8() {
         let body = "EXECUTE 'café λ pg_read_file 名→ done'";
