@@ -91,6 +91,10 @@ zeroship-auth = { workspace = true }
 # PEM/DER fixture to a tmpdir and call `signing::load_from_path`.
 tempfile = { workspace = true }
 criterion = { workspace = true }
+# The peer-boot fixture mints deterministic Ed25519 key material. The loader
+# reads PKCS#8, so the keypair is encoded here.
+ed25519-dalek = { workspace = true, features = ["pkcs8"] }
+base64 = { workspace = true }
 
 [lints]
 workspace = true

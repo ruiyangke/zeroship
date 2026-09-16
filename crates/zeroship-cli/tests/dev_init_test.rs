@@ -603,7 +603,8 @@ fn dev_init_rejects_an_empty_pairwise_file_before_creating_siblings() {
 /// being byte-for-byte untouched, not on the text alone.
 ///
 /// Does NOT cover: whether any binary refuses to LOAD such a document. That is
-/// `tests/service_peer_boot_gate.sh`'s `forged` arm, against the real binaries.
+/// the `forged` arms in `crates/zeroship-worker/tests/peer_boot.rs` and
+/// `crates/zeroship-gateway/tests/peer_boot.rs`, against the real binaries.
 #[test]
 fn dev_init_refuses_when_two_service_key_paths_hold_the_same_key() {
     const SERVICE_KEYS: [&str; 3] = ["svc-auth.pem", "svc-control.pem", "svc-gateway.pem"];

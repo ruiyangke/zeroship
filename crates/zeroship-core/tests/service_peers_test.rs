@@ -325,7 +325,8 @@ fn a_peer_document_that_is_unset_missing_or_malformed_refuses_to_load() {
 
     // Does NOT cover whether the three `main`s CALL this loader rather than
     // building a keyring some other way. That link is
-    // `tests/service_peer_boot_gate.sh`, against the real binaries.
+    // `crates/zeroship-worker/tests/peer_boot.rs` and
+    // `crates/zeroship-gateway/tests/peer_boot.rs`, against the real binaries.
 }
 
 /// The DOCUMENT-only half of the one-key refusal: whoever loads it, refuses.
