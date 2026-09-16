@@ -331,8 +331,7 @@ fn queue_or_emit(
     // event's fate cannot disagree with the row's. A write that merely
     // overlapped someone else's transaction is in autocommit and must emit
     // immediately; queueing it would park the event on a settle path that
-    // belongs to a different unit of work (previously it was both routed
-    // onto and queued behind a stranger's transaction).
+    // belongs to a different unit of work.
     if !in_tx {
         crate::cdc::broker::emit_local(app_id, collection, op, pk, changed_columns, new_tuple);
         return;
@@ -359,7 +358,7 @@ fn value_to_logical_id(value: &Value) -> Option<String> {
 
 /// Drain `app_id`'s `pending_emits` queue and fire every queued event
 /// through the broker. Called by the transaction settle path on COMMIT.
-/// SEC-1: scoped to the committing app so one app's COMMIT can never
+/// Scoped to the committing app so one app's COMMIT can never
 /// fire a co-resident app's pre-commit events.
 pub fn drain_pending_emits_on_commit(app_id: &str) {
     let queued: Vec<zeroship_data_orm::cdc::ChangeEvent> =
@@ -1255,10 +1254,10 @@ mod tests {
     }
 
     // -------------------------------------------------------------------
-    // SEC-1 — cross-tenant transaction hijack via the thread-shared slot
+    // Cross-tenant transaction hijack via the thread-shared slot
     // -------------------------------------------------------------------
     //
-    // The worker multiplexes ~200 isolates (apps) per OS thread. When
+    // The worker multiplexes many isolates (apps) per OS thread. When
     // app A's `env.db.transaction(async () => await fetch(slow))` parks
     // its tx client across the await, a co-resident app B's plain
     // `env.db.*` call lands on the same thread-local context. `run_sql`
@@ -1446,13 +1445,12 @@ mod tests {
 
     /// A gate armed on one session must leave every other session running.
     ///
-    /// The slot used to be a process-global one-shot, taken in **every**
-    /// actor's run loop by whichever actor happened to receive the next
-    /// command. So arming it here stalled an unrelated, concurrently running
-    /// test's actor on `release_rx.recv()`, and satisfied the arming test's
-    /// `wait_until_blocked()` with that foreign command - leaving the arming
-    /// test to assert against a query that was never gated. That is a race
-    /// between tests, so it only bit when the timing lined up.
+    /// The slot must be per-session, not a process-global one-shot that any
+    /// actor's run loop can take. A global slot lets arming it here stall an
+    /// unrelated, concurrently running test's actor on `release_rx.recv()` and
+    /// satisfy the arming test's `wait_until_blocked()` with that foreign
+    /// command, leaving the test to assert against a query that was never gated -
+    /// a race between tests that only bites when the timing lines up.
     ///
     /// The gate is held for the whole probe on purpose: dropping it closes
     /// `release_tx`, which would release a wrongly-gated actor and hide the
