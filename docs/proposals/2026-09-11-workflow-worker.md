@@ -956,7 +956,7 @@ before ending a result page, so an owned page cannot conceal later missing owner
 | Manager settlement | Exact delivery fence, immutable outcome, successor jobs and associated scheduling/barrier changes. |
 | Creator acceptance | Input/event reference, run or signal acceptance, request result and publication intent. |
 | Creator execution | Frontier transition, history, waits/children, promoted payload references, committed job outcome and successor intents. |
-| Creator management | Lifecycle transition or explicit refusal, request digest, durable outcome and resulting publication intents. |
+| Creator management | Lifecycle transition or explicit refusal, request identity, durable outcome and resulting publication intents. |
 | Control retention | Deployment reclamation fence and hold mutation under the same deployment lock. |
 
 There is no distributed transaction across these owners. Durable intents,
@@ -1985,7 +1985,7 @@ and uses unique indexes for scoped domain identities.
 | Manager `management` | Job identity as `id`, with scoped job linkage. Original request and actor remain separate from the resolved job command. Required run identity and management revision, unique app/request and app/run/revision, derived `blocks_execution` and closed outcome. Queue settlement owns acknowledgement; separate run-state and inbox-ACK fields are removed. |
 | Manager `management_scopes` | Opaque typed `id`, unique app/run identity, accepted revision and settled revision. It has no creator-run foreign key. |
 | Manager `jobs` | Native operation-kind, optional run identity and optional management request identity. Validate these projections against the immutable specification and digest. Unique app/management-request supplies an independent replay anchor; the linked command supplies management revision. |
-| Creator `management_receipts` | Job identity linked to the exact job receipt, app/request uniqueness, required requested-run identity and management revision, unique app/run/revision. Retains the resolved identity digest and closed outcome. Requested-run identity has no run foreign key, so `NotFound` needs no invented run. The app/run/revision unique index also orders the applied-revision lookup, so the highest revision it holds is the fence a creator run applies against. |
+| Creator `management_receipts` | Job identity linked to the exact job receipt, app/request uniqueness, required requested-run identity and management revision, unique app/run/revision. Retains the closed outcome; the linked job receipt holds the immutable specification those projections are re-derived from. Requested-run identity has no run foreign key, so `NotFound` needs no invented run. The app/run/revision unique index also orders the applied-revision lookup, so the highest revision it holds is the fence a creator run applies against. |
 
 Creator application advances its management revision for both applied commands
 and durable lifecycle refusals. Gaps, substituted identities and unknown older

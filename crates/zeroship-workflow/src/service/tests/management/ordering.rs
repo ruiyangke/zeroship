@@ -201,6 +201,13 @@ async fn damage(store: Rc<OrmStore>) {
     )
     .await
     .remove(0);
+    let head_row = journal_rows(
+        &tx,
+        "management_receipts",
+        json!({"id":second.delivery.job.id.as_str()}),
+    )
+    .await
+    .remove(0);
     tx.commit().await.unwrap();
     damage_fields(&service, &scope, &first, &stored.0, &original).await;
     let encoded = serde_json::to_string(&JobOutcome::Completed {}).unwrap();
@@ -220,21 +227,45 @@ async fn damage(store: Rc<OrmStore>) {
     )
     .await;
     assert_eq!(scope.management_job(&first).await.unwrap(), original);
+    // The receipt retains the command verbatim, so a substituted specification
+    // is refused on the delivered job itself rather than on a projection of it.
+    let mut substituted = first.clone();
+    *substituted.command_mut() = ManagementCommand::Transition {
+        operation: RunOperation::Cancel,
+    };
+    patch(
+        &service,
+        "job_receipts",
+        first.delivery.job.id.as_str(),
+        value!({"specification":serde_json::to_string(&substituted.delivery.job).unwrap()}),
+    )
+    .await;
+    assert!(scope.management_job(&first).await.is_err());
+    assert!(scope.job_receipt(&first.delivery.job).await.is_err());
+    patch(
+        &service,
+        "job_receipts",
+        first.delivery.job.id.as_str(),
+        value!({"specification":serde_json::to_string(&first.delivery.job).unwrap()}),
+    )
+    .await;
+    assert_eq!(scope.management_job(&first).await.unwrap(), original);
     // The current head remains linked even when an older receipt is replayed.
     patch(
         &service,
         "management_receipts",
         second.delivery.job.id.as_str(),
-        value!({"digest":"damaged-head"}),
+        value!({"request_id":RequestId::mint().as_str()}),
     )
     .await;
     assert!(scope.management_job(&first).await.is_err());
-    let digest = crate::service::types::digest(&second.delivery.job).unwrap();
+    let mut restore = zeroship_data_orm::value::Map::new();
+    restore.insert("request_id".into(), head_row.0["request_id"].clone());
     patch(
         &service,
         "management_receipts",
         second.delivery.job.id.as_str(),
-        value!({"digest":digest}),
+        Value::Object(restore),
     )
     .await;
     let tx = service.begin().await.unwrap();
@@ -314,7 +345,6 @@ async fn damage_fields(
         ("request_id", value!(RequestId::mint().as_str())),
         ("run_id", value!(RunId::mint().as_str())),
         ("revision", value!(3)),
-        ("digest", value!("damaged")),
         (
             "outcome",
             value!(serde_json::to_string(&ManagementOutcome::Denied {}).unwrap()),
