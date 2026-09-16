@@ -389,11 +389,10 @@ fn collect_expected_hashes(manifest: &Manifest) -> Result<HashSet<String>, Inges
             ));
         }
         out.insert(entry.hash.clone());
-        // Compression variants are content-addressed blobs like any other, and
-        // were previously absent from this walk - so a manifest could name a
-        // `br` or `gzip` blob that was never packed, ingest cleanly, and then
-        // 500 at serve time for exactly the clients that send the matching
-        // `Accept-Encoding`.
+        // Compression variants are content-addressed blobs like any other and must
+        // be walked: otherwise a manifest could name a `br` or `gzip` blob that was
+        // never packed, ingest cleanly, and then 500 at serve time for exactly the
+        // clients that send the matching `Accept-Encoding`.
         //
         // The blob keyspace has no app partition, so an unchecked variant hash
         // is also the one place a manifest can name another app's blob and have

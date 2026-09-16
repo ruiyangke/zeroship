@@ -299,14 +299,11 @@ impl EnvStore {
         Ok(n > 0)
     }
 
-    // The bump used to live here as a separate best-effort call, justified by a
-    // comment saying workers would refetch on the next reconcile anyway. They
-    // do not: `worker/src/sync.rs` skips the env reload when the version it has
-    // matches the version the control plane reports, so a dropped bump left the
-    // worker serving the old value indefinitely while the API answered 204 and
-    // the console showed the new one. Every mutation below now carries its own
-    // bump in the same statement or the same transaction, which removes the
-    // failure mode rather than logging it.
+    // The version bump must be in the SAME statement or transaction as the
+    // mutation, never a separate best-effort call: `worker/src/sync.rs` skips the
+    // env reload when the version it has matches the version the control plane
+    // reports, so a dropped bump leaves the worker serving the old value
+    // indefinitely while the API answers 204 and the console shows the new one.
 
     // ------------------------------------------------------------------
     // Secrets (encrypted at rest)
