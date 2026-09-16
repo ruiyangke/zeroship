@@ -6,11 +6,10 @@
 
 // This module is a LEAF: configuration data and DSN parsing, nothing else.
 //
-// `Config::connect` and `Config::connect_raw` used to live here, which put the
-// crate's most depended-upon module (17 dependents) inside a 16-module
-// dependency cycle for the sake of about 55 lines. Rust allows an inherent
-// `impl` in any module of the defining crate, so those two methods now live in
-// `connect.rs` beside the code they call. The public API is unchanged.
+// `Config::connect` and `Config::connect_raw` live in `connect.rs` beside the
+// code they call: Rust allows an inherent `impl` in any module of the
+// defining crate, and keeping them here would pull this leaf into the
+// dependency cycle the connection code sits in. The public API is unchanged.
 //
 // Keep it that way: if a new method here needs `connect`, `Client`,
 // `Connection` or a TLS type, it belongs in `connect.rs` instead.
@@ -1003,10 +1002,10 @@ impl Config {
     /// Fill parameters the caller did not give from the named service.
     ///
     /// `explicit` is every key the connection string itself supplied. Those
-    /// win REGARDLESS OF ORDER - measured against libpq, where
-    /// `dbname=x service=s` and `service=s dbname=x` both select `x` - which
-    /// is why this runs after the string is fully parsed rather than at the
-    /// point the `service` key is seen.
+    /// win REGARDLESS OF ORDER - in libpq, `dbname=x service=s` and
+    /// `service=s dbname=x` both select `x` - which is why this runs after the
+    /// string is fully parsed rather than at the point the `service` key is
+    /// seen.
     fn apply_service(&mut self, explicit: &[String]) -> Result<(), Error> {
         let Some(service) = self.service.clone() else {
             return Ok(());
@@ -1150,25 +1149,19 @@ impl Config {
     /// return immediately after eviction to displace the new working set.
     ///
     /// **A capacity below the connection's working set is SLOWER than leaving
-    /// the cache disabled**, so size this against the number of distinct SQL
-    /// texts one connection actually sees, not against a round number. Measured
-    /// 2026-08-29 on PostgreSQL 18 over loopback, one connection, 2000
-    /// executions, K distinct texts cycled uniformly, microseconds per execution:
+    /// the cache disabled**: once the number of distinct texts in play exceeds
+    /// the capacity, every execution evicts and re-prepares, paying a Parse
+    /// and a Close on top of the work it would have done anyway. The crossover
+    /// is sharp - a capacity that covers the working set pays for itself, one
+    /// below it costs more than nothing - so size this against the number of
+    /// distinct SQL texts one connection actually sees, not against a round
+    /// number.
     ///
-    /// | K   | capacity 0 | capacity 32 | capacity 256 |
-    /// |-----|-----------|-------------|--------------|
-    /// | 32  | 581       | 265         | 267          |
-    /// | 64  | 581       | **885**     | 269          |
-    /// | 200 | 578       | **868**     | 270          |
-    ///
-    /// Once K exceeds the capacity every execution evicts and re-prepares,
-    /// paying a Parse and a Close on top of the work it would have done anyway.
     /// Raising [`Config::statement_cache_execution_threshold`] above 1 is the
-    /// defence: at K=200 and capacity 32, a threshold of 3 returns 601 us -
-    /// parity with the cache off - because the admission history above then
-    /// stops one-shot texts from displacing the working set. The default
-    /// threshold of 1 admits every statement immediately and leaves that
-    /// protection inert.
+    /// defence: the admission history above then stops one-shot texts from
+    /// displacing the working set and returns parity with the cache off. The
+    /// default threshold of 1 admits every statement immediately and leaves
+    /// that protection inert.
     ///
     /// The cache is disabled by default. Keep it disabled when connecting
     /// through a transaction-mode connection pooler: persistent named
@@ -1387,10 +1380,10 @@ impl Config {
     /// Sets the PostgreSQL wire-protocol version requested at startup.
     ///
     /// Defaults to [`ProtocolVersion::V3_2`], which is a DELIBERATE DIVERGENCE
-    /// from libpq: libpq 18 defaults to `3.0` and makes 3.2 opt-in. Measured
-    /// 2026-08-25 with `psql -c '\conninfo'`, which reports the negotiated
-    /// version - no protocol settings gives `3.0` against an 18.4 server that
-    /// would happily speak 3.2, while `max_protocol_version=3.2` gives `3.2`.
+    /// from libpq: libpq 18 defaults to `3.0` and makes 3.2 opt-in.
+    /// `psql -c '\conninfo'` reports the negotiated version - no protocol
+    /// settings gives `3.0` against a server that would happily speak 3.2,
+    /// while `max_protocol_version=3.2` gives `3.2`.
     ///
     /// Requesting 3.2 by default is worth the divergence because 3.2 is what
     /// carries the longer cancel key; 3.0's is a fixed 32 bits, which is
@@ -1400,11 +1393,10 @@ impl Config {
     /// peers without negotiation support may do the same; use
     /// `max_protocol_version=3.0` for those peers.
     ///
-    /// The fallback was measured in every shape this driver is deployed in,
-    /// because a default that breaks a pooler is not a default: direct to
-    /// PostgreSQL 16.14 negotiates down to 3.0, and so does PgBouncer in front
-    /// of either 16.14 or 18.4 - the pooler does not speak 3.2 and negotiates
-    /// the client down rather than refusing.
+    /// The fallback holds in every shape this driver is deployed in, because a
+    /// default that breaks a pooler is not a default: a direct server
+    /// negotiates down to 3.0, and so does PgBouncer - the pooler does not
+    /// speak 3.2 and negotiates the client down rather than refusing.
     pub fn max_protocol_version(&mut self, version: ProtocolVersion) -> &mut Config {
         self.max_protocol_version = version;
         self
@@ -1772,7 +1764,7 @@ impl Config {
 
     /// NO CALLER EVER DELIVERS THE SAME KEY TWICE, so an arm here cannot
     /// "override an earlier occurrence" and a test shaped `key=A key=B` cannot
-    /// prove that it does. Measured 2026-08-26 across all three routes:
+    /// prove that it does. All three routes:
     ///
     /// * keyword strings collapse duplicates to the LAST value - `host=a host=b`
     ///   yields ONE host, and `application_name=first application_name=second`
@@ -1787,14 +1779,10 @@ impl Config {
     /// `key=A key=B` test still passes, which reads as a proved regression
     /// guard. Two such tests are marked NON-DISCRIMINATING below.
     ///
-    /// THEY WERE NOT WRITTEN THAT WAY. The collapse arrived with
-    /// `ParsedParameters::insert`, which removes an existing key before
-    /// pushing; before it, the DSN loop called `param` once per OCCURRENCE.
-    /// Both tests were measured failing against their own fix reverted, at the
-    /// commits that introduced them - so each was a working guard that a later
-    /// refactor in the same series silently disarmed, with the suite green the
-    /// whole way. That is the durable hazard here: collapsing duplicates is
-    /// correct, and it costs coverage somewhere far from the change.
+    /// The collapse comes from `ParsedParameters::insert`, which removes an
+    /// existing key before pushing. That is the durable hazard here:
+    /// collapsing duplicates is correct, and it costs coverage somewhere far
+    /// from the change.
     ///
     /// To exercise an override now, drive the SETTER
     /// (`Config::connect_timeout`) - that path is still reachable and its
@@ -1813,13 +1801,12 @@ impl Config {
         match key {
             // An EMPTY credential means UNSET, not "a user whose name is the
             // empty string". libpq resolves `?user=` by falling back to the
-            // operating-system user -- measured: psql on
-            // `postgres://:pw@127.0.0.1/postgres` fails with
-            // `role "root" does not exist`, the OS user, never having tried an
-            // empty one. Storing `Some("")` suppressed the same `whoami`
-            // fallback in `connect_raw`, so the driver sent an empty user name
-            // the server was certain to reject, and an empty password produced
-            // "password authentication failed" where libpq says
+            // operating-system user: psql on `postgres://:pw@127.0.0.1/postgres`
+            // fails with `role "root" does not exist`, the OS user, never
+            // having tried an empty one. Storing `Some("")` would suppress the
+            // same `whoami` fallback in `connect_raw`, sending an empty user
+            // name the server is certain to reject, and an empty password
+            // would produce "password authentication failed" where libpq says
             // "no password supplied".
             "user" => {
                 self.user(value);
@@ -1835,14 +1822,14 @@ impl Config {
                 // inside an option value must be escaped with a backslash, which
                 // reads like something the client unescapes before sending. It
                 // does not: the escape travels to the server and `pg_split_opts`
-                // splits on it there. MEASURED 2026-08-26 against the review container's libpq,
-                // `options=-c search_path=a\ b` reaches the backend as ONE
-                // argument whose value contains a space (`invalid value for
-                // parameter "search_path": "a b"`), while the same string with a
-                // raw space splits into two (`invalid command-line argument for
-                // server process: b`). Had libpq unescaped client-side the first
-                // case would have split exactly like the second. So unescaping
-                // here would corrupt every escaped option.
+                // splits on it there. `options=-c search_path=a\ b` reaches the
+                // backend as ONE argument whose value contains a space
+                // (`invalid value for parameter "search_path": "a b"`), while
+                // the same string with a raw space splits into two (`invalid
+                // command-line argument for server process: b`). Had libpq
+                // unescaped client-side the first case would have split exactly
+                // like the second. So unescaping here would corrupt every
+                // escaped option.
                 self.options(value);
             }
             "fallback_application_name" => {
@@ -2015,7 +2002,7 @@ impl Config {
                 }
                 self.service(value);
             }
-            // NOT a libpq key - libpq 18.4 rejects it, measured. It exists
+            // NOT a libpq key - libpq 18.4 rejects it. It exists
             // because libpq finds the service file through the environment and
             // this driver does not, so the path has to arrive some other way,
             // and it has to arrive in the CONNECTION STRING: a service is
@@ -3053,21 +3040,21 @@ impl<'a> UrlParser<'a> {
 
     fn parse_credentials(&mut self) -> Result<(), Error> {
         // THE `@` SCAN IS BOUNDED BY `/`, because userinfo cannot appear after
-        // the path begins. Scanning the whole remainder let ANY later `@` --
-        // in a query value, most easily an application_name or a password --
-        // be read as the userinfo separator. The result was not a parse error
-        // but a redirected connection:
+        // the path begins. Scanning the whole remainder would let ANY later
+        // `@` -- in a query value, most easily an application_name or a
+        // password -- be read as the userinfo separator. The result would not
+        // be a parse error but a redirected connection:
         //
         //   postgres://127.0.0.1:5432/postgres?user=postgres&application_name=c@d
-        //     libpq: connects to 127.0.0.1, application_name is "c@d"
-        //     was:   host "d", user "127.0.0.1", password
-        //            "5432/postgres?user=postgres&application_name=c"
+        //     libpq:     connects to 127.0.0.1, application_name is "c@d"
+        //     unbounded: host "d", user "127.0.0.1", password
+        //                "5432/postgres?user=postgres&application_name=c"
         //
-        // So a string carrying `password=` in its query sent that password to a
-        // host named by whatever followed the `@`.
+        // So a string carrying `password=` in its query would send that
+        // password to a host named by whatever followed the `@`.
         //
-        // BOUNDED BY `/` ONLY, NOT BY `?`, and that is measured rather than
-        // assumed. With no path at all libpq really does scan past the query:
+        // BOUNDED BY `/` ONLY, NOT BY `?`. With no path at all libpq really
+        // does scan past the query:
         // `postgres://127.0.0.1:5432?...&application_name=a@b` fails there with
         // `could not translate host name "b"`. Stopping at `?` as well would be
         // unfaithful in the other direction.
@@ -3321,12 +3308,11 @@ impl<'a> UrlParser<'a> {
     /// RFC URI would not. An interior raw space still commonly means the two
     /// DSN syntaxes were mixed, as in
     /// `postgres://host/zeroship read_timeout=5`. libpq rejects that outright;
-    /// this crate used to fold the whole tail into the DATABASE NAME and fail
-    /// later against the server with `database "zeroship read_timeout=5" does
-    /// not exist`, which names the symptom and not the cause. Measured against
-    /// the review container's libpq on 2026-08-26: it refuses an interior raw
-    /// space in the user, host, database and a query value alike, and accepts
-    /// `%20` in each.
+    /// folding the whole tail into the DATABASE NAME would instead fail later
+    /// against the server with `database "zeroship read_timeout=5" does not
+    /// exist`, which names the symptom and not the cause. libpq refuses an
+    /// interior raw space in the user, host, database and a query value alike,
+    /// and accepts `%20` in each.
     fn trim_raw_boundary_spaces(s: &str) -> Result<&str, Error> {
         let trimmed = s.trim_matches(' ');
         if trimmed.contains(' ') {
@@ -3425,17 +3411,14 @@ mod tests {
     /// Distinct values on both sides of each pair are the whole test. Equal
     /// ones would pass for a swap.
     ///
-    /// What each side actually binds, measured rather than assumed:
-    /// `get_service_file` and the `ssl_max_protocol_version` SETTER were the
-    /// unreached ones. `get_ssl_max_protocol_version` was already covered -
-    /// mutating it also failed
-    /// `tls_protocol_bounds_parse_with_libpq_defaults_and_spelling`, which
-    /// reaches it through DSN parsing rather than the setter.
-    /// Options whose REFUSAL of a bad value never ran.
+    /// What each side binds: `get_service_file` and the
+    /// `ssl_max_protocol_version` SETTER are reached here and nowhere else.
+    /// `get_ssl_max_protocol_version` is also reached through DSN parsing by
+    /// `tls_protocol_bounds_parse_with_libpq_defaults_and_spelling`.
     ///
-    /// Eight `InvalidValue` arms in `set_parameter` were uncovered. Each is a
-    /// one-line parse away, and each guards a value that would otherwise be
-    /// taken as something reasonable:
+    /// The `InvalidValue` arms in `set_parameter` are each a one-line parse
+    /// away, and each guards a value that would otherwise be taken as
+    /// something reasonable:
     ///
     /// - an empty `passfile`, `service`, `servicefile` or `sslkeylogfile`
     ///   would read as "use the default", which for `service` means silently
@@ -3688,10 +3671,11 @@ mod tests {
             assert_eq!(config.get_connect_timeout(), None);
         }
 
-        // NON-DISCRIMINATING NOW, for the same duplicate-collapse reason; it DID
-        // fail at d51ae16ff, the commit that added it. See `Config::param`. The
-        // programmatic peer, `a_programmatic_zero_connect_timeout_is_indefinite`,
-        // still discriminates.
+        // NON-DISCRIMINATING: the duplicate-collapse described on
+        // `Config::param` means this passes even with the override arm
+        // reverted. The programmatic peer,
+        // `a_programmatic_zero_connect_timeout_is_indefinite`, still
+        // discriminates.
         #[test]
         fn a_later_indefinite_connect_timeout_clears_an_earlier_limit() {
             for value in ["0", "-1"] {
@@ -3719,7 +3703,7 @@ mod tests {
 
     /// What libpq does with `key=` - a keyword whose value is empty.
     ///
-    /// Measured against the review container's libpq with the `.invalid` host read-out
+    /// Probed from libpq with the `.invalid` host read-out
     /// (`docs/runbooks/compio-postgres-libpq-parameter-probing.md` describes the
     /// technique). The rule is per-option, not uniform: `port=` selects its
     /// compiled default, other numeric options refuse an empty value, enum
@@ -3731,8 +3715,7 @@ mod tests {
     /// for the state it is permanently in, and `prefer` explicitly permits
     /// falling back to a non-GSS connection. Refusing either rejects a
     /// connection string libpq accepts, for asking us to do what we already do
-    /// - measured 2026-08-25, libpq connects for `disable`, `prefer` and
-    /// `gssdelegation=0` alike.
+    /// - libpq connects for `disable`, `prefer` and `gssdelegation=0` alike.
     ///
     /// `require` and `gssdelegation=1` are different: they ask for something
     /// this driver genuinely will not do, so they stay refused BY NAME. That
@@ -3742,12 +3725,12 @@ mod tests {
     /// An interior raw space in a URL is a MISTAKE, and the commonest one is
     /// mixing the two DSN syntaxes: appending a keyword setting to a URL.
     ///
-    /// This crate used to accept it and fold the tail into the database name,
-    /// so `postgres://h/zeroship read_timeout=5` connected to a database
-    /// literally called `zeroship read_timeout=5` and failed at the SERVER
-    /// with `database ... does not exist`, naming the symptom rather than the
-    /// cause. That cost real debugging time. libpq refuses it up front and
-    /// says what to do instead; these pin the same behaviour.
+    /// Accepting it would fold the tail into the database name, so
+    /// `postgres://h/zeroship read_timeout=5` would connect to a database
+    /// literally called `zeroship read_timeout=5` and fail at the SERVER with
+    /// `database ... does not exist`, naming the symptom rather than the
+    /// cause. libpq refuses it up front and says what to do instead; these pin
+    /// the same behaviour.
     mod raw_spaces_in_a_url {
         use crate::Config;
 
@@ -4032,10 +4015,9 @@ mod tests {
             assert!(config.get_ports().is_empty(), "port= must not set a port");
         }
 
-        // NON-DISCRIMINATING NOW: passes with the `port` arm in `param` reverted,
-        // because duplicates collapse to the last value. It DID fail that way at
-        // 618825f82, the commit that added it; `ParsedParameters` disarmed it
-        // later. See the note on `Config::param`.
+        // NON-DISCRIMINATING: passes with the `port` arm in `param` reverted,
+        // because duplicates collapse to the last value. See the note on
+        // `Config::param`.
         #[test]
         fn a_later_empty_port_restores_the_compiled_default() {
             let config: Config = "host=x.invalid port=5455 port="
@@ -4171,10 +4153,10 @@ mod tests {
         }
     }
 
-    /// The service-precedence rule, measured against libpq: an explicitly
-    /// given key wins REGARDLESS OF ORDER, so these exercise
-    /// `Config::fill_unset` directly rather than going through the file
-    /// lookup, which reads process-wide environment variables.
+    /// The service-precedence rule, from libpq: an explicitly given key wins
+    /// REGARDLESS OF ORDER, so these exercise `Config::fill_unset` directly
+    /// rather than going through the file lookup, which reads process-wide
+    /// environment variables.
     mod service_precedence {
         use crate::Config;
 
@@ -4341,13 +4323,12 @@ mod tests {
     /// A DSN zero must reach `KeepaliveConfig` so the one conversion that
     /// drops it can.
     ///
-    /// `keepalive.rs` says the zero is dropped in `TcpKeepalive::from` because
-    /// "this is the single point every entry path passes through". It was not:
-    /// the DSN arms guarded their setters with `> 0`, so a zero never became a
-    /// value at all and `keepalives_idle` kept this crate's OWN default of two
-    /// hours - neither the failure libpq produces nor the system default
-    /// PostgreSQL documents. Only `keepalives_count` reached the conversion,
-    /// which is why only it was measured.
+    /// `keepalive.rs` drops the zero in `TcpKeepalive::from`, the single point
+    /// every entry path passes through. That only holds if the DSN arms hand
+    /// the zero over: a setter guard like `> 0` would stop a zero ever
+    /// becoming a value, and `keepalives_idle` would keep this crate's OWN
+    /// default of two hours - neither the failure libpq produces nor the
+    /// system default PostgreSQL documents.
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn a_zero_keepalive_in_a_dsn_reaches_the_conversion_that_drops_it() {
@@ -4479,10 +4460,9 @@ mod tests {
 
     /// All six libpq spellings parse, to the six distinct modes.
     ///
-    /// `allow`, `verify-ca` and `verify-full` used to be parse errors, which is
-    /// the failure this pins: a driver that rejects `verify-full` sends every
-    /// deployment that wanted the strongest setting looking for a weaker one
-    /// that parses.
+    /// A driver that rejects `verify-full` sends every deployment that wanted
+    /// the strongest setting looking for a weaker one that parses; `allow`,
+    /// `verify-ca` and `verify-full` must not be parse errors.
     #[test]
     fn all_six_sslmodes_parse() {
         for (text, expected) in [
@@ -5635,9 +5615,10 @@ mod dsn_parse_tests {
     }
 
     /// libpq spells the third keepalive knob `keepalives_count`, so a connection
-    /// string copied from the PostgreSQL documentation uses that name. We carried
-    /// tokio-postgres's `keepalives_retries` instead, and unknown keys are refused,
-    /// so such a string was rejected outright rather than tuning the probe count.
+    /// string copied from the PostgreSQL documentation uses that name. Unknown
+    /// keys are refused, so a driver carrying only tokio-postgres's
+    /// `keepalives_retries` rejects that string outright rather than tuning the
+    /// probe count.
     #[test]
     fn the_libpq_spelling_of_the_keepalive_probe_count_is_accepted() {
         for dsn in [
@@ -5650,8 +5631,9 @@ mod dsn_parse_tests {
             assert_eq!(config.get_keepalives_count(), Some(9), "for {dsn:?}");
         }
 
-        // The control, differing only in the key: the old spelling is gone rather
-        // than aliased, so it now fails the same way any unknown key does.
+        // The control, differing only in the key: the `keepalives_retries`
+        // spelling is refused rather than aliased, failing the same way any
+        // unknown key does.
         "host=h keepalives=1 keepalives_retries=9"
             .parse::<Config>()
             .expect_err("keepalives_retries survived as an alias");

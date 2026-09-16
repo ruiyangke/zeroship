@@ -434,7 +434,7 @@ impl std::ops::DerefMut for PooledConn {
 }
 
 // =====================================================================
-// Red-team regression tests (R2 — pool barriers).
+// Red-team regression tests for the pool barriers.
 //
 // These drive the REAL `Pool` against a small in-process mock Redis
 // (a `compio::net::TcpListener` speaking — or refusing to speak — raw
@@ -582,7 +582,8 @@ mod red_team_tests {
     /// but DELAYS its reply to a PING by `ping_delay` (the liveness probe).
     /// This deliberately widens the probe-`await` window so a second,
     /// concurrent `acquire()` can interleave while the first is parked in its
-    /// probe — the precondition for the FIX A over-subscription bug.
+    /// probe — the precondition for the RED-POOL-PROBE-WINDOW
+    /// over-subscription hazard.
     /// Non-PING commands are answered immediately with `reply`.
     async fn spawn_slow_ping_mock(reply: &'static [u8], ping_delay: Duration) -> String {
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind mock");
@@ -881,10 +882,10 @@ mod red_team_tests {
         .expect("pool warm-up");
         assert_eq!(pool.idle_len(), 1, "warm-up parked one (now-dead) idle conn");
 
-        // Acquire + run a command. With the fix: the dead warm conn is
-        // probed -> PING fails -> discarded -> a fresh live conn opens ->
-        // the command SUCCEEDS. Pre-fix: the dead conn is handed out and the
-        // command fails with a connection error (UnexpectedEof / reset).
+        // Acquire + run a command. The dead warm conn must be probed -> PING
+        // fails -> discarded -> a fresh live conn opens -> the command
+        // SUCCEEDS. Handing the dead conn out instead would fail the command
+        // with a connection error (UnexpectedEof / reset).
         let mut c = pool.acquire().await.expect("acquire must yield a LIVE conn");
         let v = c
             .get("k")
@@ -894,20 +895,20 @@ mod red_team_tests {
     }
 
     // -----------------------------------------------------------------
-    // FIX C — RED-POOL-PROBE-DIRTY: a liveness probe that returns Ok(()) can
+    // RED-POOL-PROBE-DIRTY: a liveness probe that returns Ok(()) can
     // still leave the conn NON-rx-empty (server pipelined a reply/push after
-    // `+PONG`, arriving in the same TCP segment). The checkout barrier
-    // (~154) and the drop barrier both refuse such a conn, but the post-probe
-    // hand-out skipped that re-check — so the leftover frame would splice into
-    // the caller's FIRST command reply (intra-acquire desync).
+    // `+PONG`, arriving in the same TCP segment). The checkout barrier (the
+    // acquire fast path) and the drop barrier both refuse such a conn, and the
+    // post-probe hand-out must re-check too — otherwise the leftover frame
+    // splices into the caller's FIRST command reply (intra-acquire desync).
     //
-    // FIX: after `ping()` returns Ok, re-apply `is_dirty() || !is_rx_empty()`;
+    // So after `ping()` returns Ok, re-apply `is_dirty() || !is_rx_empty()`;
     // if it trips, discard the conn (release its reservation) and continue —
     // exactly as a probe FAILURE does. Here the warm conn's PONG carries a
-    // trailing `$3\r\nXXX\r\n`, so the probe leaves rx dirty; the fixed pool
+    // trailing `$3\r\nXXX\r\n`, so the probe leaves rx dirty; the pool
     // discards it and hands out a clean second conn whose GET returns "hello".
-    // Pre-fix the dirty conn is handed out and `get("k")` decodes the buffered
-    // leftover ("XXX") instead of the real reply.
+    // A dirty hand-out would let `get("k")` decode the buffered leftover
+    // ("XXX") instead of the real reply.
     #[compio::test]
     async fn probe_leaving_trailing_bytes_discards_conn() {
         // Warm conn's PING answer = `+PONG\r\n` + a leftover bulk frame.
@@ -927,9 +928,9 @@ mod red_team_tests {
         assert_eq!(pool.idle_len(), 1, "warm-up parked one idle conn");
 
         // Acquire: the stale warm conn is probed -> PONG decodes but leaves
-        // `$3\r\nXXX\r\n` in rx. With the fix that conn is discarded and a
-        // fresh (clean) conn opens, so GET returns the REAL value. Without the
-        // fix the dirty conn is handed out and GET reads the buffered "XXX".
+        // `$3\r\nXXX\r\n` in rx. That conn must be discarded and a fresh
+        // (clean) conn opened, so GET returns the REAL value; a dirty hand-out
+        // would let GET read the buffered "XXX".
         let mut c = pool.acquire().await.expect("acquire a clean conn");
         let v = c
             .get("k")
@@ -945,27 +946,21 @@ mod red_team_tests {
 
     // Positive control: a HOT (recently-used) idle conn is NOT probed.
     //
-    // FIX B (was a partial tautology): the old test's only assertion was
-    // `busy_count() <= 1`, which a BROKEN hot-skip also satisfies — a wrongful
-    // probe -> discard -> reconnect path also lands at `busy == 1`. This
-    // version is DISCRIMINATING: the mock serves only its FIRST connection and
-    // tallies accepts, so a wrongful reconnect is observable two ways —
+    // `busy_count() <= 1` alone would not discriminate: a wrongful probe ->
+    // discard -> reconnect path also lands at `busy == 1`. The mock serves
+    // only its FIRST connection and tallies accepts, so a wrongful reconnect
+    // is observable two ways —
     //   (a) the reused command FAILS (the second conn is closed), and
     //   (b) the accept counter reads 2 instead of 1.
     // The correct hot-skip path reuses the first conn (no `ping()`, no
     // reconnect): the command succeeds, `idle_len()==0 && busy_count()==1`
     // while held, and exactly ONE connection was ever accepted.
     //
-    // How I confirmed it discriminates: temporarily neutering the hot-skip
-    // early-return (`if false && …` so every borrow probes) makes the test
-    // FAIL — the first borrow PINGs the lone served conn, the mock answers
+    // Neutering the hot-skip early-return so every borrow probes makes this
+    // FAIL: the first borrow PINGs the lone served conn, the mock answers
     // with the bulk reply (not `+PONG`) so `ping()` errors, the conn is
     // discarded, and the on-demand reconnect lands on conn #2 which the mock
-    // slams shut, so the very next `get` fails (and `accepted` would read 2).
-    // The OLD test could NOT catch this: against `spawn_replying_mock` (which
-    // serves every connection) a wrongful reconnect's `get` still succeeds and
-    // `busy` still settles to 1, so its lone `busy_count() <= 1` assert stayed
-    // GREEN. (Sabotage reverted; the shipped hot-skip keeps `accepted == 1`.)
+    // slams shut, so the very next `get` fails (and `accepted` reads 2).
     #[compio::test]
     async fn hot_connection_is_not_probed_on_reuse() {
         let (url, accepted) = spawn_first_conn_only_mock(b"$5\r\nhello\r\n").await;
@@ -1019,24 +1014,22 @@ mod red_team_tests {
     }
 
     // -----------------------------------------------------------------
-    // FIX A — RED-POOL-PROBE-WINDOW: the liveness probe must NOT open a
-    // window in which the pool over-subscribes `max_size`. The follow-up
-    // (11d7974c) MOVED `busy += 1` to AFTER `conn.ping().await`, so while
-    // acquire A is parked in its probe (having already popped its idle
-    // candidate out of `idle` but NOT yet reserved `busy`), a concurrent
-    // acquire B sees an empty idle stack, passes the on-demand gate
-    // (`busy < max_size`), reserves a slot, and connects. When A's probe
-    // then succeeds it does an UNCONDITIONAL `busy += 1` (the gate is on
-    // the on-demand path only), pushing `busy` past `max_size`.
+    // RED-POOL-PROBE-WINDOW: the liveness probe must NOT open a window in
+    // which the pool over-subscribes `max_size`. The reservation is claimed
+    // atomically at pop, BEFORE `conn.ping().await`: the claim moves the conn
+    // idle->busy with no intervening `.await`, so B sees the reservation and
+    // is refused (Pool exhausted) -> `busy` stays <= 1. Were `busy += 1` moved
+    // to AFTER the probe, then while acquire A is parked in its probe (having
+    // already popped its idle candidate out of `idle` but NOT yet reserved
+    // `busy`), a concurrent acquire B would see an empty idle stack, pass the
+    // on-demand gate (`busy < max_size`), reserve a slot, and connect - and
+    // A's post-probe `busy += 1` (the gate is on the on-demand path only)
+    // would push `busy` past `max_size`.
     //
     // Single-threaded compio is COOPERATIVE: distinct tasks sharing one
     // `Pool` interleave at every `.await`, so this is reachable. The mock
-    // delays its PONG to widen A's probe window deterministically.
-    //
-    // Pre-fix: `busy` reaches 2 for `max_size=1` -> RED.
-    // Post-fix (reserve atomically at pop, before the probe): the claim
-    // moves the conn idle->busy with no intervening `.await`, so B sees the
-    // reservation and is refused (Pool exhausted) -> `busy` stays <= 1.
+    // delays its PONG to widen A's probe window deterministically. A `busy`
+    // of 2 for `max_size=1` is RED.
     #[compio::test]
     async fn probe_window_does_not_oversubscribe_max_size() {
         // PING (the probe) is held back ~250ms so acquire A parks in its
@@ -1068,8 +1061,8 @@ mod red_team_tests {
             pool_a.busy_count()
         });
 
-        // Let A get firmly parked inside its probe `await` (idle now empty,
-        // but A has NOT reserved busy yet under the buggy ordering).
+        // Let A get firmly parked inside its probe `await`, with the idle
+        // stack now empty.
         compio::time::sleep(Duration::from_millis(80)).await;
         assert_eq!(
             pool.idle_len(),
@@ -1078,13 +1071,13 @@ mod red_team_tests {
         );
 
         // Acquire B, concurrently. idle is empty, so B takes the on-demand
-        // path. Under the bug it passes `busy(0) < max_size(1)`, reserves a
-        // slot and connects -> a SECOND live conn for a max_size=1 pool.
+        // path. If A's slot were not yet reserved, B would pass
+        // `busy(0) < max_size(1)`, reserve a slot and connect -> a SECOND live
+        // conn for a max_size=1 pool.
         let b_result = pool.acquire().await;
 
-        // Sample the over-subscription. Under the bug, by now A's probe has
-        // either resolved (busy incremented to 2) or is about to; give it a
-        // beat so A's post-probe `busy += 1` lands, then read the peak.
+        // Sample the over-subscription: give A's probe a beat to resolve, then
+        // read the peak busy.
         compio::time::sleep(Duration::from_millis(250)).await;
         let peak_busy = pool.busy_count();
 
@@ -1097,11 +1090,10 @@ mod red_team_tests {
              A-observed busy={a_observed} (B acquired ok? {})",
             b_result.is_ok(),
         );
-        // The discriminating post-fix contract: A's atomic claim took the lone
-        // slot while it probed, so B (idle empty, no free slot) MUST be refused
-        // with pool exhaustion rather than over-create. Pre-fix B succeeded
-        // (and `peak_busy` hit 2); this asserts the window is truly closed, not
-        // merely that the counter happened to settle low.
+        // The discriminating contract: A's atomic claim took the lone slot
+        // while it probed, so B (idle empty, no free slot) MUST be refused
+        // with pool exhaustion rather than over-create. A settled-low counter
+        // alone would not prove the window closed; the refusal does.
         assert!(
             matches!(b_result, Err(Error::Pool(_))),
             "B should be refused (pool exhausted) while A holds the only slot \
@@ -1111,8 +1103,8 @@ mod red_team_tests {
     }
 
     // -----------------------------------------------------------------
-    // FIX B - `idle_timeout` must be enforced across the WHOLE idle stack,
-    // not just its top.
+    // `idle_timeout` must be enforced across the WHOLE idle stack, not just
+    // its top.
     //
     // Idle entries are pushed with a fresh `Instant` on release, so the
     // stack is ordered oldest-first and the FRESHEST entry sits on top.

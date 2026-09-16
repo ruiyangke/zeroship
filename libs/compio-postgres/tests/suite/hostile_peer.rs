@@ -1,12 +1,10 @@
 //! What the driver does when the peer violates the protocol.
 //!
-//! `src/` carries 43 `Error::unexpected_message()` sites across nine files -
-//! grepping the bare name reports 44, but one of those is a COMMENT at
-//! connect_raw.rs:146, and three are `ok_or_else(Error::unexpected_message)`,
-//! which ARE sites despite not looking like calls -
-//! every one a place the driver says "a PostgreSQL server cannot have sent that
-//! here". Before this file nothing drove any of them: a grep of `tests/` for a
-//! bad length, an unknown tag, or `unexpected_message` returned nothing. The
+//! `src/` scatters `Error::unexpected_message()` sites across its files - a
+//! bare grep of the name miscounts both ways, catching a COMMENT and missing
+//! the `ok_or_else(Error::unexpected_message)` spellings that ARE sites
+//! despite not looking like calls - every one a place the driver says "a
+//! PostgreSQL server cannot have sent that here". This file drives them. The
 //! oversize case is the exception and is already covered elsewhere against
 //! `MAX_MESSAGE_SIZE`, so nothing here re-tests it.
 //!
@@ -20,19 +18,18 @@
 //!   3. it happened inside a watchdog, because several of these shapes are
 //!      built to hang an implementation that waits for bytes that never come.
 //!
-//! ASSERTION 1 SAID ONLY `!chain.is_empty()` UNTIL 2026-08-23 - "an error
-//! occurred". Every wrong answer in this file satisfies that, including an
-//! error the HARNESS caused, which is how the COPY family below passed with
-//! their violations removed. Each test now names the diagnosis it expects, and
-//! [`HostileOutcome::names`] looks in both places one can land.
+//! ASSERTION 1 must name the expected diagnosis - "an error occurred" is not
+//! enough. Every wrong answer satisfies that weaker bar, including an error
+//! the HARNESS caused, which lets a test pass with its own violation removed.
+//! Each test names the diagnosis it expects, and [`HostileOutcome::names`]
+//! looks in both places one can land.
 //!
-//! ASSERTION 2 IS WEAKER THAN "THE SESSION IS RETIRED", and the difference is
-//! measured, not hedged. This header used to claim retirement outright and call
-//! it the point. It is not what happens: instrumenting the helper with
-//! `client.is_closed()` on 2026-08-23 reported FALSE half a second after the
-//! error for the unknown-tag case and both DataRow cases - the driver treats
-//! those as belonging to one response, not to the session. What makes the
-//! follow-up query fail there is the scripted peer hanging up 300ms later.
+//! ASSERTION 2 IS WEAKER THAN "THE SESSION IS RETIRED". It is not what
+//! happens: for the unknown-tag case and both DataRow cases
+//! `client.is_closed()` is still false half a second after the error - the
+//! driver treats those as belonging to one response, not to the session. What
+//! makes the follow-up query fail there is the scripted peer hanging up 300ms
+//! later.
 //! Raise that sleep past `OPERATION_WATCHDOG` and all three fail on the
 //! "reusing the poisoned session hung" arm. Only
 //! `a_length_below_its_own_header_is_refused` retires by the driver's own doing
@@ -42,15 +39,14 @@
 //! Whether the other three SHOULD retire a stream the driver has lost sync with
 //! is a driver question, not a test one; it is open.
 //!
-//! WHAT THESE ACTUALLY REACH, measured rather than assumed. The unknown-tag
-//! case reports `error parsing response from server: unknown message tag
-//! \`127\``, so it is rejected by the CODEC while decoding the frame - it never
-//! reaches an `unexpected_message` site at all. The lying-length cases are the
-//! same story one layer down. But the prepare and COPY families below DO reach
-//! the state-machine cluster: all seven report `unexpected message from server`
-//! (measured 2026-08-23), as does
-//! `a_data_row_without_a_row_description_is_refused`. Eight tests on those 43
-//! sites, five on the framing and decode defences.
+//! WHAT THESE ACTUALLY REACH. The unknown-tag case reports `error parsing
+//! response from server: unknown message tag \`127\``, so it is rejected by
+//! the CODEC while decoding the frame - it never reaches an
+//! `unexpected_message` site at all. The lying-length cases are the same story
+//! one layer down. But the prepare and COPY families below DO reach the
+//! state-machine cluster: they report `unexpected message from server`, as
+//! does `a_data_row_without_a_row_description_is_refused`. Most of this file's
+//! tests sit on those sites; the rest sit on the framing and decode defences.
 //!
 //! These tests discriminate, and that was checked rather than hoped: feeding a
 //! WELL-FORMED `CommandComplete` + `ReadyForQuery` through the same helper
@@ -58,40 +54,31 @@
 //! [CommandComplete(1)]". A version of this file that passed no matter what the
 //! peer sent would be worse than nothing, because it would read as coverage.
 //!
-//! THE COPY TESTS DID EXACTLY THAT UNTIL 2026-08-23, which is why
-//! [`well_formed_copy_out`] exists as a named control rather than a habit. All
-//! three sent a `ParseComplete` the COPY batch never asked for -- it is `B E S`,
-//! measured by logging the frontend tags -- and then fell silent instead of
-//! finishing the conversation. Either one is a violation by itself, so the
-//! driver errored whatever else the response said and all three passed with
-//! their own violation REMOVED. One of them was additionally misnamed: it
-//! claimed to test a missing `ParseComplete` in a batch that contains no Parse,
-//! and what it actually drives is a missing `CopyOutResponse`.
+//! [`well_formed_copy_out`] exists as a named control rather than a habit,
+//! because a COPY test can pass with its own violation REMOVED. A scripted
+//! `ParseComplete` the COPY batch never asked for -- it is `B E S`, visible in
+//! the frontend tags -- or a peer that falls silent instead of finishing the
+//! conversation is each a violation by itself, so the driver errors whatever
+//! else the response says and the test passes having driven nothing.
 //!
 //! So: substitute the well-formed response and require the test to FAIL. That
 //! check is cheap, it is the only thing that catches this, and it belongs on
 //! every test in this file.
 //!
-//! ALL FOUR HELPERS HAVE NOW BEEN THROUGH IT, so this need not be redone:
+//! All four helpers carry the control:
 //! `hostile_response_retires_session` (the `CommandComplete` + `ReadyForQuery`
 //! result quoted above), `hostile_copy_out_retires_session` and
-//! `hostile_copy_in_retires_session` (both fixed to earn it, 2026-08-23), and
-//! `hostile_prepare_retires_session`, whose three tests were checked the same
-//! day against a well-formed `ParseComplete` + `ParameterDescription` +
-//! `NoData` + `ReadyForQuery` and all three duly failed. The prepare helper
-//! needed no change: a correct prepare reply ends in `ReadyForQuery`, so it
-//! never had the truncation problem the COPY helper did.
+//! `hostile_copy_in_retires_session`, and `hostile_prepare_retires_session`
+//! (against a well-formed `ParseComplete` + `ParameterDescription` + `NoData` +
+//! `ReadyForQuery`). The prepare control substitutes a full correct reply,
+//! because a correct prepare reply ends in `ReadyForQuery` and so has no
+//! truncation arm.
 //!
-//! AND THE COPY HALF OF IT IS NOW A TEST, not a procedure. Re-running the
-//! substitution on 2026-08-23 found `well_formed_copy_out` was DEAD CODE - it
-//! had never had a caller, so the check it documents had to be performed by
-//! hand by someone who had read the paragraph, which is how the note below it
-//! came to say the control "could not be built" and was "INCONCLUSIVE" while
-//! the function's own doc said substituting it must fail each test. Both were
-//! written on the same day and they cannot both be right; the measurement says
-//! the function's doc is. [`a_well_formed_copy_out_is_accepted`] now runs it on
-//! every `cargo test`, and the four COPY tests were re-checked by substitution:
-//! all four fail, each at its own `expect_err`.
+//! The COPY half of the control runs as a test, not a procedure: a control
+//! with no caller is performed by hand at best, so
+//! [`a_well_formed_copy_out_is_accepted`] substitutes `well_formed_copy_out`
+//! on every `cargo test`, and each COPY test must fail at its own
+//! `expect_err` when it is.
 //!
 //! The `close_notify` regressions below are the TLS cases. A peer that sends
 //! the RIGHT bytes one at a time is covered too, since "wrong bytes, promptly"
@@ -3303,10 +3290,10 @@ async fn split_write_failure_gives_buffered_dispatch_one_scheduling_turn() {
 /// What one hostile exchange reported, from BOTH places an error can land.
 ///
 /// Two fields rather than one because a framing violation does not always reach
-/// the caller. Measured on 2026-08-23: the sub-header-length case hands the
-/// query the generic `connection closed` while the real diagnosis - `invalid
-/// message length: header length < 4` - is what the connection task returns. A
-/// test that asserted only on `query` there would be asserting on a PROXY, and
+/// the caller. The sub-header-length case hands the query the generic
+/// `connection closed` while the real diagnosis - `invalid message length:
+/// header length < 4` - is what the connection task returns. A test that
+/// asserted only on `query` there would be asserting on a PROXY, and
 /// `connection closed` is exactly the string a peer that simply hung up
 /// produces, so it distinguishes nothing.
 struct HostileOutcome {
@@ -3322,9 +3309,8 @@ struct HostileOutcome {
 impl HostileOutcome {
     /// Require `needle` to appear in one of the two places an error can land.
     ///
-    /// The assertion these tests carried until 2026-08-23 was
-    /// `!chain.is_empty()` - "an error occurred", which every wrong answer in
-    /// this file also satisfies, including an error the HARNESS caused. Naming
+    /// `!chain.is_empty()` - "an error occurred" - would be satisfied by every
+    /// wrong answer in this file, including an error the HARNESS caused. Naming
     /// the diagnosis is what makes the test about the violation it substitutes.
     fn names(&self, needle: &str) {
         let connection = self.connection.as_deref().unwrap_or("<still running>");
@@ -3370,17 +3356,17 @@ async fn hostile_response_retires_session(process_id: i32, response: Vec<u8>) ->
         .expect_err("the driver accepted a malformed frame as a valid response");
 
     // (2) The session must not be handed to the next caller. READ THE LIMIT OF
-    // THIS, measured 2026-08-23: for the unknown-tag case and both DataRow
-    // cases the driver does NOT retire the session -- `client.is_closed()` is
-    // still false half a second after the error -- and what makes the follow-up
-    // fail is the peer above hanging up at 300ms. Raise that sleep past
-    // `OPERATION_WATCHDOG` and those three fail here instead, on the `Err` arm.
-    // So this arm says "the poisoned session does not serve a second query",
-    // which is true, and NOT "the driver retired it", which is the stronger
-    // claim the file header used to make on its behalf. Only
-    // `a_length_below_its_own_header_is_refused` retires by the driver's own
-    // doing, and only `a_truncated_frame_followed_by_silence_does_not_hang`
-    // (which scripts its own peer) asserts retirement directly.
+    // THIS: for the unknown-tag case and both DataRow cases the driver does
+    // NOT retire the session -- `client.is_closed()` is still false half a
+    // second after the error -- and what makes the follow-up fail is the peer
+    // above hanging up at 300ms. Raise that sleep past `OPERATION_WATCHDOG`
+    // and those three fail here instead, on the `Err` arm. So this arm says
+    // "the poisoned session does not serve a second query", which is true, and
+    // NOT "the driver retired it", which is the stronger claim it does not
+    // make. Only `a_length_below_its_own_header_is_refused` retires by the
+    // driver's own doing, and only
+    // `a_truncated_frame_followed_by_silence_does_not_hang` (which scripts its
+    // own peer) asserts retirement directly.
     let reuse = compio::time::timeout(OPERATION_WATCHDOG, client.simple_query("SELECT 2")).await;
     match reuse {
         Err(_) => panic!("reusing the poisoned session hung instead of failing"),
@@ -4574,17 +4560,17 @@ async fn a_non_marker_tls_read_error_is_not_mapped_to_eof() {
 
 /// The CONNECTION half going away must also close the session cleanly.
 ///
-/// `ConnectionRelease` (the client half) was taught to send `close_notify`
-/// first; `ConnectionDropRelease` is the guard for every connection-side exit -
+/// `ConnectionRelease` (the client half) sends `close_notify` first;
+/// `ConnectionDropRelease` is the guard for every connection-side exit -
 /// discarded without being run, `run` cancelled, the future unwound, the task
 /// returned - and the read-timeout recovery path calls its `shutdown()`
-/// deliberately. MEASURED 2026-08-25 against a live TLS server, one connection
-/// per case: dropping the CLIENT logged nothing, dropping an unrun CONNECTION
-/// logged `could not receive data from client: Connection reset by peer`.
+/// deliberately. Against a live TLS server, dropping the CLIENT logs nothing,
+/// while dropping an unrun CONNECTION without the guard logs `could not
+/// receive data from client: Connection reset by peer`.
 ///
 /// The client is kept alive here on purpose. Dropping it would fire the
-/// already-fixed client-side release and this test would pass without the
-/// guard doing anything.
+/// client-side release and this test would pass without the guard doing
+/// anything.
 #[cfg(feature = "tls")]
 #[compio::test]
 async fn dropping_an_unrun_tls_connection_sends_close_notify() {
@@ -4909,15 +4895,13 @@ async fn a_length_below_its_own_header_is_refused() {
 /// The driver must give up on its own clock rather than waiting for the rest
 /// forever.
 ///
-/// THIS TEST COULD NOT MEASURE ITS OWN NAME UNTIL 2026-08-23, and the reason is
-/// the one this file exists to catch. It went through
-/// `hostile_response_retires_session`, whose peer sleeps 300ms and then drops
-/// the socket - so the error was the EOF, arriving well inside the 2s
-/// `OPERATION_WATCHDOG`, and the test passed exactly as well for a driver with
-/// no clock of its own at all. Measured, by raising that sleep to 3000ms: the
-/// query then hung and the test failed at "the query hung instead of rejecting
-/// a malformed frame". `stub_config` sets no `read_timeout`, so the FIXTURE
-/// could not represent the difference the name asserts.
+/// This test must end on the DRIVER's clock, not the peer's. Routing it
+/// through `hostile_response_retires_session` - whose peer sleeps 300ms and
+/// then drops the socket - would let the error be the EOF, arriving well
+/// inside `OPERATION_WATCHDOG`, and the test would pass exactly as well for a
+/// driver with no clock of its own: raising that sleep past the watchdog turns
+/// it red. `stub_config` sets no `read_timeout`, so the shared FIXTURE cannot
+/// represent the difference the name asserts.
 ///
 /// So this one configures clock (3) - `Config::read_timeout`, the post-startup
 /// socket-read inactivity deadline - and holds the socket open far past it. The
@@ -5458,9 +5442,8 @@ async fn a_misplaced_message_where_ready_for_query_is_owed_is_refused() {
 // ---------------------------------------------------------------------------
 // COPY sub-protocol violations.
 //
-// `src/copy_out.rs` and `src/copy_in.rs` hold 8 of the 43 refusal sites, and
-// this file's header listed them as NOT covered. They are the last named
-// cluster. COPY has its own sub-protocol on top of the extended query one:
+// `src/copy_out.rs` and `src/copy_in.rs` hold their own refusal-site cluster.
+// COPY has its own sub-protocol on top of the extended query one:
 // ParseComplete, BindComplete, then CopyOutResponse or CopyInResponse, and only
 // then a CopyData stream. Each step is a place a mangling proxy can substitute
 // something legitimate-looking.
@@ -5470,24 +5453,18 @@ async fn a_misplaced_message_where_ready_for_query_is_owed_is_refused() {
 // a driver that resynchronises would start handing the caller bytes from frames
 // it never parsed as data.
 //
-// WHAT THESE THREE REACH, and it took a correction to get right. The first
-// version of this helper answered the FIRST frontend batch - but `copy_out(&str)`
-// prepares before it copies, so that batch is Parse, Describe, Sync. Logging the
-// frontend tags showed "PDS": the violation was answering the PREPARE, the error
-// came from prepare.rs, and no COPY code ran at all. The helper now answers the
-// prepare correctly and applies the violation to the SECOND batch, which logs as
-// "BES" - Bind, Execute, Sync. That is the copy batch.
+// WHAT THESE THREE REACH. `copy_out(&str)` prepares before it copies, so the
+// FIRST frontend batch is Parse, Describe, Sync, and answering it answers the
+// PREPARE: the error comes from prepare.rs and no COPY code runs at all. The
+// violation belongs to the SECOND batch - Bind, Execute, Sync, the copy
+// batch - so the helper answers the prepare correctly and applies the
+// violation there.
 //
-// ESTABLISHED, and this paragraph used to say the opposite. It recorded that the
-// one-variable control "could not be built", that a scripted CopyOutResponse plus
-// CopyData, CopyDone, CommandComplete and ReadyForQuery "still errors", and that
-// the control was therefore "INCONCLUSIVE rather than negative" - so read as
-// written it told the next person not to bother trying. Re-run on 2026-08-23
-// against that exact sequence ([`well_formed_copy_out`], through the same
-// [`copy_stub_server`]) it SUCCEEDS and yields `row-one\n`. All four COPY tests
-// fail when it is substituted, each at its own `expect_err`. The refusals are
-// proven necessary; the happy path is also covered against a real server by the
-// copy family in integration.rs.
+// ESTABLISHED: the one-variable control ([`well_formed_copy_out`], through the
+// same [`copy_stub_server`]) SUCCEEDS and yields `row-one\n`, and all four
+// COPY tests fail when it is substituted, each at its own `expect_err`. The
+// refusals are proven necessary; the happy path is also covered against a real
+// server by the copy family in integration.rs.
 // ---------------------------------------------------------------------------
 
 /// The peer every COPY OUT test talks to: it answers the prepare batch
@@ -5506,8 +5483,6 @@ fn copy_stub_server(process_id: i32, response: Vec<u8>) -> StubServer {
         // Sync as one batch, and only then Bind/Execute for the copy itself.
         // Answering that first batch with the violation answers the PREPARE,
         // so the error comes from prepare.rs and no COPY code runs at all.
-        // An earlier version of this helper did exactly that; logging the
-        // frontend tags showed "PDS" and settled it.
         expect_frontend_until_sync(&mut stream);
         let mut prepared = backend_frame(b'1', b"");
         let mut params = Vec::new();
@@ -5564,15 +5539,13 @@ async fn hostile_copy_out_retires_session(process_id: i32, response: Vec<u8>) ->
 
 /// Drive `copy_in` against a peer that answers the COPY batch with `response`.
 ///
-/// The COPY IN direction had NO hostile coverage: all three tests below drive
-/// COPY OUT. That is the wrong way round for where the machinery is. The IN
-/// direction is the one with the `CopyInReceiver`, the read obligation's
-/// paused/terminal states and `copy_initial_flushed`, and it is where the
-/// producer-teardown and guard-window defects were found.
+/// The IN direction is where the machinery is: the `CopyInReceiver`, the read
+/// obligation's paused/terminal states and `copy_initial_flushed`. Driving
+/// only COPY OUT would leave those states unreached.
 ///
 /// Same two-batch shape as [`hostile_copy_out_retires_session`], for the same
-/// measured reason: `copy_in(&str)` PREPARES first, so answering the first
-/// batch with the violation would only exercise `prepare.rs`.
+/// reason: `copy_in(&str)` PREPARES first, so answering the first batch with
+/// the violation would only exercise `prepare.rs`.
 async fn hostile_copy_in_retires_session(process_id: i32, response: Vec<u8>) -> String {
     use bytes::Bytes;
     use futures_util::SinkExt;
@@ -5596,10 +5569,10 @@ async fn hostile_copy_in_retires_session(process_id: i32, response: Vec<u8>) -> 
         // COMPLETE THE CONVERSATION, so the only thing wrong is `response`.
         // Without this the peer just falls silent, the client fails on the
         // truncation rather than on the violation, and the test passes even
-        // when `response` is the CORRECT `CopyInResponse` -- measured, by
-        // running exactly that as a control. The short read timeout keeps the
-        // violation path fast: there the client has already errored and will
-        // send nothing, so this drain is expected to time out.
+        // when `response` is the CORRECT `CopyInResponse`. The short read
+        // timeout keeps the violation path fast: there the client has already
+        // errored and will send nothing, so this drain is expected to time
+        // out.
         let _ = stream.set_read_timeout(Some(Duration::from_millis(200)));
         expect_frontend_until_sync(&mut stream);
         let mut completion = backend_frame(b'C', b"COPY 1\0");
@@ -5779,10 +5752,9 @@ async fn a_copy_out_response_to_a_copy_in_request_is_refused() {
     compio::time::timeout(ASYNC_WATCHDOG, async {
         // BindComplete, then the WRONG direction. Exactly the frames a correct
         // reply carries, with `H` where `G` belongs, so the direction is the
-        // only variable. Sending a `ParseComplete` here as well -- which the
-        // COPY OUT helper below does -- would be a second violation, and the
-        // measured control showed it masks this one entirely: with it present
-        // the test passed even when the direction was RIGHT.
+        // only variable. Sending a `ParseComplete` here as well would be a
+        // second violation, and a second violation masks this one entirely:
+        // with it present the test passes even when the direction is RIGHT.
         let mut response = backend_frame(b'2', b"");
         response.extend_from_slice(&backend_frame(b'H', b"\x00\x00\x00"));
         let chain = hostile_copy_in_retires_session(511, response).await;
@@ -5801,12 +5773,11 @@ async fn a_copy_out_response_to_a_copy_in_request_is_refused() {
 /// batch has already been answered.
 ///
 /// Every COPY OUT test below is this sequence with exactly one thing wrong, and
-/// that is not cosmetic. Each of these tests used to send a `ParseComplete` the
-/// COPY batch never asked for (it is `B E S`; measured by logging the frontend
-/// tags) and then fall silent instead of finishing the conversation. Either one
-/// is a violation in its own right, so the driver errored whatever else the
-/// response said, and the tests passed WITH THE VIOLATION REMOVED -- verified by
-/// substituting this function for the response and watching them keep passing.
+/// that is not cosmetic. A `ParseComplete` the COPY batch never asked for (it
+/// is `B E S`, visible in the frontend tags) or a peer that falls silent
+/// instead of finishing the conversation is each a violation in its own right:
+/// the driver errors whatever else the response says, and the test passes WITH
+/// THE VIOLATION REMOVED.
 ///
 /// Substituting this must FAIL each test. That is the check that separates a
 /// hostile-peer test from a test of its own harness.
@@ -5823,12 +5794,9 @@ fn well_formed_copy_out() -> Vec<u8> {
 
 /// THE CONTROL, RUN RATHER THAN REMEMBERED.
 ///
-/// Until 2026-08-23 [`well_formed_copy_out`] was dead code: the substitution it
-/// documents was a procedure someone was supposed to perform by hand, and the
-/// only trace of it was a paragraph. A procedure nobody runs is a claim, not a
-/// check - and the paragraph immediately above these tests said the control
-/// "could not be built" and was "INCONCLUSIVE", which was already false by the
-/// time it was written. Both failure modes have the same cure: run it.
+/// A substitution procedure someone is supposed to perform by hand is a claim,
+/// not a check, and a control without a caller rots into dead code. The cure
+/// for both is to run it.
 ///
 /// This is the same peer, the same call, the same frames as the three tests
 /// below, with nothing wrong. It must SUCCEED, and it must yield the bytes the
@@ -6893,12 +6861,12 @@ async fn a_command_timeout_whose_recovery_never_finishes_discards_the_session() 
 
     // The message above says the session was discarded; this checks it was.
     //
-    // It binds the OUTCOME, not the recovery guard: measured by adding
-    // `recovery_guard.disarm()` to the grace arm, this stays 0 and all 95
-    // hostile_peer tests still pass, because a stalled backend is kept out of
-    // the idle set by more than the guard alone. The assertions that isolate
-    // this arm are the two message checks above - only the grace arm renders
-    // that deadline. Do not read this line as a guard test.
+    // It binds the OUTCOME, not the recovery guard: disarming the guard in the
+    // grace arm leaves this at 0 with the suite still green, because a stalled
+    // backend is kept out of the idle set by more than the guard alone. The
+    // assertions that isolate this arm are the two message checks above - only
+    // the grace arm renders that deadline. Do not read this line as a guard
+    // test.
     drop(client);
     assert_eq!(
         pool.idle_count(),
