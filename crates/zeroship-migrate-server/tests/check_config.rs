@@ -8,6 +8,8 @@
 use std::path::PathBuf;
 use std::process::{Command, Output};
 
+use zeroship_core::config::{REMEDIATION_COMMAND, SERVICE_CREDENTIAL_SENTINEL};
+
 const STRONG_HEX: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
 struct Scratch(PathBuf);
@@ -177,4 +179,82 @@ fn check_config_does_not_open_secret_path_flags() {
             .and_then(serde_json::Value::as_bool),
         Some(true)
     );
+}
+
+/// A dry run with the seal key always supplied, and the optional control key
+/// supplied only when the caller provides one.
+fn dry_run(seal: &str, control: Option<&str>) -> Output {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_zeroship-migrate-server"));
+    cmd.env_clear()
+        .env("ZEROSHIP_MIGRATE_SERVER_POLICY_SEAL_KEY", seal)
+        .env(
+            "ZEROSHIP_MIGRATE_SERVER_DATABASE_URL",
+            "postgresql://unused:unused@127.0.0.1:1/unused",
+        )
+        .env(
+            "ZEROSHIP_MIGRATE_SERVER_PROVISION_DATABASE_URL",
+            "postgresql://unused:unused@127.0.0.1:1/unused",
+        )
+        .args(["--check-config", "--check-config-format", "json"]);
+    if let Some(control) = control {
+        cmd.env("ZEROSHIP_CONTROL_KEY", control);
+    }
+    cmd.output().expect("spawn zeroship-migrate-server")
+}
+
+fn combined(output: &Output) -> String {
+    format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    )
+}
+
+/// The control key is gated on being supplied at all, because this service
+/// makes no credentialed platform call: a single-VPS deployer must not be
+/// blocked on a credential for a subsystem that does not exist.
+#[test]
+fn a_launch_that_omits_the_optional_control_key_is_accepted_and_reports_the_skip() {
+    let output = dry_run(STRONG_HEX, None);
+
+    assert_success(&output);
+    let report = report(&output.stdout);
+    assert_eq!(
+        report
+            .get("service_credentials_skipped")
+            .and_then(serde_json::Value::as_u64),
+        Some(1),
+        "a silent skip is a smaller green than a reported one"
+    );
+}
+
+/// The one-variable partner for the skip: the SAME launch with the optional
+/// credential supplied as a placeholder is now checked, and refused.
+#[test]
+fn the_optional_control_key_is_checked_once_the_operator_supplies_it() {
+    let output = dry_run(STRONG_HEX, Some(SERVICE_CREDENTIAL_SENTINEL));
+
+    assert!(
+        !output.status.success(),
+        "a credential the operator DID supply was skipped instead of checked"
+    );
+}
+
+/// The seal key is the credential this service always needs, so a placeholder
+/// must be refused even where the control key is allowed to be omitted.
+#[test]
+fn a_placeholder_policy_seal_key_is_refused() {
+    let output = dry_run(SERVICE_CREDENTIAL_SENTINEL, None);
+
+    assert!(
+        !output.status.success(),
+        "the always-needed seal key accepted the placeholder"
+    );
+    let banner = combined(&output);
+    for token in [SERVICE_CREDENTIAL_SENTINEL, REMEDIATION_COMMAND, "REFUSES TO START"] {
+        assert!(
+            banner.contains(token),
+            "the sentinel banner does not name {token:?}:\n{banner}"
+        );
+    }
 }
