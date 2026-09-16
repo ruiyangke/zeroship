@@ -40,11 +40,8 @@ pub struct NextTickCallback {
 
 /// Error kind — maps to JS exception types.
 ///
-/// Used to be `Copy`; now `Clone` only because the `JsValue` variant
-/// carries a `v8::Global<v8::Value>` that's `Clone` but not `Copy`.
-/// Existing match-on-`err.kind` sites must update to `match &err.kind`
-/// (two known consumers in the runtime, swept in the same commit that
-/// introduced this variant).
+/// `Clone` but not `Copy`: the `JsValue` variant carries a
+/// `v8::Global<v8::Value>`. Match on `&err.kind`, not `err.kind`.
 #[derive(Debug, Clone)]
 pub enum OpErrorKind {
     /// `TypeError` — wrong argument types, missing arguments
@@ -291,26 +288,25 @@ pub const REQUEST_CHANNEL_CAPACITY: usize = 256;
 pub const MAX_PENDING_OPS: usize = 1024;
 
 /// Maximum number of live timers (setTimeout + setInterval) per runtime.
-/// Each timer holds a `v8::Global<v8::Function>` (~200 bytes) + a compio
-/// sleep future. Without a cap, `for(;;) setTimeout(f, 1e9)` grows memory
+/// Each timer holds a `v8::Global<v8::Function>` plus a compio sleep
+/// future, so without a cap `for(;;) setTimeout(f, 1e9)` grows memory
 /// indefinitely. 10,000 matches the V8 guideline for reasonable timer
 /// density (Chrome DevTools warns at 10K pending timers).
 pub const MAX_PENDING_TIMERS: usize = 10_000;
 
 /// Separate, tighter cap on concurrent outbound fetches per runtime/app.
 ///
-/// The shared cyper client is cross-app: if one app fires 1024 fetches at
-/// a slow upstream, it can monopolize the connection pool and the DNS
-/// resolver for every other app on the same worker thread. `MAX_PENDING_OPS`
-/// alone doesn't distinguish fetches from cheap in-memory ops, so a
-/// dedicated fetch cap is required for multi-tenant safety.
+/// The shared cyper client is cross-app: if one app fires a full
+/// `MAX_PENDING_OPS` of fetches at a slow upstream, it can monopolize the
+/// connection pool and the DNS resolver for every other app on the same
+/// worker thread. `MAX_PENDING_OPS` alone doesn't distinguish fetches from
+/// cheap in-memory ops, so a dedicated fetch cap is required for
+/// multi-tenant safety.
 ///
-/// 64 is a heuristic: the Node.js default `http.globalAgent.maxSockets`
-/// is infinity but Undici's dispatcher defaults to 128 per origin. We err
-/// lower — platform apps are expected to reach only a handful of upstreams
-/// at once, and a runaway loop (e.g. accidentally-recursive fetch) hits
-/// this cap quickly enough to give the operator a clean error instead of
-/// an OOM or a control-plane outage.
+/// The value errs low on purpose: platform apps are expected to reach only
+/// a handful of upstreams at once, and a runaway loop (e.g.
+/// accidentally-recursive fetch) hits this cap quickly enough to give the
+/// operator a clean error instead of an OOM or a control-plane outage.
 pub const MAX_PENDING_FETCHES: usize = 64;
 
 // ---------------------------------------------------------------------------
@@ -513,8 +509,8 @@ pub struct RuntimeState {
     /// fetch task is spawned, decremented when the algorithm chain
     /// returns (success or failure). Guards against one app exhausting
     /// the shared cyper client's connection pool — `MAX_PENDING_OPS`
-    /// alone would let this climb to 1024 which is well within
-    /// OOM-by-sockets territory when the upstream is slow.
+    /// alone would let this climb into OOM-by-sockets territory when
+    /// the upstream is slow.
     pub in_flight_fetches: usize,
 
     /// The request currently being executed (None between requests).
@@ -532,8 +528,8 @@ pub struct RuntimeState {
     /// async continuations (promise .then handlers, timer callbacks) read
     /// the identity of *the request that scheduled them* — not whatever
     /// user the thread happened to be handling at the moment the callback
-    /// fires. An earlier revision used a thread-local here; that leaks
-    /// across every `.await` boundary in a single-threaded async runtime.
+    /// fires. A thread-local here would leak across every `.await`
+    /// boundary in a single-threaded async runtime.
     pub per_request_user: HashMap<u64, String>,
 
     /// Per-WebSocket-connection authenticated user JSON, keyed by native
@@ -587,7 +583,7 @@ pub struct RuntimeState {
     /// Host-supplied environment metadata, separate from creator vars and secrets.
     pub env_vars: HashMap<String, String>,
 
-    /// **Migration-first cutover (P4b/P5 S2)** — the bundled
+    /// **Migration-first cutover** — the bundled
     /// `RuntimeSchemaDescriptor` JSON (`schema.runtime.json`; v2 is
     /// `{ version, collections: { fields, options, indexes } }`) carried in
     /// `manifest.runtime_descriptor`. The worker
@@ -641,9 +637,9 @@ pub struct RuntimeState {
     ///
     /// Why cache: V8 allocates a fresh Object + 2 Functions for every
     /// request when constructed inline, which triggers `JSObject::MigrateToMap`
-    /// \+ `Object::Set` \+ `ApplyTransitionToDataProperty` hotspots (visible
-    /// in perf report). A cached, frozen singleton is the same V8 object
-    /// every time — no new allocations, no map transitions.
+    /// \+ `Object::Set` \+ `ApplyTransitionToDataProperty` hotspots. A
+    /// cached, frozen singleton is the same V8 object every time — no new
+    /// allocations, no map transitions.
     pub ctx_obj: Option<v8::Global<v8::Object>>,
 
     /// WebSocket instances, keyed by ws_id.
@@ -653,7 +649,6 @@ pub struct RuntimeState {
 
     /// Native WebSocket per-id state (events queue, send queue, cancel flag).
     /// Disjoint from `websockets`/`next_ws_id` (which are polyfill-side).
-    /// Removed once the polyfill is deleted in cutover landing 3.
     #[cfg(feature = "runtime_native_websocket")]
     pub native_websockets: HashMap<u32, std::rc::Rc<std::cell::RefCell<crate::websocket_native::network::NativeWsState>>>,
     /// Monotonically increasing native WebSocket id counter.
@@ -884,9 +879,9 @@ impl RuntimeState {
 
     /// Allocate a stream-id that is not currently held by an active forwarder or
     /// pending resolver. Uses the monotonic `next_stream_id` counter with
-    /// collision-avoidance after wrap, so long-running runtimes (>12 hours at
-    /// 100k fetches/sec) don't silently cross-wire a new stream with an
-    /// in-flight one. Skips 0 so callers can treat it as a sentinel.
+    /// collision-avoidance after wrap, so a long-running runtime does not
+    /// silently cross-wire a new stream with an in-flight one after the
+    /// counter wraps. Skips 0 so callers can treat it as a sentinel.
     pub fn alloc_stream_id(&mut self) -> u32 {
         loop {
             let sid = self.next_stream_id;
@@ -1000,8 +995,8 @@ pub enum ResolveValue {
     /// `Result<T, OpError>` and the pump constructs the right JS
     /// exception kind without the future needing a scope.
     RejectError(OpError),
-    /// **P9 PR 3** — run a plugin-supplied continuation inside the
-    /// pump's V8 scope **instead of** resolving the bound resolver.
+    /// Run a plugin-supplied continuation inside the pump's V8 scope
+    /// **instead of** resolving the bound resolver.
     ///
     /// Unlike every other variant, this one does not settle a promise by
     /// itself: the pump simply invokes `run(scope, state)` inside the

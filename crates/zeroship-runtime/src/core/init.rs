@@ -160,22 +160,6 @@ pub struct HttpResult {
 // Polyfill / dispatch constants
 // ===========================================================================
 
-// (`FETCH_JS` was the last home of the DOMException / atob / btoa /
-// structuredClone polyfills + the `__zsBeginStreamForward` JS pump.
-// All four are native now: DOMException via `dom::exception`,
-// atob/btoa via `base64::install_global`, structuredClone via
-// `structured_clone::install_global`, and the response-body
-// forwarder via `streams::response_forwarder`. The file is gone.)
-
-// Embedded WebSocket/WebSocketPair polyfill (depends on the native
-// EventTarget installed by `install_dom`).
-// The websocket polyfill JS has been deleted: the
-// native WebSocket / WebSocketPair classes + native MessageEvent /
-// CloseEvent / EventTarget are the sole providers. The previous
-// `embed/websocket.js` polyfill is gone; if a future emergency
-// requires a rollback, restore from `git log --diff-filter=D --
-// crates/runtime/src/embed/websocket.js`.
-
 /// Runtime-owned host entry imports the creator entry under its original name.
 ///
 /// It preserves creator fetch receivers, exposes the procedure dictionary for
@@ -341,27 +325,23 @@ pub(crate) fn prepare_application(
 
     // Order matters here:
     //
-    //   1. Native URL (ada-url backed) — installed before any other
-    //      polyfill so other JS code that may reference it (websocket.js)
-    //      sees the native class.
-    //   2. Native Crypto / SubtleCrypto / CryptoKey. The old
-    //      `crypto.js` polyfill is gone; native is the only
-    //      path now. Then the inline setImmediate / clearImmediate
-    //      shim runs (last surviving JS in init).
-    //   3. Native Headers / Streams / Blob / TextEncoderStream — must
-    //      install before WEBSOCKET_JS so the latter's
-    //      `Object.create(EventTarget.prototype)` captures the native
-    //      EventTarget chain.
+    //   1. Native URL (ada-url backed) — installed before any embedded
+    //      JS runs (the host entry parses `request.url` with it).
+    //   2. Native Crypto / SubtleCrypto / CryptoKey, the node-module
+    //      bridge, the `Buffer` global, and the inline setImmediate /
+    //      clearImmediate shim.
+    //   3. Native Headers / Streams / Blob / TextEncoderStream — Blob
+    //      and the text-encoding streams build on the native stream
+    //      classes, so they install after them.
     //   4. install_dom installs the rest of native DOM (EventTarget /
     //      Event / CustomEvent / AbortController / AbortSignal /
     //      FormData / Request / Response / fetch / DOMException).
-    //   5. WEBSOCKET_JS LAST so its `WebSocket.prototype =
-    //      Object.create(EventTarget.prototype)` captures the NATIVE
-    //      EventTarget prototype (not the now-deleted polyfill's).
+    //   5. EventSource / WebSocket LAST — they inherit the native
+    //      EventTarget installed by install_dom, and EventSource's
+    //      constructor calls `globalThis.fetch`.
     install_url_native(scope);
 
-    // Native WebCrypto. This is now the only path.
-    // The `embed/crypto.js` polyfill has been removed.
+    // Native WebCrypto — the only crypto path.
     {
         let global = scope.get_current_context().global(scope);
         crate::crypto_native::install_globals(scope, global);
@@ -398,7 +378,7 @@ pub(crate) fn prepare_application(
     }
 
     // setImmediate(fn, ...args) → setTimeout(() => fn(...args), 0).
-    // Last surviving JS shim — too small to be worth the dedicated
+    // Kept as an inline JS shim — too small to be worth the dedicated
     // V8 callback boilerplate (a native impl would need to capture
     // varargs into a per-call closure for the timer fire). Inlined
     // here so embed/ stays empty.
@@ -422,22 +402,20 @@ pub(crate) fn prepare_application(
     install_headers(scope);
 
     // Native WHATWG Streams. See
-    // `docs/archive/streams-native.md`. ReadableStream,
+    // `docs/decisions/2026-05-02-streams-native.md`. ReadableStream,
     // WritableStream,
     // TransformStream, *Controller, *Reader, *Writer, BYOBReader,
     // BYOBRequest, and the async-iter prototype patches are all
     // native-backed.
     install_native_streams(scope);
 
-    // Native Blob + File per WHATWG File API. Replaces the
-    // `embed/blob.js` polyfill. Installed AFTER native streams
-    // because `Blob.stream()` constructs a `new ReadableStream(...)`
-    // through the user-visible class.
+    // Native Blob + File per WHATWG File API. Installed AFTER native
+    // streams because `Blob.stream()` constructs a
+    // `new ReadableStream(...)` through the user-visible class.
     install_blob_native(scope);
 
-    // Native TextEncoderStream / TextDecoderStream. Replaces the
-    // `embed/text-streams.js` shim — closes spec gaps around
-    // Symbol.toStringTag, brand-checked accessors, and the
+    // Native TextEncoderStream / TextDecoderStream. Closes spec gaps
+    // around Symbol.toStringTag, brand-checked accessors, and the
     // GenericTransformStream §6.1 prototype-side getter shape. Loaded
     // AFTER native streams install (needs `globalThis.TransformStream`)
     // and AFTER `setup_globals` (needs `TextEncoder` / `TextDecoder`).
@@ -445,9 +423,8 @@ pub(crate) fn prepare_application(
 
     // Native DOM (DOMException / EventTarget / Event / CustomEvent /
     // AbortController / AbortSignal / FormData / Request / Response /
-    // fetch). Installed BEFORE websocket.js so
-    // `WebSocket.prototype = Object.create(EventTarget.prototype)`
-    // picks up the native EventTarget prototype.
+    // fetch). Installed BEFORE the WebSocket / EventSource classes,
+    // which inherit the native EventTarget.
     install_dom(scope);
 
     // Native CompressionStream / DecompressionStream per the WHATWG
@@ -461,23 +438,18 @@ pub(crate) fn prepare_application(
     install_eventsource(scope);
 
     // Native WebSocket, gated behind the `runtime_native_websocket`
-    // feature flag. When ON, install BEFORE
-    // the polyfill so `globalThis.WebSocket` is the native class; the
-    // polyfill's setup detects the native marker and skips its
-    // assignment. When OFF, the polyfill is the sole provider.
+    // feature flag. The native WebSocket / WebSocketPair classes are
+    // the sole providers — with the feature off, no WebSocket is
+    // installed at all.
     #[cfg(feature = "runtime_native_websocket")]
     {
         let global = scope.get_current_context().global(scope);
         crate::websocket_native::install_global(scope, global);
-        // Native WebSocketPair (workerd extension): replaces the
-        // polyfill's WebSocketPair so the two paired sockets are
-        // native instances backed by the per-WS event channel.
+        // Native WebSocketPair (workerd extension): the two paired
+        // sockets are native instances backed by the per-WS event
+        // channel.
         crate::websocket_native::pair::install_global(scope, global);
     }
-
-    // WebSocket polyfill JS deleted in cutover landing 3. The native
-    // class above is the sole provider; building with
-    // `--no-default-features` (polyfill mode) is no longer supported.
 
     // The host entry normalizes dispatch without renaming creator sources.
     // Trusted dev loaders already provide the native application entry contract.
@@ -1232,47 +1204,16 @@ fn setup_globals_with_descriptor(
         global.set(scope, nav_key.into(), nav.into());
     }
 
-    // atob / btoa per WHATWG HTML §8.6 — replaces the old fetch.js polyfill
-    // that silently dropped >0xFF code units in btoa and ignored invalid
-    // base64 in atob. The native impls throw native DOMException
-    // ("InvalidCharacterError") on out-of-range / malformed input.
+    // atob / btoa per WHATWG HTML §8.6. The native impls throw native
+    // DOMException ("InvalidCharacterError") on out-of-range input
+    // (btoa code units >0xFF) or malformed base64 (atob).
     crate::base64::install_global(scope, global);
 
-    // structuredClone per WHATWG HTML §2.7.3 — replaces the old fetch.js
-    // JSON-roundtrip polyfill that lost Map/Set/Date/ArrayBuffer/circular
-    // refs. Drives V8's ValueSerializer/Deserializer (the spec-reference
-    // structured-clone algorithm). Throws native
-    // DOMException("DataCloneError") on non-cloneable values.
+    // structuredClone per WHATWG HTML §2.7.3. Drives V8's
+    // ValueSerializer/Deserializer (the spec-reference structured-clone
+    // algorithm), so Map/Set/Date/ArrayBuffer/circular refs survive.
+    // Throws native DOMException("DataCloneError") on non-cloneable values.
     crate::structured_clone::install_global(scope, global);
-
-    // (`__rawFetch` was the V8 callback the JS polyfill in
-    // `embed/fetch.js` dispatched into. Both were removed;
-    // `globalThis.fetch` is now the native callback installed by
-    // `crate::fetch_native::install_fetch_global`.)
-
-    // (URL parsing is now part of native URL — see install_url_native.
-    // __urlParse / __urlCanParse callbacks are no longer needed.)
-
-    // (`globalThis.crypto` was previously a plain {randomUUID, getRandomValues,
-    // __cryptoXxx ops} object backing the embed/crypto.js polyfill. The
-    // polyfill was deleted in WebCrypto v2 landing 3 — `crate::crypto_native::
-    // install_globals` (called during load_polyfills_and_modules) now installs
-    // the WHATWG `Crypto` class as `globalThis.crypto` instead. The plain
-    // object install + its 10 dead `__cryptoXxx` ops have been removed.)
-
-    // (`__cryptoHashSync` / `__cryptoHmacSync` were the v1 sync hash/HMAC
-    // ad-hoc V8 callbacks consumed by the JS shim at
-    // `packages/vite-plugin/src/node-compat.ts`. Stage B of
-    // `docs/archive/node-crypto-native.md` replaced them with a
-    // boundary object; the post-Stage-B migration moved the surface
-    // into a V8 SyntheticModule registered as `node:crypto` (see
-    // `crate::core::native_modules`). The thunks are long gone.)
-
-    // (`__streams.{create,read,enqueue,close,error}` was the native
-    // backing for the JS pump in `__zsBeginStreamForward` from the
-    // long-deleted `embed/fetch.js`. The Rust-native response-body
-    // forwarder owns the wire pump now — see
-    // `crate::streams::response_forwarder`.)
 
     // env namespace
     {
@@ -1514,41 +1455,33 @@ fn setup_globals_with_descriptor(
 
         // process.nextTick - Node-only. Restores the context captured per entry.
         //
-        // ORDERING DIVERGES FROM NODE, and this comment used to claim it did
-        // not ("drains this queue before V8 Promise microtasks"). What
-        // `perform_microtask_checkpoint` actually does is drain our queue
-        // BEFORE and AFTER V8's checkpoint - it brackets that checkpoint
-        // rather than interleaving with it. Node drains the nextTick queue
-        // ahead of the promise queue and again between microtasks.
+        // ORDERING DIVERGES FROM NODE: `perform_microtask_checkpoint`
+        // drains our queue BEFORE and AFTER V8's checkpoint - it brackets
+        // that checkpoint rather than interleaving with it. Node drains
+        // the nextTick queue ahead of the promise queue and again between
+        // microtasks.
         //
         // The difference is observable whenever the `nextTick` call itself
         // happens inside a microtask, which is the common case: an async
         // handler's synchronous prefix runs as a promise job, so at the
-        // pre-drain the queue is still empty, V8 then runs the whole promise
-        // queue (including any `.then` registered alongside), and only the
-        // post-drain sees the tick. Measured:
+        // pre-drain the queue is still empty, V8 then runs the whole
+        // promise queue (including any `.then` registered alongside), and
+        // only the post-drain sees the tick:
         //
         //     Promise.resolve().then(() => o.push("promise"));
         //     process.nextTick(() => o.push("tick"));
-        //
-        // MEASURED against node v22.22.2, because the earlier note here had
-        // Node's answer attached to the wrong arrangement:
         //
         //     arrangement                        Node          this runtime
         //     CommonJS, synchronous top level    tick,promise  (n/a, ESM only)
         //     ESM, top level                     promise,tick  tick,promise
         //     inside a microtask                 promise,tick  promise,tick
         //
-        // So the in-microtask case above does NOT diverge - Node defers the
-        // tick there too. `["tick","promise"]` is Node's CommonJS
-        // synchronous-top-level answer, and the previous note applied it to
-        // the microtask case, which made the pg e2e demand something Node
-        // does not do either.
-        //
-        // The real divergence is ESM TOP LEVEL: this runtime drains the tick
-        // queue first there, like Node's CommonJS, while Node's ESM does not
-        // (module evaluation is itself driven from a job). Both arrangements
-        // are pinned in `tests/next_tick_ordering.rs`, one assertion each.
+        // The in-microtask case does NOT diverge - Node defers the tick
+        // there too. The real divergence is ESM TOP LEVEL: this runtime
+        // drains the tick queue first there, like Node's CommonJS, while
+        // Node's ESM does not (module evaluation is itself driven from a
+        // job). Both arrangements are pinned in
+        // `tests/next_tick_ordering.rs`, one assertion each.
         {
             let key = v8::String::new(scope, "nextTick").unwrap();
             let next_tick = v8::Function::new(scope, process_next_tick_callback).unwrap();
@@ -1570,12 +1503,10 @@ fn setup_globals_with_descriptor(
         global.set(scope, env_alias_key.into(), env_obj.into());
     }
 
-    // Native TextEncoder / TextDecoder. Replace the buggy hand-written
-    // JS polyfills that lived in fetch.js — those ignored the
-    // `{ stream: true }` option and corrupted multi-byte UTF-8 split
-    // across chunk boundaries (the AI SDK / SSE bug). Native
-    // implementations live in `text_encoding.rs` and are wired here
-    // via the macro-emitted `register` fn (#198).
+    // Native TextEncoder / TextDecoder, wired here via the
+    // macro-emitted `register` fn. The implementations live in
+    // `text_encoding.rs` and honour the `{ stream: true }` option —
+    // multi-byte UTF-8 split across chunk boundaries decodes correctly.
     crate::register_native_classes!(
         scope,
         global,
@@ -1586,9 +1517,8 @@ fn setup_globals_with_descriptor(
     );
 
     // Native Headers per WHATWG Fetch §2.2 — wired in
-    // `load_polyfills_and_modules` immediately after fetch.js runs.
-    // The class itself lives in `crate::headers`; it replaces the JS
-    // polyfill that used to ship in `embed/fetch.js`. WPT pass: 98/0/1.
+    // `load_polyfills_and_modules`. The class itself lives in
+    // `crate::headers`.
     Ok(runtime_descriptor)
 }
 
@@ -1725,14 +1655,12 @@ fn validate_runtime_descriptor_value(value: &serde_json::Value) -> Result<(), St
 }
 
 /// Install native `Headers` on `globalThis`. Called from
-/// `load_polyfills_and_modules` after fetch.js runs (the polyfill no
-/// longer defines its own Headers, but the install order keeps the
-/// dependency chain explicit: native primitives load before user
-/// modules).
+/// `load_polyfills_and_modules`; the install order keeps the dependency
+/// chain explicit: native primitives load before user modules.
 ///
 /// The implementation lives in `crate::headers` (Headers struct,
-/// HeadersIterator, install_global). See `docs/archive/headers-native.md`
-/// for the design.
+/// HeadersIterator, install_global). See
+/// `docs/decisions/2026-05-01-headers-native.md` for the design.
 pub fn install_headers(scope: &mut v8::PinScope) {
     let global = scope.get_current_context().global(scope);
     crate::headers::install_global(scope, global);
@@ -1742,10 +1670,9 @@ pub fn install_headers(scope: &mut v8::PinScope) {
 /// CustomEvent, AbortController, AbortSignal, FormData) plus Request /
 /// Response / fetch on `globalThis`.
 ///
-/// Called BEFORE websocket.js so its
-/// `WebSocket.prototype = Object.create(EventTarget.prototype)` reads
-/// the NATIVE EventTarget prototype — required for the polyfill's
-/// `addEventListener` / `dispatchEvent` calls to land on native code.
+/// Called BEFORE the WebSocket / EventSource installs: those classes
+/// inherit the native EventTarget installed here, so it must exist on
+/// `globalThis` first.
 pub fn install_dom(scope: &mut v8::PinScope) {
     let global = scope.get_current_context().global(scope);
     crate::dom::install_globals(scope, global);
@@ -1770,19 +1697,18 @@ pub fn install_dom(scope: &mut v8::PinScope) {
 /// *DefaultController, *DefaultWriter, *DefaultReader, BYOBReader,
 /// BYOBRequest, the async-iter prototype patches,
 /// ByteLengthQueuingStrategy, and CountQueuingStrategy. See
-/// `docs/archive/streams-native.md` for the design.
+/// `docs/decisions/2026-05-02-streams-native.md` for the design.
 pub fn install_native_streams(scope: &mut v8::PinScope) {
     let global = scope.get_current_context().global(scope);
     crate::streams::install_native_streams(scope, global);
 }
 
 /// Install native `TextEncoderStream` and `TextDecoderStream` onto
-/// `globalThis`. Replaces the legacy `embed/text-streams.js` shim,
-/// closing spec gaps the JS shim left open: `Symbol.toStringTag`,
-/// brand-checked `encoding`/`fatal`/`ignoreBOM` accessors, and the
-/// WHATWG GenericTransformStream §6.1 prototype-side `readable` /
-/// `writable` getter shape (the shim assigned own data props in the
-/// constructor body, which broke libraries that introspect via
+/// `globalThis`. Closes spec gaps: `Symbol.toStringTag`, brand-checked
+/// `encoding`/`fatal`/`ignoreBOM` accessors, and the WHATWG
+/// GenericTransformStream §6.1 prototype-side `readable` / `writable`
+/// getter shape (assigning own data props in the constructor body
+/// breaks libraries that introspect via
 /// `Object.getOwnPropertyDescriptor(Object.getPrototypeOf(s), …)`).
 ///
 /// Must run AFTER:
@@ -1793,7 +1719,7 @@ pub fn install_native_streams(scope: &mut v8::PinScope) {
 ///     delegate to).
 pub fn install_text_encoding_streams(scope: &mut v8::PinScope) {
     let global = scope.get_current_context().global(scope);
-    // #198 — bare template + globalThis bind for both classes.
+    // Bare template + globalThis bind for both classes.
     crate::register_native_classes!(
         scope,
         global,
@@ -1828,7 +1754,7 @@ pub fn install_eventsource(scope: &mut v8::PinScope) {
 }
 
 /// Install native `Blob` and `File` (per WHATWG File API) onto
-/// `globalThis`. Replaces the legacy `embed/blob.js` polyfill.
+/// `globalThis`.
 ///
 /// Must run AFTER `install_native_streams` because `Blob.stream()`
 /// constructs a user-visible `new ReadableStream(...)`.
@@ -1838,8 +1764,8 @@ pub fn install_blob_native(scope: &mut v8::PinScope) {
 }
 
 /// Install native `URL` + `URLSearchParams` (ada-url backed) onto
-/// `globalThis`. Replaces the legacy `embed/url.js` polyfill (deleted).
-/// Spec gaps closed: spec-correct setters (host parser / IPv6 brackets
+/// `globalThis`.
+/// Spec surface: spec-correct setters (host parser / IPv6 brackets
 /// / IDNA via ada-url's mutation API), live two-way sync between
 /// `url.search` and `url.searchParams`, `URL.parse(input, base?)` static
 /// method (newer spec), `URLSearchParams.{has,delete}(name, value?)`

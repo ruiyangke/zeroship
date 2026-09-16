@@ -2,11 +2,10 @@
 //! (https://url.spec.whatwg.org/#url-class).
 //!
 //! Backed by `ada_url::Url` (the same parser as Node.js, Chromium,
-//! Bun). Setters delegate to ada-url's mutation API rather than
-//! the polyfill's naive string-splitting (the polyfill's
-//! `url.host = "x:y"` literally split on `:` and reassigned both
-//! parts; ada-url runs the WHATWG host-parser state machine and
-//! handles bracketed IPv6 hosts, IDNA, etc.).
+//! Bun). Setters delegate to ada-url's mutation API — never a naive
+//! string-split on `:` — so `url.host = "x:y"` runs the WHATWG
+//! host-parser state machine and handles bracketed IPv6 hosts, IDNA,
+//! etc.
 //!
 //! ## Storage
 //!
@@ -50,7 +49,7 @@ impl Default for URL {
             // `#[v8_class]`-generated default constructor (which is
             // never reached on the JS surface because `new URL()` calls
             // the user-defined constructor with at least the input arg).
-            // m3: explicit-message expect so a future regression in ada-url's
+            // Explicit-message expect so a regression in ada-url's
             // about:blank handling fails loud at boot rather than as a
             // generic `unwrap` panic.
             inner: ada_url::Url::parse("about:blank", None)
@@ -99,10 +98,9 @@ impl URL {
         let base_s = if base.is_undefined() {
             None
         } else {
-            // The polyfill accepted `base instanceof URL` and used its
-            // `href`. The ada parser only takes &str — convert.
-            // ToUSVString(base) suffices (URL.href is already USV, so
-            // round-trip is fine).
+            // The ada parser only takes &str — convert. ToUSVString(base)
+            // suffices: `base instanceof URL` stringifies to its `href`,
+            // which is already USV, so the round-trip is lossless.
             Some(
                 read_usv_string(scope, base)
                     .ok_or_else(|| OpError::type_error("Cannot convert base to USVString"))?,
@@ -114,7 +112,7 @@ impl URL {
                 inner,
                 search_params: None,
             }),
-            // m1: do NOT echo the input into the error message — Chrome /
+            // Do NOT echo the input into the error message — Chrome /
             // Firefox / Node use a fixed message ("Invalid URL"), and
             // echoing the input risks leaking sensitive data (e.g.
             // tokens embedded in URLs) into logs.
@@ -186,11 +184,10 @@ impl URL {
             return v8::null(scope).into();
         };
 
-        // M6: parse ONCE — pre-fix called both `can_parse` (parse 1)
-        // and `new_instance` (parse 2 inside the macro-emitted
-        // constructor) on the success path. Now we parse directly via
-        // `ada_url::Url::parse`; on failure return null without
-        // entering V8 land at all.
+        // Parse ONCE via `ada_url::Url::parse`; on failure return null
+        // without entering V8 land at all. Routing through `can_parse`
+        // first would parse twice on the success path (once here, once
+        // inside the macro-emitted constructor).
         let parsed = match ada_url::Url::parse(&input_s, base_s.as_deref()) {
             Ok(u) => u,
             Err(_) => return v8::null(scope).into(),
@@ -257,7 +254,7 @@ impl URL {
     ) -> Result<(), OpError> {
         let s = read_usv_string(scope, value)
             .ok_or_else(|| OpError::type_error("Cannot convert href to USVString"))?;
-        // m1: don't echo `s` into the error message — see URL::new.
+        // Don't echo `s` into the error message — see URL::new.
         if self.inner.set_href(&s).is_err() {
             return Err(OpError::type_error("Invalid URL"));
         }
@@ -331,8 +328,7 @@ impl URL {
 
     /// `host` setter per §4.5 — runs ada-url's host parser. Spec-
     /// correct: handles bracketed IPv6 (`[::1]:8080`), IDNA, and
-    /// punctuation-bearing hosts that the polyfill's `lastIndexOf(":")`
-    /// trick mishandled.
+    /// punctuation-bearing hosts.
     #[v8_setter]
     #[v8_name = "host"]
     fn set_host(&mut self, scope: &mut v8::PinScope, value: v8::Local<v8::Value>) {
@@ -482,7 +478,7 @@ pub fn install_global<'s>(
     class_fn
 }
 
-/// Helper for `URL.parse` (M6): allocate a JS object on URL's instance
+/// Helper for `URL.parse`: allocate a JS object on URL's instance
 /// template, install the boxed URL in internal field 0, and register
 /// the GC finalizer. Returns `None` on any V8 failure (the caller
 /// should pass null back).

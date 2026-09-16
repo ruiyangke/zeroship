@@ -523,8 +523,8 @@ fn search_params_from_record() {
     assert_eq!(s, "a=1&b=2");
 }
 
-/// C5: ArrayBuffer (non-iterable object) takes the record path; should
-/// produce empty entries, not the pre-fix "[object ArrayBuffer]=" garbage.
+/// C5: ArrayBuffer (non-iterable object) takes the record path; must
+/// produce empty entries, not a "[object ArrayBuffer]=" string parse.
 #[test]
 fn search_params_from_array_buffer() {
     let s = run_in_v8(
