@@ -196,21 +196,19 @@ pub fn is_dot_segment(seg: &str) -> bool {
 /// worker (whose `new URL(request.url).pathname` is ada-backed):
 ///
 /// * `\` (0x5C) — folded to `/` for special schemes, so `pub\..\admin`
-///   is ONE segment to the gateway and THREE to the worker. Measured
-///   end to end through a running gateway on 2026-08-10
-///   (`tests/e2e_gateway_path_backslash.sh` T4): `GET /pub\..\admin/secret`
-///   was authorized against the anonymous catch-all (200) while the worker's
-///   handler served `/admin/secret`, the `auth: user` resource that answers
-///   401 on its own URL.
+///   is ONE segment to the gateway and THREE to the worker. Without the guard,
+///   `GET /pub\..\admin/secret` would be authorized against the anonymous
+///   catch-all while the worker's handler served `/admin/secret`, the
+///   `auth: user` resource that answers 401 on its own URL.
 /// * TAB / LF / CR (0x09/0x0A/0x0D) — STRIPPED by the parser before parsing,
-///   so `adm<TAB>in` reads as `admin` to the worker. Belt-and-braces only:
-///   the same harness (T8) measured that the HTTP layer already answers 400
-///   for a raw tab in the request target, so this arm has NOT been shown to
-///   be reachable. It is here so a future change to the HTTP parser cannot
+///   so `adm<TAB>in` reads as `admin` to the worker. Belt-and-braces only: the
+///   HTTP layer already answers 400 for a raw tab in the request target
+///   (`tests/e2e_gateway_path_backslash.sh` T8), so this arm is not reachable
+///   through it. It is here so a future change to the HTTP parser cannot
 ///   silently open the same hole.
 ///
 /// A conforming client percent-encodes all four (`%5C`, `%09`, …), and the
-/// gateway does not decode those (T6), so rejecting the raw bytes costs no
+/// gateway does not decode those, so rejecting the raw bytes costs no
 /// legitimate request.
 const WHATWG_PATH_REWRITE_BYTES: [char; 4] = ['\\', '\t', '\n', '\r'];
 
@@ -978,9 +976,9 @@ mod tests {
         // resource matching, so dot-segment / percent-encoded-dot /
         // trailing-slash evasions of a protected literal can never fall
         // through to a permissive catch-all. Manifest: `/api/admin` is
-        // `user`-gated; a root catch-all glob is `anonymous`. Pre-fix each
-        // evasion matches the anonymous catch-all (the literal compares the RAW
-        // string and misses); post-fix the canonical form re-matches the
+        // `user`-gated; a root catch-all glob is `anonymous`. Without
+        // canonicalization a raw-string literal comparison misses the evasions
+        // and matches the anonymous catch-all; the canonical form re-matches the
         // `/api/admin` user literal. The worker's WHATWG `new URL` collapses
         // these exact forms to `/api/admin`, so the gateway match and the
         // worker view must agree on the protected resource.
@@ -1067,11 +1065,11 @@ mod tests {
         );
     }
 
-    /// ISS-60 (SSG trailing-slash): a prerendered docs site declares a static
+    /// SSG trailing-slash: a prerendered docs site declares a static
     /// `/about` resource and a catch-all `/[...rest]` SPA/index fallback.
     /// `GET /about/` (trailing slash) must resolve to the `/about` static
     /// resource — NOT fall through to the catch-all and render the index page.
-    /// The fix rides on the SEC-2 `canonicalize_path` trailing-slash strip:
+    /// This rides on the SEC-2 `canonicalize_path` trailing-slash strip:
     /// `/about/` → `/about` BEFORE matching, so the literal hits and the same
     /// canonical path is forwarded to the worker (no auth/forward desync).
     #[test]
@@ -1111,8 +1109,8 @@ mod tests {
             "the literal /about resource resolves directly"
         );
         // WITH the trailing slash, it must STILL resolve to /about — not the
-        // catch-all. This is the ISS-60 bug: pre-canonicalization `/about/`
-        // missed the literal and fell through to `/[...rest]` (the index page).
+        // catch-all. Without canonicalization `/about/` misses the literal and
+        // falls through to `/[...rest]` (the index page).
         assert_eq!(
             c.lookup_resource_key("/about/").as_deref(),
             Some("/about"),
@@ -1520,12 +1518,12 @@ mod tests {
 
     /// `compile` must not panic on ANY manifest, however it got here.
     ///
-    /// `compile_glob` used to `assert!` that a `[...name]` catch-all was the
+    /// `compile_glob` must not `assert!` that a `[...name]` catch-all is the
     /// last segment. `CompiledManifest::compile` runs inside
     /// `RouteCache::update` on the detached route-sync task, and compio wraps
-    /// that future in `catch_unwind` before the handle is dropped — so the
-    /// panic surfaced nowhere, route sync stopped for the process lifetime,
-    /// and every app on that gateway served its last-known route table
+    /// that future in `catch_unwind` before the handle is dropped — so a panic
+    /// would surface nowhere, route sync would stop for the process lifetime,
+    /// and every app on that gateway would serve its last-known route table
     /// forever: new deploys never landing, deleted apps still answering,
     /// spend state frozen. A malformed key must cost that key, not the
     /// gateway.

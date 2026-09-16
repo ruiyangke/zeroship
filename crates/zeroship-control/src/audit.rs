@@ -69,8 +69,8 @@ pub enum Action {
     /// server-authoritative + operator-only — an organization may never lower it — so
     /// every change is audited with the actor + the new policy in the detail JSON.
     SetFeePolicy,
-    /// An operator changed the GLOBAL default FX via `PUT /api/pricing-config`
-    /// (gap #28). The global FX is the highest-leverage money lever — it reprices
+    /// An operator changed the GLOBAL default FX via `PUT /api/pricing-config`.
+    /// The global FX is the highest-leverage money lever — it reprices
     /// every plan that inherits (`fx == None`) — so the write is audited with the
     /// actor + the old→new value in the detail JSON.
     SetGlobalFx,

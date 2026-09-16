@@ -37,7 +37,7 @@ pub struct AppRuntimeLimits {
 /// Used by the control-plane catalog seed (`plan_catalog::builtin_plans`
 /// free tier) and the registry's fallback for an app whose plan row is missing
 /// or whose `runtime_limits_json` fails to parse. Keeping ONE const stops the
-/// two copies from drifting (50ms CPU / 5s wall / 64MB heap). The worker
+/// two copies from drifting. The worker
 /// therefore never gets `(None, None, None)` (unbounded) for an unpriced app.
 pub const FREE_TIER_RUNTIME_LIMITS: AppRuntimeLimits = AppRuntimeLimits {
     cpu_limit_ms: Some(50),
@@ -89,18 +89,16 @@ pub struct AppNetPolicyLimits {
     /// free-tier value is the fail-closed default, never "unbounded".
     ///
     /// This serde default is the ONLY thing that supplies the key. The
-    /// `zeroship.plans.net_policy_limits_json` column default
-    /// (`20260702000400`) still carries just `max_sockets` +
-    /// `egress_ceiling_bytes`, and that is deliberate: every reader of the
-    /// column goes through this type (`plan_catalog.rs`, `registry.rs`,
-    /// `net_grants.rs`), so a row missing the key and a row carrying
-    /// `max_grants: 10` deserialize identically. Adding it to the column
-    /// default is unobservable.
+    /// `zeroship.plans.net_policy_limits_json` column default carries just
+    /// `max_sockets` + `egress_ceiling_bytes`, and that is deliberate: every
+    /// reader of the column goes through this type (`plan_catalog.rs`,
+    /// `registry.rs`, `net_grants.rs`), so a row missing the key and a row
+    /// carrying `max_grants: 10` deserialize identically. Adding it to the
+    /// column default is unobservable.
     ///
-    /// A migration to add it was written and then DELETED rather than
-    /// rewritten: the engine cannot lower a JSON-object `setColumnDefault`
-    /// ("json value defaults need live column type"). Do not re-add one - there
-    /// is nothing to buy.
+    /// Do not add a migration for it: the engine cannot lower a JSON-object
+    /// `setColumnDefault` ("json value defaults need live column type"), so
+    /// there is nothing to buy.
     #[serde(default = "free_tier_max_grants")]
     pub max_grants: u32,
 }
@@ -160,7 +158,7 @@ pub struct AppVersionInfo {
 ///
 /// Ordered most- to least-permissive so the gateway gate is a simple match:
 /// - `Allow` — under the warn threshold; serve normally.
-/// - `Warn` — past ~80%; serve but stamp an `x-zs-spend-warn` header.
+/// - `Warn` — past the warn threshold; serve but stamp an `x-zs-spend-warn` header.
 /// - `Degrade` — past the soft cap; serve but throttle the app's effective
 ///   concurrency + rate (gateway-side, no bucket rebuild).
 /// - `Block` — at/over the hard cap; reject new requests with 402 before any
@@ -253,11 +251,8 @@ pub struct RouteEntry {
     /// (billing G2), JOINed from `zeroship.organization_billing_status` by the
     /// control-plane registry on `apps.organization_id`.
     ///
-    /// It used to be reached through the app's project, that project's
-    /// organization, and that organization's OWNERS - which fanned out, so the
-    /// registry had to collapse the result most-restrictive-first or seating an
-    /// owner with a good card could un-suspend an app. An organization has one
-    /// status row, so there is no fan-out and no collapse. The
+    /// An organization has one status row, so the registry needs no fan-out and
+    /// no most-restrictive collapse across owners. The
     /// gateway gates on this BEFORE spend (an outer AND): `Suspended` → 402
     /// `ACCOUNT_SUSPENDED`; `PastDue`/`Active` pass (PastDue is the grace
     /// window). `#[serde(default)]` ⇒ `Active` for an app whose organization has no

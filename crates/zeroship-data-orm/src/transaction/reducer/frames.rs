@@ -427,9 +427,8 @@ mod tests {
 
     /// The savepoint-shadowing arm, driven at the naming layer.
     ///
-    /// It fails on a depth-derived name (`zs_sp_<depth>`), which is what the
-    /// orchestrator emitted before dispatch moved onto this stack: open a child
-    /// at depth 1, roll it back, open another at depth 1, and both are named
+    /// It fails on a depth-derived name (`zs_sp_<depth>`): open a child at
+    /// depth 1, roll it back, open another at depth 1, and both are named
     /// `zs_sp_1` - so the second rollback resolves to whichever leftover
     /// PostgreSQL established most recently.
     ///
@@ -464,11 +463,10 @@ mod tests {
 
     /// Invariant 11 over the two fates.
     ///
-    /// Where this fails today: `FrameStack` did not exist. The release half
-    /// fails on an implementation that drops a released child's effects; the
-    /// rollback half fails on one that appends them to the parent anyway,
-    /// which is the flat-buffer shape that tells a subscriber about a row that
-    /// does not exist.
+    /// The release half fails on an implementation that drops a released
+    /// child's effects; the rollback half fails on one that appends them to the
+    /// parent anyway, which is the flat-buffer shape that tells a subscriber
+    /// about a row that does not exist.
     #[test]
     fn release_moves_a_childs_effects_to_the_parent_and_rollback_discards_them() {
         let mut stack = opened();
@@ -504,11 +502,10 @@ mod tests {
 
     /// The FAILED-`ROLLBACK TO` row: effects are retained for diagnosis.
     ///
-    /// Where this fails today: `FrameStack` did not exist. It fails on an
-    /// implementation that discards on the ASSUMPTION the rollback will
-    /// succeed - which the success-path arm above cannot catch, because a
-    /// premature discard leaves it green while destroying the evidence this
-    /// row requires.
+    /// It fails on an implementation that discards on the ASSUMPTION the
+    /// rollback will succeed - which the success-path arm above cannot catch,
+    /// because a premature discard leaves it green while destroying the
+    /// evidence this row requires.
     #[test]
     fn a_failed_rollback_to_retains_the_frames_effects_for_diagnosis() {
         let mut stack = opened();
@@ -537,9 +534,8 @@ mod tests {
 
     /// A rolled-back frame is not closed until its `RELEASE` lands.
     ///
-    /// Where this fails today: `FrameStack` did not exist. It fails on an
-    /// implementation that pops on `ROLLBACK TO`, which reports the
-    /// transaction available for new work one statement early.
+    /// It fails on an implementation that pops on `ROLLBACK TO`, which reports
+    /// the transaction available for new work one statement early.
     #[test]
     fn a_rolled_back_frame_stays_on_the_stack_until_its_release_lands() {
         let mut stack = opened();
@@ -562,9 +558,8 @@ mod tests {
     /// Only the top acts, the root cannot close, and the cap is the existing
     /// public one.
     ///
-    /// Where this fails today: `FrameStack` did not exist. Each assertion
-    /// fails on the guard being absent; none of them mutates the stack, which
-    /// the depth assertions after each rejection check.
+    /// Each assertion fails on the guard being absent; none of them mutates
+    /// the stack, which the depth assertions after each rejection check.
     #[test]
     fn the_frame_guards_refuse_without_mutating_the_stack() {
         let mut stack = opened();
@@ -587,10 +582,9 @@ mod tests {
 
     /// The ninth simultaneous child is refused.
     ///
-    /// Where this fails today: `FrameStack` did not exist. The fixture opens
-    /// children WITHOUT closing any, so the cap it reaches is the
-    /// simultaneous-open depth - the thing the cap is about - rather than the
-    /// monotonic sequence, which is uncapped by design.
+    /// The fixture opens children WITHOUT closing any, so the cap it reaches is
+    /// the simultaneous-open depth - the thing the cap is about - rather than
+    /// the monotonic sequence, which is uncapped by design.
     #[test]
     fn a_ninth_simultaneous_child_is_refused_while_the_sequence_runs_on() {
         let mut stack = opened();

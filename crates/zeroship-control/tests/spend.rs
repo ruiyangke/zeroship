@@ -7,8 +7,7 @@
 //!
 //! The database comes from `common::require_control_db`, which refuses the run
 //! rather than skipping it or substituting one: the whole target shares one
-//! database, and an unmigrated one used to present as forty-one named tests
-//! failing with `42P01`. Provision it with `tests/provision_test_backends.sh`.
+//! database. Provision it with `tests/provision_test_backends.sh`.
 
 use crate::common;
 
@@ -48,8 +47,7 @@ async fn pg(db_url: &str) -> compio_postgres::Client {
 /// CU, no base fee) with the given `spend_limit_default_cents`, then an app on
 /// it. Returns `(plan_id, app_id)`. Under compute-unit pricing the per-request
 /// cost is `weight(requests) × fx`: with the seeded global weight of 1 CU /
-/// request and `fx = 10^12` pico-cents/CU (= 1 cent/CU), 1 request = 1 cent —
-/// identical to the old per-metric `Flat{1,1}` rate.
+/// request and `fx = 10^12` pico-cents/CU (= 1 cent/CU), 1 request = 1 cent.
 async fn make_app_on_priced_plan(
     client: &compio_postgres::Client,
     spend_limit_default_cents: i64,
@@ -96,10 +94,9 @@ async fn seed_requests(metering: &Metering, app: &AppId, requests: u64) {
         )
         .await
         .expect("seed usage snapshot");
-    // Checked rather than silenced. `#[must_use]` flagged this call, and the honest
-    // response to that is to assert the seed is clean, not to bind it to `_`: a seed
-    // that reports a decrease means a previous test left a HIGHER total for this app in
-    // the same period, so the fixture is lying about its starting state.
+    // Checked rather than silenced: a seed that reports a decrease means a
+    // previous test left a HIGHER total for this app in the same period, so the
+    // fixture is lying about its starting state.
     assert!(
         write.decreased.is_empty(),
         "seeding must not lower an existing total; fixture state is dirty: {:?}",
@@ -353,12 +350,10 @@ async fn transition_writes_state_and_history_atomically_and_consistent() {
 #[allow(clippy::await_holding_lock)]
 #[compio::test]
 async fn overflowing_spend_is_skipped_not_clamped_and_blocked() {
-    // MAJOR-1 REGRESSION: an app whose priced `spend_cents` overflows i64 must be
-    // SKIPPED with a warn! by the spend sweep — NOT clamped to i64::MAX and
-    // Blocked. This mirrors billing_reconcile's overflow posture (it skips such
-    // an app too). Pre-fix the sweep did `i64::try_from(spend_cents).unwrap_or(
-    // i64::MAX)` — a silent clamp that wrote a Block state row, so enforcement
-    // Blocked an app that reconcile would skip (unbilled): the two disagreed.
+    // MAJOR-1: an app whose priced `spend_cents` overflows i64 must be SKIPPED
+    // with a warn! by the spend sweep — NOT clamped to i64::MAX and Blocked. This
+    // mirrors billing_reconcile's overflow posture (it skips such an app too), so
+    // enforcement and reconcile agree.
     let url = db_url();
     let client = pg(&url).await;
     let _sweep = SWEEP_LOCK
