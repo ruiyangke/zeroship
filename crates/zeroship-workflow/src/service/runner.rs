@@ -7,7 +7,7 @@ pub mod delivery;
 pub mod host;
 mod publication;
 pub mod ready;
-pub use budget::{ExecutionBudget, ExecutionGuard};
+pub use budget::{BudgetEnd, ExecutionBudget, ExecutionGuard};
 mod payloads;
 pub use payloads::{TaskPayloadReader, TaskPayloads};
 mod outputs;
@@ -352,11 +352,16 @@ async fn execute(
     guard: &ExecutionGuard,
     timeout: Duration,
 ) -> Result<RunnerOutcome, WorkflowServiceError> {
+    // A resolved frontier describes effects that already reached the world.
+    // Local expiry does not withdraw the right to publish it: the completion
+    // loop below is bounded by the remaining lease, and the journal refuses a
+    // submission whose task moved on. Discarding it releases a task that is
+    // immediately reclaimable, so those effects would run a second time.
     let result = compio::time::timeout(timeout, execution.wait())
         .await
         .map_err(|_| WorkflowServiceError::Timeout)
         .and_then(|result| result)
-        .and_then(|result| guard.budget().check().map(|()| result));
+        .and_then(|result| guard.budget().check_authority().map(|()| result));
     execution.cancel();
     guard.finish();
     execution.stop().await;
