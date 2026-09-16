@@ -145,9 +145,12 @@ async fn rollback(store: Rc<OrmStore>, fault: Fault) {
     assert_eq!(fixture.backend.calls(), std::slice::from_ref(&id));
     assert_eq!(fixture.page(&grant.delivery.job).await.next_index, 1);
     let uncommitted = fixture.scan().await;
-    assert_eq!(uncommitted.revision, 1);
-    assert!(uncommitted.after_id.is_none());
-    assert_eq!(uncommitted.upper_id.as_deref(), Some(id.as_str()));
+    assert_eq!(uncommitted.collection_revision, 1);
+    assert!(uncommitted.collection_after_id.is_none());
+    assert_eq!(
+        uncommitted.collection_upper_id.as_deref(),
+        Some(id.as_str())
+    );
     assert!(fixture
         .scope
         .job_receipt(&grant.delivery.job)
@@ -166,10 +169,13 @@ async fn rollback(store: Rc<OrmStore>, fault: Fault) {
     );
     assert_eq!(fixture.backend.calls(), [id]);
     let committed = fixture.scan().await;
-    assert_eq!(committed.revision, uncommitted.revision + 1);
+    assert_eq!(
+        committed.collection_revision,
+        uncommitted.collection_revision + 1
+    );
     assert!(
-        committed.after_id.is_none()
-            && committed.upper_id.is_none()
-            && committed.observed_at.is_none()
+        committed.collection_after_id.is_none()
+            && committed.collection_upper_id.is_none()
+            && committed.collection_observed_at.is_none()
     );
 }

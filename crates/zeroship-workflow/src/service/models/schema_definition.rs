@@ -31,6 +31,17 @@ zeroship_data_orm::orm::schema! {
             signal_sequence: BigInt,
             #[orm(default = 0)]
             closed_epoch: BigInt,
+            #[orm(default = 1)]
+            collection_revision: BigInt,
+            collection_after_id: Nullable<Text>,
+            collection_upper_id: Nullable<Text>,
+            collection_observed_at: Nullable<BigInt>,
+            #[orm(default = 1)]
+            reconciliation_revision: BigInt,
+            #[orm(default = "publications")]
+            reconciliation_phase: Text,
+            reconciliation_after_id: Nullable<Text>,
+            reconciliation_upper_id: Nullable<Text>,
         }
 
         __zeroship_workflow_broadcasts {
@@ -55,15 +66,6 @@ zeroship_data_orm::orm::schema! {
             app_id: Text,
             plan: Text,
             next_index: BigInt,
-        }
-
-        __zeroship_workflow_collection_scans {
-            #[orm(primary_key)]
-            id: Text,
-            revision: BigInt,
-            after_id: Nullable<Text>,
-            upper_id: Nullable<Text>,
-            observed_at: Nullable<BigInt>,
         }
 
         __zeroship_workflow_continuation_heads {
@@ -242,15 +244,6 @@ zeroship_data_orm::orm::schema! {
             revision: BigInt,
             finished: BigInt,
             created_at: BigInt,
-        }
-
-        __zeroship_workflow_reconciliation_scans {
-            #[orm(primary_key)]
-            id: Text,
-            revision: BigInt,
-            phase: Text,
-            after_id: Nullable<Text>,
-            upper_id: Nullable<Text>,
         }
 
         __zeroship_workflow_requests {
@@ -452,16 +445,30 @@ mod tests {
             receipts["reconciliation_next"].logical_type,
             LogicalType::BigInt
         );
-        let scans = journal::__zeroship_workflow_reconciliation_scans::Entity::schema();
-        assert!(scans["id"].primary_key);
-        assert!(scans["revision"].required);
-        assert_eq!(scans["revision"].logical_type, LogicalType::BigInt);
-        assert!(scans["phase"].required);
-        assert_eq!(scans["phase"].logical_type, LogicalType::Text);
-        assert!(!scans["after_id"].required);
-        assert_eq!(scans["after_id"].logical_type, LogicalType::Text);
-        assert!(!scans["upper_id"].required);
-        assert_eq!(scans["upper_id"].logical_type, LogicalType::Text);
+        let state = journal::__zeroship_workflow_app_state::Entity::schema();
+        assert!(state["id"].primary_key);
+        assert!(state["app_id"].required);
+        for scan in ["collection", "reconciliation"] {
+            let revision = &state[&format!("{scan}_revision")];
+            assert!(revision.required);
+            assert_eq!(revision.logical_type, LogicalType::BigInt);
+            for cursor in ["after_id", "upper_id"] {
+                let field = &state[&format!("{scan}_{cursor}")];
+                assert!(!field.required);
+                assert_eq!(field.logical_type, LogicalType::Text);
+            }
+        }
+        assert!(state["reconciliation_phase"].required);
+        assert_eq!(
+            state["reconciliation_phase"].logical_type,
+            LogicalType::Text
+        );
+        assert!(!state["collection_observed_at"].required);
+        assert_eq!(
+            state["collection_observed_at"].logical_type,
+            LogicalType::BigInt
+        );
+        assert_eq!(state.values().filter(|field| field.primary_key).count(), 1);
     }
 
     #[test]

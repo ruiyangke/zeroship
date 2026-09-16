@@ -59,6 +59,11 @@ paired!(
     pages::expired_replay
 );
 paired!(
+    sqlite_collect_concurrent_sweeps_advance_one_app_scan_once,
+    postgres_collect_concurrent_sweeps_advance_one_app_scan_once,
+    pages::lost_update
+);
+paired!(
     sqlite_collect_policy_replacement_cancels_delete,
     postgres_collect_policy_replacement_cancels_delete,
     authority::replacement

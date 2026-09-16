@@ -201,6 +201,92 @@
           "storage": {
             "valueColumn": "closed_epoch"
           }
+        },
+        "collection_revision": {
+          "type": "bigInt",
+          "required": true,
+          "default": 1,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "collection_revision"
+          }
+        },
+        "collection_after_id": {
+          "type": "string",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "collection_after_id"
+          }
+        },
+        "collection_upper_id": {
+          "type": "string",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "collection_upper_id"
+          }
+        },
+        "collection_observed_at": {
+          "type": "bigInt",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "collection_observed_at"
+          }
+        },
+        "reconciliation_revision": {
+          "type": "bigInt",
+          "required": true,
+          "default": 1,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "reconciliation_revision"
+          }
+        },
+        "reconciliation_phase": {
+          "type": "string",
+          "required": true,
+          "default": "publications",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "reconciliation_phase"
+          }
+        },
+        "reconciliation_after_id": {
+          "type": "string",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "reconciliation_after_id"
+          }
+        },
+        "reconciliation_upper_id": {
+          "type": "string",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "reconciliation_upper_id"
+          }
         }
       },
       "options": {
@@ -442,69 +528,6 @@
           "unique": true
         }
       ]
-    },
-    "__zeroship_workflow_collection_scans": {
-      "fields": {
-        "id": {
-          "type": "string",
-          "required": true,
-          "readable": true,
-          "filterable": true,
-          "sortable": true,
-          "projectable": true,
-          "storage": {
-            "valueColumn": "id"
-          },
-          "primaryKey": true
-        },
-        "revision": {
-          "type": "bigInt",
-          "required": true,
-          "readable": true,
-          "filterable": true,
-          "sortable": true,
-          "projectable": true,
-          "storage": {
-            "valueColumn": "revision"
-          }
-        },
-        "after_id": {
-          "type": "string",
-          "readable": true,
-          "filterable": true,
-          "sortable": true,
-          "projectable": true,
-          "storage": {
-            "valueColumn": "after_id"
-          }
-        },
-        "upper_id": {
-          "type": "string",
-          "readable": true,
-          "filterable": true,
-          "sortable": true,
-          "projectable": true,
-          "storage": {
-            "valueColumn": "upper_id"
-          }
-        },
-        "observed_at": {
-          "type": "bigInt",
-          "readable": true,
-          "filterable": true,
-          "sortable": true,
-          "projectable": true,
-          "storage": {
-            "valueColumn": "observed_at"
-          }
-        }
-      },
-      "options": {
-        "softDelete": false,
-        "versioning": false,
-        "strictness": "strict"
-      },
-      "indexes": []
     },
     "__zeroship_workflow_continuation_heads": {
       "fields": {
@@ -2238,70 +2261,6 @@
           "unique": true
         }
       ]
-    },
-    "__zeroship_workflow_reconciliation_scans": {
-      "fields": {
-        "id": {
-          "type": "string",
-          "required": true,
-          "readable": true,
-          "filterable": true,
-          "sortable": true,
-          "projectable": true,
-          "storage": {
-            "valueColumn": "id"
-          },
-          "primaryKey": true
-        },
-        "revision": {
-          "type": "bigInt",
-          "required": true,
-          "readable": true,
-          "filterable": true,
-          "sortable": true,
-          "projectable": true,
-          "storage": {
-            "valueColumn": "revision"
-          }
-        },
-        "phase": {
-          "type": "string",
-          "required": true,
-          "readable": true,
-          "filterable": true,
-          "sortable": true,
-          "projectable": true,
-          "storage": {
-            "valueColumn": "phase"
-          }
-        },
-        "after_id": {
-          "type": "string",
-          "readable": true,
-          "filterable": true,
-          "sortable": true,
-          "projectable": true,
-          "storage": {
-            "valueColumn": "after_id"
-          }
-        },
-        "upper_id": {
-          "type": "string",
-          "readable": true,
-          "filterable": true,
-          "sortable": true,
-          "projectable": true,
-          "storage": {
-            "valueColumn": "upper_id"
-          }
-        }
-      },
-      "options": {
-        "softDelete": false,
-        "versioning": false,
-        "strictness": "strict"
-      },
-      "indexes": []
     },
     "__zeroship_workflow_requests": {
       "fields": {

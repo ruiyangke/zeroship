@@ -8,7 +8,7 @@
 use super::{
     app::{decode, encode, lock_app_state},
     delivery::{self, CapturedLease, JobReceipt},
-    models::{job_receipts, reconciliation_scans},
+    models::{app_state, job_receipts},
     publication::JobPublisher,
     store::Transaction,
     AppWorkflows,
@@ -51,7 +51,7 @@ impl ReconciliationOptions {
 }
 
 mod scan;
-use scan::{pending_ids, scan, Phase, Plan, Scan};
+use scan::{pending_ids, scan, Phase, Plan};
 
 enum Admission {
     Page(Plan),
@@ -190,31 +190,19 @@ impl AppWorkflows {
             plan.validate()?;
             plan
         } else {
-            let scan = if let Some(scan) = scan(&tx, self.app_id().as_str()).await? {
-                scan
-            } else {
-                tx.database()
-                    .collection(reconciliation_scans::Entity::COLLECTION)?
-                    .insert(value!({"id":self.app_id().as_str(), "revision":1, "phase":Phase::Publications.as_str()}))
-                    .await?;
-                Scan {
-                    revision: 1,
-                    phase: Phase::Publications.as_str().into(),
-                    after_id: None,
-                    upper_id: None,
-                }
-            };
-            if scan.revision <= 0
-                || scan
-                    .after_id
-                    .as_ref()
-                    .is_some_and(|after| scan.upper_id.as_ref().is_none_or(|upper| after >= upper))
+            let scan = scan(&tx, self.app_id().as_str()).await?;
+            if scan.reconciliation_revision <= 0
+                || scan.reconciliation_after_id.as_ref().is_some_and(|after| {
+                    scan.reconciliation_upper_id
+                        .as_ref()
+                        .is_none_or(|upper| after >= upper)
+                })
             {
                 return Err(invalid());
             }
-            let phase = Phase::parse(&scan.phase)?;
-            let previous_upper = scan.upper_id.clone();
-            let upper = match scan.upper_id {
+            let phase = Phase::parse(&scan.reconciliation_phase)?;
+            let previous_upper = scan.reconciliation_upper_id.clone();
+            let upper = match scan.reconciliation_upper_id {
                 Some(upper) => Some(upper),
                 None => pending_ids(&tx, self.app_id().as_str(), phase, None, None, 1, true)
                     .await?
@@ -226,7 +214,7 @@ impl AppWorkflows {
                     &tx,
                     self.app_id().as_str(),
                     phase,
-                    scan.after_id.as_deref(),
+                    scan.reconciliation_after_id.as_deref(),
                     Some(upper),
                     options.page_size,
                     false,
@@ -241,8 +229,8 @@ impl AppWorkflows {
                     .is_some_and(|last| upper.as_ref().is_some_and(|upper| last < upper));
             let plan = Plan {
                 phase,
-                revision: scan.revision,
-                after: scan.after_id,
+                revision: scan.reconciliation_revision,
+                after: scan.reconciliation_after_id,
                 previous_upper,
                 upper,
                 ids,
@@ -283,9 +271,7 @@ impl AppWorkflows {
         if index > plan.ids.len() {
             return Err(invalid());
         }
-        let current = scan(&tx, self.app_id().as_str())
-            .await?
-            .ok_or_else(invalid)?;
+        let current = scan(&tx, self.app_id().as_str()).await?;
         plan.check_scan(&current)?;
         let progress = if let Some(id) = plan.ids.get(index) {
             // Reserve before I/O. Cancellation may skip this attempt, but the
@@ -301,8 +287,11 @@ impl AppWorkflows {
             changed_once(&changed)?;
             Progress::Item(id.clone())
         } else {
-            if current.revision == plan.revision {
-                let revision = current.revision.checked_add(1).ok_or_else(invalid)?;
+            if current.reconciliation_revision == plan.revision {
+                let revision = current
+                    .reconciliation_revision
+                    .checked_add(1)
+                    .ok_or_else(invalid)?;
                 let after = if plan.more {
                     plan.ids.last().cloned()
                 } else {
@@ -314,12 +303,16 @@ impl AppWorkflows {
                 } else {
                     plan.phase.next()
                 };
+                // Scoping by app and matching the revision this page read is what
+                // makes a lost update impossible: a concurrent advance moved the
+                // revision, so it matches no row and the zero-row result fails
+                // the attempt.
                 let changed = tx
                     .database()
-                    .collection(reconciliation_scans::Entity::COLLECTION)?
+                    .collection(app_state::Entity::COLLECTION)?
                     .execute(Operation::Update {
-                        filter: value!({"id":self.app_id().as_str(), "revision":plan.revision}),
-                        patch: value!({"revision":revision, "phase":phase.as_str(), "after_id":after, "upper_id":upper}),
+                        filter: value!({"app_id":self.app_id().as_str(), "reconciliation_revision":plan.revision}),
+                        patch: value!({"reconciliation_revision":revision, "reconciliation_phase":phase.as_str(), "reconciliation_after_id":after, "reconciliation_upper_id":upper}),
                         many: true,
                     })
                     .await?;
