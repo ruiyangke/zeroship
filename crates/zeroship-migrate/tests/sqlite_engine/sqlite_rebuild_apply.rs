@@ -464,8 +464,7 @@ async fn sequence_remove_policy_rollback_restores_old_high_water() {
 }
 
 // A table-level composite FK lifecycle is routed through the production
-// structured rebuild. This adds the pre-change regression (SQLite previously
-// rejected the add), then exercises replace + drop while proving tuple order,
+// structured rebuild: add, then replace + drop, proving tuple order,
 // explicit supporting-index preview/recreation, MATCH SIMPLE null behavior,
 // dependent-object preservation, and unconditional FK-enforcement restoration.
 #[compio::test]
@@ -1490,13 +1489,11 @@ async fn aborting_rebuild_leaves_no_wedge_and_fk_on() {
 }
 
 // ---------------------------------------------------------------------------
-// A creator TRIGGER and a PARTIAL index survive a rebuild. The lossy pre-fix
-//      path rebuilt indexes from the DESIRED IndexSnapshot (dropping the WHERE
-//      clause) and NEVER recreated triggers (DROP TABLE silently destroyed them).
-//      The fix captures every dependent object's `sql` VERBATIM from the live
-//      sqlite_master before the drop and replays it after the rename. Asserts: the
-//      trigger STILL EXISTS and FIRES post-rebuild, and the partial index survives
-//      with its WHERE clause intact. RED pre-fix (trigger gone; index loses WHERE).
+// A creator TRIGGER and a PARTIAL index survive a rebuild: the rebuild captures
+//      every dependent object's `sql` VERBATIM from the live sqlite_master before
+//      the drop and replays it after the rename. Asserts: the trigger STILL EXISTS
+//      and FIRES post-rebuild, and the partial index survives with its WHERE
+//      clause intact.
 // ---------------------------------------------------------------------------
 #[compio::test]
 async fn creator_trigger_and_partial_index_survive_rebuild() {
@@ -1728,7 +1725,6 @@ async fn dependent_referencing_dropped_column_fails_closed() {
 //      rebuild a PARENT table dropping a row a CHILD references. A check scoped to
 //      the parent passes (the orphan is in the CHILD); the unscoped check catches it.
 //      Asserts: typed ForeignKeyViolation abort, both tables intact, FK back ON.
-//      RED pre-fix (the scoped `foreign_key_check(parent)` passed and committed).
 // ---------------------------------------------------------------------------
 #[compio::test]
 async fn cross_table_fk_orphan_caught_by_unscoped_check() {
@@ -1845,10 +1841,8 @@ async fn cross_table_fk_orphan_caught_by_unscoped_check() {
 
 // ---------------------------------------------------------------------------
 // A creator-pre-created `<t>__zero_migrate_rebuild` temp table does NOT pollute the
-//      rebuild. Pre-fix the shared CREATE's `IF NOT EXISTS` silently REUSED the
-//      stale temp (junk column + junk row), then RENAMEd the pollution into place.
-//      The fix DROPs the stale temp first. Asserts: post-rebuild `t` has the NEW
-//      shape (no junk column) and the junk row is gone. RED pre-fix.
+//      rebuild: the rebuild DROPs the stale temp first. Asserts: post-rebuild `t`
+//      has the NEW shape (no junk column) and the junk row is gone.
 // ---------------------------------------------------------------------------
 #[compio::test]
 async fn pre_created_temp_table_does_not_pollute_rebuild() {
@@ -2297,8 +2291,7 @@ async fn nullability_loosen_rebuild_preserves_data() {
 
 // ---------------------------------------------------------------------------
 // (DROP-FK) Removing a FOREIGN KEY via rebuild → positive end-state: the FK is
-// GONE (`PRAGMA foreign_key_list` is empty) and integrity holds. Previously only
-// the deferred-FK-is-an-error path existed; this proves the reachable drop. v1:
+// GONE (`PRAGMA foreign_key_list` is empty) and integrity holds. v1:
 // posts(author ref→users); v2: posts(author plain string, no FK). The diff yields
 // one rebuild ("drop foreign key posts.posts_author_fkey").
 // ---------------------------------------------------------------------------
@@ -2472,16 +2465,11 @@ fn simple_migration(name: &str, up: &str) -> Migration {
 }
 
 // ---------------------------------------------------------------------------
-// REGRESSION: the executor seam `MigrationBackend::rebuild_one`
-// enforces the PER-VERSION approval SCOPE as a TRUE second gate.
-//
-// Before the fix, the trait `rebuild_one` took NO `scope` — so a direct seam
-// caller driving `MigrationBackend::rebuild_one(be, .., Approval::Approved-equiv)`
-// could rebuild a destructive table the operator never individually reviewed,
-// bypassing the engine's per-version scope gate. This test drives the SEAM
-// DIRECTLY with an EMPTY `Versions` scope (admits nothing) and asserts
-// `ApprovalNotScoped` + that the live table is UNCHANGED (no rebuild ran). It
-// fails RED on the pre-fix seam (no scope param ⇒ the rebuild ran).
+// The executor seam `MigrationBackend::rebuild_one` enforces the PER-VERSION
+// approval SCOPE as a TRUE second gate: a direct seam caller must not rebuild a
+// destructive table the operator never individually reviewed. This test drives
+// the SEAM DIRECTLY with an EMPTY `Versions` scope (admits nothing) and asserts
+// `ApprovalNotScoped` + that the live table is UNCHANGED (no rebuild ran).
 // ---------------------------------------------------------------------------
 #[compio::test]
 async fn rebuild_one_seam_refuses_destructive_rebuild_outside_version_scope() {

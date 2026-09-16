@@ -1,24 +1,22 @@
 //! **The behaviour-preservation kernel for `schema_model`**, shared by the PostgreSQL
 //! and MySQL legs.
 //!
-//! Step 2 of `docs/proposals/single-fold-and-effects.md` section G adds a neutral model,
-//! a vendor side table, and one named comparator per question. It is required to change
-//! NOTHING. Two claims make that falsifiable, and both are checked here against
-//! snapshots taken from a live server through engine-emitted SQL rather than against
-//! hand-built fixtures:
+//! The neutral model, the vendor side table, and the named comparators are
+//! required to change NOTHING. Two claims make that falsifiable, and both are
+//! checked here against snapshots taken from a live server through
+//! engine-emitted SQL rather than against hand-built fixtures:
 //!
 //! 1. **The split is LOSSLESS.** `TableSnapshot -> (Table, VendorFacts) -> TableSnapshot`
-//!    is the identity. If it is not, the neutral model cannot serve catalog identity and
-//!    the spike is refuted at its first step.
+//!    is the identity. If it is not, the neutral model cannot serve catalog identity.
 //! 2. **Every named comparator answers IDENTICALLY** to the hand-written `eq` it was
 //!    extracted from, on every ordered pair of real objects.
 //!
 //! ## Why the round trip is compared through `Debug` and not through `==`
 //!
-//! `==` is the lossy thing under test. `ColumnSnapshot::eq` ignores eleven of twenty-one
-//! fields, so a round trip that dropped the vendor leg would compare EQUAL and
+//! `==` is the lossy thing under test. `ColumnSnapshot::eq` ignores most of
+//! the fields, so a round trip that dropped the vendor leg would compare EQUAL and
 //! the test would pass while the model silently lost a vendor fact. `Debug` is total on
-//! these types - `ColumnSnapshot`'s hand-written impl prints all twenty-one, hiding only
+//! these types - `ColumnSnapshot`'s hand-written impl prints every field, hiding only
 //! ones that are at their default, and a value that went from present to lost moves from
 //! shown to hidden, so the strings differ. Every other type derives it.
 //!

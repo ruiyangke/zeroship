@@ -63,11 +63,9 @@ pub struct ColumnSnapshot {
     /// into [`Self::value_format`].
     ///
     /// These bodies NAME THEIR OWN COLUMN, so a rename has to follow them, and BOTH
-    /// replays that own a `TableSnapshot` now do: the fold's `Op::RenameColumn` arm
+    /// replays that own a `TableSnapshot` do: the fold's `Op::RenameColumn` arm
     /// and `render::declarative`'s SQLite rename rebuild, through the shared
-    /// `rename_column_in_inline_checks`. This used to be a KNOWN GAP recorded here,
-    /// and the gap was real - the rebuild emitted
-    /// `"state" TEXT NOT NULL CHECK ("status" IN (...))` over a table with no `status`.
+    /// `rename_column_in_inline_checks`.
     ///
     /// The rewrite is TEXT SURGERY, which nothing else in this crate does to an
     /// expression, and the reason is recorded in the paragraph below: there is no AST
@@ -76,7 +74,7 @@ pub struct ColumnSnapshot {
     /// column name is copied through whole, the decoded identifier is matched EXACTLY,
     /// and a body the walk cannot read is left STALE rather than corrupt.
     ///
-    /// The severity of a stale body, MEASURED before the fix: that DDL is REJECTED
+    /// The severity of a stale body: that DDL is REJECTED
     /// rather than accepted, and the rejection is designed. The SQLite actor turns off
     /// double-quoted string literals for both DDL and DML (`SQLITE_DBCONFIG_DQS_DDL` /
     /// `_DQS_DML` in the hardened open sequence), so an unknown quoted identifier is an
@@ -99,8 +97,8 @@ pub struct ColumnSnapshot {
     /// the name of the type that produced the check, so there is nothing left to
     /// regenerate from - only something to infer. That is what forces the surgery.
     ///
-    /// [`Self::generated`] carries the same hazard through the same emitter and was
-    /// repaired first, by the OTHER route: it keeps the closed `Expr` its rendering came
+    /// [`Self::generated`] carries the same hazard through the same emitter and takes
+    /// the OTHER route: it keeps the closed `Expr` its rendering came
     /// from, so its rename walks an AST.
     pub inline_checks: Vec<String>,
     /// A generated/computed column expression rendered for the target dialect,
@@ -196,7 +194,7 @@ pub struct ColumnSnapshot {
     /// takes exactly this value and every hop between here and there calls it
     /// `expression_default`.
     ///
-    /// Measured need, and the only backend that populates it today: MySQL strips
+    /// The need, and the only backend that populates it today: MySQL strips
     /// SQL quotes from `information_schema.COLUMNS.COLUMN_DEFAULT`, so the raw text
     /// cannot distinguish the literal `"uuid()"` from the call `uuid()`; its
     /// `EXTRA` column carrying `DEFAULT_GENERATED` is what settles it.
@@ -253,7 +251,7 @@ pub struct ColumnSnapshot {
     /// drift equality: the portable schema surface records collation INTENT, and a
     /// server-default storage name is not intent.
     ///
-    /// Measured need, and the only backend that populates it today: MySQL refuses a
+    /// The need, and the only backend that populates it today: MySQL refuses a
     /// character foreign key whose two sides have incompatible storage, and
     /// `ascii_bin` and `utf8mb4_bin` are both case-sensitive - so the portable
     /// [`Self::case_sensitive`] cannot tell them apart.
@@ -790,7 +788,7 @@ pub struct IndexSnapshot {
     /// emitter and EXCLUDED from equality, because the catalog cannot
     /// report it back.
     ///
-    /// Measured on PostgreSQL 18.4. `pg_get_indexdef` renders `ON ONLY` for EVERY
+    /// `pg_get_indexdef` renders `ON ONLY` for EVERY
     /// index whose table is partitioned, whether or not `ONLY` was written:
     ///
     /// ```text
@@ -829,8 +827,7 @@ pub struct IndexSnapshot {
     /// names in `columns` / `elements` / `include`, so a cascade compares them
     /// directly and this field deliberately does NOT repeat them. The last two are
     /// rendered SQL TEXT, and a name-shaped token inside rendered SQL is not a
-    /// reference - measured on PostgreSQL 18.4,
-    /// `CREATE INDEX i ON t (note) WHERE (note <> 'a')` and
+    /// reference - `CREATE INDEX i ON t (note) WHERE (note <> 'a')` and
     /// `CREATE INDEX i ON t ((note || 'a'))` both SURVIVE `DROP COLUMN a`. So the
     /// producer walks the closed `Expr` instead, descending only the leg the target
     /// dialect selects, exactly as `ConstraintSnapshot::cascade_columns` does for a
@@ -1043,7 +1040,7 @@ pub struct ConstraintSnapshot {
     /// standing rule: a rename-follow on a field this `PartialEq` compares has to run
     /// after every decision that equality drives, not beside the fields it does not.
     ///
-    /// The cost of getting it wrong was measured, and it is not the same failure a
+    /// The cost of getting it wrong is not the same failure a
     /// stale `inline_checks` produces. SQLite resolves a foreign key's CHILD column
     /// list at CREATE TABLE time, so a stale local column is `unknown column "..." in
     /// foreign key definition` at the rebuild's leading statement - loud, and NOT
@@ -1533,7 +1530,7 @@ impl FunctionKey {
 /// Two reductions, in order:
 ///
 ///  1. **Drop a type modifier.** A modifier is not part of a PostgreSQL signature
-///     and `format_type(oid, NULL)` never prints one. MEASURED on PostgreSQL 18.4:
+///     and `format_type(oid, NULL)` never prints one:
 ///     `CREATE FUNCTION g(x varchar(255))` reads back from `pg_proc` as `character
 ///     varying`, so an authored `varchar(255)` that kept its length would be
 ///     reported as a missing function and an unexpected one on every snapshot.
@@ -1542,7 +1539,7 @@ impl FunctionKey {
 ///
 /// Step 1 is deliberately NOT pushed into that shared function. It decides which
 /// migrations the gate REFUSES as duplicate signatures; widening it is a change to
-/// authoring, not to drift, and is not what this work measured.
+/// authoring, not to drift.
 #[must_use]
 pub fn canonical_signature_type(raw: &str) -> String {
     let trimmed = raw.trim();
@@ -1592,7 +1589,7 @@ pub struct FunctionIdentity {
     ///
     /// `None` means DECLINE, and it has exactly one cause: a SQL-standard-body
     /// function (`BEGIN ATOMIC ... END`) keeps its body as a PARSE TREE in
-    /// `pg_proc.prosqlbody` and leaves `prosrc` EMPTY. Measured on PostgreSQL 18.4:
+    /// `pg_proc.prosqlbody` and leaves `prosrc` EMPTY:
     ///
     /// ```text
     ///   CREATE FUNCTION f2(x int) RETURNS int LANGUAGE sql
@@ -1638,11 +1635,11 @@ impl FunctionIdentity {
 /// One function body in the ONE form an offline fold and a `pg_proc` read can both
 /// produce: the authored text with its OUTER whitespace removed.
 ///
-/// TRIMMED, and the trim is not squeamishness - it is forced, and measured. The
+/// TRIMMED, and the trim is not squeamishness - it is forced. The
 /// renderer wraps the authored body in a dollar tag with a newline at each end
 /// (`AS $zsfn$\n{body}\n$zsfn$`), so what PostgreSQL stores for a function this
-/// project created is never the authored string. Measured on PostgreSQL 18.4, after
-/// applying an authored body of `SELECT x + 1`:
+/// project created is never the authored string. After applying an authored body
+/// of `SELECT x + 1`:
 ///
 /// ```text
 ///   pg_proc.prosrc = [\nSELECT x + 1\n]
@@ -1860,9 +1857,9 @@ pub struct VendorObjectIdentities {
     /// `integer` for an authored `int`, so an uncanonicalised key would report the
     /// same function as both missing and unexpected.
     ///
-    /// A MAP rather than the set this used to be, for the reason the two siblings
+    /// A MAP rather than a set, for the reason the two siblings
     /// below are maps: the key answers "does this overload exist", and the value
-    /// answers "is it still the same function". Identity alone left
+    /// answers "is it still the same function". Identity alone would leave
     /// `CREATE OR REPLACE FUNCTION` with an unchanged signature - the ORDINARY way a
     /// function is modified - reporting a clean schema.
     pub functions: BTreeMap<FunctionKey, FunctionIdentity>,
@@ -1999,24 +1996,25 @@ pub struct NamedTypeSnapshot {
 /// A PostgreSQL argument-type spelling reduced to the form that decides whether
 /// two function signatures collide.
 ///
-/// EVERY PAIR FOLDED HERE WAS MEASURED, one `CREATE FUNCTION` per alias against a
-/// live server, and each of the eight raised `function "p" already exists with
-/// same argument types`. Three near-neighbours were measured NOT to collide and
-/// are deliberately left apart, because folding them would refuse a real
-/// overload: `int`/`bigint`, `varchar`/`text`, and `timestamptz`/`timestamp`.
+/// The pairs folded here are the ones the server itself treats as colliding:
+/// each raises `function "p" already exists with same argument types`. The
+/// near-neighbours `int`/`bigint`, `varchar`/`text`, and `timestamptz`/`timestamp`
+/// do NOT collide and are deliberately left apart, because folding them would
+/// refuse a real overload.
 ///
 /// AN UNRECOGNISED SPELLING FALLS THROUGH TO ITSELF, and that direction is
 /// chosen. A missing alias means two colliding signatures are ACCEPTED here and
-/// refused by the server - the same under-refusal that existed before this
-/// function - whereas a wrong alias would refuse a migration the server runs.
+/// refused by the server, whereas a wrong alias would refuse a migration the
+/// server runs.
 /// `varchar(255)` versus `varchar` is a known instance: length is not part of a
-/// PG signature, but it is not folded here because it was not measured.
+/// PG signature, yet the pair is not folded here - under-refusal is the chosen
+/// direction.
 ///
 /// SHARED WITH DRIFT. `zeroship_migrate::apply::drift` compares a folded function signature
 /// against the one `pg_proc` reports, and the catalog reports `integer` where the
 /// author wrote `int`, so it needs exactly this mapping. It calls this function
-/// rather than carrying a second copy - a duplicated type table that drifts from
-/// this one is a defect this codebase has already had. Drift layers ONE further
+/// rather than carrying a second copy that could drift from it. Drift layers ONE
+/// further
 /// reduction of its own (dropping a type modifier) on top of the result; that
 /// belongs to drift and not here, because widening this function widens what the
 /// authoring gate REFUSES.

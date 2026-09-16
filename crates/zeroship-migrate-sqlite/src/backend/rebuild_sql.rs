@@ -36,8 +36,8 @@
 //! sequence where the whole schema is still self-consistent: BEFORE anything is
 //! dropped, it runs `ALTER TABLE <t> RENAME COLUMN <from> TO <to>` on the LIVE
 //! table. SQLite rewrites the table body, every index, every trigger, every view
-//! and every other table's `REFERENCES` clause in one consistent step (measured:
-//! independent of whether `foreign_keys` is on); the capture below then reads DDL
+//! and every other table's `REFERENCES` clause in one consistent step,
+//! independent of whether `foreign_keys` is on; the capture below then reads DDL
 //! that already names the new column, and the replay stays verbatim. This is the
 //! same delegation [`TableRebuildSpec::column_renames`] makes on the stored-shape
 //! leg, at the other end of the rebuild - that leg creates the table under the OLD
@@ -417,8 +417,7 @@ async fn run_rebuild_steps(
     // triggers, read from the LIVE `main.sqlite_master` BEFORE the drop. This is
     // a read of `main`, allowed under EngineJournal (the engine is doing it). We
     // capture the EXACT stored DDL so partial/expression/collation/DESC index
-    // attributes and creator triggers survive - the lossy desired-IndexSnapshot
-    // recreate is gone (it dropped those attrs and never touched triggers). The
+    // attributes and creator triggers survive the rebuild exactly. The
     // table name is unchanged after the RENAME, so the captured DDL re-applies
     // cleanly. Views are DB-global (not dropped WITH the table) and are left
     // untouched; if a view referenced a now-removed column SQLite surfaces that
@@ -429,7 +428,7 @@ async fn run_rebuild_steps(
     // the replay can stay VERBATIM instead of token-rewriting two grammars it would
     // be silently wrong about. See the module header for why silence is the risk.
     // The returned list is what was ACTUALLY renamed - a rename the live shape
-    // cannot accept is left alone and the rebuild proceeds exactly as it did before.
+    // cannot accept is left alone and the rebuild proceeds without it.
     let renamed_columns = rename_live_columns(actor, spec).await?;
     let captured = capture_dependents(actor, &spec.table).await?;
     // AUTOINCREMENT's contract is stronger than "next value exceeds the largest

@@ -43,13 +43,10 @@ use zeroship_migrate_sqlite::SqliteBackend;
 /// assertion fails on a process-wide observation rather than on anything about the
 /// backfill under test.
 ///
-/// Measured, not assumed: removing the acquisition from all 18 tests fails
-/// `armed_fault_fires_when_armed_on_the_applying_thread` and
-/// `armed_fault_claim_is_released_when_a_thread_exits_without_disarming` on every
-/// run, with `left: 2, right: 1` and `left: 2, right: 0`. The other 16 pass
-/// without it, so the serialization buys them nothing measurable - narrowing the
-/// lock to the three counter-observing tests, or having them assert a delta rather
-/// than an absolute, would let the rest run in parallel.
+/// Removing the acquisition breaks only the counter-observing tests; the
+/// rest pass without it, so the serialization buys them nothing - narrowing
+/// the lock to the three counter-observing tests, or having them assert a
+/// delta rather than an absolute, would let the rest run in parallel.
 fn serial() -> std::sync::MutexGuard<'static, ()> {
     use std::sync::{Mutex, OnceLock};
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -937,10 +934,9 @@ fn armed_fault_claim_is_released_when_a_thread_exits_without_disarming() {
 
 // ── PROBE: a SUPPORTED affinity holding a MISMATCHED live storage class ──────
 //
-// `docs/security-model.md`: "A SQLite backfill additionally requires an exact
-// ordered, non-null primary or unique candidate-key tuple with supported declared
-// `INTEGER` or `TEXT` affinity. Every live cursor value must use the matching
-// storage class."
+// A SQLite backfill requires an exact ordered, non-null primary or unique
+// candidate-key tuple with supported declared `INTEGER` or `TEXT` affinity,
+// and every live cursor value must use the matching storage class.
 //
 // Every rejection arm above measures the first sentence - the DECLARED affinity
 // (REAL declared, non-UTF8 text). None measures the second, which is a different

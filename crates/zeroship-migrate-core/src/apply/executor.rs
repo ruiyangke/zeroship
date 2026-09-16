@@ -94,11 +94,9 @@ pub(crate) use zeroship_migrate_backend::executor::unmet_halt_error;
 ///
 /// # It takes a backend, not a session, and that is the point
 ///
-/// This used to take `&D: SqlSession` and build a `PostgresBackend` from it, which
-/// made a neutral orchestration entry silently PostgreSQL-only - the dialect was
-/// decided here, by this file, for every caller. It now takes whatever backend the
-/// caller resolved. The body is otherwise byte-identical: same shell, same scope,
-/// same lock mode.
+/// The dialect is decided by the caller that resolved the backend, not here:
+/// building one from a `SqlSession` inside this neutral orchestration entry
+/// would make it silently PostgreSQL-only for every caller.
 ///
 /// # Errors
 /// - [`ApplyError::ApprovalRequired`] - a destructive migration without approval;
@@ -190,8 +188,8 @@ pub(crate) async fn apply_with_lock_backend<B: MigrationBackend>(
     // this sub-batch inherits that hold and takes none of its own.
     //
     // The skip is not what keeps a concurrent deploy out. Session advisory locks
-    // stack by depth: measured on PostgreSQL 18.4, two acquires followed by ONE
-    // unlock leave the lock still held, and only the matching second unlock
+    // stack by depth: two acquires followed by ONE unlock leave the lock still
+    // held, and only the matching second unlock
     // releases it. A balanced re-acquire and release here would therefore keep the
     // outer hold intact the whole way through. What the skip buys is a round trip
     // per sub-batch, and one fewer place an error path can leave the depth
@@ -517,9 +515,9 @@ async fn apply_locked<B: MigrationBackend>(
         crate::render::backends::guard_for(vendors, &cfg.guard_config_for(&backend.dialect()));
 
     // FIRST PASS - static validation over EVERY pending migration BEFORE any
-    // execution. The guard runs per-migration inside the apply loop in the
-    // original design, which means an earlier migration could commit before a
-    // later one is denied (a half-applied batch). Hoisting the static checks
+    // execution. Running the guard per-migration inside the apply loop would let
+    // an earlier migration commit before a later one is denied (a half-applied
+    // batch); hoisting the static checks
     // (guard deny-list + non-txn idempotency) up front makes a denial apply
     // NOTHING. (A migration failing at EXECUTION still legitimately leaves the
     // earlier ones applied - standard migration semantics; only the STATIC
@@ -707,10 +705,9 @@ async fn execute_pending<B: MigrationBackend>(
         // repeatable never reaches the versioned pipeline (it is partitioned out).
         let kind = if sups.is_empty() { "apply" } else { "squash" };
 
-        // The backend owns the atomicity strategy. On today's PG/SQLite backends,
-        // `ddl_is_transactional() == true`, so this routes exactly like the old
-        // executor branch: `transactional:false` uses two-phase, everything else
-        // uses the atomic apply.
+        // The backend owns the atomicity strategy. On the PG/SQLite backends,
+        // `ddl_is_transactional() == true`, so `transactional:false` uses
+        // two-phase and everything else uses the atomic apply.
         let recovered = backend
             .apply_one(cfg, m, applied_by, had_inflight, &sups, kind)
             .await?;
@@ -950,13 +947,6 @@ fn order_repeatables<'a>(
     Ok(ordered)
 }
 
-/// The per-migration precondition verdict loop now lives in
-/// `zeroship_migrate_postgres::backend::precondition::evaluate_all` - the **Postgres** leaf reached only via
-/// [`MigrationBackend::evaluate_preconditions`]
-/// (multi-engine abstraction). The generic apply body calls the backend method
-/// (`backend.evaluate_preconditions(cfg, m)`); it holds no `&Client` and runs no
-/// `pg_query` / `information_schema` query directly.
-///
 /// The EXPAND/CONTRACT gate. A `phase: Contract` online migration
 /// may apply only when every `phase: Expand` migration it `depends_on` is
 /// NET-APPLIED (`completed`) in the journal - the single source of truth.
@@ -2018,19 +2008,6 @@ async fn rollback_locked<B: MigrationBackend>(
         skipped_irreversible: plan.skipped_irreversible,
     })
 }
-
-// ===========================================================================
-// This header described a Trusted-profile apply suite that would have run the FULL
-// `executor::apply` path under an `ExecutorConfig::trusted` and proved that SQL the
-// Confined guard hard-denies APPLIES. The suite never existed, the ctor it named was
-// `#[cfg(test)] #[allow(dead_code)]` with no caller in either language, and both are
-// gone: the belt-off posture has been removed, so `ExecutorConfig` builds exactly one
-// kind of guard config and the deny-list belt runs for all of them.
-//
-// The external boundary the header claimed for that ctor is unaffected and still
-// pinned where it always was: the unforgeable `EffectivePolicy`, held by the T8
-// `compile_fail` doctests in `zeroship_migrate_backend::guard`.
-// ===========================================================================
 
 #[cfg(test)]
 mod rollback_selection_tests {

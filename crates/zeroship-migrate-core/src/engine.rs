@@ -479,7 +479,7 @@ fn refresh_historical_live(
     if projects_sdk_field_defs {
         // The SDK-shaped field map the 12-step rebuild renders its `CREATE TABLE` from,
         // as a PROJECTION of the single fold rather than a fourth replay of the op
-        // stream (`docs/proposals/single-fold-and-effects.md` section G).
+        // stream.
         historical_live.sdk_schemas =
             single_fold::fold(vendors, cumulative_ops, dialect, project, policy)
                 .map_err(|error| error.to_string())?

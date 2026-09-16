@@ -156,8 +156,8 @@ mod schema_renderer_tests {
     /// function in this repo against a literal in this repo, which proves nothing about
     /// what a server does. The SQLite line is adjudicated by a real database in
     /// `crates/zeroship-migrate/tests/fold_live/sqlite_decimal_rebuild_live.rs` - where the un-faceted `REAL`
-    /// answer was measured turning 12345678901234.5678 into 12345678901234.6 through a
-    /// 12-step rebuild - and the PG line by the phantom-rebuild case in the same file.
+    /// answer is checked through the 12-step rebuild - and the PG line by the
+    /// phantom-rebuild case in the same file.
     ///
     /// The MySQL line is neither. `def_to_column_type_for_dialect` is called with
     /// `Postgres` at both of its production call sites, and the one caller that passes a
@@ -166,13 +166,6 @@ mod schema_renderer_tests {
     /// agree with `render::lower::author_type_override` (`numeric(p, s)` /
     /// `DECIMAL(p, s)` / `TEXT`) rather than leaving one that answers `DOUBLE`; this
     /// line is the whole of its coverage, and no live suite moves if it regresses.
-    ///
-    /// That reachability claim was later MEASURED rather than left as a reading of the
-    /// call graph. `MysqlSchemaRenderer::column_type` was given a tripwire that panics
-    /// on entry and the whole Rust suite was run against live PostgreSQL, MySQL and
-    /// SQLite. Every test that tripped it is a `#[cfg(test)]` unit test in this file -
-    /// this one among them. Not one integration test and not one live-server leg
-    /// reached the MySQL arm.
     ///
     /// A bare `number` with no facet must keep the float spelling on all three - that is
     /// the half that must NOT move, and the reason the facet is read rather than the
@@ -787,13 +780,11 @@ fn build_injected_columns(
     vendors: VendorSet,
     table: &str,
     inject: &ResolvedInject,
-    // TAKEN rather than derived from `backend`. It used to read
-    // `backend.dialect()`, which returns the OPEN `DialectId` now; every use below
-    // is a core, dialect-PARAMETERIZED helper (`render_ir_default_for_type`) that
-    // still names the closed enum, so the enum
-    // is threaded from the caller that already has one instead of being recovered
-    // from the renderer. No open-id-to-closed-enum conversion exists, and this
-    // is why none is needed.
+    // TAKEN rather than derived from `backend`: the caller resolved this
+    // backend FROM a `DialectId` it already holds, and every use below
+    // (`render_ir_default_for_type`, `bytewise_column_metadata`) takes that
+    // same open id by reference, so it is threaded from the caller instead of
+    // being recovered from the renderer.
     dialect: &DialectId,
     backend: &'static dyn SchemaRenderer,
 ) -> Result<Vec<String>, QueryError> {
@@ -836,10 +827,10 @@ fn build_injected_columns(
             })
             .transpose()?
             .unwrap_or_default();
-        // The old PostgreSQL/SQLite arm returned this codec's string directly.
-        // Pass only its bare-vs-quoted classification now: those two backends use
-        // their own identical ANSI quote spelling for the quoted case, while
-        // MySQL explicitly ignores the flag and uses its own quote spelling.
+        // Pass only this codec's bare-vs-quoted classification, not its string:
+        // the PostgreSQL/SQLite backends use their own identical ANSI quote
+        // spelling for the quoted case, while MySQL explicitly ignores the flag
+        // and uses its own quote spelling.
         // Thus the backend owns every emitted byte without changing the result for
         // any identifier, including reserved words, mixed case, or embedded quotes.
         let canonical_bare =
@@ -884,8 +875,7 @@ fn render_injected_default(
     vendors: VendorSet,
     default: &IrDefault,
     ty: &ColType,
-    // Threaded for `render_ir_default_for_type`, which is core and still
-    // dialect-parameterized on the closed enum. See `build_injected_columns`.
+    // Threaded for `render_ir_default_for_type`. See `build_injected_columns`.
     dialect: &DialectId,
     backend: &'static dyn SchemaRenderer,
 ) -> Result<String, crate::render::lower::IrLowerError> {
@@ -1517,7 +1507,7 @@ pub fn build_create_indexes(
 ///
 /// Validation is intentionally light: the SDK already verified that
 /// every field exists on the schema and that names are unique within
-/// the schema. Here we re-check the wire-format shape so a hand-rolled
+/// the schema. This layer re-checks the wire-format shape so a hand-rolled
 /// caller can't slip a malformed entry past the orchestrator.
 pub fn build_named_indexes(
     vendors: VendorSet,
@@ -2031,9 +2021,8 @@ fn def_to_constraints_for_dialect(
         match def.get("type").and_then(|t| t.as_str()) {
             // The TEXT-shaped tokens. `char` and `inet` join `string` because all
             // three carry their default as a JSON string and all three take a
-            // single-quoted SQL literal; without them a `t.char()`/`t.inet()`
-            // column's declared DEFAULT was dropped on the floor by the `_` arm
-            // below while a `t.text()` column's survived.
+            // single-quoted SQL literal; a token left out of this arm loses its
+            // declared DEFAULT to the `_` arm below.
             Some("string") | Some("char") | Some("inet") => {
                 if let Some(s) = default.as_str() {
                     parts.push(format!("DEFAULT {}", backend.schema_string_literal(s)));
@@ -2042,19 +2031,18 @@ fn def_to_constraints_for_dialect(
             // The NUMERIC tokens, all through the one precision-preserving
             // renderer [`crate::render::declarative::numeric_default_literal`].
             //
-            // `number` used to sit here alone behind `as_f64`, so every integer
-            // token reached the `_` arm and lost its DEFAULT silently: the emitted
-            // SQL stayed valid, the table was created, and the declaration simply
-            // was not in it. The sibling emitter (`declarative::field_default_expr`,
-            // which renders a `FieldDescriptor` rather than this SDK field-def map)
-            // had already fixed exactly this and lists exactly these tokens; the two
-            // can describe the same column on two different paths, so they now share
-            // the renderer instead of each spelling the carriers.
+            // The sibling emitter (`declarative::field_default_expr`, which
+            // renders a `FieldDescriptor` rather than this SDK field-def map)
+            // lists exactly these tokens; the two can describe the same column
+            // on two different paths, so they share the renderer instead of each
+            // spelling the carriers. A token left out of this arm loses its
+            // declared DEFAULT silently: the emitted SQL stays valid, the table
+            // is created, and the declaration simply is not in it.
             //
             // Routing through the shared helper rather than `as_f64` is what makes a
             // `bigInt` exact: `as_f64` rounds anything past 2^53, so a default of
-            // 9007199254740993 was previously unrepresentable even for the tokens
-            // that DID render. Only the tokens `def_to_pg_type` maps to an integer
+            // 9007199254740993 is unrepresentable through it. Only the tokens
+            // `def_to_pg_type` maps to an integer
             // or float column are listed - no PG type NAME (`int4`, `int8`,
             // `bigint`) is accepted here either, for the same typo-rejection reason
             // `def_to_pg_type` gives.
@@ -2089,11 +2077,11 @@ fn def_to_constraints_for_dialect(
     // VALUE range, and the fold recovers them from a live `CHECK` onto whatever
     // column the constraint bounds - including an `int` one (`project_field_defs`
     // reads `scores.score: {"type":"int","min":1,"max":9}` straight back out of an
-    // applied `CHECK`). While this read `Some("number")` only, that recovered range
-    // was dropped by the emitter, so a rebuild silently removed a constraint the
+    // applied `CHECK`). A recovered range on a token outside this family would be
+    // dropped by this emitter, so a rebuild would silently remove a constraint the
     // server had been enforcing.
     //
-    // ONE-SIDED ON PURPOSE, and the asymmetry is measured rather than assumed.
+    // ONE-SIDED ON PURPOSE.
     // `render/declarative.rs`'s `field_check_constraints` carries the SAME
     // `f.ty == "number"` gate for the DESIRED SNAPSHOT, and it is deliberately left
     // alone. Widening it would change what the differ asks every dialect for, and
@@ -2134,7 +2122,7 @@ fn def_to_constraints_for_dialect(
     }
 
     // Standalone literal field. The value's primitive type is
-    // already mapped by `def_to_pg_type`; here we attach a CHECK so the
+    // already mapped by `def_to_pg_type`; this arm attaches a CHECK so the
     // column can hold only the literal value. Note this only fires for
     // a `t.literal()` used as a top-level *non-union* column - inside a
     // flat-expanded union the discriminator carries an `enum` of all
@@ -2455,14 +2443,13 @@ columns = [
     // -----------------------------------------------------------------------
     // SEC-4 - aggregation pipeline must NOT leak masked-column plaintext.
     //
-    // For a mask-only column (`.mask({...})` without `.encrypted()`), after the
-    // storage flip the real value lives in `__zs_raw__<col>` and the masked
-    // string lives in the field's own `<col>`. A bare `quote_ident(field)`
-    // against the base column now reaches the MASK directly - `$group.by:"ssn"`
-    // / `$max:"ssn"` can no longer return plaintext through the base identifier,
-    // since the base identifier no longer names the plaintext column. These pin
-    // that the SQL-builder never substitutes in the raw column name (BASE
-    // column, not the pre-flip `ssn_masked` sibling / the current
+    // For a mask-only column (`.mask({...})` without `.encrypted()`), the real
+    // value lives in `__zs_raw__<col>` and the masked string lives in the
+    // field's own `<col>`. A bare `quote_ident(field)` against the base column
+    // therefore reaches the MASK directly - `$group.by:"ssn"` / `$max:"ssn"`
+    // cannot return plaintext through the base identifier, because the base
+    // identifier does not name the plaintext column. These pin that the
+    // SQL-builder never substitutes in the raw column name (BASE column, not
     // `__zs_raw__ssn`).
     // -----------------------------------------------------------------------
 
@@ -2496,17 +2483,15 @@ columns = [
     // -----------------------------------------------------------------------
     // Update-operator regression tests
     //
-    // These lock in the fixes from 6a309b3 ("resolve 7 native-layer bugs"):
-    // type preservation on jsonb array ops, value-based $pull, $set flattening,
-    // and updated_at auto-injection.
+    // These pin: type preservation on jsonb array ops, value-based $pull,
+    // $set flattening, and updated_at auto-injection.
     // -----------------------------------------------------------------------
 
     // -----------------------------------------------------------------------
     // Materialised indexes (db proposal).
     //
-    // Previously, `t.string().index()` and `t.string().unique()` set
-    // `FieldDef.index/unique` in the SDK but the Rust DDL emitter produced
-    // no index. These tests lock the materialisation contract: every
+    // `t.string().index()` and `t.string().unique()` set `FieldDef.index/unique`
+    // in the SDK. These tests lock the materialisation contract: every
     // marker yields a `CREATE [UNIQUE] INDEX CONCURRENTLY IF NOT EXISTS ...`
     // statement with a deterministic name.
     // -----------------------------------------------------------------------
@@ -3788,10 +3773,10 @@ columns = [
     /// the pair; `zeroship-data-sql` carries the same assertion, and the slice pin
     /// keeps the two lists identical.
     ///
-    /// This asserted the opposite until 2026-09-07. The prefix fenced an empty
-    /// namespace: this engine's journal tables are `__zeroship_schema_*`, and
-    /// the one live object carrying the token is the rebuild table, named
-    /// `{table}__zero_migrate_rebuild` - a SUFFIX a prefix list cannot cover.
+    /// The prefix fences an empty namespace: this engine's journal tables are
+    /// `__zeroship_schema_*`, and the one live object carrying the token is the
+    /// rebuild table, named `{table}__zero_migrate_rebuild` - a SUFFIX a prefix
+    /// list cannot cover.
     #[test]
     fn the_collection_fence_reserves_zeroship_and_not_zero_migrate() {
         let mut ruled_on = 0_usize;
@@ -3922,10 +3907,9 @@ columns = [
     }
 
     /// ASCII allowlist must accept the same shape `validate_collection`
-    /// accepts: alphanumeric + underscore. `_private` was historically
-    /// accepted but the `_` prefix is now reserved for synthetic-
-    /// `validate_field_name_rejects_reserved_underscore_prefix` for the
-    /// updated rule.
+    /// accepts: alphanumeric + underscore. A leading `_` is reserved for
+    /// synthetic-result columns - see
+    /// `validate_field_name_rejects_reserved_underscore_prefix` for that rule.
     #[test]
     fn validate_field_name_accepts_ascii_allowlist() {
         for name in &["id", "user_id", "createdAt", "v2", "first_name"] {
@@ -4001,7 +3985,7 @@ columns = [
     /// `is_schema_metadata_key` lets `_meta` / `_indexes` top-level
     /// schema keys pass through schema iteration unchanged so existing
     /// test schemas (e.g. `{"_meta": {"strictness": "off"}, ...}`)
-    /// still register cleanly under the new reserved-prefix rule.
+    /// still register cleanly under the reserved-prefix rule.
     #[test]
     fn is_schema_metadata_key_matches_meta_and_indexes() {
         assert!(is_schema_metadata_key("_meta"));
@@ -5221,24 +5205,12 @@ mod hostile_identifier_quoting {
     use crate::test_fixtures::{MYSQL, POSTGRES};
 
     /// Hostile-input coverage for the two identifier spellings this kernel can
-    /// reach. It USED to say the schema kernel carries its own quoting primitives
-    /// "deliberately", and pointed at an exemption in the render layer's structural
-    /// single-home test (`render::dml::tests::no_bare_escape_seam_outside_dml`) for
-    /// the `schema/` subtree.
+    /// reach. The ANSI double-quote spelling has exactly one physical home
+    /// (`render::backends::ansi_double_quote_ident`), and the backtick spelling
+    /// lives in `render::backends::mysql`'s own `quote_ident`; this module
+    /// reaches each, like everyone else, through a door that names a dialect.
     ///
-    /// BOTH HALVES OF THAT ARE NOW FALSE. The exemption is deleted, and so is
-    /// `schema::query::quote_ident` - the ANSI double-quote spelling has exactly one
-    /// physical home (`render::backends::ansi_double_quote_ident`) and this module
-    /// reaches it, like everyone else, through a door that names a dialect.
-    ///
-    /// AND SO IS THE BACKTICK SPELLING. This note used to end "the backtick spelling
-    /// still lives here, in `mysql_quote_ident`, which `render::backends::mysql`
-    /// delegates to" - a true statement about an arrangement that was the MIRROR
-    /// IMAGE of the one above, with the BACKEND reaching into CORE for its own
-    /// spelling. Those bytes are now `render::backends::mysql`'s own `quote_ident`
-    /// and this module reaches them through the same dialect-naming door.
-    ///
-    /// So BOTH halves below are now end-to-end: each asserts that the door for its
+    /// Both halves below are end-to-end: each asserts that the door for its
     /// dialect actually arrives at that dialect's one home. They remain the only
     /// hostile-input coverage of either primitive, which is why they assert bytes
     /// rather than delegate to the emitter they are checking.
