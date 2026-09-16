@@ -404,10 +404,10 @@ async fn query_scalar_rejects_extra_columns_even_with_no_rows() {
     compio::time::timeout(TEST_WATCHDOG, async {
         let client = connect().await;
 
-        // The populated error was captured only to be INTERPOLATED INTO the
-        // empty case's failure message until 2026-08-23 - never inspected - so
-        // the test proved both calls erred, not that they erred for the same
-        // reason. Both must name the column count, which is the claim.
+        // The populated error must be INSPECTED, not merely interpolated into the
+        // empty case's failure message: otherwise the test proves both calls erred,
+        // not that they erred for the SAME reason. Both must name the column count,
+        // which is the claim.
         let populated = common::error_chain(
             &client
                 .query_scalar::<i32, _>("SELECT 1, 2", &[])
@@ -566,17 +566,14 @@ async fn raw_size_bytes_counts_field_data_and_not_the_frame() {
 
         // WHAT THIS TEST DOES NOT PIN: the 7 bytes of frame overhead
         // (`DataRow` tag 1 + length 4 + field count 2) that `raw_size_bytes`
-        // excludes. A block here used to claim it did, asserting
-        // `row.raw_size_bytes() + 7 == 12` for `SELECT 'x'::text` and calling
-        // that "a relationship rather than a second literal". It is not one:
-        // the assertion reduces to `raw_size_bytes() == 5`, which the table's
-        // first case already checks on the identical query, and both 7 and 12
-        // were hand-written. Nothing measured a frame, so a change to the
-        // overhead could not have moved it. Pinning it needs a scripted peer
-        // whose bytes are known -- `libs/compio-postgres/tests/suite/hostile_peer.rs` has that machinery
-        // and this file does not -- so the honest statement is that the four
-        // cases above pin the FIELD accounting and nothing here pins the
-        // frame's.
+        // excludes. Asserting `row.raw_size_bytes() + 7 == 12` for
+        // `SELECT 'x'::text` does not pin it: the assertion reduces to
+        // `raw_size_bytes() == 5`, which the table's first case already checks on
+        // the identical query, and both 7 and 12 would be hand-written. Pinning the
+        // overhead needs a scripted peer whose bytes are known --
+        // `libs/compio-postgres/tests/suite/hostile_peer.rs` has that machinery and
+        // this file does not -- so the four cases above pin the FIELD accounting and
+        // nothing here pins the frame's.
     })
     .await
     .expect("raw_size_bytes test exceeded its watchdog");
@@ -995,8 +992,8 @@ async fn query_one_scalar_still_reports_a_missing_row_as_a_row_problem() {
 /// missing guard is silent: `query_one_scalar` would return the FIRST of
 /// several rows and call it the answer.
 ///
-/// Measured 2026-09-03: disabling the guard left the lib (771) and suite (798)
-/// suites entirely green.
+/// Disabling the guard leaves the lib and suite suites entirely green, so this
+/// test is the only thing pinning it.
 #[compio::test]
 async fn query_one_scalar_refuses_more_than_one_row() {
     let client = connect().await;
