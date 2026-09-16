@@ -4,10 +4,14 @@ const baseURL = process.env.ZEROSHIP_AUTH_UI_BASE_URL;
 const jsonOutput = process.env.ZEROSHIP_AUTH_UI_RESULTS_JSON;
 
 if (!baseURL) {
-  throw new Error("ZEROSHIP_AUTH_UI_BASE_URL is required; use tests/e2e_auth_ui.sh");
+  throw new Error(
+    "ZEROSHIP_AUTH_UI_BASE_URL is required; run the auth_ui case in crates/zeroship-auth/tests/",
+  );
 }
 if (!jsonOutput) {
-  throw new Error("ZEROSHIP_AUTH_UI_RESULTS_JSON is required; use tests/e2e_auth_ui.sh");
+  throw new Error(
+    "ZEROSHIP_AUTH_UI_RESULTS_JSON is required; run the auth_ui case in crates/zeroship-auth/tests/",
+  );
 }
 
 export default defineConfig({

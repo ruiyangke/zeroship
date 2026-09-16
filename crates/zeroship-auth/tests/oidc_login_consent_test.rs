@@ -695,6 +695,74 @@ async fn consent_deny_redirects_access_denied_to_registered_redirect_uri() {
             Some("state-deny")
         );
         assert_eq!(absolute_query_param(&loc, "iss").as_deref(), Some(ISSUER));
+        // A denial hands the RP a refusal and nothing else. An authorization
+        // code riding along would grant exactly the access the user refused.
+        assert!(
+            absolute_query_param(&loc, "code").is_none(),
+            "a denied consent must not carry an authorization code: {loc}"
+        );
+    })
+    .await;
+}
+
+/// A denial must leave NO grant behind.
+///
+/// The positive half is `consent_covered_short_circuits_and_new_scope_bounces`,
+/// which proves a recorded grant issues a code directly. This is the other
+/// side: if the denial were itself recorded as a decision, the very next
+/// authorize for the same request would short-circuit to a code - handing the
+/// RP the access the user just refused - and every other assertion on the
+/// denial would still pass.
+#[ntex::test]
+#[allow(clippy::future_not_send)]
+async fn a_denied_consent_is_not_recorded_as_a_grant() {
+    Database::run(async |database| {
+        let fx = Fixture::boot(database).await;
+        let cookies = fx.create_session_cookie().await;
+        let verifier = pkce_verifier();
+        let authorize_path = authorize_path(
+            &fx.client_id,
+            "openid email",
+            &verifier,
+            "state-denied-grant",
+            Some("nonce-denied-grant"),
+        );
+        let consent_loc = format!(
+            "/consent?{}",
+            url::form_urlencoded::Serializer::new(String::new())
+                .append_pair("return_to", &authorize_path)
+                .finish()
+        );
+        let consent_get = get(&fx, &consent_loc, Some(&cookies)).await;
+        assert_eq!(consent_get.status().as_u16(), 200);
+        let csrf = read_set_cookie(&consent_get, "__Host-zsidp_csrf").expect("csrf");
+        let body = form(&[
+            ("csrf", csrf.as_str()),
+            ("return_to", authorize_path.as_str()),
+        ]);
+
+        let deny = post_form(
+            &fx,
+            "/consent/deny",
+            &body,
+            Some(&format!("{cookies}; __Host-zsidp_csrf={csrf}")),
+        )
+        .await;
+        assert_eq!(deny.status().as_u16(), 303);
+        assert_eq!(
+            absolute_query_param(&location(&deny), "error").as_deref(),
+            Some("access_denied")
+        );
+
+        // The same request, re-authorized: it must prompt again rather than
+        // issue a code.
+        let again = get(&fx, &authorize_path, Some(&cookies)).await;
+        assert_eq!(again.status().as_u16(), 303);
+        assert!(
+            location(&again).starts_with("/consent?return_to="),
+            "a denied consent must not be recorded as a grant: {}",
+            location(&again)
+        );
     })
     .await;
 }

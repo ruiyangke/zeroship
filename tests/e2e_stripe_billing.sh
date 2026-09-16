@@ -117,7 +117,7 @@ echo "============================================"
 # replaced ZEROSHIP_PSQL, whose default was one pinned /nix/store hash that
 # resolved on exactly one machine; everywhere else it was absent and the
 # absence was `exit 0`, so this suite measured nothing and reported success.
-# Same chain as tests/e2e_auth_ui.sh, same variable name.
+# Same chain as the other e2e harnesses: $PATH, then the nix store, then refuse.
 #
 # THAT SENTENCE WAS THE ONLY ONE ACTED ON at the time: psql got a refusal and
 # every other prerequisite below kept its `exit 0`, so the diagnosis was written
