@@ -122,8 +122,8 @@ pub async fn ensure_journal<D: SqlSession>(
     // a kind mismatch => tamper. The applied-only columns (`kind`/`phase`/
     // `outcome`) are NULL on a `rolled_back` row; a CHECK documents the
     // per-`event_kind` shape (`applied` => all three NOT NULL; `rolled_back` => all
-    // three NULL). `by`/`at` unify the separate actor and timestamp columns the two
-    // event kinds used to carry.
+    // three NULL). `by`/`at` are the unified actor and timestamp for both event
+    // kinds.
     conn.batch(&format!(
         "CREATE TABLE IF NOT EXISTS {meta}.__zeroship_schema_migrations (
             event_seq   BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
@@ -258,8 +258,7 @@ pub async fn ensure_journal<D: SqlSession>(
     // in-scope online-rename EXPAND in file A commits durably (E1/E2/E3 +
     // dual-write trigger + the `__zeroship_schema_pending_contracts` obligation) BEFORE a
     // LATER file B in the SAME deploy can fail at apply for a runtime reason the
-    // read-only pre-validation cannot predict. Pre- that left file A's table
-    // half-renamed behind the creator's 4xx, owing a pending contract.
+    // read-only pre-validation cannot predict.
     //
     // THIS CRATE SHIPS THE DURABLE PRIMITIVES AND NO DRIVER. The table, the
     // scoped write, the promotion, the reconcile append and the resume query all
@@ -290,9 +289,8 @@ pub async fn ensure_journal<D: SqlSession>(
     // whose `deploy_id` is this deploy's, or a net-`in_progress` prior-deploy row
     // whose obligation is still `outstanding` (the crash leg).
     //
-    // **The crash-vs-legit discriminator, which is the part worth keeping.**
-    // A driver must not invert this, and the inverse has been built here before
-    // and reverted. The marker is
+    // **The crash-vs-legit discriminator.**
+    // A driver must not invert this. The marker is
     // born `in_progress` (with the obligation, atomically), and `in_progress` itself
     // is the "this deploy has not durably reached a terminal outcome" signal. The
     // success arm promotes it to `committed` in one atomic batch, and the crash
@@ -309,12 +307,11 @@ pub async fn ensure_journal<D: SqlSession>(
     // has not run.
     //
     // The tempting inverse - a marker born unprotected, stamped only once the go-live
-    // reaches its success arm, recovering anything left unstamped - was implemented
-    // here and torn out, because its
-    // stamp-failure direction leaves the marker PROTECTED, and a later deploy then
-    // silently reverts a live contract it cannot distinguish from a crash. Anyone
-    // building the driver should read that as settled rather than rediscovering it:
-    // the failure mode is a committed contract disappearing, and it is not visible
+    // reaches its success arm, recovering anything left unstamped - is the one to
+    // avoid: its stamp-failure direction leaves the marker PROTECTED, and a later
+    // deploy then silently reverts a live contract it cannot distinguish from a crash.
+    // Anyone building the driver should read that as settled rather than rediscovering
+    // it: the failure mode is a committed contract disappearing, and it is not visible
     // in the happy path.
     //
     // **Append-only + immutable + admin-only** (same posture as
@@ -398,27 +395,14 @@ pub async fn ensure_journal<D: SqlSession>(
     ))
     .await?;
 
-    // 4. Attach the immutability triggers idempotently to ALL FOUR append-only
-    // tables (PG 16 has no CREATE TRIGGER IF NOT EXISTS; guard on pg_trigger).
-    // Fewer triggers overall now that the two event tables are one.
-    //
-    // DO NOT TRUST THIS COMMENT OVER THE LOOP - it has been wrong twice. It
-    // originally said "BOTH ... the consolidated events table + ..._supersedes",
-    // written before `__zeroship_schema_pending_contracts` joined; the correction that
-    // replaced it said THREE and asserted `..._deploy_recovery` was excluded on
-    // purpose, which the loop directly below disproves. Verified live against
-    // PostgreSQL, per meta table:
-    //
-    //     __zeroship_schema_deploy_recovery         triggers=2   TRUNCATE refused
-    //     __zeroship_schema_migrations              triggers=2   TRUNCATE refused
-    //     __zeroship_schema_migrations_supersedes   triggers=2   TRUNCATE refused
-    //     __zeroship_schema_pending_contracts       triggers=2   TRUNCATE refused
-    //     __zeroship_schema_migrations_inflight     triggers=0   TRUNCATE allowed
+    // 4. Attach the immutability triggers idempotently to the append-only tables
+    // (PG 16 has no CREATE TRIGGER IF NOT EXISTS; guard on pg_trigger).
     //
     // `..._inflight` is the ONLY meta table left mutable, and deliberately so: it
     // is the side-table an operator clears by hand to recover an interrupted
     // auto-committing MySQL DDL, so making it immutable would remove the
-    // documented repair path. Everything else here is history.
+    // documented repair path. Every other meta table here is immutable by
+    // construction.
     //
     // TWO triggers per table, both calling the same RAISE function:
     // - `BEFORE UPDATE OR DELETE... FOR EACH ROW` - blocks row mutation.
@@ -1294,8 +1278,8 @@ pub async fn mark_deploy_recovery_committed<D: SqlSession>(
 /// net-`in_progress`). A genuine commit/connection failure rolls the whole batch
 /// back, leaving every marker net-`in_progress` - the *recoverable* (fail-safe)
 /// state: the next deploy AUTO-ABORTS the half-rename (safe because a pending
-/// contract has not cut over to the shadow column, so no data is lost). This is the -
-/// a promotion failure degrades to "safely re-runnable crash
+    /// contract has not cut over to the shadow column, so no data is lost). This is the
+    /// fail-safe direction: a promotion failure degrades to "safely re-runnable crash
 /// recovery", never "silent revert of a live contract a later deploy mistakes for
 /// committed".
 ///
@@ -1458,7 +1442,7 @@ pub async fn outstanding_deploy_recoveries<D: SqlSession>(
 /// supersession no longer holds and the superseded versions become pending again
 /// (consistent with `S` itself being pending again).
 ///
-/// #4 - the `kind = 'squash'` restriction is load-bearing: without it, any
+/// The `kind = 'squash'` restriction is load-bearing: without it, any
 /// net-applied version whose `version` collided with a corrupted/forged edge's
 /// `squash_version` could over-supersede (suppress a real migration). Only a
 /// genuine recorded squash may supersede.
@@ -1574,7 +1558,7 @@ pub async fn latest_completed_checksums<D: SqlSession>(
 /// (the adoption path: the schema already physically exists, so the `up` is
 /// recorded not run) and `zeroship_migrate::ops::squash`'s existing-DB path (a supersession: the
 /// effect of `[v1..vN]` is already present, so the squash's `up` is recorded not
-/// run). #3 fix: the `completed` row + every supersession edge are inserted in ONE
+/// run). The `completed` row + every supersession edge are inserted in ONE
 /// transaction THIS function brackets (`BEGIN ... COMMIT`, ROLLBACK on any error), so
 /// a net-applied squash always carries its full edge set (no partial-edge window) -
 /// a crash between the row and the edges can no longer leave `S` net-applied with
@@ -1630,8 +1614,8 @@ pub async fn record_baselines<D: SqlSession>(
     Ok(())
 }
 
-/// The row + edge INSERTs of [`record_baseline`], run INSIDE its `BEGIN ... COMMIT`
-/// (#3). Split out so the caller can ROLLBACK on the first failure, making the
+/// The row + edge INSERTs of [`record_baseline`], run INSIDE its `BEGIN ... COMMIT`.
+/// Split out so the caller can ROLLBACK on the first failure, making the
 /// completed row and its full edge set atomic.
 async fn record_baseline_inner<D: SqlSession>(
     conn: &D,
@@ -1727,15 +1711,6 @@ mod seam_tests {
 
     /// The journal seam quotes and fails closed BYTE-IDENTICALLY to every other
     /// seam that routes through `quote_ident_checked_for_backend`.
-    ///
-    /// This assertion used to be a leg of the engine's
-    /// `render::dml::tests::all_engine_seams_render_uniformly`, which named
-    /// `journal_sql::quote_ident_for_test` to reach it. It came here with the
-    /// execution half, exactly as the `role` leg did when the migrator role
-    /// derivation left - the invariant did not get dropped, it got a home next to
-    /// its subject, which is the only place it can still see it. The engine's leg
-    /// still asserts the same two facts about the author seam against the same
-    /// shared helper.
     #[test]
     fn the_journal_seam_renders_uniformly_and_fails_closed() {
         let schema = "ap\"p"; // a quote-bearing engine schema

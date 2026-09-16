@@ -15,9 +15,8 @@ use zeroship_migrate::{
     ExecutorConfig, GuardConfig, IrAuthor, LiveSchema, LockMode, LoweredArtifact, MigrationBackend,
     MigrationEngine, MigrationIr, PlanStatusManifest, SealError, SealedPolicy, StatusError,
 };
-// PG-shaped surfaces live in the vendor crate now: the neutrality refactor moved
-// them off the facade, so this PostgreSQL host names PostgreSQL rather than
-// reaching for a re-export that deliberately no longer exists.
+// PG-shaped surfaces live in the vendor crate: this PostgreSQL host names
+// PostgreSQL directly rather than through a facade re-export.
 use crate::session::CompioPgSession;
 use zeroship_migrate_policy::EffectivePolicy as PdpPolicy;
 use zeroship_migrate_postgres::backend::drift_sql::snapshot_schema;
@@ -256,14 +255,8 @@ pub enum ProvisionRuntimeRoleError {
 
 /// Apply a frozen `.ir.json` bundle into the app's own schema.
 ///
-/// THERE IS ONE PATH. Until 2026-08-28 there were two, and the second was
-/// unreachable in a way that read as a feature: a migration whose preflight gated
-/// any version was parked as `pending_approval` and could only proceed through an
-/// operator `approve()` endpoint that no dashboard, CLI or service ever called. A
-/// creator whose migration gated a version therefore got a 409 with no way past
-/// it. The approval capability is removed rather than completed; the ceiling the
-/// creator runs under is what bounds them, and the engine still refuses a
-/// destructive step it was not handed an [`Approval`] for.
+/// THERE IS ONE PATH. The ceiling the creator runs under is what bounds them, and
+/// the engine still refuses a destructive step it was not handed an [`Approval`] for.
 ///
 /// The row in `zeroship.app_schema_applies` opens only after guarded preparation
 /// and complete-history attestation, but before creator DDL. A surviving request
@@ -530,11 +523,9 @@ async fn run_apply(
         .map_err(ApplyRequestError::ProvisionRuntimeRole);
     let outcome = applied?;
     reprovisioned?;
-    // NO LONGER AMBIGUOUS. This used to hand `reconcile_app_publication` one
-    // `&str` that it spent on BOTH identities - the publication name (tenant-keyed)
-    // and the `pg_namespace.nspname` filter (schema-keyed) - because the app id
-    // and the schema were the same bytes. It now takes the tenant and asks
-    // `app_derivation` for each derived name in turn.
+    // `reconcile_app_publication` takes the tenant and derives each name it needs:
+    // the publication name is tenant-keyed, the `pg_namespace.nspname` filter is
+    // schema-keyed.
     reconcile_app_publication(session.client(), app_id).await?;
     Ok(outcome)
 }
@@ -570,9 +561,8 @@ async fn apply_sealed(
         .map_err(SealedApplyError::Apply)
 }
 
-/// Discover `*.ir.json` files in a directory, deterministically ordered by path
-/// (the service-owned replacement for the engine's removed `discover_ir_files`).
-// `IrApplyError` is ~152 bytes wide because it carries the vendored engine's
+/// Discover `*.ir.json` files in a directory, deterministically ordered by path.
+// `IrApplyError` is a large error because it carries the vendored engine's
 // own error enums verbatim (`zeroship_migrate::LoadAndLowerGuardedError` etc).
 // Boxing it would ripple through every `IrApplyError::Read { .. }` match arm
 // in this file and its callers; not doing that as part of a lint sweep.
@@ -644,15 +634,13 @@ fn resolve_shape_bytes(
     })
 }
 
-/// Live facts the PG `.ir.json` apply loop advances between files (the
-/// service-owned analogue of the engine's removed `PostgresIrApplyState`).
+/// Live facts the PG `.ir.json` apply loop advances between files.
 struct PostgresIrApplyState {
     registry: BTreeMap<String, String>,
     live_schema: LiveSchema,
 }
 
-/// Seed the PG IR apply state from the live project schema (the service-owned
-/// analogue of the engine's removed `postgres_ir_apply_state`). Introspects the
+/// Seed the PG IR apply state from the live project schema. Introspects the
 /// catalog over the [`SqlSession`] seam via the engine's `snapshot_schema` free fn
 /// (the session is the same one the backend borrows).
 async fn postgres_ir_apply_state(
@@ -766,17 +754,14 @@ async fn apply_prepared_ir_documents(
 /// The policy this apply runs under: the ceiling, narrowed by the draft the
 /// REQUEST carried.
 ///
-/// POLICY ARRIVES IN THE ARTIFACT, NOT THE DATABASE. There used to be a
-/// `zeroship.migrated_app_policies` table and a PUT endpoint that wrote it, and
-/// this function preferred the request draft and fell back to the stored one. The
-/// store is gone: a migration policy is declared in the creator's repository,
-/// folded at build time and shipped with the request, exactly like the mask
-/// policy. A policy nothing can mutate at runtime is one fewer thing to
-/// authenticate.
+/// POLICY ARRIVES IN THE ARTIFACT, NOT THE DATABASE. A migration policy is declared
+/// in the creator's repository, folded at build time and shipped with the request,
+/// exactly like the mask policy. A policy nothing can mutate at runtime is one fewer
+/// thing to authenticate.
 ///
 /// See the `write_ir_documents` allow below - same `ApplyRequestError` size, same
-/// rationale. It surfaces here and not before because this function used to be
-/// `async`, and `clippy::result_large_err` does not fire through a future.
+/// rationale. It surfaces here because `clippy::result_large_err` does not fire
+/// through a future, and this is where the function becomes synchronous.
 #[allow(clippy::result_large_err)]
 fn resolve_apply_policy(
     app_id: &AppId,
@@ -797,11 +782,8 @@ fn resolve_apply_policy(
 /// Lower every document under the guard, refuse a denied plan, and retain the
 /// exact artifacts for journal attestation and apply.
 ///
-/// It used to also classify which versions needed operator approval; that
-/// classification had exactly one consumer, an approval state machine no caller
-/// could drive, and both are gone. A bundle whose LAST document is denied must be
-/// refused before the DDL of the earlier documents commits, so preparation walks
-/// the whole set first.
+/// A bundle whose LAST document is denied must be refused before the DDL of the
+/// earlier documents commits, so preparation walks the whole set first.
 ///
 /// This function runs while the caller holds the project lock. Keeping the owned
 /// artifacts means status and apply consume one lowering result, not two catalog
@@ -930,7 +912,7 @@ fn guard_policy_for_managed(schema: &str) -> PdpPolicy {
         .expect("embedded no-inject confined guard charter must bind and compose")
 }
 
-// `ApplyRequestError` is ~152 bytes wide because it wraps `IrApplyError` /
+// `ApplyRequestError` is a large error because it wraps `IrApplyError` /
 // `SealedApplyError` (themselves wide - see the allows on `discover_ir_files`
 // above). Boxing it would ripple through every match arm on this type in
 // `apply.rs` and `api.rs`; not doing that as part of a lint sweep.
@@ -1171,25 +1153,16 @@ pub const WORKER_ROLE: &str = "zeroship_worker";
 ///
 /// [`WORKER_ROLE`] is ONE login role shared by every app. Without the inherit
 /// option this grant makes the worker's ambient authority the union of every
-/// app runtime role it has ever been granted. The load-bearing fact is the
-/// PROPORTION, not the count: on the dev database on 2026-08-28 every single
-/// `app_%_role` membership the worker held was `inherit_option = t` - 540 of
-/// 540. The count drifts with every test run and is recorded as a dated
-/// observation, not a figure to carry forward - and much of that population was
-/// this suite's own leak: `cleanup_app` dropped the migrator role but not the
-/// `app_<uuid>_role` or the platform schema beside it, so one green 17-test run
-/// left 7 of each behind. Fixed in `9cf1b3fb4`; a later reading of 29 on the
-/// same database is the same posture over a smaller population, not a change in
-/// it. The worker's boot-time check walks every membership it holds, so the
-/// leak was inflating a production-shaped check on every run. Under that posture
-/// `SET LOCAL ROLE` only ever NARROWS: a statement that forgets it
-/// does not fail, it runs with cross-tenant reach. `WITH INHERIT FALSE` inverts
-/// the default so omission fails closed with `permission denied for schema`,
-/// and the fence stops depending on every call site remembering.
+/// app runtime role it has ever been granted: a membership created without the
+/// option inherits by default, so `SET LOCAL ROLE` only ever NARROWS and a
+/// statement that forgets it does not fail, it runs with cross-tenant reach.
+/// `WITH INHERIT FALSE` inverts the default so omission fails closed with
+/// `permission denied for schema`, and the fence stops depending on every call
+/// site remembering.
 ///
-/// Measured on PostgreSQL 16.14 (`server_version_num=160014`), four arms
-/// differing in one variable, bare `SELECT` from an app schema as the login
-/// role:
+/// The property is the SERVER membership catalog's, so it is settled by a live
+/// measurement - four arms differing in one variable, bare `SELECT` from an app
+/// schema as the login role:
 ///
 /// | grant | result |
 /// | --- | --- |
@@ -1205,28 +1178,28 @@ pub const WORKER_ROLE: &str = "zeroship_worker";
 /// # Why no `REVOKE` first, and why that is not an oversight
 ///
 /// This block re-runs on every apply, so existing databases carry the legacy
-/// inheriting membership and must converge without a migration. Measured on the
-/// same server: issuing `GRANT ... WITH INHERIT FALSE` over an existing
-/// inheriting membership flips `pg_auth_members.inherit_option` from `t` to `f`
-/// IN PLACE, and the bare `SELECT` that succeeded a statement earlier then
-/// fails. A `REVOKE` would be strictly worse - it opens a window in which the
-/// worker holds no membership at all, so a concurrent `SET LOCAL ROLE` fails
-/// spuriously, and it buys nothing the re-grant does not already do.
+/// inheriting membership and must converge without a migration. Issuing
+/// `GRANT ... WITH INHERIT FALSE` over an existing inheriting membership flips
+/// `pg_auth_members.inherit_option` from `t` to `f` IN PLACE, and the bare
+/// `SELECT` that succeeded a statement earlier then fails. A `REVOKE` would be
+/// strictly worse - it opens a window in which the worker holds no membership at
+/// all, so a concurrent `SET LOCAL ROLE` fails spuriously, and it buys nothing
+/// the re-grant does not already do.
 ///
 /// The reverse is a no-op, which is the safe asymmetry: a plain `GRANT` over a
 /// non-inheriting membership reports `NOTICE: role ... has already been granted
-/// membership` and leaves `inherit_option = f`. A caller that regressed to the
-/// old statement could not silently re-open the fence.
+/// membership` and leaves `inherit_option = f`, so a caller that issued the
+/// plain statement could not silently re-open the fence.
 ///
 /// # What this does NOT converge
 ///
 /// `pg_auth_members` is keyed on `(roleid, member, GRANTOR)`. A second grantor
 /// adds a SECOND row, PostgreSQL takes the UNION, and one inheriting row
-/// re-opens the fence for the pair - measured, including that a plain `REVOKE`
-/// as superuser removes only the issuing grantor's row and leaves the other
-/// live. This statement converges the row it owns; catching a foreign inheriting
-/// row is `zeroship_worker`'s boot-time posture check, which refuses on ANY
-/// inheriting app-role membership regardless of who granted it.
+/// re-opens the fence for the pair - a plain `REVOKE` as superuser removes only
+/// the issuing grantor's row and leaves the other live. This statement converges
+/// the row it owns; catching a foreign inheriting row is `zeroship_worker`'s
+/// boot-time posture check, which refuses on ANY inheriting app-role membership
+/// regardless of who granted it.
 ///
 fn runtime_dependents_sql_for_role(runtime_role: &str) -> String {
     let runtime_role_q = quote_ident(runtime_role);
@@ -1282,13 +1255,11 @@ impl RuntimeRoleProvisioningSql {
 ///
 /// The role this composes is what the data plane's `SET LOCAL ROLE` must name,
 /// and the data plane composes that name on its own side
-/// (`zeroship_data_orm::backend::postgres::pg_session_sql::tx_session_setup_sql`). While both
-/// took `&str`, "they agree" was only ever true of the value each caller
-/// happened to hold: the parameter here is the SCHEMA and the one there was the
-/// TENANT, and the two are the same string only until the physical schema stops
-/// being the app id. Both now take the same type, so a caller reaching for the
-/// wrong identity is a compile error rather than a `SET LOCAL ROLE` naming a
-/// role nobody created.
+/// (`zeroship_data_orm::backend::postgres::pg_session_sql::tx_session_setup_sql`). The
+/// parameter here is the SCHEMA and the one there is the TENANT, and the two are
+/// the same string only until the physical schema stops being the app id. Both take
+/// the same type, so a caller reaching for the wrong identity is a compile error
+/// rather than a `SET LOCAL ROLE` naming a role nobody created.
 ///
 /// # Preconditions
 ///
@@ -1308,10 +1279,10 @@ impl RuntimeRoleProvisioningSql {
 ///
 /// The durable fix is to stop pre-interpolating and let the block quote its own
 /// identifiers with `format('%I', ...)`.
-/// The tenant is no longer an input: every statement below is derived from the
-/// SCHEMA and the migrator role. The parameter stays so a caller that holds an
-/// app identity keeps naming the app it is provisioning for; a caller that holds
-/// only a schema reaches [`runtime_role_provisioning_sql_for_schema`] instead.
+/// The tenant is not an input: every statement below is derived from the SCHEMA
+/// and the migrator role. The parameter stays so a caller that holds an app
+/// identity keeps naming the app it is provisioning for; a caller that holds only
+/// a schema reaches [`runtime_role_provisioning_sql_for_schema`] instead.
 pub fn runtime_role_provisioning_sql(
     _app_id: &AppId,
     schema: &SchemaName,
@@ -1462,7 +1433,7 @@ mod tests {
              TO \"zeroship_worker\" WITH INHERIT FALSE"
         ));
         // Belt and braces against a re-grant that drops the option: a bare
-        // `... TO "zeroship_worker";` terminator is the pre-fix statement.
+        // `... TO "zeroship_worker";` terminator is the inheriting form.
         assert!(
             !sql.contains("TO \"zeroship_worker\";"),
             "an unqualified grant re-opens the ambient union across every app: {sql}"
@@ -1858,9 +1829,9 @@ mod live_audit_unmask_provisioning {
             "the id column must own an implicit sequence"
         );
 
-        // OWNERSHIP, which is the change this commit made: the table is created
-        // by the migration service's admin principal, so the worker's runtime
-        // role is an ordinary grantee rather than the owner it used to be.
+        // OWNERSHIP: the table is created by the migration service's admin
+        // principal, so the worker's runtime role is an ordinary grantee rather
+        // than the owner.
         let owner: String = admin
             .query_one_scalar(
                 "SELECT tableowner FROM pg_tables \
@@ -2402,9 +2373,8 @@ mod live_creator_schema_table_privileges {
 // generated string for `WITH INHERIT FALSE`. It proves the statement SAYS the
 // words - never that PostgreSQL honours them, never that the role-level
 // `NOINHERIT` attribute would not have done the same job, and never that an
-// existing database provisioned the old way converges when the statement runs
-// again. Every one of those was measured here and two of them are counter-
-// intuitive.
+// existing database carrying an inheriting membership converges when the
+// statement runs again.
 //
 // THE FIXTURE IS `SET SESSION AUTHORIZATION`, not a second connection. It sets
 // both session and current user, so privilege checks run fully as the stand-in
@@ -2462,10 +2432,8 @@ mod live_worker_role_fence {
     /// a concurrently-running case's roles out from under it, producing a
     /// failure that looks like a privilege bug.
     ///
-    /// It exists because a case that PANICS never reaches its `teardown`, and
-    /// an assertion firing is the EXPECTED outcome of three of these five
-    /// before the fix - one such run left four schemas and thirteen roles
-    /// behind. Sweeping at the head makes that self-correcting.
+    /// A case that PANICS never reaches its `teardown`, so sweeping at the head
+    /// makes a crashed run self-correcting.
     ///
     /// Residual, stated rather than hidden: two runs of the SAME case against
     /// the same server (two worktrees, one Postgres) still collide. Nothing
@@ -2551,7 +2519,7 @@ mod live_worker_role_fence {
     ///
     /// Built by substituting the stand-in's name into
     /// [`runtime_dependents_sql`]'s own output rather than by restating the
-    /// grant, so a revert of the fix reaches these cases. The `DO` block's
+    /// grant, so the cases exercise the shipped statement. The `DO` block's
     /// guard is `IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '<worker>')`,
     /// so the substitution has to reach the quoted identifier AND the string
     /// literal or the block silently no-ops and every assertion below would
@@ -2676,12 +2644,12 @@ mod live_worker_role_fence {
         )
     }
 
-    /// 1. THE REGRESSION. The production grant must leave the shared worker
-    /// login UNABLE to read a tenant schema without `SET LOCAL ROLE`.
+    /// 1. The production grant must leave the shared worker login UNABLE to read
+    /// a tenant schema without `SET LOCAL ROLE`.
     ///
-    /// FAILS BEFORE THE FIX. With the pre-fix `GRANT <role> TO <worker>` the
-    /// bare SELECT returns `tenant-scoped-secret` and the `expect_err` below is
-    /// the assertion that goes red.
+    /// A `GRANT <role> TO <worker>` that inherits would return
+    /// `tenant-scoped-secret` to the bare SELECT; the `expect_err` below is the
+    /// assertion that catches it.
     #[compio::test]
     async fn the_production_grant_denies_a_bare_read_of_a_tenant_schema() {
         let admin = admin_client().await;
@@ -2697,8 +2665,8 @@ mod live_worker_role_fence {
         // THE BEHAVIOUR FIRST, deliberately. `pg_auth_members` is the mechanism;
         // being refused the row is the property, and it is the property that
         // should name itself when this goes red. Asserting the catalog first
-        // would make a pre-fix run report `left: [true], right: [false]` - true
-        // but a description of a bit, not of a tenant boundary.
+        // would report `left: [true], right: [false]` - true but a description
+        // of a bit, not of a tenant boundary.
         let denial = denied_as_worker(&admin, &fx, &bare_select(&fx))
             .await
             .expect_err(
@@ -2758,7 +2726,7 @@ mod live_worker_role_fence {
     /// Without this, case 1 would pass just as happily if the app role had
     /// never been granted USAGE on the schema - "denied" is the default state
     /// of a role with no privileges, and a fixture that mis-provisioned would
-    /// read as a working fence. This arm runs the SHIPPED pre-fix statement and
+    /// read as a working fence. This arm runs the inheriting statement and
     /// requires the bare read to SUCCEED, which is simultaneously the proof
     /// that the fixture grants something real and the demonstration of the
     /// vulnerability.
@@ -2775,7 +2743,7 @@ mod live_worker_role_fence {
         sweep(&admin, &fx).await;
         setup(&admin, &fx).await;
 
-        // ARM A - the shipped pre-fix statement, verbatim.
+        // ARM A - the option-less inheriting statement, verbatim.
         admin
             .batch_execute(&format!(
                 "GRANT {} TO {}",
@@ -2831,12 +2799,11 @@ mod live_worker_role_fence {
     /// migration. The `DO $runtime_dependents$` block re-runs on every apply,
     /// and existing databases carry the legacy inheriting membership.
     ///
-    /// Measured rather than reasoned: re-granting with the option flips
-    /// `inherit_option` IN PLACE, with no `REVOKE` and therefore no window in
-    /// which the worker holds no membership at all. The reverse is a no-op, so
-    /// a regression to the old statement cannot silently re-open a fenced
-    /// database - asserted here because that asymmetry is the opposite of what
-    /// "the last GRANT wins" would predict.
+    /// Re-granting with the option flips `inherit_option` IN PLACE, with no
+    /// `REVOKE` and therefore no window in which the worker holds no membership at
+    /// all. The reverse is a no-op, so a plain `GRANT` cannot silently re-open a
+    /// fenced database - asserted here because that asymmetry is the opposite of
+    /// what "the last GRANT wins" would predict.
     #[compio::test]
     async fn re_granting_converges_a_legacy_database_and_does_not_regress() {
         let admin = admin_client().await;

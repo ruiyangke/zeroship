@@ -171,14 +171,14 @@ async fn admin_conn() -> Client {
 
 /// Refuse a database the platform migrations have not been applied to.
 ///
-/// THIS USED TO CREATE THE TABLE UNDER TEST ITSELF, with a hand-written
-/// `CREATE TABLE IF NOT EXISTS` for each of the three `migrated_*` tables. That
-/// is verification-record class 7 in the fixture rather than the assertion: the
-/// suite then measured a shape the corpus does not produce, so a column the
-/// corpus declares `NOT NULL` could be nullable here, a CHECK could be absent,
-/// and every case would still be green. `zeroship.app_schema_applies` now comes
-/// from `db/migrations-ts/20260702000200_control_tables.ts` like every other
-/// platform table, and a database without it fails loudly here.
+/// The platform schema must come from the corpus, not from a hand-written
+/// `CREATE TABLE IF NOT EXISTS`: that is verification-record class 7 in the
+/// fixture rather than the assertion, measuring a shape the corpus does not
+/// produce, so a column the corpus declares `NOT NULL` could be nullable here, a
+/// CHECK could be absent, and every case would still be green.
+/// `zeroship.app_schema_applies` comes from
+/// `db/migrations-ts/20260702000200_control_tables.ts` like every other platform
+/// table, and a database without it fails loudly here.
 async fn assert_platform_schema_present(conn: &Client) {
     const REQUIRED: [&str; 4] = ["plans", "users", "apps", "app_schema_applies"];
     let rows = conn
@@ -211,10 +211,8 @@ async fn assert_platform_schema_present(conn: &Client) {
 async fn cleanup_app(conn: &Client, app_id: &AppId) {
     let schema = app_derivation::schema_name(app_id);
     // The vendor crate, not the composition root: `migrator_role_name` lives at
-    // `zeroship_migrate_postgres::role`, which is how `src/apply.rs:19` in this
-    // same crate already spells it. The old path did not resolve, so this test
-    // target had stopped compiling - invisible while the clippy gate aborted
-    // before reaching it.
+    // `zeroship_migrate_postgres::role`, which is how `src/apply.rs` in this
+    // same crate spells it.
     let role = zeroship_migrate_postgres::role::migrator_role_name(&schema).unwrap();
     let q = |s: &str| format!("\"{}\"", s.replace('"', "\"\""));
     let _ = conn
@@ -225,15 +223,11 @@ async fn cleanup_app(conn: &Client, app_id: &AppId) {
             q(&schema),
         ))
         .await;
-    // BOTH ROLES, and the runtime one was leaking too. Every case here that
-    // reaches a successful apply creates `app_<uuid>_role` and grants
-    // `zeroship_worker` membership in it; only the migrator role was ever
-    // dropped, so a shared test database accumulated one dead role and one dead
-    // worker membership per apply, forever. That is not just untidiness: the
-    // worker's boot-time posture check walks every `app_%_role` membership it
-    // holds, so the leak makes a production-shaped check slower on every run and
-    // muddies any measurement of it (the `runtime_dependents_sql` docstring's
-    // "540 of 540" was taken over a population this suite had been growing).
+    // BOTH ROLES. Every case here that reaches a successful apply creates
+    // `app_<uuid>_role` and grants `zeroship_worker` membership in it, so cleanup
+    // must drop both that role and the migrator role. A leaked `app_%_role`
+    // membership is walked by the worker's boot-time posture check on every run,
+    // making a production-shaped check slower and muddying any measurement of it.
     let runtime_role =
         zeroship_core::database_role::per_app_role_name(&schema).expect("test app role name");
     for r in [role, runtime_role] {
@@ -419,14 +413,10 @@ fn state_for_with_dsns(
 /// Fail as "the fixture is stale" before any test can fail as a wrong status code.
 ///
 /// Every policy fixture below is a hand-written TOML literal, and the engine's
-/// accepted-document set moves under it. When `runtime.lock_timeout_ms` stopped
-/// being loadable (2026-08-10), `tighter_policy()` kept granting it and FIVE tests
-/// across five unrelated behaviours went red at once: error redaction saw 422 where
-/// it asserted 503, the stored-policy fallback saw 422 where it asserted 200, and so
-/// on for repreflight, request-id propagation and the versioned policy API. A 422 for
-/// an unparseable draft is indistinguishable, at the assertion level, from the status
-/// each test meant to exercise, so none of them were testing what their name claims
-/// and nothing in the output said "fixture".
+/// accepted-document set moves under it. A fixture that no longer parses makes
+/// every test that uses it fail with a 422 that is indistinguishable, at the
+/// assertion level, from the status each test meant to exercise, so none of them
+/// test what their name claims and nothing in the output says "fixture".
 ///
 /// This runs on the one funnel every service-level test goes through, and states the
 /// intent of each fixture as an assertion:
@@ -729,15 +719,15 @@ fn drop_notes_request() -> Value {
 /// A creator migration that CREATES a table named exactly like the platform's
 /// journal.
 ///
-/// The journal now lives in the app's OWN schema, so this name is inside the
+/// The journal lives in the app's OWN schema, so this name is inside the
 /// creator's declared scope as far as the confined ceiling is concerned. If the
 /// op were permitted on a fresh app the engine's `CREATE TABLE IF NOT EXISTS`
 /// bootstrap would ADOPT the creator's table as the journal.
 ///
-/// `createTable` takes `name`, not `table`. The first draft of this fixture used
-/// `table` and the request was refused as a MALFORMED IR ENVELOPE - a 422 that
-/// looks exactly like a name refusal in the response and proves nothing about the
-/// name. Keep the op shape valid or the case measures the typo.
+/// `createTable` takes `name`, not `table`; a wrong field name is refused as a
+/// MALFORMED IR ENVELOPE - a 422 that looks exactly like a name refusal in the
+/// response and proves nothing about the name. Keep the op shape valid or the
+/// case measures the typo.
 fn create_platform_journal_table_request() -> Value {
     json!({
         "kind": "ir",
@@ -788,28 +778,24 @@ fn with_policy(mut request: Value, body: &str) -> Value {
     request
 }
 
-// The creator policy draft is now a `zeroship-migrate-policy` `PolicyDoc` (grant rules
-// against the operator ceiling), not the old `PolicyProfile` TOML. A draft may only
+// The creator policy draft is a `zeroship-migrate-policy` `PolicyDoc` (grant rules
+// against the operator ceiling), not a `PolicyProfile` TOML. A draft may only
 // TIGHTEN: `safety.destructive_ops` orders forbid <= warn <= allow, so `forbid` is
 // admissible under the confined ceiling's `allow`.
 //
-// This draft ALSO carried `runtime.lock_timeout_ms = 1000`. It cannot: every
-// `runtime.*` knob is registered `DeclaredOnly` with default 1, and the engine's
-// II.6 load gate refuses ANY document raising one above its default
-// (`DeclaredOnlyNonDefault`), in an operator ceiling or a creator draft alike. The
-// grant was dropped from the shipped ceilings and the `policy.rs` unit tests on
-// 2026-08-10 (see `crates/zeroship-migrate-server/policies/confined.policy.toml`) and not from
-// here, so every test that PUT this fixture got a 422 for a parse failure instead
-// of exercising the behaviour its name claims. `assert_policy_fixtures_are_current`
-// below is what makes the next such removal fail as a stale fixture.
+// No `runtime.*` knob can be raised: every one is registered `DeclaredOnly` with
+// default 1, and the engine's load gate refuses ANY document raising one above its
+// default (`DeclaredOnlyNonDefault`), in an operator ceiling or a creator draft
+// alike. A fixture carrying one gets a 422 for a parse failure instead of
+// exercising the behaviour its name claims; `assert_policy_fixtures_are_current`
+// below is what makes such a removal fail as a stale fixture.
 fn tighter_policy() -> &'static str {
     "policy_version = 1\n\n[[grant]]\nkey = \"safety.destructive_ops\"\nvalue = \"forbid\"\nscope = \"all\"\n"
 }
 
-// Approval is now the SEALED `safety.require_approval` obligation the engine declares and
+// Approval is the SEALED `safety.require_approval` obligation the engine declares and
 // the host enforces. A draft authors it as a normal `[[require]]` — `always` gates
-// EVERY migration for operator approval (destructive or not), the successor to the old
-// managed-only `require_approval = true` overlay. The draft also RE-STATES the
+// EVERY migration for operator approval (destructive or not). The draft also RE-STATES the
 // `safety.destructive_ops = allow` grant it wants kept (admit resolves grants
 // from the draft layer, so a draft that only tightens one knob must re-state the
 // ceiling grants it relies on — here, keeping destructive ops classifiable-not-denied
@@ -819,10 +805,9 @@ fn require_approval_policy() -> &'static str {
 }
 
 // A SECOND, textually distinct tightening, so the versioned-policy test can submit
-// two drafts and tell version 1 from version 2 by `raw_toml`. It used to differ by a
-// lower `runtime.lock_timeout_ms`, which the engine no longer loads at any non-default
-// value; it now also revokes `schema.rename`, a real tightening of a grant the
-// confined ceiling does carry (`value = true`).
+// two drafts and tell version 1 from version 2 by `raw_toml`. It revokes
+// `schema.rename`, a real tightening of a grant the confined ceiling carries
+// (`value = true`).
 fn second_tighter_policy() -> &'static str {
     "policy_version = 1\n\n[[grant]]\nkey = \"safety.destructive_ops\"\nvalue = \"forbid\"\nscope = \"all\"\n\n[[grant]]\nkey = \"schema.rename\"\nvalue = false\nscope = \"all\"\n"
 }
@@ -1020,11 +1005,10 @@ fn quote_ident(ident: &str) -> String {
 
 /// Completed rows in the app's OWN journal, `"<app_uuid>".__zeroship_schema_migrations`.
 ///
-/// BOTH HALVES OF THAT NAME MOVED on 2026-08-28 and the old spelling
-/// (`"<app_uuid>_migrations".schema_migrations`) resolves to nothing, so a probe
-/// left on it would return 0 forever and every `>= 1` assertion below would fail
-/// while the code was correct. `journal_is_absent_at_the_unfenced_name` is the
-/// case that keeps this helper honest by pinning the OTHER direction.
+/// The prefix and the nesting are load-bearing: a probe on any other spelling
+/// returns 0 forever and every `>= 1` assertion below fails while the code is
+/// correct. `journal_is_absent_at_the_unfenced_name` is the case that keeps this
+/// helper honest by pinning the OTHER direction.
 async fn journaled_count(conn: &Client, app_id: &AppId) -> i64 {
     let q = format!(
         "\"{}\".__zeroship_schema_migrations",
@@ -1120,14 +1104,11 @@ async fn create_database_is_idempotent_and_provisions_only_schema_and_migrator_p
         ),
     )
     .await;
-    // THE RUNTIME ROLE MOVED ACROSS THIS BOUNDARY, and the assertion below moved
-    // with it rather than being dropped. It used to be apply-owned, which left an
-    // app that never applies a creator migration holding a database it could not
-    // open: the only thing that provisioned its role was a domain-specific entry
-    // point beside the apply path, and that entry point is gone. Create now
-    // establishes every IDENTITY the database needs. The audit table and the
-    // ledger row below still witness the boundary, because both describe
-    // MIGRATIONS rather than the database's existence.
+    // Create establishes every IDENTITY the database needs, including the runtime
+    // role: an app that never applies a creator migration must still hold a
+    // database it can open. The audit table and the ledger row below still witness
+    // the boundary, because both describe MIGRATIONS rather than the database's
+    // existence.
     let runtime_role_exists = probe_bool(
         &conn,
         &format!(
@@ -1774,8 +1755,7 @@ async fn apply_api_accepts_apps_migrate_owner_and_applies_ir_pg() {
     // build that puts the journal anywhere reachable by that one name; these two
     // pin the placement itself.
     //
-    // The unfenced spelling matters more than the old meta schema: the engine
-    // bootstraps with `CREATE TABLE IF NOT EXISTS` and its table names are
+    // The unfenced spelling matters: the engine bootstraps with `CREATE TABLE IF NOT EXISTS` and its table names are
     // literals, so if the prefix were dropped a creator declaring a table called
     // `schema_migrations` would have it silently adopted as the journal. This
     // asserts nothing occupies that name.
@@ -1818,7 +1798,7 @@ async fn apply_api_accepts_apps_migrate_owner_and_applies_ir_pg() {
 /// Two project ids that collide in PostgreSQL's 32-bit `hashtext` space still
 /// own independent project locks.
 ///
-/// The pair is fixed output from a 200,000-row live-PostgreSQL search over
+/// The pair is fixed output from a live-PostgreSQL search over
 /// `md5(generate_series)::uuid`. The fixture assertion keeps the regression
 /// honest if PostgreSQL ever changes `hashtext`; the backend calls below, not a
 /// reimplementation in the test, decide whether the two ids contend.
@@ -2170,23 +2150,20 @@ async fn project_lock_spans_every_file_and_the_terminal_ledger_write_pg() {
     );
 }
 
-/// A DESTRUCTIVE migration is no longer parked for an operator who does not exist.
+/// A DESTRUCTIVE migration is not parked for an operator who does not exist.
 ///
-/// THIS IS A CAPABILITY REMOVAL, PINNED SO IT CANNOT COME BACK BY ACCIDENT. Until
-/// 2026-08-28 a `dropTable` preflighted as gated, the request answered
-/// **409 `migration_requires_operator_approval`** naming a `migration_id`, and the
-/// only way past it was `POST .../migrations/{id}/approve` - a route no dashboard,
-/// CLI or service ever called. The creator's own destructive migration was
-/// therefore a dead end.
+/// THIS IS A CAPABILITY REMOVAL, PINNED SO IT CANNOT COME BACK BY ACCIDENT. A
+/// `dropTable` preflighted as gated must not answer
+/// **409 `migration_requires_operator_approval`** naming a `migration_id` that
+/// only an operator `approve` route could clear.
 ///
 /// WHAT THIS DOES NOT ASSERT, AND MUST NOT BE READ AS. The drop still does not
-/// apply. Measured 2026-08-28 against live PostgreSQL 16: the request answers
-/// **422** with *"apply (0002_drop_notes.ir.json): plan requires approval
-/// (destructive) but none was given"* - the ENGINE's refusal, because this host
-/// passes `Approval::None`. Removing the host's approval state machine removed a
-/// refusal nobody could clear; it did not grant creators destructive migrations,
-/// and giving them one is a separate decision about what `Approval` the host
-/// asserts on a creator's behalf.
+/// apply. The request answers **422** with *"apply (0002_drop_notes.ir.json):
+/// plan requires approval (destructive) but none was given"* - the ENGINE's
+/// refusal, because this host passes `Approval::None`. Removing the host's
+/// approval state machine removed a refusal nobody could clear; it did not grant
+/// creators destructive migrations, and giving them one is a separate decision
+/// about what `Approval` the host asserts on a creator's behalf.
 ///
 /// So this case asserts the ABSENCE of the unclearable refusal, not any
 /// particular success. Asserting `status == OK` would make it a statement about
@@ -2558,11 +2535,11 @@ async fn a_post_ddl_failure_closes_the_schema_apply_ledger_row_pg() {
 
 /// A creator must not move the deploy ledger head behind the database journal.
 ///
-/// The first request supplies and applies 1..N. The second request is the old
-/// 1..K artifact: every migration it carries is already journaled, so the engine
-/// applies nothing. Before the server attested full-set journal coverage, that
-/// empty apply returned 200 and stamped the truncated descriptor as the newest
-/// applied row, which made the deploy guard admit old code over the newer schema.
+/// The first request supplies and applies 1..N. The second request is the
+/// truncated 1..K artifact: every migration it carries is already journaled, so
+/// the engine applies nothing. An empty apply must not return 200 and stamp the
+/// truncated descriptor as the newest applied row, which would make the deploy
+/// guard admit old code over the newer schema.
 #[ntex::test]
 async fn a_truncated_history_cannot_move_the_schema_ledger_backwards_pg() {
     let conn = admin_conn().await;
@@ -2916,15 +2893,14 @@ async fn apply_api_rejects_confined_denied_vendor_op_pg() {
 ///
 /// `validate_request_shape` only checks that each document is a JSON object, so
 /// `{"foo": 1}` passes it and fails later at the envelope parse. That parse failure
-/// used to become `IrApplyError::Read`, which classifies as 503
+/// must classify as a creator fault (422), never as `IrApplyError::Read` / 503
 /// `migration_infrastructure` - the same variant a genuine disk read failure produces.
-/// The 5xx arm of `apply_error_response` then logs at ERROR and REPLACES the detail
-/// with "migration service unavailable", so the creator learned neither what was wrong
-/// nor which file, an operator got paged for a typo, and any client retrying on 5xx
-/// retried a request that can never succeed.
+/// The 5xx arm of `apply_error_response` logs at ERROR and REPLACES the detail
+/// with "migration service unavailable", so miscategorising it would leave the creator
+/// knowing neither what was wrong nor which file, page an operator for a typo, and
+/// make a retrying client retry a request that can never succeed.
 ///
-/// The suppression of detail on 5xx is correct and stays; what was wrong is calling
-/// this a 5xx.
+/// The suppression of detail on 5xx is correct and stays.
 #[ntex::test]
 async fn apply_api_reports_malformed_ir_as_creator_fault_pg() {
     let conn = admin_conn().await;
@@ -3071,9 +3047,9 @@ async fn apply_api_rejects_malformed_policy_draft_fail_closed() {
 }
 
 /// The direct edge route must retain the shared, PostgreSQL-backed mutation
-/// bucket that the deleted control forward used to apply. Two tokens are the
-/// configured burst; the third request from the same trusted source is refused,
-/// while a different source still owns an independent bucket.
+/// bucket. Two tokens are the configured burst; the third request from the same
+/// trusted source is refused, while a different source still owns an independent
+/// bucket.
 #[ntex::test]
 async fn apply_api_rate_limits_each_source_ip_across_the_shared_store_pg() {
     let app_id = AppId::mint();
@@ -3454,10 +3430,10 @@ async fn real_delegating_authenticator_rejects_malformed_bearer() {
 /// The authz audit row records the request id the caller sent, so a denial can
 /// be joined back to the request that caused it.
 ///
-/// The handler used to mint a fresh uuid at the authz call, which is correlated
-/// with nothing: it appears in no gateway log, no control-plane log, and no
-/// client's records. Honouring an inbound `x-request-id` is what the control
-/// plane already does, so the two services agree on the identifier.
+/// A freshly minted uuid would be correlated with nothing - no gateway log, no
+/// control-plane log, no client's records. Honouring an inbound `x-request-id` is
+/// what the control plane already does, so the two services agree on the
+/// identifier.
 #[ntex::test]
 async fn authz_receives_the_callers_request_id_pg() {
     let conn = admin_conn().await;
@@ -3481,11 +3457,9 @@ async fn authz_receives_the_callers_request_id_pg() {
     .await;
 
     // THE APPLY ENDPOINT reaches authorization before its expected database
-    // precondition refusal. This case used to drive
-    // `PUT /v1/apps/{app}/policy`, which was deleted with the policy store; a
-    // request-id test pointed at a route that 404s before authz runs would observe
-    // an empty `seen_request_ids` and read as a failure of the header plumbing
-    // rather than of the fixture.
+    // precondition refusal. A request-id test pointed at a route that 404s before
+    // authz runs would observe an empty `seen_request_ids` and read as a failure
+    // of the header plumbing rather than of the fixture.
     let caller_request_id = "req-from-the-caller-0001";
     let req = test::TestRequest::post()
         .uri(&format!("/v1/apps/{}/migrations/apply", app_id.as_str()))
