@@ -55,16 +55,11 @@ const IMMUTABLE_TRG_PREFIX: &str = "zm_immutable";
 /// (which emits Postgres double-quotes). A schema / table / trigger name is NEVER
 /// interpolated as raw SQL.
 ///
-/// THE GATES ARE THIS FUNCTION'S JOB; THE SPELLING IS NOT. This used to end in its
-/// own `format!` doubling an embedded backtick, which made it a SECOND physical
-/// home for MySQL's identifier spelling - the ANSI needle in
-/// `render::dml::tests::no_bare_escape_seam_outside_dml` has zero offenders
-/// crate-wide, so the backtick needle having two was an asymmetry rather than a
-/// difference of kind. The bytes come from this crate's own
-/// [`crate::dml::RENDERER`] now - the one physical home of the backtick spelling -
-/// reached through [`zeroship_migrate_backend::dml::escape_quote_ident_for_backend`];
-/// the two refusals below are unchanged, including their messages, because they are
-/// semantics rather than spelling.
+/// THE GATES ARE THIS FUNCTION'S JOB; THE SPELLING IS NOT. The bytes come from
+/// this crate's own [`crate::dml::RENDERER`] - the one physical home of the
+/// backtick spelling - reached through
+/// [`zeroship_migrate_backend::dml::escape_quote_ident_for_backend`]. The two
+/// refusals below are semantics rather than spelling, so their messages stay here.
 ///
 /// # Errors
 /// [`JournalError::Backend`] on an empty or NUL-bearing identifier.

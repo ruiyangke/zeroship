@@ -12,11 +12,11 @@
 //! ALTER TABLE t2 DROP COLUMN a;                -- x2 is GONE (whole constraint)
 //! ```
 //!
-//! Both `render/fold.rs` EXCLUDE producers recorded `cascade_columns: None` with an
-//! empty `definition`, and the `DropColumn` cascade falls back to parsing the leading
-//! parenthesized group of `definition` when the provenance is absent. That parse
-//! finds nothing in an empty string, so the constraint never matched and never
-//! cascaded, leaving a PHANTOM EXCLUDE the live catalog does not have.
+//! The `DropColumn` cascade falls back to parsing the leading parenthesized group
+//! of `definition` when the provenance is absent, and an empty `definition` parses
+//! to nothing. An EXCLUDE with no `cascade_columns` provenance therefore never
+//! matched and never cascaded, leaving a PHANTOM EXCLUDE the live catalog does not
+//! have.
 //!
 //! The empty `definition` is correct and stays: PostgreSQL canonicalizes exclusion
 //! bodies differently from the authored render, so

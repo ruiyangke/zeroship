@@ -1,9 +1,7 @@
 //! MySQL SQL spelling.
 //!
-//! This was the only backend module whose trigger spelling already lived beside the
-//! rest of its vendor's SQL rather than in the engine's lowerer, so it was the
-//! worked example the other two backends were moved into the shape of. Each vendor
-//! crate now carries its own trigger spelling.
+//! Each vendor crate carries its own trigger spelling beside the rest of its
+//! vendor's SQL rather than in the engine's lowerer.
 // Every render leaf here returns `IrLowerError`, the cold lower-failure error that
 // sits over the 128-byte heuristic. Boxing it would churn the `?` ergonomics across
 // the whole vendor render path for no real-world win.
@@ -525,37 +523,13 @@ impl DmlRenderer for MysqlDmlRenderer {
     /// THE single physical home of MySQL's backtick identifier spelling: double
     /// every embedded backtick, then wrap the result in backticks.
     ///
-    /// It lives HERE, in the vendor's own module, and no longer in core. It used
-    /// to be `schema::query::mysql_quote_ident` - `pub`, in the schema kernel -
-    /// with this method reaching INTO core to get its own spelling: the exact
-    /// mirror image of the ANSI arrangement, where `ansi_double_quote_ident` is
-    /// `pub(in crate::render::backends)` so that core CANNOT reach it un-named.
+    /// It lives HERE, in the vendor's own module, not in core: this crate must not
+    /// need core at RUNTIME to spell its own identifier, which would be the
+    /// core-to-backend cycle the crate split exists to break.
     ///
-    /// NOTHING WAS EMITTED WRONGLY BEFORE THE MOVE, and that is the point. Every
-    /// call site named MySQL in the callee's name, so no vendor was unnamed. What it
-    /// blocked was the crate
-    /// split: this crate would have needed core at RUNTIME to spell its own
-    /// identifier - the core-to-backend cycle the split exists to break, and the
-    /// same shape as the extraction spike's finding that one vendor crate needed
-    /// another to quote a trigger name.
-    /// The move was checked by neutering each candidate spelling with a single
-    /// appended token and reading which tests went red. The two before-sets NEST
-    /// rather than being disjoint - the inverse of the ANSI case, and exactly what
-    /// "the backend delegates into core" means operationally: NOTHING reddened by
-    /// neutering this method was missed by neutering core. The tests in the
-    /// difference are the ones whose MySQL identifier bytes this backend had NO say
-    /// in.
-    ///
-    /// Neutering this method AFTER the move reddens strictly more than neutering
-    /// core did before it, because the change also routed two SECOND homes found
-    /// during it - `zeroship_migrate_mysql::backend::journal_sql` and `::backfill_sql`,
-    /// each carrying its own copy of the spelling, and so unreachable by the core
-    /// neuter at all. Nothing was lost at any step: the after-set is a strict
-    /// superset of the before-set, and the binary's test total did not move.
-    ///
-    /// Like the two ANSI impls, this spells the bytes DIRECTLY rather than through
-    /// the `*_for_dialect` seam its sibling methods use: it IS this dialect's
-    /// `quote_ident`, so routing through the dispatch would recurse.
+    /// This spells the bytes DIRECTLY rather than through the `*_for_dialect` seam
+    /// its sibling methods use: it IS this dialect's `quote_ident`, so routing
+    /// through the dispatch would recurse.
     fn quote_ident(&self, ident: &str) -> String {
         format!("`{}`", ident.replace('`', "``"))
     }
@@ -860,8 +834,7 @@ impl DmlRenderer for MysqlDmlRenderer {
             // The parts MySQL does not render TODAY. `Quarter`, `Week` and
             // `Microseconds` are native MySQL EXTRACT units and belong in the arm
             // above, but admitting them is a behaviour change that needs its own
-            // live three-dialect proof; carrying them here keeps this commit a
-            // pure relocation of the decision.
+            // live three-dialect proof.
             ExtractField::Second
             | ExtractField::Doy
             | ExtractField::Epoch
@@ -1355,10 +1328,10 @@ fn render_mysql_trigger_stmt(stmt: &TriggerStmt, eff_schema: &str) -> Result<Str
         }
         // MySQL forbids a trigger body that RETURNS A RESULT SET, and it says so when
         // the `CREATE TRIGGER` is executed, not when the trigger fires: MySQL 8.4.11
-        // answers `[0A000] Not allowed to return a result set from a trigger`. Before
-        // this arm existed, the plan cleared validate, the guard and lower, and died
-        // there - the one outcome class `dialect_conformance_live.rs` exists to catch,
-        // and the row that measured it is `createTrigger/bodySimple` on MySQL.
+        // answers `[0A000] Not allowed to return a result set from a trigger`. The
+        // refusal must happen HERE, because an arm that lets it through clears
+        // validate, the guard and lower and dies only in apply - the outcome class
+        // `dialect_conformance_live.rs` exists to catch.
         //
         // Refused rather than rewritten: `SELECT <expr>` has no result-set-free MySQL
         // spelling, because `SELECT ... INTO` needs a declared target and this closed

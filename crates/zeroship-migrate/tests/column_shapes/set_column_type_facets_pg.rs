@@ -13,23 +13,14 @@
 //!      `inline_checks`) are the ones the server does not carry across the ALTER,
 //!      so clearing them is what makes the retyped column drift-clean.
 //!
-//! Before the fix, (2) failed loudly. Measured on PostgreSQL 18.4 through the real
-//! path (author → lower → apply → introspect → diff), a `citext → varchar(40)`
-//! retype reported `case_sensitive expected "false" actual ""` on a schema that was
-//! exactly what had been deployed, and a `typeId(usr) text → varchar(50)` retype
-//! reported `collation`, `format` AND an unexpected `<table>_v_check` constraint.
-//!
 //! WHAT IS NOT HERE, and why. The `case_sensitive` leg is the one that produced the
 //! sharpest measurement above, and it is NOT retained as a live test, because
 //! `render::declarative` hardcodes `public.citext` as the PostgreSQL spelling of a
 //! case-insensitive column and an extension name is unique PER DATABASE, not per
 //! schema. `drop_extension_rollback_pg` already owns `citext` in this database and
 //! says so in its own header ("the two tests here cannot share one:
-//! `pg_extension_name_index` rejects the second creator"). An earlier draft of this
-//! file created the extension `IF NOT EXISTS` and left it installed, and
-//! `rolling_back_a_dropped_extension_restores_it` failed with
-//! `extension "citext" already exists` - correctly. Creating and dropping it here
-//! instead would only narrow the window, since cargo runs the two binaries in
+//! `pg_extension_name_index` rejects the second creator"). Creating and dropping it
+//! here instead would only narrow the window, since cargo runs the two binaries in
 //! parallel.
 //!
 //! So the `case_sensitive` verdict is pinned OFFLINE, in `set_column_type_facets`,
@@ -53,12 +44,10 @@ use zeroship_migrate_postgres::backend::drift_sql::snapshot_schema;
 use zeroship_migrate_postgres::PostgresBackend;
 
 /// The test-side PostgreSQL identifier spelling, written out here rather than
-/// imported from the crate. It used to be
-/// `zeroship_migrate::schema::query::quote_ident`, which was `pub`, un-dialected, and a
-/// SECOND physical home for the spelling `render::backends::ansi_double_quote_ident`
-/// owns; it is gone. A probe that builds its expectation by calling the emitter it is
-/// checking is not an oracle anyway, so the replacement is deliberately independent —
-/// the same shape the sibling `fold_rename_column_constraint_definition_pg` and
+/// imported from the crate. A probe that builds its expectation by calling the
+/// emitter it is checking is not an oracle, so the spelling is deliberately
+/// independent — the same shape the sibling
+/// `fold_rename_column_constraint_definition_pg` and
 /// `fold_rename_column_check_body_pg` probes already use.
 fn quote_ident(identifier: &str) -> String {
     format!("\"{}\"", identifier.replace('"', "\"\""))

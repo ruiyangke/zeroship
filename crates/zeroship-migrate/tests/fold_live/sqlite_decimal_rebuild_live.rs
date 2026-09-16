@@ -48,9 +48,9 @@
 //!
 //! * [`a_decimal_column_keeps_its_digits_through_a_fold_seeded_rebuild`] takes the
 //!   `stored_create_sql.is_none()` route - the shape `engine::refresh_historical_live`
-//!   builds when it re-derives live state from the fold, and the shape the six
+//!   builds when it re-derives live state from the fold, and the shape the
 //!   `*_sqlite.rs` fold suites drive. THE FIELD-DEF CARRIER DECIDES, and this is where
-//!   the digits were measured going away.
+//!   the digits are lost.
 //! * [`an_unchanged_decimal_table_does_not_phantom_diff_into_a_rebuild`] never gets as
 //!   far as a rebuild arm: it shows the shipped
 //!   [`zeroship_migrate::MigrationEngine::plan_declarative`] AUTHORING a destructive
@@ -58,13 +58,12 @@
 //!   `real` it derives from the field-def carrier canonicalise apart.
 //! * [`the_deploy_path_rename_replays_the_stored_create_and_leaves_the_decimal_alone`]
 //!   holds BOTH conjuncts and so takes the stored-shape arm. THE SNAPSHOT CARRIER
-//!   DECIDES, and it was already right. That case was green before the fix; it is
-//!   pinned as the tripwire for a future change that flips a conjunct, not as evidence
-//!   of a bug.
+//!   DECIDES, and the rebuild leaves the decimal alone. It is pinned as the tripwire
+//!   for a future change that flips a conjunct, not as evidence of a bug.
 //!
-//! A stand-alone `setColumnNotNull` was tried as a fourth route onto the map-reading arm
-//! and is NOT one: SQLite refuses the op before lowering ("SQLite has no ALTER COLUMN"),
-//! so it never reaches a rebuild at all.
+//! A stand-alone `setColumnNotNull` is not a fourth route onto the map-reading arm:
+//! SQLite refuses the op before lowering ("SQLite has no ALTER COLUMN"), so it never
+//! reaches a rebuild at all.
 //!
 //! # No skip
 //!
@@ -563,9 +562,8 @@ async fn an_unchanged_decimal_table_does_not_phantom_diff_into_a_rebuild() {
     );
 }
 
-/// **Which carrier decides on the shipped deploy path - PINNED, not fixed.**
+/// **Which carrier decides on the shipped deploy path.**
 ///
-/// This case was green before the fix and is green after it, and that is the finding.
 /// `preserve_stored_shape = pure_rename.is_some() && dt.stored_create_sql.is_some()`,
 /// and on [`zeroship_migrate::MigrationEngine::deploy_envelopes`] BOTH conjuncts hold for a
 /// `renameColumn`: the live snapshot is introspected out of the running database so it
@@ -575,11 +573,9 @@ async fn an_unchanged_decimal_table_does_not_phantom_diff_into_a_rebuild() {
 /// therefore replays SQLite's OWN `CREATE TABLE` text and never reads the field-def
 /// map's content.
 ///
-/// So the deploy path was not the route by which the collision destroyed data: the
-/// SNAPSHOT carrier decides there, and it was already right. Recording that is half the
-/// answer to "which carrier decides for a real deploy"; the other half is the two cases
-/// above, which reach the field-def carrier through routes that do NOT hold both
-/// conjuncts.
+/// The SNAPSHOT carrier therefore decides for a real deploy, and the rebuild leaves the
+/// decimal alone. The two cases above reach the field-def carrier through routes that do
+/// NOT hold both conjuncts.
 ///
 /// Keep this pinned. If a future change flips either conjunct off, the deploy path
 /// starts reading the map and this test is the tripwire.
