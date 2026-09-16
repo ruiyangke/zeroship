@@ -24,10 +24,9 @@
 //!
 //! ## Panics never cross the FFI boundary
 //! Every export carries `catch_unwind`. Without it a panic unwinds out of the
-//! generated `extern "C"` shim and aborts the whole Node process - measured as
-//! `fatal runtime error: failed to initiate panic, error 5, aborting` and a core
-//! dump, with no JS stack and nothing for a caller to catch. napi-rs applies its
-//! own `catch_unwind` only on that opt-in, so the attribute is load-bearing on
+//! generated `extern "C"` shim and aborts the whole Node process, with no JS
+//! stack and nothing for a caller to catch. napi-rs applies its own
+//! `catch_unwind` only on that opt-in, so the attribute is load-bearing on
 //! every one of these, not decoration.
 //!
 //! It covers what the worker-thread catch cannot: generated argument conversion,
@@ -67,13 +66,6 @@ use zeroship_migrate::apply::journal::{HistoryEvent, HistoryKind};
 use zeroship_migrate::approval::Approval;
 use zeroship_migrate::conn::ExecutorConfig;
 use zeroship_migrate::model::migration::{Migration, MigrationId};
-// `POSTGRES` is no longer imported here. It was, for exactly one reason: an
-// `if dialect != POSTGRES` in `advisories_for` that decided on the backends' behalf
-// which of them could be analyzed. The backends state that themselves now, through
-// `zeroship_migrate::analyzer_absence`, so this addon has one fewer vendor it names.
-// (The PG-only status path below reaches `zeroship_migrate_postgres` for its backend
-// type, which is a different coupling and untouched here; it no longer names a
-// dialect at all.)
 use zeroship_migrate::{MigrationEngine, MigrationIr};
 use zeroship_migrate_postgres::confinement::PostgresConfinementExt;
 use zeroship_migrate_sqlite::SqliteBackend;
@@ -739,12 +731,10 @@ pub fn apply_ir_sqlite(
         // serves - so it is what establishes the platform tables the worker
         // WRITES but must not CREATE.
         //
-        // It ran in the worker until 2026-08-28: `crud/unmask.rs` issued
-        // `CREATE TABLE IF NOT EXISTS` plus three `CREATE INDEX IF NOT EXISTS`
-        // on every single `unmask()` call, from the process that executes
-        // creator code. Moving it here is the SQLite half of removing the last
-        // live DDL from the data plane; `zeroship-migrate-server`'s
-        // `provision_audit_unmask_table` is the Postgres half.
+        // The worker must never issue DDL: it executes creator code, so schema
+        // creation belongs to the schema authority. This is the SQLite half;
+        // `zeroship-migrate-server`'s `provision_audit_unmask_table` is the
+        // Postgres half.
         //
         // BEFORE `deploy_envelopes`, so the apply-time ordering still prevents
         // silent adoption if an unchecked artifact ever reaches execution.
@@ -1371,10 +1361,8 @@ pub fn history(
 
     run_verb(env, host_driver, move |session| async move {
         let cfg = ExecutorConfig::new(project_id, project_schema, effective);
-        // Through the backend, like every other verb in this file. The old call
-        // handed `ops::status::history` a raw session plus a `POSTGRES` dialect
-        // argument that the function then ignored in favour of PostgreSQL's journal
-        // module - naming the dialect and resolving it were two different things.
+        // Through the backend, like every other verb in this file: the backend
+        // resolves the dialect rather than the caller naming it.
         let backend = zeroship_migrate_postgres::PostgresBackend::new_generic(&session);
         zeroship_migrate::ops::status::history_via_backend(&backend, &cfg)
             .await
@@ -1425,13 +1413,10 @@ pub fn advisories_for(source: PreviewSqlSource) -> Result<Vec<AdvisoryDto>> {
     // nothing". Say which one it is; an operator reading a silent report is
     // entitled to know the analyzer never spoke.
     //
-    // This used to be an `if dialect != POSTGRES` written HERE, with this host
-    // addon deciding on the backend's behalf which backends can be analyzed and
-    // spelling out why in a sentence that lived nowhere near the backend it was
-    // about. The backend answers now: `analyzer_absence` asks the registered vendor
-    // and the vendor states its own posture, in its own crate. Asked BEFORE the
-    // envelope loop, so an unchecked set is reported even when it renders to no
-    // statements at all.
+    // `analyzer_absence` asks the registered vendor, and the vendor states its own
+    // posture in its own crate - the host addon does not decide on a backend's
+    // behalf which backends can be analyzed. Asked BEFORE the envelope loop, so an
+    // unchecked set is reported even when it renders to no statements at all.
     if let Some(absent) = zeroship_migrate::analyzer_absence(zeroship_migrate::shipping_vendors(), &dialect)
     {
         let advisory = absent.advisory();
