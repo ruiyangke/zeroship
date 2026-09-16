@@ -859,9 +859,10 @@ table has the `__zeroship_workflow_` prefix; none belongs in Control's schema.
 | `schedules`, `occurrences` | Existing customer schedule definitions and accepted occurrences. Calendar discovery moves to the manager; customer acceptance, overlap state and input references remain customer-side. |
 | `payloads`, `payload_refs` | Prepared upload metadata, ownership, integrity and committed references. |
 | `outbox` | Customer events and their payloads; distinct from manager queue metadata. |
-| `job_publications` | Closed immutable Advance, Fanout or Propagate specifications, validated operation-specific projections and manager confirmation time. Pending Advance records retain deployment dependencies; publications survive history removal. |
-| `job_receipts` | Immutable logical job specification and committed semantic outcome, retained independently of run history and delivery attempts. App-wide reconciliation records a selected page and its durable attempt offset; its run identity is absent. |
-| `collection_pages` | Immutable bounded payload identity plan and reserved item offset, scoped to its logical job receipt. |
+| `job_publications` | Closed immutable Advance, Fanout or Propagate specification and manager confirmation time. Publications survive history removal. |
+| `advance_publications`, `fanout_publications`, `propagation_publications` | The projection each published operation owns, scoped to its intent. The advance projection carries the run, generation, frontier revision, due time and deployment that a pending intent retains; the other two carry their broadcast or obligation and its revision. |
+| `job_receipts` | Immutable logical job specification and committed semantic outcome, retained independently of run history and delivery attempts. Its run identity is present only for the kinds that name a run. |
+| `collection_pages`, `reconciliation_pages` | Immutable bounded plan and reserved item offset for a paged sweep, scoped to its logical job receipt. |
 
 The two app-wide sweeps are columns of `app_state` rather than tables of their
 own. `reconciliation_*` holds the scan revision, publication/hold phase,
@@ -886,13 +887,14 @@ published. Inlining would have to delete two foreign keys that both dialects
 enforce today, replacing a write-time refusal with a read-time validator on a
 journal that creator code can reach.
 
-`job_receipts.reconciliation` and `reconciliation_next` are the one violation
-still present. They are the reason `delivery.rs` carries a validator that matches
-every job operation solely to assert which columns are null, and they duplicate
-the shape `collection_pages` already stores. They move to a side table.
-`job_publications` carries the same violation for its own three operations and is
-converted with them, so that the journal's two job tables answer this question
-the same way.
+Both job tables answer this question the same way. `reconciliation_pages` holds
+the reconciliation sweep's plan and reserved offset in the shape
+`collection_pages` already stores, so `job_receipts` keeps only `run_id`: the one
+column a kind-blind scan reads. `advance_publications`, `fanout_publications` and
+`propagation_publications` hold what each published operation projects, and each
+kind's deduplication key is total on its own table rather than a unique index
+over a nullable group. Neither table carries a validator that matches every
+operation to assert which columns are null.
 
 Publication intents now use dedicated journal records. The scoped unique index
 binds run, generation, frontier revision and due time; `id` remains the sole

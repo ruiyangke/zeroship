@@ -17,6 +17,17 @@ zeroship_data_orm::orm::schema! {
             revision: BigInt,
         }
 
+        __zeroship_workflow_advance_publications {
+            #[orm(primary_key)]
+            id: Text,
+            app_id: Text,
+            deploy_id: Text,
+            run_id: Text,
+            generation: BigInt,
+            frontier_revision: BigInt,
+            available_at: BigInt,
+        }
+
         __zeroship_workflow_app_state {
             #[orm(primary_key)]
             id: Text,
@@ -116,6 +127,14 @@ zeroship_data_orm::orm::schema! {
             result: Text,
         }
 
+        __zeroship_workflow_fanout_publications {
+            #[orm(primary_key)]
+            id: Text,
+            app_id: Text,
+            broadcast_id: Text,
+            revision: BigInt,
+        }
+
         __zeroship_workflow_generations {
             #[orm(primary_key)]
             id: Text,
@@ -137,15 +156,6 @@ zeroship_data_orm::orm::schema! {
             #[orm(primary_key)]
             id: Text,
             app_id: Text,
-            run_id: Nullable<Text>,
-            deploy_id: Nullable<Text>,
-            generation: Nullable<BigInt>,
-            frontier_revision: Nullable<BigInt>,
-            broadcast_id: Nullable<Text>,
-            broadcast_revision: Nullable<BigInt>,
-            propagation_id: Nullable<Text>,
-            propagation_revision: Nullable<BigInt>,
-            available_at: BigInt,
             specification: Text,
             created_at: BigInt,
             confirmed_at: Nullable<BigInt>,
@@ -229,6 +239,14 @@ zeroship_data_orm::orm::schema! {
             propagation_id: Text,
             revision: BigInt,
             result: Text,
+        }
+
+        __zeroship_workflow_propagation_publications {
+            #[orm(primary_key)]
+            id: Text,
+            app_id: Text,
+            propagation_id: Text,
+            revision: BigInt,
         }
 
         __zeroship_workflow_propagations {

@@ -1,5 +1,5 @@
 use super::*;
-use crate::service::models::{job_publications, propagation_pages, propagations};
+use crate::service::models::{propagation_pages, propagation_publications, propagations};
 use zeroship_data_orm::orm::{Entity, Filter, Patch};
 
 /// Damaged projections, obligations and page records fail closed without
@@ -29,12 +29,13 @@ pub(super) async fn damage(store: Rc<OrmStore>) {
             .await,
         Err(WorkflowServiceError::PermissionDenied)
     ));
-    // A null page projection cannot pass as this or any other operation.
+    // A page projection that disagrees with its specification cannot pass as
+    // this or any other operation.
     refused_while_damaged(&service, &scope, &grant, |damaged| {
         (
-            job_publications::id.eq(page.id.as_str()).unwrap(),
-            job_publications::propagation_revision
-                .set(if damaged { None } else { Some(1_i64) })
+            propagation_publications::id.eq(page.id.as_str()).unwrap(),
+            propagation_publications::revision
+                .set(if damaged { 2_i64 } else { 1 })
                 .unwrap(),
         )
     })
