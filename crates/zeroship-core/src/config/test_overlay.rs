@@ -104,28 +104,20 @@ fn load_opt() -> Option<FileConfig> {
 /// a naming change; deciding on their behalf what happens when there is no
 /// database is not, and belongs to whoever owns each test.
 ///
-/// WHAT THE CALLERS ACTUALLY DECIDED, and why the answer is no longer "some of
-/// them substitute a default". This doc used to say that most announce a skip,
-/// a few panic, and `crates/zeroship-data-v8/tests/distributed_live.rs` substitutes a
-/// default. The census on 2026-08-21 found 26 substituting a default, not one:
-/// eighteen in `crates/control` alone, all naming `zeroship_billing_test`
-/// regardless of what the file was about, and four in `crates/plugin-db`
-/// naming a DIFFERENT SERVER (`localhost:5434`, password `test`). Every one of
-/// them is gone. A caller that cannot proceed without a database now takes
-/// [`database_url`] (which panics naming the provisioner) or
+/// WHAT THE CALLERS ACTUALLY DECIDED. A caller that cannot proceed without a
+/// database takes [`database_url`] (which panics naming the provisioner) or
 /// `zeroship_testkit::live_db::require_configured` (which refuses the whole run
-/// and is what a multi-module target wants); an `_opt` caller that still wants
-/// to skip still skips.
+/// and is what a multi-module target wants); an `_opt` caller that still wants to
+/// skip still skips. Substituting a default instead is what this module exists to
+/// prevent.
 ///
-/// The 12 remaining are all in `libs/`, which by the `libs/` boundary cannot
-/// see this module at all - they read `PG_TEST_URL` and nothing else, and their
-/// compiled default is the shared `zeroship` database. That is how 84 `cpg_*`
-/// schemas came to be sitting in it.
+/// Callers in `libs/` cannot see this module at all by the `libs/` boundary -
+/// they read `PG_TEST_URL` and nothing else.
 ///
 /// `PG_TEST_URL` wins over the overlay. That is how a suite hands its per-run
-/// scratch database name down (`tests/lib/scratch_db.sh`) and how two
-/// concurrent runs stay disjoint - a per-run value cannot live in a file both
-/// of them read.
+/// scratch database name down (`tests/lib/scratch_db.sh`) and how two concurrent
+/// runs stay disjoint - a per-run value cannot live in a file both of them read.
+///
 /// THE RESOLUTION ANNOUNCES ITSELF, and that is the whole of what the printing
 /// below is for. `env -u PG_TEST_URL cargo test ...` LOOKS like a no-database
 /// arm and is not: it falls through to the overlay, which points at the auth
@@ -133,13 +125,12 @@ fn load_opt() -> Option<FileConfig> {
 /// believes it is testing "no database" is instead pointed at a server another
 /// suite is actively destroying, and nothing said so.
 ///
-/// MEASURED, so nobody re-derives it: the empty-string arm is already taken.
-/// `.filter(|url| !url.is_empty())` runs BEFORE the `or_else`, so
-/// `PG_TEST_URL=""` behaves exactly like unset. THERE IS NO VALUE OF
-/// `PG_TEST_URL` THAT MEANS "NO DATABASE".
+/// The empty-string arm is already taken: `.filter(|url| !url.is_empty())` runs
+/// BEFORE the `or_else`, so `PG_TEST_URL=""` behaves exactly like unset. THERE IS
+/// NO VALUE OF `PG_TEST_URL` THAT MEANS "NO DATABASE".
 ///
-/// The fallback is NOT the bug and must not be deleted - see the paragraph
-/// above it. Making the choice audible is the fix a trap deserves: a trap that
+/// The fallback is NOT the bug and must not be deleted - see the paragraph above
+/// it. Making the choice audible is the fix a trap deserves: a trap that
 /// announces itself is not a trap.
 ///
 /// ONCE PER PROCESS, not per call. This is called from test setup paths that
