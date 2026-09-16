@@ -22,6 +22,12 @@
 //! exercised more cheaply by `stream_tmp_tests::cap_exceeded_removes_tmp_file`
 //! in `crates/zeroship-control/src/api.rs`.
 
+#![expect(
+    clippy::future_not_send,
+    reason = "these fixtures hold ntex and compio handles on their own runtime thread, \
+              exactly as the handlers they drive do"
+)]
+
 use std::collections::HashMap;
 use std::io::Write;
 use std::path::PathBuf;
@@ -212,6 +218,211 @@ fn build_zship(
 }
 
 // ---------------------------------------------------------------------------
+// The workflow manager the deploy path asks to provision a journal
+// ---------------------------------------------------------------------------
+
+/// Stand-ins for the workflow manager route the deploy path calls.
+///
+/// [`journal::never_called`] is what every case that is about something else
+/// gets, and it REFUSES: a refusal fails the deploy, so a regression that
+/// provisioned a journal for an app declaring no workflow turns those cases red
+/// instead of passing quietly.
+mod journal {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    use zeroship_control::publication::{publisher::Exchange, DeployJournal, JournalManager};
+    use zeroship_core::schema_bundle::SchemaBundleOutcome;
+    use zeroship_workflow_client::Error as ManagerError;
+
+    /// A manager that records every schema it was asked about and refuses.
+    #[derive(Default)]
+    pub struct Refusing {
+        asked: RefCell<Vec<String>>,
+    }
+
+    impl Refusing {
+        pub fn new() -> Rc<Self> {
+            Rc::new(Self::default())
+        }
+
+        /// The schemas the deploy path asked about, in order.
+        pub fn asked(&self) -> Vec<String> {
+            self.asked.borrow().clone()
+        }
+    }
+
+    impl JournalManager for Refusing {
+        fn ensure<'a>(&'a self, schema: &'a str) -> Exchange<'a, SchemaBundleOutcome> {
+            self.asked.borrow_mut().push(schema.to_owned());
+            Box::pin(async { Err(ManagerError::Unavailable) })
+        }
+    }
+
+    /// The REAL journal artifacts, applied by the REAL bundle applier against a
+    /// real creator database.
+    ///
+    /// What it leaves out is the two HTTP hops - Control to the manager, the
+    /// manager to the migration service - and each is covered where it lives:
+    /// the manager's endpoint by its own suite, the bundle applier's install,
+    /// upgrade, downgrade-refusal and corruption arms by
+    /// `zeroship-migrate-server`'s. What it keeps is everything this change is
+    /// about: which apps Control asks for, which schema it names, and whether
+    /// the journal is there when the deploy answers.
+    pub struct Applying {
+        dsn: String,
+        outcomes: RefCell<Vec<SchemaBundleOutcome>>,
+    }
+
+    impl Applying {
+        pub fn against(dsn: &str) -> Rc<Self> {
+            Rc::new(Self {
+                dsn: dsn.to_owned(),
+                outcomes: RefCell::new(Vec::new()),
+            })
+        }
+
+        /// What applying the bundle did, once per call.
+        pub fn outcomes(&self) -> Vec<SchemaBundleOutcome> {
+            self.outcomes.borrow().clone()
+        }
+    }
+
+    impl JournalManager for Applying {
+        fn ensure<'a>(&'a self, schema: &'a str) -> Exchange<'a, SchemaBundleOutcome> {
+            Box::pin(async move {
+                let bundle = zeroship_workflow_server::journal::bundle_for(schema)
+                    .expect("this build carries the PostgreSQL journal artifacts");
+                let outcome =
+                    zeroship_migrate_server::bundle::apply_schema_bundle(&self.dsn, &bundle)
+                        .await
+                        .map_err(|error| {
+                            eprintln!("journal bundle refused for {schema}: {error}");
+                            ManagerError::Unavailable
+                        })?;
+                self.outcomes.borrow_mut().push(outcome.clone());
+                Ok(outcome)
+            })
+        }
+    }
+
+    /// Compose the deploy path's journal client over a manager stand-in.
+    pub fn over(manager: Rc<dyn JournalManager>) -> Rc<DeployJournal> {
+        Rc::new(DeployJournal::new(manager))
+    }
+
+    /// The client a case that is not about journals gets.
+    pub fn never_called() -> Rc<DeployJournal> {
+        over(Refusing::new())
+    }
+}
+
+/// A creator database on this binary's `PostgreSQL`: a separate database with no
+/// platform schema, so a journal assertion cannot read a platform table and the
+/// zone split production runs under survives in the fixture.
+async fn creator_database(label: &str) -> String {
+    let control = db_url();
+    let name = format!(
+        "journal_{label}_{}",
+        &Uuid::new_v4().simple().to_string()[..10]
+    );
+    let (client, connection) = compio_postgres::connect(&control, compio_postgres::NoTls)
+        .await
+        .expect("creator database connection");
+    let driver = compio::runtime::spawn(connection.run());
+    client
+        .batch_execute(&format!("CREATE DATABASE {name}"))
+        .await
+        .expect("create the creator database");
+    drop(client);
+    driver
+        .await
+        .expect("creator database task")
+        .expect("creator database driver");
+    let (base, _) = control
+        .rsplit_once('/')
+        .expect("the control DSN names a database");
+    format!("{base}/{name}")
+}
+
+/// The version and fingerprint the journal's stamp row carries, or `None` when
+/// the schema holds no stamp table at all.
+async fn journal_stamp(dsn: &str, schema: &str) -> Option<(i64, String)> {
+    let (client, connection) = compio_postgres::connect(dsn, compio_postgres::NoTls)
+        .await
+        .expect("creator database connection");
+    let driver = compio::runtime::spawn(connection.run());
+    let present: bool = client
+        .query_one(
+            "SELECT EXISTS (SELECT 1 FROM pg_tables WHERE schemaname = $1 AND tablename = $2)",
+            &[&schema, &zeroship_workflow_schema::STAMP_TABLE],
+        )
+        .await
+        .expect("stamp table probe")
+        .get(0);
+    let stamp = if present {
+        let row = client
+            .query_one(
+                &format!(
+                    "SELECT version, fingerprint FROM {}.{} WHERE id = $1",
+                    zeroship_workflow_schema::quote_ident(schema),
+                    zeroship_workflow_schema::quote_ident(zeroship_workflow_schema::STAMP_TABLE)
+                ),
+                &[&zeroship_workflow_schema::STAMP_ROW_ID],
+            )
+            .await
+            .expect("stamp row");
+        Some((row.get(0), row.get(1)))
+    } else {
+        None
+    };
+    drop(client);
+    driver
+        .await
+        .expect("creator database task")
+        .expect("creator database driver");
+    stamp
+}
+
+/// Run one statement on a creator database and report whether it succeeded.
+async fn creator_execute(dsn: &str, sql: &str) -> Result<(), String> {
+    let (client, connection) = compio_postgres::connect(dsn, compio_postgres::NoTls)
+        .await
+        .expect("creator database connection");
+    let driver = compio::runtime::spawn(connection.run());
+    let result = client.batch_execute(sql).await.map_err(|e| e.to_string());
+    drop(client);
+    driver
+        .await
+        .expect("creator database task")
+        .expect("creator database driver");
+    result
+}
+
+/// How many rows a creator-database query returns.
+async fn creator_count(dsn: &str, sql: &str) -> i64 {
+    let (client, connection) = compio_postgres::connect(dsn, compio_postgres::NoTls)
+        .await
+        .expect("creator database connection");
+    let driver = compio::runtime::spawn(connection.run());
+    let count: i64 = client.query_one(sql, &[]).await.expect("count").get(0);
+    drop(client);
+    driver
+        .await
+        .expect("creator database task")
+        .expect("creator database driver");
+    count
+}
+
+/// A manifest declaring one workflow, which is what makes a deploy provision
+/// the app's journal.
+fn manifest_with_workflows(worker_hash: &str, workflows: &[&str]) -> Manifest {
+    let mut m = manifest_for(Some(worker_hash), &[]);
+    m.workflows = Some(serde_json::json!(workflows));
+    m
+}
+
+// ---------------------------------------------------------------------------
 // AppState construction
 // ---------------------------------------------------------------------------
 
@@ -384,7 +595,10 @@ async fn deploy_happy_path_returns_200_with_deploy_hash() {
     // Mount a single deploy route under the test app. PayloadConfig
     // mirrors what main.rs configures so the upper bound matches prod.
     let app = test::init_service(
-        web::App::new().state(fx.state.clone()).service(
+        web::App::new()
+            .state(fx.state.clone())
+            .state(journal::never_called())
+            .service(
             web::resource("/api/apps/{id}/deploy")
                 .state(web::types::PayloadConfig::new(
                     zeroship_control::deploy::MAX_COMPRESSED_BYTES,
@@ -481,7 +695,10 @@ async fn deploy_wrong_content_type_returns_415_without_consuming_body() {
     let body: Vec<u8> = b"this is not a zship payload".to_vec();
 
     let app = test::init_service(
-        web::App::new().state(fx.state.clone()).service(
+        web::App::new()
+            .state(fx.state.clone())
+            .state(journal::never_called())
+            .service(
             web::resource("/api/apps/{id}/deploy")
                 .state(web::types::PayloadConfig::new(
                     zeroship_control::deploy::MAX_COMPRESSED_BYTES,
@@ -525,7 +742,10 @@ async fn deploy_missing_auth_returns_401_without_consuming_body() {
     let body: Vec<u8> = b"won't ever be looked at".to_vec();
 
     let app = test::init_service(
-        web::App::new().state(fx.state.clone()).service(
+        web::App::new()
+            .state(fx.state.clone())
+            .state(journal::never_called())
+            .service(
             web::resource("/api/apps/{id}/deploy")
                 .state(web::types::PayloadConfig::new(
                     zeroship_control::deploy::MAX_COMPRESSED_BYTES,
@@ -606,7 +826,10 @@ async fn deploy_manifest_not_first_returns_400() {
     let body = build_zship(&manifest_bytes, &blobs, /*manifest_first=*/ false);
 
     let app = test::init_service(
-        web::App::new().state(fx.state.clone()).service(
+        web::App::new()
+            .state(fx.state.clone())
+            .state(journal::never_called())
+            .service(
             web::resource("/api/apps/{id}/deploy")
                 .state(web::types::PayloadConfig::new(
                     zeroship_control::deploy::MAX_COMPRESSED_BYTES,
@@ -689,7 +912,10 @@ async fn deploy_colliding_scope_returns_400_invalid_scope() {
     let body = build_zship(&manifest_bytes, &blobs, true);
 
     let app = test::init_service(
-        web::App::new().state(fx.state.clone()).service(
+        web::App::new()
+            .state(fx.state.clone())
+            .state(journal::never_called())
+            .service(
             web::resource("/api/apps/{id}/deploy")
                 .state(web::types::PayloadConfig::new(
                     zeroship_control::deploy::MAX_COMPRESSED_BYTES,
@@ -786,7 +1012,10 @@ async fn deploy_noncolliding_scope_returns_200() {
     let body = build_zship(&manifest_bytes, &blobs, true);
 
     let app = test::init_service(
-        web::App::new().state(fx.state.clone()).service(
+        web::App::new()
+            .state(fx.state.clone())
+            .state(journal::never_called())
+            .service(
             web::resource("/api/apps/{id}/deploy")
                 .state(web::types::PayloadConfig::new(
                     zeroship_control::deploy::MAX_COMPRESSED_BYTES,
@@ -876,8 +1105,17 @@ async fn deploy_service(
 ) -> ntex::Pipeline<
     impl ntex::Service<ntex::http::Request, Response = ntex::web::WebResponse, Error = ntex::web::Error>,
 > {
+    deploy_service_with_journal(state, journal::never_called()).await
+}
+
+async fn deploy_service_with_journal(
+    state: Arc<AppState>,
+    journal: std::rc::Rc<zeroship_control::publication::DeployJournal>,
+) -> ntex::Pipeline<
+    impl ntex::Service<ntex::http::Request, Response = ntex::web::WebResponse, Error = ntex::web::Error>,
+> {
     test::init_service(
-        web::App::new().state(state).service(
+        web::App::new().state(state).state(journal).service(
             web::resource("/api/apps/{id}/deploy")
                 .state(web::types::PayloadConfig::new(
                     zeroship_control::deploy::MAX_COMPRESSED_BYTES,
@@ -1050,7 +1288,10 @@ async fn deploy_to_nonexistent_app_does_not_write_blobs() {
     let body = build_zship(&manifest_bytes, &blobs, true);
 
     let app = test::init_service(
-        web::App::new().state(fx.state.clone()).service(
+        web::App::new()
+            .state(fx.state.clone())
+            .state(journal::never_called())
+            .service(
             web::resource("/api/apps/{id}/deploy")
                 .state(web::types::PayloadConfig::new(
                     zeroship_control::deploy::MAX_COMPRESSED_BYTES,
@@ -1113,7 +1354,10 @@ async fn deploy_is_rate_limited() {
     let app_id = AppId::mint();
 
     let app = test::init_service(
-        web::App::new().state(fx.state.clone()).service(
+        web::App::new()
+            .state(fx.state.clone())
+            .state(journal::never_called())
+            .service(
             web::resource("/api/apps/{id}/deploy")
                 .state(web::types::PayloadConfig::new(
                     zeroship_control::deploy::MAX_COMPRESSED_BYTES,
@@ -2086,6 +2330,267 @@ async fn a_deleted_app_refuses_command_replay() {
         "the deleted app stays deleted and empty"
     );
 
+    pat.cleanup(&fx.state).await;
+    drop(app);
+    drop(fx);
+    common::drain_pg().await;
+}
+
+// ---------------------------------------------------------------------------
+// The workflow journal a deploy leaves behind
+// ---------------------------------------------------------------------------
+
+/// Build a `.zship` whose manifest declares `workflows`.
+fn workflow_zship(marker: &str, workflows: &[&str]) -> Vec<u8> {
+    let server = format!("export default {{ fetch() {{ return new Response('{marker}'); }} }}");
+    let server_hash = sha256_hex(server.as_bytes());
+    let manifest = manifest_with_workflows(&server_hash, workflows);
+    let manifest_bytes = serde_json::to_vec(&manifest).unwrap();
+    build_zship(
+        &manifest_bytes,
+        &[(server_hash, server.into_bytes())],
+        true,
+    )
+}
+
+/// THE BINDING CASE. A deploy of an app that declares a workflow leaves that
+/// app's creator database carrying the journal this build ships, and the proof
+/// is the STAMP read back out of the database - not the reply the ensure call
+/// returned, which would be green even if the call wrote nothing.
+///
+/// MUTATION-CHECKED: removing the `journal.ensure` call from `api::deploy`
+/// fails this case and leaves its neighbours green.
+#[compio::test]
+async fn a_deploy_declaring_workflows_leaves_the_journal_at_the_current_version() {
+    let fx = build_test_state(&db_url(), "journal-install").await;
+    let creator = creator_database("install").await;
+    let manager = journal::Applying::against(&creator);
+    let app = deploy_service_with_journal(fx.state.clone(), journal::over(manager.clone())).await;
+    let pat = seed_owner(&fx.state, "journal-install").await;
+    let app_id = create_labelled_app(&fx.state, "journalinstall", &pat.user_id).await;
+    let schema = zeroship_core::app_derivation::schema_name(&app_id);
+
+    assert_eq!(
+        journal_stamp(&creator, &schema).await,
+        None,
+        "the control: a creator database with no deploy carries no journal"
+    );
+
+    let (status, _, json) = post_command(
+        &app,
+        &app_id,
+        &pat.bearer(),
+        &[DeployCommandId::mint().as_str()],
+        workflow_zship("journal-install", &["Onboarding"]),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+
+    let expected_fingerprint =
+        zeroship_workflow_schema::fingerprint(zeroship_workflow_schema::POSTGRES)
+            .expect("this build carries the PostgreSQL fingerprint");
+    assert_eq!(
+        journal_stamp(&creator, &schema).await,
+        Some((
+            i64::from(zeroship_workflow_schema::VERSION),
+            expected_fingerprint.to_owned()
+        )),
+        "the deploy must leave the journal stamped at the version this build carries"
+    );
+    assert_eq!(
+        creator_count(
+            &creator,
+            &format!(
+                "SELECT COUNT(*)::bigint FROM pg_tables WHERE schemaname = '{schema}' \
+                 AND tablename = '__zeroship_workflow_runs'"
+            ),
+        )
+        .await,
+        1,
+        "a stamp without the journal's own tables is not a provisioned journal"
+    );
+    assert_eq!(
+        manager.outcomes().len(),
+        1,
+        "one deploy asks once: {:?}",
+        manager.outcomes()
+    );
+
+    let _ = fx.state.registry.archive_app(&app_id).await;
+    pat.cleanup(&fx.state).await;
+    drop(app);
+    drop(fx);
+    common::drain_pg().await;
+}
+
+/// An app that declares NO workflow provisions nothing. The manager stand-in
+/// refuses every call, so a deploy that asked would answer 503 as well as
+/// recording the schema it asked about.
+#[compio::test]
+async fn a_deploy_declaring_no_workflows_provisions_no_journal() {
+    let fx = build_test_state(&db_url(), "journal-none").await;
+    let manager = journal::Refusing::new();
+    let app = deploy_service_with_journal(fx.state.clone(), journal::over(manager.clone())).await;
+    let pat = seed_owner(&fx.state, "journal-none").await;
+    let app_id = create_labelled_app(&fx.state, "journalnone", &pat.user_id).await;
+    let (body, _) = marked_zship("journal-none");
+
+    let (status, _, json) = post_command(
+        &app,
+        &app_id,
+        &pat.bearer(),
+        &[DeployCommandId::mint().as_str()],
+        body,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    assert!(
+        manager.asked().is_empty(),
+        "an app declaring no workflow must not be provisioned, asked {:?}",
+        manager.asked()
+    );
+
+    let _ = fx.state.registry.archive_app(&app_id).await;
+    pat.cleanup(&fx.state).await;
+    drop(app);
+    drop(fx);
+    common::drain_pg().await;
+}
+
+/// A second deploy of the same app asks again - the ensure is idempotent, so
+/// there is no Control-side flag to go stale - and the second ask changes
+/// nothing: the stamp is the one the first deploy wrote, and a row written into
+/// a journal table between the two deploys survives.
+#[compio::test]
+async fn a_second_deploy_leaves_the_journal_and_its_rows_alone() {
+    let fx = build_test_state(&db_url(), "journal-again").await;
+    let creator = creator_database("again").await;
+    let manager = journal::Applying::against(&creator);
+    let app = deploy_service_with_journal(fx.state.clone(), journal::over(manager.clone())).await;
+    let pat = seed_owner(&fx.state, "journal-again").await;
+    let app_id = create_labelled_app(&fx.state, "journalagain", &pat.user_id).await;
+    let schema = zeroship_core::app_derivation::schema_name(&app_id);
+
+    let (status, _, json) = post_command(
+        &app,
+        &app_id,
+        &pat.bearer(),
+        &[DeployCommandId::mint().as_str()],
+        workflow_zship("journal-again-one", &["Onboarding"]),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    let installed = journal_stamp(&creator, &schema).await;
+    assert!(installed.is_some(), "the first deploy installs the journal");
+
+    creator_execute(
+        &creator,
+        &format!(
+            "INSERT INTO \"{schema}\".\"__zeroship_workflow_app_state\" (id, app_id) \
+             VALUES ('{app}', '{app}')",
+            app = app_id.as_str()
+        ),
+    )
+    .await
+    .expect("write a row into the installed journal");
+
+    let (status, _, json) = post_command(
+        &app,
+        &app_id,
+        &pat.bearer(),
+        &[DeployCommandId::mint().as_str()],
+        workflow_zship("journal-again-two", &["Onboarding"]),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+
+    assert_eq!(
+        journal_stamp(&creator, &schema).await,
+        installed,
+        "a second deploy must not move the stamp"
+    );
+    assert_eq!(
+        creator_count(
+            &creator,
+            &format!(
+                "SELECT COUNT(*)::bigint FROM \"{schema}\".\"__zeroship_workflow_app_state\""
+            ),
+        )
+        .await,
+        1,
+        "a second deploy must not disturb the journal's rows"
+    );
+    let actions: Vec<_> = manager
+        .outcomes()
+        .iter()
+        .map(|outcome| outcome.action)
+        .collect();
+    assert_eq!(
+        actions,
+        vec![
+            zeroship_core::schema_bundle::SchemaBundleAction::Installed,
+            zeroship_core::schema_bundle::SchemaBundleAction::Unchanged,
+        ],
+        "the second ask must be recognised as already current"
+    );
+
+    let _ = fx.state.registry.archive_app(&app_id).await;
+    pat.cleanup(&fx.state).await;
+    drop(app);
+    drop(fx);
+    common::drain_pg().await;
+}
+
+/// A journal that cannot be provisioned FAILS the deploy. Nothing is committed,
+/// so the creator sees the fault and an exact retry under the same command id
+/// repeats the whole path rather than replaying a success over a journal that
+/// is not there.
+#[compio::test]
+async fn a_deploy_whose_journal_cannot_be_provisioned_is_refused_and_commits_nothing() {
+    let fx = build_test_state(&db_url(), "journal-refused").await;
+    let manager = journal::Refusing::new();
+    let app = deploy_service_with_journal(fx.state.clone(), journal::over(manager.clone())).await;
+    let pat = seed_owner(&fx.state, "journal-refused").await;
+    let app_id = create_labelled_app(&fx.state, "journalrefused", &pat.user_id).await;
+    let before = publication_rows(&fx.state, &app_id).await;
+
+    let (status, _, json) = post_command(
+        &app,
+        &app_id,
+        &pat.bearer(),
+        &[DeployCommandId::mint().as_str()],
+        workflow_zship("journal-refused", &["Onboarding"]),
+    )
+    .await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{json}");
+    assert_eq!(
+        json.get("error").and_then(|value| value.as_str()),
+        Some("workflow_journal_unavailable"),
+        "{json}"
+    );
+    assert_eq!(
+        manager.asked(),
+        vec![zeroship_core::app_derivation::schema_name(&app_id)],
+        "the deploy must name the schema the worker's own repair path names"
+    );
+    assert_eq!(
+        publication_rows(&fx.state, &app_id).await,
+        before,
+        "a refused deploy commits no receipt and no lifecycle intent"
+    );
+    let live: Option<String> = fx
+        .state
+        .control_pg
+        .query_one(
+            "SELECT deploy_hash FROM zeroship.apps WHERE id = $1",
+            &[&app_id.as_str()],
+        )
+        .await
+        .map(|row| row.get(0))
+        .unwrap();
+    assert_eq!(live, None, "a refused deploy must not move the app pointer");
+
+    let _ = fx.state.registry.archive_app(&app_id).await;
     pat.cleanup(&fx.state).await;
     drop(app);
     drop(fx);

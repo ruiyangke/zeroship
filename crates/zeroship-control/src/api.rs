@@ -1,6 +1,7 @@
 //! Admin API handlers — app CRUD, deploy, plan, usage.
 
 use std::path::Path as StdPath;
+use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -21,7 +22,7 @@ use crate::authz_guard::AuthzGuard;
 use crate::deploy::{self, IngestError};
 use crate::publication::{
     self, AcceptanceResult, CatalogError, CommandBinding, DeployCommand, DeploymentRejected,
-    VerifiedDeployment,
+    DeployJournal, VerifiedDeployment,
 };
 use crate::registry::RegistryError;
 use crate::AppState;
@@ -766,6 +767,7 @@ pub async fn deploy(
     id: Path<String>,
     authz: AuthzGuard,
     state: State<Arc<AppState>>,
+    journal: State<Rc<DeployJournal>>,
     mut body: web::types::Payload,
 ) -> web::HttpResponse {
     // Deploy is the most expensive endpoint here - it streams a body to disk,
@@ -1029,6 +1031,36 @@ pub async fn deploy(
             );
         }
     };
+
+    // An app that declares workflows gets its journal brought to the current
+    // version HERE, before the catalog transaction below commits the activation
+    // intent - because that intent is what tells the manager the deployment
+    // exists, and therefore what makes a run reachable. Provisioning after it
+    // would leave a window where a run is accepted against a journal that is
+    // absent or behind.
+    //
+    // It fails the deploy rather than being recorded for retry. The creator is
+    // waiting on this response and can send the same command again; a deploy
+    // that answered 200 and left the journal for a background sweep would hand
+    // back an app whose first workflow run fails, with nothing in the answer
+    // saying why. Nothing has been committed at this point, so an exact retry
+    // under the same `Idempotency-Key` repeats the whole path, and the manager's
+    // ensure is idempotent, so repeating it costs a stamp read.
+    //
+    // An app declaring no workflows provisions nothing.
+    if deployment.declares_workflows() {
+        if let Err(error) = journal.ensure(&uid).await {
+            tracing::error!(
+                app_id = %uid.as_str(),
+                %error,
+                "control: deploy refused - the app's workflow journal could not be provisioned"
+            );
+            return web::HttpResponse::ServiceUnavailable().json(&serde_json::json!({
+                "error": "workflow_journal_unavailable",
+                "detail": error.to_string(),
+            }));
+        }
+    }
 
     // Attempt OAuth-client reconciliation BEFORE the manifest commit. When
     // reconciliation succeeds, the gateway's next route-sync pull sees the

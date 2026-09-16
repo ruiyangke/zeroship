@@ -70,6 +70,7 @@ pub struct VerifiedDeployment {
     manifest_json: String,
     descriptor_sha256: Option<String>,
     schedules: Vec<ScheduleDescriptor>,
+    workflows: bool,
 }
 
 impl VerifiedDeployment {
@@ -83,15 +84,16 @@ impl VerifiedDeployment {
     pub fn verify(manifest_json: String, hash: String) -> Result<Self, DeploymentRejected> {
         let manifest = zeroship_bundle::verify_deployment_manifest(manifest_json.as_bytes(), &hash)
             .map_err(|_| DeploymentRejected::Manifest)?;
-        let schedules = zeroship_workflow::service::BundleDeclarations::parse(&manifest)
+        let declarations = zeroship_workflow::service::BundleDeclarations::parse(&manifest)
             .map_err(|_| {
                 DeploymentRejected::Schedules(
                     "schedules must name declared workflows, unique schedule names and valid \
                      calendars"
                         .into(),
                 )
-            })?
-            .manager_schedules();
+            })?;
+        let workflows = !declarations.workflows().is_empty();
+        let schedules = declarations.manager_schedules();
         zeroship_workflow_manager::scheduling::Options::default()
             .validate(&schedules)
             .map_err(|error| DeploymentRejected::Schedules(schedule_refusal(error)))?;
@@ -100,6 +102,7 @@ impl VerifiedDeployment {
             manifest_json,
             descriptor_sha256: manifest.runtime_descriptor.map(|entry| entry.hash),
             schedules,
+            workflows,
         })
     }
 
@@ -121,6 +124,18 @@ impl VerifiedDeployment {
     #[must_use]
     pub fn schedules(&self) -> &[ScheduleDescriptor] {
         &self.schedules
+    }
+
+    /// Whether the artifact declares any workflow at all.
+    ///
+    /// This is what decides whether a deploy provisions the app's workflow
+    /// journal: an app that declares none never runs a workflow, so installing
+    /// a journal for it would put platform tables in a creator schema that
+    /// nothing will ever read. A schedule must name a declared workflow, so a
+    /// deployment with schedules and no workflows does not exist.
+    #[must_use]
+    pub const fn declares_workflows(&self) -> bool {
+        self.workflows
     }
 
     /// The exact preparation request the publisher sends for this deployment.

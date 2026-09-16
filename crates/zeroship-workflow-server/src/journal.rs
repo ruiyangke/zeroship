@@ -86,6 +86,18 @@ impl Journal {
     }
 }
 
+/// The exact bundle this build sends for one schema.
+///
+/// Public without an HTTP client or a service identity because it IS the whole
+/// contract with the migration service: a caller that wants to know what the
+/// manager would install can read it here rather than infer it from a reply.
+///
+/// # Errors
+/// Refuses a build whose artifacts do not carry the `PostgreSQL` series.
+pub fn bundle_for(schema: &str) -> Result<SchemaBundle, Error> {
+    journal_bundle(schema, &charter())
+}
+
 /// Build the bundle for one schema from the artifacts this build carries.
 ///
 /// A free function so it can be exercised without an HTTP client or a service

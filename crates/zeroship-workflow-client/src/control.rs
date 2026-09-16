@@ -1,6 +1,7 @@
 use super::{transport::Transport, Error, Options};
 use std::sync::Arc;
 use zeroship_core::{
+    schema_bundle::{EnsureJournal, SchemaBundleOutcome},
     service_assertion::ServiceIssuer,
     service_identity::endpoints,
     service_peers::{service_issuer, ServiceAuth, CONTROL_SERVICE_NAME},
@@ -43,6 +44,36 @@ impl ControlCoordinator {
             )?,
             schedule_publisher,
         })
+    }
+
+    /// Ask the manager to bring one creator database's workflow journal to the
+    /// version the platform currently carries.
+    ///
+    /// Control is the party that learns an app deployed, so Control is what
+    /// asks; the manager holds the journal artifacts and sends them on. Routing
+    /// the artifacts through Control instead would put the workflow domain back
+    /// inside the control plane.
+    ///
+    /// Idempotent at the far end - the manager reads the installed stamp and
+    /// installs, upgrades, verifies or refuses - so a deploy may call it every
+    /// time and no caller-side "already provisioned" flag exists to go stale.
+    ///
+    /// # Errors
+    /// Refuses failed exchanges and an outcome describing another schema.
+    pub async fn ensure_journal(&self, schema: &str) -> Result<SchemaBundleOutcome, Error> {
+        let outcome: SchemaBundleOutcome = self
+            .transport
+            .post(
+                endpoints::WORKFLOW_JOURNAL_ENSURE,
+                &EnsureJournal {
+                    schema: schema.to_owned(),
+                },
+            )
+            .await?;
+        if outcome.schema != schema {
+            return Err(Error::InvalidResponse);
+        }
+        Ok(outcome)
     }
 
     /// Prepare immutable schedule metadata using the Control service signer.

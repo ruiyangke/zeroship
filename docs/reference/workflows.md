@@ -197,12 +197,17 @@ sends that bundle.
 
 Two things trigger it, and both are idempotent:
 
+- **Deploy.** A deploy of an app that declares a workflow brings that app's
+  journal to the current version BEFORE it answers, so the first run never waits
+  on provisioning and an app that is deployed and not yet run still has one. A
+  deploy that cannot provision is refused rather than accepted: you see the
+  fault in the deploy, not in the first run. An app that declares no workflow
+  provisions nothing. This is why a schema change rolls out without a migration
+  step on your side - a redeploy carries it.
 - **A host that refuses a journal.** A worker verifies the journal against the
   fingerprint it was built with. If it finds an older one, or none, it asks the
-  manager to provision and retries once. This is why a schema change rolls out
-  without a migration step on your side.
-- **Registration.** When an app registers, its journal is brought to the current
-  version.
+  manager to provision and retries once. This is the repair path for an app that
+  has not redeployed since the schema moved.
 
 The stamp is one row per creator database, not per app, so an upgrade moves every
 app in that database at once and does so in a single transaction: an upgrade that
