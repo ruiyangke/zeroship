@@ -23,14 +23,10 @@ use crate::schema_error::MaskSentinelError;
 ///
 /// # Why this is a constant and not a knob
 ///
-/// It was a knob until 2026-09-04: a `SentinelPrefix` struct plus
-/// `build_*_with` / `parse_*_with` pairs, so "a host that must interoperate with
-/// a legacy writer" could inject that writer's prefix. Nothing ever injected
-/// one - `SentinelPrefix` occurred ten times in the whole tree, all inside its
-/// own defining file - and the reader that was supposed to be interoperated
-/// with (`zeroship-data-sql`'s copy of this codec, which the data plane uses to
-/// read the live catalog) simply spelled the sentinel differently and never
-/// learned this one.
+/// A per-host prefix was never needed. A `SentinelPrefix` knob existed so "a host
+/// that must interoperate with a legacy writer" could inject that writer's prefix,
+/// but nothing ever injected one, and the reader it was meant to interoperate with
+/// simply spells the sentinel differently and never learned this one.
 ///
 /// That is what the knob cost. `zeroship_data_orm::protection::protection_floor`
 /// refuses a write whose descriptor dropped a protection the catalog still

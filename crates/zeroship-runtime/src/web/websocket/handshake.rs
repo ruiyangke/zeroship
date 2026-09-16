@@ -42,9 +42,9 @@
 //! buffer is also opaque. To use our own framer post-handshake, we
 //! need full control over the leftover bytes; the only way is to do
 //! the HTTP handshake ourselves. The handshake is small (RFC 6455 §4.1
-//! is one request + one response with fixed header validation), and
-//! the SSRF / extension / subprotocol / Sec-WebSocket-Accept guards we
-//! used to layer ON TOP of tungstenite were already most of the work.
+//! is one request + one response with fixed header validation), and the
+//! SSRF / extension / subprotocol / Sec-WebSocket-Accept guards are most
+//! of the work.
 
 #![cfg(feature = "runtime_native_websocket")]
 
