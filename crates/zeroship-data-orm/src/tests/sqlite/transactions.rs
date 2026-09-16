@@ -9,6 +9,10 @@ use zeroship_data_orm::backend::sqlite::session::TerminalIntent;
 
 use zeroship_data_orm::error::DbError;
 
+use crate::error::{BeginIntent, OpenSessionError, SettleIntent, TerminalResult};
+use crate::executor::ScopedExecutor;
+use zeroship_data_orm::backend::sqlite::SqliteBackend;
+
 #[cfg(test)]
 use crate::tests::fixtures::DatabaseFixture;
 
@@ -1041,6 +1045,227 @@ fn an_app_files_write_upgrade_is_plain_busy_because_it_is_not_in_wal() {
                 "the control: the session's own database IS in WAL, so the two databases \
              on one connection genuinely differ"
             );
+        });
+    })
+}
+
+// ---------------------------------------------------------------------------
+// How an explicit transaction opens, and what that costs.
+//
+// `BEGIN_TRANSACTION` in `backend::sqlite::executor` says why the ORM opens
+// with `IMMEDIATE`. These three measure it: the write lock is held from `BEGIN`,
+// two replicas over one file therefore take turns instead of one being refused
+// outright, and a transaction locks `main` even when its binding does not
+// address `main`.
+// ---------------------------------------------------------------------------
+
+/// Open two backends over ONE database directory, the way two replicas of a
+/// service reach one SQLite file.
+///
+/// `fresh_backend` mints a temp dir per backend, which is the opposite of what
+/// these arms need.
+fn replica_backends(host: &Host) -> (SqliteBackend, SqliteBackend, tempfile::TempDir) {
+    let dir = tempfile::tempdir().expect("create tempdir");
+    let open = || {
+        zeroship_data_orm::backend_selection::new_sqlite_backend(
+            std::path::PathBuf::from(dir.path()),
+            host.key_source(),
+        )
+        .expect("open SqliteBackend")
+    };
+    let left = open();
+    let right = open();
+    (left, right, dir)
+}
+
+/// The file `SqliteBackend` opens as `main`, which is the database a binding on
+/// schema `main` addresses. Spelled from the same directory the backend was
+/// given, because a probe has to reach the identical file for its lock to mean
+/// anything.
+fn platform_file(dir: &tempfile::TempDir) -> std::path::PathBuf {
+    dir.path().join("zs-control.sqlite")
+}
+
+/// A connection of this test's own, with a short lock budget.
+///
+/// The platform's own budget is `budgets::DB_LOCK_TIMEOUT_MS`, which a probe
+/// that is SUPPOSED to be refused would sit out in full. The probe answers the
+/// same question with a budget of its own, so the arms below stay fast without
+/// changing what they ask.
+fn impatient_probe(path: &std::path::Path) -> rusqlite::Connection {
+    let probe = rusqlite::Connection::open(path).expect("open a probe connection");
+    probe
+        .busy_timeout(std::time::Duration::from_millis(50))
+        .expect("set the probe's own lock budget");
+    probe
+}
+
+fn main_schema() -> crate::sql::SchemaName {
+    crate::sql::SchemaName::new("main").expect("main is a legal schema name")
+}
+
+/// **The write lock is taken at `BEGIN`, before the transaction's first
+/// statement.**
+///
+/// This is the whole of the change, stated where it cannot be mistaken for a
+/// consequence of some later statement: nothing has run on the transaction yet.
+///
+/// Under a bare `BEGIN` the probe's write SUCCEEDS here, because a deferred
+/// transaction holds nothing. That is the defect: the first write the
+/// transaction issues then has to upgrade, and SQLite refuses an upgrade
+/// without invoking the busy handler, so the lock budget every other statement
+/// spends is unavailable to exactly the statement that needed it.
+#[test]
+fn a_transaction_holds_the_write_lock_from_begin_before_any_statement() {
+    Host::test(|host| {
+        host.run(async {
+            let (backend, dir) = fresh_backend(host);
+            backend
+                .execute_fixture("CREATE TABLE ledger (id INTEGER PRIMARY KEY, who TEXT)", &[])
+                .await
+                .expect("create the table");
+
+            let session = backend
+                .open_tx_session("replica", &main_schema(), BeginIntent::Default)
+                .await
+                .expect("open the transaction");
+
+            let probe = impatient_probe(&platform_file(&dir));
+            let refused = probe.execute("INSERT INTO ledger (who) VALUES ('probe')", []);
+            assert!(
+                refused.is_err(),
+                "an open transaction must already hold the write lock; the probe wrote \
+                 instead, so BEGIN took no lock and the transaction's own first write \
+                 will have to upgrade"
+            );
+
+            assert_eq!(
+                session.settle(SettleIntent::Rollback).await.0,
+                TerminalResult::RolledBack
+            );
+            // The refusal was the transaction's, not the file's: the same probe
+            // writes once the transaction ends. Without this the arm above
+            // passes on a probe that could never have written at all.
+            probe
+                .execute("INSERT INTO ledger (who) VALUES ('probe')", [])
+                .expect("the probe writes once the transaction has settled");
+        });
+    })
+}
+
+/// **Two replicas racing over one file both make progress.** The outcome the
+/// mechanism above buys, in the shape that reported it: each replica reads
+/// before it writes, which is what pins a deferred snapshot and turns the
+/// loser's write into a refused upgrade.
+///
+/// Both transactions must finish. Under a bare `BEGIN` one of them is refused
+/// with `LockContention` the instant it writes.
+#[test]
+fn two_replicas_reading_before_they_write_both_commit() {
+    Host::test(|host| {
+        host.run(async {
+            let (left, right, _dir) = replica_backends(host);
+            left.execute_fixture("CREATE TABLE ledger (id INTEGER PRIMARY KEY, who TEXT)", &[])
+                .await
+                .expect("create the table");
+
+            async fn replica(backend: &SqliteBackend, who: &str) -> Result<(), DbError> {
+                let session = backend
+                    .open_tx_session(who, &main_schema(), BeginIntent::Default)
+                    .await
+                    .map_err(|error| match error {
+                        OpenSessionError::Failed(error) => error,
+                        OpenSessionError::Setup(setup) => setup.into_db_error(),
+                    })?;
+                // The read comes first deliberately. A transaction whose first
+                // statement is a write starts its write transaction there and
+                // never upgrades, so a write-first replica would pass under
+                // either BEGIN mode and measure nothing.
+                session.query("SELECT COUNT(*) FROM ledger", &[]).await?;
+                session
+                    .exec(
+                        "INSERT INTO ledger (who) VALUES ($1)",
+                        &[crate::value::Value::from(who)],
+                    )
+                    .await?;
+                match session.settle(SettleIntent::Commit).await {
+                    (TerminalResult::Committed, _) => Ok(()),
+                    (other, error) => Err(error.unwrap_or_else(|| {
+                        DbError::internal(format!("replica {who} settled as {other:?}"))
+                    })),
+                }
+            }
+
+            let (first, second) =
+                futures::future::join(replica(&left, "left"), replica(&right, "right")).await;
+            first.expect("the left replica's transaction must complete");
+            second.expect("the right replica's transaction must complete");
+
+            let rows = left
+                .autocommit_client()
+                .query("SELECT who FROM ledger ORDER BY who", &[])
+                .await
+                .expect("read the ledger back");
+            assert_eq!(
+                rows.iter()
+                    .map(|row| row[0].as_deref().unwrap_or_default().to_owned())
+                    .collect::<Vec<_>>(),
+                vec!["left".to_owned(), "right".to_owned()],
+                "both replicas' writes must be durable, not merely unrefused"
+            );
+        });
+    })
+}
+
+/// **The cost, measured rather than asserted in prose.**
+///
+/// `IMMEDIATE` locks every database the connection has open. A transaction lane
+/// carries `main` plus its own app's attached file, so a transaction whose
+/// binding addresses only the app file still holds `main`'s write lock - and
+/// `main` is the one database every app on this backend shares.
+///
+/// Read this as the price of the two arms above, not as a contract worth
+/// keeping. It fails if the price is ever paid down, which is the point: the
+/// divergence recorded in `docs/reference/sqlite-divergences.md` stops being
+/// true silently.
+#[test]
+fn two_apps_on_one_backend_serialize_their_transactions_through_main() {
+    Host::test(|host| {
+        host.run(async {
+            let (backend, dir) = fresh_backend(host);
+            let app_schema =
+                crate::sql::SchemaName::new("tenant_a").expect("legal schema name");
+            backend
+                .attach_app_file("tenant_a")
+                .await
+                .expect("attach the app file");
+
+            // A table in `main`, which this binding does not address at all.
+            backend
+                .execute_fixture("CREATE TABLE shared (id INTEGER PRIMARY KEY)", &[])
+                .await
+                .expect("create a table in main");
+
+            let session = backend
+                .open_tx_session("tenant_a", &app_schema, BeginIntent::Default)
+                .await
+                .expect("open the app's transaction");
+
+            let probe = impatient_probe(&platform_file(&dir));
+            assert!(
+                probe.execute("INSERT INTO shared DEFAULT VALUES", []).is_err(),
+                "a transaction bound to an app file holds main's write lock too; if this \
+                 passes, IMMEDIATE has stopped reaching main and the cross-app \
+                 serialization the divergence records is gone"
+            );
+
+            assert_eq!(
+                session.settle(SettleIntent::Rollback).await.0,
+                TerminalResult::RolledBack
+            );
+            probe
+                .execute("INSERT INTO shared DEFAULT VALUES", [])
+                .expect("main is writable once the app's transaction settles");
         });
     })
 }
