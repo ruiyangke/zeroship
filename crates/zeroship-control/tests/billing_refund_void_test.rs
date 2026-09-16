@@ -17,14 +17,17 @@
 //! Only the Stripe WIRE is a recording fake (it records every `create_refund` call so the
 //! cash-leg `re_…` ref assertions are real, but no HTTP leaves the process).
 //!
-//! These FAIL against the pre-PR-3 code/schema:
-//!   (a) no `refunds` table / over-refund trigger → the credit-laundering scenario cannot
-//!       even be rejected;
-//!   (b) no `RefundProvider` seam → no `re_…` ref for cash, no `refund_to_credit` grant;
-//!   (c) no claim-then-call / no `refund_provider_refs` → a crashed POST is not re-drivable;
-//!   (f) no `void_reversal` append → consume→void→reissue double-consumes (balance not
-//!       conserved);
-//!   (g) a true-up that ignores already-issued refunds → over-refunds + the trigger rejects it.
+//! Invariants pinned:
+//!   (a) over-refund bound: a refund that would push Σ(refunds) past the cash anchor
+//!       Σ(invoice_payments) is REJECTED — credit-funded value can never be re-granted
+//!       as fresh credit (the credit-laundering scenario);
+//!   (b) a cash refund carries its Stripe `re_…` ref; a credit refund appends a
+//!       `refund_to_credit` grant;
+//!   (c) claim-then-call: a crashed refund POST is re-drivable from its claim row
+//!       (`refund_provider_refs`);
+//!   (f) consume→void→reissue conserves the balance — the `void_reversal` append
+//!       prevents the double-consume;
+//!   (g) the true-up subtracts already-issued refunds, so it never over-refunds.
 
 #![allow(clippy::future_not_send)]
 
@@ -683,10 +686,6 @@ async fn over_refund_three_way_bound_blocks_credit_laundering() {
 /// `charge` row. Refunding the `in_…` against a real invoice with no inline settlement
 /// fails; the recorded `pi_…` always works. This exercises the resolver directly (no
 /// reconcile precondition) so it's deterministic.
-///
-/// RED pre-fix: `provider_invoice_id_for_cash_refund` returned the charge row's `in_…`
-/// provider_ref, so `create_refund` had to re-derive the pi_ from the invoice (and a
-/// real out-of-band-paid invoice has none → the refund 500s).
 #[compio::test]
 async fn cash_refund_targets_recorded_payment_intent_not_invoice() {
     let url = db_url();
@@ -1159,12 +1158,8 @@ async fn tax_split_refund_returns_proportional_tax() {
 // ===========================================================================
 
 // The scope vocabulary is resource-blind: a scope always lowers to
-// `Resource::Any`, so per-app narrowing now comes from Cedar app membership
-// rather than from the caller-supplied wrapper policy a PAT used to carry.
-// The old "organization self" fixture modeled a token holding BillingWrite scoped
-// to ONE app only (not Resource::Any) so the operator-only endpoint would
-// deny it; that per-resource narrowing has no OAuth-scope equivalent, so the
-// denied caller below instead carries "billing:read" — a real, plausible
+// `Resource::Any`, so per-app narrowing comes from Cedar app membership.
+// The denied caller below carries "billing:read" — a real, plausible
 // organization scope that simply omits the billing:write action under test.
 
 // ===========================================================================
@@ -1404,17 +1399,12 @@ async fn true_up_subtracts_already_issued_cash_refunds() {
 //     held must be reflected in the claimed amount — proving there is no stale window
 //     between reading the anchor and claiming the refund.
 //
-// Setup: a VOIDED invoice with cash $60 collected, no prior refunds. reissued_total = $10,
-//     so a naive (pre-fix) computation would refund $60 − $0 − $10 = $50. We hold the
-//     organization lock on an observer, start the true-up (it BLOCKS on the lock — proof it
-//     acquires the lock BEFORE reading the anchor), append a −$20 dispute_debit under the
-//     held lock (cash → $40), then release. The true-up must recompute $40 − $0 − $10 = $30
-//     under the lock — NOT the stale $50.
-//
-// RED pre-fix: void_reissue read cash_paid_old OUTSIDE the lock and passed a fixed $50 to
-//     issue_true_up_refund; the concurrent debit would make $50 stale → the over-refund
-//     trigger ($50 cash-refund > $40 cash) would REJECT it (the "BUG cap math" abort), or
-//     under/over-refund. Post-fix the recompute under the lock yields the correct $30.
+// Setup: a VOIDED invoice with cash $60 collected, no prior refunds. reissued_total = $10.
+//     We hold the organization lock on an observer, start the true-up (it BLOCKS on the
+//     lock — proof it acquires the lock BEFORE reading the anchor), append a −$20
+//     dispute_debit under the held lock (cash → $40), then release. The true-up must
+//     recompute $40 − $0 − $10 = $30 under the lock — NOT the stale $50 a pre-lock
+//     read would have claimed.
 // ===========================================================================
 
 // See the allow on `over_refund_three_way_bound_blocks_credit_laundering` above.
@@ -1658,9 +1648,6 @@ async fn one_active_invoice_per_period_void_releases_claim() {
 //     consume/refund for the same organization. While the claim tx holds the lock, a
 //     SECOND connection's `pg_try_advisory_xact_lock(same key)` must FAIL; a
 //     DIFFERENT organization's key is free. Mirrors the PR-2 consume-lock test.
-// (RED pre-fix: the old `issue_refund` took NO lock + opened NO txn, so the
-//  try-lock on the same key would SUCCEED even mid-claim → the over-refund bound
-//  was defeatable by concurrency.)
 // ===========================================================================
 
 // See the allow on `over_refund_three_way_bound_blocks_credit_laundering` above.
@@ -1851,16 +1838,11 @@ async fn two_refunds_summing_over_cash_second_is_rejected() {
 // ===========================================================================
 // MAJOR-1: a `refund_to_credit` double-drive appends EXACTLY ONE grant — the
 //     `credit_ledger_refund_to_credit_note_idx` partial UNIQUE is the durable guard.
-//     We claim a credit refund as `pending`, then drive it TWICE bypassing the
-//     fast-path SELECT skip (delete the grant between drives to force the second
-//     INSERT to actually fire and hit ON CONFLICT DO NOTHING is moot — instead we
-//     drive twice concurrently-equivalent and assert one grant). Simplest faithful
-//     form: drive the same pending refund twice; the unique index makes the second
-//     INSERT a no-op even if the SELECT guard were absent.
-// (RED pre-fix: no unique index + a SELECT-then-INSERT guard → a second INSERT that
-//  races past the SELECT appends a SECOND grant. We force the INSERT path on the
-//  second drive by deleting the just-written grant is impossible (immutable trigger),
-//  so we assert the constraint directly: a direct second INSERT of the same note RAISEs.)
+//     Drive the same pending refund twice; the unique index makes the second INSERT
+//     a no-op even if the fast-path SELECT skip were absent. The immutability
+//     trigger makes it impossible to delete the first grant to force the INSERT
+//     path, so the constraint is also asserted directly: a second INSERT of the
+//     same note RAISEs.
 // ===========================================================================
 
 // See the allow on `over_refund_three_way_bound_blocks_credit_laundering` above.
@@ -2134,17 +2116,14 @@ async fn void_reissue_is_redrivable_after_phase1_crash() {
 }
 
 // ===========================================================================
-// GAP-5: the operator `issue_refund` is FINALIZED-ONLY (after the `allow_voided`
-//     removal). A refund of a DRAFT or a VOID invoice must be rejected as
-//     `RefundOutcome::InvalidInvoice` — never claimed, never issued. No prior test
-//     asserts this rejection; the true-up bridge (which legitimately refunds a VOID
-//     invoice) no longer routes through `issue_refund`, so this path is finalized-only.
+// GAP-5: the operator `issue_refund` is FINALIZED-ONLY. A refund of a DRAFT or a
+//     VOID invoice must be rejected as `RefundOutcome::InvalidInvoice` — never
+//     claimed, never issued. The true-up bridge (which legitimately refunds a VOID
+//     invoice) does not route through `issue_refund`, so this path is finalized-only.
 //
-// RED-proof: this PINS `let refundable = status == "finalized"` in
-//     `issue_refund_inner`. If that bound is loosened (e.g. back to
-//     `status == "finalized" || status == "void"`), the VOID case below would
-//     CLAIM-and-ISSUE instead of returning InvalidInvoice — the second assertion
-//     (`Issued`-vs-`InvalidInvoice`) and the "zero refund rows" assertion both flip.
+//     Pins `let refundable = status == "finalized"` in `issue_refund_inner`: if that
+//     bound admitted `void`, the VOID case below would CLAIM-and-ISSUE instead of
+//     returning InvalidInvoice, and the "zero refund rows" assertion would flip.
 // ===========================================================================
 
 #[compio::test]

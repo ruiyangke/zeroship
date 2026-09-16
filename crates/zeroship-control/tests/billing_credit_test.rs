@@ -15,14 +15,16 @@
 //! Only the Stripe WIRE is a recording fake (Stripe is irrelevant to credit math; the
 //! Stripe path is covered by `billing_reconcile_test`).
 //!
-//! These FAIL against the pre-PR-2 code/schema:
-//!   (a) no `credit_ledger` table → the append-only / CHECK assertions cannot even run;
-//!   (b) the finalize UPDATE hard-wired `credit_cents = 0` → consume writes nothing, so
-//!       `credit_cents`/`total_cents`/the per-grant `consumed` entry assertions fail;
-//!   (c) a reconcile re-run with no re-run guard double-consumes → balance not conserved;
-//!   (d) no expiry filter → an expired grant is drawn;
-//!   (e) no `grant_credit` endpoint / no operator gate → the 403 + 409 assertions fail;
-//!   (f) no currency filter → a non-USD grant is drawn against a USD bill.
+//! Invariants pinned:
+//!   (a) the `credit_ledger` is append-only, with the kind↔sign CHECK and the
+//!       immutability trigger enforced by the database;
+//!   (b) finalize consumes credit: `credit_cents`/`total_cents` and a per-grant
+//!       `consumed` entry are written by the real finalize UPDATE;
+//!   (c) a reconcile re-run never double-consumes — the balance is conserved;
+//!   (d) an expired grant is never drawn;
+//!   (e) the operator gate: 403 for a non-operator caller, 409 on idem-key reuse
+//!       with a different body (no double grant);
+//!   (f) a grant is only drawn against a bill in its own currency.
 
 #![allow(clippy::future_not_send)]
 
@@ -1107,19 +1109,13 @@ async fn grant_helper_idempotency_key_and_fingerprint() {
 // ===========================================================================
 
 // The scope vocabulary is resource-blind: a scope always lowers to
-// `Resource::Any`, so per-app narrowing now comes from Cedar app membership
-// rather than from the caller-supplied wrapper policy a PAT used to carry.
-// The old "organization self" fixture modeled a token holding BillingWrite scoped
-// to ONE app only (not Resource::Any) so the operator-only endpoint would
-// deny it; that per-resource narrowing has no OAuth-scope equivalent, so the
-// denied caller below instead carries "billing:read" — a real, plausible
+// `Resource::Any`, so per-app narrowing comes from Cedar app membership.
+// The denied caller below carries "billing:read" — a real, plausible
 // organization scope that simply omits the billing:write action under test.
 
 // ===========================================================================
 // MINOR-2: `note` IS part of the grant fingerprint. A reused key with a DIFFERENT
 // note is a body change ⇒ 409, never a silent return of the first grant.
-// (RED pre-fix: `grant_fingerprint` excluded `note`, so the second call returned
-//  Duplicate(first) and the assertion `== Conflict` failed.)
 // ===========================================================================
 
 #[compio::test]
@@ -1252,14 +1248,12 @@ async fn grant_note_change_is_a_conflict() {
 // MINOR-3: the idempotency conflict re-SELECT is organization-scoped. A key reused
 // ACROSS creators is a Conflict for the second organization (never another organization's
 // grant id) and appends no grant for them.
-// NOTE on RED: this finding is DEFENSE-IN-DEPTH — it cannot produce a behavioral
-// RED against the pre-fix helper, because `organization_id` is ALREADY part of
-// `grant_fingerprint`. With the old unscoped `WHERE idempotency_key = $1`, organization
-// B's reuse read A's row, computed B's (different) fingerprint, and returned
-// Conflict anyway. The scoped re-SELECT makes that explicit (B's `else` branch
-// returns Conflict without ever touching A's row) and forecloses any future
-// fingerprint scheme that drops organization_id. The assertions below hold under both,
-// so this test is a correctness GUARD, not a RED-distinguishing regression.
+// DEFENSE-IN-DEPTH: `organization_id` is ALREADY part of `grant_fingerprint`, so an
+// unscoped `WHERE idempotency_key = $1` re-SELECT would return Conflict anyway (B's
+// reuse reads A's row, computes B's different fingerprint). The scoped re-SELECT makes
+// that explicit (B's `else` branch returns Conflict without ever touching A's row) and
+// forecloses any future fingerprint scheme that drops organization_id. This test is a
+// correctness GUARD for that scoping, not a behavioral distinguisher.
 // ===========================================================================
 
 #[compio::test]
@@ -1353,8 +1347,6 @@ async fn grant_idempotency_key_is_creator_scoped() {
 // MINOR-6: `kind` is normalized case-insensitively (uniform with `currency`).
 // `GRANT` / `Promo` are accepted and stored lowercase; the domain CHECK is
 // lowercase-only, so a non-normalized kind would have FK/domain-violated.
-// (RED pre-fix: `matches!(kind, "grant"|...)` was case-sensitive ⇒ "GRANT" was
-//  rejected with InvalidInput before it ever reached the INSERT.)
 // ===========================================================================
 
 #[compio::test]
@@ -1425,14 +1417,12 @@ async fn grant_kind_is_case_insensitive() {
 // ===========================================================================
 // MINOR-5 (+ MINOR-4): the grant endpoint classifies the `organization_billing` INSERT
 // failure by SQLSTATE — only a foreign_key_violation (23503, a non-existent user) is
-// a 400 "unknown organization". A grant for a NON-EXISTENT organization_id (no users row) ⇒
+// a 400 "unknown organization"; any other INSERT error routes to 500 via
+// `error_response`. A grant for a NON-EXISTENT organization_id (no users row) ⇒
 // 400; a grant for a real organization ⇒ 201 — both through the REAL one-`transaction()`
-// upsert+grant path (MINOR-4). NOTE on RED: the ghost→400 outcome matches the pre-fix
-// string-match behaviour (the pre-fix code 400'd ANY error), so this is not a
-// RED-distinguishing test for the mis-classification per se — faithfully injecting a
-// transient/non-FK error against real PG mid-INSERT is impractical. It GUARDS that the
-// FK→400 path and the real→201 path both still hold under the SQLSTATE classifier and
-// the single transaction (a non-FK error now routes to 500 via `error_response`).
+// upsert+grant path (MINOR-4). A transient/non-FK error cannot be faithfully injected
+// against real PG mid-INSERT, so this GUARDS the FK→400 and real→201 paths under the
+// SQLSTATE classifier rather than exercising the 500 route.
 // ===========================================================================
 
 // ===========================================================================
@@ -1443,8 +1433,6 @@ async fn grant_kind_is_case_insensitive() {
 //       a DIFFERENT organization's key still succeeds (per-organization, not global).
 //   (2) sequential over-draw is impossible: two consumes against ONE grant draw
 //       at most the grant balance, and the balance never goes negative.
-// (RED pre-fix: no lock was taken in `consume_at_finalize`, so assertion (1)'s
-//  try-lock on the same key would SUCCEED even mid-consume-tx.)
 // ===========================================================================
 
 #[compio::test]

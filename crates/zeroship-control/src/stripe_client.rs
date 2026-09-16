@@ -16,18 +16,18 @@
 //! key (invoice item / invoice / finalize / refund / meter event / connect
 //! PaymentIntent) carry an `Idempotency-Key` header (defense in depth on top of
 //! the `invoices` per-period claim) so an at-least-once retry replays the
-//! same Stripe object instead of creating a duplicate. **Customer and connect
-//! account creation now carry one too**, keyed on `organization_id`.
+//! same Stripe object instead of creating a duplicate. Customer and connect
+//! account creation carry one too, keyed on `organization_id`.
 //!
-//! They previously did not, on the stated grounds that "at-most-once is
-//! enforced by the caller's own `organization_billing` / `organization_accounts` row
-//! check". That check is a plain check-then-act with no lock spanning it
-//! (`stripe_handlers.rs` 245/253/257), so two concurrent requests both observe
+//! The caller's own `organization_billing` / `organization_accounts` row check
+//! cannot substitute for a key: it is a plain check-then-act with no lock
+//! spanning it (the `get_customer` → `create_customer` → `set_customer`
+//! sequence in `stripe_handlers.rs`), so two concurrent requests both observe
 //! no row and both post. The row's `ON CONFLICT` then keeps one and the other
 //! Stripe object is orphaned — an external side effect no local rollback
 //! reaches. A key collapses the race where a row check cannot.
 //!
-//! `account_link` and the checkout setup session still carry no key, and that
+//! `account_link` and the checkout setup session carry no key, and that
 //! one IS sound: both are short-lived hosted URLs, so a duplicate is discarded
 //! by expiry rather than persisted.
 //!
@@ -274,8 +274,9 @@ pub trait StripeApi {
     /// This is the C2 re-drive guard: the export cron pushes
     /// `current_local − stripe_aggregate`, so a re-drive PAST Stripe's ~24h
     /// `identifier` dedup window (where a blind re-push would be SUMMED twice)
-    /// instead pushes only the still-missing remainder. The guarantee no longer
-    /// depends on the local high-water being fresh, nor on the 24h window.
+    /// instead pushes only the still-missing remainder. The guarantee rests on
+    /// the aggregate read itself — not on the local high-water being fresh, nor
+    /// on the 24h window.
     ///
     /// `meter_id` is the `mtr_…` id; `start_time`/`end_time` are unix seconds
     /// (the billing period `[start, end)`). Returns the aggregated CU total.
@@ -719,12 +720,11 @@ fn extract_id(json: &serde_json::Value, what: &str) -> Result<String, StripeErro
 
 impl StripeApi for StripeClient {
     async fn create_customer(&self, email: &str, organization_id: &str) -> Result<String, StripeError> {
-        // DETERMINISTIC key, keyed on the organization. The previous note here said
-        // the caller "ensures at-most-once via the `organization_billing` row
-        // check" and therefore needed no key. The caller does a plain
+        // DETERMINISTIC key, keyed on the organization. The caller's
+        // `organization_billing` row check cannot substitute: it is a plain
         // check-then-act - `get_customer` -> None -> `create_customer` ->
-        // `set_customer` (stripe_handlers.rs:245/253/257) - with no lock
-        // spanning it, so two concurrent requests both see None and both post
+        // `set_customer` (stripe_handlers.rs) - with no lock spanning it, so
+        // two concurrent requests both see None and both post
         // here. `set_customer`'s ON CONFLICT then keeps one row and the second
         // Customer is orphaned in Stripe, which no local rollback can undo.
         //
@@ -868,7 +868,7 @@ impl StripeApi for StripeClient {
         // auto_advance=false so WE control finalization (no surprise charge
         // timing); the deterministic key makes the create replay-safe within 24h.
         // metadata[organization_id] lets invoice.payment_failed resolve the organization.
-        // `metadata[invoice_kind]=infra` is the POSITIVE infra signal (critic #6):
+        // `metadata[invoice_kind]=infra` is the POSITIVE infra signal:
         // the `invoice.paid` recovery path only un-suspends when THIS marker is
         // present, so a Connect end-user `invoice.paid` whose customer happens to
         // collide with a platform `organization_billing.stripe_customer_id` can never
