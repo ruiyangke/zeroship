@@ -9,6 +9,38 @@ use crate::{
 };
 use async_trait::async_trait;
 
+/// How an explicit creator transaction opens on SQLite.
+///
+/// **`IMMEDIATE` is load-bearing, not a style choice.** A bare `BEGIN` is
+/// `BEGIN DEFERRED`: it takes no lock, so the transaction's first read pins a
+/// snapshot and the first write has to *upgrade* to the write lock. SQLite
+/// refuses that upgrade with the `SQLITE_BUSY` family and **does not invoke the
+/// busy handler for it**, because a connection already holding a read
+/// transaction cannot be made to wait without risking deadlock. The refusal is
+/// therefore immediate, and the connection's `busy_timeout` - which
+/// `session::lock_wait` sets from `budgets::DB_LOCK_TIMEOUT_MS`,
+/// the same budget PostgreSQL spends on `lock_timeout` - buys nothing. The
+/// second of two replicas racing over one file was refused outright rather than
+/// waiting for its turn.
+///
+/// `IMMEDIATE` takes the write lock at `BEGIN`, where there is no prior read
+/// transaction and the busy handler does run, so the lock budget applies to a
+/// transaction the way it already applies to every other statement.
+/// `enter_wal` in `session` documents the same SQLite rule for the WAL
+/// switch; this is that rule applied to the transaction path.
+///
+/// The cost, stated because it is real: `IMMEDIATE` takes a write lock on every
+/// database the connection has open, `main` included, not only the one this
+/// binding addresses. A transaction lane carries `main` plus at most its own
+/// app's attached file, so two apps on one backend now serialize their explicit
+/// transactions through `main` instead of overlapping. They serialize rather
+/// than deadlock: `main` is database zero, so every lane takes the locks in the
+/// same order. `docs/reference/sqlite-divergences.md` records it as a
+/// divergence, and
+/// `two_apps_on_one_backend_serialize_their_transactions_through_main` measures
+/// it.
+const BEGIN_TRANSACTION: &str = "BEGIN IMMEDIATE";
+
 #[async_trait(?Send)]
 impl ScopedExecutor for SqliteBackend {
     fn namespace<'a>(&self, app_id: &'a str, schema: &'a SchemaName) -> &'a str {
@@ -75,7 +107,7 @@ impl ScopedExecutor for SqliteBackend {
             .await?
             .acquire(LeaseKind::Transaction)
             .await?;
-        session.exec("BEGIN", &[]).await?;
+        session.exec(BEGIN_TRANSACTION, &[]).await?;
         Ok(session)
     }
 }
