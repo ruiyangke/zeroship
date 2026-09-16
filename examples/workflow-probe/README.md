@@ -27,5 +27,10 @@ tests require child output to reach its parent and compensation to reverse the
 recorded effect while preserving the creator's original failure.
 
 The RPC procedures are `wf.ping`, `wf.start`, `wf.status`, `wf.signal`,
-`wf.trail`, and `wf.resetTrail`. The supported cases are `basic`, `sleep`,
-`signal`, `child`, and `compensate`.
+`wf.trail`, `wf.resetTrail`, and `wf.compensatorRedispatches`. The supported
+cases are `basic`, `sleep`, `signal`, `child`, and `compensate`.
+
+Compensation is at-least-once, so the compensate case dedupes its undo on
+`ctx.idempotencyKey` and counts the re-dispatches that meet an effect which
+already landed. The test records that count per tier under `tests/.artifacts/`
+and never asserts it.
