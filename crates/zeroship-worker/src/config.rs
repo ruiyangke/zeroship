@@ -378,14 +378,10 @@ mod tests {
 
     #[test]
     fn the_usage_stream_has_flags_and_is_not_environment_only() {
-        // REGRESSION. Until 2026-08-20 the worker's usage-stream settings had
-        // NO flag: `UsageStreamSettings::from_env` was the single channel for
-        // `REDPANDA_BROKERS` and `USAGE_EVENTS_TOPIC`, and 9b205f6ed had
-        // already removed the `--config` overlay that was the other one. Nine
-        // e2e harnesses were left setting ambient variables on the worker's
-        // command prefix because the product offered nothing else. Asserted on
-        // the COMMAND rather than on the struct: a field that resolves
-        // correctly but projects no flag is exactly the state being fixed.
+        // The usage-stream settings must be settable as flags, not only through
+        // ambient env vars. Asserted on the COMMAND rather than on the struct: a
+        // field that resolves correctly but projects no flag is the state this
+        // guards.
         let command = WorkerSettingsSources::command();
         let longs = command
             .get_arguments()

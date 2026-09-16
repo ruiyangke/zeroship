@@ -198,7 +198,7 @@ impl CleanupGoal {
 /// Both backends expose it and it is the same oracle the terminal classifier
 /// uses: PostgreSQL's `transaction_status()`, whose `None` means
 /// *indeterminate* and is documented as such
-/// (`libs/compio-postgres/src/client.rs:3170-3188`), and SQLite's
+/// (`libs/compio-postgres/src/client.rs`, `transaction_status`), and SQLite's
 /// `is_autocommit` sample.
 ///
 /// Defined in data-core beside [`SettleIntent`] and [`TerminalResult`], for the
@@ -1278,9 +1278,7 @@ impl TxReducer {
         //
         // The two `RolledBack` arms stay separate deliberately: one is the L8
         // case - a COMMIT the server refused - and the other is an ordinary
-        // rollback succeeding. Merging them would detach the L8 comment from
-        // the case it explains, and that case is the one that used to report
-        // success for writes that never landed.
+        // rollback succeeding. They agree on the outcome for different reasons.
         #[allow(
             clippy::match_same_arms,
             reason = "the L8 arm and the ordinary rollback arm agree on the \

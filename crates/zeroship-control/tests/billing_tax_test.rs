@@ -21,10 +21,9 @@
 //!       holds) — the behaviour-neutral USD-launch default;
 //!   (b) a FAKE provider returning a NON-ZERO tax ⇒ that tax is FROZEN onto the invoice
 //!       (`tax_cents = fake`) and `total = subtotal − credit + tax` (balance CHECK holds)
-//!       — proves the seam wires through the one-statement finalize UPDATE. RED-first: it
-//!       FAILS against any reconciler that hard-wires `tax_cents = 0` (the pre-PR-5 code,
-//!       and any code that ignores the provider result), because `total` would be
-//!       `subtotal − credit` and `tax_cents` would be 0;
+//!       — proves the seam wires through the one-statement finalize UPDATE. Any reconciler
+//!       that hard-wires `tax_cents = 0`, or that ignores the provider result, fails here,
+//!       because `total` would be `subtotal − credit` and `tax_cents` would be 0;
 //!   (c) the fake is INJECTED the same way Native is (`AppState.tax_provider`), so the
 //!       seam is provider-swappable — covered structurally by (a) vs (b) sharing one
 //!       `build_fixture(tax_provider)` path;
@@ -425,12 +424,10 @@ async fn make_plan(state: &AppState) -> String {
 
 /// An app the given ORGANIZATION bills.
 ///
-/// It used to seed an app in a fresh organization and then seat a human owner in
-/// it, because the reconciler found the subject by walking to that owner. The
-/// subject is now the app row's own `organization_id`, so an app seeded into
-/// one organization and asserted against another would simply never be billed -
-/// the test would go green on an empty sweep. Placing it in the caller's
-/// organization is what keeps the assertion attached to anything.
+/// The app must be seeded into the organization the assertion bills: the
+/// reconciler finds the subject by the app row's own `organization_id`, so an app
+/// seeded into one organization and asserted against another would never be billed
+/// and the test would go green on an empty sweep.
 async fn make_owned_app(state: &AppState, plan_id: &str, organization: &str) -> AppId {
     let name = format!("tax-{}", Uuid::new_v4());
     common::seed_app_in_organization(&state.control_pg, &name, plan_id, organization).await
@@ -586,7 +583,7 @@ async fn native_tax_is_zero_and_total_is_subtotal_minus_credit() {
 
 // ===========================================================================
 // (b) FAKE provider returning a NON-ZERO tax ⇒ tax FROZEN onto the invoice +
-//     total = subtotal − credit + tax. RED-first: FAILS if tax isn't wired into the
+//     total = subtotal − credit + tax. Fails if tax isn't wired into the
 //     one-statement finalize UPDATE (a reconciler hard-wiring tax_cents = 0 would
 //     leave tax_cents = 0 and total = subtotal − credit).
 // ===========================================================================
@@ -814,26 +811,15 @@ async fn tax_provider_error_fails_closed_invoice_not_finalized() {
 }
 
 // ===========================================================================
-// #23/#8 (missing customer with usage): a organization with BILLABLE usage but NO saved
+// (missing customer with usage): an organization with BILLABLE usage but NO saved
 //     Stripe Customer is SKIPPED - `bill_organization` returns Ok(false) BEFORE any draft
 //     claim / Stripe item / finalize, so nothing is billed against a phantom customer.
 //
-// WHAT THIS TEST DOES NOT PIN, measured 2026-08-11 rather than reasoned about. The
-// comment here used to add "Revenue is surfaced (the warn), never silently billed",
-// crediting this test with both halves. Only the SKIP half is asserted. Deleting the
-// `tracing::warn!(billing_event = "missing_customer_with_usage", ...)` arm from
-// billing_reconcile.rs entirely and re-running leaves this test GREEN:
-//
-//     test result: ok. 1 passed; 0 failed   (warn present)
-//     test result: ok. 1 passed; 0 failed   (warn deleted)
-//
-// So the visibility half - the thing that turns silent revenue loss into something an
-// operator can see - rests on nobody noticing the line is gone. That is not this
-// test's fault; there is no log-assertion facility in this crate, and `billing_event`
-// has FIVE emitters in crates/control/src and ZERO mentions in crates/control/tests.
-// Whether to add a capturing subscriber or promote the markers to queryable rows is
-// an open call (task #310); the comment is corrected so it stops answering a question
-// the assertions never asked.
+// Only the SKIP half is pinned here. The `tracing::warn!(billing_event =
+// "missing_customer_with_usage", ...)` arm that surfaces the skipped revenue is
+// NOT asserted: there is no log-assertion facility in this crate. Whether to add
+// a capturing subscriber or promote the billing markers to queryable rows is an
+// open call.
 // ===========================================================================
 
 // See the allow on `native_tax_is_zero_and_total_is_subtotal_minus_credit` above.

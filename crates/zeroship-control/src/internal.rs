@@ -488,7 +488,7 @@ pub async fn get_app_env(
 ) -> web::HttpResponse {
     // Internal endpoint, no user authz: the caller is a SERVICE and there is no
     // user principal. It presents its own ed25519 assertion under the full
-    // profile; a shared bearer no longer opens this door, which matters most
+    // profile; a shared bearer does not open this door, which matters most
     // here because the response body is the app's DECRYPTED environment.
     let id = match zone_scoped_app_read(&req, &state, endpoints::CONTROL_APP_ENV, &app_id, || {
         web::HttpResponse::BadRequest().json(&serde_json::json!({"error": "bad app_id"}))

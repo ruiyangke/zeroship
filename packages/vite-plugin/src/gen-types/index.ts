@@ -86,32 +86,18 @@ const MIGRATION_SOURCE_FAULT = "migration-source";
  * a missing native addon, an engine panic, an unparseable descriptor, an
  * unwritable output dir.
  *
- * The distinction has to be CARRIED, not derived. Measured 2026-08-11 across
- * four fault classes: an engine-rejected migration and an esbuild failure both
- * arrive as a plain `Error` with `code === undefined`, and so — by reading —
- * do `addonLoadError`, the missing-`runtimeJson` arm below, and
+ * The distinction has to be CARRIED, not derived. An engine-rejected migration
+ * and an esbuild failure both arrive as a plain `Error` with `code ===
+ * undefined`, and so do `addonLoadError`, the missing-`runtimeJson` arm, and
  * `parseRuntimeDescriptor`. `code` therefore separates neither class from the
- * other; only two of the eight producers set one at all, and both are ours or
- * the environment's: `EACCES` from the write, and `ERR_MODULE_NOT_FOUND`-class
- * codes from the recorder. See task #269.
+ * other; only two producers set one at all, and both are ours or the
+ * environment's: `EACCES` from the write, and `ERR_MODULE_NOT_FOUND`-class
+ * codes from the recorder.
  *
- * AN ENGINE PANIC IS NOT IN THAT TABLE, and an earlier version of this comment
- * wrongly put it there with `GenericFailure`. At OUR PIN a panic never reaches
- * this catch at all -- it aborts the process. Verified in our own
- * `third_party/zero-migrate` @ cb1bcb59: `catch_unwind` appears ZERO times in
- * the whole `zeroship-migrate-node` crate src, and the export is a bare
- * `#[napi(js_name = "genArtifacts")]` (bridge.rs:132; that same grep returning
- * line 132 is the positive control that the file was read). Without
- * `catch_unwind` a Rust panic crossing an `extern "C"` shim aborts rather than
- * becoming a catchable Error.
- *
- * The upstream fix (`bc4d1c9b`, "a panicking export throws instead of killing
- * the Node process") is NOT in our object store and NOT an ancestor of our pin
- * -- checked, not assumed. It postdates cb1bcb59 by about ten hours on the same
- * day, which is exactly the window where "they fixed it" and "we have it" come
- * apart; task #29 records the same shape. Whether to bump the pin is an
- * operator call (see task #271); the range is unaudited.
- *
+ * AN ENGINE PANIC IS NOT IN THAT CLASS. At our vendored pin a panic never
+ * reaches this catch at all -- it aborts the process, because the
+ * `zeroship-migrate-node` export carries no `catch_unwind` and a Rust panic
+ * crossing an `extern "C"` shim aborts rather than becoming a catchable Error.
  * So the loud arm below is REAL for every fault that arrives as a JS Error --
  * a missing addon, an unparseable descriptor, an unwritable dir, a caller-shape
  * bug -- and INERT for a panic, which kills the process before any of our code
@@ -120,38 +106,23 @@ const MIGRATION_SOURCE_FAULT = "migration-source";
  *
  * WHERE THIS TAG STOPS, and it is a boundary not a guarantee. The tag covers
  * the SYNC verb, `genArtifacts`, because every creator-content fault comes back
- * through its soft `{ ok:false }` arm and `unwrap` converts it here. Measured
- * 2026-08-11 at the decode boundary itself, which is the arm most likely to
- * reject rather than return: a non-object envelope, an unknown op token, a
- * missing-field envelope and a malformed JSON string ALL returned
- * `ok:false, error:"envelope[N] is not a valid IR document: ..."`. None threw.
- *
- * That soft return is a GUARDED CONTRACT upstream, not four lucky samples,
- * which is what makes it safe to build an allow-list on. Checked at OUR OWN
- * vendored pin (`third_party/zero-migrate` @ cb1bcb59) rather than taken on
- * report, because an upstream guarantee is only worth what the pin we compile
- * against actually contains: `bridge.rs:129-131`, the doc comment ON the
- * `genArtifacts` export, promises `ok=false` + `error` "on a malformed/incoherent
- * source ... (never a throw)", and `api.rs:452`
- * `gen_artifacts_from_a_malformed_envelope_fails_soft` asserts `!reply.ok` for an
- * envelope whose `ops` is not an array. A change that made a malformed source
- * throw fails that test upstream instead of silently reaching us.
- *
- * (zero-migrate reported this as ZERO-MIGRATE-2026-08-11-011, citing different
- * line numbers and different prose -- their tree is AHEAD of this pin. Grepping
- * for their sentence here returns nothing while the contract is plainly present
- * under other words, so re-check this by concept, not by their quote.)
+ * through its soft `{ ok:false }` arm and `unwrap` converts it here. That soft
+ * return is a GUARDED CONTRACT upstream, not a lucky sample: the export's own
+ * doc comment promises `ok=false` + `error` "on a malformed/incoherent source
+ * ... (never a throw)", so it is safe to build an allow-list on. A change that
+ * made a malformed source throw would fail that upstream contract test instead
+ * of silently reaching us.
  *
  * The ASYNC verb, `applyIrSqlite`, does NOT behave that way. It rejects at the
  * napi boundary, and `Error::from_reason` hardcodes `Status::GenericFailure`,
  * so a CREATOR's invalid migration arrives from the engine indistinguishable
- * from an engine panic and carrying no tag of ours. (Established by
- * zero-migrate, ZERO-MIGRATE-2026-08-11-010, with a live rejection.)
+ * from an engine panic and carrying no tag of ours.
  *
  * That costs nothing TODAY because the only caller of `applyIrSqlite` is
  * `cli/migrate-dev.ts`, which has no try/catch, so both classes propagate
  * equally loudly. It stops being free the moment the apply is chained into the
- * dev server -- which `docs/proposals/2026-08-09-dev-sqlite-migration-apply-ahead-of-runtime.md`
+ * dev server -- which
+ * `docs/proposals/2026-08-09-dev-sqlite-migration-apply-ahead-of-runtime.md`
  * proposes doing. Under this allow-list, a creator's own bad migration would
  * then land in the LOUD arm and refuse to boot. Whoever wires that up owes
  * either a tag at that boundary or a deliberate decision that refusing to boot
@@ -182,8 +153,7 @@ export interface GenTypesResult {
    * The artifact filenames relative to the out dir, in emit order.
    *
    * Always the two schema artifacts; plus `migrations.ir.json` when the source
-   * was migrations (the manual `schema.ts` source has none to record), which is
-   * why this is no longer a fixed-length tuple.
+   * was migrations (the manual `schema.ts` source has none to record).
    */
   files: readonly string[];
 }
@@ -208,66 +178,40 @@ export async function genTypesFromSchemaFile(
     // sources keeps the descriptor + envelope outputs byte-identical.
     charterLayers: [CONFINED_SCHEMA_EMIT_CEILING_TOML],
     // `postgres` is the platform tier; the SQLite dev tier consumes the same
-    // descriptor for typing only. Required by the engine since the vendored pin
-    // moved.
+    // descriptor for typing only. Required by the engine.
     //
-    // THIS CONSTANT IS SAFE BY A CONDITION, NOT BY CONSTRUCTION, and the comment
-    // that used to sit here got that wrong. It claimed the descriptor is
-    // "dialect-neutral - it carries types, idPrefix and mask facets, never DDL".
-    // The second half is true; the first half does not follow from it and is
-    // false in general. The dialect does not change how a column RENDERS here -
-    // it changes WHICH COLUMNS EXIST, before rendering, because the fold selects
-    // `Op::Dialectal` legs. A history authored with `dialect({ pg, mysql })`
-    // yields a different column set per target, and the descriptor lists columns.
-    // (Established by zero-migrate, ZERO-MIGRATE-2026-08-10-192, citing the
-    // `dialect` field contract and two live tests that fold one history under two
-    // dialects and match each against that database's real catalog.)
+    // THIS CONSTANT IS SAFE BY A CONDITION, NOT BY CONSTRUCTION. The descriptor
+    // is NOT dialect-neutral: the dialect does not change how a column RENDERS
+    // here, but it changes WHICH COLUMNS EXIST, before rendering, because the
+    // fold selects `Op::Dialectal` legs. A history authored with
+    // `dialect({ pg, mysql })` yields a different column set per target, and the
+    // descriptor lists columns.
     //
-    // The condition: NO migration in this repo authors a dialectal leg.
-    // Re-measured 2026-08-11 across ALL 17 migration `.ts` files in the live
-    // tree - db/migrations-ts/, the four examples/*/migrations/, and
-    // packages/create-zeroship-app/template/migrations/, which the previous
-    // 16-file scope omitted. Zero hits for BOTH spellings: `dialect(` (the
-    // engine's own) and `emitDialectal` (ours, ops.ts:525). Grepping only the
-    // engine's spelling would miss every leg a creator could actually author
-    // through our surface, which is the one that matters here. Positive
-    // control: `table(` in the same scope, same tool, 456 hits.
+    // The condition: NO migration in this repo authors a dialectal leg. Re-check
+    // with a grep for BOTH spellings over every migration `.ts` in the tree -
+    // `dialect(` (the engine's own) and `emitDialectal` (ours) - because grepping
+    // only the engine's spelling would miss every leg a creator could author
+    // through our surface. Run it under `bash -c`: an unquoted multi-root scope
+    // does not word-split in zsh, so the whole sweep collapses to one bogus path
+    // and reports a confident zero.
     //
-    // Run under `bash -c`, not this shell: an unquoted multi-root $SCOPE does
-    // not word-split in zsh, so the whole sweep collapses to one bogus path and
-    // reports a confident zero. The first attempt did exactly that and reported
-    // "0 files in scope" alongside its zeros, which is the only reason it was
-    // caught.
-    //
-    // While that holds, folding through `postgres` is exactly right.
-    //
-    // AND THAT GREP IS THE WHOLE CHECK - there is no second door, which is what
-    // makes re-verifying this cheap. Three independent facts close the other
-    // routes a leg could take in:
+    // That grep is the whole check; the other routes a leg could take are
+    // closed:
     //   - OUR recorder cannot accept a hand-written envelope. `discoverMigrations`
-    //     gates on `MIGRATION_TS_RE` (recorder.ts:37), so a committed `.json`
-    //     beside the migrations is silently skipped; envelopes exist only as
-    //     in-memory values built from a `.ts`, and nothing in gen-types reads one
-    //     from disk. Verified by me.
-    //   - THE DESCRIPTOR LANE cannot carry one at all: zero `Dialectal` in the
-    //     engine's `render/declarative.rs` at our pin cb1bcb59 (positive control:
-    //     316 `fn ` in the same file). Verified by me, at OUR pin rather than
-    //     upstream's.
-    //   - NOTHING UPSTREAM CONSTRUCTS ONE outside tests: 61 `Op::Dialectal` sites
-    //     in `crates/`, 3 construction-shaped, all 3 inside `#[cfg(test)]`
-    //     modules. Reported by zero-migrate (ZERO-MIGRATE-2026-08-11-015) with
-    //     counts and line numbers, after they corrected their OWN earlier
-    //     "verified" on it, which had been inferred from directory names. Taken
-    //     from them, not re-read by me.
+    //     gates on `MIGRATION_TS_RE`, so a committed `.json` beside the migrations
+    //     is silently skipped; envelopes exist only as in-memory values built from
+    //     a `.ts`, and nothing in gen-types reads one from disk.
+    //   - THE DESCRIPTOR LANE cannot carry one at all: there is no `Dialectal` in
+    //     the engine's `render/declarative.rs` at our pin.
+    //   - NOTHING UPSTREAM CONSTRUCTS ONE outside tests.
     // So a future reader re-checking this only has to re-run the migration grep
-    // above. They do not have to wonder about generated artifacts or the other
-    // `genArtifacts` source.
+    // above.
     //
     // Nothing enforces it. `emitDialectal` is exposed on our own op surface
-    // (packages/zero-migrate/src/ops.ts), so the first migration to use it makes this
-    // constant silently wrong for the SQLite dev tier - a column set that the dev
-    // database does not have. If you are adding a dialectal leg, this line is the
-    // thing that breaks, and it will not tell you.
+    // (packages/zero-migrate/src/ops.ts), so the first migration to use it makes
+    // this constant silently wrong for the SQLite dev tier - a column set that
+    // the dev database does not have. If you are adding a dialectal leg, this
+    // line is the thing that breaks, and it will not tell you.
     dialect: "postgres",
   });
   const runtimeJson = unwrap(reply, "manual schema source");

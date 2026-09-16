@@ -289,8 +289,8 @@ pub async fn provider_invoice_id_for_cash_refund<C: GenericClient + Sync>(
 /// The net cash collected on an invoice: `Σ(invoice_payments.amount_cents)` — the
 /// over-refund anchor (NOT `total_cents`). Re-exported from [`crate::invoice_payments`] so
 /// the cap anchor has EXACTLY ONE implementation (M1): the refund precheck, the true-up
-/// bridge, and the `0049` over-refund trigger all read the identical `Σ`. The historical
-/// `refund::cash_collected` path is preserved for callers; there is no second copy to drift.
+/// bridge, and the `0049` over-refund trigger all read the identical `Σ`; there is no
+/// second copy to drift.
 pub use crate::invoice_payments::cash_collected;
 
 /// Σ of refunds already issued/claimed on an invoice for one destination — used by
@@ -353,8 +353,8 @@ pub enum RefundFailureOutcome {
 ///   1. flips `refunds.status` → the terminal failure (gated `WHERE status NOT IN
 ///      ('failed','canceled')`, so a redelivery is a 0-row no-op) and stamps `failed_at`.
 ///      This makes the over-refund cap STOP counting the refund (the trigger + the Rust
-///      precheck exclude failed/canceled) — so a failed CASH refund no longer permanently
-///      reduces refundable cash; the organization CAN re-refund.
+///      precheck exclude failed/canceled) — so a failed CASH refund does not permanently
+///      reduce refundable cash; the organization CAN re-refund.
 ///   2. for a `destination='credit'` refund, appends a compensating NEGATIVE
 ///      `credit_ledger('refund_clawback')` entry that offsets the `refund_to_credit` grant
 ///      (the cash never left Stripe, so the organization must not keep the minted credit). The
@@ -704,9 +704,9 @@ async fn issue_refund_inner<C: GenericClient + Sync, P: RefundProvider>(
     let currency: String = row.get("currency");
     let status: String = row.get("status");
     // Only a finalized invoice is refundable here; a draft or void invoice is not. (The
-    // true-up bridge refunds a VOIDED invoice's over-collection, but it no longer routes
-    // through this function — it recomputes under the per-organization lock via
-    // `claim_true_up_locked` (HIGH-1), so this path is finalized-only.)
+    // true-up bridge refunds a VOIDED invoice's over-collection by recomputing under the
+    // per-organization lock via `claim_true_up_locked`; it does not route through this
+    // function, so this path is finalized-only.)
     let refundable = status == "finalized";
     if !refundable {
         return Ok(RefundOutcome::InvalidInvoice(format!(

@@ -56,7 +56,7 @@ impl PlanCatalog {
     /// Fetch one plan by id. `None` if no such row (archived plans ARE
     /// returned — the caller decides whether to reject an archived plan).
     ///
-    /// MAJOR-2: a corrupt `runtime_limits_json` no longer hard-errors here —
+    /// MAJOR-2: a corrupt `runtime_limits_json` does not hard-error here —
     /// `row_to_plan` falls back to free-tier runtime limits so the plan still
     /// PRICES (billing reconcile must still bill an app whose plan row's JSONB
     /// is poison). See [`row_to_plan`].
@@ -67,7 +67,7 @@ impl PlanCatalog {
 
     /// List every plan (including archived ones) ordered by id.
     ///
-    /// MAJOR-2: poison tolerance is now in `row_to_plan` itself — a corrupt
+    /// MAJOR-2: poison tolerance lives in `row_to_plan` itself — a corrupt
     /// `runtime_limits_json` falls back to free-tier runtime limits and the plan
     /// is still RETURNED (not skipped), so spend enforcement still prices (and
     /// can Block) the app. `get(:id)` is poison-tolerant the SAME way, so the
@@ -270,12 +270,11 @@ pub async fn get_on<C: compio_postgres::GenericClient + Sync>(
 /// (`base_fee_cents`, `included_units`, `fx`, `spend_limit_default_cents`) —
 /// NOT the runtime limits. A row whose JSONB can't parse falls back to the
 /// conservative [`FREE_TIER_RUNTIME_LIMITS`] (with a `warn!`) so BOTH `list()`
-/// (spend enforcement) and `get()` (billing reconcile) still PRICE the app —
-/// previously `list` SKIPPED the poison row (app ran uncapped) while `get`
-/// HARD-ERRORED (creator's whole bill failed), so a poison plan made an app
-/// both uncapped AND unbilled. The runtime-limits consumer in
-/// `registry.rs::get_versions` has its OWN conservative fallback and does not go
-/// through this decoder, so a real runtime-limits read is unaffected.
+/// (spend enforcement) and `get()` (billing reconcile) still PRICE the app; a
+/// poison row must never leave an app both uncapped AND unbilled. The
+/// runtime-limits consumer in `registry.rs::get_versions` has its OWN
+/// conservative fallback and does not go through this decoder, so a real
+/// runtime-limits read is unaffected.
 fn row_to_plan(row: &Row) -> Result<Plan, RegistryError> {
     let base_fee: i64 = row.get("base_fee_cents");
     let included_units: i64 = row.get("included_units");
@@ -378,8 +377,7 @@ pub fn unlimited_plan_id() -> String {
 
 /// Build the three built-in tiers, `[free, pro, unlimited]`.
 ///
-/// `runtime_limits_json` reproduces the matrix the deleted
-/// `registry.rs::runtime_limits_for_plan` hardcoded: free = 50ms/5s/64MB,
+/// `runtime_limits_json` is the tier matrix: free = 50ms/5s/64MB,
 /// pro = 30s/30s/256MB, unlimited = None/None/None. Under compute-unit pricing
 /// the price model is scalar: `base_fee_cents`, `included_units`, and an FX
 /// where `None` inherits the global `pricing_config` default.

@@ -21,8 +21,7 @@
 //      explicit id) is a build error in production.
 //
 // No previous-build alias state. No persistence. The wireId is always
-// what the current source says. (The earlier alias system is gone — see
-// the §2 update in `docs/proposals/rpc.md`.)
+// what the current source says.
 //
 // Wireshape: see `docs/proposals/rpc.md` §7.
 
@@ -77,13 +76,8 @@ export interface ManifestExtrasInput {
   schedules?: DiscoveredSchedule[];
   /**
    * Export names of the durable workflow classes the server graph declares.
-   * Emitted verbatim as `manifest.workflows`.
-   *
-   * THIS NAMED THE CONTROL PLANE AS THE CONSUMER until the legacy path was
-   * removed: Control's workflow instance API is gone, and the declarations are
-   * now read by the durable engine itself, in
+   * Emitted verbatim as `manifest.workflows`. Read by the durable engine in
    * `crates/zeroship-workflow/src/service/bundle.rs`, alongside the schedules.
-   * The list and its purpose are unchanged; only the reader moved.
    */
   workflowNames?: string[];
   /** Production: throw on validation errors. Development: warn. */
@@ -433,12 +427,10 @@ function validateResources(
   // is not a posture the runtime can honour, so a dev build that accepted
   // it would emit a manifest the gateway cannot compile.
   //
-  // `"admin"` is called out by name because the platform used to accept it
-  // and the build itself used to recommend it. It was never enforced: the
-  // gateway matched it in the same arm as `user`, so a route locked down
-  // with `admin` was reachable by every signed-in end user. There is no
-  // platform-admin principal (`docs/architecture/control-plane.md`), so the
-  // level was deleted rather than implemented.
+  // `"admin"` gets its own message rather than the generic one: there is no
+  // platform-admin principal (`docs/architecture/control-plane.md`), and the
+  // gateway enforced that level identically to `user`, so a route gated with it
+  // was reachable by every signed-in end user.
   for (const [key, node] of Object.entries(flat)) {
     if (!("auth" in node) || node.auth === undefined) continue;
     if (node.auth === "anonymous" || node.auth === "user") continue;
@@ -1049,10 +1041,7 @@ export async function computeManifestExtras(
   //     procedure module and only the first set empties: the build then
   //     ships `rpc:` policies for procedures that are not in the worker
   //     bundle, while the client bundle inlines and calls the handler
-  //     locally instead of over the wire. MEASURED before this gate
-  //     existed: `vite build` printed "0 modules, 0 server functions",
-  //     still emitted `rpc:getMessages` + `rpc:addMessage`, and exited 0
-  //     with no warning at all.
+  //     locally instead of over the wire.
   //
   //     A declared `rpc:` key is legitimate in exactly two shapes: it
   //     names a discovered procedure, or it is a dot-segment FAMILY
