@@ -1,10 +1,40 @@
-import { dialect, raw, table, t } from "../../../packages/zero-migrate/dist/index.js";
+import { dialect, table, t } from "../../../packages/zero-migrate/dist/index.js";
+
+// Cursor order and identity copies compare these columns as bytes, so their
+// order must not move with the database's default collation. The facet carries
+// the intent; the compiler spells it per dialect (PostgreSQL `COLLATE "C"`,
+// SQLite `COLLATE BINARY`).
+//
+// The set is deliberately narrow: a column earns a place here by being compared
+// in a cursor or range scan, not by being text, and it is NOT closed over the
+// foreign keys that reference it.
+const bytewiseColumns = {
+  job_publications: ["id", "app_id", "run_id", "deploy_id", "broadcast_id"],
+  fanout_pages: ["id", "app_id", "broadcast_id"],
+  propagation_pages: ["id", "app_id"],
+  broadcasts: ["id", "app_id", "topic"],
+  topics: ["app_id", "topic"],
+  deployment_holds: ["deploy_id"],
+  job_receipts: ["id", "app_id", "run_id"],
+  collection_pages: ["id", "app_id"],
+  collection_scans: ["id", "after_id", "upper_id"],
+  payloads: ["id", "app_id"],
+  activations: ["id", "app_id", "deploy_id"],
+  activation_scopes: ["id", "activation_id"],
+  management_receipts: ["id", "app_id", "run_id", "request_id"],
+  management_scopes: ["id", "app_id", "run_id"],
+  schedules: ["id", "app_id", "name"],
+  occurrences: ["id", "app_id", "schedule_id", "job_id", "run_id"],
+  reconciliation_scans: ["id", "after_id", "upper_id"],
+  tasks: ["job_id"],
+};
 
 // The customer owns the journal. Provisioning supplies its resolved schema;
 // both database adapters use the canonical definition and reserved table names.
 export function workflowSchema(namespace) {
   const identifiers = new Set();
   const columnsInSchema = new Set();
+  const bytewisePending = new Set(Object.keys(bytewiseColumns));
   const owned = name => { identifiers.add(name); return name; };
   const text = () => t.text().notNull();
   const integer = () => t.bigInt().notNull();
@@ -20,6 +50,11 @@ export function workflowSchema(namespace) {
   const create = (name, columns, domainKey, foreignKeys = [], uniques = []) => {
     owned(name);
     columns = { id: text(), ...columns };
+    bytewisePending.delete(name);
+    for (const column of bytewiseColumns[name] ?? []) {
+      if (!(column in columns)) throw new Error(`${name}.${column} is pinned bytewise but is not a column of ${name}`);
+      columns[column] = columns[column].collation("bytewise");
+    }
     Object.keys(columns).forEach(column => columnsInSchema.add(column));
     const domainUnique = domainKey.length === 1 && domainKey[0] === "id"
       ? []
@@ -305,37 +340,10 @@ export function workflowSchema(namespace) {
   create("reconciliation_scans", {
     revision: integer(), phase: text(), after_id: t.text(), upper_id: t.text(),
   }, ["id"], [fk("reconciliation_scan_app", ["id"], "app_state", ["app_id"])]);
-  // The migration DSL does not expose the column collation facet yet. Cursor
-  // order and identity copies must use bytewise comparison; SQLite uses BINARY.
-  dialect({
-    postgres() {
-      for (const [name, columns] of Object.entries({
-        job_publications: ["id", "app_id", "run_id", "deploy_id", "broadcast_id"],
-        fanout_pages: ["id", "app_id", "broadcast_id"],
-        propagation_pages: ["id", "app_id"],
-        broadcasts: ["id", "app_id", "topic"],
-        topics: ["app_id", "topic"],
-        deployment_holds: ["deploy_id"],
-        job_receipts: ["id", "app_id", "run_id"],
-        collection_pages: ["id", "app_id"],
-        collection_scans: ["id", "after_id", "upper_id"],
-        payloads: ["id", "app_id"],
-        activations: ["id", "app_id", "deploy_id"],
-        activation_scopes: ["id", "activation_id"],
-        management_receipts: ["id", "app_id", "run_id", "request_id"],
-        management_scopes: ["id", "app_id", "run_id"],
-        schedules: ["id", "app_id", "name"],
-        occurrences: ["id", "app_id", "schedule_id", "job_id", "run_id"],
-        reconciliation_scans: ["id", "after_id", "upper_id"],
-        tasks: ["job_id"],
-      })) {
-        raw({
-          sql: `ALTER TABLE "${namespace}"."${name}" ${columns.map(column => `ALTER COLUMN "${column}" TYPE text COLLATE "C"`).join(", ")}`,
-          reason: "workflow delivery identities require bytewise comparison",
-        });
-      }
-    },
-    sqlite() {},
-  });
+  // A map entry naming a table this schema does not create would pin nothing and
+  // say so nowhere, so the unconsumed keys are an error rather than a no-op.
+  if (bytewisePending.size) {
+    throw new Error(`bytewise pins name tables the journal does not create: ${[...bytewisePending].join(", ")}`);
+  }
   return { identifiers, columns: columnsInSchema };
 }
