@@ -612,7 +612,7 @@ async fn assert_rolled_back(service: &WorkflowService, local: &AppId, run: &str,
     assert_eq!(head(service, local, run).await, (0, "queued".into()));
     assert_eq!(receipt_count(service, request).await, 0);
     let tx = service.begin().await.unwrap();
-    for table in ["management_scopes", "job_receipts"] {
+    for table in ["management_receipts", "job_receipts"] {
         assert_eq!(
             journal_count(&tx, table, json!({"app_id":local.as_str()})).await,
             0
